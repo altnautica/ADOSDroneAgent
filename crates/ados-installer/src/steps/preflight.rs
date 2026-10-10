@@ -12,10 +12,16 @@
 //!      else the `drone` default. The resolved value lands in `ctx.profile`.
 //!   4. **channel** — `--channel` wins, else `ctx.channel`'s existing default
 //!      (`edge`). The resolved value lands back in `ctx.channel`.
-//!   5. a best-effort connectivity note (logged, never fatal — `fetch_binaries`
+//!   5. **armed** — an upgrade (or a reinstall over a present install) of a
+//!      drone or ground-station node restarts the MAVLink, radio and video
+//!      services, so it is refused while the vehicle is, or may be, armed,
+//!      unless `--force-armed`. The verdict is the shared
+//!      `ados_protocol::armed` rule: no fresh `armed: false` state fails closed.
+//!   6. a best-effort connectivity note (logged, never fatal — `fetch_binaries`
 //!      is the real network gate).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::ctx::Ctx;
 use crate::env::{self, PROFILE_CONF};
@@ -134,7 +140,18 @@ impl Step for Preflight {
         }
         tracing::info!(channel = %ctx.channel, "resolved release channel");
 
-        // 5. connectivity note — best-effort, never fatal. `fetch_binaries`
+        // 5. armed interlock — an upgrade restarts the link-carrying services.
+        let upgrading = ctx.args.upgrade || env::probe_install_present();
+        if let Some(why) = armed_refusal(
+            upgrading,
+            ctx.args.force_armed,
+            &ctx.profile,
+            &state_socket_path(),
+        ) {
+            return StepOutcome::Failed(why);
+        }
+
+        // 6. connectivity note — best-effort, never fatal. `fetch_binaries`
         // is the real network gate; this is just an early operator hint.
         note_connectivity();
 
@@ -173,6 +190,67 @@ fn note_connectivity() {
 /// True when `/etc/ados/profile.conf` exists (used by status/diagnostics).
 pub fn profile_conf_present() -> bool {
     Path::new(PROFILE_CONF).exists()
+}
+
+/// How long the one-shot vehicle-state read waits for a frame.
+const STATE_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The router's vehicle-state socket, under the agent's run directory
+/// (`ADOS_RUN_DIR`, default `/run/ados`), the same resolution the services use.
+fn state_socket_path() -> PathBuf {
+    std::env::var_os("ADOS_RUN_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/run/ados"))
+        .join("state.sock")
+}
+
+/// Whether a profile carries a vehicle link an upgrade would drop.
+pub fn profile_carries_vehicle(profile: &str) -> bool {
+    matches!(profile, "drone" | "ground_station")
+}
+
+/// Read one vehicle-state snapshot from `state_socket` and apply the shared
+/// armed rule. A runtime that cannot be built proves nothing, so it fails
+/// closed like an absent socket.
+fn vehicle_armed(state_socket: &Path) -> bool {
+    let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return true;
+    };
+    let snapshot = rt.block_on(ados_protocol::armed::read_state_snapshot(
+        state_socket,
+        STATE_READ_TIMEOUT,
+    ));
+    ados_protocol::armed::vehicle_treated_as_armed(snapshot)
+}
+
+/// The refusal for an upgrade while the vehicle is, or may be, armed, or
+/// `None` when the run may proceed. Only an upgrade of a vehicle-carrying
+/// profile is checked; `--force-armed` overrides.
+pub fn armed_refusal(
+    upgrading: bool,
+    force_armed: bool,
+    profile: &str,
+    state_socket: &Path,
+) -> Option<String> {
+    if !upgrading || !profile_carries_vehicle(profile) {
+        return None;
+    }
+    if !vehicle_armed(state_socket) {
+        return None;
+    }
+    if force_armed {
+        tracing::warn!("vehicle is armed or its arm state is unknown; proceeding (--force-armed)");
+        return None;
+    }
+    Some(
+        "refusing to upgrade: the vehicle is armed or its arm state is unknown \
+         (the upgrade restarts the MAVLink, radio and video services). Disarm \
+         and retry, or pass --force-armed to proceed anyway"
+            .to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -246,5 +324,29 @@ mod tests {
         // No flag, no recognizable conf → drone default.
         assert_eq!(resolve_profile(None, Some("profile: auto")), "drone");
         assert_eq!(resolve_profile(None, None), "drone");
+    }
+
+    #[test]
+    fn preflight_refuses_armed() {
+        let dir = tempfile::tempdir().unwrap();
+        // No router state socket: the arm state is unknown and fails closed.
+        let sock = dir.path().join("state.sock");
+        for profile in ["drone", "ground_station"] {
+            let why = armed_refusal(true, false, profile, &sock).expect("refused");
+            assert!(why.contains("armed"), "{why}");
+            assert!(why.contains("--force-armed"), "{why}");
+        }
+        // A fresh install, and a profile with no vehicle link, are not checked.
+        assert_eq!(armed_refusal(false, false, "drone", &sock), None);
+        assert_eq!(armed_refusal(true, false, "workstation", &sock), None);
+        assert_eq!(armed_refusal(true, false, "compute", &sock), None);
+    }
+
+    #[test]
+    fn force_armed_proceeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("state.sock");
+        assert_eq!(armed_refusal(true, true, "drone", &sock), None);
+        assert_eq!(armed_refusal(true, true, "ground_station", &sock), None);
     }
 }

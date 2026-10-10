@@ -75,12 +75,50 @@ impl Action {
     }
 }
 
+/// What the cockpit knows about the vehicle's arm state when an update is asked
+/// for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArmView {
+    /// A fresh snapshot reports disarmed.
+    Disarmed,
+    /// A fresh snapshot reports armed.
+    Armed,
+    /// No arm state, or a snapshot too old to trust.
+    Unknown,
+}
+
+impl ArmView {
+    /// The view from the latest snapshot's `armed` field and whether the
+    /// snapshot is stale. A stale snapshot proves nothing, whatever it says.
+    pub fn from_snapshot(armed: Option<bool>, stale: bool) -> Self {
+        match (armed, stale) {
+            (_, true) | (None, _) => ArmView::Unknown,
+            (Some(true), false) => ArmView::Armed,
+            (Some(false), false) => ArmView::Disarmed,
+        }
+    }
+}
+
+/// The note the y/N prompt carries when the arm state is unknown.
+pub const ARM_STATE_UNKNOWN: &str = "arm state unknown";
+
+/// The y/N confirmation line for `label`, naming an unknown arm state so the
+/// operator decides knowing the cockpit could not confirm the vehicle is
+/// disarmed.
+pub fn confirm_prompt(label: &str, arm: Option<ArmView>) -> String {
+    match arm {
+        Some(ArmView::Unknown) => format!("{label} ({ARM_STATE_UNKNOWN}) — proceed? [y/N] "),
+        _ => format!("{label} — proceed? [y/N] "),
+    }
+}
+
 /// Resolve an operator's update request to the confirming "Update agent" entry
-/// of [`ACTIONS`] (y/N prompt, no `--yes`), or refuse it while `armed` reads
-/// true. An unknown arm state is not a refusal: the y/N prompt still stands
-/// between the key and the upgrade.
-pub fn update_request(armed: Option<bool>) -> Result<&'static Action, &'static str> {
-    if armed == Some(true) {
+/// of [`ACTIONS`] (y/N prompt, no `--yes`), or refuse it while the vehicle
+/// reports armed. An unknown arm state is not a refusal here: the y/N prompt,
+/// which then names the unknown state, still stands between the key and the
+/// upgrade, and the installer applies its own armed interlock.
+pub fn update_request(arm: ArmView) -> Result<&'static Action, &'static str> {
+    if arm == ArmView::Armed {
         return Err(UPDATE_REFUSED_ARMED);
     }
     Ok(ACTIONS
@@ -163,15 +201,41 @@ mod tests {
 
     #[test]
     fn an_update_request_is_confirmed_and_refused_while_armed() {
-        let a = update_request(Some(false)).expect("disarmed runs");
+        let a = update_request(ArmView::Disarmed).expect("disarmed runs");
         assert!(a.confirm, "the update always asks y/N");
         assert_eq!(
             a.argv(None).unwrap(),
             ("ados", vec!["update"]),
             "never the non-interactive --yes form"
         );
-        assert!(update_request(None).is_ok_and(|a| a.confirm));
-        assert_eq!(update_request(Some(true)).err(), Some(UPDATE_REFUSED_ARMED));
+        assert!(update_request(ArmView::Unknown).is_ok_and(|a| a.confirm));
+        assert_eq!(
+            update_request(ArmView::Armed).err(),
+            Some(UPDATE_REFUSED_ARMED)
+        );
+    }
+
+    #[test]
+    fn a_stale_snapshot_is_an_unknown_arm_state_in_the_prompt() {
+        assert_eq!(
+            ArmView::from_snapshot(Some(false), false),
+            ArmView::Disarmed
+        );
+        assert_eq!(ArmView::from_snapshot(Some(true), false), ArmView::Armed);
+        assert_eq!(ArmView::from_snapshot(None, false), ArmView::Unknown);
+        // A stale snapshot proves nothing, whichever way it reads.
+        assert_eq!(ArmView::from_snapshot(Some(false), true), ArmView::Unknown);
+        assert_eq!(ArmView::from_snapshot(Some(true), true), ArmView::Unknown);
+
+        let unknown = confirm_prompt("Update agent", Some(ArmView::Unknown));
+        assert!(unknown.contains(ARM_STATE_UNKNOWN), "{unknown}");
+        assert!(unknown.ends_with("[y/N] "));
+        let known = confirm_prompt("Update agent", Some(ArmView::Disarmed));
+        assert!(!known.contains(ARM_STATE_UNKNOWN), "{known}");
+        assert_eq!(
+            confirm_prompt("Reboot host", None),
+            "Reboot host — proceed? [y/N] "
+        );
     }
 
     #[test]

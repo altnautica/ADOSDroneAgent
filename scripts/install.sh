@@ -2,7 +2,7 @@
 # =============================================================================
 # ADOS Drone Agent — Installer Bootstrap
 #
-# This thin POSIX-sh bootstrap fetches, verifies, and execs the prebuilt
+# This thin POSIX-sh bootstrap fetches, verifies, and runs the prebuilt
 # `ados-installer` Rust binary, which orchestrates the full install. Rollback
 # is by git history (the prior tree, or a pinned older release asset).
 #
@@ -424,6 +424,11 @@ verify_download "${tmp}/${asset}" || {
     exit 1
 }
 
-# 6. Install + exec, passing all flags through verbatim.
+# 6. Install + run, passing all flags through verbatim. Not `exec`: the shell
+#    must outlive the installer so the temp dir (on tmpfs, RAM on most boards)
+#    is removed, and the installer's exit status is passed on unchanged.
 install -m 0755 "${tmp}/${asset}" "${tmp}/ados-installer"
-exec "${tmp}/ados-installer" "$@"
+rc=0
+"${tmp}/ados-installer" "$@" || rc=$?
+rm -rf "$tmp"
+exit "$rc"

@@ -78,6 +78,10 @@ pub const FLAGS: &[FlagSpec] = &[
     ),
     flag("--upgrade", "Upgrade an existing install in place"),
     flag("--force", "Clear checkpoints and reinstall"),
+    flag(
+        "--force-armed",
+        "Proceed with an upgrade even when the vehicle is (or may be) armed",
+    ),
     valued("--branch", "<name>", "Install from a git branch (dev)"),
     valued("--channel", "<name>", "Release channel selector"),
     valued("--version", "<ver>", "Pin an explicit agent version"),
@@ -201,6 +205,7 @@ impl Args {
         match name {
             "--upgrade" => self.upgrade = true,
             "--force" => self.force = true,
+            "--force-armed" => self.force_armed = true,
             "--uninstall" => self.uninstall = true,
             "--status" => self.status = true,
             "--plain" => self.plain = true,

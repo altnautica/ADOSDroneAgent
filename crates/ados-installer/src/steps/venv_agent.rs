@@ -25,6 +25,8 @@
 //! The venv-path + pip-args + wheel-URL + git-args builders are pure so a unit
 //! test exercises them without a real interpreter or the network.
 
+mod retain;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
@@ -34,6 +36,7 @@ use crate::env;
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::net;
+use crate::rollback::snapshots::{begin_run_record, ROLLBACK_DIR, RUN_RECORD};
 use crate::steps::fetch_binaries;
 use crate::ui::{activity, ProgressSink};
 use crate::verify;
@@ -574,6 +577,10 @@ fn install_agent_stable(ctx: &Ctx) -> anyhow::Result<PathBuf> {
         &sink,
         "pip install of the agent wheel failed",
     )?;
+    // Keep the verified wheel for the next upgrade's rollback.
+    if let Err(e) = retain::keep_wheel(&wheel_path, Path::new(ROLLBACK_DIR)) {
+        tracing::warn!(error = %e, "could not keep the agent wheel for rollback");
+    }
 
     let repo = clone_dest()?;
     unpack_bundle(&bundle_path, &repo)?;
@@ -774,6 +781,15 @@ impl Step for VenvAgent {
             return StepOutcome::Failed(e.to_string());
         }
 
+        // Start this run's rollback record, then record the retained wheel of
+        // the version this run replaces, so a failed install can reinstall it.
+        let record = Path::new(RUN_RECORD);
+        if let Err(e) = begin_run_record(record) {
+            tracing::warn!(error = %e, "rollback record not started");
+        }
+        let previous = env::installed_agent_version();
+        retain::record_previous(Path::new(ROLLBACK_DIR), record, previous.as_deref());
+
         // (3) Install the agent package per channel. The stable path installs a
         // signature-verified release wheel and unpacks the release's deploy
         // bundle; the edge path clones the repo. Both return the source tree.
@@ -803,6 +819,23 @@ impl Step for VenvAgent {
                     .to_string(),
             );
         }
+
+        // Keep the installed package as a wheel for the next upgrade's
+        // rollback. The stable path already kept its verified release wheel.
+        // A retention failure never fails the install; it only means the next
+        // upgrade has no wheel to restore.
+        let rollback_dir = Path::new(ROLLBACK_DIR);
+        if ctx.channel != "stable" {
+            if let Err(e) = retain::build_and_keep(&venv_pip(), &repo, rollback_dir) {
+                tracing::warn!(error = %e, "could not keep the agent wheel for rollback");
+            }
+        }
+        let current = env::installed_agent_version();
+        let keep: Vec<&str> = [previous.as_deref(), current.as_deref()]
+            .into_iter()
+            .flatten()
+            .collect();
+        retain::prune(rollback_dir, &keep);
 
         // Record the source tree so the downstream OS steps find the unit files,
         // udev rules, and driver scripts under it.

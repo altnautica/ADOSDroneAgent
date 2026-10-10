@@ -1,23 +1,64 @@
 //! Background "newer version available?" check for the cockpit.
 //!
-//! Pings GitHub for the latest agent version on `main` (the same source the
-//! `ados update` CLI reads) and compares it to the installed version. The fetch
-//! shells out to `curl` — matching the installer's house pattern (the workspace
-//! `ureq` is HTTP-only / no-TLS, see `ados-installer::net`) — so the tiny cockpit
-//! binary never links a TLS stack. It runs on a background thread that re-checks
-//! periodically, so an open cockpit auto-notices a fresh release without ever
-//! blocking startup, the poll loop, or input, and degrades silently when
-//! offline (a failed re-check keeps the last-good value). Set
-//! `ADOS_NO_UPDATE_CHECK` to skip it entirely.
+//! Asks GitHub for the latest agent version on the node's release channel and
+//! compares it to the installed version. The channel is the one the installer
+//! recorded in `/etc/ados/profile.conf` (`edge` when unrecorded, the installer's
+//! default): an edge node follows `__version__` on `main`; a stable node follows
+//! the `__version__` of the newest published `v*` release, because that is all
+//! `ados update` installs there. The fetch shells out to `curl` — matching the
+//! installer's house pattern (the workspace `ureq` is HTTP-only / no-TLS, see
+//! `ados-installer::net`) — so the tiny cockpit binary never links a TLS stack.
+//! It runs on a background thread that re-checks periodically, so an open
+//! cockpit auto-notices a fresh release without ever blocking startup, the poll
+//! loop, or input, and degrades silently when offline (a failed re-check keeps
+//! the last-good value). Set `ADOS_NO_UPDATE_CHECK` to skip it entirely.
 
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// The raw `__init__.py` on `main` — the same source `ados update` reads.
-const REMOTE_VERSION_URL: &str =
-    "https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/main/src/ados/__init__.py";
+/// The raw `__init__.py` at a git ref.
+fn init_py_url(git_ref: &str) -> String {
+    format!("https://raw.githubusercontent.com/altnautica/ADOSDroneAgent/{git_ref}/src/ados/__init__.py")
+}
+
+/// The published releases, newest first.
+const RELEASES_URL: &str =
+    "https://api.github.com/repos/altnautica/ADOSDroneAgent/releases?per_page=50";
+
+/// Where the installer records the node's release channel.
+const PROFILE_CONF: &str = "/etc/ados/profile.conf";
+
+/// The release channel a node follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Channel {
+    /// Tip of `main`.
+    Edge,
+    /// Published `v<X.Y.Z>` releases.
+    Stable,
+}
+
+/// The channel a `profile.conf` body records (`channel: stable` or the legacy
+/// `channel=stable`). Anything else, or no line, is the installer default:
+/// edge.
+pub fn parse_channel(profile_conf: &str) -> Channel {
+    for line in profile_conf.lines() {
+        let line = line.trim();
+        let value = line
+            .strip_prefix("channel:")
+            .or_else(|| line.strip_prefix("channel="));
+        if let Some(v) = value {
+            let v = v.trim().trim_matches(|c| c == '"' || c == '\'');
+            return if v == "stable" {
+                Channel::Stable
+            } else {
+                Channel::Edge
+            };
+        }
+    }
+    Channel::Edge
+}
 
 /// How often the background thread re-fetches the latest version. Modest so an
 /// open cockpit notices a new release within a few minutes, low-volume enough
@@ -39,7 +80,10 @@ pub fn spawn_check() -> LatestSlot {
     }
     let out = Arc::clone(&slot);
     thread::spawn(move || loop {
-        store_result(&out, fetch_latest());
+        let channel = std::fs::read_to_string(PROFILE_CONF)
+            .map(|body| parse_channel(&body))
+            .unwrap_or(Channel::Edge);
+        store_result(&out, fetch_latest(channel));
         thread::sleep(RECHECK_INTERVAL);
     });
     slot
@@ -57,9 +101,9 @@ fn store_result(slot: &LatestSlot, fetched: Option<String>) {
     }
 }
 
-/// Fetch the latest `__version__` from GitHub via `curl`. `None` on any error
-/// (offline, curl missing, non-2xx, unparseable) so the cockpit stays silent.
-fn fetch_latest() -> Option<String> {
+/// `curl` a URL to a string. `None` on any error (offline, curl missing,
+/// non-2xx).
+fn curl(url: &str) -> Option<String> {
     let output = Command::new("curl")
         .args([
             "-fsSL",
@@ -67,14 +111,44 @@ fn fetch_latest() -> Option<String> {
             "4",
             "--max-time",
             "8",
-            REMOTE_VERSION_URL,
+            "-H",
+            "User-Agent: ados-tui",
+            url,
         ])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
-    parse_version(&String::from_utf8_lossy(&output.stdout))
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Fetch the latest `__version__` on `channel`. `None` on any error so the
+/// cockpit stays silent.
+fn fetch_latest(channel: Channel) -> Option<String> {
+    let git_ref = match channel {
+        Channel::Edge => "main".to_string(),
+        Channel::Stable => latest_release_tag(&curl(RELEASES_URL)?)?,
+    };
+    parse_version(&curl(&init_py_url(&git_ref))?)
+}
+
+/// The tag of the newest published `v<X.Y.Z>` release in a GitHub releases
+/// listing: drafts, pre-releases and non-version tags (the rolling binary
+/// tags) are skipped, and "newest" is the highest version, not list order.
+pub fn latest_release_tag(releases_json: &str) -> Option<String> {
+    let releases: serde_json::Value = serde_json::from_str(releases_json).ok()?;
+    releases
+        .as_array()?
+        .iter()
+        .filter(|r| r["draft"] != true && r["prerelease"] != true)
+        .filter_map(|r| r["tag_name"].as_str())
+        .filter(|tag| {
+            tag.strip_prefix('v')
+                .is_some_and(|v| parse_tuple(v).is_some())
+        })
+        .max_by(|a, b| parse_tuple(&a[1..]).cmp(&parse_tuple(&b[1..])))
+        .map(str::to_string)
 }
 
 /// Extract `__version__ = "X.Y.Z"` from a Python source string (single or double
@@ -162,5 +236,41 @@ mod tests {
         // A newer fetch replaces it.
         store_result(&slot, Some("0.99.121".to_string()));
         assert_eq!(slot.lock().unwrap().as_deref(), Some("0.99.121"));
+    }
+
+    #[test]
+    fn the_channel_comes_from_profile_conf() {
+        assert_eq!(
+            parse_channel("profile: drone\nchannel: stable\n"),
+            Channel::Stable
+        );
+        assert_eq!(
+            parse_channel("profile=drone\nchannel=stable\n"),
+            Channel::Stable
+        );
+        assert_eq!(
+            parse_channel("profile: drone\nchannel: edge\n"),
+            Channel::Edge
+        );
+        assert_eq!(parse_channel("profile: drone\n"), Channel::Edge);
+    }
+
+    #[test]
+    fn stable_channel_no_badge_when_main_ahead() {
+        let releases = r#"[
+            {"tag_name": "prebuilt-main", "draft": false, "prerelease": false},
+            {"tag_name": "v0.104.0-rc1", "draft": false, "prerelease": true},
+            {"tag_name": "v0.103.0", "draft": true, "prerelease": false},
+            {"tag_name": "v0.101.0", "draft": false, "prerelease": false},
+            {"tag_name": "v0.102.0", "draft": false, "prerelease": false}
+        ]"#;
+        let tag = latest_release_tag(releases).unwrap();
+        assert_eq!(tag, "v0.102.0");
+        let installed = "0.102.0";
+        // main is ahead, but a stable node is not offered it.
+        let main_version = "0.103.0";
+        assert!(is_newer(main_version, installed));
+        assert!(!is_newer(&tag[1..], installed));
+        assert_eq!(latest_release_tag("not json"), None);
     }
 }

@@ -26,7 +26,7 @@ use ratatui::crossterm::{execute, ExecutableCommand};
 use ratatui::Terminal;
 use serde_json::Value;
 
-use crate::action::{update_request, Action, ACTIONS};
+use crate::action::{confirm_prompt, update_request, Action, ArmView, ACTIONS};
 use crate::poll::{AgentView, Poller};
 
 /// Where the agent stores the pairing key (matches `ados.core.paths.PAIRING_JSON`).
@@ -112,14 +112,11 @@ fn show_refusal(terminal: &mut Terminal<CrosstermBackend<Stdout>>, why: &str) ->
     pause_then_restore(terminal)
 }
 
-/// Run an update request: the confirming update action, or the refusal while the
-/// vehicle reports armed.
-fn request_update(
-    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    armed: Option<bool>,
-) -> Result<()> {
-    match update_request(armed) {
-        Ok(action) => run_action(terminal, action, None),
+/// Run an update request: the confirming update action (its prompt naming an
+/// unknown arm state), or the refusal while the vehicle reports armed.
+fn request_update(terminal: &mut Terminal<CrosstermBackend<Stdout>>, arm: ArmView) -> Result<()> {
+    match update_request(arm) {
+        Ok(action) => run_action(terminal, action, None, Some(arm)),
         Err(why) => show_refusal(terminal, why),
     }
 }
@@ -139,6 +136,7 @@ fn run_action(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     action: &Action,
     profile: Option<&str>,
+    arm: Option<ArmView>,
 ) -> Result<()> {
     let (program, args) = match action.argv(profile) {
         Ok(argv) => argv,
@@ -154,7 +152,7 @@ fn run_action(
     let _signals = SignalGuard::ignore();
 
     if action.confirm {
-        print!("\n{} — proceed? [y/N] ", action.label);
+        print!("\n{}", confirm_prompt(action.label, arm));
         let _ = std::io::stdout().flush();
         if !read_line().trim().eq_ignore_ascii_case("y") {
             return restore_cockpit(terminal);
@@ -269,7 +267,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: RestClient) ->
         // (polls are failing or hanging while an old snapshot is still held).
         let stale = view.is_stale(Instant::now(), STALE_AFTER);
         let dash = view.dash.as_ref();
-        let armed = dash.and_then(|d| d.armed);
+        let arm = ArmView::from_snapshot(dash.and_then(|d| d.armed), stale);
         let profile = dash.map(|d| d.profile.as_str());
 
         // The latest version from the background check (None until it lands).
@@ -315,7 +313,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: RestClient) ->
                     update_splash = false;
                     update_splash_done = true;
                     if splash_requests_update(key.code) {
-                        request_update(terminal, armed)?;
+                        request_update(terminal, arm)?;
                         poller.refresh();
                     }
                     continue;
@@ -334,9 +332,9 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: RestClient) ->
                             actions_selected = None;
                             let action = &ACTIONS[sel];
                             if action.is_update() {
-                                request_update(terminal, armed)?;
+                                request_update(terminal, arm)?;
                             } else {
-                                run_action(terminal, action, profile)?;
+                                run_action(terminal, action, profile, None)?;
                             }
                             poller.refresh(); // refresh right after returning
                         }
@@ -350,13 +348,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, client: RestClient) ->
                         // `[u] update` (shown in the footer only when a newer
                         // version is available) runs the agent update, y/N-gated.
                         KeyCode::Char('u') | KeyCode::Char('U') if update_available => {
-                            request_update(terminal, armed)?;
+                            request_update(terminal, arm)?;
                             poller.refresh();
                         }
                         KeyCode::Char(c) => {
                             let c = c.to_ascii_lowercase();
                             if let Some(action) = ACTIONS.iter().find(|a| a.key == Some(c)) {
-                                run_action(terminal, action, profile)?;
+                                run_action(terminal, action, profile, None)?;
                                 poller.refresh();
                             }
                         }

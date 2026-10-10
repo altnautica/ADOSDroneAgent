@@ -8,16 +8,19 @@
 //! half-applied upgrade therefore leaves the node on the binaries it was
 //! running before, not on a mix of new binaries and old units or config.
 //!
-//! Deliberately narrow. It restores **binaries only** — not the Python wheel,
-//! not config, not systemd units. That bounds what it can promise: it recovers
-//! the common bad-upgrade case, which is a Rust service that will not start or
-//! a later step that could not finish, and it does not pretend to be a general
-//! time machine. Only binaries replaced by THIS run are touched: a `.prev` left
-//! by an earlier upgrade of a binary this run did not replace is not restored.
+//! It also restores the agent wheel and config snapshots this run took (see
+//! [`snapshots`]): the wheel of the version the run replaced is reinstalled and
+//! `/etc/ados/config.yaml` goes back to its pre-migration copy, before the units
+//! restart. Systemd units are not restored. Only what THIS run replaced is
+//! touched: a `.prev` left by an earlier upgrade of a binary this run did not
+//! replace is not restored, and a snapshot record from another run is ignored.
+
+pub mod snapshots;
 
 use std::path::{Path, PathBuf};
 
 use crate::steps::fetch_binaries::prev_sibling;
+use snapshots::{read_run_snapshots, reinstall_wheel, restore_snapshots, RUN_RECORD};
 
 /// What a rollback would do to one binary.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +122,10 @@ pub struct RollbackReport {
     pub restarted: Vec<String>,
     /// Units whose restart failed.
     pub restart_failed: Vec<String>,
+    /// The agent wheel reinstalled from this run's snapshot.
+    pub wheel_restored: Option<PathBuf>,
+    /// The pre-migration config copy put back.
+    pub config_restored: Option<PathBuf>,
 }
 
 impl RollbackReport {
@@ -147,6 +154,12 @@ impl RollbackReport {
                 self.restart_failed.join(", ")
             ));
         }
+        if let Some(w) = &self.wheel_restored {
+            parts.push(format!("agent wheel restored from {}", w.display()));
+        }
+        if let Some(c) = &self.config_restored {
+            parts.push(format!("config restored from {}", c.display()));
+        }
         parts.join("; ")
     }
 }
@@ -170,10 +183,16 @@ pub fn restore_replaced(replaced: &[PathBuf]) -> RollbackReport {
     report
 }
 
-/// Roll back a failed install: restore every binary this run replaced and
-/// restart the enabled or active units that run them.
+/// Roll back a failed install: restore every binary this run replaced and the
+/// agent wheel and config snapshots it took, then restart the enabled or active
+/// units that run the restored binaries.
 pub fn roll_back(replaced: &[PathBuf]) -> RollbackReport {
     let mut report = restore_replaced(replaced);
+    let snaps = read_run_snapshots(Path::new(RUN_RECORD));
+    let restored = restore_snapshots(&snaps, Path::new(crate::env::CONFIG_YAML), reinstall_wheel);
+    report.wheel_restored = restored.wheel;
+    report.config_restored = restored.config;
+    report.failed.extend(restored.failed);
     for unit in units_running(&report.restored, &read_units(UNIT_DIRS)) {
         let wanted = crate::exec::run_ok("systemctl", &["is-enabled", "--quiet", &unit])
             || crate::exec::run_ok("systemctl", &["is-active", "--quiet", &unit]);

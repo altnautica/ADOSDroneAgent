@@ -28,6 +28,10 @@ pub struct Args {
     pub upgrade: bool,
     /// `--force` — clear checkpoints and reinstall from scratch.
     pub force: bool,
+    /// `--force-armed` — proceed with an upgrade even when the vehicle is (or
+    /// may be) armed. Without it an upgrade refuses while the vehicle state
+    /// says armed, is stale, or cannot be read.
+    pub force_armed: bool,
     /// `--branch <v>` — install from a git branch (dev path).
     pub branch: Option<String>,
     /// `--channel <v>` — release channel selector.
