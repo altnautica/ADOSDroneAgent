@@ -4,6 +4,47 @@ All notable changes to the ADOS Drone Agent are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.102.6] - 2026-10-10
+
+### Added
+
+- Ground station phone receivers: a phone can ask to receive the WFB link
+  directly. The operator approves each request (shown with the phone's key
+  fingerprint) in Mission Control, the dashboard pairing page or the HDMI
+  cockpit Pair screen; the receive bundle is sealed to the phone's key and can
+  be fetched once. The routes are ground-station only and refused over the
+  relay.
+- HDMI cockpit: Kill, Pause and Resume skills; confirm tiers (hold, slide,
+  guarded Kill) usable by touch, panel buttons and gamepad; takeoff sends the
+  chosen altitude; extension skills, video overlays, panels and widgets with a
+  sandboxed host that checks granted capabilities; alerts by level.
+- Extension manifests may omit the GCS entrypoint when they contribute only
+  skills or parameters; map overlays and mission templates are accepted.
+- GCS capabilities `ui.slot.cockpit-widget` and `vision.track.designate`.
+
+### Changed
+
+- The cockpit, dashboard, terminal UI, installer and display pages use the
+  generated brand palette; the cockpit and dashboard share one web code base
+  (video transport, session, API client).
+- The kiosk opens the cockpit (`/cockpit/?kiosk=1`) by default.
+- Dashboard: "Plugins" is now "Extensions" (`/extensions`), routes load on
+  demand, unknown paths show a not-found page, and the wake lock is held only
+  while video is visible.
+- Cockpit Feed polling drops to about 6.5 requests a second on a drone with no
+  extensions; detection and button sockets back off instead of reconnecting in
+  a loop.
+
+### Fixed
+
+- Dashboard client routes load on an unpaired node instead of returning JSON.
+- WHEP sessions are deleted when the video stops.
+- HLS gives up and falls back after repeated fatal network errors.
+- Command skills are enabled only while the local flight controller link is
+  live; a ground station relaying a drone says so instead of offering commands
+  that would be refused.
+- A battery reported as unknown no longer raises a low-battery warning.
+
 ## [0.102.5] - 2026-10-07
 
 ### Fixed
