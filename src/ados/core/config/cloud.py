@@ -34,13 +34,12 @@ class ServerConfig(BaseModel):
     mode: Literal["cloud", "self_hosted", "local"] = "local"
     cloud: CloudServerConfig = CloudServerConfig()
     self_hosted: SelfHostedServerConfig = SelfHostedServerConfig()
+    # The relay authenticates as `ados-<device_id>` with the pairing key over
+    # TLS; the transport is the only MQTT setting it reads from this block.
     mqtt_transport: str = "websockets"  # "tcp" or "websockets"
-    # Empty uses the bare device id, which the broker ACL `ados/%u/#` keys on.
-    mqtt_username: str = ""
-    mqtt_password: str = ""  # Auto-filled from API key in cloud mode
-    # Development brokers only: connect without TLS. The password (the pairing
-    # key in cloud mode) then crosses the network in clear text.
-    mqtt_plaintext_dev: bool = False
+    # Allow an operator-triggered export of node logs to the cloud. There is no
+    # continuous upload; this is the whole gate on any export.
+    cloud_logs_enabled: bool = False
 
 
 class CloudflareTunnelConfig(BaseModel):

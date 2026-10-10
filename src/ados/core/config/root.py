@@ -14,7 +14,8 @@ from .ground_station import GroundStationConfig
 from .mavlink import MavlinkConfig
 from .network import NetworkConfig
 from .radio import RadioConfig
-from .security import SecurityConfig
+from .security import McpConfig, SecurityConfig
+from .storage import HardwareConfig, StorageConfig
 from .system import (
     DiscoveryConfig,
     LoggingConfig,
@@ -39,7 +40,6 @@ SECRET_PATHS: tuple[str, ...] = (
     "security.api.api_key",
     "server.self_hosted.api_key",
     "security.hmac_secret",
-    "server.mqtt_password",
     "network.wifi_client.password",
     "network.hotspot.password",
 )
@@ -63,6 +63,9 @@ class ADOSConfig(BaseModel):
     battery: BatteryConfig = BatteryConfig()
     ground_station: GroundStationConfig = GroundStationConfig()
     ui: UiConfig = Field(default_factory=UiConfig)
+    mcp: McpConfig = McpConfig()
+    storage: StorageConfig = StorageConfig()
+    hardware: HardwareConfig = HardwareConfig()
 
     model_config = {"extra": "ignore"}
 

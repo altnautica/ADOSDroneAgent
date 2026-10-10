@@ -1,25 +1,15 @@
-"""Start or stop the remote-access tunnel unit when its config changes.
+"""Restart the remote-access tunnel unit on demand.
 
 ``remote_access.provider`` and ``remote_access.cloudflare.enabled`` say whether
-this node is reachable beyond the LAN through an outbound tunnel. The tunnel
-itself is a separate systemd unit (``remote_access.cloudflare.service_name``,
-``cloudflared`` by default), so a config write alone changes nothing: an
-operator who turns the tunnel off would see the change saved while the node
-stayed publicly reachable.
+this node is reachable beyond the LAN through an outbound tunnel run by a
+separate systemd unit (``remote_access.cloudflare.service_name``,
+``cloudflared`` by default). Enabling or disabling that unit when the posture
+changes is a config side effect, run natively for every config writer.
 
-This module is called from the single ``/etc/ados/config.yaml`` write
-chokepoint. When the effective tunnel posture changes it enables and starts the
-unit (``provider == "cloudflare"`` and ``enabled``), or disables and stops it
-(anything else), so the unit also stays in that state across a reboot. The
-node's own status report (``remote_access.status`` in the setup status) reads
-the unit's state back, so a surface can show whether the start or stop landed.
-
-Only unit names that start with ``cloudflared`` are acted on. The service name
-is a config value, and without the check a config write could stop an
-arbitrary unit.
-
-Best-effort: a systemctl failure is logged and never fails the config write
-that triggered it.
+What stays here is the one action a config write cannot express: restarting a
+running tunnel so it picks up a freshly installed token. Only unit names that
+start with ``cloudflared`` are acted on, because the name is a config value and
+without the check a caller could restart an arbitrary unit.
 """
 
 from __future__ import annotations
@@ -33,77 +23,37 @@ from ados.core.logging import get_logger
 log = get_logger("remote_access_sync")
 
 _SYSTEMCTL_TIMEOUT_S = 10.0
-_DEFAULT_UNIT = "cloudflared"
-_UNIT_NAME = re.compile(r"^cloudflared[A-Za-z0-9@._-]*$")
+UNIT_NAME_RE = re.compile(r"^cloudflared[A-Za-z0-9@._-]*$")
 
 
-def _posture(config: dict[str, Any] | None) -> tuple[bool, str]:
-    """``(tunnel wanted, unit name)`` for a raw config mapping.
+def restart_tunnel_unit(unit: str) -> dict[str, Any]:
+    """``systemctl --no-block try-restart`` the tunnel unit.
 
-    An absent block reads as the packaged default: provider ``none``, tunnel
-    off, unit ``cloudflared``.
+    ``try-restart`` restarts a running unit and never starts a stopped one, so
+    a disabled tunnel stays down. Returns ``{"unit", "ok", "error"}``: ``ok``
+    is true only when systemctl accepted the job. Never raises.
     """
-    remote = config.get("remote_access") if isinstance(config, dict) else None
-    if not isinstance(remote, dict):
-        return False, _DEFAULT_UNIT
-    cf = remote.get("cloudflare")
-    if not isinstance(cf, dict):
-        cf = {}
-    unit = cf.get("service_name")
-    unit = unit.strip() if isinstance(unit, str) and unit.strip() else _DEFAULT_UNIT
-    wanted = remote.get("provider") == "cloudflare" and cf.get("enabled") is True
-    return wanted, unit
-
-
-def _kick(unit: str, wanted: bool) -> None:
-    """``systemctl enable --now`` or ``disable --now`` the tunnel unit.
-
-    ``--no-block`` queues the start or stop without holding the config-write
-    request on systemd.
-    """
-    if not _UNIT_NAME.match(unit):
-        log.warning("remote_access_unit_refused", unit=unit)
-        return
-    verb = "enable" if wanted else "disable"
+    if not isinstance(unit, str) or not UNIT_NAME_RE.fullmatch(unit):
+        log.warning("remote_access_unit_refused", unit=str(unit))
+        return {"unit": unit, "ok": False, "error": "unit name refused"}
     try:
         result = subprocess.run(
-            ["systemctl", "--no-block", verb, "--now", unit],
+            ["systemctl", "--no-block", "try-restart", unit],
             capture_output=True,
             timeout=_SYSTEMCTL_TIMEOUT_S,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        log.warning("remote_access_unit_kick_failed", unit=unit, verb=verb, error=str(exc))
-        return
+        log.warning("remote_access_unit_restart_failed", unit=unit, error=str(exc))
+        return {"unit": unit, "ok": False, "error": str(exc)}
     if result.returncode != 0:
-        log.warning(
-            "remote_access_unit_kick_failed",
-            unit=unit,
-            verb=verb,
-            error=result.stderr.decode("utf-8", errors="replace").strip(),
+        error = result.stderr.decode("utf-8", errors="replace").strip() or (
+            f"systemctl exited {result.returncode}"
         )
-    else:
-        log.info("remote_access_unit_kicked", unit=unit, verb=verb)
+        log.warning("remote_access_unit_restart_failed", unit=unit, error=error)
+        return {"unit": unit, "ok": False, "error": error}
+    log.info("remote_access_unit_restarted", unit=unit)
+    return {"unit": unit, "ok": True, "error": None}
 
 
-def sync_after_config_write(
-    previous: dict[str, Any] | None, current: dict[str, Any] | None
-) -> None:
-    """Bring the tunnel unit in line with a just-written config.
-
-    Acts only when the tunnel posture or the unit name changed, so unrelated
-    config saves never restart a running tunnel. A renamed unit stops the old
-    one before the new one starts.
-    """
-    before = _posture(previous)
-    after = _posture(current)
-    if before == after:
-        return
-    was_wanted, old_unit = before
-    wanted, unit = after
-    if was_wanted and old_unit != unit:
-        _kick(old_unit, False)
-    _kick(unit, wanted)
-
-
-__all__ = ["sync_after_config_write"]
+__all__ = ["UNIT_NAME_RE", "restart_tunnel_unit"]

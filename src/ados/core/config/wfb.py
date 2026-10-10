@@ -6,7 +6,22 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from ._bounds import I8_MAX, I8_MIN, U8_MAX, U16_MAX, U32_MAX
+from ._bounds import I8_MAX, I8_MIN, I64_MAX, U8_MAX, U16_MAX, U32_MAX
+
+
+class PairRearmConfig(BaseModel):
+    """Re-arm of the auto-pair window when a paired link stays dead.
+
+    Read by the supervisor's pair-proof machine and the pair write route.
+    """
+
+    enabled: bool = True
+    # Seconds the link must stay unproven before the window re-arms (floor 1).
+    confirm_hold_s: int = Field(default=600, ge=0, le=I64_MAX)
+    # Seconds between two re-arms.
+    cooldown_s: int = Field(default=1800, ge=0, le=I64_MAX)
+    # Oldest link-stats sample, in seconds, still counted as live (floor 1).
+    stats_fresh_ceiling_s: int = Field(default=30, ge=0, le=I64_MAX)
 
 
 class WfbConfig(BaseModel):
@@ -183,6 +198,31 @@ class WfbConfig(BaseModel):
     # the current channel for at least 30 s.
     hop_loss_threshold_percent: float = 10.0
     hop_rssi_threshold_dbm: float = -75.0
+    # Rotate to a quieter channel on a timer as well as on degradation.
+    periodic_hop_enabled: bool = False
+    # Refuse to bring the link up on a channel the regulatory domain does not
+    # permit at usable power, instead of transmitting anyway.
+    reg_gate_strict: bool = True
+    # Allow DFS channels as hop candidates.
+    dfs_allowed: bool = False
+    # Channel both sides return to on link loss; unset means `channel`.
+    rendezvous_channel: int | None = Field(default=None, ge=0, le=U8_MAX)
+    # Radio backend: `auto` (kernel monitor mode on Linux), `kernel` or
+    # `userspace`. An unknown value resolves to `auto`.
+    backend: str = "auto"
+    # Auxiliary low-rate MAVLink/status link carried beside video.
+    aux_enable: bool = True
+    aux_tx_port: int = Field(default=5602, ge=0, le=U16_MAX)
+    aux_rx_port: int = Field(default=5603, ge=0, le=U16_MAX)
+    aux_fec_k: int = Field(default=1, ge=0, le=U8_MAX)
+    aux_fec_n: int = Field(default=2, ge=0, le=U8_MAX)
+    # MCS of the aux link; unset means `mcs_index`.
+    aux_mcs_index: int | None = Field(default=None, ge=0, le=U8_MAX)
+    # Status and identity frames the cloud relay publishes over the aux link.
+    aux_status_enabled: bool = True
+    aux_status_interval_s: float = 1.0
+    aux_identity_interval_s: float = 10.0
+    pair_rearm: PairRearmConfig = PairRearmConfig()
 
     @model_validator(mode="before")
     @classmethod

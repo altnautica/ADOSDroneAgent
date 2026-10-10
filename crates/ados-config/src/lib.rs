@@ -25,6 +25,8 @@
 
 pub mod log_store;
 mod profile;
+pub mod schema;
+pub mod side_effects;
 
 pub use profile::{
     ground_station_role, mesh_role_path, node_profile, node_profile_at, normalize_profile,
@@ -32,10 +34,44 @@ pub use profile::{
     PROFILE_CONF,
 };
 
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::Path;
+use std::sync::LazyLock;
+
+use parking_lot::Mutex;
 
 use serde::de::DeserializeOwned;
+
+/// The last error logged per config slice. A malformed file is parsed on every
+/// request by the hot-path readers, so the error is logged once per distinct
+/// `(slice, error)` and again only after it changes or the slice parses clean.
+static REPORTED: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Log a parse failure for `what`, once per distinct error message.
+fn report_error(what: &str, msg: &str) {
+    let mut seen = REPORTED.lock();
+    if seen.get(what).map(String::as_str) == Some(msg) {
+        return;
+    }
+    seen.insert(what.to_string(), msg.to_string());
+    drop(seen);
+    tracing::error!(
+        config = what,
+        error = %msg,
+        "config parse failed; using defaults until the config is valid"
+    );
+}
+
+/// Forget a logged failure for `what` once it parses clean, so a recurrence is
+/// logged again.
+fn clear_reported(what: &str) {
+    let mut seen = REPORTED.lock();
+    if !seen.is_empty() {
+        seen.remove(what);
+    }
+}
 
 fn report<T, E>(parsed: Result<T, E>, what: &str) -> (T, Option<String>)
 where
@@ -43,14 +79,13 @@ where
     E: Display,
 {
     match parsed {
-        Ok(v) => (v, None),
+        Ok(v) => {
+            clear_reported(what);
+            (v, None)
+        }
         Err(e) => {
             let msg = e.to_string();
-            tracing::error!(
-                config = what,
-                error = %msg,
-                "config parse failed; using defaults until the config is valid"
-            );
+            report_error(what, &msg);
             (T::default(), Some(msg))
         }
     }
@@ -310,5 +345,46 @@ mod tests {
         );
 
         std::env::remove_var("ADOS_RUN_DIR");
+    }
+
+    /// An `io::Write` sink the test subscriber writes formatted events into.
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn report_dedupes() {
+        let sink = Captured::default();
+        let writer = sink.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let lines = || {
+            String::from_utf8(sink.0.lock().clone())
+                .unwrap()
+                .matches("config parse failed")
+                .count()
+        };
+        tracing::subscriber::with_default(subscriber, || {
+            for _ in 0..100 {
+                let _: Sample = yaml_or_default("count: not-a-number\n", "dedupe-probe");
+            }
+            assert_eq!(lines(), 1, "one line for one repeated error");
+            let _: Sample = yaml_or_default("count: [1]\n", "dedupe-probe");
+            assert_eq!(lines(), 2, "a different error is logged");
+            let _: Sample = yaml_or_default("count: 3\n", "dedupe-probe");
+            let _: Sample = yaml_or_default("count: [1]\n", "dedupe-probe");
+            assert_eq!(lines(), 3, "a recurrence after a clean parse is logged");
+        });
     }
 }

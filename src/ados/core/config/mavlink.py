@@ -90,6 +90,18 @@ class MavlinkConfig(BaseModel):
     # firmware's ingest collapses instead of halving, setting this true is the
     # rollback. Read by the native router, which owns the FC link.
     legacy_stream_request: bool = False
+    # Gate plugin FC writes on the pilot-in-command arbiter's verdict. The
+    # arbiter runs on a ground station only, so a drone write that turns this
+    # on is refused; the installer turns it on for ground stations.
+    injector_arbitration: bool = False
+    # Adopt the fleet slot's system id onto the flight controller when the
+    # ground station reports a collision. Read by the control front.
+    adopt_slot_system_id: bool = False
+    # Deliver flight-controller frames addressed to one system id only to the
+    # endpoint that owns it, instead of to every client.
+    route_aware: bool = False
+    # Sign agent-originated frames with an agent-held MAVLink 2 signing key.
+    agent_signing: bool = False
 
     @model_validator(mode="before")
     @classmethod

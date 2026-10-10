@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from ._bounds import U8_MAX, U32_MAX
+from ._bounds import I64_MAX, U8_MAX, U32_MAX
 
 
 class WifiClientConfig(BaseModel):
@@ -119,6 +119,64 @@ class RegulatoryConfig(BaseModel):
     # ISO-8601 timestamp recorded when the region/posture was chosen
     # (audit). Stored as a plain string.
     ack_at: str | None = None
+    # The radio driver's per-rate PA calibration table: 0 (default) runs the
+    # home channel at full driver power bounded by the software TX clamp, 1
+    # applies the efuse per-rate table. Read by the installer and supervisor.
+    tx_pwr_by_rate: int = Field(default=0, ge=0, le=U8_MAX)
+
+
+class WatchdogConfig(BaseModel):
+    # Arm the SoC hardware watchdog through systemd at install time. Off by
+    # default; the installer reads it.
+    enabled: bool = False
+
+
+class _TickConfig(BaseModel):
+    """A supervisor reconciler's switch and cadence: a fast tick for the first
+    window after boot, then the steady tick."""
+
+    enabled: bool = True
+    tick_interval_s: int = Field(default=30, ge=0, le=I64_MAX)
+    fast_initial_window_s: int = Field(default=60, ge=0, le=I64_MAX)
+    fast_initial_tick_interval_s: int = Field(default=5, ge=0, le=I64_MAX)
+
+
+class MgmtFailoverConfig(BaseModel):
+    """Onboard-WiFi reach-back when the wired management link goes down."""
+
+    enabled: bool = True
+    down_debounce_s: int = Field(default=20, ge=0, le=I64_MAX)
+    recover_debounce_s: int = Field(default=15, ge=0, le=I64_MAX)
+    # Floor 1.
+    tick_interval_s: int = Field(default=5, ge=0, le=I64_MAX)
+
+
+class ManagementLinkGuardianConfig(_TickConfig):
+    """Repairs a management link that stopped passing traffic."""
+
+    fail_threshold: int = Field(default=2, ge=0, le=U32_MAX)
+    repairs_per_window: int = Field(default=5, ge=0, le=U32_MAX)
+    repair_window_s: int = Field(default=600, ge=0, le=I64_MAX)
+
+
+class RegReconcilerConfig(_TickConfig):
+    """Re-asserts the wanted global regulatory domain when it drifts."""
+
+    # The wanted domain; unset falls back to `video.wfb.reg_domain`, then US.
+    domain: str | None = None
+
+
+class UsbRehomeConfig(BaseModel):
+    """Rebinds a radio adapter on a slow USB port whose RF stays unverified."""
+
+    enabled: bool = True
+    cooldown_s: int = Field(default=60, ge=0, le=I64_MAX)
+    healthy_reset_s: int = Field(default=120, ge=0, le=I64_MAX)
+    tick_interval_s: int = Field(default=5, ge=0, le=I64_MAX)
+
+
+class WifiPowersaveConfig(_TickConfig):
+    """Keeps WiFi power saving off on the management adapter."""
 
 
 class NetworkConfig(BaseModel):
@@ -128,3 +186,11 @@ class NetworkConfig(BaseModel):
     mac_pin: MacPinConfig = MacPinConfig()
     wifi_selfheal: WifiSelfHealConfig = WifiSelfHealConfig()
     regulatory: RegulatoryConfig = RegulatoryConfig()
+    watchdog: WatchdogConfig = WatchdogConfig()
+    mgmt_failover: MgmtFailoverConfig = MgmtFailoverConfig()
+    management_link_guardian: ManagementLinkGuardianConfig = (
+        ManagementLinkGuardianConfig()
+    )
+    reg_reconciler: RegReconcilerConfig = RegReconcilerConfig()
+    usb_rehome: UsbRehomeConfig = UsbRehomeConfig()
+    wifi_powersave: WifiPowersaveConfig = WifiPowersaveConfig()

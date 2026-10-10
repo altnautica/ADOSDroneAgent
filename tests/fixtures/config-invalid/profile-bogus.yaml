@@ -1,0 +1,3 @@
+# agent.profile outside the profile enum.
+agent:
+  profile: bogus

@@ -94,16 +94,54 @@ def test_committed_schema_shape_and_secret_markers() -> None:
             return sum(_count_markers(v) for v in node)
         return 0
 
-    assert _count_markers(schema) == 6
+    assert _count_markers(schema) == 5
     defs = schema["$defs"]
     for def_name, prop in (
         ("ApiSecurityConfig", "api_key"),
         ("SelfHostedServerConfig", "api_key"),
         ("SecurityConfig", "hmac_secret"),
-        ("ServerConfig", "mqtt_password"),
         ("WifiClientConfig", "password"),
         ("HotspotConfig", "password"),
     ):
         assert defs[def_name]["properties"][prop].get("x-secret") is True, (
             f"{def_name}.{prop} lost its x-secret marker"
         )
+
+
+def test_committed_schema_carries_the_closed_sets_and_native_keys() -> None:
+    """Closed sets are enums, so the native write refuses anything else, and
+    the keys only native services read are described with their defaults."""
+    schema = json.loads(_SCHEMA.read_text(encoding="utf-8"))
+    defs = schema["$defs"]
+
+    assert defs["AgentConfig"]["properties"]["profile"]["enum"] == [
+        "auto",
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute",
+    ]
+    assert defs["VisionConfig"]["properties"]["backend"]["enum"] == [
+        "auto",
+        "rknn",
+        "hailo",
+        "onnx",
+        "mock",
+    ]
+    channel = defs["MeshConfig"]["properties"]["channel"]
+    assert (channel["minimum"], channel["maximum"]) == (1, 13)
+
+    for def_name, prop, default in (
+        ("AgentConfig", "headless", False),
+        ("MavlinkConfig", "injector_arbitration", False),
+        ("MavlinkConfig", "route_aware", False),
+        ("MavlinkConfig", "agent_signing", False),
+        ("WfbConfig", "reg_gate_strict", True),
+        ("WfbConfig", "aux_enable", True),
+        ("WatchdogConfig", "enabled", False),
+        ("CameraConfig", "passthrough", False),
+        ("VisionConfig", "mock_target", False),
+    ):
+        assert defs[def_name]["properties"][prop]["default"] is default, f"{def_name}.{prop}"
+
+    assert "mqtt_password" not in defs["ServerConfig"]["properties"]

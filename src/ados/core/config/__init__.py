@@ -14,8 +14,10 @@ per-domain files alongside this barrel:
 * ``radio.py`` — :class:`RadioConfig`, :class:`CrsfConfig`
 * ``cloud.py`` — :class:`ServerConfig`, :class:`RemoteAccessConfig` and
   friends
-* ``security.py`` — :class:`SecurityConfig` and friends, plus
-  :data:`DEFAULT_CORS_ORIGINS`
+* ``security.py`` — :class:`SecurityConfig` and friends, :class:`McpConfig`,
+  plus :data:`DEFAULT_CORS_ORIGINS`
+* ``storage.py`` — :class:`StorageConfig` (the disk janitor) and
+  :class:`HardwareConfig`
 * ``api.py`` — :class:`ApiConfig`, :class:`RestApiConfig`
 * ``battery.py`` — :class:`BatteryConfig`
 * ``system.py`` — :class:`VisionConfig`,
@@ -76,8 +78,10 @@ from .root import SECRET_PATHS, ADOSConfig
 from .security import (
     DEFAULT_CORS_ORIGINS,
     ApiSecurityConfig,
+    McpConfig,
     SecurityConfig,
 )
+from .storage import HardwareConfig, StorageConfig
 from .system import (
     DiscoveryConfig,
     LoggingConfig,
@@ -132,7 +136,11 @@ __all__ = [
     # security
     "ApiSecurityConfig",
     "DEFAULT_CORS_ORIGINS",
+    "McpConfig",
     "SecurityConfig",
+    # storage
+    "HardwareConfig",
+    "StorageConfig",
     # system
     "DiscoveryConfig",
     "LoggingConfig",

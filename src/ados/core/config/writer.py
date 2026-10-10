@@ -2,11 +2,12 @@
 
 Every process that persists ``/etc/ados/config.yaml`` goes through
 :func:`update_config`. There is deliberately exactly one lock window, one
-atomic write and one post-write marker sync in the tree, because the file is
-co-owned: the Python models describe part of it, the Rust services
-(``ados-radio``, ``ados-supervisor``, ``ados-plugin-host``, the installer's
-watchdog step) read keys the Python models have never heard of, and the
-installer line-edits a third set.
+atomic write and one post-write side-effect pass in the tree, because the file
+is co-owned: the Python models describe it, the Rust services (``ados-radio``,
+``ados-supervisor``, ``ados-plugin-host``, the installer) read and write slices
+of it on their own, and the installer line-edits keys at install time. The side
+effects themselves (enable markers, unit kicks) are implemented once, natively,
+and run here through ``ados-control --apply-config-side-effects``.
 
 Three rules follow from that co-ownership, and all three are enforced here
 rather than left to each callsite:
@@ -38,9 +39,12 @@ ledger row it does not write.
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import os
 import stat
+import subprocess
+import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -57,7 +61,7 @@ from ._lock import WRITE_LOCK_TIMEOUT_S, exclusive_config_lock
 from ._migrators import _deep_merge, apply_migrations
 from ._yaml import dump_mapping, read_mapping
 
-# The document carries secrets (mqtt_password, api_key, hmac_secret, the AP
+# The document carries secrets (api_key, hmac_secret, the AP
 # passphrase, pair fingerprints). A file this writer creates, or one whose mode
 # it could not read, gets the restrictive mode rather than the umask default.
 SECRET_MODE = 0o600
@@ -124,14 +128,33 @@ def read_config_mapping(path: str | Path | None = None) -> dict[str, Any]:
         return {}
 
 
-def _sync_markers(config_path: Path, previous: dict[str, Any], merged: dict[str, Any]) -> None:
-    """Keep the sidecar enable-markers and units true to the document just written.
+# The native control binary that owns the config side effects (enable markers
+# and unit kicks). Every writer runs the same implementation through it.
+SIDE_EFFECTS_BINARY = Path("/opt/ados/bin/ados-control")
+_SIDE_EFFECTS_TIMEOUT_S = 30.0
 
-    Three lanes mirror a config flag onto a ``/etc/ados`` marker plus a
-    ``systemctl try-reload-or-restart``: CRSF, the config-over-radio tunnel and
-    the setup AP. A fourth starts or stops the remote-access tunnel unit. Each
-    no-ops unless its own slice changed. Best-effort by contract — a marker or
-    systemd hiccup never fails a write that has already landed on disk.
+INJECTOR_ARBITRATION_ON_DRONE = (
+    "injector arbitration needs the pilot-in-command arbiter, which runs on a "
+    "ground station"
+)
+
+
+def _arbitration_on_drone(document: Mapping[str, Any]) -> bool:
+    agent = document.get("agent")
+    mavlink = document.get("mavlink")
+    profile = agent.get("profile") if isinstance(agent, dict) else None
+    arbitration = mavlink.get("injector_arbitration") if isinstance(mavlink, dict) else None
+    return profile == "drone" and arbitration is True
+
+
+def _apply_side_effects(config_path: Path, previous: dict[str, Any]) -> None:
+    """Run the config side effects for the document just written.
+
+    ``ados-control --apply-config-side-effects <old.yaml>`` compares the
+    previous document (handed over in a private temp file) with the one now on
+    disk and reconciles the CRSF, config-tunnel and setup-AP enable markers and
+    the remote-access tunnel unit. Best-effort by contract: a failure is logged
+    and never fails a write that has already landed.
 
     Only runs for the node's canonical document. A staging or fixture path does
     not describe this node, so syncing this node's markers from it would be
@@ -143,17 +166,31 @@ def _sync_markers(config_path: Path, previous: dict[str, Any], merged: dict[str,
     from ados.core.logging import get_logger
 
     log = get_logger("config.writer")
-    for module_name, label in (
-        ("ados.core.crsf_marker", "crsf"),
-        ("ados.core.tunnel_marker", "tunnel"),
-        ("ados.core.hotspot_marker", "hotspot"),
-        ("ados.core.remote_access_sync", "remote_access"),
-    ):
-        try:
-            module = __import__(module_name, fromlist=["sync_after_config_write"])
-            module.sync_after_config_write(previous or None, merged)
-        except Exception as exc:  # noqa: BLE001 — the write already landed
-            log.warning(f"{label}_config_sync_failed", error=str(exc))
+    binary = SIDE_EFFECTS_BINARY
+    if not binary.is_file():
+        log.warning("config_side_effects_skipped_no_binary", binary=str(binary))
+        return
+    fd, tmp = tempfile.mkstemp(prefix="ados-config-old-", suffix=".yaml")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(dump_mapping(previous))
+        result = subprocess.run(
+            [str(binary), "--apply-config-side-effects", tmp],
+            capture_output=True,
+            timeout=_SIDE_EFFECTS_TIMEOUT_S,
+            check=False,
+        )
+        if result.returncode != 0:
+            log.warning(
+                "config_side_effects_failed",
+                returncode=result.returncode,
+                error=result.stderr.decode("utf-8", errors="replace").strip(),
+            )
+    except (OSError, subprocess.SubprocessError, yaml.YAMLError) as exc:
+        log.warning("config_side_effects_failed", error=str(exc))
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
 
 
 def update_config(
@@ -177,7 +214,12 @@ def update_config(
 
     ``dry_run`` still takes the lock and still runs ``mutate`` — the answer is
     only meaningful for a document nobody is mid-write on — but nothing reaches
-    disk and no marker is synced.
+    disk and no side effect runs.
+
+    A write that turns ``mavlink.injector_arbitration`` on for a ``drone``
+    profile is refused (:data:`INJECTOR_ARBITRATION_ON_DRONE`). The rule is a
+    write-time rule, not a model rule: a file that already says so still loads
+    and other keys stay writable.
     """
     config_path = Path(path) if path is not None else CONFIG_YAML
 
@@ -219,6 +261,11 @@ def update_config(
         if document == previous:
             return ConfigWriteResult(ok=True, locked=True)
 
+        if _arbitration_on_drone(document) and not _arbitration_on_drone(previous):
+            return ConfigWriteResult(
+                ok=False, locked=True, error=INJECTOR_ARBITRATION_ON_DRONE
+            )
+
         try:
             body = dump_mapping(document)
         except yaml.YAMLError as exc:
@@ -245,7 +292,7 @@ def update_config(
                 ok=False, locked=True, error=f"config write failed: {exc}"
             )
 
-        _sync_markers(config_path, previous, document)
+        _apply_side_effects(config_path, previous)
         return ConfigWriteResult(ok=True, locked=True, wrote=True, changed=changed)
 
 

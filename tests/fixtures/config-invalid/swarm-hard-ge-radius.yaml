@@ -1,0 +1,5 @@
+# swarm.separation.hard_m must stay below swarm.separation.radius_m.
+swarm:
+  separation:
+    radius_m: 8
+    hard_m: 8

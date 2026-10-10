@@ -1,0 +1,4 @@
+# The mesh carrier is 2.4 GHz only: channels 1-13.
+ground_station:
+  mesh:
+    channel: 36

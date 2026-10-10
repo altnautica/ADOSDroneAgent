@@ -1,0 +1,4 @@
+# battery.critical_cell_mv must stay below battery.low_cell_mv.
+battery:
+  low_cell_mv: 3500
+  critical_cell_mv: 3500

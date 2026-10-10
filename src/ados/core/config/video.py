@@ -80,6 +80,9 @@ class CameraConfig(BaseModel):
     # short low-latency GOP (0.5 s at the configured fps) so radio FEC recovers
     # fast. An explicit value is honoured as ``-g`` / ``key-int-max``.
     keyframe_interval: int = Field(default=0, ge=0, le=30)
+    # Forward the camera's own compressed stream (an H.264 source) without
+    # re-encoding it.
+    passthrough: bool = False
 
 
 class CameraMatch(BaseModel):
@@ -169,6 +172,8 @@ class RecordingConfig(BaseModel):
     enabled: bool = False
     path: str = str(RECORDINGS_DIR)
     max_duration_minutes: int = Field(default=30, ge=0, le=U32_MAX)
+    # How long finished segments are kept, as a duration (`24h`, `7d`).
+    retention: str = "24h"
 
 
 class UsbRecoveryConfig(BaseModel):
@@ -202,6 +207,20 @@ class UsbRecoveryConfig(BaseModel):
     # Append usbcore.old_scheme_first=1 to the Pi boot cmdline (installer-applied)
     # as a reversible cold-boot enumeration aid. Default off (experiment).
     cold_boot_enum_aid: bool = False
+    # Allow a reset of the hub the camera shares with the radio and flight
+    # controller (a brief re-enumeration of both), gated on a disarmed FC.
+    allow_shared_hub_reset: bool = False
+
+
+class VisionTapConfig(BaseModel):
+    """The decoded-frame tap the video service feeds the vision engine."""
+
+    enabled: bool = False
+    fps: int = Field(default=10, ge=0, le=U32_MAX)
+    width: int = Field(default=640, ge=0, le=U32_MAX)
+    height: int = Field(default=480, ge=0, le=U32_MAX)
+    format: str = "rgb24"
+    sink: str = "/run/ados/vision-tap-main.sock"
 
 
 class VideoConfig(BaseModel):
@@ -214,6 +233,9 @@ class VideoConfig(BaseModel):
     cameras: list[CameraLeg] = Field(default_factory=list)
     recording: RecordingConfig = RecordingConfig()
     usb_recovery: UsbRecoveryConfig = UsbRecoveryConfig()
+    vision: VisionTapConfig = VisionTapConfig()
+    # Overrides `agent.profile` for the video service's role; unset follows it.
+    profile: str | None = None
     cloud_relay_url: str = ""  # e.g. rtsp://video.altnautica.com:8554
     # Decoded-frame cap fed into the LCD GStreamer pipeline (videorate
     # decimation target). Higher = smoother LCD video at the cost of

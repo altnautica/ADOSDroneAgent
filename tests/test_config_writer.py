@@ -72,10 +72,10 @@ def _read(cfg: Path) -> dict:
 def test_a_leaf_write_preserves_keys_the_model_does_not_declare(tmp_path):
     """The blocker, pinned.
 
-    `ADOSConfig` declares none of these four keys and drops them at load
-    (`extra: "ignore"`). A write must therefore never be a whole-document
-    replace, or an operator toggling one unrelated setting silently disarms
-    the FC-write arbiter and the hardware watchdog.
+    A write must never be a whole-document replace, or an operator toggling
+    one unrelated setting silently resets keys other writers set: the
+    FC-write arbiter, the hardware watchdog, and a key no model declares
+    (`network.watchdog.timeout_s`), which `ADOSConfig` drops at load.
     """
     cfg = _write_doc(tmp_path)
 
@@ -287,7 +287,7 @@ def test_the_write_result_is_falsy_only_on_failure():
 
 @pytest.mark.parametrize("mode", [0o600, 0o640])
 def test_a_write_keeps_the_document_mode(tmp_path, mode):
-    """The document carries the MQTT password, the API key, the HMAC secret and
+    """The document carries the API key, the HMAC secret and
     the AP passphrase. A write must not widen its mode."""
     cfg = _write_doc(tmp_path)
     os.chmod(cfg, mode)
@@ -295,3 +295,75 @@ def test_a_write_keeps_the_document_mode(tmp_path, mode):
     assert merge_into_config({"video": {"wfb": {"channel": 161}}}, path=cfg)
 
     assert (os.stat(cfg).st_mode & 0o777) == mode
+
+
+def _canonical(monkeypatch, cfg: Path, binary: Path) -> list[list[str]]:
+    """Make `cfg` the node's canonical document (lock beside it) and record
+    every side-effect invocation with the old document it was handed."""
+    import ados.core.config.writer as writer
+
+    monkeypatch.setattr(writer, "CONFIG_YAML", cfg)
+    monkeypatch.setattr(writer, "CONFIG_LOCK", cfg.with_name("config.yaml.lock"))
+    monkeypatch.setattr(writer, "SIDE_EFFECTS_BINARY", binary)
+    calls: list[list[str]] = []
+
+    def _run(argv, **_kwargs):
+        calls.append([*argv, Path(argv[2]).read_text(encoding="utf-8")])
+
+        class _Done:
+            returncode = 0
+            stderr = b""
+
+        return _Done()
+
+    monkeypatch.setattr(writer.subprocess, "run", _run)
+    return calls
+
+
+def test_writer_calls_side_effects_binary(tmp_path, monkeypatch):
+    """Markers and unit kicks are implemented once, natively: a landed write
+    hands the previous document to `ados-control --apply-config-side-effects`
+    and removes the temp copy afterwards."""
+    cfg = _write_doc(tmp_path, "radio:\n  crsf:\n    enabled: false\n")
+    binary = tmp_path / "ados-control"
+    binary.write_text("", encoding="utf-8")
+    calls = _canonical(monkeypatch, cfg, binary)
+
+    assert set_config_values({"radio.crsf.enabled": True}, path=cfg)
+
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[:2] == [str(binary), "--apply-config-side-effects"]
+    assert yaml.safe_load(argv[3]) == {"radio": {"crsf": {"enabled": False}}}
+    assert not Path(argv[2]).exists()
+
+    # A write that changes nothing runs nothing.
+    assert set_config_values({"radio.crsf.enabled": True}, path=cfg)
+    assert len(calls) == 1
+
+
+def test_writer_skips_side_effects_without_the_binary(tmp_path, monkeypatch):
+    cfg = _write_doc(tmp_path, "agent:\n  name: a\n")
+    calls = _canonical(monkeypatch, cfg, tmp_path / "absent")
+
+    assert set_config_values({"agent.name": "b"}, path=cfg)
+    assert calls == []
+
+
+def test_injector_arbitration_on_drone_is_refused_at_write(tmp_path):
+    """The arbiter runs on a ground station only, so a drone write that turns
+    arbitration on is refused; a file that already says so stays writable."""
+    cfg = _write_doc(tmp_path, "agent:\n  profile: drone\n")
+
+    result = set_config_values({"mavlink.injector_arbitration": True}, path=cfg)
+    assert not result
+    assert "pilot-in-command arbiter" in (result.error or "")
+    assert _read(cfg) == {"agent": {"profile": "drone"}}
+
+    gs = _write_doc(tmp_path, "agent:\n  profile: ground_station\n")
+    assert set_config_values({"mavlink.injector_arbitration": True}, path=gs)
+
+    legacy = _write_doc(
+        tmp_path, "agent:\n  profile: drone\nmavlink:\n  injector_arbitration: true\n"
+    )
+    assert set_config_values({"agent.name": "kept-writable"}, path=legacy)

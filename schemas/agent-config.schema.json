@@ -7,6 +7,11 @@
           "title": "Device Id",
           "type": "string"
         },
+        "headless": {
+          "default": false,
+          "title": "Headless",
+          "type": "boolean"
+        },
         "name": {
           "default": "my-drone",
           "title": "Name",
@@ -14,6 +19,13 @@
         },
         "profile": {
           "default": "auto",
+          "enum": [
+            "auto",
+            "drone",
+            "ground_station",
+            "workstation",
+            "compute"
+          ],
           "title": "Profile",
           "type": "string"
         },
@@ -197,6 +209,11 @@
           "minimum": 0,
           "title": "Keyframe Interval",
           "type": "integer"
+        },
+        "passthrough": {
+          "default": false,
+          "title": "Passthrough",
+          "type": "boolean"
         },
         "rotation": {
           "default": 0,
@@ -859,6 +876,17 @@
       "title": "GroundStationUiConfig",
       "type": "object"
     },
+    "HardwareConfig": {
+      "properties": {
+        "gpio_out_enabled": {
+          "default": true,
+          "title": "Gpio Out Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "HardwareConfig",
+      "type": "object"
+    },
     "HotspotConfig": {
       "properties": {
         "channel": {
@@ -891,6 +919,180 @@
         }
       },
       "title": "HotspotConfig",
+      "type": "object"
+    },
+    "JanitorCapsConfig": {
+      "description": "Per-category disk caps, in MiB.",
+      "properties": {
+        "apt_mb": {
+          "default": 400,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Apt Mb",
+          "type": "integer"
+        },
+        "audit_log_mb": {
+          "default": 64,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Audit Log Mb",
+          "type": "integer"
+        },
+        "journal_mb": {
+          "default": 400,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Journal Mb",
+          "type": "integer"
+        },
+        "log_store_mb": {
+          "default": 1200,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Log Store Mb",
+          "type": "integer"
+        },
+        "plugin_logs_mb": {
+          "default": 256,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Plugin Logs Mb",
+          "type": "integer"
+        },
+        "quarantined_stores_mb": {
+          "default": 400,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Quarantined Stores Mb",
+          "type": "integer"
+        },
+        "recordings_mb": {
+          "default": 2400,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Recordings Mb",
+          "type": "integer"
+        }
+      },
+      "title": "JanitorCapsConfig",
+      "type": "object"
+    },
+    "JanitorConfig": {
+      "description": "The supervisor's disk janitor: trims logs, recordings and the journal\nagainst a total budget and the free-space thresholds.",
+      "properties": {
+        "audit_keep_mb": {
+          "default": 4,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Audit Keep Mb",
+          "type": "integer"
+        },
+        "audit_max_mb": {
+          "default": 16,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Audit Max Mb",
+          "type": "integer"
+        },
+        "budget_mb": {
+          "default": 5120,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Budget Mb",
+          "type": "integer"
+        },
+        "caps": {
+          "$ref": "#/$defs/JanitorCapsConfig",
+          "default": {
+            "apt_mb": 400,
+            "audit_log_mb": 64,
+            "journal_mb": 400,
+            "log_store_mb": 1200,
+            "plugin_logs_mb": 256,
+            "quarantined_stores_mb": 400,
+            "recordings_mb": 2400
+          }
+        },
+        "critical_free_pct": {
+          "default": 10.0,
+          "title": "Critical Free Pct",
+          "type": "number"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "interval_s": {
+          "default": 3600,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Interval S",
+          "type": "integer"
+        },
+        "journal_floor_mb": {
+          "default": 64,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Journal Floor Mb",
+          "type": "integer"
+        },
+        "journal_pressure_mb": {
+          "default": 128,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Journal Pressure Mb",
+          "type": "integer"
+        },
+        "plugin_log_keep_mb": {
+          "default": 8,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Plugin Log Keep Mb",
+          "type": "integer"
+        },
+        "plugin_log_max_mb": {
+          "default": 32,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Plugin Log Max Mb",
+          "type": "integer"
+        },
+        "pressure_free_pct": {
+          "default": 20.0,
+          "title": "Pressure Free Pct",
+          "type": "number"
+        },
+        "quarantine_keep_newest": {
+          "default": 1,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Quarantine Keep Newest",
+          "type": "integer"
+        },
+        "recording_keep_newest": {
+          "default": 3,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Recording Keep Newest",
+          "type": "integer"
+        },
+        "recording_pressure_retention_days": {
+          "default": 14,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Recording Pressure Retention Days",
+          "type": "integer"
+        },
+        "recording_retention_days": {
+          "default": 90,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Recording Retention Days",
+          "type": "integer"
+        }
+      },
+      "title": "JanitorConfig",
       "type": "object"
     },
     "KioskConfig": {
@@ -999,8 +1201,72 @@
       "title": "MacPinConfig",
       "type": "object"
     },
+    "ManagementLinkGuardianConfig": {
+      "description": "Repairs a management link that stopped passing traffic.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "fail_threshold": {
+          "default": 2,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Fail Threshold",
+          "type": "integer"
+        },
+        "fast_initial_tick_interval_s": {
+          "default": 5,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Fast Initial Tick Interval S",
+          "type": "integer"
+        },
+        "fast_initial_window_s": {
+          "default": 60,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Fast Initial Window S",
+          "type": "integer"
+        },
+        "repair_window_s": {
+          "default": 600,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Repair Window S",
+          "type": "integer"
+        },
+        "repairs_per_window": {
+          "default": 5,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Repairs Per Window",
+          "type": "integer"
+        },
+        "tick_interval_s": {
+          "default": 30,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Tick Interval S",
+          "type": "integer"
+        }
+      },
+      "title": "ManagementLinkGuardianConfig",
+      "type": "object"
+    },
     "MavlinkConfig": {
       "properties": {
+        "adopt_slot_system_id": {
+          "default": false,
+          "title": "Adopt Slot System Id",
+          "type": "boolean"
+        },
+        "agent_signing": {
+          "default": false,
+          "title": "Agent Signing",
+          "type": "boolean"
+        },
         "aux_uplink_enforce_origin": {
           "default": false,
           "title": "Aux Uplink Enforce Origin",
@@ -1027,6 +1293,11 @@
           "title": "Endpoints",
           "type": "array"
         },
+        "injector_arbitration": {
+          "default": false,
+          "title": "Injector Arbitration",
+          "type": "boolean"
+        },
         "legacy_stream_request": {
           "default": false,
           "title": "Legacy Stream Request",
@@ -1040,6 +1311,11 @@
         "raw_proxy_lan_access": {
           "default": false,
           "title": "Raw Proxy Lan Access",
+          "type": "boolean"
+        },
+        "route_aware": {
+          "default": false,
+          "title": "Route Aware",
           "type": "boolean"
         },
         "serial_port": {
@@ -1074,6 +1350,18 @@
       "title": "MavlinkConfig",
       "type": "object"
     },
+    "McpConfig": {
+      "description": "The AI control surface's posture, read by the LAN auth edge.\n\nOff by default, so the MCP token path stays inert until an operator opts\nin.",
+      "properties": {
+        "token_accept_enabled": {
+          "default": false,
+          "title": "Token Accept Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "McpConfig",
+      "type": "object"
+    },
     "MeshConfig": {
       "description": "batman-adv local mesh transport settings.\n\n`carrier` is the L2 technology on the second USB WiFi dongle:\n802.11s (native mesh, preferred) or IBSS (ad-hoc, fallback for\ndrivers without 802.11s). `mesh_id` and `shared_key_path` gate the\ndeployment so two adjacent sites on the same channel stay isolated.\n`shared_key_path` defaults to a device-derived key written on first\nboot by mesh_manager (0o600, never logged).",
       "properties": {
@@ -1093,8 +1381,8 @@
         },
         "channel": {
           "default": 1,
-          "maximum": 255,
-          "minimum": 0,
+          "maximum": 13,
+          "minimum": 1,
           "title": "Channel",
           "type": "integer"
         },
@@ -1131,6 +1419,39 @@
       "title": "MeshConfig",
       "type": "object"
     },
+    "MgmtFailoverConfig": {
+      "description": "Onboard-WiFi reach-back when the wired management link goes down.",
+      "properties": {
+        "down_debounce_s": {
+          "default": 20,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Down Debounce S",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "recover_debounce_s": {
+          "default": 15,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Recover Debounce S",
+          "type": "integer"
+        },
+        "tick_interval_s": {
+          "default": 5,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Tick Interval S",
+          "type": "integer"
+        }
+      },
+      "title": "MgmtFailoverConfig",
+      "type": "object"
+    },
     "NetworkConfig": {
       "properties": {
         "cellular": {
@@ -1158,13 +1479,60 @@
             "overrides": {}
           }
         },
+        "management_link_guardian": {
+          "$ref": "#/$defs/ManagementLinkGuardianConfig",
+          "default": {
+            "enabled": true,
+            "fail_threshold": 2,
+            "fast_initial_tick_interval_s": 5,
+            "fast_initial_window_s": 60,
+            "repair_window_s": 600,
+            "repairs_per_window": 5,
+            "tick_interval_s": 30
+          }
+        },
+        "mgmt_failover": {
+          "$ref": "#/$defs/MgmtFailoverConfig",
+          "default": {
+            "down_debounce_s": 20,
+            "enabled": true,
+            "recover_debounce_s": 15,
+            "tick_interval_s": 5
+          }
+        },
+        "reg_reconciler": {
+          "$ref": "#/$defs/RegReconcilerConfig",
+          "default": {
+            "domain": null,
+            "enabled": true,
+            "fast_initial_tick_interval_s": 5,
+            "fast_initial_window_s": 60,
+            "tick_interval_s": 30
+          }
+        },
         "regulatory": {
           "$ref": "#/$defs/RegulatoryConfig",
           "default": {
             "ack_at": null,
             "ack_operator": null,
             "mode": "unrestricted",
-            "region": null
+            "region": null,
+            "tx_pwr_by_rate": 0
+          }
+        },
+        "usb_rehome": {
+          "$ref": "#/$defs/UsbRehomeConfig",
+          "default": {
+            "cooldown_s": 60,
+            "enabled": true,
+            "healthy_reset_s": 120,
+            "tick_interval_s": 5
+          }
+        },
+        "watchdog": {
+          "$ref": "#/$defs/WatchdogConfig",
+          "default": {
+            "enabled": false
           }
         },
         "wifi_client": {
@@ -1173,6 +1541,15 @@
             "enabled": false,
             "password": "",
             "ssid": ""
+          }
+        },
+        "wifi_powersave": {
+          "$ref": "#/$defs/WifiPowersaveConfig",
+          "default": {
+            "enabled": true,
+            "fast_initial_tick_interval_s": 5,
+            "fast_initial_window_s": 60,
+            "tick_interval_s": 30
           }
         },
         "wifi_selfheal": {
@@ -1185,6 +1562,39 @@
         }
       },
       "title": "NetworkConfig",
+      "type": "object"
+    },
+    "PairRearmConfig": {
+      "description": "Re-arm of the auto-pair window when a paired link stays dead.\n\nRead by the supervisor's pair-proof machine and the pair write route.",
+      "properties": {
+        "confirm_hold_s": {
+          "default": 600,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Confirm Hold S",
+          "type": "integer"
+        },
+        "cooldown_s": {
+          "default": 1800,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Cooldown S",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "stats_fresh_ceiling_s": {
+          "default": 30,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Stats Fresh Ceiling S",
+          "type": "integer"
+        }
+      },
+      "title": "PairRearmConfig",
       "type": "object"
     },
     "PairingConfig": {
@@ -1269,9 +1679,59 @@
           "default": "/var/ados/recordings",
           "title": "Path",
           "type": "string"
+        },
+        "retention": {
+          "default": "24h",
+          "title": "Retention",
+          "type": "string"
         }
       },
       "title": "RecordingConfig",
+      "type": "object"
+    },
+    "RegReconcilerConfig": {
+      "description": "Re-asserts the wanted global regulatory domain when it drifts.",
+      "properties": {
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Domain"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "fast_initial_tick_interval_s": {
+          "default": 5,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Fast Initial Tick Interval S",
+          "type": "integer"
+        },
+        "fast_initial_window_s": {
+          "default": 60,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Fast Initial Window S",
+          "type": "integer"
+        },
+        "tick_interval_s": {
+          "default": 30,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Tick Interval S",
+          "type": "integer"
+        }
+      },
+      "title": "RegReconcilerConfig",
       "type": "object"
     },
     "RegulatoryConfig": {
@@ -1320,6 +1780,13 @@
           ],
           "default": null,
           "title": "Region"
+        },
+        "tx_pwr_by_rate": {
+          "default": 0,
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Tx Pwr By Rate",
+          "type": "integer"
         }
       },
       "title": "RegulatoryConfig",
@@ -1457,6 +1924,11 @@
             "url": "https://convex-site.altnautica.com"
           }
         },
+        "cloud_logs_enabled": {
+          "default": false,
+          "title": "Cloud Logs Enabled",
+          "type": "boolean"
+        },
         "mode": {
           "default": "local",
           "enum": [
@@ -1467,25 +1939,9 @@
           "title": "Mode",
           "type": "string"
         },
-        "mqtt_password": {
-          "default": "",
-          "title": "Mqtt Password",
-          "type": "string",
-          "x-secret": true
-        },
-        "mqtt_plaintext_dev": {
-          "default": false,
-          "title": "Mqtt Plaintext Dev",
-          "type": "boolean"
-        },
         "mqtt_transport": {
           "default": "websockets",
           "title": "Mqtt Transport",
-          "type": "string"
-        },
-        "mqtt_username": {
-          "default": "",
-          "title": "Mqtt Username",
           "type": "string"
         },
         "self_hosted": {
@@ -1499,6 +1955,41 @@
         }
       },
       "title": "ServerConfig",
+      "type": "object"
+    },
+    "StorageConfig": {
+      "properties": {
+        "janitor": {
+          "$ref": "#/$defs/JanitorConfig",
+          "default": {
+            "audit_keep_mb": 4,
+            "audit_max_mb": 16,
+            "budget_mb": 5120,
+            "caps": {
+              "apt_mb": 400,
+              "audit_log_mb": 64,
+              "journal_mb": 400,
+              "log_store_mb": 1200,
+              "plugin_logs_mb": 256,
+              "quarantined_stores_mb": 400,
+              "recordings_mb": 2400
+            },
+            "critical_free_pct": 10.0,
+            "enabled": true,
+            "interval_s": 3600,
+            "journal_floor_mb": 64,
+            "journal_pressure_mb": 128,
+            "plugin_log_keep_mb": 8,
+            "plugin_log_max_mb": 32,
+            "pressure_free_pct": 20.0,
+            "quarantine_keep_newest": 1,
+            "recording_keep_newest": 3,
+            "recording_pressure_retention_days": 14,
+            "recording_retention_days": 90
+          }
+        }
+      },
+      "title": "StorageConfig",
       "type": "object"
     },
     "SwarmConfig": {
@@ -1732,6 +2223,11 @@
           "title": "Allow Ppps",
           "type": "boolean"
         },
+        "allow_shared_hub_reset": {
+          "default": false,
+          "title": "Allow Shared Hub Reset",
+          "type": "boolean"
+        },
         "boot_reset_window_s": {
           "default": 180,
           "maximum": 4294967295,
@@ -1781,6 +2277,39 @@
       "title": "UsbRecoveryConfig",
       "type": "object"
     },
+    "UsbRehomeConfig": {
+      "description": "Rebinds a radio adapter on a slow USB port whose RF stays unverified.",
+      "properties": {
+        "cooldown_s": {
+          "default": 60,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Cooldown S",
+          "type": "integer"
+        },
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "healthy_reset_s": {
+          "default": 120,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Healthy Reset S",
+          "type": "integer"
+        },
+        "tick_interval_s": {
+          "default": 5,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Tick Interval S",
+          "type": "integer"
+        }
+      },
+      "title": "UsbRehomeConfig",
+      "type": "object"
+    },
     "VideoConfig": {
       "properties": {
         "camera": {
@@ -1794,6 +2323,7 @@
             "height": 720,
             "hflip": false,
             "keyframe_interval": 0,
+            "passthrough": false,
             "rotation": 0,
             "source": "csi",
             "thumbnail": {
@@ -1835,12 +2365,25 @@
           "title": "Prefer Hw Encoder",
           "type": "boolean"
         },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
+        },
         "recording": {
           "$ref": "#/$defs/RecordingConfig",
           "default": {
             "enabled": false,
             "max_duration_minutes": 30,
-            "path": "/var/ados/recordings"
+            "path": "/var/ados/recordings",
+            "retention": "24h"
           }
         },
         "usb_recovery": {
@@ -1848,6 +2391,7 @@
           "default": {
             "allow_hub_reset": false,
             "allow_ppps": true,
+            "allow_shared_hub_reset": false,
             "boot_reset_window_s": 180,
             "cold_boot_enum_aid": false,
             "cooldown_s": 60,
@@ -1855,6 +2399,17 @@
             "enabled": true,
             "healthy_reset_s": 120,
             "tick_interval_s": 5
+          }
+        },
+        "vision": {
+          "$ref": "#/$defs/VisionTapConfig",
+          "default": {
+            "enabled": false,
+            "format": "rgb24",
+            "fps": 10,
+            "height": 480,
+            "sink": "/run/ados/vision-tap-main.sock",
+            "width": 640
           }
         },
         "wfb": {
@@ -1865,8 +2420,19 @@
             "auto_channel_enabled": false,
             "auto_hop_enabled": true,
             "auto_pair_enabled": true,
+            "aux_enable": true,
+            "aux_fec_k": 1,
+            "aux_fec_n": 2,
+            "aux_identity_interval_s": 10.0,
+            "aux_mcs_index": null,
+            "aux_rx_port": 5603,
+            "aux_status_enabled": true,
+            "aux_status_interval_s": 1.0,
+            "aux_tx_port": 5602,
+            "backend": "auto",
             "band": "u-nii-3",
             "channel": 149,
+            "dfs_allowed": false,
             "fec_k": 8,
             "fec_n": 12,
             "fleet_id": 1,
@@ -1876,9 +2442,18 @@
             "hop_rssi_threshold_dbm": -75.0,
             "interface": "",
             "mcs_index": 1,
+            "pair_rearm": {
+              "confirm_hold_s": 600,
+              "cooldown_s": 1800,
+              "enabled": true,
+              "stats_fresh_ceiling_s": 30
+            },
             "paired_at": null,
             "paired_with_device_id": null,
+            "periodic_hop_enabled": false,
             "reg_domain": "US",
+            "reg_gate_strict": true,
+            "rendezvous_channel": null,
             "sei_latency": false,
             "topology": "host_vbus",
             "tx_power_dbm": 5,
@@ -1890,21 +2465,118 @@
       "title": "VideoConfig",
       "type": "object"
     },
+    "VisionCameraEntry": {
+      "description": "One explicitly configured camera; an empty list uses HAL discovery.",
+      "properties": {
+        "device_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Device Path"
+        },
+        "id": {
+          "default": "",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "default": "tap",
+          "title": "Kind",
+          "type": "string"
+        },
+        "tap_socket": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tap Socket"
+        }
+      },
+      "title": "VisionCameraEntry",
+      "type": "object"
+    },
     "VisionConfig": {
       "properties": {
         "backend": {
           "default": "auto",
+          "enum": [
+            "auto",
+            "rknn",
+            "hailo",
+            "onnx",
+            "mock"
+          ],
           "title": "Backend",
           "type": "string"
+        },
+        "cameras": {
+          "items": {
+            "$ref": "#/$defs/VisionCameraEntry"
+          },
+          "title": "Cameras",
+          "type": "array"
         },
         "confidence_threshold": {
           "default": 0.5,
           "title": "Confidence Threshold",
           "type": "number"
         },
+        "designate_camera": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Designate Camera"
+        },
+        "detector": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisionDetectorConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "downscale_height": {
+          "default": 480,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Downscale Height",
+          "type": "integer"
+        },
+        "downscale_width": {
+          "default": 640,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Downscale Width",
+          "type": "integer"
+        },
         "enabled": {
           "default": false,
           "title": "Enabled",
+          "type": "boolean"
+        },
+        "mock_target": {
+          "default": false,
+          "title": "Mock Target",
           "type": "boolean"
         },
         "models_cache_max_mb": {
@@ -1919,13 +2591,231 @@
           "title": "Models Dir",
           "type": "string"
         },
+        "profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
+        },
         "registry_url": {
           "default": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json",
           "title": "Registry Url",
           "type": "string"
+        },
+        "reid": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisionReidConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reid_enabled": {
+          "default": false,
+          "title": "Reid Enabled",
+          "type": "boolean"
+        },
+        "reid_model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reid Model Id"
+        },
+        "shm_budget_mb": {
+          "default": 64,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Shm Budget Mb",
+          "type": "integer"
+        },
+        "slot_count": {
+          "default": 4,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Slot Count",
+          "type": "integer"
+        },
+        "socket_dir": {
+          "default": "/run/ados",
+          "title": "Socket Dir",
+          "type": "string"
+        },
+        "tracker_enabled": {
+          "default": false,
+          "title": "Tracker Enabled",
+          "type": "boolean"
         }
       },
       "title": "VisionConfig",
+      "type": "object"
+    },
+    "VisionDetectorConfig": {
+      "description": "The detector the engine runs on every frame for `vision.detection`.",
+      "properties": {
+        "class_labels": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Class Labels",
+          "type": "array"
+        },
+        "head": {
+          "default": "",
+          "title": "Head",
+          "type": "string"
+        },
+        "input_height": {
+          "default": 640,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Input Height",
+          "type": "integer"
+        },
+        "input_width": {
+          "default": 640,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Input Width",
+          "type": "integer"
+        },
+        "model_id": {
+          "default": "",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_path": {
+          "default": "",
+          "title": "Model Path",
+          "type": "string"
+        },
+        "priority": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Priority"
+        },
+        "rate_hz": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rate Hz"
+        }
+      },
+      "title": "VisionDetectorConfig",
+      "type": "object"
+    },
+    "VisionReidConfig": {
+      "description": "The appearance (re-id) model loaded beside the detector.",
+      "properties": {
+        "input_height": {
+          "default": 256,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Input Height",
+          "type": "integer"
+        },
+        "input_width": {
+          "default": 128,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Input Width",
+          "type": "integer"
+        },
+        "model_id": {
+          "default": "",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_path": {
+          "default": "",
+          "title": "Model Path",
+          "type": "string"
+        }
+      },
+      "title": "VisionReidConfig",
+      "type": "object"
+    },
+    "VisionTapConfig": {
+      "description": "The decoded-frame tap the video service feeds the vision engine.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "format": {
+          "default": "rgb24",
+          "title": "Format",
+          "type": "string"
+        },
+        "fps": {
+          "default": 10,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Fps",
+          "type": "integer"
+        },
+        "height": {
+          "default": 480,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Height",
+          "type": "integer"
+        },
+        "sink": {
+          "default": "/run/ados/vision-tap-main.sock",
+          "title": "Sink",
+          "type": "string"
+        },
+        "width": {
+          "default": 640,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Width",
+          "type": "integer"
+        }
+      },
+      "title": "VisionTapConfig",
+      "type": "object"
+    },
+    "WatchdogConfig": {
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "WatchdogConfig",
       "type": "object"
     },
     "WfbConfig": {
@@ -1957,6 +2847,73 @@
           "title": "Auto Pair Enabled",
           "type": "boolean"
         },
+        "aux_enable": {
+          "default": true,
+          "title": "Aux Enable",
+          "type": "boolean"
+        },
+        "aux_fec_k": {
+          "default": 1,
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Aux Fec K",
+          "type": "integer"
+        },
+        "aux_fec_n": {
+          "default": 2,
+          "maximum": 255,
+          "minimum": 0,
+          "title": "Aux Fec N",
+          "type": "integer"
+        },
+        "aux_identity_interval_s": {
+          "default": 10.0,
+          "title": "Aux Identity Interval S",
+          "type": "number"
+        },
+        "aux_mcs_index": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Aux Mcs Index"
+        },
+        "aux_rx_port": {
+          "default": 5603,
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Aux Rx Port",
+          "type": "integer"
+        },
+        "aux_status_enabled": {
+          "default": true,
+          "title": "Aux Status Enabled",
+          "type": "boolean"
+        },
+        "aux_status_interval_s": {
+          "default": 1.0,
+          "title": "Aux Status Interval S",
+          "type": "number"
+        },
+        "aux_tx_port": {
+          "default": 5602,
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Aux Tx Port",
+          "type": "integer"
+        },
+        "backend": {
+          "default": "auto",
+          "title": "Backend",
+          "type": "string"
+        },
         "band": {
           "default": "u-nii-3",
           "enum": [
@@ -1973,6 +2930,11 @@
           "minimum": 0,
           "title": "Channel",
           "type": "integer"
+        },
+        "dfs_allowed": {
+          "default": false,
+          "title": "Dfs Allowed",
+          "type": "boolean"
         },
         "fec_k": {
           "default": 8,
@@ -2031,6 +2993,15 @@
           "title": "Mcs Index",
           "type": "integer"
         },
+        "pair_rearm": {
+          "$ref": "#/$defs/PairRearmConfig",
+          "default": {
+            "confirm_hold_s": 600,
+            "cooldown_s": 1800,
+            "enabled": true,
+            "stats_fresh_ceiling_s": 30
+          }
+        },
         "paired_at": {
           "anyOf": [
             {
@@ -2055,6 +3026,11 @@
           "default": null,
           "title": "Paired With Device Id"
         },
+        "periodic_hop_enabled": {
+          "default": false,
+          "title": "Periodic Hop Enabled",
+          "type": "boolean"
+        },
         "reg_domain": {
           "anyOf": [
             {
@@ -2066,6 +3042,25 @@
           ],
           "default": "US",
           "title": "Reg Domain"
+        },
+        "reg_gate_strict": {
+          "default": true,
+          "title": "Reg Gate Strict",
+          "type": "boolean"
+        },
+        "rendezvous_channel": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rendezvous Channel"
         },
         "sei_latency": {
           "default": false,
@@ -2186,6 +3181,39 @@
       "title": "WifiDirectConfig",
       "type": "object"
     },
+    "WifiPowersaveConfig": {
+      "description": "Keeps WiFi power saving off on the management adapter.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "fast_initial_tick_interval_s": {
+          "default": 5,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Fast Initial Tick Interval S",
+          "type": "integer"
+        },
+        "fast_initial_window_s": {
+          "default": 60,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Fast Initial Window S",
+          "type": "integer"
+        },
+        "tick_interval_s": {
+          "default": 30,
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "title": "Tick Interval S",
+          "type": "integer"
+        }
+      },
+      "title": "WifiPowersaveConfig",
+      "type": "object"
+    },
     "WifiSelfHealConfig": {
       "properties": {
         "cooldown_s": {
@@ -2217,6 +3245,7 @@
       "$ref": "#/$defs/AgentConfig",
       "default": {
         "device_id": "",
+        "headless": false,
         "name": "my-drone",
         "profile": "auto",
         "tier": "auto"
@@ -2293,6 +3322,12 @@
         }
       }
     },
+    "hardware": {
+      "$ref": "#/$defs/HardwareConfig",
+      "default": {
+        "gpio_out_enabled": true
+      }
+    },
     "logging": {
       "$ref": "#/$defs/LoggingConfig",
       "default": {
@@ -2308,6 +3343,8 @@
     "mavlink": {
       "$ref": "#/$defs/MavlinkConfig",
       "default": {
+        "adopt_slot_system_id": false,
+        "agent_signing": false,
         "aux_uplink_enforce_origin": false,
         "baud_rate": 57600,
         "component_id": 191,
@@ -2319,13 +3356,21 @@
             "type": "websocket"
           }
         ],
+        "injector_arbitration": false,
         "legacy_stream_request": false,
         "raw_proxy_enforce_auth": true,
         "raw_proxy_lan_access": false,
+        "route_aware": false,
         "serial_port": "",
         "source": "auto",
         "system_id": 1,
         "ws_proxy_enforce_auth": true
+      }
+    },
+    "mcp": {
+      "$ref": "#/$defs/McpConfig",
+      "default": {
+        "token_accept_enabled": false
       }
     },
     "network": {
@@ -2347,16 +3392,54 @@
           "enabled": true,
           "overrides": {}
         },
+        "management_link_guardian": {
+          "enabled": true,
+          "fail_threshold": 2,
+          "fast_initial_tick_interval_s": 5,
+          "fast_initial_window_s": 60,
+          "repair_window_s": 600,
+          "repairs_per_window": 5,
+          "tick_interval_s": 30
+        },
+        "mgmt_failover": {
+          "down_debounce_s": 20,
+          "enabled": true,
+          "recover_debounce_s": 15,
+          "tick_interval_s": 5
+        },
+        "reg_reconciler": {
+          "domain": null,
+          "enabled": true,
+          "fast_initial_tick_interval_s": 5,
+          "fast_initial_window_s": 60,
+          "tick_interval_s": 30
+        },
         "regulatory": {
           "ack_at": null,
           "ack_operator": null,
           "mode": "unrestricted",
-          "region": null
+          "region": null,
+          "tx_pwr_by_rate": 0
+        },
+        "usb_rehome": {
+          "cooldown_s": 60,
+          "enabled": true,
+          "healthy_reset_s": 120,
+          "tick_interval_s": 5
+        },
+        "watchdog": {
+          "enabled": false
         },
         "wifi_client": {
           "enabled": false,
           "password": "",
           "ssid": ""
+        },
+        "wifi_powersave": {
+          "enabled": true,
+          "fast_initial_tick_interval_s": 5,
+          "fast_initial_window_s": 60,
+          "tick_interval_s": 30
         },
         "wifi_selfheal": {
           "cooldown_s": 60,
@@ -2440,16 +3523,45 @@
           "mqtt_port": 443,
           "url": "https://convex-site.altnautica.com"
         },
+        "cloud_logs_enabled": false,
         "mode": "local",
-        "mqtt_password": "",
-        "mqtt_plaintext_dev": false,
         "mqtt_transport": "websockets",
-        "mqtt_username": "",
         "self_hosted": {
           "api_key": "",
           "mqtt_broker": "",
           "mqtt_port": 8883,
           "url": ""
+        }
+      }
+    },
+    "storage": {
+      "$ref": "#/$defs/StorageConfig",
+      "default": {
+        "janitor": {
+          "audit_keep_mb": 4,
+          "audit_max_mb": 16,
+          "budget_mb": 5120,
+          "caps": {
+            "apt_mb": 400,
+            "audit_log_mb": 64,
+            "journal_mb": 400,
+            "log_store_mb": 1200,
+            "plugin_logs_mb": 256,
+            "quarantined_stores_mb": 400,
+            "recordings_mb": 2400
+          },
+          "critical_free_pct": 10.0,
+          "enabled": true,
+          "interval_s": 3600,
+          "journal_floor_mb": 64,
+          "journal_pressure_mb": 128,
+          "plugin_log_keep_mb": 8,
+          "plugin_log_max_mb": 32,
+          "pressure_free_pct": 20.0,
+          "quarantine_keep_newest": 1,
+          "recording_keep_newest": 3,
+          "recording_pressure_retention_days": 14,
+          "recording_retention_days": 90
         }
       }
     },
@@ -2498,6 +3610,7 @@
           "height": 720,
           "hflip": false,
           "keyframe_interval": 0,
+          "passthrough": false,
           "rotation": 0,
           "source": "csi",
           "thumbnail": {
@@ -2514,14 +3627,17 @@
         "lcd_fps_cap": 15,
         "mode": "wfb",
         "prefer_hw_encoder": true,
+        "profile": null,
         "recording": {
           "enabled": false,
           "max_duration_minutes": 30,
-          "path": "/var/ados/recordings"
+          "path": "/var/ados/recordings",
+          "retention": "24h"
         },
         "usb_recovery": {
           "allow_hub_reset": false,
           "allow_ppps": true,
+          "allow_shared_hub_reset": false,
           "boot_reset_window_s": 180,
           "cold_boot_enum_aid": false,
           "cooldown_s": 60,
@@ -2530,14 +3646,33 @@
           "healthy_reset_s": 120,
           "tick_interval_s": 5
         },
+        "vision": {
+          "enabled": false,
+          "format": "rgb24",
+          "fps": 10,
+          "height": 480,
+          "sink": "/run/ados/vision-tap-main.sock",
+          "width": 640
+        },
         "wfb": {
           "adaptive_bitrate_enabled": true,
           "adaptive_mcs_max": 3,
           "auto_channel_enabled": false,
           "auto_hop_enabled": true,
           "auto_pair_enabled": true,
+          "aux_enable": true,
+          "aux_fec_k": 1,
+          "aux_fec_n": 2,
+          "aux_identity_interval_s": 10.0,
+          "aux_mcs_index": null,
+          "aux_rx_port": 5603,
+          "aux_status_enabled": true,
+          "aux_status_interval_s": 1.0,
+          "aux_tx_port": 5602,
+          "backend": "auto",
           "band": "u-nii-3",
           "channel": 149,
+          "dfs_allowed": false,
           "fec_k": 8,
           "fec_n": 12,
           "fleet_id": 1,
@@ -2547,9 +3682,18 @@
           "hop_rssi_threshold_dbm": -75.0,
           "interface": "",
           "mcs_index": 1,
+          "pair_rearm": {
+            "confirm_hold_s": 600,
+            "cooldown_s": 1800,
+            "enabled": true,
+            "stats_fresh_ceiling_s": 30
+          },
           "paired_at": null,
           "paired_with_device_id": null,
+          "periodic_hop_enabled": false,
           "reg_domain": "US",
+          "reg_gate_strict": true,
+          "rendezvous_channel": null,
           "sei_latency": false,
           "topology": "host_vbus",
           "tx_power_dbm": 5,
@@ -2562,11 +3706,25 @@
       "$ref": "#/$defs/VisionConfig",
       "default": {
         "backend": "auto",
+        "cameras": [],
         "confidence_threshold": 0.5,
+        "designate_camera": null,
+        "detector": null,
+        "downscale_height": 480,
+        "downscale_width": 640,
         "enabled": false,
+        "mock_target": false,
         "models_cache_max_mb": 500,
         "models_dir": "/opt/ados/models/vision",
-        "registry_url": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json"
+        "profile": null,
+        "registry_url": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json",
+        "reid": null,
+        "reid_enabled": false,
+        "reid_model_id": null,
+        "shm_budget_mb": 64,
+        "slot_count": 4,
+        "socket_dir": "/run/ados",
+        "tracker_enabled": false
       }
     }
   },

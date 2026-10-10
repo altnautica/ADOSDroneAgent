@@ -8,16 +8,78 @@ from pydantic import BaseModel, Field, model_validator
 
 from ados.core.paths import FLIGHT_LOGS_DIR, PAIRING_JSON
 
-from ._bounds import I64_MAX, I64_MIN, U32_MAX
+from ._bounds import I64_MAX, I64_MIN, U8_MAX, U32_MAX
+
+# The inference backends the native vision engine selects between. A closed
+# set: any other name used to fall through to the mock engine silently.
+VisionBackend = Literal["auto", "rknn", "hailo", "onnx", "mock"]
+
+
+# The vision sub-models default the fields the native engine requires
+# (`model_id`, `model_path`, a camera's `id`) to empty, so a partly written
+# block never stops the Python services from loading; the engine refuses such
+# an entry itself.
+class VisionCameraEntry(BaseModel):
+    """One explicitly configured camera; an empty list uses HAL discovery."""
+
+    id: str = ""
+    # "tap" reads the video pipeline's frame tap; "capture" opens the device.
+    kind: str = "tap"
+    # For "tap": the frame socket; unset is `<socket_dir>/vision-tap-<id>.sock`.
+    tap_socket: str | None = None
+    # For "capture": the device path; unset is resolved by HAL discovery.
+    device_path: str | None = None
+
+
+class VisionDetectorConfig(BaseModel):
+    """The detector the engine runs on every frame for `vision.detection`."""
+
+    model_id: str = ""
+    model_path: str = ""
+    input_width: int = Field(default=640, ge=0, le=U32_MAX)
+    input_height: int = Field(default=640, ge=0, le=U32_MAX)
+    # Output-head layout: `yolo8` (empty is yolo8) or `yolo5`.
+    head: str = ""
+    class_labels: list[str] = Field(default_factory=list)
+    # Target inference rate; unset runs on every captured frame.
+    rate_hz: float | None = None
+    # Higher runs first when several models are due at once.
+    priority: int | None = Field(default=None, ge=0, le=U8_MAX)
+
+
+class VisionReidConfig(BaseModel):
+    """The appearance (re-id) model loaded beside the detector."""
+
+    model_id: str = ""
+    model_path: str = ""
+    input_width: int = Field(default=128, ge=0, le=U32_MAX)
+    input_height: int = Field(default=256, ge=0, le=U32_MAX)
 
 
 class VisionConfig(BaseModel):
     enabled: bool = False
-    backend: str = "auto"  # auto, rknn, hailo, onnx, mock
+    backend: VisionBackend = "auto"
+    # Bench aid for the mock backend: emit one synthetic moving `person`
+    # detection so detection consumers can be exercised without a model.
+    mock_target: bool = False
     confidence_threshold: float = 0.5
     models_dir: str = "/opt/ados/models/vision"
     models_cache_max_mb: int = Field(default=500, ge=0, le=U32_MAX)
     registry_url: str = "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json"
+    # Overrides `agent.profile` for the engine; unset follows it.
+    profile: str | None = None
+    socket_dir: str = "/run/ados"
+    cameras: list[VisionCameraEntry] = Field(default_factory=list)
+    downscale_width: int = Field(default=640, ge=0, le=U32_MAX)
+    downscale_height: int = Field(default=480, ge=0, le=U32_MAX)
+    slot_count: int = Field(default=4, ge=0, le=U32_MAX)
+    shm_budget_mb: int = Field(default=64, ge=0, le=U32_MAX)
+    tracker_enabled: bool = False
+    reid_enabled: bool = False
+    reid_model_id: str | None = None
+    designate_camera: str | None = None
+    detector: VisionDetectorConfig | None = None
+    reid: VisionReidConfig | None = None
 
 
 class LogStoreConfig(BaseModel):

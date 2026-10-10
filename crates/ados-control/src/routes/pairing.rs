@@ -101,9 +101,9 @@ pub async fn get_pairing_info(
 ) -> Response {
     let paths = &state.pairing_paths;
 
-    // Device identity + profile, read live off the config (mirroring the FastAPI
-    // route's read of the live runtime config).
-    let cfg = PairingConfig::load_from(&paths.config);
+    // Device identity + profile, from the cached config snapshot (one parse per
+    // change of the file; this is a probe the GCS polls).
+    let cfg = PairingConfig::cached(&paths.config);
     let device_id = cfg.agent.device_id.clone();
     // The FastAPI route falls back to "ADOS Agent" when the config name is empty
     // (`name or "ADOS Agent"`); the config default is "my-drone", so a configured
@@ -171,13 +171,10 @@ pub async fn get_pairing_info(
         "mdns_host": mdns_host,
         "profile": profile,
         "role": role,
-        // Native-vs-packaged badge. The native surface has no in-process port of
-        // the Python compute_runtime_mode(profile), so the Python API writes the
-        // computed value to the `runtime-mode` sidecar at startup and this reads it
-        // live (then the ADOS_RUNTIME_MODE env, then "packaged"). Defaults to
-        // "packaged" when neither is present, the correct value for any agent that
-        // has not cut over.
-        "runtime_mode": crate::state::runtime_mode(),
+        // Native-vs-packaged badge, computed in process from the installed
+        // binaries for this profile (cached for a few seconds), so it stays
+        // true with no Python process running.
+        "runtime_mode": crate::runtime_mode::current_in(&profile, &state.bin_dir),
         "bind_state": bind_state,
         // Reserved for a future in-process radio reader; null today, exactly as
         // the FastAPI route emits (the GCS falls back to radio_paired).
@@ -515,7 +512,7 @@ async fn accept_external_code(state: &AppState, code: &str) -> AcceptCodeRespons
     }
 
     let paths = &state.pairing_paths;
-    let config = match crate::routes::config_rw::effective_config(&paths.config) {
+    let config = match ados_config::schema::effective(&paths.config) {
         Ok(config) => config,
         Err(reason) => {
             return AcceptCodeResponse::failure(

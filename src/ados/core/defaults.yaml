@@ -56,8 +56,6 @@ network:
 server:
   mode: "local"
   mqtt_transport: "websockets"
-  mqtt_username: ""
-  mqtt_password: ""
 
 remote_access:
   provider: "none"

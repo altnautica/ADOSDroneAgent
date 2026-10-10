@@ -3,22 +3,24 @@
 //! Two writes the GCS uses to drive which detector the engine auto-loads:
 //!
 //! - **`PUT /api/vision/detector`** — body `{model_id, model_path?}`. Writes the
-//!   `vision.detector` block (`model_id` + `enabled: true`, plus `model_path`
-//!   only when the body carries one) into `/etc/ados/config.yaml` with a surgical
-//!   merge that preserves every other key, then restarts `ados-vision` so the
-//!   engine reloads with the new detector. The response carries the new active
-//!   `model_id`.
+//!   `vision.detector` block (`model_id`, `model_path` and `enabled: true`) into
+//!   `/etc/ados/config.yaml` with a surgical merge that preserves every other
+//!   key, then restarts `ados-vision` so the engine reloads with the new
+//!   detector. The response carries the new active `model_id` and the resolved
+//!   `model_path`.
 //! - **`DELETE /api/vision/detector`** — removes the `vision.detector` block
 //!   entirely (the engine reverts to inert, driving no inference of its own) and
 //!   restarts `ados-vision`. The response reports `model_id: null`.
 //!
-//! ## Why the route does not resolve the model path
+//! ## How the model path is chosen
 //!
-//! The engine resolves a registry `model_id` to an on-disk path at boot through
-//! the model manager, so this route writes only the operator's selection. A
-//! sideloaded model that is not in the registry carries its own `model_path`,
-//! which the body supplies; otherwise the engine does the lookup. The route never
-//! touches the model files — it only flips the config the engine reads.
+//! The engine's detector config requires `model_path`: a block without one
+//! fails to parse and the whole `vision` section falls back to defaults. So the
+//! route always writes a path. A sideloaded model may carry its own; otherwise
+//! the route resolves the id against the files installed in the models dir
+//! (`<id>.<ext>` for an upload, `<id>-<board>.<ext>` for a registry download).
+//! An id with no installed file is refused with `409` rather than written as a
+//! selection the engine cannot load. The route never touches the model files.
 //!
 //! ## Config write + restart seam
 //!
@@ -54,6 +56,9 @@ use crate::state::AppState;
 /// The unit that runs the vision engine; restarting it reloads the detector.
 const VISION_UNIT: &str = "ados-vision";
 
+/// Model file extensions a vision backend runs.
+const MODEL_SUFFIXES: [&str; 4] = ["rknn", "onnx", "tflite", "hef"];
+
 /// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`), the
 /// same resolution the sibling write routes use.
 fn config_yaml_path() -> PathBuf {
@@ -82,11 +87,22 @@ pub async fn put_detector(
         return detail(StatusCode::BAD_REQUEST, "model_id is required");
     }
 
-    if let Err(msg) = write_detector_block(
-        &config_yaml_path(),
-        &model_id,
-        req.model_path.as_deref().filter(|p| !p.trim().is_empty()),
-    ) {
+    let supplied = req
+        .model_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
+    let resolved = supplied.or_else(|| {
+        let dir = crate::routes::vision_upload::models_dir();
+        resolve_installed_model(&dir, &model_id).map(|p| p.to_string_lossy().into_owned())
+    });
+    let Some(model_path) = resolved else {
+        let msg = format!("model {model_id} is not installed; download or upload it first");
+        return detail(StatusCode::CONFLICT, msg);
+    };
+
+    if let Err(msg) = write_detector_block(&config_yaml_path(), &model_id, &model_path) {
         return detail(StatusCode::INTERNAL_SERVER_ERROR, msg);
     }
 
@@ -94,10 +110,42 @@ pub async fn put_detector(
     restart_reply(
         json!({
             "model_id": model_id,
+            "model_path": model_path,
             "enabled": true,
         }),
         restart,
     )
+}
+
+/// The installed file for model `id` under `dir`: `<id>.<ext>` (an upload)
+/// first, else the first `<id>-<suffix>.<ext>` (a registry download, named per
+/// board) in name order. Only extensions a backend runs count. `None` when
+/// nothing matches or the dir cannot be read.
+fn resolve_installed_model(dir: &Path, id: &str) -> Option<PathBuf> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    let runnable = |name: &str| -> Option<String> {
+        let (stem, ext) = name.rsplit_once('.')?;
+        MODEL_SUFFIXES
+            .contains(&ext.to_ascii_lowercase().as_str())
+            .then(|| stem.to_string())
+    };
+    let exact = names
+        .iter()
+        .find(|n| runnable(n).is_some_and(|stem| stem == id));
+    let prefix = format!("{id}-");
+    exact
+        .or_else(|| {
+            names
+                .iter()
+                .find(|n| runnable(n).is_some_and(|stem| stem.starts_with(&prefix)))
+        })
+        .map(|n| dir.join(n))
 }
 
 /// The reply for a detector write: `200 {status:"ok", ..}` when the engine
@@ -132,14 +180,13 @@ pub async fn delete_detector(State(_state): State<AppState>) -> Response {
     )
 }
 
-/// Surgically write `vision.detector.{model_id, enabled}` (plus `model_path` when
-/// supplied), preserving every other key, so the edit never clobbers a sibling
-/// `vision` field (cameras, backend, tracker_enabled, …) or any other top-level
-/// section.
+/// Surgically write `vision.detector.{model_id, model_path, enabled}`,
+/// preserving every other key, so the edit never clobbers a sibling `vision`
+/// field (cameras, backend, tracker_enabled, …) or any other top-level section.
 fn write_detector_block(
     config_path: &Path,
     model_id: &str,
-    model_path: Option<&str>,
+    model_path: &str,
 ) -> Result<(), String> {
     use serde_norway::Value as Yaml;
 
@@ -149,20 +196,11 @@ fn write_detector_block(
             Yaml::String("model_id".to_string()),
             Yaml::String(model_id.to_string()),
         );
+        detector.insert(
+            Yaml::String("model_path".to_string()),
+            Yaml::String(model_path.to_string()),
+        );
         detector.insert(Yaml::String("enabled".to_string()), Yaml::Bool(true));
-        match model_path {
-            Some(p) => {
-                detector.insert(
-                    Yaml::String("model_path".to_string()),
-                    Yaml::String(p.to_string()),
-                );
-            }
-            // No path supplied: pop a stale one so the engine resolves the new id
-            // through the registry rather than against the previous model's file.
-            None => {
-                detector.remove("model_path");
-            }
-        }
         Ok(())
     })
     .map(|_| ())
@@ -214,7 +252,12 @@ mod tests {
         )
         .unwrap();
 
-        write_detector_block(&cfg, "com.example.coco-yolov8n", None).unwrap();
+        write_detector_block(
+            &cfg,
+            "com.example.coco-yolov8n",
+            "/var/ados/models/com.example.coco-yolov8n-rk3588.rknn",
+        )
+        .unwrap();
 
         let parsed = read_yaml(&cfg);
         let detector = parsed
@@ -229,8 +272,11 @@ mod tests {
             detector.get("enabled").and_then(|v| v.as_bool()),
             Some(true)
         );
-        // No model_path written when the body omits it.
-        assert!(detector.get("model_path").is_none());
+        // The engine's detector config requires a path, so one is always written.
+        assert_eq!(
+            detector.get("model_path").and_then(|v| v.as_str()),
+            Some("/var/ados/models/com.example.coco-yolov8n-rk3588.rknn")
+        );
         // Sibling vision keys + the unrelated agent section survive.
         let vision = parsed.get("vision").unwrap();
         assert_eq!(vision.get("backend").and_then(|v| v.as_str()), Some("rknn"));
@@ -245,12 +291,12 @@ mod tests {
     }
 
     #[test]
-    fn write_includes_model_path_when_supplied() {
+    fn write_includes_the_supplied_model_path() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         std::fs::write(&cfg, "vision:\n  enabled: true\n").unwrap();
 
-        write_detector_block(&cfg, "custom-1", Some("/var/ados/models/custom-1.onnx")).unwrap();
+        write_detector_block(&cfg, "custom-1", "/var/ados/models/custom-1.onnx").unwrap();
 
         let parsed = read_yaml(&cfg);
         let detector = parsed
@@ -264,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn write_replacing_an_existing_detector_pops_a_stale_path() {
+    fn write_replacing_an_existing_detector_replaces_the_path() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         // An existing detector that carried an explicit path.
@@ -274,9 +320,7 @@ mod tests {
         )
         .unwrap();
 
-        // Re-select a registry model with no explicit path → the stale path pops so
-        // the engine resolves the new id itself.
-        write_detector_block(&cfg, "new-registry-id", None).unwrap();
+        write_detector_block(&cfg, "new-id", "/var/ados/models/new-id.onnx").unwrap();
 
         let parsed = read_yaml(&cfg);
         let detector = parsed
@@ -285,12 +329,44 @@ mod tests {
             .unwrap();
         assert_eq!(
             detector.get("model_id").and_then(|v| v.as_str()),
-            Some("new-registry-id")
+            Some("new-id")
         );
-        assert!(
-            detector.get("model_path").is_none(),
-            "a stale model_path must be popped on re-select"
+        assert_eq!(
+            detector.get("model_path").and_then(|v| v.as_str()),
+            Some("/var/ados/models/new-id.onnx"),
+            "the previous model's path never survives a re-select"
         );
+    }
+
+    #[test]
+    fn resolve_prefers_the_exact_upload_name_then_a_board_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for name in [
+            "coco-yolov8n-rk3588.rknn",
+            "coco-yolov8n-cpu.onnx",
+            "coco-yolov8n.onnx.tmp",
+            "coco-yolov8n.etag",
+            "other.onnx",
+        ] {
+            std::fs::write(d.join(name), b"m").unwrap();
+        }
+        // No exact file: the first board download in name order.
+        assert_eq!(
+            resolve_installed_model(d, "coco-yolov8n"),
+            Some(d.join("coco-yolov8n-cpu.onnx"))
+        );
+        // An exact `<id>.<ext>` upload wins.
+        std::fs::write(d.join("coco-yolov8n.tflite"), b"m").unwrap();
+        assert_eq!(
+            resolve_installed_model(d, "coco-yolov8n"),
+            Some(d.join("coco-yolov8n.tflite"))
+        );
+        // A partial download, a sidecar file, or a different id never match.
+        assert_eq!(resolve_installed_model(d, "missing"), None);
+        assert_eq!(resolve_installed_model(d, "oth"), None);
+        // An unreadable dir is no match, not a panic.
+        assert_eq!(resolve_installed_model(&d.join("absent"), "x"), None);
     }
 
     #[test]
@@ -298,7 +374,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
         // No file yet.
-        write_detector_block(&cfg, "first", None).unwrap();
+        write_detector_block(&cfg, "first", "/var/ados/models/first.onnx").unwrap();
         let parsed = read_yaml(&cfg);
         assert_eq!(
             parsed

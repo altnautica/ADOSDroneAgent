@@ -63,3 +63,13 @@ class SecurityConfig(BaseModel):
     # True requires an X-ADOS-Setup-Token header on every setup mutation;
     # the token is generated at first boot and printed by the CLI.
     setup_token_required: bool = False
+
+
+class McpConfig(BaseModel):
+    """The AI control surface's posture, read by the LAN auth edge.
+
+    Off by default, so the MCP token path stays inert until an operator opts
+    in.
+    """
+
+    token_accept_enabled: bool = False

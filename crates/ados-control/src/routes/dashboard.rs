@@ -30,7 +30,7 @@ use ados_video::config::{CameraConfig, RosterVideoConfig};
 
 use crate::config::PairingConfig;
 use crate::mediamtx_probe;
-use crate::routes::{config_rw, pairing};
+use crate::routes::pairing;
 use crate::state::AppState;
 
 /// The last `bytesReceived` reading of the live `main` path and when it was
@@ -65,7 +65,7 @@ pub async fn get_dashboard_snapshot(
 
     let fc = fc_slice(state.state.snapshot().as_ref());
 
-    let mode = config_rw::effective_config(&paths.config)
+    let mode = ados_config::schema::effective(&paths.config)
         .ok()
         .and_then(|c| {
             c.pointer("/server/mode")

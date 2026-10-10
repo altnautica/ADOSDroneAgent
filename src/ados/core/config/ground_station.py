@@ -8,15 +8,15 @@ from pydantic import BaseModel, Field
 
 from ados.core.paths import MESH_PSK_PATH
 
-from ._bounds import U8_MAX, U16_MAX
+from ._bounds import U16_MAX
 
 # ground_station fields live in the Pydantic model so they validate,
 # round-trip through save cycles, and show up in config dumps. An earlier
 # layout wrote `paired_drone_id` and `paired_at` to `/etc/ados/config.yaml`
-# via direct YAML manipulation in pair_manager.py while ADOSConfig had
-# `extra="ignore"`, and `share_uplink` lived in a side-file at
-# `/etc/ados/ground-station-ui.json`. The migrator in `load_config()` picks
-# the legacy side-file value up once and preserves the file on disk.
+# by direct YAML manipulation while ADOSConfig had `extra="ignore"`, and
+# `share_uplink` lived in a side-file at `/etc/ados/ground-station-ui.json`.
+# The migrator in `load_config()` picks the legacy side-file value up once
+# and preserves the file on disk.
 
 
 class GroundStationUiConfig(BaseModel):
@@ -121,7 +121,9 @@ class MeshConfig(BaseModel):
     carrier: Literal["802.11s", "ibss"] = "802.11s"
     mesh_id: str | None = None
     shared_key_path: str = str(MESH_PSK_PATH)
-    channel: int = Field(default=1, ge=0, le=U8_MAX)  # 2.4 GHz ch 1 default for mesh dongle
+    # 2.4 GHz channels 1-13 only: the mesh carrier has no 5 GHz frequency map,
+    # so any other value would silently land on channel 1.
+    channel: int = Field(default=1, ge=1, le=13)
     bat_iface: str = "bat0"
 
 
