@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use ados_installer::binaries;
 use ados_installer::checkpoint::Checkpoint;
-use ados_installer::cli::{Args, RunMode, USAGE};
+use ados_installer::cli::{usage, Args, RunMode};
 use ados_installer::ctx::{artifacts_conflict, resolve_channel, rev_channel_conflict, Ctx};
 use ados_installer::env::{self, EnvInfo, RESULT_PATH};
 use ados_installer::exec;
@@ -58,13 +58,13 @@ async fn main() -> Result<ExitCode> {
     let args = match Args::from_env() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("error: {e}\n\n{USAGE}");
+            eprintln!("error: {e}\n\n{}", usage());
             return Ok(ExitCode::from(2));
         }
     };
 
     if args.help {
-        print!("{USAGE}");
+        print!("{}", usage());
         return Ok(ExitCode::SUCCESS);
     }
 

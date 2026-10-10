@@ -65,7 +65,7 @@ use tokio::process::Command;
 /// The set of units the restart route may touch: every shipped `ados-*.service`
 /// except those in [`NOT_RESTARTABLE`]. A request name is normalized to
 /// `ados-<name>` and must land in this set or it is rejected.
-const ALLOWED_UNITS: &[&str] = &[
+pub const ALLOWED_UNITS: &[&str] = &[
     "ados-api",
     "ados-batman",
     "ados-cloud",

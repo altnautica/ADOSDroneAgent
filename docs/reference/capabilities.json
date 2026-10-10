@@ -1,0 +1,716 @@
+{
+  "capabilities": [
+    {
+      "category": "hardware",
+      "description": "Lets the plugin receive press events (short, long, chord) from the host's front-panel buttons. Used by node plugins that drive an on-device workflow from physical buttons. Read-only; it does not remap or consume the buttons from other consumers.",
+      "enforced": true,
+      "id": "button.subscribe",
+      "label": "Subscribe to onboard button press events",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin publish small messages (at most 64 KiB each) on its own cloud stream through the agent's cloud relay, so a signed-in operator can receive them off the local network. Publishing detections onto the shared detection topic additionally needs vision.detection.publish.",
+      "enforced": true,
+      "id": "cloud.publish",
+      "label": "Publish data to the cloud relay",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin read shared fleet data from the cloud backend (drone status rows, paired devices, fleet roster).",
+      "enforced": null,
+      "id": "cloud.read",
+      "label": "Read fleet data from the cloud",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin write small JSON records (at most 64 KiB each) into its own collection in the operator's cloud account, where the plugin's GCS half can read them back.",
+      "enforced": true,
+      "id": "cloud.records",
+      "label": "Store records in the operator's cloud account",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin list, read, write and delete records in its own cloud collection for the signed-in operator (for example job history). Records are keyed by plugin, so a plugin can never read another plugin's records. Each record is capped at 64 KiB and each plugin at 5000 records.",
+      "enforced": null,
+      "id": "cloud.records",
+      "label": "Store the plugin's own records in the cloud",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin ask the GCS to send takeoff, land or return-to-launch to the drone it is bound to, or retarget that drone's follow tracker. The operator confirms every one of these in a prompt that names the drone. Arming, mode changes and every other command are refused. The same grant lets the plugin write its own per-drone configuration without a prompt.",
+      "enforced": null,
+      "id": "command.send",
+      "label": "Send commands to drones from the GCS",
+      "risk": "medium",
+      "side": "gcs"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin register a page (its rendered content and touch or hit zones) on the host's onboard display, so a plugin can present status without recompiling the display service. The host owns page switching and arbitration between contributed pages.",
+      "enforced": true,
+      "id": "display.oled.page",
+      "label": "Contribute a page to the onboard display",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin push pose samples (position, attitude, or both) directly into the autopilot state estimator. A bad pose stream produces unsafe position commands and fly-aways.",
+      "enforced": true,
+      "id": "estimator.pose.inject",
+      "label": "Inject pose estimates into the EKF",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin emit events on topics it has been granted access to. Other plugins and host services that subscribe to the same topic will receive the payload.",
+      "enforced": true,
+      "id": "event.publish",
+      "label": "Publish events on the plugin event bus",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin emit events on the in-memory GCS event bus other installed plugin panels subscribe to. The bus never leaves the browser tab; it carries no host authority of its own.",
+      "enforced": null,
+      "id": "event.publish",
+      "label": "Publish events on the GCS plugin event bus",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin subscribe to topics it has been granted access to. The plugin sees payloads from other plugins and from host services that publish on those topics.",
+      "enforced": true,
+      "id": "event.subscribe",
+      "label": "Receive events from the plugin event bus",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin subscribe to topics on the in-memory GCS event bus and see payloads other installed plugin panels publish.",
+      "enforced": null,
+      "id": "event.subscribe",
+      "label": "Receive events from the GCS plugin event bus",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "compute_process",
+      "description": "Lets the plugin read and write files outside its own data directory. Required by plugins that ingest logs, maps, or other host-provided files.",
+      "enforced": true,
+      "id": "filesystem.host",
+      "label": "Read and write files on the host filesystem",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin command the flight controller with guided-mode position or velocity setpoints (and the guided-mode entry and exit handshake) through a scoped sender, instead of raw MAVLink writes. The setpoint stream is the only flight-command surface this capability grants.",
+      "enforced": true,
+      "id": "flight.guided_setpoint",
+      "label": "Emit guided-mode setpoints",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets a plugin command the flight controller with SET_ATTITUDE_TARGET setpoints (an attitude quaternion and/or body rates, plus collective thrust) through a scoped sender, for GUIDED-mode vehicles that accept attitude/rate offboard control. This is a second flight-command surface alongside guided-mode position/velocity setpoints; the setpoint stream is the only flight-command surface this capability grants.",
+      "enforced": true,
+      "id": "flight.rate_setpoint",
+      "label": "Emit attitude/rate setpoints",
+      "risk": "critical",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin capture video frames from CSI-attached cameras on the SBC's camera connector. Required by native camera drivers.",
+      "enforced": true,
+      "id": "hardware.camera.csi",
+      "label": "Read frames from MIPI CSI cameras",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin read input pins and drive output pins on the SBC. Used by switches, LEDs, and discrete peripheral control.",
+      "enforced": true,
+      "id": "hardware.gpio",
+      "label": "Read and toggle GPIO pins on the host",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin drive a host GPIO output line high or low and play a bounded buzzer or LED beep pattern through the agent's GPIO-output service. Output-only; it does not read input pins.",
+      "enforced": true,
+      "id": "hardware.gpio_out",
+      "label": "Drive GPIO output lines (status buzzer or LED)",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin open the host's GPU and neural-accelerator device nodes (DRM render nodes, Mali, RKNPU, NVIDIA) for inference or rendering. Without it the plugin runs in a private /dev with no accelerator.",
+      "enforced": true,
+      "id": "hardware.gpu",
+      "label": "Use the GPU or neural accelerator",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin talk to I2C devices on the SBC's I2C buses. Used by sensor drivers and small peripherals.",
+      "enforced": true,
+      "id": "hardware.i2c",
+      "label": "Read and write I2C devices on the host",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin talk to SPI devices on the SBC's SPI buses. Used by displays and high-rate sensor drivers.",
+      "enforced": true,
+      "id": "hardware.spi",
+      "label": "Read and write SPI devices on the host",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin open and exchange data over UART serial ports. Required by GPS, range-finder, and modem drivers.",
+      "enforced": true,
+      "id": "hardware.uart",
+      "label": "Open UART serial ports on the host",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin attach to and exchange bulk transfers with USB devices. Required by vendor SDK drivers that talk to specific USB peripherals.",
+      "enforced": true,
+      "id": "hardware.usb",
+      "label": "Claim raw USB devices on the host",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin capture video frames from USB Video Class cameras. Required by webcam and machine-vision drivers.",
+      "enforced": true,
+      "id": "hardware.usb.uvc",
+      "label": "Read frames from USB UVC cameras",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin register itself as a MAVLink camera component and respond to camera-related MAVLink messages from the GCS and the autopilot.",
+      "enforced": false,
+      "id": "mavlink.component.camera",
+      "label": "Act as a MAVLink camera component",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin register itself as a MAVLink gimbal manager or device and handle gimbal control messages. Required by gimbal driver plugins.",
+      "enforced": false,
+      "id": "mavlink.component.gimbal",
+      "label": "Act as a MAVLink gimbal component",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin register itself as a MAVLink payload component for actuators, droppers, and other mission-specific hardware.",
+      "enforced": false,
+      "id": "mavlink.component.payload",
+      "label": "Act as a MAVLink payload component",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin claim a MAVLink component id for a peripheral that does not fit the camera, gimbal, or payload categories. Used by sensor bridges and experimental devices.",
+      "enforced": false,
+      "id": "mavlink.component.peripheral",
+      "label": "Act as a generic MAVLink peripheral component",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin register as a VIO source that publishes pose estimates over MAVLink. The autopilot can fuse these directly into the EKF, so a faulty source can cause unsafe flight behavior.",
+      "enforced": true,
+      "id": "mavlink.component.vio",
+      "label": "Act as a MAVLink visual-inertial-odometry source",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin observe the live MAVLink message stream, including telemetry, mode changes, and status text. Useful for analytics, logging, and dashboards.",
+      "enforced": true,
+      "id": "mavlink.read",
+      "label": "Read MAVLink messages from the flight controller",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin exchange application payloads over MAVLink TUNNEL frames (a private payload_type) on the existing link, without the full MAVLink write surface. Used for plugin-to-plugin or node-to-node application data carried inside the MAVLink stream.",
+      "enforced": true,
+      "id": "mavlink.tunnel",
+      "label": "Send and receive MAVLink TUNNEL payloads",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin inject MAVLink commands to the autopilot, including mode changes, arming, and parameter writes. An untrusted plugin with this capability can take control of the aircraft.",
+      "enforced": true,
+      "id": "mavlink.write",
+      "label": "Send MAVLink commands to the flight controller",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin publish its declared tools, resources, and prompts to an MCP client, and lets the host route a tool invocation into the plugin. Exposure alone grants no host authority: each tool acts only through the plugin's OTHER granted capabilities, so a tool can never do anything the plugin could not already do.",
+      "enforced": true,
+      "id": "mcp.expose",
+      "label": "Expose the plugin's tools to the AI-control (MCP) surface",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin publish its declared GCS-half tools, resources, and prompts to an MCP client. A GCS-only tool routes through the GCS bridge (command / mission), so its effect is still bounded by the plugin's other GCS capabilities and the MCP token's scope.",
+      "enforced": null,
+      "id": "mcp.expose",
+      "label": "Expose the plugin's GCS tools to the AI-control (MCP) surface",
+      "risk": "medium",
+      "side": "gcs"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin read the active mission, waypoints, fences, and rally points stored on the agent.",
+      "enforced": true,
+      "id": "mission.read",
+      "label": "Read mission plans loaded on the agent",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin read the active mission, waypoints, fences, and rally points that the operator has loaded into the GCS planner.",
+      "enforced": null,
+      "id": "mission.read",
+      "label": "Read mission plans loaded in the GCS",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin upload new missions, edit waypoints, or change fence and rally definitions. Used by mission-planner and pattern-generator plugins.",
+      "enforced": true,
+      "id": "mission.write",
+      "label": "Upload or modify mission plans on the agent",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin upload, edit, or replace missions in the GCS planner. Used by pattern generators and mission-template plugins.",
+      "enforced": null,
+      "id": "mission.write",
+      "label": "Edit mission plans in the GCS",
+      "risk": "high",
+      "side": "gcs"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin observe the raw MSP byte stream from a Betaflight / iNav / KISS flight controller, so it can decode telemetry, sensor, and status replies. Read-only on the MSP stream; the sibling of mavlink.read for an FC that speaks MSP instead of MAVLink.",
+      "enforced": true,
+      "id": "msp.read",
+      "label": "Read MSP messages from the flight controller",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin write raw MSP commands to a Betaflight / iNav / KISS flight controller, including MSP_SET_RAW_RC (the RC channel values that fly the aircraft in a rate mode). An untrusted plugin with this capability can command the aircraft, exactly like mavlink.write on a MAVLink FC.",
+      "enforced": true,
+      "id": "msp.write",
+      "label": "Send MSP commands to the flight controller",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets a declared plugin service bind the TCP ports it lists in its manifest (listen_ports) so other nodes on the network can reach it, and advertise those ports on the local network over mDNS through the agent. Every other port stays closed to the plugin, and the plugin's main process never listens.",
+      "enforced": true,
+      "id": "network.listen",
+      "label": "Accept inbound network connections",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin make outbound TCP, UDP, and HTTP connections from the agent host, and find services on the local network over mDNS through the agent. Required by plugins that talk to external services.",
+      "enforced": true,
+      "id": "network.outbound",
+      "label": "Open outbound network connections",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin read what kind of node it runs on: the node profile, the board and whether it has a neural accelerator, the ground-station role, whether the camera pipeline is up, and the main video stream's size and frame rate. Read-only facts; no telemetry, imagery, credentials or configuration values.",
+      "enforced": true,
+      "id": "node.info.read",
+      "label": "Read this node's hardware and role facts",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin read the drone's perception state: where detection runs (on the drone or offloaded to a compute node), the bound compute node, and the live session health (feed freshness, throughput). Read-only on derived data; it does not open or read the camera.",
+      "enforced": null,
+      "id": "perception.read",
+      "label": "Read perception state in the GCS",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin subscribe to the live detection stream (bounding boxes, classes, track ids) for the drones the operator has paired, the same detections the cockpit already renders. Read-only; the detections are derived data, not the raw camera feed.",
+      "enforced": null,
+      "id": "perception.subscribe",
+      "label": "Subscribe to live detections in the GCS",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "compute_process",
+      "description": "Lets the plugin launch helper subprocesses listed in its manifest's spawn allowlist. Required to ship vendor-binary drivers and language runtimes outside the Python plugin host.",
+      "enforced": true,
+      "id": "process.spawn",
+      "label": "Spawn subprocesses on the agent host",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin open a dedicated auxiliary stream on the radio link (a separate radio-port from the data and control planes) managed by the radio service, and read or write application frames on it. Used by plugins that need an isolated low-rate channel between nodes.",
+      "enforced": true,
+      "id": "radio.aux_stream",
+      "label": "Open and use an auxiliary radio stream",
+      "risk": "high",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin save video, telemetry, or analysis outputs into the agent's recording store so the GCS and post-flight tools can find them.",
+      "enforced": true,
+      "id": "recording.write",
+      "label": "Write recordings into the agent recording store",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin write recordings (video, telemetry CSV, analysis output) into the GCS recording library so the operator can replay them later.",
+      "enforced": null,
+      "id": "recording.write",
+      "label": "Save recordings to the GCS library",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin declare a camera device the rest of the agent and the GCS can address (live preview, recording, mission usage).",
+      "enforced": false,
+      "id": "sensor.camera.register",
+      "label": "Register a camera as a system sensor",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin declare a depth-camera or stereo sensor. Downstream services can consume depth maps for obstacle avoidance and SLAM.",
+      "enforced": false,
+      "id": "sensor.depth.register",
+      "label": "Register a depth sensor as a system sensor",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin declare a secondary IMU device the rest of the agent can address. Often paired with VIO and odometry workflows.",
+      "enforced": false,
+      "id": "sensor.imu.register",
+      "label": "Register an auxiliary IMU as a system sensor",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin declare a LiDAR device. Downstream services can consume point clouds for mapping and obstacle avoidance.",
+      "enforced": false,
+      "id": "sensor.lidar.register",
+      "label": "Register a LiDAR as a system sensor",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin declare a payload device (sprayer, dropper, sampler) so missions and the GCS can address it.",
+      "enforced": false,
+      "id": "sensor.payload.register",
+      "label": "Register a payload device as a system sensor",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin add new fields to the telemetry stream that ships to the GCS. Used by sensor plugins that surface custom readings on the dashboard.",
+      "enforced": true,
+      "id": "telemetry.extend",
+      "label": "Publish new telemetry fields to the GCS",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin read the same telemetry feed the GCS consumes (battery, GPS, attitude, mode). Useful for logging and analytics.",
+      "enforced": true,
+      "id": "telemetry.read",
+      "label": "Read telemetry streams from the agent",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin subscribe to live telemetry streams (attitude, GPS, battery, mode) for the drones the operator has paired with the GCS.",
+      "enforced": null,
+      "id": "telemetry.subscribe",
+      "label": "Read live telemetry from drones",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin add a panel to the in-flight cockpit quick-settings surface, scoped to the currently selected drone.",
+      "enforced": null,
+      "id": "ui.slot.cockpit-panel",
+      "label": "Add a panel to the cockpit quick settings",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin place a small widget in one of the cockpit's corner zones over the live video, scoped to the drone the cockpit is flying. The widget renders inside a sandboxed iframe with no host DOM access.",
+      "enforced": null,
+      "id": "ui.slot.cockpit-widget",
+      "label": "Add a widget to the cockpit HUD",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin add a tab to the per-drone flight controller area. The tab renders inside a sandboxed iframe with no host DOM access.",
+      "enforced": null,
+      "id": "ui.slot.fc-tab",
+      "label": "Add a tab to the flight controller panel",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin register a flight skill that appears in the cockpit Skill Bar, can be bound to a hotkey or gamepad button, and activated by the operator. Activation flips the plugin's per-drone config; the cockpit's arm and confirmation gates still apply.",
+      "enforced": null,
+      "id": "ui.slot.flight-skill",
+      "label": "Contribute a flight skill to the cockpit",
+      "risk": "medium",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin add a tab on the Hardware page so the operator can inspect or configure devices the plugin manages.",
+      "enforced": null,
+      "id": "ui.slot.hardware-tab",
+      "label": "Add a tab to the hardware page",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin draw geometry on the map view (polygons, markers, heatmaps). The overlay is rendered in a sandboxed canvas.",
+      "enforced": null,
+      "id": "ui.slot.map-overlay",
+      "label": "Draw an overlay on the map",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin add a new entry to the mission template picker so the operator can start missions with the plugin's parameters.",
+      "enforced": null,
+      "id": "ui.slot.mission-template",
+      "label": "Register a mission template",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin add a page to the sectioned Agent sidebar of a node's detail panel, next to the built-in companion and configuration pages. The page is scoped to the selected node.",
+      "enforced": null,
+      "id": "ui.slot.node-agent-page",
+      "label": "Add a page to a node's Agent sidebar",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin add a per-node tab inside the node detail panel on any node profile (drone, ground station, compute). The tab is scoped to the currently selected node.",
+      "enforced": null,
+      "id": "ui.slot.node-detail-tab",
+      "label": "Add a tab to the node detail panel",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin add a top-level surface to the node detail tab strip for the node profiles it declares (for example a workstation overview). The surface is scoped to the selected node.",
+      "enforced": null,
+      "id": "ui.slot.node-surface",
+      "label": "Add a top-level tab to a node's detail panel",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin push notifications into the GCS notification center so it can surface alerts and status changes to the operator.",
+      "enforced": null,
+      "id": "ui.slot.notification-channel",
+      "label": "Show notifications in the GCS",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin add its own section to the GCS Settings page so the operator can configure the plugin from a single place.",
+      "enforced": null,
+      "id": "ui.slot.settings-section",
+      "label": "Add a section to the Settings page",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "ui_slot",
+      "description": "Lets the plugin draw overlays on top of the live video feed (detection boxes, telemetry HUDs). The overlay is rendered above the player.",
+      "enforced": null,
+      "id": "ui.slot.video-overlay",
+      "label": "Draw an overlay on the live video",
+      "risk": "low",
+      "side": "gcs"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin declare the camera and stream sources the agent's video pipeline should serve (one primary plus optional secondary legs), so a smart-camera or pod driver can auto-configure its own feeds without an operator hand-typing them. Applying a new source list restarts the video pipeline.",
+      "enforced": true,
+      "id": "video.source.set",
+      "label": "Configure the agent's video stream sources",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin publish detection results (bounding boxes, class labels, confidence, track ids) that other plugins, overlays, and mission logic can consume. Detections are derived data; they do not command the vehicle.",
+      "enforced": true,
+      "id": "vision.detection.publish",
+      "label": "Publish detections to the vision engine",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin receive the detection batches the vision engine publishes (bounding boxes, class labels, confidence, and the tracker's stable track id and lock state on the locked object). Detections are derived data; subscribing does not command the vehicle or open the camera.",
+      "enforced": true,
+      "id": "vision.detection.subscribe",
+      "label": "Subscribe to detections from the vision engine",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "compute_process",
+      "description": "Lets the plugin subscribe to normalized camera frames the vision engine publishes (resolution and pixel format set by the engine). Frames are shared read-only; the plugin does not open the camera itself.",
+      "enforced": true,
+      "id": "vision.frame.read",
+      "label": "Read camera frames from the vision engine",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "compute_process",
+      "description": "Lets the plugin read the resolution of its own declared models: for each model the state (resolved, needs-model, verify-failed), the resolved on-disk path and runtime when resolved, and the reason otherwise. This is how a plugin finds where its delivered model was cached so it can load it. Reads only this plugin's own resolution; it does not read frames, other plugins' models, or command the vehicle.",
+      "enforced": true,
+      "id": "vision.model.read",
+      "label": "Read the plugin's resolved model delivery status",
+      "risk": "low",
+      "side": "agent"
+    },
+    {
+      "category": "compute_process",
+      "description": "Lets the plugin register an inference model (and its input format and output classes) so the vision engine can load and run it, or so the plugin can run it against shared frames. Registered models appear to detection consumers.",
+      "enforced": true,
+      "id": "vision.model.register",
+      "label": "Register an inference model with the vision engine",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "compute_process",
+      "description": "Lets the plugin report the perception offload link it holds (whether a compute node is paired, whether the bearer to it is good enough, its address and the model it runs). The node's perception tier and status read it. The agent counts the node as paired only when the advertised address answers, and only one plugin owns the link at a time.",
+      "enforced": true,
+      "id": "vision.offload.advertise",
+      "label": "Advertise a perception offload link",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin choose which object the vision engine's single-object tracker locks onto (the follow target), by naming the box to track. This selects a target for downstream follow / framing logic; designation alone does not command the vehicle.",
+      "enforced": true,
+      "id": "vision.track.designate",
+      "label": "Set the vision engine's follow target",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "flight_control",
+      "description": "Lets the plugin ask the GCS to set the vision engine's follow target on the drone it is bound to, by naming the detection box to track. Designation selects a target for downstream follow and framing logic; it does not command the vehicle.",
+      "enforced": null,
+      "id": "vision.track.designate",
+      "label": "Choose the follow target from the GCS",
+      "risk": "medium",
+      "side": "gcs"
+    }
+  ],
+  "schema": 1
+}

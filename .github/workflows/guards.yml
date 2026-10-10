@@ -275,6 +275,49 @@ jobs:
         working-directory: ADOSDroneAgent
         run: python scripts/check-api-surface.py
 
+  reference-data:
+    name: Docs reference data is current
+    runs-on: ubuntu-latest
+    steps:
+      # docs/reference/*.json feed the documentation site's generated tables.
+      # Each is exported from the code that defines the surface, so a change
+      # to a CLI command, route, config key, capability, manifest field, board,
+      # unit, installer flag or dashboard page must ship its regenerated JSON.
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install the agent
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,ground-station,vision]"
+
+      - name: Check mode catches planted drift
+        run: |
+          set -euo pipefail
+          cp docs/reference/cli.json "$RUNNER_TEMP/cli.json"
+          python - <<'PY'
+          import json
+          path = "docs/reference/cli.json"
+          data = json.load(open(path, encoding="utf-8"))
+          data["commands"].append({"path": "planted", "help": None, "arguments": [], "options": []})
+          open(path, "w", encoding="utf-8").write(json.dumps(data))
+          PY
+          rc=0
+          python scripts/emit-reference.py --check || rc=$?
+          cp "$RUNNER_TEMP/cli.json" docs/reference/cli.json
+          if [ "$rc" -ne 1 ]; then
+            echo "FAIL: --check exited $rc on a planted drift, expected 1"
+            exit 1
+          fi
+
+      - name: Committed reference data matches the code
+        run: python scripts/emit-reference.py --check
+
   ignored-test-inventory:
     name: The ignored-test set is a decision, not a drift
     runs-on: ubuntu-latest

@@ -1,0 +1,407 @@
+{
+  "boards": [
+    {
+      "arch": "aarch64",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h265_enc",
+        "h264_dec",
+        "h265_dec"
+      ],
+      "id": "beagley-ai",
+      "max_encode_resolution": "1920x1080",
+      "name": "BeagleBoard.org BeagleY-AI",
+      "plugin_tokens": [
+        "beagley-ai",
+        "ti am67a (j722s)"
+      ],
+      "soc": "TI AM67A (J722S)",
+      "vendor": "BeagleBoard.org",
+      "vio_capable": null
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 2,
+      "hw_video_codecs": [
+        "h264_dec"
+      ],
+      "id": "cm3",
+      "max_encode_resolution": null,
+      "name": "Raspberry Pi Compute Module 3",
+      "plugin_tokens": [
+        "cm3",
+        "bcm2837"
+      ],
+      "soc": "BCM2837",
+      "vendor": "Raspberry Pi",
+      "vio_capable": false
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_dec"
+      ],
+      "id": "cm4",
+      "max_encode_resolution": "1920x1080",
+      "name": "Raspberry Pi CM4",
+      "plugin_tokens": [
+        "cm4",
+        "bcm2711"
+      ],
+      "soc": "BCM2711",
+      "vendor": "Raspberry Pi",
+      "vio_capable": false
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 4,
+      "hw_video_codecs": [
+        "h264_dec",
+        "h265_enc",
+        "h265_dec"
+      ],
+      "id": "cm5",
+      "max_encode_resolution": "1920x1080",
+      "name": "Raspberry Pi CM5",
+      "plugin_tokens": [
+        "cm5",
+        "bcm2712"
+      ],
+      "soc": "BCM2712",
+      "vendor": "Raspberry Pi",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_dec",
+        "vp9_dec"
+      ],
+      "id": "cubie-a7s",
+      "max_encode_resolution": "3840x2160",
+      "name": "Radxa Cubie A7S",
+      "plugin_tokens": [
+        "cubie-a7s",
+        "allwinner a733"
+      ],
+      "soc": "Allwinner A733",
+      "vendor": "Radxa",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 2,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_dec"
+      ],
+      "id": "cubie-a7z",
+      "max_encode_resolution": "1920x1080",
+      "name": "Radxa Cubie A7Z",
+      "plugin_tokens": [
+        "cubie-a7z",
+        "allwinner a733"
+      ],
+      "soc": "Allwinner A733",
+      "vendor": "Radxa",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 2,
+      "hw_video_codecs": [],
+      "id": "generic-arm64",
+      "max_encode_resolution": null,
+      "name": "generic-arm64",
+      "plugin_tokens": [
+        "generic-arm64",
+        "unknown"
+      ],
+      "soc": "unknown",
+      "vendor": "unknown",
+      "vio_capable": false
+    },
+    {
+      "arch": "x86_64",
+      "default_tier": 2,
+      "hw_video_codecs": [],
+      "id": "generic-x86_64",
+      "max_encode_resolution": null,
+      "name": "generic-x86_64",
+      "plugin_tokens": [
+        "generic-x86_64",
+        "unknown"
+      ],
+      "soc": "unknown",
+      "vendor": "unknown",
+      "vio_capable": false
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec"
+      ],
+      "id": "jetson-nano",
+      "max_encode_resolution": "3840x2160",
+      "name": "NVIDIA Jetson Nano",
+      "plugin_tokens": [
+        "jetson-nano",
+        "tegra x1"
+      ],
+      "soc": "Tegra X1",
+      "vendor": "NVIDIA",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 4,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec",
+        "av1_dec"
+      ],
+      "id": "jetson-orin-nano",
+      "max_encode_resolution": "3840x2160",
+      "name": "NVIDIA Jetson Orin Nano",
+      "plugin_tokens": [
+        "jetson-orin-nano",
+        "tegra orin"
+      ],
+      "soc": "Tegra Orin",
+      "vendor": "NVIDIA",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 4,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec",
+        "av1_dec",
+        "vp9_dec"
+      ],
+      "id": "orange-pi-5",
+      "max_encode_resolution": "7680x4320",
+      "name": "Orange Pi 5",
+      "plugin_tokens": [
+        "orange-pi-5",
+        "rk3588s"
+      ],
+      "soc": "RK3588S",
+      "vendor": "Xunlong",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec"
+      ],
+      "id": "rdk-x3",
+      "max_encode_resolution": "3840x2160",
+      "name": "D-Robotics RDK X3",
+      "plugin_tokens": [
+        "rdk-x3",
+        "horizon sunrise x3"
+      ],
+      "soc": "Horizon Sunrise X3",
+      "vendor": "D-Robotics",
+      "vio_capable": false
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec",
+        "vp9_dec"
+      ],
+      "id": "rk3566",
+      "max_encode_resolution": "1920x1080",
+      "name": "Radxa CM3 (RK3566)",
+      "plugin_tokens": [
+        "rk3566"
+      ],
+      "soc": "RK3566",
+      "vendor": "Radxa",
+      "vio_capable": false
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec",
+        "vp9_dec",
+        "av1_dec"
+      ],
+      "id": "rk3576",
+      "max_encode_resolution": "3840x2160",
+      "name": "Rockchip RK3576 (Reference)",
+      "plugin_tokens": [
+        "rk3576"
+      ],
+      "soc": "RK3576",
+      "vendor": "Rockchip",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 4,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec",
+        "av1_dec",
+        "vp9_dec"
+      ],
+      "id": "rk3588s2",
+      "max_encode_resolution": "7680x4320",
+      "name": "Radxa CM4 (RK3588S2)",
+      "plugin_tokens": [
+        "rk3588s2"
+      ],
+      "soc": "RK3588S2",
+      "vendor": "Radxa",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 4,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec",
+        "av1_dec",
+        "vp9_dec"
+      ],
+      "id": "rock-5c-lite",
+      "max_encode_resolution": "3840x2160",
+      "name": "Radxa ROCK 5C Lite (RK3582)",
+      "plugin_tokens": [
+        "rock-5c-lite",
+        "rk3582"
+      ],
+      "soc": "RK3582",
+      "vendor": "Radxa",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 2,
+      "hw_video_codecs": [
+        "h264_dec"
+      ],
+      "id": "rpi3",
+      "max_encode_resolution": null,
+      "name": "Raspberry Pi 3",
+      "plugin_tokens": [
+        "rpi3",
+        "bcm2837"
+      ],
+      "soc": "BCM2837",
+      "vendor": "Raspberry Pi",
+      "vio_capable": false
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_dec"
+      ],
+      "id": "rpi4b",
+      "max_encode_resolution": "1920x1080",
+      "name": "Raspberry Pi 4B",
+      "plugin_tokens": [
+        "rpi4b",
+        "bcm2711"
+      ],
+      "soc": "BCM2711",
+      "vendor": "Raspberry Pi",
+      "vio_capable": false
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 4,
+      "hw_video_codecs": [
+        "h264_dec",
+        "h265_enc",
+        "h265_dec"
+      ],
+      "id": "rpi5",
+      "max_encode_resolution": "1920x1080",
+      "name": "Raspberry Pi 5",
+      "plugin_tokens": [
+        "rpi5",
+        "bcm2712"
+      ],
+      "soc": "BCM2712",
+      "vendor": "Raspberry Pi",
+      "vio_capable": true
+    },
+    {
+      "arch": "armv7l",
+      "default_tier": 3,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec"
+      ],
+      "id": "rv1126b",
+      "max_encode_resolution": "3840x2160",
+      "name": "Rockchip RV1126B",
+      "plugin_tokens": [
+        "rv1126b"
+      ],
+      "soc": "RV1126B",
+      "vendor": "Rockchip",
+      "vio_capable": true
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 2,
+      "hw_video_codecs": [
+        "h264_dec"
+      ],
+      "id": "zero2w",
+      "max_encode_resolution": null,
+      "name": "Raspberry Pi Zero 2 W",
+      "plugin_tokens": [
+        "zero2w",
+        "bcm2710a1"
+      ],
+      "soc": "BCM2710A1",
+      "vendor": "Raspberry Pi",
+      "vio_capable": false
+    }
+  ],
+  "schema": 1
+}

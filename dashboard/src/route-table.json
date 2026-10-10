@@ -1,0 +1,239 @@
+[
+  {
+    "key": "home",
+    "path": "/home",
+    "label": "Home",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "pairing",
+    "path": "/pairing",
+    "label": "Pairing",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "receive",
+    "path": "/receive",
+    "label": "WFB Receive",
+    "profiles": [
+      "ground_station"
+    ],
+    "roles": null
+  },
+  {
+    "key": "mesh",
+    "path": "/mesh",
+    "label": "Mesh",
+    "profiles": [
+      "ground_station"
+    ],
+    "roles": [
+      "relay",
+      "receiver"
+    ]
+  },
+  {
+    "key": "sources",
+    "path": "/sources",
+    "label": "Sources",
+    "profiles": [
+      "ground_station"
+    ],
+    "roles": [
+      "receiver"
+    ]
+  },
+  {
+    "key": "extensions",
+    "path": "/extensions",
+    "label": "Extensions",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "peripherals",
+    "path": "/peripherals",
+    "label": "Peripherals",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "logs",
+    "path": "/logs",
+    "label": "Logs",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "diagnostics",
+    "path": "/diagnostics",
+    "label": "Diagnostics",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "telemetry",
+    "path": "/telemetry",
+    "label": "Telemetry",
+    "profiles": [
+      "drone"
+    ],
+    "roles": null
+  },
+  {
+    "key": "video",
+    "path": "/video",
+    "label": "Video",
+    "profiles": [
+      "drone"
+    ],
+    "roles": null
+  },
+  {
+    "key": "transmit",
+    "path": "/transmit",
+    "label": "WFB Transmit",
+    "profiles": [
+      "drone"
+    ],
+    "roles": null
+  },
+  {
+    "key": "io",
+    "path": "/io",
+    "label": "Display & Joystick",
+    "profiles": [
+      "ground_station"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-profile",
+    "path": "/settings/profile",
+    "label": "Profile",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "settings-region",
+    "path": "/settings/region",
+    "label": "Region",
+    "profiles": [
+      "drone",
+      "ground_station"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-battery",
+    "path": "/settings/battery",
+    "label": "Battery",
+    "profiles": [
+      "drone"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-network",
+    "path": "/settings/network",
+    "label": "Network",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "settings-cellular",
+    "path": "/settings/cellular",
+    "label": "Cellular",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "settings-mac-pin",
+    "path": "/settings/mac-pin",
+    "label": "MAC pinning",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "settings-cloud",
+    "path": "/settings/cloud",
+    "label": "Cloud",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "settings-self-heal",
+    "path": "/settings/self-heal",
+    "label": "Self-heal",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "settings-mavlink",
+    "path": "/settings/mavlink",
+    "label": "MAVLink",
+    "profiles": [
+      "drone"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-security",
+    "path": "/settings/security",
+    "label": "Security",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "settings-vision",
+    "path": "/settings/vision",
+    "label": "Vision",
+    "profiles": [
+      "drone"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-camera",
+    "path": "/settings/camera",
+    "label": "Camera",
+    "profiles": [
+      "drone"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-swarm",
+    "path": "/settings/swarm",
+    "label": "Swarm",
+    "profiles": [
+      "drone"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-discovery",
+    "path": "/settings/discovery",
+    "label": "Discovery",
+    "profiles": null,
+    "roles": null
+  },
+  {
+    "key": "settings-display",
+    "path": "/settings/display",
+    "label": "Display",
+    "profiles": [
+      "ground_station"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-advanced",
+    "path": "/settings/advanced",
+    "label": "Advanced",
+    "profiles": null,
+    "roles": null
+  }
+]

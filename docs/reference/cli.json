@@ -1,0 +1,813 @@
+{
+  "commands": [
+    {
+      "arguments": [],
+      "help": "Show the ADOS command overview.",
+      "options": [],
+      "path": "help"
+    },
+    {
+      "arguments": [],
+      "help": "Query the durable local logging and telemetry store.",
+      "options": [],
+      "path": "logs"
+    },
+    {
+      "arguments": [],
+      "help": "Downsampled metric series for charts.",
+      "options": [
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--metric"
+          ],
+          "help": "Metric key (repeatable).",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--since"
+          ],
+          "help": "Relative lower bound, e.g. -1h.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--from"
+          ],
+          "help": "Window start.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--to"
+          ],
+          "help": "Window end.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--session"
+          ],
+          "help": "Restrict to one session id.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": "auto",
+          "flags": [
+            "--bucket"
+          ],
+          "help": null,
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": "avg",
+          "flags": [
+            "--agg"
+          ],
+          "help": null,
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--json"
+          ],
+          "help": "Print the raw query-API envelope.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--key"
+          ],
+          "help": "API key for --host (else ADOS_KEY env, else the local pairing key).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--host"
+          ],
+          "help": "Query a remote agent over the LAN (TCP :8090). Default is the on-box unix socket.",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "path": "logs aggregate"
+    },
+    {
+      "arguments": [],
+      "help": "Stream a window of the store as jsonl or jsonl.zst to a file or stdout.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--since"
+          ],
+          "help": "Relative lower bound, e.g. -1h.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--from"
+          ],
+          "help": "Window start.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--to"
+          ],
+          "help": "Window end.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--kind"
+          ],
+          "help": null,
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--source"
+          ],
+          "help": "Filter by source (repeatable).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--metric"
+          ],
+          "help": "Filter by metric (repeatable).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--session"
+          ],
+          "help": "Restrict to one session id.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": "jsonl",
+          "flags": [
+            "--format"
+          ],
+          "help": null,
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--output",
+            "-o"
+          ],
+          "help": "Write to a file (default stdout).",
+          "required": false,
+          "type": "path"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--host"
+          ],
+          "help": "Query a remote agent over the LAN (TCP :8090).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--key"
+          ],
+          "help": "API key for --host.",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "path": "logs export"
+    },
+    {
+      "arguments": [],
+      "help": "Export a window of the store to the paired cloud account.\n\n    This is a thin front door: it records the request and lets the cloud service\n    do the export, upload, and mark. The cloud service refuses the push when the\n    agent is in local mode, is not cloud-paired, or has cloud log push disabled,\n    which is the correct state for an agent that has nothing to sync. By default\n    the command waits a few seconds for the result and prints what was pushed;\n    ``--no-wait`` returns as soon as the request is recorded.\n\n    The request file lives under the root-owned runtime dir: root records it\n    directly, while a non-root operator hands the write to the running agent on\n    loopback and only falls back to the direct seam if the agent is unreachable.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--session"
+          ],
+          "help": "Restrict the window to one session id.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--since"
+          ],
+          "help": "Lower bound: a relative -5m/-2h/-1d, an epoch-us integer, or an ISO timestamp.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--kinds"
+          ],
+          "help": "Comma-separated subset of logs,metrics,events,hw. Default: all four.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--no-wait"
+          ],
+          "help": "Return as soon as the push is requested, without waiting for the result.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--json"
+          ],
+          "help": "Print the raw result envelope.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "logs push"
+    },
+    {
+      "arguments": [],
+      "help": "Keyset-paginated rows across the logs, events, metrics, or hardware tables.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--since"
+          ],
+          "help": "Relative lower bound, e.g. -5m, -2h, -1d.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--from"
+          ],
+          "help": "Window start (epoch us, ISO, or -5m).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--to"
+          ],
+          "help": "Window end (epoch us, ISO, or -5m).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--kind"
+          ],
+          "help": null,
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--source"
+          ],
+          "help": "Filter by emitting source (repeatable).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--metric"
+          ],
+          "help": "Filter by metric key (repeatable; for metrics).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--event-kind"
+          ],
+          "help": "Filter by event kind (repeatable).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--level"
+          ],
+          "help": "Minimum level: trace|debug|info|warn|error.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--text"
+          ],
+          "help": "Substring match on the message.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--session"
+          ],
+          "help": "Restrict to one session id.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--limit"
+          ],
+          "help": "Page size.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--cursor"
+          ],
+          "help": "Pagination cursor from a prior page.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--json"
+          ],
+          "help": "Print the raw query-API envelope.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--key"
+          ],
+          "help": "API key for --host (else ADOS_KEY env, else the local pairing key).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--host"
+          ],
+          "help": "Query a remote agent over the LAN (TCP :8090). Default is the on-box unix socket.",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "path": "logs query"
+    },
+    {
+      "arguments": [],
+      "help": "List boot, flight, and manual sessions with per-session counts.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--since"
+          ],
+          "help": "Relative lower bound on the start time.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--from"
+          ],
+          "help": "Window start.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--to"
+          ],
+          "help": "Window end.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--kind"
+          ],
+          "help": null,
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--open"
+          ],
+          "help": "Only currently-open sessions.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--limit"
+          ],
+          "help": "Page size.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--json"
+          ],
+          "help": "Print the raw query-API envelope.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--key"
+          ],
+          "help": "API key for --host (else ADOS_KEY env, else the local pairing key).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--host"
+          ],
+          "help": "Query a remote agent over the LAN (TCP :8090). Default is the on-box unix socket.",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "path": "logs sessions"
+    },
+    {
+      "arguments": [],
+      "help": "Store health, ingest and drop rates, and the sync watermark.",
+      "options": [
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--openapi"
+          ],
+          "help": "Print the query-API OpenAPI schema instead.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--json"
+          ],
+          "help": "Print the raw query-API envelope.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--key"
+          ],
+          "help": "API key for --host (else ADOS_KEY env, else the local pairing key).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--host"
+          ],
+          "help": "Query a remote agent over the LAN (TCP :8090). Default is the on-box unix socket.",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "path": "logs status"
+    },
+    {
+      "arguments": [],
+      "help": "Follow the live stream of new rows until interrupted.",
+      "options": [
+        {
+          "default": 0,
+          "flags": [
+            "--replay"
+          ],
+          "help": "Replay this many recent rows before the live tail.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--kind"
+          ],
+          "help": null,
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--source"
+          ],
+          "help": "Filter by source (repeatable).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--metric"
+          ],
+          "help": "Filter by metric (repeatable).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--event-kind"
+          ],
+          "help": "Filter by event kind (repeatable).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--level"
+          ],
+          "help": "Minimum level.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--text"
+          ],
+          "help": "Substring match on the message.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--json"
+          ],
+          "help": "Print the raw query-API envelope.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--key"
+          ],
+          "help": "API key for --host (else ADOS_KEY env, else the local pairing key).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--host"
+          ],
+          "help": "Query a remote agent over the LAN (TCP :8090). Default is the on-box unix socket.",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "path": "logs tail"
+    },
+    {
+      "arguments": [],
+      "help": "Connect this agent to Mission Control, or bind the WFB radio (--role).",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--role"
+          ],
+          "help": "Bind the WFB radio in this role instead of showing connection info.",
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--yes",
+            "-y"
+          ],
+          "help": "Skip confirmation prompts.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "pair"
+    },
+    {
+      "arguments": [],
+      "help": "Show agent setup, link, video, and service status.",
+      "options": [
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--json"
+          ],
+          "help": "Output JSON for scripts.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "status"
+    },
+    {
+      "arguments": [],
+      "help": "Collect one redacted archive for a support request.\n\n    Nothing is sent anywhere. The archive is written locally and the operator\n    decides who sees it.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--output",
+            "-o"
+          ],
+          "help": "Where to write the archive. Defaults to the working directory.",
+          "required": false,
+          "type": "file"
+        }
+      ],
+      "path": "support-bundle"
+    },
+    {
+      "arguments": [],
+      "help": "Uninstall ADOS Drone Agent from this system.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--purge"
+          ],
+          "help": "Remove config as well.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--yes",
+            "-y"
+          ],
+          "help": "Skip confirmation prompt.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "uninstall"
+    },
+    {
+      "arguments": [],
+      "help": "Release this agent from Mission Control (and optionally the WFB radio).",
+      "options": [
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--radio"
+          ],
+          "help": "Also wipe the WFB radio bind.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--all"
+          ],
+          "help": "Unpair the node and the WFB radio.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--yes",
+            "-y"
+          ],
+          "help": "Skip the confirmation prompt.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "unpair"
+    },
+    {
+      "arguments": [],
+      "help": "Update the agent to the latest and restart it.",
+      "options": [
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--check-only"
+          ],
+          "help": "Report the current + latest version, don't install.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--yes",
+            "-y"
+          ],
+          "help": "Update without an interactive prompt.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": "Sentinel.UNSET",
+          "flags": [
+            "--json"
+          ],
+          "help": "Output JSON for scripts.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--profile"
+          ],
+          "help": "Override the profile to install. Defaults to whatever this box already is.",
+          "required": false,
+          "type": "choice"
+        }
+      ],
+      "path": "update"
+    },
+    {
+      "arguments": [],
+      "help": "Print the installed agent version (works when the service is down).",
+      "options": [],
+      "path": "version"
+    }
+  ],
+  "schema": 1
+}

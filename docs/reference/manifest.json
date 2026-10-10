@@ -1,0 +1,1156 @@
+{
+  "fields": [
+    {
+      "default": null,
+      "description": "Binaries",
+      "enum": null,
+      "path": "agent.binaries",
+      "required": false,
+      "type": "object"
+    },
+    {
+      "default": false,
+      "description": "Contains Vendor Binary",
+      "enum": null,
+      "path": "agent.contains_vendor_binary",
+      "required": false,
+      "type": "boolean"
+    },
+    {
+      "default": null,
+      "description": "Drivers",
+      "enum": null,
+      "path": "agent.contributes.drivers",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Prompts",
+      "enum": null,
+      "path": "agent.contributes.prompts",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Resources",
+      "enum": null,
+      "path": "agent.contributes.resources",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Services",
+      "enum": null,
+      "path": "agent.contributes.services",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Command",
+      "enum": null,
+      "path": "agent.contributes.services[].command",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Listen Ports",
+      "enum": null,
+      "path": "agent.contributes.services[].listen_ports",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Name",
+      "enum": null,
+      "path": "agent.contributes.services[].name",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Profiles",
+      "enum": null,
+      "path": "agent.contributes.services[].profiles",
+      "required": false,
+      "type": "array|null"
+    },
+    {
+      "default": null,
+      "description": "Ready Check",
+      "enum": null,
+      "path": "agent.contributes.services[].ready_check",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": "on-failure",
+      "description": "Restart",
+      "enum": [
+        "always",
+        "on-failure",
+        "no"
+      ],
+      "path": "agent.contributes.services[].restart",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": "ados-plugins.slice",
+      "description": "Slice",
+      "enum": null,
+      "path": "agent.contributes.services[].slice",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Shared Topics",
+      "enum": null,
+      "path": "agent.contributes.shared_topics",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Subscribe Capability",
+      "enum": null,
+      "path": "agent.contributes.shared_topics[].subscribe_capability",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Topic",
+      "enum": null,
+      "path": "agent.contributes.shared_topics[].topic",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Tools",
+      "enum": null,
+      "path": "agent.contributes.tools",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Behaviors",
+      "enum": null,
+      "path": "agent.contributes.vision.behaviors",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Detectors",
+      "enum": null,
+      "path": "agent.contributes.vision.detectors",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Models",
+      "enum": null,
+      "path": "agent.contributes.vision.models",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Declared Capabilities",
+      "enum": null,
+      "path": "agent.declared_capabilities",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": "",
+      "description": "Description",
+      "enum": null,
+      "path": "agent.declared_capabilities[].description",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Id",
+      "enum": null,
+      "path": "agent.declared_capabilities[].id",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Risk",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "path": "agent.declared_capabilities[].risk",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Entrypoint",
+      "enum": null,
+      "path": "agent.entrypoint",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Http",
+      "enum": null,
+      "path": "agent.http",
+      "required": false,
+      "type": "boolean"
+    },
+    {
+      "default": "subprocess",
+      "description": "Isolation",
+      "enum": [
+        "subprocess",
+        "inprocess"
+      ],
+      "path": "agent.isolation",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Mavlink Components",
+      "enum": null,
+      "path": "agent.mavlink_components",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Component Id",
+      "enum": null,
+      "path": "agent.mavlink_components[].component_id",
+      "required": true,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Component Kind",
+      "enum": [
+        "camera",
+        "gimbal",
+        "payload",
+        "peripheral",
+        "generic",
+        "vio"
+      ],
+      "path": "agent.mavlink_components[].component_kind",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Sub Id",
+      "enum": null,
+      "path": "agent.mavlink_components[].sub_id",
+      "required": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Payloads",
+      "enum": null,
+      "path": "agent.payloads",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Arch Os",
+      "enum": null,
+      "path": "agent.payloads[].arch_os",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Path",
+      "enum": null,
+      "path": "agent.payloads[].path",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Profiles",
+      "enum": null,
+      "path": "agent.payloads[].profiles",
+      "required": false,
+      "type": "array|null"
+    },
+    {
+      "default": null,
+      "description": "Sha256",
+      "enum": null,
+      "path": "agent.payloads[].sha256",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Size Bytes",
+      "enum": null,
+      "path": "agent.payloads[].size_bytes",
+      "required": true,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Source",
+      "enum": null,
+      "path": "agent.payloads[].source",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Per Drone Config",
+      "enum": null,
+      "path": "agent.per_drone_config",
+      "required": false,
+      "type": "boolean"
+    },
+    {
+      "default": null,
+      "description": "Permissions",
+      "enum": null,
+      "path": "agent.permissions",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Degraded Behavior",
+      "enum": null,
+      "path": "agent.permissions[].degraded_behavior",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Id",
+      "enum": null,
+      "path": "agent.permissions[].id",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Required",
+      "enum": null,
+      "path": "agent.permissions[].required",
+      "required": false,
+      "type": "boolean"
+    },
+    {
+      "default": "standard",
+      "description": "Class",
+      "enum": [
+        "standard",
+        "heavy"
+      ],
+      "path": "agent.resources.class",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": 25,
+      "description": "Max Cpu Percent",
+      "enum": null,
+      "path": "agent.resources.max_cpu_percent",
+      "required": false,
+      "type": "integer"
+    },
+    {
+      "default": 12,
+      "description": "Max Pids",
+      "enum": null,
+      "path": "agent.resources.max_pids",
+      "required": false,
+      "type": "integer"
+    },
+    {
+      "default": 96,
+      "description": "Max Ram Mb",
+      "enum": null,
+      "path": "agent.resources.max_ram_mb",
+      "required": false,
+      "type": "integer"
+    },
+    {
+      "default": "python",
+      "description": "Runtime",
+      "enum": [
+        "python",
+        "rust"
+      ],
+      "path": "agent.runtime",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Subprocess Spawn",
+      "enum": null,
+      "path": "agent.subprocess_spawn",
+      "required": false,
+      "type": "array|null"
+    },
+    {
+      "default": null,
+      "description": "Target Profiles",
+      "enum": null,
+      "path": "agent.target_profiles",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Test Fixtures",
+      "enum": null,
+      "path": "agent.test_fixtures",
+      "required": false,
+      "type": "object"
+    },
+    {
+      "default": null,
+      "description": "Vendor Attribution",
+      "enum": null,
+      "path": "agent.vendor_attribution",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Commit Sha",
+      "enum": null,
+      "path": "agent.vendor_attribution[].commit_sha",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "License",
+      "enum": null,
+      "path": "agent.vendor_attribution[].license",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Name",
+      "enum": null,
+      "path": "agent.vendor_attribution[].name",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Notice",
+      "enum": null,
+      "path": "agent.vendor_attribution[].notice",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Source Offer Url",
+      "enum": null,
+      "path": "agent.vendor_attribution[].source_offer_url",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Source Url",
+      "enum": null,
+      "path": "agent.vendor_attribution[].source_url",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Upstream Repo",
+      "enum": null,
+      "path": "agent.vendor_attribution[].upstream_repo",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Upstream Version",
+      "enum": null,
+      "path": "agent.vendor_attribution[].upstream_version",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": "",
+      "description": "Author",
+      "enum": null,
+      "path": "author",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Ados Version",
+      "enum": null,
+      "path": "compatibility.ados_version",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Gcs Version",
+      "enum": null,
+      "path": "compatibility.gcs_version",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Min Tier",
+      "enum": null,
+      "path": "compatibility.min_tier",
+      "required": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Supported Boards",
+      "enum": null,
+      "path": "compatibility.supported_boards",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": "",
+      "description": "Description",
+      "enum": null,
+      "path": "description",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Description Long",
+      "enum": null,
+      "path": "description_long",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Documentation Url",
+      "enum": null,
+      "path": "documentation_url",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Extra",
+      "enum": null,
+      "path": "extra",
+      "required": false,
+      "type": "object"
+    },
+    {
+      "default": null,
+      "description": "Features",
+      "enum": null,
+      "path": "features",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Agent Pages",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "After",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages[].after",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Icon",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages[].icon",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Id",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages[].id",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Order",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages[].order",
+      "required": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Profile",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages[].profile",
+      "required": false,
+      "type": "array|null"
+    },
+    {
+      "default": null,
+      "description": "Section",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages[].section",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Setup For",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages[].setup_for",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Title",
+      "enum": null,
+      "path": "gcs.contributes.agent_pages[].title",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Map Overlays",
+      "enum": null,
+      "path": "gcs.contributes.map_overlays",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Mission Templates",
+      "enum": null,
+      "path": "gcs.contributes.mission_templates",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Models",
+      "enum": null,
+      "path": "gcs.contributes.models",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Node Surfaces",
+      "enum": null,
+      "path": "gcs.contributes.node_surfaces",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Group",
+      "enum": [
+        "status",
+        "vehicle",
+        "link",
+        "device",
+        "compute"
+      ],
+      "path": "gcs.contributes.node_surfaces[].group",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Id",
+      "enum": null,
+      "path": "gcs.contributes.node_surfaces[].id",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Order",
+      "enum": null,
+      "path": "gcs.contributes.node_surfaces[].order",
+      "required": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Profile",
+      "enum": null,
+      "path": "gcs.contributes.node_surfaces[].profile",
+      "required": true,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Title",
+      "enum": null,
+      "path": "gcs.contributes.node_surfaces[].title",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Notifications",
+      "enum": null,
+      "path": "gcs.contributes.notifications",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Overlays",
+      "enum": null,
+      "path": "gcs.contributes.overlays",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Panels",
+      "enum": null,
+      "path": "gcs.contributes.panels",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Parameters",
+      "enum": null,
+      "path": "gcs.contributes.parameters",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Prompts",
+      "enum": null,
+      "path": "gcs.contributes.prompts",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Resources",
+      "enum": null,
+      "path": "gcs.contributes.resources",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Settings",
+      "enum": null,
+      "path": "gcs.contributes.settings",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Skills",
+      "enum": null,
+      "path": "gcs.contributes.skills",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Smart Functions",
+      "enum": null,
+      "path": "gcs.contributes.smart_functions",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Tabs",
+      "enum": null,
+      "path": "gcs.contributes.tabs",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Target Actions",
+      "enum": null,
+      "path": "gcs.contributes.target_actions",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Tools",
+      "enum": null,
+      "path": "gcs.contributes.tools",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Entrypoint",
+      "enum": null,
+      "path": "gcs.entrypoint",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": "iframe",
+      "description": "Isolation",
+      "enum": [
+        "iframe",
+        "inline"
+      ],
+      "path": "gcs.isolation",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Locales",
+      "enum": null,
+      "path": "gcs.locales",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Permissions",
+      "enum": null,
+      "path": "gcs.permissions",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Degraded Behavior",
+      "enum": null,
+      "path": "gcs.permissions[].degraded_behavior",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Id",
+      "enum": null,
+      "path": "gcs.permissions[].id",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Required",
+      "enum": null,
+      "path": "gcs.permissions[].required",
+      "required": false,
+      "type": "boolean"
+    },
+    {
+      "default": null,
+      "description": "Boards",
+      "enum": null,
+      "path": "hardware_requirements.boards",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Cameras",
+      "enum": null,
+      "path": "hardware_requirements.cameras",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Fc Firmware",
+      "enum": null,
+      "path": "hardware_requirements.fc_firmware",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Optional",
+      "enum": null,
+      "path": "hardware_requirements.optional",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Homepage",
+      "enum": null,
+      "path": "homepage",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Id",
+      "enum": null,
+      "path": "id",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "License",
+      "enum": null,
+      "path": "license",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Name",
+      "enum": null,
+      "path": "name",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Ardupilot",
+      "enum": null,
+      "path": "required_fc_parameters.ardupilot",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Note",
+      "enum": null,
+      "path": "required_fc_parameters.ardupilot[].note",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Param",
+      "enum": null,
+      "path": "required_fc_parameters.ardupilot[].param",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Value",
+      "enum": null,
+      "path": "required_fc_parameters.ardupilot[].value",
+      "required": false,
+      "type": "string|number|integer|null"
+    },
+    {
+      "default": null,
+      "description": "Inav",
+      "enum": null,
+      "path": "required_fc_parameters.inav",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Note",
+      "enum": null,
+      "path": "required_fc_parameters.inav[].note",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Param",
+      "enum": null,
+      "path": "required_fc_parameters.inav[].param",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Value",
+      "enum": null,
+      "path": "required_fc_parameters.inav[].value",
+      "required": false,
+      "type": "string|number|integer|null"
+    },
+    {
+      "default": null,
+      "description": "Px4",
+      "enum": null,
+      "path": "required_fc_parameters.px4",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Note",
+      "enum": null,
+      "path": "required_fc_parameters.px4[].note",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Param",
+      "enum": null,
+      "path": "required_fc_parameters.px4[].param",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Value",
+      "enum": null,
+      "path": "required_fc_parameters.px4[].value",
+      "required": false,
+      "type": "string|number|integer|null"
+    },
+    {
+      "default": null,
+      "description": "Cpu Percent Peak",
+      "enum": null,
+      "path": "resource_impact.cpu_percent_peak",
+      "required": false,
+      "type": "number|null"
+    },
+    {
+      "default": null,
+      "description": "Output Rate Hz",
+      "enum": null,
+      "path": "resource_impact.output_rate_hz",
+      "required": false,
+      "type": "number|null"
+    },
+    {
+      "default": null,
+      "description": "Pids",
+      "enum": null,
+      "path": "resource_impact.pids",
+      "required": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Ram Mb",
+      "enum": null,
+      "path": "resource_impact.ram_mb",
+      "required": false,
+      "type": "number|null"
+    },
+    {
+      "default": null,
+      "description": "Startup Time Seconds",
+      "enum": null,
+      "path": "resource_impact.startup_time_seconds",
+      "required": false,
+      "type": "number|null"
+    },
+    {
+      "default": "medium",
+      "description": "Risk",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "path": "risk",
+      "required": false,
+      "type": "string"
+    },
+    {
+      "default": 1,
+      "description": "Schema Version",
+      "enum": null,
+      "path": "schema_version",
+      "required": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Screenshots",
+      "enum": null,
+      "path": "screenshots",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Caption",
+      "enum": null,
+      "path": "screenshots[].caption",
+      "required": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Url",
+      "enum": null,
+      "path": "screenshots[].url",
+      "required": true,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Telemetry Fields",
+      "enum": null,
+      "path": "telemetry_fields",
+      "required": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Version",
+      "enum": null,
+      "path": "version",
+      "required": true,
+      "type": "string"
+    }
+  ],
+  "schema": 1
+}

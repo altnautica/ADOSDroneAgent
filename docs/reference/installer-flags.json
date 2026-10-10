@@ -1,0 +1,208 @@
+{
+  "flags": [
+    {
+      "help": "Agent profile to install",
+      "name": "--profile",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<drone|ground_station|workstation|compute>"
+    },
+    {
+      "help": "mDNS hostname to set",
+      "name": "--name",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<hostname>"
+    },
+    {
+      "help": "Skip the RTL8812EU WFB radio driver build",
+      "name": "--no-rtl-driver",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Install the World Engine extension (3D world model + compute offload). Default: on for workstation and compute, off for drone and ground station. An installed extension is left alone; plugin auto-update keeps it current. The last of --world-engine and --no-world-engine wins.",
+      "name": "--world-engine",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Skip the World Engine extension",
+      "name": "--no-world-engine",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Do not perform the single automatic reboot when provisioning needs one (a camera/display overlay, an I2C dtparam). The install then reports degraded and names what is still staged.",
+      "name": "--no-reboot",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Pairing code (or pass it positionally). On an already-installed box a bare code does a fast re-pair, not a reinstall.",
+      "name": "--pair",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<code>"
+    },
+    {
+      "help": "Upgrade an existing install in place",
+      "name": "--upgrade",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Clear checkpoints and reinstall",
+      "name": "--force",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Install from a git branch (dev)",
+      "name": "--branch",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<name>"
+    },
+    {
+      "help": "Release channel selector",
+      "name": "--channel",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<name>"
+    },
+    {
+      "help": "Pin an explicit agent version",
+      "name": "--version",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<ver>"
+    },
+    {
+      "help": "Pin the agent package AND the prebuilt binaries to one revision, from that commit's rev-<sha> release. Requires the edge channel.",
+      "name": "--ref",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<commit>"
+    },
+    {
+      "help": "Install the service binaries from this directory of locally-built artifacts instead of fetching them. Each file is named for its service (ados-video) or its release asset (ados-video-aarch64) and needs its <name>.sha256 beside it; a service the directory does not carry still comes from the release. Requires the edge channel; not combinable with --ref. Linux only.",
+      "name": "--artifacts",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<dir>"
+    },
+    {
+      "help": "Display selection. `auto` (the ground-station default) auto-detects a panel; `none` opts out; an explicit id must be one the detected board declares.",
+      "name": "--display",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<auto|none|id>"
+    },
+    {
+      "help": "Camera hardware hint",
+      "name": "--camera",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<hint>"
+    },
+    {
+      "help": "Join this Wi-Fi network during a headless install (so the wired cable can be unplugged)",
+      "name": "--wifi-ssid",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<ssid>"
+    },
+    {
+      "help": "File holding the --wifi-ssid password (omit if open; keeps it off the command line)",
+      "name": "--wifi-pass-file",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<path>"
+    },
+    {
+      "help": "Plugin trust key (PEM) to copy into /etc/ados/plugin-keys/ on install. Repeatable.",
+      "name": "--plugin-key",
+      "short": "-k",
+      "takes_value": true,
+      "value_name": "<path>"
+    },
+    {
+      "help": "Remove the agent",
+      "name": "--uninstall",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Print install status and exit",
+      "name": "--status",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Plain line output (no animation/color)",
+      "name": "--plain",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Print only the final summary",
+      "name": "--quiet",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Machine output on stdout; no progress UI",
+      "name": "--json",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Disable color in the progress UI",
+      "name": "--no-color",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "ASCII glyph fallback",
+      "name": "--ascii",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Accept the detected defaults; skip the interactive setup and install right away",
+      "name": "--yes",
+      "short": "-y",
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Never prompt; run the silent, flag-driven install (the identity flags above are the automation surface)",
+      "name": "--non-interactive",
+      "short": null,
+      "takes_value": false,
+      "value_name": null
+    },
+    {
+      "help": "Print this help and exit",
+      "name": "--help",
+      "short": "-h",
+      "takes_value": false,
+      "value_name": null
+    }
+  ],
+  "schema": 1
+}

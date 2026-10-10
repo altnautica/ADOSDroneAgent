@@ -1,0 +1,2426 @@
+{
+  "keys": [
+    {
+      "default": "",
+      "description": "Device Id",
+      "enum": null,
+      "key": "agent.device_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "my-drone",
+      "description": "Name",
+      "enum": null,
+      "key": "agent.name",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Profile",
+      "enum": null,
+      "key": "agent.profile",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Tier",
+      "enum": null,
+      "key": "agent.tier",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Mission Control Url",
+      "enum": null,
+      "key": "api.mission_control_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "api.rest.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "0.0.0.0",
+      "description": "Host",
+      "enum": null,
+      "key": "api.rest.host",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 8080,
+      "description": "Port",
+      "enum": null,
+      "key": "api.rest.port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 50,
+      "description": "Cell Divergence Mv",
+      "enum": null,
+      "key": "battery.cell_divergence_mv",
+      "maximum": 500,
+      "minimum": 10,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 3300,
+      "description": "Critical Cell Mv",
+      "enum": null,
+      "key": "battery.critical_cell_mv",
+      "maximum": 4000,
+      "minimum": 2500,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "battery.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 3500,
+      "description": "Low Cell Mv",
+      "enum": null,
+      "key": "battery.low_cell_mv",
+      "maximum": 4200,
+      "minimum": 2500,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 30,
+      "description": "Predictive Window S",
+      "enum": null,
+      "key": "battery.predictive_window_s",
+      "maximum": 300,
+      "minimum": 5,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 25,
+      "description": "Reserve Percent",
+      "enum": null,
+      "key": "battery.reserve_percent",
+      "maximum": 50,
+      "minimum": 5,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 50,
+      "description": "Temp Spike Dc Per S",
+      "enum": null,
+      "key": "battery.temp_spike_dc_per_s",
+      "maximum": 200,
+      "minimum": 5,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 500,
+      "description": "Voltage Drop Mv Per S",
+      "enum": null,
+      "key": "battery.voltage_drop_mv_per_s",
+      "maximum": 5000,
+      "minimum": 100,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Mdns Enabled",
+      "enum": null,
+      "key": "discovery.mdns_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "_ados._tcp.local.",
+      "description": "Service Type",
+      "enum": null,
+      "key": "discovery.service_type",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Cloud Uplink",
+      "enum": [
+        "auto",
+        "force_on",
+        "force_off"
+      ],
+      "key": "ground_station.cloud_uplink",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Type",
+      "enum": [
+        "auto",
+        "hdmi",
+        "lcd",
+        "none"
+      ],
+      "key": "ground_station.display.type",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "ground_station.kiosk.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Minimal Layer",
+      "enum": null,
+      "key": "ground_station.kiosk.minimal_layer",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "auto",
+      "description": "Resolution",
+      "enum": null,
+      "key": "ground_station.kiosk.resolution",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Target Url",
+      "enum": null,
+      "key": "ground_station.kiosk.target_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "bat0",
+      "description": "Bat Iface",
+      "enum": null,
+      "key": "ground_station.mesh.bat_iface",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "802.11s",
+      "description": "Carrier",
+      "enum": [
+        "802.11s",
+        "ibss"
+      ],
+      "key": "ground_station.mesh.carrier",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 1,
+      "description": "Channel",
+      "enum": null,
+      "key": "ground_station.mesh.channel",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Interface Override",
+      "enum": null,
+      "key": "ground_station.mesh.interface_override",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Mesh Id",
+      "enum": null,
+      "key": "ground_station.mesh.mesh_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "/etc/ados/mesh/psk.key",
+      "description": "Shared Key Path",
+      "enum": null,
+      "key": "ground_station.mesh.shared_key_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Paired At",
+      "enum": null,
+      "key": "ground_station.paired_at",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Paired Drone Id",
+      "enum": null,
+      "key": "ground_station.paired_drone_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "direct",
+      "description": "Role",
+      "enum": [
+        "direct",
+        "relay",
+        "receiver"
+      ],
+      "key": "ground_station.role",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Share Uplink",
+      "enum": null,
+      "key": "ground_station.share_uplink",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": {},
+      "description": "Buttons",
+      "enum": null,
+      "key": "ground_station.ui.buttons",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "object"
+    },
+    {
+      "default": {},
+      "description": "Oled",
+      "enum": null,
+      "key": "ground_station.ui.oled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "object"
+    },
+    {
+      "default": {},
+      "description": "Screens",
+      "enum": null,
+      "key": "ground_station.ui.screens",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "object"
+    },
+    {
+      "default": true,
+      "description": "Accept Local Nic",
+      "enum": null,
+      "key": "ground_station.wfb_receiver.accept_local_nic",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 5800,
+      "description": "Listen Port",
+      "enum": null,
+      "key": "ground_station.wfb_receiver.listen_port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "_ados-receiver._tcp",
+      "description": "Receiver Mdns Service",
+      "enum": null,
+      "key": "ground_station.wfb_relay.receiver_mdns_service",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 5800,
+      "description": "Receiver Port",
+      "enum": null,
+      "key": "ground_station.wfb_relay.receiver_port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "/var/ados/logs/flights",
+      "description": "Flight Log Dir",
+      "enum": null,
+      "key": "logging.flight_log_dir",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 5,
+      "description": "Keep Count",
+      "enum": null,
+      "key": "logging.keep_count",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "info",
+      "description": "Level",
+      "enum": null,
+      "key": "logging.level",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 50,
+      "description": "Max Size Mb",
+      "enum": null,
+      "key": "logging.max_size_mb",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "logging.store.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Aux Uplink Enforce Origin",
+      "enum": null,
+      "key": "mavlink.aux_uplink_enforce_origin",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 57600,
+      "description": "Baud Rate",
+      "enum": null,
+      "key": "mavlink.baud_rate",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 191,
+      "description": "Component Id",
+      "enum": null,
+      "key": "mavlink.component_id",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": [
+        {
+          "enabled": true,
+          "host": "0.0.0.0",
+          "port": 8765,
+          "type": "websocket"
+        }
+      ],
+      "description": "Endpoints",
+      "enum": null,
+      "key": "mavlink.endpoints",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "mavlink.endpoints[].enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "0.0.0.0",
+      "description": "Host",
+      "enum": null,
+      "key": "mavlink.endpoints[].host",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 8765,
+      "description": "Port",
+      "enum": null,
+      "key": "mavlink.endpoints[].port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "websocket",
+      "description": "Type",
+      "enum": null,
+      "key": "mavlink.endpoints[].type",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Legacy Stream Request",
+      "enum": null,
+      "key": "mavlink.legacy_stream_request",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": true,
+      "description": "Raw Proxy Enforce Auth",
+      "enum": null,
+      "key": "mavlink.raw_proxy_enforce_auth",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Raw Proxy Lan Access",
+      "enum": null,
+      "key": "mavlink.raw_proxy_lan_access",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "",
+      "description": "Serial Port",
+      "enum": null,
+      "key": "mavlink.serial_port",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Source",
+      "enum": [
+        "auto",
+        "serial",
+        "udp",
+        "tcp"
+      ],
+      "key": "mavlink.source",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 1,
+      "description": "System Id",
+      "enum": null,
+      "key": "mavlink.system_id",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Ws Proxy Enforce Auth",
+      "enum": null,
+      "key": "mavlink.ws_proxy_enforce_auth",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "",
+      "description": "Apn",
+      "enum": null,
+      "key": "network.cellular.apn",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.cellular.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 6,
+      "description": "Channel",
+      "enum": null,
+      "key": "network.hotspot.channel",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.hotspot.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "",
+      "description": "Interface",
+      "enum": null,
+      "key": "network.hotspot.interface",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Password",
+      "enum": null,
+      "key": "network.hotspot.password",
+      "maximum": null,
+      "minimum": null,
+      "secret": true,
+      "type": "string"
+    },
+    {
+      "default": "ADOS-{device_id}",
+      "description": "Ssid",
+      "enum": null,
+      "key": "network.hotspot.ssid",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Apply Live Allowed",
+      "enum": null,
+      "key": "network.mac_pin.apply_live_allowed",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.mac_pin.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": {},
+      "description": "Overrides",
+      "enum": null,
+      "key": "network.mac_pin.overrides",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "object"
+    },
+    {
+      "default": null,
+      "description": "Ack At",
+      "enum": null,
+      "key": "network.regulatory.ack_at",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Ack Operator",
+      "enum": null,
+      "key": "network.regulatory.ack_operator",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "unrestricted",
+      "description": "Mode",
+      "enum": [
+        "unrestricted",
+        "region"
+      ],
+      "key": "network.regulatory.mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Region",
+      "enum": null,
+      "key": "network.regulatory.region",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.wifi_client.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "",
+      "description": "Password",
+      "enum": null,
+      "key": "network.wifi_client.password",
+      "maximum": null,
+      "minimum": null,
+      "secret": true,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Ssid",
+      "enum": null,
+      "key": "network.wifi_client.ssid",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 60,
+      "description": "Cooldown S",
+      "enum": null,
+      "key": "network.wifi_selfheal.cooldown_s",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "network.wifi_selfheal.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 2,
+      "description": "Fail Threshold",
+      "enum": null,
+      "key": "network.wifi_selfheal.fail_threshold",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Beacon Enabled",
+      "enum": null,
+      "key": "pairing.beacon_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 30,
+      "description": "Beacon Interval",
+      "enum": null,
+      "key": "pairing.beacon_interval",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "",
+      "description": "Convex Url",
+      "enum": null,
+      "key": "pairing.convex_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 60,
+      "description": "Heartbeat Interval",
+      "enum": null,
+      "key": "pairing.heartbeat_interval",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "/etc/ados/pairing.json",
+      "description": "State Path",
+      "enum": null,
+      "key": "pairing.state_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "dual",
+      "description": "Band",
+      "enum": [
+        "dual",
+        "900",
+        "2p4"
+      ],
+      "key": "radio.crsf.band",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "hid",
+      "description": "Channel Source",
+      "enum": [
+        "hid",
+        "inject",
+        "hybrid"
+      ],
+      "key": "radio.crsf.channel_source",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Device",
+      "enum": null,
+      "key": "radio.crsf.device",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "radio.crsf.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Mavlink Command Enabled",
+      "enum": null,
+      "key": "radio.crsf.mavlink_command_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "serial",
+      "description": "Mavlink Transport",
+      "enum": [
+        "serial",
+        "backpack_wifi"
+      ],
+      "key": "radio.crsf.mavlink_transport",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "crsf_rc",
+      "description": "Mode",
+      "enum": [
+        "crsf_rc",
+        "mavlink",
+        "airport"
+      ],
+      "key": "radio.crsf.mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 150,
+      "description": "Packet Rate Hz",
+      "enum": null,
+      "key": "radio.crsf.packet_rate_hz",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "none",
+      "description": "Relay Role",
+      "enum": [
+        "none",
+        "repeater",
+        "agent_last_mile"
+      ],
+      "key": "radio.crsf.relay_role",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Tx Power Dbm",
+      "enum": null,
+      "key": "radio.crsf.tx_power_dbm",
+      "maximum": 127,
+      "minimum": -128,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": false,
+      "description": "Command Enabled",
+      "enum": null,
+      "key": "radio.tunnel.command_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "radio.tunnel.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 5820,
+      "description": "Rx Port",
+      "enum": null,
+      "key": "radio.tunnel.rx_port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "",
+      "description": "Api Url",
+      "enum": null,
+      "key": "remote_access.cloudflare.api_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "remote_access.cloudflare.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "",
+      "description": "Mavlink Ws Url",
+      "enum": null,
+      "key": "remote_access.cloudflare.mavlink_ws_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "cloudflared",
+      "description": "Service Name",
+      "enum": null,
+      "key": "remote_access.cloudflare.service_name",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Setup Url",
+      "enum": null,
+      "key": "remote_access.cloudflare.setup_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "/etc/ados/secrets/cloudflare-tunnel-token",
+      "description": "Token Path",
+      "enum": null,
+      "key": "remote_access.cloudflare.token_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Video Whep Url",
+      "enum": null,
+      "key": "remote_access.cloudflare.video_whep_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "none",
+      "description": "Provider",
+      "enum": [
+        "none",
+        "cloudflare"
+      ],
+      "key": "remote_access.provider",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": [],
+      "description": "Public Urls",
+      "enum": null,
+      "key": "remote_access.public_urls",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": "",
+      "description": "Api Key",
+      "enum": null,
+      "key": "security.api.api_key",
+      "maximum": null,
+      "minimum": null,
+      "secret": true,
+      "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Cors Enabled",
+      "enum": null,
+      "key": "security.api.cors_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": [
+        "http://localhost:4000",
+        "http://127.0.0.1:4000",
+        "http://localhost:4001",
+        "http://127.0.0.1:4001"
+      ],
+      "description": "Cors Origins",
+      "enum": null,
+      "key": "security.api.cors_origins",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": [],
+      "description": "Cors Origins Extra",
+      "enum": null,
+      "key": "security.api.cors_origins_extra",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": false,
+      "description": "Hmac Enabled",
+      "enum": null,
+      "key": "security.hmac_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "",
+      "description": "Hmac Secret",
+      "enum": null,
+      "key": "security.hmac_secret",
+      "maximum": null,
+      "minimum": null,
+      "secret": true,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Setup Token Required",
+      "enum": null,
+      "key": "security.setup_token_required",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "mqtt.altnautica.com",
+      "description": "Mqtt Broker",
+      "enum": null,
+      "key": "server.cloud.mqtt_broker",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 443,
+      "description": "Mqtt Port",
+      "enum": null,
+      "key": "server.cloud.mqtt_port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "https://convex-site.altnautica.com",
+      "description": "Url",
+      "enum": null,
+      "key": "server.cloud.url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "local",
+      "description": "Mode",
+      "enum": [
+        "cloud",
+        "self_hosted",
+        "local"
+      ],
+      "key": "server.mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Mqtt Password",
+      "enum": null,
+      "key": "server.mqtt_password",
+      "maximum": null,
+      "minimum": null,
+      "secret": true,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Mqtt Plaintext Dev",
+      "enum": null,
+      "key": "server.mqtt_plaintext_dev",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "websockets",
+      "description": "Mqtt Transport",
+      "enum": null,
+      "key": "server.mqtt_transport",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Mqtt Username",
+      "enum": null,
+      "key": "server.mqtt_username",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Api Key",
+      "enum": null,
+      "key": "server.self_hosted.api_key",
+      "maximum": null,
+      "minimum": null,
+      "secret": true,
+      "type": "string"
+    },
+    {
+      "default": "",
+      "description": "Mqtt Broker",
+      "enum": null,
+      "key": "server.self_hosted.mqtt_broker",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 8883,
+      "description": "Mqtt Port",
+      "enum": null,
+      "key": "server.self_hosted.mqtt_port",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "",
+      "description": "Url",
+      "enum": null,
+      "key": "server.self_hosted.url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "line",
+      "description": "Default Formation",
+      "enum": [
+        "line",
+        "column",
+        "wedge",
+        "grid",
+        "circle"
+      ],
+      "key": "swarm.default_formation",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 10,
+      "description": "Default Spacing",
+      "enum": null,
+      "key": "swarm.default_spacing",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "swarm.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 60,
+      "description": "Alignment",
+      "enum": null,
+      "key": "swarm.flock.alignment",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 40,
+      "description": "Cohesion",
+      "enum": null,
+      "key": "swarm.flock.cohesion",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 7,
+      "description": "Neighbors",
+      "enum": null,
+      "key": "swarm.flock.neighbors",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 30,
+      "description": "Radius M",
+      "enum": null,
+      "key": "swarm.flock.radius_m",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 150,
+      "description": "Separation Gain",
+      "enum": null,
+      "key": "swarm.flock.separation_gain",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "hold",
+      "description": "Mode",
+      "enum": [
+        "hold",
+        "flocking",
+        "formation"
+      ],
+      "key": "swarm.mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Role",
+      "enum": null,
+      "key": "swarm.role",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 4,
+      "description": "Hard M",
+      "enum": null,
+      "key": "swarm.separation.hard_m",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 8,
+      "description": "Radius M",
+      "enum": null,
+      "key": "swarm.separation.radius_m",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Assigned Task Id",
+      "enum": null,
+      "key": "swarm.tasks.assigned_task_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Bundle Position",
+      "enum": null,
+      "key": "swarm.tasks.bundle_position",
+      "maximum": 9223372036854775807,
+      "minimum": -9223372036854775808,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "swarm.tasks.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "swarm.wifi_direct.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "",
+      "description": "Interface",
+      "enum": null,
+      "key": "swarm.wifi_direct.interface",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "dark",
+      "description": "Theme",
+      "enum": [
+        "dark",
+        "light"
+      ],
+      "key": "ui.theme",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 4000,
+      "description": "Bitrate Kbps",
+      "enum": null,
+      "key": "video.camera.bitrate_kbps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "h264",
+      "description": "Codec",
+      "enum": null,
+      "key": "video.camera.codec",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Encoder",
+      "enum": [
+        "auto",
+        "omx",
+        "v4l2m2m",
+        "software"
+      ],
+      "key": "video.camera.encoder",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Expected",
+      "enum": [
+        "auto",
+        "true",
+        "false"
+      ],
+      "key": "video.camera.expected",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 30,
+      "description": "Fps",
+      "enum": null,
+      "key": "video.camera.fps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 720,
+      "description": "Height",
+      "enum": null,
+      "key": "video.camera.height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Hflip",
+      "enum": null,
+      "key": "video.camera.hflip",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 0,
+      "description": "Keyframe Interval",
+      "enum": null,
+      "key": "video.camera.keyframe_interval",
+      "maximum": 30,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 0,
+      "description": "Rotation",
+      "enum": null,
+      "key": "video.camera.rotation",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "csi",
+      "description": "Source",
+      "enum": null,
+      "key": "video.camera.source",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 50,
+      "description": "Bitrate Kbps",
+      "enum": null,
+      "key": "video.camera.thumbnail.bitrate_kbps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 1,
+      "description": "Fps",
+      "enum": null,
+      "key": "video.camera.thumbnail.fps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 180,
+      "description": "Height",
+      "enum": null,
+      "key": "video.camera.thumbnail.height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 320,
+      "description": "Width",
+      "enum": null,
+      "key": "video.camera.thumbnail.width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Vflip",
+      "enum": null,
+      "key": "video.camera.vflip",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 1280,
+      "description": "Width",
+      "enum": null,
+      "key": "video.camera.width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": [],
+      "description": "Cameras",
+      "enum": null,
+      "key": "video.cameras",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": 4000,
+      "description": "Bitrate Kbps",
+      "enum": null,
+      "key": "video.cameras[].bitrate_kbps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Calibration",
+      "enum": null,
+      "key": "video.cameras[].calibration",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "h264",
+      "description": "Codec",
+      "enum": null,
+      "key": "video.cameras[].codec",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "video.cameras[].enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "auto",
+      "description": "Encoder",
+      "enum": [
+        "auto",
+        "omx",
+        "v4l2m2m",
+        "software"
+      ],
+      "key": "video.cameras[].encoder",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Fov Deg",
+      "enum": null,
+      "key": "video.cameras[].fov_deg",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": 30,
+      "description": "Fps",
+      "enum": null,
+      "key": "video.cameras[].fps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 720,
+      "description": "Height",
+      "enum": null,
+      "key": "video.cameras[].height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Hflip",
+      "enum": null,
+      "key": "video.cameras[].hflip",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "main",
+      "description": "Id",
+      "enum": null,
+      "key": "video.cameras[].id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 0,
+      "description": "Keyframe Interval",
+      "enum": null,
+      "key": "video.cameras[].keyframe_interval",
+      "maximum": 30,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Csi Port",
+      "enum": null,
+      "key": "video.cameras[].match.csi_port",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Csi Sensor",
+      "enum": null,
+      "key": "video.cameras[].match.csi_sensor",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Usb",
+      "enum": null,
+      "key": "video.cameras[].match.usb",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Mount Pitch Deg",
+      "enum": null,
+      "key": "video.cameras[].mount_pitch_deg",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": null,
+      "description": "Name",
+      "enum": null,
+      "key": "video.cameras[].name",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Orientation",
+      "enum": null,
+      "key": "video.cameras[].orientation",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Owner",
+      "enum": null,
+      "key": "video.cameras[].owner",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Purpose",
+      "enum": null,
+      "key": "video.cameras[].purpose",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Role",
+      "enum": null,
+      "key": "video.cameras[].role",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": 0,
+      "description": "Rotation",
+      "enum": null,
+      "key": "video.cameras[].rotation",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "csi",
+      "description": "Source",
+      "enum": null,
+      "key": "video.cameras[].source",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Vflip",
+      "enum": null,
+      "key": "video.cameras[].vflip",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 1280,
+      "description": "Width",
+      "enum": null,
+      "key": "video.cameras[].width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "",
+      "description": "Cloud Relay Url",
+      "enum": null,
+      "key": "video.cloud_relay_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 15,
+      "description": "Lcd Fps Cap",
+      "enum": null,
+      "key": "video.lcd_fps_cap",
+      "maximum": 60,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "wfb",
+      "description": "Mode",
+      "enum": null,
+      "key": "video.mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Prefer Hw Encoder",
+      "enum": null,
+      "key": "video.prefer_hw_encoder",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "video.recording.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 30,
+      "description": "Max Duration Minutes",
+      "enum": null,
+      "key": "video.recording.max_duration_minutes",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "/var/ados/recordings",
+      "description": "Path",
+      "enum": null,
+      "key": "video.recording.path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Allow Hub Reset",
+      "enum": null,
+      "key": "video.usb_recovery.allow_hub_reset",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": true,
+      "description": "Allow Ppps",
+      "enum": null,
+      "key": "video.usb_recovery.allow_ppps",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 180,
+      "description": "Boot Reset Window S",
+      "enum": null,
+      "key": "video.usb_recovery.boot_reset_window_s",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Cold Boot Enum Aid",
+      "enum": null,
+      "key": "video.usb_recovery.cold_boot_enum_aid",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 60,
+      "description": "Cooldown S",
+      "enum": null,
+      "key": "video.usb_recovery.cooldown_s",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 20,
+      "description": "Debounce S",
+      "enum": null,
+      "key": "video.usb_recovery.debounce_s",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "video.usb_recovery.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 120,
+      "description": "Healthy Reset S",
+      "enum": null,
+      "key": "video.usb_recovery.healthy_reset_s",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 5,
+      "description": "Tick Interval S",
+      "enum": null,
+      "key": "video.usb_recovery.tick_interval_s",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Adaptive Bitrate Enabled",
+      "enum": null,
+      "key": "video.wfb.adaptive_bitrate_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 3,
+      "description": "Adaptive Mcs Max",
+      "enum": null,
+      "key": "video.wfb.adaptive_mcs_max",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Auto Channel Enabled",
+      "enum": null,
+      "key": "video.wfb.auto_channel_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": true,
+      "description": "Auto Hop Enabled",
+      "enum": null,
+      "key": "video.wfb.auto_hop_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": true,
+      "description": "Auto Pair Enabled",
+      "enum": null,
+      "key": "video.wfb.auto_pair_enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "u-nii-3",
+      "description": "Band",
+      "enum": [
+        "u-nii-1",
+        "u-nii-3",
+        "all"
+      ],
+      "key": "video.wfb.band",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 149,
+      "description": "Channel",
+      "enum": null,
+      "key": "video.wfb.channel",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 8,
+      "description": "Fec K",
+      "enum": null,
+      "key": "video.wfb.fec_k",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 12,
+      "description": "Fec N",
+      "enum": null,
+      "key": "video.wfb.fec_n",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 1,
+      "description": "Fleet Id",
+      "enum": null,
+      "key": "video.wfb.fleet_id",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 0,
+      "description": "Fleet Slot",
+      "enum": null,
+      "key": "video.wfb.fleet_slot",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 10.0,
+      "description": "Hop Loss Threshold Percent",
+      "enum": null,
+      "key": "video.wfb.hop_loss_threshold_percent",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 60,
+      "description": "Hop Period Seconds",
+      "enum": null,
+      "key": "video.wfb.hop_period_seconds",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": -75.0,
+      "description": "Hop Rssi Threshold Dbm",
+      "enum": null,
+      "key": "video.wfb.hop_rssi_threshold_dbm",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": "",
+      "description": "Interface",
+      "enum": null,
+      "key": "video.wfb.interface",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 1,
+      "description": "Mcs Index",
+      "enum": null,
+      "key": "video.wfb.mcs_index",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Paired At",
+      "enum": null,
+      "key": "video.wfb.paired_at",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Paired With Device Id",
+      "enum": null,
+      "key": "video.wfb.paired_with_device_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "US",
+      "description": "Reg Domain",
+      "enum": null,
+      "key": "video.wfb.reg_domain",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": false,
+      "description": "Sei Latency",
+      "enum": null,
+      "key": "video.wfb.sei_latency",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "host_vbus",
+      "description": "Topology",
+      "enum": [
+        "host_vbus",
+        "powered_hub",
+        "external_5v"
+      ],
+      "key": "video.wfb.topology",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 5,
+      "description": "Tx Power Dbm",
+      "enum": null,
+      "key": "video.wfb.tx_power_dbm",
+      "maximum": 127,
+      "minimum": -128,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 15,
+      "description": "Tx Power Max Dbm",
+      "enum": null,
+      "key": "video.wfb.tx_power_max_dbm",
+      "maximum": 127,
+      "minimum": -128,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "conservative",
+      "description": "Wfb Link Preset",
+      "enum": [
+        "conservative",
+        "balanced",
+        "aggressive"
+      ],
+      "key": "video.wfb.wfb_link_preset",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "auto",
+      "description": "Backend",
+      "enum": null,
+      "key": "vision.backend",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 0.5,
+      "description": "Confidence Threshold",
+      "enum": null,
+      "key": "vision.confidence_threshold",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "vision.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 500,
+      "description": "Models Cache Max Mb",
+      "enum": null,
+      "key": "vision.models_cache_max_mb",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "/opt/ados/models/vision",
+      "description": "Models Dir",
+      "enum": null,
+      "key": "vision.models_dir",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "https://raw.githubusercontent.com/altnautica/ADOSMissionControl/main/public/models/registry.json",
+      "description": "Registry Url",
+      "enum": null,
+      "key": "vision.registry_url",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    }
+  ],
+  "schema": 1
+}

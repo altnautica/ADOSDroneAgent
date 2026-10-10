@@ -1,0 +1,629 @@
+{
+  "schema": 1,
+  "units": [
+    {
+      "api_restartable": true,
+      "category": "core",
+      "condition_paths": [],
+      "description": "ADOS REST API",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "128M",
+      "name": "ados-api",
+      "profiles": [
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/mesh/role"
+      ],
+      "description": "ADOS batman-adv local wireless mesh (ground-station mesh role)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "64M",
+      "name": "ados-batman",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": false,
+      "category": null,
+      "condition_paths": [
+        "/etc/ados/camera.probation"
+      ],
+      "description": "ADOS camera presence probe (apply-verify-auto-revert)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-camera-probe",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "core",
+      "condition_paths": [
+        "/opt/ados/bin/ados-cloud"
+      ],
+      "description": "ADOS Cloud Relay (MQTT + Convex Heartbeat)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "256M",
+      "name": "ados-cloud",
+      "profiles": [
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": false,
+      "category": "on_demand",
+      "condition_paths": [
+        "/opt/ados/bin/ados-control"
+      ],
+      "description": "ADOS Native Control API",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "384M",
+      "name": "ados-control",
+      "profiles": [
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/crsf-enabled"
+      ],
+      "description": "ADOS CRSF RC Control Lane",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "64M",
+      "name": "ados-crsf",
+      "profiles": [
+        "drone",
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "on_demand",
+      "condition_paths": [],
+      "description": "ADOS mDNS Discovery",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "20M",
+      "name": "ados-discovery",
+      "profiles": [
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": false,
+      "category": null,
+      "condition_paths": [
+        "/etc/ados/display.probation"
+      ],
+      "description": "ADOS display presence probe (apply-verify-auto-revert)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-display-probe",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/dnsmasq-gs.conf",
+        "/etc/ados/hotspot-enabled"
+      ],
+      "description": "ADOS Ground Station DHCP/DNS (dnsmasq)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "32M",
+      "name": "ados-dnsmasq-gs",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": false,
+      "category": null,
+      "condition_paths": [
+        "/etc/ados/display.conf"
+      ],
+      "description": "ADOS detach framebuffer console from the LCD framebuffer",
+      "drops_link": false,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-fbcon-detach",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS GPIO Output Service (status buzzer / LED)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "32M",
+      "name": "ados-gpio",
+      "profiles": [
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "core",
+      "condition_paths": [],
+      "description": "ADOS Health Monitor",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "20M",
+      "name": "ados-health",
+      "profiles": [
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/hostapd-gs.conf",
+        "/etc/ados/hotspot-enabled"
+      ],
+      "description": "ADOS Ground Station WiFi AP (hostapd)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "32M",
+      "name": "ados-hostapd",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/opt/ados/bin/ados-input"
+      ],
+      "description": "ADOS Input Manager (ground-station profile)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-input",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS HDMI Kiosk (ground-station profile)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-kiosk",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "core",
+      "condition_paths": [],
+      "description": "ADOS Logging and Telemetry Store",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "256M",
+      "name": "ados-logd",
+      "profiles": [
+        "drone",
+        "ground_station",
+        "workstation",
+        "compute"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "core",
+      "condition_paths": [],
+      "description": "ADOS MAVLink Proxy",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "50M",
+      "name": "ados-mavlink",
+      "profiles": [
+        "drone",
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS mediamtx Manager (ground-station profile)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "256M",
+      "name": "ados-mediamtx-gs",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": null,
+      "condition_paths": [
+        "/etc/ados/profile.conf"
+      ],
+      "description": "ADOS mesh pairing daemon (UDP 5801 sidecar for pairing_manager)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "48M",
+      "name": "ados-mesh-pairing",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/display.enabled"
+      ],
+      "description": "ADOS OLED UI (ground-station profile)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "48M",
+      "name": "ados-oled",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/dev/i2c-1",
+        "/opt/ados/bin/ados-oled-i2c"
+      ],
+      "description": "ADOS I2C status OLED (ground-station profile)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "48M",
+      "name": "ados-oled-i2c",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/opt/ados/bin/ados-pic"
+      ],
+      "description": "ADOS Pilot-in-Command Arbiter (ground-station profile)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-pic",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": null,
+      "condition_paths": [
+        "/opt/ados/bin/ados-plugin-host"
+      ],
+      "description": "ADOS Plugin Host",
+      "drops_link": false,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-plugin-host",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": null,
+      "condition_paths": [],
+      "description": "ADOS Power Hardening Re-assert",
+      "drops_link": false,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-power",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "on_demand",
+      "condition_paths": [
+        "!/var/lib/ados/setup-complete"
+      ],
+      "description": "ADOS Captive Portal DNS + HTTP responder (first-boot only)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "48M",
+      "name": "ados-setup-captive",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": false,
+      "category": null,
+      "condition_paths": [],
+      "description": "ADOS Drone Agent Supervisor",
+      "drops_link": true,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-supervisor",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "core",
+      "condition_paths": [
+        "/opt/ados/bin/ados-swarmbus"
+      ],
+      "description": "ADOS Swarm State Bus",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "32M",
+      "name": "ados-swarmbus",
+      "profiles": [
+        "drone",
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/tunnel-enabled"
+      ],
+      "description": "ADOS Config-over-Radio Channel",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "64M",
+      "name": "ados-tunnel-config",
+      "profiles": [
+        "drone",
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS Uplink Router (ground-station profile)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "96M",
+      "name": "ados-uplink-router",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": false,
+      "category": null,
+      "condition_paths": [],
+      "description": "ADOS force USB OTG controllers into host mode",
+      "drops_link": false,
+      "install": null,
+      "memory_max": null,
+      "name": "ados-usb-otg-host",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS Video Pipeline",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "512M",
+      "name": "ados-video",
+      "profiles": [
+        "drone"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/opt/ados/bin/ados-vision"
+      ],
+      "description": "ADOS Vision Engine",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "256M",
+      "name": "ados-vision",
+      "profiles": [
+        "drone"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/usr/lib/librknnrt.so"
+      ],
+      "description": "ADOS Vision NPU Inference Sidecar (RKNN)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "512M",
+      "name": "ados-vision-rknn",
+      "profiles": [
+        "drone"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS WFB-ng Link Manager",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "96M",
+      "name": "ados-wfb",
+      "profiles": [
+        "drone"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/mesh/role"
+      ],
+      "description": "ADOS WFB-ng receiver (mesh receiver role)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "96M",
+      "name": "ados-wfb-receiver",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/mesh/role"
+      ],
+      "description": "ADOS WFB-ng relay (mesh relay role)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "64M",
+      "name": "ados-wfb-relay",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS WFB-ng RX (ground-station direct role)",
+      "drops_link": true,
+      "install": null,
+      "memory_max": "64M",
+      "name": "ados-wfb-rx",
+      "profiles": [
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": null
+    },
+    {
+      "api_restartable": true,
+      "category": null,
+      "condition_paths": [],
+      "description": "ADOS WiFi Client Manager (ground-station profile)",
+      "drops_link": false,
+      "install": null,
+      "memory_max": "64M",
+      "name": "ados-wifi-client",
+      "profiles": null,
+      "roles": [],
+      "start_on_install": null
+    }
+  ]
+}

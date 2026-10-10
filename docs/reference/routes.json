@@ -1,0 +1,2300 @@
+{
+  "routes": [
+    {
+      "method": "GET",
+      "notes": "dashboard bundle; its client routes and assets beneath it",
+      "path": "/",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "front",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/_ws/ticket",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/can/passthrough",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/cloud/link",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/command",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/commands",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/config/schema",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/dashboard/pin/clear",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "unauthenticated by design; relay-forbidden",
+      "path": "/api/dashboard/pin/set",
+      "public": true,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "unauthenticated by design",
+      "path": "/api/dashboard/pin/status",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "unauthenticated by design",
+      "path": "/api/dashboard/pin/verify",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/diag/storage",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/diag/video",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/fleet/enrollment",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/fleet/peers",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/logs",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/logs/push",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/logs/stream",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/mavlink/ports",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/mavlink/signing/capability",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/mavlink/signing/counters",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/mavlink/signing/disable-on-fc",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/mavlink/signing/enroll-fc",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/mcp/revoke",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/mcp/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/mcp/tokens",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/pairing/accept",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "unauthenticated by design; relay-forbidden",
+      "path": "/api/pairing/claim",
+      "public": true,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "unauthenticated by design; relay-forbidden",
+      "path": "/api/pairing/code",
+      "public": true,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "unauthenticated by design",
+      "path": "/api/pairing/info",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/pairing/unpair",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/params",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/params/{name}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/params/{name}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/peripherals",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/peripherals/scan",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "unauthenticated by design",
+      "path": "/api/ping",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/plugins/capability-token",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/install",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/install_builtin",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/install_from_url",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "WS",
+      "notes": null,
+      "path": "/api/plugins/jobs/{job_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": true
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/parse",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/parse_from_url",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/attestation",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/auto-update",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/disable",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/enable",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/gcs/{*asset_path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/grant",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/manifest",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/perms/{permission_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/pin",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/readiness",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/state",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/tools/{tool}/invoke",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/unpin",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/x/{*rest}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/x/{*rest}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PATCH",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/x/{*rest}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/x/{*rest}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/plugins/{plugin_id}/x/{*rest}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/relay/peer-secret",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/services",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/services/{name}/restart",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/status/full",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/swarm/neighbors",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/system",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/telemetry",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/time",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/battery",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/dashboard/snapshot",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/diagnostics",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/display/calibrate/start",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/display/calibrate/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/display/page",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/display/page",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/display/snapshot",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/bluetooth/pair",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/bluetooth/paired",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/bluetooth/scan",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/v1/ground-station/bluetooth/{mac}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/camera/switch",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/captive-token",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/crsf",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/crsf/channels",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/crsf/params",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/display",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/display",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/ground-station/factory-reset",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/fleet/hero",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/gamepads",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/gamepads/primary",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/mesh",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/mesh/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/mesh/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/mesh/gateway_preference",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/mesh/gateways",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/mesh/neighbors",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/mesh/routes",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/modem-status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/network",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/ap",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/client",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/client/join",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/client/scan",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/ethernet",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/ethernet",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/modem",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/modem",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/priority",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/priority",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/network/share_uplink",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pair/accept",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pair/approve/{device_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pair/close",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pair/join",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/pair/pending",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pair/revoke/{device_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/pic",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pic/claim",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pic/confirm-token",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "WS",
+      "notes": "unauthenticated by design",
+      "path": "/api/v1/ground-station/pic/events",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": true
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pic/heartbeat",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/pic/release",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/recording/clip",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/recording/list",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/recording/segments",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/recording/start",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/recording/stop",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/v1/ground-station/recording/{segment}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PATCH",
+      "notes": null,
+      "path": "/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/relay-proxy/{peer_device_id}/{*path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/relayed/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/relayed/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/relayed/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/role",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/role",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/ui",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/ui/buttons",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/ui/oled",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/ui/screens",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/invite",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/invite",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/invite/{id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/invite/{id}/approve",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/invite/{id}/reject",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/ground-station/wfb/pair",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/ground-station/wfb/pair",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/pair/{device_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/receiver/combined",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/receiver/relays",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/wfb/relay/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "WS",
+      "notes": "unauthenticated by design",
+      "path": "/api/v1/ground-station/ws/buttons",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": true
+    },
+    {
+      "method": "WS",
+      "notes": "unauthenticated by design",
+      "path": "/api/v1/ground-station/ws/mesh",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": true
+    },
+    {
+      "method": "WS",
+      "notes": "unauthenticated by design",
+      "path": "/api/v1/ground-station/ws/uplink",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": true
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/v1/network/client",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/network/client/configured",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/v1/network/client/configured/{name}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/network/client/configured/{name}/autoconnect",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/network/client/join",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/network/client/scan",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/network/client/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/network/mac/adapters",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/network/mac/pin",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/v1/network/mac/{iface}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/peripherals",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/peripherals/{peripheral_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/peripherals/{peripheral_id}/action",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/peripherals/{peripheral_id}/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/plugins/catalog",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/setup/apply",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/setup/cloud-choice",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "WS",
+      "notes": null,
+      "path": "/api/v1/setup/cloudflare/logs",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": true
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/setup/cloudflare/verify",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/setup/display/calibrate/start",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/setup/display/install",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/setup/display/job/{job_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/setup/display/options",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/setup/finish",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/setup/hardware-check",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/setup/hardware-check/refresh",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/setup/nudges",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/setup/nudges/{nudge_id}/ack",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/setup/profile",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/setup/reboot",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/setup/remote-access/cloudflare",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/setup/reset",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/setup/skip",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/setup/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/setup/step/{step_id}/skip",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/system/restart-supervisor",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v2/observability/{*upstream_path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "unauthenticated by design",
+      "path": "/api/version",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/video",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/video/cameras",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/video/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/video/config",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/video/latency",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/video/profile",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/video/record/start",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/video/record/stop",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/video/roster",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/video/roster",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/video/snapshot",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/vision/capabilities",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/vision/designate",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/vision/detections/latest",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "WS",
+      "notes": null,
+      "path": "/api/vision/detections/ws",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": true
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/api/vision/detector",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/vision/detector",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/vision/models",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/vision/models/upload",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/vision/models/{model_id}/download",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/vision/models/{model_id}/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/vision/plugin-models/{plugin_id}/deliver",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/vision/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/wfb",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/wfb/channel",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/wfb/history",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/wfb/pair",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/wfb/pair/auto-pair",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/wfb/pair/failover-status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "relay-forbidden",
+      "path": "/api/wfb/pair/local-bind",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/wfb/pair/local-bind",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/wfb/pair/unpair",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/wfb/tx-power",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "on-box cockpit bundle",
+      "path": "/cockpit/{*path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "front",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "unauthenticated by design",
+      "path": "/healthz",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "relayed to mediamtx on loopback",
+      "path": "/hls/{*path}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "front",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "ados-logd on :8090",
+      "path": "/v1/aggregate",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "logd",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "ados-logd on :8090",
+      "path": "/v1/export",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "logd",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "ados-logd on :8090",
+      "path": "/v1/healthz",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "logd",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "ados-logd on :8090",
+      "path": "/v1/openapi.json",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "logd",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "ados-logd on :8090",
+      "path": "/v1/query",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "logd",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "ados-logd on :8090",
+      "path": "/v1/sessions",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "logd",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "ados-logd on :8090",
+      "path": "/v1/stats",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "logd",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": "ados-logd on :8090",
+      "path": "/v1/tail",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "logd",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/whep",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": null,
+      "path": "/whep/{session_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "PATCH",
+      "notes": null,
+      "path": "/whep/{session_id}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    }
+  ],
+  "schema": 1
+}

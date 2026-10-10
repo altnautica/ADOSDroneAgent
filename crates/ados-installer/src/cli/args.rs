@@ -5,6 +5,14 @@
 //! branch/channel/version/ref source selectors, the display/camera hardware
 //! hints, and the `--uninstall` / `--status` / `--help` actions. A bare positional
 //! argument is treated as a pair code (the `--pair KEY` shorthand).
+//!
+//! [`FLAGS`] is the single table of the flag surface: it drives the parser,
+//! the `--help` text ([`usage`]) and the `flags` example that exports the
+//! table as JSON for the reference docs.
+
+mod flags;
+
+pub use flags::{find_flag, usage, FlagSpec, FLAGS};
 
 /// Parsed command-line arguments.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -138,51 +146,21 @@ impl Args {
 
         while i < tokens.len() {
             let tok = tokens[i].as_str();
-            match tok {
-                "--upgrade" => args.upgrade = true,
-                "--force" => args.force = true,
-                "--uninstall" => args.uninstall = true,
-                "--status" => args.status = true,
-                "--plain" => args.plain = true,
-                "--quiet" => args.quiet = true,
-                "--json" => args.json = true,
-                "--no-color" => args.no_color = true,
-                "--ascii" => args.ascii = true,
-                "--no-rtl-driver" => args.no_rtl_driver = true,
-                "--world-engine" => args.world_engine = Some(true),
-                "--no-world-engine" => args.world_engine = Some(false),
-                "--no-reboot" => args.no_reboot = true,
-                "--yes" | "-y" => args.yes = true,
-                "--non-interactive" => args.non_interactive = true,
-                "--help" | "-h" => args.help = true,
-                "--profile" => args.profile = Some(take_value(&tokens, &mut i, "--profile")?),
-                "--name" => args.name = Some(take_value(&tokens, &mut i, "--name")?),
-                "--pair" => args.pair = Some(take_value(&tokens, &mut i, "--pair")?),
-                "--branch" => args.branch = Some(take_value(&tokens, &mut i, "--branch")?),
-                "--channel" => args.channel = Some(take_value(&tokens, &mut i, "--channel")?),
-                "--version" => args.version = Some(take_value(&tokens, &mut i, "--version")?),
-                "--ref" => args.rev = Some(take_value(&tokens, &mut i, "--ref")?),
-                "--artifacts" => args.artifacts = Some(take_value(&tokens, &mut i, "--artifacts")?),
-                "--display" => args.display = Some(take_value(&tokens, &mut i, "--display")?),
-                "--camera" => args.camera = Some(take_value(&tokens, &mut i, "--camera")?),
-                "--wifi-ssid" => args.wifi_ssid = Some(take_value(&tokens, &mut i, "--wifi-ssid")?),
-                "--wifi-pass-file" => {
-                    args.wifi_pass_file = Some(take_value(&tokens, &mut i, "--wifi-pass-file")?)
+            if let Some(spec) = find_flag(tok) {
+                let value = if spec.takes_value {
+                    Some(take_value(&tokens, &mut i, spec.name)?)
+                } else {
+                    None
+                };
+                args.apply(spec.name, value);
+            } else if tok.starts_with('-') {
+                return Err(ParseError::UnknownFlag(tok.to_string()));
+            } else {
+                // A bare token is the pair code (the `--pair KEY` shorthand).
+                if args.pair.is_some() {
+                    return Err(ParseError::UnexpectedPositional(tok.to_string()));
                 }
-                "--plugin-key" | "-k" => {
-                    args.plugin_key
-                        .push(take_value(&tokens, &mut i, "--plugin-key")?)
-                }
-                other if other.starts_with('-') => {
-                    return Err(ParseError::UnknownFlag(other.to_string()));
-                }
-                positional => {
-                    // A bare token is the pair code (the `--pair KEY` shorthand).
-                    if args.pair.is_some() {
-                        return Err(ParseError::UnexpectedPositional(positional.to_string()));
-                    }
-                    args.pair = Some(positional.to_string());
-                }
+                args.pair = Some(tok.to_string());
             }
             i += 1;
         }
