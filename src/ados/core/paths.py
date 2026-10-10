@@ -112,6 +112,9 @@ CONFIG_LOCK = ADOS_RUN_DIR / "config.yaml.lock"
 # IPC sockets
 STATE_SOCK = ADOS_RUN_DIR / "state.sock"
 PAIRING_SOCK = ADOS_RUN_DIR / "pairing.sock"
+# The supervisor's Unix control socket (role changes, bind sessions). The
+# supervisor binds it; Python callers forward one JSON request per connection.
+SUPERVISOR_SOCK = ADOS_RUN_DIR / "supervisor.sock"
 
 
 # Ingest socket for the local logging and telemetry store. The store's
@@ -162,14 +165,6 @@ PAIR_EVENTS_JSONL = ADOS_RUN_DIR / "pair-events.jsonl"
 # wfb stats need to surface to multiple consumers per box.
 WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
 
-# Hop supervisor + bitrate controller snapshots. Both live inside the
-# ados-wfb service in production multi-process; consumers (api,
-# oled, lcd channel-hops page) read these files because the
-# accessors are cross-process-blind. Written by their owners every
-# ~5 s (atomic tmpfile+rename).
-HOP_SUPERVISOR_JSON = ADOS_RUN_DIR / "hop-supervisor.json"
-
-
 # Sentinel files
 UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
 
@@ -215,24 +210,6 @@ PAIRING_JSON = (
 PROFILE_CONF = ADOS_ETC_DIR / "profile.conf"
 BOARD_OVERRIDE_PATH = ADOS_ETC_DIR / "board_override"
 DISPLAY_CONF_PATH = ADOS_ETC_DIR / "display.conf"
-# Marker mirroring `radio.crsf.enabled`: present ⇔ the CRSF RC lane is opted
-# in. The ados-crsf systemd unit gates on it (ConditionPathExists) so a node
-# that never enables the lane skips the unit cleanly. Reconciled by the config
-# persist path and by the installer, never hand-managed.
-CRSF_ENABLED_PATH = ADOS_ETC_DIR / "crsf-enabled"
-# Marker mirroring `radio.tunnel.enabled`: present ⇔ the config-over-radio
-# channel is opted in. The ados-tunnel-config systemd unit gates on it
-# (ConditionPathExists) so a node that never enables the channel skips the unit
-# cleanly. Reconciled by the config persist path and by the installer, never
-# hand-managed.
-TUNNEL_ENABLED_PATH = ADOS_ETC_DIR / "tunnel-enabled"
-# Marker mirroring `network.hotspot.enabled`: present ⇔ the ground-station
-# setup AP is opted in. The ados-dnsmasq-gs systemd unit gates on it
-# (ConditionPathExists) because hostapd's unit idles-in-place rather than
-# exiting when the operator has not opted in, so it stays `active` and cannot
-# itself gate the DHCP/DNS unit. Reconciled by the config persist path and by
-# the installer, never hand-managed.
-HOTSPOT_ENABLED_PATH = ADOS_ETC_DIR / "hotspot-enabled"
 AP_PASSPHRASE_PATH = ADOS_ETC_DIR / "ap-passphrase"
 # Stable-MAC pin verdicts per USB WiFi adapter. Written by the installer's
 # mac-pin step and the supervisor reconciler (``ados-macpin``); read by the
@@ -253,13 +230,8 @@ CLOUDFLARE_TUNNEL_TOKEN_PATH = SECRETS_DIR / "cloudflare-tunnel-token"
 # Self-hosted backend API key set during cloud-choice. 0600 owner-only.
 SERVER_API_KEY_PATH = SECRETS_DIR / "server-api-key"
 
-# Hostapd + dnsmasq config files (rendered on demand)
-HOSTAPD_CONF_PATH = ADOS_ETC_DIR / "hostapd-gs.conf"
-DNSMASQ_CONF_PATH = ADOS_ETC_DIR / "dnsmasq-gs.conf"
-
 # Ground-station side-files (legacy + active migrations)
 GS_UI_JSON = ADOS_ETC_DIR / "ground-station-ui.json"
-GS_WIFI_CLIENT_JSON = ADOS_ETC_DIR / "ground-station-wifi-client.json"
 
 # Peripherals
 PERIPHERALS_GLOB = "/etc/ados/peripherals/*.yaml"

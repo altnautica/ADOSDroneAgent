@@ -2,10 +2,10 @@
 #
 # Codegen (`cargo run -p ados-capabilities-codegen`) emits, from this file:
 #   - Rust:   crates/ados-protocol/src/wfb_tables.rs                (consumed by ados-radio)
-#   - Python: src/ados/services/wfb/_wfb_tables_generated.py        (consumed by services/wfb/adapter.py)
+#   - Python: src/ados/services/wfb/_wfb_tables_generated.py        (pinned by tests/test_wfb_tables_parity.py)
 #
-# Four tables, kept in lockstep across the Rust radio service and the Python
-# iw-fallback / mesh relay+receiver adapters so the deny-set can never drift:
+# Four tables. The Rust radio service is the only runtime classifier; the
+# Python copy is generated from the same file so the two can never drift:
 #
 #   [[compatible]]  — WFB-ng compatible chipsets by VID:PID, with a label.
 #                     RTL8812AU family (0x8812, 0x881A-C), RTL8812EU /

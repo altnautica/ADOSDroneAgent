@@ -1,0 +1,37 @@
+[Unit]
+Description=ADOS Vision NPU Inference Sidecar (Hailo)
+After=ados-mavlink.service
+PartOf=ados-supervisor.service
+# Start only when the Hailo PCIe accelerator is enumerated. The sidecar drives
+# the device through the HailoRT runtime; on a board without the accelerator
+# the unit is a clean no-op rather than a crash loop.
+ConditionPathExists=/dev/hailo0
+StartLimitIntervalSec=0
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are
+# observable per unit (the slice sets MemoryAccounting=yes).
+Slice=ados.slice
+Type=simple
+# The sidecar owns the HailoRT runtime the Rust vision engine cannot link. It
+# listens on /run/ados/vision-hailo.sock and answers the engine's load_model /
+# infer requests. Run from the agent venv; pass the socket explicitly so the
+# path is unambiguous.
+ExecStart=/opt/ados/venv/bin/python -m ados.services.vision.hailo_sidecar --socket /run/ados/vision-hailo.sock
+Restart=always
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/ados /run/ados /etc/ados /dev/shm
+
+MemoryMax=512M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-vision-hailo
+
+[Install]
+WantedBy=ados-supervisor.service

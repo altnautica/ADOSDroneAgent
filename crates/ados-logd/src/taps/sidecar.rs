@@ -146,26 +146,6 @@ const SPECS: &[SidecarSpec] = &[
         }),
     },
     SidecarSpec {
-        name: "health.json",
-        staleness: DEFAULT_STALENESS,
-        source: "health",
-        scalars: &[
-            ScalarMap {
-                path: "cpu_load_1m",
-                key: "cpu.load_avg_1m",
-            },
-            ScalarMap {
-                path: "memory_used_pct",
-                key: "memory.used_pct",
-            },
-            ScalarMap {
-                path: "disk_used_pct",
-                key: "disk.used_pct",
-            },
-        ],
-        string_event: None,
-    },
-    SidecarSpec {
         name: "camera-state.json",
         staleness: DEFAULT_STALENESS,
         source: "camera",

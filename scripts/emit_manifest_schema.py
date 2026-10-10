@@ -35,7 +35,7 @@ SCHEMA_PATH = ROOT / "schemas" / "plugin-manifest.schema.json"
 
 def render() -> str:
     """The exact file body: the model's JSON Schema, deterministically ordered
-    with a trailing newline (matching the ``emit_openapi`` convention)."""
+    with a trailing newline."""
     return json.dumps(schema_dict(), indent=2, sort_keys=True) + "\n"
 
 

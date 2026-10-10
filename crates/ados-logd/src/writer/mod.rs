@@ -17,17 +17,20 @@
 //!
 //! The loop body is grouped into sibling modules by concern: [`config`] holds
 //! the tuning knobs and the error type; [`batch`] holds the per-batch
-//! transaction, the WAL checkpoint, and the shutdown close; [`control`] holds
-//! the mark-synced control plane; [`maintenance`] holds the retention pass;
-//! [`session`] holds the flight-session boundary rule; [`encode`] holds the row
-//! insertion and the shared clock. Every previously-public item is re-exported
-//! here so the writer's external surface is unchanged.
+//! transaction, the WAL checkpoint, and the shutdown close; [`reclaim`] holds
+//! the one-shot eviction a full-disk commit triggers before its retry;
+//! [`control`] holds the mark-synced control plane; [`maintenance`] holds the
+//! retention pass; [`session`] holds the flight-session boundary rule;
+//! [`encode`] holds the row insertion and the shared clock. Every
+//! previously-public item is re-exported here so the writer's external surface
+//! is unchanged.
 
 mod batch;
 mod config;
 mod control;
 mod encode;
 mod maintenance;
+mod reclaim;
 mod session;
 
 pub use config::{
@@ -187,6 +190,9 @@ pub struct Writer {
     /// rows already written carry stamps from the pre-step clock, so absolute
     /// age is a lie about them for as long as this writer lives.
     pub(super) clock_stepped: bool,
+    /// How many full-disk emergency evictions this writer has run. Each one is
+    /// a commit that hit `SQLITE_FULL` and was retried after freeing space.
+    pub(super) emergency_evictions: u64,
 }
 
 impl Writer {
@@ -237,6 +243,7 @@ impl Writer {
             session_start_us,
             session_start_at: now,
             clock_stepped: false,
+            emergency_evictions: 0,
         })
     }
 

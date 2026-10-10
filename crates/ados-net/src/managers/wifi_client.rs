@@ -5,8 +5,7 @@
 //! radio. This manager coordinates with the AP service through an advisory file
 //! lock and a "was the AP up?" flag so a failed join restores the AP.
 //! NetworkManager owns credential storage; we persist only the "enabled on
-//! boot" flag and the last SSID. Implements the [`UplinkManager`] trait. Ports
-//! `wifi_client_manager.py`.
+//! boot" flag and the last SSID. Implements the [`UplinkManager`] trait.
 //!
 //! The interface is resolved by DRIVER, never assumed to be `wlan0`: names race
 //! at boot, and a station bound to the wrong name runs `nmcli` on the aircraft's
@@ -223,8 +222,7 @@ impl WifiClientManager {
     }
 
     /// Persist `{enabled_on_boot, last_ssid}` as `json.dumps(indent=2)+"\n"`,
-    /// atomically (tmp `.json.tmp` sibling + rename). Mirrors
-    /// `_save_client_config`.
+    /// atomically (tmp `.json.tmp` sibling + rename).
     fn save_client_config(&self, data: &ClientConfig) {
         let body = match serde_json::to_string_pretty(data) {
             Ok(s) => format!("{s}\n"),
@@ -537,14 +535,14 @@ impl WifiClientManager {
         }
     }
 
-    /// Toggle the NetworkManager autoconnect flag for a saved profile. Mirrors
-    /// the Python `set_autoconnect`: an empty name is `{"autoconnect": false,
-    /// "name": "", "error": "name_required"}`; otherwise it runs `nmcli
-    /// connection modify <name> connection.autoconnect yes|no` and returns
+    /// Toggle the NetworkManager autoconnect flag for a saved profile. An empty
+    /// name is `{"autoconnect": false, "name": "", "error": "name_required"}`;
+    /// otherwise it runs `nmcli connection modify <name> connection.autoconnect
+    /// yes|no` and returns
     /// `{"autoconnect": <enabled>, "name": <name>, "error": null}` on success, or
     /// the trimmed stderr/stdout (falling back to `nmcli_failed`) on a nonzero
-    /// nmcli exit. The `autoconnect` field always echoes the requested value (the
-    /// Python reports the intended state even on a failed write).
+    /// nmcli exit. The `autoconnect` field always echoes the requested value
+    /// (the intended state is reported even on a failed write).
     pub async fn set_autoconnect(&self, connection_name: &str, enabled: bool) -> Value {
         if connection_name.is_empty() {
             return json!({"autoconnect": false, "name": "", "error": "name_required"});

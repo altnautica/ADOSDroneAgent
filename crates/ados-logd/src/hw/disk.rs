@@ -130,6 +130,33 @@ pub fn read_fs_usage(_path: &Path) -> Option<(u64, u64)> {
     None
 }
 
+/// Filesystem total and *available* bytes of the mount containing `path`, via
+/// `statvfs`. Available is `f_bavail`: what an unprivileged writer can still
+/// allocate, which is the honest headroom for the store (reserved root blocks
+/// are not space the daemon can count on). Returns `(total_bytes,
+/// available_bytes)`, or `None` when the syscall fails or the filesystem reports
+/// zero total blocks. Live mount, not a fixture tree.
+#[cfg(target_os = "linux")]
+pub fn read_fs_space(path: &Path) -> Option<(u64, u64)> {
+    let st = nix::sys::statvfs::statvfs(path).ok()?;
+    let frsize = st.fragment_size() as u64;
+    let total_blocks = st.blocks() as u64;
+    if total_blocks == 0 || frsize == 0 {
+        return None;
+    }
+    let avail = st.blocks_available() as u64;
+    Some((
+        total_blocks.saturating_mul(frsize),
+        avail.saturating_mul(frsize),
+    ))
+}
+
+/// Non-Linux stub: see [`read_fs_used_pct`].
+#[cfg(not(target_os = "linux"))]
+pub fn read_fs_space(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
 /// Keep whole backing devices; drop partitions and pseudo-devices.
 ///
 /// Partitions end in a digit on top of a name that ends in a non-digit

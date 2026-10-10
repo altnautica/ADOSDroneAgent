@@ -1,8 +1,9 @@
 //! RTL8812EU adapter selection and monitor-mode setup.
 //!
-//! Mirrors `services/wfb/adapter.py`: scans network interfaces, identifies
-//! RTL injection radios by USB VID/PID or driver name, denies AIC8800 and
-//! brcmfmac management-wifi adapters, validates monitor mode with a 4× retry.
+//! Scans network interfaces, identifies RTL injection radios by USB VID/PID
+//! or driver name, denies AIC8800 and brcmfmac management-wifi adapters, and
+//! validates monitor mode with a 4× retry. The single adapter classifier: the
+//! Python agent reads its results over the adapter sidecar.
 //!
 //! All OS calls (iw, nmcli, ip) are Linux-only. On non-Linux hosts this
 //! module compiles but `select_interface` always returns None.

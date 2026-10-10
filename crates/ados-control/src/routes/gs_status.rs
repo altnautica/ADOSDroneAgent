@@ -222,8 +222,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
 
     // Paired-drone identity. `paired_drone_id` is surfaced only when the pair read
     // reports paired; `key_fingerprint` is always the pair read's fingerprint
-    // (null when unpaired or the key is unreadable). Mirrors the Python
-    // `_pair_manager().status("gs")` read on the GS profile.
+    // (null when unpaired or the key is unreadable).
     let (paired_drone_id, key_fingerprint) = pair_identity(&state);
 
     // Role block. `current` reads the live `/etc/ados/mesh/role` sentinel (the
@@ -346,8 +345,7 @@ fn pair_identity(state: &AppState) -> (Value, Value) {
 
 /// The GS peer device id from the config, preferring `video.wfb.paired_with_device_id`
 /// and falling back to the legacy `ground_station.paired_drone_id`. A non-string /
-/// absent value reads as `null`. Mirrors the Python `pair_manager.status("gs")`
-/// peer resolution.
+/// absent value reads as `null`.
 fn config_gs_peer(config_path: &Path) -> Value {
     let raw = crate::config::load_config_object(config_path);
     let peer = raw
@@ -629,7 +627,7 @@ const AP_GATEWAY_IP: &str = "192.168.4.1";
 /// `ap_ssid` from `status()["ssid"]` (the manager's resolved SSID, present
 /// regardless of the unit state) and `ap_ip` from `status()["gateway"]`. The front
 /// has no in-process manager but reads the same live seams: the resolved SSID off
-/// config (the way `_hostapd_manager` + `_build_ssid` resolve it) and the
+/// config (the way `ados-net`'s `build_ssid` resolves it) and the
 /// `192.168.4.1` gateway while the AP unit is active. `usb_ip` stays the static
 /// null leg. `uplink_type` / `uplink_reachable` come from the uplink router's
 /// active-uplink sentinel (see [`uplink_view`]). When the AP unit is down, `ap_ip`
@@ -709,8 +707,8 @@ fn network_view_compose(ap_ssid: &str, running: bool, uplink: (Value, Value)) ->
     })
 }
 
-/// The resolved AP SSID from config, the way `_hostapd_manager` + `_build_ssid`
-/// resolve it: honour a configured `network.hotspot.ssid` only when it is
+/// The resolved AP SSID from config, the way `ados-net`'s `build_ssid`
+/// resolves it: honour a configured `network.hotspot.ssid` only when it is
 /// non-empty, carries no `{device_id}` placeholder, and already starts with
 /// `ADOS-GS-`; otherwise build `ADOS-GS-<first 4 hex of device_id, uppercased,
 /// zero-padded>`. The device id resolves against the identity file `identity`.
@@ -734,8 +732,8 @@ fn ap_ssid_from_config(cfg: &Value, identity: &std::path::Path) -> String {
     )
 }
 
-/// Resolve the AP SSID exactly as the live hostapd manager does (the
-/// `_hostapd_manager` `ssid_override` gate + `_build_ssid`): a configured SSID is
+/// Resolve the AP SSID exactly as the live AP owner does (`ados-net`'s
+/// configured-SSID gate + `build_ssid`): a configured SSID is
 /// honoured only when it is non-empty, has no `{device_id}` placeholder, and
 /// already starts with `ADOS-GS-`; otherwise build `ADOS-GS-<short_id>`.
 fn resolve_ap_ssid(configured: &str, device_id: &str) -> String {
@@ -749,8 +747,7 @@ fn resolve_ap_ssid(configured: &str, device_id: &str) -> String {
 }
 
 /// The first 4 hex chars of the device id, uppercased, zero-padded to 4 when the
-/// id has fewer than 4 hex chars after stripping non-hex characters. Mirrors the
-/// Python `_short_id`.
+/// id has fewer than 4 hex chars after stripping non-hex characters.
 fn short_id(device_id: &str) -> String {
     let hex_only: String = device_id.chars().filter(char::is_ascii_hexdigit).collect();
     let padded = if hex_only.len() >= 4 {

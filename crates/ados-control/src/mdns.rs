@@ -3,13 +3,11 @@
 //! # Why the control front owns it
 //!
 //! The GCS Add-a-Node card browses `_ados._tcp` and probes whatever answers
-//! (`/api/lan-pair/discover` → `/api/pairing/info` on each responder). Until
-//! this existed, a fresh drone or ground station advertised nothing at boot:
-//! the Python `ados-discovery` unit is `OnDemand`, so it starts only when a
-//! cloud pairing code is generated, and the static avahi service file the
-//! installer drops is ground-station-only. The discovered list was therefore
-//! empty on a fresh box, and the operator had to know and type a hostname —
-//! an undocumented manual step.
+//! (`/api/lan-pair/discover` → `/api/pairing/info` on each responder). Without
+//! an always-on advert, a fresh drone or ground station would advertise nothing
+//! at boot: the static avahi service file the installer drops is
+//! ground-station-only. The discovered list would be empty on a fresh box, and
+//! the operator would have to know and type a hostname.
 //!
 //! The advert belongs to the process that actually answers `/api/pairing/*` on
 //! `:8080`. That is this daemon, on every profile, and the record therefore

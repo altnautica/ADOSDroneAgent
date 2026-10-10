@@ -329,8 +329,7 @@ pub async fn select_interface(override_iface: &str) -> Option<SelectedAdapter> {
 /// Rank an adapter so the validated RTL injection radios float to the front
 /// (lower is better): RTL8812EU silicon first, RTL8812AU rebadges next, any
 /// other passing chip last. Makes selection independent of USB bus order so a
-/// management WiFi enumerated first can never win by accident. Mirrors the
-/// Python `_injection_rank`.
+/// management WiFi enumerated first can never win by accident.
 #[cfg(any(target_os = "linux", test))]
 fn injection_rank(adapter: &WifiAdapterInfo) -> u8 {
     let label = adapter.chipset.to_ascii_uppercase();

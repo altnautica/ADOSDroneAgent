@@ -25,7 +25,10 @@
 //!    exceeds the high-water cap, evict the oldest raw rows first, across all
 //!    raw tables, down to the low-water mark, and report the freed span so the
 //!    writer records a `retention.evicted` event. This is what stops a runaway
-//!    producer from wedging the box.
+//!    producer from wedging the box. The same oldest-first loop also runs when
+//!    the *filesystem* the store lives on drops below its free-space reserve
+//!    (see [`FsUsage`]), so a card filled by something else cannot turn every
+//!    insert into a disk-full error while the store sits under its own cap.
 //!
 //! Reclaim is **incremental**, never a full rewrite on the eviction path. A full
 //! `VACUUM` rewrites the entire file; with the store parked at its size cap and
@@ -55,6 +58,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
+
+mod headroom;
+
+pub use headroom::{
+    emergency_evict, is_disk_full, read_fs_usage, EmergencyEviction, FsUsage, MIN_FREE_BYTES,
+    MIN_FREE_PERCENT,
+};
 
 /// Default raw-row retention window. Raw `logs`/`metrics`/`events`/`hw` rows
 /// older than this are deleted (after the metric rows are rolled up).
@@ -290,6 +300,13 @@ const RAW_TABLES: [&str; 4] = ["logs", "metrics", "events", "hw"];
 /// NTP would otherwise delete that flight's whole boot window. Rollup and the
 /// size cap are unaffected: they order rows, they do not date them, so the
 /// store stays bounded even on a node that never sees a time source.
+///
+/// `fs` is the free space of the filesystem holding the store, measured by the
+/// caller ([`read_fs_usage`] in production, a fixed value under test). Below the
+/// reserve it arms eviction even under the byte cap. `None` (an unreadable
+/// filesystem, or a host without `statvfs`) leaves only the byte cap armed —
+/// a measurement failure never evicts.
+#[allow(clippy::too_many_arguments)]
 pub fn run_maintenance(
     conn: &Connection,
     cfg: &RetentionConfig,
@@ -298,6 +315,7 @@ pub fn run_maintenance(
     do_vacuum: bool,
     stop: &AtomicBool,
     clock: ClockTrust,
+    fs: Option<FsUsage>,
 ) -> Result<MaintenanceReport, rusqlite::Error> {
     // Step 1: roll up closed metric windows before any raw row can age out.
     let rolled_up_rows = roll_up(conn, now_us)?;
@@ -315,8 +333,8 @@ pub fn run_maintenance(
         (0, 0)
     };
 
-    // Step 4: size-cap eviction, the safety net.
-    let eviction = enforce_size_cap(conn, cfg, db_path)?;
+    // Step 4: size-cap and free-space eviction, the safety net.
+    let eviction = enforce_size_cap(conn, cfg, db_path, fs)?;
 
     // Reclaim. Two different mechanisms, deliberately not interchangeable:
     //
@@ -333,8 +351,11 @@ pub fn run_maintenance(
     // without it the on-disk footprint would stay high even though the logical
     // data is small.
     let stopping = stop.load(Ordering::Relaxed);
-    let reclaimed_pages = if eviction.rows > 0 && !stopping {
-        incremental_vacuum(conn, MAX_INCREMENTAL_VACUUM_PAGES)?
+    // A low-headroom pass reclaims even when it evicted nothing: the free list
+    // may already hold the pages the filesystem is short of.
+    let reclaim = eviction.rows > 0 || eviction.low_headroom;
+    let reclaimed_pages = if reclaim && !stopping {
+        incremental_vacuum(conn, eviction.reclaim_pages)?
     } else {
         0
     };
@@ -351,7 +372,7 @@ pub fn run_maintenance(
     } else {
         false
     };
-    if (vacuumed || eviction.rows > 0) && !stopping {
+    if (vacuumed || reclaim) && !stopping {
         conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
     }
 
@@ -412,12 +433,20 @@ fn full_vacuum_warranted(conn: &Connection) -> Result<bool, rusqlite::Error> {
 /// auto-vacuum mode, and SQLite reports no count, so the freed page total is
 /// measured as the drop in `freelist_count` across the call. That also makes the
 /// no-op case read honestly as zero rather than as an assumed success.
+///
+/// The pragma frees one page per VDBE step (it yields a row per page), so it is
+/// stepped to completion here; `execute_batch` steps a statement only once and
+/// would hand back a single page whatever `max_pages` said.
 fn incremental_vacuum(conn: &Connection, max_pages: i64) -> Result<u64, rusqlite::Error> {
     let before: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
     if before <= 0 {
         return Ok(0);
     }
-    conn.execute_batch(&format!("PRAGMA incremental_vacuum({max_pages})"))?;
+    {
+        let mut stmt = conn.prepare(&format!("PRAGMA incremental_vacuum({max_pages})"))?;
+        let mut rows = stmt.query([])?;
+        while rows.next()?.is_some() {}
+    }
     let after: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
     Ok((before - after).max(0) as u64)
 }
@@ -590,28 +619,45 @@ fn delete_older_than(
     Ok(total)
 }
 
-// --- step 4: size-cap eviction ------------------------------------------
+// --- step 4: size-cap and free-space eviction ---------------------------
 
-/// The outcome of size-cap eviction: how many rows were evicted and the
-/// timestamp span they covered (for the `retention.evicted` event).
+/// The outcome of eviction: how many rows were evicted and the timestamp span
+/// they covered (for the `retention.evicted` event), plus how the reclaim step
+/// after it must run.
 #[derive(Debug, Clone, Default)]
 struct Eviction {
     rows: u64,
     from_us: Option<i64>,
     to_us: Option<i64>,
+    /// The filesystem was below its free-space reserve this pass, so the
+    /// reclaim step runs even if nothing was evicted.
+    low_headroom: bool,
+    /// The page bound for the reclaim step: [`MAX_INCREMENTAL_VACUUM_PAGES`],
+    /// raised to the filesystem shortfall on a low-headroom pass so the freed
+    /// pages actually go back to the filesystem in the same pass.
+    reclaim_pages: i64,
 }
 
 /// Evict the oldest raw rows first, across all raw tables, until the store is at
-/// or below the low-water mark, or there is nothing left to evict, or the
-/// per-pass batch bound is hit. Returns the eviction span so the writer can
-/// record it.
+/// or below its target, or there is nothing left to evict, or the per-pass
+/// batch bound is hit. Returns the eviction span so the writer can record it.
+///
+/// Two independent triggers arm it, and the stricter target wins:
+///
+/// - the store is over its byte cap → the target is the low-water mark;
+/// - the filesystem is below its free-space reserve (`fs`, see [`FsUsage`]) →
+///   the target is the allocated file size minus the shortfall, i.e. evict
+///   until the pages the reclaim step will hand back cover the deficit. Free
+///   space itself is not re-measured inside the loop: a `DELETE` frees pages
+///   onto SQLite's free list, not to the filesystem, so `statvfs` would not
+///   move until the reclaim and would drain the store to empty.
 ///
 /// Eviction is the safety net for a small card: TTL handles the steady state,
 /// this handles a spike. It is strictly oldest-first by `ts_us`, so the rollups
 /// (which are not evicted here) keep the long-horizon shape even after the raw
 /// rows for that span are gone.
 ///
-/// Both the trigger and the stopping condition are measured against the
+/// The byte-cap trigger and the stopping condition are measured against the
 /// **logical** used size ([`logical_used_bytes`]: `(page_count -
 /// freelist_count) * page_size`) plus the WAL — not the raw file size.
 ///
@@ -632,15 +678,39 @@ fn enforce_size_cap(
     conn: &Connection,
     cfg: &RetentionConfig,
     db_path: &Path,
+    fs: Option<FsUsage>,
 ) -> Result<Eviction, rusqlite::Error> {
-    if used_store_bytes(conn, db_path)? <= cfg.max_bytes {
+    let over_cap = used_store_bytes(conn, db_path)? > cfg.max_bytes;
+    let deficit = fs.map_or(0, |u| u.deficit_bytes());
+    if !over_cap && deficit == 0 {
         return Ok(Eviction::default());
     }
 
-    let low_water = cfg.low_water_bytes();
-    let mut ev = Eviction::default();
+    let mut target = if over_cap {
+        cfg.low_water_bytes()
+    } else {
+        u64::MAX
+    };
+    let mut ev = Eviction {
+        reclaim_pages: MAX_INCREMENTAL_VACUUM_PAGES,
+        ..Eviction::default()
+    };
+    if deficit > 0 {
+        let page_size = page_size_bytes(conn)?;
+        let allocated = allocated_bytes(conn)?;
+        target = target.min(allocated.saturating_sub(deficit));
+        ev.low_headroom = true;
+        ev.reclaim_pages = ev
+            .reclaim_pages
+            .max(headroom::pages_for(deficit, page_size));
+        tracing::warn!(
+            deficit_bytes = deficit,
+            store_bytes = allocated,
+            "filesystem below its free-space reserve; evicting oldest store rows"
+        );
+    }
     for _ in 0..MAX_DELETE_BATCHES_PER_PASS {
-        if logical_used_bytes(conn)? <= low_water {
+        if logical_used_bytes(conn)? <= target {
             break;
         }
         // Find the oldest ts_us across all raw tables and evict one batch from
@@ -684,9 +754,22 @@ fn used_store_bytes(conn: &Connection, db_path: &Path) -> Result<u64, rusqlite::
 fn logical_used_bytes(conn: &Connection) -> Result<u64, rusqlite::Error> {
     let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
     let freelist: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
-    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
     let used_pages = (page_count - freelist).max(0);
-    Ok(used_pages as u64 * page_size.max(0) as u64)
+    Ok(used_pages as u64 * page_size_bytes(conn)?)
+}
+
+/// The store's allocated size in bytes, free list included: `page_count *
+/// page_size`. What the main file occupies once checkpointed, and so the most
+/// a full reclaim can shrink it from.
+fn allocated_bytes(conn: &Connection) -> Result<u64, rusqlite::Error> {
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    Ok(page_count.max(0) as u64 * page_size_bytes(conn)?)
+}
+
+/// `PRAGMA page_size` in bytes.
+fn page_size_bytes(conn: &Connection) -> Result<u64, rusqlite::Error> {
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok(page_size.max(0) as u64)
 }
 
 /// The span and count of one evicted batch.
@@ -956,6 +1039,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(report.ttl_deleted_rows >= 2, "old rows were TTL-deleted");
@@ -1002,6 +1086,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Unestablished,
+            None,
         )
         .unwrap();
         assert_eq!(report.ttl_deleted_rows, 0, "no age-based delete may run");
@@ -1021,6 +1106,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(after.ttl_deleted_rows >= 2);
@@ -1056,6 +1142,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Unestablished,
+            None,
         )
         .unwrap();
         assert!(
@@ -1097,6 +1184,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(
@@ -1178,6 +1266,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(report.had_eviction(), "eviction ran when over the cap");
@@ -1241,6 +1330,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(
@@ -1261,6 +1351,7 @@ mod tests {
                 false,
                 &AtomicBool::new(false),
                 ClockTrust::Established,
+                None,
             )
             .unwrap();
             assert!(
@@ -1330,6 +1421,7 @@ mod tests {
             true,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(report.vacuumed);
@@ -1369,6 +1461,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(!report.had_eviction());
@@ -1398,6 +1491,7 @@ mod tests {
             true,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(
@@ -1440,6 +1534,7 @@ mod tests {
             true,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(
@@ -1475,6 +1570,7 @@ mod tests {
             true,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(report.vacuumed, "the conversion rewrite still runs");
@@ -1500,6 +1596,7 @@ mod tests {
             true,
             &AtomicBool::new(true),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(
@@ -1536,6 +1633,7 @@ mod tests {
             false,
             &AtomicBool::new(true),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert!(report.had_eviction(), "eviction still runs while stopping");
@@ -1579,6 +1677,7 @@ mod tests {
             false,
             &AtomicBool::new(false),
             ClockTrust::Established,
+            None,
         )
         .unwrap();
         assert_eq!(report, MaintenanceReport::default());

@@ -20,8 +20,7 @@ import asyncio
 import json
 
 from ados.core.logging import get_logger
-from ados.core.paths import MESH_ROLE_PATH
-from ados.services.wfb.bind_client import SUPERVISOR_SOCK
+from ados.core.paths import MESH_ROLE_PATH, SUPERVISOR_SOCK
 
 log = get_logger("ground_station.role_manager")
 
@@ -78,7 +77,7 @@ async def apply_role(target: str, *, reason: str = "operator") -> dict:
     except (TimeoutError, OSError) as exc:
         log.warning("role_socket_unreachable", error=str(exc))
         raise RoleUnavailableError(
-            "supervisor control socket unavailable at " + SUPERVISOR_SOCK
+            f"supervisor control socket unavailable at {SUPERVISOR_SOCK}"
         ) from exc
 
     try:

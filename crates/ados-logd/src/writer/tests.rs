@@ -74,7 +74,7 @@ fn writer_inserts_each_frame_into_the_right_table() {
             h
         }),
     ];
-    run_writer_to_completion(&path, WriterConfig::default(), frames);
+    run_writer_to_completion(&path, WriterConfig::hermetic(), frames);
 
     let ro = db::open_readonly(&path).unwrap();
     for (table, want) in [("logs", 1), ("metrics", 1), ("events", 1), ("hw", 1)] {
@@ -110,7 +110,7 @@ fn secret_fields_are_redacted_before_insert() {
     let mut log = LogFrame::new(2_000, "test-src", Level::Info, "with a secret");
     log.fields
         .insert("api_key".to_string(), MpVal::from("ABCDEFGHIJ1234567890"));
-    run_writer_to_completion(&path, WriterConfig::default(), vec![IngestFrame::Log(log)]);
+    run_writer_to_completion(&path, WriterConfig::hermetic(), vec![IngestFrame::Log(log)]);
 
     let ro = db::open_readonly(&path).unwrap();
     let (fields_blob, redacted): (Vec<u8>, i64) = ro
@@ -138,7 +138,7 @@ fn size_boundary_commits_at_max_rows() {
         batch_max_rows: 5,
         batch_max: Duration::from_secs(3600),
         checkpoint_interval_frames: 1_000_000,
-        ..WriterConfig::default()
+        ..WriterConfig::hermetic()
     };
     let frames: Vec<IngestFrame> = (0..10)
         .map(|i| IngestFrame::Telemetry(TelemetryFrame::new(i, "cpu.load", i as f64)))
@@ -161,7 +161,7 @@ fn time_boundary_commits_a_partial_batch() {
         batch_max_rows: 10_000,
         batch_max: Duration::from_millis(20),
         checkpoint_interval_frames: 1_000_000,
-        ..WriterConfig::default()
+        ..WriterConfig::hermetic()
     };
     run_writer_to_completion(
         &path,
@@ -190,7 +190,7 @@ fn arm_event_opens_a_flight_session_and_disarm_closes_it() {
         .insert("reason".to_string(), MpVal::from("disarm"));
     run_writer_to_completion(
         &path,
-        WriterConfig::default(),
+        WriterConfig::hermetic(),
         vec![IngestFrame::Event(arm), mid, IngestFrame::Event(disarm)],
     );
 
@@ -219,7 +219,7 @@ fn shutdown_closes_the_boot_session_with_reason_shutdown() {
     let (_dir, path) = temp_db();
     run_writer_to_completion(
         &path,
-        WriterConfig::default(),
+        WriterConfig::hermetic(),
         vec![IngestFrame::Telemetry(TelemetryFrame::new(1, "m", 1.0))],
     );
     let ro = db::open_readonly(&path).unwrap();
@@ -243,7 +243,7 @@ fn periodic_checkpoint_keeps_the_store_intact() {
         batch_max_rows: 1,
         batch_max: Duration::from_secs(3600),
         checkpoint_interval_frames: 1,
-        ..WriterConfig::default()
+        ..WriterConfig::hermetic()
     };
     let frames: Vec<IngestFrame> = (0..20)
         .map(|i| IngestFrame::Telemetry(TelemetryFrame::new(i, "cpu.load", i as f64)))
@@ -282,7 +282,7 @@ fn maintenance_runs_on_the_writer_thread_and_records_an_eviction_event() {
         batch_max_rows: 4096,
         batch_max: Duration::from_millis(20),
         retention,
-        ..WriterConfig::default()
+        ..WriterConfig::hermetic()
     };
 
     // A bounded channel small enough that the writer must be draining for the
@@ -459,7 +459,7 @@ fn mark_synced_writes_a_pushed_window_event() {
     let writer = Writer::new(
         &path,
         rx,
-        WriterConfig::default(),
+        WriterConfig::hermetic(),
         Arc::new(AtomicBool::new(false)),
     )
     .unwrap();
@@ -543,7 +543,7 @@ fn mark_synced_ack_returns_while_ingest_flows() {
     let writer = Writer::new(
         &path,
         rx,
-        WriterConfig::default(),
+        WriterConfig::hermetic(),
         Arc::new(AtomicBool::new(false)),
     )
     .unwrap();

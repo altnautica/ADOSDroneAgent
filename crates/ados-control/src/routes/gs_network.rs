@@ -147,8 +147,8 @@ const AP_IFACE: &str = "wlan0";
 /// (`_AP_ADDR`), reported as the AP `gateway` while the AP is running.
 const AP_GATEWAY_IP: &str = "192.168.4.1";
 
-/// The hostapd manager's default channel (`_hostapd_manager` falls back to `6`
-/// when `network.hotspot.channel` is absent), so the AP channel is always an
+/// The AP owner's default channel (`ados-net`'s hostapd manager uses `6` when
+/// `network.hotspot.channel` is absent), so the AP channel is always an
 /// integer, never null.
 const AP_DEFAULT_CHANNEL: i64 = 6;
 
@@ -191,7 +191,7 @@ pub async fn get_ground_station_network(State(state): State<AppState>) -> Respon
 /// probes them directly instead of reporting a static not-running shape.
 ///
 /// - `running` / `enabled` — `systemctl is-active ados-hostapd.service == active`.
-/// - `ssid` — resolved the way `_hostapd_manager` + `_build_ssid` resolve it: a
+/// - `ssid` — resolved the way `ados-net`'s `build_ssid` resolves it: a
 ///   configured SSID is honoured only when it is non-empty, carries no
 ///   `{device_id}` placeholder, and is already an `ADOS-GS-` name; otherwise it
 ///   is built as `ADOS-GS-<first 4 hex of device_id, uppercased, zero-padded>`.
@@ -368,7 +368,7 @@ async fn station_dump_macs(interface: &str) -> Vec<String> {
 
 /// Parse the MAC addresses out of `iw … station dump` output: each associated
 /// station begins with a `Station <mac> …` line whose second whitespace token is
-/// the MAC, lowercased. Mirrors the manager's `_connected_clients` line scan.
+/// the MAC, lowercased.
 fn parse_station_dump(text: &str) -> Vec<String> {
     let mut macs = Vec::new();
     for line in text.lines() {
@@ -396,8 +396,7 @@ fn resolve_ap_ssid(configured: &str, device_id: &str) -> String {
 }
 
 /// The first 4 hex chars of the device id, uppercased, zero-padded to 4 when the
-/// id has fewer than 4 hex chars after stripping non-hex characters. Mirrors the
-/// Python `_short_id`.
+/// id has fewer than 4 hex chars after stripping non-hex characters.
 fn short_id(device_id: &str) -> String {
     let hex_only: String = device_id.chars().filter(char::is_ascii_hexdigit).collect();
     let padded = if hex_only.len() >= 4 {

@@ -1,10 +1,10 @@
 """Tests for the cross-process WFB adapter probe read seam.
 
-The probe resolves adapter facts through the radio service's sidecar
-files first, then the radio binary's one-shot scan, then the in-process
-``iw`` parse. These tests exercise the pure record-normalisation logic
-and the sidecar-first resolution, stubbing the binary and the in-process
-fallback so nothing touches a real radio.
+The probe resolves the adapter list through the radio service's sidecar
+first, then the radio binary's one-shot scan, and is empty when neither
+answers. These tests exercise the pure record-normalisation logic and the
+sidecar-first resolution, stubbing the binary so nothing touches a real
+radio.
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ def _write_sidecar(path, payload):
 
 
 def test_detect_reads_fresh_sidecar(tmp_path, monkeypatch):
-    """A fresh adapters sidecar short-circuits the binary + iw fallback."""
+    """A fresh adapters sidecar short-circuits the binary scan."""
     sidecar = tmp_path / "wfb-adapters.json"
     _write_sidecar(
         sidecar,
@@ -119,7 +119,7 @@ def test_detect_reads_fresh_sidecar(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(probe, "WFB_ADAPTERS_JSON", sidecar)
 
-    # Trip-wires: neither the binary nor the iw fallback may run.
+    # Trip-wire: the binary scan may not run.
     monkeypatch.setattr(
         probe, "_run_radio_adapters_cli", lambda: pytest.fail("binary ran")
     )
@@ -157,84 +157,15 @@ def test_detect_skips_stale_sidecar_uses_binary(tmp_path, monkeypatch):
     assert [a.interface_name for a in adapters] == ["binwlan"]
 
 
-def test_detect_falls_back_to_iw_when_nothing_else(tmp_path, monkeypatch):
-    """No sidecar + no binary -> the in-process iw scan owns the answer."""
+def test_detect_is_empty_when_nothing_answers(tmp_path, monkeypatch):
+    """No sidecar + no binary -> no adapters; Python runs no scan of its own."""
     monkeypatch.setattr(probe, "WFB_ADAPTERS_JSON", tmp_path / "absent.json")
     monkeypatch.setattr(probe, "_run_radio_adapters_cli", lambda: None)
 
-    sentinel = [
-        WifiAdapterInfo(
-            interface_name="iwwlan",
-            driver="8812eu",
-            chipset="RTL8812EU",
-            supports_monitor=True,
-            current_mode="monitor",
-            is_wfb_compatible=True,
-        )
-    ]
-    import ados.services.wfb.adapter as adapter_mod
-
-    monkeypatch.setattr(adapter_mod, "detect_wfb_adapters_iw", lambda: sentinel)
-
-    adapters = probe.detect_wfb_adapters()
-    assert [a.interface_name for a in adapters] == ["iwwlan"]
+    assert probe.detect_wfb_adapters() == []
 
 
-# --- get_interface_mode: sidecar-first ---
-
-
-def test_get_mode_from_fresh_sidecar(tmp_path, monkeypatch):
-    sidecar = tmp_path / "wfb-adapters.json"
-    _write_sidecar(
-        sidecar,
-        [{"interface_name": "wlan1", "current_mode": "monitor"}],
-    )
-    monkeypatch.setattr(probe, "WFB_ADAPTERS_JSON", sidecar)
-    assert probe.get_interface_mode("wlan1") == "monitor"
-
-
-def test_get_mode_falls_back_to_iw_when_iface_absent(tmp_path, monkeypatch):
-    sidecar = tmp_path / "wfb-adapters.json"
-    _write_sidecar(
-        sidecar,
-        [{"interface_name": "other", "current_mode": "managed"}],
-    )
-    monkeypatch.setattr(probe, "WFB_ADAPTERS_JSON", sidecar)
-
-    import ados.services.wfb.adapter as adapter_mod
-
-    monkeypatch.setattr(
-        adapter_mod, "get_interface_mode_iw", lambda _iface: "managed"
-    )
-    assert probe.get_interface_mode("wlan1") == "managed"
-
-
-def test_get_mode_empty_interface_is_none():
-    assert probe.get_interface_mode("") is None
-
-
-# --- enabled_channels: hop-supervisor sidecar first ---
-
-
-def test_enabled_channels_from_hop_sidecar(tmp_path, monkeypatch):
-    sidecar = tmp_path / "hop-supervisor.json"
-    _write_sidecar(sidecar, {"enabled_channels": [149, 153, 157]})
-    monkeypatch.setattr(probe, "HOP_SUPERVISOR_JSON", sidecar)
-    assert probe.enabled_channels("wlan1") == {149, 153, 157}
-
-
-def test_enabled_channels_falls_back_to_iw_when_sidecar_empty(tmp_path, monkeypatch):
-    sidecar = tmp_path / "hop-supervisor.json"
-    _write_sidecar(sidecar, {"enabled_channels": []})
-    monkeypatch.setattr(probe, "HOP_SUPERVISOR_JSON", sidecar)
-
-    import ados.services.wfb.adapter as adapter_mod
-
-    monkeypatch.setattr(
-        adapter_mod, "enabled_channels_iw", lambda _iface: {149}
-    )
-    assert probe.enabled_channels("wlan1") == {149}
-
-
-def test_enabled_channels_empty_interface_is_empty():
-    assert probe.enabled_channels("") == set()
+def test_the_binary_is_not_run_when_absent(tmp_path, monkeypatch):
+    """A missing radio binary is a clean miss, not a subprocess error."""
+    monkeypatch.setattr(probe, "RADIO_BIN", str(tmp_path / "no-such-ados-radio"))
+    assert probe._run_radio_adapters_cli() is None

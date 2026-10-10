@@ -91,6 +91,9 @@ impl Writer {
         // the pass itself rather than the pass plus whatever the loop spent
         // waiting for a frame beforehand.
         self.mark_progress();
+        // Free space of the filesystem holding the store: below its reserve it
+        // arms eviction even while the store is under its byte cap.
+        let fs = (self.config.fs_usage)(self.db_path.parent().unwrap_or(self.db_path.as_path()));
         let report = retention::run_maintenance(
             &self.conn,
             &self.config.retention,
@@ -99,6 +102,7 @@ impl Writer {
             do_vacuum,
             &self.stop,
             clock,
+            fs,
         )?;
         // Only the periodic full vacuum resets the cadence. Eviction reclaims
         // incrementally and deliberately does not count as one: letting it push

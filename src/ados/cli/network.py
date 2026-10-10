@@ -250,6 +250,21 @@ def regulatory_region(code: str) -> None:
 # --- Access point passphrase --------------------------------------------------
 
 
+def read_ap_passphrase() -> str:
+    """The persisted AP passphrase, or empty when there is none or it is unreadable.
+
+    Read-only on purpose: the access point owner generates and persists the
+    passphrase, so asking for it must never mint a second one hostapd never
+    loaded. Resolved at call time from ``AP_PASSPHRASE_PATH`` so the platform's
+    etc directory applies.
+    """
+    try:
+        return AP_PASSPHRASE_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+
 @network_group.command(
     "ap-passphrase",
     help="Print this unit's WiFi access point passphrase.",
@@ -269,13 +284,6 @@ def ap_passphrase() -> None:
     that did the same printed a path that cannot exist on the host the operator
     was reading it from.
     """
-    # Imported here rather than at module scope: this is the AP manager's own
-    # read-only accessor (it deliberately does NOT generate, so asking does not
-    # mint a second passphrase hostapd never loaded), and pulling the
-    # ground-station service stack into every `ados` invocation to reach it
-    # would cost every other command startup time.
-    from ados.services.ground_station.hostapd_manager import read_ap_passphrase
-
     value = read_ap_passphrase()
     if value:
         click.echo(value)

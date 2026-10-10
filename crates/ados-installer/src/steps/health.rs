@@ -537,6 +537,23 @@ mod tests {
     }
 
     #[test]
+    fn no_profile_expects_a_retired_or_hardware_gated_unit() {
+        // A retired unit is pruned before the gate runs, and the Hailo sidecar
+        // is inactive on a board without the accelerator, so expecting either
+        // would fail a healthy install.
+        for profile in ["drone", "ground_station", "workstation", "compute"] {
+            let units = expected_profile_units(profile);
+            for unit in crate::steps::systemd::RETIRED_UNITS {
+                assert!(!units.contains(unit), "{profile} expects retired {unit}");
+            }
+            assert!(
+                !units.contains(&"ados-vision-hailo.service"),
+                "{profile} expects the hardware-gated hailo sidecar"
+            );
+        }
+    }
+
+    #[test]
     fn missing_hard_binaries_reports_only_absent_hard_gates() {
         // Pretend every binary is present → no misses.
         let none = missing_hard_binaries("drone", |_| true);

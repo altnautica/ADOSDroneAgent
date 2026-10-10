@@ -2,9 +2,9 @@
 
 Disambiguation: this module is the mesh-fabric tap-to-pair manager
 (relay ↔ receiver invite bundle exchange over UDP/bat0). It is NOT
-the WFB radio-link pair manager — that lives in ``pair_manager`` (no
-``-ing`` suffix). Different concern, different transport, similar
-filename.
+the WFB radio-link pair flow — that lives in the native ``ados-groundlink``
+service (``pair_state``) and the supervisor's bind keys. Different concern,
+different transport.
 
 When a receiver operator opens the Accept window from the OLED, this
 module listens on UDP/`bat0` for join requests, runs a Curve25519 ECDH

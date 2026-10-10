@@ -24,9 +24,15 @@
 //! Two public endpoints (`/v1/healthz`, `/v1/openapi.json`) are open on both
 //! edges so discovery and liveness probes always work.
 //!
-//! A token-bucket rate limiter caps the TCP edge so a runaway client cannot pin
-//! the box; the Unix edge is unlimited.
+//! Two token-bucket rate limiters cap the TCP edge so a runaway client cannot
+//! pin the box; the Unix edge is unlimited. Authentication runs first and picks
+//! the bucket: an authorized request draws from the shared read budget, a
+//! refused one from a small per-peer bucket ([`PeerRateLimiter`]). A flood of
+//! bad or missing keys therefore spends only its own peers' budget and can never
+//! starve a keyed caller.
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -116,20 +122,45 @@ pub fn is_public(path: &str) -> bool {
     path == "/v1/healthz" || path == "/v1/openapi.json"
 }
 
-/// A fixed-window token-bucket rate limiter for the TCP edge. Each refill
-/// window grants `capacity` tokens; a request consumes one. When the bucket is
-/// empty within a window the request is rejected with 429. One shared bucket
-/// guards the whole TCP edge (the read budget is per-agent, not per-route),
-/// which is enough to stop a runaway client from pinning the box.
+/// A fixed-window token-bucket rate limiter for authorized TCP-edge requests.
+/// Each refill window grants `capacity` tokens; a request consumes one. When the
+/// bucket is empty within a window the request is rejected with 429. One shared
+/// bucket guards the whole authorized read path (the read budget is per-agent,
+/// not per-route), which is enough to stop a runaway client from pinning the
+/// box. Only requests that passed authentication are charged here.
 pub struct RateLimiter {
     capacity: u32,
     window: Duration,
     state: Mutex<RateState>,
 }
 
+/// One fixed-window bucket: the tokens left and when the window opened.
 struct RateState {
     tokens: u32,
     window_start: Instant,
+}
+
+impl RateState {
+    fn full(capacity: u32, now: Instant) -> Self {
+        Self {
+            tokens: capacity,
+            window_start: now,
+        }
+    }
+
+    /// Refill if the window has passed, then try to spend one token.
+    fn take(&mut self, capacity: u32, window: Duration, now: Instant) -> bool {
+        if now.saturating_duration_since(self.window_start) >= window {
+            self.window_start = now;
+            self.tokens = capacity;
+        }
+        if self.tokens > 0 {
+            self.tokens -= 1;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl RateLimiter {
@@ -138,10 +169,7 @@ impl RateLimiter {
         Self {
             capacity,
             window,
-            state: Mutex::new(RateState {
-                tokens: capacity,
-                window_start: Instant::now(),
-            }),
+            state: Mutex::new(RateState::full(capacity, Instant::now())),
         }
     }
 
@@ -155,16 +183,105 @@ impl RateLimiter {
     /// window's budget is exhausted.
     pub fn check(&self) -> bool {
         let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if s.window_start.elapsed() >= self.window {
-            s.window_start = Instant::now();
-            s.tokens = self.capacity;
+        s.take(self.capacity, self.window, Instant::now())
+    }
+}
+
+/// How many peers the unauthenticated limiter tracks at once. A full map
+/// evicts its least-recently-seen peer, so memory stays bounded however many
+/// addresses a flood comes from.
+pub const MAX_TRACKED_PEERS: usize = 256;
+
+/// Refused requests one peer may make per window before it gets 429 instead of
+/// 401. Small: a legitimate client that gets its key wrong needs a handful of
+/// attempts, not a stream.
+pub const UNAUTH_PEER_CAPACITY: u32 = 10;
+
+/// A per-peer fixed-window limiter for requests that failed authentication.
+///
+/// Each peer address gets its own bucket of `capacity` per `window`, held in a
+/// map capped at `max_peers` entries with least-recently-used eviction. It is
+/// charged only *after* authentication refused a request, so it bounds how fast
+/// one peer can probe keys without ever touching the authorized budget.
+pub struct PeerRateLimiter {
+    capacity: u32,
+    window: Duration,
+    max_peers: usize,
+    state: Mutex<PeerBuckets>,
+}
+
+struct PeerBuckets {
+    buckets: HashMap<IpAddr, PeerBucket>,
+    /// A logical clock bumped on every check; a bucket's `last_seen` is the
+    /// tick of its latest use, so the smallest tick is the LRU peer.
+    tick: u64,
+}
+
+struct PeerBucket {
+    bucket: RateState,
+    last_seen: u64,
+}
+
+impl PeerRateLimiter {
+    /// A limiter granting each peer `capacity` refused requests per `window`,
+    /// tracking at most `max_peers` peers (at least one).
+    pub fn new(capacity: u32, window: Duration, max_peers: usize) -> Self {
+        let max_peers = max_peers.max(1);
+        Self {
+            capacity,
+            window,
+            max_peers,
+            state: Mutex::new(PeerBuckets {
+                buckets: HashMap::with_capacity(max_peers),
+                tick: 0,
+            }),
         }
-        if s.tokens > 0 {
-            s.tokens -= 1;
-            true
-        } else {
-            false
+    }
+
+    /// The default unauthenticated budget: [`UNAUTH_PEER_CAPACITY`] per second
+    /// per peer, [`MAX_TRACKED_PEERS`] peers.
+    pub fn default_unauth() -> Self {
+        Self::new(
+            UNAUTH_PEER_CAPACITY,
+            Duration::from_secs(1),
+            MAX_TRACKED_PEERS,
+        )
+    }
+
+    /// Charge one refused request to `peer`. Returns `true` while the peer's
+    /// window still has budget, `false` once it is spent.
+    pub fn check(&self, peer: IpAddr) -> bool {
+        let now = Instant::now();
+        let mut s = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        s.tick += 1;
+        let tick = s.tick;
+        if !s.buckets.contains_key(&peer) && s.buckets.len() >= self.max_peers {
+            let lru = s
+                .buckets
+                .iter()
+                .min_by_key(|(_, b)| b.last_seen)
+                .map(|(ip, _)| *ip);
+            if let Some(lru) = lru {
+                s.buckets.remove(&lru);
+            }
         }
+        let capacity = self.capacity;
+        let entry = s.buckets.entry(peer).or_insert_with(|| PeerBucket {
+            bucket: RateState::full(capacity, now),
+            last_seen: tick,
+        });
+        entry.last_seen = tick;
+        entry.bucket.take(capacity, self.window, now)
+    }
+
+    /// How many peers are tracked right now.
+    #[cfg(test)]
+    fn tracked_peers(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .buckets
+            .len()
     }
 }
 
@@ -254,5 +371,49 @@ mod tests {
         assert!(!limiter.check());
         std::thread::sleep(Duration::from_millis(30));
         assert!(limiter.check(), "the window refilled");
+    }
+
+    fn ip(n: u32) -> IpAddr {
+        IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + n))
+    }
+
+    #[test]
+    fn per_ip_map_never_exceeds_256_entries() {
+        let limiter = PeerRateLimiter::new(1, Duration::from_secs(3600), MAX_TRACKED_PEERS);
+        assert_eq!(MAX_TRACKED_PEERS, 256);
+        for n in 0..1_000 {
+            limiter.check(ip(n));
+            assert!(
+                limiter.tracked_peers() <= MAX_TRACKED_PEERS,
+                "map grew past the cap at peer {n}"
+            );
+        }
+        assert_eq!(limiter.tracked_peers(), MAX_TRACKED_PEERS);
+    }
+
+    #[test]
+    fn the_least_recently_seen_peer_is_evicted_first() {
+        let limiter = PeerRateLimiter::new(1, Duration::from_secs(3600), 3);
+        for n in 0..3 {
+            assert!(limiter.check(ip(n)), "first request from a peer has budget");
+        }
+        // Peer 0 is seen again (and is now out of budget), so peer 1 is the LRU.
+        assert!(!limiter.check(ip(0)));
+        // A fourth peer evicts peer 1, not peer 0.
+        assert!(limiter.check(ip(3)));
+        assert_eq!(limiter.tracked_peers(), 3);
+        assert!(!limiter.check(ip(0)), "peer 0 kept its spent bucket");
+        // Peer 1 was evicted; re-admitting it evicts the LRU again (peer 2).
+        assert!(limiter.check(ip(1)), "peer 1 was evicted and starts fresh");
+        assert_eq!(limiter.tracked_peers(), 3);
+    }
+
+    #[test]
+    fn peers_have_independent_buckets() {
+        let limiter = PeerRateLimiter::new(2, Duration::from_secs(3600), 8);
+        assert!(limiter.check(ip(1)));
+        assert!(limiter.check(ip(1)));
+        assert!(!limiter.check(ip(1)), "peer 1 spent its budget");
+        assert!(limiter.check(ip(2)), "peer 2 is unaffected");
     }
 }

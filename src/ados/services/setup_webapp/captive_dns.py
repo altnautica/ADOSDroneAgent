@@ -56,7 +56,7 @@ from ados.core.paths import SETUP_COMPLETE_PATH
 
 log = get_logger("setup_webapp.captive_dns")
 
-# Assigned from `ados.core.paths`, not re-listed: `pair_manager` writes this
+# Assigned from `ados.core.paths`, not re-listed: ados-groundlink writes this
 # sentinel and the systemd unit's ConditionPathExists names the same file, so a
 # second literal here would be a third copy of one path to drift.
 SETUP_COMPLETE_SENTINEL = SETUP_COMPLETE_PATH

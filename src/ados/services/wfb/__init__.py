@@ -1,3 +1,3 @@
-"""WFB-ng video link service — adapter detection, link management, channel control."""
+"""WFB-ng link helpers: adapter records, adapter probe, and key management."""
 
 from __future__ import annotations

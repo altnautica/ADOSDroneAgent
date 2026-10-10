@@ -25,6 +25,8 @@ classifiers = [
 ]
 
 dependencies = [
+    # Not imported by the agent itself: the plugin runtime contract for
+    # extensions, whose agent halves import pymavlink from this venv.
     "pymavlink>=2.4.41",
     # fastapi>=0.135 is the floor that accepts the modern starlette 1.x line.
     # Older fastapi (<=0.116) caps starlette<0.48; if a stray starlette 1.x ends
@@ -35,7 +37,6 @@ dependencies = [
     "fastapi>=0.135.0",
     "starlette>=1.0.0,<2.0",
     "uvicorn[standard]>=0.27.0",
-    "paho-mqtt>=2.0.0",
     "pyyaml>=6.0",
     "pydantic>=2.5.0",
     "click>=8.1.0",
@@ -46,11 +47,6 @@ dependencies = [
     "httpx>=0.27.0",
     "cryptography>=42.0.0",
     "zeroconf>=0.131.0",
-    "jinja2>=3.0.0",
-    # Required at runtime by ados.api.routes.plugins, which declares a
-    # Form(...) parameter for the .adosplug upload endpoint. FastAPI
-    # raises at module import time if this is missing.
-    "python-multipart>=0.0.6",
     # msgpack is the IPC wire format (ados.core.ipc plus the plugin and
     # Rust-service sockets) — a hard runtime requirement, not optional. On the
     # legacy boards it happened to be satisfied by the system python3-msgpack
@@ -58,13 +54,6 @@ dependencies = [
     # (e.g. Python 3.11 where the system python is older and invisible to the
     # venv) has no such fallback, so `import msgpack` fails unless declared here.
     "msgpack>=1.0.0",
-    # GPS EXIF on /api/video/snapshot photos. Without it every snapshot is
-    # saved with no position even when the FC has a fix.
-    "piexif>=1.1.3",
-    # Validates a peripheral config write against its manifest config_schema.
-    # 4.0 is the first release that validates draft 2019-09 / 2020-12 schemas,
-    # which manifests may declare.
-    "jsonschema>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -196,9 +185,6 @@ module = [
     "yaml.*",
     "psutil",
     "msgpack",
-    "jsonschema",
-    "jsonschema.*",
-    "piexif",
     "numpy",
     "numpy.*",
     "PIL",
@@ -221,8 +207,8 @@ testpaths = ["tests", "tools/api-conformance/tests", "tools/logd-conformance/tes
 # `importlib` gives each file a unique module identity from its full path.
 addopts = "--import-mode=importlib"
 # `importlib` does not put the rootdir on `sys.path` the way the legacy mode
-# did, and `tests/test_emit_openapi.py` imports `scripts.emit_openapi` from the
-# repo root. That import survived only because `python -m pytest` happens to
-# prepend the cwd; the bare `pytest` console script CI runs does not, so the
-# dependency was on the launcher rather than on anything declared. State it.
+# did, and the suite imports shared helpers as `tests.api_runtime_utils` and
+# `tests.state_ipc_utils` from the repo root. Those imports would survive only
+# because `python -m pytest` happens to prepend the cwd; the bare `pytest`
+# console script CI runs does not, so state the dependency.
 pythonpath = ["."]

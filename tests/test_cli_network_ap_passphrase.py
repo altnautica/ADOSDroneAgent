@@ -17,18 +17,16 @@ from pathlib import Path
 from click.testing import CliRunner
 
 import ados.cli.network as netmod
-import ados.services.ground_station.hostapd_manager as hostapd
 from ados.cli.network import network_group
 
 _FIXTURE = "KM7QRT4XPN29"
 
 
 def _install(monkeypatch, tmp_path, body: str | None):
-    """Point both the reader and the CLI's message at a temp passphrase file."""
+    """Point the CLI's reader and its message at a temp passphrase file."""
     path = tmp_path / "ap-passphrase"
     if body is not None:
         path.write_text(body, encoding="utf-8")
-    monkeypatch.setattr(hostapd, "_PASSPHRASE_PATH", path)
     monkeypatch.setattr(netmod, "AP_PASSPHRASE_PATH", path)
     return path
 
@@ -76,6 +74,18 @@ def test_reading_it_does_not_create_or_rotate_the_file(monkeypatch, tmp_path) ->
         result = CliRunner().invoke(network_group, ["ap-passphrase"])
         assert result.output == f"{_FIXTURE}\n"
     assert path.read_text(encoding="utf-8") == f"{_FIXTURE}\n"
+
+
+def test_the_reader_strips_and_reads_what_is_on_disk(monkeypatch, tmp_path) -> None:
+    _install(monkeypatch, tmp_path, f"  {_FIXTURE}\n")
+    assert netmod.read_ap_passphrase() == _FIXTURE
+
+
+def test_the_reader_returns_empty_for_a_missing_file(monkeypatch, tmp_path) -> None:
+    path = _install(monkeypatch, tmp_path, None)
+    assert netmod.read_ap_passphrase() == ""
+    assert not path.exists(), "a read must not create the file"
+
 
 
 def test_the_path_is_resolved_not_hardcoded() -> None:

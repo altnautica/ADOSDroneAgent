@@ -6,8 +6,8 @@
 //!
 //! `ados-radio`'s hop supervisor learns the peer's device id from a verified
 //! presence beacon and writes `/run/ados/peer-backfill.json` on every newly-heard
-//! peer. Nothing read it. Its intended consumer was a Python REST seam calling
-//! `pair_manager.update_peer_device_id`, and that function had zero callers — so
+//! peer. Nothing read it. Its intended consumer was a Python REST seam that
+//! was never wired to a caller — so
 //! the learned id never reached `config.yaml`, and
 //! `gs_status`'s `paired_drone.device_id` (which reads
 //! `video.wfb.paired_with_device_id`, with the legacy

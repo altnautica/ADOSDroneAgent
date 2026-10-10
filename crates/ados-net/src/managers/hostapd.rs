@@ -165,7 +165,7 @@ pub fn parse_iw_info(stdout: &str) -> RadioView {
 }
 
 /// First four hex chars of `device_id`, uppercased; zero-padded when there are
-/// fewer than four after stripping non-hex characters. Mirrors `_short_id`.
+/// fewer than four after stripping non-hex characters.
 pub fn short_id(device_id: &str) -> String {
     let hex_only: String = device_id
         .chars()
@@ -671,8 +671,7 @@ impl HostapdManager {
         out.stdout.trim() == "active"
     }
 
-    /// Scrape `iw dev wlan0 station dump` for associated MAC addresses. Mirrors
-    /// `_connected_clients`.
+    /// Scrape `iw dev wlan0 station dump` for associated MAC addresses.
     async fn connected_clients(&self) -> Vec<String> {
         let out = self
             .runner

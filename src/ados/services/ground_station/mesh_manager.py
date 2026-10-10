@@ -55,6 +55,7 @@ from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import (
     ADOS_RUN_DIR,
     MESH_GATEWAY_JSON,
+    SUPERVISOR_SOCK,
     UPLINK_ACTIVE_FLAG,
 )
 from ados.core.paths import (
@@ -63,7 +64,6 @@ from ados.core.paths import (
 from ados.core.paths import (
     MESH_PSK_PATH as _MESH_PSK_PATH,
 )
-from ados.services.wfb.bind_client import SUPERVISOR_SOCK
 
 from .role_manager import get_current_role
 

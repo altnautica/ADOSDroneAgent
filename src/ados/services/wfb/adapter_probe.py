@@ -1,31 +1,19 @@
-"""Cross-process probe for WFB adapter facts the radio service owns.
+"""Cross-process probe for the WFB adapter list the radio service owns.
 
-The drone-side WFB transmit service runs as its own systemd unit (a
-compiled binary) and is the authoritative owner of the live adapter
-scan, each interface's operating mode, and the regulatory-permitted
-channel set. The REST surface, the bind interface setup, and the CLI
-all live in *other* processes that need the same facts without poking
-the radio's raw-socket internals.
+The radio service runs as its own systemd unit (a compiled binary) and is
+the authoritative owner of the live adapter scan and its classification. The
+CLI lives in another process and reads the same facts without poking the
+radio's raw-socket internals.
 
-This module is the thin, permanent read seam for those facts. Each
-lookup resolves through three layers, fastest-and-freshest first:
+The lookup resolves through two layers, fastest-and-freshest first:
 
-1. The sidecar files the radio service writes atomically on every scan
-   (``/run/ados/wfb-adapters.json`` for the full adapter list,
-   ``/run/ados/hop-supervisor.json`` for the regulatory channel set).
-   Used only while fresh so a dead service never serves stale facts.
+1. The sidecar the radio service writes atomically on every scan
+   (``/run/ados/wfb-adapters.json``). Used only while fresh so a dead
+   service never serves stale facts.
 2. The radio binary's one-shot ``adapters`` mode, which performs a live
-   scan, prints the JSON list, and refreshes the sidecar. This is the
-   path a pre-service caller (e.g. the bind setup before the radio unit
-   is up) takes when no sidecar exists yet.
-3. The in-process ``iw`` parse in :mod:`ados.services.wfb.adapter`, the
-   permanent fallback for hosts where neither the sidecar nor the binary
-   is present (the binary is absent on a Python-only build, and the
-   sidecar is absent before the first scan).
+   scan, prints the JSON list, and refreshes the sidecar.
 
-Every function returns the exact shapes the existing Python callers
-already consume, so importers keep working unchanged when the radio
-moves to its own process.
+When neither answers, the list is empty: Python carries no scan of its own.
 """
 
 from __future__ import annotations
@@ -37,7 +25,8 @@ import time
 from pathlib import Path
 
 from ados.core.logging import get_logger
-from ados.core.paths import HOP_SUPERVISOR_JSON, WFB_STATS_JSON
+from ados.core.paths import WFB_STATS_JSON
+from ados.services.wfb.adapter import WifiAdapterInfo
 
 log = get_logger("wfb.adapter_probe")
 
@@ -91,8 +80,6 @@ def _adapter_from_record(record: dict) -> object | None:
     normalises those back to the dataclass defaults so a consumer cannot
     tell which process produced the record.
     """
-    from ados.services.wfb.adapter import WifiAdapterInfo
-
     name = record.get("interface_name")
     if not isinstance(name, str) or not name:
         return None
@@ -170,12 +157,11 @@ def _run_radio_adapters_cli() -> list | None:
 
 
 def detect_wfb_adapters() -> list:
-    """Return the detected WFB adapters, radio-service-owned facts first.
+    """Return the detected WFB adapters as the radio service reports them.
 
     Resolution order: the fresh ``wfb-adapters.json`` sidecar, then the
-    radio binary's one-shot scan, then the in-process ``iw`` parse. The
-    return type and per-adapter shape match the historical
-    ``adapter.detect_wfb_adapters`` so every importer keeps working.
+    radio binary's one-shot scan. Empty when neither is available (no
+    radio binary on this host, or the scan failed).
     """
     payload = _read_fresh_json(WFB_ADAPTERS_JSON, _SIDECAR_FRESH_S)
     parsed = _parse_adapter_list(payload) if payload is not None else None
@@ -185,68 +171,7 @@ def detect_wfb_adapters() -> list:
     from_cli = _run_radio_adapters_cli()
     if from_cli is not None:
         return from_cli
-
-    # Permanent fallback: the in-process scan. Imported lazily so this
-    # module and ``adapter`` can re-export across each other without a
-    # circular import at module load time.
-    from ados.services.wfb.adapter import detect_wfb_adapters_iw
-
-    return detect_wfb_adapters_iw()
+    return []
 
 
-def get_interface_mode(interface: str) -> str | None:
-    """Return an interface's operating mode ("monitor" | "managed" | ...).
-
-    Prefers the ``current_mode`` the radio service recorded for the
-    interface in the fresh adapter sidecar, then falls back to the
-    in-process ``iw <iface> info`` read. ``None`` when the mode cannot be
-    determined by any layer.
-    """
-    if not interface:
-        return None
-    payload = _read_fresh_json(WFB_ADAPTERS_JSON, _SIDECAR_FRESH_S)
-    if isinstance(payload, list):
-        for record in payload:
-            if not isinstance(record, dict):
-                continue
-            if record.get("interface_name") == interface:
-                mode = record.get("current_mode")
-                if isinstance(mode, str) and mode:
-                    return mode
-                break
-
-    from ados.services.wfb.adapter import get_interface_mode_iw
-
-    return get_interface_mode_iw(interface)
-
-
-def enabled_channels(interface: str) -> set[int]:
-    """5 GHz channels this adapter can use, regulatory-filtered.
-
-    The radio service computes this set once per scan and mirrors it onto
-    ``hop-supervisor.json``; that mirror is the cross-process source while
-    the service runs. Falls back to the in-process ``iw phy <phy>
-    channels`` parse otherwise (e.g. before the radio unit starts, when
-    the bind interface setup needs the set). Empty set means "could not
-    determine"; callers treat that as "do not restrict".
-    """
-    if not interface:
-        return set()
-    payload = _read_fresh_json(HOP_SUPERVISOR_JSON, _SIDECAR_FRESH_S)
-    if isinstance(payload, dict):
-        channels = payload.get("enabled_channels")
-        if isinstance(channels, list):
-            parsed = {int(c) for c in channels if isinstance(c, int)}
-            if parsed:
-                return parsed
-
-    from ados.services.wfb.adapter import enabled_channels_iw
-
-    return enabled_channels_iw(interface)
-
-
-__all__ = [
-    "detect_wfb_adapters",
-    "enabled_channels",
-    "get_interface_mode",
-]
+__all__ = ["detect_wfb_adapters"]

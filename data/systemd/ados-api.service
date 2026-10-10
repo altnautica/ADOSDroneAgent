@@ -17,14 +17,14 @@ EnvironmentFile=-/etc/ados/env
 
 NoNewPrivileges=yes
 ProtectSystem=strict
-# Plugin lifecycle runs inside this service: POST /api/plugins/install drives
-# the supervisor, which writes per-plugin unit files and the shared slice
-# under /etc/systemd/system and removes them on uninstall, so /etc must be
-# writable. Runtime config writes (config.yaml, peripherals, display.conf)
-# land under /etc/ados. /var/lib/ados holds plugin state. /tmp is writable so
-# the plugin upload is staged via a temp file before the supervisor unpacks
-# it. The radio bind keygen no longer runs here (it moved to the supervisor).
-ReadWritePaths=/var/ados /run/ados /etc /tmp /var/lib/ados
+# The residual API writes only agent state: runtime config (config.yaml,
+# peripherals, display.conf) under /etc/ados, sockets and sidecars under
+# /run/ados, and data under /var/ados and /var/lib/ados. Plugin lifecycle is
+# native and no longer runs here, so neither /etc nor /tmp is writable.
+# The optional display install escapes this sandbox by design: it runs its
+# package install through `systemd-run` as a transient unit outside the
+# service's namespace.
+ReadWritePaths=/etc/ados /run/ados /var/ados /var/lib/ados
 
 MemoryMax=128M
 CPUQuota=25%

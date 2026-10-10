@@ -5,10 +5,16 @@
 //! on orchestration. Defaults are tuned for SD-card-backed boards; the config
 //! layer overrides them at start.
 
+use std::path::Path;
 use std::time::Duration;
 
 use crate::db::DbError;
-use crate::retention::RetentionConfig;
+use crate::retention::{self, FsUsage, RetentionConfig};
+
+/// Measures the filesystem holding the store's directory. Production reads the
+/// live mount ([`retention::read_fs_usage`]); a test injects a fixed answer so
+/// a pass never depends on how full the host's temp filesystem happens to be.
+pub type FsUsageProbe = fn(&Path) -> Option<FsUsage>;
 
 /// How many rows accumulate before a batch is committed.
 pub const DEFAULT_BATCH_MAX_ROWS: usize = 500;
@@ -59,6 +65,8 @@ pub struct WriterConfig {
     /// runs retention on its own thread against its own connection — there is
     /// never a second read-write connection.
     pub retention: RetentionConfig,
+    /// The free-space probe a maintenance pass arms headroom eviction from.
+    pub fs_usage: FsUsageProbe,
 }
 
 impl Default for WriterConfig {
@@ -68,6 +76,19 @@ impl Default for WriterConfig {
             batch_max: DEFAULT_BATCH_MAX,
             checkpoint_interval_frames: DEFAULT_CHECKPOINT_INTERVAL_FRAMES,
             retention: RetentionConfig::default(),
+            fs_usage: retention::read_fs_usage,
+        }
+    }
+}
+
+#[cfg(test)]
+impl WriterConfig {
+    /// The defaults with no filesystem measurement, so only the byte cap arms
+    /// eviction: a writer test behaves the same on any host.
+    pub(crate) fn hermetic() -> Self {
+        Self {
+            fs_usage: |_| None,
+            ..Self::default()
         }
     }
 }

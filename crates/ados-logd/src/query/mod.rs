@@ -12,7 +12,8 @@
 //! 2. **TCP `:8090`** — the LAN edge. The auth layer follows the agent's
 //!    data-plane posture (see [`auth`]): unpaired ⇒ first-boot reach only,
 //!    paired ⇒ `X-ADOS-Key` required and an exact match, an unreadable pairing
-//!    file ⇒ refused. A token-bucket rate limit guards the edge.
+//!    file ⇒ refused. Token-bucket rate limits guard the edge: authorized
+//!    requests share one read budget, refused ones are charged per peer.
 //!
 //! Auth and rate limiting are a per-edge middleware: a no-op on the Unix
 //! listener, enforcing on the TCP listener. The two public endpoints
@@ -60,7 +61,7 @@ use ados_protocol::pairing_posture::{classify_caller, CallerClass};
 
 use crate::writer::ControlMsg;
 
-use self::auth::{PairingState, RateLimiter};
+use self::auth::{PairingState, PeerRateLimiter, RateLimiter};
 use self::routes::AppState;
 use self::sse::{ExportSlots, TailSlots};
 use crate::ingest::IngestStats;
@@ -74,7 +75,10 @@ pub const SYNCED_PATH: &str = "/v1/synced";
 #[derive(Clone)]
 struct EdgeAuth {
     pairing: Arc<PairingState>,
+    /// The shared read budget, charged only by authorized requests.
     rate: Arc<RateLimiter>,
+    /// The per-peer budget charged by requests authentication refused.
+    unauth_rate: Arc<PeerRateLimiter>,
 }
 
 /// Where a LAN-edge request came from: the TCP peer and the local address it
@@ -111,8 +115,18 @@ async fn not_found() -> Response {
     (StatusCode::NOT_FOUND, Json(body)).into_response()
 }
 
-/// The TCP-edge middleware: public-path bypass, then rate-limit, then auth. The
-/// Unix edge does not mount this, so trusted on-box callers bypass all three.
+/// The TCP-edge middleware: local-only refusal, public-path bypass, then
+/// authentication, then the rate limit of whichever side of auth the request
+/// landed on. The Unix edge does not mount this, so trusted on-box callers
+/// bypass all of it.
+///
+/// Authentication runs *before* the rate limit so the two budgets never mix: a
+/// refused request is charged to its peer's own bucket and answered 401 (or 429
+/// once that peer's bucket is spent), and never touches the shared budget an
+/// authorized caller draws from. Rate-limiting first let an unauthenticated
+/// flood drain that shared bucket and lock out the keyed operator. The pairing
+/// read behind the auth check is a short-TTL cache, so running it per request
+/// costs a lock and a compare, not a file read.
 async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
     // The mark-synced write is reachable ONLY on the trusted local socket: the
@@ -134,13 +148,6 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) ->
     if auth::is_public(&path) {
         return next.run(request).await;
     }
-    // Rate limit before the pairing read so a flood does not even reach it.
-    if !edge.rate.check() {
-        let body = serde_json::json!({
-            "error": { "code": "rate_limited", "message": "read budget exceeded; slow down" }
-        });
-        return (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response();
-    }
     let presented = request
         .headers()
         .get("X-ADOS-Key")
@@ -148,11 +155,20 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) ->
         .map(str::to_string);
     // Who is calling, from the accepted socket and the forwarding headers. A
     // request with no recorded peer cannot be placed and is treated as remote.
-    let caller = match request.extensions().get::<TcpPeer>() {
+    let peer = request.extensions().get::<TcpPeer>().copied();
+    let caller = match peer {
         Some(p) => classify_caller(Some(p.peer), p.local, |h| request.headers().contains_key(h)),
         None => CallerClass::Remote,
     };
     if !edge.pairing.authorize(&path, caller, presented.as_deref()) {
+        // A request with no recorded peer shares one bucket under the
+        // unspecified address rather than escaping the per-peer limit.
+        let ip = peer.map_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED), |p| {
+            p.peer
+        });
+        if !edge.unauth_rate.check(ip) {
+            return rate_limited();
+        }
         let body = serde_json::json!({
             "error": {
                 "code": "unauthorized",
@@ -161,7 +177,18 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, request: Request, next: Next) ->
         });
         return (StatusCode::UNAUTHORIZED, Json(body)).into_response();
     }
+    if !edge.rate.check() {
+        return rate_limited();
+    }
     next.run(request).await
+}
+
+/// The 429 envelope both TCP-edge budgets answer with once spent.
+fn rate_limited() -> Response {
+    let body = serde_json::json!({
+        "error": { "code": "rate_limited", "message": "read budget exceeded; slow down" }
+    });
+    (StatusCode::TOO_MANY_REQUESTS, Json(body)).into_response()
 }
 
 /// Spawn the query server: bind both listeners, serve the shared Router on each,
@@ -215,10 +242,11 @@ where
     // The Unix edge: the bare Router, no auth.
     let unix_app = build_router(state.clone());
 
-    // The TCP edge: the same Router wrapped with the rate-limit + auth layer.
+    // The TCP edge: the same Router wrapped with the auth + rate-limit layer.
     let edge = EdgeAuth {
         pairing,
         rate: Arc::new(RateLimiter::default_read()),
+        unauth_rate: Arc::new(PeerRateLimiter::default_unauth()),
     };
     let tcp_app = build_router(state).layer(middleware::from_fn_with_state(edge, tcp_edge));
 
@@ -368,6 +396,9 @@ where
 }
 
 #[cfg(test)]
+mod edge_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db;
@@ -453,7 +484,7 @@ mod tests {
         let writer = crate::writer::Writer::new(
             &db_path,
             ingest_rx,
-            crate::writer::WriterConfig::default(),
+            crate::writer::WriterConfig::hermetic(),
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .unwrap();

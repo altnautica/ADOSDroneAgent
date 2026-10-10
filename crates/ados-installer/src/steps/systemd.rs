@@ -6,7 +6,7 @@
 //! Ports the deploy + enable portions of `scripts/install.d/07-systemd.sh`
 //! (`install_systemd_service`, `enable_universal_units`,
 //! `disable_other_profile_units`, `enable_ground_station_units` ENABLE half,
-//! `mask_conflicting_standalone_services`, `reconcile_rust_cutover_units`).
+//! `mask_conflicting_standalone_services`).
 //!
 //! THE ORDERING INVARIANT: this step deploys + enables but NEVER STARTS the
 //! supervisor. The bash `install_systemd_service` does
@@ -45,12 +45,6 @@ const UNIVERSAL_UNITS: &[&str] = &[
     // able to revert it wherever it is.
     "ados-camera-probe.service",
     "ados-usb-otg-host.service",
-    // mDNS advertiser: registers the `_ados._tcp` service (with the live pair
-    // code in the TXT) so Mission Control can find the agent on the LAN and
-    // pair by 6-char code, not just by hostname. Enabled here so systemd's
-    // `WantedBy=ados-supervisor.service` auto-starts it with the supervisor
-    // (the same pattern as the plugin host); the supervisor only monitors it.
-    "ados-discovery.service",
     // The native plugin host owns the per-plugin sockets. Every profile fetches
     // the binary, so it is enabled cross-profile here and the supervisor pulls
     // it up via `WantedBy=ados-supervisor.service`; its `ConditionPathExists`
@@ -97,10 +91,6 @@ pub(crate) const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
     "ados-input.service",
     "ados-pic.service",
     "ados-uplink-router.service",
-    // ados-wifi-client.service is deliberately absent: ados-net owns the
-    // station in-process and the name is in ALWAYS_SUBSUMED_UNITS, so
-    // enable-linking it here means an install enables a unit it disables again
-    // in the same run.
 ];
 
 /// Units the agent shipped in a prior release but has since deleted. The
@@ -112,7 +102,7 @@ pub(crate) const GROUND_STATION_ENABLE_UNITS: &[&str] = &[
 /// the source set" sweep: the runtime-written plugin slice (`ados-plugins.slice`)
 /// and the per-plugin subprocess units legitimately live outside `data/systemd`
 /// and must never be pruned.
-const RETIRED_UNITS: &[&str] = &[
+pub(crate) const RETIRED_UNITS: &[&str] = &[
     "ados-scripting.service",
     "ados-cloud-relay.service",
     // The native ados-pic reads the front-panel buttons in-process and the
@@ -144,7 +134,38 @@ const RETIRED_UNITS: &[&str] = &[
     // its SIGHUP reload) served nobody. Its module was deleted, so left on disk
     // its ExecStart points at nothing.
     "ados-peripherals.service",
+    // The Python mDNS advertiser. The native control surface owns the
+    // `_ados._tcp` advert on every profile, so this unit published a second,
+    // differently named record for the same node. Its module was deleted.
+    "ados-discovery.service",
+    // The Python health writer. Its only reader was the logging store's
+    // sidecar tap, which reads its own hardware snapshot instead; the module
+    // was deleted, so left on disk its ExecStart points at nothing.
+    "ados-health.service",
+    // The packaged WiFi station manager. The native net daemon owns the
+    // station in-process on every profile and the module was deleted, so the
+    // unit is pruned rather than stopped and disabled on every install.
+    "ados-wifi-client.service",
 ];
+
+/// Drone-profile units enable-linked here. Each self-gates on its hardware, so
+/// enabling it on a board without the device is a clean no-op.
+pub(crate) const DRONE_ENABLE_UNITS: &[&str] = &[
+    // The Hailo inference sidecar the vision engine's `hailo` backend dials.
+    // `ConditionPathExists=/dev/hailo0` keeps it inactive on a board without
+    // the accelerator.
+    "ados-vision-hailo.service",
+];
+
+/// The units the install enable-links for a profile (`run` step 6). The
+/// supervisor and the cross-profile set are enabled separately.
+pub(crate) fn profile_enable_units(profile: &str) -> &'static [&'static str] {
+    match profile {
+        "ground_station" => GROUND_STATION_ENABLE_UNITS,
+        "drone" => DRONE_ENABLE_UNITS,
+        _ => &[],
+    }
+}
 
 /// Udev rules retired with the units they triggered. Same reasoning as
 /// [`RETIRED_UNITS`]: a rule left on an upgraded box fires `systemctl start` for
@@ -164,8 +185,13 @@ fn other_profile_units(profile: &str) -> &'static [&'static str] {
         // a ground station receives video through ados-mediamtx-gs. ados-video's
         // binary is fetched on the drone profile only, so a GS that was ever a
         // drone keeps a stale ados-video enable whose binary is now absent —
-        // tear it down so it cannot restart-loop.
-        "ground_station" => &["ados-wfb.service", "ados-video.service"],
+        // tear it down so it cannot restart-loop. The Hailo inference sidecar
+        // serves the drone's vision engine only.
+        "ground_station" => &[
+            "ados-wfb.service",
+            "ados-video.service",
+            "ados-vision-hailo.service",
+        ],
         _ => &[
             "ados-wfb-rx.service",
             "ados-mediamtx-gs.service",
@@ -178,7 +204,6 @@ fn other_profile_units(profile: &str) -> &'static [&'static str] {
             "ados-input.service",
             "ados-pic.service",
             "ados-uplink-router.service",
-            "ados-wifi-client.service",
             "ados-batman.service",
             "ados-mesh-pairing.service",
         ],
@@ -803,13 +828,21 @@ fn enable_if_present(unit: &str) {
 /// dir. Idempotent — a unit already gone is a clean no-op. Must run before the
 /// `daemon-reload` so the removal is visible to systemd in the same install.
 fn prune_retired_units() {
-    for unit in RETIRED_UNITS {
-        let path = Path::new(SYSTEMD_DIR).join(unit);
-        let dropin = Path::new(SYSTEMD_DIR).join(format!("{unit}.d"));
+    prune_retired_units_in(Path::new(SYSTEMD_DIR), &mut |args| {
+        let _ = exec::run("systemctl", args);
+    });
+}
+
+/// [`prune_retired_units`] against an injected unit dir and `systemctl` runner,
+/// so the prune is testable without touching the host's systemd.
+fn prune_retired_units_in(systemd_dir: &Path, systemctl: &mut dyn FnMut(&[&str])) {
+    for &unit in RETIRED_UNITS {
+        let path = systemd_dir.join(unit);
+        let dropin = systemd_dir.join(format!("{unit}.d"));
         let present = path.exists() || dropin.exists();
-        let _ = exec::run("systemctl", &["stop", unit]);
-        let _ = exec::run("systemctl", &["disable", unit]);
-        let _ = exec::run("systemctl", &["reset-failed", unit]);
+        systemctl(&["stop", unit]);
+        systemctl(&["disable", unit]);
+        systemctl(&["reset-failed", unit]);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&dropin);
         if present {
@@ -847,27 +880,6 @@ fn disable_other_profile_units(profile: &str) {
 fn mask_conflicting_standalone_services() {
     for action in ["stop", "disable", "mask"] {
         let _ = exec::run("systemctl", &[action, "dnsmasq.service", "hostapd.service"]);
-    }
-}
-
-/// The packaged units a native daemon always owns instead. Module-level so the
-/// enable/start lists can be pinned against it: a name here must never also be
-/// enable-linked, or an install enables a unit it then disables in the same run.
-pub(crate) const ALWAYS_SUBSUMED_UNITS: &[&str] = &["ados-wifi-client.service"];
-
-/// Reconcile the packaged units a native consolidator daemon subsumes
-/// (`reconcile_rust_cutover_units`). GROUND-STATION ONLY. The native net daemon
-/// always owns the WiFi station in-process, so its packaged unit is ALWAYS torn
-/// down. (Ethernet, modem and the OTG gadget went further: their packaged
-/// units are retired and pruned outright.)
-fn reconcile_rust_cutover_units() {
-    // ados-ethernet + ados-modem moved to RETIRED_UNITS (their Python
-    // entrypoints were deleted), so the prune removes them outright rather than
-    // leaving a disabled unit on disk.
-    for &unit in ALWAYS_SUBSUMED_UNITS {
-        let _ = exec::run("systemctl", &["stop", unit]);
-        let _ = exec::run("systemctl", &["disable", unit]);
-        let _ = exec::run("systemctl", &["reset-failed", unit]);
     }
 }
 
@@ -1754,17 +1766,16 @@ impl Step for Systemd {
         reconcile_front_unit();
 
         // 6. Profile-specific enable + teardown.
+        for unit in profile_enable_units(&ctx.profile) {
+            enable_if_present(unit);
+        }
         if ctx.profile == "ground_station" {
             // The mDNS AP service file and the hardware-access group
             // memberships are GS-only — they belong to the AP +
             // button/joystick/OLED service set.
             install_avahi_gs_ap(Some(&source));
-            for unit in GROUND_STATION_ENABLE_UNITS {
-                enable_if_present(unit);
-            }
             add_ground_station_group_memberships();
             mask_conflicting_standalone_services();
-            reconcile_rust_cutover_units();
         }
         disable_other_profile_units(&ctx.profile);
 
@@ -1800,24 +1811,94 @@ mod tests {
     }
 
     #[test]
-    fn a_subsumed_unit_is_never_enabled() {
-        // A native daemon owns each of these in-process, so the packaged unit
-        // must be torn down and never enable-linked. An install that enables a
-        // unit and then disables it in the same run is the contradiction this
-        // pins shut, and it shipped twice: the gadget unit was enabled, started,
-        // and subsumed all in one install, and the wifi-client unit alongside it.
-        //
-        // Generalised over the whole list on purpose. Pinning one name leaves
-        // the next entry free to reacquire exactly the defect just removed.
-        for unit in ALWAYS_SUBSUMED_UNITS {
+    fn installer_prunes_retired_units() {
+        // The three deleted Python daemons are pruned on every install so an
+        // upgraded box keeps no unit whose module is gone.
+        for unit in [
+            "ados-discovery.service",
+            "ados-health.service",
+            "ados-wifi-client.service",
+        ] {
+            assert!(RETIRED_UNITS.contains(&unit), "{unit} must be retired");
             assert!(
-                !GROUND_STATION_ENABLE_UNITS.contains(unit),
-                "{unit} is subsumed by a native daemon and must not be enable-linked"
+                !UNIVERSAL_UNITS.contains(&unit),
+                "{unit} must not be enabled"
             );
+            for profile in ["drone", "ground_station"] {
+                assert!(
+                    !profile_enable_units(profile).contains(&unit),
+                    "{unit} must not be enable-linked on {profile}"
+                );
+            }
         }
-        // The retired composer oneshot is pruned, not merely disabled, so an
-        // upgraded box does not keep an orphan whose script no longer exists.
+        // The retired composer oneshot is pruned, not merely disabled.
         assert!(RETIRED_UNITS.contains(&"ados-usb-gadget-setup.service"));
+
+        // Against a surrogate unit dir: the unit file and its drop-in dir are
+        // removed, and each retired unit is stopped, disabled and reset.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("ados-discovery.service"), "[Unit]\n").unwrap();
+        std::fs::write(dir.path().join("ados-health.service"), "[Unit]\n").unwrap();
+        std::fs::create_dir(dir.path().join("ados-wifi-client.service.d")).unwrap();
+        std::fs::write(dir.path().join("ados-api.service"), "[Unit]\n").unwrap();
+        let mut calls: Vec<Vec<String>> = Vec::new();
+        prune_retired_units_in(dir.path(), &mut |args| {
+            calls.push(args.iter().map(|a| a.to_string()).collect());
+        });
+        assert!(!dir.path().join("ados-discovery.service").exists());
+        assert!(!dir.path().join("ados-health.service").exists());
+        assert!(!dir.path().join("ados-wifi-client.service.d").exists());
+        // A live unit is never touched.
+        assert!(dir.path().join("ados-api.service").exists());
+        for unit in RETIRED_UNITS {
+            for verb in ["stop", "disable", "reset-failed"] {
+                assert!(
+                    calls.contains(&vec![verb.to_string(), unit.to_string()]),
+                    "{verb} {unit} not issued"
+                );
+            }
+        }
+        assert!(!calls
+            .iter()
+            .any(|c| c.contains(&"ados-api.service".to_string())));
+    }
+
+    #[test]
+    fn hailo_unit_enabled_on_drone() {
+        assert!(profile_enable_units("drone").contains(&"ados-vision-hailo.service"));
+        assert!(!profile_enable_units("ground_station").contains(&"ados-vision-hailo.service"));
+        assert!(profile_enable_units("workstation").is_empty());
+        // A ground station that was ever a drone tears the sidecar down.
+        assert!(other_profile_units("ground_station").contains(&"ados-vision-hailo.service"));
+        assert!(!other_profile_units("drone").contains(&"ados-vision-hailo.service"));
+
+        // The shipped unit mirrors the RKNN sidecar: gated on the device node
+        // and serving the socket the vision engine's hailo backend dials.
+        let unit = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/systemd/ados-vision-hailo.service");
+        let body = std::fs::read_to_string(unit).expect("hailo unit ships");
+        assert!(body.contains("ConditionPathExists=/dev/hailo0\n"));
+        assert!(body.contains(
+            "-m ados.services.vision.hailo_sidecar --socket /run/ados/vision-hailo.sock"
+        ));
+        assert!(body.contains("PartOf=ados-supervisor.service\n"));
+        assert!(body.contains("WantedBy=ados-supervisor.service"));
+    }
+
+    #[test]
+    fn ados_api_unit_paths_narrow() {
+        let unit =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd/ados-api.service");
+        let body = std::fs::read_to_string(unit).expect("api unit ships");
+        let rw: Vec<&str> = body
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("ReadWritePaths="))
+            .flat_map(str::split_whitespace)
+            .collect();
+        assert_eq!(rw, ["/etc/ados", "/run/ados", "/var/ados", "/var/lib/ados"]);
+        // The display install leaves the sandbox through systemd-run by
+        // design; the unit says so rather than widening its own paths.
+        assert!(body.contains("systemd-run"));
     }
 
     #[test]
@@ -1889,7 +1970,14 @@ mod tests {
     fn other_profile_units_branch_by_profile() {
         // A GS rig tears down the drone-side TX + camera-encode units.
         let gs = other_profile_units("ground_station");
-        assert_eq!(gs, &["ados-wfb.service", "ados-video.service"]);
+        assert_eq!(
+            gs,
+            &[
+                "ados-wfb.service",
+                "ados-video.service",
+                "ados-vision-hailo.service"
+            ]
+        );
         // A drone rig tears down the GS RX + AP set.
         let drone = other_profile_units("drone");
         assert!(drone.contains(&"ados-wfb-rx.service"));
@@ -1897,7 +1985,7 @@ mod tests {
         assert!(drone.contains(&"ados-batman.service"));
         // It must NOT tear down the supervisor or a cross-profile unit.
         assert!(!drone.contains(&"ados-supervisor.service"));
-        assert!(!drone.contains(&"ados-discovery.service"));
+        assert!(!drone.contains(&"ados-plugin-host.service"));
     }
 
     #[test]
@@ -1966,9 +2054,9 @@ mod tests {
     #[test]
     fn universal_units_are_profile_agnostic() {
         assert!(UNIVERSAL_UNITS.contains(&"ados-display-probe.service"));
-        // The mDNS advertiser is cross-profile so every agent is discoverable
-        // for local pair-by-code, not just the ground station's static file.
-        assert!(UNIVERSAL_UNITS.contains(&"ados-discovery.service"));
+        // The native front owns the mDNS advert, so no Python advertiser is
+        // enable-linked.
+        assert!(!UNIVERSAL_UNITS.contains(&"ados-discovery.service"));
         // The native plugin host owns the per-plugin sockets by default, so it
         // is enabled cross-profile (both profiles fetch the binary). Its
         // ExecStart self-gates to /bin/true when the fallback marker is set, so
@@ -2233,7 +2321,9 @@ mod tests {
         // retired, so a legitimate shrink below this is a deliberate edit here,
         // and the message has to say so rather than accusing the scan.
         assert!(
-            checked >= 39,
+            // 39 -> 37: ados-discovery, ados-health and ados-wifi-client were
+            // removed and ados-vision-hailo was added.
+            checked >= 37,
             "parsed only {checked} unit files under {}. Either the scan is broken, \
              or units were legitimately removed -- if the latter, lower this floor \
              deliberately rather than deleting the check",
@@ -2323,7 +2413,7 @@ mod tests {
             problems.extend(restart_policy_problems(name, &body));
         }
         assert!(
-            checked >= 38,
+            checked >= 30,
             "parsed only {checked} ados-*.service files under {}",
             dir.display()
         );
@@ -2419,7 +2509,7 @@ mod tests {
             checked += 1;
             problems.extend(unguaranteed_paths(name, &body));
         }
-        assert!(checked >= 38, "parsed only {checked} units");
+        assert!(checked >= 30, "parsed only {checked} units");
         assert!(
             problems.is_empty(),
             "these units fail namespace setup when the path is absent:\n{}",

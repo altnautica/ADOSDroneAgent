@@ -226,9 +226,8 @@ class PeripheralRegistry:
 # ----------------------------------------------------------------------
 # Module-level singleton
 # ----------------------------------------------------------------------
-# Same pattern as get_input_manager() / get_pic_arbiter() /
-# get_pair_manager(). Single instance per agent process; test code can
-# call _reset_for_tests() to drop the cache.
+# Same pattern as get_input_manager() / get_pic_arbiter(). Single instance
+# per agent process; test code can call _reset_for_tests() to drop the cache.
 _instance: PeripheralRegistry | None = None
 _instance_lock = threading.Lock()
 

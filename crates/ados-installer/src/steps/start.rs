@@ -34,9 +34,6 @@ const GROUND_STATION_START_UNITS: &[&str] = &[
     "ados-input.service",
     "ados-pic.service",
     "ados-uplink-router.service",
-    // ados-wifi-client.service is absent on purpose: ados-net owns the station
-    // in-process and the install subsumes its packaged unit, so kicking it here
-    // restarts something already stopped.
 ];
 
 /// Start the top-level supervisor unit (+ the GS unit set on a ground station).
@@ -164,15 +161,15 @@ mod tests {
     }
 
     #[test]
-    fn a_subsumed_unit_is_never_started() {
-        // ados-net owns these in-process and the systemd step subsumes their
-        // packaged units on every GS install. Starting one here would revive
-        // the unit the same install just stopped. Checked against the subsume
-        // list itself so a new entry cannot quietly reacquire the defect.
-        for unit in crate::steps::systemd::ALWAYS_SUBSUMED_UNITS {
+    fn a_retired_unit_is_never_started() {
+        // The systemd step prunes every retired unit before this step runs.
+        // Starting one here would name a unit file that no longer exists.
+        // Checked against the retired list itself so a new entry cannot
+        // quietly reacquire the defect.
+        for unit in crate::steps::systemd::RETIRED_UNITS {
             assert!(
                 !GROUND_STATION_START_UNITS.contains(unit),
-                "{unit} is subsumed by a native daemon and must not be started"
+                "{unit} is retired and must not be started"
             );
         }
     }

@@ -33,12 +33,12 @@ jobs:
 
       # `ruff check .`, not `ruff check src/ tests/`.
       #
-      # The narrow scope silently exempted 30 tracked Python files from every
+      # The narrow scope silently exempted tracked Python files from every
       # lint this repository runs: scripts/emit_config_schema.py,
-      # scripts/emit_manifest_schema.py, scripts/emit_openapi.py, the two
+      # scripts/emit_manifest_schema.py, the two
       # crates/**/tests/interop/generate_fixtures.py generators, and the whole
       # of tools/api-conformance/ and tools/logd-conformance/ — two test
-      # harnesses with their own pytest suites. `.` picks up 31 more paths and
+      # harnesses with their own pytest suites. `.` picks up those paths and
       # the tree is already clean at that scope, so widening it costs nothing
       # and closes the gap. (dashboard/ and cockpit/ hold no Python at all;
       # they are Vite/TypeScript, so they were never the omission.)
