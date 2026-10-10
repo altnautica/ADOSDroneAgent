@@ -1,0 +1,1 @@
+import{i as e,n as t}from"./jsx-runtime-CU3EbJiN.js";var n=e(t(),1);function r(e){(0,n.useEffect)(()=>{if(!e)return;let t=e=>{e.preventDefault(),e.returnValue=``};return window.addEventListener(`beforeunload`,t),()=>window.removeEventListener(`beforeunload`,t)},[e])}export{r as t};

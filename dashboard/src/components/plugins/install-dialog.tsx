@@ -125,7 +125,7 @@ export function PluginInstallDialog({
         );
         toast.err(
           `Plugin installed but not granted: ${missing.join(", ")}.`,
-          disabled ? "The plugin is disabled." : "Disable it from the Plugins list.",
+          disabled ? "The extension is disabled." : "Disable it from the Extensions list.",
         );
         onOpenChange(false);
         onFinished();
@@ -188,7 +188,7 @@ function SummaryStage({ manifest, onCancel, onContinue }: SummaryStageProps) {
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Install plugin</DialogTitle>
+        <DialogTitle>Install extension</DialogTitle>
         <DialogDescription>
           Review what this plugin is and what it will add. Permissions come on
           the next screen.

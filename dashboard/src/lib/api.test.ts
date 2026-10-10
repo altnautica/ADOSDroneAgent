@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiError, isAuthChallenge } from "./api";
+import { ApiError, isAuthChallenge } from "@/shared/api-fetch";
 import { refusalDetail } from "./refusal";
 
 describe("isAuthChallenge", () => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { verifyAccess } from "@/lib/access";
-import { setAuthRequiredHandler } from "@/lib/api";
+import { setAuthChallengeHandler } from "@/shared/api-fetch";
 import { fetchPinStatus, type PinStatus } from "@/lib/pin";
 import { PinSplash } from "./PinSplash";
 
@@ -54,10 +54,10 @@ export function DashboardAccessGate({ children }: { children: ReactNode }) {
   }, [probe]);
 
   useEffect(() => {
-    setAuthRequiredHandler(() => {
+    setAuthChallengeHandler(() => {
       void probe();
     });
-    return () => setAuthRequiredHandler(null);
+    return () => setAuthChallengeHandler(null);
   }, [probe]);
 
   if (state === "checking") return <GateChecking />;

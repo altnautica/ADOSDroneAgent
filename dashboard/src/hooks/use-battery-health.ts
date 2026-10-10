@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 
 export type BatteryRuleId =
   | "cell_critical"

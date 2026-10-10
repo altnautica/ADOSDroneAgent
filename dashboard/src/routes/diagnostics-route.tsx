@@ -13,7 +13,7 @@ import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 import { fmtNum } from "@/lib/format";
 import { rebootAgent } from "@/lib/setup-actions";
 import { toast, toastFromError } from "@/lib/toast";

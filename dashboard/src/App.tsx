@@ -2,69 +2,135 @@ import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { DashboardAccessGate } from "@/components/access/DashboardAccessGate";
-import { ErrorBoundary } from "@/components/error-boundary";
+import { ErrorBoundary } from "@/shared/error-boundary";
 import { AppShell } from "@/components/layout/app-shell";
 import { SettingsLayout } from "@/components/layout/settings-layout";
 import { ProfileGate } from "@/components/profile-gate";
 import { ThemeProvider } from "@/components/theme-provider";
-import { Skeleton } from "@/components/ui/skeleton";
+import { RouteFallback } from "@/components/route-fallback";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { ComingSoonRoute } from "@/routes/coming-soon";
-import { DiagnosticsRoute } from "@/routes/diagnostics-route";
-import { TransmitRoute } from "@/routes/drone-pages";
-import {
-  MeshRoute,
-  ReceiveRoute,
-  SourcesRoute,
-} from "@/routes/ground-pages";
 import { HomeRoute } from "@/routes/home";
 import { IndexRedirect } from "@/routes/index-redirect";
-import { IoRoute } from "@/routes/io-route";
-import { LogsRoute } from "@/routes/logs-route";
-import { PairingRoute } from "@/routes/pairing-route";
-import { PeripheralsRoute } from "@/routes/peripherals-route";
-import { AdvancedSettings } from "@/routes/settings/advanced-settings";
-import { BatterySettings } from "@/routes/settings/battery-settings";
-import { CellularSettings } from "@/routes/settings/cellular-settings";
-import { CameraSettings } from "@/routes/settings/camera-settings";
-import { CloudSettings } from "@/routes/settings/cloud-settings";
-import { DiscoverySettings } from "@/routes/settings/discovery-settings";
-import { DisplaySettings } from "@/routes/settings/display-settings";
-import { MacPinSettings } from "@/routes/settings/mac-pin-settings";
-import { MavlinkSettings } from "@/routes/settings/mavlink-settings";
-import { NetworkSettings } from "@/routes/settings/network-settings";
-import { ProfileSettings } from "@/routes/settings/profile-settings";
-import { RegionSettings } from "@/routes/settings/region-settings";
-import { SecuritySettings } from "@/routes/settings/security-settings";
-import { SelfHealSettings } from "@/routes/settings/self-heal-settings";
-import { SwarmSettings } from "@/routes/settings/swarm-settings";
-import { VisionSettings } from "@/routes/settings/vision-settings";
-import { VideoRoute } from "@/routes/video-route";
+import { NotFoundRoute } from "@/routes/not-found";
 
-// Code-split heavy routes. The telemetry page pulls in
-// @tanstack/react-virtual + ~600 params; the plugins route pulls in the
-// install-dialog + risk-badge bundle. Splitting them keeps the main
-// chunk small.
+// Every route except Home is code-split so the main chunk carries only the
+// shell and the landing page. Each page loads on first navigation.
+const DiagnosticsRoute = lazy(() =>
+  import("@/routes/diagnostics-route").then((m) => ({ default: m.DiagnosticsRoute })),
+);
+const TransmitRoute = lazy(() =>
+  import("@/routes/drone-pages").then((m) => ({ default: m.TransmitRoute })),
+);
+const MeshRoute = lazy(() =>
+  import("@/routes/ground-pages").then((m) => ({ default: m.MeshRoute })),
+);
+const ReceiveRoute = lazy(() =>
+  import("@/routes/ground-pages").then((m) => ({ default: m.ReceiveRoute })),
+);
+const SourcesRoute = lazy(() =>
+  import("@/routes/ground-pages").then((m) => ({ default: m.SourcesRoute })),
+);
+const IoRoute = lazy(() =>
+  import("@/routes/io-route").then((m) => ({ default: m.IoRoute })),
+);
+const LogsRoute = lazy(() =>
+  import("@/routes/logs-route").then((m) => ({ default: m.LogsRoute })),
+);
+const PairingRoute = lazy(() =>
+  import("@/routes/pairing-route").then((m) => ({ default: m.PairingRoute })),
+);
+const PeripheralsRoute = lazy(() =>
+  import("@/routes/peripherals-route").then((m) => ({ default: m.PeripheralsRoute })),
+);
+const ExtensionsRoute = lazy(() =>
+  import("@/routes/extensions-route").then((m) => ({ default: m.ExtensionsRoute })),
+);
 const TelemetryRoute = lazy(() =>
-  import("@/routes/telemetry-route").then((m) => ({
-    default: m.TelemetryRoute,
+  import("@/routes/telemetry-route").then((m) => ({ default: m.TelemetryRoute })),
+);
+const VideoRoute = lazy(() =>
+  import("@/routes/video-route").then((m) => ({ default: m.VideoRoute })),
+);
+const AdvancedSettings = lazy(() =>
+  import("@/routes/settings/advanced-settings").then((m) => ({
+    default: m.AdvancedSettings,
   })),
 );
-const PluginsRoute = lazy(() =>
-  import("@/routes/plugins-route").then((m) => ({
-    default: m.PluginsRoute,
+const BatterySettings = lazy(() =>
+  import("@/routes/settings/battery-settings").then((m) => ({
+    default: m.BatterySettings,
   })),
 );
-
-function RouteFallback() {
-  return (
-    <div className="p-6 space-y-3">
-      <Skeleton className="h-6 w-40" />
-      <Skeleton className="h-4 w-64" />
-      <Skeleton className="h-32 w-full" />
-    </div>
-  );
-}
+const CellularSettings = lazy(() =>
+  import("@/routes/settings/cellular-settings").then((m) => ({
+    default: m.CellularSettings,
+  })),
+);
+const CameraSettings = lazy(() =>
+  import("@/routes/settings/camera-settings").then((m) => ({
+    default: m.CameraSettings,
+  })),
+);
+const CloudSettings = lazy(() =>
+  import("@/routes/settings/cloud-settings").then((m) => ({
+    default: m.CloudSettings,
+  })),
+);
+const DiscoverySettings = lazy(() =>
+  import("@/routes/settings/discovery-settings").then((m) => ({
+    default: m.DiscoverySettings,
+  })),
+);
+const DisplaySettings = lazy(() =>
+  import("@/routes/settings/display-settings").then((m) => ({
+    default: m.DisplaySettings,
+  })),
+);
+const MacPinSettings = lazy(() =>
+  import("@/routes/settings/mac-pin-settings").then((m) => ({
+    default: m.MacPinSettings,
+  })),
+);
+const MavlinkSettings = lazy(() =>
+  import("@/routes/settings/mavlink-settings").then((m) => ({
+    default: m.MavlinkSettings,
+  })),
+);
+const NetworkSettings = lazy(() =>
+  import("@/routes/settings/network-settings").then((m) => ({
+    default: m.NetworkSettings,
+  })),
+);
+const ProfileSettings = lazy(() =>
+  import("@/routes/settings/profile-settings").then((m) => ({
+    default: m.ProfileSettings,
+  })),
+);
+const RegionSettings = lazy(() =>
+  import("@/routes/settings/region-settings").then((m) => ({
+    default: m.RegionSettings,
+  })),
+);
+const SecuritySettings = lazy(() =>
+  import("@/routes/settings/security-settings").then((m) => ({
+    default: m.SecuritySettings,
+  })),
+);
+const SelfHealSettings = lazy(() =>
+  import("@/routes/settings/self-heal-settings").then((m) => ({
+    default: m.SelfHealSettings,
+  })),
+);
+const SwarmSettings = lazy(() =>
+  import("@/routes/settings/swarm-settings").then((m) => ({
+    default: m.SwarmSettings,
+  })),
+);
+const VisionSettings = lazy(() =>
+  import("@/routes/settings/vision-settings").then((m) => ({
+    default: m.VisionSettings,
+  })),
+);
 
 export function App() {
   return (
@@ -108,7 +174,7 @@ export function App() {
                     </ProfileGate>
                   }
                 />
-                <Route path="/plugins" element={<PluginsRoute />} />
+                <Route path="/extensions" element={<ExtensionsRoute />} />
                 <Route path="/peripherals" element={<PeripheralsRoute />} />
                 <Route path="/logs" element={<LogsRoute />} />
                 <Route path="/diagnostics" element={<DiagnosticsRoute />} />
@@ -202,20 +268,18 @@ export function App() {
                     }
                   />
                   <Route path="discovery" element={<DiscoverySettings />} />
-                  <Route path="display" element={<DisplaySettings />} />
+                  <Route
+                    path="display"
+                    element={
+                      <ProfileGate allow={["ground_station"]}>
+                        <DisplaySettings />
+                      </ProfileGate>
+                    }
+                  />
                   <Route path="advanced" element={<AdvancedSettings />} />
                 </Route>
-                <Route
-                  path="*"
-                  element={
-                    <ComingSoonRoute
-                      title="Coming soon"
-                      description="This page hasn't been wired into the new dashboard yet."
-                    />
-                  }
-                />
+                <Route path="*" element={<NotFoundRoute />} />
               </Route>
-              <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </Suspense>
           </DashboardAccessGate>

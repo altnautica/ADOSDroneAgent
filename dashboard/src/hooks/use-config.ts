@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 
 // Loose shape — the agent returns a Pydantic dump with secrets redacted.
 // We only consume the agent slice for log level and a couple of advanced

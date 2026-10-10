@@ -32,6 +32,9 @@ if ! command -v npm >/dev/null 2>&1; then
     exit 1
 fi
 
+echo "[build-dashboard] checking dashboard/src/shared against web-shared/"
+bash "${repo_root}/scripts/sync-web-shared.sh" --check
+
 echo "[build-dashboard] installing dependencies"
 ( cd "${dashboard_src}" && npm ci --no-audit --no-fund )
 

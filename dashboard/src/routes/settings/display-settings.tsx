@@ -3,7 +3,7 @@ import { Monitor } from "lucide-react";
 
 import { RiskBadge } from "@/components/settings/risk-badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 
 interface DisplayOption {
   id: string;

@@ -1,0 +1,1 @@
+import{c as e,g as t}from"./card-CUDA6lEQ.js";function n(){return t({queryKey:[`config`],queryFn:()=>e(`/api/config`),staleTime:3e4,refetchOnWindowFocus:!1})}export{n as t};

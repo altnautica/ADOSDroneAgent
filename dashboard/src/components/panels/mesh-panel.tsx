@@ -8,7 +8,7 @@ import {
 } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
 import { useStatus } from "@/hooks/use-status";
-import { ApiError } from "@/lib/api";
+import { ApiError } from "@/shared/api-fetch";
 import { fmtPercent } from "@/lib/format";
 
 // GET /api/v1/ground-station/mesh — the relay/receiver poll loop's mesh-state

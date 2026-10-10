@@ -17,7 +17,7 @@ import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useResource } from "@/hooks/use-resource";
 import { useSnapshot } from "@/hooks/use-snapshot";
-import { ApiError, apiFetch } from "@/lib/api";
+import { ApiError, apiFetch } from "@/shared/api-fetch";
 import { resolveFirmwareType } from "@/lib/fc-firmware";
 import { fmtNum, fmtPercent, fmtVoltage } from "@/lib/format";
 import { loadParamMetadata, type ParamMetadata } from "@/lib/param-metadata";

@@ -17,6 +17,8 @@ import {
 import { NavLink } from "react-router-dom";
 
 import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useNodeProfile } from "@/hooks/use-node-profile";
 import { useStatus } from "@/hooks/use-status";
 import type { GroundRole, Profile } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -32,7 +34,7 @@ const COMMON_TOP: NavItem[] = [{ to: "/", label: "Home", icon: Home }];
 
 const COMMON_BOTTOM: NavItem[] = [
   { to: "/pairing", label: "Pairing", icon: Link2 },
-  { to: "/plugins", label: "Plugins", icon: Plug },
+  { to: "/extensions", label: "Extensions", icon: Plug },
   { to: "/peripherals", label: "Peripherals", icon: Cpu },
   { to: "/logs", label: "Logs", icon: ScrollText },
   { to: "/diagnostics", label: "Diagnostics", icon: Wrench },
@@ -75,10 +77,11 @@ interface SidebarLinkProps {
 function SidebarLink({ item, collapsed }: SidebarLinkProps) {
   const Icon = item.icon;
 
-  return (
+  const link = (
     <NavLink
       to={item.to}
       end={item.to === "/"}
+      aria-label={collapsed ? item.label : undefined}
       className={({ isActive }) =>
         cn(
           "flex items-center gap-3 px-3 py-2 text-sm rounded-md transition-colors",
@@ -88,9 +91,17 @@ function SidebarLink({ item, collapsed }: SidebarLinkProps) {
         )
       }
     >
-      <Icon className="h-4 w-4 shrink-0" />
+      <Icon className="h-4 w-4 shrink-0" aria-hidden />
       {!collapsed && <span>{item.label}</span>}
     </NavLink>
+  );
+
+  if (!collapsed) return link;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{link}</TooltipTrigger>
+      <TooltipContent side="right">{item.label}</TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -100,7 +111,7 @@ export function Sidebar() {
   const mobileNavOpen = useUiStore((s) => s.mobileNavOpen);
   const closeMobileNav = useUiStore((s) => s.closeMobileNav);
 
-  const profile: Profile = (status.data?.profile as Profile) ?? "auto";
+  const profile = useNodeProfile();
   const role: GroundRole = status.data?.ground_role ?? "direct";
 
   const profileItems = itemsForProfile(profile, role);

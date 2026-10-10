@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 
 import { App } from "./App";
-import { consumeUrlKey } from "./lib/api-key";
+import { consumeUrlKey } from "./shared/api-key";
 import "./styles/globals.css";
 
 // Capture a one-shot ?ados_key=… URL parameter into localStorage before
@@ -20,6 +20,8 @@ const queryClient = new QueryClient({
       // hook level for hot data (status / snapshot / heartbeat).
       staleTime: 5_000,
       refetchOnWindowFocus: false,
+      // Polls stop while the tab is hidden; they resume on return.
+      refetchIntervalInBackground: false,
       retry: 1,
     },
   },

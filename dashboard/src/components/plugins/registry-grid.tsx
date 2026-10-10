@@ -78,7 +78,7 @@ export function RegistryGrid({ installedIds, busy, onInstall }: Props) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium">Available plugins</h2>
+        <h2 className="text-sm font-medium">Available extensions</h2>
         <span className="text-xs text-muted-foreground">
           First-party catalog. Downloaded fresh each install.
         </span>

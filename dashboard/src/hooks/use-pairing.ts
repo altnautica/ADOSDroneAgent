@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 
 /** `GET /api/pairing/info`. A node has one owner: `owner_id`/`paired_at` are
  *  set only while paired, `pairing_code` only while unpaired (and only to a

@@ -38,7 +38,7 @@ import {
   type SensorFlag,
 } from "./telemetry-decoders";
 import { WebSocketTransport, mavlinkWsUrl } from "./transport";
-import { WS_TICKET_PROTOCOL, mintMavlinkWsTicket } from "./ws-ticket";
+import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/shared/ws-ticket";
 
 // ── Poll groups ────────────────────────────────────────────────
 
@@ -224,7 +224,7 @@ export class MspTelemetryClient {
 
   /** Open the WS proxy (ticket-authenticated when paired) and start polling. */
   async connect(signal?: AbortSignal): Promise<void> {
-    const ticket = await mintMavlinkWsTicket(signal);
+    const ticket = await mintWsTicket("gs.mavlink_ws", signal);
     const url = mavlinkWsUrl();
     try {
       await Promise.race([

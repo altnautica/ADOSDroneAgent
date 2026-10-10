@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 
 /** `GET /api/cloud/link`: the cloud relay's broker session and last status
  * POST. The route answers 404 while the relay is not reporting. */

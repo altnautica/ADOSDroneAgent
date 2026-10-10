@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { verifyAccess } from "./access";
-import { ApiError, apiFetch, setAuthRequiredHandler } from "./api";
+import { ApiError, apiFetch, setAuthChallengeHandler } from "@/shared/api-fetch";
 import {
   groupPermissions,
   installPlugin,
   requiresCoolOff,
   type PluginManifestSummary,
 } from "./plugin-install";
-import { clearSession, getSession, setSession } from "./session";
+import { clearSession, getSession, setSession } from "@/shared/session";
 
 function reply(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -27,7 +27,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  setAuthRequiredHandler(null);
+  setAuthChallengeHandler(null);
   clearSession();
 });
 
@@ -38,7 +38,7 @@ describe("a refused request", () => {
     // operator out to the PIN splash.
     fetchMock.mockResolvedValueOnce(reply(403, { detail: "capability_denied: mavlink.write" }));
     const reverify = vi.fn();
-    setAuthRequiredHandler(reverify);
+    setAuthChallengeHandler(reverify);
 
     await expect(apiFetch("/api/plugins/demo/tools/x/invoke", { method: "POST" })).rejects.toBeInstanceOf(
       ApiError,

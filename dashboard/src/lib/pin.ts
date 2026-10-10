@@ -6,7 +6,7 @@
 // signal. On a correct PIN the agent returns a session token, stored via
 // `setSession` so subsequent `apiFetch` calls carry it.
 
-import { setSession } from "./session";
+import { setSession } from "@/shared/session";
 
 export interface PinStatus {
   pin_set: boolean;

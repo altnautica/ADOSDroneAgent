@@ -12,12 +12,16 @@ on:
   push:
     paths:
       - "dashboard/**"
+      - "web-shared/**"
+      - "scripts/sync-web-shared.sh"
       - "src/ados/dashboard/static/**"
       - "scripts/build-dashboard.sh"
       - ".github/workflows/dashboard-build.yml"
   pull_request:
     paths:
       - "dashboard/**"
+      - "web-shared/**"
+      - "scripts/sync-web-shared.sh"
       - "src/ados/dashboard/static/**"
       - "scripts/build-dashboard.sh"
       - ".github/workflows/dashboard-build.yml"
@@ -28,6 +32,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # dashboard/src/shared/ is a committed copy of web-shared/src/; a change
+      # to one without re-syncing the other ships divergent code.
+      - name: Shared web code in sync
+        run: bash scripts/sync-web-shared.sh --check
 
       - name: Set up Node.js
         uses: actions/setup-node@v7
@@ -63,6 +72,20 @@ jobs:
           test -d dashboard/dist/assets
           ls -la dashboard/dist
           du -sh dashboard/dist
+
+      # Main entry chunk budget: 450 KB uncompressed. Heavy pages and the
+      # chart library live in lazy chunks; a regression here means something
+      # was imported eagerly from the shell or Home.
+      - name: Main bundle within budget
+        run: |
+          set -euo pipefail
+          main="$(ls dashboard/dist/assets/index-*.js)"
+          size="$(du -b $main | awk '{s+=$1} END {print s}')"
+          echo "main JS: ${size} bytes"
+          if [ "$size" -gt 460800 ]; then
+            echo "::error::Dashboard main JS is ${size} bytes, over the 460800-byte budget."
+            exit 1
+          fi
 
       # Rebuild through the real staging script and fail if the committed bundle
       # differs. Compares CONTENT rather than the asset filenames alone: Vite

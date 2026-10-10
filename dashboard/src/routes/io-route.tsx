@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 import { toast, toastFromError } from "@/lib/toast";
 
 // GET /api/v1/ground-station/gamepads — the live evdev controllers plus the

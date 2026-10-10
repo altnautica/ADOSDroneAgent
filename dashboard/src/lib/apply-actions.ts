@@ -8,7 +8,7 @@
 
 import { z } from "zod";
 
-import { apiFetch } from "./api";
+import { apiFetch } from "@/shared/api-fetch";
 import type { GroundRole, Profile } from "./types";
 
 // ---- request shapes ------------------------------------------------

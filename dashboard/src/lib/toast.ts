@@ -5,7 +5,7 @@
 
 import { toast as sonnerToast } from "sonner";
 
-import { ApiError } from "./api";
+import { ApiError } from "@/shared/api-fetch";
 
 export const toast = {
   ok(message: string, description?: string) {

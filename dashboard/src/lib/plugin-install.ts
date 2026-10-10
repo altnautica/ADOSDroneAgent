@@ -7,7 +7,7 @@
 // same credential the rest of the dashboard sends. If a required permission
 // did not land, the caller disables the plugin so it never runs half-granted.
 
-import { ApiError, apiFetch } from "@/lib/api";
+import { ApiError, apiFetch } from "@/shared/api-fetch";
 
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 

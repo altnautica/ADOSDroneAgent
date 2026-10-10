@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useNodeProfile } from "@/hooks/use-node-profile";
 import { useStatus } from "@/hooks/use-status";
 import type { GroundRole, Profile } from "@/lib/types";
 
@@ -78,10 +79,10 @@ function LoadingPlaceholder() {
 
 export function ProfileGate({ allow, roles, children }: ProfileGateProps) {
   const status = useStatus();
-  const profile: Profile = (status.data?.profile as Profile) ?? "auto";
+  const profile = useNodeProfile();
   const role: GroundRole = status.data?.ground_role ?? "direct";
 
-  if (status.isPending && !status.data) {
+  if (profile === "auto" && status.isPending && !status.data) {
     return <LoadingPlaceholder />;
   }
 

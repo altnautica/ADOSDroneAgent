@@ -3,7 +3,7 @@
 // the diagnostics reboot action). Onboarding itself lives in the CLI
 // installer, not the browser.
 
-import { apiFetch } from "./api";
+import { apiFetch } from "@/shared/api-fetch";
 import type { RegulatoryMode } from "./types";
 
 // Operating-region (RF regulatory posture). Persists the operator's

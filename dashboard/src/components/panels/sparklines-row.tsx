@@ -1,8 +1,15 @@
-import { Sparkline } from "@/components/chart/sparkline";
+import { lazy, Suspense } from "react";
+
 import { Card, CardContent } from "@/components/ui/card";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { useTimeSeries } from "@/hooks/use-time-series";
+
+// The chart library is the heaviest dependency on Home; load it in its own
+// chunk so the shell renders before the charts arrive.
+const Sparkline = lazy(() =>
+  import("@/components/chart/sparkline").then((m) => ({ default: m.Sparkline })),
+);
 
 interface CardProps {
   label: string;
@@ -28,7 +35,9 @@ function MiniCard({ label, unit, value, data, tone = "primary" }: CardProps) {
           </span>
           <span className="text-xs text-muted-foreground">{unit}</span>
         </div>
-        <Sparkline data={data} tone={tone} height={48} />
+        <Suspense fallback={<div style={{ height: 48 }} aria-hidden />}>
+          <Sparkline data={data} tone={tone} height={48} />
+        </Suspense>
       </CardContent>
     </Card>
   );

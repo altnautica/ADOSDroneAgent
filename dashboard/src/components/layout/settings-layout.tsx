@@ -17,10 +17,12 @@ import {
   Wifi,
   type LucideIcon,
 } from "lucide-react";
+import { Suspense } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 
 import type { AllowedProfile } from "@/components/profile-gate";
-import { useStatus } from "@/hooks/use-status";
+import { RouteFallback } from "@/components/route-fallback";
+import { useNodeProfile } from "@/hooks/use-node-profile";
 import type { Profile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -193,6 +195,7 @@ const SECTIONS: SectionLink[] = [
     icon: Monitor,
     blurb: "Local kiosk display selection.",
     group: "System & safety",
+    allow: ["ground_station"],
   },
   {
     to: "/settings/advanced",
@@ -204,8 +207,7 @@ const SECTIONS: SectionLink[] = [
 ];
 
 export function SettingsLayout() {
-  const status = useStatus();
-  const profile: Profile = (status.data?.profile as Profile) ?? "auto";
+  const profile = useNodeProfile();
 
   return (
     <div className="container mx-auto px-4 py-6 max-w-5xl">
@@ -263,7 +265,9 @@ export function SettingsLayout() {
         </nav>
 
         <main className="min-w-0">
-          <Outlet />
+          <Suspense fallback={<RouteFallback />}>
+            <Outlet />
+          </Suspense>
         </main>
       </div>
     </div>

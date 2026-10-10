@@ -4,8 +4,8 @@ import { useUiStore } from "@/stores/ui-store";
 
 // Applies the persisted theme preference to the document root. The
 // `system` choice follows the OS color-scheme media query and updates
-// live if the OS preference flips. The Tailwind config keys off the
-// `dark` class on <html>.
+// live if the OS preference flips. Dark is the default token set on
+// :root; light is selected with `data-theme="light"` on <html>.
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const theme = useUiStore((s) => s.theme);
 
@@ -21,8 +21,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       } else {
         resolved = theme;
       }
-      root.classList.toggle("dark", resolved === "dark");
-      root.classList.toggle("light", resolved === "light");
+      if (resolved === "light") root.dataset.theme = "light";
+      else delete root.dataset.theme;
     };
 
     apply();

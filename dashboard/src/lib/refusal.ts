@@ -1,4 +1,4 @@
-import { ApiError, isAuthChallenge } from "./api";
+import { ApiError, isAuthChallenge } from "@/shared/api-fetch";
 
 /**
  * The agent's own words when it answered and refused, or `null` when it did not

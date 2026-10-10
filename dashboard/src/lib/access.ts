@@ -2,8 +2,8 @@
 // plane right now. The access gate runs it on load and whenever a request is
 // refused; it is the ONE place a stored session is judged dead and dropped.
 
-import { ApiError, apiFetch, isAuthChallenge } from "./api";
-import { clearSession } from "./session";
+import { ApiError, apiFetch, isAuthChallenge } from "@/shared/api-fetch";
+import { clearSession } from "@/shared/session";
 
 export type AccessVerdict = "ok" | "locked";
 

@@ -3,7 +3,7 @@
 // Profile-gated on the agent (they 404 on a drone / workstation), so the
 // Cellular page only calls them once it knows the node is a ground station.
 
-import { apiFetch } from "./api";
+import { apiFetch } from "@/shared/api-fetch";
 
 // GET /api/v1/ground-station/modem-status — mmcli-backed presence + facts. A
 // missing modem / no ModemManager reports present:false with a reason; a

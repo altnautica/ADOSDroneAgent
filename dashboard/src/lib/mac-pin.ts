@@ -4,7 +4,7 @@
 // and profile-agnostic (they work on any node), so the MAC-pin page reads and
 // writes them directly.
 
-import { apiFetch } from "./api";
+import { apiFetch } from "@/shared/api-fetch";
 
 // GET /api/v1/network/mac/adapters — the per-adapter stable-MAC verdicts. An
 // empty adapter list is a real fact ("nothing needs pinning"), distinct from a

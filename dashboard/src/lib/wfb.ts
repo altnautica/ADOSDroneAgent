@@ -3,7 +3,7 @@
 // and RX-side fields together and the caller decides which to render
 // based on the agent profile and the reported state.
 
-import { apiFetch } from "./api";
+import { apiFetch } from "@/shared/api-fetch";
 import type { WfbStatus } from "./types";
 
 export function getWfbStatus() {

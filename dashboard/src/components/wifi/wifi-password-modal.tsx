@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ApiError } from "@/lib/api";
+import { ApiError } from "@/shared/api-fetch";
 import { toast, toastFromError } from "@/lib/toast";
 import { isSecured, joinWifi } from "@/lib/wifi";
 

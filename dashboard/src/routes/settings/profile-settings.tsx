@@ -15,6 +15,7 @@ import {
   profileFromStatus,
 } from "@/lib/apply-actions";
 import type { GroundRole } from "@/lib/types";
+import { invalidateProfile } from "@/shared/use-profile";
 
 type ApplyProfile = "drone" | "ground_station";
 
@@ -88,6 +89,8 @@ export function ProfileSettings() {
       const section = res.sections.profile;
       if (res.overall && section?.ok) {
         toast.ok(section.message || "Profile saved.");
+        // The node may now serve a different page set; probe it again.
+        invalidateProfile();
       } else {
         toast.err(section?.message ?? "Apply failed.");
       }

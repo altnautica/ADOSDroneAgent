@@ -24,7 +24,7 @@ import { MspSerialQueue } from "./serial-queue";
 import { SettingsClient, type SettingInfo } from "./settings-client";
 import { MSP_CMD, decodeInavStatus, decodeStatusEx } from "./telemetry-decoders";
 import { WebSocketTransport, mavlinkWsUrl } from "./transport";
-import { WS_TICKET_PROTOCOL, mintMavlinkWsTicket } from "./ws-ticket";
+import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/shared/ws-ticket";
 import type { CliSettingChange } from "./types";
 
 /** MSP_EEPROM_WRITE — persist the RAM settings to EEPROM (no payload). */
@@ -134,7 +134,7 @@ export class MspFcClient {
 
   /** Open the WS proxy (ticket-authenticated when paired, bare otherwise). */
   async connect(signal?: AbortSignal): Promise<void> {
-    const ticket = await mintMavlinkWsTicket(signal);
+    const ticket = await mintWsTicket("gs.mavlink_ws", signal);
     const url = mavlinkWsUrl();
     await Promise.race([
       this.transport.connect(url, ticket ? [WS_TICKET_PROTOCOL, ticket] : undefined),

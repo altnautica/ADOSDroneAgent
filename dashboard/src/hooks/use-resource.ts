@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 
 // Tiny shared hook for read-only resource endpoints. Each panel below
 // uses this to fetch its slice. Polling is opt-in via refetchMs since

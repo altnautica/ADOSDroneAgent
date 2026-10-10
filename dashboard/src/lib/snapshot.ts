@@ -1,4 +1,4 @@
-import { ApiError, credentialHeaders } from "./api";
+import { ApiError, credentialHeaders } from "@/shared/api-fetch";
 
 /** One still frame and the moment the agent grabbed it. */
 export interface Snapshot {

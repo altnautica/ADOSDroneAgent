@@ -1,6 +1,6 @@
 // Helpers for the Wi-Fi panel: REST wrappers + presentation utilities.
 
-import { apiFetch } from "./api";
+import { apiFetch } from "@/shared/api-fetch";
 import type {
   WifiForgetResult,
   WifiJoinResult,

@@ -1,3 +1,4 @@
+import { Suspense } from "react";
 import { Outlet } from "react-router-dom";
 import { Toaster } from "sonner";
 
@@ -5,13 +6,11 @@ import { BannerHost } from "./banner-host";
 import { BottomDock } from "./bottom-dock";
 import { Header } from "./header";
 import { Sidebar } from "./sidebar";
-import { useWakeLock } from "@/hooks/use-wake-lock";
+import { RouteFallback } from "@/components/route-fallback";
 import { useUiStore } from "@/stores/ui-store";
 
 export function AppShell() {
   const theme = useUiStore((s) => s.theme);
-  // Keep the display awake while the console is open (laptop or panel).
-  useWakeLock();
   return (
     <div className="flex flex-col min-h-dvh">
       <Header />
@@ -20,7 +19,9 @@ export function AppShell() {
         <main className="flex-1 min-w-0">
           <BannerHost />
           <div className="px-4 lg:px-6 py-4 lg:py-6">
-            <Outlet />
+            <Suspense fallback={<RouteFallback />}>
+              <Outlet />
+            </Suspense>
           </div>
         </main>
       </div>

@@ -1,0 +1,1 @@
+import{c as e,g as t}from"./card-CUDA6lEQ.js";function n(){return e(`/api/wfb`)}function r(t){return e(`/api/video/config`,{method:`POST`,body:t})}function i(){return t({queryKey:[`wfb`,`status`],queryFn:()=>n(),refetchInterval:2e3})}export{r as n,i as t};

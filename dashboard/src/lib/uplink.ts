@@ -4,7 +4,7 @@
 // workstation), so the Network panel only calls them once it knows the node is
 // a ground station.
 
-import { apiFetch } from "./api";
+import { apiFetch } from "@/shared/api-fetch";
 
 // /api/v1/ground-station/network — the aggregate uplink matrix. Each leg is the
 // agent's own report; `active_uplink` is the daemon's authoritative selection.
