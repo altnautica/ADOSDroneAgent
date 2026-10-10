@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The cockpit builds from its copy of the shared web code; a copy that
       # drifted from web-shared/ would ship code nobody reviewed there.
