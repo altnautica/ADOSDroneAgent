@@ -290,12 +290,16 @@ struct PathConfig {
 /// (they are per-path in mediamtx, NOT global).
 #[derive(Debug, Serialize)]
 struct PathDefaults {
-    /// Route the ORIGINAL absolute timestamps of RTSP/WebRTC frames instead of
-    /// replacing them. Upstream defaults this to false, which means mediamtx
-    /// overwrites each frame's timestamp with the current time and destroys the
-    /// capture-time information — exactly the field a frame-to-pose or
-    /// glass-to-glass measurement needs. There is no reason to prefer the
-    /// rewritten value on either profile.
+    /// Kept false on both profiles. With it on, mediamtx skips every RTP
+    /// packet of an RTSP publisher until that publisher's first RTCP sender
+    /// report, and the ffmpeg encoder's first one lands about 5 s after it
+    /// starts publishing, so every encoder spawn, camera recovery and
+    /// hero/thumbnail switch blanked `main` for every reader for ~5 s
+    /// (measured on the bench: the publisher session carried bytes from
+    /// +0.1 s while the path's bytesReceived stayed 0 for 5.0 s). Frame
+    /// capture time for latency measurement travels in the wall-clock SEI
+    /// the agent injects upstream of mediamtx (`video.wfb.sei_latency`), not
+    /// in RTP timestamps.
     #[serde(rename = "useAbsoluteTimestamp")]
     use_absolute_timestamp: bool,
     record: bool,
@@ -597,7 +601,7 @@ pub fn mediamtx_config_yaml(params: &ConfigParams) -> String {
             Some(params.lan_ips.to_vec())
         },
         path_defaults: PathDefaults {
-            use_absolute_timestamp: true,
+            use_absolute_timestamp: false,
             record: rec.enabled,
             record_path: record_path_template(&rec.root),
             record_format: "fmp4".into(),
@@ -1356,9 +1360,11 @@ mod tests {
             // recording without it is a write-only store.
             assert_eq!(v["playback"], true);
             assert_eq!(v["playbackAddress"], "127.0.0.1:9996");
-            // mediamtx's default REPLACES each frame's timestamp with the
-            // current time, destroying capture-time information.
-            assert_eq!(pd["useAbsoluteTimestamp"], true);
+            // Off: with it on, mediamtx drops every RTP packet until the
+            // encoder's first RTCP sender report (~5 s after each spawn), which
+            // blanked `main` on every encoder respawn and profile switch.
+            // Capture time rides in the injected SEI instead.
+            assert_eq!(pd["useAbsoluteTimestamp"], false);
             // No hook: the reclaim owner is the supervisor janitor, and a
             // second reclaimer would race it to delete the same files.
             assert!(pd.get("runOnRecordSegmentComplete").is_none());
