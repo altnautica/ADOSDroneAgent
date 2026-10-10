@@ -130,6 +130,9 @@ pub enum ApLiveness {
     /// evidence of a fault, and restarting the AP on it would turn a missing
     /// `iw` binary into a reboot loop of the operator's only reachability.
     Unknown(&'static str),
+    /// The hostapd unit is not active: no AP at all. Never acted on here; the
+    /// setup-AP guard owns starting it (and retries every tick).
+    Down,
 }
 
 /// Last observed transmit counter on the AP interface and when it last moved.
@@ -786,7 +789,7 @@ impl HostapdManager {
     pub async fn supervise(&self) -> ApLiveness {
         if !self.is_unit_active(HOSTAPD_UNIT).await {
             *self.tx_sample.lock() = None;
-            return ApLiveness::Unknown("unit_inactive");
+            return ApLiveness::Down;
         }
         let verdict = self.check_liveness().await;
         if let ApLiveness::Stalled(reason) = verdict {

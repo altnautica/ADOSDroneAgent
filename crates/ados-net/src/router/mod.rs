@@ -99,6 +99,9 @@ impl Prober for CloudProber {
 #[async_trait]
 pub trait RouteApplier: Send + Sync {
     async fn apply(&self, iface: &str, gateway: Option<&str>) -> bool;
+    /// The interface the router-programmed default route points at now, or
+    /// `None` when it is absent or could not be read.
+    async fn installed_iface(&self) -> Option<String>;
 }
 
 /// Production route applier: `ip route replace default ...` over the crate's
@@ -134,6 +137,9 @@ impl RouteApplier for IpRouteApplier {
     async fn apply(&self, iface: &str, gateway: Option<&str>) -> bool {
         failover::apply_default_route(self.runner.as_ref(), iface, gateway).await
     }
+    async fn installed_iface(&self) -> Option<String> {
+        failover::installed_default_iface(self.runner.as_ref()).await
+    }
 }
 
 /// Live router state, guarded by a single async mutex so a manager-event tick
@@ -147,6 +153,9 @@ struct RouterState {
     /// Monotonic instant of the last switch; `None` == never switched (treated
     /// as "cooldown elapsed", matching the Python `_last_switch_at = 0.0`).
     last_switch_at: Option<Instant>,
+    /// Whether the default route for the active uplink was programmed. A
+    /// failed apply is retried on every tick until it lands.
+    route_applied: bool,
 }
 
 /// The externally-visible effects of a decided switch, cloned out of
@@ -434,7 +443,7 @@ impl UplinkRouter {
     /// that meant the lock was held longest at the worst possible moment, when
     /// the link had already dropped. Everything this needs from the state is
     /// carried in the [`SwitchEffect`] instead, so nothing here touches it.
-    async fn commit_switch(&self, effect: SwitchEffect) {
+    async fn commit_switch(&self, effect: SwitchEffect) -> bool {
         let SwitchEffect {
             previous,
             uplink,
@@ -442,14 +451,10 @@ impl UplinkRouter {
             reachable,
         } = effect;
 
-        if let Some(name) = &uplink {
-            let iface = self
-                .uplink_iface(name)
-                .await
-                .unwrap_or_else(|| name.clone());
-            let gateway = self.uplink_gateway(name).await;
-            self.route.apply(&iface, gateway.as_deref()).await;
-        }
+        let route_ok = match &uplink {
+            Some(name) => self.apply_route(name).await,
+            None => true,
+        };
 
         // Presence of the flag is the mesh gateway-election signal: write it on
         // a switch to a real uplink, unlink it on a switch to None.
@@ -473,17 +478,49 @@ impl UplinkRouter {
             data_cap_state: None,
             timestamp_ms: self.now_ms(),
         });
+        route_ok
+    }
+
+    /// Program the default route for uplink `name` and record whether it took.
+    async fn apply_route(&self, name: &str) -> bool {
+        let iface = self
+            .uplink_iface(name)
+            .await
+            .unwrap_or_else(|| name.to_string());
+        let gateway = self.uplink_gateway(name).await;
+        let ok = self.route.apply(&iface, gateway.as_deref()).await;
+        self.state.lock().await.route_applied = ok;
+        ok
+    }
+
+    /// Re-apply the active uplink's route when the last apply failed or the
+    /// installed default no longer names its interface (a link flap, or
+    /// another tool rewriting the table).
+    async fn verify_route(&self, name: &str) {
+        let applied = self.state.lock().await.route_applied;
+        let want = self
+            .uplink_iface(name)
+            .await
+            .unwrap_or_else(|| name.to_string());
+        if applied && self.route.installed_iface().await.as_deref() == Some(want.as_str()) {
+            return;
+        }
+        if self.apply_route(name).await {
+            info!(uplink = %name, iface = %want, "uplink.route_reapplied");
+        } else {
+            warn!(uplink = %name, iface = %want, "uplink.route_reapply_failed_retrying");
+        }
     }
 
     /// Switch the active uplink and run the side effects it implies. Ports
     /// `_switch_to`, split across the lock boundary: record under the guard,
     /// commit without it. Callers must NOT hold the state lock.
-    async fn switch_to(&self, uplink: Option<String>, available: Vec<String>) {
+    async fn switch_to(&self, uplink: Option<String>, available: Vec<String>) -> bool {
         let effect = {
             let mut st = self.state.lock().await;
             Self::record_switch(&mut st, uplink, available)
         };
-        self.commit_switch(effect).await;
+        self.commit_switch(effect).await
     }
 
     /// One control-loop iteration. Ports `_tick`.
@@ -555,8 +592,23 @@ impl UplinkRouter {
                 None
             }
         };
+        let picked = first_pick.is_some();
         if let Some(effect) = first_pick {
             self.commit_switch(effect).await;
+        }
+
+        // The active uplink vanished from the viable set (unplugged, carrier
+        // lost): move to the best viable one now. No probe streak or cooldown
+        // applies, because there is nothing left to probe on the old link.
+        let active = self.state.lock().await.active_uplink.clone();
+        if let Some(name) = active {
+            if !available.contains(&name) {
+                warn!(from_uplink = %name, to_uplink = %available[0], "uplink.active_vanished");
+                self.switch_to(Some(available[0].clone()), available.clone())
+                    .await;
+            } else if !picked {
+                self.verify_route(&name).await;
+            }
         }
 
         // Probe the current uplink. The name is cloned out and the guard dropped
@@ -700,7 +752,9 @@ impl UplinkRouter {
                 self.publish_health_change(active.as_deref(), available, false)
                     .await;
             }
-            FailoverOutcome::Switch(effect) => self.commit_switch(effect).await,
+            FailoverOutcome::Switch(effect) => {
+                self.commit_switch(effect).await;
+            }
         }
     }
 
@@ -740,367 +794,11 @@ impl UplinkRouter {
             "fail_streak": st.fail_streak,
             "success_streak": st.success_streak,
             "last_switch_monotonic": st.last_switch_at.map(|t| t.elapsed().as_secs_f64()),
+            "route_applied": st.route_applied,
             "data_usage": serde_json::Value::Null,
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    fn s(v: &[&str]) -> Vec<String> {
-        v.iter().map(|x| x.to_string()).collect()
-    }
-
-    /// A manager whose `is_up` is fixed at construction.
-    struct UpManager {
-        iface: String,
-        up: bool,
-    }
-    #[async_trait]
-    impl UplinkManager for UpManager {
-        async fn is_up(&self) -> bool {
-            self.up
-        }
-        fn get_iface(&self) -> String {
-            self.iface.clone()
-        }
-        async fn get_gateway(&self) -> Option<String> {
-            None
-        }
-    }
-
-    /// Prober that returns scripted verdicts; counts calls.
-    struct ScriptedProber {
-        verdict: bool,
-        calls: AtomicUsize,
-    }
-    #[async_trait]
-    impl Prober for ScriptedProber {
-        async fn probe(&self, _iface: Option<&str>) -> bool {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.verdict
-        }
-    }
-
-    /// Route applier that records the last (iface, gateway) it was asked for.
-    #[derive(Default)]
-    struct RecordingRoute {
-        calls: std::sync::Mutex<Vec<(String, Option<String>)>>,
-    }
-    #[async_trait]
-    impl RouteApplier for RecordingRoute {
-        async fn apply(&self, iface: &str, gateway: Option<&str>) -> bool {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((iface.to_string(), gateway.map(|g| g.to_string())));
-            true
-        }
-    }
-
-    /// Route applier that reads the router's own state while the route is being
-    /// applied.
-    ///
-    /// This is the regression guard for the substantive fix: `commit_switch`
-    /// runs the route apply with the state mutex released, so a concurrent
-    /// reader completes. Back when `_switch_to` took `st: &mut RouterState` the
-    /// guard was still held here, and every state reader — `active_iface`,
-    /// `get_state`, the data-cap consumer — queued behind an `ip route replace`
-    /// spawn. The read is bounded so a regression fails as an assertion rather
-    /// than as a hung test.
-    #[derive(Default)]
-    struct ReentrantRoute {
-        router: std::sync::OnceLock<std::sync::Weak<UplinkRouter>>,
-        state_readable: AtomicBool,
-    }
-    #[async_trait]
-    impl RouteApplier for ReentrantRoute {
-        async fn apply(&self, _iface: &str, _gateway: Option<&str>) -> bool {
-            let Some(router) = self.router.get().and_then(|w| w.upgrade()) else {
-                return true;
-            };
-            // Bounded so a regression is a failed assertion, not a hung test.
-            let bound = std::time::Duration::from_secs(2);
-            let read = tokio::time::timeout(bound, router.get_state()).await;
-            if read.is_ok() {
-                self.state_readable.store(true, Ordering::SeqCst);
-            }
-            true
-        }
-    }
-
-    fn managers(specs: &[(&str, bool)]) -> HashMap<String, Arc<dyn UplinkManager>> {
-        specs
-            .iter()
-            .map(|(name, up)| {
-                let m: Arc<dyn UplinkManager> = Arc::new(UpManager {
-                    iface: name.to_string(),
-                    up: *up,
-                });
-                (name.to_string(), m)
-            })
-            .collect()
-    }
-
-    fn router(
-        specs: &[(&str, bool)],
-        verdict: bool,
-        flag_path: std::path::PathBuf,
-    ) -> (UplinkRouter, Arc<ScriptedProber>) {
-        let prober = Arc::new(ScriptedProber {
-            verdict,
-            calls: AtomicUsize::new(0),
-        });
-        let r = UplinkRouter::with_seams(
-            managers(specs),
-            Some(s(&["eth0", "wlan0_client", "wwan0", "usb0"])),
-            Some(flag_path.with_extension("cfg.json")),
-            Arc::clone(&prober) as Arc<dyn Prober>,
-            Arc::new(RecordingRoute::default()),
-            ActiveFlagWriter::with_path(flag_path),
-        );
-        (r, prober)
-    }
-
-    #[tokio::test]
-    async fn first_pick_selects_highest_priority_and_writes_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let flag = dir.path().join("uplink-active");
-        // wlan0_client up, eth0 down → highest-priority viable is wlan0_client.
-        let (r, _p) = router(
-            &[("eth0", false), ("wlan0_client", true)],
-            true,
-            flag.clone(),
-        );
-        r.tick().await;
-        let st = r.get_state().await;
-        assert_eq!(st["active_uplink"], "wlan0_client");
-        assert_eq!(st["internet_reachable"], true);
-        // Headline fix: the flag exists now that there is an active uplink.
-        assert!(flag.is_file());
-    }
-
-    #[tokio::test]
-    async fn no_viable_uplink_unlinks_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let flag = dir.path().join("uplink-active");
-        let (r, _p) = router(&[("eth0", false)], true, flag.clone());
-        r.tick().await;
-        let st = r.get_state().await;
-        assert!(st["active_uplink"].is_null());
-        assert!(!flag.is_file());
-    }
-
-    /// Drop `last_switch_at` far into the past so the cooldown gate is open.
-    async fn arm_cooldown(r: &UplinkRouter) {
-        r.state.lock().await.last_switch_at =
-            Some(Instant::now() - std::time::Duration::from_secs(60));
-    }
-
-    #[tokio::test]
-    async fn three_consecutive_failures_after_cooldown_fail_over() {
-        let dir = tempfile::tempdir().unwrap();
-        let flag = dir.path().join("uplink-active");
-        // eth0 + wlan0_client both up; probe always fails.
-        let (r, _p) = router(
-            &[("eth0", true), ("wlan0_client", true)],
-            false,
-            flag.clone(),
-        );
-        // First tick picks eth0 AND probes it (probe fails) → fail_streak 1.
-        // The pick set last_switch_at = now, so the cooldown gate is closed and
-        // no failover happens this tick regardless of the streak (Python `_tick`
-        // behaves the same: it probes the freshly-picked uplink in the same tick).
-        r.tick().await;
-        assert_eq!(r.get_state().await["active_uplink"], "eth0");
-        assert_eq!(r.get_state().await["fail_streak"], 1);
-        // Open the cooldown gate for the remaining failure ticks.
-        arm_cooldown(&r).await;
-        r.tick().await; // fail_streak 2 (still < FAIL_DOWN_THRESHOLD, no switch).
-        assert_eq!(r.get_state().await["active_uplink"], "eth0");
-        assert_eq!(r.get_state().await["fail_streak"], 2);
-        arm_cooldown(&r).await;
-        // fail_streak 3 + cooldown open → failover down to wlan0_client.
-        r.tick().await;
-        assert_eq!(r.get_state().await["active_uplink"], "wlan0_client");
-        // The flag is still present: a lower uplink is now active.
-        assert!(flag.is_file());
-        // set_priority is the persisted-config writer; exercise it once here.
-        assert!(r.set_priority(s(&["eth0", "wlan0_client"])).await.is_ok());
-    }
-
-    #[tokio::test]
-    async fn fewer_than_three_failures_do_not_fail_over() {
-        let dir = tempfile::tempdir().unwrap();
-        let flag = dir.path().join("uplink-active");
-        let (r, _p) = router(
-            &[("eth0", true), ("wlan0_client", true)],
-            false,
-            flag.clone(),
-        );
-        // Picking tick → fail_streak 1. One more failure tick (cooldown open)
-        // → fail_streak 2, still below the 3-fail threshold, so no failover.
-        r.tick().await;
-        arm_cooldown(&r).await;
-        r.tick().await;
-        assert_eq!(r.get_state().await["fail_streak"], 2);
-        assert_eq!(r.get_state().await["active_uplink"], "eth0");
-    }
-
-    #[tokio::test]
-    async fn climbs_back_to_higher_priority_after_success_streak() {
-        let dir = tempfile::tempdir().unwrap();
-        let flag = dir.path().join("uplink-active");
-        // Both up; probe always succeeds. Force the active uplink to the lower
-        // wlan0_client so a higher-priority eth0 is available to climb to.
-        let (r, _p) = router(&[("eth0", true), ("wlan0_client", true)], true, flag);
-        {
-            let mut st = r.state.lock().await;
-            st.active_uplink = Some("wlan0_client".to_string());
-            st.internet_reachable = true;
-        }
-        // SUCCESS_UP_THRESHOLD (=3) consecutive successes on the lower uplink,
-        // each with the cooldown gate open and the higher candidate probing OK,
-        // climb us back to eth0. The first two ticks build the success streak.
-        arm_cooldown(&r).await;
-        r.tick().await;
-        assert_eq!(r.get_state().await["active_uplink"], "wlan0_client");
-        arm_cooldown(&r).await;
-        r.tick().await;
-        assert_eq!(r.get_state().await["active_uplink"], "wlan0_client");
-        // Third success → probe the candidate (eth0) → switch up.
-        arm_cooldown(&r).await;
-        r.tick().await;
-        assert_eq!(r.get_state().await["active_uplink"], "eth0");
-    }
-
-    #[tokio::test]
-    async fn get_state_keys_match_python() {
-        let dir = tempfile::tempdir().unwrap();
-        let flag = dir.path().join("uplink-active");
-        let (r, _p) = router(&[("eth0", true)], true, flag);
-        let st = r.get_state().await;
-        for k in [
-            "active_uplink",
-            "internet_reachable",
-            "priority",
-            "fail_streak",
-            "success_streak",
-            "last_switch_monotonic",
-            "data_usage",
-        ] {
-            assert!(st.get(k).is_some(), "missing key {k}");
-        }
-    }
-
-    /// Build a router with an explicit priority-config path so a test can rewrite
-    /// the file and prove the per-tick reload adopts it.
-    fn router_with_cfg(
-        specs: &[(&str, bool)],
-        verdict: bool,
-        cfg_path: std::path::PathBuf,
-        flag_path: std::path::PathBuf,
-    ) -> UplinkRouter {
-        let prober = Arc::new(ScriptedProber {
-            verdict,
-            calls: AtomicUsize::new(0),
-        });
-        UplinkRouter::with_seams(
-            managers(specs),
-            // Load the order from the cfg file (None forces the loader).
-            None,
-            Some(cfg_path),
-            prober as Arc<dyn Prober>,
-            Arc::new(RecordingRoute::default()),
-            ActiveFlagWriter::with_path(flag_path),
-        )
-    }
-
-    #[tokio::test]
-    async fn reload_priority_adopts_a_rewritten_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("ground-station-uplink.json");
-        // Seed the file with a non-default order so the initial load picks it up.
-        failover::save_priority(&cfg, &s(&["wlan0_client", "eth0"]));
-        let r = router_with_cfg(
-            &[("eth0", true), ("wlan0_client", true)],
-            true,
-            cfg.clone(),
-            dir.path().join("uplink-active"),
-        );
-        assert_eq!(r.get_priority(), s(&["wlan0_client", "eth0"]));
-        // An unchanged file → reload is a no-op.
-        assert!(!r.reload_priority().await);
-        // Operator rewrites the file (the REST PUT does this) → reload adopts it.
-        failover::save_priority(&cfg, &s(&["eth0", "wlan0_client", "wwan0"]));
-        assert!(r.reload_priority().await);
-        assert_eq!(r.get_priority(), s(&["eth0", "wlan0_client", "wwan0"]));
-        // A second reload with no further change → no-op.
-        assert!(!r.reload_priority().await);
-    }
-
-    #[tokio::test]
-    async fn tick_picks_up_a_priority_change_without_a_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("ground-station-uplink.json");
-        // Order puts wlan0_client first; both ifaces are up but the probe FAILS,
-        // so a failover walks the live priority order.
-        failover::save_priority(&cfg, &s(&["wlan0_client", "eth0"]));
-        let r = router_with_cfg(
-            &[("eth0", true), ("wlan0_client", true)],
-            false,
-            cfg.clone(),
-            dir.path().join("uplink-active"),
-        );
-        // First tick picks the highest-priority viable uplink = wlan0_client and
-        // probes it (fails → fail_streak 1, no switch this tick).
-        r.tick().await;
-        assert_eq!(r.get_state().await["active_uplink"], "wlan0_client");
-
-        // Operator rewrites the file to prefer eth0; the daemon never restarts.
-        // The reloaded order means the next failover target below the failing
-        // wlan0_client is eth0. Drive the fail streak past threshold + cooldown.
-        failover::save_priority(&cfg, &s(&["eth0", "wlan0_client"]));
-        arm_cooldown(&r).await;
-        r.tick().await; // reloads the order, fail_streak 2.
-                        // The live order now leads with eth0 (proves the reload reached state).
-        assert_eq!(
-            r.get_state().await["priority"],
-            serde_json::json!(["eth0", "wlan0_client"])
-        );
-        arm_cooldown(&r).await;
-        r.tick().await; // fail_streak 3 + cooldown → fail over to eth0.
-        assert_eq!(r.get_state().await["active_uplink"], "eth0");
-    }
-
-    #[tokio::test]
-    async fn the_state_mutex_is_not_held_across_the_route_apply() {
-        let dir = tempfile::tempdir().unwrap();
-        let flag = dir.path().join("uplink-active");
-        let route = Arc::new(ReentrantRoute::default());
-        let r = Arc::new(UplinkRouter::with_seams(
-            managers(&[("eth0", true)]),
-            Some(s(&["eth0"])),
-            Some(flag.with_extension("cfg.json")),
-            Arc::new(ScriptedProber {
-                verdict: true,
-                calls: AtomicUsize::new(0),
-            }),
-            Arc::clone(&route) as Arc<dyn RouteApplier>,
-            ActiveFlagWriter::with_path(flag),
-        ));
-        route.router.set(Arc::downgrade(&r)).unwrap();
-
-        // The first tick has no active uplink, so it picks eth0 — the route-apply
-        // path — and the applier reads the state from inside the apply.
-        r.tick().await;
-        assert_eq!(r.get_state().await["active_uplink"], "eth0");
-        assert!(
-            route.state_readable.load(Ordering::SeqCst),
-            "a router state read must complete while the default route is being applied"
-        );
-    }
-}
+mod tests;

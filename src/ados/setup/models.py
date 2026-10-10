@@ -144,7 +144,6 @@ class ProfileSuggestion(BaseModel):
     ground_role_hint: Literal["direct", "relay", "receiver"] = "direct"
     ground_score: int = 0
     air_score: int = 0
-    mesh_capable: bool = False
     signals: dict[str, bool] = Field(default_factory=dict)
     confirmed: bool = False
     detected_at: str | None = None

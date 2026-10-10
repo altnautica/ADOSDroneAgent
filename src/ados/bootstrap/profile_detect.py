@@ -580,46 +580,6 @@ def probe_uplink_kinds() -> list[str]:
     return kinds
 
 
-def probe_mesh_capable() -> bool:
-    """True when a second USB-attached wireless adapter is present.
-
-    Mesh role (relay or receiver) requires one wireless NIC in monitor mode
-    for WFB-ng plus a second NIC running 802.11s or IBSS for batman-adv.
-    The second NIC must be USB-attached so it can be hot-plugged and does
-    not clash with the SBC's onboard SDIO or PCIe wireless (e.g. Pi 4B's
-    Broadcom module or a Radxa CM4 onboard chip). Counting raw
-    /sys/class/net/wlan* entries is not enough because onboard WiFi shows
-    up there too; we walk each wlan*/device symlink and match the bus
-    type before counting.
-
-    The flag does not change the default role (which stays `direct`). It
-    only controls whether the OLED shows the Mesh submenu and whether the
-    GCS Hardware tab surfaces the Distributed RX and Mesh sub-views.
-    """
-    try:
-        net_dir = Path("/sys/class/net")
-        if not net_dir.is_dir():
-            return False
-        usb_wlan_count = 0
-        for iface in net_dir.iterdir():
-            if not iface.name.startswith("wlan"):
-                continue
-            device_link = iface / "device"
-            if not device_link.exists():
-                continue
-            try:
-                resolved = os.path.realpath(device_link)
-            except OSError:
-                continue
-            # Device path contains "/usb" only when the NIC is attached via
-            # USB. Onboard SDIO shows "/sdio/", PCIe shows "/pci/", etc.
-            if "/usb" in resolved:
-                usb_wlan_count += 1
-        return usb_wlan_count >= 2
-    except OSError:
-        return False
-
-
 # ---- Decision -------------------------------------------------------------
 
 
@@ -666,7 +626,6 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
             "ground_score": 0,
             "air_score": 0,
             "signals": {"override": config_override},
-            "mesh_capable": False,
             "detected_at": _now_iso(),
         }
 
@@ -740,9 +699,6 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
         "ground_score": ground_score,
         "air_score": air_score,
         "signals": signals,
-        # second wireless NIC gates mesh role visibility. Default False
-        # so existing single-node deployments keep current UX.
-        "mesh_capable": probe_mesh_capable(),
         "detected_at": _now_iso(),
     }
     try:

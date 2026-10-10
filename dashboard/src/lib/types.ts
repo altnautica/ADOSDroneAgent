@@ -62,7 +62,6 @@ export interface ProfileSuggestion {
   ground_role_hint?: GroundRole;
   ground_score?: number;
   air_score?: number;
-  mesh_capable?: boolean;
   signals?: Record<string, unknown>;
   confirmed?: boolean;
   detected_at?: string;

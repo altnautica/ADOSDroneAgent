@@ -239,27 +239,21 @@ def _check_radio_wfb(required: bool = False, min_count: int = 1) -> HardwareChec
 
 
 def _check_mesh_dongle(required: bool) -> HardwareCheckItem:
-    try:
-        from ados.bootstrap.profile_detect import probe_mesh_capable
-
-        capable = probe_mesh_capable()
-    except Exception:
-        capable = False
-    if capable:
+    if len(_radio_devices()) >= 2:
         return HardwareCheckItem(
             id="mesh_dongle",
             label="Mesh second-radio dongle",
             required=required,
             state="ok",
-            detail="Second USB wireless adapter detected. Eligible for batman-adv mesh.",
+            detail="Two RTL8812-class WFB adapters detected. Eligible for batman-adv mesh.",
         )
     return HardwareCheckItem(
         id="mesh_dongle",
         label="Mesh second-radio dongle",
         required=required,
         state="missing" if required else "warning",
-        detail="No second USB wireless adapter detected.",
-        fix_hint="Mesh roles need a second USB WiFi adapter for batman-adv carrier.",
+        detail="Fewer than two RTL8812-class WFB adapters detected.",
+        fix_hint="Mesh roles need two RTL8812-class USB adapters.",
     )
 
 

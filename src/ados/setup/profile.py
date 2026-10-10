@@ -102,7 +102,6 @@ def build_profile_suggestion(config: Any) -> ProfileSuggestion:
         ground_role_hint=ground_role,  # type: ignore[arg-type]
         ground_score=int(result.get("ground_score", 0) or 0),
         air_score=int(result.get("air_score", 0) or 0),
-        mesh_capable=bool(result.get("mesh_capable", False)),
         signals={
             str(name): bool(detected)
             for name, detected in (result.get("signals") or {}).items()

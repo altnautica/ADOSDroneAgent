@@ -564,7 +564,6 @@ def test_build_profile_suggestion_marks_explicit_pick_confirmed(monkeypatch) -> 
             "ground_score": 0,
             "air_score": 5,
             "signals": {"mavlink_serial": True},
-            "mesh_capable": False,
             "detected_at": "2026-05-04T20:00:00+05:30",
         },
     )
@@ -582,7 +581,6 @@ def test_build_profile_suggestion_unconfirmed_when_profile_auto(monkeypatch) -> 
             "ground_score": 5,
             "air_score": 0,
             "signals": {"oled_i2c": True, "buttons_gpio": True},
-            "mesh_capable": False,
             "detected_at": "2026-05-04T20:00:00+05:30",
         },
     )
@@ -681,9 +679,6 @@ def test_run_hardware_check_ground_relay_requires_mesh_dongle(monkeypatch) -> No
         )(),
     )
     monkeypatch.setattr("ados.hal.usb.discover_usb_devices", lambda: [])
-    monkeypatch.setattr(
-        "ados.bootstrap.profile_detect.probe_mesh_capable", lambda: False
-    )
     monkeypatch.setattr(
         "ados.bootstrap.profile_detect.probe_i2c_oled", lambda bus=1: (0, 0, False)
     )

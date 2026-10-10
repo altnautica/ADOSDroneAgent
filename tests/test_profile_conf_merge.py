@@ -1,50 +1,57 @@
-"""profile.conf is co-owned with the installer; detection never clobbers it."""
+"""`ados profile set` merges the profile sentinel instead of rewriting it."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 import yaml
 
-from ados.bootstrap import profile_detect
-from ados.bootstrap.profile_detect import write_profile_conf
+from ados.cli import profile as cli_profile
 
 
-def test_a_detected_profile_keeps_the_installer_channel_and_version(tmp_path):
+def test_profile_set_keeps_channel_version_and_unknown_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     conf = tmp_path / "profile.conf"
-    conf.write_text("channel: stable\nversion: 0.101.0\n", encoding="utf-8")
-
-    assert write_profile_conf("ground_station", path=str(conf)) is True
-
-    assert yaml.safe_load(conf.read_text()) == {
-        "profile": "ground_station",
-        "channel": "stable",
-        "version": "0.101.0",
-    }
-
-
-def test_a_recorded_profile_is_never_replaced_by_detection(tmp_path):
-    conf = tmp_path / "profile.conf"
-    body = "profile: drone\nchannel: stable\nversion: 0.101.0\n"
-    conf.write_text(body, encoding="utf-8")
-
-    assert write_profile_conf("ground_station", path=str(conf)) is False
-
-    assert conf.read_text() == body
-
-
-def test_the_wizard_status_read_never_writes_profile_conf(monkeypatch):
-    from ados.core.config import ADOSConfig
-    from ados.setup.profile import build_profile_suggestion
-
-    writes: list[object] = []
-    monkeypatch.setattr(profile_detect, "write_profile_conf", lambda *a, **k: writes.append(a))
-    monkeypatch.setattr(
-        profile_detect,
-        "detect_profile",
-        lambda config_override=None: {"profile": "ground_station", "source": "detected"},
+    conf.write_text(
+        "profile: drone\nchannel: edge\nversion: 1.2.3\noperator_note: bench rig\n",
+        encoding="utf-8",
     )
-    config = ADOSConfig()
-    config.agent.profile = "workstation"
+    monkeypatch.setattr(cli_profile, "PROFILE_CONF", str(conf))
 
-    build_profile_suggestion(config)
+    cli_profile._write_profile_conf("ground_station")
 
-    assert writes == []
+    doc = yaml.safe_load(conf.read_text(encoding="utf-8"))
+    assert doc == {
+        "profile": "ground_station",
+        "channel": "edge",
+        "version": "1.2.3",
+        "operator_note": "bench rig",
+    }
+    assert not (tmp_path / "profile.conf.tmp").exists()
+
+
+def test_profile_set_creates_a_missing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conf = tmp_path / "sub" / "profile.conf"
+    monkeypatch.setattr(cli_profile, "PROFILE_CONF", str(conf))
+
+    cli_profile._write_profile_conf("drone")
+
+    assert yaml.safe_load(conf.read_text(encoding="utf-8")) == {"profile": "drone"}
+
+
+def test_invalid_yaml_is_not_clobbered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conf = tmp_path / "profile.conf"
+    broken = "profile: drone\nchannel: [edge\n"
+    conf.write_text(broken, encoding="utf-8")
+    monkeypatch.setattr(cli_profile, "PROFILE_CONF", str(conf))
+
+    with pytest.raises(RuntimeError, match="is not valid YAML; fix or remove it"):
+        cli_profile._write_profile_conf("ground_station")
+
+    assert conf.read_text(encoding="utf-8") == broken

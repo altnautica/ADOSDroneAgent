@@ -29,7 +29,6 @@ use ados_net::managers::{
     ModemSession, SetupApGuard, UsbGadgetManager, WifiClientManager,
 };
 use ados_net::router::failover;
-use ados_net::sysfs::detect_ethernet_iface;
 use ados_net::{run_firewall_reconciler, ShareUplinkFirewall, UplinkManager, UplinkRouter};
 
 /// Cadence of the cellular session reconcile: how soon a failed dial or a
@@ -83,11 +82,12 @@ fn build_managers(
     runner: Arc<TokioCmdRunner>,
     modem: Arc<ModemManager>,
 ) -> HashMap<String, Arc<dyn UplinkManager>> {
-    let eth_iface = detect_ethernet_iface();
+    // The wired port is resolved by driver on every read, so a NIC that
+    // enumerates after startup is used without a restart.
     let mut m: HashMap<String, Arc<dyn UplinkManager>> = HashMap::new();
     m.insert(
         "eth0".to_string(),
-        Arc::new(EthernetManager::new(eth_iface, runner.clone())),
+        Arc::new(EthernetManager::new(runner.clone())),
     );
     m.insert(
         "wlan0_client".to_string(),
@@ -285,8 +285,7 @@ async fn main() -> Result<()> {
     // firewall the uplink-switch consumer does, which serializes its applies, so
     // an operator toggle takes effect now instead of at the next uplink switch.
     let wifi_cmd = Arc::new(Mutex::new(WifiClientManager::new(runner.clone())));
-    let eth_iface = detect_ethernet_iface();
-    let eth_cmd = Arc::new(EthernetManager::new(eth_iface, runner.clone()));
+    let eth_cmd = Arc::new(EthernetManager::new(runner.clone()));
     let cmdsock_task = {
         let state = ados_net::CmdState {
             wifi: Arc::clone(&wifi_cmd),

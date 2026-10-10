@@ -121,18 +121,24 @@ fn mesh_dir() -> PathBuf {
 // Mesh-capability + paired-identity gates (the FastAPI role-route preconditions).
 // ---------------------------------------------------------------------------
 
-/// True when `profile.conf` carries `mesh_capable: true`. The FastAPI route reads
-/// `_read_yaml_or_empty(PROFILE_CONF).get("mesh_capable", False)`; a missing file
-/// / key / a non-true value is not mesh-capable. Mirrors that read.
-fn mesh_capable() -> bool {
-    let Ok(text) = std::fs::read_to_string(ados_config::profile_conf_path()) else {
-        return false;
-    };
-    let Ok(doc) = serde_norway::from_str::<Value>(&text) else {
-        return false;
-    };
-    doc.get("mesh_capable")
-        .and_then(Value::as_bool)
+/// The mesh-capability gate for a role write: relay and receiver need two
+/// WFB-class radios, `direct` is always allowed (the opt-out path). `capable`
+/// is the live hardware probe ([`ados_protocol::netif::mesh_capable`] in
+/// production), injected so a test can point it at a fake sysfs root.
+fn mesh_capability_gate(role: &str, capable: impl FnOnce() -> bool) -> Option<Response> {
+    if (role == "relay" || role == "receiver") && !capable() {
+        return Some(nested_detail(
+            StatusCode::CONFLICT,
+            json!({"code": "E_MESH_NOT_CAPABLE"}),
+        ));
+    }
+    None
+}
+
+/// The live mesh-capability probe, off the async runtime (it walks sysfs).
+async fn mesh_capable_live() -> bool {
+    tokio::task::spawn_blocking(ados_protocol::netif::mesh_capable)
+        .await
         .unwrap_or(false)
 }
 
@@ -197,10 +203,15 @@ pub async fn put_role(
         }
     };
 
-    // Mesh-capability gate: relay/receiver require the `mesh_capable` flag; direct
-    // is always allowed (the opt-out path even when the flag is absent).
-    if (role == "relay" || role == "receiver") && !mesh_capable() {
-        return nested_detail(StatusCode::CONFLICT, json!({"code": "E_MESH_NOT_CAPABLE"}));
+    // Mesh-capability gate: relay/receiver need two WFB-class radios, detected
+    // live; direct is always allowed. The probe only runs when the role needs it.
+    let capable = if role == "relay" || role == "receiver" {
+        mesh_capable_live().await
+    } else {
+        true
+    };
+    if let Some(refused) = mesh_capability_gate(&role, || capable) {
+        return refused;
     }
 
     // Paired-identity gate for relay: a fresh box with no mesh identity would send
@@ -636,6 +647,41 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Two RTL USB radios under a fake sysfs root pass the relay gate; one
+    /// radio is refused with `E_MESH_NOT_CAPABLE`; `direct` never probes.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn role_relay_passes_on_two_radio_fake_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let net = root.join("net");
+        for (i, name) in ["wlan1", "wlan2"].iter().enumerate() {
+            let usb = root.join("devices").join(format!("1-{i}"));
+            let intf = usb.join(format!("1-{i}:1.0"));
+            let drv = root.join("drivers").join("rtl88x2eu");
+            std::fs::create_dir_all(&intf).unwrap();
+            std::fs::create_dir_all(&drv).unwrap();
+            std::fs::write(usb.join("idVendor"), "0bda\n").unwrap();
+            std::fs::write(usb.join("idProduct"), "a81a\n").unwrap();
+            std::os::unix::fs::symlink(&drv, intf.join("driver")).unwrap();
+            let iface = net.join(name);
+            std::fs::create_dir_all(iface.join("phy80211")).unwrap();
+            std::os::unix::fs::symlink(&intf, iface.join("device")).unwrap();
+        }
+        let probe = || ados_protocol::netif::mesh_capable_in(&net);
+        assert!(mesh_capability_gate("relay", probe).is_none());
+        assert!(mesh_capability_gate("receiver", probe).is_none());
+
+        std::fs::remove_dir_all(net.join("wlan2")).unwrap();
+        let refused = mesh_capability_gate("relay", probe).unwrap();
+        assert_eq!(refused.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            body_json(refused).await,
+            json!({"detail": {"error": {"code": "E_MESH_NOT_CAPABLE"}}})
+        );
+        assert!(mesh_capability_gate("direct", || panic!("direct never probes")).is_none());
     }
 
     // ── profile gate ─────────────────────────────────────────────────────────

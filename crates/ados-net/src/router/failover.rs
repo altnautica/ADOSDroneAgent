@@ -259,6 +259,36 @@ pub async fn apply_default_route(
     true
 }
 
+/// The interface the router-programmed default route (at
+/// [`ACTIVE_ROUTE_METRIC`]) points at right now, from
+/// `ip -4 route show default metric 10`. `None` when the route is absent or
+/// the read failed.
+pub async fn installed_default_iface(runner: &dyn CmdRunner) -> Option<String> {
+    let metric_s = ACTIVE_ROUTE_METRIC.to_string();
+    let out = runner
+        .run(
+            &["ip", "-4", "route", "show", "default", "metric", &metric_s],
+            ROUTE_TIMEOUT,
+        )
+        .await;
+    if !out.ok() {
+        return None;
+    }
+    parse_route_dev(&out.stdout)
+}
+
+/// The `dev <iface>` of the first route line.
+pub fn parse_route_dev(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| !l.trim().is_empty())?;
+    let mut words = line.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "dev" {
+            return words.next().map(str::to_string);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,6 +440,37 @@ mod tests {
         assert_eq!(
             runner.recorded()[0],
             ["ip", "route", "replace", "default", "dev", "usb0", "metric", "10"]
+        );
+    }
+
+    #[test]
+    fn route_dev_is_parsed_from_the_first_line() {
+        assert_eq!(
+            parse_route_dev("default via 192.168.1.1 dev eth0 proto static metric 10 \n"),
+            Some("eth0".to_string())
+        );
+        assert_eq!(
+            parse_route_dev("default dev usb0 scope link metric 10\n").as_deref(),
+            Some("usb0")
+        );
+        assert_eq!(parse_route_dev(""), None);
+    }
+
+    #[tokio::test]
+    async fn installed_default_iface_queries_the_router_metric() {
+        let runner = ScriptedRunner::new();
+        runner.push(crate::cmd::CmdOut {
+            rc: 0,
+            stdout: "default via 192.168.1.1 dev wwan0 metric 10\n".to_string(),
+            stderr: String::new(),
+        });
+        assert_eq!(
+            installed_default_iface(&runner).await.as_deref(),
+            Some("wwan0")
+        );
+        assert_eq!(
+            runner.recorded()[0],
+            ["ip", "-4", "route", "show", "default", "metric", "10"]
         );
     }
 }

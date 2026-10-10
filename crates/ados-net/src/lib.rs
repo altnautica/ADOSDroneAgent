@@ -17,7 +17,6 @@ pub mod paths;
 pub mod process;
 pub mod router;
 pub mod sidecar;
-pub mod sysfs;
 pub mod throttle;
 
 // Re-export the surface a consumer (or the daemon) reaches for.
@@ -36,5 +35,4 @@ pub use router::events::{DataCapState, UplinkEvent, UplinkEventBus, UplinkEventK
 pub use router::failover;
 pub use router::health;
 pub use router::{CloudProber, IpRouteApplier, StubManager, UplinkManager, UplinkRouter};
-pub use sysfs::detect_ethernet_iface;
 pub use throttle::run_firewall_reconciler;

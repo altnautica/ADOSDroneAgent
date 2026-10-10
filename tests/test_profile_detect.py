@@ -37,7 +37,6 @@ def _stub_probes(monkeypatch, **points: tuple[int, int, bool]) -> None:
         defaults[name] = value
     for name, value in defaults.items():
         monkeypatch.setattr(profile_detect, name, lambda v=value: v)
-    monkeypatch.setattr(profile_detect, "probe_mesh_capable", lambda: False)
 
 
 def test_override_short_circuits_probes(monkeypatch) -> None:
@@ -146,12 +145,11 @@ def test_result_carries_signals_and_mesh_flag(monkeypatch) -> None:
         probe_i2c_oled=(3, 0, True),
         probe_uplink_type=(1, 0, True),
     )
-    monkeypatch.setattr(profile_detect, "probe_mesh_capable", lambda: True)
     result = profile_detect.detect_profile(config_override=None)
     assert result["signals"]["oled_i2c"] is True
     assert result["signals"]["uplink"] is True
     assert result["signals"]["mavlink_serial"] is False
-    assert result["mesh_capable"] is True
+    assert "mesh_capable" not in result
 
 
 @pytest.mark.parametrize(

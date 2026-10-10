@@ -129,6 +129,9 @@ mod tests {
         async fn apply(&self, _iface: &str, _gateway: Option<&str>) -> bool {
             true
         }
+        async fn installed_iface(&self) -> Option<String> {
+            None
+        }
     }
 
     fn router(dir: &std::path::Path) -> Arc<UplinkRouter> {

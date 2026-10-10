@@ -21,10 +21,12 @@ Two commands:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
 import click
+import yaml
 
 from ados.core.paths import CONFIG_YAML, PROFILE_CONF
 from ados.core.profile import _read_profile_conf_value, current_profile_and_role
@@ -96,6 +98,12 @@ def set_profile(value: str, role: str | None, no_restart: bool, as_json: bool) -
             click.echo(json.dumps({"ok": False, "error": "permission_denied", "message": msg}))
             raise SystemExit(1)
         click.echo(f"error: {msg}", err=True)
+        raise SystemExit(1)
+    except RuntimeError as exc:
+        if as_json:
+            click.echo(json.dumps({"ok": False, "error": "invalid_profile_conf", "message": str(exc)}))
+            raise SystemExit(1)
+        click.echo(f"error: {exc}", err=True)
         raise SystemExit(1)
 
     # Restart profile-sensitive units so the new gate (in wfb/__main__.py
@@ -205,12 +213,42 @@ def _read_config_yaml_profile() -> str | None:
 
 
 def _write_profile_conf(target: str) -> None:
-    """Atomic write of the canonical profile sentinel file."""
+    """Set ``profile`` in the profile sentinel, keeping every other key.
+
+    The file also carries the install channel, version and any operator keys,
+    so it is merged, never rewritten. The replace is atomic (tmp plus
+    ``os.replace``). A file that is not valid YAML is left untouched and the
+    caller gets a ``RuntimeError`` naming it.
+    """
     path = Path(PROFILE_CONF)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    try:
+        loaded = yaml.safe_load(text) if text.strip() else {}
+    except yaml.YAMLError as exc:
+        raise RuntimeError(
+            f"{PROFILE_CONF} is not valid YAML; fix or remove it"
+        ) from exc
+    if isinstance(loaded, dict):
+        doc: dict[Any, Any] = dict(loaded)
+    elif isinstance(loaded, str):
+        # Legacy ``key=value`` lines parse as one scalar; keep their keys.
+        doc = {}
+        for line in text.splitlines():
+            key, sep, value = line.partition("=")
+            if sep and key.strip() and not key.lstrip().startswith("#"):
+                doc[key.strip()] = value.strip()
+    elif loaded is None:
+        doc = {}
+    else:
+        raise RuntimeError(f"{PROFILE_CONF} is not valid YAML; fix or remove it")
+    doc["profile"] = target
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(f"profile: {target}\n", encoding="utf-8")
-    tmp.replace(path)
+    tmp.write_text(yaml.safe_dump(doc, default_flow_style=False, sort_keys=False), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _write_config_yaml(target: str, role: str | None) -> None:

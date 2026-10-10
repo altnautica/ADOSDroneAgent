@@ -136,7 +136,7 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     let radio = radio_to_camel(build_radio_block(wfb_status.as_ref()));
 
     // --- Mesh (ground-station profile, non-direct role only) ---
-    let mesh = build_mesh_block(&config_profile);
+    let mesh = build_mesh_block(&config_profile).await;
 
     // The perception capability + tier, before `board` is moved into the payload.
     // Same canonical ados_offload::pick_tier decision the LAN /api/status uses,
@@ -228,7 +228,7 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     );
 
     // Camera presence + USB-recovery, folded in only when the sidecars are fresh.
-    for (k, v) in read_camera_status() {
+    for (k, v) in read_camera_status(&state.run_dir) {
         payload.insert(k, v);
     }
 
@@ -236,7 +236,7 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     // rehome, WiFi power-save — folded in only when each sidecar is fresh. Every
     // one of these had a GCS reader and a card and no producer on either
     // transport, so all four rendered permanently empty.
-    for (k, v) in read_reconciler_status() {
+    for (k, v) in read_reconciler_status(&state.run_dir) {
         payload.insert(k, v);
     }
 
@@ -981,22 +981,30 @@ pub(crate) async fn mediamtx_whep_serving() -> bool {
 /// role it also folds in the `up` / `peer_count` / `selected_gateway` / `partition`
 /// fields from `/run/ados/mesh-state.json`. Every read degrades to omitting that
 /// field rather than failing. Mirrors the FastAPI mesh block.
-fn build_mesh_block(config_profile: &str) -> Value {
+async fn build_mesh_block(config_profile: &str) -> Value {
+    if config_profile != "ground_station" {
+        return json!({});
+    }
+    // Detected live from the attached radios; the sysfs walk runs off the runtime.
+    let mesh_capable = tokio::task::spawn_blocking(ados_protocol::netif::mesh_capable)
+        .await
+        .unwrap_or(false);
     build_mesh_block_at(
         config_profile,
         &ados_config::mesh_role_path(),
-        &ados_config::profile_conf_path(),
+        mesh_capable,
         &run_dir().join("mesh-state.json"),
     )
 }
 
-/// The path-injectable core of [`build_mesh_block`]: read the role sentinel,
-/// `mesh_capable` hint, and mesh-state sidecar from explicit paths. Pure (no env
+/// The path-injectable core of [`build_mesh_block`]: read the role sentinel and
+/// mesh-state sidecar from explicit paths, with the live `mesh_capable` probe
+/// result passed in. Pure (no env
 /// reads), so a test drives it with a tempdir without touching process-global env.
 fn build_mesh_block_at(
     config_profile: &str,
     role_path: &Path,
-    profile_conf: &Path,
+    mesh_capable: bool,
     mesh_state_path: &Path,
 ) -> Value {
     if config_profile != "ground_station" {
@@ -1006,10 +1014,7 @@ fn build_mesh_block_at(
     let mut mesh = Map::new();
     let role = ados_config::read_mesh_role(role_path);
     mesh.insert("role".to_string(), json!(role));
-    mesh.insert(
-        "mesh_capable".to_string(),
-        json!(read_mesh_capable_at(profile_conf)),
-    );
+    mesh.insert("mesh_capable".to_string(), json!(mesh_capable));
 
     if role == "relay" || role == "receiver" {
         if let Some(snap) = read_sidecar_object(mesh_state_path) {
@@ -1044,21 +1049,6 @@ fn build_mesh_block_at(
     Value::Object(mesh)
 }
 
-/// The `mesh_capable` hint from `profile.conf` (parsed as YAML), defaulting to
-/// `false` when absent / unparseable / not a truthy value. Mirrors
-/// `bool(pc.get("mesh_capable", False))`.
-fn read_mesh_capable_at(path: &Path) -> bool {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    let parsed: Value = match serde_norway::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    parsed.get("mesh_capable").map(json_truthy).unwrap_or(false)
-}
-
 // ---------------------------------------------------------------------------
 // Camera status: the LOCAL camera-presence + USB-recovery surface.
 // ---------------------------------------------------------------------------
@@ -1077,8 +1067,8 @@ const CAMERA_RECOVERY_FRESH_S: f64 = 60.0;
 /// `/run/ados/camera-usb-recovery.json` (the recovery block), staleness-gated on each
 /// sidecar's `updated_at_unix`. Shared with the `/api/status` route, which folds the
 /// same camera keys into its body.
-pub(crate) fn read_camera_status() -> Vec<(String, Value)> {
-    read_camera_status_in(&run_dir(), now_unix_secs())
+pub(crate) fn read_camera_status(run_dir: &Path) -> Vec<(String, Value)> {
+    read_camera_status_in(run_dir, now_unix_secs())
 }
 
 /// The path-injectable core of [`read_camera_status`]: read the two camera sidecars
@@ -1178,8 +1168,8 @@ const USB_REHOME_FRESH_S: f64 = 600.0;
 /// Every block is omitted (not defaulted) when its sidecar is absent, stale, or
 /// malformed: a stopped supervisor must read as "no reading", never as a healthy
 /// verdict frozen at the moment it died.
-pub(crate) fn read_reconciler_status() -> Vec<(String, Value)> {
-    read_reconciler_status_in(&run_dir(), now_unix_secs())
+pub(crate) fn read_reconciler_status(run_dir: &Path) -> Vec<(String, Value)> {
+    read_reconciler_status_in(run_dir, now_unix_secs())
 }
 
 /// The path-injectable core of [`read_reconciler_status`]. Pure (no env reads), so
@@ -2333,11 +2323,11 @@ mod tests {
 
     // -------- mesh --------
 
-    #[test]
-    fn mesh_block_is_empty_for_a_drone_or_auto_profile() {
-        assert_eq!(build_mesh_block("drone"), json!({}));
-        assert_eq!(build_mesh_block("auto"), json!({}));
-        assert_eq!(build_mesh_block(""), json!({}));
+    #[tokio::test]
+    async fn mesh_block_is_empty_for_a_drone_or_auto_profile() {
+        assert_eq!(build_mesh_block("drone").await, json!({}));
+        assert_eq!(build_mesh_block("auto").await, json!({}));
+        assert_eq!(build_mesh_block("").await, json!({}));
     }
 
     #[test]
@@ -2347,7 +2337,7 @@ mod tests {
         let mesh = build_mesh_block_at(
             "ground_station",
             &dir.path().join("absent.role"),
-            &dir.path().join("absent.conf"),
+            false,
             &dir.path().join("absent.mesh"),
         );
         let obj = mesh.as_object().unwrap();
@@ -2360,16 +2350,14 @@ mod tests {
     fn mesh_block_on_a_relay_folds_in_the_mesh_state() {
         let dir = tempfile::tempdir().unwrap();
         let role = dir.path().join("role");
-        let conf = dir.path().join("profile.conf");
         let state = dir.path().join("mesh-state.json");
         std::fs::write(&role, "relay\n").unwrap();
-        std::fs::write(&conf, "mesh_capable: true\n").unwrap();
         std::fs::write(
             &state,
             r#"{"up":true,"neighbors":[{"id":"a"},{"id":"b"}],"selected_gateway":"a","partition":false}"#,
         )
         .unwrap();
-        let mesh = build_mesh_block_at("ground_station", &role, &conf, &state);
+        let mesh = build_mesh_block_at("ground_station", &role, true, &state);
         let obj = mesh.as_object().unwrap();
         assert_eq!(obj["role"], json!("relay"));
         assert_eq!(obj["mesh_capable"], json!(true));

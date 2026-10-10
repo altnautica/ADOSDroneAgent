@@ -228,10 +228,13 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
 
     // Role block. `current` reads the live `/etc/ados/mesh/role` sentinel (the
     // role resolved by the gate above), `configured` reads the config value, and
-    // `mesh_capable` reads the `profile.conf` flag. They diverge briefly during a
-    // role transition; clients that drive state decisions prefer `current`.
+    // `mesh_capable` is detected live from the attached radios. They diverge
+    // briefly during a role transition; clients that drive state decisions
+    // prefer `current`.
     let configured_role = ground_station_config_role(&state.pairing_paths.config);
-    let mesh_capable = profile_conf_mesh_capable(&ados_config::profile_conf_path());
+    let mesh_capable = tokio::task::spawn_blocking(ados_protocol::netif::mesh_capable)
+        .await
+        .unwrap_or(false);
     let role_block = json!({
         "current": role,
         "configured": configured_role,
@@ -377,22 +380,6 @@ fn ground_station_config_role(config_path: &Path) -> String {
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| "direct".to_string())
-}
-
-/// The `mesh_capable` flag from `profile.conf`, defaulting to `false` when the file
-/// / field is absent or falsey. Mirrors the Python
-/// `bool(profile_conf.get("mesh_capable", False))`.
-fn profile_conf_mesh_capable(path: &Path) -> bool {
-    // `profile.conf` is YAML; read the whole doc and project the one flag.
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return false,
-    };
-    let doc: Value = match serde_norway::from_str(&text) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    doc.get("mesh_capable").map(json_truthy).unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -663,7 +650,8 @@ async fn network_view(state: &AppState) -> Value {
     let running = crate::probe::unit_is_active(HOSTAPD_UNIT).await;
     let router_running = crate::probe::unit_is_active(UPLINK_ROUTER_UNIT).await;
     let uplink = uplink_view(&uplink_active_flag_path(), router_running);
-    network_view_compose(&ap_ssid_from_config(&cfg), running, uplink)
+    let identity = crate::config::device_id_file_for(&state.pairing_paths.config);
+    network_view_compose(&ap_ssid_from_config(&cfg, &identity), running, uplink)
 }
 
 /// `(uplink_type, uplink_reachable)` from the uplink router's sentinel.
@@ -725,8 +713,8 @@ fn network_view_compose(ap_ssid: &str, running: bool, uplink: (Value, Value)) ->
 /// resolve it: honour a configured `network.hotspot.ssid` only when it is
 /// non-empty, carries no `{device_id}` placeholder, and already starts with
 /// `ADOS-GS-`; otherwise build `ADOS-GS-<first 4 hex of device_id, uppercased,
-/// zero-padded>`.
-fn ap_ssid_from_config(cfg: &Value) -> String {
+/// zero-padded>`. The device id resolves against the identity file `identity`.
+fn ap_ssid_from_config(cfg: &Value, identity: &std::path::Path) -> String {
     let configured = cfg
         .get("network")
         .filter(|v| v.is_object())
@@ -742,7 +730,7 @@ fn ap_ssid_from_config(cfg: &Value) -> String {
         .and_then(Value::as_str);
     resolve_ap_ssid(
         configured,
-        &ados_protocol::identity::device_id(configured_id),
+        &ados_protocol::identity::device_id_at(identity, configured_id),
     )
 }
 
@@ -1375,12 +1363,13 @@ mod tests {
             "agent": {"device_id": "d9dbcafe"},
             "network": {"hotspot": {"ssid": "ADOS-{device_id}"}},
         });
-        assert_eq!(ap_ssid_from_config(&cfg), "ADOS-GS-D9DB");
+        let none = std::path::Path::new("/nonexistent/ados/device-id");
+        assert_eq!(ap_ssid_from_config(&cfg, none), "ADOS-GS-D9DB");
         // An explicit ADOS-GS- name is honoured verbatim.
         let cfg2 = json!({"network": {"hotspot": {"ssid": "ADOS-GS-ABCD"}}});
-        assert_eq!(ap_ssid_from_config(&cfg2), "ADOS-GS-ABCD");
+        assert_eq!(ap_ssid_from_config(&cfg2, none), "ADOS-GS-ABCD");
         // No config at all → the zero-padded short id.
-        assert_eq!(ap_ssid_from_config(&json!({})), "ADOS-GS-0000");
+        assert_eq!(ap_ssid_from_config(&json!({}), none), "ADOS-GS-0000");
     }
 
     #[test]
@@ -1727,17 +1716,6 @@ mod tests {
         // Neither present → null.
         std::fs::write(&cfg_path, "agent:\n  profile: ground_station\n").unwrap();
         assert_eq!(config_gs_peer(&cfg_path), Value::Null);
-    }
-
-    #[test]
-    fn profile_conf_mesh_capable_reads_the_flag() {
-        let dir = tempfile::tempdir().unwrap();
-        let conf = dir.path().join("profile.conf");
-        std::fs::write(&conf, "profile: ground_station\nmesh_capable: true\n").unwrap();
-        assert!(profile_conf_mesh_capable(&conf));
-        std::fs::write(&conf, "profile: ground_station\n").unwrap();
-        assert!(!profile_conf_mesh_capable(&conf));
-        assert!(!profile_conf_mesh_capable(&dir.path().join("absent.conf")));
     }
 
     #[test]
