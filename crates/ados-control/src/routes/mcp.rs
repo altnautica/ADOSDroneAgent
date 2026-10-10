@@ -25,7 +25,7 @@ use serde_json::{json, Value};
 
 use ados_protocol::pairing_posture::{constant_time_eq, CallerClass, Pairing};
 
-use crate::config::{ControlSecurityConfig, PairingConfig};
+use crate::config::PairingConfig;
 use crate::mcp::{MintError, MintRequest};
 use crate::routes::detail;
 use crate::state::AppState;
@@ -38,9 +38,9 @@ const MAX_TTL_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 /// `GET /api/mcp/status` → the accept-flag posture + the minted-token registry
 /// (ids/labels/scopes/expiry + revoked/expired flags). No secret is returned.
 pub async fn get_mcp_status(State(state): State<AppState>) -> Json<Value> {
-    let accept_enabled = ControlSecurityConfig::load_from(&state.pairing_paths.config)
-        .mcp
-        .token_accept_enabled;
+    // The same cached security view the LAN edge decides with, so the reported
+    // flag is the one a minted token is actually judged against.
+    let accept_enabled = state.security.config_or_default().mcp.token_accept_enabled;
     let (tokens, revoked) = state.mcp_tokens.status();
     let now_ms = now_unix_ms();
     let list: Vec<Value> = tokens

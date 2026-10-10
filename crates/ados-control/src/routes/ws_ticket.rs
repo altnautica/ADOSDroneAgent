@@ -187,13 +187,19 @@ pub async fn mint_ws_ticket(
         .unwrap_or(DEFAULT_TTL_SECONDS)
         .clamp(1, MAX_TTL_SECONDS);
 
-    // Key the ticket off the same pairing key the router validates against. When
-    // unpaired there is no key: the WS proxy then decides a caller by its class
-    // alone and never verifies a ticket, so minting under the empty-key issuer
-    // keeps the response shape valid for the GCS flow without special-casing it.
+    // Key the ticket off the same pairing key the router validates against.
+    // While unpaired there is no key: once a dashboard PIN is set the ticket is
+    // keyed by its salt, which is what the ground-station streams require of an
+    // operator-LAN caller on an unpaired node (the edge already demanded a PIN
+    // session to reach this route from there). With no PIN set, the on-box and
+    // lifeline callers that reach this route open those streams by their class
+    // alone, and the empty-key issuer keeps the response shape valid.
     let issuer = match state.pairing.current() {
         Pairing::Paired(key) => WsTicketIssuer::from_api_key(&key),
-        Pairing::Unpaired => WsTicketIssuer::from_api_key(""),
+        Pairing::Unpaired => match state.dashboard_pin.salt() {
+            Some(salt) => WsTicketIssuer::issuer_unpaired(&salt),
+            None => WsTicketIssuer::from_api_key(""),
+        },
         // No key anyone holds: nothing minted here could be verified.
         Pairing::Unreadable => {
             return detail(StatusCode::SERVICE_UNAVAILABLE, "The pairing state on this device is unreadable. Unpair it on the device itself to recover.")

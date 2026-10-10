@@ -29,6 +29,7 @@ HMAC verification fails for any other.
 
 from __future__ import annotations
 
+import hmac
 from typing import Any
 
 from ados.core.logging import get_logger
@@ -42,6 +43,9 @@ log = get_logger("api.ws_auth")
 # agent echoes back ``ados-ws-ticket`` in
 # ``websocket.accept(subprotocol=...)`` per RFC 6455.
 WS_TICKET_PROTOCOL = "ados-ws-ticket"
+
+# The on-box trust stamp the native front sets after stripping any client value.
+ONBOX_HEADER = "x-ados-onbox"
 
 
 def _extract_subprotocols(websocket: Any) -> list[str]:
@@ -86,9 +90,10 @@ async def authenticate_websocket(
     app = get_agent_app()
     pm = getattr(app, "pairing_manager", None)
 
-    # Open posture on an unpaired agent. Matches HTTP middleware so
-    # the bench operator can run the wizard before pairing.
-    if pm is None or not getattr(pm, "is_paired", False):
+    # The native front strips any client-supplied ``X-ADOS-Onbox`` and sets
+    # it to ``1`` only for an on-box caller (loopback with no forwarding
+    # header, or the operator Unix socket), so the header is trustworthy here.
+    if websocket.headers.get(ONBOX_HEADER) == "1":
         return ""
 
     configured_key: str | None = None
@@ -99,9 +104,9 @@ async def authenticate_websocket(
 
     api_key = websocket.headers.get("X-ADOS-Key")
     if api_key:
-        if configured_key and api_key == configured_key:
+        if configured_key and hmac.compare_digest(api_key, configured_key):
             return ""
-        if pm.validate_key(api_key):
+        if pm is not None and getattr(pm, "is_paired", False) and pm.validate_key(api_key):
             return ""
         # Bad header: still try the ticket path before rejecting, in
         # case a buggy intermediary stuck a junk value on the wire.
@@ -123,6 +128,10 @@ async def authenticate_websocket(
                 ticket_value, expected_scope=scope, api_key=pairing_key
             ):
                 return marker
+
+    # An unpaired node with no on-box stamp, key or ticket is refused too:
+    # the front requires a PIN session for operator-LAN data while unpaired,
+    # and this stream must not be the one surface that skips it.
 
     await websocket.close(code=4401, reason="auth required")
     return None

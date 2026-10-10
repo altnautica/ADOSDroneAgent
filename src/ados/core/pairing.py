@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import fcntl
+import hmac
 import json
 import os
 import secrets
@@ -236,7 +237,7 @@ class PairingManager:
                 current = self.generate_code()
                 state["pairing_code"] = current
                 state["code_created_at"] = time.time()
-                log.info("pairing_code_generated", code=current)
+                log.info("pairing_code_generated")
                 changed = True
             # The code and the pending key always travel together (see
             # get_or_create_api_key).
@@ -338,7 +339,10 @@ class PairingManager:
         self._maybe_reload()
         if not self._state.get("paired", False):
             return True  # When unpaired, all access is open
-        return key == self._state.get("api_key")
+        stored = self._state.get("api_key")
+        if not isinstance(stored, str) or not stored or not isinstance(key, str):
+            return False
+        return hmac.compare_digest(key.encode(), stored.encode())
 
     def get_info(self) -> dict:
         """Get pairing info for the /pairing/info endpoint."""

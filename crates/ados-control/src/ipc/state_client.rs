@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ados_protocol::retry::RetryPace;
-use ados_protocol::state::read_state_value;
+use ados_protocol::state::read_state_value_into;
 use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::io::BufReader;
@@ -66,6 +66,12 @@ const RECONNECT_PACE: RetryPace = ados_protocol::retry::LOCAL_SOCKET;
 /// older than this means the state hub stopped (crashed, restarting, or wedged)
 /// and its last armed/mode/battery values are no longer the vehicle's.
 pub const STATE_STALE_AFTER: Duration = Duration::from_secs(3);
+
+/// How long one frame may take to arrive before the stream is treated as dead.
+/// A producer that holds the socket open but stops writing would otherwise
+/// leave the reader blocked for ever while the snapshot goes stale; past this
+/// the stream ends and the fixed reconnect pace re-dials.
+const FRAME_IDLE_TIMEOUT: Duration = STATE_STALE_AFTER.saturating_add(Duration::from_secs(1));
 
 /// The shared, latest vehicle-state snapshot and when it arrived. `None` until
 /// the first frame decodes. A route reads it through [`StateIpcClient::snapshot`],
@@ -238,10 +244,11 @@ enum StreamEnd {
     Stopped,
 }
 
-/// Read frames from one connected stream until EOF, a read error, or shutdown,
-/// updating the shared snapshot on each decoded frame. The seam is injectable:
-/// `reader` is any async byte source, so a test feeds canned frames without a
-/// live socket.
+/// Read frames from one connected stream until EOF, a read error, a frame that
+/// does not arrive within [`FRAME_IDLE_TIMEOUT`], or shutdown, updating the
+/// shared snapshot on each decoded frame. One buffer is reused for every frame.
+/// The seam is injectable: `reader` is any async byte source, so a test feeds
+/// canned frames without a live socket.
 async fn process_stream<R>(
     mut reader: R,
     snapshot: &Snapshot,
@@ -250,17 +257,28 @@ async fn process_stream<R>(
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    let mut buf = Vec::new();
     loop {
         let frame = tokio::select! {
             biased;
             _ = &mut **stop => return StreamEnd::Stopped,
-            r = read_state_value(&mut reader) => r,
+            r = tokio::time::timeout(
+                FRAME_IDLE_TIMEOUT,
+                read_state_value_into(&mut reader, &mut buf),
+            ) => r,
         };
         match frame {
-            Ok(Some(value)) => {
+            Ok(Ok(Some(value))) => {
                 *snapshot.lock() = Some((Instant::now(), value));
             }
-            Ok(None) | Err(_) => return StreamEnd::Ended,
+            Err(_) => {
+                tracing::warn!(
+                    idle_s = FRAME_IDLE_TIMEOUT.as_secs(),
+                    "state stream idle; reconnecting"
+                );
+                return StreamEnd::Ended;
+            }
+            Ok(Ok(None)) | Ok(Err(_)) => return StreamEnd::Ended,
         }
     }
 }
@@ -397,6 +415,29 @@ mod tests {
         // No socket → no snapshot, and no panic.
         assert!(client.snapshot().is_none());
         handle.shutdown().await;
+    }
+
+    /// One frame, then a held-open silent socket: the stream ends within the
+    /// idle bound so the reconnect loop re-dials.
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_stream_ends_within_the_idle_bound() {
+        let (reader, mut writer) = tokio::io::duplex(4096);
+        tokio::io::AsyncWriteExt::write_all(&mut writer, &encode_v2(&sample()).unwrap())
+            .await
+            .unwrap();
+        let snapshot: Snapshot = Arc::new(Mutex::new(None));
+        let (_tx, rx) = oneshot::channel::<()>();
+        tokio::pin!(rx);
+        let started = tokio::time::Instant::now();
+        let end = process_stream(reader, &snapshot, &mut rx.as_mut()).await;
+        assert_eq!(end, StreamEnd::Ended);
+        let waited = started.elapsed();
+        assert!(
+            waited >= FRAME_IDLE_TIMEOUT && waited <= Duration::from_millis(4100),
+            "ended after {waited:?}"
+        );
+        assert_eq!(snapshot.lock().clone().map(|(_, v)| v), Some(sample()));
+        drop(writer);
     }
 
     #[test]

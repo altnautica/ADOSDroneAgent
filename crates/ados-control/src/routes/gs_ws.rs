@@ -4,7 +4,9 @@
 //! enforces the agent's WebSocket auth contract itself (mirroring the residual
 //! handlers, which did the same because the upgrade bypasses the HTTP gate):
 //!
-//! * **Unpaired** ⇒ open (the bench operator can read before pairing).
+//! * **Unpaired** ⇒ open to the on-box operator and the first-boot lifelines;
+//!   an operator-LAN caller presents a ticket minted under the dashboard-PIN
+//!   salt (the same PIN bar every unpaired data route sets).
 //! * **Paired + a valid `X-ADOS-Key` handshake header** ⇒ open (native clients
 //!   that control handshake headers).
 //! * **Paired + a valid `Sec-WebSocket-Protocol: ados-ws-ticket, <token>`** ⇒
@@ -228,9 +230,11 @@ fn extract_ticket(offered: &[String]) -> Option<&str> {
 
 /// Decide the handshake.
 ///
-/// - **Unpaired:** open to the caller classes that reach an unpaired node's
-///   data plane (the local operator, the first-boot lifelines, the operator's
-///   LAN), never to a remote caller (a public-WAN host, a tunnelled request).
+/// - **Unpaired:** the local operator and the first-boot lifelines are
+///   admitted plainly. An operator-LAN caller needs a ticket minted while
+///   unpaired, keyed by the dashboard-PIN salt (the ticket route is PIN-gated
+///   for that caller), the same bar every unpaired data route sets. A remote
+///   caller (a public-WAN host, a tunnelled request) is refused.
 /// - **Unreadable pairing state:** only the on-box operator. A corrupt
 ///   `pairing.json` may be a paired node's record on a failing card; reading
 ///   it as unpaired would open these streams to anyone.
@@ -248,10 +252,24 @@ fn decide_ws_auth(
     let pairing = state.pairing.current();
     let key = match pairing {
         Pairing::Unpaired => {
-            return if caller == CallerClass::Remote {
-                WsAuth::Reject
-            } else {
-                WsAuth::AcceptPlain
+            return match caller {
+                CallerClass::OnBox | CallerClass::Lifeline => WsAuth::AcceptPlain,
+                CallerClass::OperatorLan => {
+                    let issuer = state
+                        .dashboard_pin
+                        .salt()
+                        .map(|salt| WsTicketIssuer::issuer_unpaired(&salt));
+                    let offered = offered_subprotocols(headers);
+                    match (issuer, extract_ticket(&offered)) {
+                        (Some(issuer), Some(token))
+                            if issuer.verify_once(token, scope, now_unix()).is_ok() =>
+                        {
+                            WsAuth::AcceptTicket
+                        }
+                        _ => WsAuth::Reject,
+                    }
+                }
+                CallerClass::Remote => WsAuth::Reject,
             };
         }
         Pairing::Unreadable => {
@@ -969,8 +987,19 @@ mod tests {
     }
 
     #[test]
-    fn unpaired_admits_without_a_credential() {
+    fn unpaired_admits_the_box_and_lifelines_but_the_lan_needs_a_pin_ticket() {
         let (_d, state) = state_with_pairing(r#"{"paired": false}"#);
+        for caller in [CallerClass::OnBox, CallerClass::Lifeline] {
+            assert!(
+                matches!(
+                    decide_ws_auth(&state, &HeaderMap::new(), SCOPE_UPLINK_EVENTS, caller),
+                    WsAuth::AcceptPlain
+                ),
+                "{caller:?}"
+            );
+        }
+        // Operator LAN, no ticket: refused, as every unpaired data route is
+        // without a PIN session.
         assert!(matches!(
             decide_ws_auth(
                 &state,
@@ -978,7 +1007,43 @@ mod tests {
                 SCOPE_UPLINK_EVENTS,
                 CallerClass::OperatorLan
             ),
-            WsAuth::AcceptPlain
+            WsAuth::Reject
+        ));
+        // With a ticket keyed by the PIN salt: admitted.
+        state.dashboard_pin.set_pin("1234", 0.0).unwrap();
+        let salt = state.dashboard_pin.salt().unwrap();
+        let offer = |token: String| {
+            headers_with(&[(
+                "sec-websocket-protocol",
+                &format!("ados-ws-ticket, {token}"),
+            )])
+        };
+        let token = WsTicketIssuer::issuer_unpaired(&salt)
+            .mint(SCOPE_UPLINK_EVENTS, 30)
+            .unwrap()
+            .token;
+        assert!(matches!(
+            decide_ws_auth(
+                &state,
+                &offer(token),
+                SCOPE_UPLINK_EVENTS,
+                CallerClass::OperatorLan
+            ),
+            WsAuth::AcceptTicket
+        ));
+        // An empty-key ticket (anyone can mint one) opens nothing.
+        let forged = WsTicketIssuer::from_api_key("")
+            .mint(SCOPE_UPLINK_EVENTS, 30)
+            .unwrap()
+            .token;
+        assert!(matches!(
+            decide_ws_auth(
+                &state,
+                &offer(forged),
+                SCOPE_UPLINK_EVENTS,
+                CallerClass::OperatorLan
+            ),
+            WsAuth::Reject
         ));
     }
 

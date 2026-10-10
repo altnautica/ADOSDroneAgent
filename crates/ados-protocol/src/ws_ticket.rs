@@ -45,6 +45,10 @@ type HmacSha256 = Hmac<Sha256>;
 /// MUST match `ados.core.ws_ticket._LABEL` exactly.
 pub const TICKET_KEY_LABEL: &[u8] = b"ados-ws-ticket-v1";
 
+/// Domain-separation label for the ticket key of an UNPAIRED node, derived from
+/// the dashboard-PIN salt rather than a pairing key (there is none yet).
+pub const UNPAIRED_TICKET_KEY_LABEL: &[u8] = b"ados-ws-ticket-unpaired-v1";
+
 /// Default ticket lifetime in seconds (matches the prior store's default).
 pub const DEFAULT_TTL_SECONDS: i64 = 30;
 
@@ -121,6 +125,19 @@ impl WsTicketIssuer {
         let mut mac =
             HmacSha256::new_from_slice(api_key.as_bytes()).expect("HMAC accepts any key length");
         mac.update(TICKET_KEY_LABEL);
+        let key = mac.finalize().into_bytes().to_vec();
+        Self { key }
+    }
+
+    /// The issuer for an UNPAIRED node: the ticket key is derived from the
+    /// dashboard-PIN `salt` under its own label. A ticket from it proves the
+    /// holder unlocked the PIN on this node since the PIN was last set (a reset
+    /// rotates the salt and revokes every such ticket), which is what an
+    /// operator-LAN caller must show to open a stream while the node is
+    /// unpaired. It can never verify as a paired ticket, nor the reverse.
+    pub fn issuer_unpaired(salt: &[u8]) -> Self {
+        let mut mac = HmacSha256::new_from_slice(salt).expect("HMAC accepts any key length");
+        mac.update(UNPAIRED_TICKET_KEY_LABEL);
         let key = mac.finalize().into_bytes().to_vec();
         Self { key }
     }
@@ -375,6 +392,28 @@ mod tests {
             "v2|gs.mavlink_ws|1000000|1000030|00112233445566778899aabbccddeeff|\
 4d99ddf7a9dc48119b137be1fe135a50f7618a77f44d3a104e5ccac9171193e7",
             "if this fails, regenerate the vector and update ados.core.ws_ticket"
+        );
+    }
+
+    /// An unpaired ticket is keyed by the PIN salt: it verifies under the same
+    /// salt only, never under another salt or as a paired (or empty-key) ticket.
+    #[test]
+    fn unpaired_tickets_are_keyed_by_the_pin_salt() {
+        let salt = [7u8; 16];
+        let issuer = WsTicketIssuer::issuer_unpaired(&salt);
+        let t = issuer.mint_at("gs.mesh_events", 30, 1_000_000, NONCE);
+        assert_eq!(issuer.verify(&t.token, "gs.mesh_events", 1_000_001), Ok(()));
+        assert_eq!(
+            WsTicketIssuer::issuer_unpaired(&[8u8; 16]).verify(
+                &t.token,
+                "gs.mesh_events",
+                1_000_001
+            ),
+            Err(WsTicketError::HmacMismatch)
+        );
+        assert_eq!(
+            WsTicketIssuer::from_api_key("").verify(&t.token, "gs.mesh_events", 1_000_001),
+            Err(WsTicketError::HmacMismatch)
         );
     }
 }

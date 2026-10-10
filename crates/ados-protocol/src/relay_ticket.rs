@@ -468,45 +468,90 @@ pub fn load_secret_at(path: &std::path::Path) -> Option<String> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-/// Store a relay secret at `path` with owner-only permissions.
-///
-/// The mode is set explicitly AFTER writing as well as at open time, because
-/// the open-time mode applies only on creation: an existing file left
-/// group-readable by an earlier build would otherwise keep that mode and leave
-/// the material readable to anything on the box. Mirrors the plugin token
-/// secret's write, which is owner-only for the same reason.
-pub fn store_secret_at(path: &std::path::Path, secret: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(parent) {
-                let mut perms = meta.permissions();
-                perms.set_mode(0o700);
-                let _ = std::fs::set_permissions(parent, perms);
-            }
-        }
-    }
+/// Serialises every offer this process applies, so two concurrent offers
+/// cannot both read "none held". The hard link below is the cross-process
+/// guard; this one keeps the read-decide-link sequence whole in-process.
+static RELAY_SECRET_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Create the secret's directory, owner-only.
+fn prepare_secret_dir(path: &std::path::Path) -> std::io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent)?;
     #[cfg(unix)]
     {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)?;
-        f.write_all(secret.as_bytes())?;
-        f.flush()?;
-        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        Ok(())
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    Ok(())
+}
+
+/// Write `secret` to a fresh owner-only file at `tmp` and flush it to disk.
+fn write_private_file(tmp: &std::path::Path, secret: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(tmp)?;
+    f.write_all(secret.as_bytes())?;
+    f.sync_all()
+}
+
+/// Flush the directory entry for `path`, so a power cut after an accept
+/// cannot lose the link that made the secret visible.
+fn sync_parent(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
     }
     #[cfg(not(unix))]
-    {
-        std::fs::write(path, secret.as_bytes())
+    let _ = path;
+    Ok(())
+}
+
+/// Make `offered` the held secret unless one already exists.
+///
+/// The secret is written whole to a temp sibling first and then hard-linked
+/// into place: the link either creates the file with its full content or
+/// fails because a file is already there, so no reader ever sees a partial or
+/// empty secret and two writers cannot both win. On `AlreadyExists` the held
+/// value decides the answer; an existing file that holds nothing (a leftover
+/// from an older non-atomic write) is replaced atomically.
+fn install_secret(path: &std::path::Path, offered: &str) -> std::io::Result<AcceptDecision> {
+    prepare_secret_dir(path)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = path.with_file_name(format!(".{name}.{}.{nanos}.tmp", std::process::id()));
+    if let Err(e) = write_private_file(&tmp, offered) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
+    let outcome = match std::fs::hard_link(&tmp, path) {
+        Ok(()) => Ok(AcceptDecision::Accept),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => match load_secret_at(path) {
+            Some(held) => Ok(decide_accept(Some(&held), offered)),
+            None => std::fs::rename(&tmp, path).map(|()| AcceptDecision::Accept),
+        },
+        Err(e) => Err(e),
+    };
+    // Gone already after a rename; otherwise the link (or the refusal) made it
+    // redundant.
+    let _ = std::fs::remove_file(&tmp);
+    if matches!(outcome, Ok(AcceptDecision::Accept)) {
+        sync_parent(path)?;
+    }
+    outcome
 }
 
 /// Apply an offered secret under the [`decide_accept`] rule, storing it only on
@@ -514,16 +559,20 @@ pub fn store_secret_at(path: &std::path::Path, secret: &str) -> std::io::Result<
 ///
 /// The decision and the write are joined here so no caller can reach the write
 /// without going through the rule -- the whole scheme rests on first-write-wins,
-/// and a handler that stored first and asked afterwards would defeat it.
+/// and a handler that stored first and asked afterwards would defeat it. The
+/// write itself is atomic and exclusive (see [`install_secret`]), and offers
+/// are serialised, so concurrent offers yield exactly one `Accept`. Blocking
+/// file IO: an async caller runs it in `spawn_blocking`.
 pub fn apply_offered_secret(
     path: &std::path::Path,
     offered: &str,
 ) -> Result<AcceptDecision, std::io::Error> {
+    let _guard = RELAY_SECRET_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let decision = decide_accept(load_secret_at(path).as_deref(), offered);
-    if decision == AcceptDecision::Accept {
-        store_secret_at(path, offered)?;
+    if decision != AcceptDecision::Accept {
+        return Ok(decision);
     }
-    Ok(decision)
+    install_secret(path, offered)
 }
 
 #[cfg(test)]
@@ -848,19 +897,58 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_stored_secret_is_owner_only_even_over_a_looser_existing_file() {
+    fn an_empty_leftover_file_is_replaced_owner_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("relay-peer-secret");
-        // An earlier build could have left this world-readable; the open-time
-        // mode alone would not repair it.
-        std::fs::write(&path, "old").unwrap();
+        // What a crash between truncate and write used to leave behind, with
+        // the looser mode an earlier build could have set.
+        std::fs::write(&path, "").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        store_secret_at(&path, HEX32).unwrap();
-
+        assert_eq!(
+            apply_offered_secret(&path, HEX32).unwrap(),
+            AcceptDecision::Accept
+        );
+        assert_eq!(load_secret_at(&path).as_deref(), Some(HEX32));
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "got {mode:o}");
+    }
+
+    #[test]
+    fn concurrent_offers_accept_exactly_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets/relay-peer-secret");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let offers = [HEX32.to_string(), "f".repeat(64)];
+        let handles: Vec<_> = offers
+            .iter()
+            .cloned()
+            .map(|offer| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (offer.clone(), apply_offered_secret(&path, &offer).unwrap())
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winners: Vec<_> = results
+            .iter()
+            .filter(|(_, d)| *d == AcceptDecision::Accept)
+            .collect();
+        assert_eq!(winners.len(), 1, "{results:?}");
+        assert!(results
+            .iter()
+            .any(|(_, d)| *d == AcceptDecision::RefusedWouldOverwrite));
+        assert_eq!(
+            load_secret_at(&path).as_deref(),
+            Some(winners[0].0.as_str())
+        );
+        // No temp sibling is left behind.
+        let leftovers = std::fs::read_dir(path.parent().unwrap()).unwrap().count();
+        assert_eq!(leftovers, 1);
     }
 
     #[test]

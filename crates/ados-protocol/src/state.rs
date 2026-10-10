@@ -237,9 +237,22 @@ pub async fn read_state_value<R>(reader: &mut R) -> io::Result<Option<Value>>
 where
     R: AsyncRead + Unpin,
 {
+    read_state_value_into(reader, &mut Vec::new()).await
+}
+
+/// [`read_state_value`] reading each frame into the caller's `buf`, so a
+/// long-lived subscriber reuses one allocation for every snapshot instead of
+/// allocating a body per frame. The buffer's contents are scratch on return.
+pub async fn read_state_value_into<R>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<Value>>
+where
+    R: AsyncRead + Unpin,
+{
     let mut mismatches = MismatchRun(0);
     loop {
-        match read_state_frame(reader).await? {
+        match read_state_frame_into(reader, buf).await? {
             Some(StateFrame::Value(v)) => return Ok(Some(v)),
             Some(StateFrame::Skip) => continue,
             Some(StateFrame::VersionMismatch { got }) => mismatches.record(got)?,
@@ -248,8 +261,12 @@ where
     }
 }
 
-/// Read one frame asynchronously. `Ok(None)` = a clean EOF at a frame boundary.
-async fn read_state_frame<R>(reader: &mut R) -> io::Result<Option<StateFrame>>
+/// Read one frame asynchronously into `buf`. `Ok(None)` = a clean EOF at a
+/// frame boundary.
+async fn read_state_frame_into<R>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> io::Result<Option<StateFrame>>
 where
     R: AsyncRead + Unpin,
 {
@@ -260,15 +277,16 @@ where
         Err(e) => return Err(e),
     }
 
+    buf.clear();
     if first[0] == 0x00 {
         let mut rest = [0u8; frame::HEADER_SIZE - 1];
         reader.read_exact(&mut rest).await?;
         let len = v2_body_len([first[0], rest[0], rest[1], rest[2]])?;
-        let mut body = vec![0u8; len];
-        reader.read_exact(&mut body).await?;
-        Ok(Some(decode_state_body(true, &body)))
+        buf.resize(len, 0);
+        reader.read_exact(buf.as_mut_slice()).await?;
+        Ok(Some(decode_state_body(true, buf)))
     } else {
-        let mut line = vec![first[0]];
+        buf.push(first[0]);
         let mut byte = [0u8; 1];
         loop {
             match reader.read_exact(&mut byte).await {
@@ -281,15 +299,15 @@ where
             if byte[0] == b'\n' {
                 break;
             }
-            if line.len() >= STATE_V2_MAX_FRAME {
+            if buf.len() >= STATE_V2_MAX_FRAME {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "state v1 line exceeded the frame cap without a newline",
                 ));
             }
-            line.push(byte[0]);
+            buf.push(byte[0]);
         }
-        Ok(Some(decode_state_body(false, &line)))
+        Ok(Some(decode_state_body(false, buf)))
     }
 }
 
@@ -475,6 +493,49 @@ mod tests {
         assert_eq!(read_state_value(&mut r).await.unwrap().unwrap(), a);
         assert_eq!(read_state_value(&mut r).await.unwrap().unwrap(), b);
         assert!(read_state_value(&mut r).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn read_state_value_into_reuses_one_buffer_across_frames() {
+        let a = json!({"mode": "STABILIZE", "pad": "x".repeat(512)});
+        let b = json!({"mode": "GUIDED"});
+        let mut wire = encode_v2(&a).unwrap();
+        wire.extend(encode_v1(&b).unwrap());
+        wire.extend(encode_v2(&b).unwrap());
+        let mut r = std::io::Cursor::new(wire);
+        let mut buf = Vec::new();
+        assert_eq!(
+            read_state_value_into(&mut r, &mut buf)
+                .await
+                .unwrap()
+                .unwrap(),
+            a
+        );
+        let grown = buf.capacity();
+        assert!(grown >= 512);
+        assert_eq!(
+            read_state_value_into(&mut r, &mut buf)
+                .await
+                .unwrap()
+                .unwrap(),
+            b
+        );
+        assert_eq!(
+            read_state_value_into(&mut r, &mut buf)
+                .await
+                .unwrap()
+                .unwrap(),
+            b
+        );
+        assert_eq!(
+            buf.capacity(),
+            grown,
+            "the smaller frames reused the allocation"
+        );
+        assert!(read_state_value_into(&mut r, &mut buf)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

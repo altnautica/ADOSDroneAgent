@@ -12,10 +12,12 @@
 //! Auth posture per route (the edge public-exempts status/verify/set so an
 //! off-box paired browser can reach them; clear stays behind the normal gate):
 //!
-//! - **status** — public read of `{pin_set, locked, locked_until}` (booleans, no
-//!   secret) so the splash picks set-vs-enter. `locked` is the caller's own.
+//! - **status** — public read of `{pin_set, locked, locked_until, scope}`
+//!   (booleans, no secret) so the splash picks set-vs-enter. `scope` is `node`
+//!   when every caller is locked, `peer` when only this caller is.
 //! - **verify** — public login: rate-limited per caller at the edge, plus a
-//!   per-caller lockout ladder in the store. A correct PIN returns a session.
+//!   per-caller lockout ladder and a node-wide failure budget in the store. A
+//!   correct PIN returns a session; a spent budget answers `423`.
 //! - **set** — public at the edge, AUTHORIZED IN THE HANDLER: on-box OR a valid
 //!   `X-ADOS-Key` OR a valid current session OR a matching `current_pin`, OR —
 //!   only while the node is UNPAIRED and no PIN is set yet — trust-on-first-use
@@ -25,6 +27,8 @@
 //! - **clear** — NOT public: the normal gate already admits only on-box or a
 //!   valid credential (the GCS holds the key), which is exactly reset's audience.
 
+use std::sync::LazyLock;
+
 use axum::extract::{Extension, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -33,38 +37,78 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use ados_protocol::dashboard_session::DashboardSession;
+use ados_protocol::logd::emitter::IngestEmitter;
+use ados_protocol::logd::{Fields, Level, Value as FieldValue};
 use ados_protocol::pairing_posture::{CallerClass, Pairing};
 
 use crate::dashboard_pin::{PeerKey, PinStatus, VerifyOutcome, DASHBOARD_SESSION_HEADER};
 use crate::routes::detail;
-use crate::serve::PeerAddr;
+use crate::serve::{PeerAddr, PeerKeyHint};
 use crate::state::AppState;
 
-/// The lockout key for this request's caller: its address on the TCP edge, or
-/// the local operator on the Unix socket.
-fn peer_key(peer: Option<Extension<PeerAddr>>) -> PeerKey {
+/// The lockout key for this request's caller: the edge's keying hint when it
+/// stamped one (a tunnelled caller's forwarded address), else its address on
+/// the TCP edge, or the local operator on the Unix socket.
+fn peer_key(peer: Option<Extension<PeerAddr>>, hint: Option<Extension<PeerKeyHint>>) -> PeerKey {
+    if let Some(Extension(PeerKeyHint(key))) = hint {
+        return key;
+    }
     PeerKey::of(peer.map(|Extension(PeerAddr(addr))| addr.ip()))
 }
 
-/// `GET /api/dashboard/pin/status` → `{pin_set, locked, locked_until|null}`.
-/// Public — reveals only booleans so the splash can pick set-vs-enter.
+/// The `423` every caller gets while the node-wide budget is spent.
+fn node_locked(locked_until: f64, now: f64) -> Response {
+    let retry_after_s = (locked_until - now).max(0.0).ceil() as u64;
+    (
+        StatusCode::LOCKED,
+        Json(json!({
+            "error": "E_PIN_LOCKED",
+            "scope": "node",
+            "retry_after_s": retry_after_s,
+        })),
+    )
+        .into_response()
+}
+
+/// The logging-store emitter for PIN events, started on first use (inside the
+/// runtime, as the shipper task needs).
+static EMITTER: LazyLock<IngestEmitter> = LazyLock::new(|| IngestEmitter::new("ados-control"));
+
+/// Record the node-wide lock in the logging store (once, as it engages).
+fn record_node_lock(locked_until: f64) {
+    let mut detail = Fields::new();
+    detail.insert("locked_until".to_string(), FieldValue::from(locked_until));
+    EMITTER.emit_event("dashboard_pin.global_lock", Level::Warn, detail);
+    tracing::warn!(locked_until, "dashboard_pin.global_lock");
+}
+
+/// `GET /api/dashboard/pin/status` → `{pin_set, locked, locked_until|null,
+/// scope|null}`. Public — reveals only booleans so the splash can pick
+/// set-vs-enter.
 pub async fn get_pin_status(
     State(state): State<AppState>,
     peer: Option<Extension<PeerAddr>>,
+    hint: Option<Extension<PeerKeyHint>>,
 ) -> Json<Value> {
     let PinStatus {
         pin_set,
         locked,
         locked_until,
+        node_locked,
     } = state
         .dashboard_pin
-        .status(peer_key(peer), now_unix_seconds());
+        .status(peer_key(peer, hint), now_unix_seconds());
     Json(json!({
         "pin_set": pin_set,
         "locked": locked,
         // Only meaningful while locked; null otherwise so the client does not
         // render a stale countdown.
         "locked_until": if locked { json!(locked_until) } else { Value::Null },
+        "scope": match (locked, node_locked) {
+            (false, _) => Value::Null,
+            (true, true) => json!("node"),
+            (true, false) => json!("peer"),
+        },
     }))
 }
 
@@ -76,15 +120,18 @@ pub struct VerifyRequest {
 
 /// `POST /api/dashboard/pin/verify` — enter the PIN. On success returns a session
 /// token; on a wrong PIN a `401` with the remaining-attempt countdown; while
-/// locked a `429` with the lockout expiry.
+/// this caller is locked a `429` with the lockout expiry; while the whole node
+/// is locked a `423` with `scope: "node"`.
 pub async fn verify_pin(
     State(state): State<AppState>,
     peer: Option<Extension<PeerAddr>>,
+    hint: Option<Extension<PeerKeyHint>>,
     Json(req): Json<VerifyRequest>,
 ) -> Response {
+    let now = now_unix_seconds();
     match state
         .dashboard_pin
-        .verify_pin(peer_key(peer), &req.pin, now_unix_seconds())
+        .verify_pin(peer_key(peer, hint), &req.pin, now)
     {
         VerifyOutcome::Ok => session_response(&state),
         VerifyOutcome::Wrong { remaining_attempts } => (
@@ -97,6 +144,15 @@ pub async fn verify_pin(
             Json(json!({ "ok": false, "locked_until": locked_until })),
         )
             .into_response(),
+        VerifyOutcome::NodeLocked {
+            locked_until,
+            engaged,
+        } => {
+            if engaged {
+                record_node_lock(locked_until);
+            }
+            node_locked(locked_until, now)
+        }
         VerifyOutcome::NotSet => detail(StatusCode::CONFLICT, "No dashboard PIN is set"),
     }
 }
@@ -117,10 +173,11 @@ pub async fn set_pin(
     State(state): State<AppState>,
     caller: Option<Extension<CallerClass>>,
     peer: Option<Extension<PeerAddr>>,
+    hint: Option<Extension<PeerKeyHint>>,
     headers: HeaderMap,
     Json(req): Json<SetRequest>,
 ) -> Response {
-    let peer = peer_key(peer);
+    let peer = peer_key(peer, hint);
     let now = now_unix_seconds();
     let pairing = state.pairing.current();
     // The caller class the edge computed (the Unix edge stamps on-box). A
@@ -154,6 +211,7 @@ pub async fn set_pin(
     // Then the current-PIN change path, short-circuited so a wrong
     // `current_pin` is only consulted when nothing else authorized — it
     // counts as a failed attempt against the lockout ladder.
+    let mut node_lock = None;
     let authorized = caller == CallerClass::OnBox
         || key_valid
         || session_valid
@@ -161,15 +219,26 @@ pub async fn set_pin(
         || req
             .current_pin
             .as_deref()
-            .map(|cp| {
-                matches!(
-                    state.dashboard_pin.verify_pin(peer, cp, now),
-                    VerifyOutcome::Ok
-                )
+            .map(|cp| match state.dashboard_pin.verify_pin(peer, cp, now) {
+                VerifyOutcome::Ok => true,
+                VerifyOutcome::NodeLocked {
+                    locked_until,
+                    engaged,
+                } => {
+                    if engaged {
+                        record_node_lock(locked_until);
+                    }
+                    node_lock = Some(locked_until);
+                    false
+                }
+                _ => false,
             })
             .unwrap_or(false);
 
     if !authorized {
+        if let Some(locked_until) = node_lock {
+            return node_locked(locked_until, now);
+        }
         // Different refusals, because they need different operator actions.
         if !pin_set {
             tracing::warn!(?caller, "dashboard_pin_first_set_refused");

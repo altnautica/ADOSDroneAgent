@@ -33,8 +33,11 @@
 //! the box; the Unix edge is unlimited.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::config::ControlSecurityConfig;
+use crate::security_state::SecurityState;
 
 // The pairing-posture primitives are shared with the direct MAVLink proxies, so
 // they live once in the protocol crate. Re-exported here under the names this
@@ -153,9 +156,10 @@ const PAIRING_TTL: Duration = Duration::from_secs(2);
 pub struct PairingState {
     path: PathBuf,
     cache: Mutex<Cache>,
-    /// The operator-configured `security.api.api_key`, empty when none. A
-    /// second credential accepted everywhere the pairing key is.
-    configured_key: String,
+    /// The live `security:` posture: its `api.api_key`, when set, is a second
+    /// credential accepted everywhere the pairing key is. Read per request, so
+    /// rotating it takes effect without a restart. `None` accepts none.
+    security: Option<Arc<SecurityState>>,
 }
 
 struct Cache {
@@ -179,21 +183,31 @@ impl PairingState {
                 at: Instant::now(),
                 primed: false,
             }),
-            configured_key: String::new(),
+            security: None,
         }
     }
 
-    /// Also accept the operator-configured `security.api.api_key`.
-    pub fn with_configured_key(mut self, key: impl Into<String>) -> Self {
-        self.configured_key = key.into();
+    /// Also accept the operator-configured `security.api.api_key`, read live.
+    pub fn with_security(mut self, security: Arc<SecurityState>) -> Self {
+        self.security = Some(security);
         self
+    }
+
+    /// The live security config, all-defaults (no configured key) when none
+    /// is attached or the config has never been readable.
+    fn security_config(&self) -> Arc<ControlSecurityConfig> {
+        self.security
+            .as_ref()
+            .map(|s| s.config_or_default())
+            .unwrap_or_default()
     }
 
     /// Whether `presented` is a credential this node accepts: the pairing key
     /// or the configured key. Every surface that checks a key calls this, so a
     /// credential is never accepted on one route and refused on another.
     pub fn credential_valid(&self, presented: Option<&str>) -> bool {
-        credential_matches(&self.current(), &self.configured_key, presented)
+        let configured = self.security_config();
+        credential_matches(&self.current(), &configured.security.api.api_key, presented)
     }
 
     /// The pairing-state file path this reader watches.
@@ -228,7 +242,8 @@ impl PairingState {
         if pairing == Pairing::Unpaired {
             return true;
         }
-        credential_matches(&pairing, &self.configured_key, presented_key)
+        let configured = self.security_config();
+        credential_matches(&pairing, &configured.security.api.api_key, presented_key)
     }
 }
 
@@ -558,10 +573,13 @@ pub fn unpaired_decision(
     }
 }
 
-/// Who a request is charged to: the caller's address, with an IPv6 address
-/// reduced to its /64 (one host controls a whole /64, so keying on the full
-/// address would hand it 2^64 fresh budgets) and an IPv4-mapped address read
-/// as the IPv4 address. `None` is a caller with no address (the Unix socket).
+/// Who a request is charged to: the caller's address, with a global IPv6
+/// address reduced to its /64 (one host controls a whole /64, so keying on the
+/// full address would hand it 2^64 fresh budgets) and an IPv4-mapped address
+/// read as the IPv4 address. Link-local (`fe80::/10`) and unique-local
+/// (`fc00::/7`) addresses are keyed per /128: every host on a LAN shares that
+/// /64, so collapsing it let one host exhaust everyone's budget. `None` is a
+/// caller with no address (the Unix socket).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PeerKey(Option<std::net::IpAddr>);
 
@@ -572,7 +590,13 @@ impl PeerKey {
         Self(ip.map(|ip| match ip.to_canonical() {
             IpAddr::V6(v6) => {
                 let s = v6.segments();
-                IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+                let link_local = s[0] & 0xffc0 == 0xfe80;
+                let unique_local = s[0] & 0xfe00 == 0xfc00;
+                if link_local || unique_local {
+                    IpAddr::V6(v6)
+                } else {
+                    IpAddr::V6(Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+                }
             }
             v4 => v4,
         }))
@@ -1164,7 +1188,18 @@ mod tests {
     fn the_native_edge_accepts_the_configured_key() {
         let dir = tempfile::tempdir().unwrap();
         let path = write_pairing(dir.path(), r#"{"paired": true, "api_key": "pair-key"}"#);
-        let state = PairingState::with_path(path).with_configured_key("cfg-key");
+        let state = PairingState::with_path(path).with_security(Arc::new(SecurityState::fixed(
+            crate::config::ControlSecurityConfig {
+                security: crate::config::SecuritySection {
+                    api: crate::config::ApiSecuritySection {
+                        api_key: "cfg-key".to_string(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )));
         assert!(state.authorize("/api/status", Some("cfg-key")));
         assert!(state.authorize("/api/status", Some("pair-key")));
         assert!(!state.authorize("/api/status", Some("nope")));
@@ -1225,6 +1260,24 @@ mod tests {
         assert!(!limiter.check(a));
         std::thread::sleep(Duration::from_millis(30));
         assert!(limiter.check(a), "the window refilled");
+    }
+
+    /// Link-local and unique-local callers share a /64 with every host on the
+    /// LAN, so each is its own caller; a global /64 still collapses.
+    #[test]
+    fn link_local_and_ula_peers_each_get_their_own_budget() {
+        let limiter = RateLimiter::new(60, Duration::from_secs(60));
+        for pair in [
+            ("fe80::1", "fe80::2"),
+            ("febf::1", "febf::2"),
+            ("fd12:3456::1", "fd12:3456::2"),
+        ] {
+            let (a, b) = (peer(pair.0), peer(pair.1));
+            assert_ne!(a, b, "{pair:?}");
+            while limiter.check(a) {}
+            assert!(limiter.check(b), "{} keeps its budget", pair.1);
+        }
+        assert_eq!(peer("2001:db8:1:2::10"), peer("2001:db8:1:2::20"));
     }
 
     #[test]

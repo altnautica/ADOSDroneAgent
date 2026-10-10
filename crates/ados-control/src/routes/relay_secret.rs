@@ -60,8 +60,14 @@ pub async fn post_peer_secret(
     State(state): State<AppState>,
     Json(req): Json<OfferedSecret>,
 ) -> (StatusCode, Json<Value>) {
-    let path = state.pairing_paths.relay_secret.as_path();
-    match relay_ticket::apply_offered_secret(path, &req.secret) {
+    // The read, the exclusive link and the directory fsync are blocking file
+    // IO, so they run on the blocking pool rather than a reactor worker.
+    let path = state.pairing_paths.relay_secret.clone();
+    let applied =
+        tokio::task::spawn_blocking(move || relay_ticket::apply_offered_secret(&path, &req.secret))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));
+    match applied {
         Ok(AcceptDecision::Accept) => (
             StatusCode::OK,
             Json(json!({ "accepted": true, "decision": "accepted" })),

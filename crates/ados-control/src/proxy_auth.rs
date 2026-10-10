@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::http::{Method, StatusCode};
@@ -31,7 +31,8 @@ use sha2::Sha256;
 
 use ados_protocol::pairing_posture::{constant_time_eq, Pairing};
 
-use crate::config::SecuritySection;
+use crate::config::{ControlSecurityConfig, SecuritySection};
+use crate::security_state::SecurityState;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -111,6 +112,25 @@ const REPLAY_MAX_NONCES: usize = 50_000;
 /// `len(secret_bytes) >= 16` guard in `SecurityMiddleware.__init__` and the
 /// `HmacSigner` constructor.
 const HMAC_MIN_SECRET_LEN: usize = 16;
+
+/// The header an upload carries its body digest on: the lowercase hex
+/// SHA-256 of the body. On the streaming upload routes the HMAC covers this
+/// digest instead of the body, so a large body is never buffered to verify.
+pub const CONTENT_DIGEST_HEADER: &str = "x-content-sha256";
+
+/// The routes whose bodies (plugin archives, vision models) are too large to
+/// buffer for the signature. Each route hashes the body while it streams and
+/// rejects a mismatch with the declared digest.
+const DIGEST_SIGNED_ROUTES: &[&str] = &[
+    "/api/plugins/parse",
+    "/api/plugins/install",
+    "/api/vision/models/upload",
+];
+
+/// True when `value` is a SHA-256 hex digest (64 hex characters).
+pub fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
 
 /// The headers the decision reads off a request, captured before the body is
 /// touched so the decision is a pure function of typed inputs (the caller pulls
@@ -252,48 +272,64 @@ fn unix_now() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The auth decision for a PROXIED route, holding the config slice + the shared
-/// replay detector + the setup-token path. Built once at startup and shared
-/// behind an `Arc` in the edge state.
+/// The auth decision for a PROXIED route, holding the live security posture +
+/// the shared replay detector + the setup-token path. Built once at startup and
+/// shared behind an `Arc` in the edge state.
 pub struct ProxiedAuth {
-    config: SecuritySection,
+    security: Arc<SecurityState>,
     replay: ReplayDetector,
     setup_token_path: PathBuf,
 }
 
+/// The default setup-token path, honouring `ADOS_SETUP_TOKEN_PATH`.
+fn default_setup_token_path() -> PathBuf {
+    std::env::var("ADOS_SETUP_TOKEN_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_SETUP_TOKEN_PATH))
+}
+
 impl ProxiedAuth {
-    /// Build from the loaded `security:` config slice, the standard setup-token
-    /// path (or its `ADOS_SETUP_TOKEN_PATH` override), and a fresh 300s/50000
-    /// replay detector.
-    pub fn new(config: SecuritySection) -> Self {
-        let setup_token_path = std::env::var("ADOS_SETUP_TOKEN_PATH")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(DEFAULT_SETUP_TOKEN_PATH));
+    /// Build over the live security posture, the standard setup-token path (or
+    /// its `ADOS_SETUP_TOKEN_PATH` override), and a fresh 300s/50000 replay
+    /// detector. Every decision reads the posture per request.
+    pub fn live(security: Arc<SecurityState>) -> Self {
         Self {
-            config,
+            security,
             replay: ReplayDetector::default_security(),
-            setup_token_path,
+            setup_token_path: default_setup_token_path(),
         }
     }
 
-    /// Build with an explicit setup-token path + detector (tests).
+    /// Build over a fixed `security:` slice that never changes (tests, tools).
+    pub fn new(config: SecuritySection) -> Self {
+        Self::live(fixed_security(config))
+    }
+
+    /// Build over a fixed slice with an explicit setup-token path + detector
+    /// (tests).
     pub fn with_paths(
         config: SecuritySection,
         setup_token_path: PathBuf,
         replay: ReplayDetector,
     ) -> Self {
         Self {
-            config,
+            security: fixed_security(config),
             replay,
             setup_token_path,
         }
+    }
+
+    /// The `security:` slice right now (the defaults while unreadable).
+    fn config(&self) -> Arc<ControlSecurityConfig> {
+        self.security.config_or_default()
     }
 
     /// Whether the HMAC gate is active: enabled in config AND the secret is at
     /// least the minimum length. Mirrors the predecessor middleware's
     /// `enabled and bool(secret)` plus the `>= 16` length guard.
     pub fn hmac_active(&self) -> bool {
-        self.config.hmac_enabled && self.config.hmac_secret.len() >= HMAC_MIN_SECRET_LEN
+        let cfg = self.config();
+        cfg.security.hmac_enabled && cfg.security.hmac_secret.len() >= HMAC_MIN_SECRET_LEN
     }
 
     /// True when the HMAC gate would read the request body for THIS request: the
@@ -301,6 +337,12 @@ impl ProxiedAuth {
     /// caller buffers the body only in this case (otherwise it streams).
     pub fn hmac_needs_body(&self, method: &Method, path: &str) -> bool {
         self.hmac_active() && is_verified_method(method) && !is_hmac_exempt(path)
+    }
+
+    /// True when `path` is a streaming upload whose signature may cover the
+    /// declared body digest (`X-Content-SHA256`) instead of the body.
+    pub fn is_digest_signed_route(method: &Method, path: &str) -> bool {
+        *method == Method::POST && contains(DIGEST_SIGNED_ROUTES, path)
     }
 
     /// The API-key gate (the `ApiKeyAuthMiddleware.dispatch` order). Returns
@@ -349,7 +391,7 @@ impl ProxiedAuth {
                 .iter()
                 .any(|p| path.starts_with(p));
         if is_setup_mutation {
-            let require_token = self.config.setup_token_required;
+            let require_token = self.config().security.setup_token_required;
             if !require_token && matches!(pairing, Pairing::Unpaired) && is_same_origin(headers) {
                 return Decision::Accept;
             }
@@ -406,8 +448,38 @@ impl ProxiedAuth {
         headers: &RequestHeaders,
         body: &[u8],
     ) -> Decision {
+        self.decide_signed(method, path, query, headers, body)
+    }
+
+    /// The HMAC/replay gate for a streaming upload that declared its body
+    /// digest. The signature covers `METHOD \n path[?query] \n nonce \n
+    /// be_f64(ts) \n <digest>`, so the body itself is never buffered; the route
+    /// hashes the body as it streams and rejects a mismatch with `digest`.
+    pub fn decide_hmac_digest(
+        &self,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: &RequestHeaders,
+        digest: &str,
+    ) -> Decision {
+        let signed_payload = format!("\n{digest}");
+        self.decide_signed(method, path, query, headers, signed_payload.as_bytes())
+    }
+
+    /// The shared gate: `body` is what the signature covers after the
+    /// timestamp (the request body, or a newline and the body digest).
+    fn decide_signed(
+        &self,
+        method: &Method,
+        path: &str,
+        query: Option<&str>,
+        headers: &RequestHeaders,
+        body: &[u8],
+    ) -> Decision {
+        let cfg = self.config();
         // Pass through if the gate is not active.
-        if !self.hmac_active() {
+        if !(cfg.security.hmac_enabled && cfg.security.hmac_secret.len() >= HMAC_MIN_SECRET_LEN) {
             return Decision::Accept;
         }
         // Skip non-mutating methods.
@@ -454,7 +526,7 @@ impl ProxiedAuth {
             timestamp,
             body,
         };
-        if !verify_hmac(self.config.hmac_secret.as_bytes(), &signed, sig) {
+        if !verify_hmac(cfg.security.hmac_secret.as_bytes(), &signed, sig) {
             return reject(
                 StatusCode::UNAUTHORIZED,
                 BodyField::Error,
@@ -475,7 +547,7 @@ impl ProxiedAuth {
     fn valid_api_key(&self, headers: &RequestHeaders, pairing: &Pairing) -> bool {
         crate::auth::credential_matches(
             pairing,
-            &self.config.api.api_key,
+            &self.config().security.api.api_key,
             headers.x_ados_key.as_deref(),
         )
     }
@@ -512,6 +584,14 @@ impl ProxiedAuth {
             Some(trimmed.to_string())
         }
     }
+}
+
+/// A posture that never changes, wrapping a bare `security:` slice.
+fn fixed_security(config: SecuritySection) -> Arc<SecurityState> {
+    Arc::new(SecurityState::fixed(ControlSecurityConfig {
+        security: config,
+        ..Default::default()
+    }))
 }
 
 /// Non-`/api/` paths that are a DATA plane, not the operator's browser shell.
@@ -1563,6 +1643,52 @@ mod tests {
             auth.decide_hmac(&Method::POST, "/api/command", None, &headers, body),
             Decision::Accept
         );
+    }
+
+    #[test]
+    fn a_digest_signature_covers_the_declared_digest_not_the_body() {
+        let secret = "a-long-enough-secret-key";
+        let auth = hmac_auth(secret);
+        let ts = unix_now();
+        let path = "/api/plugins/install";
+        let digest = "ab".repeat(32);
+        let signed = |nonce: &str| RequestHeaders {
+            x_timestamp: Some(format!("{ts}")),
+            x_nonce: Some(nonce.to_string()),
+            x_hmac_signature: Some(sign_for(
+                secret,
+                "POST",
+                path,
+                nonce,
+                ts,
+                format!("\n{digest}").as_bytes(),
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            auth.decide_hmac_digest(&Method::POST, path, None, &signed("n-d1"), &digest),
+            Decision::Accept
+        );
+        // The same signature does not vouch for a different digest.
+        assert_eq!(
+            auth.decide_hmac_digest(&Method::POST, path, None, &signed("n-d2"), &"cd".repeat(32)),
+            reject(
+                StatusCode::UNAUTHORIZED,
+                BodyField::Error,
+                messages::INVALID_SIGNATURE
+            ),
+        );
+        for route in DIGEST_SIGNED_ROUTES {
+            assert!(ProxiedAuth::is_digest_signed_route(&Method::POST, route));
+        }
+        assert!(!ProxiedAuth::is_digest_signed_route(
+            &Method::POST,
+            "/api/command"
+        ));
+        assert!(!ProxiedAuth::is_digest_signed_route(&Method::GET, path));
+        assert!(is_sha256_hex(&digest));
+        assert!(!is_sha256_hex("ab"));
+        assert!(!is_sha256_hex(&"zz".repeat(32)));
     }
 
     #[test]

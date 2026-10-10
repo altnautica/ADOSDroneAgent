@@ -18,7 +18,9 @@
 //!
 //! 1. the file is `0600`, owner-only (an attacker with it already has root);
 //! 2. physical presence on the LAN is the reach boundary (same as pairing-claim);
-//! 3. the verify lockout ladder makes online brute-force infeasible.
+//! 3. the verify lockout ladder makes online brute-force infeasible: per caller,
+//!    plus a node-wide budget of [`NODE_FAILURE_BUDGET`] failures per rolling
+//!    hour across every caller, so spraying from many addresses buys nothing.
 //!
 //! So the hash is a salted SHA-256 (plenty to avoid storing the PIN in the
 //! clear + to salt across nodes), not a slow KDF — a slow KDF would buy nothing
@@ -28,10 +30,10 @@
 //! session-token key (see [`ados_protocol::dashboard_session`]), so writing a
 //! fresh salt on every set/reset revokes every previously-minted session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use ados_protocol::dashboard_session::{
     now_unix, DashboardSession, DashboardSessionIssuer, DEFAULT_TTL_SECONDS,
@@ -62,14 +64,23 @@ const MAX_PIN_LEN: usize = 12;
 /// splash counts down from.
 const LOCK_AFTER: u32 = 5;
 
-/// How long a loaded salt is trusted before the record is re-read. The same
-/// short TTL the pairing reader uses: the edge validates a dashboard session on
-/// every browser request, and each validation needs the salt.
-const SALT_TTL: Duration = Duration::from_secs(2);
+/// How long a loaded record is trusted before the file is stat-ed again. The
+/// same short TTL the pairing reader uses: the edge validates a dashboard
+/// session on every browser request, and each validation needs the salt.
+const DOC_TTL: Duration = Duration::from_secs(2);
 
 /// Past this many tracked callers, entries that are not currently locked are
 /// dropped, so a caller spraying addresses cannot grow the table without bound.
 const MAX_TRACKED_PEERS: usize = 1024;
+
+/// Wrong PINs, across every caller, that lock the whole node.
+pub const NODE_FAILURE_BUDGET: usize = 30;
+
+/// The rolling window the node-wide budget counts over (seconds).
+const NODE_WINDOW_S: f64 = 3600.0;
+
+/// How long the node-wide lock holds unless cleared (seconds).
+const NODE_LOCK_S: f64 = 1800.0;
 
 /// The persisted PIN record. Absent file = no PIN set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -91,11 +102,40 @@ struct Attempts {
     locked_until: f64,
 }
 
-/// The cached decoded salt, with the instant it was read.
+/// The cached record, keyed on the file's size and modification time.
 #[derive(Debug)]
-struct SaltCache {
-    salt: Option<Vec<u8>>,
+struct DocCache {
+    doc: Option<DashboardPinDoc>,
+    stamp: Option<(SystemTime, u64)>,
     at: Instant,
+}
+
+/// The node-wide failure budget: recent failure times and the lock expiry.
+#[derive(Debug, Default)]
+struct NodeBudget {
+    failures: VecDeque<f64>,
+    locked_until: f64,
+}
+
+impl NodeBudget {
+    /// Count one wrong PIN at `now`. Returns the lock expiry when this failure
+    /// exhausts the budget.
+    fn record_failure(&mut self, now: f64) -> Option<f64> {
+        while self
+            .failures
+            .front()
+            .is_some_and(|t| now - *t >= NODE_WINDOW_S)
+        {
+            self.failures.pop_front();
+        }
+        self.failures.push_back(now);
+        if self.failures.len() < NODE_FAILURE_BUDGET {
+            return None;
+        }
+        self.failures.clear();
+        self.locked_until = now + NODE_LOCK_S;
+        Some(self.locked_until)
+    }
 }
 
 /// The public status the `pin/status` route reports, for one caller.
@@ -105,6 +145,8 @@ pub struct PinStatus {
     pub locked: bool,
     /// The lockout expiry (unix seconds), meaningful only when `locked`.
     pub locked_until: f64,
+    /// The lock is node-wide (every caller), not this caller's own.
+    pub node_locked: bool,
 }
 
 /// The outcome of a verify attempt.
@@ -116,6 +158,9 @@ pub enum VerifyOutcome {
     Wrong { remaining_attempts: u32 },
     /// Locked out until `locked_until` (unix seconds).
     Locked { locked_until: f64 },
+    /// Every caller is locked out until `locked_until` (unix seconds): the
+    /// node-wide budget is spent. `engaged` is true on the failure that spent it.
+    NodeLocked { locked_until: f64, engaged: bool },
     /// No PIN is set, so there is nothing to verify against.
     NotSet,
 }
@@ -144,10 +189,10 @@ impl std::fmt::Display for PinError {
 
 impl std::error::Error for PinError {}
 
-/// The dashboard-PIN store: the record path, the per-caller lockout ladder, and
-/// a short-lived salt cache. Every holder shares one instance (behind an `Arc`),
-/// so a set or clear through the routes invalidates the cache the auth edge
-/// reads.
+/// The dashboard-PIN store: the record path, the per-caller lockout ladder, the
+/// node-wide failure budget and a short-lived record cache. Every holder shares
+/// one instance (behind an `Arc`), so a set or clear through the routes
+/// invalidates the cache the auth edge reads.
 ///
 /// The lockout ladder is per caller and in memory. A single ladder in the record
 /// let any host on the network lock the operator out indefinitely by sending one
@@ -157,7 +202,8 @@ impl std::error::Error for PinError {}
 pub struct DashboardPin {
     path: PathBuf,
     attempts: Arc<Mutex<HashMap<PeerKey, Attempts>>>,
-    salt_cache: Arc<Mutex<Option<SaltCache>>>,
+    node: Arc<parking_lot::Mutex<NodeBudget>>,
+    doc_cache: Arc<parking_lot::Mutex<Option<DocCache>>>,
 }
 
 impl DashboardPin {
@@ -174,7 +220,8 @@ impl DashboardPin {
         Self {
             path,
             attempts: Arc::new(Mutex::new(HashMap::new())),
-            salt_cache: Arc::new(Mutex::new(None)),
+            node: Arc::new(parking_lot::Mutex::new(NodeBudget::default())),
+            doc_cache: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -183,16 +230,31 @@ impl DashboardPin {
         &self.path
     }
 
+    /// The record, read at most once per [`DOC_TTL`] and parsed again only
+    /// when the file's size or modification time changed.
     fn load(&self) -> Option<DashboardPinDoc> {
-        let text = std::fs::read_to_string(&self.path).ok()?;
-        let doc: DashboardPinDoc = serde_json::from_str(&text).ok()?;
-        // A record with no hash/salt is treated as unset (a truncated / cleared
-        // file that somehow parsed).
-        if doc.pin_hash.is_empty() || doc.salt.is_empty() {
-            None
-        } else {
-            Some(doc)
+        let mut cache = self.doc_cache.lock();
+        if let Some(c) = cache.as_ref() {
+            if c.at.elapsed() < DOC_TTL {
+                return c.doc.clone();
+            }
         }
+        let stamp = std::fs::metadata(&self.path)
+            .ok()
+            .and_then(|m| Some((m.modified().ok()?, m.len())));
+        if let Some(c) = cache.as_mut() {
+            if c.stamp == stamp {
+                c.at = Instant::now();
+                return c.doc.clone();
+            }
+        }
+        let doc = read_doc(&self.path);
+        *cache = Some(DocCache {
+            doc: doc.clone(),
+            stamp,
+            at: Instant::now(),
+        });
+        doc
     }
 
     /// Whether a PIN is set.
@@ -201,49 +263,50 @@ impl DashboardPin {
     }
 
     /// The current status for the `pin/status` route, as seen by `peer`: the
-    /// lock is that caller's own.
+    /// node-wide lock when it holds, else that caller's own lock.
     pub fn status(&self, peer: PeerKey, now: f64) -> PinStatus {
         if self.load().is_none() {
             return PinStatus {
                 pin_set: false,
                 locked: false,
                 locked_until: 0.0,
+                node_locked: false,
             };
         }
         let attempts = self.attempts.lock().unwrap_or_else(|p| p.into_inner());
+        let node_until = self.node.lock().locked_until;
+        if node_until > now {
+            return PinStatus {
+                pin_set: true,
+                locked: true,
+                locked_until: node_until,
+                node_locked: true,
+            };
+        }
         let locked_until = attempts.get(&peer).map_or(0.0, |a| a.locked_until);
         PinStatus {
             pin_set: true,
             locked: locked_until > now,
             locked_until,
+            node_locked: false,
         }
     }
 
     /// The decoded salt, or `None` when no PIN is set / the stored salt is not
-    /// hex. Read at most once per [`SALT_TTL`]; a set or clear through this
-    /// store drops the cached value at once.
+    /// hex. Served from the record cache; a set or clear through this store
+    /// drops the cached record at once.
     pub fn salt(&self) -> Option<Vec<u8>> {
-        let mut cache = self.salt_cache.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(c) = cache.as_ref() {
-            if c.at.elapsed() < SALT_TTL {
-                return c.salt.clone();
-            }
-        }
-        let salt = self.load().and_then(|doc| hex::decode(&doc.salt).ok());
-        *cache = Some(SaltCache {
-            salt: salt.clone(),
-            at: Instant::now(),
-        });
-        salt
+        self.load().and_then(|doc| hex::decode(&doc.salt).ok())
     }
 
-    fn invalidate_salt(&self) {
-        *self.salt_cache.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    fn invalidate_doc(&self) {
+        *self.doc_cache.lock() = None;
     }
 
     /// Set (or replace) the PIN. Mints a fresh salt, hashes, atomically writes
-    /// the record and clears every caller's lockout. `now` is the `set_at` stamp
-    /// (unix seconds). Validates the PIN is 4–12 digits.
+    /// the record and clears every caller's lockout and the node-wide lock.
+    /// `now` is the `set_at` stamp (unix seconds). Validates the PIN is 4–12
+    /// digits.
     pub fn set_pin(&self, pin: &str, now: f64) -> Result<(), PinError> {
         if !is_valid_pin(pin) {
             return Err(PinError::InvalidPin);
@@ -257,23 +320,33 @@ impl DashboardPin {
         };
         let mut attempts = self.attempts.lock().unwrap_or_else(|p| p.into_inner());
         let written = self.persist(&doc).map_err(PinError::Persist);
-        self.invalidate_salt();
+        self.invalidate_doc();
         if written.is_ok() {
             attempts.clear();
+            *self.node.lock() = NodeBudget::default();
         }
         written
     }
 
     /// Verify `pin` for the caller `peer`. On a correct PIN that caller's ladder
     /// resets and `Ok` is returned. On a wrong PIN its counter advances and, past
-    /// the threshold, a lockout window is set. While locked, a verify does not
-    /// consume an attempt — it returns `Locked` immediately. `now` is the wall
-    /// clock. Serialised: the ladder's mutex is held for the whole attempt.
+    /// the threshold, a lockout window is set; the failure also counts against
+    /// the node-wide budget, which once spent locks every caller. While either
+    /// lock holds, a verify does not consume an attempt — it returns at once,
+    /// even for the correct PIN. `now` is the wall clock. Serialised: the
+    /// ladder's mutex is held for the whole attempt.
     pub fn verify_pin(&self, peer: PeerKey, pin: &str, now: f64) -> VerifyOutcome {
         let mut attempts = self.attempts.lock().unwrap_or_else(|p| p.into_inner());
         let Some(doc) = self.load() else {
             return VerifyOutcome::NotSet;
         };
+        let mut node = self.node.lock();
+        if node.locked_until > now {
+            return VerifyOutcome::NodeLocked {
+                locked_until: node.locked_until,
+                engaged: false,
+            };
+        }
         let current = attempts.get(&peer).copied().unwrap_or_default();
         if current.locked_until > now {
             return VerifyOutcome::Locked {
@@ -297,6 +370,12 @@ impl DashboardPin {
         let entry = attempts.entry(peer).or_default();
         entry.failed = entry.failed.saturating_add(1);
         let lock = lock_seconds(entry.failed);
+        if let Some(locked_until) = node.record_failure(now) {
+            return VerifyOutcome::NodeLocked {
+                locked_until,
+                engaged: true,
+            };
+        }
         if lock > 0.0 {
             entry.locked_until = now + lock;
             VerifyOutcome::Locked {
@@ -329,9 +408,10 @@ impl DashboardPin {
         }
     }
 
-    /// Clear the PIN (remove the record). A subsequent visit re-enters the
-    /// trust-on-first-use "set a PIN" flow, and the salt rotation revokes every
-    /// live session. Absent file is a no-op success.
+    /// Clear the PIN (remove the record) and every lock, the node-wide one
+    /// included. A subsequent visit re-enters the trust-on-first-use "set a
+    /// PIN" flow, and the salt rotation revokes every live session. Absent file
+    /// is a no-op success.
     pub fn clear(&self) -> std::io::Result<()> {
         let mut attempts = self.attempts.lock().unwrap_or_else(|p| p.into_inner());
         let removed = match std::fs::remove_file(&self.path) {
@@ -339,9 +419,10 @@ impl DashboardPin {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         };
-        self.invalidate_salt();
+        self.invalidate_doc();
         if removed.is_ok() {
             attempts.clear();
+            *self.node.lock() = NodeBudget::default();
         }
         removed
     }
@@ -402,6 +483,15 @@ impl Default for DashboardPin {
     }
 }
 
+/// Read and parse the record. A missing, unreadable or unparseable file, or a
+/// record with no hash/salt (a truncated / cleared file that somehow parsed),
+/// is no PIN.
+fn read_doc(path: &Path) -> Option<DashboardPinDoc> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc: DashboardPinDoc = serde_json::from_str(&text).ok()?;
+    (!doc.pin_hash.is_empty() && !doc.salt.is_empty()).then_some(doc)
+}
+
 /// Hex `SHA-256(salt || pin)`. See the module threat-model note on why a plain
 /// salted SHA-256 (not a slow KDF) is the right choice for a 4-digit PIN.
 fn hash_pin(salt: &[u8], pin: &str) -> String {
@@ -433,258 +523,5 @@ fn lock_seconds(failed: u32) -> f64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const PEER_IP: std::net::IpAddr =
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 50));
-
-    fn peer() -> PeerKey {
-        PeerKey::of(Some(PEER_IP))
-    }
-
-    fn store(dir: &Path) -> DashboardPin {
-        DashboardPin::with_path(dir.join("dashboard-pin.json"))
-    }
-
-    #[test]
-    fn absent_file_is_unset() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        assert!(!s.is_set());
-        assert_eq!(
-            s.status(peer(), 100.0),
-            PinStatus {
-                pin_set: false,
-                locked: false,
-                locked_until: 0.0
-            }
-        );
-        assert_eq!(s.verify_pin(peer(), "1234", 100.0), VerifyOutcome::NotSet);
-        assert!(s.salt().is_none());
-    }
-
-    #[test]
-    fn set_then_verify_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("1234", 10.0).unwrap();
-        assert!(s.is_set());
-        assert_eq!(s.verify_pin(peer(), "1234", 11.0), VerifyOutcome::Ok);
-        // A wrong PIN is Wrong with the remaining countdown, not Ok.
-        assert_eq!(
-            s.verify_pin(peer(), "0000", 12.0),
-            VerifyOutcome::Wrong {
-                remaining_attempts: LOCK_AFTER - 1
-            }
-        );
-        // A subsequent correct PIN resets the counter.
-        assert_eq!(s.verify_pin(peer(), "1234", 13.0), VerifyOutcome::Ok);
-        assert_eq!(
-            s.verify_pin(peer(), "0000", 14.0),
-            VerifyOutcome::Wrong {
-                remaining_attempts: LOCK_AFTER - 1
-            }
-        );
-    }
-
-    #[test]
-    fn rejects_non_digit_and_short_pins() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        assert!(matches!(s.set_pin("12", 0.0), Err(PinError::InvalidPin)));
-        assert!(matches!(s.set_pin("12ab", 0.0), Err(PinError::InvalidPin)));
-        assert!(matches!(s.set_pin("", 0.0), Err(PinError::InvalidPin)));
-        assert!(s.set_pin("1234", 0.0).is_ok());
-        assert!(s.set_pin("123456", 0.0).is_ok());
-    }
-
-    #[test]
-    fn lockout_after_five_wrong() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("4321", 0.0).unwrap();
-        // Four wrong: still counting down, not locked.
-        for i in 1..=4u32 {
-            assert_eq!(
-                s.verify_pin(peer(), "0000", i as f64),
-                VerifyOutcome::Wrong {
-                    remaining_attempts: LOCK_AFTER - i
-                }
-            );
-        }
-        // Fifth wrong: locked for 30 s.
-        match s.verify_pin(peer(), "0000", 5.0) {
-            VerifyOutcome::Locked { locked_until } => assert_eq!(locked_until, 35.0),
-            other => panic!("expected Locked, got {other:?}"),
-        }
-        // While locked, even the CORRECT PIN is refused (returns Locked, no
-        // attempt consumed).
-        match s.verify_pin(peer(), "4321", 10.0) {
-            VerifyOutcome::Locked { locked_until } => assert_eq!(locked_until, 35.0),
-            other => panic!("expected Locked, got {other:?}"),
-        }
-        // After the window, the correct PIN unlocks + resets.
-        assert_eq!(s.verify_pin(peer(), "4321", 40.0), VerifyOutcome::Ok);
-        assert_eq!(
-            s.verify_pin(peer(), "0000", 41.0),
-            VerifyOutcome::Wrong {
-                remaining_attempts: LOCK_AFTER - 1
-            }
-        );
-    }
-
-    /// One caller's wrong PINs lock that caller only. A single shared ladder let
-    /// any host keep the operator locked out by sending one wrong PIN each time
-    /// the lock expired.
-    #[test]
-    fn a_lockout_is_per_caller() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("4321", 0.0).unwrap();
-        let other = PeerKey::of(Some("192.168.1.51".parse().unwrap()));
-        for i in 1..=LOCK_AFTER {
-            s.verify_pin(other, "0000", i as f64);
-        }
-        assert!(s.status(other, 6.0).locked);
-        assert!(!s.status(peer(), 6.0).locked, "the operator is not locked");
-        assert_eq!(s.verify_pin(peer(), "4321", 6.0), VerifyOutcome::Ok);
-    }
-
-    /// Every address in one IPv6 /64 shares a ladder, and an IPv4-mapped
-    /// address shares its IPv4 ladder.
-    #[test]
-    fn peer_keys_collapse_a_v6_prefix_and_v4_mapped_addresses() {
-        let a = PeerKey::of(Some("2001:db8:1:2::10".parse().unwrap()));
-        let b = PeerKey::of(Some("2001:db8:1:2:ffff::1".parse().unwrap()));
-        let c = PeerKey::of(Some("2001:db8:1:3::10".parse().unwrap()));
-        assert_eq!(a, b);
-        assert_ne!(a, c);
-        let mapped = PeerKey::of(Some("::ffff:192.168.1.50".parse().unwrap()));
-        assert_eq!(mapped, peer());
-    }
-
-    /// Concurrent wrong attempts each count: the verify is one critical section.
-    #[test]
-    fn concurrent_wrong_attempts_all_count() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("4321", 0.0).unwrap();
-        let handles: Vec<_> = (0..LOCK_AFTER)
-            .map(|_| {
-                let s = s.clone();
-                std::thread::spawn(move || s.verify_pin(peer(), "0000", 1.0))
-            })
-            .collect();
-        for h in handles {
-            h.join().unwrap();
-        }
-        assert!(s.status(peer(), 1.0).locked, "five wrong attempts lock");
-    }
-
-    /// The edge validates a session on every request, so the salt is cached;
-    /// a set through the store must still revoke at once.
-    #[test]
-    fn a_set_invalidates_the_cached_salt_immediately() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("1234", 0.0).unwrap();
-        let before = s.salt().unwrap();
-        s.set_pin("1234", 1.0).unwrap();
-        assert_ne!(s.salt().unwrap(), before);
-        s.clear().unwrap();
-        assert!(s.salt().is_none());
-    }
-
-    #[test]
-    fn clear_removes_and_re_tofus() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("1234", 0.0).unwrap();
-        assert!(s.is_set());
-        s.clear().unwrap();
-        assert!(!s.is_set());
-        // Clearing an absent file is a no-op success.
-        s.clear().unwrap();
-    }
-
-    #[test]
-    fn set_rotates_the_salt() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("1234", 0.0).unwrap();
-        let salt1 = s.salt().unwrap();
-        s.set_pin("1234", 1.0).unwrap();
-        let salt2 = s.salt().unwrap();
-        assert_ne!(salt1, salt2, "each set mints a fresh salt");
-    }
-
-    #[test]
-    fn session_round_trip_and_reset_revocation() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("1234", 0.0).unwrap();
-        let paired = Pairing::Paired("ados_key".to_string());
-        let sess = s
-            .mint_session("ados_key")
-            .expect("a set PIN mints a session");
-        assert!(
-            s.session_valid_for(&paired, &sess.token),
-            "a fresh session verifies"
-        );
-        // A reset (new salt) revokes the live session.
-        s.set_pin("5678", 1.0).unwrap();
-        assert!(
-            !s.session_valid_for(&paired, &sess.token),
-            "resetting the PIN revokes the prior session"
-        );
-        // Unpaired never validates a session (the data plane is open anyway).
-        assert!(!s.session_valid_for(&Pairing::Unpaired, &sess.token));
-        // A wrong pairing key does not validate.
-        let other = Pairing::Paired("different".to_string());
-        let fresh = s.mint_session("ados_key").unwrap();
-        assert!(!s.session_valid_for(&other, &fresh.token));
-    }
-
-    /// The PIN gate on an unpaired node's data routes: the session is minted under
-    /// the empty-key issuer (there is no pairing key on file) and must validate
-    /// via `session_valid_unpaired`. This is the credential a trusted-LAN browser
-    /// holds before the node is paired.
-    #[test]
-    fn unpaired_session_round_trips_and_revokes_on_reset() {
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        // No PIN set: nothing can validate, and nothing can be minted.
-        assert!(!s.session_valid_unpaired("v1|1|2|00"));
-        assert!(s.mint_session("").is_none());
-
-        s.set_pin("1234", 0.0).unwrap();
-        let sess = s
-            .mint_session("")
-            .expect("a set PIN mints an unpaired session");
-        assert!(
-            s.session_valid_unpaired(&sess.token),
-            "a fresh unpaired session verifies"
-        );
-        // A reset (new salt) revokes the live session.
-        s.set_pin("5678", 1.0).unwrap();
-        assert!(
-            !s.session_valid_unpaired(&sess.token),
-            "resetting the PIN revokes the prior unpaired session"
-        );
-        // A tampered token never validates.
-        assert!(!s.session_valid_unpaired("v1|1|2|ff"));
-        assert!(!s.session_valid_unpaired("garbage"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn record_is_0600() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let dir = tempfile::tempdir().unwrap();
-        let s = store(dir.path());
-        s.set_pin("1234", 0.0).unwrap();
-        let mode = std::fs::metadata(s.path()).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "dashboard-pin.json must be 0600");
-    }
-}
+#[path = "dashboard_pin_tests.rs"]
+mod tests;

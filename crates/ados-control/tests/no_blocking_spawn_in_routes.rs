@@ -329,6 +329,38 @@ fn nothing_reachable_from_a_route_wraps_a_blocking_spawn_in_spawn_blocking() {
     );
 }
 
+/// Files on the LAN edge's per-request path that may not touch the filesystem
+/// synchronously: every request crosses the edge middleware, and the armed
+/// guard runs on every guarded request. Their config and record reads go
+/// through the mtime-keyed caches (`config::config_snapshot`, the PIN record
+/// cache); anything else belongs in `spawn_blocking`.
+const NO_SYNC_FS: &[&str] = &[
+    "ados-control/src/serve.rs",
+    "ados-control/src/armed_guard.rs",
+];
+
+#[test]
+fn the_edge_and_the_armed_guard_do_no_synchronous_file_io() {
+    let workspace = workspace_dir();
+    let mut violations: Vec<String> = Vec::new();
+    for rel in NO_SYNC_FS {
+        let text = std::fs::read_to_string(workspace.join(rel))
+            .unwrap_or_else(|e| panic!("{rel} must exist to be scanned: {e}"));
+        for (lineno, line) in code_lines(&text) {
+            if line.contains("std::fs") {
+                violations.push(format!("{rel}:{lineno}: {}", line.trim()));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "synchronous file IO on the edge's per-request path stalls a reactor \
+         worker on a slow card. Read through the cached config snapshot or the \
+         record cache, or move the IO into spawn_blocking.\n  {}",
+        violations.join("\n  ")
+    );
+}
+
 /// The stripper is the part of this boundary that can silently disable it, so
 /// it gets its own assertions rather than being trusted.
 #[test]

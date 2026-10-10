@@ -18,6 +18,7 @@ use crate::ipc::{LogdQueryClient, MavlinkIpcClient, StateIpcClient};
 use crate::mcp::{McpTokenStore, MintRequest, MCP_TOKEN_HEADER};
 use crate::proxy_auth::ProxiedAuth;
 use crate::routes;
+use crate::security_state::SecurityState;
 use crate::state::{AppState, PairingPaths};
 
 const KEY: &str = "ados_secret";
@@ -64,6 +65,7 @@ fn harness(paired: bool) -> Harness {
         dashboard_pin: pin.clone(),
         mcp_tokens: mcp.clone(),
         config_path: config.clone(),
+        security: Arc::new(SecurityState::new(config.clone())),
     };
     let state = AppState::new(
         pairing,

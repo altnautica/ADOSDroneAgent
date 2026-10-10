@@ -43,20 +43,31 @@ use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
-use tower::{Service, ServiceBuilder};
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower::Service;
+use tower_http::cors::{AllowHeaders, AllowMethods, CorsLayer};
 
 use crate::auth::{self, Pairing, PairingState, PeerKey, RateLimiter};
-use crate::config::{ControlSecurityConfig, PairingConfig};
+use crate::config::PairingConfig;
 use crate::mcp::{
     route_decides_scope, route_scope, McpTokenStore, MCP_SCOPES_HEADER, MCP_TOKEN_HEADER,
 };
-use crate::proxy_auth::{BodyField, Decision, ProxiedAuth, RequestHeaders};
+use crate::proxy_auth::{
+    is_sha256_hex, BodyField, Decision, ProxiedAuth, RequestHeaders, CONTENT_DIGEST_HEADER,
+};
 use crate::routes::detail;
+use crate::security_state::SecurityState;
 use ados_protocol::ipc::OperatorListener;
 use ados_protocol::mcp_token::scope_allows_class;
 use ados_protocol::pairing_posture::{classify_caller, CallerClass};
 use ados_protocol::ws_ticket::{now_unix, WsTicketIssuer};
+
+mod edge_util;
+
+pub use edge_util::PeerKeyHint;
+use edge_util::{
+    canonical_uri, config_unreadable, is_mutating, keying_peer, live_cors_origins,
+    proxied_ws_scope, unix_edge,
+};
 
 /// The header the front stamps on a request that passes its on-box loopback
 /// check, so the residual Python (which does not see the TCP peer) can honour the
@@ -108,6 +119,12 @@ const MAX_TCP_CONNECTIONS: usize = 512;
 /// cockpit on one host, each with a few streams open, fit well under it.
 const MAX_TCP_CONNECTIONS_PER_PEER: usize = 32;
 
+/// Concurrent connections every loopback peer may hold together: the tunnel's
+/// ingress, the radio relay and the on-box CLI all arrive on loopback, and
+/// before the request head arrives they cannot be told apart. Without this
+/// sub-cap one tunnelled client could take the whole total.
+const MAX_REMOTE_LOOPBACK_CONNS: usize = 64;
+
 /// How long a connection may take to deliver a request head, including the
 /// idle wait for the next request on a kept-alive connection.
 const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
@@ -123,42 +140,47 @@ const RELAY_CONFIG_BODY_LIMIT: usize = 64 * 1024;
 #[derive(Clone, Default)]
 struct ConnCounts(Arc<Mutex<HashMap<PeerKey, usize>>>);
 
-/// Holds one connection's slot: a share of the total, plus (for an off-box
-/// caller) one of that caller's slots. Released on drop.
+/// Holds one connection's slot: a share of the total, plus one of its caller's
+/// slots. Released on drop.
 struct ConnSlot {
-    counted: Option<(ConnCounts, PeerKey)>,
+    counted: (ConnCounts, PeerKey),
     _permit: OwnedSemaphorePermit,
 }
 
 impl ConnCounts {
-    /// Take a slot for `key` if both the total and the per-caller caps allow.
-    /// `None` for `key` takes a share of the total only.
-    fn acquire(&self, key: Option<PeerKey>, total: &Arc<Semaphore>) -> Option<ConnSlot> {
+    /// Take a slot for `key` if both the total and the caller's `cap` allow.
+    fn acquire(&self, key: PeerKey, cap: usize, total: &Arc<Semaphore>) -> Option<ConnSlot> {
         let permit = total.clone().try_acquire_owned().ok()?;
-        let Some(key) = key else {
-            return Some(ConnSlot {
-                counted: None,
-                _permit: permit,
-            });
-        };
         let mut counts = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let held = counts.entry(key).or_insert(0);
-        if *held >= MAX_TCP_CONNECTIONS_PER_PEER {
+        if *held >= cap {
             return None;
         }
         *held += 1;
         Some(ConnSlot {
-            counted: Some((self.clone(), key)),
+            counted: (self.clone(), key),
             _permit: permit,
         })
     }
 }
 
+/// The connection-accounting key and cap for an accepted peer: every loopback
+/// peer shares one key under [`MAX_REMOTE_LOOPBACK_CONNS`]; any other caller is
+/// keyed by address under [`MAX_TCP_CONNECTIONS_PER_PEER`].
+fn conn_key(peer: std::net::IpAddr) -> (PeerKey, usize) {
+    if peer.to_canonical().is_loopback() {
+        (
+            PeerKey::of(Some(Ipv4Addr::LOCALHOST.into())),
+            MAX_REMOTE_LOOPBACK_CONNS,
+        )
+    } else {
+        (PeerKey::of(Some(peer)), MAX_TCP_CONNECTIONS_PER_PEER)
+    }
+}
+
 impl Drop for ConnSlot {
     fn drop(&mut self) {
-        let Some((counts, key)) = &self.counted else {
-            return;
-        };
+        let (counts, key) = &self.counted;
         let mut counts = counts.0.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(held) = counts.get_mut(key) {
             *held = held.saturating_sub(1);
@@ -185,9 +207,12 @@ struct EdgeAuth {
     /// and only when the accept flag is on, to admit a scoped MCP token as a
     /// last-resort credential (with per-route scope enforcement).
     mcp_tokens: Arc<McpTokenStore>,
-    /// The agent config path the edge reads the MCP accept flag + this node's
-    /// device id from, on the rare would-be-401-with-MCP-token path.
+    /// The agent config path the edge reads this node's device id from, on the
+    /// rare would-be-401-with-MCP-token path.
     config_path: std::path::PathBuf,
+    /// The live `security:` / `mcp:` posture: the MCP accept flag, and whether
+    /// the config is unreadable (off-box mutations are then refused).
+    security: Arc<SecurityState>,
 }
 
 /// The outcome of consulting a presented MCP token at the auth edge.
@@ -206,8 +231,8 @@ enum McpDecision {
 
 impl EdgeAuth {
     /// Consult a presented MCP token for a native route on a would-be-401. Reads
-    /// the accept flag + this node's device id fresh (the rate limiter bounds this
-    /// rare path) and verifies the token against the current pairing key. Returns
+    /// the accept flag + this node's device id from the cached config snapshot
+    /// and verifies the token against the current pairing key. Returns
     /// [`McpDecision::Fallthrough`] the moment anything is missing/invalid, so an
     /// absent flag or a bad token behaves exactly as before (a normal 401).
     fn mcp_admits(
@@ -221,13 +246,13 @@ impl EdgeAuth {
         };
         // Opt-in: default off. An agent that has never enabled the flag never
         // honors an MCP token, so the whole path is inert until an operator opts in.
-        if !ControlSecurityConfig::load_from(&self.config_path)
-            .mcp
-            .token_accept_enabled
-        {
+        if !self.security.config_or_default().mcp.token_accept_enabled {
             return McpDecision::Fallthrough;
         }
-        let device_id = PairingConfig::load_from(&self.config_path).agent.device_id;
+        let device_id = PairingConfig::cached(&self.config_path)
+            .agent
+            .device_id
+            .clone();
         let pairing = self.pairing.current();
         let Some(claims) = self
             .mcp_tokens
@@ -290,6 +315,16 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
             return detail(StatusCode::BAD_REQUEST, auth::PathRejection::MESSAGE);
         }
     };
+    // The router behind this edge, the fallback proxy and the residual all
+    // read the request target, so they must read the string this edge just
+    // authorized: an accepted encoded spelling is rewritten to the canonical
+    // encoding of the decoded path before anything downstream sees it.
+    if path != request.uri().path() {
+        match canonical_uri(request.uri(), &path) {
+            Some(uri) => *request.uri_mut() = uri,
+            None => return detail(StatusCode::BAD_REQUEST, auth::PathRejection::MESSAGE),
+        }
+    }
 
     // Classify the caller ONCE, from the peer address and the forwarding
     // headers, and hand the one value to every gate below and to every handler
@@ -303,7 +338,20 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
     let caller = classify_caller(peer_ip, local_ip, |h| request.headers().contains_key(h));
     request.extensions_mut().insert(caller);
     let on_box = caller == CallerClass::OnBox;
-    let peer_key = PeerKey::of(peer_ip);
+    // Who the request is charged to (rate limit, PIN lockout): a tunnelled
+    // caller on loopback by its forwarded address, anyone else by its peer.
+    let peer_key = keying_peer(peer_ip, request.headers());
+    request.extensions_mut().insert(PeerKeyHint(peer_key));
+
+    // A config that has never parsed since this process started leaves the
+    // security posture unknown. Failing open would mean "HMAC off, no
+    // configured key"; instead every off-box write is refused until the file
+    // is repaired on the node (the on-box operator and the Unix socket stay
+    // open for exactly that).
+    if !on_box && is_mutating(request.method()) && edge.security.is_unreadable() {
+        tracing::warn!(path = %path, "config_unreadable_mutation_refused");
+        return config_unreadable();
+    }
 
     // A request that crossed the radio relay arrives on loopback, so it is
     // on-box by the check above. The drone's relay handler admitted it only
@@ -562,6 +610,11 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
 /// and only up to [`HMAC_BODY_LIMIT`]: a larger body is a `413` rather than an
 /// unbounded read into a memory-capped process. Otherwise the request streams
 /// through untouched, so an upload or an SSE request is not buffered.
+///
+/// A streaming upload (plugin archive, vision model) that declares its body
+/// digest in `X-Content-SHA256` is verified over that digest instead and
+/// forwarded with the header and its body unread; the route hashes the body as
+/// it streams and rejects a mismatch.
 async fn hmac_then_run(
     proxied: &ProxiedAuth,
     path: &str,
@@ -574,6 +627,23 @@ async fn hmac_then_run(
     }
     let headers = collect_headers(request.headers());
     let query = request.uri().query().map(str::to_string);
+    let digest = request
+        .headers()
+        .get(CONTENT_DIGEST_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .filter(|d| is_sha256_hex(d))
+        .map(str::to_ascii_lowercase);
+    if let Some(digest) = digest.filter(|_| ProxiedAuth::is_digest_signed_route(&method, path)) {
+        if let Decision::Reject {
+            status,
+            field,
+            message,
+        } = proxied.decide_hmac_digest(&method, path, query.as_deref(), &headers, &digest)
+        {
+            return reject_response(status, field, message);
+        }
+        return next.run(request).await;
+    }
     let (parts, body) = request.into_parts();
     let bytes = match axum::body::to_bytes(body, HMAC_BODY_LIMIT).await {
         Ok(b) => b,
@@ -642,11 +712,10 @@ async fn proxied_auth_then_forward(
                 .unwrap_or(false);
         // A browser cannot set `X-ADOS-Key` on a WebSocket handshake, so a
         // proxied WS route (e.g. the vision-detections stream) authenticates via
-        // a one-shot HMAC ticket in the `Sec-WebSocket-Protocol` list. Admit at
-        // the edge when the ticket is authentic + unexpired; the proxied Python
-        // route re-verifies the ticket AND enforces the exact route scope, so a
-        // wrong-scope ticket is still rejected there.
-        let ws_ticket_ok = ws_upgrade_ticket_admits(request.headers(), &pairing);
+        // a one-shot HMAC ticket in the `Sec-WebSocket-Protocol` list, minted
+        // for the scope bound to this path. The proxied Python route
+        // re-verifies the ticket and its scope as well.
+        let ws_ticket_ok = ws_upgrade_ticket_admits(request.headers(), &pairing, &path);
         if !session_ok && !ws_ticket_ok {
             return reject_response(status, field, message);
         }
@@ -660,29 +729,20 @@ async fn proxied_auth_then_forward(
 
 /// True when a WebSocket-upgrade request to a proxied route carries an authentic,
 /// unexpired one-shot HMAC ticket in its `Sec-WebSocket-Protocol` list
-/// (`["ados-ws-ticket", "<token>"]`). A browser cannot set an `X-ADOS-Key` header
-/// on a WS handshake, so the ticket subprotocol is the only data-plane credential
-/// it can present for a proxied stream (e.g. `/api/vision/detections/ws`). The
-/// front admits an authentic ticket at the edge; the proxied Python route
-/// re-verifies the ticket AND enforces the exact route scope via
-/// `authenticate_websocket`, so the front verifies against the scope encoded in
-/// the token and the route stays the authority on scope. Mirrors the native
-/// ground-station WS ticket check in `routes::gs_ws`.
-fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing) -> bool {
+/// (`["ados-ws-ticket", "<token>"]`) minted for the scope bound to `path` (see
+/// [`edge_util::PROXIED_WS_SCOPES`]). A browser cannot set an `X-ADOS-Key`
+/// header on a WS handshake, so the ticket subprotocol is the only data-plane
+/// credential it can present for a proxied stream. A ticket for any other
+/// scope, or an upgrade to a path with no bound scope, is refused here rather
+/// than left to the residual route. Parallels [`native_ws_ticket_admits`].
+fn ws_upgrade_ticket_admits(headers: &http::HeaderMap, pairing: &Pairing, path: &str) -> bool {
     if !crate::proxy::is_websocket_upgrade(headers) {
         return false;
     }
     let Pairing::Paired(key) = pairing else {
         return false;
     };
-    let Some(token) = offered_ticket(headers) else {
-        return false;
-    };
-    // The scope is the token's 2nd `|`-field
-    // (`v2|<scope>|<issued>|<expires>|<nonce>|<mac>`).
-    // Verify authenticity for that scope; the Python route independently enforces
-    // the exact scope it expects, so a wrong-scope ticket is still rejected there.
-    let Some(scope) = token.split('|').nth(1).filter(|s| !s.is_empty()) else {
+    let (Some(scope), Some(token)) = (proxied_ws_scope(path), offered_ticket(headers)) else {
         return false;
     };
     WsTicketIssuer::from_api_key(key)
@@ -840,16 +900,28 @@ fn reject_response(status: StatusCode, field: BodyField, message: &str) -> Respo
 }
 
 /// Build the Unix-edge app: the bare Router, no auth (the socket is the trust
-/// boundary).
+/// boundary). Every caller here is on-box, so the residual sees
+/// `x-ados-onbox: 1` on every request, whatever the client sent.
 pub fn unix_app(router: Router) -> Router {
-    router
+    router.layer(middleware::from_fn(unix_edge))
+}
+
+/// The router behind the LAN edge: `router` mounted as the fallback of an
+/// outer router that carries [`tcp_edge`]. A layer on a router runs after that
+/// router has matched a route, so the edge has to sit outside the router it
+/// guards for its canonical request target to be the one that is routed.
+fn edge_router(router: Router, edge: EdgeAuth) -> Router {
+    Router::new()
+        .fallback_service(router)
+        .layer(middleware::from_fn_with_state(edge, tcp_edge))
 }
 
 /// Build the LAN-edge app: the same Router wrapped with the rate-limit + auth
 /// layer keyed on the shared pairing reader. `proxied` carries the ported
 /// proxied-route auth decision the front runs on every forwarded request;
 /// `dashboard_pin` lets the edge accept a valid dashboard session token as an
-/// alternative to `X-ADOS-Key`.
+/// alternative to `X-ADOS-Key`; `security` is the live `security:` posture the
+/// CORS allow-list and the unreadable-config refusal read per request.
 pub fn tcp_app(
     router: Router,
     pairing: Arc<PairingState>,
@@ -857,7 +929,7 @@ pub fn tcp_app(
     dashboard_pin: Arc<crate::dashboard_pin::DashboardPin>,
     mcp_tokens: Arc<McpTokenStore>,
     config_path: std::path::PathBuf,
-    security: &ControlSecurityConfig,
+    security: Arc<SecurityState>,
 ) -> Router {
     let edge = EdgeAuth {
         pairing,
@@ -866,9 +938,10 @@ pub fn tcp_app(
         dashboard_pin,
         mcp_tokens,
         config_path,
+        security: Arc::clone(&security),
     };
-    // CORS wraps OUTSIDE the auth layer (ServiceBuilder applies the first
-    // layer outermost). A browser cross-origin call to this LAN edge sends a
+    // CORS wraps OUTSIDE the auth layer (the layer added last is outermost).
+    // A browser cross-origin call to this LAN edge sends a
     // custom `X-ADOS-Key` header, which forces a preflight `OPTIONS` that
     // carries no key — the CORS layer must answer it before `tcp_edge` can
     // 401 it, and it stamps `Access-Control-Allow-Origin` onto every response
@@ -882,27 +955,17 @@ pub fn tcp_app(
     // `Access-Control-Allow-Origin: *` let ANY page the operator happened to
     // visit walk the local network, read an unclaimed agent's pairing code
     // and claim the aircraft from the browser. The allow-list is the same
-    // one the residual Python half enforces, read from the same config keys,
-    // so the two surfaces cannot disagree about who may call this agent.
+    // one the residual Python half enforces, read from the same config keys
+    // (per request, so an edit applies without a restart), so the two
+    // surfaces cannot disagree about who may call this agent.
     //
     // `expose_headers(Any)` is also gone: nothing on this edge needs a
     // non-simple response header readable cross-origin.
-    let origins: Vec<axum::http::HeaderValue> = security
-        .security
-        .api
-        .effective_cors_origins()
-        .iter()
-        .filter_map(|o| axum::http::HeaderValue::from_str(o).ok())
-        .collect();
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
+        .allow_origin(live_cors_origins(security))
         .allow_methods(AllowMethods::mirror_request())
         .allow_headers(AllowHeaders::mirror_request());
-    router.layer(
-        ServiceBuilder::new()
-            .layer(cors)
-            .layer(middleware::from_fn_with_state(edge, tcp_edge)),
-    )
+    edge_router(router, edge).layer(cors)
 }
 
 /// Bind the Unix listener through the shared command-plane helper: stale socket
@@ -996,12 +1059,13 @@ pub async fn serve_unix(listener: OperatorListener, app: Router, stop: oneshot::
 /// the logd listener, the accepted peer and local addresses are threaded into
 /// each connection so the edge middleware can classify the caller.
 ///
-/// Connections are capped: [`MAX_TCP_CONNECTIONS`] in total and
-/// [`MAX_TCP_CONNECTIONS_PER_PEER`] per off-box caller. One host opening
+/// Connections are capped: [`MAX_TCP_CONNECTIONS`] in total,
+/// [`MAX_TCP_CONNECTIONS_PER_PEER`] per off-box caller, and
+/// [`MAX_REMOTE_LOOPBACK_CONNS`] across every loopback peer together (the
+/// relay, a tunnel's ingress and the CLI share one address). One host opening
 /// connections and trickling header bytes used to exhaust the process's
 /// descriptors and cut every client off; past a cap the new connection is
-/// closed on accept. Loopback callers (the relay, a tunnel's ingress, the CLI)
-/// share one address, so they count against the total only.
+/// closed on accept.
 pub async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiver<()>) {
     tokio::pin!(stop);
     let total = Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS));
@@ -1012,9 +1076,8 @@ pub async fn serve_tcp(listener: TcpListener, app: Router, stop: oneshot::Receiv
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, peer)) => {
-                        let key = (!peer.ip().to_canonical().is_loopback())
-                            .then(|| PeerKey::of(Some(peer.ip())));
-                        let Some(slot) = counts.acquire(key, &total) else {
+                        let (key, cap) = conn_key(peer.ip());
+                        let Some(slot) = counts.acquire(key, cap, &total) else {
                             tracing::debug!(peer = %peer, "control tcp connection cap reached");
                             continue;
                         };
@@ -1085,723 +1148,7 @@ where
 mod caller_tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod tests;
 
-    #[tokio::test]
-    async fn bind_tcp_returns_real_bound_listeners() {
-        // Port 0 lets the kernel pick a free port; the v4 leg binds first and the
-        // v6 leg follows on the SAME port. On a dual-stack host both bind (2); on a
-        // host without IPv6 only the v4 leg returns (1). Either way every returned
-        // listener is a real bound socket with a resolvable local address.
-        let listeners = bind_tcp(0).await.expect("v4 leg must bind");
-        assert!(
-            listeners.len() == 1 || listeners.len() == 2,
-            "expected 1 (IPv4-only host) or 2 (dual-stack) listeners, got {}",
-            listeners.len()
-        );
-        for l in &listeners {
-            // A real listener resolves its bound address.
-            let addr = l.local_addr().expect("a bound listener resolves its addr");
-            assert_ne!(addr.port(), 0, "an ephemeral bind resolves to a real port");
-        }
-    }
-
-    fn ws_headers(subprotocol: Option<&str>) -> http::HeaderMap {
-        let mut h = http::HeaderMap::new();
-        h.insert(http::header::CONNECTION, "upgrade".parse().unwrap());
-        h.insert(http::header::UPGRADE, "websocket".parse().unwrap());
-        if let Some(sp) = subprotocol {
-            h.insert("sec-websocket-protocol", sp.parse().unwrap());
-        }
-        h
-    }
-
-    #[test]
-    fn ws_ticket_admits_authentic_upgrade_and_rejects_the_rest() {
-        let key = "ados_secret";
-        let paired = Pairing::Paired(key.to_string());
-        let ticket = WsTicketIssuer::from_api_key(key)
-            .mint("vision.detections", 30)
-            .unwrap()
-            .token;
-
-        // A WS upgrade carrying an authentic ticket subprotocol is admitted.
-        let good = ws_headers(Some(&format!("ados-ws-ticket, {ticket}")));
-        assert!(ws_upgrade_ticket_admits(&good, &paired));
-
-        // No ticket in the subprotocol list → not admitted.
-        assert!(!ws_upgrade_ticket_admits(&ws_headers(None), &paired));
-
-        // A valid ticket present but the request is NOT a WS upgrade → not admitted.
-        let mut plain = http::HeaderMap::new();
-        plain.insert(
-            "sec-websocket-protocol",
-            format!("ados-ws-ticket, {ticket}").parse().unwrap(),
-        );
-        assert!(!ws_upgrade_ticket_admits(&plain, &paired));
-
-        // Unpaired agent → the edge handles openness elsewhere; the ticket helper
-        // never admits on its own.
-        assert!(!ws_upgrade_ticket_admits(&good, &Pairing::Unpaired));
-
-        // A ticket signed by a DIFFERENT pairing key → rejected.
-        let forged = WsTicketIssuer::from_api_key("other-key")
-            .mint("vision.detections", 30)
-            .unwrap()
-            .token;
-        let bad = ws_headers(Some(&format!("ados-ws-ticket, {forged}")));
-        assert!(!ws_upgrade_ticket_admits(&bad, &paired));
-    }
-
-    /// A native plugin stream admits only a ticket minted for the scope its own
-    /// path names: the passthrough for that plugin, the progress stream for
-    /// that job. Another plugin's, another job's or an unrelated scope's
-    /// authentic ticket is refused.
-    #[test]
-    fn a_native_plugin_stream_admits_only_its_own_scoped_ticket() {
-        let key = "ados_secret";
-        let paired = Pairing::Paired(key.to_string());
-        let issuer = WsTicketIssuer::from_api_key(key);
-        let offer = |scope: &str| {
-            ws_headers(Some(&format!(
-                "ados-ws-ticket, {}",
-                issuer.mint(scope, 30).unwrap().token
-            )))
-        };
-        let web = "/api/plugins/com.example.web/x/live";
-        assert!(native_ws_ticket_admits(
-            &offer("plugins.http:com.example.web"),
-            &paired,
-            web
-        ));
-        for scope in [
-            "plugins.http:com.example.other",
-            "plugins.install_job:job-1",
-            "vision.detections",
-        ] {
-            assert!(
-                !native_ws_ticket_admits(&offer(scope), &paired, web),
-                "{scope}"
-            );
-        }
-        let job = "/api/plugins/jobs/job-1";
-        assert!(native_ws_ticket_admits(
-            &offer("plugins.install_job:job-1"),
-            &paired,
-            job
-        ));
-        assert!(!native_ws_ticket_admits(
-            &offer("plugins.install_job:job-2"),
-            &paired,
-            job
-        ));
-        // A path with no bound scope admits no ticket at all.
-        assert!(!native_ws_ticket_admits(
-            &offer("plugins.http:com.example.web"),
-            &paired,
-            "/api/plugins/com.example.web"
-        ));
-    }
-
-    /// Build an `EdgeAuth` over temp paths: a paired agent (`api_key=ados_secret`,
-    /// device `node-1`) with the MCP accept flag `enabled`, plus a store carrying
-    /// one minted `read`-scope token. Returns the edge and the token string.
-    fn mcp_edge(dir: &Path, accept_enabled: bool) -> (EdgeAuth, String) {
-        let pairing_path = dir.join("pairing.json");
-        std::fs::write(
-            &pairing_path,
-            r#"{"paired": true, "api_key": "ados_secret"}"#,
-        )
-        .unwrap();
-        let config_path = dir.join("config.yaml");
-        std::fs::write(
-            &config_path,
-            format!(
-                "mcp:\n  token_accept_enabled: {accept_enabled}\nagent:\n  device_id: node-1\n"
-            ),
-        )
-        .unwrap();
-        let mcp_tokens = Arc::new(McpTokenStore::with_path(dir.join("mcp-token.json")));
-        let scopes = ["read".to_string()];
-        let token = mcp_tokens
-            .mint(&crate::mcp::MintRequest {
-                api_key: "ados_secret",
-                label: "test",
-                operator_id: "op",
-                node_id: "node-1",
-                scopes: &scopes,
-                allowed_nodes: &[],
-                ttl_ms: 3_600_000,
-                now_secs: 0.0,
-                now_ms: now_unix_ms(),
-            })
-            .unwrap();
-        let edge = EdgeAuth {
-            pairing: Arc::new(PairingState::with_path(pairing_path)),
-            rate: Arc::new(RateLimiter::default_control()),
-            proxied: Arc::new(ProxiedAuth::new(crate::config::SecuritySection::default())),
-            dashboard_pin: Arc::new(crate::dashboard_pin::DashboardPin::with_path(
-                dir.join("dashboard-pin.json"),
-            )),
-            mcp_tokens,
-            config_path,
-        };
-        (edge, token)
-    }
-
-    fn token_headers(token: &str) -> http::HeaderMap {
-        let mut h = http::HeaderMap::new();
-        h.insert(MCP_TOKEN_HEADER, token.parse().unwrap());
-        h
-    }
-
-    #[test]
-    fn mcp_admits_a_read_token_on_a_read_route() {
-        let dir = tempfile::tempdir().unwrap();
-        let (edge, token) = mcp_edge(dir.path(), true);
-        let h = token_headers(&token);
-        // A read-scoped token reaches a read (GET) route.
-        match edge.mcp_admits(&http::Method::GET, "/api/status", &h) {
-            McpDecision::Admit(scopes) => assert_eq!(scopes, "read"),
-            other => panic!("expected Admit, got {:?}", DecisionDbg(&other)),
-        }
-    }
-
-    #[test]
-    fn mcp_denies_a_read_token_on_a_flight_route() {
-        let dir = tempfile::tempdir().unwrap();
-        let (edge, token) = mcp_edge(dir.path(), true);
-        let h = token_headers(&token);
-        // The command route needs the flight class; a read token is scope-denied.
-        assert!(matches!(
-            edge.mcp_admits(&http::Method::POST, "/api/command", &h),
-            McpDecision::ScopeDenied
-        ));
-    }
-
-    #[test]
-    fn mcp_falls_through_when_flag_off_or_no_token() {
-        let dir = tempfile::tempdir().unwrap();
-        // Flag OFF: even a valid token falls through to the normal 401.
-        let (edge_off, token) = mcp_edge(dir.path(), false);
-        assert!(matches!(
-            edge_off.mcp_admits(&http::Method::GET, "/api/status", &token_headers(&token)),
-            McpDecision::Fallthrough
-        ));
-        // Flag ON but no token header → fall through.
-        let dir2 = tempfile::tempdir().unwrap();
-        let (edge_on, _t) = mcp_edge(dir2.path(), true);
-        assert!(matches!(
-            edge_on.mcp_admits(&http::Method::GET, "/api/status", &http::HeaderMap::new()),
-            McpDecision::Fallthrough
-        ));
-    }
-
-    #[test]
-    fn mcp_falls_through_on_a_tampered_or_wrong_key_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let (edge, token) = mcp_edge(dir.path(), true);
-        // Flip a byte in the blob → HMAC fails → fall through (a normal 401).
-        let (blob, sig) = token.rsplit_once('.').unwrap();
-        let tampered = format!("{blob}x.{sig}");
-        assert!(matches!(
-            edge.mcp_admits(&http::Method::GET, "/api/status", &token_headers(&tampered)),
-            McpDecision::Fallthrough
-        ));
-    }
-
-    /// Build an UNPAIRED `EdgeAuth`: pairing.json with `paired:false`, a set
-    /// dashboard PIN (so a browser can mint a session), and a session minted the
-    /// way `/api/dashboard/pin/verify` does when the node has no pairing key.
-    fn unpaired_edge(dir: &std::path::Path) -> (EdgeAuth, crate::dashboard_pin::DashboardPin) {
-        let pairing_path = dir.join("pairing.json");
-        std::fs::write(&pairing_path, r#"{"paired": false, "api_key": ""}"#).unwrap();
-        let dashboard_pin = Arc::new(crate::dashboard_pin::DashboardPin::with_path(
-            dir.join("dashboard-pin.json"),
-        ));
-        let edge = EdgeAuth {
-            pairing: Arc::new(PairingState::with_path(pairing_path)),
-            rate: Arc::new(RateLimiter::default_control()),
-            proxied: Arc::new(ProxiedAuth::new(crate::config::SecuritySection::default())),
-            dashboard_pin: dashboard_pin.clone(),
-            mcp_tokens: Arc::new(McpTokenStore::with_path(dir.join("mcp-token.json"))),
-            config_path: dir.join("config.yaml"),
-        };
-        (edge, dashboard_pin.as_ref().clone())
-    }
-
-    fn lan_app(edge: EdgeAuth) -> axum::Router {
-        axum::Router::new()
-            .route("/api/status", axum::routing::get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(edge.clone(), tcp_edge))
-            .with_state(edge)
-    }
-
-    /// The founder's scenario end-to-end: a private-LAN browser reaching a DATA
-    /// route on an UNPAIRED node must hold a dashboard PIN session. Without one it
-    /// is refused (403, exactly the pre-fix outcome); with a valid one it is
-    /// served. This is the new PIN gate, and it fails on the pre-fix behaviour
-    /// (which had no PIN path for a private-LAN peer at all).
-    #[tokio::test]
-    async fn unpaired_private_lan_data_route_requires_a_pin_session() {
-        use tower::util::ServiceExt;
-        let dir = tempfile::tempdir().unwrap();
-        let (edge, dashboard_pin) = unpaired_edge(dir.path());
-        dashboard_pin.set_pin("1234", 0.0).unwrap();
-        let sess = dashboard_pin
-            .mint_session("")
-            .expect("a set PIN mints an unpaired session");
-        let app = lan_app(edge);
-        let peer = PeerAddr(SocketAddr::from(([192, 168, 1, 50], 45678)));
-
-        // No session -> 403.
-        let req = Request::builder()
-            .uri("/api/status")
-            .extension(peer)
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-        // A wrong/tampered session is still refused.
-        let req = Request::builder()
-            .uri("/api/status")
-            .header(crate::dashboard_pin::DASHBOARD_SESSION_HEADER, "v1|1|2|ff")
-            .extension(peer)
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-        // A valid session -> served.
-        let req = Request::builder()
-            .uri("/api/status")
-            .header(crate::dashboard_pin::DASHBOARD_SESSION_HEADER, &sess.token)
-            .extension(peer)
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    /// A first-boot lifeline peer keeps unrestricted unpaired data access (no PIN
-    /// required) — the provisioning surface is where the PIN is first created.
-    #[tokio::test]
-    async fn unpaired_lifeline_peer_served_data_without_a_pin() {
-        use tower::util::ServiceExt;
-        let dir = tempfile::tempdir().unwrap();
-        let (edge, _set_pin_unused) = unpaired_edge(dir.path());
-        let app = lan_app(edge);
-        // Each peer reached the agent's own address on its subnet.
-        for (ip, local) in [
-            ("192.168.4.37", "192.168.4.1"),
-            ("192.168.7.2", "192.168.7.1"),
-            ("127.0.0.1", "127.0.0.1"),
-        ] {
-            let ip: std::net::IpAddr = ip.parse().unwrap();
-            let local: std::net::IpAddr = local.parse().unwrap();
-            let req = Request::builder()
-                .uri("/api/status")
-                .extension(PeerAddr(SocketAddr::from((ip, 45678))))
-                .extension(LocalAddr(SocketAddr::from((local, 8080))))
-                .body(Body::empty())
-                .unwrap();
-            let resp = app.clone().oneshot(req).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::OK, "{ip} is a lifeline");
-        }
-        // A peer on a LAN merely numbered like the AP subnet, reaching the
-        // node's own lease rather than the AP address, is not a lifeline.
-        let req = Request::builder()
-            .uri("/api/status")
-            .extension(PeerAddr(SocketAddr::from(([192, 168, 4, 37], 45678))))
-            .extension(LocalAddr(SocketAddr::from(([192, 168, 4, 12], 8080))))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN, "not a lifeline");
-        // A public-WAN peer stays refused on a data route.
-        let req = Request::builder()
-            .uri("/api/status")
-            .extension(PeerAddr(SocketAddr::from(([8, 8, 8, 8], 45678))))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    // --- the media-plane session, in the query string ------------------------
-    //
-    // A `<video>` element cannot attach a header to the requests it makes for a
-    // playlist or its segments, so a header-only credential is unreachable for
-    // element-driven playback and the operator gets a black frame with no way to
-    // authenticate it. These pin the narrow shape of the alternative.
-
-    #[test]
-    fn a_session_travels_in_the_query_string() {
-        assert_eq!(
-            session_token_from_query(Some("ados_session=abc123")),
-            Some("abc123".to_string())
-        );
-        assert_eq!(
-            session_token_from_query(Some("foo=1&ados_session=abc123&bar=2")),
-            Some("abc123".to_string()),
-            "the parameter need not be first"
-        );
-        // `encodeURIComponent` sends the token's `|` separators as `%7C`.
-        assert_eq!(
-            session_token_from_query(Some("ados_session=v1%7C1%7C2%7Cff")),
-            Some("v1|1|2|ff".to_string())
-        );
-        assert_eq!(session_token_from_query(Some("ados_session=v1%7")), None);
-    }
-
-    #[test]
-    fn an_empty_session_parameter_is_absent_not_a_credential() {
-        // `?ados_session=` must not read as "a session was presented". An empty
-        // string that reached the validator would be one typo away from a
-        // credential-shaped hole.
-        assert_eq!(session_token_from_query(Some("ados_session=")), None);
-        assert_eq!(session_token_from_query(Some("")), None);
-        assert_eq!(session_token_from_query(None), None);
-    }
-
-    #[test]
-    fn a_similarly_named_parameter_is_not_the_session() {
-        // Exact key match. A prefix or contains check here would accept
-        // `not_ados_session` or `ados_session_id` as the real thing.
-        assert_eq!(session_token_from_query(Some("not_ados_session=x")), None);
-        assert_eq!(session_token_from_query(Some("ados_session_id=x")), None);
-        assert_eq!(session_token_from_query(Some("session=x")), None);
-    }
-
-    #[test]
-    fn only_the_media_plane_may_carry_a_session_in_the_url() {
-        // The whole justification for a URL-borne credential is that the video
-        // element cannot send a header. Every `/api/*` caller is code that can,
-        // so widening this beyond the media plane would put a credential in
-        // access logs and browser history for no reason.
-        for p in ["/whep", "/whep/main", "/hls", "/hls/main/index.m3u8"] {
-            assert!(crate::proxy_auth::is_media_plane(p), "{p} is media");
-        }
-        for p in [
-            "/api/status",
-            "/api/config",
-            "/api/command",
-            "/cockpit/",
-            "/whepinar",
-        ] {
-            assert!(!crate::proxy_auth::is_media_plane(p), "{p} is NOT media");
-        }
-    }
-
-    // --- the path-normalization bypass table ---------------------------------
-    //
-    // Every gate on this edge used to call `request.uri().path()` for itself.
-    // That is the RAW target from the request line, so `%61pi` is six
-    // characters matching no literal in the relay denylist, the public list
-    // or `routing::is_native`. The request therefore missed every gate AND
-    // missed the native router, fell through to the reverse proxy, and the
-    // residual FastAPI decoded it the way every ASGI server does — serving
-    // `/api/v1/setup/reboot` to a caller holding no credential.
-    //
-    // This is the test that would have caught the whole class.
-
-    /// The edge harness for a PAIRED node, where every non-public route needs
-    /// `X-ADOS-Key`.
-    fn paired_edge(dir: &std::path::Path) -> EdgeAuth {
-        let pairing_path = dir.join("pairing.json");
-        std::fs::write(
-            &pairing_path,
-            r#"{"paired": true, "api_key": "ados_secret"}"#,
-        )
-        .unwrap();
-        EdgeAuth {
-            pairing: Arc::new(PairingState::with_path(pairing_path)),
-            rate: Arc::new(RateLimiter::default_control()),
-            proxied: Arc::new(ProxiedAuth::new(crate::config::SecuritySection::default())),
-            dashboard_pin: Arc::new(crate::dashboard_pin::DashboardPin::with_path(
-                dir.join("dashboard-pin.json"),
-            )),
-            mcp_tokens: Arc::new(McpTokenStore::with_path(dir.join("mcp-token.json"))),
-            config_path: dir.join("config.yaml"),
-        }
-    }
-
-    /// Every spelling of a privileged path that is not its canonical form is
-    /// refused BEFORE any gate reads it, on a paired node, with no credential.
-    #[tokio::test]
-    async fn encoded_paths_never_reach_a_handler_without_a_credential() {
-        use tower::util::ServiceExt;
-        let dir = tempfile::tempdir().unwrap();
-        let app = lan_app(paired_edge(dir.path()));
-
-        // An off-box peer, so on-box loopback trust cannot mask the result.
-        let peer = PeerAddr(SocketAddr::from(([192, 168, 1, 50], 45678)));
-
-        for uri in [
-            // The percent-encoded first letter: the original bypass.
-            "/%61pi/v1/setup/reboot",
-            // The media plane, which is deliberately NOT exempt.
-            "/%77hep",
-            // An encoded dot segment, which a downstream router may collapse.
-            "/api/%2e%2e/v1/setup/reboot",
-            // An empty segment, which different routers collapse differently.
-            "/api//v1/setup/reboot",
-            // A literal dot segment.
-            "/api/../api/v1/setup/reboot",
-            // Double encoding: `%2561pi` decodes once to `%61pi`.
-            "/%2561pi/v1/setup/reboot",
-        ] {
-            let req = Request::builder()
-                .uri(uri)
-                .extension(peer)
-                .body(Body::empty())
-                .unwrap();
-            let status = app.clone().oneshot(req).await.unwrap().status();
-            assert!(
-                status == StatusCode::BAD_REQUEST || status == StatusCode::UNAUTHORIZED,
-                "{uri} must be refused before any handler, got {status}",
-            );
-        }
-    }
-
-    /// The canonical spelling of the same route still behaves normally: the
-    /// normalizer must not have turned the gate into a blanket refusal.
-    #[tokio::test]
-    async fn the_canonical_path_still_reaches_the_gate() {
-        use tower::util::ServiceExt;
-        let dir = tempfile::tempdir().unwrap();
-        let app = lan_app(paired_edge(dir.path()));
-        let peer = PeerAddr(SocketAddr::from(([192, 168, 1, 50], 45678)));
-
-        // No key: the ordinary 401, not the 400 the normalizer emits.
-        let req = Request::builder()
-            .uri("/api/status")
-            .extension(peer)
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(
-            app.clone().oneshot(req).await.unwrap().status(),
-            StatusCode::UNAUTHORIZED,
-        );
-
-        // With the key: served.
-        let req = Request::builder()
-            .uri("/api/status")
-            .header("X-ADOS-Key", "ados_secret")
-            .extension(peer)
-            .body(Body::empty())
-            .unwrap();
-        assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
-    }
-
-    /// The media plane through the WHOLE edge on a paired node. `/whep` and
-    /// `/hls` are proxied routes, so this exercises the proxied lane, where the
-    /// query-string session used to be ignored: a `<video>` element holding a
-    /// valid PIN session got 401 and a black frame.
-    #[tokio::test]
-    async fn the_proxied_media_plane_accepts_a_query_session_and_refuses_no_credential() {
-        use tower::util::ServiceExt;
-        let dir = tempfile::tempdir().unwrap();
-        let edge = paired_edge(dir.path());
-        edge.dashboard_pin.set_pin("1234", 0.0).unwrap();
-        let sess = edge
-            .dashboard_pin
-            .mint_session("ados_secret")
-            .expect("a set PIN mints a session");
-        // What a browser's `encodeURIComponent` puts on the wire.
-        let sess_q = sess.token.replace('|', "%7C");
-        let app = axum::Router::new()
-            .route(
-                "/hls/main/index.m3u8",
-                axum::routing::get(|| async { "ok" }),
-            )
-            .route("/whep", axum::routing::post(|| async { "ok" }))
-            .route("/api/status", axum::routing::get(|| async { "ok" }))
-            .layer(axum::middleware::from_fn_with_state(edge.clone(), tcp_edge))
-            .with_state(edge);
-        let peer = PeerAddr(SocketAddr::from(([192, 168, 1, 50], 45678)));
-        let status = |method: &str, uri: String, key: Option<&str>| {
-            let app = app.clone();
-            let mut b = Request::builder().method(method).uri(uri).extension(peer);
-            if let Some(k) = key {
-                b = b.header("X-ADOS-Key", k);
-            }
-            async move {
-                app.oneshot(b.body(Body::empty()).unwrap())
-                    .await
-                    .unwrap()
-                    .status()
-            }
-        };
-
-        // No credential: the credentialed proxy refuses.
-        assert_eq!(
-            status("GET", "/hls/main/index.m3u8".into(), None).await,
-            StatusCode::UNAUTHORIZED
-        );
-        assert_eq!(
-            status("POST", "/whep".into(), None).await,
-            StatusCode::UNAUTHORIZED
-        );
-        // A forged session in the query is refused.
-        assert_eq!(
-            status(
-                "GET",
-                "/hls/main/index.m3u8?ados_session=v1%7C1%7C2%7Cff".into(),
-                None
-            )
-            .await,
-            StatusCode::UNAUTHORIZED
-        );
-        // A valid session in the query is served, on both media routes.
-        assert_eq!(
-            status(
-                "GET",
-                format!("/hls/main/index.m3u8?ados_session={sess_q}"),
-                None
-            )
-            .await,
-            StatusCode::OK
-        );
-        assert_eq!(
-            status("POST", format!("/whep?ados_session={sess_q}"), None).await,
-            StatusCode::OK
-        );
-        // The pairing key still works.
-        assert_eq!(
-            status("GET", "/hls/main/index.m3u8".into(), Some("ados_secret")).await,
-            StatusCode::OK
-        );
-        // Off the media plane the URL never carries a credential.
-        assert_eq!(
-            status("GET", format!("/api/status?ados_session={sess_q}"), None).await,
-            StatusCode::UNAUTHORIZED
-        );
-    }
-
-    /// The same table against the RADIO RELAY denylist. A relayed caller is
-    /// on-box by construction (the relay lands on loopback), so an encoded
-    /// path that slips the denylist is served with full node authority.
-    #[tokio::test]
-    async fn encoded_paths_cannot_slip_the_relay_denylist() {
-        use tower::util::ServiceExt;
-        let dir = tempfile::tempdir().unwrap();
-        let app = lan_app(paired_edge(dir.path()));
-
-        for uri in [
-            "/api/pairing/%75npair",
-            "/%61pi/pairing/unpair",
-            "/api//pairing/unpair",
-            "/api/pairing/%2e/unpair",
-            // Prefix coverage: anything beneath a denied route is denied too.
-            "/api/pairing/claim/resume",
-        ] {
-            let req = Request::builder()
-                .uri(uri)
-                .header(auth::RELAYED_HEADER, "1")
-                .extension(PeerAddr(SocketAddr::from(([127, 0, 0, 1], 45678))))
-                .body(Body::empty())
-                .unwrap();
-            let status = app.clone().oneshot(req).await.unwrap().status();
-            assert!(
-                status == StatusCode::BAD_REQUEST || status == StatusCode::FORBIDDEN,
-                "{uri} must not be reachable over the relay, got {status}",
-            );
-        }
-    }
-
-    /// The relay carries the linked ground station's authority over the
-    /// operating surface but never a trust-root change, with HMAC enabled or
-    /// not: the ticket the drone verified is the request's authentication.
-    #[tokio::test]
-    async fn the_relay_reaches_operations_but_not_trust_roots() {
-        use tower::util::ServiceExt;
-        let dir = tempfile::tempdir().unwrap();
-        let mut edge = paired_edge(dir.path());
-        // HMAC on: a relayed write must still go through, unsigned.
-        edge.proxied = Arc::new(ProxiedAuth::new(crate::config::SecuritySection {
-            hmac_enabled: true,
-            hmac_secret: "a-long-enough-secret-key".to_string(),
-            ..Default::default()
-        }));
-        let ok = || async { "ok" };
-        let app = axum::Router::new()
-            .route("/api/pairing/claim", axum::routing::post(ok))
-            .route("/api/v1/setup/apply", axum::routing::post(ok))
-            .route("/api/plugins/{id}/enable", axum::routing::post(ok))
-            .layer(axum::middleware::from_fn_with_state(edge.clone(), tcp_edge))
-            .with_state(edge);
-        let relayed = |uri: &str| {
-            Request::builder()
-                .method("POST")
-                .uri(uri)
-                .header(auth::RELAYED_HEADER, "1")
-                .extension(PeerAddr(SocketAddr::from(([127, 0, 0, 1], 45678))))
-                .body(Body::empty())
-                .unwrap()
-        };
-        for uri in ["/api/pairing/claim", "/api/v1/setup/apply"] {
-            let status = app.clone().oneshot(relayed(uri)).await.unwrap().status();
-            assert_eq!(status, StatusCode::FORBIDDEN, "{uri}");
-        }
-        let status = app
-            .clone()
-            .oneshot(relayed("/api/plugins/com.example.tool/enable"))
-            .await
-            .unwrap()
-            .status();
-        assert_eq!(status, StatusCode::OK, "a ticketed plugin enable crosses");
-    }
-
-    /// The normalizer's own contract, unit-level, so a failure names the rule
-    /// rather than a status code.
-    #[test]
-    fn decision_path_decodes_once_and_refuses_ambiguity() {
-        use crate::auth::{decision_path, PathRejection};
-
-        assert_eq!(decision_path("/api/status").unwrap(), "/api/status");
-        assert_eq!(decision_path("/%61pi/status").unwrap(), "/api/status");
-        // A trailing slash is the one legitimate empty segment.
-        assert_eq!(decision_path("/api/status/").unwrap(), "/api/status/");
-
-        assert_eq!(
-            decision_path("/%2561pi/status"),
-            Err(PathRejection::DoubleEncoded),
-        );
-        assert_eq!(
-            decision_path("/api//status"),
-            Err(PathRejection::EmptySegment)
-        );
-        assert_eq!(
-            decision_path("/api/../status"),
-            Err(PathRejection::DotSegment)
-        );
-        assert_eq!(
-            decision_path("/api/%2e%2e/status"),
-            Err(PathRejection::DotSegment),
-        );
-        assert_eq!(decision_path("/api/%00"), Err(PathRejection::ControlByte));
-        assert_eq!(
-            decision_path("/api/%zz"),
-            Err(PathRejection::MalformedEscape)
-        );
-        assert_eq!(
-            decision_path("/api/%a"),
-            Err(PathRejection::MalformedEscape)
-        );
-    }
-
-    /// A tiny Debug shim so a failing Admit assertion can print the variant.
-    struct DecisionDbg<'a>(&'a McpDecision);
-    impl std::fmt::Debug for DecisionDbg<'_> {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self.0 {
-                McpDecision::Admit(s) => write!(f, "Admit({s})"),
-                McpDecision::ScopeDenied => write!(f, "ScopeDenied"),
-                McpDecision::Fallthrough => write!(f, "Fallthrough"),
-            }
-        }
-    }
-}
+#[cfg(test)]
+mod edge_tests;

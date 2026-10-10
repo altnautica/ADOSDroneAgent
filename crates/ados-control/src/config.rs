@@ -11,7 +11,12 @@
 //! snapshot rather than an error, so the guaranteed-200 pairing-info contract
 //! holds on a fresh, partially-configured agent.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
+
+use parking_lot::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::Deserialize;
 
@@ -91,6 +96,14 @@ pub struct PairingConfig {
 }
 
 impl PairingConfig {
+    /// The pairing slice of the shared config snapshot (see [`config_snapshot`]):
+    /// one parse per change of the file, re-checked at most every
+    /// [`CONFIG_CACHE_TTL`]. The hot-path reader; all-defaults on absence or a
+    /// parse error, logged once per change rather than once per request.
+    pub fn cached(path: &Path) -> Arc<Self> {
+        config_snapshot(path, CONFIG_CACHE_TTL).pairing
+    }
+
     /// Load from the canonical path (or the `ADOS_CONFIG` override). A missing or
     /// unparseable file yields the all-defaults config rather than failing — the
     /// pairing-info route must still answer 200.
@@ -99,8 +112,10 @@ impl PairingConfig {
         Self::load_from(Path::new(&path))
     }
 
-    /// Load from an explicit path (testable). All-defaults on absence / parse
-    /// error. `agent.device_id` is always the node's resolved identity
+    /// Load from an explicit path, read fresh on every call (testable).
+    /// All-defaults on absence / parse error, logging the parse error each call:
+    /// per-request readers use [`Self::cached`] instead. `agent.device_id` is
+    /// always the node's resolved identity
     /// ([`ados_protocol::identity::device_id`]): the provisioned file first, so
     /// a configured value only stands in on a host with no identity file.
     pub fn load_from(path: &Path) -> Self {
@@ -250,32 +265,135 @@ pub struct McpSection {
 }
 
 impl ControlSecurityConfig {
-    /// Load from the canonical path (or the `ADOS_CONFIG` override).
-    pub fn load() -> Self {
-        let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
-        Self::load_from(Path::new(&path))
+    /// The security slice of the shared config snapshot, all-defaults when the
+    /// file cannot be read or parsed. The edge gates that must fail closed on an
+    /// unreadable config read [`crate::security_state::SecurityState`] instead.
+    pub fn cached(path: &Path) -> Arc<Self> {
+        config_snapshot(path, CONFIG_CACHE_TTL)
+            .security
+            .unwrap_or_default()
     }
 
-    /// Load from an explicit path (testable). All-defaults on absence / parse
-    /// error, so the gate stays off on a config the front cannot read.
+    /// Read the slice fresh from `path`: all-defaults on absence or a parse
+    /// error. For a one-off read; per-request readers use [`Self::cached`] or
+    /// [`crate::security_state::SecurityState`].
     pub fn load_from(path: &Path) -> Self {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(_) => return ControlSecurityConfig::default(),
-        };
-        let (cfg, cfg_err) = ados_config::yaml_reporting::<ControlSecurityConfig>(&text, "control");
-        // Publish the parse result so a malformed config surfaces on the fleet
-        // Health view, not just in the log (per-service status sidecar). This is
-        // the control service's startup config load (built once at server init);
-        // the pairing reader stays on the quiet-default helper (it is on the hot
-        // per-request path).
-        ados_config::write_config_status("control", cfg_err.as_deref());
-        cfg
+        ados_config::load_yaml_or_default(path, "control")
     }
 
     /// The `security:` section.
     pub fn security(&self) -> &SecuritySection {
         &self.security
+    }
+}
+
+/// How long a cached config snapshot is trusted before the file is stat-ed
+/// again: the same short TTL the pairing reader uses, so a config write is
+/// honoured within a couple of requests without a stat per request.
+pub const CONFIG_CACHE_TTL: Duration = Duration::from_secs(2);
+
+/// The config document as the control plane types it: the pairing slice and the
+/// security slice, parsed together in one pass.
+#[derive(Debug, Default, Deserialize)]
+struct ConfigDoc {
+    #[serde(default)]
+    agent: AgentSection,
+    #[serde(default)]
+    video: VideoSection,
+    #[serde(default)]
+    security: SecuritySection,
+    #[serde(default)]
+    mcp: McpSection,
+}
+
+/// One parse of the config, shared by every reader until the file changes.
+#[derive(Clone)]
+pub struct ConfigSnapshot {
+    /// The pairing slice; all-defaults when the file is absent or malformed.
+    pub pairing: Arc<PairingConfig>,
+    /// The security slice, or why it could not be read. An absent file is the
+    /// all-defaults config of a fresh node, not an error.
+    pub security: Result<Arc<ControlSecurityConfig>, Arc<str>>,
+}
+
+/// Size and modification time of a file, `None` when it cannot be stat-ed.
+type FileStamp = Option<(SystemTime, u64)>;
+
+struct CacheEntry {
+    /// The config file's stamp and its identity file's stamp when parsed.
+    stamp: (FileStamp, FileStamp),
+    checked: Instant,
+    snapshot: ConfigSnapshot,
+}
+
+static CONFIG_CACHE: LazyLock<Mutex<HashMap<PathBuf, CacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn stamp_of(path: &Path) -> FileStamp {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// The parsed config at `path`. Within `ttl` of the last check the cached
+/// snapshot is returned untouched; after it the config file and its identity
+/// file are stat-ed and the document is parsed again only when either changed.
+/// A parse error is therefore logged once per change of the file.
+pub fn config_snapshot(path: &Path, ttl: Duration) -> ConfigSnapshot {
+    let mut cache = CONFIG_CACHE.lock();
+    let now = Instant::now();
+    if let Some(entry) = cache.get(path) {
+        if now.duration_since(entry.checked) < ttl {
+            return entry.snapshot.clone();
+        }
+    }
+    let stamp = (stamp_of(path), stamp_of(&device_id_file_for(path)));
+    if let Some(entry) = cache.get_mut(path) {
+        if entry.stamp == stamp {
+            entry.checked = now;
+            return entry.snapshot.clone();
+        }
+    }
+    let snapshot = parse_snapshot(path);
+    cache.insert(
+        path.to_path_buf(),
+        CacheEntry {
+            stamp,
+            checked: now,
+            snapshot: snapshot.clone(),
+        },
+    );
+    snapshot
+}
+
+fn parse_snapshot(path: &Path) -> ConfigSnapshot {
+    let (doc, error): (ConfigDoc, Option<String>) = match std::fs::read_to_string(path) {
+        // The dedupe key names the file, so a parse error is logged once per
+        // config file rather than once per process-wide "control" slice.
+        Ok(text) => ados_config::yaml_reporting(&text, &format!("control:{}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (ConfigDoc::default(), None),
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "config file unreadable");
+            (ConfigDoc::default(), Some(e.to_string()))
+        }
+    };
+    let ConfigDoc {
+        agent,
+        video,
+        security,
+        mcp,
+    } = doc;
+    let mut pairing = PairingConfig { agent, video };
+    pairing.agent.device_id = ados_protocol::identity::device_id_at(
+        &device_id_file_for(path),
+        Some(&pairing.agent.device_id),
+    );
+    let security = match error {
+        None => Ok(Arc::new(ControlSecurityConfig { security, mcp })),
+        Some(e) => Err(Arc::from(e)),
+    };
+    ConfigSnapshot {
+        pairing: Arc::new(pairing),
+        security,
     }
 }
 
@@ -292,7 +410,7 @@ impl ControlSecurityConfig {
 ///
 /// Deliberately the quiet-sidecar helper, not `write_config_status`: these are
 /// per-request readers, and publishing a service-level status sidecar on every
-/// request is a startup concern, matching the note on the pairing reader above.
+/// request is a startup concern (the daemon publishes it once at bring-up).
 pub fn load_config_object(path: &Path) -> serde_json::Value {
     let value: serde_json::Value = ados_config::load_yaml_or_default(path, "control");
     if value.is_object() {
@@ -310,145 +428,5 @@ pub fn load_config_object_default() -> serde_json::Value {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    fn temp_yaml(body: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let p = dir.path().join("config.yaml");
-        let mut f = std::fs::File::create(&p).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-        (dir, p)
-    }
-
-    #[test]
-    fn load_config_object_is_always_an_object() {
-        // The routes index straight into the result, so every failure mode has
-        // to land on `{}` rather than null/scalar. These four cases are the
-        // contract the per-route readers had before they shared one loader; the
-        // only intended change is that the malformed case now logs the parser
-        // error instead of being silently identical to the absent one.
-
-        // Absent — the normal fresh-node case.
-        assert_eq!(
-            load_config_object(Path::new("/nonexistent/ados/config.yaml")),
-            serde_json::json!({})
-        );
-
-        // Present but malformed. Asserted to be a genuine parse failure first:
-        // if this text merely parsed to a non-mapping it would still land on
-        // `{}` and the case would pass without ever exercising the loud path.
-        let malformed = "agent: {device_id: [unclosed\n  bad";
-        assert!(
-            serde_norway::from_str::<serde_json::Value>(malformed).is_err(),
-            "fixture must be a parse error, otherwise this case proves nothing"
-        );
-        let (_bad_dir, bad) = temp_yaml(malformed);
-        assert_eq!(load_config_object(&bad), serde_json::json!({}));
-
-        // Parses cleanly, but the root is not a mapping — a distinct path from
-        // the one above, and the reason the object coercion exists at all.
-        let scalar_text = "just-a-string\n";
-        let parsed = serde_norway::from_str::<serde_json::Value>(scalar_text)
-            .expect("fixture must parse, to separate this case from the malformed one");
-        assert!(!parsed.is_object());
-        let (_scalar_dir, scalar) = temp_yaml(scalar_text);
-        assert_eq!(load_config_object(&scalar), serde_json::json!({}));
-
-        // The happy path still projects the mapping through untouched.
-        let (_good_dir, good) = temp_yaml("agent:\n  name: test-drone\nvideo:\n  mode: disabled\n");
-        let v = load_config_object(&good);
-        assert_eq!(v["agent"]["name"], "test-drone");
-        assert_eq!(v["video"]["mode"], "disabled");
-    }
-
-    #[test]
-    fn missing_file_yields_the_python_defaults() {
-        let cfg = PairingConfig::load_from(Path::new("/nonexistent/ados/config.yaml"));
-        assert_eq!(cfg.agent.device_id, "");
-        assert_eq!(cfg.agent.name, "my-drone");
-        assert_eq!(cfg.agent.profile, "auto");
-        assert_eq!(cfg.radio_peer_device_id(), None);
-    }
-
-    #[test]
-    fn reads_agent_identity_ignoring_the_rest() {
-        let yaml = "\
-mavlink:
-  port: /dev/ttyACM0
-agent:
-  device_id: abcdef1234567890
-  name: test-drone
-  profile: drone
-video:
-  mode: disabled
-";
-        let (_dir, path) = temp_yaml(yaml);
-        let cfg = PairingConfig::load_from(&path);
-        assert_eq!(cfg.agent.device_id, "abcdef1234567890");
-        assert_eq!(cfg.agent.name, "test-drone");
-        assert_eq!(cfg.agent.profile, "drone");
-    }
-
-    #[test]
-    fn reads_the_radio_peer_device_id() {
-        let yaml = "\
-video:
-  wfb:
-    channel: 149
-    paired_with_device_id: peer-1234567890
-";
-        let (_dir, path) = temp_yaml(yaml);
-        let cfg = PairingConfig::load_from(&path);
-        assert_eq!(
-            cfg.radio_peer_device_id(),
-            Some("peer-1234567890".to_string())
-        );
-    }
-
-    #[test]
-    fn an_empty_peer_is_treated_as_no_peer() {
-        // Matches the Python `isinstance(peer_raw, str) and peer_raw` guard: a
-        // present-but-empty value reads as no peer.
-        let yaml = "\
-video:
-  wfb:
-    paired_with_device_id: \"\"
-";
-        let (_dir, path) = temp_yaml(yaml);
-        let cfg = PairingConfig::load_from(&path);
-        assert_eq!(cfg.radio_peer_device_id(), None);
-    }
-
-    #[test]
-    fn security_defaults_are_the_python_defaults() {
-        // A missing file → all-defaults → the same defaults the Python agent uses.
-        let cfg = ControlSecurityConfig::load_from(Path::new("/nonexistent/ados/config.yaml"));
-        let s = cfg.security();
-        assert_eq!(s.api.api_key, "");
-        assert!(!s.hmac_enabled);
-        assert_eq!(s.hmac_secret, "");
-        assert!(!s.setup_token_required);
-    }
-
-    #[test]
-    fn a_python_written_config_reads_identically() {
-        // A config the Python agent wrote reads the same field values here.
-        let yaml = "\
-security:
-  api:
-    api_key: configured-key
-  hmac_enabled: true
-  hmac_secret: a-very-long-secret-key
-  setup_token_required: true
-";
-        let (_dir, path) = temp_yaml(yaml);
-        let cfg = ControlSecurityConfig::load_from(&path);
-        let s = cfg.security();
-        assert_eq!(s.api.api_key, "configured-key");
-        assert!(s.hmac_enabled);
-        assert_eq!(s.hmac_secret, "a-very-long-secret-key");
-        assert!(s.setup_token_required);
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;
