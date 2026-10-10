@@ -20,12 +20,13 @@ registry and the on-disk files.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from ados.api.deps import get_agent_app
@@ -91,23 +92,55 @@ async def list_vision_models() -> dict[str, Any]:
     }
 
 
-@router.post("/vision/models/{model_id}/download")
+# Model downloads in flight, keyed by model id. Held so the task survives the
+# request that started it, and so a second request for the same model is
+# refused instead of racing the first on the same temp file.
+_DOWNLOADS: dict[str, asyncio.Task[str]] = {}
+
+
+def _download_finished(model_id: str, task: asyncio.Task[str]) -> None:
+    """Drop a finished download and log how it ended (progress keeps the error)."""
+    if _DOWNLOADS.get(model_id) is task:
+        del _DOWNLOADS[model_id]
+    if task.cancelled():
+        log.warning("model_download_cancelled", model=model_id)
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.warning("model_download_task_failed", model=model_id, error=str(exc))
+
+
+@router.post("/vision/models/{model_id}/download", status_code=202)
 async def download_vision_model(model_id: str) -> dict[str, Any]:
-    """Download a vision model, selecting the best variant for this board."""
+    """Start downloading a vision model, picking the best variant for this board.
+
+    The download runs in the background, past the request's lifetime: a large
+    model takes longer than any proxy's request timeout. The reply is 202 with
+    the status URL to poll; 409 when the same model is already downloading.
+    """
     app = get_agent_app()
     mm = getattr(app, "model_manager", None)
     if mm is None:
-        return {"status": "error", "message": "Model manager not available"}
-
+        raise HTTPException(status_code=503, detail="Model manager not available")
     await mm.fetch_registry()
+    running = _DOWNLOADS.get(model_id)
+    if running is not None and not running.done():
+        raise HTTPException(status_code=409, detail=f"Model {model_id} is already downloading")
 
-    try:
-        path = await mm.download_model(model_id)
-        return {"status": "ok", "message": f"Model {model_id} downloaded", "path": path}
-    except ValueError as exc:
-        return {"status": "error", "message": str(exc)}
-    except Exception as exc:
-        return {"status": "error", "message": f"Download failed: {exc}"}
+    variant = mm.select_best_variant(model_id)
+    if not variant:
+        raise HTTPException(status_code=404, detail=f"No suitable variant found for model: {model_id}")
+    if not variant.get("url"):
+        raise HTTPException(status_code=422, detail=f"No download URL for model variant: {model_id}")
+
+    task = asyncio.create_task(mm.download_model(model_id))
+    _DOWNLOADS[model_id] = task
+    task.add_done_callback(lambda t: _download_finished(model_id, t))
+    return {
+        "status": "started",
+        "model_id": model_id,
+        "status_url": f"/api/vision/models/{model_id}/status",
+    }
 
 
 @router.get("/vision/models/{model_id}/status")

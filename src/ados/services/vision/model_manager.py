@@ -42,6 +42,7 @@ class DownloadProgress:
     total_bytes: int = 0
     speed_bps: float = 0.0
     eta_seconds: float = 0.0
+    error: str | None = None
 
     def percent(self) -> float:
         if self.total_bytes <= 0:
@@ -56,6 +57,7 @@ class DownloadProgress:
             "total_bytes": self.total_bytes,
             "speed_bps": round(self.speed_bps),
             "eta_seconds": round(self.eta_seconds),
+            "error": self.error,
         }
 
 
@@ -495,6 +497,7 @@ class ModelManager:
         except (httpx.HTTPError, OSError) as exc:
             log.error("model_download_failed", model=model_id, error=str(exc))
             progress.state = DownloadState.FAILED
+            progress.error = str(exc)
             raise
 
         # Atomic rename
@@ -515,6 +518,7 @@ class ModelManager:
             if got != want.lower():
                 Path(final_file).unlink(missing_ok=True)
                 progress.state = DownloadState.FAILED
+                progress.error = "sha256 mismatch"
                 log.error(
                     "model_download_sha256_mismatch",
                     model=model_id,

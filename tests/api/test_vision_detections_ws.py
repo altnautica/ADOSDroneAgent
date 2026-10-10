@@ -120,7 +120,7 @@ def short_sock_path():
 
 @pytest.fixture
 def unpaired_client(short_sock_path, monkeypatch):
-    """Unpaired agent → open WS posture (no ticket needed)."""
+    """Unpaired agent reached on-box (the native front's on-box stamp)."""
     monkeypatch.setattr(
         route, "VISION_DETECTIONS_SOCK", short_sock_path, raising=False
     )
@@ -143,12 +143,17 @@ def paired_client(short_sock_path, monkeypatch):
     return TestClient(create_app(app_double)), short_sock_path
 
 
+# The stamp the native front sets only for an on-box caller. An unpaired node
+# no longer opens this stream to an off-box browser without a PIN-backed ticket.
+_ONBOX = {"X-ADOS-Onbox": "1"}
+
+
 def test_forwards_batch_as_json(unpaired_client):
     client, sock_path = unpaired_client
     engine = _FakeEngineSocket(sock_path, [_frame(SAMPLE_BATCH)])
     engine.start()
     try:
-        with client.websocket_connect("/api/vision/detections/ws") as ws:
+        with client.websocket_connect("/api/vision/detections/ws", headers=_ONBOX) as ws:
             got = ws.receive_json()
         assert got["model_id"] == "com.example.weeds"
         assert got["camera_id"] == "uvc-0"
@@ -170,7 +175,7 @@ def test_forwards_multiple_batches_in_order(unpaired_client):
     engine = _FakeEngineSocket(sock_path, [_frame(SAMPLE_BATCH), _frame(second)])
     engine.start()
     try:
-        with client.websocket_connect("/api/vision/detections/ws") as ws:
+        with client.websocket_connect("/api/vision/detections/ws", headers=_ONBOX) as ws:
             a = ws.receive_json()
             b = ws.receive_json()
         assert a["frame_id"] == 7
@@ -189,6 +194,17 @@ def test_closes_cleanly_when_socket_absent(unpaired_client):
     with pytest.raises(_WSDisconnect):
         with client.websocket_connect("/api/vision/detections/ws") as ws:
             ws.receive_json()
+
+
+def test_close_reason_reports_unavailable():
+    """The no-engine close reason carries the same ``available: false``."""
+    import json as _json
+
+    import ados.api.routes.vision_detections as route_mod
+
+    reason = _json.loads(route_mod._UNAVAILABLE_CLOSE_REASON)
+    assert reason["available"] is False
+    assert len(route_mod._UNAVAILABLE_CLOSE_REASON.encode()) <= 123
 
 
 def test_paired_no_key_rejected(paired_client):
@@ -234,6 +250,7 @@ def test_get_latest_returns_most_recent_batch(unpaired_client):
         assert resp.status_code == 200
         assert resp.json()["frame_id"] == 7
         assert resp.json()["detections"][0]["class_label"] == "weed"
+        assert resp.json()["available"] is True
     finally:
         engine.stop()
 
@@ -248,7 +265,7 @@ def test_get_latest_does_not_serve_a_stale_batch_as_current(unpaired_client):
     try:
         resp = client.get("/api/vision/detections/latest")
         assert resp.status_code == 200
-        assert resp.json() == {"detections": [], "stale": True}
+        assert resp.json() == {"detections": [], "stale": True, "available": True}
     finally:
         engine.stop()
 
@@ -273,7 +290,7 @@ def test_get_latest_returns_empty_detections_when_socket_absent():
             client = TestClient(create_app(app_double))
             resp = client.get("/api/vision/detections/latest")
             assert resp.status_code == 200
-            assert resp.json() == {"detections": []}
+            assert resp.json() == {"detections": [], "available": False}
         finally:
             route_mod.VISION_DETECTIONS_SOCK = original
     finally:

@@ -26,60 +26,19 @@ import json
 from typing import Any
 
 import click
-import httpx
 
-from ados.cli import _ansi, api_bases
-from ados.core.paths import PAIRING_JSON
-
-
-def _load_api_key() -> str | None:
-    try:
-        if PAIRING_JSON.exists():
-            data = json.loads(PAIRING_JSON.read_text(encoding="utf-8"))
-            key = data.get("api_key")
-            return key if isinstance(key, str) else None
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
-    return None
-
-
-def _auth_headers() -> dict[str, str]:
-    key = _load_api_key()
-    return {"X-ADOS-Key": key} if key else {}
+from ados.cli import _agent_http, _ansi
 
 
 def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-    """Minimal REST helper. Returns the parsed body dict.
-
-    Tries each candidate control port so a wrong-port probe never reads as
-    "agent not running"; a connection refusal falls through to the next.
-    """
-    timeout = kwargs.pop("timeout", 10.0)
-    try:
-        for base in api_bases():
-            try:
-                with httpx.Client(timeout=timeout) as client:
-                    resp = client.request(
-                        method, f"{base}{path}", headers=_auth_headers(), **kwargs
-                    )
-                if resp.status_code >= 400:
-                    raise click.ClickException(
-                        f"Agent API returned {resp.status_code} for {path}"
-                    )
-                try:
-                    body = resp.json()
-                except ValueError as exc:
-                    raise click.ClickException(
-                        f"Agent API returned non-JSON for {path}"
-                    ) from exc
-                return body if isinstance(body, dict) else {"data": body}
-            except httpx.ConnectError:
-                continue  # this port refused; try the next candidate
-        raise click.ClickException(
-            "Agent is not running. Start it with: sudo systemctl start ados-supervisor"
-        )
-    except httpx.HTTPError as exc:
-        raise click.ClickException(str(exc)) from exc
+    """One control-surface request; the parsed body dict, else a ClickException."""
+    return _agent_http.call_json(
+        method,
+        path,
+        json_body=kwargs.get("json"),
+        params=kwargs.get("params"),
+        timeout=kwargs.get("timeout", 10.0),
+    )
 
 
 # Map a video-hop verdict to a state dot + a plain colour for the summary line.

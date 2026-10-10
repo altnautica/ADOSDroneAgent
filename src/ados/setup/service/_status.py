@@ -153,6 +153,22 @@ def _assemble_status(  # noqa: C901
         config=config,
         mission_control_url=mission_control_url,
     )
+    # Pairing surface — read once, expose at the top level so the CLI
+    # and webapp can render the code without walking the steps array, and
+    # feed the pair step from the same reading.
+    pairing_code: str | None = None
+    paired_now = False
+    pm = getattr(runtime.raw_runtime, "pairing_manager", None) or getattr(
+        runtime, "pairing_manager", None
+    )
+    if pm is not None:
+        try:
+            paired_now = bool(getattr(pm, "is_paired", False))
+            if not paired_now:
+                pairing_code = pm.get_or_create_code()
+        except Exception:
+            pairing_code = None
+
     reg_cfg = getattr(getattr(config, "network", None), "regulatory", None)
     reg_mode = str(getattr(reg_cfg, "mode", "unrestricted") or "unrestricted")
     reg_region = getattr(reg_cfg, "region", None)
@@ -163,6 +179,7 @@ def _assemble_status(  # noqa: C901
         network=network,
         remote=remote,
         cloud_choice=cloud_choice,
+        cloud_paired=paired_now,
         profile_suggestion=profile_suggestion,
         hardware_check=hardware_check,
         mission_control_url=mission_control_url,
@@ -216,21 +233,6 @@ def _assemble_status(  # noqa: C901
     profile_source = (
         "user" if explicit_profile else profile_suggestion.source
     )
-
-    # Pairing surface — read once, expose at the top level so the CLI
-    # and webapp can render the code without walking the steps array.
-    pairing_code: str | None = None
-    paired_now = False
-    pm = getattr(runtime.raw_runtime, "pairing_manager", None) or getattr(
-        runtime, "pairing_manager", None
-    )
-    if pm is not None:
-        try:
-            paired_now = bool(getattr(pm, "is_paired", False))
-            if not paired_now:
-                pairing_code = pm.get_or_create_code()
-        except Exception:
-            pairing_code = None
 
     return SetupStatus(
         version=__version__,

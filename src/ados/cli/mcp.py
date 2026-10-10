@@ -24,62 +24,24 @@ from pathlib import Path
 from typing import Any
 
 import click
-import httpx
 
-from ados.cli import api_bases, default_api_base
-from ados.core.paths import CONFIG_YAML, PAIRING_JSON
-
-API_BASE = default_api_base()
+from ados.cli import _agent_http
+from ados.core.paths import CONFIG_YAML
 
 # The scope groups a token may carry. Mirrors the agent's route->scope classes.
 _VALID_SCOPES = ("read", "safe_write", "admin", "flight", "destructive", "secret_read")
 
 
-def _load_api_key() -> str | None:
-    """The pairing key, or None when unpaired / unreadable (on-box is trusted)."""
-    try:
-        data = json.loads(Path(PAIRING_JSON).read_text())
-    except (OSError, ValueError):
-        return None
-    key = data.get("api_key")
-    return key if isinstance(key, str) and key else None
-
-
-def _auth_headers() -> dict[str, str]:
-    key = _load_api_key()
-    return {"X-ADOS-Key": key} if key else {}
-
-
 def _request(method: str, path: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
-    """Minimal REST helper. Returns (status_code, parsed_body)."""
-    timeout = kwargs.pop("timeout", 8.0)
-    # Try each candidate control port; a connection refusal falls through to the
-    # next so a wrong-port probe never reads as "agent not running".
-    bases = api_bases()
-    try:
-        for base in bases:
-            try:
-                with httpx.Client(timeout=timeout) as client:
-                    resp = client.request(
-                        method, f"{base}{path}", headers=_auth_headers(), **kwargs
-                    )
-                try:
-                    body = resp.json()
-                except ValueError:
-                    body = {"text": resp.text}
-                if resp.status_code >= 400:
-                    detail = body.get("detail") if isinstance(body, dict) else None
-                    raise click.ClickException(
-                        f"Agent API returned {resp.status_code}: {detail or body}"
-                    )
-                return resp.status_code, body if isinstance(body, dict) else {"data": body}
-            except httpx.ConnectError:
-                continue  # this port refused; try the next candidate
-        raise click.ClickException(
-            "Agent is not running. Start it with: sudo systemctl start ados-supervisor"
-        )
-    except httpx.HTTPError as exc:
-        raise click.ClickException(str(exc)) from exc
+    """One control-surface request: ``(status, body)``; an error status raises."""
+    response = _agent_http.call(
+        method, path, json_body=kwargs.get("json"), timeout=kwargs.get("timeout", 8.0)
+    )
+    body = response.body
+    if not response.ok:
+        detail = body.get("detail") if isinstance(body, dict) else None
+        raise click.ClickException(f"Agent API returned {response.status}: {detail or body}")
+    return response.status, body if isinstance(body, dict) else {"data": body}
 
 
 @click.group("mcp", help="Manage AI-control (MCP) access tokens.")

@@ -85,6 +85,7 @@ def _setup_steps(
     network: NetworkStatus,
     remote: RemoteAccessStatus,
     cloud_choice: CloudChoiceStatus,
+    cloud_paired: bool = False,
     profile_suggestion: ProfileSuggestion,
     hardware_check: HardwareCheckStatus,
     mission_control_url: str,
@@ -103,7 +104,8 @@ def _setup_steps(
     is_drone = profile != "ground_station"
     is_ground = profile == "ground_station"
     network_complete = bool(network.local_ips) or bool(network.hotspot_enabled)
-    cloud_paired = cloud_choice.paired
+    # `cloud_paired` comes from the pairing manager (the one owner of the
+    # pairing record), not from the cloud-choice posture.
     cloud_local = cloud_choice.mode == "local"
     profile_confirmed = profile_suggestion.confirmed and profile in (
         "drone",

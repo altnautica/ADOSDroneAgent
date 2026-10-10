@@ -211,6 +211,7 @@ def test_update_upgrade_failure_surfaces_as_click_exception() -> None:
     with (
         patch("ados.cli.main._installed_version", return_value="0.10.0"),
         patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli.main._armed_refusal", return_value=None),
         patch(
             "ados.cli.main._run_upgrade",
             side_effect=click.ClickException("Could not fetch the installer"),
@@ -328,56 +329,113 @@ def test_request_connect_error_yields_friendly_message() -> None:
 
 def test_request_http_status_error_includes_response_text() -> None:
     """A 503 must surface the status code and a snippet of the body."""
-    fake_response = MagicMock(status_code=503)
-    fake_response.text = "Service Unavailable"
-    err = httpx.HTTPStatusError("bad", request=MagicMock(), response=fake_response)
-    with patch("httpx.Client") as client_factory:
-        instance = MagicMock()
-        instance.__enter__.return_value = instance
-        instance.__exit__.return_value = False
+    transport = httpx.MockTransport(lambda _req: httpx.Response(503, text="Service Unavailable"))
+    real_client = httpx.Client
 
-        response_mock = MagicMock()
-        response_mock.raise_for_status.side_effect = err
-        instance.request.return_value = response_mock
-        client_factory.return_value = instance
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
 
+    with patch("httpx.Client", side_effect=client_factory):
         with pytest.raises(click.ClickException) as exc:
             cli_main._request("GET", "/api/v1/setup/status")
     assert "503" in str(exc.value.message)
+    assert "Service Unavailable" in str(exc.value.message)
 
 
 # ---------------------------------------------------------------------------
-# Auth header derivation from on-disk pairing state
+# Auth key derivation from on-disk pairing state (the shared agent client)
 # ---------------------------------------------------------------------------
 
 
-def test_auth_headers_empty_when_pairing_file_missing(tmp_path: Path) -> None:
-    """No pairing file on disk -> no auth header sent."""
-    with patch.object(cli_main, "PAIRING_STATE_PATH", tmp_path / "missing.json"):
-        assert cli_main._auth_headers() == {}
+def _pairing_key(path: Path):
+    from ados.cli import _agent_http
+
+    with patch.object(_agent_http, "PAIRING_JSON", path):
+        return _agent_http._load_pairing_key().value
 
 
-def test_auth_headers_carries_api_key_when_present(tmp_path: Path) -> None:
+def test_auth_key_absent_when_pairing_file_missing(tmp_path: Path) -> None:
+    assert _pairing_key(tmp_path / "missing.json") is None
+
+
+def test_auth_key_read_when_present(tmp_path: Path) -> None:
     state = tmp_path / "pairing.json"
     state.write_text(json.dumps({"api_key": "secret-xyz"}))
-    with patch.object(cli_main, "PAIRING_STATE_PATH", state):
-        headers = cli_main._auth_headers()
-    assert headers == {"X-ADOS-Key": "secret-xyz"}
+    assert _pairing_key(state) == "secret-xyz"
 
 
-def test_auth_headers_handles_malformed_pairing_json(tmp_path: Path) -> None:
-    """Corrupt pairing JSON degrades to anonymous (no header)."""
+def test_auth_key_absent_for_malformed_pairing_json(tmp_path: Path) -> None:
     state = tmp_path / "pairing.json"
     state.write_text("{ not valid json")
-    with patch.object(cli_main, "PAIRING_STATE_PATH", state):
-        assert cli_main._auth_headers() == {}
+    assert _pairing_key(state) is None
 
 
-def test_auth_headers_skips_non_string_api_key(tmp_path: Path) -> None:
+def test_auth_key_skips_non_string_api_key(tmp_path: Path) -> None:
     state = tmp_path / "pairing.json"
     state.write_text(json.dumps({"api_key": 42}))  # wrong type
-    with patch.object(cli_main, "PAIRING_STATE_PATH", state):
-        assert cli_main._auth_headers() == {}
+    assert _pairing_key(state) is None
+
+
+# ---------------------------------------------------------------------------
+# `ados status` when the setup facade is unavailable
+# ---------------------------------------------------------------------------
+
+
+def _routes(answers: dict[str, tuple[int, object]]):
+    from ados.cli._agent_http import AgentResponse
+
+    def call(method, path, **_kw):
+        if path not in answers:
+            return AgentResponse(404, {"detail": "not found"}, "http://127.0.0.1:8082")
+        status, body = answers[path]
+        return AgentResponse(status, body, "http://127.0.0.1:8082")
+
+    return call
+
+
+def test_status_falls_back_to_native_routes_when_the_facade_is_down() -> None:
+    answers = {
+        "/api/v1/setup/status": (502, {"detail": "upstream down"}),
+        "/api/status/full": (
+            200,
+            {"version": "0.103.0", "profile": "drone", "fc_connected": True, "fc_port": "/dev/ttyACM0"},
+        ),
+        "/api/pairing/info": (200, {"name": "bench", "paired": False, "mdns_host": "ados-1.local"}),
+    }
+    with patch("ados.cli.main._agent_http.call", _routes(answers)):
+        result = runner.invoke(cli, ["status", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["version"] == "0.103.0"
+    assert data["network"]["api_port"] == 8082
+    assert data["mavlink"]["connected"] is True
+    # Never read: printed as unknown, never invented.
+    assert data["completion_percent"] == "unknown"
+    assert data["cloud_choice"]["mode"] == "unknown"
+    assert data["remote_access"]["status"] == "unknown"
+
+
+def test_status_plain_output_survives_unknown_fields() -> None:
+    answers = {
+        "/api/v1/setup/status": (501, {"detail": "no upstream"}),
+        "/api/pairing/info": (200, {"name": "bench"}),
+    }
+    with patch("ados.cli.main._agent_http.call", _routes(answers)):
+        result = runner.invoke(cli, ["status"])
+    assert result.exit_code == 0, result.output
+    assert "unknown" in result.output
+
+
+def test_status_reads_server_mode_from_config() -> None:
+    answers = {
+        "/api/v1/setup/status": (503, {}),
+        "/api/status/full": (200, {"profile": "drone"}),
+        "/api/config": (200, {"server": {"mode": "cloud"}}),
+    }
+    with patch("ados.cli.main._agent_http.call", _routes(answers)):
+        data = cli_main._setup_status()
+    assert data["cloud_choice"]["mode"] == "cloud"
 
 
 # ---------------------------------------------------------------------------
@@ -419,11 +477,12 @@ def test_update_pins_the_boxs_own_profile_so_it_cannot_be_reprofiled() -> None:
         patch("ados.cli.main._installed_version", return_value="0.10.0"),
         patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
         patch("ados.cli.main._read_profile_conf_value", return_value="ground_station"),
+        patch("ados.cli.main._armed_refusal", return_value=None),
         patch("ados.cli.main._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--yes"])
     assert result.exit_code == 0
-    upgrade.assert_called_once_with("ground_station")
+    upgrade.assert_called_once_with("ground_station", force_armed=False)
 
 
 def test_update_profile_override_wins_for_a_deliberate_conversion() -> None:
@@ -432,11 +491,12 @@ def test_update_profile_override_wins_for_a_deliberate_conversion() -> None:
         patch("ados.cli.main._installed_version", return_value="0.10.0"),
         patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
         patch("ados.cli.main._read_profile_conf_value", return_value="drone"),
+        patch("ados.cli.main._armed_refusal", return_value=None),
         patch("ados.cli.main._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--yes", "--profile", "ground-station"])
     assert result.exit_code == 0
-    upgrade.assert_called_once_with("ground-station")
+    upgrade.assert_called_once_with("ground-station", force_armed=False)
 
 
 def test_update_says_so_when_the_profile_cannot_be_known() -> None:
@@ -445,12 +505,110 @@ def test_update_says_so_when_the_profile_cannot_be_known() -> None:
         patch("ados.cli.main._installed_version", return_value="0.10.0"),
         patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
         patch("ados.cli.main._read_profile_conf_value", return_value=None),
+        patch("ados.cli.main._armed_refusal", return_value=None),
         patch("ados.cli.main._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--yes"])
     assert result.exit_code == 0
-    upgrade.assert_called_once_with(None)
+    upgrade.assert_called_once_with(None, force_armed=False)
     assert "unknown" in result.output.lower()
+
+
+def _status_full(body: dict | None):
+    """A stand-in for ``_agent_http.call`` answering ``/api/status/full``."""
+    from ados.cli._agent_http import AgentResponse
+
+    def call(method, path, **_kw):
+        if body is None:
+            raise click.ClickException("Agent is not running")
+        return AgentResponse(200, body, "http://127.0.0.1:8080")
+
+    return call
+
+
+_ARMED = {
+    "profile": "drone",
+    "mavlinkAlive": True,
+    "heartbeatAgeS": 0.4,
+    "telemetry": {"armed": True},
+}
+
+
+def _update(args: list[str], status_body: dict | None, profile: str | None = "drone"):
+    with (
+        patch("ados.cli.main._installed_version", return_value="0.10.0"),
+        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli.main._read_profile_conf_value", return_value=profile),
+        patch("ados.cli.main._agent_http.call", _status_full(status_body)),
+        patch("ados.cli.main._run_upgrade") as upgrade,
+    ):
+        result = runner.invoke(cli, ["update", "--yes", *args])
+    return result, upgrade
+
+
+def test_update_refuses_armed() -> None:
+    result, upgrade = _update([], _ARMED)
+    assert result.exit_code != 0
+    assert "armed" in result.output
+    assert "--force-armed" in result.output
+    upgrade.assert_not_called()
+
+
+def test_update_refuses_a_stale_or_unknown_arm_state() -> None:
+    stale = {**_ARMED, "heartbeatAgeS": 9.0, "telemetry": {"armed": False}}
+    for body in (stale, None, {**_ARMED, "telemetry": {}}):
+        result, upgrade = _update([], body)
+        assert result.exit_code != 0, body
+        upgrade.assert_not_called()
+
+
+def test_update_runs_when_disarmed() -> None:
+    result, upgrade = _update([], {**_ARMED, "telemetry": {"armed": False}})
+    assert result.exit_code == 0, result.output
+    upgrade.assert_called_once_with("drone", force_armed=False)
+
+
+def test_update_force_armed_overrides_and_reaches_the_installer() -> None:
+    result, upgrade = _update(["--force-armed"], _ARMED)
+    assert result.exit_code == 0, result.output
+    upgrade.assert_called_once_with("drone", force_armed=True)
+
+
+def test_update_does_not_gate_a_workstation() -> None:
+    result, upgrade = _update([], None, profile="workstation")
+    assert result.exit_code == 0, result.output
+    upgrade.assert_called_once()
+
+
+def test_run_upgrade_passes_force_armed_to_the_installer() -> None:
+    seen: dict[str, list[str]] = {}
+
+    class _Client:
+        def __init__(self, *_a, **_kw) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a) -> None:
+            return None
+
+        def get(self, _url):
+            return SimpleNamespace(text="#!/bin/sh\n", raise_for_status=lambda: None)
+
+    def _fake_run(argv, **_kw):
+        seen["argv"] = list(argv)
+        return SimpleNamespace(returncode=0)
+
+    with (
+        patch("ados.cli.main.httpx.Client", _Client),
+        patch("ados.cli.main.subprocess.run", _fake_run),
+        patch("ados.cli.main.os.geteuid", return_value=0, create=True),
+        patch("ados.cli.main.platform.system", return_value="Linux"),
+    ):
+        cli_main._run_upgrade("drone", force_armed=True)
+    assert "--force-armed" in seen["argv"]
+
 
 def test_run_upgrade_actually_passes_the_profile_to_the_installer() -> None:
     """The decision is worthless unless it reaches the installer's argv.

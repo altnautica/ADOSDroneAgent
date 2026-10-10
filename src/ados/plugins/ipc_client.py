@@ -13,7 +13,8 @@ Public surface today:
   read and write through the host's router.
 * ``ctx.peripheral_manager.register_*_driver`` and ``camera.claim`` —
   driver registration plus exclusive camera holds.
-* ``ctx.telemetry.extend`` — extend the heartbeat schema.
+* ``ctx.telemetry.extend`` — extend the heartbeat schema;
+  ``subscribe_telemetry`` — the live vehicle-state stream.
 * ``ctx.config.get / set`` — per-drone or global kv.
 * ``ctx.process.spawn`` — sandboxed vendor-binary spawn with
   allowlist enforcement on the supervisor side.
@@ -25,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,10 @@ _TOOL_INVOKE_METHOD = "tool.invoke"
 # failing ``token_expired`` ten minutes after the host began serving, with the
 # plugin process still up and only per-call errors in its own log.
 _TOKEN_REFRESH_METHOD = "token.refresh"
+
+# The event topic the host pushes the vehicle-state snapshot on to a plugin
+# that armed ``telemetry.subscribe`` (``ados_protocol::plugin::TELEMETRY_STATE_TOPIC``).
+TELEMETRY_STATE_TOPIC = "telemetry.state"
 
 # ---------------------------------------------------------------------
 # Typed exceptions surfaced to plugin code
@@ -235,6 +240,43 @@ class PluginIpcClient:
             capability="event.subscribe",
             args={"topic": topic_pattern},
         )
+
+    # ---- Telemetry ----------------------------------------------------
+
+    async def subscribe_telemetry(
+        self, topic: str = TELEMETRY_STATE_TOPIC
+    ) -> AsyncIterator[dict]:
+        """Yield the vehicle-state snapshot as the host pushes it.
+
+        Same wire as the Rust SDK's ``telemetry_subscribe``: a
+        ``telemetry.subscribe`` request gated on ``telemetry.read``, after
+        which the host pushes the state object as an event on
+        ``telemetry.state``, rate-limited and always the newest. Each yielded
+        item is that state object. A consumer slower than the push sees the
+        newest snapshot, never a backlog. A node with no flight controller
+        never yields.
+        """
+        if topic != TELEMETRY_STATE_TOPIC:
+            raise ValueError(f"the host pushes telemetry on {TELEMETRY_STATE_TOPIC!r} only")
+        latest: asyncio.Queue[dict] = asyncio.Queue(maxsize=1)
+
+        def _push(payload: dict) -> None:
+            if latest.full():
+                latest.get_nowait()
+            latest.put_nowait(payload)
+
+        callbacks = self._event_callbacks.setdefault(topic, [])
+        callbacks.append(_push)
+        try:
+            await self._send_request(
+                "telemetry.subscribe",
+                capability=REQUIRED_CAP["telemetry.subscribe"],
+                args={},
+            )
+            while True:
+                yield await latest.get()
+        finally:
+            callbacks.remove(_push)
 
     # ---- MAVLink ------------------------------------------------------
 

@@ -235,7 +235,7 @@ def test_record_clip_streams_the_body_to_the_output_file(tmp_path):
         kwargs["transport"] = transport
         return real_client(*args, **kwargs)
 
-    with patch("ados.cli.record.httpx.Client", side_effect=client_factory):
+    with patch("ados.cli._agent_http.httpx.Client", side_effect=client_factory):
         result = CliRunner().invoke(
             record_group,
             [
@@ -278,7 +278,7 @@ def test_record_clip_refuses_a_non_positive_duration_without_a_round_trip():
         kwargs["transport"] = transport
         return real_client(*args, **kwargs)
 
-    with patch("ados.cli.record.httpx.Client", side_effect=client_factory):
+    with patch("ados.cli._agent_http.httpx.Client", side_effect=client_factory):
         result = CliRunner().invoke(
             record_group,
             [

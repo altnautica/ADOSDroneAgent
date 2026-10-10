@@ -65,7 +65,6 @@ _SECTION_LEAVES: dict[str, tuple[str, ...]] = {
     ),
     "cloud": (
         "server.mode",
-        "server.mqtt_password",
         "server.self_hosted.url",
         "server.self_hosted.mqtt_broker",
         "server.self_hosted.mqtt_port",
@@ -129,9 +128,9 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
     for name, payload in order:
         if payload is None:
             continue
-        snapshot = _capture_section_snapshot(runtime, name)
+        snapshot = await asyncio.to_thread(_capture_section_snapshot, runtime, name)
         try:
-            result = await _apply_single_section(runtime, name, payload)
+            result = await _apply_single_section(runtime, name, payload, request.force is True)
         except Exception as exc:  # noqa: BLE001 (never raise 500 from /apply)
             log.warning("apply_section_raised", section=name, error=str(exc))
             result = SetupActionResult(
@@ -171,12 +170,13 @@ async def batch_apply_settings(request: ApplyRequest) -> ApplyResponse:
 
 
 async def _apply_single_section(
-    runtime, name: str, payload
+    runtime, name: str, payload, force: bool = False
 ) -> SetupActionResult:
     """Dispatch one section to its setter.
 
     The setters shell out and take the config lock, so they run on a worker
-    thread and the residual API keeps serving meanwhile.
+    thread and the residual API keeps serving meanwhile. ``force`` is the
+    armed override the batch already checked; the native WFB routes see it.
     """
     if name == "profile":
         # The restart is dispatched by the batch only once every section
@@ -203,7 +203,7 @@ async def _apply_single_section(
     if name == "ui":
         return await asyncio.to_thread(apply_ui, runtime, payload)
     if name == "wfb":
-        return await asyncio.to_thread(apply_wfb, runtime, payload)
+        return await asyncio.to_thread(lambda: apply_wfb(runtime, payload, force=force))
     if name == "regulatory":
         return await asyncio.to_thread(apply_regulatory, runtime, payload)
     if name == "display":

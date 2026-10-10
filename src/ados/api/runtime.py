@@ -9,6 +9,8 @@ an in-process handle that does not exist and quietly report its default.
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +18,7 @@ from typing import Any, Protocol
 
 from ados.core.config import ADOSConfig, load_config
 from ados.core.config.writer import ConfigWriteResult, set_config_values
-from ados.core.paths import CONFIG_YAML
+from ados.core.paths import BOARD_JSON, CONFIG_YAML
 
 
 class ApiRuntime(Protocol):
@@ -103,6 +105,18 @@ class ApiRuntimeFacade:
     def model_manager(self) -> Any:
         return getattr(self._runtime, "model_manager", None)
 
+    async def aconfig(self) -> ADOSConfig:
+        """The config for an async caller, read off the event loop.
+
+        A config reload parses YAML and validates the whole model; that work
+        runs in a thread so it never stalls the loop.
+        """
+        reader = getattr(self._runtime, "aconfig", None)
+        if callable(reader):
+            config: ADOSConfig = await reader()
+            return config
+        return self._runtime.config
+
     def write_config(self, values: Mapping[str, Any]) -> ConfigWriteResult:
         """Set dotted-path config leaves (``{"server.mode": "local"}``) on disk.
 
@@ -177,6 +191,7 @@ class StandaloneApiRuntime:
         log: Any,
         *,
         config_path: Path = CONFIG_YAML,
+        board_json: Path = BOARD_JSON,
     ) -> None:
         from ados.core.pairing import PairingManager
 
@@ -189,7 +204,9 @@ class StandaloneApiRuntime:
         self.board_name = "unknown"
         self.board_soc: str | None = None
         self.board_model: str | None = None
+        self.npu_tops = 0.0
         self.model_manager = None
+        self._initialize_board(Path(board_json), log)
         self._initialize_model_manager(log)
 
     def _stat_stamp(self) -> tuple[int, int, int] | None:
@@ -213,6 +230,10 @@ class StandaloneApiRuntime:
                 self._log.warning("config_reload_failed", error=str(exc))
         return self._config
 
+    async def aconfig(self) -> ADOSConfig:
+        """``config`` for async callers: the stat and any reload run off the loop."""
+        return await asyncio.to_thread(lambda: self.config)
+
     def write_config(self, values: Mapping[str, Any]) -> ConfigWriteResult:
         """Set dotted-path leaves on the config document, under the write lock.
 
@@ -224,25 +245,54 @@ class StandaloneApiRuntime:
         """
         return set_config_values(values, path=self._config_path, model=ADOSConfig)
 
-    def _initialize_model_manager(self, log: Any) -> None:
+    def _initialize_board(self, board_json: Path, log: Any) -> None:
+        """Set the board identity, independent of the model manager.
+
+        The board fingerprint sidecar (``/run/ados/board.json``) is written by
+        the supervisor at startup, in Rust, and has exactly one writer; it is
+        read first so this process names the same board the native half does.
+        Python detection is the fallback for a box where the sidecar is absent.
+        """
+        doc = _read_board_sidecar(board_json)
+        if doc is not None:
+            self._apply_board(
+                doc.get("name"), doc.get("soc"), doc.get("model"), doc.get("npu_tops")
+            )
+            return
         try:
             from ados.hal.detect import detect_board
+
+            info = detect_board()
+        except Exception as exc:  # noqa: BLE001 — board stays "unknown"
+            log.warning("board_detect_failed", error=str(exc))
+            return
+        self._apply_board(info.name, info.soc, info.model, info.npu_tops)
+
+    def _apply_board(self, name: Any, soc: Any, model: Any, npu_tops: Any) -> None:
+        if isinstance(name, str) and name:
+            self.board_name = name
+        self.board_soc = soc if isinstance(soc, str) and soc and soc != "unknown" else None
+        self.board_model = model if isinstance(model, str) and model else None
+        if isinstance(npu_tops, (int, float)) and not isinstance(npu_tops, bool):
+            self.npu_tops = float(npu_tops)
+
+    def _initialize_model_manager(self, log: Any) -> None:
+        try:
             from ados.services.vision.model_manager import ModelManager
 
-            board_info = detect_board()
-            self.board_name = board_info.name
-            self.board_soc = board_info.soc if board_info.soc != "unknown" else None
-            self.board_model = board_info.model or None
-            # The board fingerprint sidecar (/run/ados/board.json) is written by
-            # the supervisor at startup, in Rust, and has exactly one writer.
-            # This process is not it. The NPU rating comes from the profile
-            # detection resolved (override, compatible token, variant), never
-            # from a second match over the board YAMLs.
-            npu_tops = board_info.npu_tops
-            self.model_manager = ModelManager(self.config.vision, npu_tops=npu_tops)
-            log.info("model_manager_initialized", board=board_info.name, npu_tops=npu_tops)
+            self.model_manager = ModelManager(self.config.vision, npu_tops=self.npu_tops)
+            log.info("model_manager_initialized", board=self.board_name, npu_tops=self.npu_tops)
         except Exception as e:
             log.warning("model_manager_init_failed", error=str(e))
+
+
+def _read_board_sidecar(path: Path) -> dict[str, Any] | None:
+    """The board fingerprint document, or ``None`` when absent or unreadable."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
 
 
 def ensure_api_runtime(runtime: ApiRuntime | ApiRuntimeFacade | Any) -> ApiRuntimeFacade:

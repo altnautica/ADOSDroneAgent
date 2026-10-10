@@ -18,17 +18,10 @@ import uvicorn
 from ados.core.config import load_config
 from ados.core.ipc import StateIPCClient
 from ados.core.logging import configure_logging
-from ados.core.paths import ADOS_RUN_DIR
 
 _PROFILE_SEED_DELAY_S = 5.0
 _PROFILE_SEED_RETRY_GAP_S = 30.0
 _PROFILE_SEED_MAX_RETRIES = 4
-
-# Plain-text sidecar carrying the node's native-vs-packaged runtime badge. The
-# native control surface has no in-process port of compute_runtime_mode, so this
-# process computes the value once at startup and persists it here for the front
-# to read live. One short word, mode 0640, atomic temp+rename.
-RUNTIME_MODE_PATH = ADOS_RUN_DIR / "runtime-mode"
 
 # State IPC reconnect cadence. The native router publishes the snapshot; this
 # process subscribes and keeps the connection live across router restarts and
@@ -107,7 +100,7 @@ async def _seed_profile_conf_if_unset(config, log) -> None:
         if _read_profile_conf_value() is not None:
             return
 
-        from ados.bootstrap.profile_detect import detect_profile, write_profile_conf
+        from ados.bootstrap.profile_detect import redetect, write_profile_conf
 
         await asyncio.sleep(_PROFILE_SEED_DELAY_S)
 
@@ -118,7 +111,9 @@ async def _seed_profile_conf_if_unset(config, log) -> None:
             if _read_profile_conf_value() is not None:
                 return
 
-            result = await asyncio.to_thread(detect_profile, None)
+            # `redetect` also persists the detection snapshot, so the first
+            # setup-status read serves it instead of re-running the probes.
+            result = await asyncio.to_thread(redetect)
             source = str(result.get("source") or "")
             if source != "default":
                 ok = await asyncio.to_thread(
@@ -132,9 +127,6 @@ async def _seed_profile_conf_if_unset(config, log) -> None:
                         attempt=attempt,
                         path=str(PROFILE_CONF),
                     )
-                    # The runtime badge is profile-scoped and was computed at
-                    # startup against the pre-seed default; recompute it now.
-                    await asyncio.to_thread(_persist_runtime_mode, config, log)
                 return
             log.info(
                 "profile_seed_tied_retrying",
@@ -152,38 +144,6 @@ async def _seed_profile_conf_if_unset(config, log) -> None:
         except Exception:
             pass
 
-
-def _persist_runtime_mode(config, log) -> None:
-    """Compute the node's native-vs-packaged badge once and persist the sidecar.
-
-    The native control surface reads the runtime badge live off this file rather
-    than running its own service-binary stat sweep. The value is computed the same
-    way the pairing-info and heartbeat paths do — ``compute_runtime_mode`` against
-    the wire-contract profile ``current_profile_and_role`` resolves — so the front
-    reports the exact same string the FastAPI surface does. Best-effort and atomic
-    (temp sibling + rename, mode 0640); a write failure leaves the front to fall
-    back to its env / "packaged" default and never crashes startup.
-    """
-    try:
-        import os
-
-        from ados.core.profile import current_profile_and_role
-        from ados.core.runtime_mode import compute_runtime_mode
-
-        profile, _role = current_profile_and_role(config)
-        mode = compute_runtime_mode(profile)
-
-        RUNTIME_MODE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = RUNTIME_MODE_PATH.with_suffix(".tmp")
-        tmp.write_text(mode, encoding="utf-8")
-        os.chmod(tmp, 0o640)
-        tmp.replace(RUNTIME_MODE_PATH)
-        log.info("runtime_mode_persisted", mode=mode, profile=profile)
-    except Exception as exc:  # noqa: BLE001 - boot must never crash on the sidecar
-        try:
-            log.warning("runtime_mode_persist_failed", error=str(exc))
-        except Exception:
-            pass
 
 
 async def main() -> int:
@@ -207,11 +167,6 @@ async def main() -> int:
 
     api_runtime = StandaloneApiRuntime(config, state_client, log)
     app = create_app(api_runtime)
-
-    # Persist the native-vs-packaged runtime badge to its sidecar so the native
-    # control surface can read it live (it has no in-process port of
-    # compute_runtime_mode). Cheap + best-effort; never blocks startup.
-    _persist_runtime_mode(config, log)
 
     # Boot-time profile auto-detect + persist. The full chain depends
     # on /etc/ados/profile.conf to bridge the operator-friendly

@@ -35,10 +35,8 @@ from pathlib import Path
 from typing import Any
 
 import click
-import httpx
 
-from ados.cli import _ansi, api_bases
-from ados.core.paths import PAIRING_JSON
+from ados.cli import _agent_http, _ansi
 
 #: How long any single collection step may take. A wedged service must not hold
 #: the whole bundle: a bundle that never finishes is one the operator abandons,
@@ -58,7 +56,9 @@ LOG_RECORDS = 5000
 # ---------------------------------------------------------------------------
 
 #: Keys whose VALUE is a secret wherever it appears, matched case-insensitively
-#: against JSON/YAML keys and `key=value` lines.
+#: against JSON/YAML keys and `key=value` lines. A compound key whose last
+#: segment is one of these (`mqtt_password`, `relay_secret`, `server_api_key`)
+#: matches too.
 _SECRET_KEYS = (
     "api_key",
     "apikey",
@@ -67,6 +67,7 @@ _SECRET_KEYS = (
     "psk",
     "secret",
     "token",
+    "key",
     "private_key",
     "privatekey",
     "admin_key",
@@ -79,22 +80,28 @@ _SECRET_KEYS = (
     "session",
     "cookie",
     "pin",
+    "pairing_code",
+    "code",
 )
 
-# The optional closing quote before the separator is load bearing: in JSON the
-# key is `"api_key"`, so the colon does NOT follow the word directly. Without it
-# this matched shell and YAML while silently missing JSON — which is the format
-# most of the bundle is collected in.
+# Word boundaries are spelled as "not alphanumeric" rather than `\b`, because
+# `_` is a word character: `\bpassword\b` never matched `mqtt_password`. The
+# optional closing quote before the separator is load bearing: in JSON the key
+# is `"api_key"`, so the colon does NOT follow the word directly.
 _KV_PATTERN = re.compile(
-    r"(?i)\b(" + "|".join(re.escape(k) for k in _SECRET_KEYS) + r")\b"
+    r"(?i)(?<![A-Za-z0-9])((?:[A-Za-z0-9]+_)*(?:"
+    + "|".join(re.escape(k) for k in _SECRET_KEYS)
+    + r"))(?![A-Za-z0-9])"
     r"([\"']?\s*[:=]\s*)"
     r"(\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
 )
 
-#: A bare base64/hex blob long enough to be a key. wfb-ng keys are 64 bytes, so
-#: their base64 is 88 characters; anything at or above 40 is treated as key
-#: material rather than guessed at.
-_BLOB_PATTERN = re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b")
+#: A bare blob long enough to be key material: base64, base64url or hex,
+#: including `token_urlsafe` keys (`-` and `_`). wfb-ng keys are 64 bytes, so
+#: their base64 is 88 characters.
+_BLOB_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{32,}={0,2}(?![A-Za-z0-9+/_-])"
+)
 
 REDACTED = "«redacted»"
 
@@ -119,36 +126,15 @@ def _redacted_json(obj: Any) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _api_key() -> str | None:
-    try:
-        if PAIRING_JSON.exists():
-            data = json.loads(PAIRING_JSON.read_text(encoding="utf-8"))
-            key = data.get("api_key")
-            return key if isinstance(key, str) else None
-    except (OSError, ValueError):
-        pass
-    return None
-
-
 def _get(path: str) -> Any:
-    """GET a local control-surface route, trying each candidate port."""
-    headers = {}
-    key = _api_key()
-    if key:
-        headers["X-ADOS-Key"] = key
-    last: Exception | None = None
-    for base in api_bases():
-        try:
-            r = httpx.get(f"{base}{path}", headers=headers, timeout=STEP_TIMEOUT_S)
-            if r.status_code == 200:
-                try:
-                    return r.json()
-                except ValueError:
-                    return r.text
-            last = RuntimeError(f"HTTP {r.status_code}")
-        except Exception as e:  # noqa: BLE001 - recorded, not raised
-            last = e
-    raise RuntimeError(str(last) if last else "unreachable")
+    """GET a local control-surface route; any failure is raised to be recorded."""
+    try:
+        response = _agent_http.call("GET", path, timeout=STEP_TIMEOUT_S)
+    except click.ClickException as exc:
+        raise RuntimeError(exc.message) from exc
+    if response.status != 200:
+        raise RuntimeError(f"HTTP {response.status}")
+    return response.body
 
 
 def _run(argv: list[str]) -> str:

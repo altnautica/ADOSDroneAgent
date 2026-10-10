@@ -31,7 +31,13 @@ def _runtime(tmp_path, monkeypatch) -> tuple[ApiRuntimeFacade, os.PathLike]:
         encoding="utf-8",
     )
     config = load_config(cfg_path)
-    raw = StandaloneApiRuntime(config, state_client=None, log=_Log(), config_path=cfg_path)
+    raw = StandaloneApiRuntime(
+        config,
+        state_client=None,
+        log=_Log(),
+        config_path=cfg_path,
+        board_json=tmp_path / "board.json",
+    )
     return ApiRuntimeFacade(raw), cfg_path
 
 

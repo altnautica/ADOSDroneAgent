@@ -27,8 +27,7 @@ from typing import Any
 import click
 import httpx
 
-from ados.cli import _ansi, api_bases
-from ados.core.paths import PAIRING_JSON
+from ados.cli import _agent_http, _ansi
 
 # Recording payloads are a whole video file, so the clip read gets a long
 # deadline while the JSON reads keep the snappy one the sibling verbs use.
@@ -36,30 +35,6 @@ _JSON_TIMEOUT = 10.0
 _CLIP_TIMEOUT = 300.0
 
 _RECORDING_BASE = "/api/v1/ground-station/recording"
-
-
-def _load_api_key() -> str | None:
-    try:
-        if PAIRING_JSON.exists():
-            data = json.loads(PAIRING_JSON.read_text(encoding="utf-8"))
-            key = data.get("api_key")
-            return key if isinstance(key, str) else None
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
-    return None
-
-
-def _auth_headers() -> dict[str, str]:
-    key = _load_api_key()
-    return {"X-ADOS-Key": key} if key else {}
-
-
-def _parse_body(resp: httpx.Response) -> dict[str, Any]:
-    try:
-        body = resp.json()
-    except ValueError:
-        return {"text": resp.text}
-    return body if isinstance(body, dict) else {"data": body}
 
 
 def _error_code_and_message(body: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -103,6 +78,12 @@ def _raise_api_error(status: int, body: dict[str, Any]) -> None:
     raise click.ClickException(f"Agent API returned {status}: {body.get('detail') or body}")
 
 
+def _as_dict(body: Any) -> dict[str, Any]:
+    if isinstance(body, str):
+        return {"text": body}
+    return body if isinstance(body, dict) else {"data": body}
+
+
 def _request(
     method: str,
     path: str,
@@ -110,29 +91,14 @@ def _request(
     timeout: float = _JSON_TIMEOUT,
     **kwargs: Any,
 ) -> tuple[int, dict[str, Any]]:
-    """Minimal REST helper. Returns (status_code, parsed_body).
-
-    Tries each candidate control port so a wrong-port probe never reads as
-    "agent not running"; a connection refusal falls through to the next.
-    """
-    try:
-        for base in api_bases():
-            try:
-                with httpx.Client(timeout=timeout) as client:
-                    resp = client.request(
-                        method, f"{base}{path}", headers=_auth_headers(), **kwargs
-                    )
-                body = _parse_body(resp)
-                if resp.status_code >= 400:
-                    _raise_api_error(resp.status_code, body)
-                return resp.status_code, body
-            except httpx.ConnectError:
-                continue  # this port refused; try the next candidate
-        raise click.ClickException(
-            "Agent is not running. Start it with: sudo systemctl start ados-supervisor"
-        )
-    except httpx.HTTPError as exc:
-        raise click.ClickException(str(exc)) from exc
+    """One control-surface request: ``(status, body)``; an error status raises."""
+    response = _agent_http.call(
+        method, path, json_body=kwargs.get("json"), params=kwargs.get("params"), timeout=timeout
+    )
+    body = _as_dict(response.body)
+    if not response.ok:
+        _raise_api_error(response.status, body)
+    return response.status, body
 
 
 def _download(path: str, dest: Path) -> int:
@@ -143,29 +109,10 @@ def _download(path: str, dest: Path) -> int:
     the box being reviewed, and the route it reads was written to stream for the
     same reason.
     """
-    try:
-        for base in api_bases():
-            try:
-                with httpx.Client(timeout=_CLIP_TIMEOUT) as client:
-                    with client.stream(
-                        "GET", f"{base}{path}", headers=_auth_headers()
-                    ) as resp:
-                        if resp.status_code >= 400:
-                            resp.read()
-                            _raise_api_error(resp.status_code, _parse_body(resp))
-                        written = 0
-                        with dest.open("wb") as out:
-                            for chunk in resp.iter_bytes():
-                                out.write(chunk)
-                                written += len(chunk)
-                        return written
-            except httpx.ConnectError:
-                continue  # this port refused; try the next candidate
-        raise click.ClickException(
-            "Agent is not running. Start it with: sudo systemctl start ados-supervisor"
-        )
-    except httpx.HTTPError as exc:
-        raise click.ClickException(str(exc)) from exc
+    response = _agent_http.download(path, dest, timeout=_CLIP_TIMEOUT)
+    if not response.ok:
+        _raise_api_error(response.status, _as_dict(response.body))
+    return int(response.body)
 
 
 def _fmt_bytes(value: Any) -> str:
@@ -299,7 +246,7 @@ def _print_listing(body: dict[str, Any]) -> None:
 
 def _print_segments(stream_path: str, body: dict[str, Any]) -> None:
     theme = _ansi.detect_theme()
-    # mediamtx answers a JSON ARRAY, which `_parse_body` wraps under "data".
+    # mediamtx answers a JSON ARRAY, which `_as_dict` wraps under "data".
     segments = body.get("data") if isinstance(body.get("data"), list) else []
 
     click.echo(_ansi.marker(theme, f"SEGMENTS · {stream_path}"))

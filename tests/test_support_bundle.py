@@ -54,6 +54,27 @@ class TestRedaction:
         assert "40bb1a5a" in out
         assert "-51" in out
 
+    def test_compound_secret_keys_are_redacted(self):
+        for key in (
+            "mqtt_password",
+            "hmac_secret",
+            "relay_secret",
+            "pending_api_key",
+            "server_api_key",
+            "pairing_code",
+        ):
+            out = redact(json.dumps({key: "VALUE123"}))
+            assert "VALUE123" not in out, key
+            assert key in out, key
+
+    def test_a_logged_pairing_code_is_redacted(self):
+        out = redact("pairing_code_generated code=482913")
+        assert "482913" not in out
+
+    def test_a_urlsafe_token_blob_is_redacted(self):
+        token = "ados_" + "Ab-_9" * 8
+        assert token not in redact(f"key issued {token} ok")
+
     def test_a_realistic_config_blob_is_clean(self):
         cfg = json.dumps(
             {

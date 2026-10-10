@@ -18,9 +18,8 @@ import sys
 from typing import Any
 
 import click
-import httpx
 
-from ados.cli import _ansi
+from ados.cli import _agent_http, _ansi
 
 # The local-bind rendezvous can run up to ~120s; give the HTTP call headroom.
 _WFB_BIND_TIMEOUT = 130.0
@@ -30,35 +29,21 @@ _IPV4 = re.compile(r"//(\d{1,3}(?:\.\d{1,3}){3})")
 def _req(method: str, path: str, **kwargs: Any) -> tuple[int, dict[str, Any]]:
     """Call the local agent, returning ``(status_code, body)`` without raising.
 
-    ``status_code == 0`` means no answer: either no control surface listens on
-    any local port, or one accepted the call and did not answer in time (the
-    two carry different ``error`` text). Non-raising so the caller can branch
-    on 404 (feature absent on this profile) / 409 (bind busy).
+    ``status_code == 0`` means no answer: no control surface listens on any
+    local port, it did not answer in time, or it refused the caller (the
+    ``error`` text says which). Non-raising so the caller can branch on 404
+    (feature absent on this profile) / 409 (bind busy).
     """
-    from ados.cli import api_bases
-    from ados.cli.main import _load_api_key
-
-    key = _load_api_key()
-    headers = {"X-ADOS-Key": key} if key else {}
-    timeout = kwargs.pop("timeout", 8.0)
-    last_error = "agent not reachable"
-    for base in api_bases():
-        try:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.request(method, f"{base}{path}", headers=headers, **kwargs)
-        except httpx.ConnectError as exc:
-            last_error = f"agent not reachable: {exc}"
-            continue  # this port refused; try the next candidate
-        except httpx.TimeoutException:
-            return 0, {"error": f"agent did not answer in time ({timeout:g} s)"}
-        except httpx.HTTPError as exc:
-            return 0, {"error": str(exc)}
-        try:
-            body = resp.json()
-        except ValueError:
-            body = {"text": resp.text}
-        return resp.status_code, (body if isinstance(body, dict) else {"data": body})
-    return 0, {"error": last_error}
+    try:
+        response = _agent_http.call(
+            method, path, json_body=kwargs.get("json"), timeout=kwargs.get("timeout", 8.0)
+        )
+    except click.ClickException as exc:
+        return 0, {"error": exc.message}
+    body = response.body
+    if isinstance(body, str):
+        body = {"text": body}
+    return response.status, (body if isinstance(body, dict) else {"data": body})
 
 
 def _interactive() -> bool:

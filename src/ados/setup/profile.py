@@ -2,16 +2,20 @@
 
 The wizard's profile step lets the operator confirm or override the
 auto-detected agent profile. Auto-detect lives in
-``ados.bootstrap.profile_detect`` and is invoked here so the wizard's
-``SetupStatus`` payload carries a fresh fingerprint without the webapp
-having to call the probes itself.
+``ados.bootstrap.profile_detect``; its stored result is shaped here so the
+wizard's ``SetupStatus`` payload carries the fingerprint without re-running
+the probes on every poll.
 """
 
 from __future__ import annotations
 
 import socket
+from pathlib import Path
 from typing import Any
 
+import httpx
+
+from ados.core.paths import ADOS_RUN_DIR
 from ados.setup._persist import persist_config
 from ados.setup.models import (
     ProfileSuggestion,
@@ -20,6 +24,10 @@ from ados.setup.models import (
     UiApplyRequest,
     WfbApplyRequest,
 )
+
+#: The native control surface's trusted on-box socket.
+CONTROL_SOCK = ADOS_RUN_DIR / "control.sock"
+_NATIVE_TIMEOUT_S = 10.0
 
 
 def _is_valid_region_code(code: str) -> bool:
@@ -53,31 +61,48 @@ def _hostname_suggested_profile() -> str | None:
     return None
 
 
-def build_profile_suggestion(config: Any) -> ProfileSuggestion:
-    """Run the boot-time profile detector and shape the result for the wizard.
+def build_profile_suggestion(
+    config: Any, snapshot_path: Path | None = None
+) -> ProfileSuggestion:
+    """Shape the stored profile detection for the wizard.
+
+    The probes scan I2C, open UARTs and read the state socket, so a status
+    poll never runs them: it reads the snapshot the boot detection wrote
+    (``/run/ados/profile-detect.json``). When no snapshot exists yet the
+    detection runs once and stores one. ``POST /api/v1/setup/profile/redetect``
+    refreshes it on demand.
 
     ``config.agent.profile`` is passed through as ``confirmed=True`` only
     when the operator already set an explicit value (anything other than
-    ``"auto"``). The detector itself short-circuits on a non-auto override
-    so this is a single fast call in the explicit-profile case.
+    ``"auto"``).
     """
+    try:
+        from ados.bootstrap import profile_detect
+
+        path = snapshot_path or profile_detect.PROFILE_DETECT_JSON
+        result = profile_detect.read_detect_snapshot(path)
+        if result is None:
+            result = profile_detect.redetect(path)
+    except Exception:
+        result = None
+    return _suggestion_from(config, result)
+
+
+def redetect_profile_suggestion(
+    config: Any, snapshot_path: Path | None = None
+) -> ProfileSuggestion:
+    """Run the probes now, replace the stored snapshot, and shape the result."""
+    from ados.bootstrap import profile_detect
+
+    result = profile_detect.redetect(snapshot_path or profile_detect.PROFILE_DETECT_JSON)
+    return _suggestion_from(config, result)
+
+
+def _suggestion_from(config: Any, result: dict[str, Any] | None) -> ProfileSuggestion:
     explicit = str(getattr(config.agent, "profile", "") or "")
     confirmed = explicit in ("drone", "ground_station")
-
-    try:
-        from ados.bootstrap.profile_detect import detect_profile
-
-        # Pass None so the detector runs all probes even when config has
-        # an explicit value: the wizard wants to show the live signals
-        # alongside the operator's prior pick so the operator can spot
-        # detect/config drift.
-        result = detect_profile(config_override=None)
-    except Exception:
-        return ProfileSuggestion(
-            detected="drone",
-            source="default",
-            confirmed=confirmed,
-        )
+    if result is None:
+        return ProfileSuggestion(detected="drone", source="default", confirmed=confirmed)
 
     detected = str(result.get("profile") or "drone")
     if detected not in ("drone", "ground_station"):
@@ -88,10 +113,7 @@ def build_profile_suggestion(config: Any) -> ProfileSuggestion:
         source = "detected"
 
     # Read-only: the suggestion never writes profile.conf. Recording a
-    # detected profile is the boot seed's job (merge of the one key, only
-    # while profile.conf names none); a status poll rewriting that file
-    # would drop the installer's channel and version pin.
-
+    # detected profile is the boot seed's job.
     ground_role = str(getattr(config.ground_station, "role", "direct") or "direct")
     if ground_role not in ("direct", "relay", "receiver"):
         ground_role = "direct"
@@ -347,21 +369,40 @@ def apply_ui(
     return SetupActionResult(ok=True, message=message, data=data)
 
 
+def _native_call(
+    client: httpx.Client, method: str, path: str, body: dict[str, object]
+) -> tuple[int, object]:
+    """One request to the native control surface: ``(status, decoded body)``."""
+    try:
+        resp = client.request(method, path, json=body)
+    except httpx.HTTPError as exc:
+        return 503, {"detail": f"control surface unreachable: {exc}"}
+    try:
+        return resp.status_code, resp.json()
+    except ValueError:
+        return resp.status_code, resp.text
+
+
+def _control_transport() -> httpx.BaseTransport:
+    """The transport to the native control surface's on-box socket."""
+    return httpx.HTTPTransport(uds=str(CONTROL_SOCK))
+
+
 def apply_wfb(
     runtime: Any,
     request: WfbApplyRequest | None,
+    *,
+    force: bool = False,
 ) -> SetupActionResult:
-    """Persist a WFB radio config slice onto ``runtime.config.video.wfb``.
+    """Apply a WFB radio slice.
 
-    ``channel`` and ``tx_power_dbm`` mirror the existing dedicated
-    routes (``POST /api/wfb/channel``, ``PUT /api/wfb/tx-power``).
-    ``mcs_index`` and ``topology`` have no dedicated route; this
-    setter is the only path that updates them. Reboot-required flips
-    are surfaced through ``data["restart_required"]`` so the caller
-    can tally pending reboots.
-
-    Returns ``ok=True`` on a no-op so the batch-apply route can
-    iterate sections without special-casing absent payloads.
+    ``channel`` and ``tx_power_dbm`` go through the native routes over the
+    control socket (``POST /api/wfb/channel``, ``PUT /api/wfb/tx-power``), so
+    the radio is retuned live and the native validation, armed interlock and
+    persistence apply; their answers are returned under ``data["native"]``.
+    ``force`` is the caller's armed override, already checked by the caller.
+    ``mcs_index`` and ``topology`` have no native route and are written to
+    config; they take effect on a restart (``data["restart_required"]``).
     """
     if request is None:
         return SetupActionResult(
@@ -379,62 +420,14 @@ def apply_wfb(
             message="WFB configuration is not available on this agent.",
         )
 
+    # Validate the config-only leaves before any live change.
     values: dict[str, object] = {}
-    restart_required = False
-
-    if request.channel is not None:
-        new_channel = int(request.channel)
-        # Validate against the standard list to refuse a typo before it
-        # reaches the wfb manager. Imported lazily so the setup module
-        # does not pull the wfb service tree at import time.
-        try:
-            from ados.services.wfb.channel import STANDARD_CHANNELS, get_channel
-
-            if get_channel(new_channel) is None:
-                valid = [c.channel_number for c in STANDARD_CHANNELS]
-                return SetupActionResult(
-                    ok=False,
-                    message=(
-                        f"channel must be one of {valid}, got {new_channel}"
-                    ),
-                )
-        except ImportError:
-            pass
-        if int(getattr(wfb, "channel", 0)) != new_channel:
-            values["video.wfb.channel"] = new_channel
-            restart_required = True
-
-    if request.tx_power_dbm is not None:
-        requested = int(request.tx_power_dbm)
-        ceiling = int(getattr(wfb, "tx_power_max_dbm", 15))
-        if requested < 1:
-            return SetupActionResult(
-                ok=False,
-                message=f"tx_power_dbm below floor (min 1), got {requested}",
-            )
-        if requested > ceiling:
-            return SetupActionResult(
-                ok=False,
-                message=(
-                    f"tx_power_dbm above ceiling (max {ceiling}), got {requested}"
-                ),
-            )
-        if int(getattr(wfb, "tx_power_dbm", 0)) != requested:
-            values["video.wfb.tx_power_dbm"] = requested
-
     if request.mcs_index is not None:
         new_mcs = int(request.mcs_index)
-        # MCS index range is 0..7 for the modulation table the wfb
-        # transport understands. Refuse anything outside that.
         if new_mcs < 0 or new_mcs > 7:
-            return SetupActionResult(
-                ok=False,
-                message=f"mcs_index must be 0..7, got {new_mcs}",
-            )
+            return SetupActionResult(ok=False, message=f"mcs_index must be 0..7, got {new_mcs}")
         if int(getattr(wfb, "mcs_index", 0)) != new_mcs:
             values["video.wfb.mcs_index"] = new_mcs
-            restart_required = True
-
     if request.topology is not None:
         new_topo = str(request.topology)
         if new_topo not in ("host_vbus", "powered_hub", "external_5v"):
@@ -447,19 +440,45 @@ def apply_wfb(
             )
         if str(getattr(wfb, "topology", "")) != new_topo:
             values["video.wfb.topology"] = new_topo
-            restart_required = True
+
+    calls: list[tuple[str, str, str, dict[str, object], int]] = []
+    if request.channel is not None and int(getattr(wfb, "channel", 0)) != int(request.channel):
+        body: dict[str, object] = {"channel": int(request.channel), "force": force}
+        calls.append(("channel", "POST", "/api/wfb/channel", body, 202))
+    if request.tx_power_dbm is not None and int(getattr(wfb, "tx_power_dbm", 0)) != int(
+        request.tx_power_dbm
+    ):
+        body = {"tx_power_dbm": int(request.tx_power_dbm), "force": force}
+        calls.append(("tx_power_dbm", "PUT", "/api/wfb/tx-power", body, 200))
+
+    native: dict[str, object] = {}
+    changed_fields: list[str] = []
+    if calls:
+        with httpx.Client(
+            transport=_control_transport(),
+            base_url="http://ados-control",
+            timeout=_NATIVE_TIMEOUT_S,
+        ) as client:
+            for field_name, method, path, body, expected in calls:
+                status, answer = _native_call(client, method, path, body)
+                native[field_name] = {"status": status, "body": answer}
+                if status != expected:
+                    return SetupActionResult(
+                        ok=False,
+                        message=f"WFB {field_name} refused ({status}): {answer}",
+                        data={"native": native, "fields": changed_fields},
+                    )
+                changed_fields.append(field_name)
 
     failed = persist_config(runtime, values, what="WFB settings")
     if failed is not None:
         return failed
+    changed_fields += [path.rsplit(".", 1)[-1] for path in values]
 
-    changed_fields = [path.rsplit(".", 1)[-1] for path in values]
-
-    data: dict[str, object] = {
-        "changed": bool(changed_fields),
-        "fields": changed_fields,
-    }
-    if restart_required:
+    data: dict[str, object] = {"changed": bool(changed_fields), "fields": changed_fields}
+    if native:
+        data["native"] = native
+    if values:
         data["restart_required"] = True
     if changed_fields:
         message = f"WFB updated ({', '.join(changed_fields)})."

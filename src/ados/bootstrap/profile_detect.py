@@ -17,6 +17,7 @@ Run a dry-run from a shell:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
@@ -37,7 +38,10 @@ except ImportError:  # pragma: no cover - fall back to stdlib logging
 
     log = logging.getLogger(__name__)
 
-from ados.core.paths import PROFILE_CONF
+from ados.core.paths import ADOS_RUN_DIR, PROFILE_CONF
+
+# The last detection result, written at boot and on an explicit re-detect.
+PROFILE_DETECT_JSON = ADOS_RUN_DIR / "profile-detect.json"
 
 # RTL8812 family USB IDs used on WFB-ng primary adapters.
 # (vendor 0x0bda Realtek, known product IDs for the RTL8812 series).
@@ -702,7 +706,7 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
         "detected_at": _now_iso(),
     }
     try:
-        log.info(
+        log.debug(
             "profile_detect_result",
             profile=profile,
             source=source,
@@ -711,6 +715,40 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
         )
     except Exception:
         pass
+    return result
+
+
+def write_detect_snapshot(result: dict[str, Any], path: Path = PROFILE_DETECT_JSON) -> bool:
+    """Persist a detection result so readers never re-run the probes.
+
+    The probes scan I2C, open UARTs and read the state socket, so they run
+    once (at boot or on an explicit re-detect) and every status read serves
+    this snapshot. Written atomically; a failure is reported, never raised.
+    """
+    target = Path(path)
+    tmp = target.with_name(target.name + ".tmp")
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(result), encoding="utf-8")
+        os.replace(tmp, target)
+    except OSError:
+        return False
+    return True
+
+
+def read_detect_snapshot(path: Path = PROFILE_DETECT_JSON) -> dict[str, Any] | None:
+    """The persisted detection result, or ``None`` when absent or unreadable."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) and data.get("profile") else None
+
+
+def redetect(path: Path = PROFILE_DETECT_JSON) -> dict[str, Any]:
+    """Run every probe now and replace the persisted snapshot."""
+    result = detect_profile(config_override=None)
+    write_detect_snapshot(result, path)
     return result
 
 

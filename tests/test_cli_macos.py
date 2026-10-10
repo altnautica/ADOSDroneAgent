@@ -16,26 +16,31 @@ import ados.cli.main as cli_main
 
 
 def test_native_status_composes_from_native_routes():
-    """`_setup_status` on macOS builds the display dict from `/api/status` +
-    `/api/pairing/info`, never the absent proxied `/api/v1/setup/status`."""
+    """`_setup_status` on macOS builds the display dict from the native routes,
+    never the absent proxied `/api/v1/setup/status`, and invents nothing."""
+    from ados.cli._agent_http import AgentResponse
 
-    def fake_request(method: str, path: str, **_k):
-        if path == "/api/status":
-            return {"version": "1.2.3", "fc_connected": False, "fc_port": ""}
-        if path == "/api/pairing/info":
-            return {
-                "name": "my-mac",
-                "profile": "workstation",
-                "paired": True,
-                "pairing_code": None,
-                "mdns_host": "ados-abcd12.local",
-            }
-        raise AssertionError(f"unexpected path {path}")
+    answers = {
+        "/api/status/full": {"version": "1.2.3", "profile": "workstation", "fc_connected": False},
+        "/api/pairing/info": {
+            "name": "my-mac",
+            "profile": "workstation",
+            "paired": True,
+            "pairing_code": None,
+            "mdns_host": "ados-abcd12.local",
+        },
+        "/api/config": {"server": {"mode": "local"}},
+    }
+
+    def fake_call(method: str, path: str, **_k):
+        if path not in answers:
+            raise AssertionError(f"unexpected path {path}")
+        return AgentResponse(200, answers[path], "http://127.0.0.1:8082")
 
     from unittest.mock import patch
 
     with patch.object(cli_main, "IS_MACOS", True), patch.object(
-        cli_main, "_request", side_effect=fake_request
+        cli_main._agent_http, "call", side_effect=fake_call
     ):
         data = cli_main._setup_status()
 
@@ -45,7 +50,8 @@ def test_native_status_composes_from_native_routes():
     assert data["paired"] is True
     assert data["lan_host"] == "ados-abcd12.local"
     assert data["cloud_choice"]["mode"] == "local"
-    assert data["completion_percent"] == 100
+    assert data["network"]["api_port"] == 8082
+    assert data["completion_percent"] == "unknown"
 
 
 def test_uninstall_macos_boots_out_agents_and_purges(tmp_path, monkeypatch):

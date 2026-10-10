@@ -11,6 +11,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ados.api.deps import get_agent_app
 from ados.api.ws_downlink import send_until_disconnect
+from ados.core.remote_access_sync import UNIT_NAME_RE
 from ados.setup.models import SetupActionResult
 from ados.setup.service import apply_cloud_choice, install_cloudflare_token
 
@@ -22,6 +23,9 @@ from ._models import (
 )
 
 router = APIRouter()
+
+# Scheduled reboots, held so the task is not garbage-collected mid-sleep.
+_REBOOT_TASKS: set[asyncio.Task[None]] = set()
 
 
 @router.post("/remote-access/cloudflare", response_model=SetupActionResult)
@@ -56,7 +60,9 @@ async def trigger_reboot() -> SetupActionResult:
     closes the socket; the wizard then polls /v1/setup/status until the
     agent comes back online.
     """
-    asyncio.create_task(_reboot_after_delay(3.0))
+    task = asyncio.create_task(_reboot_after_delay(3.0))
+    _REBOOT_TASKS.add(task)
+    task.add_done_callback(_REBOOT_TASKS.discard)
     log.info("reboot_scheduled", delay_seconds=3)
     return SetupActionResult(
         ok=True,
@@ -65,7 +71,12 @@ async def trigger_reboot() -> SetupActionResult:
 
 
 async def _reboot_after_delay(seconds: float) -> None:
-    """Sleep then issue the reboot. Tries systemctl first, falls back to /sbin/reboot."""
+    """Sleep then issue the reboot.
+
+    Tries systemctl first, then ``/sbin/reboot``, then ``reboot``. A command
+    that runs but exits non-zero (an inhibitor, a polkit refusal) is logged
+    and the next candidate is tried.
+    """
     await asyncio.sleep(seconds)
     candidates: list[list[str]] = [
         ["systemctl", "reboot"],
@@ -79,13 +90,26 @@ async def _reboot_after_delay(seconds: float) -> None:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-            await proc.wait()
-            return
+            returncode = await proc.wait()
         except FileNotFoundError:
             continue
         except Exception as exc:  # noqa: BLE001
             log.warning("reboot_command_failed", cmd=cmd, error=str(exc))
+            continue
+        if returncode == 0:
+            return
+        log.warning("reboot_command_failed", cmd=cmd, returncode=returncode)
     log.error("reboot_all_commands_failed")
+
+
+def _log_unit(service_name: object) -> str:
+    """The unit whose journal the log stream tails.
+
+    The name is a config value, so only a ``cloudflared*`` unit is accepted;
+    anything else falls back to ``cloudflared``.
+    """
+    name = service_name.strip() if isinstance(service_name, str) else ""
+    return name if UNIT_NAME_RE.match(name) else "cloudflared"
 
 
 @router.get("/cloudflare/verify", response_model=CloudflareVerifyResponse)
@@ -98,7 +122,7 @@ async def verify_cloudflare_tunnel() -> CloudflareVerifyResponse:
     operator still has work to do.
     """
     app = get_agent_app()
-    cf = getattr(app.config.remote_access, "cloudflare", None)
+    cf = getattr((await app.aconfig()).remote_access, "cloudflare", None)
     target = (getattr(cf, "setup_url", "") or "").strip() if cf is not None else ""
     if not target:
         return CloudflareVerifyResponse(
@@ -292,8 +316,8 @@ async def stream_cloudflare_logs(websocket: WebSocket) -> None:
     else:
         await websocket.accept()
     app = get_agent_app()
-    cf = getattr(app.config.remote_access, "cloudflare", None)
-    unit = (getattr(cf, "service_name", "") or "cloudflared").strip() or "cloudflared"
+    cf = getattr((await app.aconfig()).remote_access, "cloudflare", None)
+    unit = _log_unit(getattr(cf, "service_name", None))
     tail = _journal_tail_for(unit)
     queue = await tail.subscribe()
 

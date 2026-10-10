@@ -91,6 +91,11 @@ _WS_SCOPE = "vision.detections"
 # otherwise keep a click-to-track overlay frozen on boxes from the past.
 _LATEST_MAX_AGE_MS = 1000
 
+# The WS close reason when the engine socket cannot be reached: the same
+# ``available: false`` the latest poll reports, so a client tells "vision off"
+# apart from "nothing detected". Well under the 123-byte close-reason limit.
+_UNAVAILABLE_CLOSE_REASON = '{"available":false,"error":"E_VISION_DETECTIONS_UNAVAILABLE"}'
+
 
 def _msgpack_loads(data: bytes) -> dict | None:
     """Decode a msgpack detection-batch body, or ``None`` if the frame is
@@ -149,9 +154,7 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
                         error=str(exc),
                     )
                     try:
-                        await websocket.close(
-                            code=1011, reason="E_VISION_DETECTIONS_UNAVAILABLE"
-                        )
+                        await websocket.close(code=1011, reason=_UNAVAILABLE_CLOSE_REASON)
                     except RuntimeError:
                         pass
                     return
@@ -195,7 +198,7 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
 
 @router.get("/vision/detections/latest")
 async def get_latest_detection() -> dict:
-    """Return the most-recent detection batch, or ``{"detections": []}``.
+    """Return the most-recent detection batch, with an ``available`` flag.
 
     A poll target for a caller that cannot hold a WebSocket open — chiefly
     the ground-station WFB relay proxy (see the module docstring's
@@ -209,7 +212,9 @@ async def get_latest_detection() -> dict:
     GET; it does not use the WebSocket ticket scheme.
 
     A batch older than ``_LATEST_MAX_AGE_MS`` (by its ``ts_ms`` capture time)
-    is not current: the reply is the empty shape with ``stale: true``.
+    is not current: the reply is the empty shape with ``stale: true``. When
+    the engine socket cannot be reached or read, the reply carries
+    ``available: false`` so "vision is off" never reads as "nothing detected".
     """
     sock_path = str(VISION_DETECTIONS_SOCK)
     try:
@@ -217,19 +222,17 @@ async def get_latest_detection() -> dict:
             asyncio.open_unix_connection(sock_path), timeout=1.0
         )
     except (FileNotFoundError, ConnectionRefusedError, OSError, TimeoutError):
-        # Vision isn't running (or isn't up yet) on this board. Honest empty
-        # reading, not a fabricated batch — mirrors the WS route's
-        # "no live detections" close rather than erroring the poll loop.
-        return {"detections": []}
+        # Vision isn't running (or isn't up yet) on this board.
+        return {"detections": [], "available": False}
     try:
         header = await asyncio.wait_for(reader.readexactly(_HEADER_SIZE), timeout=1.0)
         (length,) = struct.unpack("!I", header)
         if length == 0 or length > _MAX_FRAME_SIZE:
             log.warning("vision_detections_latest_bad_frame_len", length=length)
-            return {"detections": []}
+            return {"detections": [], "available": True}
         body = await asyncio.wait_for(reader.readexactly(length), timeout=1.0)
     except (asyncio.IncompleteReadError, ConnectionResetError, OSError, TimeoutError):
-        return {"detections": []}
+        return {"detections": [], "available": False}
     finally:
         try:
             writer.close()
@@ -243,5 +246,5 @@ async def get_latest_detection() -> dict:
         not isinstance(ts_ms, int)
         or int(time.time() * 1000) - ts_ms > _LATEST_MAX_AGE_MS
     ):
-        return {"detections": [], "stale": True}
-    return batch
+        return {"detections": [], "stale": True, "available": True}
+    return {**batch, "available": True}

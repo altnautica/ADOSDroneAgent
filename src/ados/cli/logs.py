@@ -28,21 +28,15 @@ import sys
 from typing import Any
 
 import click
-import httpx
 
-from ados.cli import default_api_base
+from ados.cli import _agent_http
 from ados.cli.logs_transport import LogsClient, LogsTransportError
-from ados.core.paths import LOGD_QUERY_SOCK, PAIRING_JSON
+from ados.core.paths import LOGD_QUERY_SOCK
 
 # The query-API port and unix socket the logging daemon binds. Kept in step
 # with the daemon's runtime paths (crates/ados-logd/src/lib.rs).
 QUERY_SOCKET = str(LOGD_QUERY_SOCK)
 QUERY_TCP_PORT = 8090
-
-# The agent's local control surface. `push` records its request under the
-# root-owned runtime dir, so a non-root operator hands the write to the agent
-# process here instead of touching the dir itself.
-API_BASE = default_api_base()
 
 
 def _client(host: str | None, key: str | None) -> LogsClient:
@@ -227,39 +221,18 @@ def export_cmd(since, from_, to_, kind, source, metric, session, fmt, output, ho
         click.echo(f"Wrote {written} bytes to {output}", err=True)
 
 
-def _load_api_key() -> str | None:
-    """Read the local pairing api_key, when this caller can read the file.
-
-    The pairing file is owned by the root agent process (``0600``), so a
-    non-root operator gets ``None`` here — which is expected. The same-origin
-    header in :func:`_delegate_push_via_api` is what authorises the loopback
-    request on a paired agent; the key is attached only when readable (a root
-    caller) so the strict path also works.
-    """
-    try:
-        if PAIRING_JSON.exists():
-            data = json.loads(PAIRING_JSON.read_text(encoding="utf-8"))
-            key = data.get("api_key")
-            return key if isinstance(key, str) else None
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
-    return None
-
-
 def _delegate_push_via_api(request, *, wait: bool) -> dict[str, Any] | None:
     """Hand the push request to the root agent over its local control surface.
 
     The request file lives under the root-owned runtime dir, so a non-root
     operator cannot write it directly. Rather than widen that directory, the
-    operator posts the request to the agent on loopback; the agent process
-    (running as root) performs the privileged write and returns the same result
-    envelope the direct seam would. This mirrors how the sibling ``logs``
-    subcommands reach the daemon, and it rides the eventual move of this route
-    onto the native control surface unchanged.
+    operator posts the request to the agent on loopback (an on-box caller is
+    trusted); the agent process (running as root) performs the privileged write
+    and returns the same result envelope the direct seam would.
 
-    Returns the result envelope, or ``None`` when the local API is unreachable
-    or cannot authorise the request, so the caller can fall back to the direct
-    seam (and, for a non-root caller, surface a clear hint).
+    Returns the result envelope, or ``None`` when the local agent is
+    unreachable or cannot authorise the request, so the caller can fall back
+    to the direct seam (and, for a non-root caller, surface a clear hint).
     """
     body: dict[str, Any] = {"kinds": list(request.kinds), "wait": wait}
     if request.session is not None:
@@ -269,36 +242,18 @@ def _delegate_push_via_api(request, *, wait: bool) -> dict[str, Any] | None:
         # route accepts, so the already-resolved bound round-trips verbatim.
         body["since"] = request.since_us
 
-    # Being on the box, reaching loopback, is the trust gate: the same-origin
-    # header authorises a keyless request on a paired agent exactly as the
-    # agent-served dashboard is trusted, and the key is added too when readable.
-    headers = {"Origin": API_BASE}
-    key = _load_api_key()
-    if key:
-        headers["X-ADOS-Key"] = key
-
     try:
-        with httpx.Client(timeout=12.0) as client:
-            resp = client.post(f"{API_BASE}/api/logs/push", json=body, headers=headers)
-    except httpx.ConnectError:
+        resp = _agent_http.call("POST", "/api/logs/push", json_body=body, timeout=12.0)
+    except click.ClickException:
         return None
-    except httpx.HTTPError as exc:
-        raise click.ClickException(str(exc)) from exc
 
-    if resp.status_code in (200, 202):
-        data = resp.json()
-        return data if isinstance(data, dict) else None
-    if resp.status_code == 401:
-        # Paired and hardened (same-origin trust closed) with no readable key:
-        # nothing more the CLI can do without privilege. Fall back.
-        return None
+    if resp.status in (200, 202):
+        return resp.body if isinstance(resp.body, dict) else None
     # A rejected selector or other error: surface the route's structured error.
-    try:
-        err = resp.json().get("error") or {}
-    except ValueError:
-        err = {}
-    code = err.get("code", f"http_{resp.status_code}")
-    message = err.get("message", resp.text[:160])
+    err = resp.body.get("error") if isinstance(resp.body, dict) else None
+    err = err if isinstance(err, dict) else {}
+    code = err.get("code", f"http_{resp.status}")
+    message = err.get("message", str(resp.body)[:160])
     raise click.ClickException(f"{code}: {message}")
 
 

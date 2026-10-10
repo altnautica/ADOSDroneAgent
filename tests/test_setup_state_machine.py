@@ -46,9 +46,9 @@ def test_drone_profile_paired_with_cloud() -> None:
         remote=RemoteAccessStatus(status="running"),
         cloud_choice=CloudChoiceStatus(
             mode="cloud",
-            backend_url="https://convex.altnautica.com",
-            paired=True,
+            backend_url="https://convex.example.com",
         ),
+        cloud_paired=True,
         profile_suggestion=ProfileSuggestion(detected="drone", confirmed=True),
         hardware_check=_ok_hc("drone"),
         mission_control_url="https://mc.local",
@@ -97,9 +97,9 @@ def test_ground_station_profile_includes_ground_receiver_and_display() -> None:
         remote=RemoteAccessStatus(),
         cloud_choice=CloudChoiceStatus(
             mode="cloud",
-            backend_url="https://convex.altnautica.com",
-            paired=True,
+            backend_url="https://convex.example.com",
         ),
+        cloud_paired=True,
         profile_suggestion=ProfileSuggestion(
             detected="ground_station",
             ground_role_hint="direct",
@@ -188,7 +188,8 @@ def test_fc_disconnected_mid_flow() -> None:
         video=VideoAccess(state="running"),
         network=NetworkStatus(local_ips=["10.0.0.5"]),
         remote=RemoteAccessStatus(),
-        cloud_choice=CloudChoiceStatus(mode="cloud", paired=True, backend_url="https://x"),
+        cloud_choice=CloudChoiceStatus(mode="cloud", backend_url="https://x"),
+        cloud_paired=True,
         profile_suggestion=ProfileSuggestion(detected="drone", confirmed=True),
         hardware_check=_ok_hc("drone"),
         mission_control_url="",

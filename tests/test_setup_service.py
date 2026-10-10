@@ -235,7 +235,6 @@ class _Server:
     mode = "local"
     cloud = _Cloud()
     self_hosted = _SelfHosted()
-    mqtt_password = ""
 
 
 class _Pairing:
@@ -252,7 +251,6 @@ def test_cloud_choice_status_local_returns_minimal_record() -> None:
     cfg.server.mode = "local"
     cs = _cloud_choice_status(cfg)
     assert cs.mode == "local"
-    assert cs.paired is False
     assert cs.pair_code_required is False
     assert cs.backend_url == ""
 
@@ -281,13 +279,12 @@ def _Runtime():
     return build_api_runtime()
 
 
-def test_apply_cloud_choice_local_clears_mqtt_password() -> None:
+def test_apply_cloud_choice_local_writes_only_the_mode() -> None:
     runtime = _Runtime()
-    runtime.config.server.mqtt_password = "leftover"
     result = apply_cloud_choice(runtime, mode="local")
     assert result.ok is True
     assert runtime.config.server.mode == "local"
-    assert runtime.config.server.mqtt_password == ""
+    assert "backend_url" not in (result.data or {})
 
 
 def test_apply_cloud_choice_self_hosted_persists_url_and_port() -> None:
@@ -555,7 +552,7 @@ def test_apply_profile_rejects_unknown_role() -> None:
     assert result.ok is False
 
 
-def test_build_profile_suggestion_marks_explicit_pick_confirmed(monkeypatch) -> None:
+def test_build_profile_suggestion_marks_explicit_pick_confirmed(monkeypatch, tmp_path) -> None:
     cfg = _ProfileConfig(profile="drone", role="direct")
     monkeypatch.setattr(
         "ados.bootstrap.profile_detect.detect_profile",
@@ -567,12 +564,12 @@ def test_build_profile_suggestion_marks_explicit_pick_confirmed(monkeypatch) -> 
             "detected_at": "2026-05-04T20:00:00+05:30",
         },
     )
-    sug = build_profile_suggestion(cfg)
+    sug = build_profile_suggestion(cfg, snapshot_path=tmp_path / "pd.json")
     assert sug.confirmed is True
     assert sug.detected == "drone"
 
 
-def test_build_profile_suggestion_unconfirmed_when_profile_auto(monkeypatch) -> None:
+def test_build_profile_suggestion_unconfirmed_when_profile_auto(monkeypatch, tmp_path) -> None:
     cfg = _ProfileConfig(profile="auto")
     monkeypatch.setattr(
         "ados.bootstrap.profile_detect.detect_profile",
@@ -584,10 +581,46 @@ def test_build_profile_suggestion_unconfirmed_when_profile_auto(monkeypatch) -> 
             "detected_at": "2026-05-04T20:00:00+05:30",
         },
     )
-    sug = build_profile_suggestion(cfg)
+    sug = build_profile_suggestion(cfg, snapshot_path=tmp_path / "pd.json")
     assert sug.confirmed is False
     assert sug.detected == "ground_station"
     assert sug.signals.get("oled_i2c") is True
+
+
+def test_build_profile_suggestion_serves_the_snapshot_without_probing(
+    monkeypatch, tmp_path
+) -> None:
+    from ados.bootstrap import profile_detect
+
+    calls: list[int] = []
+
+    def _detect(config_override=None):
+        calls.append(1)
+        return {"profile": "ground_station", "source": "detected", "signals": {}}
+
+    monkeypatch.setattr("ados.bootstrap.profile_detect.detect_profile", _detect)
+    snap = tmp_path / "profile-detect.json"
+    cfg = _ProfileConfig(profile="auto")
+    for _ in range(3):
+        assert build_profile_suggestion(cfg, snapshot_path=snap).detected == "ground_station"
+    assert len(calls) == 1
+    assert profile_detect.read_detect_snapshot(snap)["profile"] == "ground_station"
+
+
+def test_redetect_replaces_the_snapshot(monkeypatch, tmp_path) -> None:
+    from ados.bootstrap import profile_detect
+    from ados.setup.profile import redetect_profile_suggestion
+
+    snap = tmp_path / "profile-detect.json"
+    profile_detect.write_detect_snapshot({"profile": "drone", "source": "detected"}, snap)
+    monkeypatch.setattr(
+        "ados.bootstrap.profile_detect.detect_profile",
+        lambda config_override=None: {"profile": "ground_station", "source": "detected"},
+    )
+    cfg = _ProfileConfig(profile="auto")
+    assert build_profile_suggestion(cfg, snapshot_path=snap).detected == "drone"
+    assert redetect_profile_suggestion(cfg, snapshot_path=snap).detected == "ground_station"
+    assert build_profile_suggestion(cfg, snapshot_path=snap).detected == "ground_station"
 
 
 # --- hardware check ----------------------------------------------------------

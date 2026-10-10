@@ -16,12 +16,9 @@ from typing import Any
 import click
 import httpx
 
-from ados.cli import _ansi, api_bases, default_api_base
-from ados.core.paths import ADOS_RUN_DIR, INSTALL_CHECKPOINT_DIR, INSTALL_RESULT, PAIRING_JSON
+from ados.cli import _agent_http, _ansi, api_bases
+from ados.core.paths import ADOS_RUN_DIR, INSTALL_CHECKPOINT_DIR, INSTALL_RESULT
 from ados.core.profile import _read_profile_conf_value
-
-API_BASE = default_api_base()
-PAIRING_STATE_PATH = PAIRING_JSON
 
 # macOS runs a rootless, Rust-only workstation node: the control surface serves
 # the native routes (/api/status, /api/pairing/*) but NOT the proxied setup
@@ -30,20 +27,13 @@ PAIRING_STATE_PATH = PAIRING_JSON
 IS_MACOS = platform.system() == "Darwin"
 
 
-def _load_api_key() -> str | None:
-    try:
-        if PAIRING_STATE_PATH.exists():
-            data = json.loads(PAIRING_STATE_PATH.read_text(encoding="utf-8"))
-            key = data.get("api_key")
-            return key if isinstance(key, str) else None
-    except (OSError, ValueError, json.JSONDecodeError):
-        pass
-    return None
+# The facade answers these when the residual setup API is absent (headless) or
+# down; `ados status` then builds the summary from the native routes.
+_SETUP_FALLBACK_STATUSES = frozenset({501, 502, 503})
 
-
-def _auth_headers() -> dict[str, str]:
-    key = _load_api_key()
-    return {"X-ADOS-Key": key} if key else {}
+# How old the vehicle state may be before an upgrade treats the vehicle as
+# armed; the same bound as `ados_protocol::armed::ARMED_STATE_MAX_AGE`.
+ARMED_STATE_MAX_AGE_S = 3.0
 
 
 def _answered_locally() -> bool:
@@ -61,72 +51,68 @@ def _answered_locally() -> bool:
 
 
 def _request(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-    timeout = kwargs.pop("timeout", 8.0)
-    # Try each candidate control port; only a connection refusal falls through to
-    # the next one. A wrong-port probe must never masquerade as "agent not
-    # running" — the front may be on :8080 or the alternate :8082.
-    bases = api_bases()
+    """One control-surface request; the parsed body dict, else a ClickException."""
+    return _agent_http.call_json(
+        method, path, json_body=kwargs.get("json"), timeout=kwargs.get("timeout", 8.0)
+    )
+
+
+def _read_native(path: str) -> tuple[dict[str, Any] | None, str]:
+    """``(body, answering base)`` for a native read; ``None`` when it was not read."""
     try:
-        for base in bases:
-            try:
-                with httpx.Client(timeout=timeout) as client:
-                    response = client.request(
-                        method,
-                        f"{base}{path}",
-                        headers=_auth_headers(),
-                        **kwargs,
-                    )
-                response.raise_for_status()
-                data = response.json()
-                return data if isinstance(data, dict) else {"data": data}
-            except httpx.ConnectError:
-                continue  # this port refused; try the next candidate
-        # Every candidate control port refused the connection.
-        raise click.ClickException(
-            "Agent is not running. Open the setup URL printed by the "
-            "service, or start demo mode from the development entrypoint."
-        ) from None
-    except httpx.HTTPStatusError as exc:
-        raise click.ClickException(
-            f"Agent API returned {exc.response.status_code}: {exc.response.text[:160]}"
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise click.ClickException(str(exc)) from exc
+        response = _agent_http.call("GET", path, timeout=8.0)
+    except click.ClickException:
+        return None, ""
+    if not response.ok or not isinstance(response.body, dict):
+        return None, response.base
+    return response.body, response.base
 
 
 def _native_status() -> dict[str, Any]:
     """Compose the status dict from the native control-surface routes.
 
-    On a Rust-only node (the macOS workstation) the proxied setup facade is
-    absent, so build the same shape ``_plain_status`` consumes out of the native
-    ``/api/status`` + ``/api/pairing/info`` routes (both guaranteed-200). Fields
-    a workstation does not have (an FC, a local video pipeline, a cloud relay)
-    report honestly rather than being faked.
+    Used when the proxied setup facade is absent (a Rust-only node) or its
+    upstream is down. Built from ``/api/status/full``, ``/api/pairing/info``
+    and ``server.mode`` in ``/api/config``; the API port is the one of the base
+    that answered. Anything that could not be read prints as ``unknown``.
     """
-    status = _request("GET", "/api/status")
-    info = _request("GET", "/api/pairing/info")
+    full, full_base = _read_native("/api/status/full")
+    info, info_base = _read_native("/api/pairing/info")
+    if full is None and info is None:
+        raise click.ClickException(
+            "Agent is not running. Start it with: sudo systemctl start ados-supervisor"
+        )
+    config, _ = _read_native("/api/config")
+    status = full or {}
+    pairing = info or {}
+    base = full_base or info_base
+    port: Any = "unknown"
+    if base.rsplit(":", 1)[-1].isdigit():
+        port = int(base.rsplit(":", 1)[-1])
 
-    mdns_host = str(info.get("mdns_host") or "")
-    paired = bool(info.get("paired"))
-    fc_connected = status.get("fc_connected", info.get("fc_connected"))
-    fc_port = status.get("fc_port") or info.get("fc_port")
+    mdns_host = str(pairing.get("mdns_host") or "")
+    paired = pairing.get("paired") if isinstance(pairing.get("paired"), bool) else None
+    server = (config or {}).get("server")
+    mode = server.get("mode") if isinstance(server, dict) else None
+    video = status.get("video")
+    fc_connected = status.get("fc_connected")
     return {
-        "device_name": info.get("name") or "ADOS",
-        "profile": info.get("profile") or "workstation",
-        "version": status.get("version") or info.get("version") or "?",
+        "device_name": pairing.get("name") or "unknown",
+        "profile": status.get("profile") or pairing.get("profile") or "unknown",
+        "version": status.get("version") or pairing.get("version") or "unknown",
         "paired": paired,
-        "pairing_code": info.get("pairing_code"),
-        # A node that answers is installed + configured; "setup" is a drone
-        # onboarding concept, not a workstation one, so report it complete.
-        "completion_percent": 100,
-        "network": {"api_port": 8080, "mdns_host": mdns_host, "hostname": mdns_host},
+        "pairing_code": pairing.get("pairing_code"),
+        "completion_percent": "unknown",
+        "network": {"api_port": port, "mdns_host": mdns_host, "hostname": mdns_host},
         "lan_host": mdns_host,
         "access_urls": [],
-        "mavlink": {"connected": bool(fc_connected), "port": fc_port},
-        "video": {"state": "n/a"},
-        # The workstation config sets server.mode=local, so cloud relay is off.
-        "cloud_choice": {"mode": "local"},
-        "remote_access": {"status": "disabled"},
+        "mavlink": {
+            "connected": fc_connected if isinstance(fc_connected, bool) else None,
+            "port": status.get("fc_port"),
+        },
+        "video": video if isinstance(video, dict) else {"state": "unknown"},
+        "cloud_choice": {"mode": mode if isinstance(mode, str) and mode else "unknown"},
+        "remote_access": {"status": "unknown"},
         "next_action": (
             "This node is connected to Mission Control."
             if paired
@@ -138,7 +124,14 @@ def _native_status() -> dict[str, Any]:
 def _setup_status() -> dict[str, Any]:
     if IS_MACOS:
         return _native_status()
-    return _request("GET", "/api/v1/setup/status")
+    response = _agent_http.call("GET", "/api/v1/setup/status", timeout=8.0)
+    if response.ok and isinstance(response.body, dict):
+        return response.body
+    if response.status in _SETUP_FALLBACK_STATUSES:
+        return _native_status()
+    raise click.ClickException(
+        f"Agent API returned {response.status}: {str(response.body)[:160]}"
+    )
 
 
 def _viewer_url_from_whep(whep_url: str | None) -> str | None:
@@ -171,7 +164,9 @@ def _console_reach_urls(data: dict[str, Any]) -> list[str]:
     address is present, so a remote operator always sees a usable line first.
     """
     network = data.get("network", {}) or {}
-    port = int(network.get("api_port", 8080) or 8080)
+    raw_port = network.get("api_port", 8080)
+    port = raw_port if isinstance(raw_port, int) else None
+    suffix = f":{port}" if port is not None else ""
     urls: list[str] = []
 
     def _add_base(raw: str) -> None:
@@ -186,13 +181,13 @@ def _console_reach_urls(data: dict[str, Any]) -> list[str]:
 
     for entry in data.get("access_urls") or []:
         raw = str(entry.get("url", ""))
-        if raw and (entry.get("primary") or "/setup" in raw) and f":{port}" in raw:
+        if raw and (entry.get("primary") or "/setup" in raw) and suffix in raw:
             _add_base(raw)
     lan_host = data.get("lan_host") or network.get("mdns_host") or network.get("hostname")
     if lan_host and not _ansi.is_localhost(str(lan_host)):
-        _add_base(f"http://{lan_host}:{port}")
+        _add_base(f"http://{lan_host}{suffix}")
     if not urls:
-        _add_base(f"http://localhost:{port}")
+        _add_base(f"http://localhost{suffix}")
     return urls
 
 
@@ -203,18 +198,22 @@ def _plain_status(data: dict[str, Any]) -> None:
     version = data.get("version", "?")
     click.echo(f"{_ansi.marker(theme, f'ADOS  {device} · {profile}')}   {theme.dim(f'v{version}')}")
 
-    paired = bool(data.get("paired", False))
+    paired_raw = data.get("paired", False)
     code = data.get("pairing_code")
-    if paired:
+    if paired_raw is True:
         pair_txt = f"{_ansi.dot(theme, 'ok')} {theme.ok('paired')}"
     elif code:
         pair_txt = (
             f"{_ansi.dot(theme, 'warn')} code {theme.bold(str(code))} "
             f"{theme.dim('(enter in Mission Control)')}"
         )
+    elif paired_raw is None:
+        pair_txt = f"{_ansi.dot(theme, 'warn')} {theme.dim('pairing unknown')}"
     else:
         pair_txt = f"{_ansi.dot(theme, 'pending')} {theme.dim('not paired')}"
-    click.echo(f"  {theme.dim('setup')} {data.get('completion_percent', 0)}%    {pair_txt}")
+    completion = data.get("completion_percent", 0)
+    completion_txt = f"{completion}%" if isinstance(completion, (int, float)) else str(completion)
+    click.echo(f"  {theme.dim('setup')} {completion_txt}    {pair_txt}")
     click.echo("")
 
     for line in _ansi.reach_block(theme, _console_reach_urls(data)):
@@ -222,7 +221,8 @@ def _plain_status(data: dict[str, Any]) -> None:
     click.echo("")
 
     mavlink = data.get("mavlink", {})
-    fc = "connected" if mavlink.get("connected") else "not connected"
+    connected = mavlink.get("connected")
+    fc = "unknown" if connected is None else ("connected" if connected else "not connected")
     port = mavlink.get("port")
     click.echo(_ansi.kv(theme, "MAVLink FC", fc + (f"  ({port})" if port else "")))
     if mavlink.get("tcp_url"):
@@ -249,13 +249,12 @@ def _plain_status(data: dict[str, Any]) -> None:
     click.echo(_ansi.kv(theme, "Video", state + detail))
 
     cloud_choice = data.get("cloud_choice", {}) or {}
-    cloud_paired = bool(cloud_choice.get("paired"))
     backend_url = str(cloud_choice.get("backend_url", "") or "")
     cloud_mode = str(cloud_choice.get("mode", "") or "")
-    if cloud_paired and backend_url:
-        cloud_txt = f"paired ({backend_url})"
+    if cloud_mode == "unknown":
+        cloud_txt = "unknown"
     elif backend_url and cloud_mode != "local":
-        cloud_txt = f"configured ({backend_url}, awaiting pair)"
+        cloud_txt = f"configured ({backend_url})"
     elif cloud_mode == "local":
         cloud_txt = "disabled (local mode)"
     else:
@@ -405,7 +404,51 @@ def _upgrade_profile(override: str | None) -> str | None:
     return _read_profile_conf_value()
 
 
-def _run_upgrade(profile: str | None = None) -> None:
+def _vehicle_arm_state() -> tuple[str, str | None]:
+    """``(arm state, profile)`` from the router state the agent reports.
+
+    The state is ``"disarmed"`` only when a live link says so; a missing,
+    unreadable or stale state (older than ``ARMED_STATE_MAX_AGE_S``) is
+    ``"unknown"``, which an upgrade treats as armed.
+    """
+    try:
+        response = _agent_http.call("GET", "/api/status/full", timeout=4.0)
+    except click.ClickException:
+        return "unknown", None
+    body = response.body if response.ok and isinstance(response.body, dict) else {}
+    profile = body.get("profile") if isinstance(body.get("profile"), str) else None
+    age = body.get("heartbeatAgeS")
+    fresh = (
+        body.get("mavlinkAlive") is True
+        and isinstance(age, (int, float))
+        and age <= ARMED_STATE_MAX_AGE_S
+    )
+    telemetry = body.get("telemetry")
+    armed = telemetry.get("armed") if isinstance(telemetry, dict) else None
+    if not fresh or not isinstance(armed, bool):
+        return "unknown", profile
+    return ("armed" if armed else "disarmed"), profile
+
+
+def _armed_refusal(profile: str | None) -> str | None:
+    """Why an upgrade must not run now, or ``None`` when it may.
+
+    An upgrade restarts the MAVLink, radio and video services. On a node that
+    carries or links a vehicle (drone, ground station) it is refused while the
+    vehicle is armed or its arm state is unknown or stale.
+    """
+    state, reported = _vehicle_arm_state()
+    resolved = (reported or profile or "").replace("-", "_")
+    if resolved not in ("drone", "ground_station") or state == "disarmed":
+        return None
+    reason = "armed" if state == "armed" else "of unknown arm state (no fresh vehicle state)"
+    return (
+        f"Refusing to update: the vehicle is {reason}. An update restarts the "
+        "MAVLink, radio and video services. Disarm first, or pass --force-armed."
+    )
+
+
+def _run_upgrade(profile: str | None = None, *, force_armed: bool = False) -> None:
     """Fetch the canonical install.sh (latest main) and run it in upgrade mode.
 
     Linux needs root (the systemd install writes under /opt and /etc), so
@@ -414,7 +457,8 @@ def _run_upgrade(profile: str | None = None) -> None:
     stays attached to this terminal.
 
     ``profile`` is passed through to the installer when known, so an upgrade
-    cannot silently re-profile the box.
+    cannot silently re-profile the box; ``force_armed`` passes the operator's
+    armed override to the installer's own preflight.
     """
     try:
         with httpx.Client(timeout=30.0, follow_redirects=True) as client:
@@ -430,6 +474,8 @@ def _run_upgrade(profile: str | None = None) -> None:
         argv = ["bash", script, "--upgrade"]
         if profile:
             argv += ["--profile", profile]
+        if force_armed:
+            argv.append("--force-armed")
         if platform.system() == "Linux" and os.geteuid() != 0:
             if shutil.which("sudo") is None:
                 raise click.ClickException(
@@ -524,7 +570,21 @@ def _run_uninstall_linux(*, purge: bool, yes: bool) -> None:
     default=None,
     help="Override the profile to install. Defaults to whatever this box already is.",
 )
-def update(check_only: bool, yes: bool, as_json: bool, profile_override: str | None) -> None:
+@click.option(
+    "--force-armed",
+    is_flag=True,
+    help=(
+        "Override the armed refusal (here and in the installer): update even while "
+        "the vehicle is armed or its arm state is unknown. Can drop the link in flight."
+    ),
+)
+def update(
+    check_only: bool,
+    yes: bool,
+    as_json: bool,
+    profile_override: str | None,
+    force_armed: bool,
+) -> None:
     """Update the agent to the latest and restart it."""
     current = _installed_version()
     latest = _latest_main_version()
@@ -556,10 +616,15 @@ def update(check_only: bool, yes: bool, as_json: bool, profile_override: str | N
         click.echo("Already up to date.")
         return
 
+    profile = _upgrade_profile(profile_override)
+    if not force_armed:
+        refusal = _armed_refusal(profile)
+        if refusal:
+            raise click.ClickException(refusal)
+
     if not yes:
         click.confirm("Update the agent to the latest now?", abort=True)
 
-    profile = _upgrade_profile(profile_override)
     if profile:
         click.echo(f"Profile:         {profile} (pinned, so the upgrade cannot change it)")
     else:
@@ -568,7 +633,7 @@ def update(check_only: bool, yes: bool, as_json: bool, profile_override: str | N
             "installer will resolve it. Pass --profile to be certain."
         )
     click.echo("Updating — this rebuilds and restarts the agent…")
-    _run_upgrade(profile)
+    _run_upgrade(profile, force_armed=force_armed)
     click.echo("Update complete.")
 
 

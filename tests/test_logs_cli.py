@@ -222,53 +222,33 @@ def test_push_no_wait_reports_requested(tmp_path, monkeypatch) -> None:
 # --- push delegation (non-root → root agent over loopback) -------------
 
 
-class _FakeResp:
-    def __init__(self, status_code: int, payload: dict, text: str = "") -> None:
-        self.status_code = status_code
-        self._payload = payload
-        self.text = text
+def _agent_answers(captured: dict, status: int, body: dict):
+    """A stand-in for ``_agent_http.call`` that records the request."""
+    from ados.cli._agent_http import AgentResponse
 
-    def json(self) -> dict:
-        return self._payload
+    def call(method, path, *, json_body=None, timeout=None, **_kw):
+        captured.update(method=method, path=path, json=json_body)
+        return AgentResponse(status, body, "http://127.0.0.1:8080")
+
+    return call
 
 
-class _FakeClient:
-    """Stand-in for httpx.Client as a context manager, capturing the POST."""
+def _agent_down(*_a, **_k):
+    import click
 
-    def __init__(self, captured: dict, resp, raise_exc: Exception | None = None) -> None:
-        self._captured = captured
-        self._resp = resp
-        self._raise = raise_exc
-
-    def __enter__(self) -> _FakeClient:
-        return self
-
-    def __exit__(self, *_a) -> bool:
-        return False
-
-    def post(self, url, json=None, headers=None):  # noqa: A002 - httpx kw name
-        self._captured["url"] = url
-        self._captured["json"] = json
-        self._captured["headers"] = headers
-        if self._raise is not None:
-            raise self._raise
-        return self._resp
+    raise click.ClickException("Agent is not running")
 
 
 def test_push_non_root_delegates_to_loopback_api(monkeypatch) -> None:
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
-    monkeypatch.setattr(logs_mod, "_load_api_key", lambda: None)
     captured: dict = {}
-    resp = _FakeResp(200, {"pushed": True, "bytes": 4096, "rows": 12, "synced": True, "pending": False})
-    monkeypatch.setattr(logs_mod.httpx, "Client", lambda *a, **k: _FakeClient(captured, resp))
+    body = {"pushed": True, "bytes": 4096, "rows": 12, "synced": True, "pending": False}
+    monkeypatch.setattr(logs_mod._agent_http, "call", _agent_answers(captured, 200, body))
 
     result = runner.invoke(logs_group, ["push", "--session", "7", "--kinds", "logs"])
     assert result.exit_code == 0, result.output
     assert "pushed" in result.output
-    assert captured["url"].endswith("/api/logs/push")
-    # Same-origin loopback header is the trust gate for a non-root caller.
-    assert captured["headers"]["Origin"] == "http://localhost:8080"
-    assert "X-ADOS-Key" not in captured["headers"]
+    assert (captured["method"], captured["path"]) == ("POST", "/api/logs/push")
     assert captured["json"]["session"] == 7
     assert captured["json"]["kinds"] == ["logs"]
     assert captured["json"]["wait"] is True
@@ -278,12 +258,7 @@ def test_push_non_root_falls_back_to_seam_when_api_down(tmp_path, monkeypatch) -
     from ados.services.cloud import log_push_trigger as trig
 
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
-    monkeypatch.setattr(logs_mod, "_load_api_key", lambda: None)
-    monkeypatch.setattr(
-        logs_mod.httpx,
-        "Client",
-        lambda *a, **k: _FakeClient({}, None, raise_exc=logs_mod.httpx.ConnectError("down")),
-    )
+    monkeypatch.setattr(logs_mod._agent_http, "call", _agent_down)
 
     req = tmp_path / "req.json"
     res = tmp_path / "res.json"
@@ -311,12 +286,7 @@ def test_push_non_root_api_down_and_seam_denied_hints_sudo(monkeypatch) -> None:
     from ados.services.cloud import log_push_trigger as trig
 
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
-    monkeypatch.setattr(logs_mod, "_load_api_key", lambda: None)
-    monkeypatch.setattr(
-        logs_mod.httpx,
-        "Client",
-        lambda *a, **k: _FakeClient({}, None, raise_exc=logs_mod.httpx.ConnectError("down")),
-    )
+    monkeypatch.setattr(logs_mod._agent_http, "call", _agent_down)
 
     def deny(_request, *, wait):
         raise trig.LogPushTriggerError(

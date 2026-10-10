@@ -13,6 +13,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from ados.core import remote_access_sync
 from ados.setup._persist import persist_config
 from ados.setup.models import CloudChoiceStatus, SetupActionResult
 
@@ -40,32 +41,14 @@ def _cloud_choice_status(config: Any) -> CloudChoiceStatus:
     if mode not in ("cloud", "self_hosted", "local"):
         mode = "local"
     if mode == "local":
-        return CloudChoiceStatus(
-            mode="local",
-            paired=False,
-            pair_code_required=False,
-            backend_url="",
-            backend_reachable=False,
-        )
+        return CloudChoiceStatus(mode="local", pair_code_required=False, backend_url="")
     if mode == "self_hosted":
         sh = getattr(server, "self_hosted", None)
         url = str(getattr(sh, "url", "") or "")
-        return CloudChoiceStatus(
-            mode="self_hosted",
-            paired=bool(getattr(sh, "api_key", "") or ""),
-            pair_code_required=True,
-            backend_url=url,
-            backend_reachable=False,
-        )
+        return CloudChoiceStatus(mode="self_hosted", pair_code_required=True, backend_url=url)
     cloud = getattr(server, "cloud", None)
     cloud_url = str(getattr(cloud, "url", "") or "")
-    return CloudChoiceStatus(
-        mode="cloud",
-        paired=False,
-        pair_code_required=True,
-        backend_url=cloud_url,
-        backend_reachable=False,
-    )
+    return CloudChoiceStatus(mode="cloud", pair_code_required=True, backend_url=cloud_url)
 
 
 def apply_cloud_choice(  # noqa: C901
@@ -79,7 +62,7 @@ def apply_cloud_choice(  # noqa: C901
     Persists the chosen mode and any self-hosted backend coordinates the
     operator entered. The optional ``api_key`` is written to a root-owned
     secret file and is not stored back in config or returned in the
-    response. ``mqtt_password`` is cleared on transition to ``local``.
+    response.
     """
     if mode not in ("cloud", "self_hosted", "local"):
         return SetupActionResult(ok=False, message=f"Unknown mode: {mode}")
@@ -137,8 +120,6 @@ def apply_cloud_choice(  # noqa: C901
             values["server.self_hosted.api_key"] = ""
     elif mode == "cloud":
         backend_url = str(runtime.config.server.cloud.url)
-    else:
-        values["server.mqtt_password"] = ""
 
     api_key_written = False
     if api_key:
@@ -182,9 +163,15 @@ def apply_cloud_choice(  # noqa: C901
 
 
 def install_cloudflare_token(runtime: Any, token_or_script: str) -> SetupActionResult:
-    """Persist a Cloudflare tunnel token and mark remote access enabled."""
+    """Persist a Cloudflare tunnel token, enable remote access, apply it.
+
+    When the tunnel was already enabled the config write changes no posture,
+    so the unit is restarted here to pick up the new token; otherwise the
+    config write's own posture sync starts it.
+    """
     token = extract_cloudflare_token(token_or_script)
     cf = runtime.config.remote_access.cloudflare
+    was_enabled = runtime.config.remote_access.provider == "cloudflare" and bool(cf.enabled)
     token_path = Path(cf.token_path)
     try:
         token_path.parent.mkdir(parents=True, exist_ok=True)
@@ -210,13 +197,19 @@ def install_cloudflare_token(runtime: Any, token_or_script: str) -> SetupActionR
         "token_path": str(token_path),
         "cloudflared_installed": bool(shutil.which("cloudflared")),
     }
-    if shutil.which("systemctl"):
-        data["service_command"] = f"sudo systemctl restart {cf.service_name}"
-    return SetupActionResult(
-        ok=True,
-        message="Cloudflare tunnel token installed. Restart cloudflared to connect the tunnel.",
-        data=data,
-    )
+    if was_enabled:
+        restart = remote_access_sync.restart_tunnel_unit(str(cf.service_name))
+        data["tunnel_restart"] = restart
+        if restart.get("ok"):
+            message = "Cloudflare tunnel token installed and the tunnel restarted with it."
+        else:
+            message = (
+                "Cloudflare tunnel token installed, but restarting the tunnel failed: "
+                f"{restart.get('error')}"
+            )
+    else:
+        message = "Cloudflare tunnel token installed and the tunnel enabled."
+    return SetupActionResult(ok=True, message=message, data=data)
 
 
 __all__ = [
