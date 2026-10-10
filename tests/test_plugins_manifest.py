@@ -555,3 +555,66 @@ def test_node_surface_requires_profile() -> None:
     m = PluginManifest.from_yaml_text(_yaml(raw))
     assert m.gcs is not None
     assert m.gcs.contributes.node_surfaces[0].profile == ["ground-station"]
+
+
+# ── gcs entrypoint is needed only by bundle-rendered contributions ──
+
+
+def _gcs_without_entrypoint(contributes: dict) -> dict:
+    raw = _good_manifest_dict()
+    del raw["agent"]
+    raw["gcs"] = {"isolation": "iframe", "contributes": contributes}
+    return raw
+
+
+def test_gcs_half_with_nothing_to_render_needs_no_entrypoint() -> None:
+    raw = _gcs_without_entrypoint(
+        {
+            "parameters": [{"key": "gain", "type": "number"}],
+            "skills": [{"id": "boost"}],
+        }
+    )
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    assert m.gcs is not None
+    assert m.gcs.entrypoint is None
+    assert m.gcs.contributes.parameters == [{"key": "gain", "type": "number"}]
+    # No contributions at all, or empty bundle lists, are equally bundle-free.
+    assert PluginManifest.from_yaml_text(_yaml(_gcs_without_entrypoint({}))).gcs
+    assert PluginManifest.from_yaml_text(
+        _yaml(_gcs_without_entrypoint({"panels": []}))
+    ).gcs
+
+
+@pytest.mark.parametrize(
+    ("key", "entries"),
+    [
+        ("panels", [{"id": "p"}]),
+        ("tabs", [{"id": "t"}]),
+        ("agent_pages", [{"id": "world", "title": "World"}]),
+        ("node_surfaces", [{"id": "s", "title": "S", "profile": ["drone"]}]),
+    ],
+)
+def test_bundle_contribution_without_entrypoint_is_refused(
+    key: str, entries: list
+) -> None:
+    raw = _gcs_without_entrypoint({key: entries})
+    with pytest.raises(ManifestError, match=f"gcs.contributes.{key}.*gcs.entrypoint"):
+        PluginManifest.from_yaml_text(_yaml(raw))
+
+
+def test_map_overlays_mission_templates_settings_and_models_parse() -> None:
+    raw = _gcs_without_entrypoint(
+        {
+            "map_overlays": [{"id": "heat"}],
+            "mission_templates": [{"id": "grid"}],
+            "settings": [{"key": "a"}],
+            "models": [{"id": "yolo"}],
+        }
+    )
+    m = PluginManifest.from_yaml_text(_yaml(raw))
+    assert m.gcs is not None
+    c = m.gcs.contributes
+    assert c.map_overlays == [{"id": "heat"}]
+    assert c.mission_templates == [{"id": "grid"}]
+    assert c.settings == [{"key": "a"}]
+    assert c.models == [{"id": "yolo"}]

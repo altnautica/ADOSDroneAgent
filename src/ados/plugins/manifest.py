@@ -887,6 +887,10 @@ class GcsContributes(_StrictModel):
     # Plugin settings rendered by the GCS settings surface. Free-form; the
     # agent does not interpret them.
     settings: list[dict[str, Any]] = Field(default_factory=list)
+    # Map-overlay and mission-template contributions, read by the GCS map and
+    # mission-template picker. Free-form; the agent does not interpret them.
+    map_overlays: list[dict[str, Any]] = Field(default_factory=list)
+    mission_templates: list[dict[str, Any]] = Field(default_factory=list)
     agent_pages: list[AgentPage] = Field(default_factory=list)
     node_surfaces: list[NodeSurface] = Field(default_factory=list)
 
@@ -922,12 +926,25 @@ class GcsContributes(_StrictModel):
         return self
 
 
+# The GCS contribution lists rendered from the half's bundle (an iframe or an
+# inline module); declaring any of them requires ``gcs.entrypoint``.
+_GCS_BUNDLE_CONTRIBUTIONS: tuple[str, ...] = (
+    "panels",
+    "tabs",
+    "agent_pages",
+    "node_surfaces",
+)
+
+
 class GcsBlock(_StrictModel):
     """GCS-half manifest block."""
 
-    entrypoint: str
+    entrypoint: str | None = None
     """Relative path inside the archive to the GCS bundle entrypoint
-    (``gcs/plugin.bundle.js``)."""
+    (``gcs/plugin.bundle.js``). May be omitted only when the half contributes
+    nothing rendered from a bundle (no ``panels``, ``tabs``, ``agent_pages``
+    or ``node_surfaces``), so a parameters- or skills-only half needs no
+    bundle."""
 
     isolation: Literal["iframe", "inline"] = "iframe"
     """Inline is restricted to first-party signers."""
@@ -938,8 +955,22 @@ class GcsBlock(_StrictModel):
 
     @field_validator("entrypoint")
     @classmethod
-    def _validate_entrypoint(cls, v: str) -> str:
+    def _validate_entrypoint(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
         return _validate_entrypoint(v)
+
+    @model_validator(mode="after")
+    def _require_entrypoint_for_bundle_contributions(self) -> GcsBlock:
+        if self.entrypoint is not None:
+            return self
+        for key in _GCS_BUNDLE_CONTRIBUTIONS:
+            if getattr(self.contributes, key):
+                raise ManifestError(
+                    f"gcs.contributes.{key} is rendered from a bundle and needs "
+                    "gcs.entrypoint"
+                )
+        return self
 
     @field_validator("permissions", mode="before")
     @classmethod

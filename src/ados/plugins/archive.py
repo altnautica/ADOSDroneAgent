@@ -334,7 +334,7 @@ def _required_entrypoints(manifest: PluginManifest) -> list[tuple[str, str]]:
     Returns ``(label, relative_path)`` pairs for every entrypoint that
     must be present as a real file in the packed/unpacked archive:
 
-    * the GCS bundle at ``gcs.entrypoint`` when a ``gcs`` block exists;
+    * the GCS bundle at ``gcs.entrypoint`` when the ``gcs`` block names one;
     * the agent binary at ``agent.entrypoint`` when ``agent.runtime`` is
       ``rust`` (a Python agent's ``module:Class`` entrypoint is resolved
       by the runner, not a packed file, so it is skipped).
@@ -343,8 +343,9 @@ def _required_entrypoints(manifest: PluginManifest) -> list[tuple[str, str]]:
     file and is excluded from the must-exist set.
     """
     required: list[tuple[str, str]] = []
-    if manifest.gcs is not None and ":" not in manifest.gcs.entrypoint:
-        required.append(("gcs.entrypoint", manifest.gcs.entrypoint))
+    gcs_entry = manifest.gcs.entrypoint if manifest.gcs is not None else None
+    if gcs_entry is not None and ":" not in gcs_entry:
+        required.append(("gcs.entrypoint", gcs_entry))
     if (
         manifest.agent is not None
         and manifest.agent.runtime == "rust"

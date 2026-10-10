@@ -317,6 +317,24 @@ def test_pack_complete_gcs_tree_round_trips(tmp_path: Path) -> None:
         assert zf.read("agent/plugin.py") == b"# stub"
 
 
+def test_pack_gcs_half_without_entrypoint_needs_no_bundle(tmp_path: Path) -> None:
+    """A parameters-only GCS half names no bundle, so packing requires none."""
+    src = tmp_path / "src"
+    (src / "agent").mkdir(parents=True)
+    (src / "agent" / "plugin.py").write_text("# stub")
+
+    text = _manifest_with_gcs_yaml().replace(
+        "  entrypoint: gcs/plugin.bundle.js\n",
+        "  contributes:\n    parameters:\n      - {key: gain, type: number}\n",
+    )
+    manifest = PluginManifest.from_yaml_text(text)
+    assert manifest.gcs is not None and manifest.gcs.entrypoint is None
+    out = tmp_path / "params.adosplug"
+    pack_directory(src, manifest, out)
+    with zipfile.ZipFile(io.BytesIO(out.read_bytes())) as zf:
+        assert zf.read("agent/plugin.py") == b"# stub"
+
+
 def test_pack_raises_when_rust_binary_missing(tmp_path: Path) -> None:
     """A rust-runtime agent half whose entrypoint binary is absent must
     fail at pack time the same way a missing GCS bundle does."""

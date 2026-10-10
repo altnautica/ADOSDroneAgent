@@ -435,8 +435,16 @@
           "$ref": "#/$defs/GcsContributes"
         },
         "entrypoint": {
-          "title": "Entrypoint",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entrypoint"
         },
         "isolation": {
           "default": "iframe",
@@ -462,9 +470,6 @@
           "type": "array"
         }
       },
-      "required": [
-        "entrypoint"
-      ],
       "title": "GcsBlock",
       "type": "object"
     },
@@ -476,6 +481,22 @@
             "$ref": "#/$defs/AgentPage"
           },
           "title": "Agent Pages",
+          "type": "array"
+        },
+        "map_overlays": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Map Overlays",
+          "type": "array"
+        },
+        "mission_templates": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Mission Templates",
           "type": "array"
         },
         "models": {
