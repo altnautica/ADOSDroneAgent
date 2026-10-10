@@ -1,7 +1,12 @@
-//! Extensions: install the first-party World Engine extension
-//! (`com.altnautica.world-engine`) on a node whose operator asked for it.
-//! Optional, and after `health`, so it runs against a node whose plugin host,
-//! control surface and loopback guard are already up.
+//! Extensions: seed the plugin revocation list, then install the first-party
+//! World Engine extension (`com.altnautica.world-engine`) on a node whose
+//! operator asked for it. Optional, and after `health`, so it runs against a
+//! node whose plugin host, control surface and loopback guard are already up.
+//!
+//! The revocation list (`/etc/ados/plugin-revocations.json`) is copied from
+//! the shipped `scripts/plugin-keys/revoked.json` only when absent: an
+//! existing list (merged from the registry, or edited by the operator) is
+//! never overwritten.
 //!
 //! The toggle is [`crate::ctx::Ctx::install_world_engine`]: the
 //! `--world-engine` / `--no-world-engine` flag or the wizard's checkbox, else
@@ -65,6 +70,41 @@ const ATTEMPTS: u32 = 3;
 
 /// The pause between download attempts on a node.
 pub const DOWNLOAD_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+/// The shipped revocation list, relative to the source tree.
+pub const SHIPPED_REVOCATIONS: &str = "scripts/plugin-keys/revoked.json";
+
+/// Copy the shipped revocation list to `target` when no list exists there.
+/// Returns whether it copied. The shipped file must parse; an existing target
+/// is never touched.
+pub fn seed_revocation_list(source: Option<&Path>, target: &Path) -> Result<bool, String> {
+    use std::io::Write;
+    if target.exists() {
+        return Ok(false);
+    }
+    let Some(shipped) = source.map(|s| s.join(SHIPPED_REVOCATIONS)) else {
+        return Err("the source tree was not found, so no revocation list was seeded".into());
+    };
+    let bytes = std::fs::read(&shipped).map_err(|e| format!("{}: {e}", shipped.display()))?;
+    ados_plugin_host::signing::parse_revocations(&bytes)
+        .map_err(|e| format!("{}: {e}", shipped.display()))?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(format!("{}: {e}", target.display())),
+    };
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("{}: {e}", target.display()))?;
+    Ok(true)
+}
 
 /// Whether a profile installs the World Engine when no flag or wizard answer
 /// says otherwise: on for the workstation-class nodes that run its heavy half,
@@ -412,6 +452,15 @@ impl Step for Extensions {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
+        let source = crate::env::resolve_source_dir(ctx.source_dir.as_deref());
+        match seed_revocation_list(
+            source.as_deref(),
+            Path::new(ados_plugin_host::signing::PLUGIN_REVOCATIONS_PATH),
+        ) {
+            Ok(true) => tracing::info!("plugin revocation list seeded"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "plugin revocation list not seeded"),
+        }
         if !ctx.install_world_engine {
             tracing::info!(profile = %ctx.profile, "World Engine extension not selected");
             return StepOutcome::Skipped;
@@ -441,6 +490,44 @@ impl Step for Extensions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_revocation_list_is_seeded_only_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        std::fs::create_dir_all(source.join("scripts/plugin-keys")).unwrap();
+        std::fs::write(
+            source.join(SHIPPED_REVOCATIONS),
+            r#"{"signers":[],"archives":[]}"#,
+        )
+        .unwrap();
+        let target = dir.path().join("etc/plugin-revocations.json");
+        assert!(seed_revocation_list(Some(&source), &target).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            r#"{"signers":[],"archives":[]}"#
+        );
+        // An existing list is never overwritten.
+        std::fs::write(&target, r#"["alice"]"#).unwrap();
+        assert!(!seed_revocation_list(Some(&source), &target).unwrap());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), r#"["alice"]"#);
+        // A malformed shipped file, or no source tree, seeds nothing.
+        let fresh = dir.path().join("etc/other.json");
+        std::fs::write(source.join(SHIPPED_REVOCATIONS), "{").unwrap();
+        assert!(seed_revocation_list(Some(&source), &fresh).is_err());
+        assert!(seed_revocation_list(None, &fresh).is_err());
+        assert!(!fresh.exists());
+    }
+
+    #[test]
+    fn the_shipped_revocation_list_parses_and_is_empty() {
+        let shipped = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(SHIPPED_REVOCATIONS);
+        let revs =
+            ados_plugin_host::signing::parse_revocations(&std::fs::read(shipped).unwrap()).unwrap();
+        assert!(revs.signers.is_empty() && revs.archives.is_empty());
+    }
     use std::io::Write;
     use std::sync::Arc;
 

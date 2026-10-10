@@ -656,11 +656,9 @@ pub struct Compatibility {
     pub ados_version: String,
     #[serde(default)]
     pub gcs_version: Option<String>,
-    /// HAL board ids this plugin supports. Empty means any board. A list
-    /// containing the literal `"*"` also means any board — the scaffolder used
-    /// to emit that form and it was an exact-match reject on every real board,
-    /// so both spellings of "any" are accepted (mirrors the Pydantic
-    /// `Compatibility.supported_boards` note).
+    /// Board tokens this plugin supports: a HAL profile stem (`cm4`,
+    /// `rock-5c-lite`) or a SoC (`rk3588s2`). Empty means any board, and so
+    /// does a list containing the literal `"*"`.
     #[serde(default)]
     pub supported_boards: Vec<String>,
     /// Minimum compute tier (1-4) the plugin needs. `None` means no floor.
@@ -674,12 +672,33 @@ pub struct Compatibility {
     pub min_tier: Option<u8>,
 }
 
+/// The running board's identity the `supported_boards` gate keys on: the HAL
+/// profile stem (the canonical token, the one `/etc/ados/board_override`
+/// accepts) and the SoC (so archives that list a SoC keep matching).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardId {
+    pub profile: String,
+    /// Empty when the sidecar reports the SoC as unknown.
+    pub soc: String,
+}
+
+impl std::fmt::Display for BoardId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.profile)
+    }
+}
+
 impl Compatibility {
-    /// True when `board` satisfies `supported_boards`. Empty list or a `"*"`
-    /// entry means any board.
-    pub fn supports_board(&self, board: &str) -> bool {
+    /// True when `board` satisfies `supported_boards`: the list is empty, an
+    /// entry is `"*"`, or an entry equals the profile stem or the (non-empty)
+    /// SoC, case-insensitively.
+    pub fn supports_board(&self, board: &BoardId) -> bool {
         self.supported_boards.is_empty()
-            || self.supported_boards.iter().any(|b| b == "*" || b == board)
+            || self.supported_boards.iter().any(|b| {
+                b == "*"
+                    || b.eq_ignore_ascii_case(&board.profile)
+                    || (!board.soc.is_empty() && b.eq_ignore_ascii_case(&board.soc))
+            })
     }
 }
 
@@ -1195,6 +1214,34 @@ fn is_module_path(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supports_board_matches_stem_soc_and_star() {
+        let compat = |boards: &[&str]| Compatibility {
+            ados_version: ">=0.1.0".into(),
+            gcs_version: None,
+            supported_boards: boards.iter().map(|s| s.to_string()).collect(),
+            min_tier: None,
+        };
+        let board = BoardId {
+            profile: "rock-5c-lite".into(),
+            soc: "RK3582".into(),
+        };
+        assert!(compat(&[]).supports_board(&board));
+        assert!(compat(&["*"]).supports_board(&board));
+        assert!(compat(&["cm4", "ROCK-5C-LITE"]).supports_board(&board));
+        assert!(compat(&["rk3582"]).supports_board(&board));
+        // The display name is not a board token.
+        assert!(!compat(&["Radxa ROCK 5C Lite (RK3582)"]).supports_board(&board));
+        assert!(!compat(&["cm4"]).supports_board(&board));
+        // An unknown SoC never matches an empty entry.
+        let no_soc = BoardId {
+            profile: "cm4".into(),
+            soc: String::new(),
+        };
+        assert!(!compat(&[""]).supports_board(&no_soc));
+        assert_eq!(board.to_string(), "rock-5c-lite");
+    }
 
     const MINIMAL: &str = r#"
 id: com.example.thermal

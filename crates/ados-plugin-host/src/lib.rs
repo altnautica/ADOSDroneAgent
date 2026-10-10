@@ -189,8 +189,12 @@ mod capability_enforcement_guard {
         // metadata that understates the protection actually in place -- the
         // safe direction, but still a surface saying something untrue about
         // itself, and one a reader would use to decide what to audit.
+        // A cap that gates only methods this host answers `not_implemented`
+        // grants nothing, so the catalog may declare it unenforced.
+        let ungrantable = crate::realhost::RealHost::ungrantable_caps();
         let under: Vec<String> = actually_gated()
             .into_iter()
+            .filter(|c| !ungrantable.contains(c))
             .filter(|c| {
                 ados_protocol::capabilities::get_agent_capability(c).is_some_and(|m| !m.enforced)
             })

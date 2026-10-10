@@ -13,7 +13,7 @@
 //! }
 //! ```
 //!
-//! The write is atomic (`.tmp` + rename) and serialized under an advisory file
+//! The write is durable (tmp + fsync + rename + dir fsync, mode 0600) and serialized under an advisory file
 //! lock held on a sidecar `.lock` file so two concurrent install/remove flows
 //! on the same host do not corrupt the file. The auto-update fields default
 //! safely so older state files load clean.
@@ -108,6 +108,14 @@ pub struct PluginInstall {
     /// round-trip-preservation reason as `model_status`.
     #[serde(default)]
     pub service_status: Option<serde_json::Value>,
+    /// The signer or archive was revoked while the vehicle was armed: the
+    /// disable is deferred until disarm, and the record says so.
+    #[serde(default)]
+    pub revocation_pending: bool,
+    /// Lowercase sha256 hex of the installed `.adosplug`, so a revoked archive
+    /// digest also blocks enable. `None` for a built-in or an older record.
+    #[serde(default)]
+    pub archive_sha256: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -177,8 +185,10 @@ pub fn load_state_checked(path: Option<&Path>) -> Result<Vec<PluginInstall>, Str
     Ok(out)
 }
 
-/// Atomically persist the install list. Writes a sibling `.tmp` and renames it
-/// over the target so a crash mid-write never leaves a truncated file.
+/// Durably persist the install list through
+/// [`ados_protocol::sidecar::write_durable`]: a power cut leaves the old file
+/// or the new one, never a truncated mix. The file is created owner-only
+/// (0600) and the mode is kept across rewrites.
 pub fn save_state(installs: &[PluginInstall], path: Option<&Path>) -> Result<(), LifecycleError> {
     let target = state_path(path);
     if let Some(parent) = target.parent() {
@@ -190,9 +200,30 @@ pub fn save_state(installs: &[PluginInstall], path: Option<&Path>) -> Result<(),
     };
     let json = serde_json::to_string_pretty(&payload)
         .map_err(|e| LifecycleError::Io(std::io::Error::other(e)))?;
-    let tmp = with_added_suffix(&target, ".tmp");
-    std::fs::write(&tmp, json.as_bytes())?;
-    std::fs::rename(&tmp, &target)?;
+    ensure_owner_only(&target)?;
+    ados_protocol::sidecar::write_durable(&target, json.as_bytes())?;
+    Ok(())
+}
+
+/// Give the state file mode 0600 before the durable write, which carries the
+/// existing file's mode over to its replacement.
+#[cfg(unix)]
+fn ensure_owner_only(target: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    if target.exists() {
+        std::fs::set_permissions(target, std::fs::Permissions::from_mode(0o600))
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(target)
+            .map(drop)
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_owner_only(_target: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -368,6 +399,8 @@ mod tests {
             reenable_pending: false,
             model_status: None,
             service_status: None,
+            revocation_pending: false,
+            archive_sha256: None,
         }
     }
 
@@ -386,6 +419,36 @@ mod tests {
         // The on-disk file carries the schema wrapper.
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("\"schema\": 1"), "{raw}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_state_uses_write_durable_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plugin-state.json");
+        save_state(&[sample()], Some(&path)).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        // A rewrite keeps the mode and leaves no temp file behind.
+        save_state(&[], Some(&path)).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, vec!["plugin-state.json".to_string()]);
+        // A crash that left only a temp file loads the previous state.
+        std::fs::write(dir.path().join("plugin-state.json.tmp-1"), b"{trunc").unwrap();
+        assert!(load_state_checked(Some(&path)).unwrap().is_empty());
+        // The new fields default on an older record.
+        let raw = serde_json::to_value(sample()).unwrap();
+        let mut obj = raw.as_object().unwrap().clone();
+        obj.remove("revocation_pending");
+        obj.remove("archive_sha256");
+        let back: PluginInstall = serde_json::from_value(obj.into()).unwrap();
+        assert!(!back.revocation_pending && back.archive_sha256.is_none());
     }
 
     #[test]

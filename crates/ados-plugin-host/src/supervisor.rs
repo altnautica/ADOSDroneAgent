@@ -71,8 +71,8 @@ use crate::errors::{
     LifecycleError, ManifestError, SignatureError, SignatureErrorKind, SupervisorError,
 };
 use crate::manifest::{
-    bin_reference, host_arch_os, AgentIsolation, DeclaredCapability, GcsIsolation, PluginManifest,
-    ResourceClass, PAYLOAD_MAX_BYTES,
+    bin_reference, host_arch_os, AgentIsolation, BoardId, DeclaredCapability, GcsIsolation,
+    PluginManifest, ResourceClass, PAYLOAD_MAX_BYTES,
 };
 use crate::plugin_account::{host_accounts, Accounts};
 use crate::server::{plugin_socket_dir, plugin_socket_path};
@@ -81,8 +81,8 @@ use crate::services::{
     ReadyCheck, ServiceSpec,
 };
 use crate::signing::{
-    is_first_party_signer, load_revocation_list, load_trusted_keys, verify_archive_signature,
-    PLUGIN_KEYS_DIR,
+    is_first_party_signer, load_revocations, load_trusted_keys, verify_archive_signature,
+    Revocations, PLUGIN_KEYS_DIR, PLUGIN_REVOCATIONS_PATH,
 };
 use crate::state::{
     self, filter_permissions_against_manifest, find_install, grant_permission, load_state, now_ms,
@@ -90,8 +90,8 @@ use crate::state::{
     PluginStatus, StateLock,
 };
 use crate::systemd::{
-    build_unit_spec, plugin_http_dir, unit_name_for, PLUGIN_LOG_DIR, PLUGIN_RUNNER_BINARY,
-    PLUGIN_UNIT_DIR,
+    build_unit_spec, plugin_http_dir, plugin_unit_basename, unit_name_for, PLUGIN_LOG_DIR,
+    PLUGIN_LOG_SUFFIX, PLUGIN_RUNNER_BINARY, PLUGIN_UNIT_DIR, PLUGIN_UNIT_PREFIX,
 };
 use crate::token_secret::{
     plugin_data_dir, shared_issuer, token_credential_path, write_token_credential, PLUGIN_DATA_DIR,
@@ -114,6 +114,23 @@ pub struct InstallResult {
     pub signer_id: Option<String>,
     pub risk: String,
     pub permissions_requested: Vec<String>,
+}
+
+/// Summary returned from a successful remove. `warning` names what could not
+/// be read when the install was removed without its manifest (a missing,
+/// tampered or no-longer-valid one); `None` on a normal remove.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoveOutcome {
+    pub warning: Option<String>,
+}
+
+/// What one revocation pass did: the plugins it disabled, and the plugins it
+/// left running because the vehicle counts as armed (their records carry
+/// `revocation_pending`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RevocationSweep {
+    pub disabled: Vec<String>,
+    pub deferred: Vec<String>,
 }
 
 /// Filesystem + unit-dir layout the controller writes to. Tests point these at
@@ -193,11 +210,25 @@ pub const SIGNER_CHANGE_REASON: &str = "signer_change";
 /// The failure reason recorded on an install whose signer has been revoked.
 pub const SIGNER_REVOKED_REASON: &str = "signer_revoked";
 
+/// The refusal reason when the revocation list exists but cannot be read: a
+/// signed plugin is neither installed nor enabled until it can be.
+pub const REVOCATION_LIST_UNREADABLE_REASON: &str = "revocation_list_unreadable";
+
+/// The refusal and failure reason for an archive whose digest is revoked.
+pub const ARCHIVE_REVOKED_REASON: &str = "archive_revoked";
+
+/// The refusal and failure reason for a plugin release the registry revoked
+/// by `<plugin_id>@<version>`.
+pub const VERSION_REVOKED_REASON: &str = "version_revoked";
+
+/// The refusal reason for a plugin whose `supported_boards` excludes this board.
+pub const BOARD_MISMATCH_REASON: &str = "board_mismatch";
+
 /// Plugin lifecycle controller. Constructed once per agent.
 pub struct PluginSupervisor {
     paths: Paths,
     require_signed: bool,
-    current_board_id: Option<String>,
+    current_board_id: Option<BoardId>,
     /// The current board's compute tier (1-4), for the `min_tier` floor. `None`
     /// leaves the floor unenforced, matching the `supported_boards` posture: a
     /// node that cannot tell you its tier does not get to refuse installs over
@@ -228,6 +259,9 @@ pub struct PluginSupervisor {
     /// Creates and removes each plugin's system user and hands its writable
     /// dirs to it, on a sandboxing backend.
     accounts: Accounts,
+    /// Extra first-party keys a unit test pins (see `with_first_party_key`).
+    #[cfg(test)]
+    test_first_party: Vec<(String, [u8; 32])>,
 }
 
 impl PluginSupervisor {
@@ -239,7 +273,7 @@ impl PluginSupervisor {
     pub fn new(
         paths: Paths,
         require_signed: bool,
-        current_board_id: Option<String>,
+        current_board_id: Option<BoardId>,
         agent_version: impl Into<String>,
     ) -> Self {
         let backend = default_backend(&paths.unit_dir);
@@ -258,6 +292,8 @@ impl PluginSupervisor {
             trusted_keys_dir: PathBuf::from(PLUGIN_KEYS_DIR),
             revocations_path: None,
             accounts,
+            #[cfg(test)]
+            test_first_party: Vec::new(),
         }
     }
 
@@ -273,7 +309,7 @@ impl PluginSupervisor {
     /// logged so it is never silent.
     pub fn production(
         paths: Paths,
-        current_board_id: Option<String>,
+        current_board_id: Option<BoardId>,
         agent_version: impl Into<String>,
     ) -> Self {
         let require_signed = require_signed_default();
@@ -286,20 +322,28 @@ impl PluginSupervisor {
         PluginSupervisor::new(paths, require_signed, current_board_id, agent_version)
     }
 
-    /// The board id and compute tier the `compatibility.supported_boards` and
-    /// `min_tier` gates key on, read from the HAL board sidecar at
+    /// The board identity and compute tier the `compatibility.supported_boards`
+    /// and `min_tier` gates key on, read from the HAL board sidecar at
     /// `board_sidecar`. Every daemon that builds a [`production`](Self::production)
     /// controller passes these, so a plugin refused on one install path is
-    /// refused on all of them. `(None, None)` when the sidecar is absent or
-    /// unreadable, and each half is `None` when it is `unknown` or out of range:
-    /// a node that has not probed yet stays lenient rather than refusing every
-    /// install.
-    pub fn board_identity(board_sidecar: &Path) -> (Option<String>, Option<u8>) {
+    /// refused on all of them. The identity is the profile stem plus the SoC
+    /// (empty when `unknown`); it is `None` when the sidecar is absent,
+    /// unreadable or names no profile, and the tier is `None` when out of
+    /// range: a node that has not probed yet stays lenient rather than refusing
+    /// every install.
+    pub fn board_identity(board_sidecar: &Path) -> (Option<BoardId>, Option<u8>) {
         let Some(board) = ados_hal_probe::board_sidecar::read_sidecar(board_sidecar) else {
             return (None, None);
         };
-        let id = (!board.name.is_empty() && board.name != "unknown").then_some(board.name);
         let tier = (1..=4).contains(&board.tier).then_some(board.tier as u8);
+        let id = (!board.profile.is_empty()).then(|| BoardId {
+            profile: board.profile,
+            soc: if board.soc.eq_ignore_ascii_case("unknown") {
+                String::new()
+            } else {
+                board.soc
+            },
+        });
         (id, tier)
     }
 
@@ -335,15 +379,59 @@ impl PluginSupervisor {
         self
     }
 
-    /// Read the signer revocation list from `path` instead of the default
+    /// Read the revocation list from `path` instead of the default
     /// (tests revoke a throwaway key).
     pub fn with_revocations_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.revocations_path = Some(path.into());
         self
     }
 
-    fn revocations(&self) -> BTreeSet<String> {
-        load_revocation_list(self.revocations_path.as_deref())
+    /// The revocation list this controller enforces.
+    pub fn revocations_path(&self) -> PathBuf {
+        self.revocations_path
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(PLUGIN_REVOCATIONS_PATH))
+    }
+
+    /// The current revocation list. `Err` when the file exists but is
+    /// unreadable or malformed: the callers refuse rather than trust a list
+    /// they could not read.
+    pub fn revocations(&self) -> Result<Revocations, String> {
+        load_revocations(&self.revocations_path())
+    }
+
+    /// True when `signer_id` verified against an enrolled key that is a
+    /// pinned first-party key. A first-party NAME on another key is a third
+    /// party.
+    fn is_first_party(&self, signer_id: Option<&str>) -> bool {
+        let Some(signer_id) = signer_id else {
+            return false;
+        };
+        let Some(key) = load_trusted_keys(Some(&self.trusted_keys_dir)).remove(signer_id) else {
+            return false;
+        };
+        #[cfg(test)]
+        if self
+            .test_first_party
+            .iter()
+            .any(|(id, bytes)| id == signer_id && key.verifying_key.as_bytes() == bytes)
+        {
+            return true;
+        }
+        is_first_party_signer(signer_id, &key.verifying_key)
+    }
+
+    /// Treat `key` as a pinned first-party key for `signer_id` (unit tests sign
+    /// with throwaway keys; the real pinned keys have no private half here).
+    #[cfg(test)]
+    pub(crate) fn with_first_party_key(
+        mut self,
+        signer_id: &str,
+        key: ed25519_dalek::VerifyingKey,
+    ) -> Self {
+        self.test_first_party
+            .push((signer_id.to_string(), key.to_bytes()));
+        self
     }
 
     /// True when this controller enforces a valid first-party signature before
@@ -387,12 +475,52 @@ impl PluginSupervisor {
     /// file).
     pub fn discover(&mut self) -> Result<(), LifecycleError> {
         self.installs = load_state(Some(&self.paths.state_path));
+        self.restore_interrupted_swaps();
         self.filter_installs_against_manifests();
         tracing::info!(
             installed_count = self.installs.len(),
             "plugin_supervisor_discovered"
         );
         Ok(())
+    }
+
+    /// Put back an install tree a crash left missing between the two renames
+    /// of a swap: the retired tree (it matches the record) first, else the
+    /// validated staging tree.
+    fn restore_interrupted_swaps(&self) {
+        for install in &self.installs {
+            let Ok(target) = plugin_dir_under(&self.paths.install_dir, &install.plugin_id) else {
+                continue;
+            };
+            if target.exists() {
+                continue;
+            }
+            for kind in ["retired", "staging"] {
+                let candidate = self
+                    .paths
+                    .install_dir
+                    .join(format!(".{}.{kind}", install.plugin_id));
+                if !candidate.is_dir() {
+                    continue;
+                }
+                match std::fs::rename(&candidate, &target) {
+                    Ok(()) => {
+                        tracing::warn!(
+                            plugin_id = %install.plugin_id,
+                            from = kind,
+                            "plugin_install_restored"
+                        );
+                        break;
+                    }
+                    Err(e) => tracing::error!(
+                        plugin_id = %install.plugin_id,
+                        from = kind,
+                        error = %e,
+                        "plugin_install_restore_failed"
+                    ),
+                }
+            }
+        }
     }
 
     /// Re-read the install list from disk before a read-modify-write.
@@ -410,6 +538,7 @@ impl PluginSupervisor {
                 "plugin state is unreadable ({e}); refusing to overwrite it"
             ))
         })?;
+        self.restore_interrupted_swaps();
         self.filter_installs_against_manifests();
         Ok(())
     }
@@ -628,17 +757,18 @@ impl PluginSupervisor {
     ) -> Result<InstallResult, LifecycleError> {
         let contents = builtin_contents(manifest_yaml)?;
         let source = format!("builtin:{}", contents.manifest.id);
-        self.install_verified(contents, None, Path::new(&source), false)
+        self.install_verified(contents, None, None, Path::new(&source), false)
     }
 
     /// Install from parsed contents, choosing whether a version downgrade is
     /// permitted.
     ///
-    /// Order: signature, compatibility, the first-party gates and the service
-    /// block, then the payload downloads (outside the state lock, so a large
-    /// fetch never blocks another lifecycle call), then under the lock the
-    /// downgrade and shared-topic checks, the staged unpack with payloads and
-    /// the attestation placed into it, the swap, the unit and the record.
+    /// Order: signature and revocation, compatibility, the first-party gates
+    /// and the service block, then the payload downloads (outside the state
+    /// lock, so a large fetch never blocks another lifecycle call), then under
+    /// the lock the downgrade and shared-topic checks, the staged unpack with
+    /// payloads and the attestation placed into it, the swap, the unit and the
+    /// record.
     pub fn install_contents_with(
         &mut self,
         contents: ArchiveContents,
@@ -646,7 +776,34 @@ impl PluginSupervisor {
         allow_downgrade: bool,
     ) -> Result<InstallResult, LifecycleError> {
         let signer = self.verified_signer(&contents)?;
-        self.install_verified(contents, signer, source_path, allow_downgrade)
+        let digest = hex::encode(Sha256::digest(&contents.raw_archive_bytes));
+        // A revoked archive or release is refused whoever signed it; an
+        // unreadable list has already refused a signed archive in
+        // `verified_signer`.
+        if let Ok(revocations) = self.revocations() {
+            let manifest = &contents.manifest;
+            let refusal = if revocations.archive_revoked(&digest) {
+                Some((ARCHIVE_REVOKED_REASON, format!("archive {digest}")))
+            } else if revocations.version_revoked(&manifest.id, &manifest.version) {
+                Some((
+                    VERSION_REVOKED_REASON,
+                    format!("version {}", manifest.version),
+                ))
+            } else {
+                None
+            };
+            if let Some((reason, what)) = refusal {
+                return Err(SignatureError::new(
+                    SignatureErrorKind::Revoked,
+                    format!(
+                        "refused: {reason}: {what} of plugin {} is on the revocation list",
+                        manifest.id
+                    ),
+                )
+                .into());
+            }
+        }
+        self.install_verified(contents, signer, Some(digest), source_path, allow_downgrade)
     }
 
     /// The signer whose Ed25519 signature over the archive's payload hash
@@ -675,7 +832,17 @@ impl PluginSupervisor {
             return Ok(None);
         };
         let trusted = load_trusted_keys(Some(&self.trusted_keys_dir));
-        let revocations = self.revocations();
+        // An unreadable list never silently re-trusts a revoked signer.
+        let revocations = match self.revocations() {
+            Ok(r) => r.signers,
+            Err(e) => {
+                tracing::error!(plugin_id = %plugin_id, error = %e, "plugin_revocation_list_unreadable");
+                return Err(SignatureError::new(
+                    SignatureErrorKind::Revoked,
+                    format!("refused: {REVOCATION_LIST_UNREADABLE_REASON}: {e}"),
+                ));
+            }
+        };
         match verify_archive_signature(
             &contents.payload_hash,
             sig_b64,
@@ -684,7 +851,9 @@ impl PluginSupervisor {
             &revocations,
         ) {
             Ok(()) => Ok(Some(signer_id.to_string())),
-            Err(e) if self.require_signed => Err(e),
+            // A revoked signer is refused even with signing relaxed: it must
+            // not slip in as an unsigned install.
+            Err(e) if self.require_signed || e.kind == SignatureErrorKind::Revoked => Err(e),
             Err(e) => {
                 tracing::warn!(
                     plugin_id = %plugin_id,
@@ -704,14 +873,16 @@ impl PluginSupervisor {
         &mut self,
         contents: ArchiveContents,
         signer: Option<String>,
+        archive_sha256: Option<String>,
         source_path: &Path,
         allow_downgrade: bool,
     ) -> Result<InstallResult, LifecycleError> {
         let manifest = &contents.manifest;
         self.check_compatibility(manifest)?;
-        self.reject_inline_for_third_party(manifest, signer.as_deref())?;
-        self.reject_heavy_for_third_party(manifest, signer.as_deref())?;
-        self.reject_unsandboxed_third_party(manifest, signer.as_deref())?;
+        let first_party = self.is_first_party(signer.as_deref());
+        self.reject_inline_for_third_party(manifest, signer.as_deref(), first_party)?;
+        self.reject_heavy_for_third_party(manifest, first_party)?;
+        self.reject_unsandboxed_third_party(manifest, first_party)?;
         // A malformed service block (a foreign slice, an off-box ready_check,
         // an unrenderable command, an undeclared listener) is refused here, as
         // the Python manifest model refuses it at parse, rather than surfacing
@@ -732,6 +903,7 @@ impl PluginSupervisor {
                 self.install_locked(
                     &contents,
                     signer,
+                    archive_sha256,
                     source_path,
                     allow_downgrade,
                     &payload_dir,
@@ -794,10 +966,12 @@ impl PluginSupervisor {
         Ok(fetched)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn install_locked(
         &mut self,
         contents: &ArchiveContents,
         signer: Option<String>,
+        archive_sha256: Option<String>,
         source_path: &Path,
         allow_downgrade: bool,
         payload_dir: &Path,
@@ -871,23 +1045,7 @@ impl PluginSupervisor {
             // keep running while state reports the new one.
             self.stop_for_replacement(previous);
         }
-        swap_into_place(&staging, &target)?;
-
-        // Write the unit for subprocess agent halves. A fresh install has
-        // granted nothing yet, so the unit renders with the most restrictive
-        // sandbox; grant/revoke re-renders it.
-        if let Some(spec) = build_unit_spec(
-            manifest,
-            &self.paths,
-            &self.current_profile,
-            &BTreeSet::new(),
-            false,
-        )? {
-            self.backend.install(&unit_name_for(&manifest.id), &spec)?;
-        }
-
-        let manifest_bytes = std::fs::read(target.join(MANIFEST_FILENAME))?;
-        let manifest_hash = hex::encode(Sha256::digest(&manifest_bytes));
+        let swap = swap_into_place(&staging, &target)?;
 
         let install = PluginInstall {
             plugin_id: manifest.id.clone(),
@@ -895,7 +1053,8 @@ impl PluginSupervisor {
             source: PluginSource::LocalFile,
             source_uri: Some(source_path.display().to_string()),
             signer_id: signer.clone(),
-            manifest_hash,
+            // Filled from the swapped-in tree.
+            manifest_hash: String::new(),
             status: PluginStatus::Installed,
             installed_at: now_ms(),
             enabled_at: None,
@@ -909,9 +1068,20 @@ impl PluginSupervisor {
             reenable_pending: false,
             model_status: None,
             service_status: None,
+            revocation_pending: false,
+            archive_sha256,
         };
-        self.installs = upsert_install(std::mem::take(&mut self.installs), install);
-        save_state(&self.installs, Some(&self.paths.state_path))?;
+        // Everything from here to the saved record either completes or rolls
+        // back: a half-applied install (new tree, old record) would fail every
+        // later lifecycle call on a manifest-hash mismatch.
+        if let Err(e) = self.write_unit_and_record(manifest, &target, install) {
+            // Swap the previous tree back before touching its unit, so the
+            // restored unit reads the files its record describes.
+            drop(swap);
+            self.restore_previous_unit(&manifest.id, previous.as_ref());
+            return Err(e);
+        }
+        swap.commit();
 
         Ok(InstallResult {
             plugin_id: manifest.id.clone(),
@@ -920,6 +1090,70 @@ impl PluginSupervisor {
             risk: manifest.risk.clone(),
             permissions_requested: manifest.declared_permissions().into_iter().collect(),
         })
+    }
+
+    /// The post-swap half of an install: write the unit for a subprocess agent
+    /// half (a fresh install has granted nothing yet, so it renders with the
+    /// most restrictive sandbox; grant/revoke re-renders it), then save the
+    /// record with the swapped-in manifest's hash.
+    fn write_unit_and_record(
+        &mut self,
+        manifest: &PluginManifest,
+        target: &Path,
+        mut install: PluginInstall,
+    ) -> Result<(), LifecycleError> {
+        if let Some(spec) = build_unit_spec(
+            manifest,
+            &self.paths,
+            &self.current_profile,
+            &BTreeSet::new(),
+            false,
+        )? {
+            self.backend.install(&unit_name_for(&manifest.id), &spec)?;
+        }
+        let manifest_bytes = std::fs::read(target.join(MANIFEST_FILENAME))?;
+        install.manifest_hash = hex::encode(Sha256::digest(&manifest_bytes));
+        let installs = upsert_install(self.installs.clone(), install);
+        save_state(&installs, Some(&self.paths.state_path))?;
+        self.installs = installs;
+        Ok(())
+    }
+
+    /// After a failed install rolled the tree back: re-install the previous
+    /// version's unit and start it again if it was running, or drop the unit a
+    /// fresh install wrote. Best-effort, logged.
+    fn restore_previous_unit(&self, plugin_id: &str, previous: Option<&PluginInstall>) {
+        let Some(previous) = previous else {
+            if let Err(e) = self.backend.uninstall(&unit_name_for(plugin_id)) {
+                tracing::warn!(plugin_id, error = %e, "plugin_install_rollback_unit_cleanup_failed");
+            }
+            tracing::warn!(plugin_id, "plugin_install_rolled_back");
+            return;
+        };
+        let manifest = match self.manifest_for(plugin_id) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(plugin_id, error = %e, "plugin_install_rollback_manifest_unreadable");
+                return;
+            }
+        };
+        if let Err(e) = self.refresh_unit(plugin_id, &manifest) {
+            tracing::error!(plugin_id, error = %e, "plugin_install_rollback_unit_failed");
+        }
+        if manifest.is_subprocess_agent()
+            && matches!(
+                previous.status,
+                PluginStatus::Running | PluginStatus::Enabled
+            )
+        {
+            match self.backend.enable_start(&unit_name_for(plugin_id)) {
+                Ok(()) => self.start_declared_services(plugin_id, &manifest),
+                Err(e) => {
+                    tracing::error!(plugin_id, error = %e, "plugin_install_rollback_restart_failed")
+                }
+            }
+        }
+        tracing::warn!(plugin_id, "plugin_install_rolled_back");
     }
 
     /// Grant a declared permission. Rejects a permission the manifest does not
@@ -1172,11 +1406,9 @@ impl PluginSupervisor {
         let is_subprocess = manifest.is_subprocess_agent();
         {
             let install = self.require_install_ref(plugin_id)?;
-            if self.signer_revoked(install, &self.revocations()) {
+            if let Some(reason) = self.revocation_refusal(install) {
                 return Err(SupervisorError(format!(
-                    "refused: {SIGNER_REVOKED_REASON}: plugin {plugin_id} is signed by revoked \
-                     signer {}",
-                    install.signer_id.as_deref().unwrap_or_default()
+                    "refused: {reason}: plugin {plugin_id} may not be enabled"
                 ))
                 .into());
             }
@@ -1268,7 +1500,12 @@ impl PluginSupervisor {
 
     /// Remove a plugin: disable it (if running/enabled), remove the units,
     /// delete the unpacked dir and drop the state; unless `keep_data`, also the
-    /// log, the data dir and the plugin's system user.
+    /// logs, the data dir and the plugin's system user.
+    ///
+    /// An install whose manifest cannot be read (missing, tampered, no longer
+    /// valid) is still removable: its main unit and every
+    /// `ados-plugin-<basename>-*.service` in the unit dir are uninstalled by
+    /// name, and the outcome carries the reason as a warning.
     ///
     /// A data dir this process cannot delete (it belongs to the plugin's own
     /// user, and a caller without DAC override such as the cloud relay cannot
@@ -1277,7 +1514,11 @@ impl PluginSupervisor {
     /// `data_not_removed:` after everything else is done, so the caller reports
     /// it rather than a clean removal; the user is then kept so the files keep
     /// an owner.
-    pub fn remove(&mut self, plugin_id: &str, keep_data: bool) -> Result<(), LifecycleError> {
+    pub fn remove(
+        &mut self,
+        plugin_id: &str,
+        keep_data: bool,
+    ) -> Result<RemoveOutcome, LifecycleError> {
         // disable() takes the lock itself; decide against current state, run it
         // outside the lock below, then re-read under the lock for the removal.
         let status = {
@@ -1294,12 +1535,22 @@ impl PluginSupervisor {
         let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
         self.reload_installs()?;
         self.require_install_ref(plugin_id)?;
-        let manifest = self.manifest_for(plugin_id)?;
-        if manifest.is_subprocess_agent() {
-            // disable() already stopped the declared services; delete their
-            // units alongside the main unit.
-            self.delete_declared_service_units(plugin_id, &manifest);
-            self.backend.uninstall(&unit_name_for(plugin_id))?;
+        let (manifest, warning) = match self.manifest_for(plugin_id) {
+            Ok(m) => (Some(m), None),
+            Err(e) => {
+                tracing::warn!(plugin_id, error = %e, "plugin_remove_manifest_unreadable");
+                (None, Some(e.0))
+            }
+        };
+        match &manifest {
+            Some(m) if m.is_subprocess_agent() => {
+                // disable() already stopped the declared services; delete their
+                // units alongside the main unit.
+                self.delete_declared_service_units(plugin_id, m);
+                self.backend.uninstall(&unit_name_for(plugin_id))?;
+            }
+            Some(_) => {}
+            None => self.uninstall_units_by_name(plugin_id),
         }
         let http_dir = plugin_http_dir(&self.paths.run_dir, plugin_id);
         if http_dir.exists() {
@@ -1314,13 +1565,11 @@ impl PluginSupervisor {
         self.installs = remove_install(std::mem::take(&mut self.installs), plugin_id);
         save_state(&self.installs, Some(&self.paths.state_path))?;
         tracing::info!(plugin_id, keep_data, "plugin_removed");
+        let outcome = RemoveOutcome { warning };
         if keep_data {
-            return Ok(());
+            return Ok(outcome);
         }
-        let log_file = crate::systemd::log_path_for(&self.paths.log_dir, plugin_id);
-        if log_file.exists() {
-            std::fs::remove_file(&log_file)?;
-        }
+        self.remove_logs(plugin_id, manifest.as_ref())?;
         let data = plugin_dir_under(&self.paths.data_root, plugin_id)?;
         let removed = match std::fs::remove_dir_all(&data) {
             Ok(()) => Ok(()),
@@ -1337,8 +1586,82 @@ impl PluginSupervisor {
             ))
             .into());
         }
-        if manifest.is_subprocess_agent() && self.backend.enforces_sandbox() {
-            self.accounts.remove(plugin_id)?;
+        if self.backend.enforces_sandbox() {
+            match &manifest {
+                Some(m) if m.is_subprocess_agent() => self.accounts.remove(plugin_id)?,
+                Some(_) => {}
+                // The manifest is gone, so whether it had an account is
+                // unknown: remove it if there is one, best-effort.
+                None => {
+                    if let Err(e) = self.accounts.remove(plugin_id) {
+                        tracing::warn!(plugin_id, error = %e, "plugin_account_remove_failed");
+                    }
+                }
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// Stop and uninstall a plugin's main unit and every
+    /// `ados-plugin-<basename>-*.service` in the unit dir, by name alone.
+    /// Best-effort: the remove of an unreadable install must not stop here.
+    fn uninstall_units_by_name(&self, plugin_id: &str) {
+        let main = unit_name_for(plugin_id);
+        let prefix = format!("{PLUGIN_UNIT_PREFIX}{}-", plugin_unit_basename(plugin_id));
+        let mut names = vec![main];
+        if let Ok(entries) = std::fs::read_dir(&self.paths.unit_dir) {
+            let mut found: Vec<String> = entries
+                .filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .filter(|n| n.starts_with(&prefix) && n.ends_with(".service"))
+                .collect();
+            found.sort();
+            names.extend(found);
+        }
+        for name in names {
+            if let Err(e) = self.backend.stop_disable(&name) {
+                tracing::warn!(plugin_id, unit = %name, error = %e, "plugin_unit_stop_failed");
+            }
+            if let Err(e) = self.backend.uninstall(&name) {
+                tracing::warn!(plugin_id, unit = %name, error = %e, "plugin_unit_uninstall_failed");
+            }
+        }
+    }
+
+    /// Delete a plugin's main log, each declared service's log, and any other
+    /// `<basename>-*.log` left from a previous version's services.
+    fn remove_logs(
+        &self,
+        plugin_id: &str,
+        manifest: Option<&PluginManifest>,
+    ) -> Result<(), LifecycleError> {
+        let log_dir = &self.paths.log_dir;
+        let mut paths = vec![crate::systemd::log_path_for(log_dir, plugin_id)];
+        if let Some(m) = manifest {
+            paths.extend(
+                self.services_of(plugin_id, m)
+                    .iter()
+                    .map(|s| crate::systemd::service_log_path_for(log_dir, plugin_id, &s.name)),
+            );
+        }
+        let prefix = format!("{}-", plugin_unit_basename(plugin_id));
+        if let Ok(entries) = std::fs::read_dir(log_dir) {
+            paths.extend(
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.file_name().to_str().is_some_and(|n| {
+                            n.starts_with(&prefix) && n.ends_with(PLUGIN_LOG_SUFFIX)
+                        })
+                    })
+                    .map(|e| e.path()),
+            );
+        }
+        for path in paths {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
         }
         Ok(())
     }
@@ -1428,7 +1751,7 @@ impl PluginSupervisor {
         if let Some(board) = &self.current_board_id {
             if !manifest.compatibility.supports_board(board) {
                 return Err(SupervisorError(format!(
-                    "plugin {} does not support board {board}",
+                    "refused: {BOARD_MISMATCH_REASON}: plugin {} does not support board {board}",
                     manifest.id
                 ))
                 .into());
@@ -1539,11 +1862,10 @@ impl PluginSupervisor {
         &self,
         manifest: &PluginManifest,
         signer_id: Option<&str>,
+        first_party: bool,
     ) -> Result<(), LifecycleError> {
         if let Some(gcs) = &manifest.gcs {
-            if gcs.isolation == GcsIsolation::Inline
-                && signer_id.map(is_first_party_signer) != Some(true)
-            {
+            if gcs.isolation == GcsIsolation::Inline && !first_party {
                 return Err(SupervisorError(format!(
                     "plugin {} requests inline GCS isolation but signer {} is not first-party",
                     manifest.id,
@@ -1560,13 +1882,13 @@ impl PluginSupervisor {
     fn reject_heavy_for_third_party(
         &self,
         manifest: &PluginManifest,
-        signer_id: Option<&str>,
+        first_party: bool,
     ) -> Result<(), LifecycleError> {
         let heavy = manifest
             .agent
             .as_ref()
             .is_some_and(|a| a.resources.class == ResourceClass::Heavy);
-        if heavy && signer_id.map(is_first_party_signer) != Some(true) {
+        if heavy && !first_party {
             return Err(
                 SupervisorError("refused: heavy_resources_first_party_only".to_string()).into(),
             );
@@ -1581,12 +1903,9 @@ impl PluginSupervisor {
     fn reject_unsandboxed_third_party(
         &self,
         manifest: &PluginManifest,
-        signer_id: Option<&str>,
+        first_party: bool,
     ) -> Result<(), LifecycleError> {
-        if manifest.is_subprocess_agent()
-            && !self.backend.enforces_sandbox()
-            && signer_id.map(is_first_party_signer) != Some(true)
-        {
+        if manifest.is_subprocess_agent() && !self.backend.enforces_sandbox() && !first_party {
             return Err(SupervisorError(
                 "refused: sandbox_unavailable_first_party_only".to_string(),
             )
@@ -1709,51 +2028,93 @@ impl PluginSupervisor {
         Ok(())
     }
 
-    /// Whether `install` is signed by a revoked signer.
-    fn signer_revoked(&self, install: &PluginInstall, revoked: &BTreeSet<String>) -> bool {
-        install
+    /// Why `install` may not run under `revocations`: its signer, its archive
+    /// digest or its release (`<plugin_id>@<version>`) is revoked.
+    fn revoked_reason(install: &PluginInstall, revocations: &Revocations) -> Option<&'static str> {
+        if install
             .signer_id
             .as_deref()
-            .is_some_and(|s| revoked.contains(s))
+            .is_some_and(|s| revocations.signers.contains(s))
+        {
+            Some(SIGNER_REVOKED_REASON)
+        } else if install
+            .archive_sha256
+            .as_deref()
+            .is_some_and(|d| revocations.archive_revoked(d))
+        {
+            Some(ARCHIVE_REVOKED_REASON)
+        } else if revocations.version_revoked(&install.plugin_id, &install.version) {
+            Some(VERSION_REVOKED_REASON)
+        } else {
+            None
+        }
     }
 
-    /// Disable every installed plugin signed by a revoked signer and record
-    /// [`SIGNER_REVOKED_REASON`] on it. Run by the plugin host at startup and
-    /// whenever the revocation list changes, so revoking a compromised key
-    /// stops the plugins it already signed instead of only refusing new
-    /// installs. Returns the ids disabled by this call.
-    pub fn disable_revoked_signers(&mut self) -> Result<Vec<String>, LifecycleError> {
-        let revoked = self.revocations();
-        if revoked.is_empty() {
-            return Ok(Vec::new());
+    /// The refusal reason for enabling `install` now: revoked, or a signed
+    /// plugin while the revocation list cannot be read.
+    fn revocation_refusal(&self, install: &PluginInstall) -> Option<&'static str> {
+        match self.revocations() {
+            Ok(revocations) => Self::revoked_reason(install, &revocations),
+            Err(e) if install.signer_id.is_some() => {
+                tracing::error!(plugin_id = %install.plugin_id, error = %e, "plugin_revocation_list_unreadable");
+                Some(REVOCATION_LIST_UNREADABLE_REASON)
+            }
+            Err(_) => None,
         }
-        let targets: Vec<String> = {
+    }
+
+    /// Apply `revocations` to the installed plugins.
+    ///
+    /// Disarmed: every plugin signed by a revoked signer or installed from a
+    /// revoked archive is disabled with the reason recorded, and its
+    /// `revocation_pending` cleared. Armed (`armed` is the fail-closed verdict:
+    /// unknown or stale counts as armed): nothing is stopped mid-flight; each
+    /// such plugin is marked `revocation_pending` and listed as deferred, and
+    /// the next disarmed pass applies the disable. New installs and enables of a
+    /// revoked plugin are refused at once in either state.
+    pub fn apply_revocations(
+        &mut self,
+        revocations: &Revocations,
+        armed: bool,
+    ) -> Result<RevocationSweep, LifecycleError> {
+        let mut sweep = RevocationSweep::default();
+        if revocations.signers.is_empty() && revocations.archives.is_empty() {
+            return Ok(sweep);
+        }
+        let targets: Vec<(String, &'static str)> = {
             let _lock = StateLock::acquire(Some(&self.paths.state_path))?;
             self.reload_installs()?;
             self.installs
                 .iter()
-                .filter(|i| self.signer_revoked(i, &revoked))
-                .filter(|i| {
+                .filter_map(|i| Self::revoked_reason(i, revocations).map(|r| (i, r)))
+                .filter(|(i, reason)| {
                     i.status != PluginStatus::Disabled
-                        || i.failure_reason.as_deref() != Some(SIGNER_REVOKED_REASON)
+                        || i.failure_reason.as_deref() != Some(*reason)
+                        || i.revocation_pending
                 })
-                .map(|i| i.plugin_id.clone())
+                .map(|(i, reason)| (i.plugin_id.clone(), reason))
                 .collect()
         };
-        let mut disabled = Vec::new();
-        for plugin_id in targets {
+        for (plugin_id, reason) in targets {
+            if armed {
+                self.update_record(&plugin_id, |install| install.revocation_pending = true)?;
+                tracing::warn!(plugin_id, reason, "plugin_revocation_deferred_armed");
+                sweep.deferred.push(plugin_id);
+                continue;
+            }
             if let Err(e) = self.disable(&plugin_id) {
                 tracing::error!(plugin_id, error = %e, "revoked plugin could not be stopped");
             }
             self.update_record(&plugin_id, |install| {
                 install.status = PluginStatus::Disabled;
                 install.enabled_at = None;
-                install.failure_reason = Some(SIGNER_REVOKED_REASON.to_string());
+                install.failure_reason = Some(reason.to_string());
+                install.revocation_pending = false;
             })?;
-            tracing::warn!(plugin_id, "plugin_disabled_signer_revoked");
-            disabled.push(plugin_id);
+            tracing::warn!(plugin_id, reason, "plugin_disabled_revoked");
+            sweep.disabled.push(plugin_id);
         }
-        Ok(disabled)
+        Ok(sweep)
     }
 
     /// Create an `agent.http` plugin's socket dir, owned by the account its
@@ -2152,12 +2513,54 @@ fn create_private_dir(dir: &Path) -> Result<bool, LifecycleError> {
     }
 }
 
+/// A swapped-in install tree that is not final yet: the previous tree stays at
+/// `.<id>.retired` until [`commit`](Self::commit). Dropped uncommitted, it
+/// removes the new tree and renames the previous one back.
+#[must_use = "an uncommitted swap rolls back when dropped"]
+struct SwapGuard {
+    target: PathBuf,
+    retired: Option<PathBuf>,
+    committed: bool,
+}
+
+impl SwapGuard {
+    /// Keep the new tree and delete the retired one.
+    fn commit(mut self) {
+        self.committed = true;
+        if let Some(retired) = &self.retired {
+            let _ = std::fs::remove_dir_all(retired);
+        }
+    }
+}
+
+impl Drop for SwapGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Err(e) = std::fs::remove_dir_all(&self.target) {
+            tracing::error!(dir = %self.target.display(), error = %e, "plugin_install_rollback_failed");
+            return;
+        }
+        if let Some(retired) = &self.retired {
+            if let Err(e) = std::fs::rename(retired, &self.target) {
+                tracing::error!(dir = %self.target.display(), error = %e, "plugin_install_rollback_failed");
+            }
+        }
+    }
+}
+
 /// Replace `target` with the validated `staging` tree by renames, so the
-/// install dir only ever holds a complete old tree or a complete new one.
-fn swap_into_place(staging: &Path, target: &Path) -> Result<(), LifecycleError> {
+/// install dir only ever holds a complete old tree or a complete new one. The
+/// returned guard keeps the old tree until committed.
+fn swap_into_place(staging: &Path, target: &Path) -> Result<SwapGuard, LifecycleError> {
     if !target.exists() {
         std::fs::rename(staging, target)?;
-        return Ok(());
+        return Ok(SwapGuard {
+            target: target.to_path_buf(),
+            retired: None,
+            committed: false,
+        });
     }
     let name = target
         .file_name()
@@ -2169,8 +2572,11 @@ fn swap_into_place(staging: &Path, target: &Path) -> Result<(), LifecycleError> 
     }
     std::fs::rename(target, &retired)?;
     std::fs::rename(staging, target)?;
-    let _ = std::fs::remove_dir_all(&retired);
-    Ok(())
+    Ok(SwapGuard {
+        target: target.to_path_buf(),
+        retired: Some(retired),
+        committed: false,
+    })
 }
 
 /// Bounded semver-range parser for the constraint vocabulary.
@@ -2773,7 +3179,10 @@ mod tests {
         let mut sup = PluginSupervisor::new(
             paths_in(dir.path()),
             false,
-            Some("rpi4b".to_string()),
+            Some(BoardId {
+                profile: "rpi4b".to_string(),
+                soc: "BCM2711".to_string(),
+            }),
             "0.48.11",
         )
         .with_backend(Arc::new(RecordingBackend::default()));
@@ -2782,7 +3191,9 @@ mod tests {
         let err = sup
             .install_contents(contents, Path::new("/tmp/x.adosplug"))
             .unwrap_err();
-        assert!(format!("{err}").contains("does not support board"), "{err}");
+        let err = format!("{err}");
+        assert!(err.starts_with("refused: board_mismatch"), "{err}");
+        assert!(err.contains("does not support board rpi4b"), "{err}");
     }
 
     #[test]
@@ -2796,7 +3207,8 @@ mod tests {
         std::fs::write(
             &sidecar,
             serde_json::json!({
-                "version": 1, "name": "rock-5c-lite", "model": "x", "tier": 3,
+                "version": 1, "name": "Radxa ROCK 5C Lite (RK3582)", "profile": "rock-5c-lite",
+                "model": "x", "tier": 3,
                 "ram_mb": 4096, "cpu_cores": 6, "vendor": "radxa", "soc": "rk3582",
                 "arch": "aarch64", "hw_video_codecs": [], "npu_tops": 0.0,
                 "has_accelerator": false, "local_inference": "none",
@@ -2805,9 +3217,43 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        // The gate keys on the profile stem, never on the display name.
         assert_eq!(
             PluginSupervisor::board_identity(&sidecar),
-            (Some("rock-5c-lite".to_string()), Some(3))
+            (
+                Some(BoardId {
+                    profile: "rock-5c-lite".to_string(),
+                    soc: "rk3582".to_string()
+                }),
+                Some(3)
+            )
+        );
+        // An older sidecar without a profile stays lenient; an unknown SoC is empty.
+        std::fs::write(
+            &sidecar,
+            serde_json::json!({
+                "version": 1, "name": "x", "model": "x", "tier": 2, "ram_mb": 1,
+                "cpu_cores": 1, "vendor": "v", "soc": "unknown", "arch": "a",
+                "hw_video_codecs": [], "npu_tops": 0.0, "has_accelerator": false,
+                "local_inference": "none", "has_local_inference": false,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(PluginSupervisor::board_identity(&sidecar), (None, Some(2)));
+        let generic = serde_json::json!({
+            "version": 1, "name": "generic-arm64", "profile": "generic-arm64", "model": "x",
+            "tier": 2, "ram_mb": 1, "cpu_cores": 1, "vendor": "v", "soc": "unknown",
+            "arch": "a", "hw_video_codecs": [], "npu_tops": 0.0, "has_accelerator": false,
+            "local_inference": "none", "has_local_inference": false,
+        });
+        std::fs::write(&sidecar, generic.to_string()).unwrap();
+        assert_eq!(
+            PluginSupervisor::board_identity(&sidecar).0,
+            Some(BoardId {
+                profile: "generic-arm64".to_string(),
+                soc: String::new()
+            })
         );
     }
 
@@ -2842,7 +3288,8 @@ mod tests {
         let third = enrol(&keys, "third-party");
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
             .with_backend(Arc::new(RecordingBackend::default()))
-            .with_trusted_keys_dir(&keys);
+            .with_trusted_keys_dir(&keys)
+            .with_first_party_key(FIRST_PARTY, first.verifying_key());
         let panel = || archive_with(INLINE_PANEL, &[("gcs/dist/index.js", b"x")]);
         for contents in [
             parse_archive_bytes(panel()).unwrap(),
@@ -2973,6 +3420,8 @@ mod tests {
             last_update_check_at: None,
             last_update_attempt: None,
             reenable_pending: false,
+            revocation_pending: false,
+            archive_sha256: None,
             model_status: None,
             service_status: None,
         };
@@ -3172,7 +3621,8 @@ mod tests {
         let rec = Arc::new(RecordingBackend::default());
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
             .with_backend(rec.clone())
-            .with_trusted_keys_dir(&keys);
+            .with_trusted_keys_dir(&keys)
+            .with_first_party_key(FIRST_PARTY, first.verifying_key());
         for contents in [
             parse_archive_bytes(build_unsigned_archive(HEAVY)).unwrap(),
             signed_by(build_unsigned_archive(HEAVY), "third-party", &third),
@@ -3296,10 +3746,15 @@ mod tests {
         .unwrap();
         sup.enable(id).unwrap();
         // Nothing revoked: nothing changes.
-        assert!(sup.disable_revoked_signers().unwrap().is_empty());
+        let none = sup.revocations().unwrap();
+        assert_eq!(
+            sup.apply_revocations(&none, false).unwrap(),
+            Default::default()
+        );
 
         std::fs::write(&revocations, r#"["alice"]"#).unwrap();
-        assert_eq!(sup.disable_revoked_signers().unwrap(), [id]);
+        let revs = sup.revocations().unwrap();
+        assert_eq!(sup.apply_revocations(&revs, false).unwrap().disabled, [id]);
         let record = sup.find_install(id).unwrap();
         assert_eq!(record.status, PluginStatus::Disabled);
         assert_eq!(
@@ -3308,12 +3763,403 @@ mod tests {
         );
         assert!(rec.called("stop_disable", &unit_name_for(id)));
         // A second pass has nothing left to do, and the plugin stays off.
-        assert!(sup.disable_revoked_signers().unwrap().is_empty());
+        assert_eq!(
+            sup.apply_revocations(&revs, false).unwrap(),
+            Default::default()
+        );
         let err = sup.enable(id).unwrap_err();
         assert!(
             format!("{err}").starts_with("refused: signer_revoked"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn revocation_deferred_while_armed_then_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let alice = enrol(&keys, "alice");
+        let revocations = dir.path().join("plugin-revocations.json");
+        let rec = Arc::new(RecordingBackend::default());
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(rec.clone())
+            .with_trusted_keys_dir(&keys)
+            .with_revocations_path(&revocations);
+        let id = "com.example.thermal";
+        sup.install_contents(
+            signed_by(thermal_at("1.0.0"), "alice", &alice),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        sup.enable(id).unwrap();
+        rec.clear_calls();
+        std::fs::write(&revocations, r#"{"signers":["alice"],"archives":[]}"#).unwrap();
+        let revs = sup.revocations().unwrap();
+
+        // Armed: nothing is stopped, the record says the disable is pending.
+        let sweep = sup.apply_revocations(&revs, true).unwrap();
+        assert_eq!(sweep.deferred, [id]);
+        assert!(sweep.disabled.is_empty());
+        assert!(!rec.called("stop_disable", &unit_name_for(id)));
+        let record = sup.find_install(id).unwrap();
+        assert_eq!(record.status, PluginStatus::Running);
+        assert!(record.revocation_pending);
+        // A new enable or install of the revoked signer is refused at once.
+        assert!(sup
+            .install_contents(
+                signed_by(thermal_at("1.1.0"), "alice", &alice),
+                Path::new("/tmp/thermal.adosplug"),
+            )
+            .is_err());
+
+        // Disarmed: the next pass applies the disable and clears the flag.
+        let sweep = sup.apply_revocations(&revs, false).unwrap();
+        assert_eq!(sweep.disabled, [id]);
+        assert!(rec.called("stop_disable", &unit_name_for(id)));
+        let record = sup.find_install(id).unwrap();
+        assert_eq!(record.status, PluginStatus::Disabled);
+        assert!(!record.revocation_pending);
+    }
+
+    #[test]
+    fn malformed_revocations_refuse_signed_enable() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let alice = enrol(&keys, "alice");
+        let revocations = dir.path().join("plugin-revocations.json");
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_trusted_keys_dir(&keys)
+            .with_revocations_path(&revocations);
+        let id = "com.example.thermal";
+        sup.install_contents(
+            signed_by(thermal_at("1.0.0"), "alice", &alice),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        std::fs::write(&revocations, b"[\"alice\"").unwrap();
+        let err = sup.enable(id).unwrap_err();
+        assert!(
+            format!("{err}").starts_with("refused: revocation_list_unreadable"),
+            "{err}"
+        );
+        let err = sup
+            .install_contents(
+                signed_by(thermal_at("1.1.0"), "alice", &alice),
+                Path::new("/tmp/thermal.adosplug"),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("revocation_list_unreadable"),
+            "{err}"
+        );
+        // A missing file is an empty list: the enable goes through.
+        std::fs::remove_file(&revocations).unwrap();
+        sup.enable(id).unwrap();
+    }
+
+    #[test]
+    fn archive_hash_revocation_blocks_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let revocations = dir.path().join("plugin-revocations.json");
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_revocations_path(&revocations);
+        let bytes = thermal_at("1.0.0");
+        let digest = hex::encode(Sha256::digest(&bytes));
+        sup.install_contents(
+            parse_archive_bytes(bytes.clone()).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        let id = "com.example.thermal";
+        assert_eq!(
+            sup.find_install(id).unwrap().archive_sha256.as_deref(),
+            Some(digest.as_str())
+        );
+        std::fs::write(
+            &revocations,
+            format!(
+                r#"{{"signers":[],"archives":["{}"]}}"#,
+                digest.to_uppercase()
+            ),
+        )
+        .unwrap();
+        let err = sup
+            .install_contents(
+                parse_archive_bytes(bytes).unwrap(),
+                Path::new("/tmp/thermal.adosplug"),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("refused: archive_revoked"),
+            "{err}"
+        );
+        let err = sup.enable(id).unwrap_err();
+        assert!(
+            format!("{err}").starts_with("refused: archive_revoked"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn registry_version_revocation_blocks_install_and_enable() {
+        let dir = tempfile::tempdir().unwrap();
+        let revocations = dir.path().join("plugin-revocations.json");
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_revocations_path(&revocations);
+        let bytes = thermal_at("1.0.0");
+        sup.install_contents(
+            parse_archive_bytes(bytes.clone()).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        // The registry revokes a release by id and version, with no digest.
+        std::fs::write(
+            &revocations,
+            br#"{"signer_keys":[],"plugin_versions":["com.example.thermal@1.0.0"],"generated_at":1}"#,
+        )
+        .unwrap();
+        let err = sup
+            .install_contents(
+                parse_archive_bytes(bytes).unwrap(),
+                Path::new("/tmp/thermal.adosplug"),
+            )
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("refused: version_revoked"),
+            "{err}"
+        );
+        let err = sup.enable("com.example.thermal").unwrap_err();
+        assert!(
+            format!("{err}").starts_with("refused: version_revoked"),
+            "{err}"
+        );
+        // Another release of the same plugin is not caught.
+        sup.install_contents(
+            parse_archive_bytes(thermal_at("1.0.1")).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn forged_first_party_named_key_is_third_party() {
+        // A key planted under a first-party NAME verifies, and is recorded as
+        // that signer, but buys none of the first-party allowances.
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let planted = enrol(&keys, FIRST_PARTY);
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()))
+            .with_trusted_keys_dir(&keys);
+        let err = sup
+            .install_contents(
+                signed_by(build_unsigned_archive(HEAVY), FIRST_PARTY, &planted),
+                Path::new("/tmp/heavy.adosplug"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            format!("{err}"),
+            "refused: heavy_resources_first_party_only"
+        );
+        let panel = archive_with(INLINE_PANEL, &[("gcs/dist/index.js", b"x")]);
+        let err = sup
+            .install_contents(
+                signed_by(panel, FIRST_PARTY, &planted),
+                Path::new("/tmp/panel.adosplug"),
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("inline GCS isolation"), "{err}");
+    }
+
+    #[test]
+    fn remove_with_tampered_manifest_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(RecordingBackend::default());
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(rec.clone());
+        let id = "com.example.thermal";
+        let manifest = SUBPROC_MANIFEST.to_string()
+            + "  contributes:\n    services:\n      - name: bridge\n        command: bin/bridge\n";
+        sup.install_contents(
+            parse_archive_bytes(build_unsigned_archive(&manifest)).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        sup.enable(id).unwrap();
+        // A service unit file left in the unit dir, found by name alone.
+        let svc_unit = service_unit_name_for(id, "bridge");
+        let unit_dir = paths_in(dir.path()).unit_dir;
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        std::fs::write(unit_dir.join(&svc_unit), "[Unit]\n").unwrap();
+        std::fs::write(
+            dir.path().join("plugins").join(id).join(MANIFEST_FILENAME),
+            "id: tampered\n",
+        )
+        .unwrap();
+        rec.clear_calls();
+
+        let outcome = sup.remove(id, false).unwrap();
+        assert!(
+            outcome
+                .warning
+                .as_deref()
+                .is_some_and(|w| w.contains("manifest hash mismatch")),
+            "{outcome:?}"
+        );
+        assert!(rec.called("uninstall", &unit_name_for(id)));
+        assert!(rec.called("uninstall", &svc_unit));
+        assert!(sup.find_install(id).is_none());
+        assert!(state::load_state(Some(&paths_in(dir.path()).state_path)).is_empty());
+        assert!(!dir.path().join("plugins").join(id).exists());
+    }
+
+    #[test]
+    fn remove_deletes_service_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()));
+        let id = "com.example.thermal";
+        let manifest = SUBPROC_MANIFEST.to_string()
+            + "  contributes:\n    services:\n      - name: bridge\n        command: bin/bridge\n      - name: relay\n        command: bin/relay\n";
+        sup.install_contents(
+            parse_archive_bytes(build_unsigned_archive(&manifest)).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        let log_dir = paths_in(dir.path()).log_dir;
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let logs = [
+            crate::systemd::log_path_for(&log_dir, id),
+            crate::systemd::service_log_path_for(&log_dir, id, "bridge"),
+            crate::systemd::service_log_path_for(&log_dir, id, "relay"),
+            // A service an older version declared.
+            crate::systemd::service_log_path_for(&log_dir, id, "retired"),
+        ];
+        for log in &logs {
+            std::fs::write(log, "x").unwrap();
+        }
+        let other = crate::systemd::log_path_for(&log_dir, "com.example.other");
+        std::fs::write(&other, "x").unwrap();
+
+        sup.remove(id, false).unwrap();
+        for log in &logs {
+            assert!(!log.exists(), "{} should be gone", log.display());
+        }
+        assert!(other.exists(), "another plugin's log is left alone");
+    }
+
+    /// A backend whose unit install fails while `fail` is set.
+    struct FailingInstall {
+        inner: RecordingBackend,
+        fail: std::sync::atomic::AtomicBool,
+    }
+
+    impl ServiceBackend for FailingInstall {
+        fn install(
+            &self,
+            name: &str,
+            spec: &crate::backend::UnitSpec,
+        ) -> Result<bool, SupervisorError> {
+            if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(SupervisorError("daemon-reload timed out".to_string()));
+            }
+            self.inner.install(name, spec)
+        }
+        fn uninstall(&self, name: &str) -> Result<(), SupervisorError> {
+            self.inner.uninstall(name)
+        }
+        fn enable_start(&self, name: &str) -> Result<(), SupervisorError> {
+            self.inner.enable_start(name)
+        }
+        fn stop_disable(&self, name: &str) -> Result<(), SupervisorError> {
+            self.inner.stop_disable(name)
+        }
+        fn restart(&self, name: &str) -> Result<(), SupervisorError> {
+            self.inner.restart(name)
+        }
+        fn is_active(&self, name: &str) -> Result<bool, SupervisorError> {
+            self.inner.is_active(name)
+        }
+        fn probe(&self, probe: &crate::backend::ProbeSpec) -> Result<(), SupervisorError> {
+            self.inner.probe(probe)
+        }
+        fn enforces_sandbox(&self) -> bool {
+            self.inner.enforces_sandbox()
+        }
+    }
+
+    #[test]
+    fn failed_unit_install_rolls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(FailingInstall {
+            inner: RecordingBackend::default(),
+            fail: std::sync::atomic::AtomicBool::new(false),
+        });
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(backend.clone());
+        let id = "com.example.thermal";
+        sup.install_contents(
+            parse_archive_bytes(thermal_at("1.0.0")).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        sup.enable(id).unwrap();
+        let old_hash = sup.find_install(id).unwrap().manifest_hash.clone();
+        backend.inner.clear_calls();
+
+        backend
+            .fail
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(sup
+            .install_contents(
+                parse_archive_bytes(thermal_at("1.1.0")).unwrap(),
+                Path::new("/tmp/thermal.adosplug"),
+            )
+            .is_err());
+        backend
+            .fail
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // The old tree is back, the record still matches it, and the old unit
+        // was started again.
+        let target = dir.path().join("plugins").join(id);
+        let on_disk = std::fs::read(target.join(MANIFEST_FILENAME)).unwrap();
+        assert_eq!(hex::encode(Sha256::digest(&on_disk)), old_hash);
+        assert!(!dir.path().join(format!("plugins/.{id}.retired")).exists());
+        let record = sup.find_install(id).unwrap();
+        assert_eq!(record.version, "1.0.0");
+        assert_eq!(record.manifest_hash, old_hash);
+        assert!(backend.inner.called("enable_start", &unit_name_for(id)));
+        // Every later lifecycle call still works.
+        sup.disable(id).unwrap();
+        sup.enable(id).unwrap();
+    }
+
+    #[test]
+    fn discover_restores_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()));
+        let id = "com.example.thermal";
+        sup.install_contents(
+            parse_archive_bytes(thermal_at("1.0.0")).unwrap(),
+            Path::new("/tmp/thermal.adosplug"),
+        )
+        .unwrap();
+        // A crash between the two renames of a swap: no target, a retired tree.
+        let target = dir.path().join("plugins").join(id);
+        let retired = dir.path().join(format!("plugins/.{id}.retired"));
+        std::fs::rename(&target, &retired).unwrap();
+
+        let mut fresh = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
+            .with_backend(Arc::new(RecordingBackend::default()));
+        fresh.discover().unwrap();
+        assert!(target.join(MANIFEST_FILENAME).exists());
+        assert!(!retired.exists());
+        fresh.enable(id).unwrap();
     }
 
     #[test]
@@ -3324,7 +4170,8 @@ mod tests {
         let third = enrol(&keys, "third-party");
         let mut sup = PluginSupervisor::new(paths_in(dir.path()), false, None, "0.48.11")
             .with_backend(Arc::new(RecordingBackend::without_sandbox()))
-            .with_trusted_keys_dir(&keys);
+            .with_trusted_keys_dir(&keys)
+            .with_first_party_key("altnautica-2026-B", first.verifying_key());
         for contents in [
             parse_archive_bytes(build_unsigned_archive(SUBPROC_MANIFEST)).unwrap(),
             signed_by(

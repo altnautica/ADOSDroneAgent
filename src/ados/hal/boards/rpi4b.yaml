@@ -69,6 +69,9 @@ gpio_buttons:
     header_pin: 35
     function: "ground-station menu back"
 
+# Panel button roles (BCM), published in the board sidecar as `buttons`.
+buttons: {up: 5, down: 6, select: 13, back: 19}
+
 profiles:
   ground_station:
     tier: "lite"

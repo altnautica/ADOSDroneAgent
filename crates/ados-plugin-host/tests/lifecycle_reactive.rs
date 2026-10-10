@@ -76,6 +76,8 @@ fn write_state(state_path: &Path, status: PluginStatus, granted: &[&str]) {
         reenable_pending: false,
         model_status: None,
         service_status: None,
+        revocation_pending: false,
+        archive_sha256: None,
     };
     state::save_state(&[install], Some(state_path)).unwrap();
 }

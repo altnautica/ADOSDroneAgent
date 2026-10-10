@@ -1349,6 +1349,8 @@ async fn vision_read_model_returns_the_plugins_resolved_status() {
              "path": "/var/ados/models/uav.onnx", "reason": null}
         ])),
         service_status: None,
+        revocation_pending: false,
+        archive_sha256: None,
     };
     save_state(&[install], Some(&state_path)).unwrap();
 
@@ -1422,6 +1424,8 @@ async fn a_plugin_registers_only_a_model_file_delivered_to_it() {
              "path": "/var/ados/models/next.onnx", "reason": null}
         ])),
         service_status: None,
+        revocation_pending: false,
+        archive_sha256: None,
     };
     save_state(&[install], Some(&state_path)).unwrap();
     // A wired client whose engine is not up: a request that passes the path

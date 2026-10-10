@@ -287,6 +287,16 @@ class GpioButton(BaseModel):
     function: str = ""
 
 
+class ButtonPins(BaseModel):
+    """The panel button roles a board wires, by BCM pin. Optional: a board
+    without the ``buttons:`` block keeps the panel's built-in pin fallback."""
+
+    up: int
+    down: int
+    select: int
+    back: int
+
+
 class BoardVariantMatch(BaseModel):
     """The host facts a board variant can be discriminated on.
 
@@ -327,6 +337,7 @@ class BoardProfile(BaseModel):
     gpio_pins: list[int] = []
     gpio_outputs: list[GpioOutput] = Field(default_factory=list)
     gpio_buttons: list[GpioButton] = Field(default_factory=list)
+    buttons: ButtonPins | None = None
     uart_paths: list[str] = []
     hw_video_codecs: list[str] = []
 
@@ -376,6 +387,12 @@ class BoardInfo:
     # marks an NPU-less but CPU-strong board that runs the detector on-board via
     # the in-process ONNX backend. Empty string / "none" ⇒ no CPU-inference path.
     local_inference: str = "none"
+    # The board-profile YAML filename stem (``cm4``, ``rock-5c-lite``): the
+    # canonical token plugin ``supported_boards`` match against. Empty when no
+    # profile resolved.
+    profile: str = ""
+    # Panel button pins from the profile's optional ``buttons:`` block.
+    buttons: ButtonPins | None = None
 
     @property
     def has_accelerator(self) -> bool:
@@ -403,6 +420,7 @@ class BoardInfo:
         """
         return {
             "name": self.name,
+            "profile": self.profile,
             "model": self.model,
             "tier": self.tier,
             "ram_mb": self.ram_mb,
@@ -414,6 +432,7 @@ class BoardInfo:
             "npu_tops": self.npu_tops,
             "has_accelerator": self.has_accelerator,
             "local_inference": self.local_inference,
+            "buttons": self.buttons.model_dump() if self.buttons else None,
             "has_local_inference": self.has_local_inference,
         }
 
@@ -615,6 +634,8 @@ def _board_from_profile(
         hw_video_codecs=list(profile.hw_video_codecs),
         npu_tops=profile.compute.npu_tops,
         local_inference=profile.compute.local_inference,
+        profile=profile.stem,
+        buttons=profile.buttons,
     )
 
 

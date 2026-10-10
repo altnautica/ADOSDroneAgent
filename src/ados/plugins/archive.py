@@ -37,6 +37,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import io
+import unicodedata
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,6 +87,7 @@ _EXCLUDE_DIR_SEGMENTS = frozenset(
         ".mypy_cache",
         ".ruff_cache",
         "target",
+        ".git",
     }
 )
 # Two-segment directory paths to exclude (the GCS source and its deps live
@@ -102,10 +104,16 @@ _EXCLUDE_FILENAMES = frozenset(
         "vitest.config.ts",
     }
 )
-# Basename glob patterns: build configs and compiler caches by extension.
+# Basename glob patterns: build configs and compiler caches by extension, and
+# secrets that sit in a plugin root while it is signed (the signing key, env
+# files, macOS folder metadata).
 _EXCLUDE_FILENAME_GLOBS = (
     "esbuild.config.*",
     "*.tsbuildinfo",
+    "*.pem",
+    "*.key",
+    ".env*",
+    ".DS_Store",
 )
 
 
@@ -148,9 +156,16 @@ def _safe_member_path(name: str) -> str:
     A ``.`` or empty segment is refused along with ``..``: ``./manifest.yaml``
     and ``manifest.yaml`` are distinct zip names that unpack to one file, so
     accepting both lets the validated manifest differ from the one on disk. A
-    directory entry's single trailing ``/`` is not a segment.
+    directory entry's single trailing ``/`` is not a segment. A control
+    character (a newline above all) is refused: one name could otherwise spell
+    several lines of the ``path\\nhex\\n`` canonical stream the signature covers.
     """
-    if not name or name.startswith("/") or "\\" in name:
+    if (
+        not name
+        or name.startswith("/")
+        or "\\" in name
+        or any(unicodedata.category(c) == "Cc" for c in name)
+    ):
         raise ArchiveError(f"unsafe archive entry path: {name!r}")
     body = name[:-1] if name.endswith("/") else name
     for part in body.split("/"):

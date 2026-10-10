@@ -72,6 +72,9 @@ gpio_buttons:
     header_pin: 35
     function: "ground-station menu back"
 
+# Panel button roles (BCM), published in the board sidecar as `buttons`.
+buttons: {up: 5, down: 6, select: 13, back: 19}
+
 # SPI LCD support via the Waveshare 35A overlay shipped in Raspberry Pi
 # OS at /boot/firmware/overlays/waveshare35a.dtbo. ADS7846 + ILI9486 wire
 # to the canonical BCM pins (T_IRQ = BCM 17 = pin 11, DC = BCM 24 = pin

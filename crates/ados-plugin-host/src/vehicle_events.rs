@@ -167,6 +167,54 @@ impl FcIdentity {
     }
 }
 
+/// The armed verdict from the autopilot heartbeats this host already reads.
+///
+/// Unknown or stale counts as armed, the same rule as
+/// [`ados_protocol::armed::vehicle_treated_as_armed`]: no heartbeat younger
+/// than [`ados_protocol::armed::ARMED_STATE_MAX_AGE`] proves nothing. A node
+/// with no vehicle link (a workstation or compute node) is never armed.
+#[derive(Debug)]
+pub struct VehicleArmedProbe {
+    vehicle_profile: bool,
+    latest: std::sync::Mutex<Option<(std::time::Instant, bool)>>,
+}
+
+impl VehicleArmedProbe {
+    /// A probe with no heartbeat seen yet. `vehicle_profile` is false on a
+    /// node with no vehicle of its own.
+    pub fn new(vehicle_profile: bool) -> Self {
+        Self {
+            vehicle_profile,
+            latest: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Record the armed flag of one autopilot heartbeat.
+    pub fn observe(&self, armed: bool) {
+        self.observe_at(std::time::Instant::now(), armed);
+    }
+
+    /// Record a heartbeat seen at `at` (tests drive the clock).
+    pub fn observe_at(&self, at: std::time::Instant, armed: bool) {
+        if let Ok(mut latest) = self.latest.lock() {
+            *latest = Some((at, armed));
+        }
+    }
+}
+
+impl ados_protocol::armed::ArmedProbe for VehicleArmedProbe {
+    fn treated_as_armed(&self) -> bool {
+        if !self.vehicle_profile {
+            return false;
+        }
+        let latest = self.latest.lock().ok().and_then(|l| *l);
+        match latest {
+            Some((at, armed)) => armed || at.elapsed() > ados_protocol::armed::ARMED_STATE_MAX_AGE,
+            None => true,
+        }
+    }
+}
+
 /// Publish one host event on `bus`.
 pub fn publish_host_event(bus: &EventBus, topic: &str, payload: Value) -> usize {
     bus.publish(Event {
@@ -177,12 +225,14 @@ pub fn publish_host_event(bus: &EventBus, topic: &str, payload: Value) -> usize 
     })
 }
 
-/// Drain the FC frame fanout forever, publishing the vehicle events it implies
-/// and recording the autopilot's identity in `identity`.
+/// Drain the FC frame fanout forever, publishing the vehicle events it implies,
+/// recording the autopilot's identity in `identity` and its armed flag in
+/// `armed`.
 pub fn spawn_vehicle_events(
     bus: Arc<EventBus>,
     mut frames: broadcast::Receiver<Vec<u8>>,
     identity: Arc<FcIdentity>,
+    armed: Arc<VehicleArmedProbe>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut deriver = VehicleEventDeriver::default();
@@ -199,6 +249,10 @@ pub fn spawn_vehicle_events(
                 if let MavMessage::HEARTBEAT(hb) = &msg {
                     if hb.autopilot != MavAutopilot::MAV_AUTOPILOT_INVALID {
                         identity.set(header.system_id, header.component_id);
+                        armed.observe(
+                            hb.base_mode
+                                .contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED),
+                        );
                     }
                 }
                 for (topic, payload) in deriver.observe(&msg) {
@@ -340,8 +394,12 @@ mod tests {
         let mut sub = bus.subscribe();
         let (tx, rx) = broadcast::channel(8);
         let identity = Arc::new(FcIdentity::default());
-        let _task = spawn_vehicle_events(bus.clone(), rx, identity.clone());
+        let probe = Arc::new(VehicleArmedProbe::new(true));
+        let _task = spawn_vehicle_events(bus.clone(), rx, identity.clone(), probe.clone());
         assert_eq!(identity.get(), None);
+        assert!(ados_protocol::armed::ArmedProbe::treated_as_armed(
+            probe.as_ref()
+        ));
         // A fleet drone with a non-default system id: commands must target it.
         let header = ados_protocol::mavlink::MavHeader {
             system_id: 3,
@@ -359,9 +417,32 @@ mod tests {
         assert_eq!(event.topic, "vehicle.armed");
         assert_eq!(event.publisher_plugin_id, HOST_PUBLISHER);
         assert_eq!(identity.get(), Some((3, 1)));
+        // The last heartbeat said armed.
+        assert!(ados_protocol::armed::ArmedProbe::treated_as_armed(
+            probe.as_ref()
+        ));
         let _: HEARTBEAT_DATA = match heartbeat(false, 0) {
             MavMessage::HEARTBEAT(hb) => hb,
             _ => unreachable!(),
         };
+    }
+
+    #[test]
+    fn the_armed_probe_fails_closed_on_unknown_or_stale_state() {
+        use ados_protocol::armed::{ArmedProbe, ARMED_STATE_MAX_AGE};
+        let probe = VehicleArmedProbe::new(true);
+        assert!(probe.treated_as_armed(), "no heartbeat proves nothing");
+        probe.observe(false);
+        assert!(!probe.treated_as_armed());
+        probe.observe(true);
+        assert!(probe.treated_as_armed());
+        if let Some(old) = std::time::Instant::now()
+            .checked_sub(ARMED_STATE_MAX_AGE + std::time::Duration::from_secs(1))
+        {
+            probe.observe_at(old, false);
+            assert!(probe.treated_as_armed(), "a stale disarm proves nothing");
+        }
+        // A node with no vehicle never counts as armed.
+        assert!(!VehicleArmedProbe::new(false).treated_as_armed());
     }
 }

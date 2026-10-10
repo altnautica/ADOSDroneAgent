@@ -87,7 +87,14 @@ pub struct ArchiveContents {
 /// reserved: install writes it after unpack, so an archive entry under that
 /// name would be attested and then overwritten.
 fn safe_member_path(name: &str) -> Result<&str, ArchiveError> {
-    if name.is_empty() || name.starts_with('/') || name.contains('\\') {
+    // A control character (a newline above all) in a name would let one entry
+    // impersonate several in the `path\nhex\n` canonical stream the signature
+    // covers, so a re-zipped archive could verify over a different file set.
+    if name.is_empty()
+        || name.starts_with('/')
+        || name.contains('\\')
+        || name.chars().any(char::is_control)
+    {
         return Err(ArchiveError(format!("unsafe archive entry path: {name:?}")));
     }
     let body = name.strip_suffix('/').unwrap_or(name);
@@ -649,6 +656,23 @@ mod tests {
         );
         let err = parse_archive_bytes(zip).unwrap_err().to_string();
         assert!(err.contains("unsafe archive entry path"), "{}", err);
+    }
+
+    #[test]
+    fn control_char_entry_rejected() {
+        // One entry whose name spells two canonical lines must not parse.
+        let merged = format!("agent/a.py\n{}\nagent/b.py", "0".repeat(64));
+        let zip = build_zip(
+            &[
+                ("manifest.yaml", manifest_yaml().as_bytes()),
+                (merged.as_str(), b"x"),
+            ],
+            None,
+        );
+        let err = parse_archive_bytes(zip).unwrap_err().to_string();
+        assert!(err.contains("unsafe archive entry path"), "{}", err);
+        assert!(safe_member_path("agent/x\0.py").is_err());
+        assert!(safe_member_path("agent/x\r.py").is_err());
     }
 
     #[test]

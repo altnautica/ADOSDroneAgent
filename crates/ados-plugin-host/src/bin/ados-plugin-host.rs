@@ -44,10 +44,13 @@ use ados_plugin_host::manifest::PluginManifest;
 use ados_plugin_host::pic_gate::PicGate;
 use ados_plugin_host::realhost::RealHost;
 use ados_plugin_host::reconcile::PluginReconciler;
+use ados_plugin_host::signing::{load_revocations, Revocations, PLUGIN_REVOCATIONS_PATH};
 use ados_plugin_host::supervisor::Paths;
 use ados_plugin_host::token_secret::TokenMint;
+use ados_plugin_host::vehicle_events::VehicleArmedProbe;
 use ados_plugin_host::vision_client::VisionClient;
 use ados_plugin_host::{EventBus, PluginIpcServer, PluginSupervisor};
+use ados_protocol::armed::ArmedProbe;
 use ados_protocol::plugin::TokenIssuer;
 
 /// The running agent semver, used by the supervisor's compatibility gate. The
@@ -221,6 +224,7 @@ async fn build_host(
     state_path: PathBuf,
     device_id: String,
     bus: &Arc<EventBus>,
+    vehicle_armed: Arc<VehicleArmedProbe>,
 ) -> Arc<RealHost> {
     // The state file `vision.read_model` reads resolved model status from, and
     // the vehicle-state socket `telemetry.subscribe` reads snapshots from.
@@ -275,6 +279,7 @@ async fn build_host(
         Arc::clone(bus),
         mavlink.subscribe(),
         host.fc_identity(),
+        vehicle_armed,
     );
     host = host
         .with_mavlink(mavlink)
@@ -339,7 +344,7 @@ fn config_store_path() -> PathBuf {
 /// control socket; the install dir / run dir feed the host lookups.
 /// `secret_path` is the persisted HMAC secret the issuer is built from; the
 /// same file feeds the unit-generation path, so a runner's token verifies here.
-async fn wire(paths: &Paths) -> WiredDaemon<RealHost> {
+async fn wire(paths: &Paths, vehicle_armed: Arc<VehicleArmedProbe>) -> WiredDaemon<RealHost> {
     let state_path = paths.state_path.clone();
     let install_dir = paths.install_dir.clone();
     let socket_dir = paths.socket_dir.clone();
@@ -373,6 +378,7 @@ async fn wire(paths: &Paths) -> WiredDaemon<RealHost> {
         state_path.clone(),
         device_id.clone(),
         &bus,
+        vehicle_armed,
     )
     .await;
     let mint = Arc::new(TokenMint::new(
@@ -491,42 +497,84 @@ fn guard_load() -> Result<()> {
     Ok(())
 }
 
-/// How often the signer revocation list is checked for a change.
+/// How often the revocation list is checked for a change, and how often a
+/// deferred revocation re-checks the arm state.
 const REVOCATION_POLL: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Disable every plugin signed by a revoked signer. Logged, never fatal: the
-/// next pass retries.
-fn enforce_revocations(paths: &Paths) {
+/// Whether this node's vehicle state can read armed: a drone, or a ground
+/// station relaying its drone's state. Elsewhere nothing flies.
+fn is_vehicle_profile(profile: &str) -> bool {
+    matches!(profile, "drone" | "ground_station" | "ground-station")
+}
+
+/// Apply `revocations` with the current arm verdict. Logged, never fatal:
+/// the next pass retries. Returns whether a disable is still deferred.
+fn enforce_revocations(paths: &Paths, revocations: &Revocations, armed: bool) -> bool {
     let mut supervisor = production_supervisor(paths);
-    match supervisor.disable_revoked_signers() {
-        Ok(disabled) if !disabled.is_empty() => {
-            tracing::warn!(?disabled, "plugins disabled after their signer was revoked")
+    match supervisor.apply_revocations(revocations, armed) {
+        Ok(sweep) => {
+            if !sweep.disabled.is_empty() {
+                tracing::warn!(disabled = ?sweep.disabled, "plugins disabled after a revocation");
+            }
+            !sweep.deferred.is_empty()
         }
-        Ok(_) => {}
-        Err(e) => tracing::error!(error = %e, "could not apply the signer revocation list"),
+        Err(e) => {
+            tracing::error!(error = %e, "could not apply the revocation list");
+            true
+        }
+    }
+}
+
+/// Read the revocation list, keeping `last_good` when the file cannot be
+/// read: running plugins are not changed by a garbled list, while the
+/// supervisor refuses new installs and enables of signed plugins until it reads.
+fn refresh_revocations(path: &Path, last_good: &mut Revocations) {
+    match load_revocations(path) {
+        Ok(revocations) => *last_good = revocations,
+        Err(e) => {
+            tracing::error!(error = %e, "plugin_revocation_list_unreadable; keeping the last good list")
+        }
     }
 }
 
 /// Re-apply the revocation list whenever the file changes (its mtime or its
-/// presence), on a fixed poll that never gives up.
-fn spawn_revocation_watch(paths: Paths) -> JoinHandle<()> {
+/// presence), on a fixed poll that never gives up. While the vehicle counts as
+/// armed a disable is deferred (each pass warns `plugin_revocation_deferred_armed`
+/// per plugin, so every 5 s) and applied on the first pass after disarm.
+fn spawn_revocation_watch(
+    paths: Paths,
+    vehicle_armed: Arc<VehicleArmedProbe>,
+    mut last_good: Revocations,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let path = PathBuf::from(ados_plugin_host::signing::PLUGIN_REVOCATIONS_PATH);
+        let path = PathBuf::from(PLUGIN_REVOCATIONS_PATH);
         let stamp = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         let mut seen = stamp(&path);
+        // The startup pass ran before any heartbeat arrived, so it may have
+        // deferred: check again on the first tick.
+        let mut pending = true;
         let mut ticker = tokio::time::interval(REVOCATION_POLL);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
             let now = stamp(&path);
-            if now != seen {
+            let changed = now != seen;
+            if changed {
                 seen = now;
-                let paths = paths.clone();
-                if let Err(e) =
-                    tokio::task::spawn_blocking(move || enforce_revocations(&paths)).await
-                {
-                    tracing::error!(error = %e, "revocation enforcement task failed");
-                }
+                refresh_revocations(&path, &mut last_good);
+            }
+            if !changed && !pending {
+                continue;
+            }
+            let armed = vehicle_armed.treated_as_armed();
+            let (paths, revocations) = (paths.clone(), last_good.clone());
+            match tokio::task::spawn_blocking(move || {
+                enforce_revocations(&paths, &revocations, armed)
+            })
+            .await
+            {
+                Ok(still_pending) => pending = still_pending,
+                Err(e) => tracing::error!(error = %e, "revocation enforcement task failed"),
             }
         }
     })
@@ -580,6 +628,9 @@ async fn main() -> Result<()> {
     {
         tracing::warn!(path = %ungrantable_sidecar.display(), error = %e, "could not publish the ungrantable capability list");
     }
+    // The armed verdict from the autopilot heartbeats the host reads. Until
+    // one arrives a vehicle node counts as armed.
+    let vehicle_armed = Arc::new(VehicleArmedProbe::new(is_vehicle_profile(&profile)));
     let mut supervisor = PluginSupervisor::production(paths.clone(), board_id, version)
         .with_profile(profile)
         .with_board_tier(board_tier)
@@ -601,22 +652,26 @@ async fn main() -> Result<()> {
     tokio::task::spawn_blocking(move || loopback_guard::install(&ruleset, &guard_state_path))
         .await?;
 
-    // A plugin signed by a key revoked since it was installed is stopped
-    // before anything is refreshed or served.
-    match supervisor.disable_revoked_signers() {
-        Ok(disabled) if !disabled.is_empty() => {
-            tracing::warn!(?disabled, "plugins disabled after their signer was revoked")
+    // A plugin signed by a key, or installed from an archive, revoked since it
+    // was installed is stopped before anything is refreshed or served, unless
+    // the vehicle counts as armed: then the watch applies it on disarm.
+    let mut revocations = Revocations::default();
+    refresh_revocations(&supervisor.revocations_path(), &mut revocations);
+    match supervisor.apply_revocations(&revocations, vehicle_armed.treated_as_armed()) {
+        Ok(sweep) if !sweep.disabled.is_empty() => {
+            tracing::warn!(disabled = ?sweep.disabled, "plugins disabled after a revocation")
         }
         Ok(_) => {}
-        Err(e) => tracing::error!(error = %e, "could not apply the signer revocation list"),
+        Err(e) => tracing::error!(error = %e, "could not apply the revocation list"),
     }
     supervisor.refresh_all_units();
     // Discovery's job here is the state reconciliation + tamper filter it runs
     // as a side effect; the reconciler reads state itself from now on.
     drop(supervisor);
-    let revocation_watch = spawn_revocation_watch(paths.clone());
+    let revocation_watch =
+        spawn_revocation_watch(paths.clone(), Arc::clone(&vehicle_armed), revocations);
 
-    let daemon = wire(&paths).await;
+    let daemon = wire(&paths, vehicle_armed).await;
     // The shared-secret issuer is owned by the daemon for the session lifetime;
     // it both verifies the runner's `hello` token and backs the mint that
     // writes each served plugin's token credential.
@@ -761,7 +816,7 @@ mod tests {
 
         // Wire the daemon (no mavlink router up -> slot stays None, fine).
         // A tempdir secret path makes the issuer persist a shared secret.
-        let daemon = wire(&paths).await;
+        let daemon = wire(&paths, Arc::new(VehicleArmedProbe::new(false))).await;
         assert_eq!(
             daemon.reconciler.serving().len(),
             1,
@@ -837,6 +892,7 @@ mod tests {
             dir.path().join("state/plugin-state.json"),
             String::new(),
             &Arc::new(EventBus::new()),
+            Arc::new(VehicleArmedProbe::new(false)),
         )
         .await;
 

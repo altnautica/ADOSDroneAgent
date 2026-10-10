@@ -65,6 +65,16 @@ pub struct DisplaysSection {
     pub supported: Vec<DisplayBinding>,
 }
 
+/// The panel button roles a board wires, by BCM pin, from the profile's
+/// optional `buttons:` block. Absent means the panel keeps its built-in pins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ButtonPins {
+    pub up: u8,
+    pub down: u8,
+    pub select: u8,
+    pub back: u8,
+}
+
 /// The host facts a variant can be discriminated on.
 ///
 /// Only `cpu_cores` today, because that is what separates the two SoC bins
@@ -122,6 +132,8 @@ pub struct BoardProfile {
     pub displays: DisplaysSection,
     #[serde(default)]
     pub variants: Vec<BoardVariant>,
+    #[serde(default)]
+    pub buttons: Option<ButtonPins>,
     /// The profile's YAML filename stem (`cubie-a7s`, `rock-5c-lite`). Not a
     /// YAML key: [`load_profiles`] stamps it from the embedded file name, and it
     /// is the ONE canonical token `/etc/ados/board_override` accepts.
@@ -289,6 +301,11 @@ pub struct BoardFingerprint {
     pub version: u16,
     pub name: String,
     pub model: String,
+    /// The board-profile YAML filename stem (`cm4`, `rock-5c-lite`): the
+    /// canonical token plugin `supported_boards` match against. Empty when no
+    /// profile resolved.
+    #[serde(default)]
+    pub profile: String,
     pub tier: i64,
     pub ram_mb: i64,
     pub cpu_cores: i64,
@@ -300,6 +317,9 @@ pub struct BoardFingerprint {
     pub has_accelerator: bool,
     pub local_inference: String,
     pub has_local_inference: bool,
+    /// Panel button pins from the profile's optional `buttons:` block.
+    #[serde(default)]
+    pub buttons: Option<ButtonPins>,
 }
 
 /// The host facts detection needs, injected so the whole pipeline is testable
@@ -448,6 +468,7 @@ fn from_profile(profile: &BoardProfile, model_string: &str, facts: &HostFacts) -
             model_string.to_string()
         },
         name,
+        profile: profile.stem.clone(),
         tier,
         ram_mb: facts.ram_mb,
         cpu_cores: facts.cpu_cores,
@@ -459,6 +480,7 @@ fn from_profile(profile: &BoardProfile, model_string: &str, facts: &HostFacts) -
         has_accelerator: profile.compute.npu_tops > 0.0,
         has_local_inference: !matches!(local_inference.as_str(), "" | "none"),
         local_inference,
+        buttons: profile.buttons,
     }
 }
 
@@ -522,6 +544,7 @@ pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint
             detected_model
         },
         name: generic_name,
+        profile: String::new(),
         tier: detect_tier(facts.ram_mb),
         ram_mb: facts.ram_mb,
         cpu_cores: facts.cpu_cores,
@@ -537,6 +560,7 @@ pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint
         has_accelerator: false,
         local_inference: "none".to_string(),
         has_local_inference: false,
+        buttons: None,
     }
 }
 
@@ -914,6 +938,7 @@ mod tests {
             keys,
             vec![
                 "arch",
+                "buttons",
                 "cpu_cores",
                 "has_accelerator",
                 "has_local_inference",
@@ -922,6 +947,7 @@ mod tests {
                 "model",
                 "name",
                 "npu_tops",
+                "profile",
                 "ram_mb",
                 "soc",
                 "tier",
@@ -959,6 +985,44 @@ mod tests {
         assert_eq!(fp.local_inference, "onnx");
         assert!(fp.has_local_inference);
         assert!(!fp.has_accelerator);
+    }
+
+    #[test]
+    fn the_sidecar_carries_the_profile_stem() {
+        let profiles = load_profiles();
+        let cm5 = profiles
+            .iter()
+            .find(|p| p.stem == "cm5")
+            .expect("cm5 profile");
+        let fp = from_profile(cm5, "Raspberry Pi CM5", &facts("", ""));
+        assert_eq!(fp.profile, "cm5");
+        assert_eq!(fp.name, "Raspberry Pi CM5");
+        // An unmatched board resolves through its generic profile's stem.
+        let generic = resolve(&profiles, &facts("acme,unheard-of-v9", "ACME Unheard Of"));
+        assert_eq!(generic.profile, "generic-arm64");
+    }
+
+    #[test]
+    fn a_panel_board_publishes_its_button_pins() {
+        let profiles = load_profiles();
+        let rpi4 = profiles.iter().find(|p| p.stem == "rpi4b").expect("rpi4b");
+        let fp = from_profile(rpi4, "Raspberry Pi 4 Model B", &facts("", ""));
+        assert_eq!(
+            fp.buttons,
+            Some(ButtonPins {
+                up: 5,
+                down: 6,
+                select: 13,
+                back: 19
+            })
+        );
+        let cm5 = profiles.iter().find(|p| p.stem == "cm5").expect("cm5");
+        assert_eq!(from_profile(cm5, "", &facts("", "")).buttons, None);
+        // An older sidecar without either field still reads.
+        let old = r#"{"version":1,"name":"x","model":"x","tier":2,"ram_mb":1,"cpu_cores":1,"vendor":"v","soc":"s","arch":"a","hw_video_codecs":[],"npu_tops":0.0,"has_accelerator":false,"local_inference":"none","has_local_inference":false}"#;
+        let fp: BoardFingerprint = serde_json::from_str(old).unwrap();
+        assert_eq!(fp.profile, "");
+        assert_eq!(fp.buttons, None);
     }
 
     #[test]

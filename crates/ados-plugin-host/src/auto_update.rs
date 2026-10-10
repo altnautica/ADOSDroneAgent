@@ -20,6 +20,10 @@
 //!   gets an `update_available` notice and decides; a signer change needs a
 //!   remove and a fresh install.
 //! * **skipped**: pinned, auto-update off, nothing newer, or no registry row.
+//!   The whole cycle is also deferred while the vehicle counts as armed
+//!   (unknown or stale state counts as armed): an update stops the plugin,
+//!   and a plugin feeding pose or setpoints must not stop in the air. The
+//!   deferred cycle is rechecked every [`ENABLE_RETRY_INTERVAL`].
 //! * **failed**: registry, download, archive, install or enable error,
 //!   recorded on the install so the GCS shows it. The next daily check
 //!   retries. When the update stopped the plugin and it could not be started
@@ -29,18 +33,22 @@
 //!
 //! The engine is transport-free: the registry query, the archive download and
 //! the notice go through [`UpdateSource`], which the service holding the
-//! pairing credentials implements.
+//! pairing credentials implements. A cycle is planned under the supervisor
+//! lock ([`plan_cycle`]), each archive is fetched without it
+//! ([`fetch_planned`]), and the install re-takes it ([`install_planned`]), so
+//! a large download never blocks another lifecycle call.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ados_protocol::armed::ArmedProbe;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
 use crate::archive::{parse_archive_bytes, ArchiveContents};
-use crate::manifest::PluginManifest;
+use crate::manifest::{BoardId, PluginManifest};
 use crate::state::{self, now_ms, PluginInstall, PluginStatus};
 use crate::supervisor::{PluginSupervisor, SIGNER_CHANGE_REASON};
 
@@ -175,82 +183,194 @@ impl CodeSurface {
     }
 }
 
-/// Check one install against the registry and act. Never fails: every error
-/// becomes a recorded `Failed` outcome.
-pub fn check_one(
-    supervisor: &mut PluginSupervisor,
-    install: &PluginInstall,
+/// One install a cycle will check: a snapshot of its record, taken under the
+/// supervisor lock.
+#[derive(Debug, Clone)]
+pub struct PlannedUpdate {
+    pub install: PluginInstall,
+}
+
+/// A planned update's newer archive, downloaded and parsed without the lock.
+#[derive(Debug)]
+pub struct FetchedArchive {
+    pub install: PluginInstall,
+    pub row: VersionRow,
+    pub contents: ArchiveContents,
+}
+
+/// Why a planned update ended before there was an archive to install.
+#[derive(Debug)]
+pub enum FetchStop {
+    Skipped,
+    Notify { version: String, notice: Value },
+    Failed { version: String, error: String },
+}
+
+fn record(sup: &mut PluginSupervisor, id: &str, version: &str, outcome: &str, error: Option<&str>) {
+    if let Err(e) = sup.note_update_attempt(id, version, outcome, error) {
+        tracing::warn!(plugin_id = id, error = %e, "auto_update_record_failed");
+    }
+}
+
+fn notify(
+    sup: &mut PluginSupervisor,
     source: &dyn UpdateSource,
-    board: Option<&str>,
+    id: &str,
+    version: &str,
+    n: Value,
 ) -> Outcome {
+    source.notify(&n);
+    record(sup, id, version, "notify", None);
+    tracing::info!(plugin_id = id, notice = %n, "auto_update_notify");
+    Outcome::Notify
+}
+
+fn fail(sup: &mut PluginSupervisor, id: &str, version: &str, e: String) -> Outcome {
+    tracing::warn!(plugin_id = id, error = %e, "auto_update_install_failed");
+    record(sup, id, version, "failed", Some(&e));
+    Outcome::Failed
+}
+
+/// The enabled installs to check this cycle. Runs under the supervisor lock.
+pub fn plan_cycle(supervisor: &mut PluginSupervisor) -> Vec<PlannedUpdate> {
+    if let Err(e) = supervisor.refresh() {
+        tracing::warn!(error = %e, "auto_update_state_unreadable");
+        return Vec::new();
+    }
+    supervisor
+        .installs()
+        .iter()
+        .filter(|i| matches!(i.status, PluginStatus::Enabled | PluginStatus::Running))
+        .map(|install| PlannedUpdate {
+            install: install.clone(),
+        })
+        .collect()
+}
+
+/// Query the registry for a planned update and download its newer archive.
+/// Takes no lock: the download can be large.
+pub fn fetch_planned(
+    planned: &PlannedUpdate,
+    source: &dyn UpdateSource,
+) -> Result<FetchedArchive, FetchStop> {
+    let install = &planned.install;
     let id = install.plugin_id.as_str();
     if install.pinned_version.is_some() || !install.auto_update {
-        return Outcome::Skipped;
+        return Err(FetchStop::Skipped);
     }
-    let record = |sup: &mut PluginSupervisor, version: &str, outcome: &str, error: Option<&str>| {
-        if let Err(e) = sup.note_update_attempt(id, version, outcome, error) {
-            tracing::warn!(plugin_id = id, error = %e, "auto_update_record_failed");
-        }
-    };
     let row = match source.latest(id) {
         Ok(Some(row)) => row,
-        Ok(None) => return Outcome::Skipped,
+        Ok(None) => return Err(FetchStop::Skipped),
         Err(e) => {
             tracing::warn!(plugin_id = id, error = %e, "auto_update_registry_query_failed");
-            record(supervisor, "unknown", "failed", Some(&e));
-            return Outcome::Failed;
+            return Err(FetchStop::Failed {
+                version: "unknown".to_string(),
+                error: e,
+            });
         }
     };
     let (Some(latest), Some(current)) = (semver(&row.version), semver(&install.version)) else {
-        return Outcome::Skipped;
+        return Err(FetchStop::Skipped);
     };
     if latest <= current {
-        return Outcome::Skipped;
+        return Err(FetchStop::Skipped);
     }
-
-    let notify = |sup: &mut PluginSupervisor, n: Value| {
-        source.notify(&n);
-        record(sup, &row.version, "notify", None);
-        tracing::info!(plugin_id = id, notice = %n, "auto_update_notify");
-        Outcome::Notify
-    };
-    let fail = |sup: &mut PluginSupervisor, e: String| {
-        tracing::warn!(plugin_id = id, error = %e, "auto_update_install_failed");
-        record(sup, &row.version, "failed", Some(&e));
-        Outcome::Failed
-    };
-
     // A plugin id is bound to the key that installed it. The registry row
     // names the publishing key, so another key (or none, for a signed
     // install) is refused before anything is downloaded.
     let row_signer = (!row.signer_key_id.is_empty()).then_some(row.signer_key_id.as_str());
     if row_signer != install.signer_id.as_deref() {
-        return notify(
-            supervisor,
-            signer_change_notice(install, &row.version, row_signer),
-        );
+        return Err(FetchStop::Notify {
+            notice: signer_change_notice(install, &row.version, row_signer),
+            version: row.version,
+        });
     }
     if row.archive_sha256.trim().is_empty() {
-        return fail(
-            supervisor,
-            "registry row carries no archive_sha256; refusing an unpinned update".to_string(),
-        );
+        return Err(FetchStop::Failed {
+            version: row.version,
+            error: "registry row carries no archive_sha256; refusing an unpinned update"
+                .to_string(),
+        });
     }
-    let contents = match fetch_archive(source, &row) {
-        Ok(contents) => contents,
-        Err(e) => return fail(supervisor, e),
+    match fetch_archive(source, &row) {
+        Ok(contents) => Ok(FetchedArchive {
+            install: install.clone(),
+            row,
+            contents,
+        }),
+        Err(error) => Err(FetchStop::Failed {
+            version: row.version,
+            error,
+        }),
+    }
+}
+
+/// Record a planned update that ended before it had an archive.
+fn conclude_stop(
+    supervisor: &mut PluginSupervisor,
+    id: &str,
+    stop: FetchStop,
+    source: &dyn UpdateSource,
+) -> Outcome {
+    match stop {
+        FetchStop::Skipped => Outcome::Skipped,
+        FetchStop::Notify { version, notice } => notify(supervisor, source, id, &version, notice),
+        FetchStop::Failed { version, error } => fail(supervisor, id, &version, error),
+    }
+}
+
+/// Check a fetched archive against the install and act: notify, or install
+/// it silently. Runs under the supervisor lock, and first re-checks that the
+/// install is still the version (and preference) the plan saw; anything that
+/// changed during the download is left for the next cycle.
+pub fn install_planned(
+    supervisor: &mut PluginSupervisor,
+    fetched: FetchedArchive,
+    source: &dyn UpdateSource,
+    board: Option<&BoardId>,
+) -> Outcome {
+    let FetchedArchive {
+        install: planned,
+        row,
+        contents,
+    } = fetched;
+    let id = planned.plugin_id.as_str();
+    if let Err(e) = supervisor.refresh() {
+        tracing::warn!(error = %e, "auto_update_state_unreadable");
+        return Outcome::Skipped;
+    }
+    let Some(install) = supervisor.find_install(id).cloned() else {
+        return Outcome::Skipped;
+    };
+    if install.version != planned.version
+        || install.pinned_version.is_some()
+        || !install.auto_update
+        || !matches!(
+            install.status,
+            PluginStatus::Enabled | PluginStatus::Running
+        )
+    {
+        tracing::info!(plugin_id = id, "auto_update_install_changed_during_fetch");
+        return Outcome::Skipped;
+    }
+    let (Some(latest), Some(current)) = (semver(&row.version), semver(&install.version)) else {
+        return Outcome::Skipped;
     };
     // Every check below reads the manifest that would be installed.
     let remote = &contents.manifest;
     if remote.id != id {
         return fail(
             supervisor,
+            id,
+            &row.version,
             format!("archive is plugin {}, not {id}", remote.id),
         );
     }
     if remote.version != row.version {
         return fail(
             supervisor,
+            id,
+            &row.version,
             format!(
                 "archive is version {} but the registry row is {}",
                 remote.version, row.version
@@ -262,20 +382,20 @@ pub fn check_one(
     // version is touched.
     let signer = match supervisor.verified_signer(&contents) {
         Ok(signer) => signer,
-        Err(e) => return fail(supervisor, format!("signature: {e}")),
+        Err(e) => return fail(supervisor, id, &row.version, format!("signature: {e}")),
     };
     if signer.as_deref() != install.signer_id.as_deref() {
-        return notify(
-            supervisor,
-            signer_change_notice(install, &row.version, signer.as_deref()),
-        );
+        let n = signer_change_notice(&install, &row.version, signer.as_deref());
+        return notify(supervisor, source, id, &row.version, n);
     }
     if latest.0 > current.0 {
-        return notify(supervisor, notice(install, &row.version, "major_bump"));
+        let n = notice(&install, &row.version, "major_bump");
+        return notify(supervisor, source, id, &row.version, n);
     }
     if let Some(board) = board {
         if !remote.compatibility.supports_board(board) {
-            return notify(supervisor, notice(install, &row.version, "board_mismatch"));
+            let n = notice(&install, &row.version, "board_mismatch");
+            return notify(supervisor, source, id, &row.version, n);
         }
     }
     let current_manifest = supervisor.installed_manifest(id).ok();
@@ -287,29 +407,45 @@ pub fn check_one(
         .unwrap_or_default();
     let remote_declared = remote.declared_permissions();
     if remote_declared != current_declared {
-        let mut n = notice(install, &row.version, "permission_delta");
+        let mut n = notice(&install, &row.version, "permission_delta");
         n["new_permissions"] = json!(remote_declared
             .difference(&current_declared)
             .collect::<Vec<_>>());
         n["removed_permissions"] = json!(current_declared
             .difference(&remote_declared)
             .collect::<Vec<_>>());
-        return notify(supervisor, n);
+        return notify(supervisor, source, id, &row.version, n);
     }
     if current_manifest.as_ref().map(CodeSurface::of) != Some(CodeSurface::of(remote)) {
-        return notify(
-            supervisor,
-            notice(install, &row.version, "code_surface_change"),
-        );
+        let n = notice(&install, &row.version, "code_surface_change");
+        return notify(supervisor, source, id, &row.version, n);
     }
 
-    match silent_install(supervisor, install, contents, &row) {
+    match silent_install(supervisor, &install, contents, &row) {
         Ok(()) => {
-            record(supervisor, &row.version, "success", None);
+            record(supervisor, id, &row.version, "success", None);
             tracing::info!(plugin_id = id, from = %install.version, to = %row.version, "auto_update_installed");
             Outcome::SilentInstall
         }
-        Err(e) => fail(supervisor, e),
+        Err(e) => fail(supervisor, id, &row.version, e),
+    }
+}
+
+/// Check one install against the registry and act, holding the supervisor
+/// throughout (a single-owner caller). Never fails: every error becomes a
+/// recorded `Failed` outcome.
+pub fn check_one(
+    supervisor: &mut PluginSupervisor,
+    install: &PluginInstall,
+    source: &dyn UpdateSource,
+    board: Option<&BoardId>,
+) -> Outcome {
+    let planned = PlannedUpdate {
+        install: install.clone(),
+    };
+    match fetch_planned(&planned, source) {
+        Ok(fetched) => install_planned(supervisor, fetched, source, board),
+        Err(stop) => conclude_stop(supervisor, &install.plugin_id, stop, source),
     }
 }
 
@@ -384,43 +520,81 @@ pub fn retry_pending_enables(supervisor: &mut PluginSupervisor) {
     }
 }
 
-/// One pass over every enabled install. Every checked install gets its
-/// check time stamped, whatever the outcome.
+fn stamp_check(supervisor: &mut PluginSupervisor, plugin_id: &str) {
+    if let Err(e) = supervisor.note_update_check(plugin_id, now_ms()) {
+        tracing::warn!(plugin_id, error = %e, "auto_update_check_stamp_failed");
+    }
+}
+
+/// One pass over every enabled install by a single-owner caller. Every
+/// checked install gets its check time stamped, whatever the outcome. While
+/// `probe` says the vehicle counts as armed nothing is checked and the result
+/// is empty.
 pub fn run_cycle(
     supervisor: &mut PluginSupervisor,
     source: &dyn UpdateSource,
-    board: Option<&str>,
+    board: Option<&BoardId>,
+    probe: &dyn ArmedProbe,
 ) -> Vec<(String, Outcome)> {
-    if let Err(e) = supervisor.refresh() {
-        tracing::warn!(error = %e, "auto_update_state_unreadable");
+    if probe.treated_as_armed() {
+        tracing::warn!("plugin_auto_update_deferred_armed");
         return Vec::new();
     }
-    let installs: Vec<PluginInstall> = supervisor
-        .installs()
-        .iter()
-        .filter(|i| matches!(i.status, PluginStatus::Enabled | PluginStatus::Running))
-        .cloned()
-        .collect();
-    installs
-        .iter()
-        .map(|install| {
-            let outcome = check_one(supervisor, install, source, board);
-            if let Err(e) = supervisor.note_update_check(&install.plugin_id, now_ms()) {
-                tracing::warn!(plugin_id = %install.plugin_id, error = %e, "auto_update_check_stamp_failed");
-            }
-            (install.plugin_id.clone(), outcome)
+    plan_cycle(supervisor)
+        .into_iter()
+        .map(|planned| {
+            let outcome = check_one(supervisor, &planned.install, source, board);
+            stamp_check(supervisor, &planned.install.plugin_id);
+            (planned.install.plugin_id, outcome)
         })
         .collect()
+}
+
+/// One pass over a supervisor shared with other callers: planned under the
+/// lock, each archive fetched without it, each install under it again.
+/// `None` when the vehicle counts as armed, before the cycle or before any
+/// install it would make: the caller rechecks soon instead of a day later.
+pub fn run_cycle_shared(
+    supervisor: &Mutex<PluginSupervisor>,
+    source: &dyn UpdateSource,
+    board: Option<&BoardId>,
+    probe: &dyn ArmedProbe,
+) -> Option<Vec<(String, Outcome)>> {
+    let lock = || supervisor.lock().unwrap_or_else(|p| p.into_inner());
+    if probe.treated_as_armed() {
+        tracing::warn!("plugin_auto_update_deferred_armed");
+        return None;
+    }
+    let plans = plan_cycle(&mut lock());
+    let mut results = Vec::with_capacity(plans.len());
+    for planned in plans {
+        let fetched = fetch_planned(&planned, source);
+        if fetched.is_ok() && probe.treated_as_armed() {
+            tracing::warn!(plugin_id = %planned.install.plugin_id, "plugin_auto_update_deferred_armed");
+            return None;
+        }
+        let mut guard = lock();
+        let id = planned.install.plugin_id;
+        let outcome = match fetched {
+            Ok(fetched) => install_planned(&mut guard, fetched, source, board),
+            Err(stop) => conclude_stop(&mut guard, &id, stop, source),
+        };
+        stamp_check(&mut guard, &id);
+        results.push((id, outcome));
+    }
+    Some(results)
 }
 
 /// Retry pending enables every [`ENABLE_RETRY_INTERVAL`], and run the check
 /// once after [`FIRST_CHECK_DELAY`] and then every [`DAILY_INTERVAL`], until
 /// `shutdown` turns true. A cycle whose source is not ready (unpaired) is
-/// skipped, not retried early.
+/// skipped, not retried early. A cycle deferred because the vehicle counts as
+/// armed keeps its due time, so it runs at the first recheck after disarm.
 pub async fn run_daily_loop(
     supervisor: Arc<Mutex<PluginSupervisor>>,
     source: Arc<dyn UpdateSource>,
-    board: Option<String>,
+    board: Option<BoardId>,
+    probe: Arc<dyn ArmedProbe>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut next_cycle = tokio::time::Instant::now() + FIRST_CHECK_DELAY;
@@ -434,23 +608,31 @@ pub async fn run_daily_loop(
             }
         }
         let cycle_due = tokio::time::Instant::now() >= next_cycle;
-        if cycle_due {
-            next_cycle = tokio::time::Instant::now() + DAILY_INTERVAL;
-        }
         let run_cycle_now = cycle_due && source.ready();
         if cycle_due && !run_cycle_now {
             tracing::debug!("auto_update_skip_unpaired");
         }
-        let (sup, src, board) = (Arc::clone(&supervisor), Arc::clone(&source), board.clone());
+        let (sup, src, board, probe) = (
+            Arc::clone(&supervisor),
+            Arc::clone(&source),
+            board.clone(),
+            Arc::clone(&probe),
+        );
         let joined = tokio::task::spawn_blocking(move || {
-            let mut guard = sup.lock().unwrap_or_else(|p| p.into_inner());
-            retry_pending_enables(&mut guard);
-            run_cycle_now.then(|| run_cycle(&mut guard, src.as_ref(), board.as_deref()))
+            retry_pending_enables(&mut sup.lock().unwrap_or_else(|p| p.into_inner()));
+            run_cycle_now
+                .then(|| run_cycle_shared(&sup, src.as_ref(), board.as_ref(), probe.as_ref()))
         })
         .await;
+        let deferred = matches!(joined, Ok(Some(None)));
+        if cycle_due && !deferred {
+            next_cycle = tokio::time::Instant::now() + DAILY_INTERVAL;
+        }
         match joined {
-            Ok(Some(results)) => tracing::info!(checked = results.len(), "auto_update_cycle_done"),
-            Ok(None) => {}
+            Ok(Some(Some(results))) => {
+                tracing::info!(checked = results.len(), "auto_update_cycle_done")
+            }
+            Ok(Some(None)) | Ok(None) => {}
             Err(e) => tracing::warn!(error = %e, "auto_update_cycle_crashed"),
         }
     }
@@ -512,6 +694,26 @@ mod tests {
         notices: Mutex<Vec<Value>>,
         queried: Mutex<u32>,
         downloads: Mutex<u32>,
+        /// How long each download takes (a slow mirror).
+        delay: Duration,
+    }
+
+    /// A vehicle that reads disarmed.
+    struct Disarmed;
+
+    impl ArmedProbe for Disarmed {
+        fn treated_as_armed(&self) -> bool {
+            false
+        }
+    }
+
+    /// An armed verdict the test flips.
+    struct Toggle(std::sync::atomic::AtomicBool);
+
+    impl ArmedProbe for Toggle {
+        fn treated_as_armed(&self) -> bool {
+            self.0.load(std::sync::atomic::Ordering::SeqCst)
+        }
     }
 
     impl UpdateSource for FakeSource {
@@ -524,6 +726,7 @@ mod tests {
         }
         fn download(&self, _: &str, _: &str) -> Result<Vec<u8>, String> {
             *self.downloads.lock().unwrap() += 1;
+            std::thread::sleep(self.delay);
             Ok(self.archive.clone())
         }
         fn notify(&self, notice: &Value) {
@@ -543,6 +746,7 @@ mod tests {
             notices: Mutex::new(Vec::new()),
             queried: Mutex::new(0),
             downloads: Mutex::new(0),
+            delay: Duration::ZERO,
         }
     }
 
@@ -642,7 +846,10 @@ mod tests {
         let mut sup = running_v1(dir.path());
         let mut src = source("1.1.0", &["hardware.spi"]);
         src.row.signer_key_id = "someone-else".to_string();
-        assert_eq!(run_cycle(&mut sup, &src, None)[0].1, Outcome::Notify);
+        assert_eq!(
+            run_cycle(&mut sup, &src, None, &Disarmed)[0].1,
+            Outcome::Notify
+        );
         let n = &src.notices.lock().unwrap()[0];
         assert_eq!(n["reason"], "signer_change");
         assert_eq!(n["offered_signer"], "someone-else");
@@ -685,7 +892,10 @@ mod tests {
             let mut src = source("1.1.0", &["hardware.spi"]);
             src.row.signer_key_id = "alice".to_string();
             src.archive = served;
-            assert_eq!(run_cycle(&mut sup, &src, None)[0].1, Outcome::Notify);
+            assert_eq!(
+                run_cycle(&mut sup, &src, None, &Disarmed)[0].1,
+                Outcome::Notify
+            );
             let n = &src.notices.lock().unwrap()[0];
             assert_eq!(n["reason"], "signer_change");
             assert_eq!(n["current_signer"], "alice");
@@ -699,7 +909,10 @@ mod tests {
         let mut src = source("1.1.0", &["hardware.spi"]);
         src.row.signer_key_id = "alice".to_string();
         src.archive = signed(v11, "alice", &alice);
-        assert_eq!(run_cycle(&mut sup, &src, None)[0].1, Outcome::SilentInstall);
+        assert_eq!(
+            run_cycle(&mut sup, &src, None, &Disarmed)[0].1,
+            Outcome::SilentInstall
+        );
         let rec = sup.find_install("com.example.thermal").unwrap();
         assert_eq!(rec.version, "1.1.0");
         assert_eq!(rec.signer_id.as_deref(), Some("alice"));
@@ -710,7 +923,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sup = running_v1(dir.path());
         let src = source("1.1.0", &["hardware.spi"]);
-        let results = run_cycle(&mut sup, &src, None);
+        let results = run_cycle(&mut sup, &src, None, &Disarmed);
         assert_eq!(
             results,
             vec![("com.example.thermal".to_string(), Outcome::SilentInstall)]
@@ -731,11 +944,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut sup = running_v1(dir.path());
         let major = source("2.0.0", &["hardware.spi"]);
-        assert_eq!(run_cycle(&mut sup, &major, None)[0].1, Outcome::Notify);
+        assert_eq!(
+            run_cycle(&mut sup, &major, None, &Disarmed)[0].1,
+            Outcome::Notify
+        );
         assert_eq!(major.notices.lock().unwrap()[0]["reason"], "major_bump");
 
         let widened = source("1.2.0", &["hardware.spi", "mavlink.write"]);
-        assert_eq!(run_cycle(&mut sup, &widened, None)[0].1, Outcome::Notify);
+        assert_eq!(
+            run_cycle(&mut sup, &widened, None, &Disarmed)[0].1,
+            Outcome::Notify
+        );
         let n = &widened.notices.lock().unwrap()[0];
         assert_eq!(n["reason"], "permission_delta");
         assert_eq!(n["new_permissions"], json!(["mavlink.write"]));
@@ -756,7 +975,10 @@ mod tests {
             &manifest("1.1.0", &["hardware.spi"])
                 .replace("com.example.thermal", "com.example.other"),
         );
-        assert_eq!(run_cycle(&mut sup, &other, None)[0].1, Outcome::Failed);
+        assert_eq!(
+            run_cycle(&mut sup, &other, None, &Disarmed)[0].1,
+            Outcome::Failed
+        );
 
         // The archive fetches a payload binary the installed version did not,
         // under the same permission set: only the code-surface check sees it.
@@ -768,7 +990,10 @@ mod tests {
             + "\n      size_bytes: 10\n";
         let mut widened = source("1.1.0", &["hardware.spi"]);
         widened.archive = archive(&fetching);
-        assert_eq!(run_cycle(&mut sup, &widened, None)[0].1, Outcome::Notify);
+        assert_eq!(
+            run_cycle(&mut sup, &widened, None, &Disarmed)[0].1,
+            Outcome::Notify
+        );
         assert_eq!(
             widened.notices.lock().unwrap()[0]["reason"],
             "code_surface_change"
@@ -778,7 +1003,10 @@ mod tests {
         let mut riskier = source("1.1.0", &["hardware.spi"]);
         riskier.archive =
             archive(&manifest("1.1.0", &["hardware.spi"]).replace("risk: high", "risk: critical"));
-        assert_eq!(run_cycle(&mut sup, &riskier, None)[0].1, Outcome::Notify);
+        assert_eq!(
+            run_cycle(&mut sup, &riskier, None, &Disarmed)[0].1,
+            Outcome::Notify
+        );
         assert_eq!(
             riskier.notices.lock().unwrap()[0]["reason"],
             "code_surface_change"
@@ -787,7 +1015,10 @@ mod tests {
         // A row with no archive pin is refused before any download.
         let mut unpinned = source("1.1.0", &["hardware.spi"]);
         unpinned.row.archive_sha256 = String::new();
-        assert_eq!(run_cycle(&mut sup, &unpinned, None)[0].1, Outcome::Failed);
+        assert_eq!(
+            run_cycle(&mut sup, &unpinned, None, &Disarmed)[0].1,
+            Outcome::Failed
+        );
         assert_eq!(*unpinned.downloads.lock().unwrap(), 0);
 
         let rec = sup.find_install("com.example.thermal").unwrap();
@@ -814,7 +1045,10 @@ mod tests {
             .failing
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let src = source("1.1.0", &["hardware.spi"]);
-        assert_eq!(run_cycle(&mut sup, &src, None)[0].1, Outcome::Failed);
+        assert_eq!(
+            run_cycle(&mut sup, &src, None, &Disarmed)[0].1,
+            Outcome::Failed
+        );
         let rec = sup.find_install("com.example.thermal").unwrap();
         assert_eq!(rec.version, "1.1.0");
         assert!(rec.reenable_pending);
@@ -865,7 +1099,10 @@ mod tests {
         let mut sup = running_v1(dir.path());
         let mut src = source("1.1.0", &["hardware.spi"]);
         src.archive = b"not a zip".to_vec();
-        assert_eq!(run_cycle(&mut sup, &src, None)[0].1, Outcome::Failed);
+        assert_eq!(
+            run_cycle(&mut sup, &src, None, &Disarmed)[0].1,
+            Outcome::Failed
+        );
         let rec = sup.find_install("com.example.thermal").unwrap();
         assert_eq!(rec.version, "1.0.0");
         assert_eq!(rec.status, PluginStatus::Running);
@@ -889,5 +1126,71 @@ mod tests {
             latest_version_row(&json!({"plugin": {}, "versions": []})).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn auto_update_defers_while_armed_and_runs_after_disarm() {
+        let dir = tempfile::tempdir().unwrap();
+        let sup = Mutex::new(running_v1(dir.path()));
+        let src = source("1.1.0", &["hardware.spi"]);
+        let probe = Toggle(std::sync::atomic::AtomicBool::new(true));
+
+        // Armed: no query, no download, nothing stopped.
+        assert!(run_cycle_shared(&sup, &src, None, &probe).is_none());
+        assert!(run_cycle(&mut sup.lock().unwrap(), &src, None, &probe).is_empty());
+        assert_eq!(*src.queried.lock().unwrap(), 0);
+        assert_eq!(*src.downloads.lock().unwrap(), 0);
+        {
+            let guard = sup.lock().unwrap();
+            let rec = guard.find_install("com.example.thermal").unwrap();
+            assert_eq!(rec.version, "1.0.0");
+            assert_eq!(rec.status, PluginStatus::Running);
+        }
+
+        // Disarmed: the deferred update runs.
+        probe.0.store(false, std::sync::atomic::Ordering::SeqCst);
+        let results = run_cycle_shared(&sup, &src, None, &probe).unwrap();
+        assert_eq!(
+            results,
+            vec![("com.example.thermal".to_string(), Outcome::SilentInstall)]
+        );
+        let guard = sup.lock().unwrap();
+        assert_eq!(
+            guard.find_install("com.example.thermal").unwrap().version,
+            "1.1.0"
+        );
+    }
+
+    #[test]
+    fn lock_free_during_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+        let sup = Arc::new(Mutex::new(running_v1(dir.path())));
+        let mut src = source("1.1.0", &["hardware.spi"]);
+        src.delay = Duration::from_millis(800);
+        let src = Arc::new(src);
+        let (cycle_sup, cycle_src) = (Arc::clone(&sup), Arc::clone(&src));
+        let cycle = std::thread::spawn(move || {
+            run_cycle_shared(&cycle_sup, cycle_src.as_ref(), None, &Disarmed)
+        });
+        // Wait until the download is under way.
+        let started = std::time::Instant::now();
+        while *src.downloads.lock().unwrap() == 0 {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "download never started"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Another lifecycle caller gets the supervisor within 100 ms.
+        let asked = std::time::Instant::now();
+        let guard = sup.lock().unwrap();
+        assert!(
+            asked.elapsed() < Duration::from_millis(100),
+            "lock took {:?}",
+            asked.elapsed()
+        );
+        drop(guard);
+        let results = cycle.join().unwrap().unwrap();
+        assert_eq!(results[0].1, Outcome::SilentInstall);
     }
 }
