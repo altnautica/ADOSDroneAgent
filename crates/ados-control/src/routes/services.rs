@@ -242,7 +242,6 @@ fn short_name_to_unit(name: &str) -> Option<&'static str> {
         "video-pipeline" => Some("ados-video.service"),
         "wfb-link" => Some("ados-wfb.service"),
         "rest-api" => Some("ados-api.service"),
-        "health-monitor" => Some("ados-health.service"),
         "cloud-command-poll" => Some("ados-cloud.service"),
         "agent-heartbeat" => Some("ados-cloud.service"),
         "pairing-beacon" => Some("ados-cloud.service"),
@@ -443,9 +442,9 @@ mod tests {
 
     #[test]
     fn parses_an_inactive_service_row() {
-        let row = "ados-discovery.service loaded inactive dead ADOS discovery";
+        let row = "ados-cloud.service loaded inactive dead ADOS cloud";
         let svc = parse_unit_line(row).unwrap();
-        assert_eq!(svc["name"], json!("ados-discovery"));
+        assert_eq!(svc["name"], json!("ados-cloud"));
         assert_eq!(svc["active"], json!(false));
         assert_eq!(svc["state"], json!("inactive"));
         assert_eq!(svc["sub_state"], json!("dead"));
@@ -528,7 +527,7 @@ mod tests {
     fn an_unmeasured_unit_reports_null_memory_not_zero() {
         let mut services = vec![
             json!({"name": "ados-video", "active": true, "state": "active"}),
-            json!({"name": "ados-discovery", "active": false, "state": "inactive"}),
+            json!({"name": "ados-cloud", "active": false, "state": "inactive"}),
         ];
         let mut scan = BTreeMap::new();
         scan.insert("ados-video.service".to_string(), 42.5);

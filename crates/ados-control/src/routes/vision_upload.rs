@@ -46,8 +46,9 @@
 
 use std::path::{Path, PathBuf};
 
+use axum::extract::multipart::Field;
 use axum::extract::{Multipart, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
@@ -67,13 +68,13 @@ const DEFAULT_MODELS_DIR: &str = "/opt/ados/models/vision";
 const CUSTOM_CATALOG: &str = "custom-catalog.json";
 
 /// Resolve the models directory the upload writes into, from one source of truth:
-/// the agent config's `system.models_dir` (the same field the Python
+/// the agent config's `vision.models_dir` (the same field the Python
 /// `VisionConfig` reads), so an operator override lands in the same place the
 /// model manager lists from. Falls back to the `ADOS_MODELS_DIR` override (the
 /// test/seam knob) and finally the default. Resolving from config — not an
 /// independent env var — is what keeps an uploaded model visible in
 /// `GET /api/vision/models`.
-fn models_dir() -> PathBuf {
+pub(crate) fn models_dir() -> PathBuf {
     if let Some(dir) = models_dir_from_config() {
         return dir;
     }
@@ -82,7 +83,7 @@ fn models_dir() -> PathBuf {
     )
 }
 
-/// Read `system.models_dir` out of `/etc/ados/config.yaml` (or the `ADOS_CONFIG`
+/// Read `vision.models_dir` out of `/etc/ados/config.yaml` (or the `ADOS_CONFIG`
 /// override), returning `None` when the file / section / field is absent or
 /// blank so the caller falls through to the env / default.
 fn models_dir_from_config() -> Option<PathBuf> {
@@ -91,13 +92,13 @@ fn models_dir_from_config() -> Option<PathBuf> {
     models_dir_from_config_at(Path::new(&path))
 }
 
-/// The path-explicit core of [`models_dir_from_config`]: read `system.models_dir`
+/// The path-explicit core of [`models_dir_from_config`]: read `vision.models_dir`
 /// from `path`, returning `None` on absence / parse error / a blank field. A
 /// fresh box has no override, so a missing or unparseable config is not an error.
 fn models_dir_from_config_at(path: &Path) -> Option<PathBuf> {
     let text = std::fs::read_to_string(path).ok()?;
     let root: Value = serde_norway::from_str(&text).ok()?;
-    let dir = root.get("system")?.get("models_dir")?.as_str()?.trim();
+    let dir = root.get("vision")?.get("models_dir")?.as_str()?.trim();
     if dir.is_empty() {
         return None;
     }
@@ -145,9 +146,11 @@ pub struct UploadMeta {
 ///
 /// Returns `{status:"ok", id, filename, sha256, size_bytes}` on success, a 400
 /// when the metadata id is missing/empty/invalid or the file is missing/empty,
-/// a 413 when the file exceeds [`MAX_MODEL_BYTES`], a 507 when storing it would
-/// leave less than [`MIN_FREE_AFTER_UPLOAD`] free on the models filesystem, and
-/// a 500 when the file or the catalog cannot be written.
+/// a 413 when the file exceeds [`MAX_MODEL_BYTES`] or any other part exceeds
+/// [`PART_MAX_BYTES`], a 401 `E_DIGEST_MISMATCH` when the file does not hash
+/// to `X-Content-SHA256`, a 507 when storing it would leave less than
+/// [`MIN_FREE_AFTER_UPLOAD`] free on the models filesystem, and a 500 when the
+/// file or the catalog cannot be written.
 ///
 /// The file part is streamed straight to a tmp file in the models dir (hashing as
 /// it goes) rather than buffered in RAM, so a multi-megabyte detector does not sit
@@ -156,7 +159,15 @@ pub struct UploadMeta {
 /// limits, aborting and deleting the partial file the moment either is crossed,
 /// so an upload can never fill the filesystem the config and pairing files
 /// live on.
-pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipart) -> Response {
+pub async fn upload_model(
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    let expected_sha256 = match expected_digest(&headers) {
+        Ok(d) => d,
+        Err(refusal) => return refusal,
+    };
     let dir = models_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return detail(
@@ -180,26 +191,10 @@ pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipa
         };
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
-            "metadata" => {
-                let text = match field.text().await {
-                    Ok(t) => t,
-                    Err(e) => {
-                        return detail(
-                            StatusCode::BAD_REQUEST,
-                            format!("metadata read failed: {e}"),
-                        )
-                    }
-                };
-                match serde_json::from_str::<UploadMeta>(&text) {
-                    Ok(m) => meta = Some(m),
-                    Err(e) => {
-                        return detail(
-                            StatusCode::BAD_REQUEST,
-                            format!("metadata is not valid JSON: {e}"),
-                        )
-                    }
-                }
-            }
+            "metadata" => match read_metadata(field).await {
+                Ok(m) => meta = Some(m),
+                Err(refusal) => return refusal,
+            },
             "file" => {
                 if field.file_name().is_some_and(is_unsupported_model_file) {
                     return detail(
@@ -208,7 +203,11 @@ pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipa
                          agent runs them; upload an .rknn, .onnx or .tflite model",
                     );
                 }
-                let budget = match upload_budget(available_bytes(&dir)) {
+                let probe_dir = dir.clone();
+                let available = tokio::task::spawn_blocking(move || available_bytes(&probe_dir))
+                    .await
+                    .unwrap_or(None);
+                let budget = match upload_budget(available) {
                     Ok(b) => b,
                     Err(refusal) => return refusal.into_response(),
                 };
@@ -218,8 +217,13 @@ pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipa
                     Err(StreamFailure::Fault(msg)) => return detail(StatusCode::BAD_REQUEST, msg),
                 }
             }
-            // Ignore any other part — the contract is the two named parts.
-            _ => {}
+            // Any other part is outside the contract: drained and discarded,
+            // under the same cap as the metadata so it cannot buffer unbounded.
+            _ => {
+                if let Err(refusal) = drain_part_capped(field, PART_MAX_BYTES).await {
+                    return refusal;
+                }
+            }
         }
     }
 
@@ -241,6 +245,14 @@ pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipa
         Some(s) if s.size_bytes > 0 => s,
         _ => return detail(StatusCode::BAD_REQUEST, "missing or empty file part"),
     };
+    // A digest-signed upload must hash to the digest the signature covers. The
+    // staged tmp file is dropped (and removed) on a mismatch.
+    if expected_sha256
+        .as_deref()
+        .is_some_and(|expected| expected != staged.sha256)
+    {
+        return digest_mismatch();
+    }
 
     // The finalize does blocking renames, reads and an fsync, and holds the
     // catalog lock across them: run it on the blocking pool.
@@ -252,6 +264,104 @@ pub async fn upload_model(State(_state): State<AppState>, mut multipart: Multipa
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("model finalize failed: {e}"),
         ),
+    }
+}
+
+/// The cap on any non-file part: the metadata JSON and any part outside the
+/// contract, which is drained under the same cap.
+const PART_MAX_BYTES: usize = 64 * 1024;
+
+/// The upload header carrying the model file's hex sha256. A digest-signed
+/// upload's signature covers this digest instead of the streamed body.
+const CONTENT_SHA256_HEADER: &str = "x-content-sha256";
+
+/// The 413 for a non-file part past [`PART_MAX_BYTES`].
+fn part_too_large() -> Response {
+    detail(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        format!(
+            "a non-file upload part is larger than the {} KiB limit",
+            PART_MAX_BYTES / 1024
+        ),
+    )
+}
+
+/// The 401 for a model file that does not hash to `X-Content-SHA256`.
+fn digest_mismatch() -> Response {
+    let body = Json(json!({"error": "E_DIGEST_MISMATCH"}));
+    (StatusCode::UNAUTHORIZED, body).into_response()
+}
+
+/// The lowercase hex digest from `X-Content-SHA256`, `None` when absent; a
+/// present value that is not 64 hex digits is a 400.
+// The Err is the finished refusal response, built once on a cold path; boxing
+// it would only add an allocation.
+#[allow(clippy::result_large_err)]
+fn expected_digest(headers: &HeaderMap) -> Result<Option<String>, Response> {
+    let Some(raw) = headers.get(CONTENT_SHA256_HEADER) else {
+        return Ok(None);
+    };
+    let value = raw.to_str().unwrap_or_default().trim().to_ascii_lowercase();
+    if value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Ok(Some(value))
+    } else {
+        Err(detail(
+            StatusCode::BAD_REQUEST,
+            "X-Content-SHA256 must be 64 hex digits",
+        ))
+    }
+}
+
+/// Read the `metadata` part chunk by chunk under [`PART_MAX_BYTES`] and parse
+/// it. Past the cap is a 413; a read fault or invalid JSON is a 400.
+#[allow(clippy::result_large_err)]
+async fn read_metadata(mut field: Field<'_>) -> Result<UploadMeta, Response> {
+    let mut buf: Vec<u8> = Vec::new();
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                if buf.len() + chunk.len() > PART_MAX_BYTES {
+                    return Err(part_too_large());
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(detail(
+                    StatusCode::BAD_REQUEST,
+                    format!("metadata read failed: {e}"),
+                ))
+            }
+        }
+    }
+    serde_json::from_slice::<UploadMeta>(&buf).map_err(|e| {
+        detail(
+            StatusCode::BAD_REQUEST,
+            format!("metadata is not valid JSON: {e}"),
+        )
+    })
+}
+
+/// Read and discard a part, refusing with 413 once it passes `cap` bytes.
+#[allow(clippy::result_large_err)]
+async fn drain_part_capped(mut field: Field<'_>, cap: usize) -> Result<(), Response> {
+    let mut seen: usize = 0;
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                seen += chunk.len();
+                if seen > cap {
+                    return Err(part_too_large());
+                }
+            }
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                return Err(detail(
+                    StatusCode::BAD_REQUEST,
+                    format!("malformed upload: {e}"),
+                ))
+            }
+        }
     }
 }
 
@@ -891,27 +1001,28 @@ mod tests {
     }
 
     #[test]
-    fn models_dir_from_config_reads_system_models_dir() {
-        // The upload resolves the models dir from `system.models_dir` so it writes
+    fn models_dir_from_config_reads_vision_models_dir() {
+        // The upload resolves the models dir from `vision.models_dir` so it writes
         // where the Python manager lists from. An override is honoured; a blank /
         // absent field / unparseable file falls through to None (env / default).
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.yaml");
 
-        std::fs::write(&cfg, "system:\n  models_dir: /var/ados/custom-models\n").unwrap();
+        std::fs::write(&cfg, "vision:\n  models_dir: /var/ados/custom-models\n").unwrap();
         assert_eq!(
             models_dir_from_config_at(&cfg),
             Some(PathBuf::from("/var/ados/custom-models"))
         );
 
-        std::fs::write(&cfg, "system:\n  models_dir: \"\"\n").unwrap();
+        std::fs::write(&cfg, "vision:\n  models_dir: \"\"\n").unwrap();
         assert_eq!(
             models_dir_from_config_at(&cfg),
             None,
             "a blank dir falls through"
         );
 
-        std::fs::write(&cfg, "video:\n  enabled: true\n").unwrap();
+        // The key lives under `vision`, not `system`.
+        std::fs::write(&cfg, "system:\n  models_dir: /var/ados/custom-models\n").unwrap();
         assert_eq!(
             models_dir_from_config_at(&cfg),
             None,
@@ -923,5 +1034,74 @@ mod tests {
             None,
             "a missing config falls through"
         );
+    }
+
+    /// A multipart body with one part named `name` carrying `payload`.
+    async fn one_part(name: &str, payload: &[u8]) -> Multipart {
+        use axum::extract::FromRequest;
+        let boundary = "ados-test-boundary";
+        let mut body =
+            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n")
+                .into_bytes();
+        body.extend_from_slice(payload);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let request = axum::http::Request::builder()
+            .method("POST")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        match Multipart::from_request(request, &()).await {
+            Ok(m) => m,
+            Err(_) => panic!("a well-formed multipart request"),
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_1mib_413() {
+        let mut multipart = one_part("metadata", &vec![b' '; 1024 * 1024]).await;
+        let field = multipart.next_field().await.unwrap().unwrap();
+        match read_metadata(field).await {
+            Ok(_) => panic!("a 1 MiB metadata part must be refused"),
+            Err(resp) => assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE),
+        }
+        // A metadata part under the cap still parses.
+        let mut multipart = one_part("metadata", br#"{"id":"small"}"#).await;
+        let field = multipart.next_field().await.unwrap().unwrap();
+        match read_metadata(field).await {
+            Ok(m) => assert_eq!(m.id, "small"),
+            Err(resp) => panic!("small metadata refused: {}", resp.status()),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_part_is_drained_under_the_cap() {
+        let mut multipart = one_part("extra", &vec![0u8; PART_MAX_BYTES + 1]).await;
+        let field = multipart.next_field().await.unwrap().unwrap();
+        let refused = drain_part_capped(field, PART_MAX_BYTES).await;
+        assert_eq!(
+            refused.map_err(|r| r.status()),
+            Err(StatusCode::PAYLOAD_TOO_LARGE)
+        );
+        let mut multipart = one_part("extra", b"small").await;
+        let field = multipart.next_field().await.unwrap().unwrap();
+        assert!(drain_part_capped(field, PART_MAX_BYTES).await.is_ok());
+    }
+
+    #[test]
+    fn the_content_digest_header_is_parsed_or_refused() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(expected_digest(&headers).ok(), Some(None));
+        let digest = "AB".repeat(32);
+        headers.insert(CONTENT_SHA256_HEADER, digest.parse().unwrap());
+        assert_eq!(expected_digest(&headers).ok(), Some(Some("ab".repeat(32))));
+        headers.insert(CONTENT_SHA256_HEADER, "not-hex".parse().unwrap());
+        assert_eq!(
+            expected_digest(&headers).map_err(|r| r.status()),
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(digest_mismatch().status(), StatusCode::UNAUTHORIZED);
     }
 }

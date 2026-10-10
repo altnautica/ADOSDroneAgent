@@ -70,10 +70,8 @@ pub const ALLOWED_UNITS: &[&str] = &[
     "ados-batman",
     "ados-cloud",
     "ados-crsf",
-    "ados-discovery",
     "ados-dnsmasq-gs",
     "ados-gpio",
-    "ados-health",
     "ados-hostapd",
     "ados-input",
     "ados-kiosk",
@@ -92,12 +90,12 @@ pub const ALLOWED_UNITS: &[&str] = &[
     "ados-uplink-router",
     "ados-video",
     "ados-vision",
+    "ados-vision-hailo",
     "ados-vision-rknn",
     "ados-wfb",
     "ados-wfb-receiver",
     "ados-wfb-relay",
     "ados-wfb-rx",
-    "ados-wifi-client",
 ];
 
 /// Shipped units the restart route refuses: this process itself (the reply

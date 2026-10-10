@@ -65,7 +65,9 @@
 //! when its own source is unavailable, never a 500. The route carries no path
 //! params and never mutates.
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use ados_protocol::wfb_status::{build_radio_block, get_or_null, json_truthy, WfbStatusConfig};
 use axum::extract::State;
@@ -120,8 +122,17 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     let health = crate::routes::status::derive_health(signals.as_ref());
     let resources = derive_resources_subset(signals.as_ref());
 
-    // --- Services (systemd-fallback shape; no in-process tracker here) ---
-    let services = build_services_list().await;
+    // --- Services + sidecar folds, shared by concurrent pollers (2 s TTL) ---
+    let run_dir = state.run_dir.clone();
+    let slow = SLOW_BLOCKS
+        .get_or_compute(SLOW_BLOCKS_TTL, || build_slow_blocks(run_dir))
+        .await;
+    let services = slow.get("services").cloned().unwrap_or_else(|| json!([]));
+
+    // Router-owned posture flags, read before the snapshot moves into the
+    // telemetry projection. They describe the agent itself, so they are
+    // reported whether or not a flight controller is attached.
+    let router_extras = router_status_extras(snapshot.as_ref());
 
     // --- WFB status, read once and reused by the video gate + the radio block ---
     let wfb_status = wfb_status_view(&state).await;
@@ -203,7 +214,10 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     );
     payload.insert(
         "runtimeMode".to_string(),
-        json!(crate::state::runtime_mode()),
+        json!(crate::runtime_mode::current_in(
+            &resolved_profile,
+            &state.bin_dir
+        )),
     );
     // Whether this node holds the per-pair credential its ground station's
     // relayed calls must present. Reported because the consequence is
@@ -227,47 +241,22 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
         json!(ados_protocol::plugin_loopback_guard::read_state().label()),
     );
 
-    // Camera presence + USB-recovery, folded in only when the sidecars are fresh.
-    for (k, v) in read_camera_status(&state.run_dir) {
+    // The sidecar folds, computed together with the services list above:
+    // camera presence + USB recovery, the reconciler verdicts (management-link
+    // guardian, reach-back failover, USB rehome, WiFi power-save), per-adapter
+    // stable-MAC verdicts, linked WFB peers and the CRSF lane state. Each key is
+    // present only when its source is fresh, never a fabricated block.
+    if let Some(Value::Object(folds)) = slow.get("folds") {
+        for (k, v) in folds {
+            payload.insert(k.clone(), v.clone());
+        }
+    }
+
+    // The FC identity reconciler's last verdict (`/run/ados/fc-identity.json`),
+    // or null before its first tick.
+    payload.insert("fc_identity".to_string(), read_fc_identity(&state.run_dir));
+    for (k, v) in router_extras {
         payload.insert(k, v);
-    }
-
-    // Reconciler verdicts — management-link guardian, reach-back failover, USB
-    // rehome, WiFi power-save — folded in only when each sidecar is fresh. Every
-    // one of these had a GCS reader and a card and no producer on either
-    // transport, so all four rendered permanently empty.
-    for (k, v) in read_reconciler_status(&state.run_dir) {
-        payload.insert(k, v);
-    }
-
-    // Per-adapter stable-MAC verdicts. No transport emitted a `macStability`
-    // block, and nothing in the GCS fetches the LAN route that serves the same
-    // verdicts, so the adapter-stability card, the MAC-pin settings section and
-    // the radio-network health panel all read an absent key forever. Omitted
-    // (never an empty list) on a node that has pinned nothing.
-    if let Some(mac_stability) =
-        ados_macpin::engine::adapters_camel_from(&crate::routes::mac_adapters::state_file_path())
-    {
-        payload.insert("macStability".to_string(), mac_stability);
-    }
-
-    // Linked WFB peers + the freshest-peer scalars, folded in only when this node
-    // currently decodes a fresh PresenceBeacon from at least one WFB peer. This is
-    // the LOCAL-FIRST transitive-enrollment signal (a ground node's relayed drones)
-    // the cloud heartbeat carries, now on the PRIMARY LAN path, so a GCS
-    // paired only to a ground node enrols each relayed drone without the cloud
-    // relay. PROFILE-AGNOSTIC; the keys are absent on a drone / a peerless node / a
-    // node whose relay lane went quiet, never a fabricated block.
-    for (k, v) in read_linked_peers() {
-        payload.insert(k, v);
-    }
-
-    // CRSF/ExpressLRS RC control-lane state, folded in only when the lane's
-    // sidecar is live — PROFILE-AGNOSTIC, so a drone running the relay lane
-    // surfaces it over the LAN path just like a ground station. Absent (the key
-    // omitted) when the lane is down / stale, never a fabricated block.
-    if let Some(crsf) = read_crsf_status() {
-        payload.insert("crsf".to_string(), crsf);
     }
 
     // The swarm neighbour table, folded in only when `ados-swarmbus` has actually
@@ -289,9 +278,128 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
 /// gate the mesh block on the raw `"ground_station"` value. Defaults to `"auto"`
 /// (the Python `AgentConfig` default) when the file is absent.
 fn config_agent_profile(config_path: &Path) -> String {
-    crate::config::PairingConfig::load_from(config_path)
+    crate::config::PairingConfig::cached(config_path)
         .agent
         .profile
+        .clone()
+}
+
+// ---------------------------------------------------------------------------
+// Shared slow blocks: the services inventory plus the sidecar folds.
+// ---------------------------------------------------------------------------
+
+/// How long one services + sidecar computation is reused. Every poller inside
+/// the window shares one `systemctl list-units`, one `/proc` PSS scan and one
+/// pass over the sidecars.
+const SLOW_BLOCKS_TTL: Duration = Duration::from_secs(2);
+
+/// The process-wide cache behind [`get_full_status`].
+static SLOW_BLOCKS: TtlCache = TtlCache::new();
+
+/// A single-flight TTL cache for one JSON value. The lock is held across the
+/// computation, so concurrent callers on a cold or expired slot wait for the
+/// one computation in flight instead of starting their own.
+struct TtlCache {
+    slot: tokio::sync::Mutex<Option<(Instant, Value)>>,
+}
+
+impl TtlCache {
+    const fn new() -> Self {
+        Self {
+            slot: tokio::sync::Mutex::const_new(None),
+        }
+    }
+
+    /// The cached value when it is younger than `ttl`, else the result of
+    /// `compute`, stored for the next caller.
+    async fn get_or_compute<F, Fut>(&self, ttl: Duration, compute: F) -> Value
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Value>,
+    {
+        let mut slot = self.slot.lock().await;
+        if let Some((at, value)) = slot.as_ref() {
+            if at.elapsed() < ttl {
+                return value.clone();
+            }
+        }
+        let value = compute().await;
+        *slot = Some((Instant::now(), value.clone()));
+        value
+    }
+}
+
+/// The services list and the sidecar folds as `{"services": [..], "folds": {..}}`.
+/// The sidecar reads are synchronous file IO, so they run on the blocking pool.
+async fn build_slow_blocks(run_dir: PathBuf) -> Value {
+    let services = build_services_list().await;
+    let folds = tokio::task::spawn_blocking(move || sidecar_folds(&run_dir))
+        .await
+        .unwrap_or_default();
+    json!({ "services": services, "folds": Value::Object(folds) })
+}
+
+/// Every sidecar-sourced key of the consolidated body, each present only when
+/// its source is fresh.
+fn sidecar_folds(run_dir: &Path) -> Map<String, Value> {
+    let mut folds = Map::new();
+    // Camera presence + USB-recovery.
+    folds.extend(read_camera_status(run_dir));
+    // Reconciler verdicts: management-link guardian, reach-back failover, USB
+    // rehome, WiFi power-save.
+    folds.extend(read_reconciler_status(run_dir));
+    // Per-adapter stable-MAC verdicts, omitted on a node that pinned nothing.
+    if let Some(mac_stability) =
+        ados_macpin::engine::adapters_camel_from(&crate::routes::mac_adapters::state_file_path())
+    {
+        folds.insert("macStability".to_string(), mac_stability);
+    }
+    // Linked WFB peers + the freshest-peer scalars (LOCAL-FIRST transitive
+    // enrollment), absent when no fresh PresenceBeacon is decoded.
+    folds.extend(read_linked_peers());
+    // CRSF/ExpressLRS RC control-lane state, absent when the lane is down.
+    if let Some(crsf) = read_crsf_status() {
+        folds.insert("crsf".to_string(), crsf);
+    }
+    folds
+}
+
+/// The FC identity reconciler's sidecar file name under the run directory.
+const FC_IDENTITY_SIDECAR: &str = "fc-identity.json";
+
+/// The FC identity reconciler's last verdict, verbatim from its sidecar
+/// (`{version, enabled, outcome, wanted_system_id, current_system_id, at_ms}`),
+/// or null when the file is absent or not a JSON object.
+fn read_fc_identity(run_dir: &Path) -> Value {
+    std::fs::read_to_string(run_dir.join(FC_IDENTITY_SIDECAR))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or(Value::Null)
+}
+
+/// Router extras surfaced at the top level of the consolidated body: the
+/// direct-GCS proxy posture (with its per-edge `*_listening` flags), the
+/// unsigned-traffic rejection risk, and the injector arbitration mode. Each is
+/// null when the router has not published it.
+const ROUTER_STATUS_EXTRAS: [&str; 3] = [
+    "mavlink_proxy_posture",
+    "agent_commands_unsigned_rejected_risk",
+    "injector_arbitration",
+];
+
+fn router_status_extras(snapshot: Option<&Value>) -> Vec<(String, Value)> {
+    let obj = snapshot.and_then(Value::as_object);
+    ROUTER_STATUS_EXTRAS
+        .iter()
+        .map(|key| {
+            let value = obj
+                .and_then(|m| m.get(*key))
+                .cloned()
+                .unwrap_or(Value::Null);
+            (key.to_string(), value)
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -646,6 +754,10 @@ struct PipelineSidecar {
     /// `encoder_hw`: whether that encoder is hardware-backed. Absent on a
     /// writer that predates the field.
     encoder_hw: Option<bool>,
+    /// `encoder_forced_software`: the hardware encoder failed and the next
+    /// start was pinned to the software encoder. Absent on a writer that
+    /// predates the field.
+    encoder_forced_software: Option<bool>,
 }
 
 /// Read the pipeline sidecar the way every other sidecar block in this file
@@ -688,6 +800,7 @@ fn read_pipeline_outcome_in(run_dir: &Path, now: f64) -> PipelineSidecar {
             .and_then(Value::as_str)
             .map(str::to_string),
         encoder_hw: doc.get("encoder_hw").and_then(Value::as_bool),
+        encoder_forced_software: doc.get("encoder_forced_software").and_then(Value::as_bool),
     }
 }
 
@@ -764,6 +877,7 @@ fn build_video_block_with(
         reason: pipeline_reason,
         encoder,
         encoder_hw,
+        encoder_forced_software,
     } = pipeline;
 
     // The encoder identity 0.99.359 dropped: without it the GCS cannot tell a
@@ -778,6 +892,9 @@ fn build_video_block_with(
         }
         if let Some(hw) = encoder_hw {
             block["encoder_hw"] = json!(hw);
+        }
+        if let Some(forced) = encoder_forced_software {
+            block["encoder_forced_software"] = json!(forced);
         }
     };
 
@@ -1732,9 +1849,9 @@ mod tests {
     fn fallback_line_keeps_active_state_and_substate_apart() {
         // The ActiveState and the sub-state travel separately, so a consumer
         // can tell a stopped unit from a crash-looping one.
-        let row = "ados-discovery.service loaded inactive dead ADOS discovery";
+        let row = "ados-cloud.service loaded inactive dead ADOS cloud";
         let svc = parse_fallback_line(row).unwrap();
-        assert_eq!(svc["name"], json!("ados-discovery"));
+        assert_eq!(svc["name"], json!("ados-cloud"));
         assert_eq!(svc["state"], json!("inactive"));
         assert_eq!(svc["sub_state"], json!("dead"));
         assert_eq!(svc["task_done"], json!(true));
@@ -2050,6 +2167,7 @@ mod tests {
             reason: reason.map(str::to_string),
             encoder: encoder.map(str::to_string),
             encoder_hw: None,
+            encoder_forced_software: None,
         }
     }
 
@@ -2074,6 +2192,7 @@ mod tests {
             vec![],
             PipelineSidecar {
                 encoder_hw: Some(true),
+                encoder_forced_software: Some(false),
                 ..pipeline("streaming", None, Some("rpicam-vid"))
             },
         );
@@ -2107,6 +2226,44 @@ mod tests {
         assert!(v.get("whep_url_basis").is_none());
         // No sidecar streams → no `streams` key (single-stream nodes unchanged).
         assert!(v.get("streams").is_none());
+        assert_eq!(
+            v["encoder_forced_software"],
+            json!(false),
+            "the forced-software pin is surfaced"
+        );
+    }
+
+    #[test]
+    fn forced_software_is_read_from_the_camera_state_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = 1_000.0;
+        std::fs::write(
+            dir.path().join("camera-state.json"),
+            json!({
+                "pipeline_state": "streaming",
+                "encoder": "gstreamer-x264enc",
+                "encoder_hw": false,
+                "encoder_forced_software": true,
+                "updated_at_unix": now,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let p = read_pipeline_outcome_in(dir.path(), now);
+        assert_eq!(p.encoder_forced_software, Some(true));
+        let v = build_video_block_with("drone", &None, true, vec![], p);
+        assert_eq!(v["encoder_forced_software"], json!(true));
+
+        // A writer that predates the field leaves it absent, not false.
+        std::fs::write(
+            dir.path().join("camera-state.json"),
+            json!({"pipeline_state": "streaming", "updated_at_unix": now}).to_string(),
+        )
+        .unwrap();
+        let p = read_pipeline_outcome_in(dir.path(), now);
+        assert_eq!(p.encoder_forced_software, None);
+        let v = build_video_block_with("drone", &None, true, vec![], p);
+        assert!(v.get("encoder_forced_software").is_none());
     }
 
     /// The customer report, as a test. A camera is detected and mediamtx is
@@ -2968,5 +3125,100 @@ mod tests {
         let empty = dir.path().join("empty.state");
         std::fs::write(&empty, r#"{"version":1,"adapters":[]}"#).unwrap();
         assert!(ados_macpin::engine::adapters_camel_from(&empty).is_none());
+    }
+
+    // -------- shared slow blocks --------
+
+    /// Two requests inside the TTL share one computation, so one
+    /// `systemctl list-units` serves both; the seam counts computations.
+    #[tokio::test]
+    async fn status_full_two_requests_one_list_units() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let cache = TtlCache::new();
+        let list_units_calls = AtomicUsize::new(0);
+        let calls = &list_units_calls;
+        let probe = move || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            json!({"services": [{"name": "ados-cloud"}], "folds": {}})
+        };
+        let (a, b) = tokio::join!(
+            cache.get_or_compute(SLOW_BLOCKS_TTL, probe),
+            cache.get_or_compute(SLOW_BLOCKS_TTL, probe),
+        );
+        assert_eq!(a, b);
+        assert_eq!(list_units_calls.load(Ordering::SeqCst), 1);
+        // An expired slot recomputes.
+        cache.get_or_compute(Duration::ZERO, probe).await;
+        assert_eq!(list_units_calls.load(Ordering::SeqCst), 2);
+    }
+
+    // -------- fc_identity + router extras --------
+
+    fn state_in(d: &Path) -> AppState {
+        AppState::new(
+            std::sync::Arc::new(crate::auth::PairingState::with_path(d.join("pairing.json"))),
+            crate::ipc::StateIpcClient::disconnected(),
+            crate::ipc::MavlinkIpcClient::new(d.join("absent-mavlink.sock")),
+            crate::ipc::LogdQueryClient::new(d.join("absent-logd.sock")),
+            d.join("board.json"),
+            crate::state::PairingPaths {
+                config: d.join("config.yaml"),
+                pairing_json: d.join("pairing.json"),
+                wfb_key_dir: d.join("wfb"),
+                bind_state: d.join("bind-state.json"),
+                profile_conf: d.join("profile.conf"),
+                mesh_role: d.join("mesh-role"),
+                relay_secret: d.join("relay-peer-secret"),
+            },
+            std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+                d.join("dashboard-pin.json"),
+            )),
+            std::sync::Arc::new(crate::mcp::McpTokenStore::with_path(
+                d.join("mcp-token.json"),
+            )),
+        )
+        .with_run_dir(d.to_path_buf())
+    }
+
+    #[tokio::test]
+    async fn fc_identity_block_reads_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let state = state_in(d);
+        // Before the reconciler's first tick the block is null.
+        let Json(body) = get_full_status(State(state.clone())).await;
+        assert_eq!(body["fc_identity"], Value::Null);
+
+        std::fs::write(
+            d.join("fc-identity.json"),
+            r#"{"version":1,"enabled":false,"outcome":"disabled","wanted_system_id":null,"current_system_id":7,"at_ms":1}"#,
+        )
+        .unwrap();
+        state.state.set_snapshot_for_test(json!({
+            "armed": false,
+            "mavlink_proxy_posture": {"tcp_listening": true, "udp_listening": [true], "ws_listening": false},
+            "agent_commands_unsigned_rejected_risk": true,
+            "injector_arbitration": "off",
+        }));
+        let Json(body) = get_full_status(State(state)).await;
+        assert_eq!(body["fc_identity"]["outcome"], json!("disabled"));
+        assert_eq!(body["fc_identity"]["current_system_id"], json!(7));
+        assert_eq!(body["mavlink_proxy_posture"]["tcp_listening"], json!(true));
+        assert_eq!(
+            body["mavlink_proxy_posture"]["udp_listening"],
+            json!([true])
+        );
+        assert_eq!(body["agent_commands_unsigned_rejected_risk"], json!(true));
+        assert_eq!(body["injector_arbitration"], json!("off"));
+    }
+
+    #[test]
+    fn router_extras_are_null_until_published() {
+        for (_, v) in router_status_extras(None) {
+            assert_eq!(v, Value::Null);
+        }
+        let extras = router_status_extras(Some(&json!({"injector_arbitration": "active"})));
+        assert_eq!(extras.len(), 3);
+        assert!(extras.contains(&("injector_arbitration".to_string(), json!("active"))));
     }
 }

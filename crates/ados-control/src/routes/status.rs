@@ -54,10 +54,12 @@ use crate::state::AppState;
 /// mavlink_alive / heartbeat_age_s / fc_source / fc_link_hint). set. `batteries` is the per-pack
 /// BATTERY_STATUS list the battery engine reads and `/api/v1/battery` serves; the telemetry shape
 /// keeps its single-pack `battery` block. `fc_frames_decoded` is the cumulative FC frame counter
-/// the supervisor judges the router's work on.
-const IPC_ONLY_KEYS: [&str; 14] = [
+/// the supervisor judges the router's work on. `fc_device` is the canonical
+/// serial path of the FC link, read alongside `fc_port`.
+const IPC_ONLY_KEYS: [&str; 15] = [
     "fc_connected",
     "fc_port",
+    "fc_device",
     "fc_baud",
     "service_uptime",
     "transport_open",
@@ -127,11 +129,20 @@ const IPC_ONLY_KEYS: [&str; 14] = [
 /// gate would otherwise blank the one number that explains why a command did
 /// not go out.
 ///
+/// `agent_commands_unsigned_rejected_risk` and `injector_arbitration` are the
+/// router's verdicts about its own command path (whether the FC will drop the
+/// agent's unsigned frames, and whether the FC-write arbiter is active), so
+/// they stay visible while the FC link is down.
+///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 18] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 22] = [
+    "agent_commands_unsigned_rejected_risk",
     "aux_mavlink_tee",
     "aux_rpc",
+    "aux_uplink_partial_dropped",
+    "aux_uplink_queue_full_dropped",
     "fc_reachable",
+    "injector_arbitration",
     "ipc_mavlink_drops",
     "ipc_state_drops",
     "mavlink_frame_ingest",

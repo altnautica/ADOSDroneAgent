@@ -11,7 +11,7 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::multipart::{Multipart, MultipartError, MultipartRejection};
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -228,46 +228,68 @@ fn too_large(cap: u64) -> Refusal {
     )
 }
 
+#[path = "upload_admission.rs"]
+mod admission;
+use admission::{busy, expected_digest, try_archive_slot, UploadFault};
+
 /// Read the `file` part of an upload: it must be named `*.adosplug`, be
-/// non-empty and fit the archive cap. Returns `(file name, bytes)`.
+/// non-empty and fit the archive cap. The bytes are hashed as they stream in;
+/// when `expected` is set the digest must match it. Returns `(file name,
+/// bytes)`.
 async fn read_upload(
     multipart: Result<Multipart, MultipartRejection>,
-) -> Result<(String, Vec<u8>), Refusal> {
-    let expected = || Refusal::usage("usage_error", "expected a .adosplug file");
-    let mut multipart = multipart.map_err(|_| expected())?;
+    expected: Option<&str>,
+) -> Result<(String, Vec<u8>), UploadFault> {
+    let expected_file = || Refusal::usage("usage_error", "expected a .adosplug file");
+    let mut multipart = multipart.map_err(|_| expected_file())?;
     while let Some(mut field) = multipart.next_field().await.map_err(multipart_refusal)? {
         if field.name() != Some("file") {
             continue;
         }
         let file_name = field.file_name().unwrap_or_default().to_string();
         if !file_name.ends_with(".adosplug") {
-            return Err(expected());
+            return Err(expected_file().into());
         }
         let mut raw: Vec<u8> = Vec::new();
+        let mut hasher = Sha256::new();
         while let Some(chunk) = field.chunk().await.map_err(multipart_refusal)? {
             if (raw.len() + chunk.len()) as u64 > ARCHIVE_MAX_BYTES {
-                return Err(too_large(ARCHIVE_MAX_BYTES));
+                return Err(too_large(ARCHIVE_MAX_BYTES).into());
             }
+            hasher.update(&chunk);
             raw.extend_from_slice(&chunk);
         }
         if raw.is_empty() {
-            return Err(Refusal::usage("usage_error", "empty upload"));
+            return Err(Refusal::usage("usage_error", "empty upload").into());
+        }
+        if let Some(expected) = expected {
+            if hex::encode(hasher.finalize()) != expected {
+                return Err(UploadFault::DigestMismatch);
+            }
         }
         return Ok((file_name, raw));
     }
-    Err(expected())
+    Err(expected_file().into())
 }
 
 /// `POST /api/plugins/parse`: multipart `file`, the non-committing preview.
 pub async fn parse_plugin(
     State(state): State<AppState>,
+    headers: HeaderMap,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Response {
-    let result = async {
-        let (_, raw) = read_upload(multipart).await?;
-        state.plugins.read(move |sup| summarize(raw, sup)).await
-    }
-    .await;
+    let Some(_slot) = try_archive_slot() else {
+        return busy();
+    };
+    let expected = match expected_digest(&headers) {
+        Ok(d) => d,
+        Err(r) => return r.into_response(),
+    };
+    let raw = match read_upload(multipart, expected.as_deref()).await {
+        Ok((_, raw)) => raw,
+        Err(fault) => return fault.respond(None),
+    };
+    let result = state.plugins.read(move |sup| summarize(raw, sup)).await;
     respond(result.map(|summary| json_response(StatusCode::OK, &summary)))
 }
 
@@ -295,23 +317,15 @@ fn download_refusal(e: DownloadError) -> Refusal {
     }
 }
 
-/// One archive download at a time: each buffers up to the archive cap in
-/// memory, so parallel URL installs must not stack those buffers.
-static URL_DOWNLOADS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-
 /// Fetch an archive from an allowlisted URL under the archive cap and check it
 /// against `expected_sha256` (skipped when empty). Returns the bytes and their
-/// sha256. Downloads are serialized; each runs on a blocking thread because
-/// the live client is blocking.
+/// sha256. The caller holds the archive slot; the fetch runs on a blocking
+/// thread because the live client is blocking.
 async fn download_archive(
     source: Option<Arc<dyn DownloadSource>>,
     url: String,
     expected_sha256: String,
 ) -> Result<(Vec<u8>, String), Refusal> {
-    let _permit = URL_DOWNLOADS
-        .acquire()
-        .await
-        .map_err(|e| Refusal::host_io(format!("download queue closed: {e}")))?;
     tokio::task::spawn_blocking(move || {
         let live;
         let source: &dyn DownloadSource = match &source {
@@ -377,6 +391,9 @@ pub async fn parse_from_url(State(state): State<AppState>, body: Bytes) -> Respo
     let req: ParseFromUrlRequest = match parse_body(&body) {
         Ok(r) => r,
         Err(bad) => return bad.into_response(),
+    };
+    let Some(_slot) = try_archive_slot() else {
+        return busy();
     };
     let result = async {
         let url = validate_url(&req.url)?;
@@ -489,24 +506,36 @@ pub struct InstallQuery {
 pub async fn install_plugin(
     State(state): State<AppState>,
     Query(query): Query<InstallQuery>,
+    headers: HeaderMap,
     multipart: Result<Multipart, MultipartRejection>,
 ) -> Response {
-    let result = async {
-        let job = JobSidecar::new(&state.plugins.job_dir, query.job_id.clone())?;
-        let (file_name, raw) = read_upload(multipart).await.map_err(|r| job.fail(r))?;
-        let wanted: Vec<String> = query
-            .requested_permissions
-            .as_deref()
-            .unwrap_or_default()
-            .split(',')
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-            .collect();
-        let (result, granted) = install_bytes(&state, raw, file_name, &job, wanted).await?;
-        Ok(InstallResponse::new(result, granted, query.job_id))
-    }
-    .await;
+    let Some(_slot) = try_archive_slot() else {
+        return busy();
+    };
+    let job = match JobSidecar::new(&state.plugins.job_dir, query.job_id.clone()) {
+        Ok(job) => job,
+        Err(r) => return r.into_response(),
+    };
+    let expected = match expected_digest(&headers) {
+        Ok(d) => d,
+        Err(r) => return job.fail(r).into_response(),
+    };
+    let (file_name, raw) = match read_upload(multipart, expected.as_deref()).await {
+        Ok(upload) => upload,
+        Err(fault) => return fault.respond(Some(&job)),
+    };
+    let wanted: Vec<String> = query
+        .requested_permissions
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    let result = install_bytes(&state, raw, file_name, &job, wanted)
+        .await
+        .map(|(result, granted)| InstallResponse::new(result, granted, query.job_id));
     respond(result.map(|body| json_response(StatusCode::OK, &body)))
 }
 
@@ -552,6 +581,9 @@ pub async fn install_from_url(State(state): State<AppState>, body: Bytes) -> Res
     let req: InstallFromUrlRequest = match parse_body(&body) {
         Ok(r) => r,
         Err(bad) => return bad.into_response(),
+    };
+    let Some(_slot) = try_archive_slot() else {
+        return busy();
     };
     let result = async {
         let job = JobSidecar::new(&state.plugins.job_dir, req.job_id.clone())?;
@@ -639,3 +671,7 @@ pub async fn install_builtin(State(state): State<AppState>, body: Bytes) -> Resp
         )
     }))
 }
+
+#[cfg(test)]
+#[path = "install_tests.rs"]
+mod tests;

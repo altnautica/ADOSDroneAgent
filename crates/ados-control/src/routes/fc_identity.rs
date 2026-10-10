@@ -34,7 +34,7 @@
 //! discontinuity in a vehicle's control, and choosing its moment belongs to
 //! whoever can see the aircraft.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 use ados_groundlink::fleet_identity_policy::{decide_identity, IdentityDecision};
@@ -167,20 +167,14 @@ pub fn report(outcome: &IdentityOutcome) {
     }
 }
 
-/// Where the reconciler records its outcome: `/run/ados/fc-identity.json`,
-/// honouring `ADOS_RUN_DIR`.
-fn sidecar_path() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-        .join(SIDECAR_FILE)
-}
-
 /// Start the identity reconciler on the current runtime.
 ///
 /// Ticks every [`IDENTITY_RECONCILE_INTERVAL`]; each tick decides, writes when
-/// permitted, and records the outcome in the sidecar.
+/// permitted, and records the outcome in `<run_dir>/fc-identity.json`, the same
+/// run directory full status reads it back from.
 pub fn spawn_reconciler(state: AppState) {
     tokio::spawn(async move {
-        let path = sidecar_path();
+        let path = state.run_dir.join(SIDECAR_FILE);
         let mut interval = tokio::time::interval(IDENTITY_RECONCILE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {

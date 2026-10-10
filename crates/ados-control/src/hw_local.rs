@@ -16,43 +16,104 @@
 //! `thermal.*` signal and the temperature reads `null`.
 
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 use sysinfo::{Disks, System};
 
 const BYTES_PER_MB: f64 = 1024.0 * 1024.0;
 
-/// One process-global `System`, kept alive so CPU utilisation is computed as the
-/// delta between successive status reads: `sysinfo` reports usage relative to the
-/// previous refresh, so persisting the instance means each read measures the
-/// interval since the last poll. Guarded by a `Mutex` — the refresh + read is
-/// fast and never held across an `.await`. The first read after process start has
-/// only the priming refresh to diff against (a near-zero window), so it can read
-/// low; it self-corrects on the next poll. That is a real measurement over a
-/// short window, not a fabricated value.
+/// How often the background CPU sampler refreshes the aggregate utilisation.
+/// One second sits above sysinfo's minimum CPU update interval, so every
+/// published value covers a real measurement window.
+const CPU_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Process-global `System` for the memory and swap reads. CPU is not read from
+/// here: it comes from the background sampler so concurrent pollers never
+/// shrink each other's measurement window.
 fn shared_system() -> &'static Mutex<System> {
     static SYS: OnceLock<Mutex<System>> = OnceLock::new();
     SYS.get_or_init(|| {
         let mut sys = System::new();
-        sys.refresh_cpu_usage();
         sys.refresh_memory();
         Mutex::new(sys)
     })
 }
 
+/// A cached CPU reading: an `f32` stored as its bits. `NaN` bits mean no
+/// sample has completed yet, which reads as `None` (unmeasured).
+struct CpuSlot(AtomicU32);
+
+impl CpuSlot {
+    const fn new() -> Self {
+        // f32::NAN.to_bits() is not const-callable on every toolchain, so use
+        // the canonical quiet-NaN bit pattern directly.
+        Self(AtomicU32::new(0x7fc0_0000))
+    }
+
+    fn store(&self, value: f32) {
+        self.0.store(value.to_bits(), Ordering::Relaxed);
+    }
+
+    fn load(&self) -> Option<f32> {
+        let v = f32::from_bits(self.0.load(Ordering::Relaxed));
+        if v.is_nan() {
+            None
+        } else {
+            Some(v)
+        }
+    }
+}
+
+static CPU_PERCENT: CpuSlot = CpuSlot::new();
+
+/// The CPU sampler, started on first use. Initialisation takes one priming
+/// measurement over sysinfo's minimum CPU update interval (a one-time wait of
+/// about 200 ms on the first status read), so the first reader already sees
+/// a real value. The thread then refreshes a sampler-owned `System` every
+/// interval and publishes the aggregate utilisation over that window.
+static CPU_SAMPLER: LazyLock<()> = LazyLock::new(|| {
+    let mut sys = System::new();
+    sys.refresh_cpu_usage();
+    std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
+    sys.refresh_cpu_usage();
+    CPU_PERCENT.store(sys.global_cpu_usage());
+    let spawned = std::thread::Builder::new()
+        .name("ados-cpu-sampler".into())
+        .spawn(move || loop {
+            std::thread::sleep(CPU_SAMPLE_INTERVAL);
+            sys.refresh_cpu_usage();
+            CPU_PERCENT.store(sys.global_cpu_usage());
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "cpu sampler thread failed to start");
+    }
+});
+
+/// Aggregate CPU utilisation in percent, as last measured by the 1 s
+/// background sampler. Reading never refreshes, so any number of pollers see
+/// the same value within one sample interval. `None` only if no measurement
+/// could be taken.
+pub fn cpu_percent() -> Option<f32> {
+    LazyLock::force(&CPU_SAMPLER);
+    CPU_PERCENT.load()
+}
+
 /// Collect the host hardware signals as a `logd`-compatible signal map, so the
 /// existing `derive_system` / `derive_health` mappers produce their canonical
 /// shapes from a host with no logging daemon (a workstation, or an SBC whose
-/// log store is off). Emits the five essential signals (memory total +
-/// available, aggregate CPU, filesystem total + used), swap when available, and
+/// log store is off). Emits memory total + available, aggregate CPU once the
+/// sampler has a reading, filesystem total + used, swap when available, and
 /// `thermal.primary_c` when a thermal zone is readable.
 pub fn collect_signals() -> Map<String, Value> {
     let mut signals = Map::new();
+    if let Some(cpu) = cpu_percent() {
+        signals.insert("cpu.util.all".into(), json!(cpu as f64));
+    }
     if let Ok(mut sys) = shared_system().lock() {
-        sys.refresh_cpu_usage();
         sys.refresh_memory();
-        signals.insert("cpu.util.all".into(), json!(sys.global_cpu_usage() as f64));
         signals.insert("mem.total_bytes".into(), json!(sys.total_memory()));
         signals.insert("mem.avail_bytes".into(), json!(sys.available_memory()));
         signals.insert("mem.swap_total_bytes".into(), json!(sys.total_swap()));
@@ -254,6 +315,22 @@ fn normalize_arch(arch: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_two_calls_10ms_same_value() {
+        // A slot that no sampler writes isolates the cache contract from the
+        // background tick: reads never refresh, so two reads match exactly.
+        let slot = CpuSlot::new();
+        assert_eq!(slot.load(), None, "unmeasured reads as None");
+        slot.store(37.5);
+        let first = slot.load();
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(slot.load(), first);
+        assert_eq!(first, Some(37.5));
+        // The global sampler publishes a real percentage after its priming read.
+        let global = cpu_percent().expect("sampler primed a reading");
+        assert!((0.0..=100.0).contains(&global), "got {global}");
+    }
 
     #[test]
     fn the_primary_temperature_is_the_lowest_readable_thermal_zone() {
