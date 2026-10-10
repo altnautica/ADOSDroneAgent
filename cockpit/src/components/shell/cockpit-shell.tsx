@@ -11,7 +11,7 @@
 // floats translucently on top; a framed screen renders in the content region
 // with solid chrome. The menu can collapse to give the feed the whole panel.
 
-import { useEffect } from "react";
+import { Suspense, useEffect } from "react";
 
 import { ActionBar, type InputStatus } from "@/components/shell/action-bar";
 import { renderProfile, renderProfileClass } from "@/lib/render-profile";
@@ -20,9 +20,10 @@ import { QuickMenu } from "@/components/shell/quick-menu";
 import { ReachNotice } from "@/components/shell/reach-notice";
 import { RebootBanner } from "@/components/shell/reboot-banner";
 import { StatusStrip } from "@/components/shell/status-strip";
-import { TelemetryProvider } from "@/hooks/telemetry-context";
+import { useStatusPoll } from "@/hooks/use-status-poll";
+import { useExtensionsStore } from "@/stores/extensions-store";
 import { tabScreens } from "@/nav/registry";
-import { useProfile } from "@/hooks/use-profile";
+import { useProfile } from "@/shared/use-profile";
 import { getScreen } from "@/nav/registry";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 import type { ScreenContext } from "@/nav/navigator";
@@ -34,6 +35,14 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   const quickMenuOpen = useNavStore((s) => s.quickMenuOpen);
   const dispatch = useNavStore((s) => s.dispatch);
   const setVisibleTabs = useNavStore((s) => s.setVisibleTabs);
+  const loadExtensions = useExtensionsStore((s) => s.load);
+
+  // One status poll for the whole shell (strip, band, alerts, screens), and the
+  // running extensions read once so their skills and panels are ready.
+  useStatusPoll();
+  useEffect(() => {
+    void loadExtensions();
+  }, [loadExtensions]);
 
   // Tell the navigator which tabs this node actually shows, so the panel's own
   // buttons step the same set the operator can see. Declared here rather than
@@ -51,7 +60,7 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   // detail screen pushed over it renders framed.
   const fullBleed = Boolean(screen.fullBleed) && detailStack.length === 0;
   const ctx: ScreenContext = { dispatch };
-  const body = screen.render(ctx);
+  const body = <Suspense fallback={null}>{screen.render(ctx)}</Suspense>;
 
   const menuStrip = (
     <div className="flex min-h-0 flex-1 landscape:flex-row portrait:flex-col-reverse">
@@ -67,7 +76,7 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   );
 
   return (
-    <TelemetryProvider>
+    <>
       <div
         className={`relative h-full w-full overflow-hidden bg-background text-foreground ${renderProfileClass(
           renderProfile(),
@@ -89,6 +98,6 @@ export function CockpitShell({ input }: { input: InputStatus }) {
         </div>
         {quickMenuOpen ? <QuickMenu /> : null}
       </div>
-    </TelemetryProvider>
+    </>
   );
 }

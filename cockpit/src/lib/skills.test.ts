@@ -1,132 +1,94 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  AUTOPILOT_PX4,
-  CORE_SKILLS,
-  modePresetsFor,
-  resolveSkillState,
-  type Skill,
-} from "@/lib/skills";
+import { AUTOPILOT_PX4, CORE_BY_ID, CORE_SKILLS, modePresetsFor, resolveSkillState } from "@/lib/skills";
+import { parseExtensionSkill } from "@/lib/extensions";
 
-function skill(id: string): Skill {
-  const found = CORE_SKILLS.find((s) => s.id === id);
-  if (!found) throw new Error(`no core skill ${id}`);
-  return found;
-}
+const live = { fcConnected: true, live: true };
 
-describe("resolveSkillState", () => {
-  it("disables every skill without a live FC link", () => {
+describe("command skills need a commandable FC link with live telemetry", () => {
+  it("disables every built-in without an FC link", () => {
     for (const s of CORE_SKILLS) {
-      const state = resolveSkillState(s, { fcConnected: false, armed: false });
-      expect(state.enabled).toBe(false);
-      expect(state.reason).toBe("No flight controller link");
-    }
-  });
-
-  it("keeps a healthy relayed vehicle commandable from this node", () => {
-    // A relayed aircraft is commanded THROUGH this node's relay proxy to the
-    // linked drone, so a live relayed reading is as reachable as a directly
-    // attached FC — the skill stays enabled, never blamed on the link. (The
-    // armed-state-gated arm/disarm commands are excluded: with `armed:
-    // false`, disarm is correctly inapplicable regardless of reachability.)
-    for (const s of CORE_SKILLS) {
-      if (s.cmd === "arm" || s.cmd === "disarm") continue;
-      const state = resolveSkillState(s, {
-        fcConnected: false,
-        armed: false,
-        relayed: true,
+      expect(resolveSkillState(s, { fcConnected: false, live: true, armed: true })).toEqual({
+        enabled: false,
+        reason: "No flight controller link",
       });
-      expect(state.enabled).toBe(true);
-      expect(state.reason).toBeUndefined();
-    }
-    // Arm (currently disarmed) is itself reachable-and-enabled.
-    const arm = resolveSkillState(skill("arm"), {
-      fcConnected: false,
-      armed: false,
-      relayed: true,
-    });
-    expect(arm.enabled).toBe(true);
-    // Disarm (currently disarmed) stays inapplicable — that is an armed-state
-    // gate, not a reachability one.
-    const disarm = resolveSkillState(skill("disarm"), {
-      fcConnected: false,
-      armed: false,
-      relayed: true,
-    });
-    expect(disarm.enabled).toBe(false);
-    expect(disarm.reason).toBe("Not armed");
-  });
-
-  it("still drives skills normally on a directly attached FC", () => {
-    // The relayed flag must not leak into the attached case: `relayed` is only
-    // consulted once the command path is already gated off.
-    const state = resolveSkillState(CORE_SKILLS[0], {
-      fcConnected: true,
-      armed: false,
-      relayed: false,
-    });
-    expect(state.reason).toBeUndefined();
-  });
-
-  it("disables arm while armed, and disarm while disarmed", () => {
-    const armedCtx = { fcConnected: true, armed: true };
-    const disarmedCtx = { fcConnected: true, armed: false };
-    expect(resolveSkillState(skill("arm"), armedCtx)).toEqual({
-      enabled: false,
-      reason: "Already armed",
-    });
-    expect(resolveSkillState(skill("disarm"), disarmedCtx)).toEqual({
-      enabled: false,
-      reason: "Not armed",
-    });
-  });
-
-  it("enables arm when disarmed, and disarm when armed", () => {
-    expect(resolveSkillState(skill("arm"), { fcConnected: true, armed: false })).toEqual({
-      enabled: true,
-    });
-    expect(resolveSkillState(skill("disarm"), { fcConnected: true, armed: true })).toEqual({
-      enabled: true,
-    });
-  });
-
-  it("enables takeoff / land / rtl whenever the FC link is live", () => {
-    const ctx = { fcConnected: true, armed: true };
-    for (const id of ["takeoff", "land", "rtl"]) {
-      expect(resolveSkillState(skill(id), ctx).enabled).toBe(true);
     }
   });
 
-  it("marks the high-consequence core actions as confirm-guarded", () => {
+  it("disables every built-in when the link answers but telemetry is not live", () => {
+    // A relayed reading that has gone stale, or a link with no vehicle state.
     for (const s of CORE_SKILLS) {
-      expect(s.confirm).toBe(true);
+      expect(resolveSkillState(s, { fcConnected: true, live: false, armed: true }).enabled).toBe(false);
     }
+  });
+
+  it("enables commands on a live link", () => {
+    expect(resolveSkillState(CORE_BY_ID.arm, { ...live, armed: false }).enabled).toBe(true);
+    for (const id of ["disarm", "takeoff", "land", "rtl", "pause", "resume", "kill"]) {
+      expect(resolveSkillState(CORE_BY_ID[id], { ...live, armed: true }).enabled).toBe(true);
+    }
+  });
+
+  it("applies the arm requirement", () => {
+    expect(resolveSkillState(CORE_BY_ID.arm, { ...live, armed: true }).reason).toBe("Already armed");
+    expect(resolveSkillState(CORE_BY_ID.land, { ...live, armed: false }).reason).toBe("Not armed");
   });
 });
 
-describe("modePresetsFor", () => {
-  it("offers the ArduPilot mode names by default (unknown autopilot)", () => {
-    const names = modePresetsFor(null).map((s) => s.args[0]);
-    expect(names).toEqual(["STABILIZE", "ALT_HOLD", "LOITER", "GUIDED"]);
-  });
-
-  it("offers the PX4 mode names for a PX4 autopilot", () => {
-    const names = modePresetsFor(AUTOPILOT_PX4).map((s) => s.args[0]);
-    expect(names).toEqual(["ALTITUDE", "POSITION", "LOITER", "MISSION"]);
-  });
-
-  it("emits mode skills as non-confirm `mode` commands carrying the name arg", () => {
-    for (const s of modePresetsFor(null)) {
-      expect(s.cmd).toBe("mode");
-      expect(s.confirm).toBe(false);
-      expect(s.category).toBe("mode");
-      expect(s.args).toHaveLength(1);
+describe("confirm tiers", () => {
+  it("maps the built-ins to their gestures", () => {
+    expect(CORE_BY_ID.arm.gesture).toBe("slide");
+    expect(CORE_BY_ID.kill.gesture).toBe("guarded");
+    expect(CORE_BY_ID.pause.gesture).toBe("tap");
+    for (const id of ["disarm", "takeoff", "land", "rtl", "resume"]) {
+      expect(CORE_BY_ID[id].gesture).toBe("hold");
     }
+    expect(CORE_BY_ID.takeoff.takesAltitude).toBe(true);
+    expect(CORE_BY_ID.kill.command?.cmd).toBe("killswitch");
   });
 
-  it("gates mode presets off without a live FC link", () => {
-    const s = modePresetsFor(null)[0];
-    expect(resolveSkillState(s, { fcConnected: false, armed: false }).enabled).toBe(false);
-    expect(resolveSkillState(s, { fcConnected: true, armed: false }).enabled).toBe(true);
+  it("taps recovery modes and holds the rest", () => {
+    const byName = Object.fromEntries(modePresetsFor(null).map((s) => [s.command?.args[0], s.gesture]));
+    expect(byName.LOITER).toBe("tap");
+    expect(byName.ALT_HOLD).toBe("tap");
+    expect(byName.GUIDED).toBe("hold");
+    expect(modePresetsFor(AUTOPILOT_PX4).map((s) => s.command?.args[0])).toEqual([
+      "ALTITUDE",
+      "POSITION",
+      "LOITER",
+      "MISSION",
+    ]);
+  });
+});
+
+describe("extension skills", () => {
+  const follow = parseExtensionSkill("com.example.follow", {
+    id: "follow",
+    label: "Follow",
+    toggle: true,
+    confirm: true,
+    arm_requirement: "armed",
+    activation: { via: "config", config_key: "active" },
+    state: { via: "event", topic: "follow.state" },
+  })!;
+
+  it("parses a config-activated skill", () => {
+    expect(follow).toMatchObject({
+      id: "com.example.follow:follow",
+      gesture: "hold",
+      armRequirement: "armed",
+      extension: { pluginId: "com.example.follow", configKey: "active", toggle: true, stateTopic: "follow.state" },
+    });
+  });
+
+  it("follows the plugin's reported state", () => {
+    const ctx = { ...live, armed: true };
+    expect(
+      resolveSkillState(follow, { ...ctx, reported: { [follow.id]: { state: "disabled", reason: "No target" } } }),
+    ).toEqual({ enabled: false, reason: "No target" });
+    expect(resolveSkillState(follow, { ...ctx, reported: { [follow.id]: { state: "active" } } })).toMatchObject({
+      enabled: true,
+      active: true,
+    });
   });
 });

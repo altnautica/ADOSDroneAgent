@@ -48,7 +48,7 @@ function boxColorClass(d: CockpitDetection): string {
     if (d.lockState === "uncertain") return "border-warn text-warn";
     return "border-err text-err"; // lost
   }
-  if (d.confidence >= 0.7) return "border-amber text-amber";
+  if (d.confidence >= 0.7) return "border-primary text-hud-primary";
   if (d.confidence >= 0.4) return "border-warn text-warn";
   return "border-muted-foreground text-muted-foreground";
 }
@@ -73,8 +73,8 @@ export function DetectionOverlay({
   // The video's decoded resolution, published off the real <video> element by the
   // video layer. Used as the letterbox source AR; falls back to the batch frame
   // size (the same camera source) when metadata is not in yet.
-  const videoWidth = useFeedStore((s) => s.videoWidth);
-  const videoHeight = useFeedStore((s) => s.videoHeight);
+  const videoWidth = useFeedStore((s) => s.video.width);
+  const videoHeight = useFeedStore((s) => s.video.height);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
@@ -139,7 +139,7 @@ export function DetectionOverlay({
                   height: `${placed.height}px`,
                 }}
               >
-                <span className="absolute left-0 top-0 -translate-y-full whitespace-nowrap bg-background/80 px-[0.2rem] font-mono text-[0.6rem] leading-tight">
+                <span className="absolute left-0 top-0 -translate-y-full whitespace-nowrap bg-background/80 px-[0.2rem] font-mono text-[0.75rem] leading-tight">
                   {boxLabel(d)}
                 </span>
               </div>

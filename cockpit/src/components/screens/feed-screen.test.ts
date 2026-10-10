@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveLegVideoUrls } from "@/components/screens/feed-screen";
+import { feedCameras, resolveLegVideoUrls } from "@/components/screens/feed-screen";
 
 // The Feed resolves the active leg's WHEP + HLS endpoints RELATIVE to whatever
 // origin the operator reached the agent on — never an absolute host:port.
@@ -22,11 +22,26 @@ describe("resolveLegVideoUrls", () => {
     });
   });
 
-  it("builds a per-leg HLS endpoint from a secondary camera id", () => {
+  it("builds per-leg WHEP + HLS endpoints from a secondary camera id", () => {
     expect(resolveLegVideoUrls({ id: "belly" })).toEqual({
-      whepUrl: "/whep",
+      whepUrl: "/whep?camera=belly",
       hlsUrl: "/hls/belly/index.m3u8",
     });
+  });
+
+  it("offers the concurrent legs from the status body when there are several", () => {
+    const cams = feedCameras(
+      [
+        { id: "main", whepUrl: "/whep?camera=main", hls: "/hls/main/index.m3u8" },
+        { id: "ir", whepUrl: "/whep?camera=ir", hls: "/hls/ir/index.m3u8" },
+      ],
+      [{ id: "roster-only" }],
+    );
+    expect(cams.map((c) => [c.id, c.whep_url])).toEqual([
+      ["main", "/whep?camera=main"],
+      ["ir", "/whep?camera=ir"],
+    ]);
+    expect(feedCameras([{ id: "main" }], [{ id: "a" }, { id: "b" }]).map((c) => c.id)).toEqual(["a", "b"]);
   });
 
   it("prefers explicit roster URLs when the agent advertises them", () => {

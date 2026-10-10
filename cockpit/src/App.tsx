@@ -5,11 +5,11 @@
 // sources drive the same menu.
 
 import { CockpitShell } from "@/components/shell/cockpit-shell";
-import { ErrorBoundary } from "@/components/error-boundary";
+import { ErrorBoundary } from "@/shared/error-boundary";
 import { useButtons } from "@/hooks/use-buttons";
 import { useGamepad } from "@/hooks/use-gamepad";
 import { useUiScale } from "@/hooks/use-ui-scale";
-import { useWakeLock } from "@/hooks/use-wake-lock";
+import { useWakeLock } from "@/shared/wake-lock";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 
 /** The shell plus the hooks that feed it.

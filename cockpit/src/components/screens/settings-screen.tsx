@@ -15,7 +15,9 @@
 //   @<dotpath>   a leaf's touch editor
 
 import type { ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Layers, Settings as SettingsIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, Gamepad2, Layers, Settings as SettingsIcon } from "lucide-react";
+
+import { GamepadBindings } from "@/components/settings/gamepad-bindings";
 
 import { Panel } from "@/components/ui/panel";
 import { EmptyNote, StaleBadge } from "@/components/ui/data";
@@ -58,12 +60,21 @@ export function SettingsScreen({
   const isRoot = mode === "~" && rest === "";
 
   let body: ReactNode;
-  if (config == null) {
+  if (mode === "!") {
+    body = <GamepadBindings />;
+  } else if (config == null) {
     body = <EmptyNote>{ready ? error ?? "Configuration is unavailable." : "Reading configuration…"}</EmptyNote>;
   } else if (mode === "@") {
     body = <LeafEditor path={rest} config={config} write={write} onDone={back} />;
   } else if (mode === "~" && rest === "") {
-    body = <CuratedRoot config={config} onGroup={(id) => dispatch({ kind: "open-detail", id: `settings:~${id}` })} onAll={() => drill("")} />;
+    body = (
+      <CuratedRoot
+        config={config}
+        onGroup={(id) => dispatch({ kind: "open-detail", id: `settings:~${id}` })}
+        onAll={() => drill("")}
+        onGamepad={() => dispatch({ kind: "open-detail", id: "settings:!gamepad" })}
+      />
+    );
   } else if (mode === "~") {
     body = <CuratedGroupView groupId={rest} config={config} onDrill={drill} onEdit={edit} write={write} />;
   } else {
@@ -75,7 +86,7 @@ export function SettingsScreen({
     <Panel>
       <div className="mb-[0.4rem] flex items-center gap-[0.4rem]">
         {isRoot ? (
-          <SettingsIcon className="h-[1.3rem] w-[1.3rem] shrink-0 text-amber" aria-hidden />
+          <SettingsIcon className="h-[1.3rem] w-[1.3rem] shrink-0 text-hud-primary" aria-hidden />
         ) : (
           <button
             type="button"
@@ -90,7 +101,7 @@ export function SettingsScreen({
           <h1 className="truncate text-[1.1rem] font-semibold tracking-tight text-surface-foreground">
             {title}
           </h1>
-          {hint ? <div className="truncate text-[0.66rem] text-muted-foreground">{hint}</div> : null}
+          {hint ? <div className="truncate text-[0.75rem] text-muted-foreground">{hint}</div> : null}
         </div>
         <StaleBadge stale={stale} />
       </div>
@@ -106,10 +117,12 @@ function CuratedRoot({
   config,
   onGroup,
   onAll,
+  onGamepad,
 }: {
   config: AgentConfig;
   onGroup: (id: string) => void;
   onAll: () => void;
+  onGamepad: () => void;
 }) {
   return (
     <div className="flex flex-col gap-[0.3rem]">
@@ -125,10 +138,10 @@ function CuratedRoot({
             onClick={() => onGroup(g.id)}
             className="touch-target flex w-full items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.45rem] text-left hover:bg-muted active:bg-muted"
           >
-            <Icon className="h-[1.4rem] w-[1.4rem] shrink-0 text-amber" aria-hidden />
+            <Icon className="h-[1.4rem] w-[1.4rem] shrink-0 text-hud-primary" aria-hidden />
             <div className="min-w-0 flex-1">
               <div className="truncate text-[0.95rem] text-surface-foreground">{g.label}</div>
-              <div className="truncate text-[0.66rem] text-muted-foreground">{g.description}</div>
+              <div className="truncate text-[0.75rem] text-muted-foreground">{g.description}</div>
             </div>
             <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
           </button>
@@ -143,8 +156,22 @@ function CuratedRoot({
         <Layers className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1">
           <div className="truncate text-[0.95rem] text-surface-foreground">All settings</div>
-          <div className="truncate text-[0.66rem] text-muted-foreground">
+          <div className="truncate text-[0.75rem] text-muted-foreground">
             Every field in the raw config tree
+          </div>
+        </div>
+        <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
+      </button>
+      <button
+        type="button"
+        onClick={onGamepad}
+        className="touch-target flex w-full items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.45rem] text-left hover:bg-muted active:bg-muted"
+      >
+        <Gamepad2 className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[0.95rem] text-surface-foreground">Gamepad skill buttons</div>
+          <div className="truncate text-[0.75rem] text-muted-foreground">
+            Which controller button fires each skill on the Feed
           </div>
         </div>
         <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
@@ -235,6 +262,7 @@ function RawView({
 
 function headerFor(mode: string, rest: string): { title: string; hint?: string } {
   if (mode === "~" && rest === "") return { title: "Settings" };
+  if (mode === "!") return { title: "Gamepad skill buttons", hint: "Settings" };
   if (mode === "~") {
     const g = curatedGroupById(rest);
     return { title: g?.label ?? "Settings", hint: g?.description };

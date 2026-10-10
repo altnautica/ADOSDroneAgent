@@ -1,46 +1,49 @@
 // Feed-local UI state shared across the immersive surface: which camera the
-// multi-stream tabs have selected, a nonce the Stream action bumps to force the
-// video layer to re-establish its WHEP session (a manual "refresh the feed" for
-// when a stream freezes), and the live video-layer connection state + decoded
-// resolution the status strip's video zone reads (so "which feed am I looking
-// at, is it live, at what resolution" is answered from the real <video> element,
-// never fabricated). Kept out of the navigator store because it is screen-local,
-// not navigation.
+// stream tabs selected, a nonce the Stream action bumps to force the video to
+// re-dial, the camera switch in flight, and the live video snapshot (state,
+// transport, decoded resolution) mirrored from the real `<video>` element so
+// the status strip and alerts never fabricate what is on screen.
 
 import { create } from "zustand";
 
-/** The WHEP video-layer connection state, mirrored from the video layer. */
-export type VideoState = "connecting" | "live" | "error";
+import type { VideoTransportSnapshot } from "@/shared/video-transport";
+
+const IDLE_VIDEO: VideoTransportSnapshot = {
+  state: "connecting",
+  transport: null,
+  highLatency: false,
+  error: null,
+  width: null,
+  height: null,
+};
 
 interface FeedState {
-  /** The selected camera id (from the roster), or null for the primary leg. */
+  /** The selected camera id, or null for the primary leg. */
   activeCameraId: string | null;
-  /** Bumped to force the video layer to reconnect its WHEP session. */
+  /** Bumped to force the video layer to re-dial. */
   streamNonce: number;
-  /** The label of the currently-selected stream, for the strip's video zone. */
+  /** The label of the currently-selected stream. */
   activeStreamLabel: string | null;
-  /** The live WHEP connection state of the video layer. */
-  videoState: VideoState;
-  /** The decoded resolution of the playing feed, read off the <video> element. */
-  videoWidth: number | null;
-  videoHeight: number | null;
+  /** The live video snapshot from the shared transport. */
+  video: VideoTransportSnapshot;
+  /** True while the video layer is mounted (only on the Feed). */
+  videoMounted: boolean;
 
   setActiveCamera: (id: string | null) => void;
   reconnectStream: () => void;
   setActiveStreamLabel: (label: string | null) => void;
-  setVideoStatus: (state: VideoState, width: number | null, height: number | null) => void;
+  setVideo: (video: VideoTransportSnapshot | null) => void;
 }
 
 export const useFeedStore = create<FeedState>((set) => ({
   activeCameraId: null,
   streamNonce: 0,
   activeStreamLabel: null,
-  videoState: "connecting",
-  videoWidth: null,
-  videoHeight: null,
+  video: IDLE_VIDEO,
+  videoMounted: false,
   setActiveCamera: (id) => set({ activeCameraId: id }),
   reconnectStream: () => set((s) => ({ streamNonce: s.streamNonce + 1 })),
   setActiveStreamLabel: (label) => set({ activeStreamLabel: label }),
-  setVideoStatus: (videoState, videoWidth, videoHeight) =>
-    set({ videoState, videoWidth, videoHeight }),
+  setVideo: (video) =>
+    set(video ? { video, videoMounted: true } : { video: IDLE_VIDEO, videoMounted: false }),
 }));

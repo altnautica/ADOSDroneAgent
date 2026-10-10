@@ -75,15 +75,15 @@ export function LeafEditor({
       {/* before → after */}
       <div className="flex items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.5rem]">
         <div className="min-w-0 flex-1">
-          <div className="text-[0.58rem] uppercase tracking-wide text-muted-foreground">Current</div>
+          <div className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">Current</div>
           <div className="truncate font-mono text-[0.9rem] text-surface-foreground">
             {displayLeaf(path, current, kind)}
           </div>
         </div>
         <div className="text-muted-foreground">→</div>
         <div className="min-w-0 flex-1">
-          <div className="text-[0.58rem] uppercase tracking-wide text-muted-foreground">New</div>
-          <div className={cn("truncate font-mono text-[0.9rem]", canSave ? "text-amber" : "text-muted-foreground")}>
+          <div className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">New</div>
+          <div className={cn("truncate font-mono text-[0.9rem]", canSave ? "text-hud-primary" : "text-muted-foreground")}>
             {redacted
               ? pending
                 ? "•••• (new value)"
@@ -96,13 +96,13 @@ export function LeafEditor({
       </div>
 
       {reboot ? (
-        <div className="flex items-center gap-[0.4rem] rounded-md bg-warn/10 px-[0.6rem] py-[0.35rem] text-[0.72rem] text-warn">
+        <div className="flex items-center gap-[0.4rem] rounded-md bg-warn/10 px-[0.6rem] py-[0.35rem] text-[0.75rem] text-warn">
           <RotateCw className="h-[0.9rem] w-[0.9rem] shrink-0" aria-hidden />
           Takes effect after a reboot — this change is not applied live.
         </div>
       ) : null}
       {redacted ? (
-        <div className="rounded-md bg-input/30 px-[0.6rem] py-[0.35rem] text-[0.72rem] text-muted-foreground">
+        <div className="rounded-md bg-input/30 px-[0.6rem] py-[0.35rem] text-[0.75rem] text-muted-foreground">
           This value is hidden. Enter a new value to replace it, or go back to keep it.
         </div>
       ) : null}
@@ -129,7 +129,7 @@ export function LeafEditor({
         )}
       </div>
 
-      {check.error && !unchanged ? <div className="text-[0.72rem] text-warn">{check.error}</div> : null}
+      {check.error && !unchanged ? <div className="text-[0.75rem] text-warn">{check.error}</div> : null}
       {error ? (
         <div className="flex items-start gap-[0.4rem] rounded-md bg-err/10 px-[0.6rem] py-[0.4rem] text-[0.75rem] text-err">
           <AlertTriangle className="mt-[0.1rem] h-[0.9rem] w-[0.9rem] shrink-0" aria-hidden />

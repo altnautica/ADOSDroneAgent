@@ -77,5 +77,6 @@ export const TAB_ORDER: readonly string[] = [
   "pair",
   "uplink",
   "system",
+  "extensions",
   "settings",
 ];

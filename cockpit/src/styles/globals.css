@@ -1,9 +1,12 @@
+@import "../shared/fonts.css";
+@import "../shared/styles/tokens.generated.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /*
- * ADOS Ground Cockpit — amber-on-charcoal, dark, high-contrast.
+ * ADOS Ground Cockpit — brand-dark tokens (generated; see shared/styles).
  *
  * Sizing model: the layout is authored against an 800x480 reference panel
  * and scales fluidly to fill any HDMI output. The root font-size tracks the
@@ -17,28 +20,6 @@
   :root {
     /* Operator UI-scale knob (persisted). 1 = the reference size. */
     --ui-scale: 1;
-
-    /* charcoal screen */
-    --background: 0 0% 12%;
-    --foreground: 0 0% 88%;
-    /* a raised charcoal surface (panels, strips) */
-    --surface: 0 0% 15%;
-    --surface-foreground: 0 0% 91%;
-    /* amber accent + the dark text drawn on top of it */
-    --amber: 43 79% 63%;
-    --amber-foreground: 0 0% 10%;
-    /* muted body / description text */
-    --muted: 0 0% 15%;
-    --muted-foreground: 0 0% 54%;
-    /* semantic status */
-    --ok: 120 42% 63%;
-    --warn: 47 69% 65%;
-    --err: 8 68% 62%;
-    /* structure */
-    --border: 0 0% 23%;
-    --input: 0 0% 19%;
-    --ring: 43 79% 63%;
-    --radius: 0.65rem;
   }
 
   html {
@@ -124,5 +105,37 @@
   .layer-minimal *:not(.animate-spin):not(.animate-pulse)::after {
     animation-duration: 0s !important;
     animation-iteration-count: 1 !important;
+  }
+}
+
+@layer components {
+  /* Numerals line up in every readout. */
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Alert motion: the border carries the urgency, the text never moves.
+   * Critical flashes at 4 Hz for 3 s and then holds; warning pulses at 2 Hz. */
+  .alert-flash-critical {
+    animation: alert-border-flash 250ms steps(2, jump-none) 12;
+  }
+  .alert-pulse-warning {
+    animation: alert-border-pulse 500ms ease-in-out infinite;
+  }
+  @keyframes alert-border-flash {
+    50% {
+      border-color: transparent;
+    }
+  }
+  @keyframes alert-border-pulse {
+    50% {
+      border-color: hsl(var(--warn) / 0.25);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .alert-flash-critical,
+    .alert-pulse-warning {
+      animation: none;
+    }
   }
 }

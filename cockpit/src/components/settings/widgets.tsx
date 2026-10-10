@@ -29,7 +29,7 @@ export function Toggle({
       onClick={() => onChange(!on)}
       className={cn(
         "touch-target relative inline-flex w-[3.6rem] shrink-0 items-center rounded-full px-[0.2rem] transition-colors disabled:opacity-50",
-        on ? "bg-amber" : "bg-input",
+        on ? "bg-primary" : "bg-input",
       )}
     >
       <span
@@ -43,7 +43,7 @@ export function Toggle({
 }
 
 /** A vertical list of large option rows for a constrained value. The selected
- *  option is amber with a check; tapping one selects it (the editor's Save
+ *  option is accent-coloured with a check; tapping one selects it (the editor's Save
  *  commits). Scrolls when the option set is long. */
 export function SegmentedPicker({
   options,
@@ -70,7 +70,7 @@ export function SegmentedPicker({
             className={cn(
               "touch-target flex items-center justify-between gap-[0.5rem] rounded-lg px-[0.9rem] text-left transition-colors",
               selected
-                ? "bg-amber text-amber-foreground"
+                ? "bg-primary text-primary-foreground"
                 : "bg-input text-surface-foreground hover:bg-muted active:bg-muted",
             )}
           >

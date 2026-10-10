@@ -41,9 +41,9 @@ export function StreamTabs({ cameras }: { cameras: RosterCamera[] }) {
             onClick={() => setActiveCamera(cam.id)}
             aria-pressed={active}
             className={cn(
-              "rounded-md px-[0.55rem] py-[0.3rem] text-[0.7rem] font-medium backdrop-blur-sm transition-colors",
+              "rounded-md px-[0.55rem] py-[0.3rem] text-[0.75rem] font-medium backdrop-blur-sm transition-colors",
               active
-                ? "bg-amber text-amber-foreground"
+                ? "bg-primary text-primary-foreground"
                 : "bg-background/55 text-surface-foreground hover:bg-muted",
             )}
           >

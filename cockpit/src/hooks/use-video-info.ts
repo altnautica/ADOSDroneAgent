@@ -1,4 +1,4 @@
-// Polls the video config/link snapshot (`GET /api/video/config`) slowly and
+// Polls the video config/link snapshot (`GET /api/video/config`) every 10 s and
 // derives an honest "what is flowing" read for the status strip's video zone.
 // The rate is profile-aware so it never fabricates: on a drone (the video
 // SOURCE) it is the drone's own encoder rate/fps; on a ground station (a
@@ -8,9 +8,11 @@
 // stream. Anything not honestly known for the profile stays null so the strip
 // dashes it.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
-import type { AgentProfile } from "@/hooks/use-profile";
+import { pollLoop } from "@/hooks/use-status-poll";
+
+import type { AgentProfile } from "@/shared/use-profile";
 import { getVideoConfig } from "@/lib/api";
 import type { VideoConfigResponse } from "@/lib/types";
 
@@ -40,33 +42,23 @@ export function deriveVideoInfo(
   return { rateMbps: bps != null && bps > 0 ? (bps * 8) / 1e6 : null, fps: null };
 }
 
-export function useVideoInfo(profile: AgentProfile | null, intervalMs = 2000): VideoInfo {
+export function useVideoInfo(profile: AgentProfile | null, intervalMs = 10_000): VideoInfo {
   const [info, setInfo] = useState<VideoInfo>({ rateMbps: null, fps: null });
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    const controller = new AbortController();
-
-    const tick = async () => {
-      try {
-        const cfg = await getVideoConfig(controller.signal);
-        if (cancelled) return;
-        setInfo(deriveVideoInfo(cfg, profile));
-      } catch {
-        // keep the last read — a non-critical slow poll
-      } finally {
-        if (!cancelled) timer.current = setTimeout(tick, intervalMs);
-      }
-    };
-    void tick();
-
-    return () => {
-      cancelled = true;
-      controller.abort();
-      if (timer.current) clearTimeout(timer.current);
-    };
-  }, [profile, intervalMs]);
+  useEffect(
+    () =>
+      pollLoop(
+        async (signal) => {
+          try {
+            setInfo(deriveVideoInfo(await getVideoConfig(signal), profile));
+          } catch {
+            // Keep the last read: a non-critical slow poll.
+          }
+        },
+        () => intervalMs,
+      ),
+    [profile, intervalMs],
+  );
 
   return info;
 }

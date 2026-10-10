@@ -14,8 +14,8 @@
 
 import { useEffect } from "react";
 
-import { useFlightTelemetryContext } from "@/hooks/flight-telemetry-context";
-import { useTelemetryContext } from "@/hooks/telemetry-context";
+import { useFlightStore } from "@/stores/flight-store";
+import { useStatusStore } from "@/stores/status-store";
 import {
   computeMapView,
   isValidFix,
@@ -40,8 +40,9 @@ function headingOrNull(h: number | null | undefined): number | null {
 }
 
 export function MiniMap() {
-  const { telemetry, live } = useFlightTelemetryContext();
-  const { status } = useTelemetryContext();
+  const telemetry = useFlightStore((s) => s.telemetry);
+  const live = useFlightStore((s) => s.live);
+  const status = useStatusStore((s) => s.status);
   const start = useTrackStore((s) => s.start);
   const samples = useTrackStore((s) => s.samples);
   const record = useTrackStore((s) => s.record);
@@ -125,12 +126,12 @@ export function MiniMap() {
         )}
       >
         {/* top-left label */}
-        <span className="absolute left-[0.25rem] top-[0.1rem] z-10 text-[0.5rem] uppercase tracking-wide text-muted-foreground">
+        <span className="absolute left-[0.25rem] top-[0.1rem] z-10 text-[0.75rem] uppercase tracking-wide text-muted-foreground">
           Map
         </span>
 
         {empty ? (
-          <div className="flex h-full w-full items-center justify-center px-[0.3rem] text-center text-[0.55rem] text-muted-foreground">
+          <div className="flex h-full w-full items-center justify-center px-[0.3rem] text-center text-[0.75rem] text-muted-foreground">
             No GPS fix
           </div>
         ) : (
@@ -181,7 +182,7 @@ export function MiniMap() {
               {/* the vehicle — a heading-rotated arrow, or a dot when heading is
                   unknown */}
               {dronePt ? (
-                <g className="text-amber" fill="currentColor" stroke="none">
+                <g className="text-hud-primary" fill="currentColor" stroke="none">
                   {headingDeg != null ? (
                     <polygon
                       points="0,-4.6 3.2,4 0,2 -3.2,4"
@@ -210,13 +211,13 @@ export function MiniMap() {
 
             {/* scale + stale readout */}
             <div className="absolute bottom-[0.1rem] left-0 right-0 flex items-center justify-between px-[0.3rem]">
-              <span className="font-mono text-[0.5rem] text-muted-foreground">
+              <span className="font-mono text-[0.75rem] text-muted-foreground">
                 {spanM >= 1000
                   ? `~${(spanM / 1000).toFixed(1)} km`
                   : `~${Math.round(spanM)} m`}
               </span>
               {!hasFix ? (
-                <span className="font-mono text-[0.5rem] text-warn">no fix</span>
+                <span className="font-mono text-[0.75rem] text-warn">no fix</span>
               ) : null}
             </div>
           </>

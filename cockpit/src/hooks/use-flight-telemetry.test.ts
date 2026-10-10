@@ -14,6 +14,7 @@ import {
   hasUsableAttitude,
   isLive,
   isRelayed,
+  nextHome,
   vehicleStamp,
 } from "@/hooks/use-flight-telemetry";
 import type { VehicleState } from "@/lib/types";
@@ -111,10 +112,32 @@ describe("isRelayed", () => {
   });
 
   it("is independent of liveness, because the two answer different questions", () => {
-    // A relayed aircraft with real attitude: live (draw the horizon) AND
-    // relayed (do not offer to command it). Collapsing these was the defect.
+    // A relayed aircraft with real attitude is live (draw the horizon) AND
+    // relayed (label its provenance). Collapsing the two blanked the horizon.
     const relayed = flying({ telemetry_source: "relayed" });
     expect(isLive(relayed, 0)).toBe(true);
     expect(isRelayed(relayed)).toBe(true);
+  });
+});
+
+describe("nextHome", () => {
+  const at = (lat: number, lon: number, armed: boolean): VehicleState => ({
+    armed,
+    position: { lat, lon, alt_msl: 100, alt_rel: 0, heading: 0 },
+  });
+
+  it("captures home at the arming edge", () => {
+    expect(nextHome(null, false, at(12.5, 77.5, true))).toEqual({ lat: 12.5, lon: 77.5 });
+  });
+
+  it("keeps home while armed and after disarming", () => {
+    const home = { lat: 1, lon: 2 };
+    expect(nextHome(home, true, at(3, 4, true))).toBe(home);
+    expect(nextHome(home, true, at(3, 4, false))).toBe(home);
+  });
+
+  it("never invents a home without a position fix", () => {
+    expect(nextHome(null, false, { armed: true })).toBeNull();
+    expect(nextHome(null, false, at(0, 0, true))).toBeNull();
   });
 });

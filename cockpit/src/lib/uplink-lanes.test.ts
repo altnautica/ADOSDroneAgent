@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { fmtTq } from "./format";
+import { fmtTq } from "@/shared/format";
 import { laneForToken, uplinkTokenLabel } from "./uplink-lanes";
 
 describe("uplink lane tokens", () => {

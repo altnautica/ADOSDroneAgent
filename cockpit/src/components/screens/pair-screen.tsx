@@ -23,9 +23,9 @@ import {
   type Tone,
 } from "@/components/ui/data";
 import { SetUpAccess } from "@/components/shell/set-up-access";
-import { useResource } from "@/hooks/use-resource";
-import { apiFetch } from "@/lib/api";
-import { DASH } from "@/lib/format";
+import { useResource } from "@/shared/use-resource";
+import { apiFetch } from "@/shared/api-fetch";
+import { DASH } from "@/shared/format";
 import { fmtCountdown } from "@/lib/format-status";
 
 interface PairingInfo {
@@ -132,9 +132,9 @@ export function PairScreen() {
       />
 
       {windowOpen ? (
-        <div className="mb-[0.3rem] flex items-center justify-between rounded-md bg-amber/15 px-[0.6rem] py-[0.4rem]">
-          <span className="text-[0.8rem] text-amber">Pair window open</span>
-          <span className="font-mono text-[0.85rem] text-amber">{fmtCountdown(pending.data?.closes_at_ms)}</span>
+        <div className="mb-[0.3rem] flex items-center justify-between rounded-md bg-primary/15 px-[0.6rem] py-[0.4rem]">
+          <span className="text-[0.8rem] text-hud-primary">Pair window open</span>
+          <span className="font-mono text-[0.85rem] text-hud-primary">{fmtCountdown(pending.data?.closes_at_ms)}</span>
         </div>
       ) : null}
 
@@ -163,7 +163,7 @@ export function PairScreen() {
                 busy={busy === "unpair"}
                 full
               />
-              <p className="mt-[0.3rem] px-[0.2rem] text-[0.66rem] text-muted-foreground">
+              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">
                 Wipes the RF key and disables auto-bind. The drone must be re-paired to reconnect.
               </p>
             </div>
@@ -181,7 +181,7 @@ export function PairScreen() {
                 busy={busy === "pair"}
                 full
               />
-              <p className="mt-[0.3rem] px-[0.2rem] text-[0.66rem] text-muted-foreground">
+              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">
                 Opens a local bind window over the radio. Power the drone nearby; auto-bind completes the pair.
               </p>
             </div>
@@ -201,20 +201,20 @@ export function PairScreen() {
 
         {!gcsClaimed && info.data?.pairing_code ? (
           <div className="mt-[0.3rem] flex flex-col items-center rounded-md bg-input/40 px-[0.6rem] py-[0.6rem]">
-            <span className="text-[0.62rem] uppercase tracking-wide text-muted-foreground">
+            <span className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">
               Pairing code — enter in Mission Control
             </span>
-            <span className="select-text font-mono text-[1.7rem] font-semibold tracking-[0.2em] text-amber">
+            <span className="select-text font-mono text-[1.7rem] font-semibold tracking-[0.2em] text-hud-primary">
               {info.data.pairing_code}
             </span>
             {info.data?.mdns_host ? (
-              <span className="select-text text-[0.7rem] text-muted-foreground">{info.data.mdns_host}</span>
+              <span className="select-text text-[0.75rem] text-muted-foreground">{info.data.mdns_host}</span>
             ) : null}
           </div>
         ) : null}
 
         <SectionHeader>Access from a browser</SectionHeader>
-        <p className="mb-[0.2rem] px-[0.15rem] text-[0.7rem] text-muted-foreground">
+        <p className="mb-[0.2rem] px-[0.15rem] text-[0.75rem] text-muted-foreground">
           Unlock this node&apos;s data (status, video, command) from a browser on the
           trusted LAN by setting or entering its dashboard PIN.
         </p>

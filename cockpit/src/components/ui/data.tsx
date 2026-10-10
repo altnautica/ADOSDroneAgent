@@ -51,7 +51,7 @@ export function Dot({ tone }: { tone: Tone }) {
 /** A dim uppercase section label separating groups of rows/tiles. */
 export function SectionHeader({ children }: { children: ReactNode }) {
   return (
-    <h2 className="mb-[0.3rem] mt-[0.7rem] px-[0.15rem] text-[0.66rem] font-medium uppercase tracking-wider text-muted-foreground first:mt-0">
+    <h2 className="mb-[0.3rem] mt-[0.7rem] px-[0.15rem] text-[0.75rem] font-medium uppercase tracking-wider text-muted-foreground first:mt-0">
       {children}
     </h2>
   );
@@ -84,7 +84,7 @@ export function Row({
         <div className="min-w-0">
           <div className="truncate text-[0.85rem] text-surface-foreground">{label}</div>
           {hint != null ? (
-            <div className="truncate text-[0.68rem] text-muted-foreground">{hint}</div>
+            <div className="truncate text-[0.75rem] text-muted-foreground">{hint}</div>
           ) : null}
         </div>
       </div>
@@ -129,7 +129,7 @@ export function Tile({
 }) {
   return (
     <div className="flex min-h-[3.4rem] flex-col justify-center rounded-md bg-input/40 px-[0.6rem] py-[0.4rem]">
-      <span className="text-[0.6rem] uppercase tracking-wide text-muted-foreground">{label}</span>
+      <span className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">{label}</span>
       <span
         className={cn(
           "font-mono text-[1.05rem] font-semibold leading-tight",
@@ -139,7 +139,7 @@ export function Tile({
         {value}
       </span>
       {hint != null ? (
-        <span className="text-[0.62rem] text-muted-foreground">{hint}</span>
+        <span className="text-[0.75rem] text-muted-foreground">{hint}</span>
       ) : null}
     </div>
   );
@@ -195,7 +195,7 @@ export function MeterTile({
   return (
     <div className="flex min-h-[3.4rem] flex-col justify-center gap-[0.3rem] rounded-md bg-input/40 px-[0.6rem] py-[0.4rem]">
       <div className="flex items-baseline justify-between">
-        <span className="text-[0.6rem] uppercase tracking-wide text-muted-foreground">{label}</span>
+        <span className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">{label}</span>
         <span className={cn("font-mono text-[0.8rem]", tone ? toneClass(tone) : "text-surface-foreground")}>
           {display}
         </span>
@@ -227,7 +227,7 @@ export function ActionButton({
     variant === "danger"
       ? "bg-err/20 text-err hover:bg-err/30 active:bg-err/40"
       : variant === "primary"
-        ? "bg-amber text-amber-foreground hover:brightness-95 active:brightness-90"
+        ? "bg-primary text-primary-foreground hover:brightness-95 active:brightness-90"
         : "bg-input text-surface-foreground hover:bg-muted active:bg-muted";
   return (
     <button
@@ -329,7 +329,7 @@ export function ConfirmButton({
 /** A small right-aligned header badge that reads "stale" when a poll is failing
  *  (the honest-surface signal — the data may be old). */
 export function StaleBadge({ stale }: { stale?: boolean }) {
-  if (stale) return <span className="text-[0.68rem] text-warn">stale</span>;
+  if (stale) return <span className="text-[0.75rem] text-warn">stale</span>;
   return null;
 }
 

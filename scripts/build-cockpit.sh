@@ -33,6 +33,9 @@ if ! command -v npm >/dev/null 2>&1; then
     exit 1
 fi
 
+echo "[build-cockpit] checking the shared web code copy"
+bash "${repo_root}/scripts/sync-web-shared.sh" --check
+
 echo "[build-cockpit] installing dependencies"
 ( cd "${cockpit_src}" && npm ci --no-audit --no-fund )
 

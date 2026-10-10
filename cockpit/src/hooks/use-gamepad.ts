@@ -1,23 +1,36 @@
-// The gamepad input path for menu navigation. Reads the browser Gamepad API
-// each animation frame, edge-detects the d-pad + face buttons + left-stick,
-// and folds them onto the same NavCommand set the touch and button paths use
-// (one dispatcher, three sources). Flight-stick control on the
-// Feed screen (MANUAL_CONTROL through the PIC arbiter) is a later stage; this
-// hook is UI navigation only.
+// The gamepad input path. Reads the browser Gamepad API each animation frame,
+// publishes the raw button sample (skill bindings and the bindings editor read
+// it), and folds the d-pad, face buttons and left stick onto the NavCommand
+// set the touch and panel-button paths use. While a skill confirm sheet is
+// open, A (or the button that opened it) held completes the hold and B
+// cancels, instead of navigating.
 
 import { useEffect, useRef, useState } from "react";
 
-import { useNavStore } from "@/stores/nav-store";
+import { publishGamepadButtons } from "@/lib/gamepad-bus";
 import type { NavCommand } from "@/nav/navigator";
+import { useConfirmStore } from "@/stores/confirm-store";
+import { useNavStore } from "@/stores/nav-store";
 
 // Standard-mapping button indices (https://w3c.github.io/gamepad/#remapping).
-const BTN_A = 0;
-const BTN_B = 1;
+export const BTN_A = 0;
+export const BTN_B = 1;
 const BTN_START = 9;
 const BTN_DPAD_UP = 12;
 const BTN_DPAD_DOWN = 13;
 const BTN_DPAD_LEFT = 14;
 const BTN_DPAD_RIGHT = 15;
+
+/** Buttons that drive menu navigation; skill bindings may not use them. */
+export const NAV_BUTTONS: readonly number[] = [
+  BTN_A,
+  BTN_B,
+  BTN_START,
+  BTN_DPAD_UP,
+  BTN_DPAD_DOWN,
+  BTN_DPAD_LEFT,
+  BTN_DPAD_RIGHT,
+];
 
 const BUTTON_COMMANDS: Record<number, NavCommand> = {
   [BTN_A]: "activate",
@@ -29,7 +42,6 @@ const BUTTON_COMMANDS: Record<number, NavCommand> = {
   [BTN_DPAD_RIGHT]: "next",
 };
 
-// Left-stick vertical axis deflection + re-trigger cadence for held moves.
 const AXIS_THRESHOLD = 0.6;
 const AXIS_REPEAT_MS = 220;
 
@@ -37,53 +49,56 @@ export interface GamepadState {
   connected: boolean;
 }
 
-/** Poll connected gamepads and drive the navigator for the app's lifetime. */
 export function useGamepad(): GamepadState {
   const [connected, setConnected] = useState(false);
   const command = useNavStore((s) => s.command);
-  const prevButtons = useRef<Record<number, boolean>>({});
+  const prev = useRef<boolean[]>([]);
   const lastAxisFire = useRef(0);
 
   useEffect(() => {
-    if (typeof navigator === "undefined" || !("getGamepads" in navigator)) {
-      return;
-    }
-
+    if (typeof navigator === "undefined" || !("getGamepads" in navigator)) return;
     let raf = 0;
+    let wasConnected = false;
 
     const poll = () => {
-      const pads = navigator.getGamepads ? navigator.getGamepads() : [];
-      const pad = Array.from(pads).find((p): p is Gamepad => p != null);
-      setConnected(pad != null);
-
-      if (pad) {
-        for (const [indexStr, cmd] of Object.entries(BUTTON_COMMANDS)) {
-          const index = Number(indexStr);
-          const pressed = pad.buttons[index]?.pressed ?? false;
-          const was = prevButtons.current[index] ?? false;
-          if (pressed && !was) command(cmd); // rising edge only
-          prevButtons.current[index] = pressed;
-        }
-
-        // Left-stick vertical as prev/next, rate-limited so a held stick
-        // repeats at a readable cadence instead of every frame.
-        const axisY = pad.axes[1] ?? 0;
-        const now = performance.now();
-        if (Math.abs(axisY) >= AXIS_THRESHOLD) {
-          if (now - lastAxisFire.current >= AXIS_REPEAT_MS) {
-            command(axisY < 0 ? "prev" : "next");
-            lastAxisFire.current = now;
-          }
-        } else {
-          lastAxisFire.current = 0;
-        }
+      const pad = Array.from(navigator.getGamepads()).find((p): p is Gamepad => p != null);
+      if ((pad != null) !== wasConnected) {
+        wasConnected = pad != null;
+        setConnected(wasConnected);
       }
 
+      if (pad) {
+        const pressed = pad.buttons.map((b) => b.pressed);
+        const was = prev.current;
+        prev.current = pressed;
+        publishGamepadButtons(pressed);
+
+        const confirm = useConfirmStore.getState();
+        if (confirm.pending) {
+          const holdButton = confirm.pending.gamepadButton;
+          confirm.setHeld(pressed[BTN_A] || (holdButton !== null && pressed[holdButton] === true));
+          if (pressed[BTN_B] && !was[BTN_B]) confirm.cancel();
+        } else {
+          for (const [indexStr, cmd] of Object.entries(BUTTON_COMMANDS)) {
+            const i = Number(indexStr);
+            if (pressed[i] && !was[i]) command(cmd);
+          }
+          const axisY = pad.axes[1] ?? 0;
+          const now = performance.now();
+          if (Math.abs(axisY) >= AXIS_THRESHOLD) {
+            if (now - lastAxisFire.current >= AXIS_REPEAT_MS) {
+              command(axisY < 0 ? "prev" : "next");
+              lastAxisFire.current = now;
+            }
+          } else {
+            lastAxisFire.current = 0;
+          }
+        }
+      }
       raf = requestAnimationFrame(poll);
     };
 
     raf = requestAnimationFrame(poll);
-
     return () => cancelAnimationFrame(raf);
   }, [command]);
 

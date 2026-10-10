@@ -21,15 +21,17 @@ import {
 } from "lucide-react";
 
 import { FeedScreen } from "@/components/screens/feed-screen";
-import { LinkScreen } from "@/components/screens/link-screen";
-import { MeshScreen } from "@/components/screens/mesh-screen";
-import { PairScreen } from "@/components/screens/pair-screen";
-import { PluginScreen } from "@/components/screens/plugin-screen";
-import { SettingsScreen } from "@/components/screens/settings-screen";
-import { SystemScreen } from "@/components/screens/system-screen";
-import { UplinkScreen } from "@/components/screens/uplink-screen";
+import {
+  ExtensionsScreen,
+  LinkScreen,
+  MeshScreen,
+  PairScreen,
+  SettingsScreen,
+  SystemScreen,
+  UplinkScreen,
+} from "@/nav/lazy-screens";
 import { DEFAULT_TAB_ID, type ScreenSpec } from "@/nav/navigator";
-import type { AgentProfile } from "@/hooks/use-profile";
+import type { AgentProfile } from "@/shared/use-profile";
 
 /** Prefix on the detail-stack id for a Settings drill level. Everything after
  *  it is the drill path the Settings screen renders (`~`/`~group`/`#`/`#path`/
@@ -83,14 +85,13 @@ const SCREENS: ScreenSpec[] = [
     render: () => <SystemScreen />,
   },
   {
-    id: "plugin",
-    title: "Plugin",
+    id: "extensions",
+    title: "Extensions",
     icon: Blocks,
     kind: "tab",
-    // Unconditionally present in the menu; the screen resolves an installed
-    // GCS-bearing plugin and renders it, or a clean no-plugin panel when none
-    // is installed.
-    render: () => <PluginScreen />,
+    // Lists every running extension and hosts its tabs and panels; a node with
+    // none shows a plain empty state.
+    render: () => <ExtensionsScreen />,
   },
   {
     id: "settings",

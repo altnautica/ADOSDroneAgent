@@ -1,126 +1,185 @@
-// The built-in flight skills the on-box cockpit can actually drive, plus the
-// gating that keeps the bar honest.
+// The skills the on-box cockpit can drive, their confirm gestures, and the
+// gating that keeps the Skill Bar honest.
 //
-// The ONLY control path from this cockpit to the flight controller is the agent's
-// `POST /api/command`, which sends a fixed set of high-level MAVLink COMMAND_LONG
-// actions — arm, disarm, takeoff, land, rtl, and set-mode. There is no
-// virtual-stick / MANUAL_CONTROL and no guided goto over this REST surface (those
-// live on the plugin host's flight facade, not here), so this catalog contains
-// ONLY commands the agent can genuinely execute. A skill the node cannot drive is
-// never rendered; a skill that is momentarily inapplicable (already armed, no FC
-// link) renders disabled with a plain reason.
+// Built-in skills map onto the agent's `POST /api/command` (arm, disarm,
+// takeoff, land, rtl, mode, killSwitch, pauseMission, resumeMission). Extension
+// skills flip a plugin config key (`PUT /api/plugins/{id}/config`). A skill
+// the node cannot drive right now renders disabled with a plain reason.
+//
+// Confirm gestures:
+//   tap     — fires immediately (pause, hold-type recovery modes)
+//   hold    — 800 ms press-and-hold on the confirm sheet (or the bound
+//             gamepad button / Enter held); takeoff carries an altitude
+//   slide   — slide-to-confirm on touch; a 1500 ms hold on gamepad/keyboard
+//   guarded — kill: the first activation arms a 3 s guard, a 1500 ms hold
+//             inside that window fires
 
-/** `HEARTBEAT.autopilot` value for PX4 (`MAV_AUTOPILOT_PX4`). Selects the PX4
- *  flight-mode names; any other value (or none) uses the ArduPilot names. Mirrors
- *  the agent command route's family switch. */
+import type { FlightCommand } from "@/lib/api";
+
+export type ConfirmGesture = "tap" | "hold" | "slide" | "guarded";
+export type SkillCategory = "flight" | "mode" | "safety" | "extension";
+export type ArmRequirement = "any" | "armed" | "disarmed";
+
+export const HOLD_MS = 800;
+export const SLIDE_HOLD_MS = 1500;
+export const GUARD_HOLD_MS = 1500;
+export const GUARD_WINDOW_MS = 3000;
+export const DEFAULT_TAKEOFF_ALT_M = 10;
+
+/** `HEARTBEAT.autopilot` value for PX4 (`MAV_AUTOPILOT_PX4`). */
 export const AUTOPILOT_PX4 = 12;
 
-/** A skill's category, so the bar can group the core flight actions apart from
- *  the flight-mode presets. */
-export type SkillCategory = "flight" | "mode";
-
-/** One built-in skill: a labelled action that maps to a `POST /api/command`
- *  `{ cmd, args }`. `confirm` marks the high-consequence actions the bar guards
- *  with a confirmation step. */
-export interface Skill {
-  /** Stable id (unique across the catalog); e.g. `arm`, `mode:LOITER`. */
-  id: string;
-  label: string;
-  /** The `/api/command` command name. */
-  cmd: "arm" | "disarm" | "takeoff" | "land" | "rtl" | "mode";
-  /** Command args (e.g. the mode name for a `mode` preset). */
-  args: (string | number)[];
-  /** Whether the bar guards this action behind an explicit confirm. */
-  confirm: boolean;
-  category: SkillCategory;
+export interface ExtensionBinding {
+  pluginId: string;
+  configKey: string;
+  toggle: boolean;
+  stateTopic: string | null;
 }
 
-/** The core flight actions, always present when an FC link is live. Arm and
- *  disarm are both listed; the bar shows whichever one applies to the current
- *  armed state, and the gating below disables the inapplicable one. */
+export interface Skill {
+  /** Stable id: `arm`, `mode:LOITER`, or `<pluginId>:<localId>`. */
+  id: string;
+  label: string;
+  category: SkillCategory;
+  gesture: ConfirmGesture;
+  armRequirement: ArmRequirement;
+  /** Built-in: the `/api/command` call. */
+  command?: { cmd: FlightCommand; args: (string | number)[] };
+  /** Extension: the config key the skill flips. */
+  extension?: ExtensionBinding;
+  /** Takeoff: the confirm sheet carries an altitude stepper. */
+  takesAltitude?: boolean;
+  /** Lucide icon name (extension skills declare one). */
+  icon?: string;
+}
+
+/** The hold the gesture needs, in ms (0 for tap). */
+export function holdMsFor(gesture: ConfirmGesture): number {
+  switch (gesture) {
+    case "tap":
+      return 0;
+    case "hold":
+      return HOLD_MS;
+    case "slide":
+      return SLIDE_HOLD_MS;
+    case "guarded":
+      return GUARD_HOLD_MS;
+  }
+}
+
+function builtin(
+  id: string,
+  label: string,
+  cmd: FlightCommand,
+  gesture: ConfirmGesture,
+  armRequirement: ArmRequirement,
+  category: SkillCategory = "flight",
+): Skill {
+  return { id, label, category, gesture, armRequirement, command: { cmd, args: [] } };
+}
+
 export const CORE_SKILLS: Skill[] = [
-  { id: "arm", label: "Arm", cmd: "arm", args: [], confirm: true, category: "flight" },
-  { id: "disarm", label: "Disarm", cmd: "disarm", args: [], confirm: true, category: "flight" },
-  { id: "takeoff", label: "Takeoff", cmd: "takeoff", args: [], confirm: true, category: "flight" },
-  { id: "land", label: "Land", cmd: "land", args: [], confirm: true, category: "flight" },
-  { id: "rtl", label: "RTL", cmd: "rtl", args: [], confirm: true, category: "flight" },
+  builtin("arm", "Arm", "arm", "slide", "disarmed"),
+  builtin("disarm", "Disarm", "disarm", "hold", "armed"),
+  { ...builtin("takeoff", "Takeoff", "takeoff", "hold", "armed"), takesAltitude: true },
+  builtin("land", "Land", "land", "hold", "armed"),
+  builtin("rtl", "RTL", "rtl", "hold", "armed"),
+  builtin("pause", "Pause", "pausemission", "tap", "armed"),
+  builtin("resume", "Resume", "resumemission", "hold", "armed"),
+  builtin("kill", "Kill", "killswitch", "guarded", "armed", "safety"),
 ];
 
-/** ArduPilot mode presets (names resolved by the agent's copter mode table). */
-const ARDUPILOT_MODE_PRESETS: ReadonlyArray<{ name: string; label: string }> = [
-  { name: "STABILIZE", label: "Stabilize" },
-  { name: "ALT_HOLD", label: "Alt Hold" },
-  { name: "LOITER", label: "Loiter" },
-  { name: "GUIDED", label: "Guided" },
+export const CORE_BY_ID: Record<string, Skill> = Object.fromEntries(
+  CORE_SKILLS.map((s) => [s.id, s]),
+);
+
+interface ModePreset {
+  name: string;
+  label: string;
+  /** Hold-type recovery modes fire on a tap; every other mode needs a hold. */
+  recovery: boolean;
+}
+
+const ARDUPILOT_MODE_PRESETS: readonly ModePreset[] = [
+  { name: "STABILIZE", label: "Stabilize", recovery: false },
+  { name: "ALT_HOLD", label: "Alt Hold", recovery: true },
+  { name: "LOITER", label: "Loiter", recovery: true },
+  { name: "BRAKE", label: "Brake", recovery: true },
+  { name: "GUIDED", label: "Guided", recovery: false },
 ];
 
-/** PX4 mode presets (names resolved by the agent's PX4 mode table). */
-const PX4_MODE_PRESETS: ReadonlyArray<{ name: string; label: string }> = [
-  { name: "ALTITUDE", label: "Altitude" },
-  { name: "POSITION", label: "Position" },
-  { name: "LOITER", label: "Hold" },
-  { name: "MISSION", label: "Mission" },
+const PX4_MODE_PRESETS: readonly ModePreset[] = [
+  { name: "ALTITUDE", label: "Altitude", recovery: true },
+  { name: "POSITION", label: "Position", recovery: true },
+  { name: "LOITER", label: "Hold", recovery: true },
+  { name: "MISSION", label: "Mission", recovery: false },
 ];
 
-/**
- * The mode-preset skills for the FC's autopilot family. Only names valid for that
- * family are offered, so the bar never renders a mode the agent would reject — an
- * unknown `autopilot` (no heartbeat yet) defaults to the ArduPilot set, the
- * primary target. Mode changes are lower-consequence than arming/landing, so they
- * are not confirm-guarded.
- */
+/** The mode presets valid for the FC's autopilot family (ArduPilot when the
+ *  family is not known yet). */
 export function modePresetsFor(autopilot: number | null | undefined): Skill[] {
   const presets = autopilot === AUTOPILOT_PX4 ? PX4_MODE_PRESETS : ARDUPILOT_MODE_PRESETS;
   return presets.map((p) => ({
     id: `mode:${p.name}`,
     label: p.label,
-    cmd: "mode" as const,
-    args: [p.name],
-    confirm: false,
-    category: "mode" as const,
+    category: "mode",
+    gesture: p.recovery ? "tap" : "hold",
+    armRequirement: "any",
+    command: { cmd: "mode", args: [p.name] },
   }));
 }
 
-/** Inputs that decide whether a skill is currently drivable. */
-export interface SkillContext {
-  /** Whether a live MAVLink flight-controller link is present (fresh telemetry).
-   *  The COMMAND_LONG path needs this; an MSP FC (Betaflight/iNav) has no MAVLink
-   *  link, so these commands correctly gate off. */
-  fcConnected: boolean;
-  /** Whether the vehicle is armed (from the live telemetry snapshot). */
-  armed: boolean;
-  /** Whether the readings on screen came over the radio from another node and
-   *  that node is reachable through this node's relay proxy. A relayed vehicle
-   *  is commanded THROUGH this node's relay to the linked drone, so a healthy
-   *  relayed reading is as reachable as a directly attached FC. */
-  relayed?: boolean;
-}
-
-/** The resolved drivability of a skill: enabled, or disabled with a plain
- *  operator-facing reason. */
-export interface SkillState {
-  enabled: boolean;
+/** An extension skill's state as the plugin reports it. */
+export interface ReportedSkillState {
+  state: "active" | "idle" | "disabled";
+  badge?: string;
   reason?: string;
 }
 
+/** Inputs that decide whether a skill is drivable. */
+export interface SkillContext {
+  /** A flight controller link this node can command through: a drone's own
+   *  MAVLink FC, or a ground station's fresh relayed aircraft. */
+  fcConnected: boolean;
+  /** Fresh vehicle telemetry is arriving (attitude moving). */
+  live: boolean;
+  armed: boolean;
+  /** Extension skills: the plugin's last reported state, by skill id. */
+  reported?: Record<string, ReportedSkillState | undefined>;
+}
+
+export interface SkillState {
+  enabled: boolean;
+  reason?: string;
+  active?: boolean;
+  badge?: string;
+}
+
 /**
- * Whether a skill can be driven right now, and if not, why. A vehicle is
- * reachable when it has a live local flight-controller link OR a healthy
- * relayed reading (commanded through this node's relay proxy to the linked
- * drone); only a node with neither is undrivable. With a link, arm is
- * inapplicable while armed and disarm while disarmed; every other action is
- * available. The reason strings are what the bar shows on a disabled control
- * (never a control the node cannot drive without a plain reason).
+ * Whether a skill can be driven right now, and if not, why. Built-in commands
+ * need a commandable FC link with fresh telemetry: a link that answers but
+ * carries no live vehicle state is not one to fly through. Extension skills
+ * act on the plugin, so they are gated by the plugin's own reported state;
+ * any arm requirement still needs a live vehicle to read the arm state from.
  */
 export function resolveSkillState(skill: Skill, ctx: SkillContext): SkillState {
-  if (!ctx.fcConnected && !ctx.relayed) {
+  const vehicleKnown = ctx.fcConnected && ctx.live;
+  if (skill.command && !vehicleKnown) {
     return { enabled: false, reason: "No flight controller link" };
   }
-  if (skill.cmd === "arm" && ctx.armed) {
-    return { enabled: false, reason: "Already armed" };
+  if (skill.armRequirement !== "any") {
+    if (!vehicleKnown) return { enabled: false, reason: "No flight controller link" };
+    if (skill.armRequirement === "armed" && !ctx.armed) return { enabled: false, reason: "Not armed" };
+    if (skill.armRequirement === "disarmed" && ctx.armed) {
+      return { enabled: false, reason: "Already armed" };
+    }
   }
-  if (skill.cmd === "disarm" && !ctx.armed) {
-    return { enabled: false, reason: "Not armed" };
+  if (skill.extension) {
+    const reported = ctx.reported?.[skill.id];
+    if (reported?.state === "disabled") {
+      return { enabled: false, reason: reported.reason ?? "Unavailable" };
+    }
+    return { enabled: true, active: reported?.state === "active", badge: reported?.badge };
   }
   return { enabled: true };
 }

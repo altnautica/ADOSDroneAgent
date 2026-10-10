@@ -12,7 +12,7 @@
 // the assembly by -roll (right bank tilts the horizon's right side up, matching
 // the out-the-window view).
 
-import { useFlightTelemetryContext } from "@/hooks/flight-telemetry-context";
+import { useFlightStore } from "@/stores/flight-store";
 
 /** SVG units per pitch degree. */
 const K = 2.4;
@@ -74,7 +74,7 @@ function PitchRung({ deg }: { deg: number }) {
 
 function Boresight() {
   return (
-    <g className="text-amber" stroke="currentColor" strokeWidth="2.2" fill="none">
+    <g className="text-hud-primary" stroke="currentColor" strokeWidth="2.2" fill="none">
       <line x1={-28} y1={0} x2={-10} y2={0} />
       <line x1={10} y1={0} x2={28} y2={0} />
       <circle cx={0} cy={0} r={2.6} strokeWidth="1.8" />
@@ -83,7 +83,8 @@ function Boresight() {
 }
 
 export function AttitudeIndicator() {
-  const { telemetry, live } = useFlightTelemetryContext();
+  const telemetry = useFlightStore((s) => s.telemetry);
+  const live = useFlightStore((s) => s.live);
   const att = telemetry?.attitude;
   const rollDeg = att?.roll != null ? att.roll * RAD_TO_DEG : 0;
   const pitchDeg = att?.pitch != null ? att.pitch * RAD_TO_DEG : 0;
@@ -107,7 +108,7 @@ export function AttitudeIndicator() {
           {/* horizon + pitch ladder, clipped to a central window */}
           <g clipPath="url(#hud-window)">
             <g
-              className="text-amber"
+              className="text-hud-primary"
               stroke="currentColor"
               strokeWidth="1.4"
               fill="none"
@@ -152,7 +153,7 @@ export function AttitudeIndicator() {
 
           {/* moving roll pointer — rotates with the horizon */}
           <g
-            className="text-amber"
+            className="text-hud-primary"
             transform={`rotate(${-rollDeg})`}
             fill="currentColor"
             stroke="none"

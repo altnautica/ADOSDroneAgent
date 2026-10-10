@@ -13,7 +13,8 @@
 import { useEffect } from "react";
 import { create } from "zustand";
 
-import { ApiError, apiFetch, getConfig } from "@/lib/api";
+import { getConfig } from "@/lib/api";
+import { ApiError, apiFetch } from "@/shared/api-fetch";
 import type { AgentConfig } from "@/lib/types";
 import { useReachStore } from "@/stores/reach-store";
 

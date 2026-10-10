@@ -10,15 +10,15 @@ import { RotateCw } from "lucide-react";
 
 import { ConfirmButton } from "@/components/ui/data";
 import { useConfigStore } from "@/stores/config-store";
-import { useTelemetryContext } from "@/hooks/telemetry-context";
-import { apiFetch } from "@/lib/api";
+import { useStatusStore } from "@/stores/status-store";
+import { apiFetch } from "@/shared/api-fetch";
 import { prettify } from "@/lib/settings-schema";
 import { cn } from "@/lib/utils";
 
 export function RebootBanner({ floating = false }: { floating?: boolean }) {
   const paths = useConfigStore((s) => s.pendingRebootPaths);
   const maybeAutoClear = useConfigStore((s) => s.maybeAutoClearReboot);
-  const { status } = useTelemetryContext();
+  const status = useStatusStore((s) => s.status);
   const uptime = status?.system?.uptime_seconds ?? null;
   const [rebooting, setRebooting] = useState(false);
 
@@ -61,7 +61,7 @@ export function RebootBanner({ floating = false }: { floating?: boolean }) {
         <div className="truncate text-[0.8rem] font-medium">
           {rebooting ? "Rebooting…" : "Changes pending — reboot to apply"}
         </div>
-        <div className="truncate text-[0.62rem] opacity-80">{summary}</div>
+        <div className="truncate text-[0.75rem] opacity-80">{summary}</div>
       </div>
       {!rebooting ? (
         <ConfirmButton

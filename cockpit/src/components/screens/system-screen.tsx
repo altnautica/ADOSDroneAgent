@@ -23,11 +23,12 @@ import {
   TileGrid,
   type Tone,
 } from "@/components/ui/data";
-import { useProfile } from "@/hooks/use-profile";
-import { useResource } from "@/hooks/use-resource";
-import { useTelemetryContext } from "@/hooks/telemetry-context";
-import { apiFetch, startRecording, stopRecording } from "@/lib/api";
-import { DASH, fmtInt, fmtPct, fmtTemp, fmtUptime } from "@/lib/format";
+import { useProfile } from "@/shared/use-profile";
+import { useResource } from "@/shared/use-resource";
+import { useStatusStore } from "@/stores/status-store";
+import { startRecording, stopRecording } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
+import { DASH, fmtInt, fmtPct, fmtTemp, fmtUptime } from "@/shared/format";
 import { fmtBytes, fmtClock, fmtGb, fmtMb } from "@/lib/format-status";
 
 interface SystemResources {
@@ -86,7 +87,7 @@ function shortName(name: string): string {
 }
 
 export function SystemScreen() {
-  const { status } = useTelemetryContext();
+  const status = useStatusStore((s) => s.status);
   // The recorder and its file list exist only on a ground station.
   const hasRecorder = useProfile() === "ground_station";
   const sys = useResource<SystemResources>(
@@ -231,14 +232,14 @@ export function SystemScreen() {
         <SectionHeader>
           Services{services.data?.systemd_available === false ? " (systemd unavailable)" : ""}
         </SectionHeader>
-        {restartError ? <div className="truncate text-[0.7rem] text-err">{restartError}</div> : null}
+        {restartError ? <div className="truncate text-[0.75rem] text-err">{restartError}</div> : null}
         {svcList.length ? (
           svcList.map((s) => (
             <div key={s.name} className="flex items-center gap-[0.5rem] rounded-md bg-input/30 px-[0.6rem] py-[0.3rem]">
               <Dot tone={serviceTone(s)} />
               <div className="min-w-0 flex-1">
                 <div className="truncate text-[0.82rem] text-surface-foreground">{shortName(s.name)}</div>
-                <div className="truncate text-[0.66rem] text-muted-foreground">
+                <div className="truncate text-[0.75rem] text-muted-foreground">
                   {s.state ?? DASH}
                   {s.sub_state && s.sub_state !== s.state ? ` · ${s.sub_state}` : ""}
                   {s.memory_mb != null ? ` · ${fmtMb(s.memory_mb)}` : ""}

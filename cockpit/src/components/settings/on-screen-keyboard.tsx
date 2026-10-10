@@ -40,7 +40,7 @@ function Key({
       onClick={onClick}
       aria-label={ariaLabel}
       className={cn(
-        "touch-target flex flex-1 items-center justify-center rounded-md bg-input text-[1rem] font-medium text-surface-foreground transition-colors hover:bg-muted active:bg-amber active:text-amber-foreground",
+        "touch-target flex flex-1 items-center justify-center rounded-md bg-input text-[1rem] font-medium text-surface-foreground transition-colors hover:bg-muted active:bg-primary active:text-primary-foreground",
         className,
       )}
     >
@@ -77,7 +77,7 @@ export function OnScreenKeyboard({
         {value ? (
           <span>
             {value}
-            <span className="ml-[1px] inline-block animate-pulse text-amber">|</span>
+            <span className="ml-[1px] inline-block animate-pulse text-hud-primary">|</span>
           </span>
         ) : (
           <span className="text-muted-foreground">{placeholder ?? "Enter a value…"}</span>
@@ -92,7 +92,7 @@ export function OnScreenKeyboard({
               <Key
                 onClick={() => setShift((s) => !s)}
                 ariaLabel="Shift"
-                className={cn("max-w-[3.4rem]", shift && "bg-amber text-amber-foreground")}
+                className={cn("max-w-[3.4rem]", shift && "bg-primary text-primary-foreground")}
               >
                 <ArrowBigUp className="h-[1.3rem] w-[1.3rem]" />
               </Key>

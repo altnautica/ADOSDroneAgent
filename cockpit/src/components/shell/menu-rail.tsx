@@ -4,7 +4,7 @@
 // focus ring highlights the focused entry so the menu is fully operable
 // eyes-on-panel with any input source.
 
-import { useProfile } from "@/hooks/use-profile";
+import { useProfile } from "@/shared/use-profile";
 import { useNavStore } from "@/stores/nav-store";
 import { tabScreens } from "@/nav/registry";
 import { cn } from "@/lib/utils";
@@ -46,12 +46,12 @@ export function MenuRail({ floating = false }: { floating?: boolean }) {
             className={cn(
               "touch-target flex flex-1 flex-col items-center justify-center gap-[0.15rem] rounded-md px-[0.3rem] py-[0.35rem] transition-colors",
               active
-                ? "bg-amber text-amber-foreground"
+                ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-muted hover:text-surface-foreground",
             )}
           >
             {Icon ? <Icon className="h-[1.3rem] w-[1.3rem]" aria-hidden /> : null}
-            <span className="text-[0.7rem] font-medium leading-none">{tab.title}</span>
+            <span className="text-[0.75rem] font-medium leading-none">{tab.title}</span>
           </button>
         );
       })}

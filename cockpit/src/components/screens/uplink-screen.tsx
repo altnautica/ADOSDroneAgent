@@ -9,9 +9,9 @@ import { useCallback } from "react";
 
 import { Panel, PanelHeader } from "@/components/ui/panel";
 import { Dot, EmptyNote, MeterTile, Row, SectionHeader, StaleBadge, type Tone } from "@/components/ui/data";
-import { useResource } from "@/hooks/use-resource";
-import { apiFetch } from "@/lib/api";
-import { DASH } from "@/lib/format";
+import { useResource } from "@/shared/use-resource";
+import { apiFetch } from "@/shared/api-fetch";
+import { DASH } from "@/shared/format";
 import { fmtMb } from "@/lib/format-status";
 import { laneForToken, uplinkTokenLabel } from "@/lib/uplink-lanes";
 

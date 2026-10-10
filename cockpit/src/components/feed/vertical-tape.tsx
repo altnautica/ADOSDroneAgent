@@ -7,7 +7,7 @@
 // number line.
 
 import { cn } from "@/lib/utils";
-import { DASH } from "@/lib/format";
+import { DASH } from "@/shared/format";
 
 export interface VerticalTapeProps {
   side: "left" | "right";
@@ -81,7 +81,7 @@ export function VerticalTape({
       {/* label */}
       <div
         className={cn(
-          "absolute top-0 text-[0.62rem] uppercase tracking-wide text-muted-foreground",
+          "absolute top-0 text-[0.75rem] uppercase tracking-wide text-muted-foreground",
           isLeft ? "left-0" : "right-0",
         )}
       >
@@ -110,7 +110,7 @@ export function VerticalTape({
               )}
               style={{ top: `${topPct}%` }}
             >
-              <span className="font-mono text-[0.6rem] text-surface-foreground/80">
+              <span className="font-mono text-[0.75rem] text-surface-foreground/80">
                 {tick}
               </span>
               <span className="h-px w-[0.4rem] bg-surface-foreground/50" />
@@ -126,10 +126,10 @@ export function VerticalTape({
           isLeft ? "left-0" : "right-0",
         )}
       >
-        <span className="font-mono text-[0.95rem] font-semibold text-amber">
+        <span className="font-mono text-[0.95rem] font-semibold text-hud-primary">
           {hasValue ? Math.round(value as number) : DASH}
         </span>
-        <span className="text-[0.55rem] text-muted-foreground">{unit}</span>
+        <span className="text-[0.75rem] text-muted-foreground">{unit}</span>
       </div>
     </div>
   );

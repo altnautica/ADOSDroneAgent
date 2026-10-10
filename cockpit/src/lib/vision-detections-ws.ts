@@ -19,7 +19,7 @@ import type {
   LockState,
 } from "@/stores/detections-store";
 import { useDetectionsStore } from "@/stores/detections-store";
-import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/lib/ws-ticket";
+import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/shared/ws-ticket";
 
 /** The scope a `/api/vision/detections/ws` ticket must be minted for. Matches the
  *  route's `_WS_SCOPE` (`vision.detections`) so the agent validates it on

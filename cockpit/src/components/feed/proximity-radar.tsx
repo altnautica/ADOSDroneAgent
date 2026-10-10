@@ -12,7 +12,7 @@
 // surfaces: with no live heading, track, or obstacle it shows the
 // compass frame + "no heading" rather than a fabricated pose.
 
-import { useFlightTelemetryContext } from "@/hooks/flight-telemetry-context";
+import { useFlightStore } from "@/stores/flight-store";
 import {
   bearingToXY,
   obstacleSectors,
@@ -41,7 +41,8 @@ const CARDINALS: { label: string; bearing: number }[] = [
 ];
 
 export function ProximityRadar() {
-  const { telemetry, live } = useFlightTelemetryContext();
+  const telemetry = useFlightStore((s) => s.telemetry);
+  const live = useFlightStore((s) => s.live);
 
   const pos = telemetry?.position;
   const vel = telemetry?.velocity;
@@ -84,7 +85,7 @@ export function ProximityRadar() {
           !live && "opacity-70",
         )}
       >
-        <span className="absolute left-[0.25rem] top-[0.1rem] z-10 text-[0.5rem] uppercase tracking-wide text-muted-foreground">
+        <span className="absolute left-[0.25rem] top-[0.1rem] z-10 text-[0.75rem] uppercase tracking-wide text-muted-foreground">
           Radar
         </span>
 
@@ -145,7 +146,7 @@ export function ProximityRadar() {
 
           {/* the vehicle nose — heading arrow, or a plain dot when heading is
               unknown */}
-          <g className="text-amber" fill="currentColor" stroke="none">
+          <g className="text-hud-primary" fill="currentColor" stroke="none">
             {heading != null ? (
               <polygon
                 points="0,-11 5.5,6 0,3 -5.5,6"
@@ -159,7 +160,7 @@ export function ProximityRadar() {
 
         {/* bottom readout: nearest obstacle / heading / honest empty state */}
         <div className="absolute bottom-[0.1rem] left-0 right-0 text-center">
-          <span className={cn("font-mono text-[0.5rem]", bottom.cls)}>
+          <span className={cn("font-mono text-[0.75rem]", bottom.cls)}>
             {bottom.text}
           </span>
         </div>

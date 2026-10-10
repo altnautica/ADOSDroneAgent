@@ -11,10 +11,10 @@ import { useCallback } from "react";
 
 import { Panel, PanelHeader } from "@/components/ui/panel";
 import { Dot, EmptyNote, Row, SectionHeader, StaleBadge, Tile, TileGrid, type Tone } from "@/components/ui/data";
-import { useResource } from "@/hooks/use-resource";
-import { useTelemetryContext } from "@/hooks/telemetry-context";
-import { apiFetch } from "@/lib/api";
-import { DASH, fmtInt, fmtTq } from "@/lib/format";
+import { useResource } from "@/shared/use-resource";
+import { useStatusStore } from "@/stores/status-store";
+import { apiFetch } from "@/shared/api-fetch";
+import { DASH, fmtInt, fmtTq } from "@/shared/format";
 
 /** One `mesh-state` neighbour (crates/ados-groundlink mesh/state.rs). */
 interface MeshNeighbor {
@@ -49,7 +49,7 @@ function identity(n: { orig?: string; mac?: string; address?: string; name?: str
 
 
 export function MeshScreen() {
-  const { status } = useTelemetryContext();
+  const status = useStatusStore((s) => s.status);
   const mesh = useResource<MeshState>(
     useCallback((s) => apiFetch<MeshState>("/api/v1/ground-station/mesh", { signal: s }), []),
     1500,

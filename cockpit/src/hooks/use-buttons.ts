@@ -8,18 +8,25 @@
 
 import { useEffect, useState } from "react";
 
+import { useConfirmStore } from "@/stores/confirm-store";
 import { useNavStore } from "@/stores/nav-store";
+import { useProfile } from "@/shared/use-profile";
 import type { NavCommand } from "@/nav/navigator";
 import type { ButtonEvent } from "@/lib/types";
-import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/lib/ws-ticket";
+import { WS_TICKET_PROTOCOL, mintWsTicket } from "@/shared/ws-ticket";
 
 /** The scope a `/ws/buttons` ticket must be minted for (matches the native
  *  `SCOPE_BUTTON_EVENTS` in crates/ados-control). */
 const BUTTON_SCOPE = "gs.button_events";
 
-/** Fixed pause before redialling a dropped button stream (no backoff, no cap):
- *  the panel buttons are an input path, and a growing delay is dead input. */
-const RECONNECT_MS = 3000;
+/** Redial backoff for a dropped button stream: 1 s, doubling to a 10 s cap,
+ *  reset once a connection opens. */
+export const RECONNECT_MIN_MS = 1000;
+export const RECONNECT_MAX_MS = 10_000;
+
+export function nextReconnectDelay(previousMs: number | null): number {
+  return previousMs === null ? RECONNECT_MIN_MS : Math.min(RECONNECT_MAX_MS, previousMs * 2);
+}
 
 /** Default binding from a raw button identity to a folded command. The panel
  *  owns this table; on-rig the exact identity strings the `ados-pic` reader
@@ -78,9 +85,14 @@ export interface ButtonsState {
 export function useButtons(): ButtonsState {
   const [connected, setConnected] = useState(false);
   const command = useNavStore((s) => s.command);
+  // Physical buttons exist only on a ground station; no other profile serves
+  // the stream, so nothing is dialled there.
+  const isGround = useProfile() === "ground_station";
 
   useEffect(() => {
+    if (!isGround) return;
     let closed = false;
+    let delay: number | null = null;
     let socket: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     const controller = new AbortController();
@@ -96,10 +108,11 @@ export function useButtons(): ButtonsState {
       // `lib/vision-detections-ws.ts` has always had this shape; this one did
       // not.
       if (closed || reconnectTimer) return;
+      delay = nextReconnectDelay(delay);
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
         void connect();
-      }, RECONNECT_MS);
+      }, delay);
     };
 
     const connect = async () => {
@@ -125,6 +138,7 @@ export function useButtons(): ButtonsState {
 
       socket.onopen = () => {
         setConnected(true);
+        delay = null;
       };
 
       socket.onmessage = (msg) => {
@@ -140,6 +154,15 @@ export function useButtons(): ButtonsState {
           return;
         }
         const cmd = eventToCommand(frame as ButtonEvent);
+        const ev = frame as ButtonEvent;
+        const confirm = useConfirmStore.getState();
+        if (confirm.pending) {
+          // A skill sheet is open: a long-press of select completes its hold,
+          // back cancels it, nothing navigates underneath it.
+          if (cmd === "quick-menu" && ev.kind === "long") confirm.panelConfirm();
+          else if (cmd === "back") confirm.cancel();
+          return;
+        }
         if (cmd) command(cmd);
       };
 
@@ -174,7 +197,7 @@ export function useButtons(): ButtonsState {
         }
       }
     };
-  }, [command]);
+  }, [command, isGround]);
 
   return { connected };
 }

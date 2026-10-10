@@ -105,7 +105,7 @@ export function ActionBar({
         <BarButton onClick={() => nudgeUiScale(-UI_SCALE_STEP)} label="Smaller UI">
           <Minus className="h-[1.1rem] w-[1.1rem]" />
         </BarButton>
-        <span className="w-[2.4rem] text-center font-mono text-[0.72rem] text-muted-foreground">
+        <span className="w-[2.4rem] text-center font-mono text-[0.75rem] text-muted-foreground">
           {Math.round(uiScale * 100)}%
         </span>
         <BarButton onClick={() => nudgeUiScale(UI_SCALE_STEP)} label="Larger UI">
@@ -113,7 +113,7 @@ export function ActionBar({
         </BarButton>
       </div>
 
-      <div className="hidden flex-1 items-center justify-center gap-[0.6rem] font-mono text-[0.68rem] text-muted-foreground landscape:flex">
+      <div className="hidden flex-1 items-center justify-center gap-[0.6rem] font-mono text-[0.75rem] text-muted-foreground landscape:flex">
         <span>◀ ▶ move</span>
         <span>● select</span>
         <span>↩ back</span>

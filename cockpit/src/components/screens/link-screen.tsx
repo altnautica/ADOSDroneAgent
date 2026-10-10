@@ -18,9 +18,9 @@ import {
   TileGrid,
   type Tone,
 } from "@/components/ui/data";
-import { useResource } from "@/hooks/use-resource";
-import { apiFetch } from "@/lib/api";
-import { DASH, fmtChannel, fmtDbm, fmtInt, fmtMbps } from "@/lib/format";
+import { useResource } from "@/shared/use-resource";
+import { apiFetch } from "@/shared/api-fetch";
+import { DASH, fmtChannel, fmtDbm, fmtInt, fmtMbps } from "@/shared/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct, fmtMhz } from "@/lib/format-status";
 import { linkDiagView } from "@/lib/link-diag";
 import { cn } from "@/lib/utils";
@@ -152,7 +152,7 @@ function RssiSparkline({ samples }: { samples: HistorySample[] }) {
     .join(" ");
   return (
     <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-[2.4rem] w-full">
-      <polyline points={pts} fill="none" stroke="hsl(var(--amber))" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+      <polyline points={pts} fill="none" stroke="hsl(var(--primary))" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
     </svg>
   );
 }

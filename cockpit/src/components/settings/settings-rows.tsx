@@ -34,10 +34,10 @@ export function formatDisplayValue(dotpath: string, value: ConfigValue | undefin
   return String(value);
 }
 
-/** A tiny amber "restart" chip flagging a reboot-gated path. */
+/** A small accent "restart" chip flagging a reboot-gated path. */
 function RestartChip() {
   return (
-    <span className="rounded-full bg-warn/20 px-[0.4rem] py-[0.05rem] text-[0.58rem] font-medium uppercase tracking-wide text-warn">
+    <span className="rounded-full bg-warn/20 px-[0.4rem] py-[0.05rem] text-[0.75rem] font-medium uppercase tracking-wide text-warn">
       restart
     </span>
   );
@@ -81,7 +81,7 @@ export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRow
           {reboot ? <RestartChip /> : null}
         </div>
         <div className="flex shrink-0 items-center gap-[0.4rem] text-muted-foreground">
-          <span className="text-[0.72rem]">{count} field{count === 1 ? "" : "s"}</span>
+          <span className="text-[0.75rem]">{count} field{count === 1 ? "" : "s"}</span>
           <ChevronRight className="h-[1.2rem] w-[1.2rem]" aria-hidden />
         </div>
       </button>
@@ -97,7 +97,7 @@ export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRow
           <List className="h-[1rem] w-[1rem] shrink-0 text-muted-foreground" aria-hidden />
           <div className="min-w-0">
             <div className="truncate text-[0.9rem] text-surface-foreground">{name}</div>
-            <div className="truncate text-[0.64rem] text-muted-foreground">
+            <div className="truncate text-[0.75rem] text-muted-foreground">
               list · edit in config.yaml
             </div>
           </div>
@@ -115,7 +115,7 @@ export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRow
       <div className="flex items-center justify-between gap-[0.6rem] rounded-md bg-input/20 px-[0.7rem] py-[0.4rem]">
         <div className="min-w-0">
           <div className="truncate text-[0.9rem] text-surface-foreground">{name}</div>
-          <div className="truncate text-[0.64rem] text-muted-foreground">read-only</div>
+          <div className="truncate text-[0.75rem] text-muted-foreground">read-only</div>
         </div>
         <span className="shrink-0 font-mono text-[0.82rem] text-muted-foreground">
           {value === "" ? "auto-detect" : formatDisplayValue(path, value)}
@@ -151,7 +151,7 @@ export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRow
             <span className="truncate text-[0.9rem] text-surface-foreground">{name}</span>
             {reboot ? <RestartChip /> : null}
           </div>
-          {flash ? <div className="truncate text-[0.64rem] text-err">{flash}</div> : null}
+          {flash ? <div className="truncate text-[0.75rem] text-err">{flash}</div> : null}
         </div>
         <Toggle on={shownOn} onChange={flip} label={name} disabled={busy} />
       </div>
@@ -173,7 +173,7 @@ export function PathRow({ path, config, onDrill, onEdit, write, label }: PathRow
         <span
           className={cn(
             "truncate text-right font-mono text-[0.82rem]",
-            value === null || value === "" ? "text-muted-foreground" : "text-amber",
+            value === null || value === "" ? "text-muted-foreground" : "text-hud-primary",
           )}
         >
           {formatDisplayValue(path, value)}

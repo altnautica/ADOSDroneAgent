@@ -16,19 +16,26 @@
 // pinning them — a ground node with no link shows clean no-signal, never
 // fabricated boxes.
 
-import { apiFetch } from "@/lib/api";
+import { apiFetch } from "@/shared/api-fetch";
 import { mapWireBatch } from "@/lib/vision-detections-ws";
 import { useDetectionsStore } from "@/stores/detections-store";
 
-/** Poll cadence. ~4 Hz is comfortably below the engine's batch rate but fast
- *  enough that a fresh box lands within a human reaction time; the relay round
- *  trip over the radio is bounded by the proxy's own timeout. */
-const POLL_INTERVAL_MS = 250;
+/** Cadence while the drone is producing new batches: ~4 Hz lands a fresh box
+ *  within a human reaction time. */
+export const DETECTION_ACTIVE_MS = 250;
+/** Cadence while the drone reports nothing new (vision idle, radio quiet):
+ *  a slow probe, so an idle engine does not cost the radio four relayed
+ *  requests a second. The first new batch switches straight back. */
+export const DETECTION_IDLE_MS = 5000;
 
 export interface ConnectGroundDetectionPollOptions {
   /** The linked drone's device id, used as the relay-proxy peer. */
   peer: string;
-  intervalMs?: number;
+}
+
+/** The next poll delay: fast while a new frame arrived, slow otherwise. */
+export function nextDetectionDelay(gotNewFrame: boolean): number {
+  return gotNewFrame ? DETECTION_ACTIVE_MS : DETECTION_IDLE_MS;
 }
 
 /**
@@ -37,37 +44,38 @@ export interface ConnectGroundDetectionPollOptions {
  * cancels the poll and clears the store's boxes (so a stale feed never pins
  * the last frame's boxes once the cockpit leaves the flying view).
  */
-export function connectGroundDetectionPoll(
-  opts: ConnectGroundDetectionPollOptions,
-): () => void {
-  const { peer, intervalMs = POLL_INTERVAL_MS } = opts;
+export function connectGroundDetectionPoll(opts: ConnectGroundDetectionPollOptions): () => void {
   const url = `/api/v1/ground-station/relay-proxy/${encodeURIComponent(
-    peer,
+    opts.peer,
   )}/vision/detections/latest`;
 
   let cancelled = false;
-  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let lastFrame: string | null = null;
 
   const tick = async () => {
     if (cancelled) return;
+    let fresh = false;
     try {
-      const raw = await apiFetch<unknown>(url);
-      const mapped = mapWireBatch(raw as never);
-      if (mapped) useDetectionsStore.getState().setBatch(mapped);
+      const mapped = mapWireBatch((await apiFetch<unknown>(url)) as never);
+      if (mapped) {
+        const key = `${mapped.cameraId ?? ""}:${mapped.frameId}`;
+        fresh = key !== lastFrame;
+        lastFrame = key;
+        if (fresh) useDetectionsStore.getState().setBatch(mapped);
+      }
     } catch {
-      // A relayed drone that is silent — radio down, proxy not initialised, or
-      // the drone's vision idle — yields no new batch. The overlay ages the
-      // last boxes out on its own window; nothing is fabricated.
-    } finally {
-      if (!cancelled) timer = setTimeout(tick, intervalMs);
+      // A silent relayed drone yields no new batch; the overlay ages the last
+      // boxes out on its own window. Nothing is fabricated.
     }
+    if (!cancelled) timer = setTimeout(tick, nextDetectionDelay(fresh));
   };
 
   void tick();
 
   return () => {
     cancelled = true;
-    if (timer) clearTimeout(timer);
+    clearTimeout(timer);
     useDetectionsStore.getState().clear();
   };
 }

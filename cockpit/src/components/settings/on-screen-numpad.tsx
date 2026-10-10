@@ -30,7 +30,7 @@ function Key({
       disabled={disabled}
       aria-label={ariaLabel}
       className={cn(
-        "touch-target flex items-center justify-center rounded-md bg-input text-[1.25rem] font-medium text-surface-foreground transition-colors hover:bg-muted active:bg-amber active:text-amber-foreground disabled:opacity-40",
+        "touch-target flex items-center justify-center rounded-md bg-input text-[1.25rem] font-medium text-surface-foreground transition-colors hover:bg-muted active:bg-primary active:text-primary-foreground disabled:opacity-40",
         className,
       )}
     >
@@ -76,7 +76,7 @@ export function OnScreenNumpad({
         {value || <span className="text-muted-foreground">0</span>}
       </div>
       {rangeHint ? (
-        <div className="text-center text-[0.68rem] text-muted-foreground">{rangeHint}</div>
+        <div className="text-center text-[0.75rem] text-muted-foreground">{rangeHint}</div>
       ) : null}
 
       <div className="grid grid-cols-3 gap-[0.4rem]">

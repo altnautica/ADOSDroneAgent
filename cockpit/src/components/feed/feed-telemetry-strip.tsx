@@ -1,14 +1,15 @@
 // The bottom HUD readout strip: flight mode, heading, GPS fix, satellite count,
 // home distance, and battery (percent, plus voltage and current when the vehicle
 // supplies them). Flight fields come from the shared flight telemetry; mode /
-// sats / battery fall back to the ground-station status composite's paired-drone
+// sats fall back to the ground-station status composite's paired-drone
 // block when the vehicle snapshot lacks them. Every cell shows a dash when its
-// value is unknown — nothing is fabricated (home distance has no source in the
-// vehicle snapshot today, so it reads a dash until the agent supplies one).
+// value is unknown — nothing is fabricated (home distance is measured from the
+// position the vehicle armed at, a dash until an arming has been seen).
 
-import { useFlightTelemetryContext } from "@/hooks/flight-telemetry-context";
-import { useTelemetryContext } from "@/hooks/telemetry-context";
-import { DASH, fmtGpsFix, fmtHeading, fmtMeters, fmtSats } from "@/lib/format";
+import { useFlightStore } from "@/stores/flight-store";
+import { useStatusStore } from "@/stores/status-store";
+import { batteryReading } from "@/lib/alerts";
+import { DASH, fmtGpsFix, fmtHeading, fmtMeters, fmtSats, haversineM } from "@/shared/format";
 import { cn } from "@/lib/utils";
 
 function Cell({
@@ -22,7 +23,7 @@ function Cell({
 }) {
   return (
     <div className="flex min-w-[3rem] flex-col items-center">
-      <span className="text-[0.55rem] uppercase tracking-wide text-muted-foreground">
+      <span className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
       <span className={cn("font-mono text-[0.85rem] font-semibold", accent ?? "text-surface-foreground")}>
@@ -61,8 +62,13 @@ function batteryValue(
 }
 
 export function FeedTelemetryStrip() {
-  const { telemetry, live, stale, relayed } = useFlightTelemetryContext();
-  const { status } = useTelemetryContext();
+  const telemetry = useFlightStore((s) => s.telemetry);
+  const live = useFlightStore((s) => s.live);
+  const stale = useFlightStore((s) => s.stale);
+  const relayed = useFlightStore((s) => s.relayed);
+  const home = useFlightStore((s) => s.home);
+  const status = useStatusStore((s) => s.status);
+  const battery = useStatusStore((s) => s.battery);
   const drone = status?.paired_drone;
   // Name the aircraft the readings belong to when they came over the radio, so
   // the operator can tell a relayed vehicle from one attached to this node
@@ -79,8 +85,17 @@ export function FeedTelemetryStrip() {
   const heading = telemetry?.position?.heading ?? null;
   const fix = telemetry?.gps?.fix_type ?? null;
   const sats = telemetry?.gps?.satellites ?? drone?.gps_sats ?? null;
-  const dist = telemetry?.home_distance ?? null;
-  const batt = telemetry?.battery?.remaining ?? drone?.battery_pct ?? null;
+  const lat = telemetry?.position?.lat;
+  const lon = telemetry?.position?.lon;
+  // Distance from the arming point (where the autopilot sets home); a dash
+  // until an arming has been seen with a fix.
+  const dist =
+    live && home && typeof lat === "number" && typeof lon === "number" && Number.isFinite(lat) && Number.isFinite(lon)
+      ? haversineM(home.lat, home.lon, lat, lon)
+      : null;
+  // The trusted reading (battery engine, else a measured FC percentage); an
+  // unknown battery reads a dash, never 0%.
+  const batt = batteryReading(battery, telemetry)?.pct ?? null;
   const battAccent = batt == null ? undefined : batt <= 15 ? "text-err" : batt <= 30 ? "text-warn" : undefined;
 
   return (
@@ -106,7 +121,7 @@ export function FeedTelemetryStrip() {
       />
       {relayed && (
         <span
-          className="rounded border border-amber/40 px-[0.35rem] py-[0.1rem] font-mono text-[0.5rem] uppercase tracking-wide text-amber"
+          className="rounded border border-primary/40 px-[0.35rem] py-[0.1rem] font-mono text-[0.75rem] uppercase tracking-wide text-hud-primary"
           title="Telemetry received over the radio from another node. This node does not fly this aircraft."
         >
           {relayedPeer ? `Relayed · ${relayedPeer}` : "Relayed"}

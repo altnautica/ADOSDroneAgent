@@ -3,7 +3,7 @@
 // fabricated zero). Kept separate so the status screens grow their own
 // formatting vocabulary without churning the shared HUD formatter module.
 
-import { DASH } from "@/lib/format";
+import { DASH } from "@/shared/format";
 
 /** A plain decibel reading (SNR) → "12 dB". */
 export function fmtDb(v: number | null | undefined): string {

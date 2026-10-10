@@ -27,8 +27,8 @@ import { useState } from "react";
 import { KeyRound } from "lucide-react";
 
 import { ActionButton } from "@/components/ui/data";
-import { apiFetch, ApiError } from "@/lib/api";
-import { setSession } from "@/lib/session";
+import { ApiError, apiFetch } from "@/shared/api-fetch";
+import { setSession } from "@/shared/session";
 import { useReachStore } from "@/stores/reach-store";
 
 interface PinStatus {
@@ -168,13 +168,13 @@ export function SetUpAccess() {
             type="button"
             onClick={cancel}
             disabled={busy}
-            className="touch-target text-[0.72rem] text-muted-foreground hover:text-foreground"
+            className="touch-target text-[0.75rem] text-muted-foreground hover:text-foreground"
           >
             Cancel
           </button>
         </>
       )}
-      {error ? <span className="text-[0.74rem] text-err">{error}</span> : null}
+      {error ? <span className="text-[0.75rem] text-err">{error}</span> : null}
     </div>
   );
 }

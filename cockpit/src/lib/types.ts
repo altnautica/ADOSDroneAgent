@@ -80,15 +80,74 @@ export interface MeshView {
 /** The full composite from `GET /api/v1/ground-station/status`. */
 export interface GsStatus {
   profile: string;
+  /** A drone's own MAVLink FC link (from `/api/status/full`); absent on a
+   *  ground station, which has no flight controller of its own. */
+  fc_connected?: boolean;
   paired_drone: PairedDrone;
   link: LinkView;
-  gcs: { clients: unknown[]; pic_id: string | null };
+  /** Connected GCS clients and the pilot-in-command, or null when the node
+   *  does not report them (a drone). */
+  gcs: { clients: unknown[]; pic_id: string | null } | null;
   network: NetworkView;
   system: SystemView;
   recording: boolean;
-  video: { recording: boolean; recording_filename: string | null };
+  video: {
+    recording: boolean;
+    recording_filename: string | null;
+    /** ISO stamp the current recording started, when the agent reports it. */
+    recording_started_at?: string | null;
+    state?: string | null;
+    streams?: StatusStream[];
+  };
   role: RoleBlock;
   mesh: MeshView;
+}
+
+/** One concurrent video leg from `/api/status/full` `video.streams[]`. */
+export interface StatusStream {
+  id: string;
+  role?: string;
+  codec?: string;
+  whepUrl?: string;
+  hls?: string;
+  live?: boolean | null;
+}
+
+/** The subset of `GET /api/status/full` the cockpit reads. */
+export interface StatusFull {
+  version?: string | null;
+  uptime_seconds?: number | null;
+  health?: Record<string, unknown> | null;
+  resources?: Record<string, unknown> | null;
+  fc_connected?: boolean | null;
+  video?: Record<string, unknown> | null;
+  telemetry?: VehicleState | null;
+  radio?: Record<string, unknown> | null;
+  profile?: string | null;
+}
+
+/** One battery pack from `GET /api/v1/battery`. */
+export interface BatteryPack {
+  id: number;
+  stale: boolean;
+  cells_plausible?: boolean | null;
+  voltage_v?: number | null;
+  remaining_pct?: number | null;
+  prediction?: {
+    state?: string | null;
+    /** Seconds until the pack reaches the reserve threshold. */
+    eta_s?: number | null;
+  } | null;
+  anomalies?: { rule: string; severity: string; cleared_at_ms?: number | null }[];
+}
+
+/** The battery engine read model (`GET /api/v1/battery`). */
+export interface BatteryHealth {
+  enabled: boolean;
+  stale: boolean;
+  updated_at_ms: number;
+  thresholds?: { reserve_percent?: number | null } | null;
+  packs: BatteryPack[];
 }
 
 /** A physical front-panel button event, forwarded verbatim from the agent's
@@ -154,6 +213,10 @@ export interface VehicleGps {
 export interface VehicleState {
   mav_type?: number | null;
   autopilot?: number | null;
+  /** Throttle percentage from `VFR_HUD`, when reported. */
+  throttle?: number | null;
+  /** Milliseconds since the last decoded position, null when none ever. */
+  position_age_ms?: number | null;
   armed?: boolean;
   mode?: string | null;
   position?: VehiclePosition;

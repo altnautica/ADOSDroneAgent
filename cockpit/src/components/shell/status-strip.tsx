@@ -24,29 +24,32 @@ import type { ReactNode } from "react";
 import { SignalBars } from "@/components/shell/signal-bars";
 import { WallClock } from "@/components/shell/wall-clock";
 import { Dot, toneClass, type Tone } from "@/components/ui/data";
-import { useProfile } from "@/hooks/use-profile";
-import { useTelemetryContext } from "@/hooks/telemetry-context";
+import { useProfile } from "@/shared/use-profile";
+import { useStatusStore } from "@/stores/status-store";
 import { useVideoInfo } from "@/hooks/use-video-info";
-import { fmtChannel, fmtDbm, fmtMbps, fmtPct, fmtTemp, DASH } from "@/lib/format";
+import { fmtChannel, fmtDbm, fmtMbps, fmtPct, fmtTemp, DASH } from "@/shared/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct } from "@/lib/format-status";
 import { linkDiagView, type LinkDiagView } from "@/lib/link-diag";
 import type { GsStatus } from "@/lib/types";
-import { useFeedStore, type VideoState } from "@/stores/feed-store";
+import { useFeedStore } from "@/stores/feed-store";
+import type { VideoFeedState } from "@/shared/video-transport";
 import { cn } from "@/lib/utils";
 
 /** Map a bare link state string to a tone, the fallback when the agent has not
- *  yet classified the link with a verdict. */
-function stateTone(state: string | undefined): Tone {
+ *  yet classified the link with a verdict. Only the states that name a fault
+ *  are coloured; an unknown or absent state is neutral, never red. */
+function stateTone(state: string | null | undefined): Tone {
   switch (state) {
     case "connected":
       return "ok";
     case "degraded":
     case "rf_unverified":
       return "warn";
-    case "connecting":
-      return "muted";
-    default:
+    case "failed":
+    case "error":
       return "err";
+    default:
+      return "muted";
   }
 }
 
@@ -61,7 +64,7 @@ function Item({
 }) {
   return (
     <div className={cn("flex items-baseline gap-[0.3rem] whitespace-nowrap", className)}>
-      <span className="text-[0.62rem] uppercase tracking-wide text-muted-foreground">
+      <span className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">
         {label}
       </span>
       <span className="text-[0.82rem] text-surface-foreground">{children}</span>
@@ -88,7 +91,7 @@ function VerdictChip({ view }: { view: LinkDiagView }) {
       )}
     >
       <Icon className={cn("h-[0.85rem] w-[0.85rem]", toneClass(view.tone))} aria-hidden />
-      <span className={cn("text-[0.72rem] font-medium", toneClass(view.tone))}>{view.label}</span>
+      <span className={cn("text-[0.75rem] font-medium", toneClass(view.tone))}>{view.label}</span>
     </span>
   );
 }
@@ -129,33 +132,45 @@ function LinkZone({ link }: { link: GsStatus["link"] | undefined }) {
  *  over the Feed, where the video layer is mounted and its state is live. */
 function VideoZone() {
   const profile = useProfile();
-  const videoState = useFeedStore((s) => s.videoState);
+  const video = useFeedStore((s) => s.video);
   const label = useFeedStore((s) => s.activeStreamLabel);
-  const width = useFeedStore((s) => s.videoWidth);
-  const height = useFeedStore((s) => s.videoHeight);
+  const { width, height } = video;
   const info = useVideoInfo(profile);
 
-  const tone = videoTone(videoState);
+  const tone = videoTone(video.state);
   const stateLabel =
-    videoState === "live" ? "live" : videoState === "connecting" ? "connecting" : "no source";
+    video.state === "live"
+      ? "live"
+      : video.state === "frozen"
+        ? "frozen"
+        : video.state === "connecting"
+          ? "connecting"
+          : "no source";
 
   return (
     <div className="flex min-w-0 items-center gap-[0.45rem]">
       <Dot tone={tone} />
       <span className="truncate text-[0.8rem] text-surface-foreground">{label ?? "Feed"}</span>
-      <span className={cn("text-[0.72rem]", toneClass(tone))}>{stateLabel}</span>
+      <span className={cn("text-[0.75rem]", toneClass(tone))}>{stateLabel}</span>
+      {video.highLatency && video.state === "live" ? (
+        <span className="rounded bg-warn/15 px-[0.3rem] text-[0.75rem] font-medium uppercase text-warn">
+          High latency
+        </span>
+      ) : video.transport === "hls" && video.state === "live" ? (
+        <span className="text-[0.75rem] uppercase text-muted-foreground">HLS</span>
+      ) : null}
       {width && height ? (
-        <span className="hidden font-mono text-[0.72rem] text-muted-foreground md:inline">
+        <span className="hidden font-mono text-[0.75rem] text-muted-foreground md:inline">
           {width}×{height}
         </span>
       ) : null}
       {info.rateMbps != null ? (
-        <span className="hidden font-mono text-[0.72rem] text-muted-foreground lg:inline">
+        <span className="hidden font-mono text-[0.75rem] text-muted-foreground lg:inline">
           {info.rateMbps.toFixed(1)} Mbps
         </span>
       ) : null}
       {info.fps != null ? (
-        <span className="hidden font-mono text-[0.72rem] text-muted-foreground lg:inline">
+        <span className="hidden font-mono text-[0.75rem] text-muted-foreground lg:inline">
           {info.fps} fps
         </span>
       ) : null}
@@ -163,12 +178,14 @@ function VideoZone() {
   );
 }
 
-function videoTone(state: VideoState): Tone {
+function videoTone(state: VideoFeedState): Tone {
   switch (state) {
     case "live":
       return "ok";
     case "connecting":
       return "muted";
+    case "frozen":
+      return "warn";
     default:
       return "err";
   }
@@ -190,7 +207,7 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
       {recording ? (
         <span className="inline-flex items-center gap-[0.28rem] text-err">
           <span className="h-[0.5rem] w-[0.5rem] animate-pulse rounded-full bg-err" aria-hidden />
-          <span className="text-[0.72rem] font-medium">REC</span>
+          <span className="text-[0.75rem] font-medium">REC</span>
         </span>
       ) : null}
       {role ? (
@@ -225,13 +242,14 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
       <span className="text-[0.78rem] text-surface-foreground">
         <WallClock />
       </span>
-      {stale ? <span className="text-[0.72rem] text-warn">stale</span> : null}
+      {stale ? <span className="text-[0.75rem] text-warn">stale</span> : null}
     </div>
   );
 }
 
 export function StatusStrip({ floating = false }: { floating?: boolean }) {
-  const { status, stale } = useTelemetryContext();
+  const status = useStatusStore((s) => s.status);
+  const stale = useStatusStore((s) => s.stale);
 
   return (
     <div
