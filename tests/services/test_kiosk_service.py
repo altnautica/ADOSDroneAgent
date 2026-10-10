@@ -175,7 +175,8 @@ def test_resolve_drm_device_ignores_a_connector_whose_card_node_is_absent(
 def test_default_cockpit_url_is_the_served_path(tmp_path: Any) -> None:
     # The static mount serves /cockpit/. Targeting the bare path costs a
     # redirect on every kiosk boot and puts the appended query at its mercy.
-    assert ks._DEFAULT_URL.endswith("/cockpit/")
+    # The cockpit is told it is the panel's only surface, so it hides its exit.
+    assert ks._DEFAULT_URL == "http://localhost:8080/cockpit/?kiosk=1"
 
 
 def test_hdmi_present_true_fallback_when_card_node_exists(tmp_path: Any) -> None:
@@ -360,7 +361,7 @@ def test_resolve_target_url_defaults_when_nothing_set(monkeypatch: pytest.Monkey
     # Minimal is the DEFAULT on the panel. The backdrop blur it drops costs 53%
     # of the browser's CPU on a four-core board, measured with video actually
     # arriving over the radio, and nothing can see it behind a HUD.
-    assert url == "http://localhost:8080/cockpit/?layer=minimal"
+    assert url == "http://localhost:8080/cockpit/?kiosk=1&layer=minimal"
     assert minimal is True
 
 

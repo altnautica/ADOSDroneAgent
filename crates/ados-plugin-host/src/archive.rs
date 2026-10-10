@@ -349,8 +349,8 @@ fn read_signature(
 /// The archive-relative files a manifest's declared halves require.
 ///
 /// Returns `(label, relative_path)` pairs for every entrypoint that must exist
-/// as a real file: the GCS bundle at `gcs.entrypoint` when a `gcs` block
-/// exists, and the agent binary at `agent.entrypoint` when
+/// as a real file: the GCS bundle at `gcs.entrypoint` when the `gcs` block
+/// names one, and the agent binary at `agent.entrypoint` when
 /// `agent.runtime: rust`. A Python agent's `module:Class` entrypoint is
 /// resolved by the runner, not a packed file, so any value containing a `:` is
 /// excluded. A `bin:<name>` entrypoint or service command requires this host's
@@ -358,9 +358,9 @@ fn read_signature(
 /// payload (fetched and hash-checked separately).
 fn required_entrypoints(manifest: &PluginManifest, arch_os: &str) -> Vec<(String, String)> {
     let mut required: Vec<(String, String)> = Vec::new();
-    if let Some(gcs) = &manifest.gcs {
-        if !gcs.entrypoint.contains(':') {
-            required.push(("gcs.entrypoint".to_string(), gcs.entrypoint.clone()));
+    if let Some(entrypoint) = manifest.gcs.as_ref().and_then(|g| g.entrypoint.as_ref()) {
+        if !entrypoint.contains(':') {
+            required.push(("gcs.entrypoint".to_string(), entrypoint.clone()));
         }
     }
     let Some(agent) = &manifest.agent else {

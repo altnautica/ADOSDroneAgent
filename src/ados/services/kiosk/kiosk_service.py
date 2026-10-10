@@ -97,8 +97,9 @@ _URL_PROBE_TIMEOUT = 3.0
 
 # Trailing slash on purpose: it is the path the static mount actually serves,
 # so the kiosk never pays a redirect on boot and the query string this module
-# appends is not at the mercy of one.
-_DEFAULT_URL = "http://localhost:8080/cockpit/"
+# appends is not at the mercy of one. `kiosk=1` tells the cockpit it is the
+# panel's only surface, so it hides its exit-to-dashboard control.
+_DEFAULT_URL = "http://localhost:8080/cockpit/?kiosk=1"
 _ENV_URL_KEY = "ADOS_KIOSK_URL"
 _ENV_MINIMAL_KEY = "ADOS_KIOSK_MINIMAL_LAYER"
 _ENV_RENDERER_KEY = "ADOS_KIOSK_RENDERER"

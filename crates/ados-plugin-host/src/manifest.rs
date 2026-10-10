@@ -479,9 +479,15 @@ pub fn bin_reference(value: &str) -> Option<&str> {
 /// GCS-half manifest block. Only `entrypoint` + `isolation` + `permissions`
 /// are read by the controller; the page and surface contributions are
 /// validated here and projected by [`gcs_block_json`].
+///
+/// `entrypoint` names the bundle the GCS loads into an iframe or inline. It
+/// may be omitted only when the half contributes nothing rendered from a
+/// bundle (no `panels`, `tabs`, `agent_pages` or `node_surfaces`), so a
+/// parameters- or skills-only half needs no bundle at all.
 #[derive(Debug, Clone, Deserialize)]
 pub struct GcsBlock {
-    pub entrypoint: String,
+    #[serde(default)]
+    pub entrypoint: Option<String>,
     #[serde(default)]
     pub isolation: GcsIsolation,
     #[serde(default)]
@@ -571,7 +577,23 @@ impl GcsBlock {
         }
         Ok(())
     }
+
+    /// The first contribution list that renders from the bundle and is
+    /// non-empty, if any.
+    fn bundle_contribution(&self) -> Option<&'static str> {
+        let contributes = self.extra.get("contributes")?;
+        GCS_BUNDLE_CONTRIBUTIONS.iter().copied().find(|key| {
+            contributes
+                .get(*key)
+                .and_then(|v| v.as_sequence())
+                .is_some_and(|s| !s.is_empty())
+        })
+    }
 }
+
+/// The GCS contribution lists rendered from the half's bundle (an iframe or
+/// an inline module); declaring any of them requires `gcs.entrypoint`.
+const GCS_BUNDLE_CONTRIBUTIONS: &[&str] = &["panels", "tabs", "agent_pages", "node_surfaces"];
 
 /// The free-form GCS contribution lists the detail projection carries through
 /// unchanged, in the order they are emitted.
@@ -585,6 +607,8 @@ const GCS_FREEFORM_CONTRIBUTIONS: &[&str] = &[
     "models",
     "target_actions",
     "settings",
+    "map_overlays",
+    "mission_templates",
 ];
 
 /// The `manifest.gcs` block of the plugin detail route: the GCS half's
@@ -752,7 +776,15 @@ impl PluginManifest {
             self.validate_agent(agent)?;
         }
         if let Some(gcs) = &self.gcs {
-            validate_entrypoint("gcs.entrypoint", &gcs.entrypoint)?;
+            match (&gcs.entrypoint, gcs.bundle_contribution()) {
+                (Some(entrypoint), _) => validate_entrypoint("gcs.entrypoint", entrypoint)?,
+                (None, Some(key)) => {
+                    return Err(ManifestError(format!(
+                        "gcs.contributes.{key} is rendered from a bundle and needs gcs.entrypoint"
+                    )));
+                }
+                (None, None) => {}
+            }
             gcs.validate_contributions()?;
         }
         Ok(())
@@ -1671,5 +1703,66 @@ gcs:
         );
         let agent_only = agent_manifest("com.example.x", "").unwrap();
         assert!(gcs_block_json(&agent_only).is_none());
+    }
+
+    fn gcs_manifest_without_entrypoint(contributes: &str) -> Result<PluginManifest, ManifestError> {
+        PluginManifest::from_yaml_text(&format!(
+            "id: com.example.params\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0\"\ngcs:\n  isolation: iframe\n{contributes}"
+        ))
+    }
+
+    #[test]
+    fn a_half_with_nothing_to_render_needs_no_bundle() {
+        let m = gcs_manifest_without_entrypoint(
+            "  contributes:\n    parameters: [{key: gain, type: number}]\n    skills: [{id: boost}]\n",
+        )
+        .unwrap();
+        assert_eq!(m.gcs.as_ref().unwrap().entrypoint, None);
+        let block = gcs_block_json(&m).unwrap();
+        assert_eq!(block["entrypoint"], serde_json::Value::Null);
+        assert_eq!(
+            block["contributes"]["parameters"],
+            serde_json::json!([{"key": "gain", "type": "number"}])
+        );
+        // No contributions at all is equally bundle-free.
+        assert!(gcs_manifest_without_entrypoint("").is_ok());
+        // Empty bundle lists render nothing either.
+        assert!(gcs_manifest_without_entrypoint("  contributes:\n    panels: []\n").is_ok());
+    }
+
+    #[test]
+    fn a_rendered_contribution_without_a_bundle_is_refused() {
+        for (contributes, key) in [
+            ("  contributes:\n    panels: [{id: p}]\n", "panels"),
+            ("  contributes:\n    tabs: [{id: t}]\n", "tabs"),
+            (
+                "  contributes:\n    agent_pages:\n      - {id: world, title: World}\n",
+                "agent_pages",
+            ),
+            (
+                "  contributes:\n    node_surfaces:\n      - {id: s, title: S, profile: [drone]}\n",
+                "node_surfaces",
+            ),
+        ] {
+            let err = gcs_manifest_without_entrypoint(contributes).unwrap_err();
+            assert!(
+                err.0.contains(key) && err.0.contains("gcs.entrypoint"),
+                "{key}: {}",
+                err.0
+            );
+        }
+    }
+
+    #[test]
+    fn map_overlays_mission_templates_settings_and_models_are_projected() {
+        let m = gcs_manifest_without_entrypoint(
+            "  contributes:\n    map_overlays: [{id: heat}]\n    mission_templates: [{id: grid}]\n    settings: [{key: a}]\n    models: [{id: yolo}]\n",
+        )
+        .unwrap();
+        let c = gcs_block_json(&m).unwrap()["contributes"].clone();
+        assert_eq!(c["map_overlays"], serde_json::json!([{"id": "heat"}]));
+        assert_eq!(c["mission_templates"], serde_json::json!([{"id": "grid"}]));
+        assert_eq!(c["settings"], serde_json::json!([{"key": "a"}]));
+        assert_eq!(c["models"], serde_json::json!([{"id": "yolo"}]));
     }
 }

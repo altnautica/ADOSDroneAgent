@@ -439,9 +439,15 @@ pub fn is_public(path: &str) -> bool {
 /// cached bundle had no way back, because the fetch that would replace it was
 /// refused too.
 ///
-/// Deliberately an allow-list rather than "anything outside `/api/`". `/whep` is
-/// a live video stream and `/docs` enumerates the route surface; both sit
-/// outside `/api/` and both stay refused while unpaired.
+/// Deliberately not "anything outside `/api/`". `/whep` is a live video stream,
+/// `/hls/` is recorded video, `/ws*` are live streams and `/docs` enumerates the
+/// route surface; all sit outside `/api/` and all stay refused while unpaired.
+/// Beyond the fixed asset list, a dashboard client route (`/settings/network`)
+/// is admitted so a browser reload or deep link loads the shell instead of a
+/// raw JSON 403: a path counts as a client route only when it has no file
+/// extension, sits under none of those data prefixes, and is not served by any
+/// native route (the router would fall back to the dashboard bundle for it).
+/// The method gate (`GET`/`HEAD` only) lives in [`unpaired_decision`].
 pub fn is_operator_ui(path: &str) -> bool {
     // The on-box cockpit and everything under it.
     if path == "/cockpit" || path.starts_with("/cockpit/") {
@@ -452,10 +458,36 @@ pub fn is_operator_ui(path: &str) -> bool {
     if path == "/" || path.starts_with("/assets/") {
         return true;
     }
-    matches!(
+    if matches!(
         path,
         "/index.html" | "/brand.svg" | "/favicon.ico" | "/manifest.webmanifest"
-    )
+    ) {
+        return true;
+    }
+    is_spa_client_route(path)
+}
+
+/// Path prefixes outside `/api/` that carry data and are never the shell.
+const NON_UI_PREFIXES: [&str; 6] = ["/api", "/whep", "/hls", "/ws", "/healthz", "/docs"];
+
+/// A dashboard client-side route: extension-less, under no data prefix, and
+/// answered by the router with the dashboard bundle.
+fn is_spa_client_route(path: &str) -> bool {
+    if !path.starts_with('/') {
+        return false;
+    }
+    let under_data_prefix = NON_UI_PREFIXES.iter().any(|prefix| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    });
+    if under_data_prefix {
+        return false;
+    }
+    let last = path.rsplit('/').next().unwrap_or("");
+    if last.contains('.') {
+        return false;
+    }
+    crate::routing::classify(&http::Method::GET, path) == crate::routing::RouteMode::OperatorUi
 }
 
 /// The unpaired-node gate's outcome for a request, granular enough to express the
@@ -495,8 +527,16 @@ const CLAIM_PATH: &str = "/api/pairing/claim";
 /// - the other public routes are served to anyone;
 /// - a DATA route is served to the local operator and the first-boot
 ///   lifelines, PIN-gated for an operator-LAN caller, and refused otherwise.
-pub fn unpaired_decision(path: &str, unpaired: bool, caller: CallerClass) -> UnpairedDecision {
-    if !unpaired || is_operator_ui(path) {
+pub fn unpaired_decision(
+    method: &http::Method,
+    path: &str,
+    unpaired: bool,
+    caller: CallerClass,
+) -> UnpairedDecision {
+    if !unpaired {
+        return UnpairedDecision::Allow;
+    }
+    if (method == http::Method::GET || method == http::Method::HEAD) && is_operator_ui(path) {
         return UnpairedDecision::Allow;
     }
     if path == CLAIM_PATH {
@@ -605,6 +645,10 @@ impl RateLimiter {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    const GET: http::Method = http::Method::GET;
+    const HEAD: http::Method = http::Method::HEAD;
+    const POST: http::Method = http::Method::POST;
 
     /// Claiming a device over the LAN is the documented local-first flow, so
     /// the pairing handshake must stay public. The unpaired-peer filter refuses
@@ -921,13 +965,17 @@ mod tests {
     #[test]
     fn a_cockpit_lookalike_path_is_not_the_cockpit() {
         // Prefix matching is easy to get wrong in the direction that opens
-        // something: `/cockpit` must not vouch for a sibling that merely starts
-        // with the same letters.
+        // something: `/cockpit` and `/assets` must not vouch for a sibling that
+        // merely starts with the same letters. An extension-less sibling is a
+        // dashboard client route and gets the shell, but a file under one is
+        // not a bundle asset, and a data prefix never vouches for anything.
         for p in [
-            "/cockpitfoo",
-            "/cockpit-admin",
+            "/cockpitfoo/payload.bin",
+            "/cockpit-admin/dump.json",
             "/api/cockpit",
-            "/assetsfoo",
+            "/assetsfoo/index.js",
+            "/whep/cockpit",
+            "/docs/cockpit",
         ] {
             assert!(!is_operator_ui(p), "{p} is not the cockpit");
         }
@@ -948,14 +996,14 @@ mod tests {
             "/brand.svg",
         ] {
             assert_eq!(
-                unpaired_decision(p, true, lan),
+                unpaired_decision(&GET, p, true, lan),
                 UnpairedDecision::Allow,
                 "{p} must load so the operator has a surface at all"
             );
         }
         for p in ["/api/status", "/api/config", "/api/command", "/whep"] {
             assert_eq!(
-                unpaired_decision(p, true, lan),
+                unpaired_decision(&GET, p, true, lan),
                 UnpairedDecision::RequirePin,
                 "{p} must be PIN-gated for a private-LAN peer while unpaired"
             );
@@ -963,13 +1011,49 @@ mod tests {
         // Claiming the device over its own LAN is the documented local-first
         // flow, so it stays open to this caller.
         assert_eq!(
-            unpaired_decision("/api/pairing/claim", true, lan),
+            unpaired_decision(&POST, "/api/pairing/claim", true, lan),
             UnpairedDecision::Allow
         );
         assert_eq!(
-            unpaired_decision("/api/pairing/info", true, lan),
+            unpaired_decision(&GET, "/api/pairing/info", true, lan),
             UnpairedDecision::Allow
         );
+
+        // A dashboard client route reloaded or deep-linked loads the shell
+        // rather than a JSON refusal; the data it then asks for stays gated.
+        for p in ["/settings/network", "/plugins", "/logs/flight"] {
+            assert_eq!(
+                unpaired_decision(&GET, p, true, lan),
+                UnpairedDecision::Allow,
+                "{p} is a client route of the dashboard"
+            );
+            assert_eq!(
+                unpaired_decision(&HEAD, p, true, lan),
+                UnpairedDecision::Allow,
+                "{p}"
+            );
+            assert_eq!(
+                unpaired_decision(&POST, p, true, lan),
+                UnpairedDecision::RequirePin,
+                "a non-read on {p} is not the shell"
+            );
+        }
+        for p in [
+            "/api/status",
+            "/whep/abc",
+            "/hls/main/index.m3u8",
+            "/ws",
+            "/ws/telemetry",
+            "/healthz/deep",
+            "/docs",
+            "/settings/dump.json",
+        ] {
+            assert_eq!(
+                unpaired_decision(&GET, p, true, lan),
+                UnpairedDecision::RequirePin,
+                "{p} is not a client route"
+            );
+        }
     }
 
     /// A remote caller — a public-WAN host, a tunnelled internet request that
@@ -980,7 +1064,7 @@ mod tests {
         use crate::auth::UnpairedDecision;
         for p in ["/api/status", "/api/command", "/whep", "/api/pairing/claim"] {
             assert_eq!(
-                unpaired_decision(p, true, CallerClass::Remote),
+                unpaired_decision(&GET, p, true, CallerClass::Remote),
                 UnpairedDecision::Refuse,
                 "{p} must be refused to a remote caller while unpaired"
             );
@@ -989,7 +1073,7 @@ mod tests {
         // browser is never left with nothing to read.
         for p in ["/cockpit/", "/api/pairing/info", "/healthz"] {
             assert_eq!(
-                unpaired_decision(p, true, CallerClass::Remote),
+                unpaired_decision(&GET, p, true, CallerClass::Remote),
                 UnpairedDecision::Allow,
                 "{p}"
             );
@@ -1002,7 +1086,7 @@ mod tests {
         for caller in [CallerClass::OperatorLan, CallerClass::Remote] {
             for p in ["/api/status", "/api/command", "/whep", "/cockpit/"] {
                 assert_eq!(
-                    unpaired_decision(p, false, caller),
+                    unpaired_decision(&GET, p, false, caller),
                     UnpairedDecision::Allow,
                     "{p} is not this gate's business once paired"
                 );
@@ -1019,7 +1103,7 @@ mod tests {
         for caller in [CallerClass::OnBox, CallerClass::Lifeline] {
             for p in ["/api/status", "/api/pairing/claim"] {
                 assert_eq!(
-                    unpaired_decision(p, true, caller),
+                    unpaired_decision(&GET, p, true, caller),
                     UnpairedDecision::Allow,
                     "{caller:?} {p}"
                 );

@@ -501,6 +501,8 @@ GCS_CAPABILITIES: frozenset[str] = frozenset(
         "ui.slot.flight-skill",
         "ui.slot.node-detail-tab",
         "ui.slot.cockpit-panel",
+        "ui.slot.cockpit-widget",
+        "vision.track.designate",
         "telemetry.subscribe",
         "command.send",
         "recording.write",

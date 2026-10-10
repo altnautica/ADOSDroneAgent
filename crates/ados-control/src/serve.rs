@@ -387,7 +387,7 @@ async fn tcp_edge(State(edge): State<EdgeAuth>, mut request: Request, next: Next
         edge.pairing.current(),
         ados_protocol::pairing_posture::Pairing::Unpaired
     );
-    match auth::unpaired_decision(&path, unpaired, caller) {
+    match auth::unpaired_decision(request.method(), &path, unpaired, caller) {
         auth::UnpairedDecision::Refuse => {
             tracing::warn!(
                 path = %path,

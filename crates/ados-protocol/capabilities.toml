@@ -512,7 +512,7 @@ risk_reason = "Read-only node identity facts; no effect on flight, no imagery an
 enforced = true
 
 # ===========================================================================
-# GCS capabilities (24): 12 UI slots + 12 data/command/mission/cloud/bus
+# GCS capabilities (26): 13 UI slots + 13 data/command/mission/cloud/bus
 # ===========================================================================
 
 [[gcs]]
@@ -594,6 +594,22 @@ description = "Lets the plugin add a panel to the in-flight cockpit quick-settin
 category = "ui_slot"
 risk = "low"
 risk_reason = "Sandboxed iframe scoped to the cockpit of one drone."
+
+[[gcs]]
+id = "ui.slot.cockpit-widget"
+label = "Add a widget to the cockpit HUD"
+description = "Lets the plugin place a small widget in one of the cockpit's corner zones over the live video, scoped to the drone the cockpit is flying. The widget renders inside a sandboxed iframe with no host DOM access."
+category = "ui_slot"
+risk = "low"
+risk_reason = "Sandboxed iframe in a cockpit corner zone; display only."
+
+[[gcs]]
+id = "vision.track.designate"
+label = "Choose the follow target from the GCS"
+description = "Lets the plugin ask the GCS to set the vision engine's follow target on the drone it is bound to, by naming the detection box to track. Designation selects a target for downstream follow and framing logic; it does not command the vehicle."
+category = "flight_control"
+risk = "medium"
+risk_reason = "Choosing the follow target steers downstream follow/framing behaviour, though designation alone does not command flight."
 
 [[gcs]]
 id = "telemetry.subscribe"
