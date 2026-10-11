@@ -96,10 +96,22 @@ impl RecordingIssuer {
 
 impl SubscribeIssuer for RecordingIssuer {
     fn try_issue(&self, topic: &str, qos: MqttQos) -> Result<(), TransportError> {
-        let refused = self
-            .refuse
-            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
-            .is_ok();
+        // A plain compare-exchange loop: the closure-based helper is unstable
+        // on the declared MSRV and deprecated under its old name on newer
+        // toolchains.
+        let mut left = self.refuse.load(Ordering::Acquire);
+        let refused = loop {
+            if left == 0 {
+                break false;
+            }
+            match self
+                .refuse
+                .compare_exchange(left, left - 1, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => break true,
+                Err(now) => left = now,
+            }
+        };
         if refused {
             return Err(TransportError::Client("request channel full".into()));
         }
