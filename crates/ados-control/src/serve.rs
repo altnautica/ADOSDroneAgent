@@ -801,8 +801,8 @@ fn offered_ticket(headers: &http::HeaderMap) -> Option<String> {
 /// logs, browser history and `Referer`, which is why it is not accepted on
 /// `/api/*`: those callers are all code that can set a header. Every branch of
 /// the edge (unpaired PIN gate, native routes, proxied routes) reads the session
-/// through this one function, because `/whep` and `/hls` are proxied and a
-/// check that only the native branch applied never ran for them.
+/// through this one function, because `/whep` is native and `/hls` is proxied,
+/// and a check only one branch applied would leave the other refusing it.
 fn presented_session(path: &str, request: &Request) -> Option<String> {
     request
         .headers()

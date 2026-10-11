@@ -10,7 +10,6 @@ it forwards here over the internal Unix socket (see
 * ``/api/peripherals`` — the hardware scan
 * ``/api/v1/peripherals`` — the peripheral plugin registry
 * ``/api/vision`` — model delivery and the detection stream
-* ``/whep`` — the WebRTC playback exchange with the local mediamtx
 
 The front never forwards anything else, so a router mounted outside these
 prefixes would be unreachable. ``tests/api/test_residual_surface.py`` pins it.
@@ -32,7 +31,6 @@ from ados.api.routes import (
     setup,
     vision_detections,
     vision_models,
-    whep,
 )
 from ados.api.runtime import ensure_api_runtime
 
@@ -75,10 +73,5 @@ def create_app(agent: Any) -> FastAPI:
     # Live vision-detection WebSocket bridge. Forwards the engine's
     # detection-batch broadcast socket to the browser as JSON.
     app.include_router(vision_detections.router, prefix="/api")
-    # WHEP reverse-proxy mounted at the root (no /api prefix) so WebRTC clients
-    # reach the offer/answer exchange at the same host:port as the rest of the
-    # agent's surface. Forwards to the local mediamtx WHEP endpoint on every
-    # profile.
-    app.include_router(whep.router)
 
     return app

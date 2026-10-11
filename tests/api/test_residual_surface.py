@@ -18,7 +18,6 @@ PERMANENT_PREFIXES = (
     "/api/v1/setup",
     "/api/peripherals",
     "/api/v1/peripherals",
-    "/whep",
     "/api/v1/display",
 )
 

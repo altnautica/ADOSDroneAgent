@@ -136,6 +136,10 @@ tower = { workspace = true }
 tower-http = { workspace = true }
 hyper-util = { workspace = true }
 http = { workspace = true }
+# The edge's native-route matcher: the radix router axum itself routes on, so
+# the auth edge and the router agree on what a `{name}` / `{*name}` template
+# matches.
+matchit = { workspace = true }
 # Streaming request + response bodies for the reverse-proxy passthrough: the
 # front forwards the request body and relays the upstream response body without
 # buffering either, so a large upload or an SSE stream passes through unbroken.

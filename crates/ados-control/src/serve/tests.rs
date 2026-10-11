@@ -522,8 +522,8 @@ async fn the_canonical_path_still_reaches_the_gate() {
     assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
 }
 
-/// The media plane through the WHOLE edge on a paired node. `/whep` and
-/// `/hls` are proxied routes, so this exercises the proxied lane, where the
+/// The media plane through the WHOLE edge on a paired node. `/hls` takes the
+/// proxied lane and `/whep` the native one, so this exercises both, where the
 /// query-string session used to be ignored: a `<video>` element holding a
 /// valid PIN session got 401 and a black frame.
 #[tokio::test]

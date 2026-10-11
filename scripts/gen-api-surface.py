@@ -6,9 +6,9 @@ depends on, so a route rename lands as a silent 404 in one of five clients.
 This writes that place, from the two producers rather than from a hand-kept
 list:
 
-* the native control front -- ``crates/ados-control/src/routing.rs``
-  ``native_routes()``, the auth edge's own source of truth, dumped as JSON by
-  ``cargo run -p ados-control --example api-surface``;
+* the native control front -- the route table ``ados-control`` builds its
+  router from (``crates/ados-control/src/routes/register/``), dumped as JSON
+  by ``cargo run -p ados-control --example api-surface``;
 * the residual FastAPI surface -- the routers ``src/ados/api/server.py``
   mounts, enumerated through the generated OpenAPI schema plus a walk for the
   WebSocket routes OpenAPI does not describe.
@@ -16,6 +16,9 @@ list:
 Run it after adding, removing or renaming a route:
 
     ADOSDroneAgent/.venv/bin/python scripts/gen-api-surface.py
+
+``--check`` renders the table without writing it and exits 1 when the
+committed file differs, so CI catches a route change nobody regenerated.
 
 Two guards keep the committed file honest without anyone remembering to run
 this: ``crates/ados-control/tests/api_surface.rs`` fails when the native half
@@ -35,7 +38,7 @@ REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "api-surface.md"
 
 # Routers mounted under ``/api`` by ``ados.api.server.create_app``, in the same
-# order, plus the one mounted at root. Kept beside that function: a router
+# order. Kept beside that function: a router
 # added there and not here is a surface the table would silently omit, which
 # ``check-api-surface.py`` then reports as an unresolvable client path.
 API_ROUTERS = [
@@ -46,7 +49,6 @@ API_ROUTERS = [
     "vision_models",
     "vision_detections",
 ]
-ROOT_ROUTERS = ["whep"]
 
 # The logging store's own query edge. A separate listener on its own port, not
 # part of either HTTP front, but a real surface two clients dial -- Mission
@@ -151,11 +153,6 @@ def residual_routes() -> list[tuple[str, str]]:
             f"ados.api.routes.{name}", fromlist=["router"]
         )
         _walk(module.router, "/api", out)
-    for name in ROOT_ROUTERS:
-        module = getattr(routes_pkg, name, None) or __import__(
-            f"ados.api.routes.{name}", fromlist=["router"]
-        )
-        _walk(module.router, "", out)
     return out
 
 
@@ -213,7 +210,13 @@ def shadow_native(
     return [(m, p) for m, p in residual if (m, p) not in native_pairs]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    unknown = [a for a in args if a != "--check"]
+    if unknown:
+        sys.stderr.write(f"unknown arguments: {' '.join(unknown)}\n")
+        return 2
+    check = "--check" in args
     native = sorted(set(native_routes()), key=lambda r: (r[1], r[0]))
     residual = sorted(set(residual_routes()), key=lambda r: (r[1], r[0]))
     residual = shadow_native(native, residual)
@@ -229,8 +232,8 @@ def main() -> int:
         "```",
         "",
         "Two guards keep it true. `crates/ados-control/tests/api_surface.rs`",
-        "fails when the native section drifts from `routing.rs`'s",
-        "`native_route_table()`. `scripts/check-api-surface.py` fails when any",
+        "fails when the native section drifts from the route table the",
+        "router is built from. `scripts/check-api-surface.py` fails when any",
         "client calls a path this table does not carry, which is what turns a",
         "one-sided route rename from a silent 404 into a build failure.",
         "",
@@ -292,8 +295,20 @@ def main() -> int:
         "`{*path}` is the drone's own path from this table |",
         "",
     ]
+    rendered = "\n".join(body) + "\n"
+    if check:
+        current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
+        if current != rendered:
+            sys.stderr.write(
+                f"{OUT.relative_to(REPO)} is stale; regenerate with: "
+                "ADOSDroneAgent/.venv/bin/python scripts/gen-api-surface.py\n"
+            )
+            return 1
+        print(f"{OUT.relative_to(REPO)} is current: {len(native)} native, {len(residual)} residual")
+        return 0
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text("\n".join(body) + "\n", encoding="utf-8")
+    with OUT.open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write(rendered)
     print(f"wrote {OUT.relative_to(REPO)}: {len(native)} native, {len(residual)} residual")
     return 0
 

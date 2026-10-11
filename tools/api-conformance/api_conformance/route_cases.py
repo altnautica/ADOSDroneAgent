@@ -584,15 +584,6 @@ REGISTRY: list[RouteCase] = [
         path="/api/v1/ground-station/pic",
         extra_volatile=("claim_counter", "claimed_since", "primary_gamepad_id"),
     ),
-    # Ground-station captive-portal token mint. Profile-gated; on a ground station
-    # reached on-box (loopback) it mints a fresh single-use token. The token value
-    # is regenerated every call, so it is masked; the {token} shape is the contract.
-    RouteCase(
-        name="gs-captive-token",
-        method="GET",
-        path="/api/v1/ground-station/captive-token",
-        extra_volatile=("token",),
-    ),
     # Write a single FC parameter. A side effect (it sends a PARAM_SET to the FC),
     # so it is sandboxed and skipped by default; the bench opts in against a live
     # FC. The body is the {"value": <number>} the route reshapes into the frame.

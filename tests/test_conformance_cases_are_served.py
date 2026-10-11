@@ -11,11 +11,11 @@ when the harness is being used to prove a deletion was safe. This check is
 static -- it reads the two route tables rather than issuing requests -- so it
 runs in CI and cannot introduce a false failure on a rig.
 
-The Rust table is parsed from source. A parse that silently matched nothing
-would make this whole check vacuous, so the parse result is asserted against a
-floor. That floor is a broken-parse tripwire and deliberately NOT the exact count
-routing.rs pins -- see the note on the constants below for why a tight floor made
-this file hostile to its own advice.
+The Rust table is parsed from the route-registration sources. A parse that
+silently matched nothing would make this whole check vacuous, so the parse
+result is asserted against a floor. That floor is a broken-parse tripwire and
+deliberately NOT a route-count contract -- see the note on the constants below
+for why a tight floor made this file hostile to its own advice.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ROUTING_RS = REPO_ROOT / "crates" / "ados-control" / "src" / "routing.rs"
+REGISTER_DIR = REPO_ROOT / "crates" / "ados-control" / "src" / "routes" / "register"
 ROUTE_CASES = (
     REPO_ROOT / "tools" / "api-conformance" / "api_conformance" / "route_cases.py"
 )
@@ -42,30 +42,38 @@ PY_ROUTES_DIR = REPO_ROOT / "src" / "ados" / "api" / "routes"
 # parse is broken" about a parse that was working perfectly. A guard whose advice
 # breaks it is worse than no guard, because the next reader deletes it.
 #
-# Silent shrinkage is covered where it can be covered exactly: routing.rs pins the
-# native route count to an exact number, and the orphan check below is the real
-# work of this file. So these are deliberately loose.
+# Silent shrinkage is covered where it can be covered exactly: the native table
+# is recorded by the same builder that registers the router, and the orphan
+# check below is the real work of this file. So these are deliberately loose.
 MIN_NATIVE_ROUTES = 75
 MIN_CASES = 30
 MIN_PYTHON_ROUTES = 25
 
 
 def _native_routes() -> set[tuple[str, str]]:
-    """The (METHOD, path) pairs `native_routes()` registers."""
-    src = ROUTING_RS.read_text()
-    marker = "fn native_routes()"
-    if marker not in src:
-        # Renamed or restructured. Say so plainly rather than letting the split
-        # below raise an IndexError that reads as a bug in this test.
+    """The (METHOD, path) pairs the route builder registers.
+
+    Each registration is a builder call ``.get("/path", handler)`` (or ``post``,
+    ``put``, ``delete``, ``patch``, ``ws`` for an upgrade GET), or
+    ``.method("/path", Method::POST, ...)`` for a route carrying a layer, whose
+    path may be a named ``const``.
+    """
+    sources = sorted(REGISTER_DIR.glob("*.rs"))
+    if not sources:
         raise AssertionError(
-            f"{ROUTING_RS.name} no longer defines `{marker}`; update this "
-            "check's parser to match, or it will stop protecting anything"
+            f"no registration sources under {REGISTER_DIR}; update this check's "
+            "parser to match, or it will stop protecting anything"
         )
-    body = src.split(marker, 1)[1].split("\n}", 1)[0]
-    return {
-        (m.group(1).upper(), m.group(2))
-        for m in re.finditer(r'\b(get|post|put|delete)\("([^"]+)"\)', body)
-    }
+    routes: set[tuple[str, str]] = set()
+    for path in sources:
+        src = path.read_text(encoding="utf-8")
+        consts = dict(re.findall(r'const (\w+): &str = "([^"]+)";', src))
+        for m in re.finditer(r'\.(get|post|put|delete|patch|ws)\(\s*"([^"]+)"', src):
+            method = "GET" if m.group(1) == "ws" else m.group(1).upper()
+            routes.add((method, m.group(2)))
+        for m in re.finditer(r'\.method\(\s*(?:"([^"]+)"|(\w+)),\s*Method::(\w+)', src):
+            routes.add((m.group(3), m.group(1) or consts.get(m.group(2), m.group(2))))
+    return routes
 
 
 def _router_prefix(text: str) -> str:
@@ -110,7 +118,6 @@ def _python_routes() -> set[tuple[str, str]]:
         for m in re.finditer(r'@router\.(get|post|put|delete|patch)\("([^"]*)"', text):
             routes.add((m.group(1).upper(), "/api" + prefix + m.group(2)))
 
-    routes |= {(m, p.replace("/api", "", 1)) for m, p in routes if "/whep" in p}
     return routes
 
 
@@ -148,7 +155,7 @@ def _served_by(table: set[tuple[str, str]], method: str, path: str) -> bool:
 
 
 @pytest.mark.skipif(
-    not ROUTING_RS.exists() or not ROUTE_CASES.exists(),
+    not REGISTER_DIR.exists() or not ROUTE_CASES.exists(),
     reason="routing table or conformance registry not present in this checkout",
 )
 def test_every_conformance_case_names_a_served_route() -> None:
@@ -159,7 +166,7 @@ def test_every_conformance_case_names_a_served_route() -> None:
     # Guard the guard: a broken parse must fail here, not quietly pass every
     # case because the tables it compares against came back empty.
     assert len(native) >= MIN_NATIVE_ROUTES, (
-        f"parsed only {len(native)} native routes from {ROUTING_RS.name}, which is "
+        f"parsed only {len(native)} native routes from {REGISTER_DIR.name}/, which is "
         f"below the {MIN_NATIVE_ROUTES} floor. Either the regex stopped matching "
         "the table -- in which case this check would pass vacuously -- or the "
         "native surface genuinely shrank that far, in which case lower the floor "

@@ -1,9 +1,9 @@
-//! Ground-station mesh-pairing + PIC + captive-token read routes.
+//! Ground-station mesh-pairing routes.
 //!
-//! Three read-only routes the ground-station GCS surface polls. Every one gates
-//! on the node's RESOLVED profile being a ground station; a drone-profile node
-//! gets `404` with a stable error code so the GCS can tell "wrong profile" from
-//! "endpoint missing":
+//! The pairing snapshot read and the Accept-window writes the ground-station GCS
+//! surface drives. Every one gates on the node's RESOLVED profile being a ground
+//! station; a drone-profile node gets `404` with a stable error code so the GCS
+//! can tell "wrong profile" from "endpoint missing":
 //!
 //! - **`GET /api/v1/ground-station/pair/pending`** — the mesh pairing snapshot
 //!   (the open Accept window + the list of pending relay join requests). The
@@ -15,24 +15,10 @@
 //! - **`GET /api/v1/ground-station/pic`** — served by [`crate::routes::gs_pic`],
 //!   which owns the PIC control socket. It is NOT in this module: it used to be,
 //!   answering from a hardcoded unclaimed body.
-//! - **`GET /api/v1/ground-station/captive-token`** — the captive-portal token
-//!   mint for the setup webapp. The FastAPI handler gates on the request peer
-//!   being on the AP hotspot subnet (`192.168.4.0/24`) or loopback, and otherwise
-//!   raises `403 E_CAPTIVE_ONLY`. When this front owns the LAN port the residual
-//!   FastAPI is bound to an internal Unix socket, where a request has no peer IP
-//!   (`request.client` is `None`), so that AP-subnet/loopback gate can never pass
-//!   and the residual handler raises `403 E_CAPTIVE_ONLY` for every caller. The
-//!   real `192.168.4.x` hotspot client reaches the token mint through the setup
-//!   webapp, which stays on the residual Python. So this front matches the
-//!   residual's observable behavior exactly: a ground station always answers
-//!   `403 E_CAPTIVE_ONLY` here, and never mints a token of its own.
 //!
 //! Every read is fault-tolerant: an absent daemon socket / config degrades to the
 //! same status + body the FastAPI route returns when its own source is
-//! unavailable, never a `500`/panic. The routes carry no path params and never
-//! mutate, so they are safe to serve natively while the pair-window writes
-//! (`/pair/accept`, `/pair/approve/{id}`, the `/pic/*` claim/release writes) and
-//! the `/pic/events` websocket stay on the residual surface.
+//! unavailable, never a `500`/panic.
 //!
 //! Error bodies use the ground-station routes' nested
 //! `{"detail": {"error": {"code": ...}}}` shape (NOT the flat `{"detail": "..."}`
@@ -66,10 +52,10 @@ fn config_path() -> PathBuf {
     )
 }
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sidecar-reading routes honour. The pairing daemon socket lives under it.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
+/// The pairing daemon socket under the runtime dir (`ADOS_RUN_DIR`, default
+/// `/run/ados`), resolved per request so a unit override is honoured.
+fn pairing_socket() -> PathBuf {
+    ados_protocol::paths::run_dir().join(PAIRING_SOCK_NAME)
 }
 
 /// `true` when the node's RESOLVED profile (read from `config_path` + the on-disk
@@ -122,7 +108,7 @@ pub async fn get_pair_pending() -> Response {
     if !is_ground_station() {
         return profile_mismatch();
     }
-    pair_pending_body(&run_dir().join(PAIRING_SOCK_NAME)).await
+    pair_pending_body(&pairing_socket()).await
 }
 
 /// The pair-pending body, with the socket path injected so a test drives every
@@ -165,42 +151,6 @@ async fn pairing_daemon_snapshot(socket: &Path) -> Result<Value, crate::ipc::cmd
 // socket. It used to be served here from a hardcoded `unclaimed` body; see that
 // module for why that was wrong.
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// GET /api/v1/ground-station/captive-token
-// ---------------------------------------------------------------------------
-
-/// The captive-portal token mint. Ground-station only; a drone-profile node gets
-/// `404 E_PROFILE_MISMATCH`, and a ground station always gets `403
-/// E_CAPTIVE_ONLY`.
-///
-/// The FastAPI handler gates on the request peer being on the AP hotspot subnet
-/// (`192.168.4.0/24`) or loopback (`_is_ap_subnet_client`), and raises `403
-/// E_CAPTIVE_ONLY` for anything else. When this front owns the LAN port, the
-/// residual FastAPI is bound to an internal Unix socket where a request carries
-/// no peer IP (`request.client` is `None`), so that gate can never pass and the
-/// residual handler raises `403 E_CAPTIVE_ONLY` for every caller. The real
-/// `192.168.4.x` hotspot client reaches the token mint through the setup webapp,
-/// which stays on the residual Python. So this front never mints a token itself:
-/// after the profile gate it returns the same `403 E_CAPTIVE_ONLY` the residual
-/// returns for every request reaching it over its Unix socket.
-pub async fn get_captive_token() -> Response {
-    captive_token_at(&config_path(), &profile_conf_path(), &mesh_role_path())
-}
-
-/// The path-injectable core of [`get_captive_token`]: the profile gate off explicit
-/// config + sentinel paths, then the fixed `403 E_CAPTIVE_ONLY`. Threading the
-/// paths lets a test drive the gate + response shape without touching the env.
-fn captive_token_at(config: &Path, profile_conf: &Path, role_path: &Path) -> Response {
-    if !is_ground_station_at(config, profile_conf, role_path) {
-        return profile_mismatch();
-    }
-
-    // The residual FastAPI is reached over its internal Unix socket, where a
-    // request has no peer IP, so its AP-subnet/loopback gate never passes and it
-    // raises `403 E_CAPTIVE_ONLY` for every caller. Match that exactly.
-    gs_error(StatusCode::FORBIDDEN, "E_CAPTIVE_ONLY")
-}
 
 // ---------------------------------------------------------------------------
 // POST /api/v1/ground-station/pair/{accept,close,approve/{id},revoke/{id}}
@@ -279,7 +229,7 @@ pub async fn post_pair_accept(Json(req): Json<PairAcceptRequest>) -> Response {
     if let Some(refused) = receiver_gate_live() {
         return refused;
     }
-    pair_accept_at(&run_dir().join(PAIRING_SOCK_NAME), req.duration_s).await
+    pair_accept_at(&pairing_socket(), req.duration_s).await
 }
 
 async fn pair_accept_at(socket: &Path, duration_s: i64) -> Response {
@@ -313,13 +263,7 @@ pub async fn post_pair_close() -> Response {
     if let Some(refused) = receiver_gate_live() {
         return refused;
     }
-    match pairing_rpc(
-        &run_dir().join(PAIRING_SOCK_NAME),
-        "close_window",
-        json!({}),
-    )
-    .await
-    {
+    match pairing_rpc(&pairing_socket(), "close_window", json!({})).await {
         Ok(r) => Json(json!({"closed": r.get("closed").and_then(Value::as_bool).unwrap_or(false)}))
             .into_response(),
         Err(e) => daemon_unavailable(e),
@@ -333,7 +277,7 @@ pub async fn post_pair_approve(
     if let Some(refused) = receiver_gate_live() {
         return refused;
     }
-    pair_approve_at(&run_dir().join(PAIRING_SOCK_NAME), &device_id).await
+    pair_approve_at(&pairing_socket(), &device_id).await
 }
 
 async fn pair_approve_at(socket: &Path, device_id: &str) -> Response {
@@ -378,13 +322,7 @@ pub async fn post_pair_revoke(
     if let Some(refused) = receiver_gate_live() {
         return refused;
     }
-    match pairing_rpc(
-        &run_dir().join(PAIRING_SOCK_NAME),
-        "revoke",
-        json!({"device_id": device_id}),
-    )
-    .await
-    {
+    match pairing_rpc(&pairing_socket(), "revoke", json!({"device_id": device_id})).await {
         Ok(r) => Json(json!({
             "device_id": device_id,
             "revoked": r.get("revoked").and_then(Value::as_bool).unwrap_or(false),
@@ -423,7 +361,7 @@ pub async fn post_pair_join(Json(req): Json<PairJoinRequest>) -> Response {
     if let Some(refused) = join_gate(&config_path(), &profile_conf_path(), &mesh_role_path()) {
         return refused;
     }
-    pair_join_at(&run_dir().join(PAIRING_SOCK_NAME), &req).await
+    pair_join_at(&pairing_socket(), &req).await
 }
 
 /// The profile + non-receiver role gate. `None` = pass.
@@ -612,54 +550,6 @@ mod tests {
                 "pending": [],
                 "approvals": {},
             })
-        );
-    }
-
-    // -------------------------------------------------------------------
-    // Captive-token: the residual FastAPI is reached over its internal Unix
-    // socket, where a request has no peer IP, so its AP-subnet/loopback gate
-    // never passes and it raises 403 E_CAPTIVE_ONLY for every caller. The native
-    // handler must match that exactly: a ground station always answers 403, never
-    // mints a token of its own.
-    // -------------------------------------------------------------------
-
-    /// Drive the captive-token core against a config that carries an explicit
-    /// `agent.profile` (which resolves straight to the wire profile without
-    /// consulting profile.conf). Every path is threaded into the core, so the test
-    /// never mutates the process environment and cannot race a sibling test.
-    async fn captive_token_with_profile(profile: &str) -> (StatusCode, Value) {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = config_with_profile(dir.path(), profile);
-        let resp = captive_token_at(
-            &cfg,
-            &dir.path().join("absent.conf"),
-            &dir.path().join("absent.role"),
-        );
-        body_json(resp).await
-    }
-
-    #[tokio::test]
-    async fn captive_token_403s_on_a_ground_station() {
-        // GOLDEN FIXTURE: a ground station always answers 403 E_CAPTIVE_ONLY here
-        // (the residual Python's Unix-socket behavior — no peer IP, gate never
-        // passes), with the nested ground-station error body.
-        let (status, body) = captive_token_with_profile("ground_station").await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(
-            body,
-            json!({ "detail": { "error": { "code": "E_CAPTIVE_ONLY" } } })
-        );
-    }
-
-    #[tokio::test]
-    async fn captive_token_404s_on_a_drone_profile() {
-        // The profile gate runs first: a drone-profile node gets the nested 404
-        // E_PROFILE_MISMATCH every ground-station route returns, never the 403.
-        let (status, body) = captive_token_with_profile("drone").await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(
-            body,
-            json!({ "detail": { "error": { "code": "E_PROFILE_MISMATCH" } } })
         );
     }
 
