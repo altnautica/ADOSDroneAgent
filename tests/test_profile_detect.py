@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ados.bootstrap import profile_detect
+from ados.bootstrap import _profile_detect_probes, _profile_detect_uplink, profile_detect
 
 
 def _stub_probes(monkeypatch, **points: tuple[int, int, bool]) -> None:
@@ -196,8 +196,8 @@ def test_fc_heartbeat_probe_reads_state_socket(
         def exists(self) -> bool:
             return self._p == "/run/ados/state.sock"
 
-    monkeypatch.setattr(profile_detect, "Path", _PathStub)
-    monkeypatch.setattr(profile_detect.socket, "socket", _FakeSocket)
+    monkeypatch.setattr(_profile_detect_probes, "Path", _PathStub)
+    monkeypatch.setattr(_profile_detect_probes.socket, "socket", _FakeSocket)
 
     result = profile_detect.probe_fc_heartbeat(timeout=1.0)
     assert result == expected
@@ -257,8 +257,8 @@ def test_fc_heartbeat_probe_reads_state_socket_v2_msgpack(
         def exists(self) -> bool:
             return self._p == "/run/ados/state.sock"
 
-    monkeypatch.setattr(profile_detect, "Path", _PathStub)
-    monkeypatch.setattr(profile_detect.socket, "socket", _FakeSocket)
+    monkeypatch.setattr(_profile_detect_probes, "Path", _PathStub)
+    monkeypatch.setattr(_profile_detect_probes.socket, "socket", _FakeSocket)
 
     result = profile_detect.probe_fc_heartbeat(timeout=1.0)
     assert result == expected
@@ -272,7 +272,7 @@ def test_fc_heartbeat_probe_returns_zero_when_socket_missing(monkeypatch) -> Non
         def exists(self) -> bool:
             return False
 
-    monkeypatch.setattr(profile_detect, "Path", _NoFile)
+    monkeypatch.setattr(_profile_detect_probes, "Path", _NoFile)
     assert profile_detect.probe_fc_heartbeat(timeout=0.1) == (0, 0, False)
 
 
@@ -290,7 +290,7 @@ def _route_sysnet(monkeypatch, sysnet_root: Path) -> None:
             return real(str(sysnet_root) + arg[len("/sys/class/net"):])
         return real(arg, *args, **kwargs)
 
-    monkeypatch.setattr(profile_detect, "Path", _Patched)
+    monkeypatch.setattr(_profile_detect_uplink, "Path", _Patched)
 
 
 def test_probe_uplink_kinds_wlan_only(tmp_path, monkeypatch) -> None:
@@ -365,10 +365,10 @@ def test_mavlink_serial_baseline_when_port_exists_but_vid_unknown(monkeypatch) -
     """Generic USB-serial adapter at /dev/ttyACM0 with no known FC
     vendor still scores +3 air (the port-exists baseline)."""
     monkeypatch.setattr(
-        profile_detect, "Path", _FakeSerialPath("/dev/ttyACM0")
+        _profile_detect_probes, "Path", _FakeSerialPath("/dev/ttyACM0")
     )
     monkeypatch.setattr(
-        profile_detect, "_read_usb_vendor_for_tty", lambda _p: 0x1234
+        _profile_detect_probes, "_read_usb_vendor_for_tty", lambda _p: 0x1234
     )
     assert profile_detect.probe_mavlink_serial() == (0, 3, True)
 
@@ -377,10 +377,10 @@ def test_mavlink_serial_boosts_when_vid_matches_known_fc(monkeypatch) -> None:
     """SpeedyBee F4 v4 (pid.codes 0x1209) on /dev/ttyACM0 awards the
     +6 air-points score so a real FC outweighs hostname tiebreakers."""
     monkeypatch.setattr(
-        profile_detect, "Path", _FakeSerialPath("/dev/ttyACM0")
+        _profile_detect_probes, "Path", _FakeSerialPath("/dev/ttyACM0")
     )
     monkeypatch.setattr(
-        profile_detect, "_read_usb_vendor_for_tty", lambda _p: 0x1209
+        _profile_detect_probes, "_read_usb_vendor_for_tty", lambda _p: 0x1209
     )
     assert profile_detect.probe_mavlink_serial() == (0, 6, True)
 
@@ -388,7 +388,7 @@ def test_mavlink_serial_boosts_when_vid_matches_known_fc(monkeypatch) -> None:
 def test_mavlink_serial_zero_when_no_ports(monkeypatch) -> None:
     """No tty present anywhere → zero contribution."""
     monkeypatch.setattr(
-        profile_detect, "Path", _FakeSerialPath("/dev/nonexistent-zz")
+        _profile_detect_probes, "Path", _FakeSerialPath("/dev/nonexistent-zz")
     )
     assert profile_detect.probe_mavlink_serial() == (0, 0, False)
 
@@ -398,10 +398,10 @@ def test_mavlink_serial_uart_with_no_usb_metadata(monkeypatch) -> None:
     USB ancestor. It exists on every Pi whether or not an FC is wired, so
     without a heartbeat it earns no air points and is not a detection."""
     monkeypatch.setattr(
-        profile_detect, "Path", _FakeSerialPath("/dev/ttyAMA0")
+        _profile_detect_probes, "Path", _FakeSerialPath("/dev/ttyAMA0")
     )
     monkeypatch.setattr(
-        profile_detect, "_read_usb_vendor_for_tty", lambda _p: None
+        _profile_detect_probes, "_read_usb_vendor_for_tty", lambda _p: None
     )
     assert profile_detect.probe_mavlink_serial() == (0, 0, False)
 
@@ -421,7 +421,7 @@ def _stub_lsusb(monkeypatch, stdout: str, returncode: int = 0) -> None:
     def _fake_run(argv, *_args, **_kwargs):
         return _Result(returncode, stdout)
 
-    monkeypatch.setattr(profile_detect.subprocess, "run", _fake_run)
+    monkeypatch.setattr(_profile_detect_probes.subprocess, "run", _fake_run)
 
 
 def test_rtl8812_matches_canonical_pid(monkeypatch) -> None:
@@ -583,8 +583,10 @@ def _gps_bench(tmp_path: Path, monkeypatch, *, claimed: str | None = None):
     proc = tmp_path / "proc"
     proc.mkdir()
 
-    monkeypatch.setattr(profile_detect, "_GPS_CANDIDATE_PATHS", [str(alias_a), str(uart_b)])
-    monkeypatch.setattr(profile_detect, "_MAVLINK_SERIAL_PATHS", [])
+    monkeypatch.setattr(
+        _profile_detect_probes, "_GPS_CANDIDATE_PATHS", [str(alias_a), str(uart_b)]
+    )
+    monkeypatch.setattr(_profile_detect_probes, "_MAVLINK_SERIAL_PATHS", [])
     config = SimpleNamespace(
         mavlink=SimpleNamespace(serial_port=claimed or ""),
         radio=SimpleNamespace(crsf=SimpleNamespace(device=None)),
@@ -592,7 +594,7 @@ def _gps_bench(tmp_path: Path, monkeypatch, *, claimed: str | None = None):
     monkeypatch.setattr("ados.core.config.load_config", lambda: config)
     original_held = profile_detect._serial_paths_held_open
     monkeypatch.setattr(
-        profile_detect,
+        _profile_detect_probes,
         "_serial_paths_held_open",
         lambda paths: original_held(paths, proc_root=str(proc)),
     )
@@ -628,7 +630,7 @@ def test_gps_probe_opens_nothing_when_holders_cannot_be_read(
     tmp_path, monkeypatch
 ) -> None:
     fake_serial, _proc, _a, _b = _gps_bench(tmp_path, monkeypatch)
-    monkeypatch.setattr(profile_detect, "_serial_paths_held_open", lambda paths: None)
+    monkeypatch.setattr(_profile_detect_probes, "_serial_paths_held_open", lambda paths: None)
 
     assert profile_detect.probe_gps_serial() == (0, 0, False)
     assert fake_serial.opened == []

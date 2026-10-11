@@ -81,7 +81,7 @@ def test_help_shows_only_public_commands() -> None:
 
 
 def test_status_prints_setup_summary() -> None:
-    with patch("ados.cli.main._setup_status", return_value=_setup_payload()):
+    with patch("ados.cli._main_status._setup_status", return_value=_setup_payload()):
         result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
     assert "bench-agent" in result.output
@@ -91,7 +91,7 @@ def test_status_prints_setup_summary() -> None:
 
 
 def test_status_json_outputs_full_payload() -> None:
-    with patch("ados.cli.main._setup_status", return_value=_setup_payload()):
+    with patch("ados.cli._main_status._setup_status", return_value=_setup_payload()):
         result = runner.invoke(cli, ["status", "--json"])
     assert result.exit_code == 0
     assert '"device_id": "agent-1"' in result.output
@@ -106,9 +106,9 @@ def test_root_command_falls_back_to_plain_status_in_non_tty() -> None:
 
 def test_update_check_only_does_not_install() -> None:
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
-        patch("ados.cli.main._run_upgrade") as upgrade,
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--check-only"])
     assert result.exit_code == 0
@@ -135,13 +135,13 @@ def test_install_help_documents_status_and_resume() -> None:
 
 
 def test_install_status_reports_no_result_when_absent(tmp_path) -> None:
-    import ados.cli.main as cli_main
+    import ados.cli._main_install as cli_install
 
     missing_result = tmp_path / "install-result.json"
     missing_cp = tmp_path / "install-checkpoints"
     with (
-        patch.object(cli_main, "INSTALL_RESULT", missing_result),
-        patch.object(cli_main, "INSTALL_CHECKPOINT_DIR", missing_cp),
+        patch.object(cli_install, "INSTALL_RESULT", missing_result),
+        patch.object(cli_install, "INSTALL_CHECKPOINT_DIR", missing_cp),
     ):
         result = runner.invoke(cli, ["install", "--status"])
     assert result.exit_code == 0
@@ -153,7 +153,7 @@ def test_install_status_reports_no_result_when_absent(tmp_path) -> None:
 def test_install_status_json_reports_done_and_missing(tmp_path) -> None:
     import json
 
-    import ados.cli.main as cli_main
+    import ados.cli._main_install as cli_install
 
     result_file = tmp_path / "install-result.json"
     result_file.write_text(
@@ -178,8 +178,8 @@ def test_install_status_json_reports_done_and_missing(tmp_path) -> None:
     (cp_dir / "venv.done").touch()
 
     with (
-        patch.object(cli_main, "INSTALL_RESULT", result_file),
-        patch.object(cli_main, "INSTALL_CHECKPOINT_DIR", cp_dir),
+        patch.object(cli_install, "INSTALL_RESULT", result_file),
+        patch.object(cli_install, "INSTALL_CHECKPOINT_DIR", cp_dir),
     ):
         result = runner.invoke(cli, ["install", "--status", "--json"])
     assert result.exit_code == 0
@@ -193,7 +193,7 @@ def test_install_status_json_reports_done_and_missing(tmp_path) -> None:
 
 
 def test_install_resume_is_linux_only() -> None:
-    with patch("ados.cli.main.platform.system", return_value="Darwin"):
+    with patch("ados.cli._main_install.platform.system", return_value="Darwin"):
         result = runner.invoke(cli, ["install", "--resume"])
     assert result.exit_code != 0
     assert "only supported on Linux" in result.output

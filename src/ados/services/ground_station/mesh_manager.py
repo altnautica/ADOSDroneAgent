@@ -38,10 +38,7 @@ kernel netlink dependency on the installer.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
-import os
-import secrets
 import signal
 import subprocess
 import sys
@@ -54,7 +51,6 @@ from ados.core.config import ADOSConfig, load_config
 from ados.core.logging import configure_logging, get_logger
 from ados.core.paths import (
     ADOS_RUN_DIR,
-    MESH_GATEWAY_JSON,
     SUPERVISOR_SOCK,
     UPLINK_ACTIVE_FLAG,
 )
@@ -65,6 +61,29 @@ from ados.core.paths import (
     MESH_PSK_PATH as _MESH_PSK_PATH,
 )
 
+from ._mesh_cmd import (
+    _GATEWAY_PREFERENCE_PATH as _GATEWAY_PREFERENCE_PATH,
+)
+from ._mesh_cmd import (
+    _apply_persisted_gateway_preference,
+    _modprobe_batman,
+    _run,
+)
+from ._mesh_conf import (
+    _WPA_STOP_GRACE_S as _WPA_STOP_GRACE_S,
+)
+from ._mesh_conf import (
+    _channel_freq_mhz,
+    _gateway_mode_for,
+    _mesh_passphrase,
+    _stop_wpa_supplicant,
+    _wpa_supplicant_conf,
+    _write_private,
+)
+from ._mesh_conf import (
+    _check_conf_value as _check_conf_value,
+)
+from ._mesh_identity import MeshIdentityMissing, _ensure_mesh_identity, _pick_mesh_iface
 from .role_manager import get_current_role
 
 log = get_logger("ground_station.mesh_manager")
@@ -82,7 +101,6 @@ _SYS_CLASS_NET = Path("/sys/class/net")
 # How long a fresh wpa_supplicant gets to show the interface joined.
 _JOIN_VERIFY_TIMEOUT_S = 15.0
 _JOIN_VERIFY_POLL_S = 0.5
-_WPA_STOP_GRACE_S = 5.0
 
 # Supervision cadence. Fixed on purpose: the loop never backs off and never
 # gives up, so a replugged dongle or a returning uplink is picked up within one
@@ -92,141 +110,6 @@ _SUPERVISE_INTERVAL_S = 3.0
 # Per carrier: the `iw ... set type` argument and the `iw dev <if> info` type.
 _IW_SET_TYPE = {"802.11s": "mp", "ibss": "ibss"}
 _IW_INFO_TYPE = {"802.11s": "mesh point", "ibss": "IBSS"}
-
-
-def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
-    """Run a command with a hard timeout. Escalates TERM -> KILL.
-
-    `subprocess.run(timeout=...)` calls `proc.kill()` internally on
-    timeout but then waits for `communicate()` to drain stdout/stderr.
-    If the process is deadlocked in the kernel (wedged WiFi driver,
-    stuck `batctl`), that drain can itself hang. We use Popen directly
-    so a final forced wait + resource release is bounded.
-    """
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        return 127, "", "not found"
-
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        return proc.returncode, stdout, stderr
-    except subprocess.TimeoutExpired:
-        proc.terminate()
-        try:
-            stdout, stderr = proc.communicate(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            try:
-                stdout, stderr = proc.communicate(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                # Kernel still holds the process. Give up and let the
-                # zombie be reaped when the parent exits. We have
-                # exhausted the recovery options without blocking the
-                # caller further.
-                return 124, "", "timeout (kill did not release)"
-        return 124, stdout or "", stderr or "timeout"
-
-
-class MeshIdentityMissing(RuntimeError):
-    """A relay role was requested but the deployment mesh identity
-    (mesh_id + PSK) has not been delivered via a pairing invite yet.
-    The caller should fall back to `direct` rather than crash-loop."""
-
-
-def _ensure_mesh_identity(role: str, config: ADOSConfig) -> tuple[str, bytes]:
-    """Load or create the deployment mesh_id + shared PSK.
-
-    On a receiver node the first boot generates both and writes them to
-    `/etc/ados/mesh/`. Relays pick these values up from the pairing
-    invite bundle written by `pairing_manager`. If the files are missing
-    on a relay we raise `MeshIdentityMissing` so the caller can surface
-    an OLED error state and downgrade role instead of crash-looping.
-    """
-    MESH_ID_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    configured_id = config.ground_station.mesh.mesh_id
-    if configured_id:
-        mesh_id = configured_id
-    elif MESH_ID_PATH.is_file():
-        mesh_id = MESH_ID_PATH.read_text(encoding="utf-8").strip()
-    elif role == "receiver":
-        # Derive a stable short id from the device_id. HKDF would be
-        # overkill for a 16-char mesh SSID; a SHA-256 truncation keeps
-        # it deterministic per device.
-        seed = config.agent.device_id or secrets.token_hex(8)
-        mesh_id = "ados-" + hashlib.sha256(seed.encode()).hexdigest()[:10]
-        MESH_ID_PATH.write_text(mesh_id + "\n", encoding="utf-8")
-        os.chmod(MESH_ID_PATH, 0o644)
-    else:
-        raise MeshIdentityMissing(
-            "mesh_id missing. A relay must be paired with a receiver before "
-            "mesh_manager can start."
-        )
-
-    psk_path = Path(config.ground_station.mesh.shared_key_path)
-    if psk_path.is_file():
-        psk = psk_path.read_bytes().strip()
-        if len(psk) < 16:
-            raise RuntimeError(
-                f"mesh PSK at {psk_path} is shorter than 16 bytes"
-            )
-    elif role == "receiver":
-        psk = secrets.token_bytes(32)
-        psk_path.parent.mkdir(parents=True, exist_ok=True)
-        psk_path.write_bytes(psk)
-        os.chmod(psk_path, 0o600)
-    else:
-        raise MeshIdentityMissing(
-            f"mesh PSK missing at {psk_path}. A relay must be paired before "
-            "mesh_manager can start."
-        )
-
-    return mesh_id, psk
-
-
-def _pick_mesh_iface(configured: str | None) -> str | None:
-    """Return the wireless interface batman-adv should bind to.
-
-    Priority: explicit config > the mesh role from the single driver-keyed
-    role resolver. The resolver never assigns the WFB flight radio to the
-    mesh (it is by construction a non-WFB radio), and decides by the bound
-    kernel driver, not by the racing interface name.
-    """
-    if configured:
-        return configured
-
-    from ados.services.network.interface_roles import assign_roles
-
-    roles = assign_roles()
-    # mesh is the second non-WFB radio; fall back to the single control radio
-    # (mgmt_wifi) when the box has exactly one non-WFB adapter.
-    return roles.mesh or roles.mgmt_wifi
-
-
-def _modprobe_batman() -> bool:
-    rc, _out, err = _run(["modprobe", "batman-adv"], timeout=10.0)
-    if rc != 0:
-        log.error("modprobe_batman_failed", err=err.strip())
-        return False
-    return True
-
-
-def _channel_freq_mhz(channel: int) -> int:
-    """2.4 GHz channel to centre frequency. Channel 1 is 2412 MHz.
-
-    Raises ``ValueError`` outside 1..13: mapping an unsupported channel to a
-    default would join a different channel than the one config and status
-    report.
-    """
-    if not 1 <= channel <= 13:
-        raise ValueError(f"mesh channel {channel} is not a 2.4 GHz channel (1-13)")
-    return 2407 + channel * 5
 
 
 # Bound on the supervisor role request. The supervisor may stop this unit as
@@ -269,83 +152,6 @@ async def _request_direct_role(sock_path: str | None = None) -> None:
     log.info("mesh_role_downgrade_requested", reply=line.decode("utf-8", "replace").strip())
 
 
-def _mesh_passphrase(psk: bytes) -> str:
-    """The mesh passphrase every paired node derives from the shared key.
-
-    ``psk.key`` holds raw random bytes, so they are hex-encoded into printable
-    ASCII and cut at 63 characters, the WPA passphrase ceiling IBSS-RSN
-    enforces. SAE takes the same string as its ``sae_password``. The same key
-    bytes on every node give the same passphrase."""
-    return psk.hex()[:63]
-
-
-def _check_conf_value(name: str, value: str, min_len: int, max_len: int) -> None:
-    """Refuse a value that cannot sit verbatim inside a quoted wpa_supplicant
-    string: printable ASCII only (no newline, no quote, no backslash), no
-    edge whitespace, within the length bounds."""
-    if not min_len <= len(value) <= max_len:
-        raise ValueError(f"{name} must be {min_len}-{max_len} characters")
-    if value != value.strip() or any(
-        not (" " <= c <= "~") or c in '"\\' for c in value
-    ):
-        raise ValueError(
-            f"{name} must be printable ASCII without quotes, backslashes or "
-            "edge whitespace"
-        )
-
-
-def _wpa_supplicant_conf(
-    carrier: str, mesh_id: str, passphrase: str, freq_mhz: int
-) -> str:
-    """wpa_supplicant config for an authenticated mesh join.
-
-    802.11s: mesh mode (``mode=5``) with SAE and management-frame protection
-    required. IBSS: ad-hoc (``mode=1``) with IBSS-RSN, WPA2-PSK over CCMP.
-    Raises ValueError for an unknown carrier or a mesh_id / passphrase that
-    cannot be written safely (1-32 characters for the mesh_id, 8-63 for the
-    passphrase)."""
-    _check_conf_value("mesh_id", mesh_id, 1, 32)
-    _check_conf_value("mesh passphrase", passphrase, 8, 63)
-    if carrier == "802.11s":
-        lines = [
-            "network={",
-            f'\tssid="{mesh_id}"',
-            "\tmode=5",
-            f"\tfrequency={freq_mhz}",
-            "\tkey_mgmt=SAE",
-            f'\tsae_password="{passphrase}"',
-            "\tieee80211w=2",
-            "}",
-        ]
-    elif carrier == "ibss":
-        lines = [
-            # IBSS-RSN needs the driver-side scan/selection mode.
-            "ap_scan=2",
-            "network={",
-            f'\tssid="{mesh_id}"',
-            "\tmode=1",
-            f"\tfrequency={freq_mhz}",
-            "\tproto=RSN",
-            "\tkey_mgmt=WPA-PSK",
-            "\tpairwise=CCMP",
-            "\tgroup=CCMP",
-            f'\tpsk="{passphrase}"',
-            "}",
-        ]
-    else:
-        raise ValueError(f"unknown mesh carrier {carrier!r}")
-    return "\n".join(lines) + "\n"
-
-
-def _write_private(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` as a 0600 file in a 0700 directory."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="ascii") as f:
-        os.fchmod(f.fileno(), 0o600)
-        f.write(text)
-
-
 def _wpa_conf_path(iface: str) -> Path:
     return _WPA_RUN_DIR / f"wpa_supplicant-{iface}.conf"
 
@@ -373,20 +179,6 @@ def _bat_member(iface: str, bat_iface: str) -> bool:
     except OSError:
         return False
     return member_of.strip() == bat_iface
-
-
-def _stop_wpa_supplicant(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is not None:
-        return
-    proc.terminate()
-    try:
-        proc.wait(timeout=_WPA_STOP_GRACE_S)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        try:
-            proc.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            log.warning("wpa_supplicant_kill_unreaped", pid=proc.pid)
 
 
 def _bring_up_mesh_iface(
@@ -463,62 +255,6 @@ def _bind_iface_to_bat(iface: str, bat_iface: str) -> bool:
         log.error("bat_iface_up_failed", iface=bat_iface, err=e.strip())
         return False
     return True
-
-
-_GATEWAY_PREFERENCE_PATH = MESH_GATEWAY_JSON
-
-
-def _apply_persisted_gateway_preference() -> str | None:
-    """Re-apply the operator's last gateway pin on mesh setup.
-
-    Reads `/etc/ados/mesh/gateway.json` which is written by the REST
-    endpoint when the operator clicks a pin button in the GCS.
-    Returns the pinned MAC on success, or None if no preference is
-    persisted or the file is unreadable.
-
-    The file schema is `{"mode": "auto"|"pinned"|"off", "pinned_mac": str|null}`.
-    Only the "pinned" mode with a non-null MAC triggers `batctl gw_sel`.
-    Auto and off modes are already the default batman-adv behavior on
-    fresh bringup; no explicit action needed here.
-    """
-    if not _GATEWAY_PREFERENCE_PATH.is_file():
-        return None
-    try:
-        data = json.loads(_GATEWAY_PREFERENCE_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        log.warning("gateway_preference_read_failed", error=str(exc))
-        return None
-    mode = data.get("mode")
-    pinned_mac = data.get("pinned_mac")
-    if mode != "pinned" or not pinned_mac:
-        return None
-    rc, _o, err = _run(["batctl", "gw_sel", str(pinned_mac)], timeout=5.0)
-    if rc != 0:
-        log.warning(
-            "gateway_pin_apply_failed",
-            mac=pinned_mac,
-            err=err.strip(),
-        )
-        return None
-    log.info("gateway_pin_applied", mac=pinned_mac)
-    return str(pinned_mac)
-
-
-def _gateway_mode_for(role: str, cloud_uplink: str, has_uplink: bool) -> str:
-    """The batman gateway mode for this node.
-
-    ``force_on`` advertises, ``force_off`` does not, ``auto`` advertises iff
-    the uplink is live. A receiver that does not advertise runs as a gateway
-    client; every other non-advertising node runs with gateway mode off."""
-    if cloud_uplink == "force_on":
-        advertise = True
-    elif cloud_uplink == "force_off":
-        advertise = False
-    else:  # auto
-        advertise = has_uplink
-    if advertise:
-        return "server"
-    return "client" if role == "receiver" else "off"
 
 
 def _apply_gateway_mode(mode: str) -> bool:

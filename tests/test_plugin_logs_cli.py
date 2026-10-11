@@ -67,7 +67,7 @@ def test_logs_unknown_service_exits_2_with_the_list(tmp_path: Path) -> None:
 def test_logs_unreadable_file_exits_permission_denied_with_sudo_hint(tmp_path: Path) -> None:
     # The host's log directory is root-only; an operator account gets a clear
     # refusal and the command to run, not a traceback.
-    with patch("ados.cli.plugin.os.access", return_value=False):
+    with patch("ados.cli._plugin_runtime.os.access", return_value=False):
         result = _run(tmp_path, ["--lines", "5"])
     assert result.exit_code == 4, result.output
     assert "readable by root only" in result.output
@@ -78,8 +78,8 @@ def test_logs_unreadable_file_exits_permission_denied_with_sudo_hint(tmp_path: P
 def test_logs_unsearchable_directory_is_a_permission_refusal(tmp_path: Path) -> None:
     # Path.exists() raises when the parent directory is not searchable.
     with (
-        patch("ados.cli.plugin.Path.exists", side_effect=PermissionError(13, "Permission denied")),
-        patch("ados.cli.plugin.os.access", return_value=False),
+        patch("ados.cli._plugin_runtime.Path.exists", side_effect=PermissionError(13, "Permission denied")),
+        patch("ados.cli._plugin_runtime.os.access", return_value=False),
     ):
         result = _run(tmp_path, ["--lines", "5", "--json"])
     assert result.exit_code == 4, result.output

@@ -34,8 +34,10 @@ def _restore_reloaded_modules(monkeypatch):
     import ados.core.paths as paths
 
     importlib.reload(paths)
+    import ados.cli._main_install as cli_install
     import ados.cli.main as cli_main
 
+    importlib.reload(cli_install)
     importlib.reload(cli_main)
 
 
@@ -55,8 +57,10 @@ def _reload_paths(monkeypatch, *, macos: bool, home: Path):
     import ados.core.paths as paths
 
     paths = importlib.reload(paths)
+    import ados.cli._main_install as cli_install
     import ados.cli.main as cli_main
 
+    importlib.reload(cli_install)
     cli_main = importlib.reload(cli_main)
     return paths, cli_main
 

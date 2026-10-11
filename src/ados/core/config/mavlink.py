@@ -36,9 +36,18 @@ class MavlinkConfig(BaseModel):
     baud_rate: int = Field(default=57600, ge=0, le=U32_MAX)
     system_id: int = Field(default=1, ge=0, le=U8_MAX)
     component_id: int = Field(default=191, ge=0, le=U8_MAX)
-    endpoints: list[EndpointConfig] = Field(default_factory=lambda: [
-        EndpointConfig(type="websocket", port=8765, enabled=True),
-    ])
+    # The default is also published in the schema (a factory default is not),
+    # so a native reader of this slice can check its own default against it.
+    endpoints: list[EndpointConfig] = Field(
+        default_factory=lambda: [
+            EndpointConfig(type="websocket", port=8765, enabled=True),
+        ],
+        json_schema_extra={
+            "default": [
+                {"enabled": True, "host": "0.0.0.0", "port": 8765, "type": "websocket"},
+            ],
+        },
+    )
     # When true, the raw MAVLink WebSocket proxy rejects an off-box connection
     # from a paired agent that presents no valid pairing key (the on-box and
     # unpaired paths stay open). The native router reads this same key from the

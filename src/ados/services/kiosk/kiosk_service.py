@@ -40,1522 +40,246 @@ Not in scope:
 - Sub-30 ms DRM-composited low-latency video (a v2 optimization).
 """
 
-from __future__ import annotations
-
 import asyncio
-import os
-import pwd
-import shutil
 import signal
-import subprocess
 import sys
-import time
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import structlog
 
 from ados.core.config import load_config
-from ados.core.logging import configure_logging, get_logger
-from ados.core.paths import ADOS_RUN_DIR, CONFIG_YAML
-
-log = get_logger("kiosk.kiosk_service")
-
-_DRM_CARD_PATH = Path("/dev/dri/card0")
-_DRM_DIR = Path("/dev/dri")
-_DRM_SYSFS = Path("/sys/class/drm")
-
-# The DRM display devices can appear a few seconds AFTER multi-user/graphical
-# is reached at boot (the GPU/KMS driver probes asynchronously), and an operator
-# may plug a monitor in at any time after that. We poll for a display at a fixed
-# interval for as long as it takes instead of gating on it once or giving up.
-_DISPLAY_POLL_SECONDS = 5.0
-
-# How often the kiosk re-reads the config file's stat signature to notice an
-# operator edit to `ground_station.kiosk.enabled` / `resolution` without a reboot.
-_CONFIG_POLL_SECONDS = 3.0
-
-# `ground_station.kiosk.resolution` -> the DRM mode applied to the connected
-# output inside cage. Anything else (``auto``, an unknown value) leaves the mode
-# the compositor picked alone.
-_RESOLUTION_MODES = {"720p": "1280x720", "1080p": "1920x1080"}
-
-# How long to keep retrying the output-mode set after a cage launch while the
-# compositor brings its Wayland socket up.
-_OUTPUT_MODE_WAIT_SECONDS = 30.0
-_OUTPUT_MODE_POLL_SECONDS = 1.0
-
-# The agent HTTP surface that serves the cockpit (the native control front and
-# the FastAPI app it proxies) finishes starting a few seconds after this service
-# on boot. A browser launched before the URL is served loads an error page and
-# STICKS there (no auto-retry), so the operator sees a "404 Not Found" instead of
-# the cockpit. We poll the target URL until it is served before launching.
-_URL_WAIT_SECONDS = 90.0
-_URL_POLL_SECONDS = 1.0
-_URL_PROBE_TIMEOUT = 3.0
-
-# Trailing slash on purpose: it is the path the static mount actually serves,
-# so the kiosk never pays a redirect on boot and the query string this module
-# appends is not at the mercy of one. `kiosk=1` tells the cockpit it is the
-# panel's only surface, so it hides its exit-to-dashboard control.
-_DEFAULT_URL = "http://localhost:8080/cockpit/?kiosk=1"
-_ENV_URL_KEY = "ADOS_KIOSK_URL"
-_ENV_MINIMAL_KEY = "ADOS_KIOSK_MINIMAL_LAYER"
-_ENV_RENDERER_KEY = "ADOS_KIOSK_RENDERER"
-
-# Renderer selection.
-#
-# "software" (pixman / CPU) is the safe default: it never touches the GPU and
-# renders on ANY board, so a fresh box always shows the cockpit. "gpu" (cage
-# WLR_RENDERER=gles2 + Chromium EGL) is opt-in, enabled only when the installer
-# has provisioned a working GPU userspace (e.g. the Rockchip libmali blob for a
-# Mali board) and recorded it in the render marker below.
-#
-# We deliberately do NOT run a live EGL probe here to auto-detect the GPU: on
-# some Rockchip boards, poking the GPU through a mismatched driver stack (the
-# stock Mesa libEGL against a Valhall-CSF Mali) hangs the whole box, and the
-# kiosk runs on every boot. The installer decides once, from the HAL, and writes
-# the marker; the kiosk trusts it, with a self-healing downgrade to software if
-# a GPU-mode child still crash-loops.
-_RENDER_MARKER_PATH = Path("/etc/ados/kiosk-render.conf")
-_RENDERER_GPU = "gpu"
-_RENDERER_SOFTWARE = "software"
-
-# Fallback DRM device for the appliance (no-desktop) case when the connected
-# card cannot be determined. Prefer `_resolve_drm_device()`, which finds the
-# card that actually drives a display — `_hdmi_present` already knows these can
-# differ, and handing cage the wrong one leaves it with no connector to modeset.
-_DRM_DEVICE = "/dev/dri/card0"
-
-# Substrings in a child's stderr that mark a GPU/EGL/renderer init failure,
-# used to decide whether a GPU-mode crash should downgrade to software.
-_GPU_FAILURE_MARKERS = (
-    "failed to create renderer",
-    "failed to load driver",
-    "eglinitialize",
-    "egl_not_initialized",
-    "dri2",
-    "gbm",
-    "could not match drm and vulkan",
-    "no drm fd",
-    "wlr_renderer",
+from ados.core.logging import configure_logging
+from ados.core.paths import ADOS_RUN_DIR as ADOS_RUN_DIR
+from ados.services.kiosk._log import log as log
+from ados.services.kiosk.config_watch import (
+    _CONFIG_POLL_SECONDS as _CONFIG_POLL_SECONDS,
 )
-
-# Crash-loop guard: this many exits inside the window marks the child as
-# crash-looping (the trigger for the GPU->software downgrade).
-_CRASH_WINDOW_SECONDS = 60.0
-_CRASH_LIMIT = 5
-# Fixed retry between child restarts. A recovery loop that backs off leaves
-# the panel black for longer the longer the fault lasts; retry at a steady
-# short interval instead.
-_RETRY_SECONDS = 3.0
-
-# Graceful shutdown allowance for the cage child.
-_SHUTDOWN_GRACE_SECONDS = 10.0
-
-_STDERR_TAIL_BYTES = 2048
-
-# How many child stderr lines are forwarded to the journal before the rest are
-# suppressed. A browser is chatty; the point is to make a failure visible, not
-# to relay every frame's noise onto a flash-backed journal.
-_STDERR_LOG_LINE_LIMIT = 40
-
-# The browser is spawned BY the compositor, so it is legitimately absent for a
-# moment after launch. Wait this long before concluding it is missing.
-_BROWSER_START_GRACE_SECONDS = 25.0
-_BROWSER_POLL_SECONDS = 10.0
-
-# Chromium browser binary candidates, in resolution order. The binary name
-# varies by distro: Raspberry Pi OS historically shipped `chromium-browser`;
-# Debian, Armbian, and current Raspberry Pi OS ship `chromium`
-# (`/usr/bin/chromium`). `-stable` is the flatpak/snap-adjacent name some
-# images expose. The installer installs whichever apt package is available; the
-# kiosk resolves the binary at runtime so it does not depend on one fixed name.
-_BROWSER_CANDIDATES = ("chromium-browser", "chromium", "chromium-browser-stable")
-
-# Directory name for the kiosk browser's profile and cache inside a session
-# user's runtime dir (the windowed path). See _chromium_storage_flags.
-_KIOSK_STORAGE_SUBDIR = "ados-kiosk"
-
-# Upper bound on the browser disk cache. It lives in tmpfs, so this is a RAM
-# budget, not a disk one — generous for a single local page, small enough that
-# it can never compete with the video pipeline for memory.
-_DISK_CACHE_BYTES = 64 * 1024 * 1024
-
-# Where the appliance (cage) launch keeps browser storage. The agent's own
-# runtime dir, which is tmpfs and which the agent creates and owns, so it is
-# guaranteed to exist and to be writable by the root-run cage child.
-#
-# Deliberately NOT $XDG_RUNTIME_DIR (/run/user/0): systemd does not create a
-# runtime dir for a system service, so that path can simply be absent, and
-# Chromium given a --user-data-dir whose parent does not exist fails to start.
-_CAGE_STORAGE_DIR = str(ADOS_RUN_DIR / "kiosk")
-
-# XDG_RUNTIME_DIR for the cage launch, for exactly the same reason.
-#
-# The unit exports `/run/user/0`, but logind creates a per-user runtime dir only
-# for a real login SESSION. A system service does not get one, so on an
-# appliance box that path is simply absent and cage dies at startup with
-# "Unable to open Wayland socket: Invalid argument" — while the cage process
-# stays alive, so the unit still reads active and the screen is black.
-#
-# It appeared to work only on boxes where a desktop session had already created
-# the directory; a freshly installed appliance has no session and no directory.
-# Point it at a tmpfs path the agent creates and owns, mode 0700 as the spec
-# requires, so it exists before cage needs it.
-_CAGE_RUNTIME_DIR = str(ADOS_RUN_DIR / "kiosk" / "runtime")
-
-
-def _hdmi_present() -> bool:
-    """True when a DRM display is available.
-
-    Prefers a connector reporting ``connected`` (a real monitor), scanning ALL
-    cards — on some boards (e.g. a Raspberry Pi) the render node is ``card0``
-    and the display is ``card1``, so a card0-only check is wrong. Falls back to
-    "any ``/dev/dri/card*`` node exists" when the sysfs status is unreadable, so
-    a board whose DRM subsystem is up but whose connector status we cannot read
-    still counts. Absent entirely (headless / DRM not loaded) -> False.
-    """
-    try:
-        for status in _DRM_SYSFS.glob("card*-*/status"):
-            try:
-                if status.read_text().strip() == "connected":
-                    return True
-            except OSError:
-                continue
-    except OSError:
-        pass
-    try:
-        return any(_DRM_DIR.glob("card*"))
-    except OSError:
-        return False
-
-
-def _resolve_drm_device() -> str:
-    """The DRM card that actually drives a display.
-
-    On a Raspberry Pi 4 the render node is ``card0`` (v3d, no connectors) and
-    the display is ``card1`` (vc4). Pinning cage to a hardcoded ``card0`` there
-    hands it a device with nothing to modeset, so the appliance path comes up
-    with no picture on a board where the browser path works fine.
-
-    Derived from the same connected-connector scan `_hdmi_present` uses, so the
-    two cannot disagree about which card is the display. Falls back to
-    [`_DRM_DEVICE`] when no connector reports connected, which keeps the
-    previous behaviour on a board whose sysfs we cannot read.
-    """
-    try:
-        for status in sorted(_DRM_SYSFS.glob("card*-*/status")):
-            try:
-                if status.read_text().strip() != "connected":
-                    continue
-            except OSError:
-                continue
-            # ".../card1-HDMI-A-1/status" -> "card1"
-            card = status.parent.name.split("-", 1)[0]
-            node = _DRM_DIR / card
-            if node.exists():
-                return str(node)
-    except OSError:
-        pass
-    return _DRM_DEVICE
-
-
-def _connected_outputs() -> dict[str, frozenset[str]]:
-    """Connected DRM connectors -> the modes each one advertises.
-
-    Keyed by the connector name without its card prefix
-    (``card1-HDMI-A-1`` -> ``HDMI-A-1``), which is the output name wlroots (and
-    so cage and ``wlr-randr``) uses. Modes are the ``WIDTHxHEIGHT`` lines of the
-    connector's sysfs ``modes`` file.
-    """
-    outputs: dict[str, frozenset[str]] = {}
-    try:
-        statuses = sorted(_DRM_SYSFS.glob("card*-*/status"))
-    except OSError:
-        return outputs
-    for status in statuses:
-        try:
-            if status.read_text().strip() != "connected":
-                continue
-            modes = (status.parent / "modes").read_text().split()
-        except OSError:
-            continue
-        name = status.parent.name.split("-", 1)[1]
-        outputs[name] = frozenset(modes)
-    return outputs
-
-
-async def _wait_for_display(watch: _SettingsWatch) -> bool:
-    """Wait for a DRM display to appear, for as long as it takes.
-
-    Absorbs both the boot race (the KMS device is created shortly after the
-    service starts) and a monitor hot-plugged at any later time: the display is
-    re-probed on a fixed interval with no deadline. Returns True as soon as a
-    display is present, or False when the operator disables the kiosk while it
-    is waiting (the config is re-checked on the same tick)."""
-    if _hdmi_present():
-        return True
-    log.info("kiosk_waiting_for_display", poll_s=_DISPLAY_POLL_SECONDS)
-    while True:
-        await asyncio.sleep(_DISPLAY_POLL_SECONDS)
-        if await asyncio.to_thread(watch.poll) and not watch.settings.enabled:
-            return False
-        if _hdmi_present():
-            return True
-
-
-def _url_serving(url: str) -> bool:
-    """True when the target URL answers with a non-error HTTP status, i.e. the
-    cockpit is being served. A connection refusal or a 4xx/5xx (the proxy up
-    before its backend, or the route not mounted yet) reads as not-ready. A
-    401/403/405 still means the server is up and routing, so it counts as served
-    (the on-box cockpit HTML is trusted and does not gate, but be lenient)."""
-    import urllib.error
-    import urllib.request
-
-    try:
-        with urllib.request.urlopen(url, timeout=_URL_PROBE_TIMEOUT) as resp:  # noqa: S310
-            return 200 <= resp.status < 400
-    except urllib.error.HTTPError as exc:
-        return exc.code in (401, 403, 405)
-    except (urllib.error.URLError, OSError, ValueError):
-        return False
-
-
-async def _wait_for_url(url: str) -> bool:
-    """Wait (bounded) for the cockpit URL to be served before launching the
-    browser, absorbing the boot race where the agent HTTP surface finishes
-    starting after this service. Without it the browser loads an error page and
-    sticks there. Returns True once served, False after the timeout (launch
-    anyway, best-effort — a genuinely-wrong URL should still show something)."""
-    if await asyncio.to_thread(_url_serving, url):
-        return True
-    log.info("kiosk_waiting_for_url", url=url, timeout_s=_URL_WAIT_SECONDS)
-    deadline = time.monotonic() + _URL_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        await asyncio.sleep(_URL_POLL_SECONDS)
-        if await asyncio.to_thread(_url_serving, url):
-            return True
-    log.warning(
-        "kiosk_url_wait_timeout",
-        url=url,
-        msg="cockpit URL not serving after wait; launching browser anyway",
-    )
-    return False
-
-
-def hdmi_present() -> bool:
-    """Public alias for ``_hdmi_present``.
-
-    The heartbeat enrichment helper imports this to resolve the
-    effective display type on boards where ``ground_station.display.type``
-    is left at ``auto``. Keeping a public wrapper instead of removing
-    the leading-underscore name preserves the in-module call sites that
-    use the private form.
-    """
-    return _hdmi_present()
-
-
-def _display_selection(config: Any) -> str:
-    """The operator's `ground_station.display.type`, or ``auto`` when unset.
-
-    Read defensively: this service must start on a config shaped by an older or
-    newer agent, and a missing block means "no opinion", not a crash.
-    """
-    try:
-        value = config.ground_station.display.type
-    except AttributeError:
-        return "auto"
-    if not isinstance(value, str):
-        return "auto"
-    selection = value.strip().lower()
-    return selection if selection in ("auto", "hdmi", "lcd", "none") else "auto"
-
-
-def _get_kiosk_config(config: Any) -> tuple[str | None, bool | None]:
-    """Return (target_url, minimal_layer) from config, if present.
-
-    Reads ``config.ground_station.kiosk`` (the KioskConfig model). Accessed
-    defensively with ``getattr`` so a duck-typed test config or a bare object
-    without the section resolves to ``(None, None)`` instead of raising. Either
-    field may be None when unset.
-    """
-    gs = getattr(config, "ground_station", None)
-    if gs is None:
-        return None, None
-    kiosk = getattr(gs, "kiosk", None)
-    if kiosk is None:
-        return None, None
-    url = getattr(kiosk, "target_url", None)
-    minimal = getattr(kiosk, "minimal_layer", None)
-    if isinstance(url, str) and not url.strip():
-        url = None
-    return url, minimal
-
-
-@dataclass(frozen=True)
-class KioskSettings:
-    """The kiosk config fields that change what the service runs.
-
-    ``output_mode`` is the DRM mode (``WIDTHxHEIGHT``) the configured
-    resolution maps to, or None to leave the compositor's choice alone."""
-
-    enabled: bool
-    output_mode: str | None
-
-
-def _kiosk_settings(config: Any) -> KioskSettings:
-    """Read ``ground_station.kiosk.enabled`` / ``resolution``.
-
-    Defensive like the other readers: a missing section or a non-bool
-    ``enabled`` reads as disabled (the model default), and a resolution that is
-    not one of the known presets (``auto`` included) leaves the mode alone.
-    """
-    kiosk = getattr(getattr(config, "ground_station", None), "kiosk", None)
-    enabled = getattr(kiosk, "enabled", False) is True
-    resolution = getattr(kiosk, "resolution", None)
-    mode = (
-        _RESOLUTION_MODES.get(resolution.strip().lower())
-        if isinstance(resolution, str)
-        else None
-    )
-    return KioskSettings(enabled=enabled, output_mode=mode)
-
-
-def _config_signature() -> tuple[int, int] | None:
-    """``(inode, mtime_ns)`` of the config file, or None when it is absent.
-
-    The config writers replace the file atomically, so either half changing
-    means a new file landed."""
-    try:
-        st = os.stat(CONFIG_YAML)
-    except OSError:
-        return None
-    return st.st_ino, st.st_mtime_ns
-
-
-class _SettingsWatch:
-    """Notices an edit to the kiosk settings without a reboot.
-
-    ``poll()`` is cheap when nothing changed (one ``stat``); it reloads the
-    config only when the file's signature moved, and reports True only when
-    the kiosk settings themselves differ from the ones in force."""
-
-    def __init__(
-        self, settings: KioskSettings, signature: tuple[int, int] | None
-    ) -> None:
-        self.settings = settings
-        self._signature = signature
-
-    def poll(self) -> bool:
-        signature = _config_signature()
-        if signature == self._signature:
-            return False
-        self._signature = signature
-        try:
-            config = load_config()
-        except Exception as exc:
-            log.warning("kiosk_config_reload_failed", error=str(exc))
-            return False
-        settings = _kiosk_settings(config)
-        if settings == self.settings:
-            return False
-        log.info(
-            "kiosk_settings_changed",
-            enabled=settings.enabled,
-            output_mode=settings.output_mode,
-            previous_enabled=self.settings.enabled,
-            previous_output_mode=self.settings.output_mode,
-        )
-        self.settings = settings
-        return True
-
-
-async def _stop_on_settings_change(
-    watch: _SettingsWatch, supervisor: KioskSupervisor
-) -> None:
-    """Stop ``supervisor`` once the kiosk settings change, then return."""
-    while True:
-        await asyncio.sleep(_CONFIG_POLL_SECONDS)
-        if await asyncio.to_thread(watch.poll):
-            supervisor.request_stop()
-            return
-
-
-def _resolve_target_url(config: Any) -> tuple[str, bool]:
-    """Config -> env -> default. Returns (url_with_query, minimal_flag).
-
-    Query string `?layer=minimal` is appended when either the config
-    flag is true or the board has less than 3 GiB RAM. An explicit
-    env override `ADOS_KIOSK_MINIMAL_LAYER=0` forces the full layer.
-    """
-    cfg_url, cfg_minimal = _get_kiosk_config(config)
-
-    url = cfg_url or os.environ.get(_ENV_URL_KEY) or _DEFAULT_URL
-
-    # Minimal by default on the panel. The reduced layer drops the backdrop
-    # blur the cockpit draws over live video, and a blurred region above a
-    # surface that changes every frame forces the compositor to re-read and
-    # re-blur its backdrop at the video's frame rate.
-    #
-    # Measured on a 4-core panel with video actually arriving over the radio:
-    # the full layer costs 292.9% of 400% and leaves 36% of the board idle;
-    # the reduced layer costs 137.9% and leaves 68% idle. Same video, same
-    # frame rate, 53% less CPU.
-    #
-    # This used to be gated on the board having under 3 GiB of RAM, which is
-    # the wrong quantity: the blur costs compositor time, not memory. A 3.8 GiB
-    # four-core panel — comfortably over that threshold — was therefore paying
-    # full price for an effect nobody can see behind a HUD, and was the board
-    # the reduced path would have helped most. An operator who wants the full
-    # layer asks for it.
-    minimal = cfg_minimal is not False
-
-    env_minimal = os.environ.get(_ENV_MINIMAL_KEY)
-    if env_minimal is not None:
-        minimal = env_minimal.strip() not in ("0", "false", "False", "")
-
-    if minimal:
-        sep = "&" if "?" in url else "?"
-        url = f"{url}{sep}layer=minimal"
-
-    return url, minimal
-
-
-def _normalise_renderer(value: str) -> str | None:
-    v = value.strip().lower()
-    if v in (_RENDERER_GPU, "gles2", "gles", "egl"):
-        return _RENDERER_GPU
-    if v in (_RENDERER_SOFTWARE, "pixman", "sw", "cpu"):
-        return _RENDERER_SOFTWARE
-    return None
-
-
-def _read_render_marker() -> tuple[str | None, str | None]:
-    """Return ``(renderer, mali_lib_dir)`` from the install-written marker.
-
-    The marker is a tiny ``key: value`` file the installer writes only after it
-    provisioned a working GPU userspace for this board::
-
-        renderer: gpu
-        lib_dir: /opt/ados/gpu/mali
-
-    ``renderer`` is "gpu" or "software"; ``lib_dir`` (optional) is the private
-    directory holding the SCOPED libmali EGL/GLES/GBM so cage can use the GPU
-    without the system's Mesa libEGL being replaced. Absent / unreadable ->
-    ``(None, None)`` (caller defaults to software).
-    """
-    try:
-        text = _RENDER_MARKER_PATH.read_text(encoding="utf-8")
-    except OSError:
-        return None, None
-    renderer: str | None = None
-    lib_dir: str | None = None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        # Accept "renderer: gpu" or "renderer = gpu".
-        key, sep, value = line.partition(":")
-        if not sep:
-            key, sep, value = line.partition("=")
-        key = key.strip().lower()
-        value = value.strip()
-        if key == "renderer":
-            renderer = _normalise_renderer(value)
-        elif key == "lib_dir" and value:
-            lib_dir = value
-    return renderer, lib_dir
-
-
-def _resolve_render_plan() -> tuple[str, str | None]:
-    """Return ``(renderer, mali_lib_dir)`` for the cage launch.
-
-    Precedence: the ``ADOS_KIOSK_RENDERER`` env override -> the install-written
-    marker -> ``"software"`` (the safe default that always renders). A marker
-    "gpu" is trusted only when its scoped libmali directory still exists (a
-    stale marker whose libs were removed falls back to software cleanly). See
-    ``_RENDER_MARKER_PATH`` for why there is no live GPU probe here.
-    """
-    env = os.environ.get(_ENV_RENDERER_KEY)
-    if env:
-        chosen = _normalise_renderer(env)
-        if chosen == _RENDERER_SOFTWARE:
-            return _RENDERER_SOFTWARE, None
-        if chosen == _RENDERER_GPU:
-            # Operator override wins; still carry the marker's scoped lib dir.
-            _, lib_dir = _read_render_marker()
-            return _RENDERER_GPU, lib_dir
-    renderer, lib_dir = _read_render_marker()
-    if renderer == _RENDERER_GPU:
-        if lib_dir and not Path(lib_dir).is_dir():
-            return _RENDERER_SOFTWARE, None
-        return _RENDERER_GPU, lib_dir
-    return _RENDERER_SOFTWARE, None
-
-
-def _cage_env(renderer: str, mali_lib_dir: str | None) -> dict[str, str]:
-    """Environment overlay for the cage (appliance) launch.
-
-    Pins cage's renderer and DRM device. ``DISPLAY`` / ``WAYLAND_DISPLAY`` are
-    stripped separately (via ``env_unset``) so cage uses its own DRM backend
-    instead of trying to nest under an X11 / Wayland server that is not there.
-    When the GPU renderer is active and a scoped libmali directory is
-    provisioned, it is prepended to ``LD_LIBRARY_PATH`` so cage + Chromium load
-    the GPU EGL/GLES/GBM from there, WITHOUT the system Mesa libEGL being
-    touched (so a running desktop and the software fallback are never broken).
-    """
-    wlr = "gles2" if renderer == _RENDERER_GPU else "pixman"
-    env = {
-        "WLR_RENDERER": wlr,
-        "WLR_DRM_DEVICES": _resolve_drm_device(),
-        # Overrides the unit's /run/user/0, which does not exist for a system
-        # service. Without this cage cannot bind its Wayland socket at all.
-        "XDG_RUNTIME_DIR": _CAGE_RUNTIME_DIR,
-    }
-    if renderer == _RENDERER_GPU and mali_lib_dir:
-        # Scope libmali to this process tree only (cage + Chromium), so the GPU
-        # EGL/GLES/GBM shadow Mesa WITHOUT the system libEGL being replaced. We do
-        # NOT set EGL_PLATFORM: cage selects GBM and Chromium selects Wayland
-        # explicitly, and forcing a single platform here would break the client
-        # that wanted the other one.
-        existing = os.environ.get("LD_LIBRARY_PATH", "")
-        env["LD_LIBRARY_PATH"] = (
-            f"{mali_lib_dir}:{existing}" if existing else mali_lib_dir
-        )
-    elif renderer == _RENDERER_SOFTWARE:
-        # No GPU cursor plane in the software path; a hardware cursor on a
-        # pixman renderer is a known wlroots crash on some SBCs.
-        env["WLR_NO_HARDWARE_CURSORS"] = "1"
-    return env
-
-
-def _resolve_browser_binary() -> str:
-    """Return the first Chromium browser binary present on PATH.
-
-    The binary name varies by distro (see `_BROWSER_CANDIDATES`). Probe the
-    known names in order and return the absolute path of the first that
-    resolves. Raise `FileNotFoundError` naming every tried candidate when none
-    is present, so the supervisor's `kiosk_binary_missing` path reports exactly
-    what was searched instead of a bare `chromium-browser` not-found.
-    """
-    for name in _BROWSER_CANDIDATES:
-        found = shutil.which(name)
-        if found:
-            return found
-    raise FileNotFoundError(
-        "no Chromium browser binary found on PATH; tried: "
-        + ", ".join(_BROWSER_CANDIDATES)
-    )
-
-
-def _chromium_render_flags(renderer: str) -> list[str]:
-    """Chromium flags for the chosen renderer.
-
-    GPU: let Chromium pick its own GL implementation. **Do not name one.**
-
-    This used to pass ``--use-gl=egl``, and that flag has since been renamed
-    upstream to ``--gl=``. On a current Chromium the old spelling is not
-    rejected loudly — it resolves to "no implementation", so the GPU process
-    exits during initialization, over and over, and the panel stays black while
-    every other health signal reads fine. Measured on a ground station running
-    Chromium 150::
-
-        (no flag)               gpu_process_exits=0
-        --gl=egl-angle          gpu_process_exits=0
-        --use-angle=gl          gpu_process_exits=0
-        --use-gl=egl            gpu_process_exits=4   <- the only failing option
-
-    Several spellings work; passing none of them also works, and is the only
-    option that cannot go stale the same way. Chromium's default on Linux is
-    already the ANGLE/EGL path we were trying to ask for, so naming it bought
-    nothing and cost a black screen.
-
-    ``--enable-gpu-rasterization`` is likewise dropped: it has been the default
-    for years, and carrying a flag whose behaviour is now the default is how the
-    previous one survived long enough to break.
-
-    Software: ``--disable-gpu`` so Chromium composites on the CPU and never
-    opens the GPU EGL, matching cage's pixman renderer so nothing in the stack
-    touches a GPU that cannot be driven.
-    """
-    if renderer == _RENDERER_GPU:
-        return []
-    return ["--disable-gpu"]
-
-
-def _chromium_storage_flags(base_dir: str) -> list[str]:
-    """Pin Chromium's profile and cache into the runtime tmpfs, with a bounded
-    cache.
-
-    Left to itself Chromium writes its HTTP cache, code cache, shader cache,
-    Local Storage, cookies and history under ``$HOME``. Under cage the service
-    runs as root, so that is ``/root/.cache/chromium`` and ``/root/.config/
-    chromium`` — on the SD card, unbounded, and rewritten continuously because
-    the page it is showing is a live-updating SPA with a video stream. A ground
-    station runs that page for its whole life.
-
-    None of it is worth persisting. The kiosk shows one page, served from
-    localhost, with no login and no session to carry across a reboot; the cache
-    exists to avoid a network round trip that is not happening anyway. So it all
-    goes to a tmpfs directory and dies with the boot.
-
-    The size cap matters *because* the target is tmpfs: an unbounded cache there
-    would trade SD wear for RAM exhaustion, which on a 4 GB board sharing memory
-    with a video pipeline is not a trade worth making.
-
-    Applying this on the windowed path too has a second, unrelated benefit: the
-    kiosk stops sharing a profile directory with the desktop user's own browser,
-    so launching it can no longer collide with a Chromium the operator already
-    has open.
-    """
-    base = base_dir.rstrip("/")
-    return [
-        f"--user-data-dir={base}/profile",
-        f"--disk-cache-dir={base}/cache",
-        f"--disk-cache-size={_DISK_CACHE_BYTES}",
-    ]
-
-
-def _build_chromium_argv(url: str, renderer: str) -> list[str]:
-    """Full argv for `cage -- <chromium> ...`.
-
-    The browser binary is resolved at runtime (`_resolve_browser_binary`)
-    because its package/binary name varies by distro. cage handles the Wayland
-    compositor; the GPU-vs-software Chromium flags follow ``renderer`` (matched
-    to cage's WLR_RENDERER). Raises `FileNotFoundError` (propagated to the
-    `kiosk_binary_missing` path) when no browser is installed.
-    """
-    browser = _resolve_browser_binary()
-    return [
-        "cage",
-        "--",
-        browser,
-        "--kiosk",
-        "--noerrdialogs",
-        "--disable-infobars",
-        "--no-first-run",
-        # cage owns the display as root, so Chromium runs as root here and
-        # refuses to start without --no-sandbox. (The windowed path avoids this
-        # by running Chromium as the logged-in desktop user, keeping its sandbox.)
-        "--no-sandbox",
-        "--ozone-platform=wayland",
-        *_chromium_render_flags(renderer),
-        *_chromium_storage_flags(_CAGE_STORAGE_DIR),
-        "--autoplay-policy=no-user-gesture-required",
-        url,
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Adaptive launch: run inside a live desktop when one is present, else own the
-# display via cage.
-# ---------------------------------------------------------------------------
-
-# Session types loginctl reports for a graphical session.
-_GRAPHICAL_SESSION_TYPES = ("wayland", "x11")
-
-
-@dataclass(frozen=True)
-class DesktopSession:
-    """A running graphical login session the kiosk can launch a window into."""
-
-    uid: int
-    session_type: str  # "wayland" | "x11"
-    display: str | None  # X11 DISPLAY (e.g. ":0"); None for wayland
-    wayland_display: str | None  # wayland socket name; None for x11
-
-
-def _loginctl_sessions() -> list[str]:
-    """Return the session ids from ``loginctl``, or [] when loginctl is absent
-    or fails (no systemd-logind → treat the box as having no managed desktop,
-    so the kiosk owns the display via cage)."""
-    loginctl = shutil.which("loginctl")
-    if not loginctl:
-        return []
-    try:
-        out = subprocess.run(
-            [loginctl, "list-sessions", "--no-legend"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
-    if out.returncode != 0:
-        return []
-    ids: list[str] = []
-    for line in out.stdout.splitlines():
-        parts = line.split()
-        if parts:
-            ids.append(parts[0])
-    return ids
-
-
-def _loginctl_session_props(session_id: str) -> dict[str, str]:
-    """Return the ``key=value`` properties of one session, or {} on failure."""
-    loginctl = shutil.which("loginctl")
-    if not loginctl:
-        return {}
-    try:
-        out = subprocess.run(
-            [
-                loginctl,
-                "show-session",
-                session_id,
-                "-p",
-                "Type",
-                "-p",
-                "State",
-                "-p",
-                "Active",
-                "-p",
-                "Remote",
-                "-p",
-                "User",
-                "-p",
-                "Display",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if out.returncode != 0:
-        return {}
-    props: dict[str, str] = {}
-    for line in out.stdout.splitlines():
-        key, _, value = line.partition("=")
-        props[key.strip()] = value.strip()
-    return props
-
-
-def _wayland_sockets(runtime_dir: str) -> list[str]:
-    """The Wayland socket names bound in ``runtime_dir``, sorted."""
-    try:
-        return sorted(
-            n
-            for n in os.listdir(runtime_dir)
-            if n.startswith("wayland-") and not n.endswith(".lock")
-        )
-    except OSError:
-        return []
-
-
-def _wayland_display_for(uid: int) -> str:
-    """Best-effort discovery of the wayland socket name in the user's runtime
-    dir, defaulting to ``wayland-0`` (the common default) when none is found."""
-    names = _wayland_sockets(f"/run/user/{uid}")
-    return names[0] if names else "wayland-0"
-
-
-def _xauthority_for(uid: int) -> str | None:
-    """Locate the user's X authority cookie so an X11 launch can authenticate to
-    the running X server. Best-effort across the common locations."""
-    candidates: list[str] = []
-    try:
-        home = pwd.getpwuid(uid).pw_dir
-        candidates.append(os.path.join(home, ".Xauthority"))
-    except KeyError:
-        pass
-    candidates.append(f"/run/user/{uid}/.mutter-Xwaylandauth")
-    candidates.append(f"/run/user/{uid}/gdm/Xauthority")
-    for path in candidates:
-        try:
-            if os.path.exists(path):
-                return path
-        except OSError:
-            continue
-    return None
-
-
-def _detect_desktop_session() -> DesktopSession | None:
-    """Return the active graphical login session, or None when the box has no
-    running desktop. A None result means the kiosk should own the display via
-    cage; a session means it should launch a window into that desktop instead
-    (cage cannot, because the desktop compositor already holds the DRM master)."""
-    for session_id in _loginctl_sessions():
-        props = _loginctl_session_props(session_id)
-        stype = props.get("Type", "")
-        if stype not in _GRAPHICAL_SESSION_TYPES:
-            continue
-        if props.get("Remote", "no") == "yes":
-            continue
-        if props.get("Active") != "yes" and props.get("State") != "active":
-            continue
-        try:
-            uid = int(props.get("User", ""))
-        except ValueError:
-            continue
-        if stype == "wayland":
-            return DesktopSession(
-                uid=uid,
-                session_type="wayland",
-                display=None,
-                wayland_display=_wayland_display_for(uid),
-            )
-        return DesktopSession(
-            uid=uid,
-            session_type="x11",
-            display=props.get("Display") or ":0",
-            wayland_display=None,
-        )
-    return None
-
-
-# Display managers whose presence means a desktop session is about to come up,
-# so the kiosk should wait for it (and launch a window into it) instead of
-# racing to grab the display via cage while the desktop is still starting.
-_DISPLAY_MANAGERS = ("sddm", "gdm", "gdm3", "lightdm", "lxdm", "greetd")
-
-# How long to wait for a starting desktop session before falling back to cage.
-# Generous because the kiosk now starts at multi-user.target (before the
-# desktop), so on a desktop box it waits here for the login session to become
-# active; it returns as soon as the session appears, so a large ceiling is free.
-_SESSION_WAIT_SECONDS = 90.0
-_SESSION_POLL_SECONDS = 1.5
-
-
-def _display_manager_active() -> bool:
-    """True when a login/display manager unit is active — i.e. a desktop
-    session is up or coming up. Used to decide whether to wait for the session
-    before falling back to cage (avoids the boot race where the kiosk grabs the
-    display via cage a moment before KDE/GNOME finishes starting)."""
-    systemctl = shutil.which("systemctl")
-    if not systemctl:
-        return False
-    for dm in _DISPLAY_MANAGERS:
-        try:
-            out = subprocess.run(
-                [systemctl, "is-active", f"{dm}.service"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if out.stdout.strip() == "active":
-            return True
-    return False
-
-
-def _session_socket_ready(session: DesktopSession) -> bool:
-    """True when the session's display-server socket is actually bound, so a
-    client can connect. A session can be 'active' in loginctl a moment before
-    its Wayland/X socket exists — launching then fails with 'Failed to connect
-    to Wayland display', which is exactly the first-attempt crash we want to
-    avoid on boot."""
-    if session.session_type == "wayland":
-        sock = Path(f"/run/user/{session.uid}") / (session.wayland_display or "wayland-0")
-        return sock.exists()
-    # X11: DISPLAY ":N" -> /tmp/.X11-unix/XN.
-    disp = (session.display or ":0").lstrip(":").split(".")[0]
-    return Path(f"/tmp/.X11-unix/X{disp}").exists()
-
-
-def _detect_ready_session() -> DesktopSession | None:
-    """A detected desktop session whose display-server socket is up (ready for a
-    client), else None so the caller keeps waiting."""
-    session = _detect_desktop_session()
-    if session is not None and _session_socket_ready(session):
-        return session
-    return None
-
-
-async def _resolve_desktop_session() -> DesktopSession | None:
-    """Return an active desktop session whose display-server socket is READY,
-    waiting briefly for one when a display manager is active but the session /
-    its socket has not come up yet (the boot race). Returns None on a genuinely
-    headless / CLI box (no session and no display manager) so the caller owns
-    the display via cage."""
-    session = await asyncio.to_thread(_detect_ready_session)
-    if session is not None:
-        return session
-    if not await asyncio.to_thread(_display_manager_active):
-        return None
-    log.info("kiosk_waiting_for_desktop_session", timeout_s=_SESSION_WAIT_SECONDS)
-    deadline = time.monotonic() + _SESSION_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        await asyncio.sleep(_SESSION_POLL_SECONDS)
-        session = await asyncio.to_thread(_detect_ready_session)
-        if session is not None:
-            return session
-    log.warning(
-        "kiosk_desktop_session_timeout",
-        msg="display manager active but no session became active; using cage",
-    )
-    return None
-
-
-def _session_env(session: DesktopSession) -> dict[str, str]:
-    """The environment overlay that lets a process launched by this service
-    connect to the running desktop's display server. Also carries the session
-    user's HOME/USER so the windowed browser — which runs AS that user, not
-    root (Chromium refuses to run as root without --no-sandbox) — has a writable
-    profile directory instead of inheriting the service's HOME=/root."""
-    env: dict[str, str] = {"XDG_RUNTIME_DIR": f"/run/user/{session.uid}"}
-    try:
-        pw = pwd.getpwuid(session.uid)
-        env["HOME"] = pw.pw_dir
-        env["USER"] = pw.pw_name
-        env["LOGNAME"] = pw.pw_name
-    except KeyError:
-        pass
-    if session.session_type == "wayland":
-        env["WAYLAND_DISPLAY"] = session.wayland_display or "wayland-0"
-    else:
-        env["DISPLAY"] = session.display or ":0"
-        xauth = _xauthority_for(session.uid)
-        if xauth:
-            env["XAUTHORITY"] = xauth
-    return env
-
-
-def _build_windowed_chromium_argv(
-    url: str, session_type: str, renderer: str, storage_dir: str
-) -> list[str]:
-    """Full argv for a full-screen Chromium kiosk WITHOUT cage, to run inside an
-    already-running desktop session. The Ozone platform matches the session so
-    Chromium attaches to the live compositor / X server rather than trying to
-    own the display. The GPU-vs-software flags follow ``renderer`` (a desktop on
-    a board with no GPU userspace runs on llvmpipe, where ``--disable-gpu`` is
-    the reliable path). Raises ``FileNotFoundError`` (propagated to the
-    ``kiosk_binary_missing`` path) when no browser is installed."""
-    browser = _resolve_browser_binary()
-    platform = "wayland" if session_type == "wayland" else "x11"
-    return [
-        browser,
-        "--kiosk",
-        "--start-fullscreen",
-        "--noerrdialogs",
-        "--disable-infobars",
-        "--no-first-run",
-        f"--ozone-platform={platform}",
-        *_chromium_render_flags(renderer),
-        *_chromium_storage_flags(storage_dir),
-        "--autoplay-policy=no-user-gesture-required",
-        url,
-    ]
-
-
-class KioskSupervisor:
-    """Spawn and supervise the cage + Chromium child process."""
-
-    def __init__(
-        self,
-        argv: list[str],
-        *,
-        env: dict[str, str] | None = None,
-        env_unset: frozenset[str] | set[str] | None = None,
-        sweep_orphans: bool = True,
-        run_as_uid: int | None = None,
-        output_mode: str | None = None,
-    ) -> None:
-        self._argv = argv
-        # When set, the child is dropped to this uid (and its primary gid) before
-        # exec — the windowed path runs Chromium as the logged-in desktop user
-        # rather than root, because Chromium refuses to run as root without
-        # --no-sandbox. None (the cage path) runs as the service user (root).
-        self._run_as_uid = run_as_uid
-        # An environment overlay merged over the service env (used to attach a
-        # windowed launch to a running desktop's display server, or to pin
-        # cage's renderer/DRM device). None inherits the service env unchanged.
-        self._env = env
-        # Keys to REMOVE from the child env after the overlay merge. The cage
-        # path strips DISPLAY / WAYLAND_DISPLAY so cage uses its own DRM backend
-        # instead of trying (and failing) to nest under an absent X11/Wayland
-        # server — the root of the historical "Failed to open xcb connection".
-        self._env_unset = env_unset
-        # Whether to broad-pkill cage/chromium orphans on stop. True under cage
-        # (safe — cage owns the only chromium). False inside a running desktop,
-        # where a broad chromium sweep would kill the operator's own browser.
-        self._sweep_orphans_enabled = sweep_orphans
-        # The ``WIDTHxHEIGHT`` mode to set on the connected outputs once the
-        # compositor is up (cage path only). None leaves the mode alone.
-        self._output_mode = output_mode
-        self._proc: asyncio.subprocess.Process | None = None
-        self._stop = asyncio.Event()
-        self._crash_times: list[float] = []
-        # Set True when the crash-loop guard trips (5 crashes / 60 s). Lets the
-        # caller downgrade a crash-looping GPU launch to the software renderer.
-        self.crash_looped = False
-        # Last child's stderr tail, for the caller's downgrade heuristic.
-        self.last_stderr_tail = ""
-
-    def request_stop(self) -> None:
-        self._stop.set()
-
-    async def _spawn(self) -> asyncio.subprocess.Process:
-        log.info("kiosk_spawning", argv=self._argv, run_as_uid=self._run_as_uid)
-        spawn_env: dict[str, str] | None
-        if self._env is None and not self._env_unset:
-            spawn_env = None
-        else:
-            spawn_env = {**os.environ, **(self._env or {})}
-            for key in self._env_unset or ():
-                spawn_env.pop(key, None)
-        # Drop to the desktop user for the windowed path (Chromium refuses root).
-        # `user`/`group` setgid+setuid before exec (Python 3.9+). We resolve the
-        # primary gid ourselves so supplementary groups are dropped too.
-        extra: dict[str, Any] = {}
-        if self._run_as_uid is not None:
-            extra["user"] = self._run_as_uid
-            try:
-                extra["group"] = pwd.getpwuid(self._run_as_uid).pw_gid
-            except KeyError:
-                pass
-        return await asyncio.create_subprocess_exec(
-            *self._argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=spawn_env,
-            # Own session so a windowed Chromium's whole tree is killable via
-            # the child, without a broad pkill that would hit the desktop's
-            # other browsers.
-            start_new_session=True,
-            **extra,
-        )
-
-    async def _graceful_kill(self, proc: asyncio.subprocess.Process) -> None:
-        if proc.returncode is None:
-            try:
-                proc.terminate()
-            except ProcessLookupError:
-                pass
-            else:
-                try:
-                    await asyncio.wait_for(
-                        proc.wait(), timeout=_SHUTDOWN_GRACE_SECONDS
-                    )
-                    log.info("kiosk_child_terminated", rc=proc.returncode)
-                except TimeoutError:
-                    log.warning("kiosk_child_sigterm_timeout", pid=proc.pid)
-                    try:
-                        proc.kill()
-                        await proc.wait()
-                        log.warning("kiosk_child_killed", rc=proc.returncode)
-                    except ProcessLookupError:
-                        pass
-
-        # cage may leave an orphaned chromium-browser process when it is
-        # torn down under load. Sweep both names best-effort so systemd
-        # sees a clean exit. Idempotent: pkill returns non-zero when
-        # nothing matched, which is fine. Skipped inside a running desktop,
-        # where a broad chromium pkill would also kill the operator's own
-        # browser windows — there, terminating our own child (a Chromium that
-        # shuts its tree down on SIGTERM) is enough.
-        if self._sweep_orphans_enabled:
-            await self._sweep_orphans()
-
-    async def _sweep_orphans(self) -> None:
-        """Best-effort pkill sweep of cage and chromium-browser children."""
-        for name, first_sig in (("cage", "-TERM"), ("chromium", "-TERM")):
-            await self._run_pkill(first_sig, name)
-            await asyncio.sleep(1.0)
-            await self._run_pkill("-KILL", name)
-
-    @staticmethod
-    async def _run_pkill(sig: str, name: str) -> None:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "pkill",
-                sig,
-                "-f",
-                name,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3.0)
-            except TimeoutError:
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
-        except (FileNotFoundError, OSError) as exc:
-            log.debug("kiosk_pkill_skipped", sig=sig, name=name, error=str(exc))
-
-    def _record_crash_and_check(self) -> bool:
-        """Append now() to crash log, prune outside window. Return True if under limit."""
-        now = time.monotonic()
-        self._crash_times.append(now)
-        self._crash_times = [
-            t for t in self._crash_times if (now - t) <= _CRASH_WINDOW_SECONDS
-        ]
-        return len(self._crash_times) < _CRASH_LIMIT
-
-    @staticmethod
-    def _tail_bytes(data: bytes, limit: int = _STDERR_TAIL_BYTES) -> str:
-        if not data:
-            return ""
-        trimmed = data[-limit:]
-        try:
-            return trimmed.decode("utf-8", errors="replace").strip()
-        except Exception:
-            return ""
-
-    async def _stream_stderr(self, proc: Any) -> None:
-        """Forward the child's stderr to the journal line by line, and keep the
-        rolling tail the GPU-downgrade heuristic reads.
-
-        Bounded on purpose: a browser can be extremely chatty, and the point is
-        to make a failure visible, not to relay every frame's worth of noise
-        onto a flash-backed journal.
-        """
-        if proc.stderr is None:
-            return
-        seen = 0
-        recent: list[str] = []
-        try:
-            while True:
-                raw = await proc.stderr.readline()
-                if not raw:
-                    break
-                line = raw.decode("utf-8", errors="replace").rstrip()
-                if not line:
-                    continue
-                recent.append(line)
-                if len(recent) > 40:
-                    recent.pop(0)
-                self.last_stderr_tail = "\n".join(recent)[-_STDERR_TAIL_BYTES:]
-                if seen < _STDERR_LOG_LINE_LIMIT:
-                    log.warning("kiosk_child_stderr", line=line[:400])
-                elif seen == _STDERR_LOG_LINE_LIMIT:
-                    log.warning(
-                        "kiosk_child_stderr_suppressed",
-                        msg=f"further child stderr suppressed after {seen} lines",
-                    )
-                seen += 1
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return
-
-    async def _watch_browser(self, proc: Any) -> None:
-        """Resolve once the BROWSER is gone while the compositor is still up.
-
-        Only meaningful on the cage path, where the supervisor's child is the
-        compositor and the browser is its grandchild. On the windowed path the
-        child IS the browser, so `proc.wait()` already covers it and this never
-        fires.
-
-        The browser is given a grace period to appear: it is spawned by cage, so
-        it is legitimately absent for a moment right after launch.
-        """
-        if not self._sweep_orphans_enabled:
-            return  # windowed path: the child is the browser itself
-        await asyncio.sleep(_BROWSER_START_GRACE_SECONDS)
-        while True:
-            if proc.returncode is not None:
-                return  # the compositor went first; the normal path handles it
-            if not await asyncio.to_thread(_browser_running):
-                return
-            await asyncio.sleep(_BROWSER_POLL_SECONDS)
-
-    async def _apply_output_mode(self) -> None:
-        """Set the configured mode on every connected output inside cage.
-
-        Uses ``wlr-randr`` over cage's Wayland socket (cage implements the
-        wlr-output-management protocol it drives). Retried on a fixed interval
-        until the compositor's socket answers or the wait expires; an output that
-        does not advertise the mode keeps the one cage picked. Inert on the
-        windowed path, where the desktop owns its display settings.
-        """
-        mode = self._output_mode
-        if mode is None or not self._sweep_orphans_enabled:
-            return
-        runtime_dir = (self._env or {}).get("XDG_RUNTIME_DIR", _CAGE_RUNTIME_DIR)
-        pending: set[str] = set()
-        for name, modes in _connected_outputs().items():
-            if mode in modes:
-                pending.add(name)
-            else:
-                log.warning("kiosk_output_mode_unsupported", output=name, mode=mode)
-        deadline = time.monotonic() + _OUTPUT_MODE_WAIT_SECONDS
-        last_error = "compositor socket never appeared"
-        while pending and time.monotonic() < deadline:
-            sockets = _wayland_sockets(runtime_dir)
-            if sockets:
-                env = {
-                    **os.environ,
-                    **(self._env or {}),
-                    "WAYLAND_DISPLAY": sockets[0],
-                }
-                env.pop("DISPLAY", None)
-                for name in sorted(pending):
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            "wlr-randr",
-                            "--output",
-                            name,
-                            "--mode",
-                            mode,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.PIPE,
-                            env=env,
-                        )
-                    except OSError as exc:
-                        log.warning(
-                            "kiosk_output_mode_unavailable",
-                            mode=mode,
-                            error=str(exc),
-                        )
-                        return
-                    _out, err = await proc.communicate()
-                    if proc.returncode == 0:
-                        log.info("kiosk_output_mode_applied", output=name, mode=mode)
-                        pending.discard(name)
-                    else:
-                        last_error = err.decode("utf-8", errors="replace").strip()
-            if pending:
-                await asyncio.sleep(_OUTPUT_MODE_POLL_SECONDS)
-        for name in sorted(pending):
-            log.warning(
-                "kiosk_output_mode_failed", output=name, mode=mode, error=last_error
-            )
-
-    async def run(self) -> int:
-        """Supervise loop. Returns process exit code or 0 on clean stop."""
-        while not self._stop.is_set():
-            try:
-                self._proc = await self._spawn()
-            except FileNotFoundError as exc:
-                log.error("kiosk_binary_missing", error=str(exc))
-                return 3
-            except Exception as exc:
-                log.error("kiosk_spawn_failed", error=str(exc))
-                return 4
-
-            proc = self._proc
-            log.info("kiosk_child_running", pid=proc.pid)
-
-            wait_task = asyncio.create_task(proc.wait(), name="kiosk_child_wait")
-            stop_task = asyncio.create_task(self._stop.wait(), name="kiosk_stop_wait")
-            # Drain the child's stderr WHILE it runs, not only when it exits.
-            #
-            # A compositor that stays up with a broken browser inside it never
-            # exits, so an exit-time read never happens and the error is never
-            # seen. That is exactly how a black panel presented as a healthy
-            # unit: the last journal line was `kiosk_child_running`, and the GPU
-            # initialization error that caused it was only visible by running
-            # the argv by hand.
-            drain_task = asyncio.create_task(
-                self._stream_stderr(proc), name="kiosk_child_stderr"
-            )
-            # And watch the BROWSER, not just the compositor we launched. The
-            # supervisor's child is `cage`; the browser is its grandchild, so a
-            # dead browser under a live cage is invisible to `proc.wait()`.
-            browser_task = asyncio.create_task(
-                self._watch_browser(proc), name="kiosk_browser_watch"
-            )
-            # Apply the configured output mode once the compositor is up. cage
-            # picks the preferred mode on every launch, so this runs per spawn.
-            mode_task = asyncio.create_task(
-                self._apply_output_mode(), name="kiosk_output_mode"
-            )
-            done, pending = await asyncio.wait(
-                {wait_task, stop_task, browser_task},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if browser_task in done and wait_task not in done and stop_task not in done:
-                # The compositor is still alive but has nothing to show. Treat it
-                # as a crash so the existing retry + GPU-downgrade machinery
-                # handles it, rather than leaving a black screen reading healthy.
-                log.error(
-                    "kiosk_browser_vanished",
-                    msg="the browser exited while the compositor stayed up; restarting",
-                    stderr_tail=self.last_stderr_tail,
-                )
-                for t in pending:
-                    t.cancel()
-                drain_task.cancel()
-                mode_task.cancel()
-                await self._graceful_kill(proc)
-                self._record_crash_and_check()
-                await asyncio.sleep(_RETRY_SECONDS)
-                continue
-            drain_task.cancel()
-            mode_task.cancel()
-
-            if stop_task in done:
-                for t in pending:
-                    t.cancel()
-                await self._graceful_kill(proc)
-                log.info("kiosk_supervisor_stopping")
-                return 0
-
-            # Child exited on its own.
-            for t in pending:
-                t.cancel()
-
-            rc = proc.returncode if proc.returncode is not None else -1
-            stderr_data = b""
-            try:
-                if proc.stderr is not None:
-                    stderr_data = await asyncio.wait_for(proc.stderr.read(), timeout=1.0)
-            except Exception:
-                pass
-            stderr_tail = self._tail_bytes(stderr_data)
-            self.last_stderr_tail = stderr_tail
-
-            under_limit = self._record_crash_and_check()
-            log.warning(
-                "kiosk_child_exited",
-                rc=rc,
-                stderr_tail=stderr_tail,
-                crashes_in_window=len(self._crash_times),
-            )
-
-            if not under_limit:
-                self.crash_looped = True
-                log.error(
-                    "kiosk_crash_loop_guard",
-                    msg="5 crashes in 60s, stopping restart loop",
-                    last_rc=rc,
-                )
-                # Never 0: the unit's RestartPreventExitStatus=0 would treat a
-                # child that keeps exiting cleanly as "nothing to do" and leave
-                # the panel black until a reboot.
-                return rc if rc > 0 else 5
-
-            try:
-                await asyncio.wait_for(self._stop.wait(), timeout=_RETRY_SECONDS)
-                # If stop fires during the retry wait, exit cleanly.
-                return 0
-            except TimeoutError:
-                pass
-
-        return 0
-
-
-def _browser_running() -> bool:
-    """True when a process whose executable is a known browser binary is live.
-
-    Matched on each process's argv[0] basename, never on the whole command
-    line: the compositor is launched as ``cage -- /usr/bin/chromium ...``, so a
-    full-command-line match (``pgrep -f chromium``) finds cage itself and
-    reports a live browser for as long as the compositor lives.
-
-    Errs toward TRUE on any uncertainty (ps missing or failing): a false "the
-    browser is gone" would restart a working kiosk, which is worse than missing
-    one failure.
-    """
-    try:
-        res = subprocess.run(  # noqa: S603
-            ["ps", "-A", "-o", "args="],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return True
-    if res.returncode != 0:
-        return True
-    for line in res.stdout.splitlines():
-        argv0 = line.strip().split(" ", 1)[0]
-        if os.path.basename(argv0) in _BROWSER_CANDIDATES:
-            return True
-    return False
-
-
-def _looks_gpu_failure(stderr_tail: str) -> bool:
-    """True when a child's stderr tail carries a GPU/EGL/renderer-init failure
-    marker — a diagnostic hint for the GPU->software downgrade (the downgrade
-    itself does not depend on it)."""
-    low = stderr_tail.lower()
-    return any(marker in low for marker in _GPU_FAILURE_MARKERS)
-
-
-def _make_supervisor(
-    url: str,
-    session: DesktopSession | None,
-    renderer: str,
-    mali_lib_dir: str | None,
-    output_mode: str | None = None,
-) -> KioskSupervisor:
-    """Build the supervisor for the current (session, renderer) combination.
-
-    Windowed (a live desktop is present) attaches to that session's display
-    server and honours the resolved ``renderer``, exactly as the cage path does.
-
-    This deliberately does NOT force software any more. It used to, on the
-    reasoning that a desktop owns its own GL stack which our scoped GPU
-    userspace does not provision, so a desktop on a GPU-less board is on
-    llvmpipe anyway. That holds for the boards the argument was written for — a
-    Rockchip whose GL comes from our scoped libmali — but not for a board whose
-    distro ships a real GL and video stack of its own. On a Raspberry Pi the
-    desktop runs Mesa v3d with hardware decode on /dev/video10, and forcing
-    ``--disable-gpu`` there threw all of it away: the ground station's HDMI
-    cockpit software-decoded H.264 at ~113% CPU across four Chromium processes
-    on four cores, which presents to the operator as a frozen picture while the
-    stream underneath is perfectly healthy.
-
-    Passing the resolved renderer is safe because the GPU choice is not final:
-    a child that fails to bring up GL is downgraded to software by the
-    supervisor's existing GPU-failure path, so a board that genuinely cannot
-    drive a GPU still ends up rendering rather than crash-looping.
-
-    cage (the appliance case) owns the display, with DISPLAY / WAYLAND_DISPLAY
-    stripped and the renderer / DRM device / scoped libmali pinned. Raises
-    ``FileNotFoundError`` when no Chromium is installed."""
-    if session is not None:
-        argv = _build_windowed_chromium_argv(
-            url,
-            session.session_type,
-            renderer,
-            # Under the session user's own runtime dir. logind creates it for
-            # any active session, so a graphical session always has one, and it
-            # is owned by the user the child is dropped to — which a dir under
-            # the agent's root-owned runtime tree would not be.
-            f"/run/user/{session.uid}/{_KIOSK_STORAGE_SUBDIR}",
-        )
-        # Run the browser AS the logged-in desktop user (not root): Chromium
-        # refuses to run as root without --no-sandbox, and dropping to the user
-        # keeps its sandbox and gives it a writable profile (HOME from
-        # _session_env).
-        return KioskSupervisor(
-            argv,
-            env=_session_env(session),
-            sweep_orphans=False,
-            run_as_uid=session.uid,
-        )
-    # Chromium will not start when the parent of --user-data-dir is absent, and
-    # this one lives in a tmpfs that is empty on every boot, so create it here
-    # rather than assuming. Running as root under cage, this is ours to make.
-    try:
-        os.makedirs(_CAGE_STORAGE_DIR, exist_ok=True)
-    except OSError as exc:  # pragma: no cover - filesystem-dependent
-        log.warning(
-            "kiosk_storage_dir_unavailable",
-            path=_CAGE_STORAGE_DIR,
-            error=str(exc),
-        )
-    # cage refuses to bind its Wayland socket if XDG_RUNTIME_DIR is absent, and
-    # the unit's /run/user/0 does not exist for a system service. 0700 because
-    # the XDG spec requires it and libwayland complains otherwise.
-    try:
-        os.makedirs(_CAGE_RUNTIME_DIR, mode=0o700, exist_ok=True)
-        os.chmod(_CAGE_RUNTIME_DIR, 0o700)
-    except OSError as exc:  # pragma: no cover - filesystem-dependent
-        log.warning(
-            "kiosk_runtime_dir_unavailable",
-            path=_CAGE_RUNTIME_DIR,
-            error=str(exc),
-        )
-    argv = _build_chromium_argv(url, renderer)
-    return KioskSupervisor(
-        argv,
-        env=_cage_env(renderer, mali_lib_dir),
-        env_unset=frozenset({"DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"}),
-        output_mode=output_mode,
-    )
+from ados.services.kiosk.config_watch import (
+    _DEFAULT_URL as _DEFAULT_URL,
+)
+from ados.services.kiosk.config_watch import (
+    _ENV_MINIMAL_KEY as _ENV_MINIMAL_KEY,
+)
+from ados.services.kiosk.config_watch import (
+    _ENV_URL_KEY as _ENV_URL_KEY,
+)
+from ados.services.kiosk.config_watch import (
+    _RESOLUTION_MODES as _RESOLUTION_MODES,
+)
+from ados.services.kiosk.config_watch import (
+    KioskSettings as KioskSettings,
+)
+from ados.services.kiosk.config_watch import (
+    _config_signature as _config_signature,
+)
+from ados.services.kiosk.config_watch import (
+    _display_selection as _display_selection,
+)
+from ados.services.kiosk.config_watch import (
+    _get_kiosk_config as _get_kiosk_config,
+)
+from ados.services.kiosk.config_watch import (
+    _kiosk_settings as _kiosk_settings,
+)
+from ados.services.kiosk.config_watch import (
+    _resolve_target_url as _resolve_target_url,
+)
+from ados.services.kiosk.config_watch import (
+    _SettingsWatch as _SettingsWatch,
+)
+from ados.services.kiosk.config_watch import (
+    _stop_on_settings_change as _stop_on_settings_change,
+)
+from ados.services.kiosk.desktop_session import (
+    _DISPLAY_MANAGERS as _DISPLAY_MANAGERS,
+)
+from ados.services.kiosk.desktop_session import (
+    _GRAPHICAL_SESSION_TYPES as _GRAPHICAL_SESSION_TYPES,
+)
+from ados.services.kiosk.desktop_session import (
+    _SESSION_POLL_SECONDS as _SESSION_POLL_SECONDS,
+)
+from ados.services.kiosk.desktop_session import (
+    _SESSION_WAIT_SECONDS as _SESSION_WAIT_SECONDS,
+)
+from ados.services.kiosk.desktop_session import (
+    DesktopSession as DesktopSession,
+)
+from ados.services.kiosk.desktop_session import (
+    _detect_desktop_session as _detect_desktop_session,
+)
+from ados.services.kiosk.desktop_session import (
+    _detect_ready_session as _detect_ready_session,
+)
+from ados.services.kiosk.desktop_session import (
+    _display_manager_active as _display_manager_active,
+)
+from ados.services.kiosk.desktop_session import (
+    _loginctl_session_props as _loginctl_session_props,
+)
+from ados.services.kiosk.desktop_session import (
+    _loginctl_sessions as _loginctl_sessions,
+)
+from ados.services.kiosk.desktop_session import (
+    _resolve_desktop_session as _resolve_desktop_session,
+)
+from ados.services.kiosk.desktop_session import (
+    _session_env as _session_env,
+)
+from ados.services.kiosk.desktop_session import (
+    _session_socket_ready as _session_socket_ready,
+)
+from ados.services.kiosk.desktop_session import (
+    _wayland_display_for as _wayland_display_for,
+)
+from ados.services.kiosk.desktop_session import (
+    _wayland_sockets as _wayland_sockets,
+)
+from ados.services.kiosk.desktop_session import (
+    _xauthority_for as _xauthority_for,
+)
+from ados.services.kiosk.display_probe import (
+    _DISPLAY_POLL_SECONDS as _DISPLAY_POLL_SECONDS,
+)
+from ados.services.kiosk.display_probe import (
+    _DRM_CARD_PATH as _DRM_CARD_PATH,
+)
+from ados.services.kiosk.display_probe import (
+    _DRM_DEVICE as _DRM_DEVICE,
+)
+from ados.services.kiosk.display_probe import (
+    _DRM_DIR as _DRM_DIR,
+)
+from ados.services.kiosk.display_probe import (
+    _DRM_SYSFS as _DRM_SYSFS,
+)
+from ados.services.kiosk.display_probe import (
+    _URL_POLL_SECONDS as _URL_POLL_SECONDS,
+)
+from ados.services.kiosk.display_probe import (
+    _URL_PROBE_TIMEOUT as _URL_PROBE_TIMEOUT,
+)
+from ados.services.kiosk.display_probe import (
+    _URL_WAIT_SECONDS as _URL_WAIT_SECONDS,
+)
+from ados.services.kiosk.display_probe import (
+    _connected_outputs as _connected_outputs,
+)
+from ados.services.kiosk.display_probe import (
+    _hdmi_present as _hdmi_present,
+)
+from ados.services.kiosk.display_probe import (
+    _resolve_drm_device as _resolve_drm_device,
+)
+from ados.services.kiosk.display_probe import (
+    _url_serving as _url_serving,
+)
+from ados.services.kiosk.display_probe import (
+    _wait_for_display as _wait_for_display,
+)
+from ados.services.kiosk.display_probe import (
+    _wait_for_url as _wait_for_url,
+)
+from ados.services.kiosk.display_probe import (
+    hdmi_present as hdmi_present,
+)
+from ados.services.kiosk.factory import _make_supervisor as _make_supervisor
+from ados.services.kiosk.launcher import (
+    _BROWSER_CANDIDATES as _BROWSER_CANDIDATES,
+)
+from ados.services.kiosk.launcher import (
+    _CAGE_RUNTIME_DIR as _CAGE_RUNTIME_DIR,
+)
+from ados.services.kiosk.launcher import (
+    _CAGE_STORAGE_DIR as _CAGE_STORAGE_DIR,
+)
+from ados.services.kiosk.launcher import (
+    _DISK_CACHE_BYTES as _DISK_CACHE_BYTES,
+)
+from ados.services.kiosk.launcher import (
+    _ENV_RENDERER_KEY as _ENV_RENDERER_KEY,
+)
+from ados.services.kiosk.launcher import (
+    _KIOSK_STORAGE_SUBDIR as _KIOSK_STORAGE_SUBDIR,
+)
+from ados.services.kiosk.launcher import (
+    _RENDER_MARKER_PATH as _RENDER_MARKER_PATH,
+)
+from ados.services.kiosk.launcher import (
+    _RENDERER_GPU as _RENDERER_GPU,
+)
+from ados.services.kiosk.launcher import (
+    _RENDERER_SOFTWARE as _RENDERER_SOFTWARE,
+)
+from ados.services.kiosk.launcher import (
+    _build_chromium_argv as _build_chromium_argv,
+)
+from ados.services.kiosk.launcher import (
+    _build_windowed_chromium_argv as _build_windowed_chromium_argv,
+)
+from ados.services.kiosk.launcher import (
+    _cage_env as _cage_env,
+)
+from ados.services.kiosk.launcher import (
+    _chromium_render_flags as _chromium_render_flags,
+)
+from ados.services.kiosk.launcher import (
+    _chromium_storage_flags as _chromium_storage_flags,
+)
+from ados.services.kiosk.launcher import (
+    _normalise_renderer as _normalise_renderer,
+)
+from ados.services.kiosk.launcher import (
+    _read_render_marker as _read_render_marker,
+)
+from ados.services.kiosk.launcher import (
+    _resolve_browser_binary as _resolve_browser_binary,
+)
+from ados.services.kiosk.launcher import (
+    _resolve_render_plan as _resolve_render_plan,
+)
+from ados.services.kiosk.supervisor import (
+    _BROWSER_POLL_SECONDS as _BROWSER_POLL_SECONDS,
+)
+from ados.services.kiosk.supervisor import (
+    _BROWSER_START_GRACE_SECONDS as _BROWSER_START_GRACE_SECONDS,
+)
+from ados.services.kiosk.supervisor import (
+    _CRASH_LIMIT as _CRASH_LIMIT,
+)
+from ados.services.kiosk.supervisor import (
+    _CRASH_WINDOW_SECONDS as _CRASH_WINDOW_SECONDS,
+)
+from ados.services.kiosk.supervisor import (
+    _GPU_FAILURE_MARKERS as _GPU_FAILURE_MARKERS,
+)
+from ados.services.kiosk.supervisor import (
+    _OUTPUT_MODE_POLL_SECONDS as _OUTPUT_MODE_POLL_SECONDS,
+)
+from ados.services.kiosk.supervisor import (
+    _OUTPUT_MODE_WAIT_SECONDS as _OUTPUT_MODE_WAIT_SECONDS,
+)
+from ados.services.kiosk.supervisor import (
+    _RETRY_SECONDS as _RETRY_SECONDS,
+)
+from ados.services.kiosk.supervisor import (
+    _SHUTDOWN_GRACE_SECONDS as _SHUTDOWN_GRACE_SECONDS,
+)
+from ados.services.kiosk.supervisor import (
+    _STDERR_LOG_LINE_LIMIT as _STDERR_LOG_LINE_LIMIT,
+)
+from ados.services.kiosk.supervisor import (
+    _STDERR_TAIL_BYTES as _STDERR_TAIL_BYTES,
+)
+from ados.services.kiosk.supervisor import (
+    KioskSupervisor as KioskSupervisor,
+)
+from ados.services.kiosk.supervisor import (
+    _browser_running as _browser_running,
+)
+from ados.services.kiosk.supervisor import (
+    _looks_gpu_failure as _looks_gpu_failure,
+)
 
 
 async def _amain() -> int:

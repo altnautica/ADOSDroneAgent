@@ -18,7 +18,13 @@ from unittest.mock import patch
 
 import pytest
 
+from ados.services.kiosk import config_watch as cw
+from ados.services.kiosk import desktop_session as ds
+from ados.services.kiosk import display_probe as dp
+from ados.services.kiosk import factory as fac
 from ados.services.kiosk import kiosk_service as ks
+from ados.services.kiosk import launcher as ln
+from ados.services.kiosk import supervisor as sv
 from ados.services.kiosk.kiosk_service import (
     KioskSupervisor,
     _build_chromium_argv,
@@ -138,7 +144,7 @@ def test_hdmi_present_true_when_a_connector_is_connected(tmp_path: Any) -> None:
     sysfs, dev = _drm_dirs(
         tmp_path, {"card1-HDMI-A-1": "connected", "card1-HDMI-A-2": "disconnected"}, ["card0", "card1"]
     )
-    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+    with patch.object(dp, "_DRM_SYSFS", sysfs), patch.object(dp, "_DRM_DIR", dev):
         assert _hdmi_present() is True
 
 
@@ -152,13 +158,13 @@ def test_resolve_drm_device_picks_the_card_that_drives_the_display(tmp_path: Any
         {"card1-HDMI-A-1": "connected", "card1-HDMI-A-2": "disconnected"},
         ["card0", "card1"],
     )
-    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+    with patch.object(dp, "_DRM_SYSFS", sysfs), patch.object(dp, "_DRM_DIR", dev):
         assert ks._resolve_drm_device() == str(dev / "card1")
 
 
 def test_resolve_drm_device_falls_back_when_nothing_is_connected(tmp_path: Any) -> None:
     sysfs, dev = _drm_dirs(tmp_path, {"card0-HDMI-A-1": "disconnected"}, ["card0"])
-    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+    with patch.object(dp, "_DRM_SYSFS", sysfs), patch.object(dp, "_DRM_DIR", dev):
         assert ks._resolve_drm_device() == ks._DRM_DEVICE
 
 
@@ -168,7 +174,7 @@ def test_resolve_drm_device_ignores_a_connector_whose_card_node_is_absent(
     # A connected connector on a card with no /dev/dri node is not a device we
     # can hand to a compositor.
     sysfs, dev = _drm_dirs(tmp_path, {"card9-HDMI-A-1": "connected"}, ["card0"])
-    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+    with patch.object(dp, "_DRM_SYSFS", sysfs), patch.object(dp, "_DRM_DIR", dev):
         assert ks._resolve_drm_device() == ks._DRM_DEVICE
 
 
@@ -183,13 +189,13 @@ def test_hdmi_present_true_fallback_when_card_node_exists(tmp_path: Any) -> None
     # No connector status readable, but a DRM card node exists -> the subsystem
     # is up, so proceed (fallback).
     sysfs, dev = _drm_dirs(tmp_path, {}, ["card0"])
-    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+    with patch.object(dp, "_DRM_SYSFS", sysfs), patch.object(dp, "_DRM_DIR", dev):
         assert _hdmi_present() is True
 
 
 def test_hdmi_present_false_when_no_drm(tmp_path: Any) -> None:
     sysfs, dev = _drm_dirs(tmp_path, {"card1-HDMI-A-1": "disconnected"}, [])
-    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+    with patch.object(dp, "_DRM_SYSFS", sysfs), patch.object(dp, "_DRM_DIR", dev):
         assert _hdmi_present() is False
 
 
@@ -197,7 +203,7 @@ def _watch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any, *, enabled: bool = True
 ) -> ks._SettingsWatch:
     """A settings watch over a config file under tmp_path (absent at start)."""
-    monkeypatch.setattr(ks, "CONFIG_YAML", tmp_path / "config.yaml")
+    monkeypatch.setattr(cw, "CONFIG_YAML", tmp_path / "config.yaml")
     return ks._SettingsWatch(ks.KioskSettings(enabled=enabled, output_mode=None), None)
 
 
@@ -205,7 +211,7 @@ def _watch(
 async def test_wait_for_display_returns_immediately_when_present(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    with patch.object(ks, "_hdmi_present", return_value=True):
+    with patch.object(dp, "_hdmi_present", return_value=True):
         assert await ks._wait_for_display(_watch(monkeypatch, tmp_path)) is True
 
 
@@ -215,9 +221,9 @@ async def test_wait_for_display_never_gives_up_while_headless(
 ) -> None:
     """A monitor plugged in long after boot must still get the kiosk, so a
     headless box keeps polling instead of returning after a deadline."""
-    monkeypatch.setattr(ks, "_DISPLAY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(dp, "_DISPLAY_POLL_SECONDS", 0.01)
     watch = _watch(monkeypatch, tmp_path)
-    with patch.object(ks, "_hdmi_present", return_value=False):
+    with patch.object(dp, "_hdmi_present", return_value=False):
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(ks._wait_for_display(watch), timeout=0.3)
 
@@ -226,14 +232,14 @@ async def test_wait_for_display_never_gives_up_while_headless(
 async def test_wait_for_display_appears_after_poll(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    monkeypatch.setattr(ks, "_DISPLAY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(dp, "_DISPLAY_POLL_SECONDS", 0.01)
     calls = {"n": 0}
 
     def _present() -> bool:
         calls["n"] += 1
         return calls["n"] >= 3  # appears on the 3rd check
 
-    with patch.object(ks, "_hdmi_present", side_effect=_present):
+    with patch.object(dp, "_hdmi_present", side_effect=_present):
         assert await ks._wait_for_display(_watch(monkeypatch, tmp_path)) is True
 
 
@@ -241,11 +247,11 @@ async def test_wait_for_display_appears_after_poll(
 async def test_wait_for_display_stands_down_when_kiosk_disabled_meanwhile(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
-    monkeypatch.setattr(ks, "_DISPLAY_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(dp, "_DISPLAY_POLL_SECONDS", 0.01)
     watch = _watch(monkeypatch, tmp_path)
     (tmp_path / "config.yaml").write_text("ground_station: {}\n")
-    monkeypatch.setattr(ks, "load_config", lambda: _config_with_kiosk_settings(False))
-    with patch.object(ks, "_hdmi_present", return_value=False):
+    monkeypatch.setattr(cw, "load_config", lambda: _config_with_kiosk_settings(False))
+    with patch.object(dp, "_hdmi_present", return_value=False):
         assert await asyncio.wait_for(ks._wait_for_display(watch), timeout=2.0) is False
 
 
@@ -296,29 +302,29 @@ def test_url_serving_false_on_connection_refused() -> None:
 
 @pytest.mark.asyncio
 async def test_wait_for_url_returns_immediately_when_serving() -> None:
-    with patch.object(ks, "_url_serving", return_value=True):
+    with patch.object(dp, "_url_serving", return_value=True):
         assert await ks._wait_for_url("http://localhost:8080/cockpit") is True
 
 
 @pytest.mark.asyncio
 async def test_wait_for_url_serves_after_poll(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "_URL_WAIT_SECONDS", 1.0)
-    monkeypatch.setattr(ks, "_URL_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(dp, "_URL_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(dp, "_URL_POLL_SECONDS", 0.01)
     calls = {"n": 0}
 
     def _serving(_url: str) -> bool:
         calls["n"] += 1
         return calls["n"] >= 3  # serves on the 3rd probe (the boot race)
 
-    with patch.object(ks, "_url_serving", side_effect=_serving):
+    with patch.object(dp, "_url_serving", side_effect=_serving):
         assert await ks._wait_for_url("http://localhost:8080/cockpit") is True
 
 
 @pytest.mark.asyncio
 async def test_wait_for_url_times_out_launches_anyway(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ks, "_URL_WAIT_SECONDS", 0.05)
-    monkeypatch.setattr(ks, "_URL_POLL_SECONDS", 0.01)
-    with patch.object(ks, "_url_serving", return_value=False):
+    monkeypatch.setattr(dp, "_URL_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(dp, "_URL_POLL_SECONDS", 0.01)
+    with patch.object(dp, "_url_serving", return_value=False):
         # False -> the caller launches the browser anyway (best-effort).
         assert await ks._wait_for_url("http://localhost:8080/cockpit") is False
 
@@ -430,7 +436,7 @@ def test_resolve_target_url_env_can_force_full_layer(
 def test_build_chromium_argv_invokes_cage_and_resolved_browser() -> None:
     # The browser binary is resolved at runtime (its name varies by distro), so the
     # third argv slot is whatever `_resolve_browser_binary` returns.
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = _build_chromium_argv("http://target/hud", ks._RENDERER_SOFTWARE)
     assert argv[0] == "cage"
     assert argv[1] == "--"
@@ -445,7 +451,7 @@ def test_build_chromium_argv_invokes_cage_and_resolved_browser() -> None:
 def test_build_chromium_argv_software_disables_gpu() -> None:
     """Software renderer -> --disable-gpu, and NO EGL/GPU-raster flags (so
     Chromium never opens a GPU EGL that the box cannot drive)."""
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = _build_chromium_argv("http://x", ks._RENDERER_SOFTWARE)
     assert "--disable-gpu" in argv
     assert not any(a.startswith(("--use-gl", "--gl=", "--use-angle")) for a in argv)
@@ -454,7 +460,7 @@ def test_build_chromium_argv_software_disables_gpu() -> None:
 
 def test_build_chromium_argv_gpu_names_no_gl_implementation() -> None:
     """GPU renderer -> let Chromium choose, and NOT --disable-gpu."""
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = _build_chromium_argv("http://x", ks._RENDERER_GPU)
     assert not any(a.startswith(("--use-gl", "--gl=", "--use-angle")) for a in argv), (
         "the GPU path must not hardcode a GL implementation name — that is what broke"
@@ -489,7 +495,7 @@ def test_resolve_browser_binary_raises_naming_every_candidate() -> None:
 
 
 def test_windowed_argv_wayland_has_no_cage_and_wayland_platform() -> None:
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = ks._build_windowed_chromium_argv(
             "http://target/cockpit", "wayland", ks._RENDERER_SOFTWARE, "/run/user/1000"
         )
@@ -506,7 +512,7 @@ def test_cage_argv_keeps_browser_storage_off_the_card() -> None:
     # /root/.cache and /root/.config — on the SD card, unbounded, and rewritten
     # continuously because the cockpit is a live SPA with a video stream. A
     # ground station runs that page for its whole life.
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = _build_chromium_argv("http://target/cockpit", ks._RENDERER_SOFTWARE)
 
     assert f"--user-data-dir={ks._CAGE_STORAGE_DIR}/profile" in argv
@@ -526,7 +532,7 @@ def test_windowed_argv_scopes_storage_to_the_session_runtime_dir() -> None:
     # Same reasoning, plus one of its own: a kiosk that shares a profile
     # directory with the desktop user's own browser collides with a Chromium
     # the operator already has open.
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = ks._build_windowed_chromium_argv(
             "http://target/cockpit",
             "wayland",
@@ -539,7 +545,7 @@ def test_windowed_argv_scopes_storage_to_the_session_runtime_dir() -> None:
 
 
 def test_windowed_argv_x11_uses_x11_platform() -> None:
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         argv = ks._build_windowed_chromium_argv(
             "http://target/cockpit", "x11", ks._RENDERER_SOFTWARE, "/run/user/1000"
         )
@@ -561,8 +567,8 @@ def test_windowed_supervisor_honours_the_resolved_gpu_renderer() -> None:
     session = ks.DesktopSession(
         uid=1000, session_type="wayland", display=None, wayland_display="wayland-0"
     )
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
-        with patch.object(ks, "_session_env", return_value={}):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        with patch.object(fac, "_session_env", return_value={}):
             sup = ks._make_supervisor(
                 "http://target/cockpit", session, ks._RENDERER_GPU, None
             )
@@ -581,8 +587,8 @@ def test_windowed_supervisor_still_passes_software_when_resolved_software() -> N
     session = ks.DesktopSession(
         uid=1000, session_type="wayland", display=None, wayland_display="wayland-0"
     )
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
-        with patch.object(ks, "_session_env", return_value={}):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        with patch.object(fac, "_session_env", return_value={}):
             sup = ks._make_supervisor(
                 "http://target/cockpit", session, ks._RENDERER_SOFTWARE, None
             )
@@ -600,8 +606,8 @@ def test_detect_desktop_session_returns_active_wayland_session() -> None:
         "User": "1000",
         "Display": "",
     }
-    with patch.object(ks, "_loginctl_sessions", return_value=["c1"]):
-        with patch.object(ks, "_loginctl_session_props", return_value=props):
+    with patch.object(ds, "_loginctl_sessions", return_value=["c1"]):
+        with patch.object(ds, "_loginctl_session_props", return_value=props):
             session = ks._detect_desktop_session()
     assert session is not None
     assert session.session_type == "wayland"
@@ -616,8 +622,8 @@ def test_detect_desktop_session_returns_x11_session_with_display() -> None:
         "User": "1000",
         "Display": ":0",
     }
-    with patch.object(ks, "_loginctl_sessions", return_value=["c1"]):
-        with patch.object(ks, "_loginctl_session_props", return_value=props):
+    with patch.object(ds, "_loginctl_sessions", return_value=["c1"]):
+        with patch.object(ds, "_loginctl_session_props", return_value=props):
             session = ks._detect_desktop_session()
     assert session is not None
     assert session.session_type == "x11"
@@ -627,8 +633,8 @@ def test_detect_desktop_session_returns_x11_session_with_display() -> None:
 def test_detect_desktop_session_none_when_only_tty_sessions() -> None:
     """A bare tty (non-graphical) session must not be treated as a desktop."""
     props = {"Type": "tty", "Active": "yes", "Remote": "no", "User": "1000"}
-    with patch.object(ks, "_loginctl_sessions", return_value=["c1"]):
-        with patch.object(ks, "_loginctl_session_props", return_value=props):
+    with patch.object(ds, "_loginctl_sessions", return_value=["c1"]):
+        with patch.object(ds, "_loginctl_session_props", return_value=props):
             assert ks._detect_desktop_session() is None
 
 
@@ -640,8 +646,8 @@ def test_detect_desktop_session_skips_inactive_graphical_session() -> None:
         "Remote": "no",
         "User": "1000",
     }
-    with patch.object(ks, "_loginctl_sessions", return_value=["c1"]):
-        with patch.object(ks, "_loginctl_session_props", return_value=props):
+    with patch.object(ds, "_loginctl_sessions", return_value=["c1"]):
+        with patch.object(ds, "_loginctl_session_props", return_value=props):
             assert ks._detect_desktop_session() is None
 
 
@@ -663,7 +669,7 @@ def test_session_env_wayland_sets_wayland_display_and_runtime_dir() -> None:
 
 def test_session_env_x11_sets_display_and_xauthority() -> None:
     session = ks.DesktopSession(uid=1000, session_type="x11", display=":0", wayland_display=None)
-    with patch.object(ks, "_xauthority_for", return_value="/home/op/.Xauthority"):
+    with patch.object(ds, "_xauthority_for", return_value="/home/op/.Xauthority"):
         env = ks._session_env(session)
     assert env["DISPLAY"] == ":0"
     assert env["XAUTHORITY"] == "/home/op/.Xauthority"
@@ -800,7 +806,7 @@ async def test_supervisor_escalates_to_sigkill_when_terminate_ignored(
         return proc
 
     # Cut the grace window so the test stays fast.
-    monkeypatch.setattr(ks, "_SHUTDOWN_GRACE_SECONDS", 0.05)
+    monkeypatch.setattr(sv, "_SHUTDOWN_GRACE_SECONDS", 0.05)
 
     with patch("asyncio.create_subprocess_exec", _fake_exec):
         with patch.object(sup, "_sweep_orphans", new=_async_noop):
@@ -825,7 +831,7 @@ async def test_supervisor_crash_loop_guard_stops_after_5_in_60s(
         return _FakeProc(wait_result=2, wait_delay=0.0)
 
     # Zero out the retry wait so the loop runs at test speed.
-    monkeypatch.setattr(ks, "_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(sv, "_RETRY_SECONDS", 0.0)
 
     sup = KioskSupervisor(["cage", "--"])
     with patch("asyncio.create_subprocess_exec", _fake_exec):
@@ -877,20 +883,20 @@ def test_normalise_renderer_aliases() -> None:
 def test_read_render_marker_parses_renderer_and_lib_dir(tmp_path: Any) -> None:
     marker = tmp_path / "kiosk-render.conf"
     marker.write_text("# provisioned by installer\nrenderer: gpu\nlib_dir: /opt/ados/gpu/mali\n")
-    with patch.object(ks, "_RENDER_MARKER_PATH", marker):
+    with patch.object(ln, "_RENDER_MARKER_PATH", marker):
         renderer, lib_dir = ks._read_render_marker()
     assert renderer == ks._RENDERER_GPU
     assert lib_dir == "/opt/ados/gpu/mali"
 
 
 def test_read_render_marker_missing_file_returns_nones(tmp_path: Any) -> None:
-    with patch.object(ks, "_RENDER_MARKER_PATH", tmp_path / "absent.conf"):
+    with patch.object(ln, "_RENDER_MARKER_PATH", tmp_path / "absent.conf"):
         assert ks._read_render_marker() == (None, None)
 
 
 def test_resolve_render_plan_defaults_to_software(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ADOS_KIOSK_RENDERER", raising=False)
-    with patch.object(ks, "_read_render_marker", return_value=(None, None)):
+    with patch.object(ln, "_read_render_marker", return_value=(None, None)):
         assert ks._resolve_render_plan() == (ks._RENDERER_SOFTWARE, None)
 
 
@@ -898,7 +904,7 @@ def test_resolve_render_plan_env_override_software_wins(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("ADOS_KIOSK_RENDERER", "software")
-    with patch.object(ks, "_read_render_marker", return_value=(ks._RENDERER_GPU, "/x")):
+    with patch.object(ln, "_read_render_marker", return_value=(ks._RENDERER_GPU, "/x")):
         assert ks._resolve_render_plan() == (ks._RENDERER_SOFTWARE, None)
 
 
@@ -908,7 +914,7 @@ def test_resolve_render_plan_marker_gpu_requires_existing_lib_dir(
     monkeypatch.delenv("ADOS_KIOSK_RENDERER", raising=False)
     lib_dir = tmp_path / "mali"
     lib_dir.mkdir()
-    with patch.object(ks, "_read_render_marker", return_value=(ks._RENDERER_GPU, str(lib_dir))):
+    with patch.object(ln, "_read_render_marker", return_value=(ks._RENDERER_GPU, str(lib_dir))):
         assert ks._resolve_render_plan() == (ks._RENDERER_GPU, str(lib_dir))
 
 
@@ -918,7 +924,7 @@ def test_resolve_render_plan_marker_gpu_stale_lib_dir_falls_back(
     """A marker that says gpu but whose scoped lib dir is gone -> software."""
     monkeypatch.delenv("ADOS_KIOSK_RENDERER", raising=False)
     with patch.object(
-        ks, "_read_render_marker", return_value=(ks._RENDERER_GPU, "/opt/ados/gpu/gone")
+        ln, "_read_render_marker", return_value=(ks._RENDERER_GPU, "/opt/ados/gpu/gone")
     ):
         assert ks._resolve_render_plan() == (ks._RENDERER_SOFTWARE, None)
 
@@ -933,7 +939,7 @@ def pinned_drm(tmp_path: Any):
     that has one.
     """
     sysfs, dev = _drm_dirs(tmp_path, {"card0-HDMI-A-1": "connected"}, ["card0"])
-    with patch.object(ks, "_DRM_SYSFS", sysfs), patch.object(ks, "_DRM_DIR", dev):
+    with patch.object(dp, "_DRM_SYSFS", sysfs), patch.object(dp, "_DRM_DIR", dev):
         yield dev
 
 
@@ -1036,7 +1042,7 @@ async def test_spawn_env_unset_strips_display() -> None:
 
 
 def test_make_supervisor_cage_gpu_strips_display_and_scopes_libmali() -> None:
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         sup = ks._make_supervisor("http://x", None, ks._RENDERER_GPU, "/opt/ados/gpu/mali")
     assert sup._argv[0] == "cage"
     assert not any(a.startswith(("--use-gl", "--gl=", "--use-angle")) for a in sup._argv)
@@ -1060,9 +1066,9 @@ def test_make_supervisor_windowed_keeps_running_as_the_session_user() -> None:
     session = ks.DesktopSession(
         uid=1000, session_type="wayland", display=None, wayland_display="wayland-0"
     )
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
         with patch.object(
-            ks, "_session_env", return_value={"XDG_RUNTIME_DIR": "/run/user/1000"}
+            fac, "_session_env", return_value={"XDG_RUNTIME_DIR": "/run/user/1000"}
         ):
             sup = ks._make_supervisor(
                 "http://x", session, ks._RENDERER_GPU, "/opt/ados/gpu/mali"
@@ -1076,8 +1082,8 @@ def test_make_supervisor_windowed_runs_as_the_session_user() -> None:
     session = ks.DesktopSession(
         uid=1000, session_type="wayland", display=None, wayland_display="wayland-0"
     )
-    with patch.object(ks, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
-        with patch.object(ks, "_session_env", return_value={"XDG_RUNTIME_DIR": "/run/user/1000"}):
+    with patch.object(ln, "_resolve_browser_binary", return_value="/usr/bin/chromium"):
+        with patch.object(fac, "_session_env", return_value={"XDG_RUNTIME_DIR": "/run/user/1000"}):
             sup = ks._make_supervisor("http://x", session, ks._RENDERER_SOFTWARE, None)
     assert sup._run_as_uid == 1000
     assert "--no-sandbox" not in sup._argv  # runs as a user, keeps its sandbox
@@ -1158,8 +1164,8 @@ def test_display_manager_active_false_when_none_active() -> None:
 @pytest.mark.asyncio
 async def test_resolve_desktop_session_returns_immediately_when_present() -> None:
     session = ks.DesktopSession(uid=1, session_type="x11", display=":0", wayland_display=None)
-    with patch.object(ks, "_detect_desktop_session", return_value=session):
-        with patch.object(ks, "_session_socket_ready", return_value=True):
+    with patch.object(ds, "_detect_desktop_session", return_value=session):
+        with patch.object(ds, "_session_socket_ready", return_value=True):
             got = await ks._resolve_desktop_session()
     assert got is session
 
@@ -1170,8 +1176,8 @@ async def test_resolve_desktop_session_waits_for_socket_ready(
 ) -> None:
     """A session is 'active' but its display-server socket is not up yet — the
     kiosk waits (avoiding Chromium's 'Failed to connect to Wayland display')."""
-    monkeypatch.setattr(ks, "_SESSION_WAIT_SECONDS", 1.0)
-    monkeypatch.setattr(ks, "_SESSION_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(ds, "_SESSION_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(ds, "_SESSION_POLL_SECONDS", 0.01)
     session = ks.DesktopSession(uid=1, session_type="wayland", display=None, wayland_display="wayland-0")
     ready = {"n": 0}
 
@@ -1179,9 +1185,9 @@ async def test_resolve_desktop_session_waits_for_socket_ready(
         ready["n"] += 1
         return ready["n"] >= 3  # socket comes up on the 3rd check
 
-    with patch.object(ks, "_detect_desktop_session", return_value=session):
-        with patch.object(ks, "_session_socket_ready", side_effect=_sock_ready):
-            with patch.object(ks, "_display_manager_active", return_value=True):
+    with patch.object(ds, "_detect_desktop_session", return_value=session):
+        with patch.object(ds, "_session_socket_ready", side_effect=_sock_ready):
+            with patch.object(ds, "_display_manager_active", return_value=True):
                 got = await ks._resolve_desktop_session()
     assert got is session
 
@@ -1191,12 +1197,12 @@ def test_session_socket_ready_wayland(tmp_path, monkeypatch: pytest.MonkeyPatch)
     session = ks.DesktopSession(uid=4242, session_type="wayland", display=None, wayland_display="wayland-0")
     runtime = tmp_path / "run_user_4242"
     runtime.mkdir()
-    real_path = ks.Path
+    real_path = ds.Path
 
     def fake_path(p: object) -> object:
         return runtime if str(p) == "/run/user/4242" else real_path(p)
 
-    monkeypatch.setattr(ks, "Path", fake_path)
+    monkeypatch.setattr(ds, "Path", fake_path)
     # Socket file absent -> not ready.
     assert ks._session_socket_ready(session) is False
     # Socket file present -> ready.
@@ -1209,12 +1215,12 @@ def test_session_socket_ready_x11(tmp_path, monkeypatch: pytest.MonkeyPatch) -> 
     session = ks.DesktopSession(uid=1, session_type="x11", display=":0", wayland_display=None)
     x11 = tmp_path / "X11-unix"
     x11.mkdir()
-    real_path = ks.Path
+    real_path = ds.Path
 
     def fake_path(p: object) -> object:
         return x11 / "X0" if str(p) == "/tmp/.X11-unix/X0" else real_path(p)
 
-    monkeypatch.setattr(ks, "Path", fake_path)
+    monkeypatch.setattr(ds, "Path", fake_path)
     assert ks._session_socket_ready(session) is False
     (x11 / "X0").write_text("")
     assert ks._session_socket_ready(session) is True
@@ -1223,20 +1229,20 @@ def test_session_socket_ready_x11(tmp_path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_detect_ready_session_gates_on_socket() -> None:
     """A detected session is only returned once its display socket is up."""
     session = ks.DesktopSession(uid=1, session_type="wayland", display=None, wayland_display="wayland-0")
-    with patch.object(ks, "_detect_desktop_session", return_value=session):
-        with patch.object(ks, "_session_socket_ready", return_value=False):
+    with patch.object(ds, "_detect_desktop_session", return_value=session):
+        with patch.object(ds, "_session_socket_ready", return_value=False):
             assert ks._detect_ready_session() is None
-        with patch.object(ks, "_session_socket_ready", return_value=True):
+        with patch.object(ds, "_session_socket_ready", return_value=True):
             assert ks._detect_ready_session() is session
-    with patch.object(ks, "_detect_desktop_session", return_value=None):
+    with patch.object(ds, "_detect_desktop_session", return_value=None):
         assert ks._detect_ready_session() is None
 
 
 @pytest.mark.asyncio
 async def test_resolve_desktop_session_none_when_no_dm() -> None:
     """No session AND no display manager -> genuinely headless -> cage."""
-    with patch.object(ks, "_detect_desktop_session", return_value=None):
-        with patch.object(ks, "_display_manager_active", return_value=False):
+    with patch.object(ds, "_detect_desktop_session", return_value=None):
+        with patch.object(ds, "_display_manager_active", return_value=False):
             assert await ks._resolve_desktop_session() is None
 
 
@@ -1246,8 +1252,8 @@ async def test_resolve_desktop_session_waits_then_returns_when_dm_active(
 ) -> None:
     """A display manager is active but the session appears only after a poll —
     the kiosk waits for it instead of racing to cage (the KDE boot race)."""
-    monkeypatch.setattr(ks, "_SESSION_WAIT_SECONDS", 1.0)
-    monkeypatch.setattr(ks, "_SESSION_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(ds, "_SESSION_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(ds, "_SESSION_POLL_SECONDS", 0.01)
     session = ks.DesktopSession(uid=1, session_type="wayland", display=None, wayland_display="wayland-0")
     calls = {"n": 0}
 
@@ -1255,9 +1261,9 @@ async def test_resolve_desktop_session_waits_then_returns_when_dm_active(
         calls["n"] += 1
         return session if calls["n"] >= 3 else None
 
-    with patch.object(ks, "_detect_desktop_session", side_effect=_detect):
-        with patch.object(ks, "_session_socket_ready", return_value=True):
-            with patch.object(ks, "_display_manager_active", return_value=True):
+    with patch.object(ds, "_detect_desktop_session", side_effect=_detect):
+        with patch.object(ds, "_session_socket_ready", return_value=True):
+            with patch.object(ds, "_display_manager_active", return_value=True):
                 got = await ks._resolve_desktop_session()
     assert got is session
 
@@ -1267,10 +1273,10 @@ async def test_resolve_desktop_session_times_out_to_cage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """DM active but no session ever becomes active -> falls back to cage."""
-    monkeypatch.setattr(ks, "_SESSION_WAIT_SECONDS", 0.05)
-    monkeypatch.setattr(ks, "_SESSION_POLL_SECONDS", 0.01)
-    with patch.object(ks, "_detect_desktop_session", return_value=None):
-        with patch.object(ks, "_display_manager_active", return_value=True):
+    monkeypatch.setattr(ds, "_SESSION_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(ds, "_SESSION_POLL_SECONDS", 0.01)
+    with patch.object(ds, "_detect_desktop_session", return_value=None):
+        with patch.object(ds, "_display_manager_active", return_value=True):
             assert await ks._resolve_desktop_session() is None
 
 
@@ -1284,7 +1290,7 @@ async def test_crash_loop_sets_crash_looped_flag(monkeypatch: pytest.MonkeyPatch
     async def _fake_exec(*_args: Any, **_kwargs: Any) -> _FakeProc:
         return _FakeProc(wait_result=2, wait_delay=0.0)
 
-    monkeypatch.setattr(ks, "_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(sv, "_RETRY_SECONDS", 0.0)
     sup = KioskSupervisor(["cage", "--"])
     with patch("asyncio.create_subprocess_exec", _fake_exec):
         await sup.run()
@@ -1327,7 +1333,7 @@ async def test_amain_downgrades_gpu_to_software_on_cage_crash_loop(
 
     monkeypatch.setattr(ks, "load_config", lambda: _config_with_kiosk_settings(True))
     monkeypatch.setattr(ks, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(ks, "_hdmi_present", lambda: True)
+    monkeypatch.setattr(dp, "_hdmi_present", lambda: True)
     monkeypatch.setattr(ks, "_resolve_target_url", lambda _c: ("http://x", False))
     monkeypatch.setattr(ks, "_wait_for_url", _async_true)
     monkeypatch.setattr(
@@ -1401,12 +1407,13 @@ async def test_config_edit_restarts_child_with_new_resolution_then_stands_down(
     kiosk afterwards stops it and exits 0. No reboot or unit restart needed."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("v1\n")
-    monkeypatch.setattr(ks, "CONFIG_YAML", config_path)
-    monkeypatch.setattr(ks, "_CONFIG_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(cw, "CONFIG_YAML", config_path)
+    monkeypatch.setattr(cw, "_CONFIG_POLL_SECONDS", 0.01)
     configs = {"current": _config_with_kiosk_settings(True, "auto")}
     monkeypatch.setattr(ks, "load_config", lambda: configs["current"])
+    monkeypatch.setattr(cw, "load_config", lambda: configs["current"])
     monkeypatch.setattr(ks, "configure_logging", lambda *a, **k: None)
-    monkeypatch.setattr(ks, "_hdmi_present", lambda: True)
+    monkeypatch.setattr(dp, "_hdmi_present", lambda: True)
     monkeypatch.setattr(ks, "_wait_for_url", _async_true)
     monkeypatch.setattr(ks, "_resolve_render_plan", lambda: (ks._RENDERER_SOFTWARE, None))
 
@@ -1464,11 +1471,11 @@ async def _async_noop() -> None:
 def test_browser_probe_errs_toward_running_when_it_cannot_tell() -> None:
     """A false 'the browser is gone' restarts a WORKING kiosk, which is worse
     than missing one failure. Any uncertainty must read as running."""
-    with patch.object(ks.subprocess, "run", side_effect=OSError("no ps")):
+    with patch.object(sv.subprocess, "run", side_effect=OSError("no ps")):
         assert ks._browser_running() is True
 
     with patch.object(
-        ks.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="")
+        sv.subprocess, "run", return_value=SimpleNamespace(returncode=1, stdout="")
     ):
         assert ks._browser_running() is True
 
@@ -1478,7 +1485,7 @@ def test_browser_probe_matches_the_executable_not_the_command_line() -> None:
     counts as a live browser."""
     only_cage = "/usr/bin/cage -- /usr/bin/chromium --kiosk http://localhost:8080/\n"
     with patch.object(
-        ks.subprocess,
+        sv.subprocess,
         "run",
         return_value=SimpleNamespace(returncode=0, stdout=only_cage),
     ):
@@ -1486,7 +1493,7 @@ def test_browser_probe_matches_the_executable_not_the_command_line() -> None:
 
     with_browser = only_cage + "/usr/lib/chromium/chromium --type=renderer\n"
     with patch.object(
-        ks.subprocess,
+        sv.subprocess,
         "run",
         return_value=SimpleNamespace(returncode=0, stdout=with_browser),
     ):
@@ -1527,7 +1534,7 @@ async def test_crash_loop_of_clean_exits_ends_with_a_restartable_code(
     async def _fake_exec(*_args: Any, **_kwargs: Any) -> _FakeProc:
         return _FakeProc(wait_result=0, wait_delay=0.0)
 
-    monkeypatch.setattr(ks, "_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(sv, "_RETRY_SECONDS", 0.0)
     sup = KioskSupervisor(["cage", "--"])
     with patch("asyncio.create_subprocess_exec", _fake_exec):
         rc = await sup.run()

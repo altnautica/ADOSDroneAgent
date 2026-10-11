@@ -28,6 +28,7 @@ import httpx
 import pytest
 from click.testing import CliRunner
 
+from ados.cli import _main_uninstall as cli_uninstall
 from ados.cli import main as cli_main
 from ados.cli.main import cli
 
@@ -113,7 +114,7 @@ REQUIRED_STATUS_KEYS = (
 def test_status_json_carries_required_keys() -> None:
     """JSON output is verbatim — every consumer can rely on these keys."""
     payload = _full_status_payload()
-    with patch("ados.cli.main._setup_status", return_value=payload):
+    with patch("ados.cli._main_status._setup_status", return_value=payload):
         result = runner.invoke(cli, ["status", "--json"])
     assert result.exit_code == 0
     parsed = json.loads(result.output)
@@ -123,7 +124,7 @@ def test_status_json_carries_required_keys() -> None:
 
 def test_status_json_preserves_nested_video_shape() -> None:
     payload = _full_status_payload()
-    with patch("ados.cli.main._setup_status", return_value=payload):
+    with patch("ados.cli._main_status._setup_status", return_value=payload):
         result = runner.invoke(cli, ["status", "--json"])
     parsed = json.loads(result.output)
     assert parsed["video"]["state"] == "running"
@@ -134,7 +135,7 @@ def test_status_json_preserves_nested_video_shape() -> None:
 def test_status_plain_uses_lan_host_when_available() -> None:
     """A populated ``lan_host`` or ``network.mdns_host`` beats ``access_urls``."""
     payload = _full_status_payload()
-    with patch("ados.cli.main._setup_status", return_value=payload):
+    with patch("ados.cli._main_status._setup_status", return_value=payload):
         result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
     assert "Reach this agent" in result.output
@@ -145,7 +146,7 @@ def test_status_plain_falls_back_to_primary_access_url() -> None:
     """No mdns_host? CLI picks the ``primary`` access URL."""
     payload = _full_status_payload()
     payload["network"] = {}
-    with patch("ados.cli.main._setup_status", return_value=payload):
+    with patch("ados.cli._main_status._setup_status", return_value=payload):
         result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0
     assert "127.0.0.1:8080" in result.output
@@ -155,7 +156,7 @@ def test_status_plain_shows_pair_code_when_unpaired() -> None:
     payload = _full_status_payload()
     payload["paired"] = False
     payload["pairing_code"] = "987654"
-    with patch("ados.cli.main._setup_status", return_value=payload):
+    with patch("ados.cli._main_status._setup_status", return_value=payload):
         result = runner.invoke(cli, ["status"])
     assert "code 987654" in result.output
 
@@ -168,9 +169,9 @@ def test_status_plain_shows_pair_code_when_unpaired() -> None:
 def test_update_already_up_to_date_skips_upgrade() -> None:
     """When main is at the installed version, the upgrade must NOT run."""
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.0"),
-        patch("ados.cli.main._run_upgrade") as upgrade,
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update"])
     assert result.exit_code == 0
@@ -181,8 +182,8 @@ def test_update_already_up_to_date_skips_upgrade() -> None:
 def test_update_json_envelope_shape() -> None:
     """``--json`` emits current + latest + update_available."""
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
     ):
         result = runner.invoke(cli, ["update", "--json"])
     assert result.exit_code == 0
@@ -196,9 +197,9 @@ def test_update_json_envelope_shape() -> None:
 def test_update_check_only_skips_upgrade() -> None:
     """``--check-only`` reports versions and never runs the upgrade."""
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.5"),
-        patch("ados.cli.main._run_upgrade") as upgrade,
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.5"),
+        patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--check-only"])
     assert result.exit_code == 0
@@ -209,11 +210,11 @@ def test_update_check_only_skips_upgrade() -> None:
 def test_update_upgrade_failure_surfaces_as_click_exception() -> None:
     """A failure fetching/running the installer surfaces as a friendly error."""
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
-        patch("ados.cli.main._armed_refusal", return_value=None),
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli._main_update._armed_refusal", return_value=None),
         patch(
-            "ados.cli.main._run_upgrade",
+            "ados.cli._main_update._run_upgrade",
             side_effect=click.ClickException("Could not fetch the installer"),
         ),
     ):
@@ -234,9 +235,9 @@ def test_uninstall_linux_runs_the_kept_installer_without_the_network(
     local = tmp_path / "ados-installer"
     local.write_text("#!/bin/sh\n")
     local.chmod(0o755)
-    monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli_main, "LOCAL_INSTALLER_PATH", local)
-    monkeypatch.setattr(cli_main.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(cli_uninstall.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli_uninstall, "LOCAL_INSTALLER_PATH", local)
+    monkeypatch.setattr(cli_uninstall.os, "geteuid", lambda: 0, raising=False)
     run_calls: list[list[str]] = []
 
     def _fake_run(cmd, **_kwargs):
@@ -246,8 +247,8 @@ def test_uninstall_linux_runs_the_kept_installer_without_the_network(
     def _no_network(*_a, **_kw):
         raise AssertionError("the kept installer must not need the network")
 
-    with patch.object(cli_main.subprocess, "run", side_effect=_fake_run), \
-         patch.object(cli_main.httpx, "Client", side_effect=_no_network):
+    with patch.object(cli_uninstall.subprocess, "run", side_effect=_fake_run), \
+         patch.object(cli_uninstall.httpx, "Client", side_effect=_no_network):
         result = runner.invoke(cli, ["uninstall", "--yes", "--purge"])
 
     assert result.exit_code == 0, result.output
@@ -258,9 +259,9 @@ def test_uninstall_linux_without_a_kept_installer_runs_install_sh(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A box without the installer copy fetches install.sh and passes the flags."""
-    monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli_main, "LOCAL_INSTALLER_PATH", tmp_path / "absent")
-    monkeypatch.setattr(cli_main.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(cli_uninstall.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli_uninstall, "LOCAL_INSTALLER_PATH", tmp_path / "absent")
+    monkeypatch.setattr(cli_uninstall.os, "geteuid", lambda: 0, raising=False)
     run_calls: list[list[str]] = []
 
     def _fake_run(cmd, **_kwargs):
@@ -271,8 +272,8 @@ def test_uninstall_linux_without_a_kept_installer_runs_install_sh(
     client.__enter__.return_value = client
     client.__exit__.return_value = False
     client.get.return_value = MagicMock(text="#!/bin/sh\n")
-    with patch.object(cli_main.subprocess, "run", side_effect=_fake_run), \
-         patch.object(cli_main.httpx, "Client", return_value=client):
+    with patch.object(cli_uninstall.subprocess, "run", side_effect=_fake_run), \
+         patch.object(cli_uninstall.httpx, "Client", return_value=client):
         result = runner.invoke(cli, ["uninstall", "--yes"])
 
     assert result.exit_code == 0, result.output
@@ -285,15 +286,15 @@ def test_uninstall_linux_offline_without_a_kept_installer_says_what_to_do(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """No installer copy and no network: a clear error, nothing half-removed."""
-    monkeypatch.setattr(cli_main.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(cli_main, "LOCAL_INSTALLER_PATH", tmp_path / "absent")
-    monkeypatch.setattr(cli_main.os, "geteuid", lambda: 0, raising=False)
+    monkeypatch.setattr(cli_uninstall.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(cli_uninstall, "LOCAL_INSTALLER_PATH", tmp_path / "absent")
+    monkeypatch.setattr(cli_uninstall.os, "geteuid", lambda: 0, raising=False)
     client = MagicMock()
     client.__enter__.return_value = client
     client.__exit__.return_value = False
     client.get.side_effect = httpx.ConnectError("offline")
-    with patch.object(cli_main.subprocess, "run") as run, \
-         patch.object(cli_main.httpx, "Client", return_value=client):
+    with patch.object(cli_uninstall.subprocess, "run") as run, \
+         patch.object(cli_uninstall.httpx, "Client", return_value=client):
         result = runner.invoke(cli, ["uninstall", "--yes"])
 
     assert result.exit_code != 0
@@ -308,7 +309,7 @@ def test_uninstall_linux_offline_without_a_kept_installer_says_what_to_do(
 
 def test_uninstall_unsupported_platform_raises() -> None:
     """A non-Linux/macOS host fails fast with a clear message."""
-    with patch.object(cli_main.platform, "system", return_value="Windows"):
+    with patch.object(cli_uninstall.platform, "system", return_value="Windows"):
         result = runner.invoke(cli, ["uninstall", "--yes"])
     assert result.exit_code != 0
     assert "Unsupported platform" in result.output
@@ -403,7 +404,7 @@ def test_status_falls_back_to_native_routes_when_the_facade_is_down() -> None:
         ),
         "/api/pairing/info": (200, {"name": "bench", "paired": False, "mdns_host": "ados-1.local"}),
     }
-    with patch("ados.cli.main._agent_http.call", _routes(answers)):
+    with patch("ados.cli._main_status._agent_http.call", _routes(answers)):
         result = runner.invoke(cli, ["status", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.output)
@@ -421,7 +422,7 @@ def test_status_plain_output_survives_unknown_fields() -> None:
         "/api/v1/setup/status": (501, {"detail": "no upstream"}),
         "/api/pairing/info": (200, {"name": "bench"}),
     }
-    with patch("ados.cli.main._agent_http.call", _routes(answers)):
+    with patch("ados.cli._main_status._agent_http.call", _routes(answers)):
         result = runner.invoke(cli, ["status"])
     assert result.exit_code == 0, result.output
     assert "unknown" in result.output
@@ -433,7 +434,7 @@ def test_status_reads_server_mode_from_config() -> None:
         "/api/status/full": (200, {"profile": "drone"}),
         "/api/config": (200, {"server": {"mode": "cloud"}}),
     }
-    with patch("ados.cli.main._agent_http.call", _routes(answers)):
+    with patch("ados.cli._main_status._agent_http.call", _routes(answers)):
         data = cli_main._setup_status()
     assert data["cloud_choice"]["mode"] == "cloud"
 
@@ -474,11 +475,11 @@ def test_update_pins_the_boxs_own_profile_so_it_cannot_be_reprofiled() -> None:
     so the upgrade states it explicitly instead of trusting a default.
     """
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
-        patch("ados.cli.main._read_profile_conf_value", return_value="ground_station"),
-        patch("ados.cli.main._armed_refusal", return_value=None),
-        patch("ados.cli.main._run_upgrade") as upgrade,
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli._main_update._read_profile_conf_value", return_value="ground_station"),
+        patch("ados.cli._main_update._armed_refusal", return_value=None),
+        patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--yes"])
     assert result.exit_code == 0
@@ -488,11 +489,11 @@ def test_update_pins_the_boxs_own_profile_so_it_cannot_be_reprofiled() -> None:
 def test_update_profile_override_wins_for_a_deliberate_conversion() -> None:
     """The one legitimate reason to change a box's role: an explicit flag."""
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
-        patch("ados.cli.main._read_profile_conf_value", return_value="drone"),
-        patch("ados.cli.main._armed_refusal", return_value=None),
-        patch("ados.cli.main._run_upgrade") as upgrade,
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli._main_update._read_profile_conf_value", return_value="drone"),
+        patch("ados.cli._main_update._armed_refusal", return_value=None),
+        patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--yes", "--profile", "ground-station"])
     assert result.exit_code == 0
@@ -502,11 +503,11 @@ def test_update_profile_override_wins_for_a_deliberate_conversion() -> None:
 def test_update_says_so_when_the_profile_cannot_be_known() -> None:
     """No marker on disk: the operator is told, rather than it passing silently."""
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
-        patch("ados.cli.main._read_profile_conf_value", return_value=None),
-        patch("ados.cli.main._armed_refusal", return_value=None),
-        patch("ados.cli.main._run_upgrade") as upgrade,
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli._main_update._read_profile_conf_value", return_value=None),
+        patch("ados.cli._main_update._armed_refusal", return_value=None),
+        patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--yes"])
     assert result.exit_code == 0
@@ -536,11 +537,11 @@ _ARMED = {
 
 def _update(args: list[str], status_body: dict | None, profile: str | None = "drone"):
     with (
-        patch("ados.cli.main._installed_version", return_value="0.10.0"),
-        patch("ados.cli.main._latest_main_version", return_value="0.10.1"),
-        patch("ados.cli.main._read_profile_conf_value", return_value=profile),
-        patch("ados.cli.main._agent_http.call", _status_full(status_body)),
-        patch("ados.cli.main._run_upgrade") as upgrade,
+        patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
+        patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
+        patch("ados.cli._main_update._read_profile_conf_value", return_value=profile),
+        patch("ados.cli._main_update._agent_http.call", _status_full(status_body)),
+        patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
         result = runner.invoke(cli, ["update", "--yes", *args])
     return result, upgrade
@@ -601,10 +602,10 @@ def test_run_upgrade_passes_force_armed_to_the_installer() -> None:
         return SimpleNamespace(returncode=0)
 
     with (
-        patch("ados.cli.main.httpx.Client", _Client),
-        patch("ados.cli.main.subprocess.run", _fake_run),
-        patch("ados.cli.main.os.geteuid", return_value=0, create=True),
-        patch("ados.cli.main.platform.system", return_value="Linux"),
+        patch("ados.cli._main_update.httpx.Client", _Client),
+        patch("ados.cli._main_update.subprocess.run", _fake_run),
+        patch("ados.cli._main_update.os.geteuid", return_value=0, create=True),
+        patch("ados.cli._main_update.platform.system", return_value="Linux"),
     ):
         cli_main._run_upgrade("drone", force_armed=True)
     assert "--force-armed" in seen["argv"]
@@ -643,10 +644,10 @@ def test_run_upgrade_actually_passes_the_profile_to_the_installer() -> None:
         return SimpleNamespace(returncode=0)
 
     with (
-        patch("ados.cli.main.httpx.Client", _Client),
-        patch("ados.cli.main.subprocess.run", _fake_run),
-        patch("ados.cli.main.os.geteuid", return_value=0),
-        patch("ados.cli.main.platform.system", return_value="Linux"),
+        patch("ados.cli._main_update.httpx.Client", _Client),
+        patch("ados.cli._main_update.subprocess.run", _fake_run),
+        patch("ados.cli._main_update.os.geteuid", return_value=0),
+        patch("ados.cli._main_update.platform.system", return_value="Linux"),
     ):
         cli_main._run_upgrade("ground_station")
 
@@ -685,10 +686,10 @@ def test_run_upgrade_omits_the_flag_when_the_profile_is_unknown() -> None:
         return SimpleNamespace(returncode=0)
 
     with (
-        patch("ados.cli.main.httpx.Client", _Client),
-        patch("ados.cli.main.subprocess.run", _fake_run),
-        patch("ados.cli.main.os.geteuid", return_value=0),
-        patch("ados.cli.main.platform.system", return_value="Linux"),
+        patch("ados.cli._main_update.httpx.Client", _Client),
+        patch("ados.cli._main_update.subprocess.run", _fake_run),
+        patch("ados.cli._main_update.os.geteuid", return_value=0),
+        patch("ados.cli._main_update.platform.system", return_value="Linux"),
     ):
         cli_main._run_upgrade(None)
 

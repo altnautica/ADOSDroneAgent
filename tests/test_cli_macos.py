@@ -12,6 +12,8 @@ import subprocess
 
 from click.testing import CliRunner
 
+import ados.cli._main_status as cli_status
+import ados.cli._main_uninstall as cli_uninstall
 import ados.cli.main as cli_main
 
 
@@ -39,8 +41,8 @@ def test_native_status_composes_from_native_routes():
 
     from unittest.mock import patch
 
-    with patch.object(cli_main, "IS_MACOS", True), patch.object(
-        cli_main._agent_http, "call", side_effect=fake_call
+    with patch.object(cli_status, "IS_MACOS", True), patch.object(
+        cli_status._agent_http, "call", side_effect=fake_call
     ):
         data = cli_main._setup_status()
 
@@ -65,10 +67,10 @@ def test_uninstall_macos_boots_out_agents_and_purges(tmp_path, monkeypatch):
     for tail in ("supervisor", "control", "cloud", "logd"):
         (launch_agents / f"co.ados.{tail}.plist").write_text("x")
 
-    monkeypatch.setattr(cli_main.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(cli_main.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(cli_uninstall.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli_uninstall.Path, "home", staticmethod(lambda: home))
     monkeypatch.setenv("ADOS_HOME", str(ados_home))
-    monkeypatch.setattr(cli_main.os, "getuid", lambda: 501)
+    monkeypatch.setattr(cli_uninstall.os, "getuid", lambda: 501)
 
     booted: list[str] = []
 
@@ -81,7 +83,7 @@ def test_uninstall_macos_boots_out_agents_and_purges(tmp_path, monkeypatch):
         # pip/pipx/uv probes: pretend the CLI is not package-managed.
         return subprocess.CompletedProcess(cmd, 1, "", "not found")
 
-    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_uninstall.subprocess, "run", fake_run)
 
     res = CliRunner().invoke(cli_main.cli, ["uninstall", "--purge", "--yes"])
     assert res.exit_code == 0, res.output
@@ -102,17 +104,17 @@ def test_uninstall_macos_without_purge_keeps_home(tmp_path, monkeypatch):
     launch_agents.mkdir(parents=True)
     (launch_agents / "co.ados.control.plist").write_text("x")
 
-    monkeypatch.setattr(cli_main.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(cli_main.Path, "home", staticmethod(lambda: home))
+    monkeypatch.setattr(cli_uninstall.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli_uninstall.Path, "home", staticmethod(lambda: home))
     monkeypatch.setenv("ADOS_HOME", str(ados_home))
-    monkeypatch.setattr(cli_main.os, "getuid", lambda: 501)
+    monkeypatch.setattr(cli_uninstall.os, "getuid", lambda: 501)
 
     def fake_run(cmd, **_k):
         if cmd[:2] == ["launchctl", "print"]:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         return subprocess.CompletedProcess(cmd, 1, "", "")
 
-    monkeypatch.setattr(cli_main.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_uninstall.subprocess, "run", fake_run)
 
     res = CliRunner().invoke(cli_main.cli, ["uninstall", "--yes"])
     assert res.exit_code == 0, res.output

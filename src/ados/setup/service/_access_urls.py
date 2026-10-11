@@ -57,7 +57,6 @@ async def _main_stream_ready() -> bool:
     return main.get("ready") is True and main.get("source") is not None
 
 
-
 def _stream_legs(config: Any) -> list[VideoStreamAccess]:
     """The per-leg video streams a node exposes, from the declared
     ``video.cameras`` list. The primary leg (declared role ``primary`` else the

@@ -19,12 +19,33 @@ import os
 import platform
 import shutil
 import subprocess
-import time
 from typing import Any
 
 import click
 
-from ados.cli import _agent_http
+from ados.cli._radio_base import (
+    _format_int_or_dash,
+    _format_rssi,
+    _request,
+    _rssi_color,
+    radio_group,
+)
+from ados.cli._radio_pair import (  # noqa: F401 - re-exported at the old path
+    _print_pair_status,
+    pair_auto_group,
+    pair_auto_off,
+    pair_auto_on,
+    pair_failover_status,
+    pair_group,
+    pair_local,
+    pair_status,
+    pair_unpair,
+)
+from ados.cli._radio_test import (  # noqa: F401 - re-exported at the old path
+    _read_kernel_log_tail,
+    radio_adapters,
+    radio_test,
+)
 
 # The RTL8812EU (WFB) kernel module name and the vendored DKMS installer that the
 # agent installer persists under the source tree (edge channel clones with
@@ -70,54 +91,6 @@ def _resolve_driver_script() -> str | None:
         if os.path.isfile(candidate):
             return candidate
     return None
-
-
-def _request(
-    method: str,
-    path: str,
-    *,
-    raise_for_status: bool = True,
-    **kwargs: Any,
-) -> tuple[int, dict[str, Any]]:
-    """One control-surface request: ``(status, body)``.
-
-    An error status raises unless ``raise_for_status`` is False.
-    """
-    response = _agent_http.call(
-        method,
-        path,
-        json_body=kwargs.get("json"),
-        params=kwargs.get("params"),
-        timeout=kwargs.get("timeout", 8.0),
-    )
-    body = response.body if not isinstance(response.body, str) else {"text": response.body}
-    if raise_for_status and not response.ok:
-        detail = body.get("detail") if isinstance(body, dict) else None
-        raise click.ClickException(f"Agent API returned {response.status}: {detail or body}")
-    return response.status, body if isinstance(body, dict) else {"data": body}
-
-
-def _rssi_color(rssi: float | None) -> str:
-    """Map RSSI dBm to a plain colour name. None and weak signals are red."""
-    if rssi is None:
-        return "red"
-    if rssi >= -65.0:
-        return "green"
-    if rssi >= -78.0:
-        return "yellow"
-    return "red"
-
-
-def _format_rssi(rssi: float | None) -> str:
-    if rssi is None:
-        return "n/a"
-    return f"{rssi:.1f} dBm"
-
-
-def _format_int_or_dash(value: Any) -> str:
-    if value is None or value == 0:
-        return "—" if value is None else "0"
-    return str(value)
 
 
 _BIND_TERMINAL_STATES = {"idle", "paired", "failed", "aborted"}
@@ -223,11 +196,6 @@ def _print_status_table(data: dict[str, Any], bind: dict[str, Any] | None = None
             click.echo(click.style(line, fg=colour))
         else:
             click.echo(line)
-
-
-@click.group("radio", help="Inspect and tune the WFB-ng radio link.")
-def radio_group() -> None:
-    pass
 
 
 @radio_group.command("status", help="Show the current WFB-ng link status.")
@@ -357,353 +325,6 @@ def radio_hop(channel: int) -> None:
     click.echo(
         click.style(f"Hop initiated → channel {ch} ({freq} MHz).", fg="green")
     )
-
-
-def _read_kernel_log_tail() -> list[str]:
-    """Best-effort grab the last 10 kernel log lines for the test sweep."""
-    try:
-        result = subprocess.run(
-            ["journalctl", "-k", "-n", "10", "--no-pager"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        if result.returncode == 0:
-            return [line for line in result.stdout.splitlines() if line.strip()]
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
-    return []
-
-
-@radio_group.command(
-    "test",
-    help="Bench bring-up sweep: walk through 1, 5, 10 dBm and report effect.",
-)
-def radio_test() -> None:
-    _, status_data = _request("GET", "/api/wfb")
-    state = status_data.get("state")
-    if state == "absent" or state == "disabled":
-        click.echo(
-            click.style(
-                "No radio detected — plug in an RTL8812EU first.",
-                fg="red",
-            )
-        )
-        raise click.exceptions.Exit(code=1)
-
-    # The restore value is the one the radio reported; with none reported the
-    # sweep refuses to run rather than leaving a power level nobody set.
-    original_tx = status_data.get("tx_power_dbm")
-    if not isinstance(original_tx, int) or isinstance(original_tx, bool):
-        click.echo(
-            click.style(
-                "The radio did not report its current TX power, so the sweep "
-                "could not restore it afterwards. Not starting.",
-                fg="red",
-            )
-        )
-        raise click.exceptions.Exit(code=1)
-
-    # A drone only transmits; the RSSI it reports is not a measurement of
-    # its own downlink, so the sweep does not print one there.
-    from ados.core.config import load_config
-    from ados.core.profile import current_profile_and_role
-
-    rssi_measured = current_profile_and_role(load_config())[0] != "drone"
-
-    click.echo(
-        click.style(
-            f"Starting TX-power sweep. Will restore tx_power_dbm={original_tx} at the end.",
-            bold=True,
-        )
-    )
-
-    try:
-        for dbm in (1, 5, 10):
-            click.echo("")
-            click.echo(click.style(f"→ Setting TX power to {dbm} dBm", fg="cyan"))
-            code, body = _request(
-                "PUT",
-                "/api/wfb/tx-power",
-                json={"tx_power_dbm": dbm},
-                raise_for_status=False,
-            )
-            if code >= 400:
-                click.echo(
-                    click.style(f"  Refused: HTTP {code}: {body}", fg="red")
-                )
-                continue
-
-            time.sleep(3.0)
-
-            if rssi_measured:
-                _, post_status = _request("GET", "/api/wfb")
-                rssi = post_status.get("rssi_dbm")
-                if rssi == -100.0:
-                    rssi = None
-                rssi_text = _format_rssi(rssi)
-            else:
-                rssi_text = "not measured on a drone (read it on the ground station)"
-            click.echo(f"  effective={body.get('effective_dbm')} dBm   RSSI={rssi_text}")
-
-            kernel_tail = _read_kernel_log_tail()
-            flagged = [line for line in kernel_tail if "undervoltage" in line.lower()]
-            if flagged:
-                click.echo(click.style("  Kernel undervoltage warnings:", fg="yellow"))
-                for line in flagged:
-                    click.echo(f"    {line}")
-    finally:
-        # Runs on an HTTP error and on Ctrl-C too: a bench sweep must never
-        # leave a test power level persisted on the node.
-        click.echo("")
-        click.echo(click.style(f"Restoring TX power to {original_tx} dBm", fg="cyan"))
-        code, body = _request(
-            "PUT",
-            "/api/wfb/tx-power",
-            json={"tx_power_dbm": original_tx},
-            raise_for_status=False,
-        )
-        if code >= 400:
-            click.echo(
-                click.style(
-                    f"  Restore refused: HTTP {code}: {body}. Set it back with "
-                    f"`ados radio set-tx-power {original_tx}`.",
-                    fg="red",
-                )
-            )
-    click.echo("Done.")
-
-
-@radio_group.command(
-    "adapters",
-    help="List detected WiFi adapters and their WFB injection verdict.",
-)
-@click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
-def radio_adapters(as_json: bool) -> None:
-    """List the detected WiFi adapters and which are WFB-injection capable.
-
-    Resolves the live adapter facts through the radio service's stats
-    sidecar / one-shot scan, falling back to a local ``iw`` scan when the
-    radio is not running. Reads facts directly (not over REST) so it
-    works before the agent API is up.
-    """
-    from ados.services.wfb.adapter_probe import detect_wfb_adapters
-
-    adapters = detect_wfb_adapters()
-
-    if as_json:
-        payload = [
-            {
-                "interface_name": a.interface_name,
-                "driver": a.driver,
-                "chipset": a.chipset,
-                "supports_monitor": a.supports_monitor,
-                "current_mode": a.current_mode,
-                "phy": a.phy,
-                "usb_vid": a.usb_vid,
-                "usb_pid": a.usb_pid,
-                "is_wfb_compatible": a.is_wfb_compatible,
-                "capabilities": a.capabilities,
-            }
-            for a in adapters
-        ]
-        click.echo(json.dumps(payload, indent=2, sort_keys=True))
-        return
-
-    if not adapters:
-        click.echo(
-            click.style(
-                "No WiFi adapters detected. Plug in an RTL8812EU and retry.",
-                fg="red",
-            )
-        )
-        raise click.exceptions.Exit(code=1)
-
-    for a in adapters:
-        if a.is_wfb_compatible:
-            verdict, colour = "WFB-capable", "green"
-        elif a.supports_monitor:
-            verdict, colour = "monitor only (not injection)", "yellow"
-        else:
-            verdict, colour = "not compatible", "red"
-        chipset = a.chipset or a.driver or "unknown"
-        line = (
-            f"  {a.interface_name:<18}  {chipset:<22}  "
-            f"mode={a.current_mode or '?':<8}  {verdict}"
-        )
-        click.echo(click.style(line, fg=colour))
-
-
-# ---------------------------------------------------------------------
-# Pair lifecycle: status, local bind, unpair, auto-pair toggle.
-# ---------------------------------------------------------------------
-
-
-@click.group("pair", help="Inspect and control WFB radio pairing.")
-def pair_group() -> None:
-    pass
-
-
-radio_group.add_command(pair_group)
-
-
-def _print_pair_status(data: dict[str, Any]) -> None:
-    paired = bool(data.get("paired"))
-    state = "Paired" if paired else "Not paired"
-    click.echo(click.style(f"Pair state: {state}", bold=True))
-    click.echo(f"  Role            {data.get('role') or '—'}")
-    click.echo(f"  Peer device-id  {data.get('paired_with_device_id') or '—'}")
-    click.echo(f"  Paired at       {data.get('paired_at') or '—'}")
-    click.echo(f"  Fingerprint     {data.get('fingerprint') or '—'}")
-    click.echo(
-        f"  Auto-pair       "
-        f"{'armed' if data.get('auto_pair_enabled') else 'disabled'}"
-    )
-
-
-@pair_group.command("status", help="Print pair state for this rig.")
-@click.option("--json", "as_json", is_flag=True)
-def pair_status(as_json: bool) -> None:
-    _, body = _request("GET", "/api/wfb/pair")
-    if as_json:
-        click.echo(json.dumps(body, indent=2, sort_keys=True))
-    else:
-        _print_pair_status(body)
-
-
-@pair_group.command(
-    "local",
-    help=(
-        "Open a local-radio bind window. Drives the upstream wfb-ng bind "
-        "protocol via the agent's REST. Returns the terminal session "
-        "state when the protocol completes (≤60s)."
-    ),
-)
-@click.option(
-    "--role",
-    type=click.Choice(["drone", "gs"]),
-    default=None,
-    help="Override the inferred profile role.",
-)
-@click.option(
-    "--peer-device-id",
-    "peer_device_id",
-    default=None,
-    help="Optional peer device-id to persist alongside pair state.",
-)
-def pair_local(role: str | None, peer_device_id: str | None) -> None:
-    payload: dict[str, Any] = {}
-    if role is not None:
-        payload["role"] = role
-    if peer_device_id is not None:
-        payload["peer_device_id"] = peer_device_id
-    code, body = _request(
-        "POST",
-        "/api/wfb/pair/local-bind",
-        json=payload,
-        raise_for_status=False,
-        timeout=120.0,
-    )
-    if code == 409:
-        click.echo(
-            click.style("A bind session is already in progress.", fg="yellow")
-        )
-        raise click.exceptions.Exit(code=2)
-    if code >= 400:
-        click.echo(click.style(f"Bind failed: HTTP {code}: {body}", fg="red"))
-        raise click.exceptions.Exit(code=1)
-
-    state = body.get("state")
-    if state == "paired":
-        click.echo(click.style("Bind succeeded.", fg="green"))
-        click.echo(f"  fingerprint   {body.get('fingerprint')}")
-        click.echo(f"  finished_at   {body.get('finished_at')}")
-    else:
-        click.echo(
-            click.style(
-                f"Bind ended in state '{state}': {body.get('error') or '—'}",
-                fg="red",
-            )
-        )
-        raise click.exceptions.Exit(code=1)
-
-
-@pair_group.command(
-    "failover-status",
-    help="Show local-bind to cloud-relay failover state.",
-)
-@click.option("--json", "as_json", is_flag=True, help="Emit JSON.")
-def pair_failover_status(as_json: bool) -> None:
-    _, body = _request("GET", "/api/wfb/pair/failover-status")
-    if as_json:
-        click.echo(json.dumps(body, indent=2, sort_keys=True))
-        return
-    state = body.get("failover_state", "local")
-    if state == "local":
-        click.echo("Local bind active.")
-    elif state == "cloud_relay":
-        click.echo(
-            "Failover to cloud relay. "
-            "Run `ados radio pair auto on` to retry local bind."
-        )
-    elif state == "failed":
-        click.echo("Pairing failed.")
-    else:
-        click.echo(f"Unknown state: {state}")
-
-
-@pair_group.command("unpair", help="Wipe pair keys and clear pair state.")
-@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
-def pair_unpair(yes: bool) -> None:
-    if not yes:
-        click.confirm(
-            "Wipe wfb-ng key files and clear pair state?",
-            abort=True,
-            default=False,
-        )
-    _, body = _request("POST", "/api/wfb/pair/unpair")
-    click.echo("Unpaired.")
-    if isinstance(body, dict) and body.get("role"):
-        click.echo(f"  role  {body['role']}")
-
-
-@pair_group.group("auto", help="Toggle auto-pair on first boot.")
-def pair_auto_group() -> None:
-    pass
-
-
-@pair_auto_group.command("on", help="Re-arm auto-pair (only when unpaired).")
-def pair_auto_on() -> None:
-    code, body = _request(
-        "PUT",
-        "/api/wfb/pair/auto-pair",
-        json={"enabled": True},
-        raise_for_status=False,
-    )
-    if code >= 400:
-        click.echo(click.style(f"Failed: HTTP {code}: {body}", fg="red"))
-        raise click.exceptions.Exit(code=1)
-    if body.get("rearm_blocked"):
-        click.echo(
-            click.style(
-                "Cannot re-arm auto-pair while paired. "
-                "Run `ados radio pair unpair` first.",
-                fg="yellow",
-            )
-        )
-        raise click.exceptions.Exit(code=2)
-    click.echo("Auto-pair armed.")
-
-
-@pair_auto_group.command("off", help="Disable auto-pair.")
-def pair_auto_off() -> None:
-    _, _body = _request(
-        "PUT",
-        "/api/wfb/pair/auto-pair",
-        json={"enabled": False},
-        raise_for_status=False,
-    )
-    click.echo("Auto-pair disabled.")
 
 
 @radio_group.command(

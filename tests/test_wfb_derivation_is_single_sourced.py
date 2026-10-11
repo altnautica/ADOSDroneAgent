@@ -25,8 +25,9 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CRATES = REPO_ROOT / "crates"
 
-#: The one module allowed to define them.
-CANONICAL = "ados-protocol/src/wfb_status.rs"
+#: The one module allowed to define them (a directory module: `mod.rs` plus its
+#: children).
+CANONICAL = "ados-protocol/src/wfb_status/"
 
 #: The derivation's load-bearing functions. Each must have exactly one definition
 #: across the whole workspace.
@@ -91,7 +92,7 @@ def test_the_wfb_derivation_has_exactly_one_definition_each() -> None:
             text = path.read_text()
         except OSError:
             continue
-        rel = str(path.relative_to(CRATES))
+        rel = path.relative_to(CRATES).as_posix()
         for name in SINGLE_SOURCED:
             # `fn <name>(` at any visibility and either asyncness, ignoring
             # calls and doc mentions. `async` is in the pattern because the
@@ -110,7 +111,7 @@ def test_the_wfb_derivation_has_exactly_one_definition_each() -> None:
     for name, where in definitions.items():
         if len(where) != 1:
             problems.append(f"  {name}: {len(where)} definitions -> {where}")
-        elif where[0] != CANONICAL:
+        elif not where[0].startswith(CANONICAL):
             problems.append(f"  {name}: defined in {where[0]}, expected {CANONICAL}")
 
     assert not problems, (
@@ -133,10 +134,10 @@ def test_no_crate_carries_a_second_standard_channel_table() -> None:
     assert len(files) >= MIN_RUST_FILES
 
     carriers = [
-        str(p.relative_to(CRATES))
+        p.relative_to(CRATES).as_posix()
         for p in files
         if re.search(r"^\s*(?:pub\s+)?const STANDARD_CHANNELS\s*:", p.read_text(), re.M)
     ]
-    assert carriers == [CANONICAL], (
+    assert len(carriers) == 1 and carriers[0].startswith(CANONICAL), (
         f"the standard-channel table must live only in {CANONICAL}; found {carriers}"
     )
