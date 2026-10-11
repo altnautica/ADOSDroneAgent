@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 pub const MESH_ROLE_PATH: &str = "/etc/ados/mesh/role";
@@ -18,72 +18,112 @@ pub const RUN_DIR: &str = "/run/ados";
 /// role consumer reads (the transition, the boot apply, the REST role routes).
 pub const VALID_ROLES: [&str; 3] = ["direct", "relay", "receiver"];
 
-/// Only the fields the supervisor reads. serde ignores everything else in
-/// `config.yaml`, so the large operator config stays untouched here.
-#[derive(Debug, Default, Deserialize)]
+/// Only the fields the supervisor reads, as a slice of the effective config
+/// (schema defaults overlaid with `config.yaml`). serde ignores everything else,
+/// so the large operator config stays untouched here. Every default equals the
+/// schema default (`config_slice_conforms`).
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 struct RawConfig {
-    #[serde(default)]
     agent: AgentSection,
-    #[serde(default)]
     video: VideoSection,
-    #[serde(default)]
     vision: VisionSection,
-    #[serde(default)]
     ground_station: GroundStationSection,
-    #[serde(default)]
     server: ServerSection,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 struct AgentSection {
-    #[serde(default)]
-    profile: Option<String>,
+    /// `agent.profile`: `auto` (default) resolves from `profile.conf`.
+    profile: String,
     /// `agent.headless`: when true, the supervisor boots only the lean KEEP set
     /// (the Rust core), blocking FastAPI / cloud / health / GS units. Absent or
     /// false → the full agent. The zero-Python flight profile.
-    #[serde(default)]
-    headless: Option<bool>,
+    headless: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl Default for AgentSection {
+    fn default() -> Self {
+        Self {
+            profile: "auto".to_string(),
+            headless: false,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 struct VideoSection {
-    #[serde(default)]
-    mode: Option<String>,
-    #[serde(default)]
+    /// `video.mode`: any value but `disabled` enables video (default `wfb`).
+    mode: String,
     camera: CameraSection,
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl Default for VideoSection {
+    fn default() -> Self {
+        Self {
+            mode: "wfb".to_string(),
+            camera: CameraSection::default(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 struct CameraSection {
     /// `video.camera.source`: a device hint (`csi`/`usb`/`ip`) or an explicit
     /// `rtsp://…` / `http://…` network URL. The supervisor only reads it to
     /// decide whether to start the video service without a local camera node.
-    #[serde(default)]
-    source: Option<String>,
+    source: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl Default for CameraSection {
+    fn default() -> Self {
+        Self {
+            source: "csi".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
 struct VisionSection {
     /// `vision.enabled`: opt-in for the onboard vision engine. The engine reads
     /// the top-level `vision:` block (not `video:`); the supervisor mirrors that
     /// key so it can decide whether to start `ados-vision` at boot instead of
     /// leaving a configured engine silently dark.
-    #[serde(default)]
     enabled: bool,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 struct GroundStationSection {
-    #[serde(default)]
-    role: Option<String>,
+    role: String,
 }
 
-#[derive(Debug, Default, Deserialize)]
+impl Default for GroundStationSection {
+    fn default() -> Self {
+        Self {
+            role: "direct".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(default)]
 struct ServerSection {
     /// `server.mode`: `local` (default) reaches the agent only over the LAN;
     /// `cloud` / `self_hosted` enable the cloud relay.
-    #[serde(default)]
-    mode: Option<String>,
+    mode: String,
+}
+
+impl Default for ServerSection {
+    fn default() -> Self {
+        Self {
+            mode: "local".to_string(),
+        }
+    }
 }
 
 /// The resolved agent identity the orchestrator gates on.
@@ -97,7 +137,7 @@ pub struct AgentConfig {
     /// every check so a runtime role switch is honored without restarting
     /// the supervisor (see `live_role`). Kept for display / boot reporting.
     pub role: Option<String>,
-    /// `video.mode` is set and not `"disabled"`.
+    /// `video.mode` is not `"disabled"` (an absent key reads as the schema default `wfb`).
     pub video_enabled: bool,
     /// An explicit network camera source (`video.camera.source` = `rtsp://…`
     /// / `http://…`), or `None` for the local-camera path. When set, the
@@ -203,7 +243,7 @@ impl AgentConfig {
             ados_config::write_config_status("supervisor", config_error.as_deref());
         }
 
-        let profile_wire = ados_config::resolve_profile(raw.agent.profile.as_deref(), profile_conf);
+        let profile_wire = ados_config::resolve_profile(Some(&raw.agent.profile), profile_conf);
 
         let role = if profile_wire == "ground-station" {
             Some(read_current_role(mesh_role))
@@ -211,36 +251,21 @@ impl AgentConfig {
             None
         };
 
-        let video_enabled = raw
-            .video
-            .mode
-            .as_deref()
-            .map(|m| m != "disabled")
-            .unwrap_or(false);
+        let video_enabled = raw.video.mode != "disabled";
 
-        let video_network_source = raw
-            .video
-            .camera
-            .source
-            .as_deref()
-            .map(str::trim)
+        let video_network_source = Some(raw.video.camera.source.trim())
             .filter(|s| s.starts_with("rtsp://") || s.starts_with("http://"))
             .map(str::to_string);
 
         let vision_enabled = raw.vision.enabled;
 
-        let cloud_relay_enabled = matches!(
-            raw.server.mode.as_deref(),
-            Some("cloud") | Some("self_hosted")
-        );
+        let cloud_relay_enabled = matches!(raw.server.mode.as_str(), "cloud" | "self_hosted");
 
-        let configured_gs_role = raw
-            .ground_station
-            .role
+        let configured_gs_role = Some(raw.ground_station.role)
             .filter(|r| VALID_ROLES.contains(&r.as_str()))
             .unwrap_or_else(|| "direct".to_string());
 
-        let headless_mode = raw.agent.headless.unwrap_or(false);
+        let headless_mode = raw.agent.headless;
 
         AgentConfig {
             profile_wire,
@@ -281,15 +306,16 @@ impl AgentConfig {
     }
 }
 
-/// Read + parse the raw agent config, returning the parse-error message
-/// alongside the config so the startup path can surface it on a config-status
-/// sidecar. `None` on success or a missing/unreadable file (a fresh node is not a
-/// fault); `Some(msg)` on a present-but-malformed file.
+/// Read the supervisor's slice of the effective config, returning the error
+/// message alongside it so the startup path can surface it on a config-status
+/// sidecar. `None` on success or a missing file (a fresh node is not a fault,
+/// and reads as the schema defaults); `Some(msg)` on a present-but-malformed
+/// file, which falls back to the defaults.
 fn read_raw_config(path: &Path) -> (RawConfig, Option<String>) {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return (RawConfig::default(), None);
-    };
-    ados_config::yaml_reporting(&text, "supervisor")
+    match ados_config::schema::load_slice::<RawConfig>(path, "") {
+        Ok(raw) => (raw, None),
+        Err(e) => (RawConfig::default(), Some(e)),
+    }
 }
 
 /// Whether the logging store is wanted on this node. The config key is read
@@ -317,184 +343,4 @@ pub fn read_current_role(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    fn write(path: &Path, contents: &str) {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let mut f = std::fs::File::create(path).unwrap();
-        f.write_all(contents.as_bytes()).unwrap();
-    }
-
-    #[test]
-    fn explicit_config_profile_wins() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.yaml");
-        write(
-            &cfg,
-            "agent:\n  profile: ground_station\nvideo:\n  mode: auto\n",
-        );
-        let pc = dir.path().join("profile.conf"); // not read when config is explicit
-        let role = dir.path().join("mesh/role");
-        write(&role, "relay\n");
-        let ac = AgentConfig::load_from(&cfg, &pc, &role);
-        assert_eq!(ac.profile_wire, "ground-station");
-        assert_eq!(ac.role.as_deref(), Some("relay"));
-        assert!(ac.video_enabled);
-        assert_eq!(ac.profile_gate(), "ground_station");
-        assert!(ac.is_ground_station());
-    }
-
-    #[test]
-    fn cloud_relay_enabled_follows_server_mode() {
-        let dir = tempfile::tempdir().unwrap();
-        let pc = dir.path().join("profile.conf");
-        let role = dir.path().join("mesh/role");
-        let load = |body: &str| {
-            let cfg = dir.path().join("config.yaml");
-            write(&cfg, body);
-            AgentConfig::load_from(&cfg, &pc, &role).cloud_relay_enabled
-        };
-        // Local-first default (absent or explicit `local`) keeps the relay off.
-        assert!(!load("agent:\n  profile: drone\n"));
-        assert!(!load("server:\n  mode: local\n"));
-        // Cloud / self-hosted postures enable it.
-        assert!(load("server:\n  mode: cloud\n"));
-        assert!(load("server:\n  mode: self_hosted\n"));
-        // An unknown mode stays off (local-first).
-        assert!(!load("server:\n  mode: weird\n"));
-    }
-
-    #[test]
-    fn video_network_source_parsed_only_for_url() {
-        let dir = tempfile::tempdir().unwrap();
-        let pc = dir.path().join("profile.conf");
-        let role = dir.path().join("mesh/role");
-        let load = |body: &str| {
-            let cfg = dir.path().join("config.yaml");
-            write(&cfg, body);
-            AgentConfig::load_from(&cfg, &pc, &role).video_network_source
-        };
-        // A local-camera hint or device path is not a network source.
-        assert_eq!(load("video:\n  camera:\n    source: csi\n"), None);
-        assert_eq!(load("video:\n  camera:\n    source: /dev/video0\n"), None);
-        assert_eq!(load("agent:\n  profile: drone\n"), None);
-        // An explicit rtsp/http URL is picked up (trimmed).
-        assert_eq!(
-            load("video:\n  camera:\n    source: rtsp://host:8554/scene\n"),
-            Some("rtsp://host:8554/scene".to_string())
-        );
-        assert_eq!(
-            load("video:\n  camera:\n    source: \"  http://cam/stream  \"\n"),
-            Some("http://cam/stream".to_string())
-        );
-    }
-
-    #[test]
-    fn vision_enabled_follows_the_vision_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let pc = dir.path().join("profile.conf");
-        let role = dir.path().join("mesh/role");
-        let load = |body: &str| {
-            let cfg = dir.path().join("config.yaml");
-            write(&cfg, body);
-            AgentConfig::load_from(&cfg, &pc, &role).vision_enabled
-        };
-        // No vision block → disabled (the safe default on a rig without vision).
-        assert!(!load("agent:\n  profile: drone\n"));
-        // Explicit false → disabled.
-        assert!(!load("vision:\n  enabled: false\n"));
-        // Explicit true → enabled, matching the key the engine itself reads.
-        assert!(load("vision:\n  enabled: true\n"));
-    }
-
-    #[test]
-    fn auto_falls_back_to_profile_conf() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.yaml");
-        write(&cfg, "agent:\n  profile: auto\nvideo:\n  mode: disabled\n");
-        let pc = dir.path().join("profile.conf");
-        write(
-            &pc,
-            "# header\nprofile: ground-station\nmesh_capable: true\n",
-        );
-        let role = dir.path().join("mesh/role");
-        let ac = AgentConfig::load_from(&cfg, &pc, &role);
-        assert_eq!(ac.profile_wire, "ground-station");
-        // role sentinel missing → direct
-        assert_eq!(ac.role.as_deref(), Some("direct"));
-        // video.mode disabled → not enabled
-        assert!(!ac.video_enabled);
-        // The boot role-apply and receive-plane start key off the RESOLVED
-        // profile, so an `auto` config on a ground station boots its role.
-        assert!(ac.is_ground_station());
-    }
-
-    #[test]
-    fn missing_everything_defaults_to_drone() {
-        let dir = tempfile::tempdir().unwrap();
-        let ac = AgentConfig::load_from(
-            &dir.path().join("nope.yaml"),
-            &dir.path().join("nope.conf"),
-            &dir.path().join("nope.role"),
-        );
-        assert_eq!(ac.profile_wire, "drone");
-        assert_eq!(ac.role, None);
-        assert!(!ac.video_enabled);
-        assert_eq!(ac.configured_gs_role, "direct");
-        // The full agent is the default: headless must be opt-in.
-        assert!(!ac.headless_mode);
-    }
-
-    #[test]
-    fn headless_mode_follows_agent_headless() {
-        let dir = tempfile::tempdir().unwrap();
-        let pc = dir.path().join("profile.conf");
-        let role = dir.path().join("mesh/role");
-        let load = |body: &str| {
-            let cfg = dir.path().join("config.yaml");
-            write(&cfg, body);
-            AgentConfig::load_from(&cfg, &pc, &role).headless_mode
-        };
-        // Absent → full agent.
-        assert!(!load("agent:\n  profile: drone\n"));
-        // Explicit false → full agent.
-        assert!(!load("agent:\n  profile: drone\n  headless: false\n"));
-        // Explicit true → lean headless.
-        assert!(load("agent:\n  profile: drone\n  headless: true\n"));
-    }
-
-    #[test]
-    fn workstation_and_compute_profiles_resolve_and_never_collapse_to_drone() {
-        // Both the operator's workstation and a lean engine-only compute worker must
-        // survive profile resolution (a `compute` value used to fall through to
-        // `drone`, which never started the compute engine). The wire form is the
-        // same token for both, so `profile_gate()` matches the `workstation|compute`
-        // engine gate and the reconstruction pipeline runs on either node.
-        let dir = tempfile::tempdir().unwrap();
-        let role = dir.path().join("mesh/role");
-        let no_conf = dir.path().join("nope.conf");
-        let load = |profile: &str| {
-            let cfg = dir.path().join("config.yaml");
-            write(&cfg, &format!("agent:\n  profile: {profile}\n"));
-            AgentConfig::load_from(&cfg, &no_conf, &role)
-        };
-        let ws = load("workstation");
-        assert_eq!(ws.profile_wire, "workstation");
-        assert_eq!(ws.profile_gate(), "workstation");
-        let compute = load("compute");
-        assert_eq!(compute.profile_wire, "compute");
-        assert_eq!(compute.profile_gate(), "compute");
-    }
-
-    #[test]
-    fn unknown_role_sentinel_falls_back_to_direct() {
-        let dir = tempfile::tempdir().unwrap();
-        let role = dir.path().join("role");
-        write(&role, "garbage\n");
-        assert_eq!(read_current_role(&role), "direct");
-    }
-}
+mod tests;

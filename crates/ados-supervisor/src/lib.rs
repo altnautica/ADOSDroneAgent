@@ -9,6 +9,8 @@
 pub mod auto_pair;
 pub mod bind;
 pub mod config;
+#[cfg(unix)]
+pub mod daemon;
 pub mod fc_state;
 pub mod hardware;
 pub mod hotplug;

@@ -20,6 +20,11 @@ pub mod camera;
 pub mod machine;
 pub mod topo;
 
+mod rebind;
+pub use rebind::execute_rebind;
+mod settings;
+pub use settings::read_config_from;
+
 use std::time::{Duration, Instant};
 
 use ados_protocol::logd::emitter::EventEmitter;
@@ -54,15 +59,6 @@ const DEFAULT_HEALTHY_RESET_S: u64 = 120;
 /// Default reconcile cadence.
 const DEFAULT_TICK_INTERVAL_S: u64 = 5;
 
-/// Settle between the unbind and the bind so the device node fully drops.
-#[cfg(target_os = "linux")]
-const REHOME_SETTLE_UNBIND: Duration = Duration::from_millis(1500);
-/// Bounded wait for the interface to re-enumerate after the bind.
-#[cfg(target_os = "linux")]
-const REHOME_REENUM_CEILING: Duration = Duration::from_secs(5);
-#[cfg(target_os = "linux")]
-const REHOME_REENUM_STEP: Duration = Duration::from_millis(200);
-
 #[cfg(target_os = "linux")]
 const SIDECAR_PATH: &str = "/run/ados/usb-rehome.json";
 
@@ -84,11 +80,6 @@ const WFB_STATS_PATH: &str = "/run/ados/wfb-stats.json";
 /// stale sidecar reads as "no signals" (no rehome) rather than frozen-degraded.
 #[cfg(target_os = "linux")]
 const WFB_STATS_FRESH_CEILING: Duration = Duration::from_secs(30);
-/// The USB core driver's bind/unbind sysfs attributes.
-#[cfg(target_os = "linux")]
-const USB_UNBIND_PATH: &str = "/sys/bus/usb/drivers/usb/unbind";
-#[cfg(target_os = "linux")]
-const USB_BIND_PATH: &str = "/sys/bus/usb/drivers/usb/bind";
 
 /// Configuration, read from `network.usb_rehome`. Default-ON.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,53 +100,6 @@ impl Default for UsbRehomeConfig {
             healthy_reset: Duration::from_secs(DEFAULT_HEALTHY_RESET_S),
             tick_interval: Duration::from_secs(DEFAULT_TICK_INTERVAL_S),
         }
-    }
-}
-
-/// Parse `network.usb_rehome`. Absent / malformed → enabled defaults.
-pub fn read_config_from(text: &str) -> UsbRehomeConfig {
-    #[derive(serde::Deserialize, Default)]
-    struct Raw {
-        #[serde(default)]
-        network: Net,
-    }
-    #[derive(serde::Deserialize, Default)]
-    struct Net {
-        #[serde(default)]
-        usb_rehome: Option<Rehome>,
-    }
-    #[derive(serde::Deserialize)]
-    struct Rehome {
-        #[serde(default = "default_true")]
-        enabled: bool,
-        #[serde(default)]
-        cooldown_s: Option<u64>,
-        #[serde(default)]
-        healthy_reset_s: Option<u64>,
-        #[serde(default)]
-        tick_interval_s: Option<u64>,
-    }
-    fn default_true() -> bool {
-        true
-    }
-    match serde_norway::from_str::<Raw>(text) {
-        Ok(raw) => match raw.network.usb_rehome {
-            Some(r) => {
-                let cooldown_s = r.cooldown_s.unwrap_or(DEFAULT_COOLDOWN_S).max(1);
-                UsbRehomeConfig {
-                    enabled: r.enabled,
-                    cooldown: Duration::from_secs(cooldown_s),
-                    healthy_reset: Duration::from_secs(
-                        r.healthy_reset_s.unwrap_or(DEFAULT_HEALTHY_RESET_S).max(1),
-                    ),
-                    tick_interval: Duration::from_secs(
-                        r.tick_interval_s.unwrap_or(DEFAULT_TICK_INTERVAL_S).max(1),
-                    ),
-                }
-            }
-            None => UsbRehomeConfig::default(),
-        },
-        Err(_) => UsbRehomeConfig::default(),
     }
 }
 
@@ -448,42 +392,6 @@ impl UsbRehome {
     }
 }
 
-/// Execute the sysfs unbind/rebind for an authorized plan. Called by the
-/// supervisor BETWEEN stopping and starting the radio unit, so no live injector
-/// races the rebind. Best-effort; a sysfs write failure is logged and the radio
-/// restart still re-probes the adapter.
-#[cfg(target_os = "linux")]
-pub async fn execute_rebind(plan: &RehomePlan) {
-    tracing::warn!(iface = %plan.iface, bind_id = %plan.bind_id, attempt = plan.attempt, "usb_rehome_unbind_rebind");
-    if let Err(e) = sysfs_write(USB_UNBIND_PATH, &plan.bind_id).await {
-        tracing::warn!(error = %e, "usb_rehome unbind failed");
-    }
-    tokio::time::sleep(REHOME_SETTLE_UNBIND).await;
-    if let Err(e) = sysfs_write(USB_BIND_PATH, &plan.bind_id).await {
-        tracing::warn!(error = %e, "usb_rehome bind failed");
-    }
-    // Wait (bounded) for the interface's device link to resolve again.
-    let deadline = tokio::time::Instant::now() + REHOME_REENUM_CEILING;
-    let link = format!("/sys/class/net/{}/device", plan.iface);
-    loop {
-        if tokio::fs::canonicalize(&link).await.is_ok() {
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            break;
-        }
-        tokio::time::sleep(REHOME_REENUM_STEP).await;
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub async fn execute_rebind(_plan: &RehomePlan) {}
-
-#[cfg(target_os = "linux")]
-async fn sysfs_write(path: &str, val: &str) -> std::io::Result<()> {
-    tokio::fs::write(path, val).await
-}
-
 /// Read the rehome signals from the radio's `wfb-stats.json` sidecar. Returns
 /// `None` when the sidecar is absent, malformed, or STALE (older than
 /// [`WFB_STATS_FRESH_CEILING`]) — a frozen sidecar from a stopped/crashed radio
@@ -553,50 +461,4 @@ fn now_unix() -> u64 {
 use ados_protocol::sidecar::write_json_atomic;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn usb_rehome_sidecar_version_matches_registry() {
-        // The per-file const and the sidecar registry are the two sources of
-        // truth for this sidecar's schema version; a drift is caught here. The
-        // reader (`ados-control`'s status route) gates its drift warning on the
-        // registry, so an unregistered sidecar would warn on every read.
-        assert_eq!(
-            USB_REHOME_SIDECAR_VERSION,
-            ados_protocol::contracts::sidecar_version("usb-rehome").unwrap()
-        );
-    }
-
-    #[test]
-    fn absent_section_is_enabled_with_defaults() {
-        let cfg = read_config_from("agent:\n  name: x\n");
-        assert!(cfg.enabled);
-        assert_eq!(cfg.cooldown, Duration::from_secs(DEFAULT_COOLDOWN_S));
-        assert_eq!(
-            cfg.healthy_reset,
-            Duration::from_secs(DEFAULT_HEALTHY_RESET_S)
-        );
-    }
-
-    #[test]
-    fn explicit_disable_and_tunables() {
-        let cfg = read_config_from(
-            "network:\n  usb_rehome:\n    enabled: false\n    cooldown_s: 20\n    healthy_reset_s: 90\n",
-        );
-        assert!(!cfg.enabled);
-        assert_eq!(cfg.cooldown, Duration::from_secs(20));
-        assert_eq!(cfg.healthy_reset, Duration::from_secs(90));
-    }
-
-    #[test]
-    fn a_zero_cooldown_floors_rather_than_hot_looping() {
-        let cfg = read_config_from("network:\n  usb_rehome:\n    cooldown_s: 0\n");
-        assert_eq!(cfg.cooldown, Duration::from_secs(1));
-    }
-
-    #[test]
-    fn malformed_config_defaults_enabled() {
-        assert!(read_config_from(": : : not yaml").enabled);
-    }
-}
+mod tests;
