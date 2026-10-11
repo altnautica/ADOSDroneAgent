@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.103.1] - 2026-10-11
+
+### Changed
+
+- **Bundled extension catalog** is pinned to the published release archives
+  (Vision Navigation 0.5.0, Follow-Me 0.2.10, SIYI Pod 0.5.1, MAVLink Gimbal
+  1.4.1, World Engine 1.0.1) with their sha256 digests.
+  `scripts/sync-plugin-catalog.py` refreshes it and `--check` fails when it
+  lags; a weekly workflow runs the check. Entries with no published release
+  are dropped.
+
 ## [0.103.0] - 2026-10-11
 
 One day and 56 commits after 0.102.6. The range is a review pass over the
@@ -80,12 +91,6 @@ keeps them that way.
 
 ### Changed
 
-- **Bundled extension catalog** is pinned to the published release archives
-  (Vision Navigation 0.5.0, Follow-Me 0.2.10, SIYI Pod 0.5.1, MAVLink Gimbal
-  1.4.1, World Engine 1.0.1) with their sha256 digests.
-  `scripts/sync-plugin-catalog.py` refreshes it and `--check` fails when it
-  lags; a weekly workflow runs the check. Entries with no published release
-  are dropped.
 - **Native `/whep`.** WebRTC playback is served by the native control service;
   the Python WHEP proxy is gone.
 - **Native ground video.** `ados-groundlink --ground-video` serves ground
