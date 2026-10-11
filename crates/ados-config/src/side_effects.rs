@@ -5,10 +5,11 @@
 //! `ados-control --apply-config-side-effects`) runs them through [`apply`]:
 //!
 //! * **CRSF** (`radio.crsf`): the `crsf-enabled` marker the `ados-crsf` unit
-//!   gates on mirrors `enabled`. A slice change kicks the lane with
-//!   `reload-or-restart`; a change to the router's view of the slice (the pinned
-//!   device, the MAVLink-over-ELRS source, the command direction) `try-restart`s
-//!   `ados-mavlink`, which loads that view once at startup.
+//!   gates on mirrors `enabled`. A slice change kicks an enabled lane with
+//!   `reload-or-restart` and stops a disabled one; a change to the router's
+//!   view of the slice (the pinned device, the MAVLink-over-ELRS source, the
+//!   command direction) `try-restart`s `ados-mavlink`, which loads that view
+//!   once at startup.
 //! * **Config tunnel** (`radio.tunnel`): the `tunnel-enabled` marker mirrors
 //!   `enabled`; a slice change kicks `ados-tunnel-config` with
 //!   `reload-or-restart`.
@@ -184,7 +185,15 @@ impl Effects<'_> {
         );
         let flipped = self.marker("crsf-enabled", enabled(after));
         if flipped || before != after {
-            self.systemctl(&["--no-block", "reload-or-restart", "ados-crsf.service"]);
+            // A running unit is never re-checked against its marker condition,
+            // and the unit's ExecReload is a SIGHUP, so `reload-or-restart`
+            // would leave a disabled lane resident. Off means stop.
+            let verb = if enabled(after) {
+                "reload-or-restart"
+            } else {
+                "stop"
+            };
+            self.systemctl(&["--no-block", verb, "ados-crsf.service"]);
         }
         if router_view(before) != router_view(after) {
             self.systemctl(&["--no-block", "try-restart", "ados-mavlink.service"]);
@@ -282,9 +291,18 @@ mod tests {
             calls,
             vec!["systemctl --no-block reload-or-restart ados-crsf.service"]
         );
+        // Turning the lane off stops the unit: a reload would leave it resident,
+        // since systemd never re-checks the marker condition of a running unit.
         let (_, calls) = run_with(on, crsf(json!({"enabled": false})), etc.path());
         assert!(!etc.path().join("crsf-enabled").exists());
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls, vec!["systemctl --no-block stop ados-crsf.service"]);
+        // A slice edit while the lane stays off keeps it stopped.
+        let (_, calls) = run_with(
+            crsf(json!({"enabled": false})),
+            crsf(json!({"enabled": false, "packet_rate_hz": 250})),
+            etc.path(),
+        );
+        assert_eq!(calls, vec!["systemctl --no-block stop ados-crsf.service"]);
     }
 
     #[test]
