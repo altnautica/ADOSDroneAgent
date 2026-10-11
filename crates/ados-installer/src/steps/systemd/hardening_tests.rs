@@ -3,9 +3,9 @@
 use super::*;
 
 #[test]
-fn a_non_ground_install_removes_the_stale_ground_station_avahi_file() {
-    // A node reinstalled from ground_station to drone must stop advertising
-    // the "ADOS Ground Station" record the static service file publishes.
+fn every_install_removes_the_retired_ground_station_avahi_file() {
+    // The static file published a second `_ados._tcp` instance beside the
+    // control front's own advert, so an upgraded node must drop it.
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("ados-gs-ap.service");
     std::fs::write(&file, "<service-group/>").unwrap();
@@ -13,6 +13,15 @@ fn a_non_ground_install_removes_the_stale_ground_station_avahi_file() {
     assert!(!file.exists());
     // Idempotent: nothing left to remove, so no avahi reload is asked for.
     assert!(!remove_avahi_gs_ap_at(&file));
+}
+
+#[test]
+fn no_static_avahi_record_ships() {
+    // `ados-control` publishes the node's one `_ados._tcp` record on every
+    // non-loopback interface, the access point included. A static avahi
+    // record is a second instance of the same node on every interface.
+    let avahi = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/avahi");
+    assert!(!avahi.exists(), "{} ships again", avahi.display());
 }
 
 #[test]

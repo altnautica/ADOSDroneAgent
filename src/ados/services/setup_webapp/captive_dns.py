@@ -21,9 +21,11 @@ server, so a browser that follows it lands on the wizard rather than
 redirecting to itself.
 
 Lifecycle:
-- If `/var/lib/ados/setup-complete` exists at start, the service
-  logs and exits 0. The systemd unit runs with `Restart=no` so exit
-  0 is a clean "done" signal.
+- If `/var/lib/ados/setup-complete` exists at start, when
+  ados-dnsmasq-gs owns DNS, or when port 53 is already taken, the
+  service logs and exits 0. The systemd unit carries
+  `RestartPreventExitStatus=0`, so exit 0 is a clean "done" signal and
+  only a crash restarts it.
 - Otherwise we bind UDP 53 for DNS and TCP 80 for HTTP on all
   interfaces (the ground-station AP is typically the only route
   with inbound traffic, but we do not restrict the bind).

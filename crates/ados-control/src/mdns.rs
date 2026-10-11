@@ -5,9 +5,10 @@
 //! The GCS Add-a-Node card browses `_ados._tcp` and probes whatever answers
 //! (`/api/lan-pair/discover` → `/api/pairing/info` on each responder). Without
 //! an always-on advert, a fresh drone or ground station would advertise nothing
-//! at boot: the static avahi service file the installer drops is
-//! ground-station-only. The discovered list would be empty on a fresh box, and
-//! the operator would have to know and type a hostname.
+//! at boot, the discovered list would be empty, and the operator would have to
+//! know and type a hostname. This is the node's only `_ados._tcp` record: it is
+//! answered on every non-loopback interface, so a phone or laptop on a ground
+//! station's access point finds the node by the same record a LAN browser does.
 //!
 //! The advert belongs to the process that actually answers `/api/pairing/*` on
 //! `:8080`. That is this daemon, on every profile, and the record therefore

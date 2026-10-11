@@ -342,36 +342,12 @@ pub(super) fn install_motd(source: Option<&Path>) {
     }
 }
 
-/// Install the static avahi service file (GROUND-STATION only) so the AP-side
-/// `_ados._tcp` record is browseable even while the agent process is restarting.
-/// The agent also registers the same service in-process with live TXT records;
-/// this static copy is a fallback baseline. Best-effort, then reload avahi so the
-/// new service is picked up without a full restart.
-pub(super) fn install_avahi_gs_ap(source: Option<&Path>) {
-    let src = match source.map(|s| s.join("data/avahi/ados-gs-ap.service")) {
-        Some(p) if p.is_file() => p,
-        _ => {
-            tracing::warn!("avahi service source not found; skipping ados-gs-ap.service install");
-            return;
-        }
-    };
-    if let Some(parent) = Path::new(AVAHI_GS_AP_FILE).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if std::fs::copy(&src, AVAHI_GS_AP_FILE).is_err() {
-        tracing::warn!("copying avahi service file failed");
-        return;
-    }
-    set_mode(Path::new(AVAHI_GS_AP_FILE), 0o644);
-    // Reload avahi so the new service file is picked up without a full restart.
-    let _ = exec::run("systemctl", &["reload", "avahi-daemon"]);
-    tracing::info!(path = AVAHI_GS_AP_FILE, "avahi service file installed");
-}
-
-/// Remove the ground-station avahi service file on a non-GS install, so a node
-/// reinstalled from `ground_station` to another profile stops advertising an
-/// "ADOS Ground Station" `_ados._tcp` record it no longer serves. Reloads avahi
-/// only when a file was removed.
+/// Remove the static ground-station avahi service file an older release
+/// installed. It published a second `_ados._tcp` instance ("ADOS Ground Station
+/// on <host>") on every interface beside the one `ados-control` publishes, so a
+/// browser listed the node twice. The control front's advert covers every
+/// non-loopback interface, the access point included. Runs on every profile;
+/// reloads avahi only when a file was removed.
 pub(super) fn remove_avahi_gs_ap() {
     if remove_avahi_gs_ap_at(Path::new(AVAHI_GS_AP_FILE)) {
         let _ = exec::run("systemctl", &["reload", "avahi-daemon"]);

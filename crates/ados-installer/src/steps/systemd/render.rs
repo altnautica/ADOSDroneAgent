@@ -36,7 +36,8 @@ pub(super) const USB_AUTOSUSPEND_ARG: &str = "usbcore.autosuspend=-1";
 pub(super) const ETH_NO_EEE_RULE: &str = "/etc/udev/rules.d/99-ados-eth-no-eee.rules";
 /// The SSH login banner copied from `data/motd/30-ados`.
 pub(super) const MOTD_FILE: &str = "/etc/update-motd.d/30-ados";
-/// Static avahi service file advertising the AP-side `_ados._tcp` record.
+/// The retired static avahi service file that published a second AP-side
+/// `_ados._tcp` record; the install removes it on every profile.
 pub(super) const AVAHI_GS_AP_FILE: &str = "/etc/avahi/services/ados-gs-ap.service";
 /// tmpfiles drop-in that ages out the agent's own append-only files on disk.
 pub(super) const LOG_RETENTION_TMPFILES: &str = "/etc/tmpfiles.d/99-ados-log-retention.conf";

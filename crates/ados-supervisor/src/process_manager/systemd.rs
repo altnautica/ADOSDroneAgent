@@ -63,7 +63,10 @@ enum ShownEnd {
     /// `exit_zero_only` holds when the restart policy leaves exit 0 as the
     /// only such end apart from a stop job: `Restart=always` restarts after
     /// every other exit status and every signal, clean ones included, and
-    /// `RestartPreventExitStatus=0` exempts exactly status 0.
+    /// `RestartPreventExitStatus=` lists 0 and otherwise only nonzero
+    /// statuses. A prevented nonzero status (ados-video's 78) ends `failed`,
+    /// which systemd keeps, so it never reaches this collected shape; a
+    /// prevented signal would be a second clean end, so any signal disqualifies.
     Collected { exit_zero_only: bool },
 }
 
@@ -105,8 +108,10 @@ fn shown_end(stdout: &str) -> Option<ShownEnd> {
         return None;
     }
     if invocation?.is_empty() {
-        let exit_zero_only =
-            restart? == "always" && prevent?.split_whitespace().eq(std::iter::once("0"));
+        let exit_zero_only = restart? == "always" && {
+            let mut statuses = prevent?.split_whitespace().map(str::parse::<u8>);
+            statuses.clone().all(|s| s.is_ok()) && statuses.any(|s| s == Ok(0))
+        };
         return Some(ShownEnd::Collected { exit_zero_only });
     }
     Some(ShownEnd::Live(

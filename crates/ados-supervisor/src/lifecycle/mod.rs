@@ -61,12 +61,15 @@ const ADOPTION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Catalog rows the adoption sweep skips because they are MEANT to exit.
 ///
-/// `ados-setup-captive` serves the first-boot captive portal and terminates
-/// once `/var/lib/ados/setup-complete` appears; its unit is `Restart=no` and
-/// `ConditionPathExists=!` that same sentinel. Adopting it would turn its
-/// successful completion into a "service died", and every restart attempt
-/// afterwards runs against a condition that can never be met again — a
-/// permanent retry loop against a unit that did its job.
+/// `ados-setup-captive` serves the first-boot captive portal and exits 0 when
+/// it has nothing to serve: `/var/lib/ados/setup-complete` exists, the ground
+/// station's dnsmasq owns DNS, or port 53 is taken. Its unit carries
+/// `RestartPreventExitStatus=0`, so that exit is final, and
+/// `ConditionPathExists=!` the sentinel skips it once setup is done. Adopting
+/// it would turn its clean exit into a "service died", and every restart
+/// attempt afterwards either exits the same way or runs against a condition
+/// that can never be met again: a permanent retry loop against a unit that
+/// did its job.
 const SELF_TERMINATING_UNITS: [&str; 1] = ["ados-setup-captive"];
 
 /// Whether a service's profile + role gates allow it to run under `config`.

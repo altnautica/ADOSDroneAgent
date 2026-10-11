@@ -77,3 +77,44 @@ fn profile_and_install_rules_hold() {
         }
     }
 }
+
+/// The last value of `key=` in a unit file, as systemd keeps the last one.
+fn directive<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    body.lines()
+        .filter_map(|l| l.trim().strip_prefix(prefix.as_str()).map(str::trim))
+        .next_back()
+}
+
+#[test]
+fn a_unit_that_exits_zero_when_done_is_not_restarted_for_it() {
+    // A unit whose process exits 0 to say "nothing to run" or "done" must not
+    // have that exit restarted: `Restart=always` with no
+    // `RestartPreventExitStatus=0` respawns it every `RestartSec=` forever.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
+    let mut checked = 0usize;
+    for u in UNITS.iter().filter(|u| u.idle_ok || u.self_terminating) {
+        let path = dir.join(u.name);
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let restart = directive(&body, "Restart").unwrap_or("no");
+        let prevents_zero = directive(&body, "RestartPreventExitStatus")
+            .is_some_and(|v| v.split_whitespace().any(|s| s == "0"));
+        assert!(
+            !matches!(restart, "always" | "on-success") || prevents_zero,
+            "{} exits 0 when it has nothing to do but Restart={restart} restarts that exit",
+            u.name
+        );
+        // An idle exit is told apart from a death by the prevent list, so the
+        // supervisor can park it instead of counting a crash.
+        if u.idle_ok {
+            assert!(
+                prevents_zero,
+                "{} is idle_ok without RestartPreventExitStatus=0",
+                u.name
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 0);
+}

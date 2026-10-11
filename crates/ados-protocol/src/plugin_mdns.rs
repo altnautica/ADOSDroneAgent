@@ -38,8 +38,8 @@ pub const BROWSE_CAPABILITY: &str = "network.outbound";
 
 /// The service types core publishes. A plugin may browse them but never
 /// advertise one: `_ados._tcp` is every node's pairing record (the control
-/// front on every profile, the static avahi file on a ground station's access
-/// point) and `_ados-receiver._tcp` is the ground-station mesh receiver.
+/// front publishes it on every profile and interface) and `_ados-receiver._tcp`
+/// is the ground-station mesh receiver.
 pub const RESERVED_SERVICE_TYPES: &[&str] = &["_ados._tcp", "_ados-receiver._tcp"];
 
 /// The browse window when the request names none.

@@ -211,13 +211,14 @@ pub const UNITS: &[UnitSpec] = &[
         idle_ok: true,
         ..BASE
     },
-    // The camera encode pipeline is air-side only.
+    // The air-side encode pipeline; exits 0 and idles off-drone or video-off.
     UnitSpec {
         name: "ados-video.service",
         category: Some(Hardware),
         profiles: DRONE,
         drops_link: true,
         headless_keep: true,
+        idle_ok: true,
         teardown: true,
         ..BASE
     },
@@ -349,6 +350,7 @@ pub const UNITS: &[UnitSpec] = &[
     },
     UnitSpec {
         health_check: true,
+        idle_ok: true,
         ..gs_unit("ados-setup-captive.service", Some(OnDemand))
     },
     // Exits 0 when the configured display is an LCD or none.

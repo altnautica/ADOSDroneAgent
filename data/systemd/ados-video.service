@@ -55,7 +55,12 @@ Type=simple
 # `exec` replaces the shell image so SupplementaryGroups=video carries over.
 ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-video ]; then rm -f /run/ados/video-binary-missing; exec /opt/ados/bin/ados-video; fi; date -Is > /run/ados/video-binary-missing; echo "ados-video binary missing at /opt/ados/bin/ados-video; re-run the installer to fetch it" >&2; exit 78'
 Restart=always
-RestartPreventExitStatus=78
+# 0 is the idle exit: a node that is not a drone, or a drone with video.mode
+# disabled, has no pipeline to run. Restarting it respawned the process every
+# RestartSec= for as long as the unit was up (a supervisor restart re-runs every
+# active PartOf= unit, so a profile switch left it looping). The supervisor
+# parks that exit as idle and starts the unit again when the config changes.
+RestartPreventExitStatus=0 78
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env

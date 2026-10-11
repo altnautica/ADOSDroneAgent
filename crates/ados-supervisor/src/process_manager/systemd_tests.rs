@@ -77,6 +77,26 @@ fn a_collected_unit_defers_to_the_journal_only_under_an_exact_policy() {
             exit_zero_only: false
         })
     );
+    // A nonzero status beside 0 (ados-video's terminal 78) ends `failed`,
+    // which systemd never collects, so exit 0 is still the only collected end.
+    let with_status = collected.replace(
+        "RestartPreventExitStatus=0",
+        "RestartPreventExitStatus=0 78",
+    );
+    assert_eq!(
+        shown_end(&with_status),
+        Some(ShownEnd::Collected {
+            exit_zero_only: true
+        })
+    );
+    let without_zero =
+        collected.replace("RestartPreventExitStatus=0", "RestartPreventExitStatus=78");
+    assert_eq!(
+        shown_end(&without_zero),
+        Some(ShownEnd::Collected {
+            exit_zero_only: false
+        })
+    );
     let not_found = collected.replace("LoadState=loaded", "LoadState=not-found");
     assert_eq!(shown_end(&not_found), None);
     assert_eq!(shown_end("LoadState=loaded\nResult=success\n"), None);

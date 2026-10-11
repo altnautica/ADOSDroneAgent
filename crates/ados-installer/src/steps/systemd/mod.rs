@@ -182,15 +182,14 @@ impl Step for Systemd {
             enable_if_present(unit);
         }
         if ctx.profile == "ground_station" {
-            // The mDNS AP service file and the hardware-access group
-            // memberships are GS-only — they belong to the AP +
-            // button/joystick/OLED service set.
-            install_avahi_gs_ap(Some(&source));
+            // The hardware-access group memberships are GS-only: they belong
+            // to the AP + button/joystick/OLED service set.
             add_ground_station_group_memberships();
             mask_conflicting_standalone_services();
-        } else {
-            remove_avahi_gs_ap();
         }
+        // The retired static avahi record, on every profile: an upgraded
+        // ground station would otherwise keep advertising itself twice.
+        remove_avahi_gs_ap();
         disable_other_profile_units(&ctx.profile);
 
         StepOutcome::Ok
