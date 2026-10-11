@@ -72,7 +72,7 @@ pub fn write_hero_to(path: &Path, slot: u8, device_id: &str) -> std::io::Result<
         device_id: device_id.to_string(),
         updated_at_ms: now_unix_ms(),
     };
-    crate::sidecars::write_json_atomic(path, &hero, 0o644)
+    ados_protocol::sidecar::write_json_atomic(path, &hero, 0o644)
 }
 
 /// Read the published selection, or `None` when there is nothing usable to read.
@@ -153,7 +153,11 @@ mod tests {
         assert_eq!(hero.device_id, "drone-c");
         assert_eq!(hero.v, FLEET_HERO_SIDECAR_VERSION);
         // No temp sibling left behind for a reader to trip over.
-        assert!(!dir.path().join("fleet-hero.tmp").exists());
+        let stray = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
+        assert!(!stray);
     }
 
     #[test]

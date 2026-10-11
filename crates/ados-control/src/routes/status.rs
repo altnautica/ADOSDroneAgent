@@ -129,14 +129,16 @@ const IPC_ONLY_KEYS: [&str; 15] = [
 /// gate would otherwise blank the one number that explains why a command did
 /// not go out.
 ///
-/// `agent_commands_unsigned_rejected_risk` and `injector_arbitration` are the
-/// router's verdicts about its own command path (whether the FC will drop the
-/// agent's unsigned frames, and whether the FC-write arbiter is active), so
-/// they stay visible while the FC link is down.
+/// `agent_commands_unsigned_rejected_risk`, `agent_signing` and
+/// `injector_arbitration` are the router's verdicts about its own command path
+/// (whether the FC will drop the agent's unsigned frames, whether the agent
+/// signs its own frames, and whether the FC-write arbiter is active), so they
+/// stay visible while the FC link is down.
 ///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 22] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 23] = [
     "agent_commands_unsigned_rejected_risk",
+    "agent_signing",
     "aux_mavlink_tee",
     "aux_rpc",
     "aux_uplink_partial_dropped",

@@ -15,7 +15,6 @@
 //! gated: only the outward publications are, so nothing that decides whether to
 //! kill or retune the radio ever sees a coarser picture than it did before.
 
-use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -277,8 +276,8 @@ pub async fn stats_reader_loop(
             if !gate.admit(&payload, now_mono) {
                 continue;
             }
-            let path = Path::new(crate::paths::WFB_STATS_JSON);
-            if let Err(e) = crate::sidecars::write_json_atomic(path, &payload, 0o644) {
+            let path = ados_protocol::paths::run_path("wfb-stats");
+            if let Err(e) = ados_protocol::sidecar::write_json_atomic(&path, &payload, 0o644) {
                 tracing::debug!(error = %e, "ground_wfb_stats_persist_failed");
             }
             // Ship the same body to the logging store as a single full-snapshot

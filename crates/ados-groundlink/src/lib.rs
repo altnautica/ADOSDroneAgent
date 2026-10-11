@@ -34,7 +34,6 @@ pub mod presence;
 pub mod process_spawn;
 pub mod receiver;
 pub mod relay;
-pub mod sidecars;
 pub mod watchdog;
 pub mod wfb_rx;
 
@@ -58,6 +57,5 @@ pub use pairing::{decrypt_invite, encrypt_invite, InviteBundle};
 pub use presence::GsPresenceCache;
 pub use receiver::ReceiverState;
 pub use relay::RelayState;
-pub use sidecars::write_json_atomic;
 pub use watchdog::ValidPacketWatchdog;
 pub use wfb_rx::WfbRxManager;

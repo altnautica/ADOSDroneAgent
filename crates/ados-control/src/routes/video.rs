@@ -25,11 +25,15 @@
 //! `video_config_write.rs` and answers with this module's config body.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use axum::extract::State;
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
+
+use ados_protocol::paths;
+use ados_protocol::sidecar::{file_age, read_fresh_at, Reading};
 
 use crate::state::AppState;
 
@@ -37,16 +41,10 @@ use crate::state::AppState;
 // Runtime-dir + config seam paths.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sidecars resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
-/// The LCD-side SEI-latency state file (`/run/ados/lcd-latency.json`), written by the
+/// The SEI-latency state file (`/run/ados/lcd-latency.json`), written by the
 /// local tap when the SEI latency probe is enabled.
 fn lcd_latency_path() -> PathBuf {
-    run_dir().join("lcd-latency.json")
+    paths::run_path("lcd-latency")
 }
 
 /// Compose the config route's `adaptive` block: `available` from config, with the
@@ -87,11 +85,7 @@ fn build_adaptive_block(available: bool, stats: Option<&Map<String, Value>>) -> 
 /// healthy-looking dead link an honest surface forbids — the same reasoning the `link`
 /// block already documents for its own counters.
 fn read_stats_if_fresh(path: &Path) -> Option<Map<String, Value>> {
-    if sidecar_age_seconds(path).is_some_and(|age| age <= LINK_STALE_AFTER_S) {
-        read_state_file(path)
-    } else {
-        None
-    }
+    read_fresh_at(path, Some(secs(LINK_STALE_AFTER_S)), SystemTime::now()).fresh()
 }
 
 /// The `adaptive` block's live fields, read out of `wfb-stats.json`. The radio
@@ -112,13 +106,13 @@ const ADAPTIVE_KEYS: &[&str] = &[
 /// The hop-supervisor snapshot file (`/run/ados/hop-supervisor.json`), persisted
 /// by the frequency hopper.
 fn hop_supervisor_path() -> PathBuf {
-    run_dir().join("hop-supervisor.json")
+    paths::run_path("hop-supervisor")
 }
 
 /// The live wfb stats sidecar (`/run/ados/wfb-stats.json`), the link-liveness
-/// source the config route's `link` block reads. Mirrors `WFB_STATS_JSON`.
+/// source the config route's `link` block reads.
 fn wfb_stats_path() -> PathBuf {
-    run_dir().join("wfb-stats.json")
+    paths::run_path("wfb-stats")
 }
 
 /// Read a JSON snapshot file written by a sidecar producer, returning the parsed
@@ -190,7 +184,7 @@ async fn latest_video_latency(state: &AppState) -> Option<Value> {
     }))
 }
 
-/// The live SEI-latency read: the unchanged file-backed fallback, resolving the
+/// The live SEI-latency read: the file-backed fallback, resolving the
 /// runtime-dir-relative `lcd-latency.json` path. The projection itself lives in
 /// [`project_latency_live`] (path-injectable for tests).
 fn read_latency_live() -> Value {
@@ -200,26 +194,30 @@ fn read_latency_live() -> Value {
 /// Beyond this age the `lcd-latency.json` snapshot can no longer describe the
 /// pipeline NOW, so the route reports it as stale rather than as a reading.
 ///
-/// The producing tap rewrites the file once per second, and only on a poll where
-/// it actually parsed a new SEI marker (`_PERSIST_INTERVAL_S = 1.0` in
-/// `src/ados/services/video/sei_tap.py`), so a probe that is genuinely in the
-/// byte path refreshes it ten times inside this window while a probe that has
-/// been switched off stops refreshing it immediately. 10 s is the same budget the
-/// durable store's sidecar tailer already applies to this exact file
-/// (`DEFAULT_STALENESS` in `crates/ados-logd/src/taps/sidecar.rs`) and the same
-/// ceiling [`LINK_STALE_AFTER_S`] applies to `wfb-stats.json`, so the store path,
-/// the live path and the link block all flip at one moment instead of three.
-const LATENCY_STALE_AFTER_S: f64 = 10.0;
+/// The registry window for `lcd-latency`. The producing tap rewrites the file
+/// once per second, and only on a poll where it actually parsed a new SEI marker
+/// (`_PERSIST_INTERVAL_S = 1.0` in `src/ados/services/video/sei_tap.py`), so a
+/// probe that is genuinely in the byte path refreshes it ten times inside this
+/// window while a probe that has been switched off stops refreshing it
+/// immediately. The durable store's sidecar tailer applies the same registry
+/// window to this exact file, and [`LINK_STALE_AFTER_S`] applies the same
+/// ceiling to `wfb-stats.json`, so the store path, the live path and the link
+/// block all flip at one moment instead of three.
+const LATENCY_STALE_AFTER_S: f64 = paths::LCD_LATENCY_MAX_AGE_MS as f64 / 1000.0;
+
+/// A window in seconds as a [`Duration`].
+fn secs(s: f64) -> Duration {
+    Duration::from_secs_f64(s)
+}
 
 /// Project a latency state file into the route body.
 ///
-/// Reads `lcd-latency.json` when present, fresh, and actually a latency
-/// snapshot. The degraded shapes, all `latency_ms: null`, are distinguished by
-/// `source` so a consumer learns which one it hit: `"unavailable"` (no file —
-/// the probe never ran), `"stale"` (a file older than
-/// [`LATENCY_STALE_AFTER_S`], carrying its `age_s` — the probe ran and stopped),
-/// `"read_failed"` (read/parse error) and `"unexpected_shape"` (a well-formed
-/// body that is not a latency snapshot).
+/// Reads `lcd-latency.json` when present and fresh. The degraded shapes, all
+/// `latency_ms: null`, are distinguished by `source` so a consumer learns which
+/// one it hit: `"unavailable"` (no file — the probe never ran), `"stale"` (a file
+/// older than [`LATENCY_STALE_AFTER_S`] or future-dated, carrying its `age_s` when
+/// it can be established — the probe ran and stopped), and `"read_failed"` (a
+/// read/parse error, or a body that is not a JSON object).
 ///
 /// The stale branch is the load-bearing one. Nothing deletes this file when the
 /// SEI probe is disabled or `ados-video` restarts without it, so an ungated read
@@ -228,39 +226,26 @@ const LATENCY_STALE_AFTER_S: f64 = 10.0;
 /// disprove by going to the box and checking whether `ados-video` ran with the
 /// SEI injector enabled.
 ///
-/// `unexpected_shape` covers one live collision, not just a malformed file: on a
-/// node with an SPI LCD, `ados-display` writes its own framebuffer-writer stats
-/// (`writes` / `drops` / `skipped_duplicates` / `last_write_ms`) to this same
-/// path at 1 Hz. That body is fresh, well-formed, and carries no latency
-/// reading, so keying the `"sei"` default on the mere absence of a `source`
-/// field labelled it an SEI measurement. The presence of a `latency_ms` KEY is
-/// what makes a body a latency snapshot — `latency_ms: null` is a running probe
-/// with no sample yet, and that still reads as `"sei"`.
+/// The display service's framebuffer-writer counters live in their own
+/// `lcd-fb-stats.json`, so every body in this file is a latency snapshot;
+/// `latency_ms: null` is a running probe with no sample yet and reads as `"sei"`.
 fn project_latency_live(path: &Path) -> Value {
-    let Some(age_s) = sidecar_age_seconds(path) else {
-        // Absent, or an mtime this host cannot read: either way there is no
-        // reading whose freshness can be established.
-        return json!({"latency_ms": null, "source": "unavailable"});
-    };
-    if age_s > LATENCY_STALE_AFTER_S {
-        return json!({
-            "latency_ms": null,
-            "ewma_ms": null,
-            "samples": null,
-            "source": "stale",
-            "age_s": (age_s * 10.0).round() / 10.0,
-        });
-    }
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return json!({"latency_ms": null, "source": "read_failed"}),
-    };
-    let blob = match serde_json::from_str::<Value>(&text) {
-        Ok(v) => v,
-        Err(_) => return json!({"latency_ms": null, "source": "read_failed"}),
-    };
-    let Some(map) = blob.as_object().filter(|m| m.contains_key("latency_ms")) else {
-        return json!({"latency_ms": null, "source": "unexpected_shape"});
+    let now = SystemTime::now();
+    let window = Some(secs(LATENCY_STALE_AFTER_S));
+    let map = match read_fresh_at::<Map<String, Value>>(path, window, now) {
+        Reading::Fresh(map) => map,
+        Reading::Absent => return json!({"latency_ms": null, "source": "unavailable"}),
+        Reading::Malformed(_) => return json!({"latency_ms": null, "source": "read_failed"}),
+        Reading::Stale(_) => {
+            let age_s = file_age(path, now).map(|d| (d.as_secs_f64() * 10.0).round() / 10.0);
+            return json!({
+                "latency_ms": null,
+                "ewma_ms": null,
+                "samples": null,
+                "source": "stale",
+                "age_s": age_s,
+            });
+        }
     };
     // `ewma_ms` prefers `latency_ewma_ms`, then `ewma_ms`. `source` defaults "sei".
     let ewma = map
@@ -365,20 +350,10 @@ pub(crate) fn video_config_body(cfg: &VideoConfig) -> Value {
 }
 
 /// Beyond this age the `wfb-stats.json` snapshot can no longer describe the link
-/// NOW, so the received-side verdict reads `null`. The same 10 s ceiling
-/// `/api/wfb` uses to flip its `state` to `"stale"`.
-const LINK_STALE_AFTER_S: f64 = 10.0;
-
-/// Age of a sidecar snapshot in seconds, or `None` when the file is absent or its
-/// mtime is unreadable. Drives every staleness gate in this module: the link
-/// block's received-side verdict, the adaptive block's controller state, and the
-/// latency route's live read.
-fn sidecar_age_seconds(path: &Path) -> Option<f64> {
-    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
-    // A clock that moved backwards yields an Err elapsed; treat that as fresh
-    // rather than inventing an age, the same way the status route does.
-    Some(mtime.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0))
-}
+/// NOW, so the received-side verdict reads `null`: the registry window for
+/// `wfb-stats`, the same ceiling `/api/wfb` uses to flip its `state` to
+/// `"stale"`.
+const LINK_STALE_AFTER_S: f64 = paths::WFB_STATS_MAX_AGE_MS as f64 / 1000.0;
 
 /// The `rf_unverified` verdict for the link block, or `null` when it cannot be
 /// sourced honestly.
@@ -472,7 +447,18 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
     // sourced honestly — it is gated on type and freshness rather than merged
     // verbatim, so it gets its own placeholder outside the loop above.
     link.insert("rf_unverified".to_string(), Value::Null);
-    if let Some(status) = read_state_file(stats_path) {
+    let reading = read_fresh_at::<Map<String, Value>>(
+        stats_path,
+        Some(secs(LINK_STALE_AFTER_S)),
+        SystemTime::now(),
+    );
+    // A future mtime (a clock that stepped backwards) is stale, never fresh.
+    let (status, fresh) = match reading {
+        Reading::Fresh(s) => (Some(s), true),
+        Reading::Stale(s) => (Some(s), false),
+        Reading::Absent | Reading::Malformed(_) => (None, false),
+    };
+    if let Some(status) = status {
         // Best-effort schema-drift signal (never reject): warn on a producer/reader
         // version mismatch, then read anyway. The writer const lives in the radio
         // crate, so compare against the shared registry.
@@ -486,7 +472,6 @@ fn link_snapshot(config_channel: i64, stats_path: &Path) -> Value {
         // holding a stale advancing `tx_bytes_per_s` or a stale `channel_locked`
         // renders a dead link as if live. `channel` stays null
         // when stale too and falls back to the configured value below.
-        let fresh = sidecar_age_seconds(stats_path).is_some_and(|age| age <= LINK_STALE_AFTER_S);
         if fresh {
             for f in FIELDS {
                 if let Some(v) = status.get(f) {
@@ -827,14 +812,36 @@ mod tests {
     }
 
     #[test]
-    fn latency_live_of_a_non_object_is_unexpected_shape() {
+    fn latency_live_of_a_non_object_is_read_failed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lcd-latency.json");
         std::fs::write(&path, "[1,2,3]").unwrap();
         let out = project_latency_live(&path);
+        assert_eq!(out, json!({"latency_ms": null, "source": "read_failed"}));
+    }
+
+    #[test]
+    fn latency_live_with_a_future_mtime_reads_stale() {
+        // A clock that stepped backwards (an RTC-less SBC correcting after boot)
+        // leaves the file dated after "now": its age is unprovable, so it is
+        // stale, never a fresh reading.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lcd-latency.json");
+        std::fs::write(&path, r#"{"latency_ms": 82.5, "samples": 3}"#).unwrap();
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(600);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(ahead))
+            .unwrap();
+        let out = project_latency_live(&path);
+        assert_eq!(out["source"], json!("stale"));
+        assert_eq!(out["latency_ms"], Value::Null);
         assert_eq!(
-            out,
-            json!({"latency_ms": null, "source": "unexpected_shape"})
+            out["age_s"],
+            Value::Null,
+            "a future mtime has no provable age"
         );
     }
 
@@ -879,21 +886,22 @@ mod tests {
         // believing the file, and the sibling link block stops believing
         // wfb-stats.json. Different windows would mean the store path and the file
         // path disagree about whether there is a reading, which is the same
-        // healthy-looking-dead-surface failure with an extra step.
+        // healthy-looking-dead-surface failure with an extra step. All three read
+        // the one registry window.
         assert_eq!(LATENCY_STALE_AFTER_S, LINK_STALE_AFTER_S);
+        assert_eq!(
+            Some(secs(LATENCY_STALE_AFTER_S)),
+            paths::max_age("lcd-latency")
+        );
         let tailer = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../ados-logd/src/taps/sidecar.rs")
             .canonicalize()
             .expect("the sidecar tailer must exist beside this crate");
         let body = std::fs::read_to_string(&tailer).unwrap();
         assert!(
-            body.contains(&format!(
-                "const DEFAULT_STALENESS: Duration = Duration::from_secs({});",
-                LATENCY_STALE_AFTER_S as u64
-            )),
-            "{} must apply the same {}s budget this route does",
-            tailer.display(),
-            LATENCY_STALE_AFTER_S as u64
+            body.contains("paths::LCD_LATENCY_MAX_AGE_MS"),
+            "{} must take its lcd-latency budget from the registry",
+            tailer.display()
         );
     }
 
@@ -956,23 +964,13 @@ mod tests {
     }
 
     #[test]
-    fn the_display_services_framebuffer_stats_are_not_read_as_an_sei_measurement() {
-        // Two writers, one path: on an SPI-LCD node `ados-display` writes its
-        // framebuffer-writer stats to /run/ados/lcd-latency.json at 1 Hz. That
-        // body is fresh and well-formed and has no latency reading in it, so
-        // defaulting `source` to "sei" on the absence of a `source` field
-        // labelled a display counter blob an SEI measurement.
+    fn the_display_services_framebuffer_stats_have_their_own_file() {
+        // The display service's framebuffer-writer counters used to share
+        // lcd-latency.json with the SEI tap; they now live in lcd-fb-stats.json,
+        // so the latency file only ever holds a latency snapshot.
+        assert_ne!(paths::LCD_FB_STATS_JSON, paths::LCD_LATENCY_JSON);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lcd-latency.json");
-        std::fs::write(
-            &path,
-            r#"{"writes": 100, "drops": 0, "skipped_duplicates": 3, "last_write_ms": 12.0}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            project_latency_live(&path),
-            json!({"latency_ms": null, "source": "unexpected_shape"})
-        );
 
         // A running probe that has not produced a sample yet writes the key with
         // a null value. That IS a latency snapshot and still reads as "sei" — the

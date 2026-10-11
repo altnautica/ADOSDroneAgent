@@ -45,6 +45,9 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use ados_protocol::paths;
+use ados_protocol::sidecar::{file_age, read_fresh_at};
+
 use crate::state::AppState;
 use crate::wfb_pair_state::read_public_fingerprint;
 
@@ -98,47 +101,42 @@ fn wrong_role(required: &str) -> Response {
 // Runtime-dir + on-disk seams.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sidecars resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
-/// The live wfb stats sidecar (`/run/ados/wfb-stats.json`) the radio writes ~once
+/// The live wfb stats sidecar (`<run dir>/wfb-stats.json`) the radio writes ~once
 /// per second; the source of the `link` view.
-fn wfb_stats_path() -> PathBuf {
-    run_dir().join("wfb-stats.json")
+fn wfb_stats_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(paths::WFB_STATS_JSON)
 }
 
-/// The mesh-state sidecar (`/run/ados/mesh-state.json`) the relay/receiver poll
+/// The mesh-state sidecar (`<run dir>/mesh-state.json`) the relay/receiver poll
 /// loop writes; the sidecar fallback for the `/status` `mesh` block.
-fn mesh_state_path() -> PathBuf {
-    run_dir().join("mesh-state.json")
+fn mesh_state_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(paths::MESH_STATE_JSON)
 }
 
-/// The uplink router's active-uplink sentinel (`/run/ados/uplink-active`): present
+/// The uplink router's active-uplink sentinel (`<run dir>/uplink-active`): present
 /// with the selected uplink while one is up, unlinked when there is none.
-fn uplink_active_flag_path() -> PathBuf {
-    run_dir().join("uplink-active")
+fn uplink_active_flag_path(run_dir: &Path) -> PathBuf {
+    run_dir.join("uplink-active")
 }
 
 /// The unit that runs the uplink router and so owns the sentinel above.
 const UPLINK_ROUTER_UNIT: &str = "ados-uplink-router.service";
 
-/// The relay-state sidecar (`/run/ados/wfb-relay.json`) the relay loop writes; the
-/// sidecar fallback for `/wfb/relay/status`.
-fn wfb_relay_path() -> PathBuf {
-    run_dir().join("wfb-relay.json")
+/// The relay-state sidecar (`<run dir>/wfb-relay.json`) the relay loop writes;
+/// the sidecar fallback for `/wfb/relay/status`.
+fn wfb_relay_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(paths::WFB_RELAY_JSON)
 }
 
-/// The receiver-state sidecar (`/run/ados/wfb-receiver.json`) the receiver loop
+/// The receiver-state sidecar (`<run dir>/wfb-receiver.json`) the receiver loop
 /// writes; the sidecar fallback for the two `/wfb/receiver/*` routes.
-fn wfb_receiver_path() -> PathBuf {
-    run_dir().join("wfb-receiver.json")
+fn wfb_receiver_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(paths::WFB_RECEIVER_JSON)
 }
 
 /// How fresh a ground-station snapshot must be to be served as a live reading:
-/// 10 seconds.
+/// the registry window the relay, receiver, mesh, failover and wfb-stats
+/// sidecars share (10 s).
 ///
 /// The producing loops (relay, receiver, mesh, failover) write at roughly 1 Hz,
 /// so 10 s is ten missed writes — comfortably past jitter, well inside an
@@ -149,7 +147,7 @@ fn wfb_receiver_path() -> PathBuf {
 /// own literal). Sibling surfaces with independently-maintained staleness
 /// thresholds drift apart, and then two blocks of the same `/status` response
 /// disagree about whether the node is stale.
-pub(crate) const SNAPSHOT_FRESH_S: f64 = 10.0;
+pub(crate) const SNAPSHOT_FRESH_S: f64 = paths::WFB_RELAY_MAX_AGE_MS as f64 / 1000.0;
 
 /// Read a JSON object sidecar, returning the empty map on absence / a read error / a parse error /
 /// a non-object body.
@@ -168,37 +166,30 @@ fn read_json_or_empty(path: &Path) -> Map<String, Value> {
 
 /// Read a JSON object sidecar only when its mtime is within
 /// [`SNAPSHOT_FRESH_S`] of `now`; `None` when the file is absent, unreadable,
-/// not an object, empty, or older than that.
+/// not an object, empty, older than that, or future-dated.
 ///
 /// mtime is the right clock here: every one of these sidecars is rewritten whole
 /// on each poll tick, so its mtime IS the age of the reading inside it. A
 /// service that died leaves its last file on a tmpfs that survives until reboot,
 /// so without this gate the sidecar fallback re-served that file's `up: true`
-/// forever.
+/// forever. A future mtime (a clock that stepped backwards) makes the age
+/// unprovable and reads as stale.
 ///
 /// `now` is threaded in (the same shape `ados_hid::pic_view::read_pic_view`
 /// uses) so a test drives the aged case by advancing the clock instead of
 /// back-dating a file.
 fn read_fresh_json(path: &Path, now: SystemTime) -> Option<Map<String, Value>> {
-    let age_s = file_age_s(path, now)?;
-    if age_s > SNAPSHOT_FRESH_S {
-        return None;
-    }
-    match serde_json::from_str::<Value>(&std::fs::read_to_string(path).ok()?) {
-        Ok(Value::Object(map)) if !map.is_empty() => Some(map),
-        _ => None,
-    }
+    let window = Some(Duration::from_secs_f64(SNAPSHOT_FRESH_S));
+    read_fresh_at::<Map<String, Value>>(path, window, now)
+        .fresh()
+        .filter(|map| !map.is_empty())
 }
 
 /// A file's mtime age in seconds relative to `now`, or `None` when the file is
-/// absent, its mtime is unreadable, or its mtime is AFTER `now`.
-///
-/// Fails closed on a future mtime rather than treating it as age zero: a clock
-/// that stepped backwards (an RTC-less SBC correcting after boot) makes the age
-/// unprovable, and an unprovable age must not read as a fresh measurement. Same
-/// rule `pic_view` applies to the PIC sidecar.
+/// absent, its mtime is unreadable, or its mtime is AFTER `now` (an unprovable
+/// age, which must not read as a fresh measurement).
 fn file_age_s(path: &Path, now: SystemTime) -> Option<f64> {
-    crate::freshness::file_age(path, now).map(|d| d.as_secs_f64())
+    file_age(path, now).map(|d| d.as_secs_f64())
 }
 
 // ---------------------------------------------------------------------------
@@ -249,7 +240,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
     let mesh_block: Value = if role == "relay" || role == "receiver" {
         match latest_status_mesh_block(&state).await {
             Some(stored) => stored,
-            None => mesh_block_from_sidecar(&mesh_state_path(), SystemTime::now()),
+            None => mesh_block_from_sidecar(&mesh_state_path(&state.run_dir), SystemTime::now()),
         }
     } else {
         json!({})
@@ -285,7 +276,7 @@ pub async fn get_status(State(state): State<AppState>) -> Response {
             "battery_pct": Value::Null,
             "gps_sats": Value::Null,
         },
-        "link": link_view(),
+        "link": link_view(&state.run_dir),
         "gcs": {"clients": [], "pic_id": Value::Null},
         "network": network_view(&state).await,
         "system": system_snapshot(&state).await,
@@ -392,8 +383,8 @@ fn ground_station_config_role(config_path: &Path) -> String {
 /// config-channel / tx-power seeds are `None` — this view starts from the same zero
 /// base and merges the live snapshot over it. An absent / unparseable / non-object file
 /// degrades to the base; a snapshot older than 10 s flips `state` to `"stale"`.
-fn link_view() -> Value {
-    link_view_from(&wfb_stats_path())
+fn link_view(run_dir: &Path) -> Value {
+    link_view_from(&wfb_stats_path(run_dir))
 }
 
 /// The path-injectable core of [`link_view`], reading the live snapshot from an
@@ -647,7 +638,7 @@ async fn network_view(state: &AppState) -> Value {
     // about the same unit; keep it centralised so it cannot drift again.
     let running = crate::probe::unit_is_active(HOSTAPD_UNIT).await;
     let router_running = crate::probe::unit_is_active(UPLINK_ROUTER_UNIT).await;
-    let uplink = uplink_view(&uplink_active_flag_path(), router_running);
+    let uplink = uplink_view(&uplink_active_flag_path(&state.run_dir), router_running);
     let identity = crate::config::device_id_file_for(&state.pairing_paths.config);
     network_view_compose(&ap_ssid_from_config(&cfg, &identity), running, uplink)
 }
@@ -971,7 +962,7 @@ pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
     if let Some(detail) = latest_event_detail(&state, "gs.relay_state").await {
         return Json(fresh_snapshot_body(detail)).into_response();
     }
-    let path = wfb_relay_path();
+    let path = wfb_relay_path(&state.run_dir);
     match read_fresh_json(&path, SystemTime::now()) {
         Some(snap) => Json(fresh_snapshot_body(snap)).into_response(),
         None => Json(stale_snapshot_body(read_json_or_empty(&path))).into_response(),
@@ -996,7 +987,7 @@ pub async fn get_wfb_receiver_relays(State(state): State<AppState>) -> Response 
     if let Some(detail) = latest_event_detail(&state, "gs.receiver_state").await {
         return Json(slice_receiver_relays(&detail)).into_response();
     }
-    match read_fresh_json(&wfb_receiver_path(), SystemTime::now()) {
+    match read_fresh_json(&wfb_receiver_path(&state.run_dir), SystemTime::now()) {
         Some(snap) => Json(slice_receiver_relays(&snap)).into_response(),
         None => Json(json!({"relays": Value::Null, "stale": true})).into_response(),
     }
@@ -1021,7 +1012,7 @@ pub async fn get_wfb_receiver_combined(State(state): State<AppState>) -> Respons
     if let Some(detail) = latest_event_detail(&state, "gs.receiver_state").await {
         return Json(slice_receiver_combined(&detail)).into_response();
     }
-    match read_fresh_json(&wfb_receiver_path(), SystemTime::now()) {
+    match read_fresh_json(&wfb_receiver_path(&state.run_dir), SystemTime::now()) {
         Some(snap) => Json(slice_receiver_combined(&snap)).into_response(),
         None => Json(receiver_combined_stale()).into_response(),
     }
@@ -1077,7 +1068,11 @@ pub async fn get_wfb(State(state): State<AppState>) -> Response {
     if ground_station_role(&state).is_none() {
         return profile_mismatch();
     }
-    Json(wfb_view_from(&wfb_stats_path(), SystemTime::now())).into_response()
+    Json(wfb_view_from(
+        &wfb_stats_path(&state.run_dir),
+        SystemTime::now(),
+    ))
+    .into_response()
 }
 
 /// The path-injectable core of [`get_wfb`].

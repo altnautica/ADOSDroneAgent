@@ -90,17 +90,11 @@ fn gamepad_error(status: StatusCode, code: &str, message: impl Into<String>) -> 
 // The input command socket seam.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sidecars resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
-/// The `ados-input` daemon's command socket (`/run/ados/hid-cmd.sock`), which
+/// The `ados-input` daemon's command socket (`<run dir>/hid-cmd.sock`), which
 /// applies the `set_primary` op through the running hotplug tracker (the single
 /// owner of the live primary) and persists the sidecar.
-fn hid_cmd_sock() -> PathBuf {
-    run_dir().join("hid-cmd.sock")
+fn hid_cmd_sock(run_dir: &Path) -> PathBuf {
+    run_dir.join(ados_protocol::paths::HID_CMD_SOCK)
 }
 
 /// The outcome of a `set_primary` command-socket round-trip: the daemon's reply
@@ -147,7 +141,7 @@ pub async fn put_gamepad_primary(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    match set_primary_cmd(&hid_cmd_sock(), &update.device_id).await {
+    match set_primary_cmd(&hid_cmd_sock(&state.run_dir), &update.device_id).await {
         // The FastAPI route returns {"primary_id": update.device_id, "result":
         // result}, where result is the set_primary return value (None). The
         // daemon may report a persist_error, but the running primary updated, so

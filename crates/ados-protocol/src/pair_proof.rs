@@ -211,33 +211,13 @@ pub fn load_for(path: &Path, role: &str, fingerprint: &str) -> LoadedProof {
     }
 }
 
-/// Atomically write `proof` to `path`: tmp sibling, fsync, explicit mode,
-/// rename. The fsync is the point — this record is the only thing bounding a
-/// bind storm across a reboot, so it must survive a power cut mid-write.
+/// Atomically write `proof` to `path` through
+/// [`crate::sidecar::write_atomic`]: unique temp sibling, explicit mode, fsync,
+/// rename, directory fsync. The fsync is the point — this record is the only
+/// thing bounding a bind storm across a reboot, so it must survive a power cut
+/// mid-write.
 pub fn write_pair_proof_to(path: &Path, proof: &PairProof) -> std::io::Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
-    let tmp = std::path::PathBuf::from(tmp);
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(PAIR_PROOF_MODE)
-            .open(&tmp)?;
-        f.write_all(&proof.to_bytes())?;
-        f.sync_all()?;
-    }
-    // Re-chmod in case a umask altered the create-time mode.
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(PAIR_PROOF_MODE))?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    crate::sidecar::write_atomic(path, &proof.to_bytes(), PAIR_PROOF_MODE)
 }
 
 /// The operator's "retry the local link" request, consumed by the supervisor's
@@ -338,7 +318,11 @@ mod tests {
         p.mark_proven(42);
         p.record_rearm(7);
         write_pair_proof_to(&path, &p).unwrap();
-        assert!(!dir.path().join("wfb-pair-proof.json.tmp").exists());
+        let stray = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
+        assert!(!stray);
         assert_eq!(read_pair_proof_from(&path).unwrap(), p);
 
         use std::os::unix::fs::PermissionsExt;

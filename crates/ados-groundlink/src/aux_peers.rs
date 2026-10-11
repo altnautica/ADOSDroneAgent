@@ -482,7 +482,7 @@ pub async fn persist_loop(
     loop {
         let now = now_unix();
         let payload = cache.sidecar_payload(now);
-        if let Err(e) = crate::sidecars::write_json_atomic(&path, &payload, 0o644) {
+        if let Err(e) = ados_protocol::sidecar::write_json_atomic(&path, &payload, 0o644) {
             tracing::debug!(error = %e, "aux_peers_persist_failed");
         }
         // Hand the freshly-learned identities to the linked-peers surface, which

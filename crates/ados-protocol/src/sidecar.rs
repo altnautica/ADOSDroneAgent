@@ -1,4 +1,5 @@
-//! Best-effort schema-version checking for on-disk state sidecars.
+//! On-disk state sidecars: the soft schema-version check, the atomic writers,
+//! and the one freshness-gated reader.
 //!
 //! A state sidecar is a small JSON snapshot a service drops under the run
 //! directory (`/run/ados/*.json`) so the REST and heartbeat surfaces can read
@@ -16,7 +17,18 @@
 //! Each sidecar's expected version is registered in
 //! [`crate::contracts`] and mirrored by a per-file constant on the writer side;
 //! a reader passes both to [`check_sidecar_version`] at its deserialize site.
+//!
+//! Freshness: a producer rewrites its sidecar whole on each tick, so the file's
+//! mtime is the age of the reading inside it, and a producer that died leaves
+//! its last file behind until reboot. [`read_fresh`] reads a registered sidecar
+//! and classifies it against the registry's `max_age_ms` window; a future mtime
+//! (a clock that stepped backwards) makes the age unprovable and reads as
+//! [`Reading::Stale`], never as a fresh measurement.
 
+use std::path::Path;
+use std::time::{Duration, SystemTime};
+
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Compare a sidecar's declared schema version against the version this build
@@ -122,9 +134,160 @@ pub fn write_atomic(path: &std::path::Path, data: &[u8], mode: u32) -> std::io::
     result
 }
 
+/// The outcome of a freshness-gated sidecar read.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Reading<T> {
+    /// Parsed, and written within the sidecar's freshness window.
+    Fresh(T),
+    /// Parsed, but older than the window or carrying a future or unreadable
+    /// mtime: the last thing a producer wrote, not a current measurement.
+    Stale(T),
+    /// No file.
+    Absent,
+    /// The file exists but could not be read or parsed as `T`.
+    Malformed(String),
+}
+
+impl<T> Reading<T> {
+    /// The value when fresh, else `None`.
+    pub fn fresh(self) -> Option<T> {
+        match self {
+            Reading::Fresh(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Whether the reading is fresh.
+    pub fn is_fresh(&self) -> bool {
+        matches!(self, Reading::Fresh(_))
+    }
+}
+
+/// A file's mtime age relative to `now`, or `None` when the file is absent, its
+/// mtime is unreadable, or its mtime is after `now` (an unprovable age).
+pub fn file_age(path: &Path, now: SystemTime) -> Option<Duration> {
+    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
+    now.duration_since(modified).ok()
+}
+
+/// Read the registered sidecar `id` from its resolved path
+/// ([`crate::paths::run_path`]) and classify it against its registered
+/// freshness window. An unregistered id reads as [`Reading::Malformed`].
+pub fn read_fresh<T: DeserializeOwned>(id: &str, now: SystemTime) -> Reading<T> {
+    let Some(row) = crate::paths::sidecar(id) else {
+        return Reading::Malformed(format!("sidecar {id:?} is not registered"));
+    };
+    read_fresh_at(&crate::paths::run_path(id), row.max_age(), now)
+}
+
+/// The path-injectable core of [`read_fresh`]: read `path` as `T` and classify
+/// it against `max_age` (`None` = no window, every parsed read is fresh). A
+/// future or unreadable mtime is [`Reading::Stale`].
+pub fn read_fresh_at<T: DeserializeOwned>(
+    path: &Path,
+    max_age: Option<Duration>,
+    now: SystemTime,
+) -> Reading<T> {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Reading::Absent,
+        Err(e) => return Reading::Malformed(e.to_string()),
+    };
+    let value: T = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return Reading::Malformed(e.to_string()),
+    };
+    let Some(window) = max_age else {
+        return Reading::Fresh(value);
+    };
+    match file_age(path, now) {
+        Some(age) if age <= window => Reading::Fresh(value),
+        _ => Reading::Stale(value),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_aged(path: &Path, body: &str) -> SystemTime {
+        std::fs::write(path, body).unwrap();
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    #[test]
+    fn read_fresh_within_and_past_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.json");
+        let written = write_aged(&p, r#"{"a":1}"#);
+        let win = Some(Duration::from_secs(10));
+        let at = |s: u64| -> Reading<serde_json::Value> {
+            read_fresh_at(&p, win, written + Duration::from_secs(s))
+        };
+        assert_eq!(at(1), Reading::Fresh(serde_json::json!({"a": 1})));
+        assert_eq!(at(11), Reading::Stale(serde_json::json!({"a": 1})));
+        // No window: every parsed read is fresh.
+        let r: Reading<serde_json::Value> =
+            read_fresh_at(&p, None, written + Duration::from_secs(3600));
+        assert!(r.is_fresh());
+    }
+
+    #[test]
+    fn read_fresh_future_mtime_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.json");
+        let written = write_aged(&p, r#"{"a":1}"#);
+        // "now" before the write: the clock stepped backwards.
+        let earlier = written - Duration::from_secs(60);
+        let r: Reading<serde_json::Value> =
+            read_fresh_at(&p, Some(Duration::from_secs(10)), earlier);
+        assert_eq!(r, Reading::Stale(serde_json::json!({"a": 1})));
+        assert!(file_age(&p, earlier).is_none());
+    }
+
+    #[test]
+    fn absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let r: Reading<serde_json::Value> =
+            read_fresh_at(&dir.path().join("none.json"), None, SystemTime::now());
+        assert_eq!(r, Reading::Absent);
+        assert!(file_age(&dir.path().join("none.json"), SystemTime::now()).is_none());
+    }
+
+    #[test]
+    fn malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("s.json");
+        std::fs::write(&p, b"{not json").unwrap();
+        let r: Reading<serde_json::Value> = read_fresh_at(&p, None, SystemTime::now());
+        assert!(matches!(r, Reading::Malformed(_)));
+        // A well-formed body of the wrong shape is malformed for that type.
+        std::fs::write(&p, b"[1,2]").unwrap();
+        let r: Reading<serde_json::Map<String, serde_json::Value>> =
+            read_fresh_at(&p, None, SystemTime::now());
+        assert!(matches!(r, Reading::Malformed(_)));
+    }
+
+    #[test]
+    fn read_fresh_rejects_an_unregistered_id() {
+        let r: Reading<serde_json::Value> = read_fresh("no-such-sidecar", SystemTime::now());
+        assert!(matches!(r, Reading::Malformed(_)));
+    }
+
+    #[test]
+    fn registry_resolves_sidecar_and_socket_ids() {
+        assert!(crate::paths::run_path("wfb-stats").ends_with(crate::paths::WFB_STATS_JSON));
+        assert!(crate::paths::run_path("hid-cmd").ends_with(crate::paths::HID_CMD_SOCK));
+        assert_eq!(
+            crate::paths::max_age("wfb-stats"),
+            Some(Duration::from_millis(crate::paths::WFB_STATS_MAX_AGE_MS))
+        );
+        // A path outside the run dir resolves as registered.
+        assert_eq!(
+            crate::paths::run_path("ground-station-input"),
+            std::path::PathBuf::from("/etc/ados/ground-station-input.json")
+        );
+    }
 
     #[test]
     fn matching_versions_pass() {

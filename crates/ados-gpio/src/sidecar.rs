@@ -1,7 +1,7 @@
 //! The `/run/ados/gpio-output.json` state sidecar: the current driven line
-//! states, written atomically (tmp sibling + fsync + rename) so a reader never
-//! sees a half-written file. Modelled on `ados-hid`'s `ground-station-input.json`
-//! persister and `ados-net`'s `write_atomic`.
+//! states, written atomically through `ados_protocol::sidecar::write_atomic`
+//! (unique temp sibling + fsync + rename) so a reader never sees a half-written
+//! file.
 
 use std::path::Path;
 
@@ -88,50 +88,11 @@ impl GpioOutputState {
         Some(state)
     }
 
-    /// Atomically persist the state to `path` (tmp sibling + fsync + rename),
+    /// Atomically persist the state to `path` (temp sibling + fsync + rename),
     /// creating the parent. Compact JSON separators.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
-        let body = serde_json::to_vec(self).map_err(std::io::Error::other)?;
-        atomic_write(path, &body)
+        ados_protocol::sidecar::write_json_atomic(path, self, 0o644)
     }
-}
-
-/// Atomic tmp-sibling write. The tmp name is disambiguated by pid so two writers
-/// in the same directory never collide. Mirrors the `ados-hid` sidecar persister.
-fn atomic_write(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("ados-sidecar");
-    let tmp = parent.join(format!("{}.{}.tmp", file_name, std::process::id()));
-
-    let write_result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        f.write_all(body)?;
-        f.flush()?;
-        f.sync_all()?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return write_result;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -158,7 +119,7 @@ mod tests {
         let stray = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
         assert!(!stray);
     }
 

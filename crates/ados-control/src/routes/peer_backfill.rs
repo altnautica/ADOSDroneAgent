@@ -107,7 +107,7 @@ pub(crate) fn persist_peer_device_id(
 
 /// Restate the back-fill on [`BACKFILL_INTERVAL`] for the life of the front.
 pub async fn run_peer_backfill_reconciler(config_path: PathBuf, is_ground_station: bool) {
-    let sidecar = crate::routes::status_full::run_dir().join(PEER_BACKFILL_SIDECAR);
+    let sidecar = ados_protocol::paths::run_dir().join(PEER_BACKFILL_SIDECAR);
     let mut tick = tokio::time::interval(BACKFILL_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {

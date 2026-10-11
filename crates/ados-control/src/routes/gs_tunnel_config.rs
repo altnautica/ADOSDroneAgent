@@ -30,7 +30,7 @@
 //! none, the one registered drone) and adds it to the forwarded op as `ticket`.
 //! With no target it can name, the route refuses with `400`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use axum::extract::State;
@@ -38,22 +38,19 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+
+use ados_protocol::paths;
+use ados_protocol::sidecar::{read_fresh_at, Reading};
 
 use crate::routes::detail;
 use crate::state::AppState;
 
 /// The channel's state sidecar filename under the run dir.
-const SIDECAR_FILE: &str = "tunnel-config.json";
-/// The injector's command socket filename under the run dir.
-const CMD_SOCK_FILE: &str = "tunnel-config-cmd.sock";
-/// How stale the sidecar may be before it reads as absent (the service
-/// rewrites it ~1 Hz running / ~5 s idling).
-const STALE_AFTER: Duration = Duration::from_secs(30);
-
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
+const SIDECAR_FILE: &str = paths::TUNNEL_CONFIG_JSON;
+/// How stale the sidecar may be before it reads as absent: the registry window
+/// for `tunnel-config` (the service rewrites it ~1 Hz running / ~5 s idling).
+const STALE_AFTER: Duration = Duration::from_millis(paths::TUNNEL_CONFIG_MAX_AGE_MS);
 
 fn is_ground_station(state: &AppState) -> bool {
     let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
@@ -77,29 +74,17 @@ pub async fn get_relayed_config_status(State(state): State<AppState>) -> Respons
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    read_status(&run_dir().join(SIDECAR_FILE), SystemTime::now())
+    read_status(&state.run_dir.join(SIDECAR_FILE), SystemTime::now())
 }
 
+/// Absent, stale, future-dated (an unprovable age), unreadable, malformed, or
+/// not an object all read as a channel that is not running.
 fn read_status(path: &Path, now: SystemTime) -> Response {
-    let Ok(meta) = std::fs::metadata(path) else {
+    let Reading::Fresh(doc) = read_fresh_at::<Map<String, Value>>(path, Some(STALE_AFTER), now)
+    else {
         return status_not_found();
     };
-    if let Ok(modified) = meta.modified() {
-        if let Ok(age) = now.duration_since(modified) {
-            if age > STALE_AFTER {
-                return status_not_found();
-            }
-        }
-    }
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return status_not_found();
-    };
-    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
-        return status_not_found();
-    };
-    if !doc.is_object() {
-        return status_not_found();
-    }
+    let doc = Value::Object(doc);
     let version = doc.get("v").and_then(Value::as_u64).unwrap_or(0) as u16;
     let expected = ados_protocol::contracts::sidecar_version("tunnel-config").unwrap_or(0);
     ados_protocol::sidecar::check_sidecar_version("tunnel-config", version, expected);
@@ -240,7 +225,8 @@ async fn cmd_roundtrip(request: &Value) -> Option<Value> {
     /// The injector bounds the radio round trip at 30 s at most, then replies;
     /// the front waits a little longer so it hears that reply.
     const TUNNEL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(35);
-    crate::ipc::cmd::roundtrip_object(&run_dir().join(CMD_SOCK_FILE), request, TUNNEL_CMD_TIMEOUT)
+    let sock = paths::run_path("tunnel-config-cmd");
+    crate::ipc::cmd::roundtrip_object(&sock, request, TUNNEL_CMD_TIMEOUT)
         .await
         .ok()
         .map(Value::Object)

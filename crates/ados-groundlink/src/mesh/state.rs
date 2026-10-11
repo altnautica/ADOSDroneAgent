@@ -84,7 +84,7 @@ impl MeshSnapshot {
     /// Best-effort: an I/O error is logged by the caller, never fatal.
     pub fn write(&self) -> std::io::Result<()> {
         let path = std::path::Path::new(MESH_STATE_JSON);
-        crate::sidecars::write_json_atomic(path, self, 0o644)
+        ados_protocol::sidecar::write_json_atomic(path, self, 0o644)
     }
 
     /// Ship the snapshot to the logging store as a single full-snapshot

@@ -26,15 +26,17 @@ use axum::extract::Path as AxumPath;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+use ados_protocol::sidecar::{read_fresh_at, Reading};
 
 use crate::routes::detail;
 
-/// How stale a sidecar may be before the route treats it as absent. A plugin
-/// that stops publishing (disabled / crashed / no longer reporting) leaves its
-/// last sidecar on disk; beyond this window the route 404s rather than serving a
-/// frozen state the GCS would act on.
-const STALE_AFTER: Duration = Duration::from_secs(10);
+/// How stale a sidecar may be before the route treats it as absent: the registry
+/// window for `plugin-state`. A plugin that stops publishing (disabled / crashed
+/// / no longer reporting) leaves its last sidecar on disk; beyond this window the
+/// route 404s rather than serving a frozen state the GCS would act on.
+const STALE_AFTER: Duration = Duration::from_millis(ados_protocol::paths::PLUGIN_STATE_MAX_AGE_MS);
 
 /// The per-plugin socket directory the plugin-host daemon binds its sockets and
 /// writes its state sidecars in. Defaults to `/run/ados/plugins`, overridable via
@@ -77,24 +79,14 @@ fn read_plugin_state(socket_dir: &std::path::Path, plugin_id: &str, now: SystemT
     let path = socket_dir.join(format!("{plugin_id}-state.json"));
 
     // Absent (the plugin has published nothing, or is not running), stale (it
-    // stopped reporting), or future-dated (an unprovable age) all read as absent.
-    if !crate::freshness::is_fresh(&path, now, STALE_AFTER) {
-        return not_found(plugin_id);
-    }
-
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    // stopped reporting), future-dated (an unprovable age), torn / malformed, or
+    // not an object all read as absent, never a 500.
+    let Reading::Fresh(doc) = read_fresh_at::<Map<String, Value>>(&path, Some(STALE_AFTER), now)
+    else {
         return not_found(plugin_id);
     };
-    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
-        // A torn / malformed sidecar is absent-equivalent, never a 500.
-        return not_found(plugin_id);
-    };
-    // Only an object is a valid sidecar; anything else degrades to absent.
-    if !doc.is_object() {
-        return not_found(plugin_id);
-    }
 
-    (StatusCode::OK, Json(doc)).into_response()
+    (StatusCode::OK, Json(Value::Object(doc))).into_response()
 }
 
 /// The `404` body, FastAPI-shaped (`{"detail": "..."}`), matching the rest of the

@@ -54,7 +54,7 @@
 //! - a request-file write fault → `400 {"error": {"code": "trigger_unavailable",
 //!   "message": "could not write the push request: ..."}}`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -65,15 +65,11 @@ use serde_json::{json, Map, Value};
 // Path seam: the runtime tmpfs request/result files.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sentinels resolve under. The request file
-/// (`logd-push-request.json`) and the result file (`logd-push-result.json`) live
-/// directly under it, mirroring the Python `LOGD_PUSH_REQUEST_PATH` /
-/// `LOGD_PUSH_RESULT_PATH`; the write + poll helpers join the filenames onto the
-/// resolved dir so a test can redirect both with one `ADOS_RUN_DIR` override.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
+// The request file (`logd-push-request.json`) and the result file
+// (`logd-push-result.json`) live directly under the run dir
+// (`ados_protocol::paths::run_dir`), mirroring the Python `LOGD_PUSH_REQUEST_PATH`
+// / `LOGD_PUSH_RESULT_PATH`; the write + poll helpers join the filenames onto an
+// explicit dir so a test drives both against a tempdir.
 
 // ---------------------------------------------------------------------------
 // Constants matching the Python module.
@@ -495,7 +491,12 @@ pub async fn push_logs(body: Option<Json<Value>>) -> Response {
         Some(Json(v)) if v.is_object() => v,
         _ => json!({}),
     };
-    push_logs_at(&body, &run_dir(), DEFAULT_POLL_SECONDS).await
+    push_logs_at(
+        &body,
+        &ados_protocol::paths::run_dir(),
+        DEFAULT_POLL_SECONDS,
+    )
+    .await
 }
 
 /// The push logic against an explicit runtime dir + poll budget. The public

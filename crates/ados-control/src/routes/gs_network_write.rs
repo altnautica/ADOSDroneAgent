@@ -107,17 +107,11 @@ fn config_yaml_path() -> PathBuf {
     )
 }
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the override the sibling
-/// sockets resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
 /// The native `ados-net` command socket (`/run/ados/wifi-cmd.sock`), which applies
 /// the `ap_config` / `eth_config` / `modem_config` ops through the daemon's live
 /// managers.
 fn cmd_sock() -> PathBuf {
-    run_dir().join("wifi-cmd.sock")
+    ados_protocol::paths::run_path("wifi-cmd")
 }
 
 // ---------------------------------------------------------------------------

@@ -6,8 +6,6 @@
 //! its line envelope live in [`ados_supervisor::mesh_journal`], shared with the
 //! supervisor's role transition, so every writer emits the same shape.
 
-use std::path::Path;
-
 /// The mesh-event kinds a relay or receiver emits across the seam. These are
 /// the subset of the mesh kinds the FEC loops are the authority for;
 /// neighbor/gateway/partition kinds stay with the mesh poll loop.
@@ -20,7 +18,7 @@ pub const KIND_WFB_ADAPTER_MISSING: &str = "wfb_adapter_missing";
 /// `ADOS_RUN_DIR`), stamped now. Best-effort: an I/O error is logged and
 /// swallowed.
 pub fn emit(kind: &str, payload: serde_json::Value) {
-    let journal = ados_supervisor::mesh_journal::journal_path(Path::new(&crate::paths::run_dir()));
+    let journal = ados_supervisor::mesh_journal::journal_path(&ados_protocol::paths::run_dir());
     ados_supervisor::mesh_journal::append(&journal, kind, payload, now_ms());
 }
 

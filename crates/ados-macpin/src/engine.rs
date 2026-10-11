@@ -17,6 +17,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use ados_protocol::sidecar::write_atomic;
+
 use crate::{
     derive_pinned_mac, is_known_stable_efuse, is_quirk_randomizer, AdapterSource, LearnerRecord,
     MacAddr, MacPinsState, UsbId,
@@ -330,10 +332,10 @@ pub fn load_state_from(path: &Path) -> MacPinsState {
         .unwrap_or_default()
 }
 
-/// Atomically write the state file (tmp + rename).
+/// Atomically write the state file (`ados_protocol::sidecar::write_atomic`).
 pub fn save_state_to(path: &Path, state: &MacPinsState) -> std::io::Result<()> {
     let body = serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?;
-    atomic_write(path, &body, 0o644)
+    write_atomic(path, &body, 0o644)
 }
 
 /// Convenience wrappers using [`STATE_PATH`].
@@ -447,38 +449,6 @@ pub fn adapters_camel_from(state_path: &Path) -> Option<serde_json::Value> {
     }
     Some(serde_json::json!({ "adapters": adapters }))
 }
-
-fn atomic_write(path: &Path, body: &[u8], mode: u32) -> std::io::Result<()> {
-    use std::io::Write;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        f.write_all(body)?;
-        f.flush()?;
-        f.sync_all()?;
-    }
-    set_mode(&tmp, mode);
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-}
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) {}
 
 /// Read the machine-id from the first available source.
 pub fn read_machine_id() -> Option<String> {
@@ -662,7 +632,7 @@ mod linux {
             .map(|cur| cur == body)
             .unwrap_or(false);
         if !unchanged {
-            atomic_write(&path, body.as_bytes(), 0o644)?;
+            write_atomic(&path, body.as_bytes(), 0o644)?;
             reload_udev();
         }
         Ok(path)

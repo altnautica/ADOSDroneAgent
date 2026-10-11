@@ -8,6 +8,9 @@ repository.workspace = true
 description = "Stable-MAC pinning for network adapters with no efuse MAC that randomize their address each boot: a chipset quirk table, deterministic per-board MAC derivation, and a systemd-networkd .link provisioner. Shared by the installer step and the supervisor reconciler."
 
 [dependencies]
+# The shared atomic writer (`ados_protocol::sidecar::write_atomic`) the state
+# file and the .link files go through.
+ados-protocol = { path = "../ados-protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }

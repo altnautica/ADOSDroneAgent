@@ -109,19 +109,11 @@ fn pic_error(status: StatusCode, code: &str, message: impl Into<String>) -> Resp
 // The PIC control socket seam.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sidecars resolve under.
-fn run_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()),
-    )
-}
-
 /// The `ados-pic` daemon's control socket (`/run/ados/pic.sock`), which applies
 /// the `claim` / `release` / `confirm_token` / `heartbeat` ops through the single
 /// `PicArbiter` instance the daemon owns.
 fn pic_sock() -> std::path::PathBuf {
-    run_dir().join("pic.sock")
+    ados_protocol::paths::run_path("pic")
 }
 
 /// The outcome of a PIC control-socket round-trip: the parsed reply object, or

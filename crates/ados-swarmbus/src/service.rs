@@ -439,7 +439,7 @@ pub fn resolve_interface(cfg: &SwarmBusConfig) -> Option<String> {
     if !cfg.interface.trim().is_empty() {
         return Some(cfg.interface.trim().to_string());
     }
-    interface_from_sidecar(Path::new(ados_radio::paths::WFB_STATS_JSON))
+    interface_from_sidecar(&ados_protocol::paths::run_path("wfb-stats"))
 }
 
 /// Read the live interface out of the radio service's `wfb-stats.json`.

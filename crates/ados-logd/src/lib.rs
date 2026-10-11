@@ -45,16 +45,6 @@ pub mod paths {
     /// TCP port for the LAN read plane (authenticated, rate-limited).
     pub const QUERY_TCP_PORT: u16 = 8090;
 
-    /// The runtime socket directory. Honours `ADOS_RUN_DIR` — the same override
-    /// every other service resolves its `/run/ados` sockets under — else the
-    /// `/run/ados` default.
-    fn run_dir() -> String {
-        std::env::var("ADOS_RUN_DIR")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "/run/ados".to_string())
-    }
-
     /// Resolve the on-disk store path. Honours `ADOS_LOGD_DB` (an absolute
     /// override a rootless / `$HOME`-rooted install — e.g. the macOS workstation
     /// — sets so the store lives under a writable home instead of the root-owned
@@ -68,21 +58,25 @@ pub mod paths {
 
     /// The ingest socket, resolved under `ADOS_RUN_DIR` (else `/run/ados`).
     pub fn ingest_socket() -> String {
-        format!("{}/logd.sock", run_dir().trim_end_matches('/'))
+        format!("{}/logd.sock", tap_root())
     }
 
     /// The query socket, resolved under `ADOS_RUN_DIR` (else `/run/ados`).
     pub fn query_socket() -> String {
-        format!("{}/logd-query.sock", run_dir().trim_end_matches('/'))
+        format!("{}/logd-query.sock", tap_root())
     }
 
-    /// The runtime dir the tap sockets + JSON sidecars live under, resolved under
-    /// `ADOS_RUN_DIR` (else `/run/ados`). On a `$HOME`-rooted install (the macOS
-    /// workstation) this is `~/.ados/run`, where the other services actually write
-    /// their `state.sock`/`mavlink.sock`/sidecars — so the taps read the real
-    /// runtime dir instead of a nonexistent `/run/ados`.
+    /// The runtime dir the sockets, tap sockets and JSON sidecars live under:
+    /// `ados_protocol::paths::run_dir`, which honours `ADOS_RUN_DIR` (else
+    /// `/run/ados`). On a `$HOME`-rooted install (the macOS workstation) this is
+    /// `~/.ados/run`, where the other services actually write their
+    /// `state.sock`/`mavlink.sock`/sidecars, so the taps read the real runtime
+    /// dir instead of a nonexistent `/run/ados`.
     pub fn tap_root() -> String {
-        run_dir().trim_end_matches('/').to_string()
+        ados_protocol::paths::run_dir()
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_string()
     }
 
     /// The vehicle-state stream socket, resolved under `ADOS_RUN_DIR`.

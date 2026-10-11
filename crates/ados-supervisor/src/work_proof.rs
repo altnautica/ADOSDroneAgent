@@ -57,6 +57,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use ados_protocol::paths::run_dir;
 use serde_json::Value;
 
 // `tokio::time::Instant`, not `std::time::Instant`: identical in production,
@@ -115,12 +116,6 @@ const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(1);
 /// the router binds under.
 pub fn router_state_sock() -> PathBuf {
     run_dir().join("state.sock")
-}
-
-/// The runtime directory the agent's sockets and sidecars live under,
-/// honouring the `ADOS_RUN_DIR` override.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
 }
 
 /// The vision engine's unit.

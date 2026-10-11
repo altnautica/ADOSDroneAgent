@@ -12,8 +12,8 @@
 //! "primary_gamepad_id"}`. A reader that prefers the sidecar over a socket
 //! round-trip therefore sees exactly what the socket would have reported.
 //!
-//! The write is atomic (tmp sibling + fsync + rename), reusing the same pattern
-//! as [`crate::sidecar`], so a power loss mid-save never half-writes the file.
+//! The write is atomic (`ados_protocol::sidecar::write_json_atomic`: unique temp
+//! sibling + fsync + rename), so a power loss mid-save never half-writes the file.
 
 use std::path::Path;
 
@@ -47,13 +47,12 @@ pub fn snapshot_to_json(snapshot: &PicStateSnapshot) -> Value {
     })
 }
 
-/// Atomically persist the arbiter snapshot to `path` (tmp sibling + fsync +
+/// Atomically persist the arbiter snapshot to `path` (temp sibling + fsync +
 /// rename), creating the parent dir. Best-effort by contract: the daemon logs
 /// and continues on a write fault rather than failing a state transition over a
 /// sidecar it only mirrors.
 pub fn write_snapshot(path: &Path, snapshot: &PicStateSnapshot) -> std::io::Result<()> {
-    let body = serde_json::to_vec(&snapshot_to_json(snapshot)).map_err(std::io::Error::other)?;
-    atomic_write(path, &body)
+    ados_protocol::sidecar::write_json_atomic(path, &snapshot_to_json(snapshot), 0o644)
 }
 
 /// Read the persisted PIC snapshot JSON from `path`, or `None` when the file is
@@ -67,44 +66,6 @@ pub fn read_snapshot(path: &Path) -> Option<Value> {
     let got = value.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
     ados_protocol::sidecar::check_sidecar_version("pic-state", got, PIC_STATE_SIDECAR_VERSION);
     Some(value)
-}
-
-/// Atomic tmp-sibling write, disambiguated by pid so two writers in the same
-/// directory never collide. Mirrors [`crate::sidecar`]'s persister.
-fn atomic_write(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("pic-state.json");
-    let tmp = parent.join(format!("{}.{}.tmp", file_name, std::process::id()));
-
-    let write_result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        f.write_all(body)?;
-        f.flush()?;
-        f.sync_all()?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return write_result;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -166,7 +127,7 @@ mod tests {
         let stray = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
         assert!(!stray);
     }
 

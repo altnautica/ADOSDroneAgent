@@ -3,11 +3,14 @@
 //! * `lcd-state.json` (`active_page_id`) — read to restore the page on restart.
 //! * `lcd-page-request.json` (`page`) — a remote page-switch request; read then
 //!   unlinked so the same request can't reapply (mirrors the Python watcher).
-//! * `lcd-latency.json` — the fb-writer stats snapshot, written atomically at
-//!   1 Hz so the diagnostics surface sees the SPI throughput. Atomic writes
-//!   model `ados-video`'s `camera_state.rs` (tmp sibling + fsync + rename).
+//! * `lcd-fb-stats.json` — the fb-writer stats snapshot, written atomically at
+//!   1 Hz so the diagnostics surface sees the SPI throughput. Every writer here
+//!   goes through `ados_protocol::sidecar::write_atomic` (unique temp sibling,
+//!   fsync, rename).
 
 use std::path::Path;
+
+use ados_protocol::sidecar::write_atomic;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,7 +19,7 @@ use crate::fb_writer::WriterStats;
 /// Canonical sidecar paths (`core/paths.py`).
 pub const LCD_STATE_PATH: &str = "/run/ados/lcd-state.json";
 pub const LCD_PAGE_REQUEST_PATH: &str = "/run/ados/lcd-page-request.json";
-pub const LCD_LATENCY_PATH: &str = "/run/ados/lcd-latency.json";
+pub const LCD_FB_STATS_PATH: &str = "/run/ados/lcd-fb-stats.json";
 /// Data-driven content for the reserved `plugin` page. A plugin contributes its
 /// page (title, label/value rows, optional touch zones) by writing this file;
 /// the `plugin` page reads it each render so a plugin can present a status
@@ -67,7 +70,7 @@ pub fn write_snapshot_png(
             .write_image_data(rgb888)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
     }
-    atomic_write(path, &buf)
+    write_atomic(path, &buf, SIDECAR_MODE)
 }
 
 /// `lcd-state.json` payload. `active_page_id` is the page to restore.
@@ -213,20 +216,20 @@ impl LcdPluginPage {
     /// the caller to log and discard, the same contract as the other sidecars.
     pub fn write_to(&self, path: &Path) -> std::io::Result<()> {
         let body = serde_json::to_vec(self).map_err(std::io::Error::other)?;
-        atomic_write(path, &body)
+        write_atomic(path, &body, SIDECAR_MODE)
     }
 }
 
-/// `lcd-latency.json` payload — the fb-writer observability snapshot.
+/// `lcd-fb-stats.json` payload — the fb-writer observability snapshot.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct LcdLatency {
+pub struct LcdFbStats {
     pub writes: u64,
     pub drops: u64,
     pub skipped_duplicates: u64,
     pub last_write_ms: Option<f64>,
 }
 
-impl From<WriterStats> for LcdLatency {
+impl From<WriterStats> for LcdFbStats {
     fn from(s: WriterStats) -> Self {
         Self {
             writes: s.writes,
@@ -237,13 +240,13 @@ impl From<WriterStats> for LcdLatency {
     }
 }
 
-impl LcdLatency {
-    /// Atomically write the snapshot to `path` (tmp sibling + fsync + rename),
+impl LcdFbStats {
+    /// Atomically write the snapshot to `path` (temp sibling + fsync + rename),
     /// creating the parent. Best-effort: an I/O error is returned for the caller
     /// to log and discard.
     pub fn write_to(&self, path: &Path) -> std::io::Result<()> {
         let body = serde_json::to_vec(self).map_err(std::io::Error::other)?;
-        atomic_write(path, &body)
+        write_atomic(path, &body, SIDECAR_MODE)
     }
 }
 
@@ -255,45 +258,11 @@ impl LcdLatency {
 pub fn write_plugin_tap(key: &str, ts_ms: i64) -> std::io::Result<()> {
     let body = serde_json::to_vec(&serde_json::json!({ "key": key, "ts_ms": ts_ms }))
         .map_err(std::io::Error::other)?;
-    atomic_write(Path::new(LCD_PLUGIN_TAP_PATH), &body)
+    write_atomic(Path::new(LCD_PLUGIN_TAP_PATH), &body, SIDECAR_MODE)
 }
 
-/// Atomic tmp-sibling write (tmp name disambiguated by pid).
-fn atomic_write(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("ados-lcd-sidecar");
-    let tmp = parent.join(format!("{}.{}.tmp", file_name, std::process::id()));
-
-    let write_result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        f.write_all(body)?;
-        f.flush()?;
-        f.sync_all()?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return write_result;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
-}
+/// File mode of every LCD sidecar: world-readable state, owner-written.
+const SIDECAR_MODE: u32 = 0o644;
 
 #[cfg(test)]
 mod tests {
@@ -363,16 +332,16 @@ mod tests {
     }
 
     #[test]
-    fn latency_writes_from_stats_and_round_trips() {
+    fn fb_stats_writes_from_stats_and_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lcd-latency.json");
+        let path = dir.path().join("lcd-fb-stats.json");
         let stats = WriterStats {
             writes: 42,
             drops: 3,
             skipped_duplicates: 100,
             last_write_ms: Some(12.34),
         };
-        let lat: LcdLatency = stats.into();
+        let lat: LcdFbStats = stats.into();
         lat.write_to(&path).unwrap();
 
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -384,7 +353,7 @@ mod tests {
         let stray = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
         assert!(!stray);
     }
 
@@ -416,7 +385,7 @@ mod tests {
         let stray = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
         assert!(!stray);
     }
 
@@ -463,7 +432,7 @@ mod tests {
         let stray = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
         assert!(!stray);
     }
 
@@ -537,10 +506,10 @@ mod tests {
     }
 
     #[test]
-    fn latency_null_last_write_ms_serializes_null() {
+    fn fb_stats_null_last_write_ms_serializes_null() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("lcd-latency.json");
-        let lat = LcdLatency {
+        let path = dir.path().join("lcd-fb-stats.json");
+        let lat = LcdFbStats {
             writes: 0,
             drops: 0,
             skipped_duplicates: 0,

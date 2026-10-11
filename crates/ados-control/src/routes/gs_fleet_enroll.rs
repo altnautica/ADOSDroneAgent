@@ -49,8 +49,9 @@
 use std::path::Path;
 
 use ados_groundlink::{is_valid_device_id, FleetRegistry, FLEET_MAX_SLOTS, FLEET_REGISTRY_PATH};
+use ados_protocol::paths::run_dir;
 
-use crate::routes::status_full::{fresh_linked_peer_rows_in, now_unix_secs, run_dir};
+use crate::routes::status_full::{fresh_linked_peer_rows_in, now_unix_secs};
 
 /// How often the ground station checks whether an audible peer is registered.
 ///

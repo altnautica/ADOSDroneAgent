@@ -3,8 +3,10 @@
 //! `/etc/ados/wfb` (persistent). Use the functions rather than the string
 //! literals directly so the `ADOS_RUN_DIR` env override is honoured.
 
+// The live link stats snapshot is the registry's `wfb-stats` sidecar: resolve it
+// with `ados_protocol::paths::run_path("wfb-stats")`.
+
 /// Contract E sidecar JSON files written by this service.
-pub const WFB_STATS_JSON: &str = "/run/ados/wfb-stats.json";
 pub const HOP_SUPERVISOR_JSON: &str = "/run/ados/hop-supervisor.json";
 pub const PEER_PRESENCE_JSON: &str = "/run/ados/peer-presence.json";
 
@@ -106,26 +108,19 @@ pub const RADIO_CMD_SOCK: &str = "/run/ados/radio-cmd.sock";
 /// override is honoured.
 pub const RADIO_AUX_SOCK: &str = "/run/ados/radio-aux.sock";
 
-/// Return the run directory, honouring the `ADOS_RUN_DIR` env override.
-pub fn run_dir() -> String {
-    std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
-}
-
-/// Return the path to a run-dir file, honouring the env override.
+/// Return the path to a run-dir file, honouring the `ADOS_RUN_DIR` override
+/// (`ados_protocol::paths::run_dir`).
 pub fn run_path(name: &str) -> String {
-    format!("{}/{}", run_dir(), name)
+    ados_protocol::paths::run_dir()
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
 }
 
-/// Atomic JSON write: write to `.tmp` then rename, matching the Python
-/// `tmp.write + tmp.replace` pattern so a crash mid-write never leaves a
-/// truncated sidecar file.
+/// Atomic JSON write (`ados_protocol::sidecar::write_json_atomic`), so a crash
+/// mid-write never leaves a truncated sidecar file.
 pub fn write_sidecar(path: &str, value: &serde_json::Value) -> std::io::Result<()> {
-    let tmp = format!("{}.tmp", path);
-    let body = serde_json::to_vec(value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&tmp, &body)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    ados_protocol::sidecar::write_json_atomic(std::path::Path::new(path), value, 0o644)
 }
 
 /// Read the cross-process bind-liveness sentinel. Synchronous and cheap enough

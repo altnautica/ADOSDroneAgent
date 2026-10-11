@@ -6,34 +6,45 @@
 #
 # Codegen (`cargo run -p ados-capabilities-codegen`) emits, from this file:
 #   - Rust:   crates/ados-protocol/src/contracts.rs
+#   - Rust:   crates/ados-protocol/src/paths.rs (the runtime path registry)
 #   - Python: src/ados/core/_contracts_generated.py
+#   - Python: src/ados/core/_paths_generated.py (the runtime path registry)
 #   - TS:     ADOSMissionControl/src/lib/plugins/contracts.generated.ts
 #
-# Two sections:
+# Three sections:
 #   [[contract]] — a versioned inter-process wire contract.
 #   [[sidecar]]  — a versioned on-disk state sidecar (a JSON file one service
 #                  writes and another reads).
+#   [[socket]]   — a Unix socket under the run directory and the service that
+#                  binds it.
 #
 # Fields:
-#   id          — stable contract/sidecar identifier.
+#   id          — stable contract/sidecar/socket identifier.
 #   version     — the version integer. For `status = "metadata"` contracts this
 #                 is informational (0 = no registry-managed on-wire integer).
 #   wire        — the on-wire encoding (msgpack | json | binary | ...).
-#   transport   — how it travels (a socket kind, "shared-memory", the file path
-#                 for a sidecar, ...).
+#   transport   — how it travels (a socket kind, "shared-memory", ...).
 #   status      — "active" (a live versioned contract), "sidecar" (a state
 #                 file), or "metadata" (a primitive / external / legacy surface
 #                 with no registry-managed on-wire integer).
 #   rust_const  — the Rust source-of-truth constant, for provenance (optional).
 #   description — one line on what the contract carries.
+#   path        — (sidecar, socket) the default absolute path. A path under
+#                 /run/ados resolves under the `ADOS_RUN_DIR` override at
+#                 runtime; a `<placeholder>` segment marks a per-instance name.
+#   max_age_ms  — (sidecar, optional) the freshness window: a file whose mtime
+#                 is older than this is stale. Omitted for a sidecar that is
+#                 written on change or persists state, where mtime is not age.
+#   writer      — (sidecar) the service that writes the file.
+#   owner       — (socket) the service that binds the socket.
 #
 # The version integers here mirror the constants in crates/ados-protocol/src.
 # When a contract's on-wire shape changes, bump both the constant and this file
 # in the same change, and regenerate. Do not edit the generated files by hand.
 #
-# Note: the LCD render sidecars (lcd-state, lcd-page-request, lcd-video-tap) are
-# display-UI request/state files, not data contracts, and are intentionally not
-# registered here.
+# Every sidecar a crate names by literal (`run_dir().join("x.json")` or
+# "/run/ados/x.json") must have a row here; the ados-protocol
+# `sidecar_registry_scan` test enforces it.
 
 # ===========================================================================
 # CONTRACTS — versioned inter-process wire contracts
@@ -173,14 +184,6 @@ rust_const = "ados_protocol::link_feedback::LINK_FEEDBACK_VERSION"
 description = "Ground-measured video-link quality reported back to the transmitting drone, so its adaptive bitrate ladder steps on a real loss sample instead of the sentinel a transmit-only radio can never leave."
 
 [[contract]]
-id = "rest.openapi"
-version = 0
-wire = "json"
-transport = "http"
-status = "metadata"
-description = "Native control-surface REST API; versioned by the OpenAPI info.version string, not a registry integer."
-
-[[contract]]
 id = "state.v1"
 version = 1
 wire = "newline-json"
@@ -214,6 +217,7 @@ description = "Plugin data leaving the node through the cloud relay: the plugin 
 id = "cloud-link"
 version = 1
 path = "/run/ados/cloud-link.json"
+writer = "ados-cloud"
 rust_const = "ados_protocol::cloud_link::CLOUD_LINK_SIDECAR"
 description = "Cloud relay link state: broker session confirmed up, and the outcome of the last agent status POST."
 
@@ -221,6 +225,7 @@ description = "Cloud relay link state: broker session confirmed up, and the outc
 id = "offload-link"
 version = 1
 path = "/run/ados/offload-link.json"
+writer = "ados-plugin-host"
 rust_const = "ados_protocol::offload_link::OFFLOAD_LINK_SIDECAR"
 description = "Drone perception offload-link state: a paired reachable workstation the drone is offloading to, feeding the perception-tier decision."
 
@@ -228,50 +233,74 @@ description = "Drone perception offload-link state: a paired reachable workstati
 id = "wfb-stats"
 version = 1
 path = "/run/ados/wfb-stats.json"
-rust_const = "ados_radio::paths::WFB_STATS_JSON"
+max_age_ms = 10000
+writer = "ados-radio, ados-groundlink"
+rust_const = "ados_protocol::paths::WFB_STATS_JSON"
 description = "WFB link statistics: RSSI, packet counters, and derived link state."
 
 [[sidecar]]
 id = "hop-supervisor"
 version = 1
 path = "/run/ados/hop-supervisor.json"
+max_age_ms = 10000
+writer = "ados-radio"
 rust_const = "ados_radio::paths::HOP_SUPERVISOR_JSON"
 description = "FHSS hop-supervisor state."
+
+[[sidecar]]
+id = "peer-presence"
+version = 1
+path = "/run/ados/peer-presence.json"
+max_age_ms = 10000
+writer = "ados-radio"
+rust_const = "ados_radio::paths::PEER_PRESENCE_JSON"
+description = "The drone's view of its one ground peer from the presence beacon: the peer's channel and when it was last heard."
 
 [[sidecar]]
 id = "mgmt-link"
 version = 1
 path = "/run/ados/mgmt-link.json"
+max_age_ms = 90000
+writer = "ados-supervisor"
 description = "Management-link guardian state."
 
 [[sidecar]]
 id = "mgmt-failover"
 version = 1
 path = "/run/ados/mgmt-failover.json"
+max_age_ms = 90000
+writer = "ados-supervisor"
 description = "Management-link reach-back mode: primary, wifi_heartbeat, or none, with the failover interface and reason."
 
 [[sidecar]]
 id = "usb-rehome"
 version = 1
 path = "/run/ados/usb-rehome.json"
+max_age_ms = 600000
+writer = "ados-supervisor"
 description = "USB-rehome self-heal state for a WFB adapter on a slow USB port: the recovery state, attempt count, and last outcome."
 
 [[sidecar]]
 id = "wifi-powersave"
 version = 1
 path = "/run/ados/wifi-powersave.json"
+max_age_ms = 120000
+writer = "ados-supervisor"
 description = "WiFi power-save runtime reconciler state per station interface."
 
 [[sidecar]]
 id = "wfb_failover"
 version = 1
 path = "/run/ados/wfb_failover.json"
+max_age_ms = 10000
+writer = "ados-supervisor"
 description = "Local-bind to cloud-relay failover state."
 
 [[sidecar]]
 id = "wfb-pair-proof"
 version = 1
 path = "/var/lib/ados/wfb-pair-proof.json"
+writer = "ados-radio, ados-groundlink"
 rust_const = "ados_protocol::pair_proof::PAIR_PROOF_SIDECAR_VERSION"
 description = "Per-key WFB pair proof: whether a radio key's fingerprint has ever been confirmed to carry a link, plus the bounded auto-pair re-arm budget. Persistent, so the budget survives a reboot."
 
@@ -279,6 +308,7 @@ description = "Per-key WFB pair proof: whether a radio key's fingerprint has eve
 id = "bind-state"
 version = 1
 path = "/run/ados/bind-state.json"
+writer = "ados-radio"
 rust_const = "ados_radio::paths::BIND_STATE_SENTINEL"
 description = "WFB bind-session sentinel and precheck result."
 
@@ -286,6 +316,8 @@ description = "WFB bind-session sentinel and precheck result."
 id = "crsf-stats"
 version = 1
 path = "/run/ados/crsf-stats.json"
+max_age_ms = 10000
+writer = "ados-crsf"
 rust_const = "ados_crsf::paths::CRSF_STATS_JSON"
 description = "CRSF RC-lane state and link statistics: lane state, RSSI/LQ/SNR, frame rates, and the received-side liveness verdict."
 
@@ -293,6 +325,8 @@ description = "CRSF RC-lane state and link statistics: lane state, RSSI/LQ/SNR, 
 id = "tunnel-config"
 version = 1
 path = "/run/ados/tunnel-config.json"
+max_age_ms = 30000
+writer = "ados-config-tunnel"
 rust_const = "ados_config_tunnel::paths::TUNNEL_CONFIG_STATS_JSON"
 description = "Config-over-radio channel state: role (terminator/injector), enable + write gates, local bearer ports, and received-side frame/request/response/reject/timeout counters."
 
@@ -300,53 +334,122 @@ description = "Config-over-radio channel state: role (terminator/injector), enab
 id = "relayed-status"
 version = 1
 path = "/run/ados/relayed-status.json"
+max_age_ms = 20000
+writer = "ados-groundlink"
 rust_const = "ados_groundlink::aux_peers::AUX_PEERS_SIDECAR_VERSION"
 description = "Nodes a ground station relays, as they describe themselves over the radio auxiliary lane: identity, a compact status snapshot, and the arrival time of each so a reader can tell fresh from stale."
+
+[[sidecar]]
+id = "linked-peers"
+version = 1
+path = "/run/ados/linked-peers.json"
+writer = "ados-groundlink"
+rust_const = "ados_groundlink::paths::LINKED_PEERS_JSON"
+description = "The drones a ground station currently links, one entry per peer with its own last-seen time; each entry carries its own freshness, so the file has no single window."
 
 [[sidecar]]
 id = "mesh-state"
 version = 1
 path = "/run/ados/mesh-state.json"
+max_age_ms = 10000
+writer = "ados-groundlink"
 rust_const = "ados_groundlink::paths::MESH_STATE_JSON"
 description = "Mesh role and membership state."
+
+[[sidecar]]
+id = "wfb-relay"
+version = 1
+path = "/run/ados/wfb-relay.json"
+max_age_ms = 10000
+writer = "ados-groundlink"
+rust_const = "ados_groundlink::paths::WFB_RELAY_JSON"
+description = "Relay-role fragment counters a relay ground station forwards to its receiver."
+
+[[sidecar]]
+id = "wfb-receiver"
+version = 1
+path = "/run/ados/wfb-receiver.json"
+max_age_ms = 10000
+writer = "ados-groundlink"
+rust_const = "ados_groundlink::paths::WFB_RECEIVER_JSON"
+description = "Receiver-role per-relay counters and the combined FEC output statistics."
+
+[[sidecar]]
+id = "fleet-hero"
+version = 1
+path = "/run/ados/fleet-hero.json"
+writer = "ados-control"
+rust_const = "ados_groundlink::fleet_hero::FLEET_HERO_JSON"
+description = "The fleet hero a ground station shows: the selected drone, stamped on every decision and read back by the video fan-out on a slow poll."
 
 [[sidecar]]
 id = "camera-state"
 version = 2
 path = "/run/ados/camera-state.json"
+max_age_ms = 300000
+writer = "ados-video"
 rust_const = "ados_video::camera_state::CAMERA_STATE_JSON"
 description = "Camera discovery readiness AND the streaming pipeline's outcome for that camera, so a detected camera can never read as a streaming one. Keys: version, state, primary_path, primary_name, total_cameras, pipeline_state (unknown|starting|streaming|error|stopped; streaming only once mediamtx holds the encoder's publisher on main, starting while the encoder is spawned but has not published), pipeline_reason (set only on error), encoder (rpicam-vid, or <ffmpeg|gstreamer>-<codec element> e.g. ffmpeg-h264_v4l2m2m / ffmpeg-libx264), encoder_hw, encoder_forced_software (the hardware encoder failed and the next start is pinned to the software encoder), updated_at_unix."
+
+[[sidecar]]
+id = "cameras-discovered"
+version = 1
+path = "/run/ados/cameras-discovered.json"
+writer = "ados.hal.camera"
+description = "Every camera the hardware layer discovered, with its device path and capabilities, for the camera-config route."
 
 [[sidecar]]
 id = "video-streams"
 version = 2
 path = "/run/ados/video-streams.json"
+max_age_ms = 20000
+writer = "ados-video"
 rust_const = "ados_video::video_streams::VIDEO_STREAMS_JSON"
 description = "Per-leg video stream list (id/role/codec/live) the node serves, for the GCS stream switcher."
+
+[[sidecar]]
+id = "video-profile"
+version = 1
+path = "/run/ados/video-profile.json"
+writer = "ados-video"
+description = "The active video encoder profile and its leases, stamped on every change and read by the radio and the fan-out."
 
 [[sidecar]]
 id = "camera-usb-recovery"
 version = 1
 path = "/run/ados/camera-usb-recovery.json"
+max_age_ms = 60000
+writer = "ados-supervisor"
 description = "Camera USB-recovery reconciler state."
 
 [[sidecar]]
 id = "janitor"
 version = 1
 path = "/run/ados/janitor.json"
+writer = "ados-supervisor"
 description = "Disk-janitor state: the agent's footprint per category against its budget, the rung the last pass ran at, the bytes it reclaimed per category, what is still reclaimable, and the free space it left behind."
 
 [[sidecar]]
 id = "pic-state"
 version = 1
 path = "/run/ados/pic-state.json"
+writer = "ados-hid"
 rust_const = "ados_hid::paths::PIC_STATE_JSON"
 description = "Pilot-in-command arbiter state."
+
+[[sidecar]]
+id = "ground-station-input"
+version = 1
+path = "/etc/ados/ground-station-input.json"
+writer = "ados-hid"
+rust_const = "ados_hid::sidecar::GS_INPUT_JSON"
+description = "The ground station's persisted primary input device selection. Persistent, so it lives beside the agent config."
 
 [[sidecar]]
 id = "gpio-output"
 version = 1
 path = "/run/ados/gpio-output.json"
+writer = "ados-gpio"
 rust_const = "ados_gpio::sidecar::GPIO_OUTPUT_PATH"
 description = "Driven GPIO output-line state."
 
@@ -354,17 +457,262 @@ description = "Driven GPIO output-line state."
 id = "board"
 version = 1
 path = "/run/ados/board.json"
+writer = "ados-hal-probe"
 description = "Detected board fingerprint."
 
 [[sidecar]]
 id = "config-status"
 version = 1
 path = "/run/ados/config-status-<service>.json"
+writer = "ados-config"
 description = "Per-service config-load status: a loud-fail record written when a service's config is malformed."
 
 [[sidecar]]
 id = "fc-identity"
 version = 1
 path = "/run/ados/fc-identity.json"
+writer = "ados-control"
 rust_const = "ados_control::routes::fc_identity::SIDECAR_VERSION"
 description = "Flight-controller identity reconciler outcome: whether the write is enabled, the last tick's outcome, the wanted and current system id."
+
+[[sidecar]]
+id = "mavlink-router"
+version = 1
+path = "/run/ados/mavlink-router.json"
+writer = "ados-mavlink-router"
+description = "The router's learned routes (sysid, compid, endpoint) and per-endpoint rx/tx counters, rewritten on change."
+
+[[sidecar]]
+id = "link-feedback"
+version = 1
+path = "/run/ados/link-feedback.json"
+writer = "ados-mavlink-router"
+rust_const = "ados_protocol::link_feedback::LINK_FEEDBACK_SIDECAR"
+description = "The latest ground-measured video-link quality report the drone received, for its adaptive bitrate ladder."
+
+[[sidecar]]
+id = "plugin-loopback-guard"
+version = 1
+path = "/run/ados/plugin-loopback-guard.json"
+writer = "ados-plugin-host"
+rust_const = "ados_protocol::plugin_loopback_guard::SIDECAR_NAME"
+description = "The loopback ports plugins hold, so the plugin host can refuse a plugin binding a port another one owns."
+
+[[sidecar]]
+id = "plugin-state"
+version = 1
+path = "/run/ados/plugins/<plugin_id>-state.json"
+max_age_ms = 10000
+writer = "ados-plugin-host"
+description = "A plugin's latest published state per topic, served back by the plugin state route."
+
+[[sidecar]]
+id = "ap-guard"
+version = 1
+path = "/run/ados/ap-guard.json"
+writer = "ados-net"
+description = "The setup access-point guard's last decision and the interface it resolved."
+
+[[sidecar]]
+id = "logd-push-request"
+version = 1
+path = "/run/ados/logd-push-request.json"
+writer = "ados-control"
+rust_const = "ados_cloud::log_push::PUSH_REQUEST_PATH"
+description = "An operator's log-push request for the cloud service to consume: the window selector and a request id."
+
+[[sidecar]]
+id = "logd-push-result"
+version = 1
+path = "/run/ados/logd-push-result.json"
+writer = "ados-cloud"
+rust_const = "ados_cloud::log_push::PUSH_RESULT_PATH"
+description = "The cloud service's outcome for the last log-push request, keyed by its request id."
+
+[[sidecar]]
+id = "lcd-latency"
+version = 1
+path = "/run/ados/lcd-latency.json"
+max_age_ms = 10000
+writer = "ados-video"
+description = "SEI glass-to-glass latency snapshot the video tap writes at 1 Hz while the latency probe runs."
+
+[[sidecar]]
+id = "lcd-fb-stats"
+version = 1
+path = "/run/ados/lcd-fb-stats.json"
+max_age_ms = 10000
+writer = "ados-display"
+rust_const = "ados_display::sidecar::LCD_FB_STATS_PATH"
+description = "The LCD framebuffer writer's counters (writes, drops, skipped duplicates, last write time), written at 1 Hz."
+
+[[sidecar]]
+id = "lcd-state"
+version = 1
+path = "/run/ados/lcd-state.json"
+writer = "ados-display"
+rust_const = "ados_display::sidecar::LCD_STATE_PATH"
+description = "The LCD's active page id, restored on a display restart."
+
+[[sidecar]]
+id = "lcd-page-request"
+version = 1
+path = "/run/ados/lcd-page-request.json"
+writer = "ados-api"
+rust_const = "ados_display::sidecar::LCD_PAGE_REQUEST_PATH"
+description = "A pending remote LCD page switch; the display reads it then unlinks it."
+
+[[sidecar]]
+id = "lcd-plugin-page"
+version = 1
+path = "/run/ados/lcd-plugin-page.json"
+writer = "ados-plugin-host"
+rust_const = "ados_display::sidecar::LCD_PLUGIN_PAGE_PATH"
+description = "Plugin-contributed content for the LCD's reserved plugin page: title, rows, and touch zones."
+
+[[sidecar]]
+id = "lcd-plugin-tap"
+version = 1
+path = "/run/ados/lcd-plugin-tap.json"
+writer = "ados-display"
+rust_const = "ados_display::sidecar::LCD_PLUGIN_TAP_PATH"
+description = "A pending plugin display action fired by a touch zone or button, for the plugin host to deliver."
+
+# ===========================================================================
+# SOCKETS — Unix sockets under the run directory
+# ===========================================================================
+
+[[socket]]
+id = "api-internal"
+path = "/run/ados/api-internal.sock"
+owner = "ados-api"
+
+[[socket]]
+id = "aux-cmd"
+path = "/run/ados/aux-cmd.sock"
+owner = "ados-radio"
+
+[[socket]]
+id = "aux-rpc-responses"
+path = "/run/ados/aux-rpc-responses.sock"
+owner = "ados-control"
+
+[[socket]]
+id = "buttons"
+path = "/run/ados/buttons.sock"
+owner = "ados-hid"
+
+[[socket]]
+id = "cloud-publish"
+path = "/run/ados/cloud-publish.sock"
+owner = "ados-cloud"
+
+[[socket]]
+id = "crsf-cmd"
+path = "/run/ados/crsf-cmd.sock"
+owner = "ados-crsf"
+
+[[socket]]
+id = "gpio-cmd"
+path = "/run/ados/gpio-cmd.sock"
+owner = "ados-gpio"
+
+[[socket]]
+id = "groundlink-cmd"
+path = "/run/ados/groundlink-cmd.sock"
+owner = "ados-groundlink"
+
+[[socket]]
+id = "hid-cmd"
+path = "/run/ados/hid-cmd.sock"
+owner = "ados-hid"
+
+[[socket]]
+id = "logd"
+path = "/run/ados/logd.sock"
+owner = "ados-logd"
+
+[[socket]]
+id = "logd-query"
+path = "/run/ados/logd-query.sock"
+owner = "ados-logd"
+
+[[socket]]
+id = "mavlink"
+path = "/run/ados/mavlink.sock"
+owner = "ados-mavlink-router"
+
+[[socket]]
+id = "mavlink-ingest"
+path = "/run/ados/mavlink-ingest.sock"
+owner = "ados-mavlink-router"
+
+[[socket]]
+id = "msp"
+path = "/run/ados/msp.sock"
+owner = "ados-mavlink-router"
+
+[[socket]]
+id = "pairing"
+path = "/run/ados/pairing.sock"
+owner = "ados-groundlink"
+
+[[socket]]
+id = "pic"
+path = "/run/ados/pic.sock"
+owner = "ados-hid"
+
+[[socket]]
+id = "radio-aux"
+path = "/run/ados/radio-aux.sock"
+owner = "ados-radio"
+
+[[socket]]
+id = "radio-cmd"
+path = "/run/ados/radio-cmd.sock"
+owner = "ados-radio"
+
+[[socket]]
+id = "state"
+path = "/run/ados/state.sock"
+owner = "ados-mavlink-router"
+
+[[socket]]
+id = "supervisor"
+path = "/run/ados/supervisor.sock"
+owner = "ados-supervisor"
+
+[[socket]]
+id = "swarm"
+path = "/run/ados/swarm.sock"
+owner = "ados-swarmbus"
+
+[[socket]]
+id = "tunnel-config-cmd"
+path = "/run/ados/tunnel-config-cmd.sock"
+owner = "ados-config-tunnel"
+
+[[socket]]
+id = "video-cmd"
+path = "/run/ados/video-cmd.sock"
+owner = "ados-supervisor"
+
+[[socket]]
+id = "video-encoder"
+path = "/run/ados/video-encoder.sock"
+owner = "ados-video"
+
+[[socket]]
+id = "vision"
+path = "/run/ados/vision.sock"
+owner = "ados-vision"
+
+[[socket]]
+id = "wfb-cmd"
+path = "/run/ados/wfb-cmd.sock"
+owner = "ados-radio"
+
+[[socket]]
+id = "wifi-cmd"
+path = "/run/ados/wifi-cmd.sock"
+owner = "ados-net"

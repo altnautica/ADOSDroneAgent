@@ -58,24 +58,16 @@ use serde_json::{json, Map, Value};
 // The Wi-Fi command socket seam.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sidecars resolve under.
-fn run_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()),
-    )
-}
-
 /// The native `ados-net` Wi-Fi command socket (`/run/ados/wifi-cmd.sock`), which
 /// applies the `wifi_join` / `wifi_leave` / `wifi_forget` ops through the daemon's
 /// single Wi-Fi-client manager (the owner of the `wlan0` AP/STA lock).
 pub(crate) fn wifi_cmd_sock() -> std::path::PathBuf {
-    wifi_cmd_sock_in(&run_dir())
+    wifi_cmd_sock_in(&ados_protocol::paths::run_dir())
 }
 
 /// The Wi-Fi command socket under an explicit runtime directory.
 pub(crate) fn wifi_cmd_sock_in(run_dir: &std::path::Path) -> std::path::PathBuf {
-    run_dir.join("wifi-cmd.sock")
+    run_dir.join(ados_protocol::paths::WIFI_CMD_SOCK)
 }
 
 /// The outcome of a command-socket round-trip.

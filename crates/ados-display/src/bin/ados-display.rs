@@ -9,7 +9,7 @@
 //! packed and presented through the writer. It also writes a PNG of each
 //! rendered frame to `lcd-snapshot.png` so the REST snapshot endpoint can serve
 //! the live panel without re-reading the framebuffer. The writer's stats are
-//! mirrored to `lcd-latency.json` at 1 Hz, and a remote page switch arrives via
+//! mirrored to `lcd-fb-stats.json` at 1 Hz, and a remote page switch arrives via
 //! `lcd-page-request.json`.
 //!
 //! On a board with no bound SPI-LCD framebuffer the daemon logs and exits 0 — a
@@ -166,7 +166,7 @@ async fn run_linux(
 /// core on an SBC that is also serving the video chain); the panel re-renders
 /// at the active page's
 /// `refresh_hz`, floored to 0.5 Hz when idle so the dashboard's clock-second
-/// paint does not waste a core. `lcd-latency.json` is mirrored at 1 Hz, and a
+/// paint does not waste a core. `lcd-fb-stats.json` is mirrored at 1 Hz, and a
 /// remote `POST /api/v1/display/page` request is drained each render tick.
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
@@ -195,7 +195,7 @@ async fn run_page_ui(
     use ados_display::panel_action::{AgentWriter, Outcome};
     use ados_display::render_loop::{FramePresenter, TICK_GRANULARITY};
     use ados_display::sidecar::{
-        write_plugin_tap, LcdLatency, LCD_LATENCY_PATH, LCD_SNAPSHOT_PATH,
+        write_plugin_tap, LcdFbStats, LCD_FB_STATS_PATH, LCD_SNAPSHOT_PATH,
     };
     use ados_display::state_poller::StatePoller;
     use ados_display::state_source::StateSource;
@@ -456,9 +456,9 @@ async fn run_page_ui(
 
                 // Mirror writer stats + consume a recalibration request at ~1 Hz.
                 if now.duration_since(last_latency_write) >= Duration::from_secs(1) {
-                    let lat: LcdLatency = writer.stats().into();
-                    if let Err(e) = lat.write_to(Path::new(LCD_LATENCY_PATH)) {
-                        tracing::debug!(error = %e, "lcd-latency write failed");
+                    let fb_stats: LcdFbStats = writer.stats().into();
+                    if let Err(e) = fb_stats.write_to(Path::new(LCD_FB_STATS_PATH)) {
+                        tracing::debug!(error = %e, "lcd-fb-stats write failed");
                     }
                     // A GCS / bench "Recalibrate" drops the flag; relaunch the
                     // wizard in place (no reboot) and consume the request.

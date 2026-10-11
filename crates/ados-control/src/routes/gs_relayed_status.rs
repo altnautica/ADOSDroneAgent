@@ -25,7 +25,7 @@
 //! known, its readings are not current. Neither case ever serves a stale reading
 //! as a live one.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
@@ -38,14 +38,15 @@ use crate::routes::detail;
 use crate::state::AppState;
 
 /// The relayed-status sidecar filename under the run dir.
-const SIDECAR_FILE: &str = "relayed-status.json";
+const SIDECAR_FILE: &str = ados_protocol::paths::RELAYED_STATUS_JSON;
 
-/// How stale the sidecar itself may be before the surface reads as absent.
+/// How stale the sidecar itself may be before the surface reads as absent: the
+/// registry window for `relayed-status`.
 ///
 /// The writer rewrites it every couple of seconds, so this is generous enough to
 /// ride out a slow tick and tight enough that a stopped receive process is
 /// reported as gone rather than as a node that stopped moving.
-const SIDECAR_STALE_AFTER_S: f64 = 20.0;
+const SIDECAR_STALE_AFTER_S: f64 = ados_protocol::paths::RELAYED_STATUS_MAX_AGE_MS as f64 / 1000.0;
 
 /// Fallback freshness window for a peer's status, used only when the sidecar
 /// does not publish its own. The writer does publish it, so this is the
@@ -56,10 +57,6 @@ const DEFAULT_STATUS_STALE_AFTER_S: f64 = 15.0;
 /// unprovable. Both processes read the same host clock, so anything past a second
 /// is a clock step, not jitter.
 const MAX_FUTURE_SKEW_S: f64 = 1.0;
-
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
 
 fn now_unix() -> f64 {
     SystemTime::now()
@@ -93,7 +90,7 @@ pub async fn get_relayed_status(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    read_status(&run_dir().join(SIDECAR_FILE), now_unix())
+    read_status(&state.run_dir.join(SIDECAR_FILE), now_unix())
 }
 
 /// The path + clock injectable core, so a test drives the freshness gates

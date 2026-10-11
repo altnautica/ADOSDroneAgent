@@ -277,7 +277,7 @@ impl AppState {
             dashboard_pin,
             mcp_tokens,
             params_path: crate::param_store::default_params_path(),
-            run_dir: crate::routes::status_full::run_dir(),
+            run_dir: ados_protocol::paths::run_dir(),
             started: Instant::now(),
             swarm: SwarmIpcClient::disconnected(),
             aux_rpc_proxy: None,

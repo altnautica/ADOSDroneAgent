@@ -44,36 +44,30 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
+
+use ados_protocol::paths;
+use ados_protocol::sidecar::{read_fresh_at, Reading};
 
 use crate::routes::detail;
 use crate::state::AppState;
 
-/// The lane daemon's state sidecar filename under the run dir.
-const SIDECAR_FILE: &str = "crsf-stats.json";
+/// How stale the sidecar may be before a reader treats it as absent: the
+/// registry window for `crsf-stats`. The lane rewrites it ~1 Hz while
+/// transmitting and every 5 s while idling, so the window is two idle
+/// refreshes; beyond it the lane is no longer reporting. Every reader of the
+/// sidecar (this route and the consolidated status) uses this one window so the
+/// two surfaces never disagree about whether the lane is up.
+pub(crate) const CRSF_STATS_STALE: Duration = Duration::from_millis(paths::CRSF_STATS_MAX_AGE_MS);
 
-/// The lane daemon's command socket filename under the run dir.
-const CMD_SOCK_FILE: &str = "crsf-cmd.sock";
-
-/// How stale the sidecar may be before a reader treats it as absent. The lane
-/// rewrites it ~1 Hz while transmitting and every 5 s while idling, so 10 s is
-/// two idle refreshes; beyond it the lane is no longer reporting. Every reader
-/// of the sidecar (this route and the consolidated status) uses this one window
-/// so the two surfaces never disagree about whether the lane is up.
-pub(crate) const CRSF_STATS_STALE: Duration = Duration::from_secs(10);
-
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override
-/// the sibling sockets + sidecars resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
+/// The lane daemon's state sidecar under a run dir.
+fn sidecar_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(paths::CRSF_STATS_JSON)
 }
 
-fn sidecar_path() -> PathBuf {
-    run_dir().join(SIDECAR_FILE)
-}
-
-fn crsf_cmd_sock() -> PathBuf {
-    run_dir().join(CMD_SOCK_FILE)
+/// The lane daemon's command socket under a run dir.
+fn crsf_cmd_sock(run_dir: &Path) -> PathBuf {
+    run_dir.join(paths::CRSF_CMD_SOCK)
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +99,7 @@ pub async fn get_crsf_status(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    read_status(&sidecar_path(), SystemTime::now())
+    read_status(&sidecar_path(&state.run_dir), SystemTime::now())
 }
 
 /// The read logic against an explicit path + a reference "now", so a test can
@@ -113,19 +107,14 @@ pub async fn get_crsf_status(State(state): State<AppState>) -> Response {
 /// Absent / stale / unreadable / malformed all read `404` — never a `500`,
 /// and never a stale body served as current.
 fn read_status(path: &Path, now: SystemTime) -> Response {
-    // Absent, stale, or future-dated (an unprovable age) all read as no status.
-    if !crate::freshness::is_fresh(path, now, CRSF_STATS_STALE) {
-        return status_not_found();
-    }
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return status_not_found();
-    };
-    let Ok(doc) = serde_json::from_str::<Value>(&text) else {
+    // Absent, stale, future-dated (an unprovable age), unreadable, malformed,
+    // or not an object all read as no status.
+    let Reading::Fresh(doc) =
+        read_fresh_at::<Map<String, Value>>(path, Some(CRSF_STATS_STALE), now)
+    else {
         return status_not_found();
     };
-    if !doc.is_object() {
-        return status_not_found();
-    }
+    let doc = Value::Object(doc);
     // Best-effort drift signal: warn (never reject) on a producer/reader
     // version mismatch, then serve the sidecar anyway. The contract registry
     // is the source of truth for the expected version.
@@ -212,7 +201,7 @@ pub async fn post_crsf_channels(
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    command_response(crsf_cmd(&crsf_cmd_sock(), &channels_request(body)).await)
+    command_response(crsf_cmd(&crsf_cmd_sock(&state.run_dir), &channels_request(body)).await)
 }
 
 /// The `set_channels` op for a channel-injection body.
@@ -259,7 +248,7 @@ pub async fn post_crsf_param_write(
         "field_index": body.field_index,
         "data": body.data,
     });
-    command_response(crsf_cmd(&crsf_cmd_sock(), &request).await)
+    command_response(crsf_cmd(&crsf_cmd_sock(&state.run_dir), &request).await)
 }
 
 #[cfg(test)]

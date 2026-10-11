@@ -25,25 +25,19 @@ pub const TUNNEL_CONFIG_CMD_SOCK: &str = "/run/ados/tunnel-config-cmd.sock";
 /// command proxy over the radio.
 pub const LOCAL_CONFIG_BASE_URL: &str = "http://127.0.0.1:8080";
 
-/// Return the run directory, honouring the `ADOS_RUN_DIR` env override.
-pub fn run_dir() -> String {
-    std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
-}
-
-/// Return the path to a run-dir file, honouring the env override.
+/// Return the path to a run-dir file, honouring the `ADOS_RUN_DIR` override
+/// (`ados_protocol::paths::run_dir`).
 pub fn run_path(name: &str) -> String {
-    format!("{}/{}", run_dir(), name)
+    ados_protocol::paths::run_dir()
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
 }
 
-/// Atomic JSON write: write to `.tmp` then rename, so a crash mid-write never
-/// leaves a truncated sidecar file.
+/// Atomic JSON write (`ados_protocol::sidecar::write_json_atomic`), so a crash
+/// mid-write never leaves a truncated sidecar file.
 pub fn write_sidecar(path: &str, value: &serde_json::Value) -> std::io::Result<()> {
-    let tmp = format!("{path}.tmp");
-    let body = serde_json::to_vec(value)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&tmp, &body)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    ados_protocol::sidecar::write_json_atomic(std::path::Path::new(path), value, 0o644)
 }
 
 #[cfg(test)]

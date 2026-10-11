@@ -86,12 +86,6 @@ fn is_ground_station() -> bool {
 // Path seams: the run-dir socket + the etc-dir config files.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sidecars resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
 /// The agent etc dir (`ADOS_ETC_DIR`, default `/etc/ados`) holding the
 /// ground-station config side-files (priority / modem / wifi-client JSON).
 fn etc_dir() -> PathBuf {
@@ -101,7 +95,7 @@ fn etc_dir() -> PathBuf {
 /// The native `ados-net` Wi-Fi command socket (`/run/ados/wifi-cmd.sock`), which
 /// answers the `wifi_status` op with the live station status.
 fn wifi_cmd_sock() -> PathBuf {
-    run_dir().join("wifi-cmd.sock")
+    ados_protocol::paths::run_path("wifi-cmd")
 }
 
 /// The persisted uplink priority list (`/etc/ados/ground-station-uplink.json`).

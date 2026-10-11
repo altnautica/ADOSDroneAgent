@@ -72,6 +72,8 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use ados_protocol::paths::{self, run_dir};
+use ados_protocol::sidecar::{read_fresh_at, Reading};
 use ados_protocol::wfb_status::{build_radio_block, get_or_null, json_truthy, WfbStatusConfig};
 use axum::extract::State;
 use axum::Json;
@@ -383,12 +385,13 @@ fn read_fc_identity(run_dir: &Path) -> Value {
 
 /// Router extras surfaced at the top level of the consolidated body: the
 /// direct-GCS proxy posture (with its per-edge `*_listening` flags), the
-/// unsigned-traffic rejection risk, and the injector arbitration mode. Each is
-/// null when the router has not published it.
-const ROUTER_STATUS_EXTRAS: [&str; 3] = [
+/// unsigned-traffic rejection risk, the injector arbitration mode, and the
+/// agent-held signing state. Each is null when the router has not published it.
+const ROUTER_STATUS_EXTRAS: [&str; 4] = [
     "mavlink_proxy_posture",
     "agent_commands_unsigned_rejected_risk",
     "injector_arbitration",
+    "agent_signing",
 ];
 
 fn router_status_extras(snapshot: Option<&Value>) -> Vec<(String, Value)> {
@@ -691,7 +694,7 @@ async fn wfb_status_view(state: &AppState) -> Option<Map<String, Value>> {
     match crate::routes::wfb::choose_wfb_status(
         store,
         &cfg,
-        &run_dir().join("wfb-stats.json"),
+        &state.run_dir.join(paths::WFB_STATS_JSON),
         ados_protocol::wfb_status::now_unix_micros(),
     ) {
         Value::Object(map) if !map.is_empty() => Some(map),
@@ -1181,7 +1184,7 @@ async fn build_mesh_block(config_profile: &str) -> Value {
         config_profile,
         &ados_config::mesh_role_path(),
         mesh_capable,
-        &run_dir().join("mesh-state.json"),
+        &run_dir().join(paths::MESH_STATE_JSON),
     )
 }
 
@@ -1241,12 +1244,13 @@ fn build_mesh_block_at(
 // Camera status: the LOCAL camera-presence + USB-recovery surface.
 // ---------------------------------------------------------------------------
 
-/// The freshness window (seconds) for the camera-state sidecar. A reading older
-/// than this is dropped. Mirrors the Python `<= 300.0` gate.
-const CAMERA_STATE_FRESH_S: f64 = 300.0;
+/// The freshness window (seconds) for the camera-state sidecar: the registry
+/// window for `camera-state`. A reading older than this is dropped.
+const CAMERA_STATE_FRESH_S: f64 = paths::CAMERA_STATE_MAX_AGE_MS as f64 / 1000.0;
 
-/// The freshness window (seconds) for the USB-recovery sidecar. Mirrors `<= 60.0`.
-const CAMERA_RECOVERY_FRESH_S: f64 = 60.0;
+/// The freshness window (seconds) for the USB-recovery sidecar: the registry
+/// window for `camera-usb-recovery`.
+const CAMERA_RECOVERY_FRESH_S: f64 = paths::CAMERA_USB_RECOVERY_MAX_AGE_MS as f64 / 1000.0;
 
 /// Camera presence + USB-recovery state for the LOCAL status surface, folded into
 /// the payload only when the sidecars are fresh + valid (absent otherwise).
@@ -1327,20 +1331,22 @@ fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
     out
 }
 
-/// The freshness window (seconds) for the management-link guardian sidecar. The
-/// guardian ticks every few seconds inside its fast-initial window and steadies
-/// after; 90 s tolerates the steady cadence without ever rendering a stopped
-/// supervisor's last verdict as live.
-const MGMT_LINK_FRESH_S: f64 = 90.0;
+/// The freshness window (seconds) for the management-link guardian sidecar: the
+/// registry window for `mgmt-link`. The guardian ticks every few seconds inside
+/// its fast-initial window and steadies after; the window tolerates the steady
+/// cadence without ever rendering a stopped supervisor's last verdict as live.
+const MGMT_LINK_FRESH_S: f64 = paths::MGMT_LINK_MAX_AGE_MS as f64 / 1000.0;
 
-/// The freshness window (seconds) for the reach-back-mode sidecar. Same
-/// reasoning as [`MGMT_LINK_FRESH_S`]; both are written by the same tick.
-const MGMT_FAILOVER_FRESH_S: f64 = 90.0;
+/// The freshness window (seconds) for the reach-back-mode sidecar: the registry
+/// window for `mgmt-failover`. Same reasoning as [`MGMT_LINK_FRESH_S`]; both are
+/// written by the same tick.
+const MGMT_FAILOVER_FRESH_S: f64 = paths::MGMT_FAILOVER_MAX_AGE_MS as f64 / 1000.0;
 
-/// The freshness window (seconds) for the USB-rehome sidecar. It is written on a
-/// state change rather than a tick, so the window is the generous one: an idle
-/// verdict that has not changed in minutes is still the truth.
-const USB_REHOME_FRESH_S: f64 = 600.0;
+/// The freshness window (seconds) for the USB-rehome sidecar: the registry
+/// window for `usb-rehome`. It is written on a state change rather than a tick,
+/// so the window is the generous one: an idle verdict that has not changed in
+/// minutes is still the truth.
+const USB_REHOME_FRESH_S: f64 = paths::USB_REHOME_MAX_AGE_MS as f64 / 1000.0;
 
 /// Reconciler state for the LOCAL status surface: the management-link guardian,
 /// the reach-back-mode failover, the USB-rehome self-heal, and the WiFi
@@ -1450,32 +1456,36 @@ fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
     // `interfaces` to be an ARRAY and each entry to carry its own `iface`. It also
     // carries no `updated_at_unix`, so freshness is the file's mtime — the same
     // gate the CRSF block applies for the same reason.
-    let ps_path = run_dir.join("wifi-powersave.json");
-    if sidecar_mtime_fresh(&ps_path, WIFI_POWERSAVE_FRESH) {
-        if let Some(ps) = read_versioned_sidecar(&ps_path, "wifi-powersave") {
-            if let Some(ifaces) = ps.get("interfaces").and_then(Value::as_object) {
-                let rows: Vec<Value> = ifaces
-                    .iter()
-                    .filter_map(|(name, snap)| {
-                        let s = snap.as_object()?;
-                        Some(json!({
-                            "iface": name,
-                            "powersaveOn": json_truthy_default_false(s, "powersave_on"),
-                            "reasserts": s.get("reasserts").cloned().unwrap_or(json!(0)),
-                            "lastReassert": get_or_null(s, "last_reassert"),
-                            "signalDbm": get_or_null(s, "signal_dbm"),
-                            "linkState": s
-                                .get("link_state")
-                                .cloned()
-                                .unwrap_or_else(|| json!("unknown")),
-                        }))
-                    })
-                    .collect();
-                // A node with no managed WiFi interface omits the block rather than
-                // shipping an empty list, so the card stays hidden.
-                if !rows.is_empty() {
-                    out.push(("wifiPowersave".to_string(), json!({"interfaces": rows})));
-                }
+    let ps_path = run_dir.join(paths::WIFI_POWERSAVE_JSON);
+    let reading = read_fresh_at::<Map<String, Value>>(
+        &ps_path,
+        Some(WIFI_POWERSAVE_FRESH),
+        std::time::SystemTime::now(),
+    );
+    if let Reading::Fresh(ps) = reading {
+        warn_on_version_drift(&ps, "wifi-powersave");
+        if let Some(ifaces) = ps.get("interfaces").and_then(Value::as_object) {
+            let rows: Vec<Value> = ifaces
+                .iter()
+                .filter_map(|(name, snap)| {
+                    let s = snap.as_object()?;
+                    Some(json!({
+                        "iface": name,
+                        "powersaveOn": json_truthy_default_false(s, "powersave_on"),
+                        "reasserts": s.get("reasserts").cloned().unwrap_or(json!(0)),
+                        "lastReassert": get_or_null(s, "last_reassert"),
+                        "signalDbm": get_or_null(s, "signal_dbm"),
+                        "linkState": s
+                            .get("link_state")
+                            .cloned()
+                            .unwrap_or_else(|| json!("unknown")),
+                    }))
+                })
+                .collect();
+            // A node with no managed WiFi interface omits the block rather than
+            // shipping an empty list, so the card stays hidden.
+            if !rows.is_empty() {
+                out.push(("wifiPowersave".to_string(), json!({"interfaces": rows})));
             }
         }
     }
@@ -1484,26 +1494,25 @@ fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
 }
 
 /// The freshness window for the WiFi power-save sidecar, gated on file mtime
-/// because the writer stamps no in-body time.
-const WIFI_POWERSAVE_FRESH: std::time::Duration = std::time::Duration::from_secs(120);
+/// because the writer stamps no in-body time: the registry window for
+/// `wifi-powersave`.
+const WIFI_POWERSAVE_FRESH: Duration = Duration::from_millis(paths::WIFI_POWERSAVE_MAX_AGE_MS);
 
 /// Read a sidecar object and emit the best-effort schema-drift warning against the
 /// shared contract registry. Never rejects on a version mismatch — a stale sidecar
 /// from an older agent still reads.
 fn read_versioned_sidecar(path: &Path, contract_id: &str) -> Option<Map<String, Value>> {
     let obj = read_sidecar_object(path)?;
+    warn_on_version_drift(&obj, contract_id);
+    Some(obj)
+}
+
+/// The best-effort schema-drift warning for a parsed sidecar object.
+fn warn_on_version_drift(obj: &Map<String, Value>, contract_id: &str) {
     let got = obj.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
     if let Some(ours) = ados_protocol::contracts::sidecar_version(contract_id) {
         ados_protocol::sidecar::check_sidecar_version(contract_id, got, ours);
     }
-    Some(obj)
-}
-
-/// True when `path`'s mtime is within `max_age` of now. For a sidecar that carries
-/// no in-body timestamp. A future mtime is an unprovable age and reads stale
-/// (see [`crate::freshness`]).
-fn sidecar_mtime_fresh(path: &Path, max_age: std::time::Duration) -> bool {
-    crate::freshness::is_fresh(path, std::time::SystemTime::now(), max_age)
 }
 
 /// Read + parse a sidecar file into an object, or `None` on any gap (absent /
@@ -1537,7 +1546,7 @@ fn sidecar_fresh(obj: &Map<String, Value>, now: f64, max_age_s: f64) -> bool {
 // ---------------------------------------------------------------------------
 
 /// The CRSF/ExpressLRS RC control-lane state sidecar filename under the run dir.
-const CRSF_STATS_SIDECAR: &str = "crsf-stats.json";
+const CRSF_STATS_SIDECAR: &str = paths::CRSF_STATS_JSON;
 
 /// A CRSF sidecar not re-written within this window reads as absent, so a dead
 /// lane's lingering tmpfs file never keeps the status carrying a frozen state.
@@ -1565,14 +1574,8 @@ fn read_crsf_status() -> Option<Value> {
 /// shared best-effort version-drift warning (never rejects), then serves the
 /// object verbatim.
 fn read_crsf_status_in(path: &Path, now: std::time::SystemTime) -> Option<Value> {
-    if !crate::freshness::is_fresh(path, now, CRSF_STATS_STALE) {
-        return None;
-    }
-    let text = std::fs::read_to_string(path).ok()?;
-    let doc = serde_json::from_str::<Value>(&text).ok()?;
-    if !doc.is_object() {
-        return None;
-    }
+    let doc = read_fresh_at::<Map<String, Value>>(path, Some(CRSF_STATS_STALE), now).fresh()?;
+    let doc = Value::Object(doc);
     // Best-effort drift signal (never reject): warn on a producer/reader version
     // mismatch, then serve the sidecar anyway. The writer const lives in the
     // ados-crsf crate, so compare against the shared registry.
@@ -1718,12 +1721,6 @@ fn read_linked_peers_in(path: &Path, now: f64) -> Vec<(String, Value)> {
 // ---------------------------------------------------------------------------
 // logd query seam + shared helpers.
 // ---------------------------------------------------------------------------
-
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the root the sidecars
-/// resolve under.
-pub(crate) fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
 
 /// `bool(map.get(key, False))` — Python truthiness over the value, defaulting to
 /// `false` when the key is absent.
@@ -3300,6 +3297,7 @@ mod tests {
             "mavlink_proxy_posture": {"tcp_listening": true, "udp_listening": [true], "ws_listening": false},
             "agent_commands_unsigned_rejected_risk": true,
             "injector_arbitration": "off",
+            "agent_signing": "active",
         }));
         let Json(body) = get_full_status(State(state)).await;
         assert_eq!(body["fc_identity"]["outcome"], json!("disabled"));
@@ -3311,6 +3309,7 @@ mod tests {
         );
         assert_eq!(body["agent_commands_unsigned_rejected_risk"], json!(true));
         assert_eq!(body["injector_arbitration"], json!("off"));
+        assert_eq!(body["agent_signing"], json!("active"));
     }
 
     #[test]
@@ -3319,7 +3318,7 @@ mod tests {
             assert_eq!(v, Value::Null);
         }
         let extras = router_status_extras(Some(&json!({"injector_arbitration": "active"})));
-        assert_eq!(extras.len(), 3);
+        assert_eq!(extras.len(), 4);
         assert!(extras.contains(&("injector_arbitration".to_string(), json!("active"))));
     }
 }

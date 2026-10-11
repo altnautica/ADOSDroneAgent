@@ -713,7 +713,7 @@ fn write_listener_health(health: &ListenerHealth) {
 /// `ADOS_RUN_DIR`. Best-effort with the same swallow-and-log contract as
 /// [`write_listener_health`].
 fn write_listener_health_to(path: &std::path::Path, health: &ListenerHealth) {
-    if let Err(e) = crate::sidecars::write_json_atomic(path, health, 0o644) {
+    if let Err(e) = ados_protocol::sidecar::write_json_atomic(path, health, 0o644) {
         tracing::debug!(error = %e, "ground_presence_listener_sidecar_failed");
     }
 }
@@ -1120,7 +1120,7 @@ pub async fn hop_supervisor_persist_loop(cache: GsPresenceCache, band: String) {
     loop {
         let snap = cache.hop_snapshot(&band);
         let payload = hop_supervisor_payload(&snap);
-        if let Err(e) = crate::sidecars::write_json_atomic(path, &payload, 0o644) {
+        if let Err(e) = ados_protocol::sidecar::write_json_atomic(path, &payload, 0o644) {
             tracing::debug!(error = %e, "ground_hop_supervisor_persist_failed");
         }
         tokio::time::sleep(HOP_PERSIST_CADENCE).await;
@@ -1152,7 +1152,7 @@ pub async fn linked_peers_persist_loop(cache: GsPresenceCache) {
     loop {
         let peers = cache.linked_peers();
         let payload = linked_peers_payload(&peers);
-        if let Err(e) = crate::sidecars::write_json_atomic(&owned, &payload, 0o644) {
+        if let Err(e) = ados_protocol::sidecar::write_json_atomic(&owned, &payload, 0o644) {
             tracing::debug!(error = %e, "ground_linked_peers_persist_failed");
         }
         tokio::time::sleep(LINKED_PEERS_PERSIST_CADENCE).await;

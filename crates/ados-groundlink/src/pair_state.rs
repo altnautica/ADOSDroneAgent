@@ -126,29 +126,11 @@ fn iso_now() -> String {
     now.format(&Rfc3339).unwrap_or_default()
 }
 
-/// Atomically write `data` to `path` with a specific mode (tmp + chmod + rename).
+/// Atomically write `data` to `path` at `mode` through
+/// `ados_protocol::sidecar::write_atomic` (unique temp sibling, fsync, rename).
 /// The parent dir is created when absent.
 fn atomic_write(path: &Path, data: &[u8], mode: u32) -> Result<(), String> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let tmp = path.with_extension("tmp");
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(&tmp)
-            .map_err(|e| e.to_string())?;
-        f.write_all(data).map_err(|e| e.to_string())?;
-        f.sync_all().map_err(|e| e.to_string())?;
-    }
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))
-        .map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+    ados_protocol::sidecar::write_atomic(path, data, mode).map_err(|e| e.to_string())
 }
 
 /// Install a 64-byte rx-side key on the GS:

@@ -25,6 +25,7 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use ados_protocol::paths;
 use ados_video::config::{CameraLeg, CameraMatch, RosterVideoConfig};
 
 use crate::routes::detail;
@@ -32,12 +33,6 @@ use crate::routes::detail;
 // ---------------------------------------------------------------------------
 // Path seam.
 // ---------------------------------------------------------------------------
-
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`) — the same override the
-/// sibling sidecars resolve under and the Python HAL writes into.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
 
 /// The config file (`ADOS_CONFIG`, default `/etc/ados/config.yaml`) the declared
 /// `video.cameras[]` + the legacy `video.camera` block are loaded from.
@@ -51,13 +46,13 @@ fn config_path() -> PathBuf {
 /// (`/run/ados/cameras-discovered.json`). Mirrors the Python
 /// `cameras_discovered_path()`.
 fn discovered_path() -> PathBuf {
-    run_dir().join("cameras-discovered.json")
+    paths::run_path("cameras-discovered")
 }
 
 /// The live-streams sidecar the video orchestrator writes when it serves more
 /// than one leg (`/run/ados/video-streams.json`).
 fn live_streams_path() -> PathBuf {
-    run_dir().join("video-streams.json")
+    paths::run_path("video-streams")
 }
 
 /// The supervisor's video command socket (`/run/ados/video-cmd.sock`), the same
@@ -65,7 +60,7 @@ fn live_streams_path() -> PathBuf {
 /// forwards `video.cameras.set` here. The supervisor is the config-write +
 /// restart authority.
 fn video_cmd_sock() -> PathBuf {
-    run_dir().join("video-cmd.sock")
+    paths::run_path("video-cmd")
 }
 
 /// The orientation values a leg may declare (a coarse mount enum, not full

@@ -174,7 +174,7 @@ async fn run_ground_video() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
     let shutdown = Shutdown::new();
-    let run_dir = std::path::PathBuf::from(ados_groundlink::paths::run_dir());
+    let run_dir = ados_protocol::paths::run_dir();
     let task = tokio::spawn(ground_video::run(shutdown.clone(), run_dir));
     tokio::select! {
         _ = sigterm.recv() => tracing::info!("received SIGTERM"),

@@ -233,16 +233,10 @@ impl MeshRouteConfig {
 // Mesh-state seam: the sidecar file + the durable store's `mesh.state` event.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sentinels resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
-/// The live mesh-state sidecar (`/run/ados/mesh-state.json`), written by the
+/// The live mesh-state sidecar (`<run dir>/mesh-state.json`), written by the
 /// native mesh poll loop.
-fn mesh_state_path() -> PathBuf {
-    run_dir().join("mesh-state.json")
+fn mesh_state_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(ados_protocol::paths::MESH_STATE_JSON)
 }
 
 /// Read a JSON sidecar into an object map, returning the empty object on any failure or a falsy /
@@ -289,13 +283,17 @@ async fn current_mesh_snapshot(state: &AppState) -> Map<String, Value> {
     {
         return detail;
     }
-    fresh_mesh_sidecar(&mesh_state_path(), std::time::SystemTime::now())
+    fresh_mesh_sidecar(
+        &mesh_state_path(&state.run_dir),
+        std::time::SystemTime::now(),
+    )
 }
 
 /// The mesh-state sidecar when its mtime is inside [`mesh_fresh_window`] of
 /// `now`, else the empty object.
 fn fresh_mesh_sidecar(path: &Path, now: std::time::SystemTime) -> Map<String, Value> {
-    if !crate::freshness::is_fresh(path, now, mesh_fresh_window()) {
+    // Absent, aged out, or future-dated (an unprovable age) all read as no mesh.
+    if !ados_protocol::sidecar::file_age(path, now).is_some_and(|age| age <= mesh_fresh_window()) {
         return Map::new();
     }
     read_json_object_or_empty(path)

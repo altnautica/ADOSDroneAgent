@@ -28,9 +28,12 @@
 //! - [`contracts`] — the generated IPC contract + sidecar version registry: the
 //!   single source of truth for every wire-contract version integer (source of
 //!   truth is `contracts.toml`; do not edit the generated file).
-//! - [`sidecar`] — the best-effort helper for checking an on-disk state
-//!   sidecar's schema version against the value this build expects: warns (never
-//!   fails) on a drift so a stale sidecar from an older agent still reads.
+//! - [`paths`] — the generated runtime path registry: the run directory
+//!   (`ADOS_RUN_DIR` override), every registered sidecar and socket file name,
+//!   and each sidecar's freshness window (source of truth is `contracts.toml`).
+//! - [`sidecar`] — the on-disk state sidecar helpers: the soft schema-version
+//!   check, the atomic writers, and [`sidecar::read_fresh`], the one
+//!   freshness-gated reader.
 //! - [`pairing_posture`] — the data-plane auth primitives (pairing-state read,
 //!   constant-time key compare, on-box loopback trust, access decision) shared
 //!   by the native HTTP control surface and the direct MAVLink WebSocket proxy.
@@ -86,6 +89,7 @@ pub mod offload_link;
 pub mod pair_proof;
 pub mod pairing_posture;
 pub mod param_codec;
+pub mod paths;
 pub mod plugin;
 pub mod plugin_loopback_guard;
 pub mod plugin_mdns;
@@ -99,6 +103,7 @@ pub mod sidecar;
 pub mod state;
 pub mod tap;
 pub mod tunnel_config;
+pub mod units;
 pub mod vision_rpc;
 pub mod vision_status;
 pub mod wfb_status;

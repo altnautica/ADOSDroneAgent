@@ -38,7 +38,6 @@
 //! applies the switch.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use ados_hid::buttons::ButtonEvent;
@@ -505,7 +504,7 @@ impl PageNavigator {
 
     // ── persistence ─────────────────────────────────────────────────
 
-    /// Atomically write `{active_page_id, modal_stack, route_ids}` (tmp
+    /// Atomically write `{active_page_id, modal_stack, route_ids}` (unique temp
     /// sibling, fsync, rename) so a power cut mid-write cannot leave a
     /// half-flushed file. `route_ids` is every registered route in
     /// registration order: the remote page-request route validates against
@@ -527,44 +526,8 @@ impl PageNavigator {
         let Ok(body) = serde_json::to_vec(&blob) else {
             return;
         };
-        let _ = atomic_write(&self.state_path, &body);
+        let _ = ados_protocol::sidecar::write_atomic(&self.state_path, &body, 0o644);
     }
-}
-
-/// Atomic tmp-sibling write (tmp name disambiguated by pid), mirroring the
-/// sidecar latency writer: create the parent, write the tmp, fsync, rename.
-fn atomic_write(path: &Path, body: &[u8]) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("lcd-state.json");
-    let tmp = parent.join(format!("{}.{}.tmp", file_name, std::process::id()));
-
-    let write_result = (|| -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)?;
-        f.write_all(body)?;
-        f.flush()?;
-        f.sync_all()?;
-        Ok(())
-    })();
-
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-        return write_result;
-    }
-    if let Err(e) = std::fs::rename(&tmp, path) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

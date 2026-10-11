@@ -173,8 +173,8 @@ pub fn write_reg_blocked_sidecar(
             serde_json::Value::String(reason.to_string()),
         );
     }
-    let _ = crate::sidecars::write_json_atomic(
-        std::path::Path::new(crate::paths::WFB_STATS_JSON),
+    let _ = ados_protocol::sidecar::write_json_atomic(
+        &ados_protocol::paths::run_path("wfb-stats"),
         &v,
         0o644,
     );
@@ -243,8 +243,8 @@ pub fn write_no_injection_sidecar(
         None,  // no silence window (the chain is not running)
         0.0,   // no inbound video
     );
-    let _ = crate::sidecars::write_json_atomic(
-        std::path::Path::new(crate::paths::WFB_STATS_JSON),
+    let _ = ados_protocol::sidecar::write_json_atomic(
+        &ados_protocol::paths::run_path("wfb-stats"),
         &v,
         0o644,
     );
@@ -311,8 +311,8 @@ fn write_unexamined_sidecar(
     ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
 ) {
     let v = unexamined_stats(interface, channel, cfg, state, &configured_posture());
-    let _ = crate::sidecars::write_json_atomic(
-        std::path::Path::new(crate::paths::WFB_STATS_JSON),
+    let _ = ados_protocol::sidecar::write_json_atomic(
+        &ados_protocol::paths::run_path("wfb-stats"),
         &v,
         0o644,
     );

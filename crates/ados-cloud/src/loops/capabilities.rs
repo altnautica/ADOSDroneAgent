@@ -29,25 +29,19 @@
 //! route either. Emitting a value for them would be inventing a reading, so
 //! they stay absent until something measures them.
 
+use ados_protocol::paths::{self, run_dir};
 use serde_json::{json, Map, Value};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// Freshness windows, matching the LAN route's gates exactly so the two
-/// transports agree on when a reading has expired.
-const CAMERA_STATE_FRESH_S: f64 = 300.0;
-const CAMERA_RECOVERY_FRESH_S: f64 = 60.0;
-const MGMT_LINK_FRESH_S: f64 = 90.0;
-const MGMT_FAILOVER_FRESH_S: f64 = 90.0;
-const USB_REHOME_FRESH_S: f64 = 600.0;
-const WIFI_POWERSAVE_FRESH_S: u64 = 120;
-
-/// `/run/ados`, honouring the same `ADOS_RUN_DIR` override every sidecar
-/// reader in the tree uses.
-pub fn run_dir() -> PathBuf {
-    std::env::var_os("ADOS_RUN_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/run/ados"))
-}
+/// Freshness windows: the registry windows the LAN route's gates read too, so
+/// the two transports agree on when a reading has expired.
+const CAMERA_STATE_FRESH_S: f64 = paths::CAMERA_STATE_MAX_AGE_MS as f64 / 1000.0;
+const CAMERA_RECOVERY_FRESH_S: f64 = paths::CAMERA_USB_RECOVERY_MAX_AGE_MS as f64 / 1000.0;
+const MGMT_LINK_FRESH_S: f64 = paths::MGMT_LINK_MAX_AGE_MS as f64 / 1000.0;
+const MGMT_FAILOVER_FRESH_S: f64 = paths::MGMT_FAILOVER_MAX_AGE_MS as f64 / 1000.0;
+const USB_REHOME_FRESH_S: f64 = paths::USB_REHOME_MAX_AGE_MS as f64 / 1000.0;
+const WIFI_POWERSAVE_FRESH: std::time::Duration =
+    std::time::Duration::from_millis(paths::WIFI_POWERSAVE_MAX_AGE_MS);
 
 fn now_unix_secs() -> f64 {
     std::time::SystemTime::now()
@@ -74,13 +68,11 @@ fn fresh(obj: &Map<String, Value>, now: f64, window: f64) -> bool {
     }
 }
 
-fn mtime_fresh(path: &Path, window_s: u64) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .map(|age| age.as_secs() <= window_s)
-        .unwrap_or(false)
+/// Whether the file's mtime is within `window` of now. A future mtime (a clock
+/// that stepped backwards) is an unprovable age and reads as not fresh.
+fn mtime_fresh(path: &Path, window: std::time::Duration) -> bool {
+    ados_protocol::sidecar::file_age(path, std::time::SystemTime::now())
+        .is_some_and(|age| age <= window)
 }
 
 fn or_null(obj: &Map<String, Value>, key: &str) -> Value {
@@ -222,7 +214,7 @@ pub fn capability_extras_in(dir: &Path, now: f64) -> Map<String, Value> {
     // while the GCS clamp requires an ARRAY whose entries carry their own
     // `iface`. It also carries no in-body stamp, so freshness is the mtime.
     let ps_path = dir.join("wifi-powersave.json");
-    if mtime_fresh(&ps_path, WIFI_POWERSAVE_FRESH_S) {
+    if mtime_fresh(&ps_path, WIFI_POWERSAVE_FRESH) {
         if let Some(ps) = read_object(&ps_path) {
             if let Some(ifaces) = ps.get("interfaces").and_then(Value::as_object) {
                 let rows: Vec<Value> = ifaces

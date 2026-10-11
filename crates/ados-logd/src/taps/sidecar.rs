@@ -27,16 +27,12 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 
 use ados_protocol::logd::{EventFrame, IngestFrame, Level, TelemetryFrame};
+use ados_protocol::paths;
 
 use super::{Shutdown, SOURCE_SIDECAR};
 
 /// How often the directory is polled.
 pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-/// Default freshness budget. A sidecar not refreshed within this window is
-/// stale. The slowest documented writer cadence is ~5 s, so a 10 s budget is a
-/// 2x margin that avoids false positives from one missed refresh.
-const DEFAULT_STALENESS: Duration = Duration::from_secs(10);
 
 /// Keep-alive cadence for the string-carrying snapshot events. They normally fire
 /// only on a transition, so under a long steady state the row ages out of the
@@ -77,7 +73,8 @@ struct StringEventSpec {
 struct SidecarSpec {
     /// File name under the runtime root.
     name: &'static str,
-    /// Freshness budget before a `sidecar.stale` event fires.
+    /// Freshness budget before a `sidecar.stale` event fires: the sidecar's
+    /// registry window (`ados_protocol::paths::*_MAX_AGE_MS`).
     staleness: Duration,
     /// The `source` tag stamped on this sidecar's sampled metrics.
     source: &'static str,
@@ -89,11 +86,12 @@ struct SidecarSpec {
 }
 
 /// The watched sidecars, their freshness budgets, and the scalars sampled from
-/// each. The file names match the agent's canonical runtime sidecar paths.
+/// each. File names and windows both come from the generated path registry, so
+/// the tailer and every other reader agree on when a file stops being current.
 const SPECS: &[SidecarSpec] = &[
     SidecarSpec {
-        name: "wfb-stats.json",
-        staleness: DEFAULT_STALENESS,
+        name: paths::WFB_STATS_JSON,
+        staleness: Duration::from_millis(paths::WFB_STATS_MAX_AGE_MS),
         source: "wfb",
         scalars: &[
             ScalarMap {
@@ -117,13 +115,10 @@ const SPECS: &[SidecarSpec] = &[
     },
     // The SEI glass-to-glass latency snapshot written by the drone-side tap when
     // SEI latency is enabled. The numeric fields ride a `video.latency.*` series;
-    // `source` rides a `video.latency_source` event. The display service writes an
-    // unrelated framebuffer-stats blob to the same file on an LCD node — that blob
-    // has none of these keys, so the number lookups simply miss and nothing wrong
-    // is recorded.
+    // `source` rides a `video.latency_source` event.
     SidecarSpec {
-        name: "lcd-latency.json",
-        staleness: DEFAULT_STALENESS,
+        name: paths::LCD_LATENCY_JSON,
+        staleness: Duration::from_millis(paths::LCD_LATENCY_MAX_AGE_MS),
         source: "video",
         scalars: &[
             ScalarMap {
@@ -146,8 +141,8 @@ const SPECS: &[SidecarSpec] = &[
         }),
     },
     SidecarSpec {
-        name: "camera-state.json",
-        staleness: DEFAULT_STALENESS,
+        name: paths::CAMERA_STATE_JSON,
+        staleness: Duration::from_millis(paths::CAMERA_STATE_MAX_AGE_MS),
         source: "camera",
         scalars: &[
             ScalarMap {
@@ -166,22 +161,22 @@ const SPECS: &[SidecarSpec] = &[
         string_event: None,
     },
     SidecarSpec {
-        name: "hop-supervisor.json",
-        staleness: DEFAULT_STALENESS,
+        name: paths::HOP_SUPERVISOR_JSON,
+        staleness: Duration::from_millis(paths::HOP_SUPERVISOR_MAX_AGE_MS),
         source: "hop",
         scalars: &[],
         string_event: None,
     },
     SidecarSpec {
-        name: "peer-presence.json",
-        staleness: DEFAULT_STALENESS,
+        name: paths::PEER_PRESENCE_JSON,
+        staleness: Duration::from_millis(paths::PEER_PRESENCE_MAX_AGE_MS),
         source: "peer",
         scalars: &[],
         string_event: None,
     },
     SidecarSpec {
-        name: "mesh-state.json",
-        staleness: DEFAULT_STALENESS,
+        name: paths::MESH_STATE_JSON,
+        staleness: Duration::from_millis(paths::MESH_STATE_MAX_AGE_MS),
         source: "mesh",
         scalars: &[],
         string_event: None,
@@ -762,23 +757,14 @@ mod tests {
     }
 
     #[test]
-    fn lcd_latency_display_writer_blob_records_nothing_wrong() {
-        // The display service writes an unrelated framebuffer-stats blob to the
-        // same path on an LCD node. None of the SEI keys are present, so the
-        // number lookups miss and the source event does not fire.
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
-        write_with_age(
-            root,
-            "lcd-latency.json",
-            r#"{"writes": 100, "drops": 0, "skipped_duplicates": 3, "last_write_ms": 12.0}"#,
-            Duration::ZERO,
-        );
-        let mut state = TailerState::default();
-        let frames = poll_once(root, &mut state, now_us_systemtime());
-        assert!(metric(&frames, "video.latency.glass_ms").is_none());
-        assert!(metric(&frames, "video.latency.samples").is_none());
-        assert!(events(&frames, "video.latency_source").is_empty());
+    fn every_spec_window_is_its_registry_window() {
+        for spec in SPECS {
+            let row = paths::SIDECARS
+                .iter()
+                .find(|s| s.path.rsplit('/').next() == Some(spec.name))
+                .unwrap_or_else(|| panic!("{} has no registry row", spec.name));
+            assert_eq!(row.max_age(), Some(spec.staleness), "{}", spec.name);
+        }
     }
 
     #[test]

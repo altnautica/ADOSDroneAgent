@@ -8,10 +8,8 @@
 // Runtime directory: /run/ados/ (tmpfs, ephemeral live state)
 // ---------------------------------------------------------------------------
 
-/// Live wfb-ng radio stats snapshot (rssi, snr, packets, fec, bitrate). On the
-/// ground-station profile this is written ~once per second by the receive-side
-/// wfb manager and read by the API layer and the on-box link-stats UI.
-pub const WFB_STATS_JSON: &str = "/run/ados/wfb-stats.json";
+// The live wfb-ng radio stats snapshot is the registry's `wfb-stats` sidecar:
+// resolve it with `ados_protocol::paths::run_path("wfb-stats")`.
 
 /// Channel-hop supervisor snapshot (band, thresholds, last-hop time, the hop
 /// history ring). On a drone rig the transmit-side supervisor writes it; on a
@@ -106,15 +104,14 @@ pub const MESH_RECEIVER_JSON: &str = "/etc/ados/mesh/receiver.json";
 /// Revoked-invite list: membership tokens the node refuses to honour.
 pub const MESH_REVOCATIONS_JSON: &str = "/etc/ados/mesh/revocations.json";
 
-/// Return the run directory, honouring the `ADOS_RUN_DIR` env override so tests
-/// (and a non-root dev host) can redirect the tmpfs layout.
-pub fn run_dir() -> String {
-    std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
-}
-
-/// Return the path to a run-dir file, honouring the env override.
+/// Return the path to a run-dir file, honouring the `ADOS_RUN_DIR` override
+/// (`ados_protocol::paths::run_dir`) so tests (and a non-root dev host) can
+/// redirect the tmpfs layout.
 pub fn run_path(name: &str) -> String {
-    format!("{}/{}", run_dir(), name)
+    ados_protocol::paths::run_dir()
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -130,7 +127,10 @@ mod tests {
 
     #[test]
     fn contract_constants_match_python_layout() {
-        assert_eq!(WFB_STATS_JSON, "/run/ados/wfb-stats.json");
+        assert_eq!(
+            ados_protocol::paths::sidecar("wfb-stats").map(|s| s.path),
+            Some("/run/ados/wfb-stats.json")
+        );
         assert_eq!(HOP_SUPERVISOR_JSON, "/run/ados/hop-supervisor.json");
         assert_eq!(LINKED_PEERS_JSON, "/run/ados/linked-peers.json");
         assert_eq!(MESH_STATE_JSON, "/run/ados/mesh-state.json");

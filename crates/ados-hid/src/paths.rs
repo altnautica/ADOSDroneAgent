@@ -12,15 +12,14 @@
 //!   hotplug tracker (the live primary), so a write that must take effect on the
 //!   running state forwards here rather than only touching the on-disk sidecar.
 //!
-//! Paths honour the `ADOS_RUN_DIR` override (a tmpfs runtime dir, wiped on
-//! reboot) so a test can redirect them; the on-disk input selection sidecar stays
-//! in [`crate::sidecar::GS_INPUT_JSON`] under `/etc/ados`.
+//! Paths honour the `ADOS_RUN_DIR` override through
+//! `ados_protocol::paths::run_dir` (a tmpfs runtime dir, wiped on reboot) so a
+//! test can redirect them; the on-disk input selection sidecar stays in
+//! [`crate::sidecar::GS_INPUT_JSON`] under `/etc/ados`.
 
 use std::path::PathBuf;
 
-/// Runtime directory default (`ADOS_RUN_DIR`). tmpfs; wiped on reboot. The PIC
-/// state sidecar + the HID command socket live under it.
-pub const ADOS_RUN_DIR: &str = "/run/ados";
+use ados_protocol::paths::run_dir;
 
 /// The PIC arbiter state sidecar basename. The `ados-pic` daemon writes the
 /// current arbiter snapshot here on every transition + watchdog tick so a reader
@@ -35,13 +34,6 @@ pub const PIC_STATE_JSON: &str = "/run/ados/pic-state.json";
 
 /// The default HID command socket path (`/run/ados/hid-cmd.sock`).
 pub const HID_CMD_SOCK: &str = "/run/ados/hid-cmd.sock";
-
-/// The runtime dir, honouring the `ADOS_RUN_DIR` override (default
-/// [`ADOS_RUN_DIR`]). The daemons + a test resolve the runtime artifacts under
-/// it.
-pub fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| ADOS_RUN_DIR.to_string()))
-}
 
 /// The PIC state sidecar path under the resolved runtime dir.
 pub fn pic_state_json() -> PathBuf {

@@ -432,16 +432,9 @@ async fn forward_hid_cmd_to(
         .map(|_| ())
 }
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`).
-fn run_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()),
-    )
-}
-
 /// The `ados-input` command socket (`/run/ados/hid-cmd.sock`).
 fn hid_cmd_sock() -> std::path::PathBuf {
-    run_dir().join("hid-cmd.sock")
+    ados_protocol::paths::run_path("hid-cmd")
 }
 
 /// The `ground-station-input.json` sidecar path. Honours `ADOS_GS_INPUT` (a test

@@ -33,7 +33,7 @@
 //! between two reads, so the conformance diff masks them; the stable contract is
 //! the nested shape — every section + its keys present.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use axum::extract::State;
 use axum::Json;
@@ -461,9 +461,9 @@ pub async fn get_video_diagnostics(State(state): State<AppState>) -> Json<Value>
 
     // Two reads a window apart: each hop is judged by data actually moving between
     // them, not by a process being alive (the pipeline runbook).
-    let s0 = VideoSample::take().await;
+    let s0 = VideoSample::take(&state.run_dir).await;
     tokio::time::sleep(std::time::Duration::from_millis(VIDEO_SAMPLE_WINDOW_MS)).await;
-    let s1 = VideoSample::take().await;
+    let s1 = VideoSample::take(&state.run_dir).await;
 
     Json(build_video_diagnostics(&profile, &role, &s0, &s1))
 }
@@ -515,15 +515,15 @@ struct VideoSample {
 
 impl VideoSample {
     /// Sample every trusted source once: the live mediamtx `main` counters (over
-    /// HTTP) and the wfb-stats sidecar (under `ADOS_RUN_DIR`). Delegates the sidecar
-    /// read to [`VideoSample::from_run_dir`] so the assembly is drivable from an
-    /// explicit run dir in a test.
-    async fn take() -> Self {
+    /// HTTP) and the wfb-stats sidecar under the node's run dir. Delegates the
+    /// sidecar read to [`VideoSample::from_run_dir`] so the assembly is drivable
+    /// from an explicit run dir in a test.
+    async fn take(run_dir: &Path) -> Self {
         let (mtx_bytes_received, mtx_serving) = tokio::join!(
             crate::routes::status_full::mediamtx_main_bytes_received(),
             crate::routes::status_full::mediamtx_whep_serving(),
         );
-        Self::from_run_dir(&run_dir(), mtx_bytes_received, mtx_serving)
+        Self::from_run_dir(run_dir, mtx_bytes_received, mtx_serving)
     }
 
     /// Build a sample from an explicit run dir (the wfb-stats sidecar source) plus
@@ -537,7 +537,7 @@ impl VideoSample {
         Self {
             mtx_bytes_received,
             mtx_serving,
-            wfb: read_run_sidecar_at(run_dir, "wfb-stats.json"),
+            wfb: read_run_sidecar_at(run_dir, ados_protocol::paths::WFB_STATS_JSON),
         }
     }
 
@@ -560,12 +560,6 @@ impl VideoSample {
             .and_then(Value::as_str)
             .map(str::to_string)
     }
-}
-
-/// The `/run/ados` directory, honouring the `ADOS_RUN_DIR` override (the same
-/// resolution the sibling routes use).
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
 }
 
 /// Read a `<run_dir>/<name>` JSON sidecar object from an explicit dir. `None` when

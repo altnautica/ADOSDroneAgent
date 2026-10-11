@@ -95,24 +95,18 @@ fn valid_channels_repr() -> String {
 // Runtime-dir seam: the radio operator command sockets.
 // ---------------------------------------------------------------------------
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
 /// The native radio's coordinated-hop command socket (`/run/ados/radio-cmd.sock`),
 /// the same socket `ados radio hop` drives. The channel route forwards a
 /// `{"op":"hop","channel":N}` request here.
 fn radio_cmd_sock() -> PathBuf {
-    run_dir().join("radio-cmd.sock")
+    ados_protocol::paths::run_path("radio-cmd")
 }
 
 /// The native radio's data-plane command socket (`/run/ados/wfb-cmd.sock`). The
 /// tx-power route forwards a `{"op":"set_tx_power","tx_power_dbm":N}` request
 /// here, and the video-config write its FEC / MCS / preset / link-tier ops.
 pub(crate) fn wfb_cmd_sock() -> PathBuf {
-    run_dir().join("wfb-cmd.sock")
+    ados_protocol::paths::run_path("wfb-cmd")
 }
 
 /// How long a radio command-socket round trip may take. Both sockets reply

@@ -75,24 +75,13 @@ const DISABLED_RECHECK: Duration = Duration::from_secs(60);
 /// How often the counters are logged, and only when they have moved.
 const REPORT_INTERVAL: Duration = Duration::from_secs(300);
 
-/// The video-streams sidecar, and its staleness window (4x the ~5 s re-stamp).
+/// The video-streams sidecar, and its staleness window (the registry window,
+/// 4x the ~5 s re-stamp).
 const VIDEO_STREAMS_SIDECAR: &str = "/run/ados/video-streams.json";
-const VIDEO_STREAMS_STALE_S: f64 = 20.0;
+const VIDEO_STREAMS_STALE_S: f64 = ados_protocol::paths::VIDEO_STREAMS_MAX_AGE_MS as f64 / 1000.0;
 
 /// The board sidecar, for the board descriptors.
 const BOARD_SIDECAR: &str = "/run/ados/board.json";
-
-/// The radio's auxiliary command socket, under the run dir.
-///
-/// Named by the wire string rather than by depending on the radio crate: this
-/// producer needs one path, not the radio stack, and the MAVLink tee resolves
-/// the same socket the same way.
-const AUX_CMD_SOCK_FILE: &str = "radio-aux.sock";
-
-/// The run directory, honouring the `ADOS_RUN_DIR` override tests use.
-fn run_dir() -> String {
-    std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
-}
 
 /// Cumulative counters for the producer, so a lane that is publishing nothing
 /// can be told apart from one that is publishing into a refusal.
@@ -333,7 +322,7 @@ pub async fn run(config: Arc<CloudConfig>, mut shutdown: watch::Receiver<bool>) 
 
     let status_interval = wfb.status_interval();
     let identity_interval = wfb.identity_interval();
-    let egress = AuxEgress::new(format!("{}/{AUX_CMD_SOCK_FILE}", run_dir()));
+    let egress = AuxEgress::new(ados_protocol::paths::run_path("radio-aux"));
     let version = env!("CARGO_PKG_VERSION").to_string();
     // The installed plugin inventory rides the identity frame so a paired node
     // running a different build can detect a contract-version disagreement

@@ -93,7 +93,7 @@ impl RelayState {
     /// Atomically write the state to an explicit sidecar path. The path seam that
     /// lets a test write into its own temp dir without touching `ADOS_RUN_DIR`.
     pub fn write_to(&self, path: &Path) -> std::io::Result<()> {
-        crate::sidecars::write_json_atomic(path, self, 0o644)
+        ados_protocol::sidecar::write_json_atomic(path, self, 0o644)
     }
 
     /// Write the state file AND ship the same body to the logging store as a
@@ -117,7 +117,7 @@ impl RelayState {
         path: &Path,
         ingest: Option<&ados_protocol::logd::emitter::IngestEmitter>,
     ) -> std::io::Result<()> {
-        let res = crate::sidecars::write_json_atomic(path, self, 0o644);
+        let res = ados_protocol::sidecar::write_json_atomic(path, self, 0o644);
         if let Some(em) = ingest {
             let v = serde_json::to_value(self).unwrap_or(serde_json::Value::Null);
             em.emit_event(

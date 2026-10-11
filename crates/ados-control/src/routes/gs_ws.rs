@@ -335,14 +335,6 @@ fn is_ground_station(state: &AppState) -> bool {
     profile == "ground-station"
 }
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets resolve under.
-fn run_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(
-        std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()),
-    )
-}
-
 // ---------------------------------------------------------------------------
 // /ws/uplink
 // ---------------------------------------------------------------------------
@@ -371,7 +363,7 @@ async fn uplink_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
         return;
     }
 
-    let mut source = UplinkSource::new(run_dir().join("uplink-active"));
+    let mut source = UplinkSource::new(state.run_dir.join("uplink-active"));
     let mut last_sent: Option<Value> = None;
     let mut poll = tokio::time::interval(UPLINK_POLL_INTERVAL);
     poll.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -531,7 +523,7 @@ async fn relay_subscription(
         return;
     }
 
-    let stream = match tokio::net::UnixStream::connect(run_dir().join(sock_name)).await {
+    let stream = match tokio::net::UnixStream::connect(state.run_dir.join(sock_name)).await {
         Ok(s) => s,
         Err(exc) => {
             // Report the unavailable bus, then close.
@@ -651,8 +643,8 @@ async fn mesh_loop(mut socket: WebSocket, state: AppState, _auth: WsAuth) {
         return;
     }
 
-    let mut mesh_tail = JournalTail::new(run_dir().join("mesh-events.jsonl"));
-    let mut pair_tail = JournalTail::new(run_dir().join("pair-events.jsonl"));
+    let mut mesh_tail = JournalTail::new(state.run_dir.join("mesh-events.jsonl"));
+    let mut pair_tail = JournalTail::new(state.run_dir.join("pair-events.jsonl"));
     let mut keepalive = keepalive_ticker();
     let mut last_heard = Instant::now();
 

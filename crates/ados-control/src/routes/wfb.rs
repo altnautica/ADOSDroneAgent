@@ -36,6 +36,8 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use ados_protocol::paths;
+use ados_protocol::sidecar::read_fresh_at;
 use ados_protocol::wfb_status::{
     build_status_from_stats_file_at, derive_wfb_status, now_unix_micros, WfbStatusConfig,
     WFB_STALE_AGE_US,
@@ -60,22 +62,16 @@ fn status_config_path() -> PathBuf {
     )
 }
 
-/// The runtime dir (`ADOS_RUN_DIR`, default `/run/ados`), the same override the
-/// sibling sockets + sentinels resolve under.
-fn run_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string()))
-}
-
-/// The live wfb stats sidecar (`/run/ados/wfb-stats.json`), written ~once per
+/// The live wfb stats sidecar (`<run dir>/wfb-stats.json`), written ~once per
 /// second by whichever manager owns the radio.
-fn wfb_stats_path() -> PathBuf {
-    run_dir().join("wfb-stats.json")
+fn wfb_stats_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(paths::WFB_STATS_JSON)
 }
 
-/// The local-bind to cloud-relay failover sidecar (`/run/ados/wfb_failover.json`),
+/// The local-bind to cloud-relay failover sidecar (`<run dir>/wfb_failover.json`),
 /// written by the always-on auto-pair supervisor.
-fn wfb_failover_path() -> PathBuf {
-    run_dir().join("wfb_failover.json")
+fn wfb_failover_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(paths::WFB_FAILOVER_JSON)
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +92,7 @@ pub async fn get_wfb_status(State(state): State<AppState>) -> Json<Value> {
     Json(choose_wfb_status(
         store,
         &cfg,
-        &wfb_stats_path(),
+        &wfb_stats_path(&state.run_dir),
         now_unix_micros(),
     ))
 }
@@ -296,9 +292,10 @@ fn pair_snapshot(mut status: Map<String, Value>, slots: Vec<Value>) -> Value {
 /// produced.
 const FAILOVER_STATES: [&str; 3] = ["local", "cloud_relay", "failed"];
 
-/// How fresh a failover reading must be to be reported as the current state: 10
-/// seconds, the same window the ground-station snapshot routes apply.
-const FAILOVER_FRESH_S: f64 = 10.0;
+/// How fresh a failover reading must be to be reported as the current state: the
+/// registry window for `wfb_failover`, the same window the ground-station
+/// snapshot routes apply.
+const FAILOVER_FRESH_S: f64 = paths::WFB_FAILOVER_MAX_AGE_MS as f64 / 1000.0;
 
 /// `GET /api/wfb/pair/failover-status` →
 /// `{"failover_state": <state>|null, "stale": <bool>}`.
@@ -321,7 +318,7 @@ pub async fn get_failover_status(State(state): State<AppState>) -> Json<Value> {
         return Json(failover_body(Some(&s)));
     }
 
-    let path = wfb_failover_path();
+    let path = wfb_failover_path(&state.run_dir);
     let Some(map) = fresh_failover_sidecar(&path, SystemTime::now()) else {
         return Json(failover_body(None));
     };
@@ -357,17 +354,10 @@ fn failover_body(state: Option<&str>) -> Value {
 /// is the age of the reading. A file left behind by a dead producer used to be
 /// served verbatim forever.
 fn fresh_failover_sidecar(path: &Path, now: SystemTime) -> Option<Map<String, Value>> {
-    let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok()?;
     // A future mtime makes the age unprovable (a backward clock step on an
-    // RTC-less SBC), which must not read as fresh.
-    let age_s = now.duration_since(modified).ok()?.as_secs_f64();
-    if age_s > FAILOVER_FRESH_S {
-        return None;
-    }
-    match serde_json::from_str::<Value>(&std::fs::read_to_string(path).ok()?) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
+    // RTC-less SBC), which reads as stale, never as fresh.
+    let window = std::time::Duration::from_millis(paths::WFB_FAILOVER_MAX_AGE_MS);
+    read_fresh_at::<Map<String, Value>>(path, Some(window), now).fresh()
 }
 
 /// The store's most-recent failover state, validated to the accepted set, or
