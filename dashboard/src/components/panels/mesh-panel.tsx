@@ -1,4 +1,5 @@
 import { Network } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import {
   Card,
@@ -34,6 +35,7 @@ interface MeshState {
 }
 
 export function MeshPanel() {
+  const { t } = useTranslation();
   const identity = useNodeIdentity();
   const mesh = useResource<MeshState>("gs-mesh", "/api/v1/ground-station/mesh", 2_000);
 
@@ -50,7 +52,7 @@ export function MeshPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Network className="h-3.5 w-3.5" />
-          Mesh
+          {t("panels.mesh.title")}
           <span className="ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-border text-muted-foreground">
             {role}
           </span>
@@ -58,33 +60,33 @@ export function MeshPanel() {
       </CardHeader>
       <CardContent className="space-y-2">
         {notInMesh ? (
-          <p className="text-xs text-muted-foreground">This node is not in a mesh.</p>
+          <p className="text-xs text-muted-foreground">{t("panels.mesh.notInMesh")}</p>
         ) : mesh.isError ? (
-          <p className="text-xs text-destructive">Could not read the mesh state.</p>
+          <p className="text-xs text-destructive">{t("panels.mesh.readError")}</p>
         ) : !current ? (
           <p className="text-xs text-muted-foreground">
-            {mesh.isLoading ? "loading…" : "No current mesh snapshot. The mesh service is not reporting."}
+            {mesh.isLoading ? t("panels.mesh.loading") : t("panels.mesh.noSnapshot")}
           </p>
         ) : (
           <>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-              <div className="text-xs text-muted-foreground">carrier</div>
+              <div className="text-xs text-muted-foreground">{t("panels.mesh.carrier")}</div>
               <div className={`font-mono text-xs ${m.up ? "text-ok" : "text-destructive"}`}>
-                {m.up ? "up" : "down"}
+                {m.up ? t("panels.mesh.up") : t("panels.mesh.down")}
               </div>
 
-              <div className="text-xs text-muted-foreground">partition</div>
+              <div className="text-xs text-muted-foreground">{t("panels.mesh.partition")}</div>
               <div className={`font-mono text-xs ${m.partition ? "text-warn" : "text-ok"}`}>
-                {m.partition ? "partitioned" : "joined"}
+                {m.partition ? t("panels.mesh.partitioned") : t("panels.mesh.joined")}
               </div>
 
-              <div className="text-xs text-muted-foreground">gateway</div>
-              <div className="font-mono text-xs">{m.selected_gateway ?? "none elected"}</div>
+              <div className="text-xs text-muted-foreground">{t("panels.mesh.gateway")}</div>
+              <div className="font-mono text-xs">{m.selected_gateway ?? t("panels.mesh.noneElected")}</div>
 
-              <div className="text-xs text-muted-foreground">mesh id</div>
+              <div className="text-xs text-muted-foreground">{t("panels.mesh.meshId")}</div>
               <div className="font-mono text-xs">{m.mesh_id || "—"}</div>
 
-              <div className="text-xs text-muted-foreground">peers</div>
+              <div className="text-xs text-muted-foreground">{t("panels.mesh.peers")}</div>
               <div className="font-mono">{neighbors.length}</div>
             </div>
 
@@ -99,7 +101,7 @@ export function MeshPanel() {
               </ul>
             ) : (
               <p className="pt-2 border-t border-border/50 text-xs text-muted-foreground">
-                No batman-adv neighbours discovered yet.
+                {t("panels.mesh.noNeighbours")}
               </p>
             )}
           </>

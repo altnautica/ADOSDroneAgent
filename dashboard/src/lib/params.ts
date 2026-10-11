@@ -2,6 +2,8 @@
 // component can stay focused on layout and the helpers can be tested
 // without React.
 
+import i18n from "@/i18n";
+
 export function categoryFromName(name: string): string {
   // ArduPilot/iNav/Betaflight all use prefix-underscore namespacing
   // (BATT_LOW_VOLT, GPS_TYPE, ARMING_REQUIRE, MOT_PWM_TYPE, etc.).
@@ -63,8 +65,8 @@ export function filterRows(rows: ParamRow[], filter: FilterState): ParamRow[] {
 export function paramWriteBlock(armed: boolean | null | undefined): string | null {
   if (armed === false) return null;
   return armed
-    ? "Vehicle is armed — parameter writes are blocked. Disarm to save changes."
-    : "Armed state not reported yet — parameter writes are blocked until the flight controller reports it disarmed.";
+    ? i18n.t("telemetry.params.writeBlockedArmed")
+    : i18n.t("telemetry.params.writeBlockedUnknown");
 }
 
 export function formatParamValue(v: number): string {

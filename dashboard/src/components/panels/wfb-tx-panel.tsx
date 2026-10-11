@@ -1,4 +1,6 @@
+import type { TFunction } from "i18next";
 import { Antenna } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -11,6 +13,7 @@ import { useWfb } from "@/hooks/use-wfb";
 import { fmtBitrate, fmtNum } from "@/shared/format";
 
 export function WfbTxPanel() {
+  const { t } = useTranslation();
   const wfb = useWfb();
   const w = wfb.data;
 
@@ -30,14 +33,14 @@ export function WfbTxPanel() {
   const adapterMissing =
     state === "disabled" || (state === "error" && !iface);
 
-  const badge = stateBadge(state);
+  const badge = stateBadge(state, t);
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Antenna className="h-3.5 w-3.5" />
-          WFB Transmit
+          {t("wfb.tx.title")}
           {badge && (
             <Badge variant={badge.variant} className="font-normal ml-auto">
               {badge.label}
@@ -48,16 +51,14 @@ export function WfbTxPanel() {
       <CardContent>
         {adapterMissing ? (
           <p className="text-xs text-muted-foreground">
-            WFB-tx is not running. Plug in an RTL8812EU adapter; the agent
-            starts the transmit pipeline once it detects one. Channel and TX
-            power come from <code>video.wfb</code> in /etc/ados/config.yaml.
+            <Trans i18nKey="wfb.tx.notRunning" components={{ code: <code /> }} />
           </p>
         ) : (
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-            <div className="text-xs text-muted-foreground">interface</div>
+            <div className="text-xs text-muted-foreground">{t("wfb.fields.interface")}</div>
             <div className="font-mono">{iface || "—"}</div>
 
-            <div className="text-xs text-muted-foreground">channel</div>
+            <div className="text-xs text-muted-foreground">{t("wfb.fields.channel")}</div>
             <div className="font-mono">
               {channel != null
                 ? `${channel}${freq ? ` (${fmtNum(freq, 0)} MHz)` : ""}`
@@ -66,12 +67,12 @@ export function WfbTxPanel() {
 
             {bw != null && bw > 0 && (
               <>
-                <div className="text-xs text-muted-foreground">bandwidth</div>
-                <div className="font-mono">{fmtNum(bw, 0)} MHz</div>
+                <div className="text-xs text-muted-foreground">{t("wfb.fields.bandwidth")}</div>
+                <div className="font-mono">{`${fmtNum(bw, 0)} MHz`}</div>
               </>
             )}
 
-            <div className="text-xs text-muted-foreground">tx power</div>
+            <div className="text-xs text-muted-foreground">{t("wfb.fields.txPower")}</div>
             <div className="font-mono">
               {txPower != null
                 ? `${fmtNum(txPower, 0)} dBm${
@@ -82,31 +83,31 @@ export function WfbTxPanel() {
 
             {mcs != null && (
               <>
-                <div className="text-xs text-muted-foreground">MCS</div>
+                <div className="text-xs text-muted-foreground">{t("wfb.fields.mcs")}</div>
                 <div className="font-mono">{mcs}</div>
               </>
             )}
 
             {regDomain && (
               <>
-                <div className="text-xs text-muted-foreground">domain</div>
+                <div className="text-xs text-muted-foreground">{t("wfb.fields.domain")}</div>
                 <div className="font-mono">{regDomain}</div>
               </>
             )}
 
-            <div className="text-xs text-muted-foreground">bitrate</div>
+            <div className="text-xs text-muted-foreground">{t("wfb.fields.bitrate")}</div>
             <div className="font-mono">{fmtBitrate(bitrate)}</div>
 
             {packetsSent > 0 && (
               <>
-                <div className="text-xs text-muted-foreground">packets</div>
+                <div className="text-xs text-muted-foreground">{t("wfb.fields.packets")}</div>
                 <div className="font-mono">{packetsSent.toLocaleString()}</div>
               </>
             )}
 
             {restarts > 0 && (
               <>
-                <div className="text-xs text-muted-foreground">restarts</div>
+                <div className="text-xs text-muted-foreground">{t("wfb.fields.restarts")}</div>
                 <div className="font-mono">{restarts}</div>
               </>
             )}
@@ -119,17 +120,18 @@ export function WfbTxPanel() {
 
 function stateBadge(
   state: string,
+  t: TFunction,
 ): { label: string; variant: "ok" | "warn" | "info" | "default" } | null {
   switch (state) {
     case "active":
     case "ready":
       return { label: state, variant: "ok" };
     case "connecting":
-      return { label: "connecting", variant: "info" };
+      return { label: t("wfb.state.connecting"), variant: "info" };
     case "error":
-      return { label: "error", variant: "warn" };
+      return { label: t("wfb.state.error"), variant: "warn" };
     case "disabled":
-      return { label: "disabled", variant: "default" };
+      return { label: t("wfb.state.disabled"), variant: "default" };
     default:
       return state ? { label: state, variant: "default" } : null;
   }

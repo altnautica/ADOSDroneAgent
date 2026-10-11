@@ -1,4 +1,5 @@
 import { Plane } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 
 import {
   Card,
@@ -29,6 +30,7 @@ function Row({
 }
 
 export function FcPanel() {
+  const { t } = useTranslation();
   const snap = useSnapshot();
   const hb = useHeartbeat();
   const fc = snap.data?.fc;
@@ -39,11 +41,11 @@ export function FcPanel() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Plane className="h-3.5 w-3.5" />
-            Flight Controller
+            {t("panels.fc.title")}
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="text-xs text-muted-foreground">connecting…</p>
+          <p className="text-xs text-muted-foreground">{t("panels.fc.connecting")}</p>
         </CardContent>
       </Card>
     );
@@ -60,14 +62,14 @@ export function FcPanel() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Plane className="h-3.5 w-3.5" />
-            Flight Controller
+            {t("panels.fc.title")}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-0">
-          <Row label="firmware" value={mspVariantLabel(variant)} mono={false} />
-          <Row label="telemetry" value="via MSP" mono={false} />
+          <Row label={t("panels.fc.firmware")} value={mspVariantLabel(variant)} mono={false} />
+          <Row label={t("panels.fc.telemetry")} value={t("panels.fc.viaMsp")} mono={false} />
           {fc?.fc_port ? (
-            <Row label="port" value={`${fc.fc_port} @ ${fc.fc_baud ?? "—"}`} />
+            <Row label={t("panels.fc.port")} value={`${fc.fc_port} @ ${fc.fc_baud ?? "—"}`} />
           ) : null}
         </CardContent>
       </Card>
@@ -80,16 +82,18 @@ export function FcPanel() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Plane className="h-3.5 w-3.5" />
-            Flight Controller
+            {t("panels.fc.title")}
           </CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
-            no FC connected
+            {t("panels.fc.noFcConnected")}
             {fc?.fc_port ? (
-              <>
-                {" "}— <span className="font-mono">{fc.fc_port}</span> not bound
-              </>
+              <Trans
+                i18nKey="panels.fc.notBound"
+                values={{ port: fc.fc_port }}
+                components={{ mono: <span className="font-mono" /> }}
+              />
             ) : null}
           </p>
         </CardContent>
@@ -104,51 +108,51 @@ export function FcPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Plane className="h-3.5 w-3.5" />
-          Flight Controller
+          {t("panels.fc.title")}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-0">
         {!heartbeatLanded && (
           <p className="text-xs text-warn pb-2">
-            connected but waiting for telemetry…
+            {t("panels.fc.waitingTelemetry")}
           </p>
         )}
-        <Row label="vehicle" value={fc.vehicle || "—"} />
-        <Row label="firmware" value={fc.firmware || "—"} />
+        <Row label={t("panels.fc.vehicle")} value={fc.vehicle || "—"} />
+        <Row label={t("panels.fc.firmware")} value={fc.firmware || "—"} />
         <Row
-          label="mode"
+          label={t("panels.fc.mode")}
           value={
             <span className="uppercase">
               {fc.mode || "—"}
               {fc.armed === true ? (
-                <span className="ml-2 text-warn">ARMED</span>
+                <span className="ml-2 text-warn">{t("panels.fc.armed")}</span>
               ) : fc.armed === false ? (
-                <span className="ml-2 text-muted-foreground">disarmed</span>
+                <span className="ml-2 text-muted-foreground">{t("panels.fc.disarmed")}</span>
               ) : (
-                <span className="ml-2 text-muted-foreground">arm state —</span>
+                <span className="ml-2 text-muted-foreground">{t("panels.fc.armStateUnknown")}</span>
               )}
             </span>
           }
           mono={false}
         />
         <Row
-          label="gps"
+          label={t("panels.fc.gps")}
           value={
             fc.gps.satellites_visible != null
-              ? `${fc.gps.satellites_visible} sats · hdop ${fmtNum(fc.gps.hdop, 1)}`
+              ? t("panels.fc.gpsValue", { sats: fc.gps.satellites_visible, hdop: fmtNum(fc.gps.hdop, 1) })
               : "—"
           }
         />
         <Row
-          label="battery"
+          label={t("panels.fc.battery")}
           value={
             fc.battery.voltage != null
               ? `${fmtVoltage(fc.battery.voltage)} · ${fmtPct(fc.battery.remaining)}`
               : "—"
           }
         />
-        <Row label="rc" value={fmtPct(fc.rc)} />
-        <Row label="port" value={fc.fc_port ? `${fc.fc_port} @ ${fc.fc_baud ?? "—"}` : "—"} />
+        <Row label={t("panels.fc.rc")} value={fmtPct(fc.rc)} />
+        <Row label={t("panels.fc.port")} value={fc.fc_port ? `${fc.fc_port} @ ${fc.fc_baud ?? "—"}` : "—"} />
       </CardContent>
     </Card>
   );

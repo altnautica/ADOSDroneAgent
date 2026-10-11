@@ -1,3 +1,6 @@
+import { useMemo } from "react";
+import { Trans, useTranslation } from "react-i18next";
+
 import {
   ConfigEnumField,
   ConfigNumberField,
@@ -14,40 +17,53 @@ import { useConfig } from "@/hooks/use-config";
 const FORMATION_OPTIONS = [
   {
     value: "line" as const,
-    label: "Line",
-    description: "Abreast, perpendicular to the heading.",
+    labelKey: "settingsMore.swarm.formationLine",
+    descriptionKey: "settingsMore.swarm.formationLineDesc",
   },
   {
     value: "column" as const,
-    label: "Column",
-    description: "Nose to tail along the heading.",
+    labelKey: "settingsMore.swarm.formationColumn",
+    descriptionKey: "settingsMore.swarm.formationColumnDesc",
   },
   {
     value: "wedge" as const,
-    label: "Wedge",
-    description: "V, anchored on the lead slot.",
+    labelKey: "settingsMore.swarm.formationWedge",
+    descriptionKey: "settingsMore.swarm.formationWedgeDesc",
   },
   {
     value: "grid" as const,
-    label: "Grid",
-    description: "Rows and columns around the anchor.",
+    labelKey: "settingsMore.swarm.formationGrid",
+    descriptionKey: "settingsMore.swarm.formationGridDesc",
   },
   {
     value: "circle" as const,
-    label: "Circle",
-    description: "Evenly spaced on a ring around the anchor.",
+    labelKey: "settingsMore.swarm.formationCircle",
+    descriptionKey: "settingsMore.swarm.formationCircleDesc",
   },
-];
+] as const;
+
+/** Role placeholder is the config value itself, not copy. */
+const ROLE_PLACEHOLDER = "auto";
 
 function SwarmSection() {
+  const { t } = useTranslation();
   const config = useConfig();
+  const formationOptions = useMemo(
+    () =>
+      FORMATION_OPTIONS.map((o) => ({
+        value: o.value,
+        label: t(o.labelKey),
+        description: t(o.descriptionKey),
+      })),
+    [t],
+  );
   const swarm = config.data?.swarm;
 
   if (!swarm) {
     return (
       <Card>
         <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-          Swarm defaults are not exposed by this agent version.
+          {t("settingsMore.swarm.unavailable")}
         </CardContent>
       </Card>
     );
@@ -56,17 +72,18 @@ function SwarmSection() {
   return (
     <div className="space-y-6">
       <div className="rounded-md border border-info/40 bg-info/5 px-4 py-3 text-xs text-muted-foreground leading-relaxed">
-        <span className="font-medium text-foreground">Configuration only.</span>{" "}
-        These values persist to the node's config, but there is no runtime swarm
-        consumer yet. They set the defaults a future swarm layer will read.
+        <Trans
+          i18nKey="settingsMore.swarm.configOnlyBanner"
+          components={{ strong: <span className="font-medium text-foreground" /> }}
+        />
       </div>
 
       <Card>
         <CardContent className="pt-5 pb-5">
           <ConfigToggle
             configKey="swarm.enabled"
-            label="Swarm participation"
-            hint="Persist this node's intent to join a swarm. No runtime consumer acts on it yet."
+            label={t("settingsMore.swarm.participationLabel")}
+            hint={t("settingsMore.swarm.participationHint")}
             value={swarm.enabled}
           />
         </CardContent>
@@ -77,28 +94,28 @@ function SwarmSection() {
           <ConfigTextField
             configKey="swarm.role"
             id="swarm-role"
-            label="Role"
-            hint="The node's intended swarm role (e.g. auto)."
-            placeholder="auto"
+            label={t("settingsMore.swarm.roleLabel")}
+            hint={t("settingsMore.swarm.roleHint")}
+            placeholder={ROLE_PLACEHOLDER}
             value={swarm.role}
           />
           <div className="border-t border-border pt-5 space-y-2">
-            <div className="text-sm font-medium">Default formation</div>
+            <div className="text-sm font-medium">{t("settingsMore.swarm.formationTitle")}</div>
             <p className="text-xs text-muted-foreground">
-              The formation preset the node starts with.
+              {t("settingsMore.swarm.formationHint")}
             </p>
             <ConfigEnumField
               configKey="swarm.default_formation"
               value={swarm.default_formation}
-              options={FORMATION_OPTIONS}
+              options={formationOptions}
             />
           </div>
           <div className="border-t border-border pt-5">
             <ConfigNumberField
               configKey="swarm.default_spacing"
               id="swarm-spacing"
-              label="Default spacing (metres)"
-              hint="The default inter-node spacing a formation should target."
+              label={t("settingsMore.swarm.spacingLabel")}
+              hint={t("settingsMore.swarm.spacingHint")}
               value={swarm.default_spacing}
               integer
               min={0}
@@ -111,15 +128,16 @@ function SwarmSection() {
 }
 
 export function SwarmSettings() {
+  const { t } = useTranslation();
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">Reading config…</p>;
+    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-        Could not read the swarm config from this node.
+        {t("settingsMore.swarm.readError")}
       </div>
     );
   }
@@ -127,9 +145,9 @@ export function SwarmSettings() {
   return (
     <section className="space-y-3">
       <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-        Swarm
+        {t("settingsMore.swarm.title")}
         <Badge variant="default" className="font-normal">
-          config only
+          {t("settingsMore.swarm.configOnlyBadge")}
         </Badge>
       </div>
       <SwarmSection />

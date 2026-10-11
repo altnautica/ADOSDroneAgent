@@ -11,6 +11,8 @@
  * @module protocol/msp/bf-cli-settings
  */
 
+import i18n from "@/i18n";
+
 import type { CliSetting, CliSettingChange, CliSettingsCapability, CommandResult } from "./types";
 import { BfCliSession } from "./bf-cli";
 
@@ -67,7 +69,7 @@ export class BfCliSettings implements CliSettingsCapability {
   }
 
   async applySettings(changes: CliSettingChange[], opts?: { persist?: boolean }): Promise<CommandResult> {
-    if (changes.length === 0) return { success: true, resultCode: 0, message: "No changes" };
+    if (changes.length === 0) return { success: true, resultCode: 0, message: i18n.t("fc.write.noChanges") };
     await this.session.enter();
     try {
       const failed: string[] = [];
@@ -76,8 +78,12 @@ export class BfCliSettings implements CliSettingsCapability {
         if (isSetError(resp)) failed.push(c.name);
       }
       if (opts?.persist) await this.session.run("save noreboot", SAVE_TIMEOUT_MS);
-      if (failed.length) return { success: false, resultCode: -1, message: `Rejected: ${failed.join(", ")}` };
-      return { success: true, resultCode: 0, message: opts?.persist ? "Saved to flash" : "Applied to RAM" };
+      if (failed.length) return { success: false, resultCode: -1, message: i18n.t("fc.write.rejected", { names: failed.join(", ") }) };
+      return {
+        success: true,
+        resultCode: 0,
+        message: opts?.persist ? i18n.t("fc.write.savedFlash") : i18n.t("fc.write.appliedRam"),
+      };
     } finally {
       await this.session.exit(false);
     }

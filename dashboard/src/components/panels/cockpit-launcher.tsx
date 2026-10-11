@@ -1,4 +1,5 @@
 import { ArrowRight, Fullscreen } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { requestDocumentFullscreen } from "@/lib/fullscreen";
 import { cn } from "@/lib/utils";
@@ -10,6 +11,7 @@ import { cn } from "@/lib/utils";
 // same-origin navigation, other engines drop it and the cockpit re-enters on
 // the next gesture.
 export function CockpitLauncher() {
+  const { t } = useTranslation();
   const enterCockpit = async () => {
     await requestDocumentFullscreen();
     // /cockpit is a separate agent-served bundle, not an SPA route — leave the
@@ -21,7 +23,7 @@ export function CockpitLauncher() {
     <button
       type="button"
       onClick={enterCockpit}
-      aria-label="Enter the full-screen cockpit"
+      aria-label={t("panels.cockpit.ariaLabel")}
       className={cn(
         "group relative w-full overflow-hidden rounded-lg border text-left shadow-sm",
         "border-amber-500/30 bg-gradient-to-r from-amber-500/10 via-card to-card",
@@ -36,16 +38,15 @@ export function CockpitLauncher() {
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-base font-semibold tracking-tight text-foreground">
-            Enter Cockpit
+            {t("panels.cockpit.enter")}
             <ArrowRight className="h-4 w-4 text-amber-300 transition-transform group-hover:translate-x-0.5" />
           </div>
           <p className="mt-0.5 text-sm text-muted-foreground">
-            Immersive full-screen piloting &amp; video — works on this laptop or
-            the ground-station touchscreen.
+            {t("panels.cockpit.description")}
           </p>
         </div>
         <span className="hidden shrink-0 items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-200 sm:inline-flex">
-          Launch
+          {t("panels.cockpit.launch")}
         </span>
       </div>
     </button>

@@ -2,7 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { Radio, RotateCcw, Save, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
+
+import i18n from "@/i18n";
 
 import { BitmaskModal } from "@/components/fc/bitmask-modal";
 import { EnumSelect } from "@/components/fc/enum-select";
@@ -45,7 +48,7 @@ function displayValue(value: number, m?: ParamMetadata): string {
     const set = [...m.bitmask.entries()]
       .filter(([bit]) => (value & (1 << bit)) !== 0)
       .map(([, label]) => label);
-    return `${formatParamValue(value)} · ${set.length ? set.join(", ") : "none"}`;
+    return `${formatParamValue(value)} · ${set.length ? set.join(", ") : i18n.t("telemetry.params.bitsNone")}`;
   }
   return formatParamValue(value);
 }
@@ -69,12 +72,13 @@ interface ParamSetResponse {
 }
 
 export function TelemetryRoute() {
+  const { t } = useTranslation();
   const [tab, setTab] = useState<"parameters" | "sensors">("parameters");
 
   return (
     <PageShell
-      title="Telemetry"
-      blurb="Flight controller parameters and live sensors. Edits are validated against the cache before they hit the FC."
+      title={t("telemetry.page.title")}
+      blurb={t("telemetry.page.blurb")}
       maxWidth="max-w-6xl"
       rightAction={
         <div className="flex items-center gap-1 rounded-md border border-border p-0.5 text-xs">
@@ -88,7 +92,7 @@ export function TelemetryRoute() {
                 : "text-muted-foreground hover:bg-accent/40",
             )}
           >
-            Parameters
+            {t("telemetry.tabs.parameters")}
           </button>
           <button
             type="button"
@@ -100,7 +104,7 @@ export function TelemetryRoute() {
                 : "text-muted-foreground hover:bg-accent/40",
             )}
           >
-            Sensors
+            {t("telemetry.tabs.sensors")}
           </button>
         </div>
       }
@@ -131,6 +135,7 @@ function ParametersTab() {
 }
 
 function MavlinkParams() {
+  const { t } = useTranslation();
   const params = useResource<ParamsResponse>("params", "/api/params", 10000);
   const { drafts, setDraft, clearAll } = useParamsStore();
 
@@ -168,8 +173,8 @@ function MavlinkParams() {
   // Debounce the search input so typing doesn't re-filter the whole
   // list on every keystroke (param tables can run 800+ rows).
   useEffect(() => {
-    const t = setTimeout(() => setDebouncedSearch(search), 150);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setDebouncedSearch(search), 150);
+    return () => clearTimeout(timer);
   }, [search]);
 
   const rows: ParamRow[] = useMemo(
@@ -233,7 +238,7 @@ function MavlinkParams() {
         failCount++;
         const msg =
           err instanceof ApiError ? err.message : err instanceof Error ? err.message : "";
-        toast.err(`${name}: failed`, msg);
+        toast.err(t("telemetry.params.saveItemFailed", { name }), msg);
       }
       setSaveProgress({ total: items.length, done: i + 1 });
     }
@@ -241,11 +246,11 @@ function MavlinkParams() {
     setSaveProgress(null);
     params.refetch();
     if (failCount === 0 && pendingCount === 0) {
-      toast.ok(`Saved ${okCount} parameter${okCount === 1 ? "" : "s"}.`);
+      toast.ok(t("telemetry.params.savedCount", { count: okCount }));
     } else {
       toast.info(
-        `Saved ${okCount}, ${failCount} failed, ${pendingCount} pending FC ack.`,
-        "FC may take longer than 2s to echo PARAM_VALUE under heavy load.",
+        t("telemetry.params.savedPartial", { ok: okCount, failed: failCount, pending: pendingCount }),
+        t("telemetry.params.savedPartialHint"),
       );
     }
   }
@@ -264,7 +269,7 @@ function MavlinkParams() {
               : "text-muted-foreground hover:bg-accent/40",
           )}
         >
-          <span className="font-mono">All</span>
+          <span className="font-mono">{t("telemetry.params.all")}</span>
           <span className="text-[10px] tabular-nums">{rows.length}</span>
         </button>
         {Object.entries(counts)
@@ -293,7 +298,7 @@ function MavlinkParams() {
           <div className="relative flex-1 min-w-0">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
             <Input
-              placeholder="Search by name (e.g. BATT_LOW_VOLT)…"
+              placeholder={t("telemetry.params.searchPlaceholder")}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-8"
@@ -306,7 +311,7 @@ function MavlinkParams() {
               onChange={(e) => setModifiedOnly(e.target.checked)}
               className="accent-primary"
             />
-            Modified only
+            {t("telemetry.params.modifiedOnly")}
           </label>
           <Button
             size="sm"
@@ -315,7 +320,7 @@ function MavlinkParams() {
             onClick={() => clearAll()}
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            Discard
+            {t("telemetry.params.discard")}
           </Button>
           <Button
             size="sm"
@@ -325,28 +330,28 @@ function MavlinkParams() {
             <Save className="h-3.5 w-3.5" />
             {saveProgress
               ? `${saveProgress.done}/${saveProgress.total}…`
-              : `Save ${dirtyCount || ""}`}
+              : t("telemetry.params.saveButton", { n: dirtyCount || "" })}
           </Button>
         </div>
 
         {writeBlock && <p className="text-xs text-warn">{writeBlock}</p>}
 
         {params.isLoading && (
-          <p className="text-sm text-muted-foreground">loading parameters…</p>
+          <p className="text-sm text-muted-foreground">{t("telemetry.params.loading")}</p>
         )}
 
         {params.isError && (
           <Card>
             <CardContent className="pt-5 pb-5 flex items-center justify-between gap-3">
               <p className="text-sm text-destructive">
-                Couldn't reach the parameter service.
+                {t("telemetry.params.serviceUnreachable")}
               </p>
               <Button
                 size="sm"
                 variant="outline"
                 onClick={() => params.refetch?.()}
               >
-                Retry
+                {t("common.retry")}
               </Button>
             </CardContent>
           </Card>
@@ -358,11 +363,13 @@ function MavlinkParams() {
               <Radio className="h-5 w-5 text-accent-primary mt-0.5 animate-pulse" />
               <div className="flex-1 space-y-2">
                 <div className="text-sm font-medium">
-                  Priming parameter cache from FC…
+                  {t("telemetry.params.priming")}
                 </div>
                 <div className="text-xs text-muted-foreground">
-                  {params.data.progress?.got ?? 0} of{" "}
-                  {params.data.progress?.expected ?? "?"} parameters received.
+                  {t("telemetry.params.primingProgress", {
+                    got: params.data.progress?.got ?? 0,
+                    expected: params.data.progress?.expected ?? "?",
+                  })}
                 </div>
                 {params.data.progress?.expected ? (
                   <div className="h-1 w-full overflow-hidden rounded bg-muted">
@@ -395,12 +402,12 @@ function MavlinkParams() {
                 <Radio className="h-5 w-5 text-warn mt-0.5" />
                 <div className="space-y-1">
                   <div className="text-sm font-medium">
-                    Couldn't reach the flight controller.
+                    {t("telemetry.params.fcUnreachable")}
                   </div>
                   <div className="text-xs text-muted-foreground">
                     {params.data?.priming_send_failed
-                      ? "The agent could not send PARAM_REQUEST_LIST over the MAVLink link. Check the FC serial cable, baud rate, and that the FC is powered."
-                      : "The agent sent PARAM_REQUEST_LIST but the flight controller did not respond within 30 seconds. Check the cable, baud rate, and that the FC firmware is alive."}
+                      ? t("telemetry.params.primingSendFailed")
+                      : t("telemetry.params.primingTimeout")}
                   </div>
                 </div>
               </CardContent>
@@ -417,12 +424,10 @@ function MavlinkParams() {
                 <Radio className="h-5 w-5 text-muted-foreground mt-0.5" />
                 <div className="space-y-1">
                   <div className="text-sm font-medium">
-                    No parameters cached yet.
+                    {t("telemetry.params.emptyTitle")}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    Connect a flight controller and the agent fires
-                    PARAM_REQUEST_LIST on connect so the table fills in
-                    automatically.
+                    {t("telemetry.params.emptyBody")}
                   </div>
                 </div>
               </CardContent>
@@ -499,7 +504,7 @@ function MavlinkParams() {
                             })
                           }
                         >
-                          Set bits…
+                          {t("telemetry.params.setBits")}
                         </Button>
                       ) : (
                         <Input
@@ -527,7 +532,7 @@ function MavlinkParams() {
 
         {visibleRows.length === 0 && rows.length > 0 && (
           <p className="text-sm text-muted-foreground">
-            No parameters match the current filter.
+            {t("telemetry.params.noMatch")}
           </p>
         )}
       </div>
@@ -535,23 +540,19 @@ function MavlinkParams() {
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title={`Save ${dirtyCount} parameter${dirtyCount === 1 ? "" : "s"}?`}
+        title={t("telemetry.params.confirmTitle", { count: dirtyCount })}
         description={
           <div className="space-y-2">
             <p>
-              The agent will write each parameter to the FC and wait for a
-              PARAM_VALUE ack (up to 2s per param).{" "}
-              {isPx4
-                ? "PX4 stores the parameter on write — there's no separate flash step."
-                : "ArduPilot saves to EEPROM on receipt — there's no separate flash step."}
+              {t("telemetry.params.confirmBody")}{" "}
+              {isPx4 ? t("telemetry.params.confirmPx4") : t("telemetry.params.confirmArdupilot")}
             </p>
             <p className="text-xs text-muted-foreground">
-              Bad parameter values can affect flight behaviour. Test on a
-              bench rig first.
+              {t("telemetry.params.confirmWarning")}
             </p>
           </div>
         }
-        confirmLabel="Save all"
+        confirmLabel={t("telemetry.params.saveAll")}
         destructive
         onConfirm={saveAll}
       />
@@ -615,17 +616,18 @@ function SensorField({ label, value }: { label: string; value: string }) {
 }
 
 function MavlinkSensors() {
-  const t = useResource<VehicleTelemetry>("vehicle-telemetry", "/api/telemetry", 1_000);
-  const v = t.data;
+  const { t } = useTranslation();
+  const tel = useResource<VehicleTelemetry>("vehicle-telemetry", "/api/telemetry", 1_000);
+  const v = tel.data;
   const deg = (rad: number | null | undefined) =>
     rad == null ? "—" : `${fmtNum((rad * 180) / Math.PI, 1)}°`;
   const hasPosition = v?.position?.lat != null && v?.position?.lon != null;
 
-  if (t.isError && !v) {
+  if (tel.isError && !v) {
     return (
       <Card>
         <CardContent className="pt-5 pb-5 text-sm text-destructive">
-          Couldn&apos;t read the vehicle state from the agent.
+          {t("telemetry.sensors.readFailed")}
         </CardContent>
       </Card>
     );
@@ -635,54 +637,53 @@ function MavlinkSensors() {
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
       <Card>
         <CardContent className="pt-4 pb-4">
-          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">Attitude</div>
-          <SensorField label="roll" value={deg(v?.attitude?.roll)} />
-          <SensorField label="pitch" value={deg(v?.attitude?.pitch)} />
-          <SensorField label="yaw" value={deg(v?.attitude?.yaw)} />
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">{t("telemetry.sensors.attitude")}</div>
+          <SensorField label={t("telemetry.sensors.roll")} value={deg(v?.attitude?.roll)} />
+          <SensorField label={t("telemetry.sensors.pitch")} value={deg(v?.attitude?.pitch)} />
+          <SensorField label={t("telemetry.sensors.yaw")} value={deg(v?.attitude?.yaw)} />
         </CardContent>
       </Card>
       <Card>
         <CardContent className="pt-4 pb-4">
-          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">Battery</div>
-          <SensorField label="voltage" value={fmtVoltage(v?.battery?.voltage ?? null)} />
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">{t("telemetry.sensors.battery")}</div>
+          <SensorField label={t("telemetry.sensors.voltage")} value={fmtVoltage(v?.battery?.voltage ?? null)} />
           <SensorField
-            label="current"
+            label={t("telemetry.sensors.current")}
             value={v?.battery?.current != null ? `${fmtNum(v.battery.current, 2)} A` : "—"}
           />
-          <SensorField label="remaining" value={fmtPct(v?.battery?.remaining ?? null)} />
+          <SensorField label={t("telemetry.sensors.remaining")} value={fmtPct(v?.battery?.remaining ?? null)} />
         </CardContent>
       </Card>
       <Card>
         <CardContent className="pt-4 pb-4">
-          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">GPS</div>
-          <SensorField label="fix type" value={v?.gps?.fix_type != null ? String(v.gps.fix_type) : "—"} />
-          <SensorField label="sats" value={v?.gps?.satellites != null ? String(v.gps.satellites) : "—"} />
-          <SensorField label="hdop" value={fmtNum(v?.gps?.eph ?? null, 2)} />
+          <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">{t("telemetry.sensors.gps")}</div>
+          <SensorField label={t("telemetry.sensors.fixType")} value={v?.gps?.fix_type != null ? String(v.gps.fix_type) : "—"} />
+          <SensorField label={t("telemetry.sensors.sats")} value={v?.gps?.satellites != null ? String(v.gps.satellites) : "—"} />
+          <SensorField label={t("telemetry.sensors.hdop")} value={fmtNum(v?.gps?.eph ?? null, 2)} />
           <SensorField
-            label="position"
+            label={t("telemetry.sensors.position")}
             value={hasPosition ? `${fmtNum(v!.position!.lat!, 5)}, ${fmtNum(v!.position!.lon!, 5)}` : "—"}
           />
           <SensorField
-            label="alt (rel)"
+            label={t("telemetry.sensors.altRel")}
             value={v?.position?.alt_rel != null ? `${fmtNum(v.position.alt_rel, 1)} m` : "—"}
           />
         </CardContent>
       </Card>
       <Card className="md:col-span-2 lg:col-span-3">
         <CardContent className="pt-4 pb-4 grid grid-cols-2 gap-x-6">
-          <SensorField label="mode" value={v?.mode ?? "—"} />
+          <SensorField label={t("telemetry.sensors.mode")} value={v?.mode ?? "—"} />
           <SensorField
-            label="armed"
-            value={v?.armed === true ? "ARMED" : v?.armed === false ? "disarmed" : "—"}
+            label={t("telemetry.sensors.armed")}
+            value={v?.armed === true ? t("telemetry.sensors.armedValue") : v?.armed === false ? t("telemetry.sensors.disarmedValue") : "—"}
           />
         </CardContent>
       </Card>
       <p className="md:col-span-2 lg:col-span-3 text-[11px] text-muted-foreground">
-        Want to edit FC parameters? Use the{" "}
-        <Link to="/telemetry" className="text-primary hover:underline">
-          Parameters tab
-        </Link>
-        .
+        <Trans
+          i18nKey="telemetry.sensors.editHint"
+          components={{ link: <Link to="/telemetry" className="text-primary hover:underline" /> }}
+        />
       </p>
     </div>
   );

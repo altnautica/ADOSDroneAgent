@@ -1,5 +1,6 @@
 import { AlertCircle, ArrowUpCircle, Check, Download, ExternalLink, Shield } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -28,30 +29,28 @@ interface Props {
 // names (ok / info / warn / destructive) but the colour intent is
 // identical to Mission Control's status-success / accent-primary /
 // status-warning / status-error.
-const RISK_TONE: Record<
-  NonNullable<CatalogEntry["risk"]>,
-  { label: string; classes: string }
-> = {
+const RISK_TONE = {
   low: {
-    label: "Low risk",
+    labelKey: "extensions.risk.low",
     classes: "border-ok/40 bg-ok/10 text-ok",
   },
   medium: {
-    label: "Medium risk",
+    labelKey: "extensions.risk.medium",
     classes: "border-info/40 bg-info/10 text-info",
   },
   high: {
-    label: "High risk",
+    labelKey: "extensions.risk.high",
     classes: "border-warn/40 bg-warn/10 text-warn",
   },
   critical: {
-    label: "Critical risk",
+    labelKey: "extensions.risk.critical",
     classes:
       "border-destructive/40 bg-destructive/10 text-destructive font-semibold",
   },
-};
+} as const satisfies Record<NonNullable<CatalogEntry["risk"]>, { labelKey: string; classes: string }>;
 
 export function RegistryGrid({ installedVersions, busy, onInstall }: Props) {
+  const { t } = useTranslation();
   // The catalog is compiled into the agent, so it cannot change while the page
   // is open: fetch once, never poll.
   const catalog = useQuery<CatalogResponse>({
@@ -66,9 +65,9 @@ export function RegistryGrid({ installedVersions, busy, onInstall }: Props) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
-        <h2 className="text-sm font-medium">Available extensions</h2>
+        <h2 className="text-sm font-medium">{t("extensions.catalog.title")}</h2>
         <span className="text-xs text-muted-foreground">
-          First-party catalog. Downloaded fresh each install.
+          {t("extensions.catalog.subtitle")}
         </span>
       </div>
       {(view.kind === "error" || view.parseError) && (
@@ -80,7 +79,7 @@ export function RegistryGrid({ installedVersions, busy, onInstall }: Props) {
           <span>{view.kind === "error" ? view.message : view.parseError}</span>
           {view.kind === "error" && (
             <Button size="sm" variant="outline" className="ml-auto" onClick={() => void catalog.refetch()}>
-              Retry
+              {t("common.retry")}
             </Button>
           )}
         </div>
@@ -100,13 +99,13 @@ export function RegistryGrid({ installedVersions, busy, onInstall }: Props) {
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-medium text-sm">{entry.name}</span>
                         <span className="text-[10px] text-muted-foreground font-mono">
-                          v{entry.version}
+                          {`v${entry.version}`}
                         </span>
                         {tone && (
                           <span
                             className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${tone.classes}`}
                           >
-                            {tone.label}
+                            {t(tone.labelKey)}
                           </span>
                         )}
                       </div>
@@ -118,16 +117,16 @@ export function RegistryGrid({ installedVersions, busy, onInstall }: Props) {
                       {state === "installed" ? (
                         <span className="text-[10px] uppercase tracking-wider text-ok flex items-center gap-1">
                           <Check className="h-3 w-3" />
-                          installed
+                          {t("extensions.catalog.installed")}
                         </span>
                       ) : state === "update" ? (
                         <div className="flex flex-col items-end gap-1">
                           <span className="text-[10px] uppercase tracking-wider text-info">
-                            update available
+                            {t("extensions.catalog.updateAvailable")}
                           </span>
                           <Button size="sm" variant="outline" onClick={() => onInstall(entry)} disabled={busy}>
                             <ArrowUpCircle className="h-3.5 w-3.5" />
-                            Update to v{entry.version}
+                            {t("extensions.catalog.updateTo", { version: entry.version })}
                           </Button>
                         </div>
                       ) : (
@@ -137,7 +136,7 @@ export function RegistryGrid({ installedVersions, busy, onInstall }: Props) {
                           disabled={busy}
                         >
                           <Download className="h-3.5 w-3.5" />
-                          Install
+                          {t("extensions.page.install")}
                         </Button>
                       )}
                     </div>
@@ -162,7 +161,7 @@ export function RegistryGrid({ installedVersions, busy, onInstall }: Props) {
                         rel="noreferrer"
                         className="hover:underline flex items-center gap-1"
                       >
-                        View source
+                        {t("extensions.catalog.viewSource")}
                         <ExternalLink className="h-3 w-3" />
                       </a>
                     )}

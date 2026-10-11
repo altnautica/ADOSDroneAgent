@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { Card, CardContent } from "@/components/ui/card";
 import {
   ConfigEnumField,
@@ -7,39 +9,44 @@ import {
 } from "@/components/settings/config-fields";
 import { useConfig } from "@/hooks/use-config";
 
+// Example endpoint values, not copy.
+const NETWORK_TARGET_EXAMPLE = "udp:127.0.0.1:14550";
+const SERIAL_PORT_EXAMPLE = "/dev/ttyACM0";
+
 const SOURCE_OPTIONS = [
   {
     value: "auto" as const,
-    label: "Auto",
-    description: "Discover and baud-probe any candidate serial port.",
+    labelKey: "settings.mavlink.sourceAutoLabel",
+    descriptionKey: "settings.mavlink.sourceAutoDescription",
   },
   {
     value: "serial" as const,
-    label: "Serial",
-    description: "Use the configured serial port and baud rate.",
+    labelKey: "settings.mavlink.sourceSerialLabel",
+    descriptionKey: "settings.mavlink.sourceSerialDescription",
   },
   {
     value: "udp" as const,
-    label: "UDP",
-    description: "A network transport. Target goes in the port field as udp:host:port.",
+    labelKey: "settings.mavlink.sourceUdpLabel",
+    descriptionKey: "settings.mavlink.sourceUdpDescription",
   },
   {
     value: "tcp" as const,
-    label: "TCP",
-    description: "A network transport. Target goes in the port field as tcp:host:port.",
+    labelKey: "settings.mavlink.sourceTcpLabel",
+    descriptionKey: "settings.mavlink.sourceTcpDescription",
   },
-];
+] as const;
 
 export function MavlinkSettings() {
+  const { t } = useTranslation();
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">Reading config…</p>;
+    return <p className="text-[11px] text-muted-foreground/70">{t("settings.shared.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-        Could not read the MAVLink config from this node.
+        {t("settings.mavlink.readFailed")}
       </div>
     );
   }
@@ -49,7 +56,7 @@ export function MavlinkSettings() {
     return (
       <Card>
         <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-          MAVLink routing is not exposed by this agent version.
+          {t("settings.mavlink.notExposed")}
         </CardContent>
       </Card>
     );
@@ -65,16 +72,19 @@ export function MavlinkSettings() {
       <Card>
         <CardContent className="pt-5 pb-5 space-y-4">
           <div>
-            <div className="text-sm font-semibold">Flight-controller transport</div>
+            <div className="text-sm font-semibold">{t("settings.mavlink.transportTitle")}</div>
             <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-              How the agent reaches the flight controller. Auto probes candidate
-              serial ports; the explicit modes use the port and baud below.
+              {t("settings.mavlink.transportHint")}
             </p>
           </div>
           <ConfigEnumField
             configKey="mavlink.source"
             value={source}
-            options={SOURCE_OPTIONS}
+            options={SOURCE_OPTIONS.map((o) => ({
+              value: o.value,
+              label: t(o.labelKey),
+              description: t(o.descriptionKey),
+            }))}
             columns={2}
           />
         </CardContent>
@@ -86,21 +96,21 @@ export function MavlinkSettings() {
           <ConfigTextField
             configKey="mavlink.serial_port"
             id="mavlink-serial-port"
-            label={isNetwork ? "Network target" : "Serial port"}
+            label={isNetwork ? t("settings.mavlink.networkTarget") : t("settings.mavlink.serialPort")}
             hint={
               isNetwork
-                ? "A udp:host:port or tcp:host:port target. Only used when the transport is UDP or TCP."
-                : "The serial device path (e.g. /dev/ttyACM0). Only used when the transport is Serial."
+                ? t("settings.mavlink.networkTargetHint")
+                : t("settings.mavlink.serialPortHint")
             }
-            placeholder={isNetwork ? "udp:127.0.0.1:14550" : "/dev/ttyACM0"}
+            placeholder={isNetwork ? NETWORK_TARGET_EXAMPLE : SERIAL_PORT_EXAMPLE}
             value={mav.serial_port}
             disabled={source === "auto"}
           />
           <ConfigNumberField
             configKey="mavlink.baud_rate"
             id="mavlink-baud"
-            label="Baud rate"
-            hint="Serial line speed for the Serial transport (e.g. 57600, 115200, 921600)."
+            label={t("settings.mavlink.baudRate")}
+            hint={t("settings.mavlink.baudRateHint")}
             value={mav.baud_rate}
             integer
             min={1200}
@@ -113,17 +123,15 @@ export function MavlinkSettings() {
       <Card>
         <CardContent className="pt-5 pb-5 space-y-5">
           <div>
-            <div className="text-sm font-semibold">Agent identity</div>
+            <div className="text-sm font-semibold">{t("settings.mavlink.identityTitle")}</div>
             <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-              The system and component IDs the agent presents on the MAVLink bus.
-              Leave these at the defaults unless a routing collision forces a
-              change.
+              {t("settings.mavlink.identityHint")}
             </p>
           </div>
           <ConfigNumberField
             configKey="mavlink.system_id"
             id="mavlink-system-id"
-            label="System ID"
+            label={t("settings.mavlink.systemId")}
             value={mav.system_id}
             integer
             min={1}
@@ -132,7 +140,7 @@ export function MavlinkSettings() {
           <ConfigNumberField
             configKey="mavlink.component_id"
             id="mavlink-component-id"
-            label="Component ID"
+            label={t("settings.mavlink.componentId")}
             value={mav.component_id}
             integer
             min={1}
@@ -144,27 +152,26 @@ export function MavlinkSettings() {
       {/* Advertised endpoints — read-only (the list is not a single-key write). */}
       <Card>
         <CardContent className="pt-5 pb-5 space-y-2">
-          <div className="text-sm font-semibold mb-1">Endpoints</div>
+          <div className="text-sm font-semibold mb-1">{t("settings.mavlink.endpointsTitle")}</div>
           {endpoints.length === 0 ? (
             <p className="text-[11px] text-muted-foreground">
-              No MAVLink endpoints reported.
+              {t("settings.mavlink.noEndpoints")}
             </p>
           ) : (
             <div className="space-y-1">
               {endpoints.map((ep, idx) => (
                 <ReadRow
                   key={`${ep.type ?? "endpoint"}-${ep.port ?? idx}`}
-                  label={ep.type ?? "endpoint"}
+                  label={ep.type ?? t("settings.mavlink.endpointFallback")}
                   value={`${ep.host ?? "0.0.0.0"}:${ep.port ?? "?"}${
-                    ep.enabled === false ? " (disabled)" : ""
+                    ep.enabled === false ? t("settings.mavlink.disabledSuffix") : ""
                   }`}
                 />
               ))}
             </div>
           )}
           <p className="text-[11px] text-muted-foreground pt-1">
-            The MAVLink WebSocket bridge a ground station dials. Endpoints are
-            managed at install time, so they are read-only here.
+            {t("settings.mavlink.endpointsHint")}
           </p>
         </CardContent>
       </Card>
@@ -173,14 +180,10 @@ export function MavlinkSettings() {
       <Card>
         <CardContent className="pt-5 pb-5 space-y-1.5">
           <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Not configured here
+            {t("settings.mavlink.notConfiguredTitle")}
           </div>
           <p className="text-xs text-muted-foreground leading-relaxed">
-            Message signing is owned by Mission Control in the browser; the agent
-            does not persist key material, so there is nothing to set here. The
-            flight controller's own MAVLink stream rates are negotiated per
-            connection, not stored in the agent config. MAVLink WebSocket
-            authentication enforcement lives on the Security page.
+            {t("settings.mavlink.notConfiguredBody")}
           </p>
         </CardContent>
       </Card>

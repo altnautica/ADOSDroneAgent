@@ -1,4 +1,5 @@
 import { Cloud, KeyRound } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import {
@@ -17,32 +18,37 @@ function ageSeconds(ms: number | null): number | null {
 }
 
 function LinkRows({ link, error }: { link: CloudLink | undefined; error: boolean }) {
+  const { t } = useTranslation();
   if (error || !link) {
     return (
       <p className="text-xs text-muted-foreground">
-        Relay not reporting: the cloud service is stopped or starting.
+        {t("panels.cloud.relayNotReporting")}
       </p>
     );
   }
   const broker =
-    link.broker_connected === null ? "no session" : link.broker_connected ? "connected" : "down";
+    link.broker_connected === null
+      ? t("panels.cloud.noSession")
+      : link.broker_connected
+        ? t("panels.cloud.connected")
+        : t("panels.cloud.down");
   const age = ageSeconds(link.last_heartbeat_ok_ms);
   const heartbeat =
     age !== null
-      ? `ok ${age}s ago`
+      ? t("panels.cloud.heartbeatOk", { age })
       : link.last_heartbeat_status !== null
-        ? `HTTP ${link.last_heartbeat_status}`
+        ? t("panels.cloud.heartbeatHttp", { status: link.last_heartbeat_status })
         : link.last_heartbeat_error
-          ? "no answer"
-          : "not sent";
+          ? t("panels.cloud.noAnswer")
+          : t("panels.cloud.notSent");
   return (
     <>
       <div className="flex items-baseline justify-between text-sm">
-        <span className="text-xs text-muted-foreground">broker</span>
+        <span className="text-xs text-muted-foreground">{t("panels.cloud.broker")}</span>
         <Badge variant={link.broker_connected ? "ok" : "default"}>{broker}</Badge>
       </div>
       <div className="flex items-baseline justify-between text-sm">
-        <span className="text-xs text-muted-foreground">status post</span>
+        <span className="text-xs text-muted-foreground">{t("panels.cloud.statusPost")}</span>
         <span className="font-mono">{heartbeat}</span>
       </div>
     </>
@@ -50,6 +56,7 @@ function LinkRows({ link, error }: { link: CloudLink | undefined; error: boolean
 }
 
 export function CloudPanel() {
+  const { t } = useTranslation();
   const snap = useSnapshot();
   const status = useStatus();
 
@@ -65,17 +72,17 @@ export function CloudPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Cloud className="h-3.5 w-3.5" />
-          Cloud Relay
+          {t("panels.cloud.title")}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-2.5">
         <div className="flex items-baseline justify-between text-sm">
-          <span className="text-xs text-muted-foreground">mode</span>
+          <span className="text-xs text-muted-foreground">{t("panels.cloud.mode")}</span>
           <span className="font-mono">{choice?.mode ?? "—"}</span>
         </div>
         {isLocal ? (
           <p className="text-xs text-muted-foreground">
-            Relay disabled. Mission Control reaches this drone over the LAN.
+            {t("panels.cloud.relayDisabled")}
           </p>
         ) : (
           <>
@@ -83,16 +90,16 @@ export function CloudPanel() {
             <div className="border-t border-border/50 pt-3 mt-2 space-y-2">
               <div className="flex items-center gap-2 text-xs text-muted-foreground">
                 <KeyRound className="h-3 w-3" />
-                Pairing
+                {t("panels.cloud.pairing")}
               </div>
               {finalized && !code ? (
-                <Badge variant="ok">paired</Badge>
+                <Badge variant="ok">{t("panels.cloud.paired")}</Badge>
               ) : code ? (
                 <div className="font-mono text-2xl tracking-[0.3em] py-1">
                   {code}
                 </div>
               ) : (
-                <p className="text-xs text-muted-foreground">awaiting code…</p>
+                <p className="text-xs text-muted-foreground">{t("panels.cloud.awaitingCode")}</p>
               )}
             </div>
           </>

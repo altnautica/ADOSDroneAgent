@@ -1,5 +1,7 @@
 // Page-level banners shown above every route. Pure so the rules are testable.
 
+import i18n from "@/i18n";
+
 import type { Profile, Severity } from "./types";
 
 export interface Banner {
@@ -31,7 +33,7 @@ export function buildBanners({
     banners.push({
       id: "agent-offline",
       severity: "err",
-      message: "Agent is unreachable. Reconnecting…",
+      message: i18n.t("layout.banners.agentOffline"),
     });
   }
 
@@ -41,7 +43,7 @@ export function buildBanners({
     banners.push({
       id: "fc-disconnected",
       severity: "warn",
-      message: "Flight controller is disconnected.",
+      message: i18n.t("layout.banners.fcDisconnected"),
     });
   }
 

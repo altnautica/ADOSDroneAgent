@@ -1,4 +1,5 @@
 import { Check, Lock, LockOpen } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -13,9 +14,11 @@ interface Props {
 }
 
 export function WifiNetworkRow({ network, isCurrent, isSaved, onSelect }: Props) {
+  const { t } = useTranslation();
   const bars = signalToBars(network.signal);
   const secured = isSecured(network.security);
-  const sec = securityLabel(network.security);
+  const rawSec = securityLabel(network.security);
+  const sec = rawSec === "open" ? t("wifi.network.open") : rawSec;
 
   return (
     <button
@@ -30,23 +33,23 @@ export function WifiNetworkRow({ network, isCurrent, isSaved, onSelect }: Props)
       <SignalBars bars={bars} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2 text-sm font-medium truncate">
-          <span className="truncate">{network.ssid || "(hidden)"}</span>
+          <span className="truncate">{network.ssid || t("wifi.network.hidden")}</span>
           {isCurrent && (
             <span className="text-ok inline-flex items-center text-xs">
-              <Check className="h-3 w-3 mr-0.5" /> connected
+              <Check className="h-3 w-3 mr-0.5" /> {t("wifi.network.connected")}
             </span>
           )}
           {isSaved && !isCurrent && (
             <Badge variant="default" className="text-[10px] font-normal">
-              saved
+              {t("wifi.network.saved")}
             </Badge>
           )}
         </div>
         <div className="flex items-center gap-2 text-xs text-muted-foreground mt-0.5">
           {secured ? (
-            <Lock className="h-3 w-3" aria-label="secured" />
+            <Lock className="h-3 w-3" aria-label={t("wifi.network.secured")} />
           ) : (
-            <LockOpen className="h-3 w-3" aria-label="open" />
+            <LockOpen className="h-3 w-3" aria-label={t("wifi.network.open")} />
           )}
           <span className="font-mono">{sec}</span>
           <span aria-hidden>·</span>

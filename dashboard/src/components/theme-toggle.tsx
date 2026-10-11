@@ -1,3 +1,5 @@
+import type { ParseKeys } from "i18next";
+import { useTranslation } from "react-i18next";
 import { Moon, Sun, MonitorCog } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -14,13 +16,14 @@ const ICON: Record<Theme, typeof Sun> = {
   light: Sun,
   system: MonitorCog,
 };
-const LABEL: Record<Theme, string> = {
-  dark: "dark theme",
-  light: "light theme",
-  system: "follow system",
+const LABEL_KEY: Record<Theme, ParseKeys> = {
+  dark: "layout.theme.dark",
+  light: "layout.theme.light",
+  system: "layout.theme.system",
 };
 
 export function ThemeToggle() {
+  const { t } = useTranslation();
   const theme = useUiStore((s) => s.theme);
   const setTheme = useUiStore((s) => s.setTheme);
   const Icon = ICON[theme];
@@ -33,13 +36,13 @@ export function ThemeToggle() {
         <Button
           variant="ghost"
           size="icon"
-          aria-label={`switch to ${LABEL[next]}`}
+          aria-label={t("layout.theme.switchTo", { theme: t(LABEL_KEY[next]) })}
           onClick={() => setTheme(next)}
         >
           <Icon />
         </Button>
       </TooltipTrigger>
-      <TooltipContent side="bottom">{LABEL[theme]}</TooltipContent>
+      <TooltipContent side="bottom">{t(LABEL_KEY[theme])}</TooltipContent>
     </Tooltip>
   );
 }

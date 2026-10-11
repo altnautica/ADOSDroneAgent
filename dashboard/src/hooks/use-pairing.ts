@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import i18n from "@/i18n";
 import { apiFetch } from "@/shared/api-fetch";
 
 /** `GET /api/pairing/info`. A node has one owner: `owner_id`/`paired_at` are
@@ -51,7 +52,7 @@ export function useAcceptCode() {
       });
       if (!res || res.ok !== true) {
         throw new Error(
-          res?.message || res?.error || "Pairing failed. Check the code and try again.",
+          res?.message || res?.error || i18n.t("pairing.accept.failedDefault"),
         );
       }
       return res;

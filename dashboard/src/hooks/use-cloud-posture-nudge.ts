@@ -12,6 +12,7 @@ import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast as sonnerToast } from "sonner";
 
+import i18n from "@/i18n";
 import { apiFetch } from "@/shared/api-fetch";
 
 const NUDGE_ID = "cloud_posture_default_changed";
@@ -53,20 +54,19 @@ export function useCloudPostureNudge(currentMode: string | undefined) {
         };
 
         sonnerToast(
-          "Cloud relay is on by default for upgraded agents.",
+          i18n.t("app.cloudNudge.title"),
           {
-            description:
-              "New installs default to local-only. Switch if your drone never needs to be reached from outside the LAN.",
+            description: i18n.t("app.cloudNudge.description"),
             duration: 12000,
             action: {
-              label: "Switch",
+              label: i18n.t("app.cloudNudge.switch"),
               onClick: () => {
                 void ack();
                 navigate("/settings/cloud");
               },
             },
             cancel: {
-              label: "Got it",
+              label: i18n.t("app.cloudNudge.gotIt"),
               onClick: () => {
                 void ack();
               },

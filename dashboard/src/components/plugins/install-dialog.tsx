@@ -17,6 +17,7 @@ import {
   Users,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import {
   PluginRiskBadge,
@@ -61,6 +62,7 @@ export function PluginInstallDialog({
   onOpenChange,
   onFinished,
 }: InstallDialogProps) {
+  const { t } = useTranslation();
   const [stage, setStage] = useState<Stage>("summary");
   const [understood, setUnderstood] = useState(false);
   const [coolOff, setCoolOff] = useState(0);
@@ -89,8 +91,8 @@ export function PluginInstallDialog({
   // Cool-off countdown for CRITICAL plugins. Spec section 2.
   useEffect(() => {
     if (stage !== "permissions" || coolOff <= 0) return;
-    const t = setTimeout(() => setCoolOff((n) => n - 1), 1000);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => setCoolOff((n) => n - 1), 1000);
+    return () => clearTimeout(timer);
   }, [stage, coolOff]);
 
   if (!manifest) return null;
@@ -111,7 +113,7 @@ export function PluginInstallDialog({
         .map((p) => p.id);
       const res = await installPlugin(source, required);
       if (!res.ok) {
-        toast.err(`Install failed: ${res.detail || res.kind}`);
+        toast.err(t("extensions.install.failed", { detail: res.detail || res.kind }));
         setStage("permissions");
         return;
       }
@@ -124,20 +126,20 @@ export function PluginInstallDialog({
           () => false,
         );
         toast.err(
-          `Plugin installed but not granted: ${missing.join(", ")}.`,
-          disabled ? "The extension is disabled." : "Disable it from the Extensions list.",
+          t("extensions.install.notGranted", { missing: missing.join(", ") }),
+          disabled ? t("extensions.install.nowDisabled") : t("extensions.install.disableManually"),
         );
         onOpenChange(false);
         onFinished();
         return;
       }
 
-      toast.ok(`${manifest.name} installed.`);
+      toast.ok(t("extensions.install.installed", { name: manifest.name }));
       onOpenChange(false);
       onFinished();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      toast.err(`Install error: ${msg}`);
+      toast.err(t("extensions.install.error", { message: msg }));
       setStage("permissions");
     }
   }
@@ -170,7 +172,7 @@ export function PluginInstallDialog({
         {stage === "installing" && (
           <div className="flex items-center gap-3 py-6">
             <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-            <span className="text-sm">Installing {manifest.name}…</span>
+            <span className="text-sm">{t("extensions.install.installing", { name: manifest.name })}</span>
           </div>
         )}
       </DialogContent>
@@ -185,13 +187,13 @@ interface SummaryStageProps {
 }
 
 function SummaryStage({ manifest, onCancel, onContinue }: SummaryStageProps) {
+  const { t } = useTranslation();
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Install extension</DialogTitle>
+        <DialogTitle>{t("extensions.install.title")}</DialogTitle>
         <DialogDescription>
-          Review what this plugin is and what it will add. Permissions come on
-          the next screen.
+          {t("extensions.install.description")}
         </DialogDescription>
       </DialogHeader>
 
@@ -200,12 +202,12 @@ function SummaryStage({ manifest, onCancel, onContinue }: SummaryStageProps) {
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-base font-medium">{manifest.name}</span>
             <span className="text-xs text-muted-foreground font-mono">
-              v{manifest.version}
+              {`v${manifest.version}`}
             </span>
           </div>
           {manifest.author && (
             <div className="text-xs text-muted-foreground mt-0.5">
-              by {manifest.author}
+              {t("extensions.install.byAuthor", { author: manifest.author })}
             </div>
           )}
         </div>
@@ -215,15 +217,15 @@ function SummaryStage({ manifest, onCancel, onContinue }: SummaryStageProps) {
           {manifest.signed ? (
             <span
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-ok/40 text-ok bg-ok/10 text-xs"
-              title={`Signed by ${manifest.signer_id}`}
+              title={t("extensions.install.signedBy", { signer: manifest.signer_id })}
             >
               <ShieldCheck className="h-3.5 w-3.5" />
-              signed
+              {t("extensions.status.signed")}
             </span>
           ) : (
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-destructive/60 text-destructive bg-destructive/15 text-xs">
               <FileWarning className="h-3.5 w-3.5" />
-              unsigned
+              {t("extensions.status.unsigned")}
             </span>
           )}
           {manifest.license && (
@@ -241,7 +243,7 @@ function SummaryStage({ manifest, onCancel, onContinue }: SummaryStageProps) {
         {manifest.description && (
           <div>
             <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1">
-              What it does
+              {t("extensions.install.whatItDoes")}
             </div>
             <p className="text-sm">{manifest.description}</p>
           </div>
@@ -251,23 +253,22 @@ function SummaryStage({ manifest, onCancel, onContinue }: SummaryStageProps) {
           <div className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-xs">
             <FileWarning className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
             <span>
-              This plugin is unsigned. Only install plugins from sources you
-              trust.
+              {t("extensions.install.unsignedWarning")}
             </span>
           </div>
         )}
 
         <div className="text-xs text-muted-foreground">
-          Plugin id:{" "}
+          {t("extensions.install.pluginId")}{" "}
           <span className="font-mono">{manifest.plugin_id}</span>
         </div>
       </div>
 
       <DialogFooter>
         <Button variant="outline" onClick={onCancel}>
-          Cancel
+          {t("extensions.install.cancel")}
         </Button>
-        <Button onClick={onContinue}>Continue</Button>
+        <Button onClick={onContinue}>{t("extensions.install.continue")}</Button>
       </DialogFooter>
     </>
   );
@@ -296,19 +297,23 @@ function PermissionsStage({
   onCancel,
   onApprove,
 }: PermissionsStageProps) {
+  const { t } = useTranslation();
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Approve permissions</DialogTitle>
+        <DialogTitle>{t("extensions.install.approveTitle")}</DialogTitle>
         <DialogDescription>
-          {manifest.name} v{manifest.version} needs the following:
+          {t("extensions.install.approveDescription", {
+            name: manifest.name,
+            version: manifest.version,
+          })}
         </DialogDescription>
       </DialogHeader>
 
       <div className="max-h-[55vh] overflow-y-auto space-y-4 -mx-1 px-1">
         {groups.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            No permissions declared.
+            {t("extensions.install.noPermissions")}
           </p>
         )}
 
@@ -331,11 +336,11 @@ function PermissionsStage({
                       </span>
                       {row.required ? (
                         <span className="text-[10px] uppercase tracking-wider px-1 rounded bg-muted text-muted-foreground">
-                          required
+                          {t("extensions.install.required")}
                         </span>
                       ) : (
                         <span className="text-[10px] uppercase tracking-wider px-1 rounded bg-muted text-muted-foreground">
-                          optional
+                          {t("extensions.install.optional")}
                         </span>
                       )}
                     </div>
@@ -368,14 +373,14 @@ function PermissionsStage({
             aria-describedby="install-understand-text"
           />
           <span id="install-understand-text" className="text-muted-foreground">
-            I understand this plugin can take {manifest.risk}-risk actions.
+            {t("extensions.install.understand", { risk: manifest.risk })}
           </span>
         </label>
       )}
 
       <DialogFooter>
         <Button variant="outline" onClick={onCancel}>
-          Cancel
+          {t("extensions.install.cancel")}
         </Button>
         <Button
           variant={
@@ -388,12 +393,12 @@ function PermissionsStage({
           {coolOff > 0 ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin" />
-              Wait {coolOff}…
+              {t("extensions.install.wait", { seconds: coolOff })}
             </>
           ) : (
             <>
               <CheckCircle2 className="h-4 w-4" />
-              Approve and install
+              {t("extensions.install.approve")}
             </>
           )}
         </Button>

@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
 import type { HardwareItem, HardwareItemState } from "@/lib/types";
@@ -28,25 +29,35 @@ interface HardwareItemListProps {
 
 const STATE_META: Record<
   HardwareItemState,
-  { tone: string; Icon: typeof CheckCircle2; label: string }
+  {
+    tone: string;
+    Icon: typeof CheckCircle2;
+    labelKey:
+      | "panels.hardwareList.state.ok"
+      | "panels.hardwareList.state.warning"
+      | "panels.hardwareList.state.missing"
+      | "panels.hardwareList.state.checking"
+      | "panels.hardwareList.state.unknown";
+  }
 > = {
-  ok: { tone: "text-ok", Icon: CheckCircle2, label: "ok" },
-  warning: { tone: "text-warn", Icon: AlertTriangle, label: "warning" },
-  missing: { tone: "text-destructive", Icon: X, label: "missing" },
-  checking: { tone: "text-muted-foreground", Icon: Circle, label: "checking" },
-  unknown: { tone: "text-muted-foreground", Icon: HelpCircle, label: "unknown" },
+  ok: { tone: "text-ok", Icon: CheckCircle2, labelKey: "panels.hardwareList.state.ok" },
+  warning: { tone: "text-warn", Icon: AlertTriangle, labelKey: "panels.hardwareList.state.warning" },
+  missing: { tone: "text-destructive", Icon: X, labelKey: "panels.hardwareList.state.missing" },
+  checking: { tone: "text-muted-foreground", Icon: Circle, labelKey: "panels.hardwareList.state.checking" },
+  unknown: { tone: "text-muted-foreground", Icon: HelpCircle, labelKey: "panels.hardwareList.state.unknown" },
 };
 
 export function HardwareItemList({
   items,
-  emptyText = "No hardware detected.",
+  emptyText,
   showOptionalSection = true,
   className,
 }: HardwareItemListProps) {
+  const { t } = useTranslation();
   if (!items || items.length === 0) {
     return (
       <p className={cn("text-sm text-muted-foreground", className)}>
-        {emptyText}
+        {emptyText ?? t("panels.hardwareList.empty")}
       </p>
     );
   }
@@ -67,10 +78,10 @@ export function HardwareItemList({
   return (
     <div className={cn("space-y-3", className)}>
       {required.length > 0 && (
-        <Section title="Required" items={required} />
+        <Section title={t("panels.hardwareList.required")} items={required} />
       )}
       {optional.length > 0 && (
-        <Section title="Optional" items={optional} />
+        <Section title={t("panels.hardwareList.optional")} items={optional} />
       )}
     </div>
   );
@@ -92,7 +103,9 @@ function Section({ title, items }: { title: string; items: HardwareItem[] }) {
 }
 
 function HardwareItemRow({ item }: { item: HardwareItem }) {
-  const { tone, Icon, label } = STATE_META[item.state];
+  const { t } = useTranslation();
+  const { tone, Icon, labelKey } = STATE_META[item.state];
+  const label = t(labelKey);
   const [expanded, setExpanded] = useState(false);
   const Chevron = expanded ? ChevronDown : ChevronRight;
 
@@ -127,7 +140,7 @@ function HardwareItemRow({ item }: { item: HardwareItem }) {
                       : "border-muted-foreground/40 text-muted-foreground",
               )}
             >
-              {item.state}
+              {label}
             </span>
           </div>
           {item.detail && (
@@ -137,7 +150,7 @@ function HardwareItemRow({ item }: { item: HardwareItem }) {
           )}
           {item.fix_hint && item.state !== "ok" && (
             <p className="text-xs text-foreground/80 mt-1">
-              <span className="font-medium">Fix:</span> {item.fix_hint}
+              <span className="font-medium">{t("panels.hardwareList.fix")}</span> {item.fix_hint}
             </p>
           )}
         </div>
@@ -147,7 +160,7 @@ function HardwareItemRow({ item }: { item: HardwareItem }) {
           <Field name="id" value={item.id} mono />
           <Field
             name="required"
-            value={item.required ? "true (gates setup)" : "false (optional)"}
+            value={item.required ? t("panels.hardwareList.requiredTrue") : t("panels.hardwareList.requiredFalse")}
           />
           <Field name="state" value={item.state} mono />
           {item.detail && <Field name="detail" value={item.detail} />}

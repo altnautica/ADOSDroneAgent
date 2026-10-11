@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import i18n from "@/i18n";
 import { MspFcClient, type MspFirmware, type MspSetting } from "@/lib/msp/fc-settings";
 import type { CliSettingChange } from "@/lib/msp/types";
 import { loadParamMetadata } from "@/lib/param-metadata";
@@ -98,7 +99,7 @@ export function useMspSettings(
   const apply = useCallback(
     async (changes: CliSettingChange[]) => {
       const client = clientRef.current;
-      if (!client) return { ok: false, message: "not connected" };
+      if (!client) return { ok: false, message: i18n.t("fc.write.notConnected") };
       setSaving(true);
       try {
         const res = await client.apply(changes);

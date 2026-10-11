@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Loader2, Lock, RotateCw, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -99,6 +100,7 @@ export function PinSplash({
   /** Re-read the access state after a failed status read. */
   onRetry: () => void;
 }) {
+  const { t } = useTranslation();
   const mode = splashMode(status);
   const setMode = mode === "set";
   const [pin, setPin] = useState("");
@@ -131,7 +133,7 @@ export function PinSplash({
     if (!canSubmit) return;
     setError(null);
     if (setMode && pin !== confirm) {
-      setError("The PINs do not match.");
+      setError(t("access.splash.mismatch"));
       setConfirm("");
       return;
     }
@@ -151,8 +153,8 @@ export function PinSplash({
     } else if (res.kind === "wrong") {
       setError(
         res.remaining > 0
-          ? `Incorrect PIN. ${res.remaining} attempt${res.remaining === 1 ? "" : "s"} left.`
-          : "Incorrect PIN.",
+          ? t("access.splash.incorrectRemaining", { count: res.remaining })
+          : t("access.splash.incorrect"),
       );
     } else {
       setError(res.message);
@@ -173,11 +175,11 @@ export function PinSplash({
         <div className="mb-8 flex flex-col items-center gap-3 text-center">
           <div className="flex items-center gap-2">
             <img src="/brand.svg" alt="" className="h-8 w-8 rounded-md" />
-            <span className="text-lg font-semibold tracking-tight">ADOS</span>
+            <span className="text-lg font-semibold tracking-tight">{t("layout.header.brand")}</span>
           </div>
           <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-widest text-warn">
             <Lock className="h-3.5 w-3.5" />
-            Dashboard access
+            {t("access.splash.heading")}
           </div>
           {identityLine && (
             <p className="max-w-full truncate text-sm text-muted-foreground">{identityLine}</p>
@@ -186,10 +188,10 @@ export function PinSplash({
 
         {mode === "unknown" ? (
           <div className="flex flex-col items-center gap-4 text-center">
-            <p className="text-sm text-muted-foreground">Could not read access state.</p>
+            <p className="text-sm text-muted-foreground">{t("access.splash.unknownState")}</p>
             <Button variant="outline" onClick={onRetry}>
               <RotateCw className="h-4 w-4" />
-              Retry
+              {t("common.retry")}
             </Button>
           </div>
         ) : locked ? (
@@ -203,17 +205,17 @@ export function PinSplash({
           <div className="space-y-6">
             <p className="text-center text-sm text-muted-foreground">
               {setMode
-                ? "Set a PIN to unlock this dashboard from other devices on your network."
-                : "Enter the PIN to unlock this dashboard."}
+                ? t("access.splash.setPrompt")
+                : t("access.splash.enterPrompt")}
             </p>
 
             <div className="space-y-4">
               <div className="space-y-2">
                 {setMode && (
-                  <p className="text-center text-xs font-medium text-muted-foreground">Choose a 4–12 digit PIN</p>
+                  <p className="text-center text-xs font-medium text-muted-foreground">{t("access.splash.choose")}</p>
                 )}
                 <PinField
-                  label={setMode ? "New PIN" : "PIN"}
+                  label={setMode ? t("access.splash.newPin") : t("access.splash.pin")}
                   value={pin}
                   onChange={(v) => {
                     setPin(v);
@@ -227,9 +229,9 @@ export function PinSplash({
 
               {setMode && (
                 <div className="space-y-2">
-                  <p className="text-center text-xs font-medium text-muted-foreground">Confirm PIN</p>
+                  <p className="text-center text-xs font-medium text-muted-foreground">{t("access.splash.confirmPin")}</p>
                   <PinField
-                    label="Confirm PIN"
+                    label={t("access.splash.confirmPin")}
                     value={confirm}
                     onChange={(v) => {
                       setConfirm(v);
@@ -252,15 +254,15 @@ export function PinSplash({
               ) : (
                 <Lock className="h-4 w-4" />
               )}
-              {setMode ? "Set PIN" : "Unlock"}
+              {setMode ? t("access.splash.setPin") : t("access.splash.unlock")}
             </Button>
           </div>
         )}
 
         <p className="mt-8 text-center text-xs text-muted-foreground">
           {setMode
-            ? "The operator at the device, or Mission Control, can reset this PIN."
-            : "Forgot it? Reset the PIN from Mission Control or on the device."}
+            ? t("access.splash.setFooter")
+            : t("access.splash.enterFooter")}
         </p>
       </div>
     </div>

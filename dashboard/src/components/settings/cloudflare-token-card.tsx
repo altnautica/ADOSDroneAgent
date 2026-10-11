@@ -1,6 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRound } from "lucide-react";
 import { useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { RiskBadge } from "@/components/settings/risk-badge";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ interface SetupActionResult {
  *  starts empty, the value is masked while typed, cleared after submit, and a
  *  stored token is never read back or shown. */
 export function CloudflareTokenCard() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
@@ -31,14 +33,14 @@ export function CloudflareTokenCard() {
         body: { token_or_script: token.trim() },
       });
       if (res?.ok) {
-        toast.ok(res.message || "Cloudflare tunnel token installed.");
+        toast.ok(res.message || t("settings.shared.cfTokenInstalled"));
         setToken("");
         void qc.invalidateQueries({ queryKey: ["setup-status"] });
       } else {
-        toast.err(res?.message || "The token was not accepted.");
+        toast.err(res?.message || t("settings.shared.cfTokenRejected"));
       }
     } catch (err) {
-      toastFromError(err, "Could not install the tunnel token.");
+      toastFromError(err, t("settings.shared.cfTokenFailed"));
     } finally {
       setBusy(false);
     }
@@ -49,31 +51,31 @@ export function CloudflareTokenCard() {
       <CardContent className="pt-5 pb-5 space-y-4">
         <div className="flex items-center gap-2 text-sm font-semibold">
           <KeyRound className="h-4 w-4" />
-          Remote access
+          {t("settings.shared.cfTitle")}
           <RiskBadge tone="manual" />
         </div>
         <p className="text-xs text-muted-foreground">
-          Paste a Cloudflare tunnel token, or the whole{" "}
-          <code className="text-xs">cloudflared service install</code> command
-          from the Cloudflare dashboard. The agent stores it, enables the
-          tunnel and restarts it. A stored token is never shown here.
+          <Trans
+            i18nKey="settings.shared.cfDescription"
+            components={{ code: <code className="text-xs" /> }}
+          />
         </p>
         <div className="space-y-1.5">
-          <Label htmlFor="cf-token">Tunnel token</Label>
+          <Label htmlFor="cf-token">{t("settings.shared.cfTokenLabel")}</Label>
           <Input
             id="cf-token"
             type="password"
             autoComplete="off"
             spellCheck={false}
             value={token}
-            placeholder="Set a new token"
+            placeholder={t("settings.shared.cfTokenPlaceholder")}
             onChange={(e) => setToken(e.target.value)}
             disabled={busy}
           />
         </div>
         <div className="flex justify-end">
           <Button disabled={busy || token.trim() === ""} onClick={() => void handleSet()}>
-            Set token
+            {t("settings.shared.cfSetToken")}
           </Button>
         </div>
       </CardContent>

@@ -1,6 +1,8 @@
 // View model for the "Available extensions" catalog grid. Pure so the error
 // and update rules are unit-testable.
 
+import i18n from "@/i18n";
+
 export interface CatalogEntry {
   id: string;
   name: string;
@@ -38,11 +40,14 @@ export function catalogView(
   isPending: boolean,
 ): CatalogView {
   if (error && !data) {
-    const message = error instanceof Error && error.message ? error.message : "request failed";
-    return { kind: "error", message: `Could not load the extension catalog: ${message}` };
+    const message =
+      error instanceof Error && error.message ? error.message : i18n.t("extensions.catalog.requestFailed");
+    return { kind: "error", message: i18n.t("extensions.catalog.loadFailed", { message }) };
   }
   if (!data) return isPending ? { kind: "loading" } : { kind: "empty" };
-  const parseError = data.error ? `The bundled catalog could not be read: ${data.error}` : null;
+  const parseError = data.error
+    ? i18n.t("extensions.catalog.parseFailed", { message: data.error })
+    : null;
   const entries = data.plugins ?? [];
   if (entries.length === 0) {
     return parseError ? { kind: "error", message: parseError } : { kind: "empty" };

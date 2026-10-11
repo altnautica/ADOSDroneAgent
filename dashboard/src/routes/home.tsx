@@ -1,4 +1,5 @@
 import { CloudOff, Globe, RefreshCw } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
 import { CloudPanel } from "@/components/panels/cloud-panel";
@@ -61,6 +62,7 @@ function OfflineHome({
   refusal: string | null;
   onRetry: () => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="max-w-2xl mx-auto py-12">
       <div className="rounded-lg border border-border bg-muted/20 p-8 flex flex-col items-center text-center space-y-4">
@@ -69,24 +71,24 @@ function OfflineHome({
         </div>
         <div>
           <h1 className="text-xl font-semibold tracking-tight">
-            {refusal ? "Access not set up yet" : "Agent unreachable"}
+            {refusal ? t("home.offline.accessNotSetUp") : t("home.offline.unreachable")}
           </h1>
           {refusal ? (
             <p className="text-sm text-muted-foreground mt-2 max-w-sm">
-              The agent answered and declined the request: {refusal} Reload to
-              set up access with its PIN.
+              {t("home.offline.refusedBody", { refusal })}
             </p>
           ) : (
             <p className="text-sm text-muted-foreground mt-2 max-w-sm">
-              The dashboard couldn't reach the agent's REST API. Check that the
-              board is powered, on the network, and that{" "}
-              <span className="font-mono">ados-supervisor</span> is running.
+              <Trans
+                i18nKey="home.offline.unreachableBody"
+                components={{ mono: <span className="font-mono" /> }}
+              />
             </p>
           )}
         </div>
         <Button variant="outline" size="sm" onClick={onRetry}>
           <RefreshCw className="h-3.5 w-3.5" />
-          Retry
+          {t("common.retry")}
         </Button>
       </div>
     </div>
@@ -97,6 +99,7 @@ function OfflineHome({
 // radio is unrestricted (operator-responsibility framing), neutral when
 // a region is pinned. Links to the Region settings page.
 function RegionChip() {
+  const { t } = useTranslation();
   const status = useStatus();
   const reg = status.data?.regulatory as SetupStatus["regulatory"];
   const mode = modeFromStatus(reg);
@@ -108,8 +111,8 @@ function RegionChip() {
       to="/settings/region"
       title={
         unrestricted
-          ? "Unrestricted RF posture — operator responsible for local RF compliance. Click to pin a region."
-          : `Operating region pinned to ${region}. Click to change.`
+          ? t("home.region.unrestrictedTitle")
+          : t("home.region.pinnedTitle", { region })
       }
       className={cn(
         "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors",
@@ -119,22 +122,21 @@ function RegionChip() {
       )}
     >
       <Globe className="h-3.5 w-3.5" />
-      {unrestricted ? "Region: Unrestricted" : `Region: Pinned to ${region}`}
+      {unrestricted ? t("home.region.unrestricted") : t("home.region.pinned", { region })}
     </Link>
   );
 }
 
 function DroneHome() {
+  const { t } = useTranslation();
   return (
     <div className="space-y-4 max-w-[1400px]">
       <CockpitLauncher />
 
       <header className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Home</h1>
-          <p className="text-sm text-muted-foreground">
-            Live status, video, flight controller, and 60s telemetry.
-          </p>
+          <h1 className="text-xl font-semibold tracking-tight">{t("home.title")}</h1>
+          <p className="text-sm text-muted-foreground">{t("home.droneSubtitle")}</p>
         </div>
         <RegionChip />
       </header>
@@ -166,12 +168,13 @@ function DroneHome() {
 }
 
 function GroundHome({ role }: { role: "direct" | "relay" | "receiver" }) {
+  const { t } = useTranslation();
   const subtitle =
     role === "receiver"
-      ? "Aggregating relays into one stream. Live receive metrics, mesh state, and per-source FEC."
+      ? t("home.groundSubtitle.receiver")
       : role === "relay"
-        ? "Forwarding the drone link. Live receive metrics, mesh state, and gateway election."
-        : "Direct ground node. Live receive metrics for the drone link.";
+        ? t("home.groundSubtitle.relay")
+        : t("home.groundSubtitle.direct");
 
   return (
     <div className="space-y-4 max-w-[1400px]">
@@ -179,7 +182,7 @@ function GroundHome({ role }: { role: "direct" | "relay" | "receiver" }) {
 
       <header className="flex items-start justify-between gap-4">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">Home</h1>
+          <h1 className="text-xl font-semibold tracking-tight">{t("home.title")}</h1>
           <p className="text-sm text-muted-foreground">{subtitle}</p>
         </div>
         <RegionChip />

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Loader2, RefreshCw, Wifi, WifiOff } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,6 +31,7 @@ const SCAN_KEY = ["wifi", "scan"] as const;
 const SAVED_KEY = ["wifi", "saved"] as const;
 
 export function WifiPanel() {
+  const { t } = useTranslation();
   const qc = useQueryClient();
 
   const status = useQuery({
@@ -69,19 +71,19 @@ export function WifiPanel() {
   const leaveMutation = useMutation({
     mutationFn: leaveWifi,
     onSuccess: () => {
-      toast.ok("Disconnected.");
+      toast.ok(t("wifi.panel.disconnected"));
       refreshAll();
     },
-    onError: (err) => toastFromError(err, "Disconnect failed."),
+    onError: (err) => toastFromError(err, t("wifi.panel.disconnectFailed")),
   });
 
   const forgetMutation = useMutation({
     mutationFn: (name: string) => forgetWifi(name),
     onSuccess: () => {
-      toast.ok("Network forgotten.");
+      toast.ok(t("wifi.panel.forgotten"));
       refreshAll();
     },
-    onError: (err) => toastFromError(err, "Forget failed."),
+    onError: (err) => toastFromError(err, t("wifi.panel.forgetFailed")),
   });
 
   const autoconnectMutation = useMutation({
@@ -90,7 +92,7 @@ export function WifiPanel() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: SAVED_KEY });
     },
-    onError: (err) => toastFromError(err, "Auto-connect toggle failed."),
+    onError: (err) => toastFromError(err, t("wifi.panel.autoconnectFailed")),
   });
 
   const savedByName = useMemo(() => {
@@ -160,31 +162,31 @@ export function WifiPanel() {
           <div className="flex items-start justify-between gap-3">
             <div className="space-y-1 min-w-0">
               <div className="flex items-center gap-2 text-sm font-semibold">
-                Wi-Fi client
+                {t("wifi.panel.title")}
                 {status.isLoading ? (
                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
                 ) : isConnected ? (
                   <Badge variant="ok" className="font-normal">
                     <Wifi className="h-3 w-3 mr-1" />
-                    connected
+                    {t("wifi.network.connected")}
                   </Badge>
                 ) : (
                   <Badge variant="default" className="font-normal">
                     <WifiOff className="h-3 w-3 mr-1" />
-                    not connected
+                    {t("wifi.panel.notConnected")}
                   </Badge>
                 )}
               </div>
               <p className="text-xs text-muted-foreground">
                 {isConnected && currentStatus?.ssid
-                  ? `Connected to "${currentStatus.ssid}"${
+                  ? `${t("wifi.panel.connectedTo", { ssid: currentStatus.ssid })}${
                       currentStatus.ip ? ` · ${currentStatus.ip}` : ""
                     }${
                       currentStatus.signal != null
                         ? ` · ${currentStatus.signal}%`
                         : ""
                     }`
-                  : "Pick a nearby network to join, or add a hidden SSID."}
+                  : t("wifi.panel.pickHint")}
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
@@ -195,7 +197,7 @@ export function WifiPanel() {
                   disabled={leaveMutation.isPending}
                   onClick={() => leaveMutation.mutate()}
                 >
-                  Disconnect
+                  {t("wifi.panel.disconnect")}
                 </Button>
               )}
               <Button
@@ -211,7 +213,7 @@ export function WifiPanel() {
                     scanning ? "animate-spin" : ""
                   }`}
                 />
-                {scanning ? "Scanning…" : "Refresh"}
+                {scanning ? t("wifi.panel.scanning") : t("wifi.panel.refresh")}
               </Button>
             </div>
           </div>
@@ -220,7 +222,7 @@ export function WifiPanel() {
           {savedNetworks.length > 0 && (
             <div className="space-y-2">
               <div className="text-xs uppercase tracking-wider text-muted-foreground">
-                Saved networks
+                {t("wifi.panel.savedNetworks")}
               </div>
               <div className="rounded-md border border-border divide-y divide-border">
                 {savedNetworks.map((c) => (
@@ -243,17 +245,17 @@ export function WifiPanel() {
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
               <div className="text-xs uppercase tracking-wider text-muted-foreground">
-                Nearby networks
+                {t("wifi.panel.nearbyNetworks")}
               </div>
               {networks.length > 0 && (
                 <div className="text-[11px] text-muted-foreground font-mono">
-                  {networks.length} found
+                  {t("wifi.panel.found", { count: networks.length })}
                 </div>
               )}
             </div>
             {networks.length === 0 && !scanning && (
               <div className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
-                No networks found. Tap Refresh to scan again.
+                {t("wifi.panel.noNetworks")}
               </div>
             )}
             {networks.length > 0 && (
@@ -285,17 +287,17 @@ export function WifiPanel() {
         onOpenChange={(open) => {
           if (!open) setForgetTarget(null);
         }}
-        title="Forget this network?"
+        title={t("wifi.panel.forgetTitle")}
         description={
           forgetTarget ? (
-            <>
-              Remove the saved credentials for{" "}
-              <span className="font-mono font-medium">{forgetTarget.name}</span>.
-              The agent will not auto-reconnect until you join it again.
-            </>
+            <Trans
+              i18nKey="wifi.panel.forgetDescription"
+              values={{ name: forgetTarget.name }}
+              components={{ name: <span className="font-mono font-medium" /> }}
+            />
           ) : null
         }
-        confirmLabel="Forget"
+        confirmLabel={t("wifi.saved.forget")}
         destructive
         onConfirm={async () => {
           if (!forgetTarget) return;

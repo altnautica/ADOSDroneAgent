@@ -1,4 +1,5 @@
 import { Layers } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import {
   Card,
@@ -27,6 +28,7 @@ interface ReceiverRelays {
 }
 
 export function SourcesPanel() {
+  const { t } = useTranslation();
   const combined = useResource<ReceiverCombined>(
     "gs-receiver-combined",
     "/api/v1/ground-station/wfb/receiver/combined",
@@ -47,29 +49,29 @@ export function SourcesPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Layers className="h-3.5 w-3.5" />
-          Sources
+          {t("panels.sources.title")}
           {stale && (
             <span className="ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-warn/40 text-warn">
-              stale
+              {t("panels.sources.stale")}
             </span>
           )}
         </CardTitle>
       </CardHeader>
       <CardContent>
         {combined.isError ? (
-          <p className="text-xs text-destructive">Could not read the receiver state.</p>
+          <p className="text-xs text-destructive">{t("panels.sources.readError")}</p>
         ) : (
           <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-            <div className="text-xs text-muted-foreground">combined output</div>
+            <div className="text-xs text-muted-foreground">{t("panels.sources.combinedOutput")}</div>
             <div className="font-mono">{fmtBitrate(c?.output_kbps)}</div>
 
-            <div className="text-xs text-muted-foreground">fragments (dedup)</div>
+            <div className="text-xs text-muted-foreground">{t("panels.sources.fragmentsDedup")}</div>
             <div className="font-mono">{c?.fragments_after_dedup?.toLocaleString() ?? "—"}</div>
 
-            <div className="text-xs text-muted-foreground">FEC repaired</div>
+            <div className="text-xs text-muted-foreground">{t("panels.sources.fecRepaired")}</div>
             <div className="font-mono">{c?.fec_repaired?.toLocaleString() ?? "—"}</div>
 
-            <div className="text-xs text-muted-foreground">relays</div>
+            <div className="text-xs text-muted-foreground">{t("panels.sources.relays")}</div>
             <div className="font-mono">{perSource ? perSource.length : "—"}</div>
           </div>
         )}
@@ -79,19 +81,19 @@ export function SourcesPanel() {
             {perSource.map((r) => (
               <li key={r.mac} className="flex justify-between gap-2 text-muted-foreground">
                 <span className="truncate">{r.mac}</span>
-                <span>{r.fragments.toLocaleString()} frags</span>
+                <span>{t("panels.sources.frags", { frags: r.fragments.toLocaleString() })}</span>
               </li>
             ))}
           </ul>
         )}
         {perSource && perSource.length === 0 && (
           <p className="text-xs text-muted-foreground pt-3 mt-3 border-t border-border/50">
-            No relay is contributing right now.
+            {t("panels.sources.noRelayContributing")}
           </p>
         )}
         {!perSource && !relays.isLoading && (
           <p className="text-xs text-muted-foreground pt-3 mt-3 border-t border-border/50">
-            The receive loop is not reporting, so relay contributions are unknown.
+            {t("panels.sources.notReporting")}
           </p>
         )}
       </CardContent>

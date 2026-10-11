@@ -3,6 +3,8 @@
 
 import { Cloud, Cpu, KeyRound, Radio, Video, Wifi, type LucideIcon } from "lucide-react";
 
+import i18n from "@/i18n";
+
 import { mspVariant } from "./fc-firmware";
 import { summarizeHardware } from "./hardware-summary";
 import type { DashboardSnapshot, SetupStatus } from "./types";
@@ -36,20 +38,20 @@ function fcTile(snap: DashboardSnapshot | undefined, fcVariant: TileInputs["fcVa
   if (!fcConnected && variant) {
     const reachable = fcReachable === true;
     return {
-      label: "FC",
+      label: i18n.t("panels.tiles.fc"),
       icon: Radio,
-      value: reachable ? "linked" : "off",
-      sub: variant === "betaflight" ? "betaflight · msp" : "inav · msp",
+      value: reachable ? i18n.t("panels.tiles.linked") : i18n.t("panels.tiles.off"),
+      sub: variant === "betaflight" ? i18n.t("panels.tiles.betaflightMsp") : i18n.t("panels.tiles.inavMsp"),
       severity: reachable ? "ok" : "idle",
     };
   }
   const sats = snap?.fc?.gps?.satellites_visible ?? null;
   const hasFix = sats != null && sats > 0;
   return {
-    label: "MAV",
+    label: i18n.t("panels.tiles.mav"),
     icon: Radio,
-    value: hasFix ? String(sats) : fcConnected ? "linked" : "off",
-    sub: fcConnected ? (hasFix ? "sats" : "waiting for fix") : "no fc",
+    value: hasFix ? String(sats) : fcConnected ? i18n.t("panels.tiles.linked") : i18n.t("panels.tiles.off"),
+    sub: fcConnected ? (hasFix ? i18n.t("panels.tiles.sats") : i18n.t("panels.tiles.waitingForFix")) : i18n.t("panels.tiles.noFc"),
     severity: fcConnected ? "ok" : "idle",
   };
 }
@@ -70,51 +72,52 @@ function hwTile(status: SetupStatus | undefined): Tile {
     .map((i) => i.label)
     .join(", ");
   return {
-    label: "HW",
+    label: i18n.t("panels.tiles.hw"),
     icon: Cpu,
     value: items.length === 0 ? "—" : `${sum.requiredOk}/${sum.requiredTotal}`,
-    sub: items.length === 0 ? "scanning" : failing || "all required ok",
+    sub: items.length === 0 ? i18n.t("panels.tiles.scanning") : failing || i18n.t("panels.tiles.allRequiredOk"),
     severity,
-    title: failing ? `Failing required: ${failing}` : undefined,
+    title: failing ? i18n.t("panels.tiles.failingRequired", { failing }) : undefined,
   };
 }
 
 function pairTile(cloudMode: string | null, code: string, pairing: TileInputs["pairing"]): Tile {
+  const label = i18n.t("panels.tiles.pair");
   // LAN pairing works in every cloud mode, so a paired node reads paired first.
   if (pairing?.paired === true) {
-    return { label: "PAIR", icon: KeyRound, value: "paired", sub: "linked", severity: "ok" };
+    return { label, icon: KeyRound, value: i18n.t("panels.tiles.paired"), sub: i18n.t("panels.tiles.linked"), severity: "ok" };
   }
   // In local mode with no pairing code there is nothing to show.
   if (cloudMode === "local" && !code) {
-    return { label: "PAIR", icon: KeyRound, value: "n/a", sub: "local mode", severity: "idle" };
+    return { label, icon: KeyRound, value: i18n.t("panels.tiles.notApplicable"), sub: i18n.t("panels.tiles.localMode"), severity: "idle" };
   }
   if (pairing?.paired === false) {
     return code
-      ? { label: "PAIR", icon: KeyRound, value: code, sub: "code rotates", severity: "info" }
-      : { label: "PAIR", icon: KeyRound, value: "—", sub: "unpaired", severity: "idle" };
+      ? { label, icon: KeyRound, value: code, sub: i18n.t("panels.tiles.codeRotates"), severity: "info" }
+      : { label, icon: KeyRound, value: "—", sub: i18n.t("panels.tiles.unpaired"), severity: "idle" };
   }
   // Pairing state not read yet: claim nothing.
-  return { label: "PAIR", icon: KeyRound, value: "—", sub: "—", severity: "idle" };
+  return { label, icon: KeyRound, value: "—", sub: "—", severity: "idle" };
 }
 
 export function buildTiles({ snapshot: s, status: cfg, fcVariant, fcReachable, pairing }: TileInputs): Tile[] {
   const vState = s?.video?.state ?? "unknown";
   const vBitrate = s?.video?.bitrate_kbps ?? 0;
   const vid: Tile = {
-    label: "VID",
+    label: i18n.t("panels.tiles.vid"),
     icon: Video,
     value: vBitrate > 0 ? fmtBitrate(vBitrate) : vState,
-    sub: vBitrate > 0 ? "live" : vState,
+    sub: vBitrate > 0 ? i18n.t("panels.tiles.live") : vState,
     severity: severityFromState(vState),
   };
 
   const uplink = cfg?.network?.uplink_kind ?? "—";
   const rssi = cfg?.network?.rssi_dbm ?? null;
   const net: Tile = {
-    label: "NET",
+    label: i18n.t("panels.tiles.net"),
     icon: Wifi,
     value: typeof uplink === "string" ? uplink : "—",
-    sub: rssi != null ? `${rssi} dBm` : uplink && uplink !== "—" ? "online" : "—",
+    sub: rssi != null ? `${rssi} dBm` : uplink && uplink !== "—" ? i18n.t("panels.tiles.online") : "—",
     severity: uplink && uplink !== "—" ? "ok" : "idle",
   };
 
@@ -122,10 +125,10 @@ export function buildTiles({ snapshot: s, status: cfg, fcVariant, fcReachable, p
   // not reported to this dashboard, so the tile states the posture only.
   const cloudMode = s?.cloud?.mode ?? cfg?.cloud_choice?.mode ?? null;
   const cld: Tile = {
-    label: "CLD",
+    label: i18n.t("panels.tiles.cld"),
     icon: Cloud,
     value: cloudMode ?? "—",
-    sub: cloudMode === "local" ? "no relay" : cloudMode ? "relay configured" : "—",
+    sub: cloudMode === "local" ? i18n.t("panels.tiles.noRelay") : cloudMode ? i18n.t("panels.tiles.relayConfigured") : "—",
     severity: "idle",
   };
 

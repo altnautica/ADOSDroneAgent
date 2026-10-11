@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { RiskBadge } from "@/components/settings/risk-badge";
@@ -14,6 +15,7 @@ const LOG_LEVELS = ["debug", "info", "warning", "error", "critical"] as const;
 type LogLevel = (typeof LOG_LEVELS)[number];
 
 export function AdvancedSettings() {
+  const { t } = useTranslation();
   const config = useConfig();
 
   const initialLevel = (config.data?.logging?.level?.toLowerCase() as LogLevel) ?? "info";
@@ -41,13 +43,13 @@ export function AdvancedSettings() {
       const section = res.sections.advanced;
       if (!res.overall || !section?.ok) {
         setLogLevel(previous);
-        toast.err(section?.message ?? "Log level update failed.");
+        toast.err(section?.message ?? t("settingsMore.advanced.logLevelFailed"));
       } else {
-        toast.ok(section.message || `Log level set to ${next}.`);
+        toast.ok(section.message || t("settingsMore.advanced.logLevelSet", { level: next }));
       }
     } catch (err) {
       setLogLevel(previous);
-      toastFromError(err, "Log level update failed.");
+      toastFromError(err, t("settingsMore.advanced.logLevelFailed"));
     }
   }
 
@@ -59,13 +61,13 @@ export function AdvancedSettings() {
       });
       const section = res.sections.advanced;
       if (res.overall && section?.ok) {
-        toast.ok(section.message || "Board override saved.");
+        toast.ok(section.message || t("settingsMore.advanced.overrideSaved"));
         config.refetch();
       } else {
-        toast.err(section?.message ?? "Apply failed.");
+        toast.err(section?.message ?? t("settingsMore.cloud.applyFailed"));
       }
     } catch (err) {
-      toastFromError(err, "Apply failed.");
+      toastFromError(err, t("settingsMore.cloud.applyFailed"));
     } finally {
       setBusy(false);
     }
@@ -89,11 +91,11 @@ export function AdvancedSettings() {
       <Card>
         <CardContent className="pt-5 pb-5 space-y-3">
           <div className="flex items-center gap-2 text-sm font-semibold">
-            Log level
+            {t("settingsMore.advanced.logLevel")}
             <RiskBadge tone="auto" />
           </div>
           <p className="text-xs text-muted-foreground">
-            Verbosity for the structured logger. Saved on selection.
+            {t("settingsMore.advanced.logLevelHint")}
           </p>
           <div className="flex flex-wrap gap-2">
             {LOG_LEVELS.map((lvl) => {
@@ -122,21 +124,20 @@ export function AdvancedSettings() {
       <Card>
         <CardContent className="pt-5 pb-5 space-y-3">
           <div className="flex items-center gap-2 text-sm font-semibold">
-            Board override
+            {t("settingsMore.advanced.boardOverride")}
             <RiskBadge tone="manual" />
           </div>
           <p className="text-xs text-muted-foreground">
-            Force the HAL detector to use a specific board profile slug.
-            Leave blank for auto-detect. Wrong values can disable peripherals.
+            {t("settingsMore.advanced.boardOverrideHint")}
           </p>
           <div className="space-y-2">
-            <Label htmlFor="board-override">Slug</Label>
+            <Label htmlFor="board-override">{t("settingsMore.advanced.slug")}</Label>
             <Input
               id="board-override"
               spellCheck={false}
               autoComplete="off"
               maxLength={64}
-              placeholder="auto-detect"
+              placeholder={t("settingsMore.advanced.autoDetect")}
               value={boardOverride}
               onChange={(e) => {
                 setBoardOverride(e.target.value);
@@ -159,7 +160,7 @@ export function AdvancedSettings() {
                 if (validateOverride()) setOverrideConfirmOpen(true);
               }}
             >
-              Save override
+              {t("settingsMore.advanced.saveOverride")}
             </Button>
           </div>
         </CardContent>
@@ -168,19 +169,15 @@ export function AdvancedSettings() {
       <ConfirmDialog
         open={overrideConfirmOpen}
         onOpenChange={setOverrideConfirmOpen}
-        title="Override the detected board?"
+        title={t("settingsMore.advanced.confirmTitle")}
         description={
-          <>
-            HAL will use{" "}
-            <span className="font-mono font-medium">
-              {boardOverride || "auto-detect"}
-            </span>{" "}
-            on the next config reload. If the slug is wrong, peripherals
-            keyed on the board profile (display, GPIO, encoder API) may
-            stop working until you clear the override.
-          </>
+          <Trans
+            i18nKey="settingsMore.advanced.confirmBody"
+            values={{ slug: boardOverride || t("settingsMore.advanced.autoDetect") }}
+            components={{ slug: <span className="font-mono font-medium" /> }}
+          />
         }
-        confirmLabel="Apply override"
+        confirmLabel={t("settingsMore.advanced.applyOverride")}
         destructive
         onConfirm={applyOverride}
       />

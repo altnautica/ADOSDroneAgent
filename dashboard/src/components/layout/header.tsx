@@ -1,5 +1,6 @@
 import { Settings as SettingsIcon, Menu, Copy, Check } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
 import { Badge } from "@/components/ui/badge";
@@ -26,6 +27,7 @@ function profileVariant(profile?: string) {
  *  publishing (`/api/pairing/info.mdns_host`, already `.local`-qualified), never one
  *  built from the operator's device label. */
 function CopyHost({ host }: { host: string }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   const onCopy = async () => {
@@ -54,12 +56,13 @@ function CopyHost({ host }: { host: string }) {
           )}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="bottom">copy {host}</TooltipContent>
+      <TooltipContent side="bottom">{t("layout.header.copyHost", { host })}</TooltipContent>
     </Tooltip>
   );
 }
 
 export function Header() {
+  const { t } = useTranslation();
   const identity = useNodeIdentity();
   const heartbeat = useHeartbeat();
   const toggleMobileNav = useUiStore((s) => s.toggleMobileNav);
@@ -80,7 +83,7 @@ export function Header() {
           variant="ghost"
           size="icon"
           className="lg:hidden"
-          aria-label="toggle navigation"
+          aria-label={t("layout.header.toggleNavigation")}
           onClick={toggleMobileNav}
         >
           <Menu />
@@ -89,7 +92,7 @@ export function Header() {
         <Link
           to="/"
           className="flex items-center gap-2.5 group"
-          aria-label="ADOS dashboard home"
+          aria-label={t("layout.header.homeAria")}
         >
           <img
             src="/brand.svg"
@@ -98,7 +101,7 @@ export function Header() {
             className="h-7 w-7 rounded-md"
           />
           <span className="font-semibold text-base tracking-tight group-hover:text-primary transition-colors">
-            ADOS
+            {t("layout.header.brand")}
           </span>
         </Link>
 
@@ -108,7 +111,7 @@ export function Header() {
               "h-2 w-2 rounded-full",
               online ? "bg-ok" : "bg-destructive",
             )}
-            aria-label={online ? "online" : "offline"}
+            aria-label={online ? t("layout.header.online") : t("layout.header.offline")}
           />
           {deviceName && <span className="text-sm tracking-tight truncate">{deviceName}</span>}
           {mdnsHost && <CopyHost host={mdnsHost} />}
@@ -119,21 +122,21 @@ export function Header() {
         </div>
 
         <div className="hidden lg:flex items-center gap-3 ml-auto text-xs text-muted-foreground font-mono">
-          {board && <span title="board">{board}</span>}
-          {version && <span title="version">{version}</span>}
-          <span title="uptime">up {uptime}</span>
+          {board && <span title={t("layout.header.board")}>{board}</span>}
+          {version && <span title={t("layout.header.version")}>{version}</span>}
+          <span title={t("layout.header.uptimeTitle")}>{t("layout.header.uptime", { uptime })}</span>
         </div>
 
         <div className="ml-auto lg:ml-0 flex items-center gap-1">
           <Tooltip>
             <TooltipTrigger asChild>
               <Button asChild variant="ghost" size="icon">
-                <Link to="/settings" aria-label="settings">
+                <Link to="/settings" aria-label={t("layout.header.settings")}>
                   <SettingsIcon />
                 </Link>
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="bottom">settings</TooltipContent>
+            <TooltipContent side="bottom">{t("layout.header.settings")}</TooltipContent>
           </Tooltip>
           <ThemeToggle />
         </div>

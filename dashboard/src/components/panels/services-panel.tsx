@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Cog } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 
 import {
   Card,
@@ -26,6 +27,7 @@ interface ServicesResponse {
 const ADOS_PREFIX = "ados-";
 
 export function ServicesPanel() {
+  const { t } = useTranslation();
   const q = useQuery<ServicesResponse>({
     queryKey: ["services"],
     queryFn: ({ signal }) =>
@@ -42,22 +44,24 @@ export function ServicesPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Cog className="h-3.5 w-3.5" />
-          Services
+          {t("panels.services.title")}
         </CardTitle>
       </CardHeader>
       <CardContent>
         {q.isLoading && !q.data && (
-          <p className="text-xs text-muted-foreground">loading…</p>
+          <p className="text-xs text-muted-foreground">{t("panels.services.loading")}</p>
         )}
         {q.isError && (
           <p className="text-xs text-destructive">
-            services unavailable
+            {t("panels.services.unavailable")}
           </p>
         )}
         {q.data && services.length === 0 && (
           <p className="text-xs text-muted-foreground">
-            service inventory unavailable — check{" "}
-            <span className="font-mono">journalctl -u ados-supervisor</span>
+            <Trans
+              i18nKey="panels.services.inventoryUnavailable"
+              components={{ mono: <span className="font-mono" /> }}
+            />
           </p>
         )}
         <ul className="divide-y divide-border/50">

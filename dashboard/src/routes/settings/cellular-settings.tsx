@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -18,6 +19,8 @@ import {
 import { toast, toastFromError } from "@/lib/toast";
 
 const POLL_MS = 10_000;
+// Example APN value, not copy.
+const APN_PLACEHOLDER = "internet";
 
 function ReadRow({ label, value }: { label: string; value: string }) {
   return (
@@ -65,6 +68,7 @@ function ApplyField({
   validate?: (draft: string) => string | null;
   onApply: (value: string) => Promise<void>;
 }) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -102,7 +106,7 @@ function ApplyField({
           disabled={disabled || saving || !dirty || error !== null}
           onClick={() => void apply()}
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? t("settings.shared.saving") : t("settings.shared.save")}
         </Button>
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
@@ -114,6 +118,7 @@ function ApplyField({
 /** Ground-station branch: live modem presence + facts + usage, and the config
  * writes whose response is the read-back. */
 function GsCellular() {
+  const { t } = useTranslation();
   const [modem, setModemState] = useState<ModemView | null>(null);
   const [presence, setPresence] = useState<ModemPresence | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -161,9 +166,9 @@ function GsCellular() {
     setTogglePending(true);
     try {
       await writeModem({ enabled });
-      toast.ok(enabled ? "Modem enabled." : "Modem disabled.");
+      toast.ok(enabled ? t("settings.cellular.modemEnabled") : t("settings.cellular.modemDisabled"));
     } catch (err) {
-      toastFromError(err, "Could not update the modem.");
+      toastFromError(err, t("settings.cellular.modemUpdateFailed"));
     } finally {
       setTogglePending(false);
     }
@@ -172,42 +177,42 @@ function GsCellular() {
   async function applyApn(apn: string) {
     try {
       await writeModem({ apn });
-      toast.ok("APN saved.");
+      toast.ok(t("settings.cellular.apnSaved"));
     } catch (err) {
-      toastFromError(err, "Could not save the APN.");
+      toastFromError(err, t("settings.cellular.apnFailed"));
       throw err;
     }
   }
 
   async function applyCap(raw: string) {
     const gb = parseCapGb(raw);
-    if (gb === null) throw new Error("Enter a non-negative number of GB (0 clears the cap).");
+    if (gb === null) throw new Error(t("settings.cellular.capInvalidHint"));
     try {
       await writeModem({ cap_gb: gb });
-      toast.ok(gb > 0 ? "Data cap saved." : "Data cap cleared.");
+      toast.ok(gb > 0 ? t("settings.cellular.capSaved") : t("settings.cellular.capCleared"));
     } catch (err) {
-      toastFromError(err, "Could not save the data cap.");
+      toastFromError(err, t("settings.cellular.capFailed"));
       throw err;
     }
   }
 
   // Presence — unknown renders unknown; the mmcli sentinels never become facts.
   const presenceText = (() => {
-    if (!presence) return "unknown";
-    if (presence.present === true) return "detected";
+    if (!presence) return t("settings.shared.unknown");
+    if (presence.present === true) return t("settings.cellular.presenceDetected");
     switch (presence.reason) {
       case "no_modem":
-        return "no modem detected";
+        return t("settings.cellular.presenceNoModem");
       case "modemmanager_not_installed":
-        return "ModemManager not installed";
+        return t("settings.cellular.presenceNoModemManager");
       default:
         // `not_probed` and any unknown reason: nothing was looked at.
-        return "unknown";
+        return t("settings.shared.unknown");
     }
   })();
 
   const stateText =
-    typeof modem?.state === "string" && modem.state.length > 0 ? modem.state : "unknown";
+    typeof modem?.state === "string" && modem.state.length > 0 ? modem.state : t("settings.shared.unknown");
   const operator =
     typeof modem?.operator === "string" && modem.operator.length > 0 ? modem.operator : null;
   const technology =
@@ -228,36 +233,36 @@ function GsCellular() {
     <div className="space-y-6">
       {loadFailed && !modem && (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-          Could not read the modem from this node.
+          {t("settings.cellular.readFailed")}
         </div>
       )}
 
       {/* Presence + reported connection facts — read-only. */}
       <Card>
         <CardContent className="pt-5 pb-5 space-y-2">
-          <div className="text-sm font-semibold mb-1">Modem</div>
-          <ReadRow label="Presence" value={presenceText} />
+          <div className="text-sm font-semibold mb-1">{t("settings.cellular.modemTitle")}</div>
+          <ReadRow label={t("settings.cellular.presence")} value={presenceText} />
           {modem && (
             <>
-              <ReadRow label="State" value={stateText} />
-              {operator && <ReadRow label="Operator" value={operator} />}
-              {technology && <ReadRow label="Technology" value={technology} />}
+              <ReadRow label={t("settings.cellular.state")} value={stateText} />
+              {operator && <ReadRow label={t("settings.cellular.operator")} value={operator} />}
+              {technology && <ReadRow label={t("settings.cellular.technology")} value={technology} />}
               {signalQuality !== null && (
-                <ReadRow label="Signal" value={`${signalQuality}%`} />
+                <ReadRow label={t("settings.cellular.signal")} value={`${signalQuality}%`} />
               )}
               {typeof modem.ip === "string" && modem.ip.length > 0 && (
-                <ReadRow label="IP" value={modem.ip} />
+                <ReadRow label={t("settings.cellular.ip")} value={modem.ip} />
               )}
               <div className="pt-1">
                 {capMb !== null && capMb > 0 ? (
                   <ReadRow
-                    label="Data used"
+                    label={t("settings.cellular.dataUsed")}
                     value={`${usedMb ?? 0} / ${capMb} MB (${
                       percent !== null ? percent.toFixed(0) : "0"
                     }%)`}
                   />
                 ) : (
-                  <p className="text-[11px] text-muted-foreground">No data cap set.</p>
+                  <p className="text-[11px] text-muted-foreground">{t("settings.cellular.noCap")}</p>
                 )}
               </div>
             </>
@@ -271,26 +276,24 @@ function GsCellular() {
           <CardContent className="pt-5 pb-5 space-y-5">
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-1 min-w-0">
-                <div className="text-sm font-medium">Cellular uplink</div>
+                <div className="text-sm font-medium">{t("settings.cellular.uplinkTitle")}</div>
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  Bring the modem up as an uplink leg. It only carries traffic
-                  when it is higher in the failover order than a connected wired
-                  or Wi-Fi link.
+                  {t("settings.cellular.uplinkHintGs")}
                 </p>
               </div>
               <Switch
                 checked={modem.enabled === true}
                 onCheckedChange={(v) => void onToggleEnabled(v)}
                 disabled={togglePending}
-                aria-label="Cellular uplink"
+                aria-label={t("settings.cellular.uplinkTitle")}
               />
             </div>
 
             <ApplyField
               id="cellular-apn"
-              label="APN"
-              hint="The carrier access point name for your SIM (e.g. internet)."
-              placeholder="internet"
+              label={t("settings.cellular.apn")}
+              hint={t("settings.cellular.apnHintExample")}
+              placeholder={APN_PLACEHOLDER}
               current={typeof modem.apn === "string" ? modem.apn : ""}
               disabled={false}
               onApply={applyApn}
@@ -298,12 +301,12 @@ function GsCellular() {
 
             <ApplyField
               id="cellular-cap"
-              label="Data cap (GB)"
-              hint="Warn once the modem has used this much data. 0 disables the cap."
+              label={t("settings.cellular.capLabel")}
+              hint={t("settings.cellular.capHint")}
               placeholder="0"
               current={capMbToGb(capMb)}
               disabled={false}
-              validate={(v) => (parseCapGb(v) === null ? "Enter a non-negative number of GB." : null)}
+              validate={(v) => (parseCapGb(v) === null ? t("settings.cellular.capInvalid") : null)}
               onApply={applyCap}
             />
           </CardContent>
@@ -316,6 +319,7 @@ function GsCellular() {
 /** Non-ground-station branch: no live modem daemon, so the config-backed
  * cellular keys only, with an honest note. */
 function ConfigOnlyCellular() {
+  const { t } = useTranslation();
   const config = useConfig();
   const [enabled, setEnabled] = useState(false);
   const [apn, setApn] = useState("");
@@ -335,11 +339,11 @@ function ConfigOnlyCellular() {
     setEnabled(next);
     try {
       await putConfigChecked("network.cellular.enabled", String(next));
-      toast.ok(next ? "Cellular enabled." : "Cellular disabled.");
+      toast.ok(next ? t("settings.cellular.cellularEnabled") : t("settings.cellular.cellularDisabled"));
       config.refetch();
     } catch (err) {
       setEnabled(previous);
-      toastFromError(err, "Could not update the cellular setting.");
+      toastFromError(err, t("settings.cellular.cellularUpdateFailed"));
     }
   }
 
@@ -347,10 +351,10 @@ function ConfigOnlyCellular() {
     setApnBusy(true);
     try {
       await putConfigChecked("network.cellular.apn", apn.trim());
-      toast.ok("APN saved.");
+      toast.ok(t("settings.cellular.apnSaved"));
       config.refetch();
     } catch (err) {
-      toastFromError(err, "Could not save the APN.");
+      toastFromError(err, t("settings.cellular.apnFailed"));
     } finally {
       setApnBusy(false);
     }
@@ -360,9 +364,7 @@ function ConfigOnlyCellular() {
     <div className="space-y-6">
       <Card>
         <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-          This node has no live modem manager, so signal and usage are not
-          reported here. You can still configure the cellular uplink keys below;
-          a ground-station node shows live modem status.
+          {t("settings.cellular.noModemManagerNote")}
         </CardContent>
       </Card>
 
@@ -370,25 +372,25 @@ function ConfigOnlyCellular() {
         <CardContent className="pt-5 pb-5 space-y-5">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-1 min-w-0">
-              <div className="text-sm font-medium">Cellular uplink</div>
+              <div className="text-sm font-medium">{t("settings.cellular.uplinkTitle")}</div>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                Enable an attached USB cellular modem as an uplink.
+                {t("settings.cellular.uplinkHintConfig")}
               </p>
             </div>
             <Switch
               checked={enabled}
               onCheckedChange={(v) => void applyEnabled(v)}
-              aria-label="Cellular uplink"
+              aria-label={t("settings.cellular.uplinkTitle")}
             />
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="cellular-apn-config">APN</Label>
+            <Label htmlFor="cellular-apn-config">{t("settings.cellular.apn")}</Label>
             <div className="flex items-center gap-3">
               <Input
                 id="cellular-apn-config"
                 value={apn}
-                placeholder="internet"
+                placeholder={APN_PLACEHOLDER}
                 onChange={(e) => setApn(e.target.value)}
                 className="font-mono"
               />
@@ -397,11 +399,11 @@ function ConfigOnlyCellular() {
                 disabled={apn === initialApn || apnBusy}
                 onClick={() => void applyApn()}
               >
-                Save
+                {t("settings.shared.save")}
               </Button>
             </div>
             <p className="text-xs text-muted-foreground">
-              The carrier access point name for your SIM.
+              {t("settings.cellular.apnHint")}
             </p>
           </div>
         </CardContent>
@@ -414,6 +416,7 @@ export function CellularSettings() {
   // Branch on the resolved profile from the pairing-info probe, the same source
   // the sidebar and route gates use, rather than the raw config profile whose
   // "auto" default misreads an uncommitted ground station as a non-GS node.
+  const { t } = useTranslation();
   const { profile } = useNodeIdentity();
   const config = useConfig();
 
@@ -422,13 +425,13 @@ export function CellularSettings() {
   // while loading, both indistinguishable from "no cellular configured".
   if (config.isLoading) {
     return (
-      <p className="text-[11px] text-muted-foreground/70">Reading config…</p>
+      <p className="text-[11px] text-muted-foreground/70">{t("settings.shared.readingConfig")}</p>
     );
   }
   if (config.isError) {
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-        Could not read the cellular config from this node.
+        {t("settings.cellular.configReadFailed")}
       </div>
     );
   }

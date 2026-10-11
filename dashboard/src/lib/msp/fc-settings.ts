@@ -15,6 +15,7 @@
  * @license GPL-3.0-only
  */
 
+import i18n from "@/i18n";
 import { categoryFromName } from "@/lib/params";
 
 import { BfCliSession } from "./bf-cli";
@@ -39,8 +40,8 @@ const CONNECT_TIMEOUT_MS = 4000;
 export function armedWriteRefusal(armed: boolean | null): string | null {
   if (armed === false) return null;
   return armed
-    ? "The vehicle is armed. Disarm it to save settings."
-    : "Could not read the armed state from the flight controller, so nothing was written.";
+    ? i18n.t("fc.write.refusedArmed")
+    : i18n.t("fc.write.refusedUnknown");
 }
 
 /**
@@ -53,11 +54,11 @@ export function inavSaveOutcome(
   rejected: string[],
   eepromError: string | null,
 ): { ok: boolean; message: string } {
-  if (rejected.length) return { ok: false, message: `Rejected: ${rejected.join(", ")}` };
+  if (rejected.length) return { ok: false, message: i18n.t("fc.write.rejected", { names: rejected.join(", ") }) };
   if (eepromError) {
-    return { ok: false, message: `Applied to RAM only; the EEPROM write failed: ${eepromError}` };
+    return { ok: false, message: i18n.t("fc.write.eepromFailed", { error: eepromError }) };
   }
-  return { ok: true, message: "Saved to EEPROM" };
+  return { ok: true, message: i18n.t("fc.write.savedEeprom") };
 }
 
 /** One selectable enum option: what the operator sees and what gets written. */
@@ -184,7 +185,7 @@ export class MspFcClient {
    * changes and `save noreboot`s in one session.
    */
   async apply(changes: CliSettingChange[]): Promise<{ ok: boolean; message: string }> {
-    if (changes.length === 0) return { ok: true, message: "No changes" };
+    if (changes.length === 0) return { ok: true, message: i18n.t("fc.write.noChanges") };
     const refusal = armedWriteRefusal(await this.readArmed());
     if (refusal) return { ok: false, message: refusal };
     if (this.firmware === "inav") {

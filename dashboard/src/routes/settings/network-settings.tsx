@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { NetworkUplinkPanel } from "@/components/network/network-uplink-panel";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
@@ -14,6 +15,7 @@ import { getWifiStatus } from "@/lib/wifi";
 import { resolveHotspotSsid } from "@/lib/hotspot";
 
 export function NetworkSettings() {
+  const { t } = useTranslation();
   const status = useStatus();
   const wifiStatus = useQuery({
     queryKey: ["wifi", "status"],
@@ -44,13 +46,13 @@ export function NetworkSettings() {
       const section = res.sections.network;
       if (!res.overall || !section?.ok) {
         setHotspot(!next);
-        toast.err(section?.message ?? "Hotspot toggle failed.");
+        toast.err(section?.message ?? t("settings.network.hotspotFailed"));
       } else {
-        toast.ok(section.message || "Hotspot updated.");
+        toast.ok(section.message || t("settings.network.hotspotUpdated"));
       }
     } catch (err) {
       setHotspot(!next);
-      toastFromError(err, "Hotspot toggle failed.");
+      toastFromError(err, t("settings.network.hotspotFailed"));
     } finally {
       setBusy(false);
     }
@@ -89,38 +91,29 @@ export function NetworkSettings() {
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-2 min-w-0">
               <div className="flex items-center gap-2 text-sm font-medium">
-                Setup hotspot
+                {t("settings.network.hotspotTitle")}
                 <RiskBadge tone="auto" />
               </div>
               <div className="text-xs text-muted-foreground leading-relaxed">
                 {hotspotSsid.known ? (
-                  <>
-                    Spins up a captive AP named{" "}
-                    <span className="font-mono">{hotspotSsid.ssid}</span>{" "}
-                    on wlan0 so a phone or laptop can join the agent over
-                    Wi-Fi and finish onboarding without a wired
-                    connection.
-                  </>
+                  <Trans
+                    i18nKey="settings.network.hotspotHintNamed"
+                    values={{ ssid: hotspotSsid.ssid }}
+                    components={{ code: <span className="font-mono" /> }}
+                  />
                 ) : (
-                  <>
-                    Spins up a captive AP on wlan0 so a phone or laptop
-                    can join the agent over Wi-Fi and finish onboarding
-                    without a wired connection. This agent has not
-                    reported the network name, so check the configured
-                    hotspot SSID on the rig before you go looking for it.
-                  </>
+                  t("settings.network.hotspotHintUnnamed")
                 )}
               </div>
               <div className="text-xs text-warn">
-                Enabling this disconnects any active Wi-Fi client link
-                (the radio can host one or the other, not both).
+                {t("settings.network.hotspotWarning")}
               </div>
             </div>
             <Switch
               checked={hotspot}
               onCheckedChange={onToggle}
               disabled={busy}
-              aria-label="Setup hotspot"
+              aria-label={t("settings.network.hotspotTitle")}
             />
           </div>
         </CardContent>
@@ -133,27 +126,25 @@ export function NetworkSettings() {
         onOpenChange={(open) => {
           if (!open) setPendingEnable(false);
         }}
-        title="Switch wlan0 to setup AP?"
+        title={t("settings.network.confirmTitle")}
         description={
-          <>
-            The agent is currently joined to{" "}
-            <span className="font-mono font-medium">
-              {wifiStatus.data?.ssid ?? "a Wi-Fi network"}
-            </span>
-            . Enabling the setup hotspot will drop that link. The rig
-            stays reachable via{" "}
-            {hotspotSsid.known ? (
-              <>
-                the <span className="font-mono">{hotspotSsid.ssid}</span> AP
-              </>
-            ) : (
-              "the setup AP"
-            )}{" "}
-            or any other uplink (ethernet, USB tether, 4G) until you
-            toggle the hotspot back off.
-          </>
+          <Trans
+            i18nKey={
+              hotspotSsid.known
+                ? "settings.network.confirmBodyNamed"
+                : "settings.network.confirmBodyUnnamed"
+            }
+            values={{
+              current: wifiStatus.data?.ssid ?? t("settings.network.aWifiNetwork"),
+              ssid: hotspotSsid.known ? hotspotSsid.ssid : "",
+            }}
+            components={{
+              current: <span className="font-mono font-medium" />,
+              code: <span className="font-mono" />,
+            }}
+          />
         }
-        confirmLabel="Switch to AP"
+        confirmLabel={t("settings.network.confirmLabel")}
         destructive
         onConfirm={confirmEnable}
       />

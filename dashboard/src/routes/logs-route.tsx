@@ -1,5 +1,6 @@
 import { Pause, Play, ScrollText } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
 import { Button } from "@/components/ui/button";
@@ -50,6 +51,7 @@ function fmtTs(ts: LogEntry["timestamp"]): string {
 }
 
 export function LogsRoute() {
+  const { t } = useTranslation();
   const [level, setLevel] = useState<Level>("");
   const [service, setService] = useState("");
   const [paused, setPaused] = useState(false);
@@ -183,8 +185,8 @@ export function LogsRoute() {
 
   return (
     <PageShell
-      title="Logs"
-      blurb="Live tail of the agent's structured logger. Filter by level or logger name."
+      title={t("logs.page.title")}
+      blurb={t("logs.page.blurb")}
       maxWidth="max-w-6xl"
       rightAction={
         <Button
@@ -194,11 +196,11 @@ export function LogsRoute() {
         >
           {paused ? (
             <>
-              <Play className="h-3.5 w-3.5" /> Resume
+              <Play className="h-3.5 w-3.5" /> {t("logs.page.resume")}
             </>
           ) : (
             <>
-              <Pause className="h-3.5 w-3.5" /> Pause
+              <Pause className="h-3.5 w-3.5" /> {t("logs.page.pause")}
             </>
           )}
         </Button>
@@ -207,7 +209,7 @@ export function LogsRoute() {
       <Card>
         <CardContent className="pt-4 pb-4 grid grid-cols-1 sm:grid-cols-[120px_1fr_auto] gap-3 items-end">
           <div className="space-y-1.5">
-            <Label className="text-xs">Level</Label>
+            <Label className="text-xs">{t("logs.filter.level")}</Label>
             <select
               value={level}
               onChange={(e) => setLevel(e.target.value as Level)}
@@ -215,16 +217,16 @@ export function LogsRoute() {
             >
               {LEVELS.map((l) => (
                 <option key={l} value={l}>
-                  {l || "any"}
+                  {l || t("logs.filter.anyLevel")}
                 </option>
               ))}
             </select>
           </div>
 
           <div className="space-y-1.5">
-            <Label className="text-xs">Logger contains</Label>
+            <Label className="text-xs">{t("logs.filter.logger")}</Label>
             <Input
-              placeholder="filter by logger name (optional)"
+              placeholder={t("logs.filter.loggerPlaceholder")}
               value={service}
               onChange={(e) => setService(e.target.value)}
             />
@@ -233,11 +235,14 @@ export function LogsRoute() {
           <div className="text-xs text-muted-foreground font-mono pb-2 space-y-0.5 text-right">
             <div>
               {entries.length}
-              {pollFallback ? " (poll)" : " (live)"}
+              {pollFallback ? t("logs.status.poll") : t("logs.status.live")}
             </div>
             {logs.data?.buffer_size != null && (
               <div className="text-[10px] opacity-70">
-                buffer {logs.data.buffer_size}/{logs.data.buffer_cap ?? "?"}
+                {t("logs.status.buffer", {
+                  size: logs.data.buffer_size,
+                  cap: logs.data.buffer_cap ?? "?",
+                })}
               </div>
             )}
           </div>
@@ -252,16 +257,14 @@ export function LogsRoute() {
               <div className="space-y-1">
                 <div>
                   {logs.isLoading && pollFallback
-                    ? "loading…"
+                    ? t("logs.empty.loading")
                     : service || level
-                      ? "no log entries match the filter."
-                      : "no log entries buffered yet."}
+                      ? t("logs.empty.noMatch")
+                      : t("logs.empty.noEntries")}
                 </div>
                 {!logs.isLoading && (
                   <div className="text-xs opacity-70">
-                    The agent buffers up to {logs.data?.buffer_cap ?? 5000}{" "}
-                    entries since process start. Drop filters or restart a
-                    service to see fresh activity.
+                    {t("logs.empty.hint", { cap: logs.data?.buffer_cap ?? 5000 })}
                   </div>
                 )}
               </div>

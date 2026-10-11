@@ -11,6 +11,7 @@
  */
 
 import { Radio } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { useMspTelemetry } from "@/hooks/use-msp-telemetry";
@@ -56,37 +57,40 @@ function rssiPercent(rssi: number): number {
 }
 
 export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
-  const t = useMspTelemetry(firmware);
+  const { t } = useTranslation();
+  const tel = useMspTelemetry(firmware);
   const fwLabel = firmware === "betaflight" ? "Betaflight" : "iNav";
 
   const stale =
-    t?.lastFrameAt != null && Date.now() - t.lastFrameAt > STALE_MS;
+    tel?.lastFrameAt != null && Date.now() - tel.lastFrameAt > STALE_MS;
 
   // Header line: honest link state, never a fake "live" before a frame lands.
   let header: React.ReactNode;
-  if (!t || t.linkState === "connecting") {
+  if (!tel || tel.linkState === "connecting") {
     header = (
-      <span className="text-muted-foreground">connecting to {fwLabel} over MSP…</span>
+      <span className="text-muted-foreground">{t("fc.msp.connecting", { fw: fwLabel })}</span>
     );
-  } else if (t.linkState === "error") {
+  } else if (tel.linkState === "error") {
     header = (
       <span className="text-destructive">
-        MSP link error{t.error ? `: ${t.error}` : ""} — retrying…
+        {tel.error
+          ? t("fc.msp.linkErrorDetail", { error: tel.error })
+          : t("fc.msp.linkError")}
       </span>
     );
-  } else if (t.linkState === "closed") {
-    header = <span className="text-warn">MSP link closed — reconnecting…</span>;
-  } else if (t.lastFrameAt == null) {
+  } else if (tel.linkState === "closed") {
+    header = <span className="text-warn">{t("fc.msp.linkClosed")}</span>;
+  } else if (tel.lastFrameAt == null) {
     header = (
       <span className="text-muted-foreground">
-        connected — waiting for the first {fwLabel} frame…
+        {t("fc.msp.waitingFirstFrame", { fw: fwLabel })}
       </span>
     );
   } else {
     header = (
       <span className={stale ? "text-warn" : "text-ok"}>
-        live from {fwLabel} over MSP
-        {stale ? ` · stale (${fmtRelativeTime(t.lastFrameAt)})` : ""}
+        {t("fc.msp.live", { fw: fwLabel })}
+        {stale ? t("fc.msp.stale", { age: fmtRelativeTime(tel.lastFrameAt) }) : ""}
       </span>
     );
   }
@@ -97,9 +101,9 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
         <Radio
           className={cn(
             "h-3.5 w-3.5",
-            t?.linkState === "live" && !stale
+            tel?.linkState === "live" && !stale
               ? "text-ok"
-              : t?.linkState === "error"
+              : tel?.linkState === "error"
                 ? "text-destructive"
                 : "text-muted-foreground",
           )}
@@ -109,75 +113,79 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         {/* Attitude */}
-        <Panel title="Attitude">
-          <Field label="roll" value={t?.attitude ? `${fmtNum(t.attitude.roll, 1)}°` : "—"} />
-          <Field label="pitch" value={t?.attitude ? `${fmtNum(t.attitude.pitch, 1)}°` : "—"} />
-          <Field label="yaw" value={t?.attitude ? `${fmtNum(t.attitude.yaw, 0)}°` : "—"} />
+        <Panel title={t("telemetry.sensors.attitude")}>
+          <Field label={t("telemetry.sensors.roll")} value={tel?.attitude ? `${fmtNum(tel.attitude.roll, 1)}°` : "—"} />
+          <Field label={t("telemetry.sensors.pitch")} value={tel?.attitude ? `${fmtNum(tel.attitude.pitch, 1)}°` : "—"} />
+          <Field label={t("telemetry.sensors.yaw")} value={tel?.attitude ? `${fmtNum(tel.attitude.yaw, 0)}°` : "—"} />
         </Panel>
 
         {/* Battery */}
-        <Panel title="Battery">
-          <Field label="voltage" value={t?.analog ? fmtVoltage(t.analog.voltage) : "—"} />
-          <Field label="current" value={t?.analog ? `${fmtNum(t.analog.amperage, 2)} A` : "—"} />
-          <Field label="drawn" value={t?.analog ? `${t.analog.mAhDrawn} mAh` : "—"} />
-          <Field label="rssi" value={t?.analog ? fmtPct(rssiPercent(t.analog.rssi)) : "—"} />
+        <Panel title={t("telemetry.sensors.battery")}>
+          <Field label={t("telemetry.sensors.voltage")} value={tel?.analog ? fmtVoltage(tel.analog.voltage) : "—"} />
+          <Field label={t("telemetry.sensors.current")} value={tel?.analog ? `${fmtNum(tel.analog.amperage, 2)} A` : "—"} />
+          <Field label={t("fc.msp.drawn")} value={tel?.analog ? `${tel.analog.mAhDrawn} mAh` : "—"} />
+          <Field label={t("fc.msp.rssi")} value={tel?.analog ? fmtPct(rssiPercent(tel.analog.rssi)) : "—"} />
         </Panel>
 
         {/* GPS */}
-        <Panel title="GPS">
-          <Field label="fix" value={t?.gps ? gpsFixLabel(t.gps.fixType, firmware) : "—"} />
-          <Field label="sats" value={t?.gps ? String(t.gps.numSat) : "—"} />
+        <Panel title={t("telemetry.sensors.gps")}>
+          <Field label={t("fc.msp.fix")} value={tel?.gps ? gpsFixLabel(tel.gps.fixType, firmware) : "—"} />
+          <Field label={t("telemetry.sensors.sats")} value={tel?.gps ? String(tel.gps.numSat) : "—"} />
           <Field
-            label={t?.gps?.dopKind ?? (firmware === "betaflight" ? "pdop" : "hdop")}
-            value={t?.gps?.dop != null ? fmtNum(t.gps.dop, 2) : "—"}
+            label={
+              (tel?.gps?.dopKind ?? (firmware === "betaflight" ? "pdop" : "hdop")) === "pdop"
+                ? t("fc.msp.pdop")
+                : t("telemetry.sensors.hdop")
+            }
+            value={tel?.gps?.dop != null ? fmtNum(tel.gps.dop, 2) : "—"}
           />
           <Field
-            label="position"
+            label={t("telemetry.sensors.position")}
             value={
-              t?.gps && (t.gps.lat !== 0 || t.gps.lon !== 0)
-                ? `${fmtNum(t.gps.lat, 5)}, ${fmtNum(t.gps.lon, 5)}`
+              tel?.gps && (tel.gps.lat !== 0 || tel.gps.lon !== 0)
+                ? `${fmtNum(tel.gps.lat, 5)}, ${fmtNum(tel.gps.lon, 5)}`
                 : "—"
             }
           />
-          <Field label="speed" value={t?.gps ? `${fmtNum(t.gps.speed / 100, 1)} m/s` : "—"} />
+          <Field label={t("fc.msp.speed")} value={tel?.gps ? `${fmtNum(tel.gps.speed / 100, 1)} m/s` : "—"} />
         </Panel>
 
         {/* Altitude */}
-        <Panel title="Altitude">
-          <Field label="altitude" value={t?.altitude ? `${fmtNum(t.altitude.altitude, 1)} m` : "—"} />
+        <Panel title={t("fc.msp.altitudeTitle")}>
+          <Field label={t("fc.msp.altitude")} value={tel?.altitude ? `${fmtNum(tel.altitude.altitude, 1)} m` : "—"} />
           <Field
-            label="vario"
-            value={t?.altitude?.vario != null ? `${fmtNum(t.altitude.vario / 100, 1)} m/s` : "—"}
+            label={t("fc.msp.vario")}
+            value={tel?.altitude?.vario != null ? `${fmtNum(tel.altitude.vario / 100, 1)} m/s` : "—"}
           />
         </Panel>
 
         {/* FC status */}
-        <Panel title="Status">
+        <Panel title={t("fc.msp.statusTitle")}>
           <Field
-            label="armed"
+            label={t("telemetry.sensors.armed")}
             value={
-              t?.status ? (
-                t.status.armed ? (
-                  <span className="text-warn">ARMED</span>
+              tel?.status ? (
+                tel.status.armed ? (
+                  <span className="text-warn">{t("telemetry.sensors.armedValue")}</span>
                 ) : (
-                  <span className="text-muted-foreground">disarmed</span>
+                  <span className="text-muted-foreground">{t("telemetry.sensors.disarmedValue")}</span>
                 )
               ) : (
                 "—"
               )
             }
           />
-          <Field label="cpu load" value={t?.status ? fmtPct(t.status.cpuLoad) : "—"} />
-          <Field label="cycle time" value={t?.status ? `${t.status.cycleTime} µs` : "—"} />
-          <Field label="i2c errors" value={t?.status ? String(t.status.i2cErrors) : "—"} />
-          {t?.status?.hardwareFailure != null && (
+          <Field label={t("fc.msp.cpuLoad")} value={tel?.status ? fmtPct(tel.status.cpuLoad) : "—"} />
+          <Field label={t("fc.msp.cycleTime")} value={tel?.status ? `${tel.status.cycleTime} µs` : "—"} />
+          <Field label={t("fc.msp.i2cErrors")} value={tel?.status ? String(tel.status.i2cErrors) : "—"} />
+          {tel?.status?.hardwareFailure != null && (
             <Field
-              label="hardware"
+              label={t("fc.msp.hardware")}
               value={
-                t.status.hardwareFailure ? (
-                  <span className="text-destructive">fault</span>
+                tel.status.hardwareFailure ? (
+                  <span className="text-destructive">{t("fc.msp.fault")}</span>
                 ) : (
-                  <span className="text-ok">healthy</span>
+                  <span className="text-ok">{t("fc.msp.healthy")}</span>
                 )
               }
             />
@@ -185,12 +193,12 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
         </Panel>
 
         {/* Sensors */}
-        <Panel title="Sensors">
-          {t?.sensors ? (
+        <Panel title={t("telemetry.tabs.sensors")}>
+          {tel?.sensors ? (
             <div className="flex flex-wrap gap-1.5 pt-1">
-              {t.sensors.map((s) => (
+              {tel.sensors.map((s) => (
                 <span
-                  key={s.label}
+                  key={s.labelKey}
                   className={cn(
                     "text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border",
                     s.present
@@ -198,7 +206,7 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
                       : "border-muted-foreground/30 text-muted-foreground/60",
                   )}
                 >
-                  {s.label}
+                  {t(s.labelKey)}
                 </span>
               ))}
             </div>
@@ -209,12 +217,12 @@ export function MspSensorsView({ firmware }: { firmware: MspVariant }) {
       </div>
 
       {/* RC channels */}
-      <Panel title="RC channels">
-        {t?.rc && t.rc.length > 0 ? (
+      <Panel title={t("fc.msp.rcChannels")}>
+        {tel?.rc && tel.rc.length > 0 ? (
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2 pt-1">
-            {t.rc.map((v, i) => (
+            {tel.rc.map((v, i) => (
               <div key={i} className="text-xs font-mono">
-                <div className="text-muted-foreground text-[10px]">ch{i + 1}</div>
+                <div className="text-muted-foreground text-[10px]">{t("fc.msp.channel", { n: i + 1 })}</div>
                 <div>{v}</div>
               </div>
             ))}

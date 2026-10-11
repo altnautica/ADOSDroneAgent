@@ -2,6 +2,8 @@
 // can drill into Receive / Mesh / Sources without leaving the AppShell.
 // Each page is a thin wrapper around the corresponding Home panel.
 
+import { useTranslation } from "react-i18next";
+
 import { MeshPanel } from "@/components/panels/mesh-panel";
 import { SourcesPanel } from "@/components/panels/sources-panel";
 import { WfbRxPanel } from "@/components/panels/wfb-rx-panel";
@@ -25,10 +27,11 @@ function PageShell({ title, blurb, children }: ShellProps) {
 }
 
 export function ReceiveRoute() {
+  const { t } = useTranslation();
   return (
     <PageShell
-      title="WFB Receive"
-      blurb="WFB-rx adapter, channel, link quality, and FEC counters."
+      title={t("nav.receive")}
+      blurb={t("app.pages.receiveBlurb")}
     >
       <WfbRxPanel />
     </PageShell>
@@ -36,10 +39,11 @@ export function ReceiveRoute() {
 }
 
 export function MeshRoute() {
+  const { t } = useTranslation();
   return (
     <PageShell
-      title="Mesh"
-      blurb="batman-adv role, gateway election, and partition state."
+      title={t("nav.mesh")}
+      blurb={t("app.pages.meshBlurb")}
     >
       <MeshPanel />
     </PageShell>
@@ -47,10 +51,11 @@ export function MeshRoute() {
 }
 
 export function SourcesRoute() {
+  const { t } = useTranslation();
   return (
     <PageShell
-      title="Sources"
-      blurb="Per-relay aggregation and FEC dedup stats."
+      title={t("nav.sources")}
+      blurb={t("app.pages.sourcesBlurb")}
     >
       <SourcesPanel />
     </PageShell>

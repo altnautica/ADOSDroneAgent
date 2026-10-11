@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { formatParamValue } from "@/lib/params";
 
 interface Props {
@@ -14,6 +16,7 @@ interface Props {
  * silently dropped.
  */
 export function EnumSelect({ values, value, onChange, className }: Props) {
+  const { t } = useTranslation();
   const opts = [...values.entries()].sort((a, b) => a[0] - b[0]);
   const known = values.has(value);
   return (
@@ -24,7 +27,11 @@ export function EnumSelect({ values, value, onChange, className }: Props) {
         "h-7 rounded border border-border bg-background px-1 text-xs " + (className ?? "")
       }
     >
-      {!known && <option value={String(value)}>{formatParamValue(value)} (custom)</option>}
+      {!known && (
+        <option value={String(value)}>
+          {t("fc.enum.custom", { value: formatParamValue(value) })}
+        </option>
+      )}
       {opts.map(([code, label]) => (
         <option key={code} value={String(code)}>
           {code}: {label}

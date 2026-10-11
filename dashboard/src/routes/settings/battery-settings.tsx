@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { BatteryPackCard } from "@/components/battery/battery-pack-card";
 import {
   ConfigNumberField,
@@ -11,74 +13,75 @@ import { useConfig, type AgentConfig } from "@/hooks/use-config";
 type BatteryKey = Exclude<keyof NonNullable<AgentConfig["battery"]>, "enabled">;
 
 /** Threshold fields with the bounds the agent config model enforces. */
-const THRESHOLD_FIELDS: ReadonlyArray<{
-  key: BatteryKey;
-  label: string;
-  hint: string;
-  min: number;
-  max: number;
-}> = [
+const THRESHOLD_FIELDS = [
   {
     key: "low_cell_mv",
-    label: "Low cell (mV)",
-    hint: "A cell below this raises a warning. Must stay above the critical level.",
+    labelKey: "settingsMore.battery.lowCellLabel",
+    hintKey: "settingsMore.battery.lowCellHint",
     min: 2500,
     max: 4200,
   },
   {
     key: "critical_cell_mv",
-    label: "Critical cell (mV)",
-    hint: "A cell below this raises a critical alert. Must stay below the low level.",
+    labelKey: "settingsMore.battery.criticalCellLabel",
+    hintKey: "settingsMore.battery.criticalCellHint",
     min: 2500,
     max: 4000,
   },
   {
     key: "cell_divergence_mv",
-    label: "Cell divergence (mV)",
-    hint: "Spread between the highest and lowest cell that flags an unbalanced pack.",
+    labelKey: "settingsMore.battery.divergenceLabel",
+    hintKey: "settingsMore.battery.divergenceHint",
     min: 10,
     max: 500,
   },
   {
     key: "voltage_drop_mv_per_s",
-    label: "Voltage sag (mV/s)",
-    hint: "Pack voltage falling faster than this between samples flags a sag.",
+    labelKey: "settingsMore.battery.sagLabel",
+    hintKey: "settingsMore.battery.sagHint",
     min: 100,
     max: 5000,
   },
   {
     key: "temp_spike_dc_per_s",
-    label: "Temperature spike (0.1 °C/s)",
-    hint: "Temperature rising faster than this flags a spike. 50 means 5.0 °C/s.",
+    labelKey: "settingsMore.battery.tempSpikeLabel",
+    hintKey: "settingsMore.battery.tempSpikeHint",
     min: 5,
     max: 200,
   },
   {
     key: "predictive_window_s",
-    label: "Prediction window (s)",
-    hint: "How much recent history the time-to-reserve estimate averages over.",
+    labelKey: "settingsMore.battery.windowLabel",
+    hintKey: "settingsMore.battery.windowHint",
     min: 5,
     max: 300,
   },
   {
     key: "reserve_percent",
-    label: "Reserve (%)",
-    hint: "The remaining charge the time-to-reserve estimate counts down to.",
+    labelKey: "settingsMore.battery.reserveLabel",
+    hintKey: "settingsMore.battery.reserveHint",
     min: 5,
     max: 50,
   },
-];
+] as const satisfies ReadonlyArray<{
+  key: BatteryKey;
+  labelKey: string;
+  hintKey: string;
+  min: number;
+  max: number;
+}>;
 
 function LiveSection() {
+  const { t } = useTranslation();
   const health = useBatteryHealth();
 
   if (health.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">Reading battery state…</p>;
+    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.battery.readingState")}</p>;
   }
   if (health.isError || !health.data) {
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-        Could not read battery health from this node.
+        {t("settingsMore.battery.healthReadError")}
       </div>
     );
   }
@@ -87,7 +90,7 @@ function LiveSection() {
     return (
       <Card>
         <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-          Battery monitoring is off. Turn it on below to see live pack health.
+          {t("settingsMore.battery.monitoringOff")}
         </CardContent>
       </Card>
     );
@@ -96,14 +99,13 @@ function LiveSection() {
     <div className="space-y-3">
       {stale && (
         <div className="rounded-md border border-warn/40 bg-warn/5 px-3 py-2 text-[11px] text-warn">
-          No fresh battery data from the flight controller for over 5 s. Values
-          below are the last known readings.
+          {t("settingsMore.battery.stale")}
         </div>
       )}
       {packs.length === 0 ? (
         <Card>
           <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-            No battery reported by the flight controller yet.
+            {t("settingsMore.battery.noPacks")}
           </CardContent>
         </Card>
       ) : (
@@ -114,15 +116,16 @@ function LiveSection() {
 }
 
 function ThresholdSection() {
+  const { t } = useTranslation();
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">Reading config…</p>;
+    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-        Could not read the battery config from this node.
+        {t("settingsMore.battery.configReadError")}
       </div>
     );
   }
@@ -131,7 +134,7 @@ function ThresholdSection() {
     return (
       <Card>
         <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-          Battery thresholds are not exposed by this agent version.
+          {t("settingsMore.battery.thresholdsUnavailable")}
         </CardContent>
       </Card>
     );
@@ -142,8 +145,8 @@ function ThresholdSection() {
       <CardContent className="pt-5 pb-5 space-y-5">
         <ConfigToggle
           configKey="battery.enabled"
-          label="Battery health monitoring"
-          hint="Evaluate cell, sag, temperature and time-to-reserve rules on every pack and log each alert."
+          label={t("settingsMore.battery.monitoringLabel")}
+          hint={t("settingsMore.battery.monitoringHint")}
           value={battery.enabled}
         />
         {THRESHOLD_FIELDS.map((f) => (
@@ -151,8 +154,8 @@ function ThresholdSection() {
             <ConfigNumberField
               configKey={`battery.${f.key}`}
               id={`battery-${f.key}`}
-              label={f.label}
-              hint={f.hint}
+              label={t(f.labelKey)}
+              hint={t(f.hintKey)}
               value={battery[f.key]}
               integer
               min={f.min}
@@ -166,13 +169,14 @@ function ThresholdSection() {
 }
 
 export function BatterySettings() {
+  const { t } = useTranslation();
   return (
     <div className="space-y-8">
       <section className="space-y-3">
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-          Live packs
+          {t("settingsMore.battery.livePacks")}
           <Badge variant="default" className="font-normal">
-            2 s refresh
+            {t("settingsMore.battery.refresh")}
           </Badge>
         </div>
         <LiveSection />
@@ -180,7 +184,7 @@ export function BatterySettings() {
 
       <section className="space-y-3">
         <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-          Thresholds
+          {t("settingsMore.battery.thresholds")}
         </div>
         <ThresholdSection />
       </section>

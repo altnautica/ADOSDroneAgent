@@ -1,6 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { RotateCcw, Save, Search } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -29,6 +30,7 @@ function labelFor(s: MspSetting, send: string): string {
  * own armed flag before every write and refuses unless it reports disarmed.
  */
 export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
+  const { t } = useTranslation();
   const { settings, loading, error, saving, refresh, apply } = useMspSettings(
     firmware,
     firmwareVersion,
@@ -76,9 +78,9 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
     const res = await apply(changes);
     if (res.ok) {
       setDrafts(new Map());
-      toast.ok(res.message || "Saved to flight controller.");
+      toast.ok(res.message || t("fc.settings.savedToFc"));
     } else {
-      toast.err("Save failed", res.message);
+      toast.err(t("fc.settings.saveFailed"), res.message);
     }
   }
 
@@ -98,7 +100,7 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
               : "text-muted-foreground hover:bg-accent/40",
           )}
         >
-          <span className="font-mono">All</span>
+          <span className="font-mono">{t("telemetry.params.all")}</span>
           <span className="text-[10px] tabular-nums">{settings.length}</span>
         </button>
         {Object.entries(counts)
@@ -126,7 +128,7 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
           <div className="relative flex-1 min-w-0">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
             <Input
-              placeholder={`Search ${fwLabel} settings…`}
+              placeholder={t("fc.settings.searchPlaceholder", { fw: fwLabel })}
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-8"
@@ -139,17 +141,17 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
             onClick={() => setDrafts(new Map())}
           >
             <RotateCcw className="h-3.5 w-3.5" />
-            Discard
+            {t("telemetry.params.discard")}
           </Button>
           <Button size="sm" disabled={dirtyCount === 0 || saving} onClick={save}>
             <Save className="h-3.5 w-3.5" />
-            {saving ? "Saving…" : `Save ${dirtyCount || ""}`}
+            {saving ? t("fc.settings.saving") : t("telemetry.params.saveButton", { n: dirtyCount || "" })}
           </Button>
         </div>
 
         {loading && (
           <p className="text-sm text-muted-foreground">
-            reading {fwLabel} settings from the flight controller…
+            {t("fc.settings.reading", { fw: fwLabel })}
           </p>
         )}
 
@@ -157,11 +159,11 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
           <Card>
             <CardContent className="pt-5 pb-5 flex items-center justify-between gap-3">
               <div className="text-sm text-destructive">
-                Couldn't read the flight controller.
+                {t("fc.settings.readFailed")}
                 <span className="block text-xs text-muted-foreground mt-1">{error}</span>
               </div>
               <Button size="sm" variant="outline" onClick={refresh}>
-                Retry
+                {t("common.retry")}
               </Button>
             </CardContent>
           </Card>
@@ -169,7 +171,7 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
 
         {!loading && !error && settings.length === 0 && (
           <p className="text-sm text-muted-foreground">
-            No settings returned by the flight controller.
+            {t("fc.settings.empty")}
           </p>
         )}
 
@@ -221,7 +223,7 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
                           className="w-28 h-7 rounded border border-border bg-background px-1 text-xs"
                         >
                           {!s.options.some((o) => o.send === current) && (
-                            <option value={current}>{current} (custom)</option>
+                            <option value={current}>{t("fc.enum.custom", { value: current })}</option>
                           )}
                           {s.options.map((o) => (
                             <option key={o.send} value={o.send}>
@@ -259,7 +261,7 @@ export function MspSettingsTab({ firmware, firmwareVersion }: Props) {
         )}
 
         {visible.length === 0 && settings.length > 0 && (
-          <p className="text-sm text-muted-foreground">No settings match the current filter.</p>
+          <p className="text-sm text-muted-foreground">{t("fc.settings.noMatch")}</p>
         )}
       </div>
     </div>

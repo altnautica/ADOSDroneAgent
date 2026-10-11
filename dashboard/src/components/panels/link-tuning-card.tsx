@@ -4,6 +4,7 @@
 // then refetches the config so the displayed values reflect reality.
 
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
@@ -18,6 +19,12 @@ const FEC_RATIOS: Array<[number, number]> = [
 ];
 
 const PRESETS = ["conservative", "balanced", "aggressive"] as const;
+
+const PRESET_LABEL_KEYS = {
+  conservative: "wfb.tuning.presetConservative",
+  balanced: "wfb.tuning.presetBalanced",
+  aggressive: "wfb.tuning.presetAggressive",
+} as const satisfies Record<(typeof PRESETS)[number], string>;
 
 interface LinkTuningCardProps {
   mcsIndex?: number;
@@ -40,6 +47,7 @@ export function LinkTuningCard({
   adaptiveEnabled,
   onChanged,
 }: LinkTuningCardProps) {
+  const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
 
@@ -49,10 +57,14 @@ export function LinkTuningCard({
     try {
       const res = await setVideoConfig(patch);
       const warnings = res.warnings ?? [];
-      setNote(warnings.length ? `Applied with warnings: ${warnings.join(", ")}` : "Applied");
+      setNote(
+        warnings.length
+          ? t("wfb.tuning.appliedWithWarnings", { warnings: warnings.join(", ") })
+          : t("wfb.tuning.applied"),
+      );
       onChanged();
     } catch (e) {
-      setNote(e instanceof Error ? e.message : "apply failed");
+      setNote(e instanceof Error ? e.message : t("wfb.tuning.applyFailed"));
     } finally {
       setBusy(false);
     }
@@ -63,12 +75,12 @@ export function LinkTuningCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Link tuning</CardTitle>
+        <CardTitle>{t("wfb.tuning.title")}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="space-y-3 text-sm">
           <label className="block">
-            <span className="text-xs text-muted-foreground">Preset</span>
+            <span className="text-xs text-muted-foreground">{t("wfb.tuning.preset")}</span>
             <select
               className={selectClass}
               value={PRESETS.includes(preset as (typeof PRESETS)[number]) ? preset : ""}
@@ -79,18 +91,18 @@ export function LinkTuningCard({
               }}
             >
               <option value="" disabled>
-                select preset
+                {t("wfb.tuning.selectPreset")}
               </option>
               {PRESETS.map((p) => (
                 <option key={p} value={p}>
-                  {p}
+                  {t(PRESET_LABEL_KEYS[p])}
                 </option>
               ))}
             </select>
           </label>
 
           <label className="block">
-            <span className="text-xs text-muted-foreground">FEC (k / n)</span>
+            <span className="text-xs text-muted-foreground">{t("wfb.tuning.fec")}</span>
             <select
               className={selectClass}
               value={fecValue}
@@ -109,14 +121,18 @@ export function LinkTuningCard({
               )}
               {FEC_RATIOS.map(([k, n]) => (
                 <option key={`${k}/${n}`} value={`${k}/${n}`}>
-                  {k} / {n} ({Math.round(((n - k) / k) * 100)}% redundancy)
+                  {t("wfb.tuning.fecOption", {
+                    k,
+                    n,
+                    redundancy: Math.round(((n - k) / k) * 100),
+                  })}
                 </option>
               ))}
             </select>
           </label>
 
           <label className="block">
-            <span className="text-xs text-muted-foreground">MCS rate</span>
+            <span className="text-xs text-muted-foreground">{t("wfb.tuning.mcsRate")}</span>
             <select
               className={selectClass}
               value={mcsIndex != null ? String(mcsIndex) : ""}
@@ -139,7 +155,7 @@ export function LinkTuningCard({
 
           <div className="flex items-center justify-between gap-2 pt-1">
             <span className="text-xs text-muted-foreground">
-              Adaptive error correction
+              {t("wfb.tuning.adaptive")}
             </span>
             <Switch
               checked={adaptiveEnabled ?? false}

@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ConfigToggle } from "@/components/settings/config-fields";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
@@ -47,6 +48,7 @@ function StateCard({
 /** MAVLink WS auth enforcement: enabling it can lock out an off-box GCS that
  * presents no pairing key, so the enable path is gated behind a confirm. */
 function WsEnforceToggle({ value }: { value: boolean | undefined }) {
+  const { t } = useTranslation();
   const config = useConfig();
   const [checked, setChecked] = useState(value ?? false);
   const [pendingEnable, setPendingEnable] = useState(false);
@@ -60,11 +62,11 @@ function WsEnforceToggle({ value }: { value: boolean | undefined }) {
     setChecked(next);
     try {
       await putConfigChecked("mavlink.ws_proxy_enforce_auth", String(next));
-      toast.ok(next ? "WS auth enforcement on." : "WS auth enforcement off.");
+      toast.ok(next ? t("settingsMore.security.wsEnforceOn") : t("settingsMore.security.wsEnforceOff"));
       config.refetch();
     } catch (err) {
       setChecked(previous);
-      toastFromError(err, "Could not change WS auth enforcement.");
+      toastFromError(err, t("settingsMore.security.wsEnforceError"));
     }
   }
 
@@ -80,18 +82,15 @@ function WsEnforceToggle({ value }: { value: boolean | undefined }) {
     <>
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1 min-w-0">
-          <div className="text-sm font-medium">Enforce MAVLink WS auth</div>
+          <div className="text-sm font-medium">{t("settingsMore.security.wsEnforceLabel")}</div>
           <p className="text-xs text-muted-foreground leading-relaxed">
-            When on, the raw MAVLink WebSocket proxy rejects an off-box
-            connection from a paired agent that presents no valid pairing key.
-            On-box and unpaired connections stay open. Off by default: enabling
-            it can lock out a ground station that has not been keyed.
+            {t("settingsMore.security.wsEnforceHint")}
           </p>
         </div>
         <Switch
           checked={checked}
           onCheckedChange={onToggle}
-          aria-label="Enforce MAVLink WS auth"
+          aria-label={t("settingsMore.security.wsEnforceLabel")}
         />
       </div>
       <ConfirmDialog
@@ -99,16 +98,9 @@ function WsEnforceToggle({ value }: { value: boolean | undefined }) {
         onOpenChange={(open) => {
           if (!open) setPendingEnable(false);
         }}
-        title="Enforce MAVLink WS authentication?"
-        description={
-          <>
-            A paired agent will refuse an off-box MAVLink WebSocket connection
-            that carries no valid pairing key. Make sure any ground station that
-            talks to this node over the WebSocket bridge is paired first, or it
-            will lose the link.
-          </>
-        }
-        confirmLabel="Enforce"
+        title={t("settingsMore.security.wsEnforceConfirmTitle")}
+        description={<>{t("settingsMore.security.wsEnforceConfirmBody")}</>}
+        confirmLabel={t("settingsMore.security.wsEnforceConfirm")}
         destructive
         onConfirm={() => {
           setPendingEnable(false);
@@ -120,6 +112,7 @@ function WsEnforceToggle({ value }: { value: boolean | undefined }) {
 }
 
 export function SecuritySettings() {
+  const { t } = useTranslation();
   const config = useConfig();
   const pin = useQuery({
     queryKey: ["dashboard-pin-status"],
@@ -128,12 +121,12 @@ export function SecuritySettings() {
   });
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">Reading config…</p>;
+    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-        Could not read the security config from this node.
+        {t("settingsMore.security.readError")}
       </div>
     );
   }
@@ -145,37 +138,30 @@ export function SecuritySettings() {
     <div className="space-y-6">
       {/* API key — read-only state, never the value. */}
       <StateCard
-        title="Agent API key"
-        badge={apiKeySet ? "set" : "not set"}
+        title={t("settingsMore.security.apiKeyTitle")}
+        badge={apiKeySet ? t("settingsMore.security.badgeSet") : t("settingsMore.security.badgeNotSet")}
         badgeVariant={apiKeySet ? "ok" : "default"}
       >
         {apiKeySet ? (
-          <>
-            A data-plane key is set. Off-box clients must present it to reach the
-            agent's data routes. The value is never shown here; re-pair this node
-            from Mission Control to rotate it.
-          </>
+          <>{t("settingsMore.security.apiKeySet")}</>
         ) : (
-          <>
-            No data-plane key is set, so the agent is open to any client on the
-            LAN. Pair this node from Mission Control to mint one.
-          </>
+          <>{t("settingsMore.security.apiKeyNotSet")}</>
         )}
       </StateCard>
 
       {/* Dashboard PIN — read-only; management lives on the access gate. */}
       <StateCard
-        title="Dashboard access PIN"
+        title={t("settingsMore.security.pinTitle")}
         badge={
           pin.isLoading
             ? "…"
             : pin.isError
-              ? "unknown"
+              ? t("settingsMore.security.badgeUnknown")
               : pin.data?.locked
-                ? "locked"
+                ? t("settingsMore.security.badgeLocked")
                 : pin.data?.pin_set
-                  ? "set"
-                  : "not set"
+                  ? t("settingsMore.security.badgeSet")
+                  : t("settingsMore.security.badgeNotSet")
         }
         badgeVariant={
           pin.data?.locked
@@ -186,19 +172,11 @@ export function SecuritySettings() {
         }
       >
         {pin.isError ? (
-          <>Could not read the dashboard PIN state from this node.</>
+          <>{t("settingsMore.security.pinReadError")}</>
         ) : pin.data?.pin_set ? (
-          <>
-            A PIN gates off-box access to this on-box dashboard. Set or reset it
-            from the access splash on a fresh visit, or from Mission Control's
-            dashboard-access card. It is managed there, not here.
-          </>
+          <>{t("settingsMore.security.pinSet")}</>
         ) : (
-          <>
-            No PIN is set, so off-box visitors reach this dashboard with the
-            agent key alone. Set one from the access splash or from Mission
-            Control's dashboard-access card.
-          </>
+          <>{t("settingsMore.security.pinNotSet")}</>
         )}
       </StateCard>
 
@@ -210,16 +188,16 @@ export function SecuritySettings() {
             <div className="border-t border-border pt-5">
               <ConfigToggle
                 configKey="security.hmac_enabled"
-                label="HMAC replay protection"
-                hint="Require an HMAC signature on authenticated requests. Only effective once an HMAC secret is provisioned; enabling it without one has no effect."
+                label={t("settingsMore.security.hmacLabel")}
+                hint={t("settingsMore.security.hmacHint")}
                 value={security.hmac_enabled}
               />
             </div>
             <div className="border-t border-border pt-5">
               <ConfigToggle
                 configKey="security.setup_token_required"
-                label="Require a setup token"
-                hint="Require an X-ADOS-Setup-Token header on every setup mutation. Off trusts any browser served the setup webapp from this agent's own port (same-origin)."
+                label={t("settingsMore.security.setupTokenLabel")}
+                hint={t("settingsMore.security.setupTokenHint")}
                 value={security.setup_token_required}
               />
             </div>
@@ -228,7 +206,7 @@ export function SecuritySettings() {
       ) : (
         <Card>
           <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-            Auth enforcement flags are not exposed by this agent version.
+            {t("settingsMore.security.flagsUnavailable")}
           </CardContent>
         </Card>
       )}

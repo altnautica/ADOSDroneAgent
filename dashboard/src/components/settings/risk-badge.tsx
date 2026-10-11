@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -6,13 +8,14 @@ interface Props {
 }
 
 export function RiskBadge({ tone, className }: Props) {
+  const { t } = useTranslation();
   const isAuto = tone === "auto";
   return (
     <span
       title={
         isAuto
-          ? "Saved automatically when this field loses focus."
-          : "Requires explicit Save and confirmation. Risky for the live agent."
+          ? t("settings.shared.riskAutoTitle")
+          : t("settings.shared.riskManualTitle")
       }
       className={cn(
         "inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider font-medium border",
@@ -28,7 +31,7 @@ export function RiskBadge({ tone, className }: Props) {
           isAuto ? "bg-ok" : "bg-warn",
         )}
       />
-      {isAuto ? "auto" : "manual"}
+      {isAuto ? t("settings.shared.riskAuto") : t("settings.shared.riskManual")}
     </span>
   );
 }

@@ -1,5 +1,6 @@
 import { Camera, RefreshCw } from "lucide-react";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
 import { LinkTuningCard } from "@/components/panels/link-tuning-card";
@@ -53,6 +54,7 @@ interface VideoLatencyResponse {
 }
 
 export function VideoRoute() {
+  const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // When the agent grabbed the last downloaded still.
@@ -87,7 +89,7 @@ export function VideoRoute() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "snapshot failed");
+      setError(e instanceof Error ? e.message : t("video.route.snapshotFailed"));
     } finally {
       setBusy(false);
     }
@@ -101,7 +103,7 @@ export function VideoRoute() {
       // HAL enumeration, refreshed whenever the video pipeline (re)starts.
       await Promise.all([cameras.refetch(), config.refetch()]);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "rescan failed");
+      setError(e instanceof Error ? e.message : t("video.route.rescanFailed"));
     } finally {
       setBusy(false);
     }
@@ -121,8 +123,8 @@ export function VideoRoute() {
 
   return (
     <PageShell
-      title="Video"
-      blurb="Live stream, encoder configuration, camera assignment, and latency probe."
+      title={t("video.panel.title")}
+      blurb={t("video.route.blurb")}
       rightAction={
         <div className="flex items-center gap-2">
           {snapshotAt && (
@@ -131,10 +133,10 @@ export function VideoRoute() {
             </span>
           )}
           <Button variant="outline" size="sm" onClick={rescan} disabled={busy}>
-            <RefreshCw className="h-3.5 w-3.5" /> Rescan
+            <RefreshCw className="h-3.5 w-3.5" /> {t("video.route.rescan")}
           </Button>
           <Button variant="outline" size="sm" onClick={snapshot} disabled={busy}>
-            <Camera className="h-3.5 w-3.5" /> Snapshot
+            <Camera className="h-3.5 w-3.5" /> {t("video.route.snapshot")}
           </Button>
         </div>
       }
@@ -144,21 +146,21 @@ export function VideoRoute() {
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle>Encoder</CardTitle>
+            <CardTitle>{t("video.route.encoder")}</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-              <div className="text-xs text-muted-foreground">codec</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.codec")}</div>
               <div className="font-mono">{enc?.codec ?? "—"}</div>
-              <div className="text-xs text-muted-foreground">resolution</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.resolution")}</div>
               <div className="font-mono">
                 {enc?.width && enc?.height ? `${enc.width}×${enc.height}` : "—"}
               </div>
-              <div className="text-xs text-muted-foreground">fps</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.fps")}</div>
               <div className="font-mono">
                 {enc?.fps != null ? fmtNum(enc.fps, 0) : "—"}
               </div>
-              <div className="text-xs text-muted-foreground">bitrate</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.bitrate")}</div>
               <div className="font-mono">{fmtBitrate(enc?.bitrate_kbps ?? null)}</div>
             </div>
           </CardContent>
@@ -166,31 +168,31 @@ export function VideoRoute() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Radio</CardTitle>
+            <CardTitle>{t("video.route.radio")}</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-              <div className="text-xs text-muted-foreground">channel</div>
+              <div className="text-xs text-muted-foreground">{t("wfb.fields.channel")}</div>
               <div className="font-mono">{radio?.channel ?? "—"}</div>
-              <div className="text-xs text-muted-foreground">band</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.band")}</div>
               <div className="font-mono">{radio?.band ?? "—"}</div>
-              <div className="text-xs text-muted-foreground">MCS index</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.mcsIndex")}</div>
               <div className="font-mono">{radio?.mcs_index ?? "—"}</div>
-              <div className="text-xs text-muted-foreground">FEC ratio</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.fecRatio")}</div>
               <div className="font-mono">{fecRatio}</div>
-              <div className="text-xs text-muted-foreground">adaptive FEC</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.adaptiveFec")}</div>
               <div className="font-mono">
                 {adaptive?.adaptive_bitrate_enabled == null
                   ? "—"
                   : adaptive.adaptive_bitrate_enabled
-                    ? "on"
-                    : "off"}
+                    ? t("video.fields.on")
+                    : t("video.fields.off")}
               </div>
-              <div className="text-xs text-muted-foreground">tx power</div>
+              <div className="text-xs text-muted-foreground">{t("wfb.fields.txPower")}</div>
               <div className="font-mono">
                 {radio?.tx_power_dbm != null ? `${radio.tx_power_dbm} dBm` : "—"}
               </div>
-              <div className="text-xs text-muted-foreground">preset</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.preset")}</div>
               <div className="font-mono">{radio?.preset ?? "—"}</div>
             </div>
           </CardContent>
@@ -207,21 +209,21 @@ export function VideoRoute() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Latency</CardTitle>
+            <CardTitle>{t("video.route.latency")}</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-              <div className="text-xs text-muted-foreground">latest</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.latest")}</div>
               <div className="font-mono">
                 {latencyMs != null ? `${fmtNum(latencyMs, 0)} ms` : "—"}
               </div>
-              <div className="text-xs text-muted-foreground">ewma</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.ewma")}</div>
               <div className="font-mono">
                 {ewma != null ? `${fmtNum(ewma, 0)} ms` : "—"}
               </div>
-              <div className="text-xs text-muted-foreground">samples</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.samples")}</div>
               <div className="font-mono">{samples}</div>
-              <div className="text-xs text-muted-foreground">source</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.source")}</div>
               <div className="font-mono">{latency.data?.source ?? "—"}</div>
             </div>
           </CardContent>
@@ -229,13 +231,12 @@ export function VideoRoute() {
 
         <Card>
           <CardHeader>
-            <CardTitle>Cameras detected</CardTitle>
+            <CardTitle>{t("video.route.camerasDetected")}</CardTitle>
           </CardHeader>
           <CardContent>
             {camList.length === 0 ? (
               <p className="text-sm text-muted-foreground">
-                No cameras detected. Plug in a USB UVC camera or a MIPI-CSI
-                module and Rescan.
+                {t("video.route.noCameras")}
               </p>
             ) : (
               <ul className="space-y-2 text-sm">

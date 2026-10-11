@@ -14,6 +14,8 @@ import {
   Gamepad2,
   type LucideIcon,
 } from "lucide-react";
+import type { ParseKeys } from "i18next";
+import { useTranslation } from "react-i18next";
 import { NavLink } from "react-router-dom";
 
 import { Separator } from "@/components/ui/separator";
@@ -25,39 +27,39 @@ import { useUiStore } from "@/stores/ui-store";
 
 interface NavItem {
   to: string;
-  label: string;
+  labelKey: ParseKeys;
   icon: LucideIcon;
 }
 
-const COMMON_TOP: NavItem[] = [{ to: "/", label: "Home", icon: Home }];
+const COMMON_TOP: NavItem[] = [{ to: "/", labelKey: "nav.home", icon: Home }];
 
 const COMMON_BOTTOM: NavItem[] = [
-  { to: "/pairing", label: "Pairing", icon: Link2 },
-  { to: "/extensions", label: "Extensions", icon: Plug },
-  { to: "/peripherals", label: "Peripherals", icon: Cpu },
-  { to: "/logs", label: "Logs", icon: ScrollText },
-  { to: "/diagnostics", label: "Diagnostics", icon: Wrench },
-  { to: "/settings", label: "Settings", icon: SettingsIcon },
+  { to: "/pairing", labelKey: "nav.pairing", icon: Link2 },
+  { to: "/extensions", labelKey: "nav.extensions", icon: Plug },
+  { to: "/peripherals", labelKey: "nav.peripherals", icon: Cpu },
+  { to: "/logs", labelKey: "nav.logs", icon: ScrollText },
+  { to: "/diagnostics", labelKey: "nav.diagnostics", icon: Wrench },
+  { to: "/settings", labelKey: "nav.settings", icon: SettingsIcon },
 ];
 
 function droneItems(): NavItem[] {
   return [
-    { to: "/telemetry", label: "Telemetry", icon: Radio },
-    { to: "/video", label: "Video", icon: Video },
-    { to: "/transmit", label: "WFB Transmit", icon: Antenna },
+    { to: "/telemetry", labelKey: "nav.telemetry", icon: Radio },
+    { to: "/video", labelKey: "nav.video", icon: Video },
+    { to: "/transmit", labelKey: "nav.transmit", icon: Antenna },
   ];
 }
 
 function groundItems(role: GroundRole): NavItem[] {
   const items: NavItem[] = [
-    { to: "/receive", label: "WFB Receive", icon: Antenna },
-    { to: "/io", label: "Display & Joystick", icon: Gamepad2 },
+    { to: "/receive", labelKey: "nav.receive", icon: Antenna },
+    { to: "/io", labelKey: "nav.io", icon: Gamepad2 },
   ];
   if (role === "relay" || role === "receiver") {
-    items.push({ to: "/mesh", label: "Mesh", icon: Network });
+    items.push({ to: "/mesh", labelKey: "nav.mesh", icon: Network });
   }
   if (role === "receiver") {
-    items.push({ to: "/sources", label: "Sources", icon: Layers });
+    items.push({ to: "/sources", labelKey: "nav.sources", icon: Layers });
   }
   return items;
 }
@@ -74,13 +76,15 @@ interface SidebarLinkProps {
 }
 
 function SidebarLink({ item, collapsed }: SidebarLinkProps) {
+  const { t } = useTranslation();
   const Icon = item.icon;
+  const label = t(item.labelKey);
 
   const link = (
     <NavLink
       to={item.to}
       end={item.to === "/"}
-      aria-label={collapsed ? item.label : undefined}
+      aria-label={collapsed ? label : undefined}
       className={({ isActive }) =>
         cn(
           "flex items-center gap-3 px-3 py-2 text-sm rounded-md transition-colors",
@@ -91,7 +95,7 @@ function SidebarLink({ item, collapsed }: SidebarLinkProps) {
       }
     >
       <Icon className="h-4 w-4 shrink-0" aria-hidden />
-      {!collapsed && <span>{item.label}</span>}
+      {!collapsed && <span>{label}</span>}
     </NavLink>
   );
 
@@ -99,12 +103,13 @@ function SidebarLink({ item, collapsed }: SidebarLinkProps) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>{link}</TooltipTrigger>
-      <TooltipContent side="right">{item.label}</TooltipContent>
+      <TooltipContent side="right">{label}</TooltipContent>
     </Tooltip>
   );
 }
 
 export function Sidebar() {
+  const { t } = useTranslation();
   const { profile, role } = useNodeIdentity();
   const collapsed = useUiStore((s) => s.sidebarCollapsed);
   const mobileNavOpen = useUiStore((s) => s.mobileNavOpen);
@@ -173,7 +178,7 @@ export function Sidebar() {
           />
           <aside
             className="lg:hidden fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-border bg-background"
-            aria-label="navigation"
+            aria-label={t("nav.navigation")}
           >
             {navList(true)}
           </aside>

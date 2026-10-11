@@ -1,9 +1,11 @@
 import { Cpu } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
+import i18n from "@/i18n";
 
 interface PeripheralEntry {
   id: string;
@@ -25,12 +27,25 @@ interface PeripheralEntry {
   };
 }
 
+// Badge tone from the registry state; the raw state values are API data.
+function stateTone(
+  isConnected: boolean,
+  state: string | undefined,
+  connected: boolean | undefined,
+): "ok" | "err" | "warn" | "idle" {
+  if (isConnected) return "ok";
+  const label = state ?? (connected === false ? "disconnected" : "unknown");
+  if (label === "error" || label === "failed") return "err";
+  if (label === "missing" || label === "disconnected") return "warn";
+  return "idle";
+}
+
 function relativeTime(unix: number): string {
   const delta = Math.max(0, Date.now() / 1000 - unix);
-  if (delta < 60) return `${Math.floor(delta)}s ago`;
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  return `${Math.floor(delta / 86400)}d ago`;
+  if (delta < 60) return i18n.t("peripherals.time.seconds", { n: Math.floor(delta) });
+  if (delta < 3600) return i18n.t("peripherals.time.minutes", { n: Math.floor(delta / 60) });
+  if (delta < 86400) return i18n.t("peripherals.time.hours", { n: Math.floor(delta / 3600) });
+  return i18n.t("peripherals.time.days", { n: Math.floor(delta / 86400) });
 }
 
 interface PeripheralsResponse {
@@ -39,6 +54,7 @@ interface PeripheralsResponse {
 }
 
 export function PeripheralsRoute() {
+  const { t } = useTranslation();
   const list = useResource<PeripheralsResponse>(
     "peripherals-v1",
     "/api/v1/peripherals",
@@ -49,16 +65,16 @@ export function PeripheralsRoute() {
 
   return (
     <PageShell
-      title="Peripherals"
-      blurb="Registered peripheral manifests with live connection state. Plug a known device and the agent picks it up automatically."
+      title={t("peripherals.page.title")}
+      blurb={t("peripherals.page.blurb")}
       rightAction={
         <Button variant="outline" size="sm" onClick={() => list.refetch()}>
-          Refresh
+          {t("peripherals.page.refresh")}
         </Button>
       }
     >
       {list.isLoading && (
-        <p className="text-sm text-muted-foreground">loading…</p>
+        <p className="text-sm text-muted-foreground">{t("peripherals.page.loading")}</p>
       )}
 
       {!list.isLoading && items.length === 0 && (
@@ -67,12 +83,13 @@ export function PeripheralsRoute() {
             <Cpu className="h-5 w-5 text-muted-foreground mt-0.5" />
             <div>
               <div className="text-sm font-medium">
-                No peripherals registered.
+                {t("peripherals.empty.title")}
               </div>
               <div className="text-xs text-muted-foreground mt-1">
-                Manifests come from pip packages and{" "}
-                <span className="font-mono">/etc/ados/peripherals/*.yaml</span>.
-                Install a peripheral plugin and it appears here.
+                <Trans
+                  i18nKey="peripherals.empty.body"
+                  components={{ mono: <span className="font-mono" /> }}
+                />
               </div>
             </div>
           </CardContent>
@@ -90,17 +107,12 @@ export function PeripheralsRoute() {
               : p.state === "connected" ||
                 p.state === "ready" ||
                 p.state === "active";
-          const stateLabel = isConnected
-            ? "connected"
-            : (p.state ?? p.status ?? (p.connected === false ? "disconnected" : "unknown"));
-          const tone =
-            isConnected
-              ? "ok"
-              : stateLabel === "error" || stateLabel === "failed"
-                ? "err"
-                : stateLabel === "missing" || stateLabel === "disconnected"
-                  ? "warn"
-                  : "idle";
+          const stateText = isConnected
+            ? t("peripherals.state.connected")
+            : (p.state ??
+              p.status ??
+              (p.connected === false ? t("peripherals.state.disconnected") : t("peripherals.state.unknown")));
+          const tone = stateTone(isConnected, p.state ?? p.status, p.connected);
           const description =
             p.manifest?.description ??
             (typeof p.extra?.description === "string"
@@ -144,7 +156,7 @@ export function PeripheralsRoute() {
                             : "border-muted-foreground/40 text-muted-foreground"
                     }`}
                   >
-                    {stateLabel}
+                    {stateText}
                   </span>
                 </div>
                 <div className="text-[11px] text-muted-foreground font-mono">
@@ -162,7 +174,7 @@ export function PeripheralsRoute() {
                 )}
                 {!isConnected && typeof p.last_seen === "number" && (
                   <div className="text-[10px] text-muted-foreground">
-                    last seen {relativeTime(p.last_seen)}
+                    {t("peripherals.page.lastSeen", { time: relativeTime(p.last_seen) })}
                   </div>
                 )}
               </CardContent>

@@ -1,5 +1,6 @@
 import { Image as ImageIcon, Video, VideoOff } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -44,6 +45,7 @@ function useOnScreen(ref: React.RefObject<HTMLElement | null>): boolean {
 }
 
 export function VideoPanel() {
+  const { t } = useTranslation();
   const status = useStatus();
   const snap = useSnapshot();
   const wfb = useWfb();
@@ -82,9 +84,9 @@ export function VideoPanel() {
   const wfbChannel = wfb.data?.actual_channel ?? null;
   const wfbStreaming = wfbPacketsReceived > 0;
   const waitingForWfb = isGround && !wfbStreaming;
-  const wfbWaitDetail =
-    `drone TX ${wfbState}` +
-    (wfbChannel ? ` on ch ${wfbChannel}` : "");
+  const wfbWaitDetail = wfbChannel
+    ? t("video.panel.wfbWaitDetailChannel", { state: wfbState, channel: wfbChannel })
+    : t("video.panel.wfbWaitDetail", { state: wfbState });
 
   const pipelineRunning = pipelineState === "running";
   const haveAnyUrl = whepUrl.length > 0 || hlsUrl.length > 0;
@@ -93,7 +95,7 @@ export function VideoPanel() {
   const order = useMemo(() => {
     const legs: Transport[] =
       preferredTransport === "hls" ? ["hls", "whep"] : ["whep", "hls"];
-    return legs.filter((t) => (t === "hls" ? hlsUrl : whepUrl).length > 0);
+    return legs.filter((leg) => (leg === "hls" ? hlsUrl : whepUrl).length > 0);
   }, [preferredTransport, whepUrl, hlsUrl]);
 
   const onScreen = useOnScreen(panelRef);
@@ -144,16 +146,16 @@ export function VideoPanel() {
   const transportLabel = feed.transport === "hls" ? "hls" : "webrtc";
   const badgeText =
     state === "live"
-      ? `live · ${transportLabel}`
+      ? t("video.panel.badgeLive", { transport: transportLabel })
       : state === "frozen"
-        ? `${transportLabel} · frozen`
+        ? t("video.panel.badgeFrozen", { transport: transportLabel })
         : state === "connecting"
-          ? "connecting"
+          ? t("video.panel.badgeConnecting")
           : state === "failed"
             ? snapshotUrl
-              ? "snapshot"
-              : "error"
-            : "idle";
+              ? t("video.panel.badgeSnapshot")
+              : t("video.panel.badgeError")
+            : t("video.panel.badgeIdle");
   const badgeClass =
     state === "live"
       ? feed.transport === "hls"
@@ -164,11 +166,11 @@ export function VideoPanel() {
         : "border-muted-foreground/40 text-muted-foreground";
   const badgeTitle =
     state === "live" && feed.highLatency
-      ? "WebRTC failed or froze, so playback fell back to HLS (several seconds of latency). WebRTC is retried in the background."
+      ? t("video.panel.titleFellBack")
       : state === "live" && feed.transport === "hls"
-        ? "HLS playback. Several seconds of latency vs WebRTC's 100-300 ms; no decoder freeze."
+        ? t("video.panel.titleHls")
         : state === "frozen"
-          ? "No new frame decoded recently; reconnecting."
+          ? t("video.panel.titleFrozen")
           : undefined;
 
   return (
@@ -176,7 +178,7 @@ export function VideoPanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Video className={cn("h-3.5 w-3.5", isLive && "text-ok")} aria-hidden />
-          Video
+          {t("video.panel.title")}
           <span
             className={cn(
               "ml-auto text-xs uppercase tracking-wider px-1.5 py-0.5 rounded border",
@@ -185,7 +187,7 @@ export function VideoPanel() {
             title={badgeTitle}
           >
             {badgeText}
-            {state === "live" && feed.highLatency ? " · high latency" : ""}
+            {state === "live" && feed.highLatency ? t("video.panel.highLatencySuffix") : ""}
           </span>
         </CardTitle>
       </CardHeader>
@@ -209,7 +211,7 @@ export function VideoPanel() {
           {showSnapshot && snapshotUrl && (
             <img
               src={snapshotUrl}
-              alt="Last snapshot"
+              alt={t("video.panel.lastSnapshot")}
               className="absolute inset-0 h-full w-full object-contain"
             />
           )}
@@ -220,19 +222,19 @@ export function VideoPanel() {
                   <VideoOff className="h-6 w-6 opacity-60" aria-hidden />
                   <div>
                     {waitingForWfb
-                      ? "Waiting for WFB stream from drone."
+                      ? t("video.panel.waitingForWfb")
                       : pipelineState === "no_camera"
-                        ? "No camera detected."
+                        ? t("video.panel.noCamera")
                         : !haveAnyUrl
-                          ? "No stream published."
+                          ? t("video.panel.noStream")
                           : canStream && !onScreen
-                            ? "Paused while off screen."
-                            : "Pipeline idle."}
+                            ? t("video.panel.pausedOffScreen")
+                            : t("video.panel.pipelineIdle")}
                   </div>
                   <div className="text-xs max-w-xs text-center">
                     {waitingForWfb
                       ? wfbWaitDetail
-                      : "Plug in a camera and the agent will publish a video stream automatically."}
+                      : t("video.panel.plugInCamera")}
                   </div>
                 </>
               )}
@@ -240,13 +242,13 @@ export function VideoPanel() {
                 <div className="text-center">
                   {waitingForWfb ? (
                     <>
-                      Waiting for WFB stream from drone.
+                      {t("video.panel.waitingForWfb")}
                       <div className="text-xs mt-1 opacity-80">
                         {wfbWaitDetail}
                       </div>
                     </>
                   ) : (
-                    <>connecting…</>
+                    <>{t("video.panel.connectingEllipsis")}</>
                   )}
                 </div>
               )}
@@ -254,7 +256,7 @@ export function VideoPanel() {
                 <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between gap-2 bg-background/80 rounded px-2 py-1">
                   <div className="flex items-center gap-1 text-xs">
                     <ImageIcon className="h-3 w-3" aria-hidden />
-                    Snapshot only — live feed unavailable
+                    {t("video.panel.snapshotOnly")}
                     {snapshotAt && (
                       <span className="font-mono opacity-80">
                         · {capturedLabel(snapshotAt)}
@@ -266,7 +268,7 @@ export function VideoPanel() {
                     variant="outline"
                     onClick={() => setRetryToken((n) => n + 1)}
                   >
-                    Retry
+                    {t("common.retry")}
                   </Button>
                 </div>
               )}
@@ -275,17 +277,19 @@ export function VideoPanel() {
                   <VideoOff className="h-6 w-6 opacity-60" aria-hidden />
                   <div className="text-destructive max-w-md text-center">
                     {waitingForWfb
-                      ? `No video. ${wfbWaitDetail}; WFB-rx received 0 packets.`
+                      ? t("video.panel.noVideoWfb", { detail: wfbWaitDetail })
                       : snapshotError
-                        ? `${feed.error ?? "Stream unavailable."} Snapshot also unavailable.`
-                        : feed.error || "Stream unavailable."}
+                        ? t("video.panel.snapshotAlsoUnavailable", {
+                            error: feed.error ?? t("video.panel.streamUnavailable"),
+                          })
+                        : feed.error || t("video.panel.streamUnavailable")}
                   </div>
                   <Button
                     size="sm"
                     variant="outline"
                     onClick={() => setRetryToken((n) => n + 1)}
                   >
-                    Retry
+                    {t("common.retry")}
                   </Button>
                 </>
               )}
@@ -294,40 +298,40 @@ export function VideoPanel() {
         </div>
 
         <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-          <div className="text-xs text-muted-foreground">pipeline</div>
+          <div className="text-xs text-muted-foreground">{t("video.fields.pipeline")}</div>
           <div className="font-mono">{pipelineState}</div>
 
           {codec && (
             <>
-              <div className="text-xs text-muted-foreground">codec</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.codec")}</div>
               <div className="font-mono">{codec}</div>
             </>
           )}
 
           {w > 0 && h > 0 && (
             <>
-              <div className="text-xs text-muted-foreground">res</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.res")}</div>
               <div className="font-mono">{`${w}×${h}`}</div>
             </>
           )}
 
           {fps > 0 && (
             <>
-              <div className="text-xs text-muted-foreground">fps</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.fps")}</div>
               <div className="font-mono">{fmtNum(fps, 0)}</div>
             </>
           )}
 
           {bitrate > 0 && (
             <>
-              <div className="text-xs text-muted-foreground">bitrate</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.bitrate")}</div>
               <div className="font-mono">{fmtBitrate(bitrate)}</div>
             </>
           )}
 
           {g2g != null && (
             <>
-              <div className="text-xs text-muted-foreground">g2g</div>
+              <div className="text-xs text-muted-foreground">{t("video.fields.g2g")}</div>
               <div className="font-mono">{`${fmtNum(g2g, 0)} ms`}</div>
             </>
           )}
@@ -346,15 +350,16 @@ function TransportChip({
   onChange: (next: Transport) => void;
   isGround: boolean;
 }) {
+  const { t } = useTranslation();
   const hint = isGround
-    ? "HLS is preferred on ground (no Chrome decoder freeze). WebRTC has lower latency."
-    : "WebRTC is preferred for low latency. HLS has ~3-5 s lag.";
+    ? t("video.transport.hintGround")
+    : t("video.transport.hintDrone");
   return (
     <div
       className="inline-flex items-center gap-1 text-xs uppercase tracking-wider"
       title={hint}
     >
-      <span className="text-muted-foreground">transport</span>
+      <span className="text-muted-foreground">{t("video.transport.label")}</span>
       <div className="inline-flex rounded border border-border overflow-hidden">
         <button
           type="button"
@@ -366,7 +371,7 @@ function TransportChip({
               : "bg-transparent text-muted-foreground hover:bg-accent/40",
           )}
         >
-          HLS
+          {t("video.transport.hls")}
         </button>
         <button
           type="button"
@@ -378,7 +383,7 @@ function TransportChip({
               : "bg-transparent text-muted-foreground hover:bg-accent/40",
           )}
         >
-          WebRTC
+          {t("video.transport.webrtc")}
         </button>
       </div>
     </div>

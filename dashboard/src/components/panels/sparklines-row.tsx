@@ -1,4 +1,5 @@
 import { lazy, Suspense } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
@@ -20,6 +21,7 @@ interface CardProps {
 }
 
 function MiniCard({ label, unit, value, data, tone = "primary" }: CardProps) {
+  const { t } = useTranslation();
   return (
     <Card>
       <CardContent className="pt-4 pb-3 space-y-2">
@@ -27,7 +29,7 @@ function MiniCard({ label, unit, value, data, tone = "primary" }: CardProps) {
           <div className="text-[11px] uppercase tracking-wider text-muted-foreground">
             {label}
           </div>
-          <div className="text-xs text-muted-foreground/70">last 60s</div>
+          <div className="text-xs text-muted-foreground/70">{t("panels.sparklines.last60s")}</div>
         </div>
         <div className="flex items-baseline gap-1">
           <span className="font-mono text-xl tabular-nums leading-none">
@@ -44,6 +46,7 @@ function MiniCard({ label, unit, value, data, tone = "primary" }: CardProps) {
 }
 
 export function SparklinesRow() {
+  const { t } = useTranslation();
   const snap = useSnapshot();
   const heartbeat = useHeartbeat();
 
@@ -72,28 +75,28 @@ export function SparklinesRow() {
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
       <MiniCard
-        label="Battery"
+        label={t("panels.sparklines.battery")}
         unit="V"
         value={lastBat != null ? lastBat.toFixed(2) : "—"}
         data={battery}
         tone="emerald"
       />
       <MiniCard
-        label="RC RSSI"
+        label={t("panels.sparklines.rcRssi")}
         unit="%"
         value={lastRc != null ? Math.round(lastRc).toString() : "—"}
         data={rc}
         tone="primary"
       />
       <MiniCard
-        label="Bitrate"
+        label={t("panels.sparklines.bitrate")}
         unit="kbps"
         value={lastBitrate != null ? Math.round(lastBitrate).toString() : "—"}
         data={bitrate}
         tone="primary"
       />
       <MiniCard
-        label="CPU"
+        label={t("panels.sparklines.cpu")}
         unit="%"
         value={lastCpu != null ? lastCpu.toFixed(0) : "—"}
         data={cpu}

@@ -7,6 +7,7 @@ import {
   type HTMLAttributes,
 } from "react";
 
+import i18n from "@/i18n";
 import { cn } from "@/lib/utils";
 
 export const Dialog = DialogPrimitive.Root;
@@ -57,7 +58,7 @@ export const DialogContent = forwardRef<
         )}
       >
         <X className="h-4 w-4" />
-        <span className="sr-only">Close</span>
+        <span className="sr-only">{i18n.t("common.close")}</span>
       </DialogPrimitive.Close>
     </DialogPrimitive.Content>
   </DialogPortal>

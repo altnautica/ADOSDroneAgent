@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { ConfigToggle } from "@/components/settings/config-fields";
 import { Badge } from "@/components/ui/badge";
@@ -45,10 +46,11 @@ function AdapterCard({
   onUnpin: (iface: string) => void;
   busyIface: string | null;
 }) {
+  const { t } = useTranslation();
   const state = adapter.state ?? "stable";
   const iface = adapter.name ?? null;
   const busy = iface !== null && busyIface === iface;
-  const title = adapter.name || adapter.vidpid || "unknown adapter";
+  const title = adapter.name || adapter.vidpid || t("settingsMore.macPin.unknownAdapter");
 
   return (
     <Card>
@@ -58,15 +60,15 @@ function AdapterCard({
           <StateBadge state={state} />
         </div>
         <div className="space-y-1">
-          {adapter.vidpid && <StatRow label="Chipset" value={adapter.vidpid} />}
-          {adapter.pinnedMac && <StatRow label="Pinned MAC" value={adapter.pinnedMac} />}
+          {adapter.vidpid && <StatRow label={t("settingsMore.macPin.chipset")} value={adapter.vidpid} />}
+          {adapter.pinnedMac && <StatRow label={t("settingsMore.macPin.pinnedMac")} value={adapter.pinnedMac} />}
           {adapter.lastSeenMac && adapter.lastSeenMac !== adapter.pinnedMac && (
-            <StatRow label="Current MAC" value={adapter.lastSeenMac} />
+            <StatRow label={t("settingsMore.macPin.currentMac")} value={adapter.lastSeenMac} />
           )}
-          {adapter.source && <StatRow label="Source" value={adapter.source} mono={false} />}
+          {adapter.source && <StatRow label={t("settingsMore.macPin.source")} value={adapter.source} mono={false} />}
         </div>
         {adapter.deferredReason && (
-          <p className="text-[11px] text-warn">Deferred: {adapter.deferredReason}</p>
+          <p className="text-[11px] text-warn">{t("settingsMore.macPin.deferred", { reason: adapter.deferredReason })}</p>
         )}
         {state === "candidate" && (
           <div className="flex items-center gap-3 pt-1">
@@ -76,11 +78,10 @@ function AdapterCard({
               disabled={!iface || busy}
               onClick={() => iface && onPin(iface)}
             >
-              {busy ? "Pinning…" : "Pin (next boot)"}
+              {busy ? t("settingsMore.macPin.pinning") : t("settingsMore.macPin.pinNextBoot")}
             </Button>
             <span className="text-[11px] text-muted-foreground">
-              Pins the learned MAC so the address stops moving. Applies on the
-              next reboot.
+              {t("settingsMore.macPin.pinHint")}
             </span>
           </div>
         )}
@@ -92,11 +93,10 @@ function AdapterCard({
               disabled={!iface || busy}
               onClick={() => iface && onUnpin(iface)}
             >
-              {busy ? "Removing…" : "Unpin"}
+              {busy ? t("settingsMore.macPin.removing") : t("settingsMore.macPin.unpin")}
             </Button>
             <span className="text-[11px] text-muted-foreground">
-              Removes the pin. Takes effect on the next reboot; the agent re-pins
-              a known random-MAC adapter unless auto-pinning is off.
+              {t("settingsMore.macPin.unpinHint")}
             </span>
           </div>
         )}
@@ -106,6 +106,7 @@ function AdapterCard({
 }
 
 export function MacPinSettings() {
+  const { t } = useTranslation();
   const config = useConfig();
   const macPin = config.data?.network?.mac_pin;
   const [busyIface, setBusyIface] = useState<string | null>(null);
@@ -120,10 +121,10 @@ export function MacPinSettings() {
     setBusyIface(iface);
     try {
       const res = await pinMac(iface);
-      toast.ok(res.note || "Pinned.");
+      toast.ok(res.note || t("settingsMore.macPin.pinned"));
       await adapters.refetch();
     } catch (err) {
-      toastFromError(err, "Could not pin the adapter.");
+      toastFromError(err, t("settingsMore.macPin.pinError"));
     } finally {
       setBusyIface(null);
     }
@@ -138,13 +139,13 @@ export function MacPinSettings() {
       // would re-apply the old MAC at the next boot).
       const failure = res.link_error ?? res.persist_error;
       if (failure) {
-        toast.err("The adapter is still pinned for the next boot.", failure);
+        toast.err(t("settingsMore.macPin.stillPinned"), failure);
       } else {
-        toast.ok(res.note || "Unpinned.");
+        toast.ok(res.note || t("settingsMore.macPin.unpinned"));
       }
       await adapters.refetch();
     } catch (err) {
-      toastFromError(err, "Could not unpin the adapter.");
+      toastFromError(err, t("settingsMore.macPin.unpinError"));
     } finally {
       setBusyIface(null);
     }
@@ -158,15 +159,15 @@ export function MacPinSettings() {
         <CardContent className="pt-5 pb-5 space-y-5">
           <ConfigToggle
             configKey="network.mac_pin.enabled"
-            label="Auto-pin a stable MAC"
-            hint="Detect an onboard adapter with no hardware MAC (it randomizes each boot, churning this node's IP) and pin a stable address. The pin is written for the next boot and never touches the live link."
+            label={t("settingsMore.macPin.autoPinLabel")}
+            hint={t("settingsMore.macPin.autoPinHint")}
             value={macPin?.enabled}
           />
           <div className="border-t border-border pt-5">
             <ConfigToggle
               configKey="network.mac_pin.apply_live_allowed"
-              label="Allow live re-tag"
-              hint="Let the agent re-tag the live interface to fix the IP this session without a reboot. Off by default because re-tagging drops any connection over that interface."
+              label={t("settingsMore.macPin.liveRetagLabel")}
+              hint={t("settingsMore.macPin.liveRetagHint")}
               value={macPin?.apply_live_allowed}
             />
           </div>
@@ -175,17 +176,17 @@ export function MacPinSettings() {
 
       <div className="space-y-2">
         <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-          Tracked adapters
+          {t("settingsMore.macPin.trackedAdapters")}
         </div>
         {adapters.isError ? (
           <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-            Could not read adapter stability from this node.
+            {t("settingsMore.macPin.readError")}
           </div>
         ) : adapters.isLoading ? (
-          <p className="text-[11px] text-muted-foreground/70">Reading adapters…</p>
+          <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.macPin.reading")}</p>
         ) : !list || list.length === 0 ? (
           <p className="text-[11px] text-muted-foreground/70">
-            No adapters need pinning on this node.
+            {t("settingsMore.macPin.empty")}
           </p>
         ) : (
           <div className="space-y-2">
@@ -200,8 +201,7 @@ export function MacPinSettings() {
             ))}
             {list.some((a) => a.pinnedMac) && (
               <p className="text-[11px] text-muted-foreground">
-                A pinned MAC keeps this node's DHCP lease and IP stable across
-                reboots.
+                {t("settingsMore.macPin.pinnedFooter")}
               </p>
             )}
           </div>

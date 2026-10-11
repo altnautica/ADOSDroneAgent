@@ -1,3 +1,5 @@
+import { Trans, useTranslation } from "react-i18next";
+
 import { ConfigToggle, ReadRow } from "@/components/settings/config-fields";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -26,6 +28,7 @@ function ReachRow({ entry }: { entry: SetupAccessUrl }) {
 }
 
 export function DiscoverySettings() {
+  const { t } = useTranslation();
   const config = useConfig();
   const status = useStatus();
 
@@ -41,24 +44,24 @@ export function DiscoverySettings() {
     <div className="space-y-6">
       {/* mDNS toggle + read-only service type. */}
       {config.isLoading ? (
-        <p className="text-[11px] text-muted-foreground/70">Reading config…</p>
+        <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>
       ) : config.isError ? (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-          Could not read the discovery config from this node.
+          {t("settingsMore.discovery.readError")}
         </div>
       ) : discovery ? (
         <Card>
           <CardContent className="pt-5 pb-5 space-y-4">
             <ConfigToggle
               configKey="discovery.mdns_enabled"
-              label="Advertise over mDNS"
-              hint="Publish this node as a discoverable service on the LAN so Mission Control can find it by name. When off, reach it by IP."
+              label={t("settingsMore.discovery.mdnsLabel")}
+              hint={t("settingsMore.discovery.mdnsHint")}
               value={discovery.mdns_enabled}
             />
             {discovery.service_type && (
               <div className="border-t border-border pt-4">
                 <ReadRow
-                  label="Service type"
+                  label={t("settingsMore.discovery.serviceType")}
                   value={discovery.service_type}
                 />
               </div>
@@ -68,7 +71,7 @@ export function DiscoverySettings() {
       ) : (
         <Card>
           <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-            Discovery is not exposed by this agent version.
+            {t("settingsMore.discovery.unavailable")}
           </CardContent>
         </Card>
       )}
@@ -76,42 +79,41 @@ export function DiscoverySettings() {
       {/* Reach names — only what the agent advertises. */}
       <Card>
         <CardContent className="pt-5 pb-5 space-y-3">
-          <div className="text-sm font-semibold">How to reach this node</div>
+          <div className="text-sm font-semibold">{t("settingsMore.discovery.reachTitle")}</div>
 
           {status.isError ? (
             <p className="text-[11px] text-destructive">
-              Could not read reach names from this node.
+              {t("settingsMore.discovery.reachReadError")}
             </p>
           ) : (
             <div className="space-y-2">
               {/* mDNS name — the avahi-published hostname, or an honest absence. */}
               <div className="flex items-center justify-between gap-3">
                 <span className="text-[11px] text-muted-foreground">
-                  mDNS name
+                  {t("settingsMore.discovery.mdnsName")}
                 </span>
                 {mdnsHost ? (
                   <span className="font-mono text-xs">{mdnsHost}</span>
                 ) : (
                   <Badge variant="default" className="font-normal">
-                    none published
+                    {t("settingsMore.discovery.nonePublished")}
                   </Badge>
                 )}
               </div>
               {!mdnsHost && (
                 <p className="text-[11px] text-muted-foreground/80">
-                  This node publishes no resolvable mDNS name, so reach it by IP
-                  below.
+                  {t("settingsMore.discovery.noMdnsHint")}
                 </p>
               )}
 
               {hostname && hostname !== mdnsHost && (
-                <ReadRow label="Hostname" value={hostname} />
+                <ReadRow label={t("settingsMore.discovery.hostname")} value={hostname} />
               )}
               {lanHost && lanHost !== mdnsHost && (
-                <ReadRow label="LAN host" value={lanHost} />
+                <ReadRow label={t("settingsMore.discovery.lanHost")} value={lanHost} />
               )}
               {localIps.length > 0 && (
-                <ReadRow label="LAN IPs" value={localIps.join(", ")} />
+                <ReadRow label={t("settingsMore.discovery.lanIps")} value={localIps.join(", ")} />
               )}
             </div>
           )}
@@ -122,7 +124,7 @@ export function DiscoverySettings() {
       {reach.length > 0 && (
         <Card>
           <CardContent className="pt-5 pb-5 space-y-2">
-            <div className="text-sm font-semibold mb-1">Advertised links</div>
+            <div className="text-sm font-semibold mb-1">{t("settingsMore.discovery.advertisedLinks")}</div>
             <div className="divide-y divide-border/60">
               {reach.map((entry, idx) => (
                 <ReachRow
@@ -132,9 +134,10 @@ export function DiscoverySettings() {
               ))}
             </div>
             <p className="text-[11px] text-muted-foreground pt-1">
-              These are the reach URLs the agent advertises. Prefer an IP URL
-              from a hosted ground station; a <span className="font-mono">.local</span>{" "}
-              name resolves only from a device on this LAN.
+              <Trans
+                i18nKey="settingsMore.discovery.advertisedHint"
+                components={{ code: <span className="font-mono" /> }}
+              />
             </p>
           </CardContent>
         </Card>

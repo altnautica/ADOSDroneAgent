@@ -6,6 +6,7 @@ import {
   useState,
   type ChangeEvent,
 } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
 import { PluginInstallDialog } from "@/components/plugins/install-dialog";
@@ -36,6 +37,7 @@ interface PluginsListResponse {
 }
 
 export function ExtensionsRoute() {
+  const { t } = useTranslation();
   const list = useResource<PluginsListResponse>("plugins", "/api/plugins", 8000);
 
   const installs = list.data?.installs ?? [];
@@ -60,10 +62,17 @@ export function ExtensionsRoute() {
         `/api/plugins/${encodeURIComponent(plugin.plugin_id)}/${action}`,
         { method: "POST" },
       );
-      toast.ok(`${plugin.plugin_id} ${action}d.`);
+      toast.ok(
+        action === "enable"
+          ? t("extensions.toast.enabled", { id: plugin.plugin_id })
+          : t("extensions.toast.disabled", { id: plugin.plugin_id }),
+      );
       list.refetch();
     } catch (err) {
-      toastFromError(err, `Extension ${action} failed.`);
+      toastFromError(
+        err,
+        action === "enable" ? t("extensions.toast.enableFailed") : t("extensions.toast.disableFailed"),
+      );
     }
   }
 
@@ -72,26 +81,26 @@ export function ExtensionsRoute() {
   const beginInstall = useCallback(
     async (source: PluginSource) => {
       if (source.kind === "file" && !source.file.name.endsWith(".adosplug")) {
-        toast.err("Extension files must end in .adosplug");
+        toast.err(t("extensions.toast.badExtension"));
         return;
       }
       setParsing(true);
       try {
         const res = await parsePlugin(source);
         if (!res.ok) {
-          toast.err(`Extension parse failed: ${res.detail || res.kind}`);
+          toast.err(t("extensions.toast.parseFailedDetail", { detail: res.detail || res.kind }));
           return;
         }
         setInstallSource(source);
         setInstallManifest(res);
         setInstallOpen(true);
       } catch (err) {
-        toastFromError(err, "Extension parse failed.");
+        toastFromError(err, t("extensions.toast.parseFailed"));
       } finally {
         setParsing(false);
       }
     },
-    [],
+    [t],
   );
 
   function onPickFile() {
@@ -135,16 +144,16 @@ export function ExtensionsRoute() {
 
   return (
     <PageShell
-      title="Extensions"
-      blurb="Installed extension manifests. Toggle extensions on or off without restarting the agent."
+      title={t("extensions.page.title")}
+      blurb={t("extensions.page.blurb")}
       rightAction={
         <div className="flex items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => list.refetch()}>
-            Refresh
+            {t("extensions.page.refresh")}
           </Button>
           <Button size="sm" onClick={onPickFile} disabled={parsing}>
             <Upload className="h-3.5 w-3.5" />
-            {parsing ? "Parsing…" : "Install"}
+            {parsing ? t("extensions.page.parsing") : t("extensions.page.install")}
           </Button>
           <input
             ref={fileInputRef}
@@ -157,7 +166,7 @@ export function ExtensionsRoute() {
       }
     >
       {list.isLoading && (
-        <p className="text-sm text-muted-foreground">loading…</p>
+        <p className="text-sm text-muted-foreground">{t("extensions.page.loading")}</p>
       )}
 
       {!list.isLoading && installs.length === 0 && (
@@ -165,12 +174,15 @@ export function ExtensionsRoute() {
           <CardContent className="pt-5 pb-5 flex items-start gap-3">
             <Plug className="h-5 w-5 text-muted-foreground mt-0.5" />
             <div>
-              <div className="text-sm font-medium">No extensions installed.</div>
+              <div className="text-sm font-medium">{t("extensions.empty.title")}</div>
               <div className="text-xs text-muted-foreground mt-1">
-                Pick one from the catalog below, drop a signed{" "}
-                <span className="font-mono">.adosplug</span> file anywhere on
-                this window, or click <span className="font-medium">Install</span>{" "}
-                to upload one.
+                <Trans
+                  i18nKey="extensions.empty.body"
+                  components={{
+                    mono: <span className="font-mono" />,
+                    strong: <span className="font-medium" />,
+                  }}
+                />
               </div>
             </div>
           </CardContent>
@@ -194,7 +206,7 @@ export function ExtensionsRoute() {
                     <span className="font-mono text-sm">{p.plugin_id}</span>
                     {p.version && (
                       <span className="text-[10px] text-muted-foreground font-mono">
-                        v{p.version}
+                        {`v${p.version}`}
                       </span>
                     )}
                     <span
@@ -204,21 +216,24 @@ export function ExtensionsRoute() {
                           : "border-muted-foreground/40 text-muted-foreground"
                       }`}
                     >
-                      {p.status ?? (enabled ? "enabled" : "disabled")}
+                      {p.status ?? (enabled ? t("extensions.status.enabled") : t("extensions.status.disabled"))}
                     </span>
                     {p.signer_id ? (
                       <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-                        signed
+                        {t("extensions.status.signed")}
                       </span>
                     ) : (
                       <span className="text-[10px] uppercase tracking-wider text-destructive">
-                        unsigned
+                        {t("extensions.status.unsigned")}
                       </span>
                     )}
                   </div>
                   {totalCount > 0 && (
                     <p className="text-xs text-muted-foreground mt-1">
-                      {grantedCount}/{totalCount} permissions granted
+                      {t("extensions.status.permissionsGranted", {
+                        granted: grantedCount,
+                        total: totalCount,
+                      })}
                     </p>
                   )}
                 </div>
@@ -233,7 +248,7 @@ export function ExtensionsRoute() {
                       })
                     }
                   >
-                    {enabled ? "Disable" : "Enable"}
+                    {enabled ? t("extensions.actions.disable") : t("extensions.actions.enable")}
                   </Button>
                 </div>
               </CardContent>
@@ -261,15 +276,19 @@ export function ExtensionsRoute() {
         }}
         title={
           confirm
-            ? `${confirm.action === "enable" ? "Enable" : "Disable"} ${confirm.plugin.plugin_id}?`
+            ? confirm.action === "enable"
+              ? t("extensions.confirm.enableTitle", { id: confirm.plugin.plugin_id })
+              : t("extensions.confirm.disableTitle", { id: confirm.plugin.plugin_id })
             : ""
         }
         description={
           confirm?.action === "disable"
-            ? "The extension will stop processing immediately. Any background work is killed."
-            : "The extension will start with its declared capabilities."
+            ? t("extensions.confirm.disableDescription")
+            : t("extensions.confirm.enableDescription")
         }
-        confirmLabel={confirm?.action === "enable" ? "Enable" : "Disable"}
+        confirmLabel={
+          confirm?.action === "enable" ? t("extensions.actions.enable") : t("extensions.actions.disable")
+        }
         destructive={confirm?.action === "disable"}
         onConfirm={async () => {
           if (confirm) await applyAction(confirm.plugin, confirm.action);
@@ -296,6 +315,7 @@ export function ExtensionsRoute() {
 }
 
 function DragDropOverlay() {
+  const { t } = useTranslation();
   return (
     <div
       className={cn(
@@ -307,7 +327,7 @@ function DragDropOverlay() {
       <div className="rounded-lg border-2 border-dashed border-primary/60 bg-background p-8 shadow-xl">
         <Upload className="h-8 w-8 text-primary mx-auto mb-2" />
         <div className="text-sm font-medium text-center">
-          Drop the .adosplug to install
+          {t("extensions.page.dropToInstall")}
         </div>
       </div>
     </div>

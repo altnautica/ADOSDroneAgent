@@ -1,4 +1,5 @@
 import { type ReactNode, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -26,11 +27,12 @@ export function ConfirmDialog({
   onOpenChange,
   title,
   description,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
+  confirmLabel,
+  cancelLabel,
   destructive = false,
   onConfirm,
 }: Props) {
+  const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
 
   async function handleConfirm() {
@@ -58,14 +60,14 @@ export function ConfirmDialog({
             disabled={busy}
             onClick={() => onOpenChange(false)}
           >
-            {cancelLabel}
+            {cancelLabel ?? t("settings.shared.cancel")}
           </Button>
           <Button
             variant={destructive ? "destructive" : "default"}
             disabled={busy}
             onClick={handleConfirm}
           >
-            {busy ? "Working…" : confirmLabel}
+            {busy ? t("settings.shared.working") : (confirmLabel ?? t("settings.shared.confirm"))}
           </Button>
         </DialogFooter>
       </DialogContent>

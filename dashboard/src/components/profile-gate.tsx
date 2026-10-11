@@ -1,5 +1,8 @@
 import { Ban } from "lucide-react";
+import { Trans, useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
+
+import i18n from "@/i18n";
 
 import { Button } from "@/components/ui/button";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
@@ -15,14 +18,18 @@ interface ProfileGateProps {
 }
 
 function profileLabel(p: AllowedProfile | Profile): string {
-  if (p === "drone") return "Drone";
-  if (p === "ground_station") return "Ground station";
-  if (p === "auto") return "Auto-detecting";
-  return "non-flight (workstation or compute)";
+  if (p === "drone") return i18n.t("access.profileGate.profileDrone");
+  if (p === "ground_station") return i18n.t("access.profileGate.profileGroundStation");
+  if (p === "auto") return i18n.t("access.profileGate.profileAuto");
+  return i18n.t("access.profileGate.profileOther");
 }
 
 function roleLabel(r: GroundRole): string {
-  return r === "direct" ? "Direct" : r === "relay" ? "Relay" : "Receiver";
+  return r === "direct"
+    ? i18n.t("access.profileGate.roleDirect")
+    : r === "relay"
+      ? i18n.t("access.profileGate.roleRelay")
+      : i18n.t("access.profileGate.roleReceiver");
 }
 
 function ProfileMismatchPanel({
@@ -36,10 +43,15 @@ function ProfileMismatchPanel({
   allow: AllowedProfile[];
   roles?: GroundRole[];
 }) {
-  const expected = allow.map(profileLabel).join(" or ");
+  const { t } = useTranslation();
+  const expected = allow.map(profileLabel).join(t("access.profileGate.or"));
   const expectedRole = roles?.length
-    ? ` (${roles.map(roleLabel).join(" / ")} role)`
+    ? t("access.profileGate.roleSuffix", { role: roles.map(roleLabel).join(" / ") })
     : "";
+  const currentRoleSuffix =
+    current === "ground_station"
+      ? t("access.profileGate.roleSuffix", { role: roleLabel(currentRole) })
+      : "";
 
   return (
     <div className="max-w-md space-y-4 py-12">
@@ -47,20 +59,22 @@ function ProfileMismatchPanel({
         <Ban className="h-5 w-5 text-muted-foreground" />
       </div>
       <h1 className="text-xl font-semibold tracking-tight">
-        Not available on this profile
+        {t("access.profileGate.title")}
       </h1>
       <p className="text-sm text-muted-foreground">
-        This page is for the {expected} profile{expectedRole}. This node is
-        currently the {profileLabel(current)} profile
-        {current === "ground_station" ? ` (${roleLabel(currentRole)} role)` : ""}
-        . Switch profiles from{" "}
-        <Link to="/settings/profile" className="underline">
-          Settings &rarr; Profile
-        </Link>
-        .
+        <Trans
+          i18nKey="access.profileGate.body"
+          values={{
+            expected,
+            expectedRole,
+            current: profileLabel(current),
+            currentRole: currentRoleSuffix,
+          }}
+          components={{ link: <Link to="/settings/profile" className="underline" /> }}
+        />
       </p>
       <Button asChild variant="outline" size="sm">
-        <Link to="/">Back to Home</Link>
+        <Link to="/">{t("common.backToHome")}</Link>
       </Button>
     </div>
   );

@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router-dom";
 
 import { App } from "./App";
 import { consumeUrlKey } from "./shared/api-key";
+import "./i18n";
 import "./styles/globals.css";
 
 // Capture a one-shot ?ados_key=… URL parameter into localStorage before

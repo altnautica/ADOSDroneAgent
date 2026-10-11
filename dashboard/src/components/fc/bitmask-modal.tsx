@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,6 +25,7 @@ interface Props {
  * any undocumented bits that are already set, and shows the raw decimal/hex.
  */
 export function BitmaskModal({ open, onOpenChange, name, bitmask, value, onApply }: Props) {
+  const { t } = useTranslation();
   const [draft, setDraft] = useState(value >>> 0);
   useEffect(() => {
     if (open) setDraft(value >>> 0);
@@ -46,10 +48,10 @@ export function BitmaskModal({ open, onOpenChange, name, bitmask, value, onApply
         </DialogHeader>
 
         <div className="flex items-center gap-2 mb-2">
-          <Button size="sm" variant="outline" onClick={() => setAll(true)}>Select all</Button>
-          <Button size="sm" variant="outline" onClick={() => setAll(false)}>Clear all</Button>
+          <Button size="sm" variant="outline" onClick={() => setAll(true)}>{t("fc.bitmask.selectAll")}</Button>
+          <Button size="sm" variant="outline" onClick={() => setAll(false)}>{t("fc.bitmask.clearAll")}</Button>
           <span className="ml-auto font-mono text-xs text-muted-foreground tabular-nums">
-            {draft} · 0x{draft.toString(16)}
+            {`${draft} · 0x${draft.toString(16)}`}
           </span>
         </div>
 
@@ -68,20 +70,20 @@ export function BitmaskModal({ open, onOpenChange, name, bitmask, value, onApply
           ))}
           {unknown !== 0 && (
             <p className="text-[10px] text-warn pt-1">
-              Preserving undocumented bits: 0x{unknown.toString(16)}
+              {t("fc.bitmask.preservingUnknown", { hex: unknown.toString(16) })}
             </p>
           )}
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>{t("fc.bitmask.cancel")}</Button>
           <Button
             onClick={() => {
               onApply(draft);
               onOpenChange(false);
             }}
           >
-            Apply
+            {t("fc.bitmask.apply")}
           </Button>
         </DialogFooter>
       </DialogContent>

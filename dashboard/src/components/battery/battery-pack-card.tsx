@@ -1,22 +1,36 @@
+import { Trans, useTranslation } from "react-i18next";
+
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import type {
   BatteryAnomaly,
+  BatteryHistoryEvent,
   BatteryPack,
   BatteryPredictionState,
   BatteryRuleId,
+  BatterySeverity,
 } from "@/hooks/use-battery-health";
 import { fmtNum, fmtRelativeTime, fmtVoltage } from "@/shared/format";
 import { cn } from "@/lib/utils";
 
-const RULE_LABEL: Record<BatteryRuleId, string> = {
-  cell_critical: "Cell critical",
-  cell_low: "Cell low",
-  cell_divergence: "Cell divergence",
-  voltage_drop: "Voltage sag",
-  temp_spike: "Temperature spike",
-  predictive_low: "Reserve soon",
-};
+const RULE_LABEL = {
+  cell_critical: "settingsMore.battery.ruleCellCritical",
+  cell_low: "settingsMore.battery.ruleCellLow",
+  cell_divergence: "settingsMore.battery.ruleCellDivergence",
+  voltage_drop: "settingsMore.battery.ruleVoltageSag",
+  temp_spike: "settingsMore.battery.ruleTempSpike",
+  predictive_low: "settingsMore.battery.ruleReserveSoon",
+} as const satisfies Record<BatteryRuleId, string>;
+
+const SEVERITY_LABEL = {
+  warning: "settingsMore.battery.severityWarning",
+  critical: "settingsMore.battery.severityCritical",
+} as const satisfies Record<BatterySeverity, string>;
+
+const EVENT_STATE_LABEL = {
+  raised: "settingsMore.battery.eventRaised",
+  cleared: "settingsMore.battery.eventCleared",
+} as const satisfies Record<BatteryHistoryEvent["state"], string>;
 
 /** Formats an anomaly's value/threshold in the unit the engine reports for
  * that rule: cell rules in V, divergence in mV, sag in V/s, temperature in
@@ -44,15 +58,15 @@ function fmtEta(s: number | null): string {
   return m > 0 ? `${m}m ${String(rem).padStart(2, "0")}s` : `${rem}s`;
 }
 
-const PREDICTION: Record<
+const PREDICTION = {
+  idle: { labelKey: "settingsMore.battery.predIdle", variant: "default" },
+  normal: { labelKey: "settingsMore.battery.predDraining", variant: "ok" },
+  high: { labelKey: "settingsMore.battery.predDrainingFast", variant: "warn" },
+  past: { labelKey: "settingsMore.battery.predPastReserve", variant: "err" },
+} as const satisfies Record<
   BatteryPredictionState,
-  { label: string; variant: "default" | "ok" | "warn" | "err" }
-> = {
-  idle: { label: "Idle", variant: "default" },
-  normal: { label: "Draining", variant: "ok" },
-  high: { label: "Draining fast", variant: "warn" },
-  past: { label: "Past reserve", variant: "err" },
-};
+  { labelKey: string; variant: "default" | "ok" | "warn" | "err" }
+>;
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -66,10 +80,11 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 function CellBar({ pack }: { pack: BatteryPack }) {
+  const { t } = useTranslation();
   if (!pack.cells_plausible) {
     return (
       <p className="text-xs text-muted-foreground">
-        Per-cell data not reported by the flight controller.
+        {t("settingsMore.battery.noCellData")}
       </p>
     );
   }
@@ -86,29 +101,33 @@ function CellBar({ pack }: { pack: BatteryPack }) {
                 : "border-border bg-muted/30",
             )}
           >
-            <div className="text-[10px] text-muted-foreground">C{i + 1}</div>
+            <div className="text-[10px] text-muted-foreground">{t("settingsMore.battery.cellLabel", { n: i + 1 })}</div>
             <div className="font-mono text-xs">{v.toFixed(3)}</div>
           </div>
         ))}
       </div>
       <p className="text-[11px] text-muted-foreground">
-        Spread {pack.divergence_mv == null ? "—" : `${Math.round(pack.divergence_mv)} mV`}
-        {" · "}min {fmtVoltage(pack.min_cell_v)} · max {fmtVoltage(pack.max_cell_v)}
+        {t("settingsMore.battery.cellSpread", {
+          spread: pack.divergence_mv == null ? "—" : `${Math.round(pack.divergence_mv)} mV`,
+          min: fmtVoltage(pack.min_cell_v),
+          max: fmtVoltage(pack.max_cell_v),
+        })}
       </p>
     </div>
   );
 }
 
 function AnomalyRow({ a }: { a: BatteryAnomaly }) {
+  const { t } = useTranslation();
   const clearing = a.cleared_at_ms != null;
   return (
     <div className="flex items-center justify-between gap-3 text-xs">
       <div className="flex items-center gap-2">
         <Badge variant={a.severity === "critical" ? "err" : "warn"}>
-          {a.severity}
+          {t(SEVERITY_LABEL[a.severity])}
         </Badge>
-        <span className="font-medium">{RULE_LABEL[a.rule]}</span>
-        {clearing && <span className="text-muted-foreground">clearing</span>}
+        <span className="font-medium">{t(RULE_LABEL[a.rule])}</span>
+        {clearing && <span className="text-muted-foreground">{t("settingsMore.battery.clearing")}</span>}
       </div>
       <span className="font-mono text-muted-foreground">
         {fmtRuleValue(a.rule, a.value)} / {fmtRuleValue(a.rule, a.threshold)}
@@ -121,6 +140,7 @@ function AnomalyRow({ a }: { a: BatteryAnomaly }) {
  * highlighted), electrical readings, time-to-reserve prediction, the active
  * anomalies and the recent raise/clear history. */
 export function BatteryPackCard({ pack }: { pack: BatteryPack }) {
+  const { t } = useTranslation();
   const prediction = PREDICTION[pack.prediction.state];
   const recent = pack.history.slice(0, 8);
 
@@ -128,62 +148,61 @@ export function BatteryPackCard({ pack }: { pack: BatteryPack }) {
     <Card>
       <CardContent className="pt-5 pb-5 space-y-5">
         <div className="flex items-center justify-between">
-          <div className="text-sm font-semibold">Pack {pack.id}</div>
+          <div className="text-sm font-semibold">{t("settingsMore.battery.packTitle", { id: pack.id })}</div>
           <div className="flex items-center gap-2">
-            <Badge variant={prediction.variant}>{prediction.label}</Badge>
-            {pack.anomalies.length === 0 && <Badge variant="ok">Healthy</Badge>}
+            <Badge variant={prediction.variant}>{t(prediction.labelKey)}</Badge>
+            {pack.anomalies.length === 0 && <Badge variant="ok">{t("settingsMore.battery.healthy")}</Badge>}
           </div>
         </div>
 
         <CellBar pack={pack} />
 
         <div className="grid grid-cols-3 gap-4 sm:grid-cols-6">
-          <Stat label="Voltage" value={fmtVoltage(pack.voltage_v)} />
+          <Stat label={t("settingsMore.battery.statVoltage")} value={fmtVoltage(pack.voltage_v)} />
           <Stat
-            label="Current"
+            label={t("settingsMore.battery.statCurrent")}
             value={pack.current_a == null ? "—" : `${fmtNum(pack.current_a)} A`}
           />
           <Stat
-            label="Remaining"
+            label={t("settingsMore.battery.statRemaining")}
             value={pack.remaining_pct == null ? "—" : `${pack.remaining_pct}%`}
           />
           <Stat
-            label="Used"
+            label={t("settingsMore.battery.statUsed")}
             value={pack.consumed_mah == null ? "—" : `${pack.consumed_mah} mAh`}
           />
           <Stat
-            label="Energy"
+            label={t("settingsMore.battery.statEnergy")}
             value={pack.consumed_wh == null ? "—" : `${fmtNum(pack.consumed_wh)} Wh`}
           />
           <Stat
-            label="Temp"
+            label={t("settingsMore.battery.statTemp")}
             value={pack.temperature_c == null ? "—" : `${fmtNum(pack.temperature_c)} °C`}
           />
         </div>
 
         <div className="rounded-md border border-border px-3 py-2 text-xs text-muted-foreground">
-          Time to reserve{" "}
-          <span className="font-mono text-foreground">
-            {fmtEta(pack.prediction.eta_s)}
-          </span>
-          {" · "}drain{" "}
-          <span className="font-mono text-foreground">
-            {pack.prediction.drop_pct_per_s == null
-              ? "—"
-              : `${pack.prediction.drop_pct_per_s.toFixed(2)} %/s`}
-          </span>
-          {" · "}mean current{" "}
-          <span className="font-mono text-foreground">
-            {pack.prediction.mean_current_a == null
-              ? "—"
-              : `${fmtNum(pack.prediction.mean_current_a)} A`}
-          </span>
+          <Trans
+            i18nKey="settingsMore.battery.predictionLine"
+            values={{
+              eta: fmtEta(pack.prediction.eta_s),
+              drain:
+                pack.prediction.drop_pct_per_s == null
+                  ? "—"
+                  : `${pack.prediction.drop_pct_per_s.toFixed(2)} %/s`,
+              current:
+                pack.prediction.mean_current_a == null
+                  ? "—"
+                  : `${fmtNum(pack.prediction.mean_current_a)} A`,
+            }}
+            components={{ v: <span className="font-mono text-foreground" /> }}
+          />
         </div>
 
         {pack.anomalies.length > 0 && (
           <div className="space-y-2 border-t border-border pt-4">
             <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Active anomalies
+              {t("settingsMore.battery.activeAnomalies")}
             </div>
             {pack.anomalies.map((a) => (
               <AnomalyRow key={a.rule} a={a} />
@@ -194,7 +213,7 @@ export function BatteryPackCard({ pack }: { pack: BatteryPack }) {
         {recent.length > 0 && (
           <div className="space-y-1.5 border-t border-border pt-4">
             <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              Recent events
+              {t("settingsMore.battery.recentEvents")}
             </div>
             {recent.map((e) => (
               <div
@@ -202,8 +221,15 @@ export function BatteryPackCard({ pack }: { pack: BatteryPack }) {
                 className="flex items-center justify-between text-xs text-muted-foreground"
               >
                 <span>
-                  <span className="text-foreground">{RULE_LABEL[e.rule]}</span>{" "}
-                  {e.state} at {fmtRuleValue(e.rule, e.value)}
+                  <Trans
+                    i18nKey="settingsMore.battery.eventLine"
+                    values={{
+                      rule: t(RULE_LABEL[e.rule]),
+                      state: t(EVENT_STATE_LABEL[e.state]),
+                      value: fmtRuleValue(e.rule, e.value),
+                    }}
+                    components={{ rule: <span className="text-foreground" /> }}
+                  />
                 </span>
                 <span>{fmtRelativeTime(e.at_ms)}</span>
               </div>

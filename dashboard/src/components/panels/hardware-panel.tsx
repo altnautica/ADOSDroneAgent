@@ -7,6 +7,7 @@
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Cpu, RefreshCw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { HardwareItemList } from "@/components/panels/hardware-item-list";
 import { Button } from "@/components/ui/button";
@@ -20,6 +21,7 @@ import { cn } from "@/lib/utils";
 const STALE_AFTER_MS = 5 * 60 * 1000;
 
 export function HardwarePanel() {
+  const { t } = useTranslation();
   const status = useStatus();
   const qc = useQueryClient();
   const hwCheck = status.data?.hardware_check;
@@ -28,11 +30,11 @@ export function HardwarePanel() {
   const refresh = useMutation({
     mutationFn: refreshHardwareCheck,
     onSuccess: () => {
-      toast.ok("Hardware rescanned.");
+      toast.ok(t("panels.hardware.rescanned"));
       qc.invalidateQueries({ queryKey: ["setup-status"] });
       qc.invalidateQueries({ queryKey: ["dashboard-snapshot"] });
     },
-    onError: (err) => toastFromError(err, "Hardware rescan failed."),
+    onError: (err) => toastFromError(err, t("panels.hardware.rescanFailed")),
   });
 
   const lastRun = hwCheck?.last_run ? Date.parse(hwCheck.last_run) : null;
@@ -44,10 +46,10 @@ export function HardwarePanel() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Cpu className="h-3.5 w-3.5" />
-          Hardware
+          {t("panels.hardware.title")}
           {stale && (
             <span className="ml-auto text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border border-warn/40 text-warn">
-              stale
+              {t("panels.hardware.stale")}
             </span>
           )}
           {!stale && lastRun && (
@@ -59,7 +61,7 @@ export function HardwarePanel() {
       </CardHeader>
       <CardContent className="space-y-3">
         {items.length === 0 ? (
-          <p className="text-sm text-muted-foreground">scanning…</p>
+          <p className="text-sm text-muted-foreground">{t("panels.hardware.scanning")}</p>
         ) : (
           <HardwareItemList items={items} />
         )}
@@ -73,7 +75,7 @@ export function HardwarePanel() {
             <RefreshCw
               className={cn("h-3.5 w-3.5", refresh.isPending && "animate-spin")}
             />
-            Rescan
+            {t("panels.hardware.rescan")}
           </Button>
         </div>
       </CardContent>

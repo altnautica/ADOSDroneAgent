@@ -18,6 +18,8 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Suspense } from "react";
+import type { ParseKeys } from "i18next";
+import { useTranslation } from "react-i18next";
 import { NavLink, Outlet } from "react-router-dom";
 
 import type { AllowedProfile } from "@/components/profile-gate";
@@ -47,11 +49,19 @@ const GROUP_ORDER: readonly SettingsGroup[] = [
   "System & safety",
 ];
 
+const GROUP_LABEL_KEYS: Record<SettingsGroup, ParseKeys> = {
+  "Identity": "layout.settings.groupIdentity",
+  "Link & network": "layout.settings.groupLink",
+  "Video & vision": "layout.settings.groupVideo",
+  "Cloud & remote": "layout.settings.groupCloud",
+  "System & safety": "layout.settings.groupSystem",
+};
+
 interface SectionLink {
   to: string;
-  label: string;
+  labelKey: ParseKeys;
   icon: LucideIcon;
-  blurb: string;
+  blurbKey: ParseKeys;
   group: SettingsGroup;
   /** Profiles this page applies to. Absent = every profile. Mirrors the GCS
    * node-settings gates and the route's own ProfileGate so the nav never
@@ -76,45 +86,45 @@ const SECTIONS: SectionLink[] = [
   // IDENTITY
   {
     to: "/settings/profile",
-    label: "Profile",
+    labelKey: "nav.profile",
     icon: UserCog,
-    blurb: "Drone or ground station, role, restart on apply.",
+    blurbKey: "layout.settings.profileBlurb",
     group: "Identity",
   },
   // LINK & NETWORK
   {
     to: "/settings/network",
-    label: "Network",
+    labelKey: "nav.network",
     icon: Wifi,
-    blurb: "Uplink matrix, failover, Wi-Fi client, hotspot.",
+    blurbKey: "layout.settings.networkBlurb",
     group: "Link & network",
   },
   {
     to: "/settings/cellular",
-    label: "Cellular",
+    labelKey: "nav.cellular",
     icon: Signal,
-    blurb: "Modem status, APN, and data cap.",
+    blurbKey: "layout.settings.cellularBlurb",
     group: "Link & network",
   },
   {
     to: "/settings/mac-pin",
-    label: "MAC pinning",
+    labelKey: "nav.macPin",
     icon: Fingerprint,
-    blurb: "Adapter stability and stable-MAC pins.",
+    blurbKey: "layout.settings.macPinBlurb",
     group: "Link & network",
   },
   {
     to: "/settings/discovery",
-    label: "Discovery",
+    labelKey: "nav.discovery",
     icon: Radar,
-    blurb: "Advertised reach names and mDNS.",
+    blurbKey: "layout.settings.discoveryBlurb",
     group: "Link & network",
   },
   {
     to: "/settings/mavlink",
-    label: "MAVLink",
+    labelKey: "nav.mavlink",
     icon: Route,
-    blurb: "FC transport, endpoints, and IDs.",
+    blurbKey: "layout.settings.mavlinkBlurb",
     group: "Link & network",
     // MAVLink routing is the FC-connected drone's surface; a ground station has
     // no MAVLink router to configure.
@@ -123,27 +133,27 @@ const SECTIONS: SectionLink[] = [
   // VIDEO & VISION
   {
     to: "/settings/vision",
-    label: "Vision",
+    labelKey: "nav.vision",
     icon: Eye,
-    blurb: "Detection engine, backend, and thresholds.",
+    blurbKey: "layout.settings.visionBlurb",
     group: "Video & vision",
     // The on-board vision engine runs on the drone; a ground station has none.
     allow: ["drone"],
   },
   {
     to: "/settings/camera",
-    label: "Camera",
+    labelKey: "nav.camera",
     icon: Monitor,
-    blurb: "Image orientation: rotation, hflip, vflip.",
+    blurbKey: "layout.settings.cameraBlurb",
     group: "Video & vision",
     // Only the drone owns an encode pipeline for its onboard camera.
     allow: ["drone"],
   },
   {
     to: "/settings/swarm",
-    label: "Swarm",
+    labelKey: "nav.swarm",
     icon: Boxes,
-    blurb: "Swarm participation and formation defaults.",
+    blurbKey: "layout.settings.swarmBlurb",
     group: "Video & vision",
     // Swarm coordination is a drone-fleet surface.
     allow: ["drone"],
@@ -151,17 +161,17 @@ const SECTIONS: SectionLink[] = [
   // CLOUD & REMOTE
   {
     to: "/settings/cloud",
-    label: "Cloud",
+    labelKey: "nav.cloud",
     icon: Cloud,
-    blurb: "Altnautica relay, self-hosted, or local-only.",
+    blurbKey: "layout.settings.cloudBlurb",
     group: "Cloud & remote",
   },
   // SYSTEM & SAFETY
   {
     to: "/settings/region",
-    label: "Region",
+    labelKey: "nav.region",
     icon: Globe,
-    blurb: "Operating-region RF posture: unrestricted or pinned.",
+    blurbKey: "layout.settings.regionBlurb",
     group: "System & safety",
     // The operating region governs the RF radio; only the radio profiles have
     // a regulatory domain to set.
@@ -169,45 +179,46 @@ const SECTIONS: SectionLink[] = [
   },
   {
     to: "/settings/battery",
-    label: "Battery",
+    labelKey: "nav.battery",
     icon: BatteryMedium,
-    blurb: "Cell health, sag and time-to-reserve.",
+    blurbKey: "layout.settings.batteryBlurb",
     group: "System & safety",
     // Battery telemetry comes from the flight controller the drone carries.
     allow: ["drone"],
   },
   {
     to: "/settings/self-heal",
-    label: "Self-heal",
+    labelKey: "nav.selfHeal",
     icon: HeartPulse,
-    blurb: "Onboard Wi-Fi and camera auto-recovery.",
+    blurbKey: "layout.settings.selfHealBlurb",
     group: "System & safety",
   },
   {
     to: "/settings/security",
-    label: "Security",
+    labelKey: "nav.security",
     icon: Lock,
-    blurb: "API key, MAVLink WS auth, dashboard PIN.",
+    blurbKey: "layout.settings.securityBlurb",
     group: "System & safety",
   },
   {
     to: "/settings/display",
-    label: "Display",
+    labelKey: "nav.display",
     icon: Monitor,
-    blurb: "Local kiosk display selection.",
+    blurbKey: "layout.settings.displayBlurb",
     group: "System & safety",
     allow: ["ground_station"],
   },
   {
     to: "/settings/advanced",
-    label: "Advanced",
+    labelKey: "nav.advanced",
     icon: Cpu,
-    blurb: "Log level and board override.",
+    blurbKey: "layout.settings.advancedBlurb",
     group: "System & safety",
   },
 ];
 
 export function SettingsLayout() {
+  const { t } = useTranslation();
   const profile = useNodeProfile();
   // Settings sections read the setup status; the layout keeps it fresh while
   // any settings page is open.
@@ -218,10 +229,9 @@ export function SettingsLayout() {
       <header className="mb-6 flex items-start gap-3">
         <ShieldAlert className="h-6 w-6 text-warn mt-0.5 shrink-0" />
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{t("layout.settings.title")}</h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Live agent configuration. Risky changes (passwords, profile switches,
-            board override) require explicit Save and a confirm prompt.
+            {t("layout.settings.intro")}
           </p>
         </div>
       </header>
@@ -236,7 +246,7 @@ export function SettingsLayout() {
             return (
               <div key={group} className="space-y-1">
                 <div className="px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
-                  {group}
+                  {t(GROUP_LABEL_KEYS[group])}
                 </div>
                 {links.map((s) => {
                   const Icon = s.icon;
@@ -255,9 +265,9 @@ export function SettingsLayout() {
                     >
                       <Icon className="h-4 w-4 mt-0.5 shrink-0" />
                       <div className="flex-1 min-w-0">
-                        <div className="font-medium">{s.label}</div>
+                        <div className="font-medium">{t(s.labelKey)}</div>
                         <div className="text-[11px] text-muted-foreground/80 mt-0.5">
-                          {s.blurb}
+                          {t(s.blurbKey)}
                         </div>
                       </div>
                     </NavLink>

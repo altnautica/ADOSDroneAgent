@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 
+import { useTranslation } from "react-i18next";
+
 import { verifyAccess } from "@/lib/access";
 import { setAuthChallengeHandler } from "@/shared/api-fetch";
 import { fetchPinStatus, type PinStatus } from "@/lib/pin";
@@ -10,11 +12,12 @@ type GateState = "checking" | "ok" | "locked";
 /** A minimal branded loading screen while the gate probes, so the app never
  * flashes behind the splash. */
 function GateChecking() {
+  const { t } = useTranslation();
   return (
     <div className="fixed inset-0 z-[200] flex items-center justify-center bg-background">
       <div className="flex items-center gap-2 opacity-70">
         <img src="/brand.svg" alt="" className="h-7 w-7 rounded-md" />
-        <span className="text-base font-semibold tracking-tight">ADOS</span>
+        <span className="text-base font-semibold tracking-tight">{t("layout.header.brand")}</span>
       </div>
     </div>
   );

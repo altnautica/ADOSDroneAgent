@@ -8,6 +8,7 @@
 // draft from the live value and shows nothing it did not read.
 
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -52,6 +53,7 @@ export function ConfigToggle({
   disabled?: boolean;
   onCommitted?: (next: boolean) => void;
 }) {
+  const { t } = useTranslation();
   const config = useConfig();
   const [checked, setChecked] = useState(value ?? false);
 
@@ -64,12 +66,12 @@ export function ConfigToggle({
     setChecked(next);
     try {
       await putConfigChecked(configKey, String(next));
-      toast.ok("Saved.");
+      toast.ok(t("settings.shared.saved"));
       config.refetch();
       onCommitted?.(next);
     } catch (err) {
       setChecked(previous);
-      toastFromError(err, "Could not save the change.");
+      toastFromError(err, t("settings.shared.saveFailed"));
     }
   }
 
@@ -114,6 +116,7 @@ export function ConfigNumberField({
   max?: number;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation();
   const config = useConfig();
   const current = value === undefined ? "" : String(value);
   const [draft, setDraft] = useState<string | null>(null);
@@ -123,13 +126,13 @@ export function ConfigNumberField({
   const dirty = draft !== null && draft !== current;
 
   function validate(raw: string): string | null {
-    const t = raw.trim();
-    if (t.length === 0) return "Enter a value.";
-    const n = Number(t);
-    if (!Number.isFinite(n)) return "Enter a number.";
-    if (integer && !Number.isInteger(n)) return "Enter a whole number.";
-    if (min !== undefined && n < min) return `Must be at least ${min}.`;
-    if (max !== undefined && n > max) return `Must be at most ${max}.`;
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return t("settings.shared.enterValue");
+    const n = Number(trimmed);
+    if (!Number.isFinite(n)) return t("settings.shared.enterNumber");
+    if (integer && !Number.isInteger(n)) return t("settings.shared.enterWholeNumber");
+    if (min !== undefined && n < min) return t("settings.shared.mustBeAtLeast", { min });
+    if (max !== undefined && n > max) return t("settings.shared.mustBeAtMost", { max });
     return null;
   }
 
@@ -140,11 +143,11 @@ export function ConfigNumberField({
     setSaving(true);
     try {
       await putConfigChecked(configKey, shown.trim());
-      toast.ok("Saved.");
+      toast.ok(t("settings.shared.saved"));
       config.refetch();
       setDraft(null);
     } catch (err) {
-      toastFromError(err, "Could not save the change.");
+      toastFromError(err, t("settings.shared.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -167,7 +170,7 @@ export function ConfigNumberField({
           disabled={disabled || saving || !dirty || error !== null}
           onClick={() => void save()}
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? t("settings.shared.saving") : t("settings.shared.save")}
         </Button>
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
@@ -194,6 +197,7 @@ export function ConfigTextField({
   placeholder?: string;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation();
   const config = useConfig();
   const current = value ?? "";
   const [draft, setDraft] = useState<string | null>(null);
@@ -207,11 +211,11 @@ export function ConfigTextField({
     setSaving(true);
     try {
       await putConfigChecked(configKey, shown.trim());
-      toast.ok("Saved.");
+      toast.ok(t("settings.shared.saved"));
       config.refetch();
       setDraft(null);
     } catch (err) {
-      toastFromError(err, "Could not save the change.");
+      toastFromError(err, t("settings.shared.saveFailed"));
     } finally {
       setSaving(false);
     }
@@ -234,7 +238,7 @@ export function ConfigTextField({
           disabled={disabled || saving || !dirty}
           onClick={() => void save()}
         >
-          {saving ? "Saving…" : "Save"}
+          {saving ? t("settings.shared.saving") : t("settings.shared.save")}
         </Button>
       </div>
       {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
@@ -257,6 +261,7 @@ export function ConfigEnumField<T extends string>({
   columns?: 1 | 2 | 3;
   disabled?: boolean;
 }) {
+  const { t } = useTranslation();
   const config = useConfig();
   const [selected, setSelected] = useState<T | null>(value ?? null);
 
@@ -270,11 +275,11 @@ export function ConfigEnumField<T extends string>({
     setSelected(next);
     try {
       await putConfigChecked(configKey, next);
-      toast.ok("Saved.");
+      toast.ok(t("settings.shared.saved"));
       config.refetch();
     } catch (err) {
       setSelected(previous);
-      toastFromError(err, "Could not save the change.");
+      toastFromError(err, t("settings.shared.saveFailed"));
     }
   }
 

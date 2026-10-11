@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import {
   ConfigEnumField,
   ConfigNumberField,
@@ -6,18 +8,19 @@ import {
 } from "@/components/settings/config-fields";
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfig } from "@/hooks/use-config";
-import { VISION_BACKEND_OPTIONS } from "@/lib/vision-backends";
+import { visionBackendOptions } from "@/lib/vision-backends";
 
 export function VisionSettings() {
+  const { t } = useTranslation();
   const config = useConfig();
 
   if (config.isLoading) {
-    return <p className="text-[11px] text-muted-foreground/70">Reading config…</p>;
+    return <p className="text-[11px] text-muted-foreground/70">{t("settingsMore.security.readingConfig")}</p>;
   }
   if (config.isError) {
     return (
       <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-        Could not read the vision config from this node.
+        {t("settingsMore.vision.readError")}
       </div>
     );
   }
@@ -27,7 +30,7 @@ export function VisionSettings() {
     return (
       <Card>
         <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-          The vision engine is not exposed by this agent version.
+          {t("settingsMore.vision.unavailable")}
         </CardContent>
       </Card>
     );
@@ -41,8 +44,8 @@ export function VisionSettings() {
         <CardContent className="pt-5 pb-5 space-y-5">
           <ConfigToggle
             configKey="vision.enabled"
-            label="On-board detection engine"
-            hint="Run the detection engine on this node so it can publish detections locally. Off by default; a fresh node runs no vision until this is on."
+            label={t("settingsMore.vision.engineLabel")}
+            hint={t("settingsMore.vision.engineHint")}
             value={vision.enabled}
           />
         </CardContent>
@@ -53,16 +56,15 @@ export function VisionSettings() {
           <Card>
             <CardContent className="pt-5 pb-5 space-y-4">
               <div>
-                <div className="text-sm font-semibold">Inference backend</div>
+                <div className="text-sm font-semibold">{t("settingsMore.vision.backendTitle")}</div>
                 <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                  Which accelerator the engine runs on. Auto picks the best the
-                  board advertises; the explicit choices force a specific one.
+                  {t("settingsMore.vision.backendHint")}
                 </p>
               </div>
               <ConfigEnumField
                 configKey="vision.backend"
                 value={vision.backend}
-                options={VISION_BACKEND_OPTIONS}
+                options={visionBackendOptions(t)}
                 columns={2}
               />
             </CardContent>
@@ -73,8 +75,8 @@ export function VisionSettings() {
               <ConfigNumberField
                 configKey="vision.confidence_threshold"
                 id="vision-confidence"
-                label="Confidence threshold"
-                hint="Minimum detection confidence to report, from 0 to 1. Higher drops weak detections."
+                label={t("settingsMore.vision.confidenceLabel")}
+                hint={t("settingsMore.vision.confidenceHint")}
                 value={vision.confidence_threshold}
                 integer={false}
                 min={0}
@@ -84,8 +86,8 @@ export function VisionSettings() {
                 <ConfigNumberField
                   configKey="vision.models_cache_max_mb"
                   id="vision-cache"
-                  label="Model cache cap (MB)"
-                  hint="How much disk the downloaded-model cache may use before older models are pruned."
+                  label={t("settingsMore.vision.cacheLabel")}
+                  hint={t("settingsMore.vision.cacheHint")}
                   value={vision.models_cache_max_mb}
                   integer
                   min={0}
@@ -93,7 +95,7 @@ export function VisionSettings() {
               </div>
               {vision.models_dir && (
                 <div className="border-t border-border pt-5">
-                  <ReadRow label="Models directory" value={vision.models_dir} />
+                  <ReadRow label={t("settingsMore.vision.modelsDir")} value={vision.models_dir} />
                 </div>
               )}
             </CardContent>
@@ -105,12 +107,10 @@ export function VisionSettings() {
       <Card>
         <CardContent className="pt-5 pb-5 space-y-1.5">
           <div className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Managed elsewhere
+            {t("settingsMore.vision.managedElsewhere")}
           </div>
           <p className="text-xs text-muted-foreground leading-relaxed">
-            The active detector model is not a config key here; it is selected in
-            Mission Control's vision hub, which writes the engine's detector and
-            restarts it.
+            {t("settingsMore.vision.managedElsewhereBody")}
           </p>
         </CardContent>
       </Card>

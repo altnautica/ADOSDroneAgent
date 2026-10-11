@@ -7,6 +7,7 @@ import {
   Thermometer,
 } from "lucide-react";
 import { useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { PageShell } from "@/components/page-shell";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
@@ -59,6 +60,7 @@ interface ServicesResponse {
 }
 
 export function DiagnosticsRoute() {
+  const { t } = useTranslation();
   const sys = useResource<SystemSnapshot>("system", "/api/system", 5000);
   const services = useResource<ServicesResponse | ServiceEntry[]>(
     "services",
@@ -88,13 +90,13 @@ export function DiagnosticsRoute() {
         { method: "POST" },
       );
       if (res.status === "ok") {
-        toast.ok(res.message || `Restarted ${name}.`);
+        toast.ok(res.message || t("diagnostics.services.restarted", { name }));
       } else {
-        toast.err(`${name} was not restarted.`, res.message);
+        toast.err(t("diagnostics.services.notRestarted", { name }), res.message);
       }
       services.refetch();
     } catch (err) {
-      toastFromError(err, "Service restart failed.");
+      toastFromError(err, t("diagnostics.services.restartFailed"));
     } finally {
       setBusy(null);
     }
@@ -105,11 +107,11 @@ export function DiagnosticsRoute() {
     try {
       await rebootAgent();
       toast.ok(
-        "Reboot queued.",
-        "The dashboard will reconnect when the board comes back.",
+        t("diagnostics.reboot.queued"),
+        t("diagnostics.reboot.queuedDetail"),
       );
     } catch (err) {
-      toastFromError(err, "Reboot failed.");
+      toastFromError(err, t("diagnostics.reboot.failed"));
     } finally {
       setBusy(null);
     }
@@ -142,8 +144,8 @@ export function DiagnosticsRoute() {
 
   return (
     <PageShell
-      title="Diagnostics"
-      blurb="System metrics, agent services, and recovery actions."
+      title={t("diagnostics.page.title")}
+      blurb={t("diagnostics.page.blurb")}
       rightAction={
         <Button
           variant="destructive"
@@ -152,21 +154,21 @@ export function DiagnosticsRoute() {
           onClick={() => setConfirm({ kind: "reboot" })}
         >
           <Power className="h-3.5 w-3.5" />
-          {busy === "reboot" ? "Rebooting…" : "Reboot board"}
+          {busy === "reboot" ? t("diagnostics.reboot.rebooting") : t("diagnostics.reboot.button")}
         </Button>
       }
     >
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <MetricTile
           icon={Cpu}
-          label="CPU"
+          label={t("diagnostics.metrics.cpu")}
           value={pct(cpuPct)}
-          sub={cpuCount != null ? `${cpuCount} cores` : ""}
+          sub={cpuCount != null ? t("diagnostics.metrics.cores", { count: cpuCount }) : ""}
           tone={cpuTone}
         />
         <MetricTile
           icon={MemoryStick}
-          label="Memory"
+          label={t("diagnostics.metrics.memory")}
           value={pct(memPct)}
           sub={
             memUsed != null && memTotal != null
@@ -177,7 +179,7 @@ export function DiagnosticsRoute() {
         />
         <MetricTile
           icon={HardDrive}
-          label="Disk"
+          label={t("diagnostics.metrics.disk")}
           value={pct(diskPct)}
           sub={
             diskUsed != null && diskTotal != null
@@ -188,7 +190,7 @@ export function DiagnosticsRoute() {
         />
         <MetricTile
           icon={Thermometer}
-          label="Temp"
+          label={t("diagnostics.metrics.temp")}
           value={
             firstTemp
               ? `${fmtNum(firstTemp[1], 0)}°C`
@@ -208,33 +210,35 @@ export function DiagnosticsRoute() {
       <Card>
         <CardContent className="pt-5 pb-5 space-y-3">
           <div className="flex items-center justify-between">
-            <div className="text-sm font-semibold">Agent services</div>
+            <div className="text-sm font-semibold">{t("diagnostics.services.title")}</div>
             <Button
               variant="outline"
               size="sm"
               onClick={() => services.refetch()}
             >
               <RefreshCw className="h-3.5 w-3.5" />
-              Refresh
+              {t("diagnostics.services.refresh")}
             </Button>
           </div>
 
           {services.isLoading && (
-            <p className="text-xs text-muted-foreground">loading…</p>
+            <p className="text-xs text-muted-foreground">{t("diagnostics.services.loading")}</p>
           )}
 
           {services.isError && (
             <div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
               <span>
-                Couldn't reach the service inventory. Check{" "}
-                <span className="font-mono">journalctl -u ados-supervisor</span>.
+                <Trans
+                  i18nKey="diagnostics.services.unreachable"
+                  components={{ code: <span className="font-mono" /> }}
+                />
               </span>
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => services.refetch()}
               >
-                Retry
+                {t("diagnostics.services.retry")}
               </Button>
             </div>
           )}
@@ -244,10 +248,10 @@ export function DiagnosticsRoute() {
             items.length === 0 &&
             !systemdAvailable && (
               <p className="text-xs text-muted-foreground">
-                Couldn't query systemd from the agent (systemctl missing or
-                blocked). Inventory is unavailable; running services may
-                still be alive. Check{" "}
-                <span className="font-mono">journalctl -u ados-supervisor</span>.
+                <Trans
+                  i18nKey="diagnostics.services.noSystemd"
+                  components={{ code: <span className="font-mono" /> }}
+                />
               </p>
             )}
 
@@ -256,8 +260,10 @@ export function DiagnosticsRoute() {
             items.length === 0 &&
             systemdAvailable && (
               <p className="text-xs text-muted-foreground">
-                No agent services are running. Try Reboot board or check{" "}
-                <span className="font-mono">journalctl -u ados-supervisor</span>.
+                <Trans
+                  i18nKey="diagnostics.services.none"
+                  components={{ code: <span className="font-mono" /> }}
+                />
               </p>
             )}
 
@@ -288,7 +294,7 @@ export function DiagnosticsRoute() {
                       setConfirm({ kind: "restart-service", name: svc.name })
                     }
                   >
-                    {busy === `restart:${svc.name}` ? "…" : "Restart"}
+                    {busy === `restart:${svc.name}` ? "…" : t("diagnostics.services.restart")}
                   </Button>
                 </li>
               ))}
@@ -304,11 +310,11 @@ export function DiagnosticsRoute() {
         }}
         title={
           confirm?.kind === "restart-service"
-            ? `Restart ${confirm.name}?`
+            ? t("diagnostics.services.confirmTitle", { name: confirm.name })
             : ""
         }
-        description="The service drops out and ados-supervisor brings it back. Dependent services may also restart."
-        confirmLabel="Restart"
+        description={t("diagnostics.services.confirmDescription")}
+        confirmLabel={t("diagnostics.services.restart")}
         destructive
         onConfirm={async () => {
           if (confirm?.kind === "restart-service") {
@@ -322,15 +328,9 @@ export function DiagnosticsRoute() {
         onOpenChange={(open) => {
           if (!open) setConfirm(null);
         }}
-        title="Reboot the board?"
-        description={
-          <>
-            The agent shuts down all services and asks the kernel to reboot.
-            The dashboard reconnects automatically once the board is back up
-            (typically 30–60 seconds).
-          </>
-        }
-        confirmLabel="Reboot"
+        title={t("diagnostics.reboot.confirmTitle")}
+        description={t("diagnostics.reboot.confirmDescription")}
+        confirmLabel={t("diagnostics.reboot.confirm")}
         destructive
         onConfirm={rebootBoard}
       />

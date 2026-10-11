@@ -1,19 +1,20 @@
 // The vision inference backends the native engine selects between. Mirrors the
 // `vision.backend` enum in schemas/agent-config.schema.json (a unit test holds
-// the two equal); the config write refuses any other value.
+// the two equal); the config write refuses any other value. Labels and
+// descriptions live in the locale under `settingsMore.vision.backends.<value>`.
 
-export const VISION_BACKEND_OPTIONS: ReadonlyArray<{
-  value: "auto" | "rknn" | "hailo" | "onnx" | "mock";
-  label: string;
-  description: string;
-}> = [
-  {
-    value: "auto",
-    label: "Auto",
-    description: "Rockchip NPU on Rockchip boards, else ONNX on the CPU. Never picks Hailo.",
-  },
-  { value: "rknn", label: "RKNN", description: "Rockchip NPU." },
-  { value: "hailo", label: "Hailo", description: "Hailo-8 accelerator (Pi 5 AI HAT). Choose it explicitly." },
-  { value: "onnx", label: "ONNX", description: "CPU inference via ONNX Runtime." },
-  { value: "mock", label: "Mock", description: "Synthetic detections for bench tests." },
-];
+import type { TFunction } from "i18next";
+
+export const VISION_BACKENDS = ["auto", "rknn", "hailo", "onnx", "mock"] as const;
+
+export type VisionBackend = (typeof VISION_BACKENDS)[number];
+
+export function visionBackendOptions(
+  t: TFunction,
+): ReadonlyArray<{ value: VisionBackend; label: string; description: string }> {
+  return VISION_BACKENDS.map((value) => ({
+    value,
+    label: t(`settingsMore.vision.backends.${value}.label`),
+    description: t(`settingsMore.vision.backends.${value}.description`),
+  }));
+}

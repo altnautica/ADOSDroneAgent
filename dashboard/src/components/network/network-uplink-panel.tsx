@@ -1,5 +1,7 @@
+import type { TFunction } from "i18next";
 import { ArrowDown, ArrowUp } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
@@ -15,20 +17,21 @@ import { toast, toastFromError } from "@/lib/toast";
 
 const POLL_MS = 5_000;
 
-const LEG_LABELS: Record<string, string> = {
-  eth0: "Ethernet",
-  ethernet: "Ethernet",
-  wlan0_client: "Wi-Fi",
-  wifi_client: "Wi-Fi",
-  wwan0: "Cellular",
-  modem_4g: "Cellular",
-  usb0: "USB tether",
-  usb: "USB tether",
-  ap: "Access point",
-};
+const LEG_LABEL_KEYS = {
+  eth0: "uplink.leg.ethernet",
+  ethernet: "uplink.leg.ethernet",
+  wlan0_client: "uplink.leg.wifi",
+  wifi_client: "uplink.leg.wifi",
+  wwan0: "uplink.leg.cellular",
+  modem_4g: "uplink.leg.cellular",
+  usb0: "uplink.leg.usb",
+  usb: "uplink.leg.usb",
+  ap: "uplink.leg.ap",
+} as const;
 
-function legLabel(token: string): string {
-  return LEG_LABELS[token] ?? token;
+function legLabel(token: string, t: TFunction): string {
+  const key = (LEG_LABEL_KEYS as Record<string, (typeof LEG_LABEL_KEYS)[keyof typeof LEG_LABEL_KEYS]>)[token];
+  return key ? t(key) : token;
 }
 
 /** Normalise an uplink token to one of the five matrix rows, or null when it is
@@ -81,13 +84,14 @@ function LegRow({
   leg: LegState;
   active: boolean;
 }) {
+  const { t } = useTranslation();
   return (
     <li className="flex items-center justify-between gap-3 rounded-md border border-border bg-card px-3 py-2">
       <div className="flex min-w-0 items-center gap-2">
         <span className="text-sm text-foreground">{label}</span>
         {active && (
           <Badge variant="ok" className="font-normal">
-            active
+            {t("uplink.state.active")}
           </Badge>
         )}
       </div>
@@ -111,14 +115,13 @@ function LegRow({
   );
 }
 
-const NOT_REPORTED = "not reported";
-
 function joinDetail(parts: Array<string | null | undefined>): string | null {
   const joined = parts.filter(Boolean).join(" · ");
   return joined.length > 0 ? joined : null;
 }
 
 function GsUplinkMatrix() {
+  const { t } = useTranslation();
   const [net, setNet] = useState<GsNetworkView | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [savingPriority, setSavingPriority] = useState(false);
@@ -146,6 +149,9 @@ function GsUplinkMatrix() {
     };
   }, [refresh]);
 
+  const notReported = t("uplink.state.notReported");
+  const carrying = t("uplink.state.carryingTraffic");
+
   const activeToken =
     typeof net?.active_uplink === "string" && net.active_uplink.length > 0
       ? net.active_uplink
@@ -158,17 +164,17 @@ function GsUplinkMatrix() {
   // genuinely not reported.
   const ethernetLeg: LegState =
     activeLeg === "ethernet"
-      ? { state: "carrying traffic", known: true, detail: null }
-      : { state: NOT_REPORTED, known: false, detail: null };
+      ? { state: carrying, known: true, detail: null }
+      : { state: notReported, known: false, detail: null };
 
   const wifi = net?.wifi_client ?? null;
   const wifiLeg: LegState = (() => {
     if (!wifi || typeof wifi.connected !== "boolean")
-      return { state: NOT_REPORTED, known: false, detail: null };
+      return { state: notReported, known: false, detail: null };
     if (!wifi.connected)
-      return { state: "not connected", known: true, detail: null };
+      return { state: t("uplink.state.notConnected"), known: true, detail: null };
     return {
-      state: "connected",
+      state: t("uplink.state.connected"),
       known: true,
       detail: joinDetail([
         wifi.ssid,
@@ -181,12 +187,13 @@ function GsUplinkMatrix() {
   const modem = net?.modem_4g ?? null;
   const cellularLeg: LegState = (() => {
     if (!modem || typeof modem.enabled !== "boolean")
-      return { state: NOT_REPORTED, known: false, detail: null };
-    if (!modem.enabled) return { state: "disabled", known: true, detail: null };
+      return { state: notReported, known: false, detail: null };
+    if (!modem.enabled)
+      return { state: t("uplink.state.disabled"), known: true, detail: null };
     const raw = typeof modem.state === "string" ? modem.state : null;
     const pct = typeof modem.percent === "number" ? `${modem.percent.toFixed(0)}%` : null;
     return {
-      state: raw ?? NOT_REPORTED,
+      state: raw ?? notReported,
       known: raw !== null,
       detail: pct,
     };
@@ -194,22 +201,24 @@ function GsUplinkMatrix() {
 
   const usbLeg: LegState =
     activeLeg === "usb"
-      ? { state: "carrying traffic", known: true, detail: null }
-      : { state: NOT_REPORTED, known: false, detail: null };
+      ? { state: carrying, known: true, detail: null }
+      : { state: notReported, known: false, detail: null };
 
   const ap = net?.ap ?? null;
   const apLeg: LegState = (() => {
     if (!ap || typeof ap.enabled !== "boolean")
-      return { state: NOT_REPORTED, known: false, detail: null };
+      return { state: notReported, known: false, detail: null };
     if (ap.standing_down === true)
       return {
-        state: `standing down (${ap.standdown_reason ?? "unknown"})`,
+        state: t("uplink.state.standingDown", {
+          reason: ap.standdown_reason ?? t("uplink.state.unknown"),
+        }),
         known: true,
         detail: ap.ssid ?? null,
       };
     return ap.enabled
-      ? { state: "broadcasting", known: true, detail: ap.ssid ?? null }
-      : { state: "off", known: true, detail: null };
+      ? { state: t("uplink.state.broadcasting"), known: true, detail: ap.ssid ?? null }
+      : { state: t("uplink.state.off"), known: true, detail: null };
   })();
 
   const priority = net?.priority ?? null;
@@ -223,9 +232,9 @@ function GsUplinkMatrix() {
     try {
       const res = await setUplinkPriority(next);
       setNet((n) => (n ? { ...n, priority: res.priority } : n));
-      toast.ok("Failover order saved.");
+      toast.ok(t("uplink.toast.orderSaved"));
     } catch (err) {
-      toastFromError(err, "Could not save the failover order.");
+      toastFromError(err, t("uplink.toast.orderFailed"));
     } finally {
       setSavingPriority(false);
     }
@@ -239,13 +248,17 @@ function GsUplinkMatrix() {
       setNet((n) => (n ? { ...n, share_uplink: res.enabled } : n));
       if (res.applied === false) {
         toast.err(
-          `Saved, but not applied to the live uplink: ${res.apply_error ?? "unknown"}`,
+          t("uplink.toast.notApplied", {
+            error: res.apply_error ?? t("uplink.state.unknown"),
+          }),
         );
       } else {
-        toast.ok(enabled ? "Uplink sharing enabled." : "Uplink sharing disabled.");
+        toast.ok(
+          enabled ? t("uplink.toast.shareEnabled") : t("uplink.toast.shareDisabled"),
+        );
       }
     } catch (err) {
-      toastFromError(err, "Could not update uplink sharing.");
+      toastFromError(err, t("uplink.toast.shareFailed"));
     } finally {
       setSavingShare(false);
     }
@@ -255,51 +268,49 @@ function GsUplinkMatrix() {
     <Card>
       <CardContent className="pt-5 pb-5 space-y-5">
         <div className="space-y-1">
-          <div className="text-sm font-semibold">Uplink matrix</div>
+          <div className="text-sm font-semibold">{t("uplink.matrix.title")}</div>
           <p className="text-xs text-muted-foreground">
-            Every internet path this ground station can carry the fleet's cloud
-            relay over. The active uplink is the agent's own report.
+            {t("uplink.matrix.description")}
           </p>
         </div>
 
         {loadFailed && !net && (
           <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[11px] text-destructive">
-            Could not read the uplink matrix from this node.
+            {t("uplink.matrix.loadFailed")}
           </div>
         )}
 
         {/* Active uplink — the agent's authoritative selection. */}
         <div className="flex items-baseline justify-between gap-3">
           <div className="min-w-0">
-            <div className="text-xs text-muted-foreground">Active uplink</div>
+            <div className="text-xs text-muted-foreground">{t("uplink.active.title")}</div>
             <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-              The path carrying the cloud relay right now.
+              {t("uplink.active.description")}
             </p>
           </div>
           <div className="shrink-0 font-mono text-sm">
             {activeToken ? (
-              legLabel(activeToken)
+              legLabel(activeToken, t)
             ) : (
-              <span className="text-muted-foreground/70">none</span>
+              <span className="text-muted-foreground/70">{t("uplink.active.none")}</span>
             )}
           </div>
         </div>
 
         {/* The matrix, one row per leg. */}
         <ul className="flex flex-col gap-1">
-          <LegRow label="Ethernet" leg={ethernetLeg} active={activeLeg === "ethernet"} />
-          <LegRow label="Wi-Fi" leg={wifiLeg} active={activeLeg === "wifi"} />
-          <LegRow label="Cellular" leg={cellularLeg} active={activeLeg === "cellular"} />
-          <LegRow label="USB tether" leg={usbLeg} active={activeLeg === "usb"} />
-          <LegRow label="Access point" leg={apLeg} active={activeLeg === "ap"} />
+          <LegRow label={t("uplink.leg.ethernet")} leg={ethernetLeg} active={activeLeg === "ethernet"} />
+          <LegRow label={t("uplink.leg.wifi")} leg={wifiLeg} active={activeLeg === "wifi"} />
+          <LegRow label={t("uplink.leg.cellular")} leg={cellularLeg} active={activeLeg === "cellular"} />
+          <LegRow label={t("uplink.leg.usb")} leg={usbLeg} active={activeLeg === "usb"} />
+          <LegRow label={t("uplink.leg.ap")} leg={apLeg} active={activeLeg === "ap"} />
         </ul>
 
         {/* Failover priority ladder. */}
         <div>
-          <div className="text-xs text-muted-foreground">Failover order</div>
+          <div className="text-xs text-muted-foreground">{t("uplink.failover.title")}</div>
           <p className="mb-2 mt-0.5 text-[11px] text-muted-foreground/80">
-            The order the agent tries uplinks in. It falls to the next when the
-            one above drops.
+            {t("uplink.failover.description")}
           </p>
           {priority && priority.length > 0 ? (
             <ol className="flex flex-col gap-1">
@@ -311,7 +322,7 @@ function GsUplinkMatrix() {
                   <span className="w-4 shrink-0 text-right font-mono text-[11px] text-muted-foreground/80">
                     {idx + 1}
                   </span>
-                  <span className="flex-1 text-sm">{legLabel(token)}</span>
+                  <span className="flex-1 text-sm">{legLabel(token, t)}</span>
                   <span className="font-mono text-[10px] text-muted-foreground/70">
                     {token}
                   </span>
@@ -319,7 +330,7 @@ function GsUplinkMatrix() {
                     type="button"
                     onClick={() => void onMovePriority(idx, -1)}
                     disabled={savingPriority || idx === 0}
-                    aria-label={`Move ${legLabel(token)} up`}
+                    aria-label={t("uplink.failover.moveUp", { name: legLabel(token, t) })}
                     className="rounded border border-border p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
                   >
                     <ArrowUp className="h-3 w-3" aria-hidden="true" />
@@ -328,7 +339,7 @@ function GsUplinkMatrix() {
                     type="button"
                     onClick={() => void onMovePriority(idx, 1)}
                     disabled={savingPriority || idx === priority.length - 1}
-                    aria-label={`Move ${legLabel(token)} down`}
+                    aria-label={t("uplink.failover.moveDown", { name: legLabel(token, t) })}
                     className="rounded border border-border p-1 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-40"
                   >
                     <ArrowDown className="h-3 w-3" aria-hidden="true" />
@@ -338,7 +349,7 @@ function GsUplinkMatrix() {
             </ol>
           ) : (
             <p className="text-[11px] text-muted-foreground/70">
-              The agent has not reported a failover order yet.
+              {t("uplink.failover.empty")}
             </p>
           )}
         </div>
@@ -347,18 +358,16 @@ function GsUplinkMatrix() {
         {shareKnown && (
           <div className="flex items-start justify-between gap-4 border-t border-border pt-4">
             <div className="space-y-1 min-w-0">
-              <div className="text-sm font-medium">Share uplink with AP clients</div>
+              <div className="text-sm font-medium">{t("uplink.share.title")}</div>
               <p className="text-xs text-muted-foreground leading-relaxed">
-                NAT the active uplink out to devices joined to this node's access
-                point, so a phone or laptop on the AP reaches the internet through
-                the ground station.
+                {t("uplink.share.description")}
               </p>
             </div>
             <Switch
               checked={net?.share_uplink === true}
               onCheckedChange={(v) => void onShareToggle(v)}
               disabled={savingShare}
-              aria-label="Share uplink with AP clients"
+              aria-label={t("uplink.share.title")}
             />
           </div>
         )}
@@ -381,10 +390,11 @@ export function NetworkUplinkPanel() {
     return (
       <Card>
         <CardContent className="pt-5 pb-5 text-sm text-muted-foreground">
-          The uplink matrix, failover order and uplink sharing run on the
-          ground-station uplink manager. This node is a{" "}
-          <span className="font-mono">{profile}</span>; its network settings are
-          the hotspot and Wi-Fi client below.
+          <Trans
+            i18nKey="uplink.notGroundStation"
+            values={{ profile }}
+            components={{ code: <span className="font-mono" /> }}
+          />
         </CardContent>
       </Card>
     );

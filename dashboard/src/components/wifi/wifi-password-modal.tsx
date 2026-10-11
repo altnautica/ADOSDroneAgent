@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -28,6 +29,7 @@ interface Props {
 }
 
 export function WifiPasswordModal({ target, onClose, onJoined }: Props) {
+  const { t } = useTranslation();
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +53,7 @@ export function WifiPasswordModal({ target, onClose, onJoined }: Props) {
   async function attemptJoin(force = false) {
     if (!target) return;
     if (secured && !target.saved && !password) {
-      setError("Password required.");
+      setError(t("wifi.join.passwordRequired"));
       return;
     }
     setBusy(true);
@@ -64,12 +66,14 @@ export function WifiPasswordModal({ target, onClose, onJoined }: Props) {
       );
       if (res.joined) {
         toast.ok(
-          `Joined "${target.ssid}"${res.ip ? ` · ${res.ip}` : ""}`,
+          res.ip
+            ? t("wifi.join.joinedWithIp", { ssid: target.ssid, ip: res.ip })
+            : t("wifi.join.joined", { ssid: target.ssid }),
         );
         onJoined();
         onClose();
       } else {
-        setError(res.error || "Join failed.");
+        setError(res.error || t("wifi.join.failed"));
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -79,13 +83,13 @@ export function WifiPasswordModal({ target, onClose, onJoined }: Props) {
         if (body?.detail?.needs_force) {
           setError(
             body.detail.error?.message ||
-              "AP is active. Retry to steal the radio.",
+              t("wifi.join.apActive"),
           );
           setBusy(false);
           return;
         }
       }
-      toastFromError(err, "Join failed.");
+      toastFromError(err, t("wifi.join.failed"));
     } finally {
       setBusy(false);
     }
@@ -96,30 +100,30 @@ export function WifiPasswordModal({ target, onClose, onJoined }: Props) {
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {target.saved ? "Reconnect" : "Join"}{" "}
+            {target.saved ? t("wifi.common.reconnect") : t("wifi.common.join")}{" "}
             <span className="font-mono">{target.ssid}</span>
           </DialogTitle>
           <DialogDescription asChild>
             <div className="text-sm text-muted-foreground">
               {secured
                 ? target.saved
-                  ? "Saved credentials will be reused. Type a new password to overwrite."
-                  : "Enter the network password."
-                : "This network is open. No password required."}
+                  ? t("wifi.join.savedHint")
+                  : t("wifi.join.enterPassword")
+                : t("wifi.join.openNetwork")}
             </div>
           </DialogDescription>
         </DialogHeader>
 
         {secured && (
           <div className="space-y-2">
-            <Label htmlFor="wifi-join-password">Password</Label>
+            <Label htmlFor="wifi-join-password">{t("wifi.join.password")}</Label>
             <Input
               id="wifi-join-password"
               type="password"
               autoComplete="new-password"
               value={password}
               placeholder={
-                target.saved ? "(leave blank to reuse saved)" : ""
+                target.saved ? t("wifi.join.reusePlaceholder") : ""
               }
               maxLength={63}
               autoFocus
@@ -132,7 +136,7 @@ export function WifiPasswordModal({ target, onClose, onJoined }: Props) {
               }}
             />
             <p className="text-[11px] text-muted-foreground">
-              Write-only. The agent never echoes Wi-Fi passwords back.
+              {t("wifi.join.writeOnly")}
             </p>
           </div>
         )}
@@ -145,10 +149,14 @@ export function WifiPasswordModal({ target, onClose, onJoined }: Props) {
 
         <DialogFooter>
           <Button variant="outline" disabled={busy} onClick={onClose}>
-            Cancel
+            {t("wifi.common.cancel")}
           </Button>
           <Button disabled={busy} onClick={() => void attemptJoin()}>
-            {busy ? "Joining…" : target.saved ? "Reconnect" : "Join"}
+            {busy
+              ? t("wifi.join.joining")
+              : target.saved
+                ? t("wifi.common.reconnect")
+                : t("wifi.common.join")}
           </Button>
         </DialogFooter>
       </DialogContent>

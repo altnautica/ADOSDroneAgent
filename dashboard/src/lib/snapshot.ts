@@ -1,3 +1,4 @@
+import i18n from "@/i18n";
 import { ApiError, credentialHeaders } from "@/shared/api-fetch";
 
 /** One still frame and the moment the agent grabbed it. */
@@ -33,5 +34,5 @@ export async function fetchSnapshot(signal?: AbortSignal): Promise<Snapshot> {
 
 /** "Captured 14:02:31" in the viewer's local time. */
 export function capturedLabel(at: Date): string {
-  return `Captured ${at.toLocaleTimeString([], { hour12: false })}`;
+  return i18n.t("panels.snapshot.captured", { time: at.toLocaleTimeString([], { hour12: false }) });
 }

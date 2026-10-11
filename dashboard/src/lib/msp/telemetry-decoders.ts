@@ -12,6 +12,7 @@
  * @license GPL-3.0-only
  */
 
+import i18n from "@/i18n";
 import type { MspVariant } from "@/lib/fc-firmware";
 
 // ── Command codes ──────────────────────────────────────────────
@@ -89,8 +90,20 @@ export interface MspStatus {
   hardwareFailure?: boolean;
 }
 
+/** i18n key of a sensor-presence label; rendered with `t()` at use time. */
+export type SensorLabelKey =
+  | "fc.sensors.accel"
+  | "fc.sensors.baro"
+  | "fc.sensors.mag"
+  | "fc.sensors.gps"
+  | "fc.sensors.rangefinder"
+  | "fc.sensors.opticalFlow"
+  | "fc.sensors.pitot"
+  | "fc.sensors.gyro"
+  | "fc.sensors.sonar";
+
 export interface SensorFlag {
-  label: string;
+  labelKey: SensorLabelKey;
   present: boolean;
 }
 
@@ -220,23 +233,23 @@ export function decodeSensorFlags(sensors: number, firmware: MspVariant): Sensor
   const bit = (n: number) => (sensors & (1 << n)) !== 0;
   if (firmware === "inav") {
     return [
-      { label: "Accel", present: bit(0) },
-      { label: "Baro", present: bit(1) },
-      { label: "Mag", present: bit(2) },
-      { label: "GPS", present: bit(3) },
-      { label: "Rangefinder", present: bit(4) },
-      { label: "Optical flow", present: bit(5) },
-      { label: "Pitot", present: bit(6) },
+      { labelKey: "fc.sensors.accel", present: bit(0) },
+      { labelKey: "fc.sensors.baro", present: bit(1) },
+      { labelKey: "fc.sensors.mag", present: bit(2) },
+      { labelKey: "fc.sensors.gps", present: bit(3) },
+      { labelKey: "fc.sensors.rangefinder", present: bit(4) },
+      { labelKey: "fc.sensors.opticalFlow", present: bit(5) },
+      { labelKey: "fc.sensors.pitot", present: bit(6) },
     ];
   }
   // Betaflight
   return [
-    { label: "Gyro", present: bit(5) },
-    { label: "Accel", present: bit(0) },
-    { label: "Baro", present: bit(1) },
-    { label: "Mag", present: bit(2) },
-    { label: "GPS", present: bit(3) },
-    { label: "Sonar", present: bit(4) },
+    { labelKey: "fc.sensors.gyro", present: bit(5) },
+    { labelKey: "fc.sensors.accel", present: bit(0) },
+    { labelKey: "fc.sensors.baro", present: bit(1) },
+    { labelKey: "fc.sensors.mag", present: bit(2) },
+    { labelKey: "fc.sensors.gps", present: bit(3) },
+    { labelKey: "fc.sensors.sonar", present: bit(4) },
   ];
 }
 
@@ -246,15 +259,15 @@ export function decodeSensorFlags(sensors: number, firmware: MspVariant): Sensor
  * its fix type.
  */
 export function gpsFixLabel(fixType: number, firmware: MspVariant): string {
-  if (firmware === "betaflight") return fixType ? "fix" : "no fix";
+  if (firmware === "betaflight") return fixType ? i18n.t("fc.gps.fix") : i18n.t("fc.gps.noFix");
   switch (fixType) {
     case 0:
-      return "no fix";
+      return i18n.t("fc.gps.noFix");
     case 1:
       return "2D";
     case 2:
       return "3D";
     default:
-      return `fix ${fixType}`;
+      return i18n.t("fc.gps.fixN", { n: fixType });
   }
 }

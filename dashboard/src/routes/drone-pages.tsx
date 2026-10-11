@@ -3,6 +3,8 @@
 // AppShell. Each page is a thin wrapper around a Home panel and
 // renders the same panel content full-width.
 
+import { useTranslation } from "react-i18next";
+
 import { WfbTxPanel } from "@/components/panels/wfb-tx-panel";
 
 interface ShellProps {
@@ -24,10 +26,11 @@ function PageShell({ title, blurb, children }: ShellProps) {
 }
 
 export function TransmitRoute() {
+  const { t } = useTranslation();
   return (
     <PageShell
-      title="WFB Transmit"
-      blurb="WFB-tx adapter, channel, bandwidth, MCS index, and TX power."
+      title={t("nav.transmit")}
+      blurb={t("app.pages.transmitBlurb")}
     >
       <WfbTxPanel />
     </PageShell>

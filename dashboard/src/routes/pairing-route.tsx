@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link2, Unlink, Plus, Smartphone } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -25,6 +26,7 @@ function MaskedCode({ code }: { code: string }) {
 /** Phones with their own radio asking this ground station for the fleet
  *  receive keys. Nothing is shared until the operator approves one. */
 function PhoneReceiversCard() {
+  const { t } = useTranslation();
   const invites = usePhoneInvites();
   const decide = useDecidePhoneInvite();
   const pending = invites.data?.pending ?? [];
@@ -33,19 +35,18 @@ function PhoneReceiversCard() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Smartphone className="h-3.5 w-3.5" />
-          Phone receivers
+          {t("pairing.phones.title")}
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
         <p className="text-sm text-muted-foreground">
-          Approve a phone only when the fingerprint below matches the one on its
-          screen. A phone receives video and telemetry; it never transmits.
+          {t("pairing.phones.description")}
         </p>
         {invites.isError && !invites.data && (
-          <p className="text-xs text-destructive">Could not read the waiting phones.</p>
+          <p className="text-xs text-destructive">{t("pairing.phones.readError")}</p>
         )}
         {invites.data && pending.length === 0 && (
-          <p className="text-sm text-muted-foreground">No phone is waiting for approval.</p>
+          <p className="text-sm text-muted-foreground">{t("pairing.phones.empty")}</p>
         )}
         <ul className="space-y-2">
           {pending.map((p) => (
@@ -65,18 +66,18 @@ function PhoneReceiversCard() {
                   size="sm"
                   disabled={decide.isPending}
                   onClick={() => decide.mutate({ id: p.invite_id, decision: "reject" })}
-                  aria-label={`Reject ${p.label}`}
+                  aria-label={t("pairing.phones.rejectLabel", { label: p.label })}
                 >
-                  Reject
+                  {t("pairing.phones.reject")}
                 </Button>
                 <Button
                   variant="default"
                   size="sm"
                   disabled={decide.isPending}
                   onClick={() => decide.mutate({ id: p.invite_id, decision: "approve" })}
-                  aria-label={`Approve ${p.label}`}
+                  aria-label={t("pairing.phones.approveLabel", { label: p.label })}
                 >
-                  Approve
+                  {t("pairing.phones.approve")}
                 </Button>
               </div>
             </li>
@@ -84,7 +85,7 @@ function PhoneReceiversCard() {
         </ul>
         {decide.isError && (
           <p className="text-xs text-destructive">
-            The ground station refused that decision. The invite may have expired.
+            {t("pairing.phones.decideError")}
           </p>
         )}
       </CardContent>
@@ -93,6 +94,7 @@ function PhoneReceiversCard() {
 }
 
 function AcceptCodeForm() {
+  const { t } = useTranslation();
   const [value, setValue] = useState("");
   const accept = useAcceptCode();
 
@@ -109,11 +111,11 @@ function AcceptCodeForm() {
 
   return (
     <form onSubmit={onSubmit} className="space-y-2">
-      <Label htmlFor="paste-code">Accept code from Mission Control</Label>
+      <Label htmlFor="paste-code">{t("pairing.accept.label")}</Label>
       <div className="flex items-center gap-2">
         <Input
           id="paste-code"
-          placeholder="paste 6-digit code"
+          placeholder={t("pairing.accept.placeholder")}
           maxLength={12}
           value={value}
           onChange={(e) => setValue(e.target.value.toUpperCase())}
@@ -125,37 +127,37 @@ function AcceptCodeForm() {
           disabled={!value.trim() || accept.isPending}
         >
           <Plus className="h-3.5 w-3.5" />
-          Pair
+          {t("pairing.accept.pair")}
         </Button>
       </div>
       {accept.isError && (
         <p className="text-xs text-destructive">
-          {accept.error instanceof Error ? accept.error.message : "pair failed"}
+          {accept.error instanceof Error ? accept.error.message : t("pairing.accept.failed")}
         </p>
       )}
       {accept.isSuccess && (
-        <p className="text-xs text-ok">paired successfully.</p>
+        <p className="text-xs text-ok">{t("pairing.accept.success")}</p>
       )}
     </form>
   );
 }
 
 export function PairingRoute() {
+  const { t } = useTranslation();
   const info = usePairingInfo();
   const unpair = useUnpair();
   const { profile } = useNodeIdentity();
   const [confirmUnpair, setConfirmUnpair] = useState(false);
-  const subject = profile === "ground_station" ? "ground station" : "drone";
+  const subject =
+    profile === "ground_station" ? t("pairing.subject.groundStation") : t("pairing.subject.drone");
   const paired = info.data?.paired === true;
 
   return (
     <div className="space-y-6 max-w-3xl">
       <header>
-        <h1 className="text-xl font-semibold tracking-tight">Pairing</h1>
+        <h1 className="text-xl font-semibold tracking-tight">{t("pairing.page.title")}</h1>
         <p className="text-sm text-muted-foreground">
-          Link this {subject} to its Mission Control owner. An unpaired node
-          publishes a code here; pairing binds it to one owner until it is
-          unpaired.
+          {t("pairing.page.blurb", { subject })}
         </p>
       </header>
 
@@ -164,7 +166,7 @@ export function PairingRoute() {
           <CardTitle className="flex items-center justify-between">
             <span className="flex items-center gap-2">
               <Link2 className="h-3.5 w-3.5" />
-              Pairing
+              {t("pairing.page.title")}
             </span>
             {paired && (
               <Button
@@ -174,26 +176,26 @@ export function PairingRoute() {
                 disabled={unpair.isPending}
               >
                 <Unlink className="h-3.5 w-3.5" />
-                Unpair
+                {t("pairing.page.unpair")}
               </Button>
             )}
           </CardTitle>
         </CardHeader>
         <CardContent>
           {info.isLoading && !info.data && (
-            <p className="text-xs text-muted-foreground">loading…</p>
+            <p className="text-xs text-muted-foreground">{t("pairing.page.loading")}</p>
           )}
           {info.isError && !info.data && (
-            <p className="text-xs text-destructive">Could not read the pairing state.</p>
+            <p className="text-xs text-destructive">{t("pairing.page.readError")}</p>
           )}
           {info.data &&
             (paired ? (
               <div className="space-y-2">
-                <Badge variant="ok">paired</Badge>
+                <Badge variant="ok">{t("pairing.page.paired")}</Badge>
                 <div className="grid grid-cols-[110px_1fr] gap-y-1 text-sm">
-                  <span className="text-xs text-muted-foreground">owner</span>
+                  <span className="text-xs text-muted-foreground">{t("pairing.page.owner")}</span>
                   <span className="font-mono truncate">{info.data.owner_id ?? "—"}</span>
-                  <span className="text-xs text-muted-foreground">paired</span>
+                  <span className="text-xs text-muted-foreground">{t("pairing.page.paired")}</span>
                   <span className="font-mono">
                     {info.data.paired_at != null
                       ? new Date(info.data.paired_at * 1000).toLocaleString()
@@ -203,20 +205,19 @@ export function PairingRoute() {
               </div>
             ) : (
               <div className="space-y-2">
-                <Badge variant="info">awaiting pair</Badge>
+                <Badge variant="info">{t("pairing.page.awaiting")}</Badge>
                 {info.data.pairing_code ? (
                   <MaskedCode code={info.data.pairing_code} />
                 ) : (
                   <p className="text-sm text-muted-foreground">
-                    The code is shown only on this node's own networks. Open the
-                    dashboard from the node's LAN, hotspot or USB link to read it.
+                    {t("pairing.page.codeHidden")}
                   </p>
                 )}
               </div>
             ))}
           {unpair.isError && (
             <p className="pt-2 text-xs text-destructive">
-              {unpair.error instanceof Error ? unpair.error.message : "unpair failed"}
+              {unpair.error instanceof Error ? unpair.error.message : t("pairing.page.unpairFailed")}
             </p>
           )}
         </CardContent>
@@ -225,7 +226,7 @@ export function PairingRoute() {
       {!paired && (
         <Card>
           <CardHeader>
-            <CardTitle>Accept from Mission Control</CardTitle>
+            <CardTitle>{t("pairing.accept.cardTitle")}</CardTitle>
           </CardHeader>
           <CardContent>
             <AcceptCodeForm />
@@ -238,9 +239,9 @@ export function PairingRoute() {
       <ConfirmDialog
         open={confirmUnpair}
         onOpenChange={setConfirmUnpair}
-        title={`Unpair this ${subject}?`}
-        description="Mission Control loses access until the node is paired again, and this dashboard asks for its PIN again."
-        confirmLabel="Unpair"
+        title={t("pairing.confirm.title", { subject })}
+        description={t("pairing.confirm.description")}
+        confirmLabel={t("pairing.page.unpair")}
         destructive
         onConfirm={async () => {
           await unpair.mutateAsync().catch(() => undefined);

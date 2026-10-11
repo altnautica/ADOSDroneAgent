@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Trans, useTranslation } from "react-i18next";
 
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { CloudflareTokenCard } from "@/components/settings/cloudflare-token-card";
@@ -18,26 +19,37 @@ type CloudMode = "cloud" | "self_hosted" | "local";
 const MODE_OPTIONS = [
   {
     value: "local" as const,
-    label: "Local only",
-    description:
-      "Default for new installs. No cloud uplink. LAN access via /api and direct dashboard only.",
+    labelKey: "settingsMore.cloud.modeLocal",
+    descriptionKey: "settingsMore.cloud.modeLocalDesc",
   },
   {
     value: "cloud" as const,
-    label: "Altnautica relay",
-    description:
-      "Use the public Altnautica cloud relay for telemetry and video.",
+    labelKey: "settingsMore.cloud.modeCloud",
+    descriptionKey: "settingsMore.cloud.modeCloudDesc",
   },
   {
     value: "self_hosted" as const,
-    label: "Self-hosted",
-    description:
-      "Point at your own Convex backend and MQTT broker.",
+    labelKey: "settingsMore.cloud.modeSelfHosted",
+    descriptionKey: "settingsMore.cloud.modeSelfHostedDesc",
   },
-];
+] as const;
+
+// Example hostnames, not translatable copy.
+const URL_PLACEHOLDER = "https://convex.example.com";
+const BROKER_PLACEHOLDER = "mqtt.example.com";
 
 export function CloudSettings() {
+  const { t } = useTranslation();
   const status = useStatus();
+  const modeOptions = useMemo(
+    () =>
+      MODE_OPTIONS.map((o) => ({
+        value: o.value,
+        label: t(o.labelKey),
+        description: t(o.descriptionKey),
+      })),
+    [t],
+  );
 
   const initialMode = (status.data?.cloud_choice?.mode as CloudMode) ?? "local";
   const initialUrl = status.data?.cloud_choice?.backend_url ?? "";
@@ -113,13 +125,13 @@ export function CloudSettings() {
       });
       const section = res.sections.cloud;
       if (res.overall && section?.ok) {
-        toast.ok(section.message || "Cloud posture saved.");
+        toast.ok(section.message || t("settingsMore.cloud.saved"));
         setApiKey("");
       } else {
-        toast.err(section?.message ?? "Apply failed.");
+        toast.err(section?.message ?? t("settingsMore.cloud.applyFailed"));
       }
     } catch (err) {
-      toastFromError(err, "Apply failed.");
+      toastFromError(err, t("settingsMore.cloud.applyFailed"));
     } finally {
       setBusy(false);
     }
@@ -129,13 +141,13 @@ export function CloudSettings() {
     <div className="space-y-6">
       <div>
         <div className="flex items-center gap-2 text-xs font-medium uppercase tracking-wider text-muted-foreground mb-2">
-          Cloud posture
+          {t("settingsMore.cloud.posture")}
           <RiskBadge tone="manual" />
         </div>
         <RadioCardGroup
           value={mode}
           onChange={(v) => setMode(v as CloudMode)}
-          options={MODE_OPTIONS}
+          options={modeOptions}
           columns={3}
         />
       </div>
@@ -144,16 +156,16 @@ export function CloudSettings() {
         <Card>
           <CardContent className="pt-5 pb-5 space-y-4">
             <div className="flex items-center gap-2 text-sm font-semibold">
-              Self-hosted endpoints
+              {t("settingsMore.cloud.selfHostedEndpoints")}
               <RiskBadge tone="manual" />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="cloud-url">Convex URL</Label>
+              <Label htmlFor="cloud-url">{t("settingsMore.cloud.convexUrl")}</Label>
               <Input
                 id="cloud-url"
                 type="url"
-                placeholder="https://convex.example.com"
+                placeholder={URL_PLACEHOLDER}
                 value={url}
                 onChange={(e) => {
                   setUrl(e.target.value);
@@ -164,10 +176,10 @@ export function CloudSettings() {
 
             <div className="grid grid-cols-1 sm:grid-cols-[1fr_120px] gap-3">
               <div className="space-y-2">
-                <Label htmlFor="cloud-broker">MQTT broker</Label>
+                <Label htmlFor="cloud-broker">{t("settingsMore.cloud.mqttBroker")}</Label>
                 <Input
                   id="cloud-broker"
-                  placeholder="mqtt.example.com"
+                  placeholder={BROKER_PLACEHOLDER}
                   value={broker}
                   onChange={(e) => {
                     setBroker(e.target.value);
@@ -176,7 +188,7 @@ export function CloudSettings() {
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="cloud-port">Port</Label>
+                <Label htmlFor="cloud-port">{t("settingsMore.cloud.port")}</Label>
                 <Input
                   id="cloud-port"
                   type="number"
@@ -192,12 +204,12 @@ export function CloudSettings() {
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="cloud-api-key">API key</Label>
+              <Label htmlFor="cloud-api-key">{t("settingsMore.cloud.apiKey")}</Label>
               <Input
                 id="cloud-api-key"
                 type="password"
                 autoComplete="new-password"
-                placeholder="leave blank to keep existing"
+                placeholder={t("settingsMore.cloud.apiKeyPlaceholder")}
                 value={apiKey}
                 onChange={(e) => {
                   setApiKey(e.target.value);
@@ -205,7 +217,7 @@ export function CloudSettings() {
                 }}
               />
               <p className="text-[11px] text-muted-foreground">
-                Write-only. Stored as a root-owned secret on the agent.
+                {t("settingsMore.cloud.apiKeyHint")}
               </p>
             </div>
 
@@ -222,7 +234,7 @@ export function CloudSettings() {
 
       <div className="flex items-center justify-end gap-3">
         {dirty && (
-          <span className="text-xs text-muted-foreground">unsaved changes</span>
+          <span className="text-xs text-muted-foreground">{t("settingsMore.cloud.unsaved")}</span>
         )}
         <Button
           variant="default"
@@ -231,22 +243,22 @@ export function CloudSettings() {
             if (validate()) setConfirmOpen(true);
           }}
         >
-          Save cloud
+          {t("settingsMore.cloud.save")}
         </Button>
       </div>
 
       <ConfirmDialog
         open={confirmOpen}
         onOpenChange={setConfirmOpen}
-        title="Switch cloud posture?"
+        title={t("settingsMore.cloud.confirmTitle")}
         description={
-          <>
-            The cloud relay client will reconnect using the new posture (
-            <span className="font-mono font-medium">{mode}</span>). Existing
-            MQTT and HTTP sessions drop. Pairing is preserved.
-          </>
+          <Trans
+            i18nKey="settingsMore.cloud.confirmBody"
+            values={{ mode }}
+            components={{ mode: <span className="font-mono font-medium" /> }}
+          />
         }
-        confirmLabel="Apply"
+        confirmLabel={t("settingsMore.cloud.apply")}
         destructive
         onConfirm={handleApply}
       />

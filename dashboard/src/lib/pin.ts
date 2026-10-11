@@ -6,6 +6,7 @@
 // signal. On a correct PIN the agent returns a session token, stored via
 // `setSession` so subsequent `apiFetch` calls carry it.
 
+import i18n from "@/i18n";
 import { setSession } from "@/shared/session";
 
 export type LockScope = "peer" | "node";
@@ -34,9 +35,9 @@ export function splashMode(status: PinStatus | null): SplashMode {
 export function lockMessage(scope: LockScope, remainingS: number): string {
   if (scope === "node") {
     const min = Math.max(1, Math.ceil(remainingS / 60));
-    return `Too many wrong PINs on this node; locked for ${min} min. Clear it from the node console or with the pairing key.`;
+    return i18n.t("access.pin.nodeLocked", { min });
   }
-  return "Too many attempts. Try again in";
+  return i18n.t("access.pin.peerLocked");
 }
 
 export interface NodeIdentity {
@@ -69,11 +70,11 @@ export async function fetchPinStatus(signal?: AbortSignal): Promise<PinStatus> {
 export async function fetchNodeIdentity(signal?: AbortSignal): Promise<NodeIdentity> {
   try {
     const res = await fetch("/api/pairing/info", { headers: JSON_HEADERS, signal });
-    if (!res.ok) return { name: "ADOS node", profile: "" };
+    if (!res.ok) return { name: i18n.t("access.pin.fallbackNodeName"), profile: "" };
     const body = (await res.json()) as { name?: string; profile?: string };
-    return { name: body.name?.trim() || "ADOS node", profile: body.profile ?? "" };
+    return { name: body.name?.trim() || i18n.t("access.pin.fallbackNodeName"), profile: body.profile ?? "" };
   } catch {
-    return { name: "ADOS node", profile: "" };
+    return { name: i18n.t("access.pin.fallbackNodeName"), profile: "" };
   }
 }
 
@@ -93,7 +94,7 @@ async function submit(path: string, body: object): Promise<PinSubmitResult> {
       body: JSON.stringify(body),
     });
   } catch {
-    return { ok: false, kind: "error", message: "Network error. Is the node reachable?" };
+    return { ok: false, kind: "error", message: i18n.t("access.pin.networkError") };
   }
   let data: Record<string, unknown> | null = null;
   try {
@@ -129,13 +130,13 @@ async function submit(path: string, body: object): Promise<PinSubmitResult> {
     return {
       ok: false,
       kind: "invalid",
-      message: typeof data?.detail === "string" ? data.detail : "That PIN was not accepted.",
+      message: typeof data?.detail === "string" ? data.detail : i18n.t("access.pin.notAccepted"),
     };
   }
   return {
     ok: false,
     kind: "error",
-    message: typeof data?.detail === "string" ? data.detail : `Request failed (${res.status}).`,
+    message: typeof data?.detail === "string" ? data.detail : i18n.t("access.pin.requestFailed", { status: res.status }),
   };
 }
 
