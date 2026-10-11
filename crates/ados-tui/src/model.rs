@@ -149,6 +149,8 @@ pub struct Dashboard {
     pub satellites: Option<i64>,
     pub alt: Option<f64>,
 
+    /// Units that should be up, and how many of them are (see
+    /// [`Dashboard::merge_services`]). Both 0 until `/api/status/full` answers.
     pub services_running: usize,
     pub services_total: usize,
     pub next_action: String,
@@ -167,6 +169,7 @@ mod urls;
 use urls::*;
 mod from_status;
 mod reach;
+mod services;
 
 /// A reachable host used to project per-host service URLs (mDNS name or LAN IP).
 struct HostRef {

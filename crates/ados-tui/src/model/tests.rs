@@ -250,16 +250,30 @@ fn steps_carry_detail() {
     );
 }
 
+/// Build from a setup-status body, then fold in `/api/status/full` service
+/// rows given as `(state, sub_state)`, the way a poll does.
+fn with_services(data: Value, rows: &[(&str, &str)]) -> Dashboard {
+    let mut dash = Dashboard::from_status(&data);
+    let services: Vec<Value> = rows
+        .iter()
+        .map(|(state, sub)| json!({"name": "ados-x", "state": state, "sub_state": sub}))
+        .collect();
+    dash.merge_services(&json!({ "services": services }));
+    dash
+}
+
+const RUNNING: (&str, &str) = ("active", "running");
+
 #[test]
 fn health_healthy_when_configured_connected_and_all_running() {
     let data = json!({
         "profile": "drone",
         "paired": true,
         "mavlink": {"connected": true},
-        "services": [{"state": "running"}, {"state": "running"}],
         "steps": [{"label": "Profile", "state": "complete"}]
     });
-    assert_eq!(Dashboard::from_status(&data).health(), Health::Healthy);
+    let dash = with_services(data, &[RUNNING, RUNNING]);
+    assert_eq!(dash.health(), Health::Healthy);
 }
 
 #[test]
@@ -268,10 +282,10 @@ fn health_degraded_when_a_service_is_down() {
         "profile": "drone",
         "paired": true,
         "mavlink": {"connected": true},
-        "services": [{"state": "running"}, {"state": "stopped"}],
         "steps": [{"label": "Profile", "state": "complete"}]
     });
-    assert_eq!(Dashboard::from_status(&data).health(), Health::Degraded);
+    let dash = with_services(data, &[RUNNING, ("failed", "failed")]);
+    assert_eq!(dash.health(), Health::Degraded);
 }
 
 #[test]
@@ -279,10 +293,10 @@ fn health_degraded_when_configured_drone_loses_fc() {
     let data = json!({
         "profile": "drone",
         "paired": true,
-        "mavlink": {"connected": false},
-        "services": [{"state": "running"}]
+        "mavlink": {"connected": false}
     });
-    assert_eq!(Dashboard::from_status(&data).health(), Health::Degraded);
+    let dash = with_services(data, &[RUNNING]);
+    assert_eq!(dash.health(), Health::Degraded);
 }
 
 #[test]
@@ -291,10 +305,10 @@ fn health_setup_when_unpaired_and_steps_incomplete() {
         "profile": "drone",
         "paired": false,
         "mavlink": {"connected": false},
-        "services": [{"state": "running"}],
         "steps": [{"label": "Profile", "state": "pending"}]
     });
-    assert_eq!(Dashboard::from_status(&data).health(), Health::Setup);
+    let dash = with_services(data, &[RUNNING]);
+    assert_eq!(dash.health(), Health::Setup);
 }
 
 #[test]
@@ -302,10 +316,10 @@ fn health_healthy_for_ground_station_without_fc() {
     let data = json!({
         "profile": "ground_station",
         "paired": true,
-        "mavlink": {"connected": false},
-        "services": [{"state": "running"}]
+        "mavlink": {"connected": false}
     });
-    assert_eq!(Dashboard::from_status(&data).health(), Health::Healthy);
+    let dash = with_services(data, &[RUNNING]);
+    assert_eq!(dash.health(), Health::Healthy);
 }
 
 #[test]
@@ -313,10 +327,9 @@ fn health_healthy_for_a_paired_msp_drone() {
     let data = json!({
         "profile": "drone",
         "paired": true,
-        "mavlink": {"connected": false},
-        "services": [{"state": "running"}]
+        "mavlink": {"connected": false}
     });
-    let mut dash = Dashboard::from_status(&data);
+    let mut dash = with_services(data, &[RUNNING]);
     dash.merge_fc_status(&json!({"fcVariant": "betaflight", "transportOpen": true}));
     assert_eq!(dash.fc_link(), FcLink::Msp);
     assert_eq!(dash.health(), Health::Healthy);
@@ -370,7 +383,6 @@ fn full_status_extracts_typed_fields() {
             "gps": {"fix_type": 3, "satellites": 14},
             "position": {"alt_rel": 12.5}
         },
-        "services": [{"state": "running"}, {"state": "running"}, {"state": "stopped"}],
         "next_action": "Open Mission Control"
     });
     let dash = Dashboard::from_status(&data);
@@ -390,7 +402,6 @@ fn full_status_extracts_typed_fields() {
     assert_eq!(dash.gps_fix.as_deref(), Some("3D"));
     assert_eq!(dash.satellites, Some(14));
     assert_eq!(dash.alt, Some(12.5));
-    assert_eq!((dash.services_running, dash.services_total), (2, 3));
     assert_eq!(dash.next_action, "Open Mission Control");
 }
 

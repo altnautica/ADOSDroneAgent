@@ -14,11 +14,13 @@ use serde_json::Value;
 
 use crate::model::{Dashboard, History};
 
-/// One poll of the agent: the setup status the dashboard is built from, and the
-/// best-effort native status carrying the FC transport/heartbeat split.
+/// One poll of the agent: the setup status the dashboard is built from, the
+/// best-effort native status carrying the FC transport/heartbeat split, and the
+/// best-effort consolidated status carrying the service list.
 pub struct PollResult {
     pub setup: Result<Value, String>,
     pub fc_status: Option<Value>,
+    pub status_full: Option<Value>,
 }
 
 /// Handle to the poller thread.
@@ -38,7 +40,13 @@ impl Poller {
                 .setup_status()
                 .map_err(|e| format!("Agent unreachable: {e}"));
             let fc_status = client.status().ok();
-            if result_tx.send(PollResult { setup, fc_status }).is_err() {
+            let status_full = client.get_json("/api/status/full").ok();
+            let result = PollResult {
+                setup,
+                fc_status,
+                status_full,
+            };
+            if result_tx.send(result).is_err() {
                 return;
             }
             match refresh_rx.recv_timeout(interval) {
@@ -87,6 +95,9 @@ impl AgentView {
                 if let Some(fc) = &result.fc_status {
                     dash.merge_fc_status(fc);
                 }
+                if let Some(full) = &result.status_full {
+                    dash.merge_services(full);
+                }
                 self.history.record(&dash);
                 self.dash = Some(dash);
                 self.error = None;
@@ -118,6 +129,7 @@ mod tests {
                 "telemetry": {"battery": {"remaining": battery}}
             })),
             fc_status: None,
+            status_full: None,
         }
     }
 
@@ -131,6 +143,7 @@ mod tests {
         let failed = PollResult {
             setup: Err("Agent unreachable: connection refused".into()),
             fc_status: None,
+            status_full: None,
         };
         view.apply(failed, t0 + Duration::from_secs(2), "12:00:02".into());
         assert_eq!(
@@ -158,11 +171,11 @@ mod tests {
         let result = PollResult {
             setup: Ok(json!({"profile": "drone", "mavlink": {"connected": false}})),
             fc_status: Some(json!({"fcVariant": "inav"})),
+            status_full: Some(json!({"services": [{"state": "failed"}]})),
         };
         view.apply(result, Instant::now(), "12:00:00".into());
-        assert_eq!(
-            view.dash.and_then(|d| d.fc_variant).as_deref(),
-            Some("inav")
-        );
+        let dash = view.dash.unwrap();
+        assert_eq!(dash.fc_variant.as_deref(), Some("inav"));
+        assert_eq!((dash.services_running, dash.services_total), (0, 1));
     }
 }

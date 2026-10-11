@@ -143,15 +143,6 @@ impl Dashboard {
                 .and_then(Value::as_f64);
         }
 
-        // Services count.
-        if let Some(services) = data.get("services").and_then(Value::as_array) {
-            dash.services_total = services.len();
-            dash.services_running = services
-                .iter()
-                .filter(|item| item.get("state").and_then(Value::as_str) == Some("running"))
-                .count();
-        }
-
         dash.next_action = s(data, "next_action", "");
         dash.links = dash.reach_links();
         dash

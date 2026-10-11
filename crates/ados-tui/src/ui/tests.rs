@@ -65,10 +65,11 @@ fn sample() -> Dashboard {
         "steps": [
             {"label": "Flight controller", "state": "needs_action", "detail": "Connect the FC and re-check."},
             {"label": "Profile", "state": "complete", "detail": "Confirmed as drone"}
-        ],
-        "services": [{"state": "running"}]
+        ]
     });
-    Dashboard::from_status(&data)
+    let mut dash = Dashboard::from_status(&data);
+    dash.merge_services(&json!({"services": [{"state": "active"}]}));
+    dash
 }
 
 #[test]
@@ -108,7 +109,7 @@ fn no_update_badge_when_up_to_date() {
 
 /// A healthy, armed-state-reporting drone as the last good snapshot.
 fn live_drone() -> Dashboard {
-    Dashboard::from_status(&json!({
+    let mut dash = Dashboard::from_status(&json!({
         "version": "0.99.108",
         "device_name": "ados-x",
         "profile": "drone",
@@ -118,9 +119,10 @@ fn live_drone() -> Dashboard {
             "mode": "LOITER",
             "armed": false,
             "battery": {"remaining": 82.0}
-        },
-        "services": [{"state": "running"}]
-    }))
+        }
+    }));
+    dash.merge_services(&json!({"services": [{"state": "active"}]}));
+    dash
 }
 
 #[test]
