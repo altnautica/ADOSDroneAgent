@@ -131,6 +131,21 @@ impl Supervisor {
         }
 
         self.detect_and_start_hardware().await;
+
+        // A unit this pass leaves off may still carry a `failed` result from a
+        // previous process (a stop that landed mid-start). Nothing starts it
+        // again to clear that, so the status surface would report a failure
+        // for a unit that is meant to be off. The rows this pass started or
+        // tried are not `Stopped`, and `reset-failed` leaves a running unit be.
+        let left_off: Vec<&'static str> = self
+            .services
+            .iter()
+            .filter(|s| s.state == ServiceState::Stopped)
+            .map(|s| s.name)
+            .collect();
+        for name in left_off {
+            self.pm.reset_failed(name).await;
+        }
         tracing::info!(services = self.services.len(), "supervisor ready");
     }
 
@@ -150,8 +165,19 @@ impl Supervisor {
     /// installer-started unit. Under launchd the installer loads and unloads
     /// each LaunchAgent itself, and a `bootout` from here unloads the job with
     /// nothing to load it again.
+    ///
+    /// Nothing is stopped at all while systemd itself stops or restarts the
+    /// supervisor: that same transaction has already stopped every `PartOf=`
+    /// unit and, on a restart, started it again before SIGTERM reaches this
+    /// process. A `systemctl stop` from here would hit the fresh instance, so
+    /// every unit would start twice and one caught mid-`ExecStartPre` would be
+    /// left `failed`.
     pub async fn stop(&mut self) {
         tracing::info!("supervisor stopping");
+        if self.service_manager_cycling_self().await {
+            tracing::info!("systemd is cycling the supervisor's units; leaving them to it");
+            return;
+        }
 
         // Tier 0: the API frontend stops accepting requests first.
         if self

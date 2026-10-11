@@ -1073,6 +1073,44 @@ async fn nothing_is_restarted_while_systemd_cycles_the_supervisor() {
             "{name}'s stop by the supervisor's own cycle was counted as a failure"
         );
     }
+
+    // The same transaction already restarts every PartOf= unit before the
+    // SIGTERM lands. A `systemctl stop` from the shutdown path then hits the
+    // fresh instance (ados-vision died in ExecStartPre and stayed failed) and
+    // costs every other unit a second start.
+    let before_stop = pm.calls().len();
+    sup.stop().await;
+    let stops: Vec<String> = pm.calls()[before_stop..]
+        .iter()
+        .filter(|c| c.starts_with("stop:"))
+        .cloned()
+        .collect();
+    assert!(
+        stops.is_empty(),
+        "shutdown stopped units systemd is already cycling; stops={stops:?}"
+    );
+}
+
+#[tokio::test]
+async fn startup_clears_a_stale_failure_on_a_unit_it_leaves_off() {
+    // A previous process can leave an intentionally-off unit `failed`
+    // (a stop that landed mid-start). Nothing starts it again, so without a
+    // reset the status surface reports a failure for a unit meant to be off.
+    let pm = Arc::new(MockProcessManager::new());
+    let bind = Arc::new(BindOrchestrator::new());
+    let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+
+    sup.start().await;
+
+    let calls = pm.calls();
+    assert!(
+        !calls.contains(&"start:ados-vision".to_string()),
+        "vision is off in this config; calls={calls:?}"
+    );
+    assert!(
+        calls.contains(&"reset_failed:ados-vision".to_string()),
+        "the stale failed state of a unit left off was not cleared; calls={calls:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
