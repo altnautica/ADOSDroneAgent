@@ -47,6 +47,8 @@ pub mod backend;
 pub mod button_client;
 pub mod control;
 pub mod control_client;
+#[cfg(unix)]
+pub mod daemon;
 pub mod dispatch;
 pub mod download;
 pub mod errors;
