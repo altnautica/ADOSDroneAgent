@@ -80,10 +80,28 @@ def _json_value(value: Any) -> Any:
     return str(value)
 
 
-def cli_commands(root: Any) -> list[dict[str, Any]]:
-    """Every visible command under ``root`` (a click group), sorted by path.
+def _option_default(option: Any) -> Any:
+    """An option's default as JSON, the same under every supported click.
 
-    ``path`` is the space-joined command path without the program name.
+    click 8.3 marks "no default" with a sentinel (``Sentinel.UNSET``) where
+    8.1 used ``None``, or ``False`` for a boolean flag; the 8.1 value is
+    emitted, so the reference does not depend on the installed click.
+    """
+    value = option.default
+    if callable(value):
+        return None
+    if str(value) == "Sentinel.UNSET":
+        return False if getattr(option, "is_bool_flag", False) else None
+    return _json_value(value)
+
+
+def cli_commands(root: Any, listed: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    """Every user-facing command under ``root`` (a click group), sorted by path.
+
+    ``path`` is the space-joined command path without the program name. A
+    hidden command is skipped unless it is one of ``listed``: the groups kept
+    off the primary help surface but public all the same (the CLI's
+    ``ADVANCED_GROUPS``). Hidden commands and options inside them stay out.
     """
     import click
 
@@ -97,7 +115,7 @@ def cli_commands(root: Any) -> list[dict[str, Any]]:
                 if isinstance(p, click.Argument):
                     arguments.append({"name": p.name, "required": bool(p.required)})
                 elif isinstance(p, click.Option) and not p.hidden:
-                    default = None if callable(p.default) else _json_value(p.default)
+                    default = _option_default(p)
                     options.append(
                         {
                             "flags": list(p.opts) + list(p.secondary_opts),
@@ -117,7 +135,7 @@ def cli_commands(root: Any) -> list[dict[str, Any]]:
             )
         if isinstance(cmd, click.Group):
             for name, sub in cmd.commands.items():
-                if not sub.hidden:
+                if not sub.hidden or any(sub is group for group in listed):
                     walk(sub, [*path, name])
 
     walk(root, [])
@@ -125,9 +143,9 @@ def cli_commands(root: Any) -> list[dict[str, Any]]:
 
 
 def emit_cli() -> dict[str, Any]:
-    from ados.cli.main import cli
+    from ados.cli.main import ADVANCED_GROUPS, cli
 
-    return {"schema": 1, "commands": cli_commands(cli)}
+    return {"schema": 1, "commands": cli_commands(cli, ADVANCED_GROUPS)}
 
 
 def _load_api_surface() -> Any:

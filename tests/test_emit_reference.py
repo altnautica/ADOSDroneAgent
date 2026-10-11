@@ -70,6 +70,53 @@ def test_cli_walk_is_deterministic_and_skips_hidden(er):
     assert text == er.dumps({"commands": first, "schema": 1})
 
 
+def test_cli_walk_lists_advanced_groups_but_not_their_hidden_commands(er):
+    root = _fixture_group()
+
+    @click.group(hidden=True)
+    def config() -> None:
+        """Inspect the on-disk config."""
+
+    @config.command()
+    def show() -> None:
+        """Print the config."""
+
+    @config.command(hidden=True)
+    def internal() -> None:
+        """Internal."""
+
+    root.add_command(config)
+    assert "config" not in [c["path"] for c in er.cli_commands(root)]
+    paths = [c["path"] for c in er.cli_commands(root, (config,))]
+    assert paths == ["config", "config show", "plugin", "plugin logs", "version"]
+
+
+def test_the_agent_cli_reference_lists_every_advanced_group(er):
+    from ados.cli.main import ADVANCED_GROUPS
+
+    paths = {c["path"] for c in er.emit_cli()["commands"]}
+    for group in ADVANCED_GROUPS:
+        assert group.name in paths, group.name
+    assert "config" in paths
+    # The installer's entry stays internal.
+    assert "install" not in paths
+
+
+
+def test_unset_option_defaults_match_across_click_versions(er):
+    @click.command()
+    @click.option("--name", help="No default.")
+    @click.option("--force", is_flag=True, help="Boolean flag, no default.")
+    def cmd(name: str, force: bool) -> None:
+        """Command."""
+
+    name, force = cmd.params
+    # click 8.3+ leaves these as its UNSET sentinel, 8.1 as None / False: both
+    # emit the 8.1 value, never the sentinel's repr.
+    assert er._option_default(name) is None
+    assert er._option_default(force) is False
+
+
 def test_flatten_schema_resolves_refs_and_optionals(er):
     schema = {
         "$defs": {

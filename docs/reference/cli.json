@@ -2,6 +2,145 @@
   "commands": [
     {
       "arguments": [],
+      "help": "Inspect and migrate the on-disk agent config.",
+      "options": [],
+      "path": "config"
+    },
+    {
+      "arguments": [],
+      "help": "Bring /etc/ados/config.yaml to the current shape, under the lock.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--check"
+          ],
+          "help": "Report what would change without writing.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "config migrate"
+    },
+    {
+      "arguments": [],
+      "help": "Show pending config migrations without writing anything.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "config status"
+    },
+    {
+      "arguments": [],
+      "help": "Reliable per-hop pipeline diagnosis (video, link).",
+      "options": [],
+      "path": "diag"
+    },
+    {
+      "arguments": [],
+      "help": "WFB link diagnosis (deaf / mis_keyed / jammed / healthy).",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Output JSON for scripts.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "diag link"
+    },
+    {
+      "arguments": [],
+      "help": "Storage-wear verdict (write rate, throttle history, store footprint).",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Output JSON for scripts.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "diag storage"
+    },
+    {
+      "arguments": [],
+      "help": "Per-hop verdict on the video pipeline.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Output JSON for scripts.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "diag video"
+    },
+    {
+      "arguments": [],
+      "help": "Inspect and bust the hardware-check cache.",
+      "options": [],
+      "path": "hardware"
+    },
+    {
+      "arguments": [],
+      "help": "Invalidate the persisted hardware snapshot so the next API call re-probes. Used by udev rules on USB add/remove.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--quiet"
+          ],
+          "help": "Suppress success message.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "hardware bust-cache"
+    },
+    {
+      "arguments": [],
+      "help": "Print the persisted hardware snapshot.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "hardware show"
+    },
+    {
+      "arguments": [],
       "help": "Show the ADOS command overview.",
       "options": [],
       "path": "help"
@@ -17,7 +156,7 @@
       "help": "Downsampled metric series for charts.",
       "options": [
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--metric"
           ],
@@ -80,7 +219,7 @@
           "type": "choice"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--json"
           ],
@@ -150,7 +289,7 @@
           "type": "choice"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--source"
           ],
@@ -159,7 +298,7 @@
           "type": "text"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--metric"
           ],
@@ -248,7 +387,7 @@
           "type": "text"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--no-wait"
           ],
@@ -257,7 +396,7 @@
           "type": "boolean"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--json"
           ],
@@ -309,7 +448,7 @@
           "type": "choice"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--source"
           ],
@@ -318,7 +457,7 @@
           "type": "text"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--metric"
           ],
@@ -327,7 +466,7 @@
           "type": "text"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--event-kind"
           ],
@@ -381,7 +520,7 @@
           "type": "text"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--json"
           ],
@@ -451,7 +590,7 @@
           "type": "choice"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--open"
           ],
@@ -469,7 +608,7 @@
           "type": "integer"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--json"
           ],
@@ -503,7 +642,7 @@
       "help": "Store health, ingest and drop rates, and the sync watermark.",
       "options": [
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--openapi"
           ],
@@ -512,7 +651,7 @@
           "type": "boolean"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--json"
           ],
@@ -564,7 +703,7 @@
           "type": "choice"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--source"
           ],
@@ -573,7 +712,7 @@
           "type": "text"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--metric"
           ],
@@ -582,7 +721,7 @@
           "type": "text"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": null,
           "flags": [
             "--event-kind"
           ],
@@ -609,7 +748,7 @@
           "type": "text"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--json"
           ],
@@ -640,6 +779,249 @@
     },
     {
       "arguments": [],
+      "help": "Manage AI-control (MCP) access tokens.",
+      "options": [],
+      "path": "mcp"
+    },
+    {
+      "arguments": [],
+      "help": "Stop honoring scoped MCP tokens at the LAN auth edge (needs sudo).",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--no-restart"
+          ],
+          "help": "Write the config but do not restart the control front.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "mcp disable"
+    },
+    {
+      "arguments": [],
+      "help": "Accept scoped MCP tokens at the LAN auth edge (needs sudo).",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--no-restart"
+          ],
+          "help": "Write the config but do not restart the control front.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "mcp enable"
+    },
+    {
+      "arguments": [],
+      "help": "Mint a scoped MCP token (shown once).",
+      "options": [
+        {
+          "default": "",
+          "flags": [
+            "--label"
+          ],
+          "help": "A human label for the token.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--scope"
+          ],
+          "help": "A scope group to grant (repeatable).",
+          "required": true,
+          "type": "choice"
+        },
+        {
+          "default": 30,
+          "flags": [
+            "--ttl-days"
+          ],
+          "help": "Lifetime in days.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--node"
+          ],
+          "help": "Advisory node allowlist carried in the token (repeatable). This token is already bound to THIS node by its issuer; the list is a hint for a fleet connector, not an extra agent-side restriction.",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "path": "mcp mint"
+    },
+    {
+      "arguments": [
+        {
+          "name": "token_id",
+          "required": false
+        }
+      ],
+      "help": "Revoke one token by id, or --all.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--all"
+          ],
+          "help": "Revoke every token (salt rotation).",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "mcp revoke"
+    },
+    {
+      "arguments": [],
+      "help": "Show the MCP token acceptance posture and minted tokens.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "mcp status"
+    },
+    {
+      "arguments": [],
+      "help": "Inspect and manage network adapter settings.",
+      "options": [],
+      "path": "network"
+    },
+    {
+      "arguments": [],
+      "help": "Print this unit's WiFi access point passphrase.",
+      "options": [],
+      "path": "network ap-passphrase"
+    },
+    {
+      "arguments": [],
+      "help": "Stable-MAC pinning for no-efuse adapters.",
+      "options": [],
+      "path": "network mac"
+    },
+    {
+      "arguments": [
+        {
+          "name": "iface",
+          "required": true
+        }
+      ],
+      "help": "Pin a stable MAC on an adapter.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--mac"
+          ],
+          "help": "Explicit MAC (else the proposed value).",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--apply-now"
+          ],
+          "help": "Also re-tag the LIVE interface now (drops connections over it).",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "network mac pin"
+    },
+    {
+      "arguments": [],
+      "help": "Show per-adapter stable-MAC verdicts.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Emit raw JSON.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "network mac status"
+    },
+    {
+      "arguments": [
+        {
+          "name": "iface",
+          "required": true
+        }
+      ],
+      "help": "Remove an adapter's pin / override.",
+      "options": [],
+      "path": "network mac unpin"
+    },
+    {
+      "arguments": [
+        {
+          "name": "iface",
+          "required": true
+        }
+      ],
+      "help": "Show which .link wins for an interface (no reboot).",
+      "options": [],
+      "path": "network mac verify"
+    },
+    {
+      "arguments": [],
+      "help": "Operating-region posture for the radio (unrestricted by default).",
+      "options": [],
+      "path": "network regulatory"
+    },
+    {
+      "arguments": [
+        {
+          "name": "code",
+          "required": true
+        }
+      ],
+      "help": "Pin an operating region (ISO 3166-1 alpha-2 country code, e.g. US, DE).",
+      "options": [],
+      "path": "network regulatory region"
+    },
+    {
+      "arguments": [],
+      "help": "Show the current operating-region posture.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Emit raw JSON.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "network regulatory status"
+    },
+    {
+      "arguments": [],
+      "help": "Clear any pinned region; radiate on the configured channel out of the box.",
+      "options": [],
+      "path": "network regulatory unrestricted"
+    },
+    {
+      "arguments": [],
       "help": "Connect this agent to Mission Control, or bind the WFB radio (--role).",
       "options": [
         {
@@ -652,7 +1034,7 @@
           "type": "choice"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--yes",
             "-y"
@@ -666,10 +1048,835 @@
     },
     {
       "arguments": [],
+      "help": "Install, enable, and inspect plugins.",
+      "options": [],
+      "path": "plugin"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        },
+        {
+          "name": "state",
+          "required": true
+        }
+      ],
+      "help": "Toggle auto-update on or off for a plugin.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin auto-update"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        }
+      ],
+      "help": "Disable a plugin (keeps it installed).",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin disable"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        }
+      ],
+      "help": "Enable an installed plugin.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin enable"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        }
+      ],
+      "help": "Print manifest summary and runtime state.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin info"
+    },
+    {
+      "arguments": [
+        {
+          "name": "source",
+          "required": true
+        }
+      ],
+      "help": "Install a .adosplug archive, a built-in plugin by id, an archive URL, or a first-party catalog plugin by id.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--yes"
+          ],
+          "help": "Skip permission approval prompt; refuses high/critical permissions.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin install"
+    },
+    {
+      "arguments": [
+        {
+          "name": "signer_id",
+          "required": true
+        }
+      ],
+      "help": "Generate a fresh Ed25519 keypair for plugin signing. Developer aid: do NOT use this to mint production publisher keys without an offline workflow for the private half.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--output-dir"
+          ],
+          "help": "Directory where <signer-id>.pem and <signer-id>.priv.pem will be written.",
+          "required": true,
+          "type": "directory"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--force"
+          ],
+          "help": "Overwrite existing key files at the target paths.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin keygen"
+    },
+    {
+      "arguments": [
+        {
+          "name": "archive_path",
+          "required": true
+        }
+      ],
+      "help": "Run static analysis on a .adosplug archive before submission.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin lint"
+    },
+    {
+      "arguments": [],
+      "help": "List installed plugins.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--all"
+          ],
+          "help": "Include built-in plugins that ship with the agent and are not installed.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin list"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        }
+      ],
+      "help": "Tail a plugin's stdout/stderr log file.",
+      "options": [
+        {
+          "default": 100,
+          "flags": [
+            "--lines"
+          ],
+          "help": "Number of lines to print.",
+          "required": false,
+          "type": "integer"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--follow"
+          ],
+          "help": "Follow the log (like tail -f). Ctrl-C to stop.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--service"
+          ],
+          "help": "Read a declared service's log instead of the main runner's.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin logs"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        }
+      ],
+      "help": "Show, grant, or revoke permissions on an installed plugin.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--grant"
+          ],
+          "help": "Grant a permission the plugin declares.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--revoke"
+          ],
+          "help": "Revoke a specific permission id.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--yes",
+            "-y"
+          ],
+          "help": "Skip the confirmation prompt when revoking a permission.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin perms"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        },
+        {
+          "name": "version",
+          "required": true
+        }
+      ],
+      "help": "Pin a plugin to a version; auto-update will skip it.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin pin"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        }
+      ],
+      "help": "Stop, uninstall, and forget a plugin.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--keep-data"
+          ],
+          "help": "Preserve plugin data directory.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin remove"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_dir",
+          "required": true
+        }
+      ],
+      "help": "Pack a plugin directory into a signed .adosplug archive. Signs the canonical payload hash with an Ed25519 private key (PEM-encoded) and writes the SIGNATURE file inside the archive.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--key"
+          ],
+          "help": "Path to the Ed25519 private key in PEM format.",
+          "required": true,
+          "type": "file"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--signer-id"
+          ],
+          "help": "Signer identifier written to the SIGNATURE file. Must match the public-key filename on the agent (signer-id.pem).",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--output"
+          ],
+          "help": "Output path for the signed .adosplug archive.",
+          "required": true,
+          "type": "file"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin sign"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_dir",
+          "required": true
+        }
+      ],
+      "help": "Run a plugin's pytest suite under the SDK test harness.",
+      "options": [
+        {
+          "default": "tests",
+          "flags": [
+            "--tests-dir"
+          ],
+          "help": "Subdirectory under plugin_dir containing pytest tests.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "-k"
+          ],
+          "help": "pytest -k expression passed through to the runner.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin test"
+    },
+    {
+      "arguments": [
+        {
+          "name": "plugin_id",
+          "required": true
+        }
+      ],
+      "help": "Clear the pinned version on a plugin so auto-update can run.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "plugin unpin"
+    },
+    {
+      "arguments": [],
+      "help": "Show or override the agent profile.",
+      "options": [],
+      "path": "profile"
+    },
+    {
+      "arguments": [
+        {
+          "name": "value",
+          "required": true
+        }
+      ],
+      "help": "Persist a profile choice for this node.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--role"
+          ],
+          "help": "Mesh role for ground_station; ignored for drone. Defaults to direct.",
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--no-restart"
+          ],
+          "help": "Skip the automatic systemctl restart of profile-sensitive units. Operator is responsible for restarting the agent before the new profile takes effect.",
+          "required": false,
+          "type": "boolean"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "profile set"
+    },
+    {
+      "arguments": [],
+      "help": "Print the resolved agent profile.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "profile show"
+    },
+    {
+      "arguments": [],
+      "help": "Inspect and tune the WFB-ng radio link.",
+      "options": [],
+      "path": "radio"
+    },
+    {
+      "arguments": [],
+      "help": "List detected WiFi adapters and their WFB injection verdict.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "radio adapters"
+    },
+    {
+      "arguments": [
+        {
+          "name": "channel",
+          "required": true
+        }
+      ],
+      "help": "Coordinated hop to a WFB channel (the GS follows via the announce).",
+      "options": [],
+      "path": "radio hop"
+    },
+    {
+      "arguments": [],
+      "help": "Build and install the RTL8812EU (WFB) kernel driver if it is missing.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--force"
+          ],
+          "help": "Rebuild even if the module is present.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "radio install-driver"
+    },
+    {
+      "arguments": [],
+      "help": "Inspect and control WFB radio pairing.",
+      "options": [],
+      "path": "radio pair"
+    },
+    {
+      "arguments": [],
+      "help": "Toggle auto-pair on first boot.",
+      "options": [],
+      "path": "radio pair auto"
+    },
+    {
+      "arguments": [],
+      "help": "Disable auto-pair.",
+      "options": [],
+      "path": "radio pair auto off"
+    },
+    {
+      "arguments": [],
+      "help": "Re-arm auto-pair (only when unpaired).",
+      "options": [],
+      "path": "radio pair auto on"
+    },
+    {
+      "arguments": [],
+      "help": "Show local-bind to cloud-relay failover state.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Emit JSON.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "radio pair failover-status"
+    },
+    {
+      "arguments": [],
+      "help": "Open a local-radio bind window. Drives the upstream wfb-ng bind protocol via the agent's REST. Returns the terminal session state when the protocol completes (≤60s).",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--role"
+          ],
+          "help": "Override the inferred profile role.",
+          "required": false,
+          "type": "choice"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--peer-device-id"
+          ],
+          "help": "Optional peer device-id to persist alongside pair state.",
+          "required": false,
+          "type": "text"
+        }
+      ],
+      "path": "radio pair local"
+    },
+    {
+      "arguments": [],
+      "help": "Print pair state for this rig.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": null,
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "radio pair status"
+    },
+    {
+      "arguments": [],
+      "help": "Wipe pair keys and clear pair state.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--yes"
+          ],
+          "help": "Skip the confirmation prompt.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "radio pair unpair"
+    },
+    {
+      "arguments": [
+        {
+          "name": "dbm",
+          "required": true
+        }
+      ],
+      "help": "Set the WFB-ng TX power in dBm. Refused above the configured ceiling.",
+      "options": [],
+      "path": "radio set-tx-power"
+    },
+    {
+      "arguments": [],
+      "help": "Show the current WFB-ng link status.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Machine-readable output.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "radio status"
+    },
+    {
+      "arguments": [],
+      "help": "Bench bring-up sweep: walk through 1, 5, 10 dBm and report effect.",
+      "options": [],
+      "path": "radio test"
+    },
+    {
+      "arguments": [],
+      "help": "Start, stop, list and clip ground-station recordings.",
+      "options": [],
+      "path": "record"
+    },
+    {
+      "arguments": [],
+      "help": "Cut an fMP4 clip out of the recorded segments.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--path"
+          ],
+          "help": "Stream path to cut from.",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--start"
+          ],
+          "help": "RFC 3339 start timestamp.",
+          "required": true,
+          "type": "text"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--duration"
+          ],
+          "help": "Clip length in seconds.",
+          "required": true,
+          "type": "float"
+        },
+        {
+          "default": null,
+          "flags": [
+            "--output",
+            "-o"
+          ],
+          "help": "File to write the clip to.",
+          "required": true,
+          "type": "file"
+        }
+      ],
+      "path": "record clip"
+    },
+    {
+      "arguments": [],
+      "help": "List on-disk captures, or a stream's playback segments with --path.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--path"
+          ],
+          "help": "Read mediamtx's playback segments for this stream instead of the disk listing.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Output JSON for scripts.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "record list"
+    },
+    {
+      "arguments": [],
+      "help": "Begin a capture on the ground station.",
+      "options": [
+        {
+          "default": null,
+          "flags": [
+            "--hint"
+          ],
+          "help": "Name fragment to append to the filename.",
+          "required": false,
+          "type": "text"
+        },
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Output JSON for scripts.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "record start"
+    },
+    {
+      "arguments": [],
+      "help": "End the in-flight capture.",
+      "options": [
+        {
+          "default": false,
+          "flags": [
+            "--json"
+          ],
+          "help": "Output JSON for scripts.",
+          "required": false,
+          "type": "boolean"
+        }
+      ],
+      "path": "record stop"
+    },
+    {
+      "arguments": [],
       "help": "Show agent setup, link, video, and service status.",
       "options": [
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--json"
           ],
@@ -728,7 +1935,7 @@
       "help": "Release this agent from Mission Control (and optionally the WFB radio).",
       "options": [
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--radio"
           ],
@@ -737,7 +1944,7 @@
           "type": "boolean"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--all"
           ],
@@ -746,7 +1953,7 @@
           "type": "boolean"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--yes",
             "-y"
@@ -763,7 +1970,7 @@
       "help": "Update the agent to the latest and restart it.",
       "options": [
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--check-only"
           ],
@@ -772,7 +1979,7 @@
           "type": "boolean"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--yes",
             "-y"
@@ -782,7 +1989,7 @@
           "type": "boolean"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--json"
           ],
@@ -800,7 +2007,7 @@
           "type": "choice"
         },
         {
-          "default": "Sentinel.UNSET",
+          "default": false,
           "flags": [
             "--force-armed"
           ],

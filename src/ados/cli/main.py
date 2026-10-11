@@ -974,7 +974,10 @@ cli.add_command(help_command)
 cli.add_command(logs_group)
 cli.add_command(support_bundle)
 
-for _group in (
+# The advanced groups: public, documented commands kept off `ados --help`.
+# Hidden here means "not on the primary help surface", not "internal", so the
+# docs reference exporter (scripts/emit-reference.py) still lists them.
+ADVANCED_GROUPS: tuple[click.Group, ...] = (
     config_group,
     diag_group,
     hardware_group,
@@ -984,7 +987,9 @@ for _group in (
     profile_group,
     radio_group,
     record_group,
-):
+)
+
+for _group in ADVANCED_GROUPS:
     _group.hidden = True
     cli.add_command(_group)
 
