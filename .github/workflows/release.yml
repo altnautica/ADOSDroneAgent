@@ -239,7 +239,7 @@ jobs:
           gh release download "rev-${found}" --dir binaries
           ls -l binaries
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: installer
           path: installer
@@ -321,7 +321,7 @@ jobs:
       id-token: write
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-assets
           path: release-assets

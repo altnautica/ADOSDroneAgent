@@ -461,14 +461,14 @@ jobs:
           fetch-depth: 0
 
       - name: Collect this run's binaries
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: rel-*
           path: crates/rev
           merge-multiple: true
 
       - name: Collect this run's installer
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: installer
           path: crates/installer
