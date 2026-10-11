@@ -36,6 +36,7 @@
 //!   cloud, on the device's own credentials.
 
 pub mod config;
+pub mod daemon;
 pub mod dispatch;
 pub mod ground_station;
 pub mod heartbeat;

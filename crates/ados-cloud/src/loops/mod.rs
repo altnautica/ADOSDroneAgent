@@ -9,6 +9,7 @@ pub mod capabilities;
 pub mod command_poll;
 pub mod enrichment;
 pub mod heartbeat;
+pub mod sidecars;
 
 pub use beacon::{beacon_enabled, build_beacon_body, BeaconInputs, DEFAULT_BEACON_INTERVAL};
 pub use command_poll::{build_ack, parse_commands, POLL_INTERVAL};
