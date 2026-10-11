@@ -418,3 +418,7 @@ pub async fn get_readiness(
         .await;
     respond(result.map(|body| json_response(StatusCode::OK, &body)))
 }
+
+#[cfg(test)]
+#[path = "read_tests.rs"]
+mod tests;

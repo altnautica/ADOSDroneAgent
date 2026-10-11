@@ -1,0 +1,41 @@
+name: catalog-drift
+
+# The bundled plugin catalog (src/ados/data/plugin-catalog.json) pins the
+# latest published ADOSExtensions release of every extension in that repo's
+# publish allowlist. A new extension release does not touch this repository,
+# so nothing on the push path notices the catalog falling behind. This job
+# re-derives the pins from the live releases and fails when they differ.
+#
+# Runs weekly, on an `extensions-released` repository_dispatch sent after an
+# extension release, and by hand. The fix for a failure is to run
+# scripts/sync-plugin-catalog.py and commit the rewritten catalog.
+
+on:
+  schedule:
+    # Weekly, Monday 05:41 UTC. Clear of the deep-tests and driver crons.
+    - cron: "41 5 * * 1"
+  repository_dispatch:
+    types: [extensions-released]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Catalog pins the latest extension releases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install the script's dependency
+        run: pip install pyyaml
+
+      - name: Catalog matches the published releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/sync-plugin-catalog.py --check
