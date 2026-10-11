@@ -41,10 +41,10 @@ pub struct Args {
     /// `--ref <v>` — pin every artifact this install places to ONE git
     /// revision: the agent package is checked out at that commit and the
     /// prebuilt service binaries are fetched from that commit's per-revision
-    /// release (`rev-<sha>`) instead of the rolling per-service tags. Requires
-    /// the `edge` channel (`stable` resolves from a `v<X.Y.Z>` tag and has no
-    /// commit addressing). Named `rev` because the value is a revision; the flag
-    /// keeps the bootstrap's `--ref` spelling.
+    /// release (`rev-<sha>`) instead of the `rev-<sha>` the `prebuilt-main`
+    /// manifest names. Requires the `edge` channel (`stable` resolves from a
+    /// `v<X.Y.Z>` tag and has no commit addressing). Named `rev` because the
+    /// value is a revision; the flag keeps the bootstrap's `--ref` spelling.
     ///
     /// Steps read [`crate::ctx::Ctx::rev`], not this field: an abbreviated value
     /// here is expanded to the full object name once the clone can resolve it.

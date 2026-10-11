@@ -54,7 +54,7 @@ pub struct Ctx {
     /// downstream steps then fall back to `/opt/ados/source` / `INSTALL_DIR/repo`.
     pub source_dir: Option<std::path::PathBuf>,
     /// The revision every artifact is pinned to (`--ref`), or `None` for the
-    /// normal rolling install.
+    /// normal install from the `rev-<sha>` the `prebuilt-main` manifest names.
     ///
     /// `venv_agent` overwrites an abbreviated value with the full 40-character
     /// object name as soon as the clone can resolve it, and it runs before

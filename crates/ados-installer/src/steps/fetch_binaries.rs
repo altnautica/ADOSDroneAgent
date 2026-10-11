@@ -18,7 +18,8 @@
 //! the same [`install_one`] sequence a fetched asset does, and the table on that
 //! function states exactly which checks apply to each source.
 //!
-//! On the build host, next to the binaries:
+//! On the build host, next to the binaries (an optional `manifest.json` in the
+//! `prebuilt-main` shape, keyed by these file names, is checked too):
 //!
 //! ```text
 //! cargo build --release -p ados-video
@@ -50,8 +51,12 @@ use crate::net;
 use crate::ui::{activity, ProgressSink};
 use crate::verify::{self, SignaturePolicy};
 
+mod manifest;
+
+pub use manifest::{Manifest, ReleaseRef, MANIFEST_ASSET};
+
 /// GitHub release-download base; each prebuilt asset hangs off
-/// `<base>/<release_tag>/<asset>` (plus `.sha256` / `.minisig` sidecars).
+/// `<base>/<release tag>/<asset>` (plus `.sha256` / `.minisig` sidecars).
 const RELEASE_BASE: &str = "https://github.com/altnautica/ADOSDroneAgent/releases/download";
 
 /// Environment override for [`RELEASE_BASE`], for tests only.
@@ -131,11 +136,11 @@ pub fn version_release_tag(version: &str) -> String {
     format!("v{version}")
 }
 
-/// The release a pinned install resolves every asset from (pure), or `None` for
-/// the rolling per-service tags.
+/// The release a pinned install resolves every asset from (pure), or `None`
+/// for an unpinned edge install, which reads the `prebuilt-main` manifest.
 ///
 /// * `stable` is always pinned: to `v<version>`, and it refuses to run without
-///   a `--version`. The rolling tags are whatever `main` last built, which is
+///   a `--version`. The edge pointer is whatever `main` last built, which is
 ///   exactly what a stable install must never place.
 /// * Every other channel is pinned only by `--ref`, to `rev-<sha>`.
 pub fn pinned_release(
@@ -150,7 +155,7 @@ pub fn pinned_release(
             .ok_or_else(|| {
                 "the stable channel installs the service binaries of one pinned release and \
              requires --version (the release to install); refusing to fall back to the \
-             rolling per-service tags"
+             edge build"
                     .to_string()
             })?;
         return Ok(Some(version_release_tag(
@@ -160,19 +165,20 @@ pub fn pinned_release(
     Ok(rev.map(rev_release_tag))
 }
 
-/// Where one asset's URL hangs off: the rolling per-service tag normally, or the
-/// pinned release (`rev-<sha>` for `--ref`, `v<X.Y.Z>` for stable).
+/// The release a run fetches from, resolved once before the install loop.
 ///
-/// This is the SOLE place a prebuilt asset URL gets its base, so a pin cannot
-/// half-apply: every binary in the catalog, the onnx vision variant, and the
-/// ONNX Runtime library all resolve through here. `pin` is a complete release
-/// tag from [`pinned_release`]; a `--ref` inside it is already the full object
-/// name — `venv_agent` expands an abbreviated `--ref` from the clone before this
-/// step runs, so no prefix is ever handed to a server that cannot resolve one.
-pub fn asset_base(pin: Option<&str>, tag: &str) -> String {
+/// A pin (`rev-<sha>` for `--ref`, `v<X.Y.Z>` for stable) names the release
+/// directly. An unpinned edge install reads the signed `prebuilt-main`
+/// manifest and takes the single `rev-<sha>` release it names, so every
+/// binary of one install comes from one commit.
+fn resolve_release(pin: Option<&str>, tmp_dir: &Path) -> anyhow::Result<ReleaseRef> {
+    let base = release_base();
     match pin {
-        Some(pin) => format!("{}/{pin}", release_base()),
-        None => format!("{}/{tag}", release_base()),
+        Some(tag) => Ok(ReleaseRef::pinned(&base, tag)),
+        None => {
+            let m = manifest::fetch_manifest(&base, tmp_dir, SignaturePolicy::Required)?;
+            Ok(ReleaseRef::from_manifest(&base, m))
+        }
     }
 }
 
@@ -190,8 +196,8 @@ pub fn rev_release_missing(rev: &str) -> String {
          published. The workflow that builds them runs only on commits touching `crates/**`, \
          the generated `_*_generated.py` contract files, or `data/systemd/**` — a commit that \
          changed only `src/ados/**` publishes no per-revision release. Pin a commit that \
-         touched the Rust tree, or re-run without --ref to install from the rolling \
-         per-service release tags.",
+         touched the Rust tree, or re-run without --ref to install the build the \
+         `prebuilt-main` manifest names.",
         tag = rev_release_tag(rev)
     )
 }
@@ -202,25 +208,21 @@ pub fn version_release_missing(tag: &str) -> String {
     format!(
         "the {tag} release carries no prebuilt service binaries, so the stable channel has \
          nothing pinned to install. Stable places only the binaries published with its own \
-         release; it does not fall back to the rolling per-service tags. Install a release \
+         release; it does not fall back to the edge build. Install a release \
          that carries its binaries, or use --channel edge."
     )
 }
 
 /// Whether the pinned release actually carries assets.
 ///
-/// One sidecar fetch answers it: `<base>/<pin>/<asset>.sha256` exists only if CI
+/// One sidecar fetch answers it: `<release>/<asset>.sha256` exists only if CI
 /// published the binaries into that release. `sample` is a Hard-gated catalog
 /// entry, so a present sidecar means the release holds the assets the install
 /// cannot do without — not merely that a tag of that name exists. Cheap enough to
 /// pay for on every pinned install (a few hundred bytes) and it converts an
 /// opaque per-binary 404 into the one message that names the cause.
-fn pinned_release_published(pin: &str, sample: &PrebuiltBinary, tmp_dir: &Path) -> bool {
-    let url = format!(
-        "{}/{}.sha256",
-        asset_base(Some(pin), sample.release_tag),
-        sample.asset
-    );
+fn pinned_release_published(release: &ReleaseRef, sample: &PrebuiltBinary, tmp_dir: &Path) -> bool {
+    let url = format!("{}.sha256", release.asset_url(sample.asset));
     let probe = tmp_dir.join("pinned-release-probe.sha256");
     let ok = net::fetch(&url, &probe).is_ok();
     let _ = std::fs::remove_file(&probe);
@@ -263,11 +265,12 @@ pub fn gate_outcome(gate: Gate, ok: bool) -> Decision {
 /// cannot skip a check by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetSource<'a> {
-    /// The GitHub release host: the rolling per-service tag, or the pinned
-    /// release (`rev-<sha>` for `--ref`, `v<X.Y.Z>` for stable).
+    /// The GitHub release host: the one release this run resolved (`rev-<sha>`
+    /// from the edge manifest or `--ref`, `v<X.Y.Z>` for stable).
     Release {
-        /// The pinned release tag, from [`pinned_release`].
-        pin: Option<&'a str>,
+        /// The resolved release; `None` on a host the release publishes nothing
+        /// for (x86_64), where a release-sourced entry is refused unfetched.
+        release: Option<&'a ReleaseRef>,
         /// The host architecture the fetched binary has to run on, checked
         /// against the downloaded ELF header before it is placed.
         host_arch: &'a str,
@@ -340,11 +343,11 @@ fn source_for<'a>(
     b: &PrebuiltBinary,
     artifacts: Option<&'a Path>,
     host_arch: &'a str,
-    pin: Option<&'a str>,
+    release: Option<&'a ReleaseRef>,
 ) -> AssetSource<'a> {
     match artifacts {
         Some(dir) if local_artifact(dir, b).is_some() => AssetSource::Local { dir, host_arch },
-        _ => AssetSource::Release { pin, host_arch },
+        _ => AssetSource::Release { release, host_arch },
     }
 }
 
@@ -381,8 +384,15 @@ fn stage_asset(
     sink: &ProgressSink,
 ) -> anyhow::Result<()> {
     match *source {
-        AssetSource::Release { pin, host_arch } => {
-            let asset_url = format!("{}/{}", asset_base(pin, b.release_tag), b.asset);
+        AssetSource::Release { release, host_arch } => {
+            let release = release.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{}: no release resolved to fetch {} from",
+                    b.service,
+                    b.asset
+                )
+            })?;
+            let asset_url = release.asset_url(b.asset);
             // Stream byte progress so the live pane shows "<service> 4.2/8.1 MB".
             net::fetch_with_progress(&asset_url, dl_bin, |done, total| {
                 sink.byte_progress("fetch_binaries", done, total, b.service);
@@ -392,7 +402,16 @@ fn stage_asset(
             if let Some(why) = artifact_arch_error(&read_header(dl_bin), host_arch) {
                 anyhow::bail!("{}: release asset {} {why}", b.service, b.asset);
             }
-            net::fetch(&format!("{asset_url}.sha256"), dl_sha)?;
+            match release.manifest() {
+                // The signed manifest is the digest of record for an edge
+                // build: the verifier checks the bytes against it, not against
+                // a sidecar served beside the asset.
+                Some(m) => {
+                    let digest = m.check_size(b.asset, dl_bin)?;
+                    manifest::write_digest_sidecar(digest, b.asset, dl_sha)?;
+                }
+                None => net::fetch(&format!("{asset_url}.sha256"), dl_sha)?,
+            }
             // The signature is mandatory for a release asset, but its fetch is
             // allowed to fail here so the refusal comes from the verifier, which
             // names the artifact and the reason. curl is invoked with `-f`, so a
@@ -420,6 +439,16 @@ fn stage_asset(
                 .map_err(|e| anyhow::anyhow!("copy {} failed: {e}", src.display()))?;
             std::fs::copy(&src_sha, dl_sha)
                 .map_err(|e| anyhow::anyhow!("copy {} failed: {e}", src_sha.display()))?;
+            // A bench manifest beside the binaries pins their digests too: the
+            // bytes must match it, not only the build host's sidecar.
+            if let Some(m) = manifest::local_manifest(dir)? {
+                let name = src
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let digest = m.check_size(&name, dl_bin)?;
+                manifest::write_digest_sidecar(digest, &name, dl_sha)?;
+            }
             let src_sig = sidecar_path(&src, "minisig");
             if src_sig.is_file() {
                 let _ = std::fs::copy(&src_sig, dl_sig);
@@ -521,6 +550,7 @@ pub fn ignored_artifact_names(entries: &[String]) -> Vec<String> {
     entries
         .iter()
         .filter(|n| !n.ends_with(".sha256") && !n.ends_with(".minisig"))
+        .filter(|n| n.as_str() != MANIFEST_ASSET)
         .filter(|n| !is_catalog_artifact_name(n))
         .cloned()
         .collect()
@@ -740,25 +770,26 @@ fn install_service(
     sink: &ProgressSink,
     source: &AssetSource<'_>,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    if let AssetSource::Release { pin, host_arch } = *source {
-        if b.service == "ados-vision" && binaries::board_prefers_onnx_vision(board_model) {
-            // The onnx binary links the ONNX Runtime dynamically, so the binary AND
-            // its shared library are installed together — either both land or the
-            // install falls back to the default (musl, no-onnx) build. Installing the
-            // onnx binary without its runtime would leave a vision service that
-            // cannot dlopen ORT at start.
-            match install_onnx_vision(tmp_dir, sink, pin, host_arch) {
-                Ok(replaced) => return Ok(replaced),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "onnx vision build fetch failed; falling back to the default vision build"
-                    );
-                    sink.sub_log(
-                        "fetch_binaries",
-                        "onnx vision build unavailable; using the default vision build",
-                    );
-                }
+    if matches!(source, AssetSource::Release { .. })
+        && b.service == "ados-vision"
+        && binaries::board_prefers_onnx_vision(board_model)
+    {
+        // The onnx binary links the ONNX Runtime dynamically, so the binary AND
+        // its shared library are installed together — either both land or the
+        // install falls back to the default (musl, no-onnx) build. Installing the
+        // onnx binary without its runtime would leave a vision service that
+        // cannot dlopen ORT at start.
+        match install_onnx_vision(tmp_dir, sink, source) {
+            Ok(replaced) => return Ok(replaced),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "onnx vision build fetch failed; falling back to the default vision build"
+                );
+                sink.sub_log(
+                    "fetch_binaries",
+                    "onnx vision build unavailable; using the default vision build",
+                );
             }
         }
     }
@@ -882,12 +913,12 @@ fn binary_execs_on_this_host(path: &Path) -> bool {
 fn install_onnx_vision(
     tmp_dir: &Path,
     sink: &ProgressSink,
-    pin: Option<&str>,
-    host_arch: &str,
+    source: &AssetSource<'_>,
 ) -> anyhow::Result<Vec<PathBuf>> {
-    // Both halves of the variant come from the release: this path is only
-    // reached for a release-sourced `ados-vision` (see `install_service`).
-    let source = AssetSource::Release { pin, host_arch };
+    // Both halves of the variant come from the same release as the rest of
+    // the install: this path is only reached for a release-sourced
+    // `ados-vision` (see `install_service`).
+    let source = *source;
     let mut replaced: Vec<PathBuf> =
         install_one_with_retry(&binaries::PREBUILT_VISION_ONNX, tmp_dir, sink, &source)?
             .into_iter()
@@ -1082,13 +1113,11 @@ impl Step for FetchBinaries {
         let sink = ctx.progress.clone();
         let bins = binaries::for_profile(&ctx.profile);
 
-        // A pinned install resolves every asset from one release: `rev-<sha>`
-        // for `--ref`, `v<X.Y.Z>` for stable. Probe that the release carries
-        // binaries BEFORE the loop: without this the first Hard-gate binary
-        // aborts with a bare "could not be installed", which reads as a broken
-        // download rather than as the far likelier "that release never
-        // published binaries". A `--ref` pin is read from `ctx.rev`, which
-        // `venv_agent` has already expanded to a full object name.
+        // Every release-sourced asset of one install comes from one release:
+        // `rev-<sha>` for `--ref`, `v<X.Y.Z>` for stable, and on unpinned edge
+        // the `rev-<sha>` the signed `prebuilt-main` manifest names. A `--ref`
+        // pin is read from `ctx.rev`, which `venv_agent` has already expanded
+        // to a full object name.
         let rev = ctx.rev.clone();
         if let Some(rev) = rev.as_deref() {
             if !is_full_object_name(rev) {
@@ -1103,25 +1132,10 @@ impl Step for FetchBinaries {
                 return StepOutcome::Failed(msg);
             }
         };
-        if let Some(pin) = pin.as_deref().filter(|_| release_assets) {
-            let sample = bins
-                .iter()
-                .find(|b| b.gate == Gate::Hard)
-                .copied()
-                .unwrap_or(binaries::default_vision_binary());
-            sink.activity(self.id(), format!("checking the {pin} release"));
-            if !pinned_release_published(pin, sample, &tmp_dir) {
-                let _ = std::fs::remove_dir_all(&tmp_dir);
-                return StepOutcome::Failed(match rev.as_deref() {
-                    Some(rev) => rev_release_missing(rev),
-                    None => version_release_missing(pin),
-                });
-            }
-        }
 
-        // `--artifacts <dir>`: validate the directory BEFORE the loop, for the
-        // same reason the `--ref` probe above runs before it — a request that
-        // cannot mean what the operator meant should cost nothing and say why.
+        // `--artifacts <dir>`: validate the directory BEFORE anything touches
+        // the network — a request that cannot mean what the operator meant
+        // should cost nothing and say why.
         let artifacts = ctx.artifacts.clone();
         let mut ignored: Vec<String> = Vec::new();
         if let Some(dir) = artifacts.as_deref() {
@@ -1134,6 +1148,58 @@ impl Step for FetchBinaries {
             }
         }
 
+        // Resolve the release only when some entry will be fetched from it.
+        // A pinned release is probed BEFORE the loop: without this the first
+        // Hard-gate binary aborts with a bare "could not be installed", which
+        // reads as a broken download rather than as the far likelier "that
+        // release never published binaries".
+        let needs_release = bins.iter().any(|b| {
+            artifacts
+                .as_deref()
+                .is_none_or(|d| local_artifact(d, b).is_none())
+        });
+        let release: Option<ReleaseRef> = if release_assets && needs_release {
+            sink.activity(
+                self.id(),
+                match pin.as_deref() {
+                    Some(tag) => format!("checking the {tag} release"),
+                    None => format!("reading the {} manifest", manifest::POINTER_TAG),
+                },
+            );
+            let release = match resolve_release(pin.as_deref(), &tmp_dir) {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return StepOutcome::Failed(format!(
+                        "{e}. An edge install fetches its binaries from the release this \
+                         manifest names; pin one with --ref <sha> if the pointer is unreachable."
+                    ));
+                }
+            };
+            if let Some(m) = release.manifest() {
+                sink.sub_log(
+                    self.id(),
+                    &format!("edge build {} (agent {})", release.tag(), m.agent_version),
+                );
+            } else {
+                let sample = bins
+                    .iter()
+                    .find(|b| b.gate == Gate::Hard)
+                    .copied()
+                    .unwrap_or(binaries::default_vision_binary());
+                if !pinned_release_published(&release, sample, &tmp_dir) {
+                    let _ = std::fs::remove_dir_all(&tmp_dir);
+                    return StepOutcome::Failed(match rev.as_deref() {
+                        Some(rev) => rev_release_missing(rev),
+                        None => version_release_missing(release.tag()),
+                    });
+                }
+            }
+            Some(release)
+        } else {
+            None
+        };
+
         // Resolve each entry's byte source once, and SAY which ones came from
         // the local directory and which files were passed over. A fallback to the
         // release is legitimate (a one-crate rebuild) but it must never be
@@ -1142,7 +1208,7 @@ impl Step for FetchBinaries {
         let host_arch = ctx.env.arch.clone();
         let sources: Vec<AssetSource<'_>> = bins
             .iter()
-            .map(|b| source_for(b, artifacts.as_deref(), &host_arch, pin.as_deref()))
+            .map(|b| source_for(b, artifacts.as_deref(), &host_arch, release.as_ref()))
             .collect();
         if let Some(dir) = artifacts.as_deref() {
             let local: Vec<&str> = bins
@@ -1286,9 +1352,10 @@ mod tests {
         // `.sha256` beside it comes from the same host and proves nothing about
         // origin. Only `--artifacts` bytes, which cannot carry the CI signature,
         // may fall back to their build host's SHA256.
+        let stable = ReleaseRef::pinned(&base_or_default(None), "v0.101.0");
         assert_eq!(
             AssetSource::Release {
-                pin: None,
+                release: None,
                 host_arch: "aarch64"
             }
             .signature_policy(),
@@ -1296,7 +1363,7 @@ mod tests {
         );
         assert_eq!(
             AssetSource::Release {
-                pin: Some("v0.101.0"),
+                release: Some(&stable),
                 host_arch: "aarch64"
             }
             .signature_policy(),
@@ -1385,47 +1452,15 @@ mod tests {
     }
 
     #[test]
-    fn asset_base_hangs_an_unpinned_asset_off_its_rolling_tag() {
-        // The exact URL, not its shape: this string is what a board resolves,
-        // and every previous release-path defect was a wrong URL that still
-        // looked plausible.
-        assert_eq!(
-            asset_base(None, "prebuilt-supervisor"),
-            "https://github.com/altnautica/ADOSDroneAgent/releases/download/prebuilt-supervisor"
-        );
-    }
-
-    #[test]
-    fn asset_base_replaces_the_rolling_tag_with_the_per_revision_release() {
+    fn a_rev_pin_names_the_per_revision_release() {
         let sha = "3b4b8deec0ffee1234567890abcdef1234567890";
         let pin = pinned_release("edge", Some(sha), None).unwrap();
         assert_eq!(pin.as_deref(), Some(format!("rev-{sha}").as_str()));
+        // One release for every asset, so a pinned install cannot place a
+        // binary from another commit.
+        let release = ReleaseRef::pinned(&base_or_default(None), pin.as_deref().unwrap());
         assert_eq!(
-            asset_base(pin.as_deref(), "prebuilt-supervisor"),
-            format!("https://github.com/altnautica/ADOSDroneAgent/releases/download/rev-{sha}")
-        );
-        // The pin is what selects the release, so two services that differ only
-        // by rolling tag resolve to the SAME per-revision base. That is the
-        // property the flag exists for: one revision, one release, no chance of
-        // a wheel from one commit beside a binary from another.
-        assert_eq!(
-            asset_base(pin.as_deref(), "prebuilt-supervisor"),
-            asset_base(pin.as_deref(), "prebuilt-video")
-        );
-    }
-
-    #[test]
-    fn a_pinned_asset_url_is_the_rev_release_plus_the_unchanged_asset_name() {
-        // The asset filename is NOT rewritten by a pin — CI re-uploads the
-        // byte-identical set under the rev tag, so only the tag moves.
-        let sha = "0123456789abcdef0123456789abcdef01234567";
-        let pin = pinned_release("edge", Some(sha), None).unwrap();
-        let b = PREBUILT
-            .iter()
-            .find(|b| b.service == "ados-supervisor")
-            .unwrap();
-        assert_eq!(
-            format!("{}/{}", asset_base(pin.as_deref(), b.release_tag), b.asset),
+            release.asset_url("ados-supervisor-aarch64"),
             format!(
                 "https://github.com/altnautica/ADOSDroneAgent/releases/download/rev-{sha}/ados-supervisor-aarch64"
             )
@@ -1434,23 +1469,18 @@ mod tests {
 
     #[test]
     fn stable_resolves_every_binary_from_its_own_version_release() {
-        // The rolling tags are whatever main last built; a stable install must
+        // The edge pointer is whatever main last built; a stable install must
         // place the binaries published with the release it installs, and a v-
         // prefixed or bare --version addresses the same release.
         for version in ["0.99.376", "v0.99.376"] {
             let pin = pinned_release("stable", None, Some(version)).unwrap();
             assert_eq!(pin.as_deref(), Some("v0.99.376"));
-            let b = PREBUILT.iter().find(|b| b.service == "ados-video").unwrap();
-            assert_eq!(
-                format!("{}/{}", asset_base(pin.as_deref(), b.release_tag), b.asset),
-                "https://github.com/altnautica/ADOSDroneAgent/releases/download/v0.99.376/ados-video-aarch64"
-            );
         }
-        // No version means nothing pinned to install: refused, never the
-        // rolling tags.
+        // No version means nothing pinned to install: refused, never the edge
+        // build.
         assert!(pinned_release("stable", None, None).is_err());
         assert!(pinned_release("stable", None, Some("  ")).is_err());
-        // The development channel keeps the rolling tags unless --ref pins it.
+        // The development channel reads the edge manifest unless --ref pins it.
         assert_eq!(pinned_release("edge", None, Some("0.99.376")), Ok(None));
     }
 
@@ -1537,7 +1567,7 @@ mod tests {
 
     /// A minimal well-formed 64-bit little-endian ELF header declaring
     /// `machine`, followed by `payload` so two artifacts can differ in content.
-    fn fake_elf(machine: u16, payload: &[u8]) -> Vec<u8> {
+    pub(super) fn fake_elf(machine: u16, payload: &[u8]) -> Vec<u8> {
         let mut v = Vec::with_capacity(20 + payload.len());
         v.extend_from_slice(b"\x7fELF");
         v.push(2); // EI_CLASS: 64-bit
@@ -1550,7 +1580,7 @@ mod tests {
         v
     }
 
-    fn sha256_sidecar_body(bytes: &[u8], name: &str) -> String {
+    pub(super) fn sha256_sidecar_body(bytes: &[u8], name: &str) -> String {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(bytes);
@@ -1823,22 +1853,25 @@ mod tests {
             .find(|b| b.service == "ados-supervisor")
             .unwrap();
 
+        let release = ReleaseRef::pinned(&base_or_default(None), "rev-abc");
         assert!(matches!(
             source_for(video, Some(dir.path()), "aarch64", None),
             AssetSource::Local { .. }
         ));
         assert!(matches!(
-            source_for(supervisor, Some(dir.path()), "aarch64", None),
-            AssetSource::Release { pin: None, .. }
-        ));
-        // With no flag every entry is a release fetch, pin and all.
-        assert!(matches!(
-            source_for(video, None, "aarch64", Some("rev-abc")),
+            source_for(supervisor, Some(dir.path()), "aarch64", Some(&release)),
             AssetSource::Release {
-                pin: Some("rev-abc"),
+                release: Some(_),
                 ..
             }
         ));
+        // With no flag every entry is a release fetch, from the one release.
+        match source_for(video, None, "aarch64", Some(&release)) {
+            AssetSource::Release {
+                release: Some(r), ..
+            } => assert_eq!(r.tag(), "rev-abc"),
+            other => panic!("expected a release source: {other:?}"),
+        }
         // The release asset name is accepted as well as the service name.
         std::fs::write(dir.path().join("ados-supervisor-aarch64"), b"local").unwrap();
         assert!(matches!(
@@ -1877,7 +1910,7 @@ mod tests {
         // operator and the message naming what to fix.
         assert_eq!(
             AssetSource::Release {
-                pin: None,
+                release: None,
                 host_arch: "aarch64"
             }
             .max_attempts(),

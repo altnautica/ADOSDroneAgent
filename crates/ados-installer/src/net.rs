@@ -47,11 +47,11 @@ pub const STALL_FLOOR_BYTES_PER_SEC: &str = "1024";
 /// stalling on it. The destination is the caller's path verbatim (the atomic
 /// temp-then-rename dance is `fetch`'s job, not this builder's).
 ///
-/// Cache-busting: rolling tags reuse one asset URL across rebuilds, so an
-/// intermediary CDN can hand back a stale binary paired with a stale sha. The
-/// `Cache-Control: no-cache` + `Pragma: no-cache` request headers force a
-/// revalidation so the binary and its sha256 are always the freshly published
-/// pair.
+/// Cache-busting: the rolling `prebuilt-main` pointer reuses one
+/// `manifest.json` URL across rebuilds, so an intermediary CDN can hand back a
+/// stale manifest naming an older build. The `Cache-Control: no-cache` +
+/// `Pragma: no-cache` request headers force a revalidation so every fetch sees
+/// the freshly published file.
 pub fn curl_args(url: &str, dest: &Path, force_ipv4: bool) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-fsSL".to_string(),

@@ -1,13 +1,13 @@
 //! The prebuilt-binary catalog.
 //!
-//! Each service ships as an `<asset>` attached to a per-service prebuilt
-//! release tag. The fetch step downloads the assets for the active profile,
-//! verifies them, and drops each at its destination (the `ados-*` services
-//! under `/opt/ados/bin/<service>`; a mirrored third-party relay under the
-//! system bin dir). A `Hard` gate means a missing/failed binary fails the
-//! install; a `BestEffort` gate degrades it. Multiple services can share one
-//! release tag (the HID and display binaries are built and published
-//! together), so the table maps service → tag, not the reverse.
+//! Each service ships as an `<asset>` in the per-commit `rev-<sha>` release
+//! CI builds in one job. The fetch step resolves which release to read (the
+//! `prebuilt-main` manifest on edge, `--ref`, or the stable version release),
+//! downloads the assets for the active profile from it, verifies them, and
+//! drops each at its destination (the `ados-*` services under
+//! `/opt/ados/bin/<service>`; a mirrored third-party relay under the system bin
+//! dir). A `Hard` gate means a missing/failed binary fails the install; a
+//! `BestEffort` gate degrades it.
 
 /// Whether a missing prebuilt binary is fatal (`Hard`) or degrading
 /// (`BestEffort`) to the install.
@@ -27,8 +27,6 @@ pub struct PrebuiltBinary {
     pub service: &'static str,
     /// GitHub release asset name (`<service>-aarch64`).
     pub asset: &'static str,
-    /// The release tag the asset is attached to.
-    pub release_tag: &'static str,
     /// Install destination.
     pub dest: &'static str,
     /// Hard vs best-effort gate.
@@ -65,7 +63,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-tui",
         asset: "ados-tui-aarch64",
-        release_tag: "prebuilt-tui",
         dest: "/opt/ados/bin/ados-tui",
         gate: Gate::BestEffort,
         profiles: ANY,
@@ -73,7 +70,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-supervisor",
         asset: "ados-supervisor-aarch64",
-        release_tag: "prebuilt-supervisor",
         dest: "/opt/ados/bin/ados-supervisor",
         gate: Gate::Hard,
         profiles: ANY,
@@ -81,7 +77,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-mavlink-router",
         asset: "ados-mavlink-router-aarch64",
-        release_tag: "prebuilt-mavlink-router",
         dest: "/opt/ados/bin/ados-mavlink-router",
         // The sole command-and-control path: the Core MAVLink unit execs this
         // binary unconditionally and has no Python fallback. Hard on both
@@ -93,7 +88,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-radio",
         asset: "ados-radio-aarch64",
-        release_tag: "prebuilt-radio",
         dest: "/opt/ados/bin/ados-radio",
         gate: Gate::BestEffort,
         profiles: DRONE,
@@ -101,7 +95,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-video",
         asset: "ados-video-aarch64",
-        release_tag: "prebuilt-video",
         dest: "/opt/ados/bin/ados-video",
         gate: Gate::Hard,
         profiles: DRONE,
@@ -109,10 +102,8 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-camera-probe",
         asset: "ados-camera-probe-aarch64",
-        // Published alongside ados-video: same release tag, same camera-path
-        // cadence, so the probe can never be a version behind the pipeline
-        // whose overlay it validates.
-        release_tag: "prebuilt-video",
+        // Built in the same job as ados-video, so the probe can never be a
+        // version behind the pipeline whose overlay it validates.
         dest: "/opt/ados/bin/ados-camera-probe",
         // Best-effort, and fetched on every profile even though the CSI camera
         // is drone-side: the unit is `ConditionPathExists`-gated on the
@@ -127,7 +118,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-plugin-host",
         asset: "ados-plugin-host-aarch64",
-        release_tag: "prebuilt-plugin-host",
         dest: "/opt/ados/bin/ados-plugin-host",
         gate: Gate::BestEffort,
         profiles: ANY,
@@ -135,7 +125,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-cloud",
         asset: "ados-cloud-aarch64",
-        release_tag: "prebuilt-cloud",
         dest: "/opt/ados/bin/ados-cloud",
         gate: Gate::Hard,
         profiles: ANY,
@@ -143,7 +132,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-groundlink",
         asset: "ados-groundlink-aarch64",
-        release_tag: "prebuilt-groundlink",
         dest: "/opt/ados/bin/ados-groundlink",
         gate: Gate::BestEffort,
         profiles: GROUND,
@@ -151,7 +139,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-net",
         asset: "ados-net-aarch64",
-        release_tag: "prebuilt-net",
         dest: "/opt/ados/bin/ados-net",
         gate: Gate::BestEffort,
         profiles: GROUND,
@@ -159,7 +146,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-pic",
         asset: "ados-pic-aarch64",
-        release_tag: "prebuilt-hid",
         dest: "/opt/ados/bin/ados-pic",
         gate: Gate::BestEffort,
         profiles: GROUND,
@@ -167,7 +153,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-input",
         asset: "ados-input-aarch64",
-        release_tag: "prebuilt-hid",
         dest: "/opt/ados/bin/ados-input",
         gate: Gate::BestEffort,
         profiles: GROUND,
@@ -175,7 +160,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-display",
         asset: "ados-display-aarch64",
-        release_tag: "prebuilt-display",
         dest: "/opt/ados/bin/ados-display",
         gate: Gate::BestEffort,
         profiles: GROUND,
@@ -183,7 +167,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-display-probe",
         asset: "ados-display-probe-aarch64",
-        release_tag: "prebuilt-display",
         dest: "/opt/ados/bin/ados-display-probe",
         gate: Gate::BestEffort,
         profiles: GROUND,
@@ -191,7 +174,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-oled-i2c",
         asset: "ados-oled-i2c-aarch64",
-        release_tag: "prebuilt-display",
         dest: "/opt/ados/bin/ados-oled-i2c",
         gate: Gate::BestEffort,
         profiles: GROUND,
@@ -199,7 +181,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-vision",
         asset: "ados-vision-aarch64",
-        release_tag: "prebuilt-vision",
         dest: "/opt/ados/bin/ados-vision",
         gate: Gate::Hard,
         profiles: DRONE,
@@ -214,7 +195,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     // A fetch miss is NOT caught anywhere, which this comment previously claimed
     // it was: the health gate checks Hard-gated binaries plus the named WFB and
     // display exceptions, and the swarm bus is none of them. That claim mattered,
-    // because for a long time no publish job existed for this release at all, so
+    // because for a long time nothing published this binary at all, so
     // every install on both profiles 404'd here and continued degraded in
     // silence — the unit's ConditionPathExists skipped it, the socket was never
     // bound, and the swarm control loop suppressed every tick as stale
@@ -224,7 +205,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-swarmbus",
         asset: "ados-swarmbus-aarch64",
-        release_tag: "prebuilt-swarmbus",
         dest: "/opt/ados/bin/ados-swarmbus",
         gate: Gate::BestEffort,
         profiles: BOTH,
@@ -237,7 +217,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-logd",
         asset: "ados-logd-aarch64",
-        release_tag: "prebuilt-logd",
         dest: "/opt/ados/bin/ados-logd",
         gate: Gate::BestEffort,
         profiles: ANY,
@@ -252,7 +231,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-control",
         asset: "ados-control-aarch64",
-        release_tag: "prebuilt-control",
         dest: "/opt/ados/bin/ados-control",
         gate: Gate::Hard,
         profiles: ANY,
@@ -265,7 +243,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-gpio",
         asset: "ados-gpio-aarch64",
-        release_tag: "prebuilt-gpio",
         dest: "/opt/ados/bin/ados-gpio",
         gate: Gate::BestEffort,
         profiles: BOTH,
@@ -279,7 +256,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-crsf",
         asset: "ados-crsf-aarch64",
-        release_tag: "prebuilt-crsf",
         dest: "/opt/ados/bin/ados-crsf",
         gate: Gate::BestEffort,
         profiles: BOTH,
@@ -291,7 +267,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "ados-tunnel-config",
         asset: "ados-tunnel-config-aarch64",
-        release_tag: "prebuilt-tunnel-config",
         dest: "/opt/ados/bin/ados-tunnel-config",
         gate: Gate::BestEffort,
         profiles: BOTH,
@@ -303,7 +278,6 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
     PrebuiltBinary {
         service: "mediamtx",
         asset: "mediamtx-aarch64",
-        release_tag: "prebuilt-mediamtx",
         dest: "/usr/local/bin/mediamtx",
         gate: Gate::BestEffort,
         profiles: BOTH,
@@ -323,25 +297,24 @@ pub fn for_profile(profile: &str) -> Vec<&'static PrebuiltBinary> {
 /// CPU-ONNX local inference (an NPU-less but CPU-strong board — see
 /// [`board_prefers_onnx_vision`]). Same install destination as the default vision
 /// binary (`/opt/ados/bin/ados-vision`): it is the SAME service, built with the
-/// onnx feature so it runs the detector on the CPU. A separate release tag +
-/// asset so the default build is untouched — the default ships as a static musl
-/// binary, which cannot link ONNX Runtime (no musl prebuilt), so the onnx build
-/// is a distinct glibc asset published by its own release job. Not part of the
+/// onnx feature so it runs the detector on the CPU. A separate asset so the
+/// default build is untouched — the default ships as a static musl binary,
+/// which cannot link ONNX Runtime (no musl prebuilt), so the onnx build is a
+/// distinct glibc asset built by its own job. Not part of the
 /// `PREBUILT` catalog: the fetch step selects it in place of the default vision
 /// entry, with the default as a fallback so a missing onnx asset never aborts an
 /// install.
 pub const PREBUILT_VISION_ONNX: PrebuiltBinary = PrebuiltBinary {
     service: "ados-vision",
     asset: "ados-vision-onnx-aarch64",
-    release_tag: "prebuilt-vision-onnx",
     dest: "/opt/ados/bin/ados-vision",
     gate: Gate::Hard,
     profiles: DRONE,
 };
 
 /// The ONNX Runtime shared library the onnx-enabled `ados-vision` binary loads at
-/// start (via `ORT_DYLIB_PATH`). Published under the same tag as the onnx binary
-/// (`prebuilt-vision-onnx`); an official aarch64 build whose glibc floor is well
+/// start (via `ORT_DYLIB_PATH`). Published in the same release as the onnx
+/// binary; an official aarch64 build whose glibc floor is well
 /// below the target board's, so it runs where the pyke build the crate would
 /// otherwise download does not. The onnx binary links the runtime dynamically, so
 /// this library must be present for it to run — the fetch step installs the two
@@ -350,7 +323,6 @@ pub const PREBUILT_VISION_ONNX: PrebuiltBinary = PrebuiltBinary {
 pub const PREBUILT_VISION_ONNX_RUNTIME: PrebuiltBinary = PrebuiltBinary {
     service: "libonnxruntime",
     asset: "libonnxruntime-aarch64.so",
-    release_tag: "prebuilt-vision-onnx",
     dest: "/opt/ados/lib/libonnxruntime.so",
     gate: Gate::BestEffort,
     profiles: DRONE,
@@ -411,7 +383,7 @@ pub fn vision_binary(model: &str) -> &'static PrebuiltBinary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     /// The workflow that builds and publishes every prebuilt this catalog fetches.
@@ -435,325 +407,111 @@ mod tests {
         serde_norway::from_str(&text).expect("the Rust workflow must be valid YAML")
     }
 
-    /// The job that assembles the per-revision (`rev-<sha>`) release a
-    /// `--ref`-pinned install fetches from.
-    const REV_MIRROR_JOB: &str = "publish-rev";
+    /// The job that publishes `rev-<sha>` and moves the `prebuilt-main` pointer.
+    const PUBLISH_JOB: &str = "publish";
 
-    /// The per-revision mirror job's declaration.
-    fn rev_mirror_job() -> serde_norway::Value {
+    /// The publish job's declaration.
+    fn publish_job() -> serde_norway::Value {
         rust_workflow_root()
             .get("jobs")
-            .and_then(|jobs| jobs.get(REV_MIRROR_JOB))
+            .and_then(|jobs| jobs.get(PUBLISH_JOB))
             .cloned()
             .unwrap_or_else(|| {
                 panic!(
-                    "no `{REV_MIRROR_JOB}` job in .github/workflows/rust.yml — a `--ref` pinned \
-                     install resolves every asset from `rev-<sha>`, so without that job every \
-                     pinned install 404s"
+                    "no `{PUBLISH_JOB}` job in .github/workflows/rust.yml — every install \
+                     resolves its binaries from the release that job publishes"
                 )
             })
     }
 
-    /// The rolling tags the per-revision mirror copies assets out of, read from the
-    /// job's `SOURCE_TAGS` variable.
-    fn rev_mirror_source_tags() -> BTreeSet<String> {
-        let job = rev_mirror_job();
-        let raw = job
+    /// Every asset a `rev-<sha>` release carries, read from the workflow's
+    /// `REV_ASSETS` variable (the one list the build, the publish check and the
+    /// manifest all derive from).
+    fn rev_assets() -> BTreeSet<String> {
+        let root = rust_workflow_root();
+        let raw = root
             .get("env")
-            .and_then(|e| e.get("SOURCE_TAGS"))
+            .and_then(|e| e.get("REV_ASSETS"))
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| {
-                panic!(
-                    "`{REV_MIRROR_JOB}` must declare its mirror list as a `SOURCE_TAGS` job \
-                     variable; a list that only appears inside a shell line cannot be tied to \
-                     this catalog"
-                )
-            })
+            .expect("rust.yml must declare its release asset list as a top-level REV_ASSETS")
             .to_string();
         assert!(
             !raw.contains("${{"),
-            "`{REV_MIRROR_JOB}`'s SOURCE_TAGS is templated (`{raw}`); this check can only tie \
-             literal tags to the catalog"
+            "REV_ASSETS is templated (`{raw}`); only a literal list can be tied to the catalog"
         );
         raw.split_whitespace().map(str::to_string).collect()
     }
 
-    /// Everything `publish-rev` waits for.
-    fn rev_mirror_needs() -> BTreeSet<String> {
-        let job = rev_mirror_job();
-        let needs = job
-            .get("needs")
-            .and_then(|n| n.as_sequence())
-            .unwrap_or_else(|| panic!("`{REV_MIRROR_JOB}` must declare `needs`"))
+    /// Every asset an install fetches: the catalog, plus the two out-of-catalog
+    /// entries the fetch step selects explicitly (the onnx vision build and the
+    /// ONNX Runtime library that ships with it).
+    fn fetched_assets() -> BTreeSet<String> {
+        PREBUILT
             .iter()
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect();
-        needs
-    }
-
-    /// Every publish job in the workflow, the mirror itself excluded.
-    fn publish_jobs() -> BTreeSet<String> {
-        rust_workflow_root()
-            .get("jobs")
-            .and_then(|j| j.as_mapping())
-            .expect("the Rust workflow must declare jobs")
-            .iter()
-            .filter_map(|(name, _)| name.as_str())
-            .filter(|name| name.starts_with("publish-") && *name != REV_MIRROR_JOB)
-            .map(str::to_string)
+            .chain([&PREBUILT_VISION_ONNX, &PREBUILT_VISION_ONNX_RUNTIME])
+            .map(|b| b.asset.to_string())
             .collect()
     }
 
-    /// Every `tag_name:` the Rust workflow publishes to, mapped to the job that
-    /// publishes it. Parsed from the workflow itself — a second hand-maintained copy
-    /// of the tag list would drift exactly the way the catalog already did.
-    fn published_release_tags() -> BTreeMap<String, String> {
-        let root = rust_workflow_root();
-        let jobs = root
-            .get("jobs")
-            .and_then(|j| j.as_mapping())
-            .expect("the Rust workflow must declare jobs");
-
-        let mut found = BTreeMap::new();
-        for (job_name, job) in jobs {
-            let job_name = job_name.as_str().unwrap_or("<unnamed job>").to_string();
-
-            // A job that publishes with the `gh` CLI rather than the release
-            // action has no `with.tag_name` to read, so it declares the tag as
-            // a `RELEASE_TAG` job variable instead. Recognised here so such a
-            // job is still tied to the catalog; the alternative is matching the
-            // tag inside a shell line, which would tie this guard to the exact
-            // spelling of a script.
-            if let Some(tag) = job.get("env").and_then(|e| e.get("RELEASE_TAG")) {
-                let tag = tag
-                    .as_str()
-                    .unwrap_or_else(|| panic!("job `{job_name}` has a non-string RELEASE_TAG"));
-                assert!(
-                    !tag.contains("${{"),
-                    "job `{job_name}` publishes to a templated tag `{tag}`; this test can \
-                     only tie literal tags to the catalog, so either pin the tag or extend \
-                     this check to resolve it"
-                );
-                found.entry(tag.to_string()).or_insert(job_name.clone());
-            }
-
-            let Some(steps) = job.get("steps").and_then(|s| s.as_sequence()) else {
-                continue;
-            };
-            for step in steps {
-                let Some(tag) = step.get("with").and_then(|w| w.get("tag_name")) else {
-                    continue;
-                };
-                let tag = tag
-                    .as_str()
-                    .unwrap_or_else(|| panic!("job `{job_name}` has a non-string tag_name"));
-                // A templated tag (`${{ ... }}`) cannot be resolved at test time, so it
-                // would silently drop out of this check and reopen the exact hole the
-                // test closes. Fail loudly instead of skipping.
-                assert!(
-                    !tag.contains("${{"),
-                    "job `{job_name}` publishes to a templated tag `{tag}`; this test can \
-                     only tie literal tags to the catalog, so either pin the tag or extend \
-                     this check to resolve it"
-                );
-                found.insert(tag.to_string(), job_name.clone());
-            }
-        }
-        assert!(
-            !found.is_empty(),
-            "parsed no publish tags out of {} — the workflow shape changed and this \
-             check silently stopped guarding anything",
-            rust_workflow_path().display()
-        );
-        found
-    }
-
-    /// Every release tag an install will actually fetch from: the catalog, plus the
-    /// two out-of-catalog entries the fetch step selects explicitly (the onnx vision
-    /// build and the ONNX Runtime library that ships with it). Both are fetched on a
-    /// real install, so both carry the same exposure as a catalog row.
-    fn fetched_release_tags() -> BTreeMap<&'static str, &'static str> {
-        let mut tags = BTreeMap::new();
-        for b in PREBUILT
-            .iter()
-            .chain([&PREBUILT_VISION_ONNX, &PREBUILT_VISION_ONNX_RUNTIME])
-        {
-            tags.entry(b.release_tag).or_insert(b.service);
-        }
-        tags
-    }
-
-    /// Tags the workflow publishes that no install-time fetch claims — each one
-    /// named, with the reason it is legitimately absent from the catalog. An
-    /// unexplained entry here is a publish job nobody consumes.
-    const PUBLISHED_BUT_NOT_FETCHED: &[(&str, &str)] = &[
-        // The installer binary itself. `scripts/install.sh` downloads it from this
-        // tag to bootstrap the install, which is what then reads this catalog — so
-        // it cannot appear in the catalog it is a precondition for.
-        (
-            "prebuilt-installer",
-            "bootstrapped directly by scripts/install.sh before the catalog is read",
-        ),
-    ];
-
-    /// The catalog names a release tag for every binary an install fetches, but
-    /// nothing tied those names to the workflow that creates the releases. When the
-    /// swarm bus was added to the catalog with no matching publish job, every install
-    /// on both profiles 404'd the asset and continued degraded in silence: the unit's
-    /// `ConditionPathExists` skipped it, the socket was never bound, and fleet
-    /// awareness plus onboard separation input were simply absent from the field.
-    /// A typo'd or renamed tag fails exactly the same way — quietly, at install time,
-    /// on hardware, with a green CI run behind it.
+    /// The catalog and the release must name the same assets, in both directions.
+    /// An asset fetched but never published 404s at install time and the service
+    /// continues degraded in silence (the swarm bus shipped that way for a long
+    /// time); an asset published but never fetched reaches no rig.
     #[test]
-    fn every_release_tag_the_installer_fetches_is_published_by_the_rust_workflow() {
-        let published = published_release_tags();
-        let missing: Vec<String> = fetched_release_tags()
-            .iter()
-            .filter(|(tag, _)| !published.contains_key(**tag))
-            .map(|(tag, service)| format!("`{tag}` (fetched for {service})"))
-            .collect();
-
+    fn the_release_carries_exactly_the_assets_the_installer_fetches() {
+        let published = rev_assets();
+        let fetched = fetched_assets();
+        let missing: Vec<&String> = fetched.difference(&published).collect();
         assert!(
             missing.is_empty(),
-            "no job in .github/workflows/rust.yml publishes these release tags, so every \
-             install will 404 the asset and continue degraded in silence: {}",
-            missing.join(", ")
+            "rust.yml REV_ASSETS does not publish these fetched assets, so every install \
+             404s them: {missing:?}"
         );
-    }
-
-    /// The mirror failure, and just as quiet: a job that builds and publishes an
-    /// asset no install ever fetches. Nothing breaks loudly — CI stays green and a
-    /// release keeps filling up — but the binary reaches no rig, so a service
-    /// believed to be shipping is not installed anywhere. Renaming a tag on one side
-    /// only produces both halves of this at once.
-    #[test]
-    fn every_release_tag_the_rust_workflow_publishes_is_fetched_by_the_installer() {
-        let fetched = fetched_release_tags();
-        let orphans: Vec<String> = published_release_tags()
-            .iter()
-            .filter(|(tag, _)| !fetched.contains_key(tag.as_str()))
-            .filter(|(tag, _)| {
-                !PUBLISHED_BUT_NOT_FETCHED
-                    .iter()
-                    .any(|(exempt, _)| exempt == tag)
-            })
-            .map(|(tag, job)| format!("`{tag}` (published by job `{job}`)"))
-            .collect();
-
+        let orphans: Vec<&String> = published.difference(&fetched).collect();
         assert!(
             orphans.is_empty(),
-            "these release tags are published but nothing fetches them, so the binaries \
-             reach no rig: {}. If an entry is deliberate, add it to \
-             PUBLISHED_BUT_NOT_FETCHED with the reason.",
-            orphans.join(", ")
+            "rust.yml REV_ASSETS publishes assets nothing fetches: {orphans:?}"
         );
     }
 
-    /// A stale exemption is the same silence wearing a permission slip: it would keep
-    /// excusing a tag that no longer exists while reading as a considered decision.
+    /// The publish job waits for both build jobs, publishes the per-commit
+    /// release, moves the edge pointer, and keeps the installer bootstrap
+    /// (`scripts/install.sh` downloads it from `prebuilt-installer` before any
+    /// manifest can be read) current.
     #[test]
-    fn every_named_publish_exemption_still_names_a_real_tag() {
-        let published = published_release_tags();
-        for (tag, reason) in PUBLISHED_BUT_NOT_FETCHED {
+    fn the_publish_job_builds_one_release_and_moves_one_pointer() {
+        let job = publish_job();
+        let needs: BTreeSet<String> = job
+            .get("needs")
+            .and_then(|n| n.as_sequence())
+            .expect("the publish job must declare `needs`")
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        for build in ["prebuilt", "vision-onnx"] {
             assert!(
-                published.contains_key(*tag),
-                "`{tag}` is exempted from the catalog ({reason}) but no job in \
-                 .github/workflows/rust.yml publishes it any more — drop the exemption"
+                needs.contains(build),
+                "`{PUBLISH_JOB}` must wait for `{build}`, or it publishes a partial release"
             );
         }
-    }
-
-    /// The same catalog/workflow symmetry, one layer up: a `--ref <sha>` install
-    /// fetches every asset from the per-revision release, so a tag the mirror does
-    /// not copy is a service that installs fine unpinned and 404s under a pin —
-    /// silently degrading exactly the deploy that asked for certainty.
-    #[test]
-    fn the_per_revision_release_mirrors_every_tag_the_installer_fetches() {
-        let mirrored = rev_mirror_source_tags();
-        let fetched = fetched_release_tags();
-
-        let unmirrored: Vec<String> = fetched
-            .iter()
-            .filter(|(tag, _)| !mirrored.contains(**tag))
-            .map(|(tag, service)| format!("`{tag}` (fetched for {service})"))
-            .collect();
-        assert!(
-            unmirrored.is_empty(),
-            "the `{REV_MIRROR_JOB}` job does not copy these tags into the per-revision \
-             release, so a `--ref` install 404s them: {}",
-            unmirrored.join(", ")
-        );
-
-        // The mirror direction, and it is not cosmetic: copying a tag no install
-        // fetches means the mirror job fails outright once that rolling tag stops
-        // being published, taking every pinned install with it.
-        let unfetched: Vec<&str> = mirrored
-            .iter()
-            .map(String::as_str)
-            .filter(|tag| !fetched.contains_key(tag))
-            .collect();
-        assert!(
-            unfetched.is_empty(),
-            "`{REV_MIRROR_JOB}` copies tags no install fetches: {}. Drop them from \
-             SOURCE_TAGS, or add the catalog row that consumes them.",
-            unfetched.join(", ")
-        );
-    }
-
-    /// The mirror re-uploads assets the SAME run just published, so it has to wait
-    /// for all of them. A publish job missing from `needs` races the download and
-    /// hands the per-revision release the PREVIOUS commit's binary — a pin that
-    /// reports one revision and installs two, which is the failure `--ref` exists to
-    /// close.
-    #[test]
-    fn the_per_revision_mirror_waits_for_every_publish_job() {
-        let needs = rev_mirror_needs();
-        let publishers = publish_jobs();
-        let missing: Vec<&str> = publishers
-            .iter()
-            .map(String::as_str)
-            .filter(|job| !needs.contains(*job))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "`{REV_MIRROR_JOB}` does not wait for these publish jobs, so it can mirror a \
-             stale asset: {}",
-            missing.join(", ")
-        );
-
-        let stale: Vec<&str> = needs
-            .iter()
-            .map(String::as_str)
-            .filter(|job| !publishers.contains(*job))
-            .collect();
-        assert!(
-            stale.is_empty(),
-            "`{REV_MIRROR_JOB}` waits for jobs that no longer exist: {}",
-            stale.join(", ")
-        );
-    }
-
-    /// The mirror's own tag is `rev-<commit sha>`, which can only be derived at run
-    /// time. Declaring it as a `RELEASE_TAG` job variable would trip the
-    /// templated-tag refusal in `published_release_tags` and take every other
-    /// symmetry check in this module down with it, so the invariant is pinned here
-    /// rather than discovered by a confusing failure elsewhere.
-    #[test]
-    fn the_per_revision_tag_is_derived_in_shell_not_declared_as_a_job_variable() {
-        let job = rev_mirror_job();
-        let declared = job.get("env").and_then(|e| e.get("RELEASE_TAG"));
-        assert!(
-            declared.is_none(),
-            "`{REV_MIRROR_JOB}` declares a RELEASE_TAG job variable; its tag is per-commit \
-             and must be built in the shell instead"
-        );
-        // And it must not silently stop publishing anything: the tag has to appear
-        // in the job's script.
         let script = serde_norway::to_string(&job).expect("the job must re-serialize");
+        for needle in [
+            "rev-${GITHUB_SHA}",
+            "prebuilt-main",
+            "manifest.json",
+            "prebuilt-installer",
+        ] {
+            assert!(
+                script.contains(needle),
+                "`{PUBLISH_JOB}` no longer mentions `{needle}`"
+            );
+        }
+        // No per-service rolling tag survives: an install reads only the pointer
+        // and the release it names.
+        let text = std::fs::read_to_string(rust_workflow_path()).unwrap();
         assert!(
-            script.contains("rev-${GITHUB_SHA}"),
-            "`{REV_MIRROR_JOB}` no longer builds a `rev-<sha>` tag, so a pinned install has \
-             nothing to resolve against"
+            !text.contains("RELEASE_TAG"),
+            "rust.yml declares a per-service RELEASE_TAG again"
         );
     }
 
@@ -780,9 +538,6 @@ mod tests {
             .iter()
             .find(|b| b.service == "ados-camera-probe")
             .expect("the camera probe must be in the catalog");
-        // Published with the camera pipeline so the probe can never lag the
-        // overlay it validates.
-        assert_eq!(probe.release_tag, "prebuilt-video");
         assert_eq!(probe.dest, "/opt/ados/bin/ados-camera-probe");
         // Best-effort: a fetch miss must not abort an install on a board with no
         // camera at all.
@@ -888,7 +643,6 @@ mod tests {
         // until the operator opts in), so a missing binary degrades nothing and
         // must never abort the install.
         assert_eq!(gpio.gate, Gate::BestEffort);
-        assert_eq!(gpio.release_tag, "prebuilt-gpio");
         assert!(for_profile("drone")
             .iter()
             .any(|b| b.service == "ados-gpio"));
@@ -964,7 +718,6 @@ mod tests {
         // API sits behind it on an internal socket), so a node without it cannot
         // be paired or reached: a fetch miss must fail the install.
         assert_eq!(control.gate, Gate::Hard);
-        assert_eq!(control.release_tag, "prebuilt-control");
         // Cross-profile: it serves both the drone and ground-station agents.
         assert!(for_profile("drone")
             .iter()
@@ -989,22 +742,6 @@ mod tests {
     }
 
     #[test]
-    fn pic_and_input_share_the_hid_release_tag() {
-        let tag = |svc: &str| {
-            PREBUILT
-                .iter()
-                .find(|b| b.service == svc)
-                .map(|b| b.release_tag)
-                .unwrap()
-        };
-        assert_eq!(tag("ados-pic"), "prebuilt-hid");
-        assert_eq!(tag("ados-input"), "prebuilt-hid");
-        assert_eq!(tag("ados-display"), "prebuilt-display");
-        assert_eq!(tag("ados-display-probe"), "prebuilt-display");
-        assert_eq!(tag("ados-oled-i2c"), "prebuilt-display");
-    }
-
-    #[test]
     fn onnx_vision_variant_targets_the_same_service_and_destination() {
         // The onnx build is the SAME service installed at the SAME path as the
         // default vision binary — only the fetched asset differs.
@@ -1012,11 +749,9 @@ mod tests {
         assert_eq!(PREBUILT_VISION_ONNX.service, default.service);
         assert_eq!(PREBUILT_VISION_ONNX.dest, default.dest);
         assert_eq!(PREBUILT_VISION_ONNX.dest, "/opt/ados/bin/ados-vision");
-        // A distinct asset + release tag so the default (musl) build is untouched.
+        // A distinct asset so the default (musl) build is untouched.
         assert_ne!(PREBUILT_VISION_ONNX.asset, default.asset);
-        assert_ne!(PREBUILT_VISION_ONNX.release_tag, default.release_tag);
         assert_eq!(PREBUILT_VISION_ONNX.asset, "ados-vision-onnx-aarch64");
-        assert_eq!(PREBUILT_VISION_ONNX.release_tag, "prebuilt-vision-onnx");
         // Not part of the catalog (it is selected in place of the default entry).
         assert!(!PREBUILT
             .iter()
@@ -1025,13 +760,9 @@ mod tests {
 
     #[test]
     fn onnx_runtime_library_ships_beside_the_onnx_binary() {
-        // The ONNX Runtime shared library rides the same release tag as the onnx
-        // binary, installs off `bin/`, and is best-effort so a miss falls back to
-        // the default vision build rather than aborting the install.
-        assert_eq!(
-            PREBUILT_VISION_ONNX_RUNTIME.release_tag,
-            PREBUILT_VISION_ONNX.release_tag
-        );
+        // The ONNX Runtime shared library installs off `bin/`, and is
+        // best-effort so a miss falls back to the default vision build rather
+        // than aborting the install.
         assert_eq!(
             PREBUILT_VISION_ONNX_RUNTIME.asset,
             "libonnxruntime-aarch64.so"

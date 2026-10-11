@@ -17,8 +17,11 @@
 # minisign against the same public key the installer vendors.
 #
 # Usage:
-#   scripts/check-release-signatures.sh              # every prebuilt-* tag
-#   scripts/check-release-signatures.sh prebuilt-tui # one tag
+#   scripts/check-release-signatures.sh                      # every prebuilt-* tag
+#                                                            # plus the rev-<sha>
+#                                                            # prebuilt-main names
+#   scripts/check-release-signatures.sh prebuilt-main        # one tag
+#   scripts/check-release-signatures.sh rev-<40-hex commit>  # one revision
 #
 # Requires the GitHub CLI, authenticated, and minisign.
 set -uo pipefail
@@ -76,6 +79,18 @@ if [ ${#tags[@]} -eq 0 ]; then
   while IFS= read -r t; do
     [ -n "$t" ] && tags+=("$t")
   done <<< "$tag_list"
+  # The service binaries live in the rev-<sha> release that prebuilt-main's
+  # manifest.json names, not under a prebuilt-* tag, so audit that one too. A
+  # pointer that exists but cannot be resolved is an error, not a skip.
+  if printf '%s\n' "${tags[@]}" | grep -qxF prebuilt-main; then
+    if ! commit=$(gh release download prebuilt-main --pattern manifest.json --output - 2>/dev/null \
+      | sed -n 's/.*"commit"[[:space:]]*:[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -1) \
+      || [ -z "$commit" ]; then
+      echo "could not read the commit from prebuilt-main/manifest.json" >&2
+      exit 2
+    fi
+    tags+=("rev-${commit}")
+  fi
 fi
 
 if [ ${#tags[@]} -eq 0 ]; then

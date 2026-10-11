@@ -43,17 +43,49 @@ on:
       - ".github/workflows/rust.yml"
 
 # Default to read-only so the build-test job (which runs on pull requests, i.e.
-# fork-controlled code) never holds a release-write token. Only publish-tui
+# fork-controlled code) never holds a release-write token. Only the publish job
 # elevates to contents: write, and it runs only on pushes to main.
 permissions:
   contents: read
 
 # One run per ref at a time, queued rather than cancelled. Every push to main
-# republishes the same rolling prebuilt-* tags; two overlapping runs would race
-# each other's uploads and leave the tags holding a mix of two commits' binaries.
+# moves the rolling `prebuilt-main` pointer; the publish job also refuses to move
+# it backwards, so a queued run for an older commit can never repoint it.
 concurrency:
   group: rust-${{ github.ref }}
   cancel-in-progress: false
+
+# Every asset a `rev-<sha>` release carries, declared once. The publish job
+# refuses a run whose staged files differ from this list in either direction,
+# and the installer's catalog test (crates/ados-installer/src/binaries.rs)
+# requires it to equal the set an install fetches.
+env:
+  REV_ASSETS: >-
+    ados-tui-aarch64
+    ados-supervisor-aarch64
+    ados-mavlink-router-aarch64
+    ados-radio-aarch64
+    ados-video-aarch64
+    ados-camera-probe-aarch64
+    ados-plugin-host-aarch64
+    ados-cloud-aarch64
+    ados-groundlink-aarch64
+    ados-net-aarch64
+    ados-pic-aarch64
+    ados-input-aarch64
+    ados-display-aarch64
+    ados-display-probe-aarch64
+    ados-oled-i2c-aarch64
+    ados-vision-aarch64
+    ados-swarmbus-aarch64
+    ados-logd-aarch64
+    ados-control-aarch64
+    ados-gpio-aarch64
+    ados-crsf-aarch64
+    ados-tunnel-config-aarch64
+    mediamtx-aarch64
+    ados-vision-onnx-aarch64
+    libonnxruntime-aarch64.so
 
 defaults:
   run:
@@ -241,37 +273,28 @@ jobs:
       - name: Check ados-installer and ados-control (all targets)
         run: cargo check -p ados-installer -p ados-control --all-targets
 
-  # Every publish job below uploads with the `gh` CLI rather than the release
-  # action. That action replaces a rolling tag's contents by deleting all of its
-  # existing assets in parallel and then re-uploading them, and on a multi-asset
-  # tag those deletes raced each other, one returned 404, and the job aborted
-  # after the deletes had gone through but before every re-upload had. The tag
-  # was then left holding a binary with no accompanying .sha256, and a missing
-  # checksum is fatal to the installer rather than merely unverified, so a board
-  # fetching that binary fails and falls back to a degraded build behind an
-  # advancing version number. `--clobber` replaces one named asset at a time, so
-  # a failure can no longer strip a tag of the checksum beside an artifact.
+  # Release pipeline, run only on pushes to main:
   #
-  # Each job declares its tag as a RELEASE_TAG job variable rather than inline in
-  # the shell because the installer's release-tag guard reads the tag out of this
-  # file structurally; a tag that only ever appeared inside a shell line would
-  # drop out of that guard and reopen the hole it exists to close, which is an
-  # install 404ing an asset and continuing degraded in silence. GH_REPO is named
-  # explicitly so the upload target never depends on a checkout being present or
-  # on the CLI inferring one from a git remote.
-
-  # Build the terminal dashboard as a static arm64 binary and publish it to a
-  # rolling prerelease the installer fetches. Static (musl) so one binary runs
-  # on every supported board regardless of its glibc. Runs only on pushes to
-  # main, not pull requests. Artifact carries a SHA256 and a mandatory minisign .minisig.
-  publish-tui:
+  #   prebuilt     one cached build of every service binary at this commit
+  #   vision-onnx  the glibc onnx vision build (ONNX Runtime cannot link musl)
+  #   publish      signs every asset, publishes them to `rev-<sha>`, then moves
+  #                the one rolling pointer `prebuilt-main` to a manifest naming
+  #                that commit plus every asset's digest and size
+  #
+  # An edge install reads `prebuilt-main/manifest.json` and fetches every asset
+  # from the single `rev-<sha>` release it names, so a node never holds binaries
+  # from two commits. A `--ref <sha>` install addresses `rev-<sha>` directly, and
+  # release.yml copies a tagged release's binaries out of the nearest one.
+  #
+  # Uploads use the `gh` CLI with `--clobber`, which replaces one named asset at
+  # a time. GH_REPO is named explicitly so the upload target never depends on
+  # the CLI inferring one from a git remote.
+  prebuilt:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
     env:
-      RELEASE_TAG: prebuilt-tui
+      MEDIAMTX_VERSION: v1.17.1
     steps:
       - uses: actions/checkout@v4
 
@@ -280,605 +303,14 @@ jobs:
         with:
           targets: aarch64-unknown-linux-musl
 
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-tui
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-tui
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-tui rel/ados-tui-aarch64
-          ( cd rel && sha256sum ados-tui-aarch64 > ados-tui-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-tui-aarch64 -x rel/ados-tui-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-tui (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the orchestrator as a static arm64 binary and publish it to a rolling
-  # prerelease the installer fetches. Static (musl) so one binary runs on every
-  # supported board regardless of its glibc. Runs only on pushes to main, not
-  # pull requests. Artifact carries a SHA256 and a mandatory minisign .minisig.
-  publish-supervisor:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-supervisor
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-supervisor
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-supervisor
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-supervisor rel/ados-supervisor-aarch64
-          ( cd rel && sha256sum ados-supervisor-aarch64 > ados-supervisor-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-supervisor-aarch64 -x rel/ados-supervisor-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-supervisor (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the MAVLink router as a static arm64 binary and publish it to a rolling
-  # prerelease the installer fetches. Static (musl) so one binary runs on every
-  # supported board regardless of its glibc. Runs only on pushes to main.
-  publish-mavlink-router:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-mavlink-router
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-mavlink-router
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-mavlink-router
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-mavlink-router rel/ados-mavlink-router-aarch64
-          ( cd rel && sha256sum ados-mavlink-router-aarch64 > ados-mavlink-router-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-mavlink-router-aarch64 -x rel/ados-mavlink-router-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-mavlink-router (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-radio:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-radio
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-radio
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-radio
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-radio rel/ados-radio-aarch64
-          ( cd rel && sha256sum ados-radio-aarch64 > ados-radio-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-radio-aarch64 -x rel/ados-radio-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-radio (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # The swarm bus. This job was missing entirely until now: the crate, its
-  # systemd unit and its supervisor registration all shipped, but nothing ever
-  # published the binary, so every install fetched a release that did not exist,
-  # 404'd, and continued degraded because the gate is best-effort. The unit's
-  # ConditionPathExists then skipped it silently and the swarm control loop spun
-  # against a socket that was never bound.
-  publish-swarmbus:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-swarmbus
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-swarmbus
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-swarmbus
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-swarmbus rel/ados-swarmbus-aarch64
-          ( cd rel && sha256sum ados-swarmbus-aarch64 > ados-swarmbus-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-swarmbus-aarch64 -x rel/ados-swarmbus-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-swarmbus (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-gpio:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-gpio
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-gpio
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-gpio
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-gpio rel/ados-gpio-aarch64
-          ( cd rel && sha256sum ados-gpio-aarch64 > ados-gpio-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-gpio-aarch64 -x rel/ados-gpio-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-gpio (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-crsf:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-crsf
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-crsf
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-crsf
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-crsf rel/ados-crsf-aarch64
-          ( cd rel && sha256sum ados-crsf-aarch64 > ados-crsf-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-crsf-aarch64 -x rel/ados-crsf-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-crsf (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-tunnel-config:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-tunnel-config
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-tunnel-config
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-config-tunnel
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-tunnel-config rel/ados-tunnel-config-aarch64
-          ( cd rel && sha256sum ados-tunnel-config-aarch64 > ados-tunnel-config-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-tunnel-config-aarch64 -x rel/ados-tunnel-config-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-tunnel-config (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-video:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-video
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      # The camera boot probe rides the same release tag as the pipeline whose
-      # overlay it validates, so the probe can never lag the provisioner.
-      - name: Build static ados-video + ados-camera-probe
-        run: |
-          cargo build --release --target aarch64-unknown-linux-musl -p ados-video
-          cargo build --release --target aarch64-unknown-linux-musl -p ados-hal-probe --bin ados-camera-probe
-
-      - name: Stage artifacts + checksums
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-video rel/ados-video-aarch64
-          cp target/aarch64-unknown-linux-musl/release/ados-camera-probe rel/ados-camera-probe-aarch64
-          ( cd rel && sha256sum ados-video-aarch64 > ados-video-aarch64.sha256 )
-          ( cd rel && sha256sum ados-camera-probe-aarch64 > ados-camera-probe-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-video-aarch64 -x rel/ados-video-aarch64.minisig
-          minisign -S -s /tmp/sign.key -m rel/ados-camera-probe-aarch64 -x rel/ados-camera-probe-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-video (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-plugin-host:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-plugin-host
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      # ados-plugin-host fetches plugin archives over rustls, which links ring,
-      # whose build script compiles C, so it needs the zig C cross-compiler, not
-      # plain musl-tools.
+          workspaces: crates -> target
+          key: musl-release
+
+      # Bundled C (SQLite, zstd, and ring via rustls) needs an aarch64-musl C
+      # compiler; cargo-zigbuild drives zig as that compiler for every crate.
       - name: Install zig
         uses: mlugg/setup-zig@v2
 
@@ -887,588 +319,90 @@ jobs:
         with:
           tool: cargo-zigbuild
 
-      - name: Build static ados-plugin-host (bundled C via zig)
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-plugin-host
+      # Static (musl) so one binary runs on every supported board regardless of
+      # its glibc.
+      - name: Build every service binary (static musl)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl --workspace --bins --exclude ados-vision --exclude ados-capabilities-codegen
 
-      - name: Stage artifact + checksum
+      # The default vision engine ships default features only; the onnx backend
+      # has its own job below. Built on its own so its feature set is exactly
+      # the crate's defaults, reusing the dependencies the step above compiled.
+      - name: Build the default vision binary (static musl)
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-vision --bin ados-vision
+
+      # Self-hosting the upstream relay means an install never depends on a
+      # third-party release staying available.
+      - name: Stage binaries, the mirrored mediamtx, and checksums
         run: |
           set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-plugin-host rel/ados-plugin-host-aarch64
-          ( cd rel && sha256sum ados-plugin-host-aarch64 > ados-plugin-host-aarch64.sha256 )
+          out=target/aarch64-unknown-linux-musl/release
+          mkdir -p rel installer work
+          for asset in ${REV_ASSETS}; do
+            case "$asset" in
+              mediamtx-aarch64|ados-vision-onnx-aarch64|libonnxruntime-aarch64.so) continue ;;
+            esac
+            install -m 0755 "$out/${asset%-aarch64}" "rel/$asset"
+          done
+          url="https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_arm64.tar.gz"
+          curl -fsSL --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 "$url" -o work/mediamtx.tar.gz
+          tar -xzf work/mediamtx.tar.gz -C work mediamtx
+          install -m 0755 work/mediamtx rel/mediamtx-aarch64
+          install -m 0755 "$out/ados-installer" installer/ados-installer-aarch64
+          for dir in rel installer; do
+            ( cd "$dir" && for f in *; do sha256sum "$f" > "$f.sha256"; done )
+          done
+          ls -l rel installer
 
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-plugin-host-aarch64 -x rel/ados-plugin-host-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
+      - name: Hand the binaries to the publish job
         uses: actions/upload-artifact@v7
         with:
-          name: rel-${{ env.RELEASE_TAG }}
+          name: rel-prebuilt
           path: crates/rel/
           if-no-files-found: error
           retention-days: 1
 
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-plugin-host (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the native HTTP control surface as a static arm64 binary and publish it
-  # to a rolling prerelease the installer fetches. Static (musl) so one binary
-  # runs on every supported board regardless of its glibc. Runs only on pushes to
-  # main, not pull requests. It is the LAN front on :8080: every install writes
-  # the front marker and enables the unit.
-  publish-control:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-control
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      # ados-control links ados-plugin-host (ring through rustls, for plugin
-      # archive downloads), so it cross-compiles through the zig C toolchain like
-      # publish-plugin-host.
-      - name: Install zig
-        uses: mlugg/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
-      - name: Build static ados-control (bundled C via zig)
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-control
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-control rel/ados-control-aarch64
-          ( cd rel && sha256sum ados-control-aarch64 > ados-control-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-control-aarch64 -x rel/ados-control-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
+      # scripts/install.sh downloads the installer to bootstrap an install
+      # before it can read any manifest, so it rides its own pointer.
+      - name: Hand the installer to the publish job
         uses: actions/upload-artifact@v7
         with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
+          name: installer
+          path: crates/installer/
           if-no-files-found: error
           retention-days: 1
 
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-control (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-cloud:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-cloud
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install zig
-        uses: mlugg/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
-      - name: Build static ados-cloud (bundled zstd via zig)
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-cloud
-
-      - name: Stage artifacts + checksums
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-cloud rel/ados-cloud-aarch64
-          ( cd rel && sha256sum ados-cloud-aarch64 > ados-cloud-aarch64.sha256 )
-
-      - name: Sign artifacts (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-cloud-aarch64 -x rel/ados-cloud-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-cloud (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the ground-station data-plane as a static arm64 binary and publish it
-  # to a rolling prerelease the installer fetches. Static (musl) so one binary
-  # runs on every supported board regardless of its glibc. Runs only on pushes
-  # to main.
-  publish-groundlink:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-groundlink
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      # ados-groundlink links ados-plugin-host (ring through rustls, for plugin
-      # archive downloads), so it cross-compiles through the zig C toolchain like
-      # publish-plugin-host.
-      - name: Install zig
-        uses: mlugg/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
-      - name: Build static ados-groundlink (bundled C via zig)
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-groundlink
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-groundlink rel/ados-groundlink-aarch64
-          ( cd rel && sha256sum ados-groundlink-aarch64 > ados-groundlink-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-groundlink-aarch64 -x rel/ados-groundlink-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-groundlink (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the uplink matrix as a static arm64 binary and publish it to a rolling
-  # prerelease the installer fetches. Static (musl) so one binary runs on every
-  # supported board regardless of its glibc. Runs only on pushes to main.
-  publish-net:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-net
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-net
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-net
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-net rel/ados-net-aarch64
-          ( cd rel && sha256sum ados-net-aarch64 > ados-net-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-net-aarch64 -x rel/ados-net-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-net (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the human-interface daemons (ados-pic + ados-input) as static arm64
-  # binaries and publish them to a rolling prerelease the installer fetches.
-  # Static (musl) so one binary runs on every supported board regardless of its
-  # glibc. Runs only on pushes to main.
-  publish-hid:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-hid
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-pic + ados-input
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-hid
-
-      - name: Stage artifacts + checksums
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-pic rel/ados-pic-aarch64
-          cp target/aarch64-unknown-linux-musl/release/ados-input rel/ados-input-aarch64
-          ( cd rel && sha256sum ados-pic-aarch64 > ados-pic-aarch64.sha256 )
-          ( cd rel && sha256sum ados-input-aarch64 > ados-input-aarch64.sha256 )
-
-      - name: Sign artifacts (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-pic-aarch64 -x rel/ados-pic-aarch64.minisig
-          minisign -S -s /tmp/sign.key -m rel/ados-input-aarch64 -x rel/ados-input-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-hid (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the display daemons (ados-display + ados-display-probe) as static arm64
-  # binaries and publish them to a rolling prerelease the installer fetches.
-  # Static (musl) so one binary runs on every supported board regardless of its
-  # glibc. Runs only on pushes to main.
-  publish-display:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-display
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-display + ados-display-probe + ados-oled-i2c
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-display
-
-      - name: Stage artifacts + checksums
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-display rel/ados-display-aarch64
-          cp target/aarch64-unknown-linux-musl/release/ados-display-probe rel/ados-display-probe-aarch64
-          cp target/aarch64-unknown-linux-musl/release/ados-oled-i2c rel/ados-oled-i2c-aarch64
-          ( cd rel && sha256sum ados-display-aarch64 > ados-display-aarch64.sha256 )
-          ( cd rel && sha256sum ados-display-probe-aarch64 > ados-display-probe-aarch64.sha256 )
-          ( cd rel && sha256sum ados-oled-i2c-aarch64 > ados-oled-i2c-aarch64.sha256 )
-
-      - name: Sign artifacts (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-display-aarch64 -x rel/ados-display-aarch64.minisig
-          minisign -S -s /tmp/sign.key -m rel/ados-display-probe-aarch64 -x rel/ados-display-probe-aarch64.minisig
-          minisign -S -s /tmp/sign.key -m rel/ados-oled-i2c-aarch64 -x rel/ados-oled-i2c-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-display (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the vision engine as a static arm64 binary and publish it to a rolling
-  # prerelease the installer fetches. Static (musl) so one binary runs on every
-  # supported board regardless of its glibc. Built with default features only
-  # (the optional accelerated-inference backend is excluded from CI). Runs only
-  # on pushes to main.
-  publish-vision:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-vision
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install musl tools
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Build static ados-vision
-        run: cargo build --release --target aarch64-unknown-linux-musl -p ados-vision
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-vision rel/ados-vision-aarch64
-          ( cd rel && sha256sum ados-vision-aarch64 > ados-vision-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-vision-aarch64 -x rel/ados-vision-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-vision (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the vision engine WITH the ONNX Runtime backend (--features onnx) and
-  # publish it as a distinct asset the installer fetches for CPU-strong, NPU-less
-  # boards (those whose board profile declares compute.local_inference: onnx), so
-  # they run the detector on the CPU out of the box. Unlike every other prebuilt
-  # this is NOT a static musl binary: ONNX Runtime has no aarch64-musl prebuilt
-  # (a --features onnx build cannot link musl), so this ships as a glibc (gnu)
-  # binary that statically embeds ONNX Runtime. Built NATIVELY with the GNU
-  # toolchain (the toolchain the ONNX Runtime static lib was built with — a native
-  # link avoids the C++ ABI mismatch a cross linker would hit) on ubuntu-22.04-arm
-  # so the glibc floor is 2.35, old enough for the target boards' Debian 12 /
-  # Raspberry Pi OS Bookworm (glibc 2.36). The onnx gnu build is already exercised
-  # by the build-test job's `--all-features` release build; this only re-builds it
-  # on the older-glibc runner and publishes it. Runs only on pushes to main.
-  publish-vision-onnx:
+  # Build the vision engine WITH the ONNX Runtime backend (--features onnx) as a
+  # distinct asset the installer fetches for CPU-strong, NPU-less boards (those
+  # whose board profile declares compute.local_inference: onnx). Unlike every
+  # other prebuilt this is NOT a static musl binary: ONNX Runtime has no
+  # aarch64-musl prebuilt, so this ships as a glibc (gnu) binary. Built natively
+  # on ubuntu-22.04-arm so the glibc floor is 2.35, old enough for the target
+  # boards' Debian 12 / Raspberry Pi OS Bookworm (glibc 2.36).
+  #
+  # The backend loads the ONNX Runtime dynamically (the crate's `load-dynamic`
+  # feature), so the binary carries no link-time dependency on the runtime. The
+  # runtime shared library is shipped separately: an official aarch64 build the
+  # installer places at a fixed path and hands to the binary via ORT_DYLIB_PATH.
+  # Its version must match the ABI the `ort` crate targets; bump it in lockstep
+  # with the `ort` dependency. Signing happens in the publish job: minisign is
+  # not packaged for this runner's apt.
+  vision-onnx:
     needs: build-test
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-22.04-arm
-    # The onnx backend loads the ONNX Runtime dynamically (the crate's
-    # `load-dynamic` feature), so the compiled binary carries no link-time
-    # dependency on the runtime's glibc/libstdc++ and builds cleanly on this
-    # runner. The runtime shared library is shipped separately: an official
-    # aarch64 build whose glibc floor is well below the Bookworm target, fetched
-    # by the installer to a fixed path and handed to the binary via
-    # ORT_DYLIB_PATH. The runtime version must match the ABI the `ort` crate
-    # targets — bump it here in lockstep with the `ort` dependency.
     env:
       ORT_RUNTIME_VERSION: "1.24.2"
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates -> target
+          key: gnu-onnx-release
 
       - name: Build ados-vision with the onnx backend (dynamic load)
         run: cargo build --release --features onnx -p ados-vision
@@ -1492,415 +426,157 @@ jobs:
           mkdir -p rel
           cp target/release/ados-vision rel/ados-vision-onnx-aarch64
           cp libonnxruntime-aarch64.so rel/libonnxruntime-aarch64.so
-          ( cd rel && sha256sum ados-vision-onnx-aarch64 > ados-vision-onnx-aarch64.sha256 )
-          ( cd rel && sha256sum libonnxruntime-aarch64.so > libonnxruntime-aarch64.so.sha256 )
+          ( cd rel && for f in *; do sha256sum "$f" > "$f.sha256"; done )
 
-      - name: Hand the staged artifacts to the signing job
+      - name: Hand the artifacts to the publish job
         uses: actions/upload-artifact@v7
         with:
-          name: vision-onnx-rel
-          path: crates/rel/
-          retention-days: 1
-          if-no-files-found: error
-
-  # Signing is split out of the build deliberately. The build must run on the
-  # older-glibc runner so the artifact loads on the Bookworm target boards, but
-  # minisign is genuinely not packaged for that runner's apt — verified: an
-  # explicit `add-apt-repository universe` still yields "Unable to locate package
-  # minisign". Previously the job swallowed that and published unsigned, which
-  # left these two artifacts as the only unsigned files in the catalog and
-  # silently blocked ever enforcing signatures.
-  #
-  # The glibc constraint applies to the BUILD, not to the signature. So the built
-  # artifacts move to the same runner every other publish job already signs on,
-  # and are signed and published there. A signing failure now fails the job
-  # rather than degrading, because an artifact that is present but unsigned is
-  # indistinguishable downstream from one that was verified.
-  publish-vision-onnx-sign:
-    needs: publish-vision-onnx
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      # Declared as a job variable rather than written inline in the script, so
-      # the installer's release-tag guard can still tie this job to the binary
-      # catalog. That guard reads the tag out of the workflow structurally; a
-      # tag that only ever appears inside a shell line would drop out of it and
-      # reopen the hole it exists to close, which is an install 404ing an asset
-      # and continuing degraded in silence.
-      RELEASE_TAG: prebuilt-vision-onnx
-    steps:
-      - name: Collect the staged artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: vision-onnx-rel
-          path: crates/rel
-
-      - name: Sign artifacts (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-vision-onnx-aarch64 -x rel/ados-vision-onnx-aarch64.minisig
-          minisign -S -s /tmp/sign.key -m rel/libonnxruntime-aarch64.so -x rel/libonnxruntime-aarch64.so.minisig
-          rm -f /tmp/sign.key
-
-      # Uploaded per-asset rather than through the release action, which
-      # replaces a rolling tag's contents by deleting every existing asset in
-      # parallel and then re-uploading. On a six-asset tag those deletes raced
-      # against each other, one returned 404, and the job aborted midway --
-      # after removing the old assets but before re-uploading them all. That
-      # published the binary with no accompanying .sha256, and a missing
-      # checksum is fatal to the installer rather than merely unverified, so
-      # every board declaring onnx inference would have fallen back to a build
-      # with no real inference behind an advancing version number.
-      #
-      # `--clobber` replaces one named asset at a time, so a failure can no
-      # longer leave the tag holding an artifact whose checksum is absent.
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
+          name: rel-vision-onnx
           path: crates/rel/
           if-no-files-found: error
           retention-days: 1
 
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          # The repository is named explicitly because this job never checks the
-          # source out -- it only downloads the staged artifact -- so there is no
-          # git remote for the CLI to infer a target from.
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-vision (onnx, rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  publish-installer:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-installer
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      # ados-installer links ados-plugin-host (the World Engine extension step
-      # installs through its lifecycle controller), which bundles C (SQLite,
-      # zstd) and ring, so it needs the zig C cross-compiler like
-      # publish-plugin-host, not plain musl-tools.
-      - name: Install zig
-        uses: mlugg/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
-      - name: Build static ados-installer (bundled C via zig)
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-installer
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-installer rel/ados-installer-aarch64
-          ( cd rel && sha256sum ados-installer-aarch64 > ados-installer-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-installer-aarch64 -x rel/ados-installer-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-installer (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Build the logging/telemetry daemon as a static arm64 binary and publish it
-  # to a rolling prerelease the installer fetches. Unlike the other daemons it
-  # links bundled C (SQLite, zstd), so it cross-compiles via cargo-zigbuild (zig
-  # supplies the musl C cross-compiler). Runs only on pushes to main.
-  publish-logd:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-logd
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain (musl target)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-musl
-
-      - name: Install zig
-        uses: mlugg/setup-zig@v2
-
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild
-
-      - name: Build static ados-logd (bundled SQLite + zstd via zig)
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-logd
-
-      - name: Stage artifact + checksum
-        run: |
-          set -euo pipefail
-          mkdir -p rel
-          cp target/aarch64-unknown-linux-musl/release/ados-logd rel/ados-logd-aarch64
-          ( cd rel && sha256sum ados-logd-aarch64 > ados-logd-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/ados-logd-aarch64 -x rel/ados-logd-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt ados-logd (rolling)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Mirror the upstream mediamtx (the video relay the installer fetches via the
-  # prebuilt-binary catalog) into a rolling prerelease, arch-named to match the
-  # catalog asset (`mediamtx-aarch64`). Self-hosting the mirror means the install
-  # never depends on a third-party release staying available. Runs only on pushes
-  # to main. Artifact carries a SHA256; signing follows the same key-gated path.
-  publish-mediamtx:
-    needs: build-test
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04-arm
-    permissions:
-      contents: write
-    env:
-      RELEASE_TAG: prebuilt-mediamtx
-      MEDIAMTX_VERSION: v1.17.1
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Fetch + stage mediamtx (arm64)
-        run: |
-          set -euo pipefail
-          mkdir -p rel work
-          url="https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/mediamtx_${MEDIAMTX_VERSION}_linux_arm64.tar.gz"
-          curl -fsSL --connect-timeout 10 --max-time 180 --retry 3 --retry-delay 2 "$url" -o work/mediamtx.tar.gz
-          tar -xzf work/mediamtx.tar.gz -C work mediamtx
-          install -m 0755 work/mediamtx rel/mediamtx-aarch64
-          ( cd rel && sha256sum mediamtx-aarch64 > mediamtx-aarch64.sha256 )
-
-      - name: Sign artifact (mandatory)
-        env:
-          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
-        run: |
-          set -euo pipefail
-          if [ -z "${SIGNING_KEY}" ]; then
-            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
-            exit 1
-          fi
-          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
-          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
-          minisign -S -s /tmp/sign.key -m rel/mediamtx-aarch64 -x rel/mediamtx-aarch64.minisig
-          rm -f /tmp/sign.key
-
-      # publish-rev mirrors these exact bytes into rev-<sha>. It takes them from
-      # this run rather than from the rolling tag, which a slower run for an
-      # older commit can overwrite in between.
-      - name: Hand the artifacts to the per-revision mirror
-        uses: actions/upload-artifact@v7
-        with:
-          name: rel-${{ env.RELEASE_TAG }}
-          path: crates/rel/
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Publish rolling prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          set -euo pipefail
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || gh release create "$RELEASE_TAG" \
-            --prerelease --title "Prebuilt mediamtx (mirrored)" --notes ""
-          gh release upload "$RELEASE_TAG" rel/* --clobber
-
-  # Assemble ONE per-revision release out of the artifacts this same run just
-  # published, so `install.sh --ref <sha>` resolves every service binary from a
-  # single commit instead of ~22 tags that each roll independently.
+  # Sign everything, publish `rev-<sha>` in one step, then move the pointer.
   #
-  # Why a release and not run artifacts: the entire download stack on a board is
-  # anonymous `curl -fsSL` (scripts/install.sh, crates/ados-installer/src/net.rs)
-  # with no Authorization header anywhere, while GitHub's artifact-zip endpoint is
-  # auth-only — pinning through artifacts would push a token onto every board
-  # running the `curl | sudo bash` one-liner. Releases are anonymous, so the pin
-  # costs the rig nothing.
+  # Releases rather than run artifacts because the whole download stack on a
+  # board is anonymous `curl -fsSL` (scripts/install.sh,
+  # crates/ados-installer/src/net.rs), while GitHub's artifact-zip endpoint is
+  # auth-only. The rev release is created as a draft, filled, then published,
+  # so an anonymous reader never sees it half-uploaded.
   #
-  # Why a mirror and not 22 more builds: each publish job hands its staged rel/
-  # directory to this job as a run artifact, and the assets are re-uploaded
-  # BYTE-IDENTICAL from there. Reading the run's own artifacts, not the rolling
-  # tags, is what keeps the pin honest: a rolling tag can already hold a newer or
-  # older run's binary by the time this job runs. The release tag is cut at this
-  # run's commit (`--target`), not at whatever main points to when it runs.
-  #
-  # Cost, stated plainly: this creates one prerelease per commit that touches the
-  # paths this workflow filters on. Nothing prunes them yet.
-  #
-  # The installer's own catalog guard (crates/ados-installer/src/binaries.rs)
-  # asserts that SOURCE_TAGS is exactly the set of tags an install fetches, in
-  # both directions, and that this job waits for every publish job in the file —
-  # a new service otherwise never reaches the mirror and 404s under a pin.
-  publish-rev:
+  # Cost, stated plainly: one prerelease per commit that touches the paths this
+  # workflow filters on. Nothing prunes them yet.
+  publish:
     needs:
-      - publish-tui
-      - publish-supervisor
-      - publish-mavlink-router
-      - publish-radio
-      - publish-swarmbus
-      - publish-gpio
-      - publish-crsf
-      - publish-tunnel-config
-      - publish-video
-      - publish-plugin-host
-      - publish-control
-      - publish-cloud
-      - publish-groundlink
-      - publish-net
-      - publish-hid
-      - publish-display
-      - publish-vision
-      - publish-vision-onnx
-      - publish-vision-onnx-sign
-      - publish-installer
-      - publish-logd
-      - publish-mediamtx
+      - prebuilt
+      - vision-onnx
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: write
-    env:
-      # Every tag the installer's prebuilt catalog fetches. `prebuilt-installer`
-      # is deliberately absent: scripts/install.sh downloads that binary to
-      # bootstrap the install, before it could know about a pin, so mirroring it
-      # would publish an asset nothing resolves from here.
-      SOURCE_TAGS: >-
-        prebuilt-tui
-        prebuilt-supervisor
-        prebuilt-mavlink-router
-        prebuilt-radio
-        prebuilt-swarmbus
-        prebuilt-gpio
-        prebuilt-crsf
-        prebuilt-tunnel-config
-        prebuilt-video
-        prebuilt-plugin-host
-        prebuilt-control
-        prebuilt-cloud
-        prebuilt-groundlink
-        prebuilt-net
-        prebuilt-hid
-        prebuilt-display
-        prebuilt-vision
-        prebuilt-vision-onnx
-        prebuilt-logd
-        prebuilt-mediamtx
     steps:
-      # Checked out only because every `run` step in this workflow has
-      # `working-directory: crates`, which must exist.
+      # Full history: the pointer move checks commit ancestry.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Collect this run's published artifacts
+      - name: Collect this run's binaries
         uses: actions/download-artifact@v4
         with:
           pattern: rel-*
           path: crates/rev
+          merge-multiple: true
 
-      - name: Mirror this run's assets into the per-revision release
+      - name: Collect this run's installer
+        uses: actions/download-artifact@v4
+        with:
+          name: installer
+          path: crates/installer
+
+      - name: The staged set is exactly REV_ASSETS
+        run: |
+          set -euo pipefail
+          want="$(printf '%s\n' ${REV_ASSETS} | sort)"
+          have="$(cd rev && ls -1 | grep -v '\.sha256$' | sort)"
+          if [ "$want" != "$have" ]; then
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$have") >&2 || true
+            echo "::error::the staged assets differ from REV_ASSETS; refusing a partial rev-${GITHUB_SHA}"
+            exit 1
+          fi
+          for a in ${REV_ASSETS}; do
+            if [ ! -s "rev/$a.sha256" ]; then
+              echo "::error::$a has no .sha256"
+              exit 1
+            fi
+          done
+
+      # agent_version is the agent package version this commit carries, so a
+      # node can say which release line its binaries belong to.
+      - name: Write the manifest
+        run: |
+          set -euo pipefail
+          mkdir -p manifest
+          python3 - <<'PY'
+          import hashlib, json, os, re
+          with open("../src/ados/__init__.py", encoding="utf-8") as f:
+              version = re.search(r'^__version__\s*=\s*"([^"]+)"', f.read(), re.M).group(1)
+          assets = {}
+          for name in os.environ["REV_ASSETS"].split():
+              path = os.path.join("rev", name)
+              h = hashlib.sha256()
+              with open(path, "rb") as f:
+                  for chunk in iter(lambda: f.read(1 << 20), b""):
+                      h.update(chunk)
+              assets[name] = {"sha256": h.hexdigest(), "size": os.path.getsize(path)}
+          manifest = {"commit": os.environ["GITHUB_SHA"], "agent_version": version, "assets": assets}
+          with open("manifest/manifest.json", "w", encoding="utf-8", newline="\n") as f:
+              json.dump(manifest, f, indent=2, sort_keys=True)
+              f.write("\n")
+          PY
+          ( cd manifest && sha256sum manifest.json > manifest.json.sha256 )
+          cat manifest/manifest.json
+
+      - name: Sign every asset (mandatory)
+        env:
+          SIGNING_KEY: ${{ secrets.ADOS_DRIVER_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SIGNING_KEY}" ]; then
+            echo "ADOS_DRIVER_SIGNING_KEY is not set. Every install refuses a downloaded binary without a release-key signature, so nothing unsigned is published." >&2
+            exit 1
+          fi
+          sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y minisign
+          printf '%s' "${SIGNING_KEY}" > /tmp/sign.key
+          for f in rev/* installer/* manifest/manifest.json; do
+            case "$f" in *.sha256) continue ;; esac
+            minisign -S -s /tmp/sign.key -m "$f" -x "$f.minisig"
+          done
+          rm -f /tmp/sign.key
+
+      - name: Publish rev-<sha>
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Derived here, in the shell, and NOT as an env.RELEASE_TAG job
-          # variable: the installer's release-tag guard reads those variables
-          # structurally and refuses a templated value, because a tag it cannot
-          # resolve at test time would drop out of the catalog symmetry check.
-          # This tag is per-commit by construction, so it can only be templated.
           tag="rev-${GITHUB_SHA}"
-          # Every mirrored tag must have handed over its artifact. Each lands in
-          # its own rev/rel-<tag>/ subdir, so an asset name colliding across two
-          # tags cannot silently overwrite the other before the upload.
-          for src in ${SOURCE_TAGS}; do
-            if [ -z "$(ls -A "rev/rel-${src}" 2>/dev/null)" ]; then
-              echo "::error::no artifact from ${src} in this run; refusing a partial rev-${GITHUB_SHA}"
-              exit 1
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # A re-run of the same commit: same names, replaced one at a time.
+            gh release upload "$tag" rev/* --clobber
+          else
+            gh release create "$tag" rev/* \
+              --draft \
+              --prerelease \
+              --target "${GITHUB_SHA}" \
+              --title "ADOS binaries for ${GITHUB_SHA}" \
+              --notes "Prebuilt binaries for commit ${GITHUB_SHA}, built in one job. prebuilt-main/manifest.json lists every asset's sha256 and size."
+            gh release edit "$tag" --draft=false
+          fi
+
+      # The pointer only ever moves forward: a run for a commit that is an
+      # ancestor of the one prebuilt-main already names leaves it alone.
+      - name: Move the prebuilt-main pointer and the installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ptr=prebuilt-main
+          if gh release view "$ptr" >/dev/null 2>&1; then
+            rm -rf ptr-current && mkdir ptr-current
+            if gh release download "$ptr" --pattern manifest.json --dir ptr-current; then
+              current="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["commit"])' ptr-current/manifest.json)"
+              if [ "$current" != "${GITHUB_SHA}" ] && git merge-base --is-ancestor "${GITHUB_SHA}" "$current" 2>/dev/null; then
+                echo "$ptr already names $current, a descendant of ${GITHUB_SHA}; leaving it"
+                exit 0
+              fi
             fi
-          done
-          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" \
-            --prerelease \
-            --target "${GITHUB_SHA}" \
-            --title "ADOS binaries for ${GITHUB_SHA}" \
-            --notes "Per-revision release of this run's prebuilt binaries, published so \`install.sh --ref ${GITHUB_SHA}\` resolves every service binary from one commit. Byte-identical to the rolling assets this run published."
-          for src in ${SOURCE_TAGS}; do
-            gh release upload "$tag" "rev/rel-${src}"/* --clobber
-          done
+          else
+            gh release create "$ptr" --prerelease \
+              --title "ADOS edge binaries (pointer)" \
+              --notes "manifest.json names the rev-<sha> release every edge install fetches its binaries from."
+          fi
+          gh release upload "$ptr" manifest/manifest.json manifest/manifest.json.sha256 manifest/manifest.json.minisig --clobber
+          gh release view prebuilt-installer >/dev/null 2>&1 || gh release create prebuilt-installer \
+            --prerelease --title "Prebuilt ados-installer (rolling)" --notes ""
+          gh release upload prebuilt-installer installer/* --clobber
