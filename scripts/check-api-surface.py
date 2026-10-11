@@ -10,7 +10,8 @@ four ``/api/ota*`` paths nothing has ever served, and an Android MAVLink
 WebSocket path with no producer.
 
 This scans each client's sources for ``/api/...``, ``/whep`` and ``/hls/...``
-path literals and resolves every one against ``docs/api-surface.md``. A literal
+path literals (the Android client's root-relative ``"api/..."`` strings
+included) and resolves every one against ``docs/api-surface.md``. A literal
 that resolves against no served route is an error. Where the call site states
 its HTTP method (``method: "PUT"``, ``request("POST", ...)``, ``client.put(``,
 a WebSocket URL), the (method, path) pair must be served too: a route that
@@ -33,17 +34,29 @@ MONOREPO = REPO.parent
 TABLE = REPO / "docs" / "api-surface.md"
 
 # Where each client's source lives, and which file extensions carry path
-# literals. A client absent from the checkout (a partial clone) is skipped
-# with a note rather than failing — the check must be runnable inside the
-# agent repo alone.
+# literals. A client absent from a partial checkout (the agent repo alone, or
+# CI's two side-by-side checkouts) is skipped with a note, so the check stays
+# runnable there. Inside the full monorepo checkout (``.gitmodules`` present
+# beside this repo) every client is expected, and a missing root fails the
+# check: a moved client directory would otherwise silently stop being scanned.
+# The Android app is a multi-module Gradle build: ``app``, ``core/*`` and
+# ``feature/*`` each carry sources.
 CLIENTS = [
     ("Mission Control", MONOREPO / "ADOSMissionControl" / "src", {".ts", ".tsx"}),
-    ("Android GCS", MONOREPO / "ADOSAndroidGCS" / "app" / "src", {".kt", ".java"}),
+    ("Android GCS app", MONOREPO / "ADOSAndroidGCS" / "app" / "src", {".kt", ".java"}),
+    ("Android GCS core", MONOREPO / "ADOSAndroidGCS" / "core", {".kt", ".java"}),
+    ("Android GCS feature", MONOREPO / "ADOSAndroidGCS" / "feature", {".kt", ".java"}),
     ("ADOS-MCP", MONOREPO / "ADOS-MCP" / "src", {".ts"}),
     ("agent dashboard", REPO / "dashboard" / "src", {".ts", ".tsx"}),
     ("agent cockpit", REPO / "cockpit" / "src", {".ts", ".tsx"}),
     ("ados CLI", REPO / "src" / "ados" / "cli", {".py"}),
 ]
+
+# Present only in the full monorepo checkout.
+MONOREPO_MARKER = MONOREPO / ".gitmodules"
+
+# Build output directories inside a client root: generated, not call sites.
+BUILD_DIRS = {"build", ".gradle", "node_modules"}
 
 # A path literal: a slash-led `/api/...` run of URL-safe characters. Template
 # placeholders (`${id}`, `{name}`, `:id`) are normalised below rather than
@@ -133,6 +146,58 @@ HELPER_CALL = re.compile(
 )
 HELPER_USE = re.compile(r"""(?<![\w.])(?:this\.)?(?P<name>""" + "|".join(HELPERS) + r""")\(""")
 HELPER_DECL = re.compile(r"""\b(?:private|public|protected|function|def|fun)\s+(?:async\s+)?$""")
+
+# The Android client (Kotlin) names a route relative to the agent root, with no
+# leading slash: `get("api/status", ...)`, `sendJson("POST", "api/...")`, and
+# `"$BASE/wfb"` against a file-local `const val BASE = "api/..."`. Each string
+# literal that is wholly such a path is rewritten to the slash-led form the scan
+# reads, a file-local path constant is expanded in place, and a bare `$name`
+# becomes `${name}` so it collapses to one placeholder segment like any other
+# interpolation (`"api/plugins/${seg(id)}/gcs/$encoded"` matches the
+# `{*asset_path}` route by its literal prefix).
+KOTLIN_EXTS = {".kt", ".java"}
+KOTLIN_STRING = re.compile(r'"((?:\\.|\$\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}|[^"\\])*)"')
+KOTLIN_CONST = re.compile(r'\bval\s+([A-Z][A-Z0-9_]*)\s*=\s*"((?:api/|whep|hls/)[^"$]*)"')
+KOTLIN_PATH = re.compile(r"^(?:api/|whep(?:/|$)|hls/)[^\s]*$")
+KOTLIN_REF = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+# The verb a Kotlin call site states beyond `"POST", "api/..."` on one line:
+# the client's own helpers (`get(path)` and `bytes(path)` are GETs, the plugin
+# API's `post(path)` a POST), or a verb argument alone on the line above the
+# path in a call split across lines (`send(\n "PUT",\n "$BASE/wfb", ...`).
+KOTLIN_CALL = re.compile(r"""(?<!\w)(get|post|bytes)\s*\(\s*"$""")
+KOTLIN_PREV_VERB = re.compile(r"""^\s*"(GET|POST|PUT|PATCH|DELETE)"\s*,\s*$""")
+
+
+def kotlin_paths(lines: list[str]) -> list[str]:
+    """``lines`` with every relative agent-path string made slash-led."""
+    consts = {m.group(1): m.group(2) for line in lines for m in KOTLIN_CONST.finditer(line)}
+
+    def expand(ref: re.Match[str]) -> str:
+        return consts.get(ref.group(1) or ref.group(2), ref.group(0))
+
+    def brace(ref: re.Match[str]) -> str:
+        return "${" + ref.group(2) + "}" if ref.group(2) else ref.group(0)
+
+    def rewrite(s: re.Match[str]) -> str:
+        body = KOTLIN_REF.sub(expand, s.group(1))
+        if not KOTLIN_PATH.match(INTERPOLATION.sub("{}", body)):
+            return s.group(0)
+        return '"/' + KOTLIN_REF.sub(brace, body) + '"'
+
+    return [KOTLIN_STRING.sub(rewrite, line) for line in lines]
+
+
+def kotlin_method(before: str, lines: list[str], lineno: int) -> str | None:
+    """The verb a Kotlin helper call implies for the path that follows, or None."""
+    m = KOTLIN_CALL.search(before)
+    if m:
+        return "GET" if m.group(1) == "bytes" else m.group(1).upper()
+    if before.strip() == '"' and lineno >= 2:
+        p = KOTLIN_PREV_VERB.match(lines[lineno - 2])
+        if p:
+            return p.group(1)
+    return None
+
 
 # Test sources hold deliberately fake and malformed paths (traversal probes,
 # `/api/x` placeholders) that no client ever sends; they are not call sites.
@@ -353,20 +418,34 @@ def main() -> int:
     fragments: list[tuple[str, Path, int, str]] = []
     method_failures: list[tuple[str, Path, int, str, str]] = []
     scanned = 0
+    missing: list[tuple[str, Path]] = []
+    in_monorepo = MONOREPO_MARKER.is_file()
     for name, root, exts in CLIENTS:
         if not root.is_dir():
-            print(f"  skip {name}: {root} not in this checkout")
+            if in_monorepo:
+                missing.append((name, root))
+                print(f"  MISSING {name}: {root} (monorepo checkout, root expected)")
+            else:
+                print(f"  skip {name}: {root} not in this checkout")
             continue
         seen = 0
+        # Android literals checked by path alone: a route constant (a socket
+        # path, a base) or a call whose verb the site does not state.
+        path_only = 0
         own_routes = own_server_routes(root)
         for file in sorted(root.rglob("*")):
             if not file.is_file() or file.suffix not in exts or is_test_source(file, root):
+                continue
+            if any(part in BUILD_DIRS for part in file.relative_to(root).parts[:-1]):
                 continue
             try:
                 text = file.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
             lines = text.splitlines()
+            kotlin = file.suffix in KOTLIN_EXTS
+            if kotlin:
+                lines = kotlin_paths(lines)
             consumed = 0
             for lineno, raw_line in enumerate(lines, 1):
                 # A line already read as the continuation of an open
@@ -437,11 +516,20 @@ def main() -> int:
                     if not resolves(path, table):
                         failures.append((name, file, lineno, path))
                         continue
+                    if kotlin:
+                        rest = line[m.end() :] + "\n" + tail
+                        method = stated_method(before, rest) or kotlin_method(before, lines, lineno)
+                        if method is None:
+                            path_only += 1
+                        elif not method_served(path, method, table):
+                            method_failures.append((name, file, lineno, method, path))
+                        continue
                     bad = unserved_method(path, before, line[m.end() :], lines, lineno, line, tail, table)
                     if bad:
                         method_failures.append((name, file, lineno, bad, path))
         scanned += seen
-        print(f"  {name}: {seen} path literals")
+        note = f" ({path_only} checked by path alone: no verb at the site)" if path_only else ""
+        print(f"  {name}: {seen} path literals{note}")
 
     if method_failures:
         print(f"\n{len(method_failures)} client call(s) use a method the route does not serve:\n")
@@ -468,7 +556,12 @@ def main() -> int:
             "placeholders is fine) so a one-sided rename fails here, or, for a "
             "base the client appends to, add the base to BASE_PREFIXES."
         )
-    if failures or fragments or method_failures:
+    if missing:
+        print(f"\n{len(missing)} client root(s) missing from the monorepo checkout:\n")
+        for name, root in missing:
+            print(f"  {name}: {root}")
+        print("\nA client moved its sources. Update CLIENTS to the new root.")
+    if failures or fragments or method_failures or missing:
         return 1
 
     print(f"\nall {scanned} client path literals resolve against docs/api-surface.md")

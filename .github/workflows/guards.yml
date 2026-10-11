@@ -275,6 +275,41 @@ jobs:
         working-directory: ADOSDroneAgent
         run: python scripts/check-api-surface.py
 
+  rust-size:
+    name: Rust files stay within the size ratchet
+    runs-on: ubuntu-latest
+    steps:
+      # Every Rust file is held to 500 lines before its first #[cfg(test)];
+      # the files already past it are listed in crates/.loc-baseline and may
+      # shrink but never grow.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Check catches a planted growth and a planted oversize file
+        run: |
+          set -uo pipefail
+          fail=0
+          # Grow the first baselined file by one line at the top.
+          grown="crates/$(grep -v '^#' crates/.loc-baseline | grep . | head -n1 | cut -d' ' -f2-)"
+          cp "$grown" "$RUNNER_TEMP/grown.rs"
+          { echo '// planted'; cat "$RUNNER_TEMP/grown.rs"; } > "$grown"
+          rc=0; python scripts/check-rust-size.py || rc=$?
+          cp "$RUNNER_TEMP/grown.rs" "$grown"
+          if [ "$rc" -ne 1 ]; then echo "SELF-TEST FAILED: growth of $grown exited $rc, expected 1"; fail=1; fi
+          # A new file over the limit.
+          planted=crates/ados-protocol/src/planted_oversize.rs
+          seq 1 501 | sed 's#^#// #' > "$planted"
+          rc=0; python scripts/check-rust-size.py || rc=$?
+          rm -f "$planted"
+          if [ "$rc" -ne 1 ]; then echo "SELF-TEST FAILED: a new 501-line file exited $rc, expected 1"; fail=1; fi
+          exit "$fail"
+
+      - name: Rust sizes are within the ratchet
+        run: python scripts/check-rust-size.py
+
   reference-data:
     name: Docs reference data is current
     runs-on: ubuntu-latest
