@@ -1,31 +1,13 @@
-//! Render every LCD page to a PNG for visual parity review.
-//!
-//! Builds two fully-populated [`PageContext`] fixtures — a paired, link-up
-//! ground station with live drone / mesh / uplink data, and a fresh-boot
-//! unpaired variant — then paints every registered page (through its chrome)
-//! and writes the 480x320 frame to `target/ui-parity/<page>_<variant>.png`.
-//!
-//! Run on the host toolchain (the framebuffer write path is not exercised here,
-//! only the pure page composers):
-//!
-//! ```text
-//! cargo run -p ados-display --example render_pages
-//! ```
+//! Synthetic [`PageContext`] fixtures for the LCD page renders. Every
+//! hostname, id, address and MAC here is made up: IPs are documentation-style
+//! LAN examples and the setup / USB gadget defaults, MACs are locally
+//! administered.
 
-use std::path::{Path, PathBuf};
-
-use ados_display::graphics::palette::{Palette, DARK};
-use ados_display::graphics::primitives::Canvas;
 use ados_display::pages::{
-    about::AboutDetailPage, channel_hops::ChannelHopsPage, dashboard::DashboardPage,
-    diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage, link_stats::LinkStatsPage,
-    mesh::MeshDetailPage, more::MorePage, pair_drone::PairDroneDetailPage,
-    radio_link::RadioLinkDetailPage, settings::SettingsPage, uplink::UplinkDetailPage,
-    video::VideoPage, CloudCtx, DeviceCtx, DiagnosticsCtx, DroneCtx, FcCtx, HardwareItem, HopEntry,
-    HoppingCtx, LinkCtx, MeshCtx, MeshPeer, NetworkCtx, Page, PageContext, PairedDroneCtx,
-    PairingCtx, RoleCtx, SystemCtx, UplinkCtx, VideoCtx, WifiClientCtx,
+    CloudCtx, DeviceCtx, DiagnosticsCtx, DroneCtx, FcCtx, HardwareItem, HopEntry, HoppingCtx,
+    LinkCtx, MeshCtx, MeshPeer, NetworkCtx, PageContext, PairedDroneCtx, PairingCtx, RoleCtx,
+    SystemCtx, UplinkCtx, VideoCtx, WifiClientCtx,
 };
-
 /// Build a 60-sample series that wanders around `base` with amplitude `amp`, so
 /// the sparkline / battery-trend surfaces have a believable wave to draw rather
 /// than a flat line.
@@ -41,7 +23,7 @@ fn wave(base: f64, amp: f64) -> Vec<Option<f64>> {
 /// A paired, link-up ground station with a live drone, an up mesh, a reachable
 /// cellular uplink, and a cloud relay bound to Mission Control. This is the
 /// "everything connected" frame every status page should render richly.
-fn connected_context() -> PageContext {
+pub fn connected_context() -> PageContext {
     PageContext {
         lan_host: Some("ados-9f2c1a.local".to_string()),
         mission_control_url: None,
@@ -141,8 +123,8 @@ fn connected_context() -> PageContext {
         network: NetworkCtx {
             ap_passphrase: Some("EXAMPLEPASS99".into()),
             ap_ssid: Some("ADOS-GS-9F2C".to_string()),
-            ap_ip: Some("10.42.0.1".to_string()),
-            usb_ip: Some("10.55.0.1".to_string()),
+            ap_ip: Some("192.168.4.1".to_string()),
+            usb_ip: Some("192.168.7.1".to_string()),
             uplink_type: Some("cellular".to_string()),
             uplink_reachable: Some(true),
             hotspot_ssid: Some("ADOS-GS-9F2C".to_string()),
@@ -158,7 +140,7 @@ fn connected_context() -> PageContext {
             rsrq_db: Some(-11.0),
             sinr_db: Some(14.0),
             band: Some("B40".to_string()),
-            ip: Some("100.64.0.1".to_string()),
+            ip: Some("192.168.1.60".to_string()),
             tech: Some("LTE".to_string()),
             reason: None,
         },
@@ -193,7 +175,7 @@ fn connected_context() -> PageContext {
                 required: false,
                 label: Some("Cellular modem".to_string()),
                 state: Some("warning".to_string()),
-                fix_hint: Some("Weak signal — reposition antenna".to_string()),
+                fix_hint: Some("Weak signal, reposition antenna".to_string()),
             },
         ],
         hopping: HoppingCtx {
@@ -242,10 +224,10 @@ fn connected_context() -> PageContext {
             device_name: Some("Ground Node".to_string()),
             version: Some("0.49.41".to_string()),
             board_name: Some("Reference SBC".to_string()),
-            mac_wired: Some("DC:A6:32:1A:2B:3C".to_string()),
-            mac_wireless: Some("DC:A6:32:1A:2B:3D".to_string()),
-            primary_ip: Some("192.168.1.178".to_string()),
-            primary_mac: Some("DC:A6:32:1A:2B:3C".to_string()),
+            mac_wired: Some("02:A0:5D:1A:2B:3C".to_string()),
+            mac_wireless: Some("02:A0:5D:1A:2B:3D".to_string()),
+            primary_ip: Some("192.168.1.50".to_string()),
+            primary_mac: Some("02:A0:5D:1A:2B:3C".to_string()),
         },
         diagnostics: DiagnosticsCtx {
             agent_logs: vec![
@@ -263,7 +245,7 @@ fn connected_context() -> PageContext {
 /// A fresh-boot, unpaired ground station: no link, no drone, the setup wizard
 /// still open, an active local pairing window, and the cloud relay broadcasting
 /// a pair code. Exercises every page's empty / waiting / unpaired branch.
-fn unpaired_context() -> PageContext {
+pub fn unpaired_context() -> PageContext {
     PageContext {
         lan_host: Some("ados-9f2c1a.local".to_string()),
         mission_control_url: None,
@@ -313,7 +295,7 @@ fn unpaired_context() -> PageContext {
         network: NetworkCtx {
             ap_passphrase: Some("EXAMPLEPASS99".into()),
             ap_ssid: Some("ADOS-Setup-9F2C".to_string()),
-            ap_ip: Some("10.42.0.1".to_string()),
+            ap_ip: Some("192.168.4.1".to_string()),
             usb_ip: None,
             uplink_type: Some("none".to_string()),
             uplink_reachable: Some(false),
@@ -386,142 +368,53 @@ fn unpaired_context() -> PageContext {
             device_name: Some("ADOS Node".to_string()),
             version: Some("0.49.41".to_string()),
             board_name: Some("Reference SBC".to_string()),
-            mac_wired: Some("DC:A6:32:1A:2B:3C".to_string()),
-            mac_wireless: Some("DC:A6:32:1A:2B:3D".to_string()),
-            primary_ip: Some("192.168.1.115".to_string()),
-            primary_mac: Some("DC:A6:32:1A:2B:3C".to_string()),
+            mac_wired: Some("02:A0:5D:1A:2B:3C".to_string()),
+            mac_wireless: Some("02:A0:5D:1A:2B:3D".to_string()),
+            primary_ip: Some("192.168.1.51".to_string()),
+            primary_mac: Some("02:A0:5D:1A:2B:3C".to_string()),
         },
         diagnostics: DiagnosticsCtx {
             agent_logs: vec![
                 "INFO  bootstrap: first boot, profile=ground_station".to_string(),
                 "WARN  radio: no WFB adapter present".to_string(),
-                "INFO  setup: captive portal up on 10.42.0.1".to_string(),
+                "INFO  setup: captive portal up on 192.168.4.1".to_string(),
                 "INFO  cloud: broadcasting pair code 4KD9TZ".to_string(),
             ],
         },
     }
 }
 
-/// One renderable page paired with the stable id used in the output filename.
-struct PageEntry {
-    file_id: &'static str,
-    page: Box<dyn Page>,
-}
-
-/// Every page the LCD UI ships, in the same registration order the daemon uses.
-fn all_pages() -> Vec<PageEntry> {
-    vec![
-        PageEntry {
-            file_id: "dashboard",
-            page: Box::new(DashboardPage),
-        },
-        PageEntry {
-            file_id: "video",
-            page: Box::new(VideoPage),
-        },
-        PageEntry {
-            file_id: "settings",
-            page: Box::new(SettingsPage),
-        },
-        PageEntry {
-            file_id: "link_stats",
-            page: Box::new(LinkStatsPage),
-        },
-        PageEntry {
-            file_id: "channel_hops",
-            page: Box::new(ChannelHopsPage),
-        },
-        PageEntry {
-            file_id: "more",
-            page: Box::new(MorePage::default()),
-        },
-        PageEntry {
-            file_id: "radio_link",
-            page: Box::new(RadioLinkDetailPage::new()),
-        },
-        PageEntry {
-            file_id: "uplink",
-            page: Box::new(UplinkDetailPage),
-        },
-        PageEntry {
-            file_id: "drone",
-            page: Box::new(DroneDetailPage),
-        },
-        PageEntry {
-            file_id: "mesh",
-            page: Box::new(MeshDetailPage::new()),
-        },
-        PageEntry {
-            file_id: "about",
-            page: Box::new(AboutDetailPage),
-        },
-        PageEntry {
-            file_id: "pair_drone",
-            page: Box::new(PairDroneDetailPage::default()),
-        },
-        PageEntry {
-            file_id: "diagnostics",
-            page: Box::new(DiagnosticsDetailPage),
-        },
-    ]
-}
-
-/// Write a finished page canvas to `path` as an RGB PNG. The canvas already
-/// holds tightly-packed RGB888 in the panel's native 480x320 geometry.
-fn write_png(canvas: &Canvas, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let buffer: image::RgbImage =
-        image::ImageBuffer::from_raw(canvas.width(), canvas.height(), canvas.as_rgb888().to_vec())
-            .ok_or("canvas RGB888 buffer did not match its declared geometry")?;
-    buffer.save(path)?;
-    Ok(())
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crate dir has a parent (the crates workspace dir)")
-        .join("target")
-        .join("ui-parity");
-    std::fs::create_dir_all(&out_dir)?;
-
-    let palette: &Palette = &DARK;
-    let variants: [(&str, PageContext); 2] = [
-        ("connected", connected_context()),
-        ("unpaired", unpaired_context()),
-    ];
-
-    let pages = all_pages();
-    let mut written: Vec<String> = Vec::new();
-
-    for (variant, ctx) in &variants {
-        for entry in &pages {
-            let canvas = entry.page.render(ctx, palette);
-            assert_eq!(
-                canvas.width(),
-                ados_display::pages::PANEL_W,
-                "{} ({variant}) rendered the wrong width",
-                entry.file_id
-            );
-            assert_eq!(
-                canvas.height(),
-                ados_display::pages::PANEL_H,
-                "{} ({variant}) rendered the wrong height",
-                entry.file_id
-            );
-            let name = format!("{}_{variant}.png", entry.file_id);
-            let path = out_dir.join(&name);
-            write_png(&canvas, &path)?;
-            written.push(path.display().to_string());
-        }
-    }
-
-    println!(
-        "rendered {} page frames to {}",
-        written.len(),
-        out_dir.display()
-    );
-    for p in &written {
-        println!("  {p}");
-    }
-    Ok(())
+/// The connected ground station acting as the mesh receiver: the gateway of a
+/// three-relay mesh, so the Mesh page shows the RECEIVER badge and the relays.
+pub fn receiver_context() -> PageContext {
+    let mut ctx = connected_context();
+    ctx.hostname = "ados-9f2c1a".to_string();
+    ctx.role = RoleCtx {
+        current: Some("receiver".to_string()),
+        configured: Some("receiver".to_string()),
+        mesh_capable: true,
+    };
+    ctx.mesh = MeshCtx {
+        up: Some(true),
+        stale: false,
+        partition: false,
+        peer_count: Some(3),
+        selected_gateway: Some("ados-9f2c1a40".to_string()),
+        mesh_id: Some("alt-mesh-01".to_string()),
+        peers: Some(
+            [
+                ("ados-aa11bb22", 1.0),
+                ("ados-cc33dd44", 3.0),
+                ("ados-ee55ff66", 6.0),
+            ]
+            .into_iter()
+            .map(|(id, seen)| MeshPeer {
+                device_id: Some(id.to_string()),
+                role: Some("relay".to_string()),
+                last_seen_seconds_ago: Some(seen),
+            })
+            .collect(),
+        ),
+    };
+    ctx
 }

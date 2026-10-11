@@ -26,7 +26,6 @@
 732 ados-control/src/serve/tests.rs
 2107 ados-control/tests/parity.rs
 559 ados-crsf/src/hid.rs
-527 ados-display/examples/render_pages.rs
 517 ados-display/src/navigator/tests.rs
 1159 ados-display/src/pages/dashboard.rs
 523 ados-display/src/pages/mesh.rs

@@ -10,6 +10,8 @@
 //!   join-before-release teardown. The load-bearing fidelity surface.
 //! * [`oled`] — SSD1306 / SH1106 monochrome OLED over raw `/dev/i2c-N` ioctls
 //!   (no external driver-crate stack); the page packing is pure.
+//! * [`oled_frame`] — the status OLED's pure frame builder (hostname, IP,
+//!   link, role lines), shared by the daemon and the `render_oled` example.
 //! * [`sidecar`] — `/run/ados` LCD sidecars (lcd-state read, page-request
 //!   read+unlink, latency snapshot write).
 //!
@@ -45,6 +47,7 @@ pub mod host_identity;
 pub mod log_tail;
 pub mod navigator;
 pub mod oled;
+pub mod oled_frame;
 pub mod oled_link;
 pub mod pack;
 pub mod pages;

@@ -12,16 +12,17 @@
 //! and exits cleanly (rc 0) — a board with no OLED never churns.
 //!
 //! Reuse: status comes from [`crate::state_source::StateSource::status_only`]
-//! (one GET of the ground-station status every 2 s); text is rendered with
-//! [`crate::graphics::fonts::LoadedFont`] (grayscale coverage thresholded
-//! to 1bpp); the frame is packed + uploaded by [`crate::oled`], which
-//! re-initialises the panel after repeated upload failures (a brownout). The
-//! configured `ground_station.ui.oled.brightness` is applied as the controller
-//! contrast whenever it changes. The frame builder is pure and unit-tested; only
-//! the I2C open/write is Linux-gated.
+//! (one GET of the ground-station status every 2 s); the frame is painted by
+//! [`crate::oled_frame`] (grayscale glyph coverage thresholded to 1bpp) and
+//! packed + uploaded by [`crate::oled`], which re-initialises the panel after
+//! repeated upload failures (a brownout). The configured
+//! `ground_station.ui.oled.brightness` is applied as the controller contrast
+//! whenever it changes. The frame builder is pure and unit-tested; only the
+//! I2C open/write is Linux-gated.
 
-use crate::graphics::fonts::LoadedFont;
 use crate::oled::{self, Controller, OledGeometry};
+use crate::oled_frame::{build_frame, status_fonts};
+#[cfg(not(target_os = "linux"))]
 use crate::pages::PageContext;
 
 /// Read a `u8` env var with a fallback (for ops overrides; the defaults match a
@@ -168,88 +169,8 @@ impl BrightnessWatch {
     }
 }
 
-/// Format the link line from the paired-link state + RSSI.
-fn link_line(ctx: &PageContext) -> String {
-    match ctx.link.state.as_deref() {
-        Some(state) => match ctx.link.rssi_dbm {
-            Some(rssi) => format!("link {state} {rssi:.0}dBm"),
-            None => format!("link {state}"),
-        },
-        None => "link: idle".to_string(),
-    }
-}
-
-/// Format the fourth line: pairing window > role > ready.
-fn status_line(ctx: &PageContext) -> String {
-    if ctx.pairing.window_active {
-        let secs = ctx.pairing.window_remaining_seconds.unwrap_or(0.0) as i64;
-        format!("PAIRING {secs}s")
-    } else if let Some(role) = ctx.role.current.as_deref() {
-        format!("role: {role}")
-    } else if ctx.network.uplink_reachable == Some(true) {
-        "uplink up".to_string()
-    } else {
-        "ready".to_string()
-    }
-}
-
-/// Draw one line of text onto a 1bpp canvas (grayscale coverage > 0.5 -> on),
-/// clipped to the canvas bounds.
-fn draw_line(canvas: &mut [u8], w: usize, h: usize, font: &LoadedFont, text: &str, x: i32, y: i32) {
-    font.draw_text(text, x, y, |px, py, coverage| {
-        if coverage > 0.5 && px >= 0 && py >= 0 {
-            let (px, py) = (px as usize, py as usize);
-            if px < w && py < h {
-                canvas[py * w + px] = 1;
-            }
-        }
-    });
-}
-
-/// Build the packed OLED frame for the current status. PURE (no I2C) so it is
-/// unit-tested without a device. `title`/`ip`/link/status are laid out top-down
-/// on `line_h`-tall rows.
-fn build_frame(
-    ctx: &PageContext,
-    ip: &str,
-    geom: OledGeometry,
-    title_font: &LoadedFont,
-    body_font: &LoadedFont,
-) -> Vec<u8> {
-    let w = geom.width as usize;
-    let h = geom.height as usize;
-    let mut canvas = vec![0u8; w * h];
-
-    let title_h = title_font.line_height() as i32;
-    let body_h = body_font.line_height() as i32;
-    let mut y = 0;
-    // Line 1: hostname (bold).
-    let host = if ctx.hostname.is_empty() {
-        "ADOS ground"
-    } else {
-        &ctx.hostname
-    };
-    draw_line(&mut canvas, w, h, title_font, host, 0, y);
-    y += title_h;
-    // Line 2: LAN IP.
-    draw_line(&mut canvas, w, h, body_font, ip, 0, y);
-    y += body_h;
-    // Line 3: link (only room for it / line 4 on a 64px panel).
-    if (y as usize) < h {
-        draw_line(&mut canvas, w, h, body_font, &link_line(ctx), 0, y);
-        y += body_h;
-    }
-    // Line 4: pairing / role / ready.
-    if (y as usize) < h {
-        draw_line(&mut canvas, w, h, body_font, &status_line(ctx), 0, y);
-    }
-
-    oled::pack_page_buffer(&canvas, geom).unwrap_or_else(|| vec![0u8; geom.frame_bytes()])
-}
-
 #[cfg(target_os = "linux")]
 fn drive() {
-    use crate::graphics::fonts::FontFace;
     use crate::state_source::StateSource;
     use std::time::Duration;
 
@@ -298,8 +219,7 @@ fn drive() {
         "OLED status service started"
     );
 
-    let title_font = LoadedFont::new(FontFace::SansBold, 13);
-    let body_font = LoadedFont::new(FontFace::SansRegular, 11);
+    let (title_font, body_font) = status_fonts();
     let mut src = StateSource::new();
     let mut ip = CachedIp::new();
     let mut link = crate::oled_link::OledLink::new();
@@ -328,15 +248,13 @@ fn drive() {
     // This service drives a Linux I2C device. On other hosts (dev machines) do
     // a single dry render so the pure frame builder + env helpers stay compiled
     // and exercised (no dead-code warnings off-target), then exit.
-    use crate::graphics::fonts::FontFace;
     let geom = geometry_from_env();
     let _ = controller_from_env();
     let _ = addresses_to_probe();
     let mut brightness = BrightnessWatch::new(std::path::PathBuf::from("/etc/ados/config.yaml"));
     let _ = crate::oled_link::brightness_to_contrast(brightness.current());
     let mut ip = CachedIp::new();
-    let title_font = LoadedFont::new(FontFace::SansBold, 13);
-    let body_font = LoadedFont::new(FontFace::SansRegular, 11);
+    let (title_font, body_font) = status_fonts();
     let frame = build_frame(
         &PageContext::default(),
         ip.get(),
