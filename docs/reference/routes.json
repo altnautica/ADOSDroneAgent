@@ -822,15 +822,6 @@
     {
       "method": "GET",
       "notes": null,
-      "path": "/api/v1/ground-station/captive-token",
-      "public": false,
-      "relay_forbidden": false,
-      "served_by": "native",
-      "websocket": false
-    },
-    {
-      "method": "GET",
-      "notes": null,
       "path": "/api/v1/ground-station/crsf",
       "public": false,
       "relay_forbidden": false,
@@ -2301,7 +2292,7 @@
       "path": "/whep",
       "public": false,
       "relay_forbidden": false,
-      "served_by": "residual",
+      "served_by": "native",
       "websocket": false
     },
     {
@@ -2310,7 +2301,7 @@
       "path": "/whep/{session_id}",
       "public": false,
       "relay_forbidden": false,
-      "served_by": "residual",
+      "served_by": "native",
       "websocket": false
     },
     {
@@ -2319,7 +2310,7 @@
       "path": "/whep/{session_id}",
       "public": false,
       "relay_forbidden": false,
-      "served_by": "residual",
+      "served_by": "native",
       "websocket": false
     }
   ],

@@ -12,6 +12,9 @@
 //! MCP sibling in a standalone agent clone) are skipped.
 
 mod ext_mirror;
+mod paths_emit;
+
+use paths_emit::{SidecarRow, SocketRow};
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -104,15 +107,17 @@ struct WfbDenyDriver {
 }
 
 /// The IPC contract + sidecar version registry: the single source of truth for
-/// every inter-process wire-contract version integer and every on-disk
-/// state-sidecar version, so the Rust, Python, and TypeScript sides cannot
-/// disagree on a contract's version.
+/// every inter-process wire-contract version integer, every on-disk
+/// state-sidecar version and path, and every run-directory socket, so the Rust,
+/// Python, and TypeScript sides cannot disagree.
 #[derive(Debug, Deserialize)]
 struct Contracts {
     #[serde(default)]
     contract: Vec<ContractRow>,
     #[serde(default)]
     sidecar: Vec<SidecarRow>,
+    #[serde(default)]
+    socket: Vec<SocketRow>,
 }
 
 /// One versioned inter-process wire contract.
@@ -128,19 +133,6 @@ struct ContractRow {
     status: Option<String>,
     /// The Rust source-of-truth constant, emitted as a provenance comment on the
     /// generated Rust row so a reader can find the constant a version tracks.
-    #[serde(default)]
-    rust_const: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-/// One versioned on-disk state sidecar (a JSON file one service writes and
-/// another reads). `path` is the sidecar's filesystem location.
-#[derive(Debug, Deserialize)]
-struct SidecarRow {
-    id: String,
-    version: u16,
-    path: String,
     #[serde(default)]
     rust_const: Option<String>,
     #[serde(default)]
@@ -904,6 +896,12 @@ fn main() -> ExitCode {
     let contracts_raw = std::fs::read_to_string(&contracts_toml_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", contracts_toml_path.display()));
     let contracts: Contracts = toml::from_str(&contracts_raw).expect("parse contracts.toml");
+    if let Err(problems) = paths_emit::validate(&contracts.sidecar, &contracts.socket) {
+        for p in &problems {
+            eprintln!("INVALID contracts.toml: {p}");
+        }
+        return ExitCode::FAILURE;
+    }
 
     let gcs_dir = monorepo.join("ADOSMissionControl/src/lib/plugins");
 
@@ -946,6 +944,16 @@ fn main() -> ExitCode {
         Target {
             path: agent_repo.join("src/ados/core/_contracts_generated.py"),
             content: emit_python_contracts(&contracts),
+            optional: false,
+        },
+        Target {
+            path: workspace.join("ados-protocol/src/paths.rs"),
+            content: paths_emit::emit_rust(&contracts.sidecar, &contracts.socket),
+            optional: false,
+        },
+        Target {
+            path: agent_repo.join("src/ados/core/_paths_generated.py"),
+            content: paths_emit::emit_python(&contracts.sidecar, &contracts.socket),
             optional: false,
         },
         Target {
@@ -1300,9 +1308,12 @@ mod tests {
                 id: "wfb-stats".into(),
                 version: 1,
                 path: "/run/ados/wfb-stats.json".into(),
-                rust_const: Some("ados_radio::paths::WFB_STATS_JSON".into()),
+                max_age_ms: Some(10_000),
+                writer: "ados-radio".into(),
+                rust_const: Some("ados_protocol::paths::WFB_STATS_JSON".into()),
                 description: Some("WFB link statistics.".into()),
             }],
+            socket: Vec::new(),
         }
     }
 

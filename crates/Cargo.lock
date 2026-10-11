@@ -71,6 +71,7 @@ dependencies = [
 name = "ados-config"
 version = "0.102.6"
 dependencies = [
+ "ados-protocol",
  "parking_lot",
  "serde",
  "serde_json",
@@ -127,6 +128,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "matchit",
  "mdns-sd",
  "nix 0.29.0",
  "parking_lot",
@@ -358,6 +360,7 @@ dependencies = [
 name = "ados-macpin"
 version = "0.102.6"
 dependencies = [
+ "ados-protocol",
  "hex",
  "serde",
  "serde_json",
@@ -382,6 +385,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2 0.11.0",
  "socket2 0.5.10",
  "tempfile",
  "time",

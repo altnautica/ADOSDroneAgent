@@ -1,1 +1,0 @@
-import{c as e,g as t}from"./card-CUDA6lEQ.js";function n(e){return e}function r(t,r,i=!1){return n({queryKey:[t,r],queryFn:({signal:t})=>e(r,{signal:t}),refetchInterval:i||!1,staleTime:5e3})}function i(e,n,i=!1){return t(r(e,n,i))}export{i as t};

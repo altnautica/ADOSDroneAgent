@@ -1,0 +1,1 @@
+import{D as e,c as t}from"./card-BbOJ0ygx.js";function n(e){return e}function r(e,r,i=!1){return n({queryKey:[e,r],queryFn:({signal:e})=>t(r,{signal:e}),refetchInterval:i||!1,staleTime:5e3})}function i(t,n,i=!1){return e(r(t,n,i))}export{i as t};

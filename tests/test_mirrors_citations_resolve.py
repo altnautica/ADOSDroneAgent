@@ -96,7 +96,11 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: supervisor bind keys, network service and radio adapter probe became the
 #: only owners; the Rust comments that cited them now say what the code does.
 #: One citation of a sibling Rust item was reworded off the word.
-MIN_CITATIONS = 87
+#:
+#: 87 -> 86: the run-dir sidecar paths and freshness windows moved into the
+#: generated `ados-protocol` paths table, so the config route's wfb stats path
+#: is read from that one source and no longer mirrors `WFB_STATS_JSON`.
+MIN_CITATIONS = 86
 
 
 def _rust_sources() -> list[Path]:

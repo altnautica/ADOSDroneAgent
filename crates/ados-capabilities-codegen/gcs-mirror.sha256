@@ -3,4 +3,4 @@
 # never regenerated. Do not edit by hand; run the codegen.
 6e95447432589d19ef203b988671c26ff4e26eb794ebb42489904e063a3af4dc  ADOSMissionControl/src/lib/plugins/agent-capabilities.generated.ts
 6edad32d1418077662bec273c4006e4b0ec3dd48344c65424843029790e57634  ADOSMissionControl/src/lib/plugins/gcs-capabilities.generated.ts
-b021be203b06ca5a218850836e04ae345e1cd8fe1e5227139cb48175dfeb7f54  ADOSMissionControl/src/lib/plugins/contracts.generated.ts
+cf79883c3c6d50d196b0f80b7564bb13697e04c97eafc2d0c66a77b498b49865  ADOSMissionControl/src/lib/plugins/contracts.generated.ts

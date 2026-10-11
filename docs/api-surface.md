@@ -8,8 +8,8 @@ ADOSDroneAgent/.venv/bin/python scripts/gen-api-surface.py
 ```
 
 Two guards keep it true. `crates/ados-control/tests/api_surface.rs`
-fails when the native section drifts from `routing.rs`'s
-`native_route_table()`. `scripts/check-api-surface.py` fails when any
+fails when the native section drifts from the route table the
+router is built from. `scripts/check-api-surface.py` fails when any
 client calls a path this table does not carry, which is what turns a
 one-sided route rename from a silent 404 into a build failure.
 
@@ -107,7 +107,6 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/ground-station/bluetooth/scan` |  |
 | DELETE | `/api/v1/ground-station/bluetooth/{mac}` |  |
 | POST | `/api/v1/ground-station/camera/switch` |  |
-| GET | `/api/v1/ground-station/captive-token` |  |
 | GET | `/api/v1/ground-station/crsf` |  |
 | POST | `/api/v1/ground-station/crsf/channels` |  |
 | POST | `/api/v1/ground-station/crsf/params` |  |
@@ -230,8 +229,11 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/wfb/pair/unpair` | relay-forbidden |
 | PUT | `/api/wfb/tx-power` |  |
 | GET | `/healthz` | unauthenticated by design |
+| POST | `/whep` |  |
+| DELETE | `/whep/{session_id}` |  |
+| PATCH | `/whep/{session_id}` |  |
 
-206 native routes.
+208 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
@@ -280,11 +282,8 @@ known feature, not on this profile) rather than `404`.
 | POST | `/api/vision/models/{model_id}/download` |  |
 | GET | `/api/vision/models/{model_id}/status` |  |
 | POST | `/api/vision/plugin-models/{plugin_id}/deliver` |  |
-| POST | `/whep` |  |
-| DELETE | `/whep/{session_id}` |  |
-| PATCH | `/whep/{session_id}` |  |
 
-41 residual routes.
+38 residual routes.
 
 ## Front fallback — `ados-control` on :8080, outside the route table
 
