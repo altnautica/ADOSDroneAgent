@@ -17,6 +17,7 @@
 
 pub mod camera_state;
 pub mod config;
+pub mod daemon;
 pub mod discover;
 pub mod encoder;
 pub mod health;

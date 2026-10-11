@@ -41,6 +41,7 @@
 
 pub mod backend;
 pub mod config;
+pub mod daemon_support;
 pub mod detection_bus;
 pub mod engine;
 pub mod frame_bus;
