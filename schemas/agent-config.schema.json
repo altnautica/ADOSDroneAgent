@@ -1287,6 +1287,14 @@
           "type": "integer"
         },
         "endpoints": {
+          "default": [
+            {
+              "enabled": true,
+              "host": "0.0.0.0",
+              "port": 8765,
+              "type": "websocket"
+            }
+          ],
           "items": {
             "$ref": "#/$defs/EndpointConfig"
           },
