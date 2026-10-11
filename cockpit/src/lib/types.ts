@@ -80,8 +80,9 @@ export interface MeshView {
 /** The full composite from `GET /api/v1/ground-station/status`. */
 export interface GsStatus {
   profile: string;
-  /** A drone's own MAVLink FC link (from `/api/status/full`); absent on a
-   *  ground station, which has no flight controller of its own. */
+  /** This node's own MAVLink FC link, the field `POST /api/command` gates on:
+   *  from `/api/status/full` on a drone, from `/api/status` on a ground station
+   *  (the composite itself does not report it). */
   fc_connected?: boolean;
   /** Where detections come from (`local` / `offload` / `hybrid`), or `none`
    *  when the node has no working vision path; absent when not reported. */

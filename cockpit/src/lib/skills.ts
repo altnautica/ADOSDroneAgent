@@ -138,8 +138,9 @@ export interface ReportedSkillState {
 
 /** Inputs that decide whether a skill is drivable. */
 export interface SkillContext {
-  /** A flight controller link this node can command through: a drone's own
-   *  MAVLink FC, or a ground station's fresh relayed aircraft. */
+  /** A flight controller link this node can command through: its own MAVLink
+   *  link (`fc_connected`), on a drone or a ground station alike. A relayed
+   *  aircraft heard off the radio is not one. */
   fcConnected: boolean;
   /** Fresh vehicle telemetry is arriving (attitude moving). */
   live: boolean;

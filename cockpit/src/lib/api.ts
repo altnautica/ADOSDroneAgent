@@ -19,6 +19,14 @@ export function getGsStatus(signal?: AbortSignal): Promise<GsStatus> {
   return apiFetch<GsStatus>("/api/v1/ground-station/status", { signal });
 }
 
+/** This node's own MAVLink FC link (`fc_connected` on `GET /api/status`): the
+ *  snapshot field `POST /api/command` gates on, reported on every profile. The
+ *  ground-station composite does not carry it. */
+export async function getFcConnected(signal?: AbortSignal): Promise<boolean> {
+  const body = await apiFetch<{ fc_connected?: boolean | null }>("/api/status", { signal });
+  return body.fc_connected === true;
+}
+
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
 }
