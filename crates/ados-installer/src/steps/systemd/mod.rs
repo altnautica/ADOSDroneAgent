@@ -188,6 +188,8 @@ impl Step for Systemd {
             install_avahi_gs_ap(Some(&source));
             add_ground_station_group_memberships();
             mask_conflicting_standalone_services();
+        } else {
+            remove_avahi_gs_ap();
         }
         disable_other_profile_units(&ctx.profile);
 

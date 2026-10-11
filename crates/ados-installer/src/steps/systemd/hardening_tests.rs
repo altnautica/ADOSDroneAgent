@@ -3,6 +3,19 @@
 use super::*;
 
 #[test]
+fn a_non_ground_install_removes_the_stale_ground_station_avahi_file() {
+    // A node reinstalled from ground_station to drone must stop advertising
+    // the "ADOS Ground Station" record the static service file publishes.
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ados-gs-ap.service");
+    std::fs::write(&file, "<service-group/>").unwrap();
+    assert!(remove_avahi_gs_ap_at(&file));
+    assert!(!file.exists());
+    // Idempotent: nothing left to remove, so no avahi reload is asked for.
+    assert!(!remove_avahi_gs_ap_at(&file));
+}
+
+#[test]
 fn video_sysctl_carries_the_16mib_ceiling() {
     let body = video_sysctl_body();
     // The load-bearing values the wfb_rx + fanout + mediamtx chain needs.

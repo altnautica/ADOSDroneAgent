@@ -367,3 +367,22 @@ pub(super) fn install_avahi_gs_ap(source: Option<&Path>) {
     let _ = exec::run("systemctl", &["reload", "avahi-daemon"]);
     tracing::info!(path = AVAHI_GS_AP_FILE, "avahi service file installed");
 }
+
+/// Remove the ground-station avahi service file on a non-GS install, so a node
+/// reinstalled from `ground_station` to another profile stops advertising an
+/// "ADOS Ground Station" `_ados._tcp` record it no longer serves. Reloads avahi
+/// only when a file was removed.
+pub(super) fn remove_avahi_gs_ap() {
+    if remove_avahi_gs_ap_at(Path::new(AVAHI_GS_AP_FILE)) {
+        let _ = exec::run("systemctl", &["reload", "avahi-daemon"]);
+        tracing::info!(
+            path = AVAHI_GS_AP_FILE,
+            "stale ground-station avahi service file removed"
+        );
+    }
+}
+
+/// [`remove_avahi_gs_ap`] against an injected path: true when a file was removed.
+pub(super) fn remove_avahi_gs_ap_at(path: &Path) -> bool {
+    std::fs::remove_file(path).is_ok()
+}
