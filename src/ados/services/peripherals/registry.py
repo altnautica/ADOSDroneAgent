@@ -13,9 +13,11 @@ dashboard can keep showing "last seen 30 s ago" after a device drops.
 from __future__ import annotations
 
 import glob as _glob
+import os
 import re
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 from ados.core.logging import get_logger
@@ -28,6 +30,54 @@ log = get_logger("peripherals.registry")
 # Where USB devices advertise vid/pid in sysfs. One file per device,
 # four-digit lowercase hex without prefix.
 _USB_DEVICES_ROOT = Path("/sys/bus/usb/devices")
+
+# Device-class sysfs tree. A /dev node registered through a device class
+# exposes its attributes (``name``, ``device/driver``) under
+# ``/sys/class/<class>/<node>``.
+_SYS_CLASS_ROOT = Path("/sys/class")
+
+# /dev is walked only at depth 1 plus the serial by-id dir. Every
+# manifest pattern shipped today (^/dev/video\d+$, ^/dev/fb\d+$,
+# ^/dev/i2c-(0|1)$, ^/dev/serial/by-id/usb-...$) matches a path in /dev
+# itself or in that one subdir. Skipping the recursive walk avoids a
+# symlink-loop hang vector (Python stdlib glob does not detect cycles)
+# and bounds the probe runtime.
+_DEV_GLOBS = ("/dev/*", "/dev/serial/by-id/*")
+
+
+def _dev_nodes() -> Iterator[str]:
+    """Yield the candidate device paths a ``regex`` match is tried on."""
+    for root in _DEV_GLOBS:
+        yield from _glob.iglob(root)
+
+
+def _sysfs_values(node: str, attr: str) -> list[str]:
+    """Read ``attr`` for ``node`` under every ``/sys/class/<class>/``.
+
+    A symlink attribute (``device/driver``) yields the basename of its
+    target; a regular attribute yields its stripped text. Unreadable or
+    absent attributes yield nothing.
+    """
+    values: list[str] = []
+    for class_dir in _SYS_CLASS_ROOT.glob(f"*/{_glob.escape(Path(node).name)}"):
+        target = class_dir / attr
+        try:
+            if target.is_symlink():
+                values.append(Path(os.readlink(target)).name)
+            else:
+                values.append(target.read_text().strip())
+        except OSError:
+            continue
+    return values
+
+
+def _sysfs_matches(node: str, wanted: dict[str, re.Pattern[str]]) -> bool:
+    """Return whether every wanted sysfs attribute of ``node`` fullmatches."""
+    return all(
+        any(pattern.fullmatch(value) for value in _sysfs_values(node, attr))
+        for attr, pattern in wanted.items()
+    )
+
 
 # Per-manifest probe result cache. Keyed by manifest id; value is a
 # tuple of (connected, last_probe_monotonic, last_seen_unix). The TTL
@@ -82,6 +132,10 @@ class PeripheralRegistry:
           regex via ``re.fullmatch``. Anchors in the manifest become
           functionally redundant since fullmatch is implicitly
           anchored, but they're harmless and improve readability.
+          When ``sysfs`` is set, the matched node must also carry every
+          listed sysfs attribute value, so a class-wide path pattern
+          (any framebuffer, any V4L2 node) only counts the device the
+          manifest describes.
         - vid: walks ``/sys/bus/usb/devices/*/idVendor`` for any
           device whose vid matches.
         - pid: same, against ``idProduct``. Combined with vid when both
@@ -94,24 +148,19 @@ class PeripheralRegistry:
         if match.regex:
             try:
                 pattern = re.compile(match.regex)
+                sysfs = {attr: re.compile(want) for attr, want in match.sysfs.items()}
             except re.error:
                 log.warning(
                     "peripheral_regex_invalid",
                     peripheral_id=manifest.id,
                     regex=match.regex,
+                    sysfs=match.sysfs,
                 )
                 return False
-            # Walk /dev only at depth 1 — every manifest pattern shipped
-            # today (^/dev/video\d+$, ^/dev/fb\d+$, ^/dev/i2c-(0|1)$,
-            # ^/dev/serial/by-id/usb-...$) matches paths in /dev itself
-            # or in one immediate subdir. Skipping the recursive walk
-            # avoids a symlink-loop hang vector (Python stdlib glob does
-            # not detect cycles) and bounds the probe runtime.
-            for root in ("/dev/*", "/dev/serial/by-id/*"):
-                for candidate in _glob.iglob(root):
-                    if pattern.fullmatch(candidate):
-                        return True
-            return False
+            return any(
+                pattern.fullmatch(candidate) and _sysfs_matches(candidate, sysfs)
+                for candidate in _dev_nodes()
+            )
 
         if match.vid or match.pid:
             want_vid = (match.vid or "").lower().removeprefix("0x")

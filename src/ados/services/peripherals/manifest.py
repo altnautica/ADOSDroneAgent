@@ -33,11 +33,19 @@ class PeripheralMatch(BaseModel):
     device paths or service names. At least one field should be set in
     practice, but we do not enforce that at schema level so plugins
     can ship "catch-all" manifests for diagnostic use.
+
+    ``sysfs`` narrows a ``regex`` match to the device's identity. Each
+    key is an attribute path relative to ``/sys/class/<class>/<node>``
+    for the matched ``/dev/<node>``; each value is a regex the attribute
+    must fullmatch. A symlink attribute (``device/driver``) compares by
+    the basename of its target, so ``{"device/driver": "uvcvideo"}``
+    matches a node bound to the uvcvideo driver. Every key must match.
     """
 
     vid: str | None = None
     pid: str | None = None
     regex: str | None = None
+    sysfs: dict[str, str] = Field(default_factory=dict)
 
 
 class PeripheralAction(BaseModel):

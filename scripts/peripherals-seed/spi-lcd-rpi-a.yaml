@@ -3,6 +3,8 @@ display_name: "Waveshare 3.5\" RPi LCD (A)"
 transport: serial
 match:
   regex: "^/dev/fb[0-9]+$"
+  sysfs:
+    name: "fb_ili9486"
 capabilities:
   - display
   - touch

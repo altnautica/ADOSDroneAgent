@@ -3,9 +3,11 @@ display_name: "USB UVC camera"
 transport: usb
 match:
   regex: "^/dev/video[0-9]+$"
+  sysfs:
+    device/driver: "uvcvideo"
 capabilities:
   - camera
   - uvc
 extra:
-  description: "Generic UVC-class USB camera, discovered via /dev/video*."
+  description: "Generic UVC-class USB camera, discovered via /dev/video* nodes bound to the uvcvideo driver."
   category: camera
