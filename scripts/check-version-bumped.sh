@@ -33,6 +33,10 @@ VERSION_FILE="src/ados/__init__.py"
 is_shipped_path() {
     case "$1" in
         docs/* | *.md | tests/* | tools/* | .github/* | scripts/test/*) return 1 ;;
+        # Rust test modules and integration tests compile only under cfg(test)
+        # or `cargo test`, and scripts/check-* are CI gates the installer never
+        # runs; no shipped artifact contains either.
+        crates/*/tests/* | crates/*_tests.rs | crates/*/tests.rs | scripts/check-*) return 1 ;;
         src/* | crates/* | data/* | scripts/* | cockpit/* | dashboard/*) return 0 ;;
         *) return 1 ;;
     esac
