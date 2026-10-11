@@ -34,6 +34,7 @@ use ados_mavlink_router::proxies::{
 };
 use ados_mavlink_router::relayed::RelayedVehicle;
 use ados_mavlink_router::state::{firmware_family, VehicleState};
+use ados_mavlink_router::{routing, signing};
 use ados_swarm_control::ModePrecedence;
 
 const MAVLINK_QUEUE_DEPTH: usize = 256;
@@ -50,10 +51,6 @@ const UDP_PROXY_PORTS: &[u16] = &[14550, 14551];
 /// reader moves all three together.
 fn aux_ports() -> ados_protocol::aux_ports::AuxPorts {
     ados_protocol::aux_ports::AuxPorts::load()
-}
-
-fn run_dir() -> String {
-    std::env::var("ADOS_RUN_DIR").unwrap_or_else(|_| "/run/ados".to_string())
 }
 
 /// Demo mode: drive synthetic telemetry instead of opening a serial FC. Enabled
@@ -200,7 +197,9 @@ async fn main() {
     let fc = FcConnection::new(cfg.clone(), state.clone(), params.clone());
     let cancel = Shutdown::new();
 
-    let dir = run_dir();
+    let dir = ados_protocol::paths::run_dir()
+        .to_string_lossy()
+        .into_owned();
     let mavlink_sock = format!("{dir}/mavlink.sock");
     let msp_sock = format!("{dir}/msp.sock");
     let state_sock = format!("{dir}/state.sock");
@@ -292,6 +291,51 @@ async fn main() {
         }
     }
 
+    // Route-aware forwarding: one classifier decodes each FC frame once and
+    // picks its audience, and the route table is published every 2 s when it
+    // changed. Off (the default), neither runs and every consumer reads the
+    // flat fan-out.
+    if fc.routes().enabled() {
+        tracing::info!("mavlink_route_aware_enabled");
+        let hub = fc.routes().clone();
+        let frames = fc.subscribe();
+        let c = cancel.clone();
+        tasks.push(tokio::spawn(routing::run_classifier(hub, frames, c)));
+        let hub = fc.routes().clone();
+        let path = std::path::Path::new(&dir).join(routing::SIDECAR_NAME);
+        let c = cancel.clone();
+        tasks.push(tokio::spawn(routing::run_sidecar(hub, path, c)));
+    }
+
+    // Agent-held signing: load the key before the first heartbeat, then
+    // re-read it and persist the signing timestamp every 10 s and at shutdown,
+    // so an enrolment or a disable reaches this process without a restart.
+    fc.agent_signing().refresh(std::time::SystemTime::now());
+    tracing::info!(
+        agent_signing = fc.agent_signing().state(),
+        "mavlink_agent_signing"
+    );
+    if cfg.agent_signing {
+        let fc = fc.clone();
+        let cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(signing::PERSIST_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        fc.agent_signing().persist();
+                        fc.agent_signing().refresh(std::time::SystemTime::now());
+                    }
+                    _ = cancel.wait() => {
+                        fc.agent_signing().persist();
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+
     // Ship the attitude-cadence distribution to the logging store.
     //
     // The measurement lives in memory in the read loop, which answers the
@@ -380,6 +424,7 @@ async fn main() {
                 tokio::select! {
                     _ = tick.tick() => {
                         fc.tick_streams().await;
+                        fc.tick_banner_request().await;
                         fc.tick_param_sweep().await;
                     }
                     _ = cancel.wait() => break,
@@ -391,11 +436,13 @@ async fn main() {
     // FC frames -> MAVLink socket clients. The socket contract is 4-byte
     // big-endian length-prefixed in both directions (the inbound reader decodes
     // the prefix), so each raw FC frame is framed before it is broadcast. The
-    // proxies consume the raw frame stream directly and are unaffected.
+    // proxies consume the raw frame stream directly and are unaffected. The
+    // socket is one endpoint for routing, shared by the on-box clients and the
+    // cloud relay that writes through it.
     {
         let mavlink_ipc = mavlink_ipc.clone();
         let cancel = cancel.clone();
-        let mut rx = fc.subscribe();
+        let mut rx = fc.frame_feed(&["ipc", "cloud"]);
         tasks.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -422,7 +469,7 @@ async fn main() {
         aux_tee_counters = Some(counters.clone());
         // Another consumer of the same fan-out the IPC socket reads. A slow aux
         // lane makes this receiver lag and shed, never the producer stall.
-        let frames = fc.subscribe();
+        let frames = fc.frame_feed(&["aux"]);
         let egress = ados_protocol::aux_egress::AuxEgress::new(format!("{dir}/radio-aux.sock"));
         let tee_cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
@@ -572,6 +619,10 @@ async fn main() {
     {
         let fc = fc.clone();
         let cancel = cancel.clone();
+        let route_eps = fc
+            .routes()
+            .enabled()
+            .then(|| (fc.routes().register("ipc"), fc.routes().register("cloud")));
         tasks.push(tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -584,6 +635,10 @@ async fn main() {
                         // rather than the socket's.
                         Some(cmd) => {
                             let origin = ClientOrigin::from_ipc_peer(&cmd.peer);
+                            if let Some((ipc, cloud)) = &route_eps {
+                                let ep = if origin == ClientOrigin::Relayed { cloud } else { ipc };
+                                fc.routes().ingress(ep, &cmd.payload);
+                            }
                             let _ = fc.send_client_bytes(&cmd.payload, origin, cmd.peer.injector.as_ref()).await;
                         }
                         None => break,
@@ -904,11 +959,15 @@ async fn build_extras(
     );
     // The FC answers signed on a link where it enforces signing, so the
     // router's own unsigned frames (stream rates, the parameter sweep, swarm
-    // setpoints) are likely dropped. Null with no serial link to judge.
+    // setpoints) are likely dropped. Null with no serial link to judge; false
+    // while the agent signs its own frames.
     extras.insert(
         "agent_commands_unsigned_rejected_risk".into(),
         json!(fc.agent_commands_unsigned_rejected_risk().await),
     );
+    // Agent-held signing: `off` (flag off), `active` (signing with the stored
+    // key) or `no_key` (flag on, no key stored).
+    extras.insert("agent_signing".into(), json!(fc.agent_signing().state()));
     // The flight controller's own (system, component) id, latched from its
     // HEARTBEAT. Absent until latched so a consumer never addresses a guess.
     if let Some((system_id, component_id)) = fc.learned_fc_identity() {
@@ -1198,8 +1257,9 @@ mod extras_key_set_tests {
     /// vehicle fields up in place of the withheld local ones. So it appears here
     /// but in neither classification list, which is correct rather than an
     /// omission.
-    const EXPECTED_EXTRAS_KEYS: [&str; 36] = [
+    const EXPECTED_EXTRAS_KEYS: [&str; 37] = [
         "agent_commands_unsigned_rejected_risk",
+        "agent_signing",
         "aux_mavlink_tee",
         "aux_rpc",
         "aux_uplink_partial_dropped",

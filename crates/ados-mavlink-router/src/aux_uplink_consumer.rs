@@ -523,6 +523,13 @@ async fn dispatch(payload: &[u8], deps: &UplinkDeps, counters: &AuxUplinkConsume
                         continue;
                     }
                 }
+                // Route-aware forwarding: the radio-linked ground station is
+                // the `aux` endpoint; learn it and hand its frame to the
+                // other clients.
+                let routes = deps.fc.routes();
+                if routes.enabled() {
+                    routes.ingress(&routes.register("aux"), frame);
+                }
                 if deps
                     .fc
                     .send_client_bytes_bounded(frame, ClientOrigin::Relayed, None, FC_WRITE_TIMEOUT)

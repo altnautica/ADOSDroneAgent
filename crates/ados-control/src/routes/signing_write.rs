@@ -75,6 +75,9 @@ const SOURCE_COMPONENT_ID: u8 = 190;
 /// The 32-byte signing-key length the FC's signing store expects.
 const SIGNING_KEY_LEN: usize = 32;
 
+/// The agent-held key's file name, in the agent config directory.
+const AGENT_KEY_FILE: &str = "mavlink-signing.key";
+
 /// Seconds from the POSIX epoch (1970-01-01 UTC) to 2015-01-01 UTC, the MAVLink
 /// signing epoch the initial timestamp is measured from.
 const EPOCH_2015_UNIX_SECONDS: i64 = 1_420_070_400;
@@ -101,6 +104,11 @@ pub struct EnrollRequest {
     /// The target component id. Defaults to the resolved FC target.
     #[serde(default)]
     pub target_component: Option<i64>,
+    /// Let the agent keep the key and sign its own frames. Honoured only with
+    /// `mavlink.agent_signing` on; the key is then stored at
+    /// `<config dir>/mavlink-signing.key` (0600) for the router to load.
+    #[serde(default)]
+    pub agent_holds_key: bool,
 }
 
 /// `POST /api/mavlink/signing/enroll-fc` → push a 32-byte signing key to the FC.
@@ -208,12 +216,13 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
         signed_by(f, target_system, &key)
     })
     .await;
+    let agent_holds_key = req.agent_holds_key && store_agent_key(&state, &key);
     zeroize(&mut key);
 
     let enrolled_at = iso8601_seconds_utc(OffsetDateTime::now_utc());
 
     // Log the fingerprint only, never the key.
-    tracing::info!(key_id = %key_id, link_id = req.link_id, target_system, verified, "signing enroll sent");
+    tracing::info!(key_id = %key_id, link_id = req.link_id, target_system, verified, agent_holds_key, "signing enroll sent");
     (
         StatusCode::OK,
         Json(json!({
@@ -221,9 +230,50 @@ pub async fn enroll_fc(State(state): State<AppState>, Json(req): Json<EnrollRequ
             "verified": verified,
             "key_id": key_id,
             "enrolled_at": enrolled_at,
+            "agent_holds_key": agent_holds_key,
         })),
     )
         .into_response()
+}
+
+/// The agent-held key file, beside the agent config.
+fn agent_key_path(state: &AppState) -> std::path::PathBuf {
+    state
+        .pairing_paths
+        .config
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(AGENT_KEY_FILE)
+}
+
+/// Store the enrolled key for the router when `mavlink.agent_signing` is on.
+/// Returns whether the key is now held by the agent.
+fn store_agent_key(state: &AppState, key: &[u8]) -> bool {
+    let config = crate::config::load_config_object(&state.pairing_paths.config);
+    let enabled = config
+        .pointer("/mavlink/agent_signing")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !enabled {
+        tracing::info!("signing_agent_key_not_stored_agent_signing_off");
+        return false;
+    }
+    match ados_protocol::sidecar::write_atomic(&agent_key_path(state), key, 0o600) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "signing_agent_key_store_failed");
+            false
+        }
+    }
+}
+
+/// Remove the agent-held key: the FC no longer has one to check against.
+fn delete_agent_key(state: &AppState) {
+    match std::fs::remove_file(agent_key_path(state)) {
+        Ok(()) => tracing::info!("signing_agent_key_deleted"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(error = %e, "signing_agent_key_delete_failed"),
+    }
 }
 
 /// The optional `POST .../disable-on-fc` body: the same target an enrolment names,
@@ -288,6 +338,7 @@ pub async fn disable_on_fc(
             "MAVLink command link unavailable",
         );
     }
+    delete_agent_key(&state);
 
     let verified = observe(&mut stream, VERIFY_WINDOW, |f| {
         unsigned_from(f, target_system)
@@ -808,6 +859,7 @@ mod tests {
             link_id: 0,
             target_system: Some(1),
             target_component: Some(1),
+            agent_holds_key: false,
         }
     }
 
@@ -900,6 +952,7 @@ mod tests {
             link_id: 0,
             target_system: Some(1),
             target_component: Some(1),
+            agent_holds_key: false,
         };
         let resp = enroll_fc(State(state), Json(body)).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -917,6 +970,7 @@ mod tests {
             link_id: 0,
             target_system: Some(1),
             target_component: Some(1),
+            agent_holds_key: false,
         };
         let resp = enroll_fc(State(state), Json(body)).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
@@ -938,6 +992,7 @@ mod tests {
             link_id: 0,
             target_system: Some(1),
             target_component: Some(1),
+            agent_holds_key: false,
         };
         let resp = enroll_fc(State(state), Json(body)).await;
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -1026,6 +1081,61 @@ mod tests {
             body_json(resp).await,
             json!({ "detail": "MAVLink command link unavailable" })
         );
+    }
+
+    /// Enrol with `agent_holds_key` against a config with `agent_signing` set
+    /// to `flag`; returns the response body and the key file path.
+    async fn enroll_holding(
+        flag: bool,
+        key: &[u8],
+    ) -> (Value, std::path::PathBuf, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            format!("mavlink:\n  agent_signing: {flag}\n"),
+        )
+        .unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let server = fake_router(UnixListener::bind(&sock).unwrap(), 2, vec![]);
+        let state = state_with_mavlink(sock, true);
+        let mut body = enroll_body(key);
+        body.agent_holds_key = true;
+        let resp = enroll_fc(State(state), Json(body)).await;
+        server.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let path = dir.path().join(AGENT_KEY_FILE);
+        (body_json(resp).await, path, dir)
+    }
+
+    #[tokio::test]
+    async fn enroll_with_agent_holds_key_writes_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let key: Vec<u8> = (100u8..132).collect();
+        let (value, path, _dir) = enroll_holding(true, &key).await;
+        assert_eq!(value["agent_holds_key"], json!(true));
+        assert_eq!(std::fs::read(&path).unwrap(), key);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn enroll_with_agent_signing_off_does_not_store_the_key() {
+        let (value, path, _dir) = enroll_holding(false, &[9u8; 32]).await;
+        assert_eq!(value["agent_holds_key"], json!(false));
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn disable_deletes_the_agent_held_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join(AGENT_KEY_FILE);
+        std::fs::write(&key_path, [5u8; 32]).unwrap();
+        let sock = dir.path().join("mavlink.sock");
+        let server = fake_router(UnixListener::bind(&sock).unwrap(), 1, vec![fc_heartbeat(1)]);
+        let resp = disable_on_fc(State(state_with_mavlink(sock, true)), None).await;
+        server.await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(!key_path.exists());
     }
 
     /// Read an axum response body into a JSON Value for the parity asserts.

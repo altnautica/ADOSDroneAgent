@@ -30,6 +30,8 @@ const STREAM_MAX: Duration = Duration::from_secs(60);
 const STREAM_STALL: Duration = Duration::from_secs(5);
 const STREAM_HEALTHY: Duration = Duration::from_secs(2);
 const STREAM_STEP: Duration = Duration::from_secs(5);
+/// How often an unidentified ArduPilot is asked for its firmware banner.
+const BANNER_RETRY: Duration = Duration::from_secs(3);
 
 /// Per-message stream rates requested from the FC: `(MAVLink message id, Hz)`.
 const STREAM_RATES: &[(u32, f32)] = &[
@@ -524,12 +526,13 @@ impl FcConnection {
         let _ = self.send_bytes(data).await;
     }
 
-    /// Serialise `msg` with this node's identity and write it to the FC.
+    /// Serialise `msg` with this node's identity and write it to the FC,
+    /// signed with link id 2 when the agent holds a signing key.
     /// Returns whether it reached the flight controller: `false` for a frame
     /// that could not be serialised, no installed writer, or a failed write.
     pub(super) async fn send_msg(&self, msg: &MavMessage) -> bool {
         match mavlink::serialize_v2(self.our_header(), msg) {
-            Ok(bytes) => self.send_bytes(&bytes).await,
+            Ok(bytes) => self.send_bytes(&self.agent_signing().sign(bytes)).await,
             Err(_) => false,
         }
     }
@@ -624,34 +627,50 @@ impl FcConnection {
                 self.send_msg(&req).await;
             }
         }
-        // Until ArduPilot's banner has named its firmware, ask for it on the
-        // same cadence: a warm parameter cache sends no PARAM_REQUEST_LIST (the
-        // other thing that provokes the banner), and until it arrives a
-        // copter-typed heartbeat cannot be told from a QuadPlane, so no flight
-        // mode can be named or commanded.
+        *self.last_stream_req.lock().await = Some(Instant::now());
+    }
+
+    /// Until ArduPilot's banner has named its firmware, ask for it every
+    /// [`BANNER_RETRY`]. A warm parameter cache sends no PARAM_REQUEST_LIST
+    /// (the other thing that provokes the banner), and until it arrives a
+    /// copter-typed heartbeat cannot be told from a QuadPlane, so no flight
+    /// mode can be named or commanded. Its own fixed cadence rather than the
+    /// stream refresh's, which relaxes to tens of seconds on a healthy link and
+    /// left a freshly connected copter unidentified for that long.
+    pub async fn tick_banner_request(&self) {
+        if !self.transport_open() {
+            return;
+        }
         let unidentified = {
             let s = self.state.lock().await;
             s.firmware.is_none()
                 && s.autopilot == MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA as i64
                 && !s.last_heartbeat.is_empty()
         };
-        if unidentified {
-            let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
-                target_system: target,
-                target_component: 1,
-                command: MavCmd::MAV_CMD_DO_SEND_BANNER,
-                confirmation: 0,
-                param1: 0.0,
-                param2: 0.0,
-                param3: 0.0,
-                param4: 0.0,
-                param5: 0.0,
-                param6: 0.0,
-                param7: 0.0,
-            });
-            self.send_msg(&cmd).await;
+        if !unidentified {
+            return;
         }
-        *self.last_stream_req.lock().await = Some(Instant::now());
+        {
+            let mut last = self.last_banner_req.lock().await;
+            if last.is_some_and(|t| t.elapsed() < BANNER_RETRY) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: self.target_system.load(Ordering::Relaxed),
+            target_component: 1,
+            command: MavCmd::MAV_CMD_DO_SEND_BANNER,
+            confirmation: 0,
+            param1: 0.0,
+            param2: 0.0,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        });
+        self.send_msg(&cmd).await;
     }
 
     /// Parameter sweep with the priming/timeout flags the GCS spinner reads.
@@ -847,6 +866,39 @@ mod tests {
             "the rollback for a firmware that honors only REQUEST_DATA_STREAM must \
              send every legacy group"
         );
+    }
+
+    #[tokio::test]
+    async fn an_unidentified_ardupilot_is_asked_for_its_banner_at_once_then_every_retry() {
+        let state = std::sync::Arc::new(Mutex::new(VehicleState::default()));
+        {
+            let mut s = state.lock().await;
+            s.autopilot = MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA as i64;
+            s.last_heartbeat = "2026-01-01T00:00:00Z".into();
+        }
+        let params = std::sync::Arc::new(Mutex::new(ParamCache::new("/tmp/ados-test-params.json")));
+        let conn = FcConnection::new(MavlinkConfig::default(), state.clone(), params);
+        let (tx, rx) = std::sync::mpsc::channel();
+        conn.connected.store(true, Ordering::Relaxed);
+        *conn.writer.lock().await = Some(Box::pin(CapturingWriter(tx)));
+
+        conn.tick_banner_request().await;
+        conn.tick_banner_request().await;
+        // Rewind the last request past the retry: the next tick asks again.
+        *conn.last_banner_req.lock().await = Some(Instant::now() - BANNER_RETRY);
+        conn.tick_banner_request().await;
+        // Identified: no more requests.
+        state.lock().await.firmware = Some(ados_protocol::flight_modes::ArduPilotFirmware::Copter);
+        *conn.last_banner_req.lock().await = None;
+        conn.tick_banner_request().await;
+
+        *conn.writer.lock().await = None;
+        let mut buf: Vec<u8> = rx.into_iter().flatten().collect();
+        let ids: Vec<u32> = crate::connection::framing::extract_frames(&mut buf)
+            .iter()
+            .filter_map(|frame| crate::aux_tee::mavlink_message_id(frame))
+            .collect();
+        assert_eq!(ids, vec![COMMAND_LONG_ID, COMMAND_LONG_ID]);
     }
 
     #[tokio::test]

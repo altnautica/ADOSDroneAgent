@@ -62,6 +62,7 @@ use ados_protocol::aux_egress::{AuxEgress, AuxEgressError};
 use ados_protocol::aux_mux::{AuxChannel, AUX_HEADER_LEN, AUX_MAX_PAYLOAD};
 use ados_protocol::shutdown::Shutdown;
 use serde::Serialize;
+#[cfg(test)]
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 
@@ -426,16 +427,18 @@ fn report(counters: &TeeCounters, last: TeeCountersSnapshot) -> TeeCountersSnaps
 
 /// Run the tee until cancelled or the frame source closes.
 ///
-/// Takes the frame receiver rather than the FC connection so the whole loop is
+/// Takes the frame source rather than the FC connection so the whole loop is
 /// exercisable against a plain broadcast channel and a fake radio, with no
-/// flight controller and no radio hardware.
+/// flight controller and no radio hardware. A plain receiver converts into
+/// the flat [`crate::routing::FrameFeed`]; the router passes the routed one.
 pub async fn run(
-    mut frames: broadcast::Receiver<bytes::Bytes>,
+    frames: impl Into<crate::routing::FrameFeed>,
     egress: AuxEgress,
     counters: Arc<TeeCounters>,
     shaper_config: ShaperConfig,
     cancel: Shutdown,
 ) {
+    let mut frames = frames.into();
     let mut shaper = RateShaper::new(shaper_config);
     let mut gate = LaneGate::default();
     let mut last_report = TeeCountersSnapshot::default();

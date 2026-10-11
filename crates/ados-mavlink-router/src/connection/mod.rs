@@ -284,6 +284,13 @@ pub struct FcConnection {
     /// The single writer the parameter cache is persisted through, newest
     /// snapshot wins.
     param_persister: ParamPersister,
+    /// Route-aware forwarding state (`mavlink.route_aware`); inert when off.
+    routes: std::sync::Arc<crate::routing::RouteHub>,
+    /// Agent-held signing of this router's own frames (`mavlink.agent_signing`).
+    agent_signing: crate::signing::AgentSigning,
+    /// When the firmware banner was last requested (see
+    /// `tick_banner_request`); `None` before the first request.
+    last_banner_req: Mutex<Option<Instant>>,
 }
 
 impl FcConnection {
@@ -299,6 +306,8 @@ impl FcConnection {
         let injector_gate = cfg
             .injector_arbitration_active()
             .then(|| std::sync::Mutex::new(injector_gate::InjectorGateCache::new(&gate_feed)));
+        let routes = crate::routing::RouteHub::new(cfg.route_aware);
+        let agent_signing = crate::signing::AgentSigning::from_config(cfg.agent_signing);
         std::sync::Arc::new(Self {
             cfg,
             state,
@@ -342,12 +351,32 @@ impl FcConnection {
             injector_gate,
             gate_feed,
             param_persister: ParamPersister::new(),
+            routes,
+            agent_signing,
+            last_banner_req: Mutex::new(None),
         })
     }
 
     /// Subscribe to the raw inbound frame stream (the MAVLink socket + proxies).
     pub fn subscribe(&self) -> broadcast::Receiver<Bytes> {
         self.frame_tx.subscribe()
+    }
+
+    /// The route-aware forwarding hub.
+    pub fn routes(&self) -> &std::sync::Arc<crate::routing::RouteHub> {
+        &self.routes
+    }
+
+    /// The FC frame source for the consumer of endpoint `labels[0]` (see
+    /// [`crate::routing::RouteHub::feed`]): the flat fan-out when route-aware
+    /// forwarding is off.
+    pub fn frame_feed(&self, labels: &[&str]) -> crate::routing::FrameFeed {
+        self.routes.feed(labels, self.subscribe())
+    }
+
+    /// The agent-held signing state.
+    pub fn agent_signing(&self) -> &crate::signing::AgentSigning {
+        &self.agent_signing
     }
 
     /// Subscribe to the raw inbound FC byte lane (populated only for an MSP FC).

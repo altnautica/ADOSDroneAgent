@@ -107,13 +107,17 @@ impl FcConnection {
     /// (stream-rate requests, the parameter sweep, swarm setpoints): it
     /// answers signed, so it holds a key, and the link is a serial link other
     /// than its USB port, where an ArduPilot FC enforces signing. `None` when
-    /// there is no open serial link to judge (unmeasured).
+    /// there is no open serial link to judge (unmeasured). `false` while the
+    /// agent signs its own frames.
     pub async fn agent_commands_unsigned_rejected_risk(&self) -> Option<bool> {
         if !self.transport_open() {
             return None;
         }
         let device = self.fc_device.lock().await;
         let device = device.as_deref()?;
+        if self.agent_signing().active() {
+            return Some(false);
+        }
         Some(self.fc_signed() && !device_is_usb(device))
     }
 

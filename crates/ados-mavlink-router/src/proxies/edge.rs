@@ -162,18 +162,24 @@ impl ClientFramer {
 }
 
 /// Forward a client's bytes toward the FC: whole frames only, batched, for a
-/// MAVLink FC; raw for an MSP FC, which does not speak MAVLink.
+/// MAVLink FC; raw for an MSP FC, which does not speak MAVLink. With
+/// route-aware forwarding on, `ep` names the client: each batch is learned
+/// and handed to the other clients.
 pub(super) async fn forward_client_bytes(
     fc: &FcConnection,
     framer: &mut ClientFramer,
     data: &[u8],
     origin: ClientOrigin,
+    ep: Option<&crate::routing::Endpoint>,
 ) {
     if fc.fc_variant().await.is_some() {
         let _ = fc.send_client_bytes(data, origin, None).await;
         return;
     }
     for batch in framer.push(data) {
+        if let Some(ep) = ep {
+            fc.routes().ingress(ep, &batch);
+        }
         let _ = fc.send_client_bytes(&batch, origin, None).await;
     }
 }

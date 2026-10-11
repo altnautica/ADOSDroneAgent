@@ -555,7 +555,7 @@ async fn handle_tcp_client(
     local: Option<std::net::IpAddr>,
 ) {
     let (mut rd, mut wr) = stream.into_split();
-    let mut rx = fc.subscribe();
+    let (mut rx, route_ep) = fc.routes().client_feed("tcp", fc.subscribe());
     let mut raw_rx = fc.subscribe_raw();
 
     // FC -> client.
@@ -590,7 +590,10 @@ async fn handle_tcp_client(
         tokio::select! {
             read = rd.read(&mut buf) => match read {
                 Ok(0) | Err(_) => break,
-                Ok(n) => forward_client_bytes(&fc, &mut framer, &buf[..n], origin).await,
+                Ok(n) => {
+                    forward_client_bytes(&fc, &mut framer, &buf[..n], origin, route_ep.as_ref())
+                        .await
+                }
             },
             _ = recheck.tick() => match raw_peer_verdict(&auth, peer, local) {
                 (Some(now), _) => origin = now,
@@ -602,6 +605,9 @@ async fn handle_tcp_client(
         }
     }
     writer.abort();
+    if let Some(ep) = &route_ep {
+        fc.routes().retire(ep);
+    }
 }
 
 /// The admission re-check cadence, first tick one period from now.
@@ -647,7 +653,9 @@ pub async fn run_udp_proxy(
     // and quiet peers are evicted once a second rather than per frame.
     let send_sock = sock.clone();
     let send_peers = peers.clone();
-    let mut rx = fc.subscribe();
+    let mut rx = crate::routing::PeerFeed::new(fc.routes(), fc.subscribe());
+    let peer_eps = crate::routing::PeerEndpoints::new(fc.routes().clone(), &format!("udp{port}"));
+    let send_eps = peer_eps.clone();
     let mut raw_rx = fc.subscribe_raw();
     let sender = tokio::spawn(async move {
         let mut targets: Vec<SocketAddr> = Vec::with_capacity(UDP_MAX_PEERS);
@@ -657,14 +665,14 @@ pub async fn run_udp_proxy(
             // Forward whichever lane produces bytes: the MAVLink frame lane for a
             // MAVLink FC, the raw byte lane for an MSP FC. Exactly one lane is
             // populated for a given FC, so there is no duplication.
-            let frame = tokio::select! {
+            let (frame, routed) = tokio::select! {
                 r = rx.recv() => match r {
                     Ok(f) => f,
                     Err(RecvError::Lagged(_)) => continue,
                     Err(RecvError::Closed) => break,
                 },
                 r = raw_rx.recv() => match r {
-                    Ok(b) => b,
+                    Ok(b) => (b, None),
                     Err(RecvError::Lagged(_)) => continue,
                     Err(RecvError::Closed) => break,
                 },
@@ -677,9 +685,16 @@ pub async fn run_udp_proxy(
             let generation = send_peers.generation();
             if generation != targets_generation {
                 send_peers.fill(&mut targets);
+                send_eps.retain(&targets);
                 targets_generation = generation;
             }
             for peer in &targets {
+                // Route-aware: only the peers this frame is addressed to.
+                if let Some(routed) = &routed {
+                    if !routed.accepts(&send_eps.get(*peer)) {
+                        continue;
+                    }
+                }
                 let _ = send_sock.send_to(&frame, *peer).await;
             }
         }
@@ -688,6 +703,7 @@ pub async fn run_udp_proxy(
     // peers -> FC.
     let mut verdicts = UdpVerdicts::new(PAIRING_TTL, UDP_MAX_PEERS);
     let mut buf = [0u8; 4096];
+    let recv_eps = peer_eps;
     loop {
         tokio::select! {
             recv = sock.recv_from(&mut buf) => {
@@ -720,6 +736,7 @@ pub async fn run_udp_proxy(
                         continue;
                     };
                     peers.touch(addr, Instant::now(), UDP_MAX_PEERS);
+                    recv_eps.ingress(addr, &buf[..n]);
                     let _ = fc.send_client_bytes(&buf[..n], origin, None).await;
                 }
             }
@@ -916,7 +933,7 @@ async fn handle_ws_client(
         Err(_) => return,
     };
     let (mut write, mut read) = ws.split();
-    let mut rx = fc.subscribe();
+    let (mut rx, route_ep) = fc.routes().client_feed("ws", fc.subscribe());
     let mut raw_rx = fc.subscribe_raw();
 
     // FC -> client (binary frames).
@@ -957,7 +974,7 @@ async fn handle_ws_client(
         tokio::select! {
             msg = read.next() => match msg {
                 Some(Ok(Message::Binary(data))) => {
-                    forward_client_bytes(&fc, &mut framer, &data, ws_origin).await
+                    forward_client_bytes(&fc, &mut framer, &data, ws_origin, route_ep.as_ref()).await
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
                 Some(Ok(_)) => {}
@@ -971,6 +988,9 @@ async fn handle_ws_client(
         }
     }
     writer.abort();
+    if let Some(ep) = &route_ep {
+        fc.routes().retire(ep);
+    }
 }
 
 #[cfg(test)]

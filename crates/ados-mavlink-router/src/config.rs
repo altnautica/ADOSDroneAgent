@@ -214,6 +214,14 @@ pub struct MavlinkConfig {
     /// forever. See [`MavlinkConfig::injector_arbitration_state`].
     #[serde(default)]
     pub injector_arbitration: bool,
+    /// Whether FC frames addressed to one system go only to the endpoint that
+    /// owns it (`mavlink.route_aware`). Off: today's flat fan-out.
+    #[serde(default)]
+    pub route_aware: bool,
+    /// Whether agent-originated frames are signed with an agent-held key
+    /// (`mavlink.agent_signing`). See [`crate::signing`].
+    #[serde(default)]
+    pub agent_signing: bool,
     /// The serial device an ExpressLRS / CRSF RC module is pinned to
     /// (`radio.crsf.device` in the config — the top-level `radio:` section, NOT
     /// the `mavlink:` block, so it is skipped by the section deserializer and
@@ -311,6 +319,8 @@ impl Default for MavlinkConfig {
             aux_uplink_enforce_origin: default_aux_uplink_enforce_origin(),
             legacy_stream_request: default_legacy_stream_request(),
             injector_arbitration: false,
+            route_aware: false,
+            agent_signing: false,
             crsf_device: String::new(),
             crsf_enabled: false,
             crsf_mode: "crsf_rc".to_string(),
