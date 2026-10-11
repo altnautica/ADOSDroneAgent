@@ -1,15 +1,24 @@
 //! The catalog of managed systemd service units and the per-service runtime
 //! state used by the orchestration loop.
 //!
-//! This is the authority for which units the supervisor manages. It is NOT a
-//! mirror of anything: several packaged units are deliberately absent because a
-//! native daemon owns their function in-process, and each absence is recorded
-//! where the row would have been. The supervisor never spawns these processes
-//! itself; it issues `systemctl` against this catalog. systemd remains the
-//! process manager and owns the cgroup, restart, and journald wiring.
+//! The catalog is every [`ados_protocol::units::UNITS`] row that carries a
+//! supervisor tier, in table order. A shipped unit with no tier (the
+//! supervisor itself, boot oneshots, units pulled up by `WantedBy=`) is not
+//! managed here, and neither is a unit a native daemon owns in-process: those
+//! are retired and pruned by the installer. The supervisor never spawns these
+//! processes itself; it issues `systemctl` against this catalog. systemd
+//! remains the process manager and owns the cgroup, restart, and journald
+//! wiring.
 
 use std::collections::VecDeque;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
+
+use ados_protocol::units::{self, UnitSpec};
+
+/// Service tier, from the unit table. Start order is core first, then
+/// hardware, then on-demand.
+pub use ados_protocol::units::Category;
 
 /// Failures inside the window at which a service is labelled crash-looping.
 pub const MAX_FAILURES: usize = 5;
@@ -22,15 +31,6 @@ pub const FAILURE_WINDOW: Duration = Duration::from_secs(60);
 /// never stretches it: a drone whose FC needs one more attempt after a brownout
 /// gets that attempt within 5 s however many came before.
 pub const PARKED_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
-
-/// Service tier. Start order is core first, then hardware, then on-demand;
-/// shutdown tears down in the reverse-ish order handled by the lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Category {
-    Core,
-    Hardware,
-    OnDemand,
-}
 
 /// Runtime lifecycle state of a single managed unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,22 +61,21 @@ impl ServiceState {
     }
 }
 
-/// A static registry entry. `profile_gate` scopes the unit to one agent
-/// profile (`None` = any). `role_gate` is a pipe-separated set of ground
-/// station roles the unit runs under (`None` = any role); only consulted when
-/// the profile gate is `ground_station`.
+/// A catalog entry. `profile_gate` scopes the unit to a pipe-separated set of
+/// agent profiles (`None` = any). `role_gate` is a pipe-separated set of
+/// ground station roles the unit runs under (`None` = any role); only
+/// consulted when the profile gate is `ground_station`.
 #[derive(Debug, Clone, Copy)]
 pub struct ServiceDef {
+    /// The unit name without `.service` (`ados-video`).
     pub name: &'static str,
     pub category: Category,
     pub profile_gate: Option<&'static str>,
     pub role_gate: Option<&'static str>,
     /// True for the lean headless KEEP set: the minimal services a zero-Python
-    /// flight node runs (the MAVLink router, the camera encode, the radio TX,
-    /// and the native HTTP front). When the agent is in headless mode, the gate
-    /// blocks every service that is NOT in this set, so the box boots only the
-    /// Rust core. `false` for all other services (the default via `def`); the
-    /// KEEP set is marked with `def_keep`.
+    /// flight node runs. When the agent is in headless mode, the gate blocks
+    /// every service that is NOT in this set, so the box boots only the Rust
+    /// core.
     pub headless_keep: bool,
     /// True for units whose `exit 0` means "this node has nothing for me to
     /// run" (the unit file carries `RestartPreventExitStatus=0`). Such an exit
@@ -84,220 +83,53 @@ pub struct ServiceDef {
     pub nothing_to_run_ok: bool,
 }
 
-const fn def(
-    name: &'static str,
-    category: Category,
-    profile_gate: Option<&'static str>,
-    role_gate: Option<&'static str>,
-) -> ServiceDef {
-    ServiceDef {
-        name,
-        category,
-        profile_gate,
-        role_gate,
-        headless_keep: false,
-        nothing_to_run_ok: false,
+/// The pipe-joined form of every multi-entry profile or role list in the
+/// table, built once and owned by this static.
+static JOINED_GATES: LazyLock<Vec<(&'static [&'static str], String)>> = LazyLock::new(|| {
+    let mut out: Vec<(&'static [&'static str], String)> = Vec::new();
+    for unit in units::UNITS {
+        for list in [unit.profiles, unit.roles] {
+            if list.len() > 1 && !out.iter().any(|(k, _)| *k == list) {
+                out.push((list, list.join("|")));
+            }
+        }
+    }
+    out
+});
+
+/// A gate string for a table list: `None` when empty, else the pipe-joined
+/// set.
+fn gate(list: &'static [&'static str]) -> Option<&'static str> {
+    match list {
+        [] => None,
+        [one] => Some(one),
+        many => JOINED_GATES
+            .iter()
+            .find(|(k, _)| *k == many)
+            .map(|(_, joined)| joined.as_str()),
     }
 }
 
-/// A registry entry in the lean headless KEEP set (`headless_keep = true`): the
-/// minimal services a zero-Python flight node keeps running. Identical to `def`
-/// in every other respect.
-const fn def_keep(
-    name: &'static str,
-    category: Category,
-    profile_gate: Option<&'static str>,
-    role_gate: Option<&'static str>,
-) -> ServiceDef {
-    ServiceDef {
-        headless_keep: true,
-        ..def(name, category, profile_gate, role_gate)
+impl ServiceDef {
+    fn from_unit(unit: &'static UnitSpec, category: Category) -> Self {
+        ServiceDef {
+            name: unit.stem(),
+            category,
+            profile_gate: gate(unit.profiles),
+            role_gate: gate(unit.roles),
+            headless_keep: unit.headless_keep,
+            nothing_to_run_ok: unit.idle_ok,
+        }
     }
 }
-
-/// Mark an entry whose clean `exit 0` is an idle verdict, not a death.
-const fn idle_ok(d: ServiceDef) -> ServiceDef {
-    ServiceDef {
-        nothing_to_run_ok: true,
-        ..d
-    }
-}
-
-use Category::{Core, Hardware, OnDemand};
 
 /// Every service the supervisor knows about, in canonical order.
-pub const SERVICE_REGISTRY: &[ServiceDef] = &[
-    // Core (always running). ados-mavlink is the sole command-and-control path
-    // to the flight controller: it execs the native router binary and has no
-    // packaged fallback. The FC-bearing profiles (drone + ground station) always
-    // start it (Core); the FC-less compute node does NOT (it never fetches the
-    // router binary, so an unconditional start would crash-loop). A missing
-    // router on a drone/GS still crash-loops visibly, and the installer
-    // Hard-gates the binary's fetch + re-checks its presence in the health gate.
-    def_keep("ados-mavlink", Core, Some("drone|ground_station"), None),
-    // The decentralized swarm state bus: every drone broadcasts a 20-byte
-    // position/velocity beacon at 2 Hz and every node in the fleet hears every
-    // other node. Core on both FC-bearing profiles, and gated the same way
-    // ados-mavlink is, because the two are the same seam seen from either end:
-    // a drone fills its beacon from the router's state socket, and a ground
-    // station listens so the operator's fleet view is local-first. Deliberately
-    // NOT gated to drone alone — a receive-only ground station is what makes the
-    // fleet view work without a cloud round-trip, and its slot 0 never emits a
-    // beacon because a ground station is not an aircraft. In the headless KEEP
-    // set: onboard collision avoidance reads this table, so a lean flight node
-    // that keeps ados-mavlink must keep the bus that feeds separation. A drone
-    // with no fleet slot yet (every fresh install) has nothing to run: the bus
-    // exits 0 and the row idles until the agent config changes.
-    idle_ok(def_keep(
-        "ados-swarmbus",
-        Core,
-        Some("drone|ground_station"),
-        None,
-    )),
-    def("ados-api", Core, None, None),
-    def("ados-cloud", Core, None, None),
-    // The durable logging + telemetry store. Registered so it gets the
-    // monitor's liveness check, the auto-restart, the parked retry and — the
-    // one that matters most — the `systemctl reset-failed` that clears a
-    // `failed (start-limit-hit)` latch. Five restarts in a minute (a store that
-    // re-quarantines, a full /var, a wedged writer tripping the unit's
-    // WatchdogSec) used to leave the black box permanently dead with nothing
-    // in-process able to clear it, so `ados logs query|tail` returned nothing
-    // and every producer's log layer dropped silently — off-box RCA gone.
-    //
-    // In the headless KEEP set: the store is Rust (zero-Python holds) and a
-    // lean flight node is precisely the node an operator cannot reach, so it is
-    // the one that most needs its own flight recorder.
-    //
-    // Gated on `log_store_enabled` in `gate_allows`, not here: the store ships
-    // OFF and the installer MASKS the unit when it is off, so an ungated row
-    // would have the supervisor start-fail a masked unit forever.
-    idle_ok(def_keep("ados-logd", Core, None, None)),
-    // Hardware-dependent (started on detection). Drone-only: the camera encode
-    // pipeline runs on the air side; a ground station receives video through
-    // ados-mediamtx-gs, never ados-video. The prebuilt catalog fetches the
-    // ados-video binary on the drone profile only, so leaving this ungated made
-    // a ground station start a unit whose binary is (correctly) absent — an
-    // endless restart loop. Gate it to drone to match the catalog.
-    def_keep("ados-video", Hardware, Some("drone"), None),
-    // NPU inference sidecar (RKNN). Drone-only: the camera + vision pipeline
-    // runs air-side, so the detector sidecar follows the camera. Python (it
-    // owns the proprietary rknn-toolkit-lite2 wheel the Rust engine cannot
-    // link), so it is NOT in the headless KEEP set. The unit self-gates on the
-    // NPU runtime library, so it is a clean no-op on a board without the NPU.
-    def("ados-vision-rknn", Hardware, Some("drone"), None),
-    // NPU inference sidecar (Hailo): serves the engine's `backend: hailo`
-    // socket. Drone-only and outside the headless KEEP set like the RKNN
-    // sidecar. The unit's `ConditionPathExists=/dev/hailo0` skips the start on a
-    // board without the accelerator, and the row then idles (`condition_unmet`).
-    def("ados-vision-hailo", Hardware, Some("drone"), None),
-    // Drone-side WFB-ng TX manager. Profile-gated to drone so a ground station
-    // does not bring up wfb_tx and fight the GS wfb_rx for the same adapter.
-    def_keep("ados-wfb", Hardware, Some("drone"), None),
-    // The onboard vision engine: loads the configured detector and publishes the
-    // detection stream that follow / designate plugins consume. Drone-only (the
-    // air side owns the cameras) to match the prebuilt catalog, which fetches the
-    // ados-vision binary on the drone profile only. The engine self-gates on
-    // `vision.enabled` (it exits cleanly when vision is off, the default), so the
-    // unit is a clean no-op until provisioning enables vision + a detector. NOT
-    // in the headless KEEP set: vision/AI is excluded from the lean headless
-    // core. On an NPU board the engine reaches its model through the
-    // ados-vision-rknn sidecar.
-    def("ados-vision", Hardware, Some("drone"), None),
-    // On-demand.
-    // The native HTTP control surface: the LAN front on `:8080` on every
-    // profile, the operator's API. systemd owns its lifecycle, as it does the
-    // plugin host's: the installer enables it (it writes the front marker on
-    // every install), `WantedBy=` pulls it up with the supervisor and `PartOf=`
-    // cycles it on a supervisor restart. So this row is OnDemand (the supervisor
-    // never starts it itself), the adoption sweep brings it under death
-    // detection, and shutdown leaves it to systemd. In the KEEP set because the
-    // lean headless profile runs it as its only HTTP surface.
-    def_keep("ados-control", OnDemand, None, None),
-    // GPIO-output substrate (status buzzer / LED). Cross-profile (a header GPIO
-    // can drive an indicator on either an air or a ground node) and not in the
-    // headless KEEP set. The unit ships disabled until the operator turns it on,
-    // so on a board with no GPIO header it is a clean no-op.
-    idle_ok(def("ados-gpio", Hardware, None, None)),
-    // CRSF / ExpressLRS RC control lane. Ground-side today (the ground node
-    // drives the RC transmitter module) with a drone gate for the relay
-    // last-mile posture; the service itself idles on a drone profile and the
-    // unit gates on the /etc/ados/crsf-enabled marker (mirroring
-    // radio.crsf.enabled), so an un-opted node skips it cleanly. NOT in the
-    // headless KEEP set. Hot-plugging the RC module's USB bridge restarts it
-    // via the dedicated Elrs hot-plug class.
-    idle_ok(def(
-        "ados-crsf",
-        Hardware,
-        Some("drone|ground_station"),
-        None,
-    )),
-    // Config-over-radio channel: a MAVLink-TUNNEL request/response lane so a
-    // node reachable only over the radio can have its /api/config read and
-    // written from the ground. It rides the radio's auxiliary application lane
-    // on its own multiplex channel, not the control plane, which is fully
-    // occupied by the frequency-hop handshake and carries no demultiplexer. The
-    // unit gates on the /etc/ados/tunnel-enabled marker (mirroring
-    // radio.tunnel.enabled), so an un-opted node skips it cleanly.
-    // Cross-profile (drone terminator + ground injector), NOT in the headless
-    // KEEP set.
-    idle_ok(def(
-        "ados-tunnel-config",
-        Hardware,
-        Some("drone|ground_station"),
-        None,
-    )),
-    // Ground-station-only services. ados-wfb-rx is the single-node RX path,
-    // gated to the direct role so it does not grab the adapter the relay or
-    // receiver units drive.
-    idle_ok(def(
-        "ados-wfb-rx",
-        Hardware,
-        Some("ground_station"),
-        Some("direct"),
-    )),
-    def("ados-mediamtx-gs", Hardware, Some("ground_station"), None),
-    // Physical UI + AP + first-boot captive portal.
-    def("ados-oled", Hardware, Some("ground_station"), None),
-    // Optional I2C status OLED, coexists with the HDMI cockpit (self-skips
-    // cleanly when no panel answers on the bus).
-    def("ados-oled-i2c", Hardware, Some("ground_station"), None),
-    def("ados-hostapd", Hardware, Some("ground_station"), None),
-    def("ados-dnsmasq-gs", Hardware, Some("ground_station"), None),
-    def("ados-setup-captive", OnDemand, Some("ground_station"), None),
-    // Standalone flight stack.
-    // The kiosk exits 0 when the configured display is an LCD or none: there
-    // is nothing for it to show on this node.
-    idle_ok(def("ados-kiosk", Hardware, Some("ground_station"), None)),
-    def("ados-input", Hardware, Some("ground_station"), None),
-    def("ados-pic", Hardware, Some("ground_station"), None),
-    // Uplink matrix and cloud relay.
-    def("ados-uplink-router", Hardware, Some("ground_station"), None),
-    // No rows for ados-modem, ados-wifi-client or ados-ethernet. ados-net owns
-    // the modem, the WiFi station and the wired link in-process; their packaged
-    // units are retired and pruned on every profile. A row here would have the
-    // supervisor report, and try to reconcile, a service no install ever leaves
-    // running.
-    // Distributed-receive role-gated services.
-    idle_ok(def(
-        "ados-batman",
-        Hardware,
-        Some("ground_station"),
-        Some("relay|receiver"),
-    )),
-    idle_ok(def(
-        "ados-wfb-relay",
-        Hardware,
-        Some("ground_station"),
-        Some("relay"),
-    )),
-    idle_ok(def(
-        "ados-wfb-receiver",
-        Hardware,
-        Some("ground_station"),
-        Some("receiver"),
-    )),
-];
+pub static SERVICE_REGISTRY: LazyLock<Vec<ServiceDef>> = LazyLock::new(|| {
+    units::UNITS
+        .iter()
+        .filter_map(|u| u.category.map(|c| ServiceDef::from_unit(u, c)))
+        .collect()
+});
 
 /// Per-service mutable runtime state held by the supervisor.
 #[derive(Debug)]
@@ -518,7 +350,7 @@ mod tests {
         // restart to the unit. A unit without it would keep running after
         // `systemctl stop ados-supervisor` and would not be cycled by a restart.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
-        for def in SERVICE_REGISTRY {
+        for def in SERVICE_REGISTRY.iter() {
             let path = dir.join(format!("{}.service", def.name));
             let body = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));

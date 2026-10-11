@@ -112,12 +112,6 @@ security:\n  \
 api:\n    \
 cors_enabled: true\n\
 \n\
-scripting:\n  \
-rest_api:\n    \
-enabled: true\n    \
-host: \"0.0.0.0\"\n    \
-port: 8080\n\
-\n\
 pairing:\n  \
 convex_url: \"{CONVEX_URL}\"\n  \
 beacon_interval: 30\n  \
@@ -131,7 +125,6 @@ mdns_enabled: true\n\
 video:\n  \
 mode: \"auto\"\n  \
 cloud_relay_url: \"\"\n  \
-record: false\n  \
 camera:\n    \
 width: 1280\n    \
 height: 720\n    \
@@ -782,8 +775,11 @@ mod tests {
         assert!(cfg.contains("name: \"skynode\""));
         assert!(cfg.contains("profile: \"drone\""));
         assert!(cfg.contains("serial_port: \"/dev/ttyACM0\""));
-        // The scripting REST block must keep port 8080 (the health gate probes it).
-        assert!(cfg.contains("port: 8080"));
+        // No dead blocks: the REST port lives in the API's own config, not a
+        // retired scripting block, and recording is not a video key.
+        assert!(!cfg.contains("scripting:"));
+        assert!(!cfg.contains("rest_api:"));
+        assert!(!cfg.contains("record:"));
         // The pairing convex_url must be the constant, not blank.
         assert!(cfg.contains(&format!("convex_url: \"{CONVEX_URL}\"")));
         // Video defaults present.

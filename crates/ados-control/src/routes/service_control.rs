@@ -25,12 +25,12 @@
 //! ## The restart-service name guard
 //!
 //! Only an `ados-*` unit can be restarted. A request name is normalized to
-//! `ados-<name>` when it lacks the prefix, then checked against a fixed allowlist
-//! of the units the install ships; anything outside the list is rejected with an
-//! `Unknown service` error before any `systemctl` runs, so an arbitrary unit
-//! (e.g. `sshd`, `nginx`) can never be restarted through this route. A test
-//! holds the allowlist to the shipped unit files, so a unit that is not shipped
-//! cannot be listed and a shipped one cannot be forgotten.
+//! `ados-<name>` when it lacks the prefix, then checked against the unit
+//! table's `api_restartable` column (`ados_protocol::units`); anything outside
+//! it is rejected with an `Unknown service` error before any `systemctl` runs,
+//! so an arbitrary unit (e.g. `sshd`, `nginx`) can never be restarted through
+//! this route. The table is held to the shipped unit files, so a unit that is
+//! not shipped cannot be allowed.
 //!
 //! The caller names the real unit. Each profile lists its own units on
 //! `/api/services`, so a ground station's receive stack is `ados-wfb-rx`, never
@@ -62,54 +62,21 @@ use axum::Json;
 use serde_json::{json, Value};
 use tokio::process::Command;
 
-/// The set of units the restart route may touch: every shipped `ados-*.service`
-/// except those in [`NOT_RESTARTABLE`]. A request name is normalized to
-/// `ados-<name>` and must land in this set or it is rejected.
-pub const ALLOWED_UNITS: &[&str] = &[
-    "ados-api",
-    "ados-batman",
-    "ados-cloud",
-    "ados-crsf",
-    "ados-dnsmasq-gs",
-    "ados-gpio",
-    "ados-hostapd",
-    "ados-input",
-    "ados-kiosk",
-    "ados-logd",
-    "ados-mavlink",
-    "ados-mediamtx-gs",
-    "ados-mesh-pairing",
-    "ados-oled",
-    "ados-oled-i2c",
-    "ados-pic",
-    "ados-plugin-host",
-    "ados-power",
-    "ados-setup-captive",
-    "ados-swarmbus",
-    "ados-tunnel-config",
-    "ados-uplink-router",
-    "ados-video",
-    "ados-vision",
-    "ados-vision-hailo",
-    "ados-vision-rknn",
-    "ados-wfb",
-    "ados-wfb-receiver",
-    "ados-wfb-relay",
-    "ados-wfb-rx",
-];
+/// Whether the restart route may touch `unit` (an `ados-<name>` stem): the
+/// unit table's `api_restartable` column. The column refuses this process
+/// itself (the reply could never be delivered), the supervisor (it has its
+/// own route), and the boot oneshots that have nothing to restart.
+pub fn restart_allowed(unit: &str) -> bool {
+    ados_protocol::units::find(unit).is_some_and(|u| u.api_restartable)
+}
 
-/// Shipped units the restart route refuses: this process itself (the reply
-/// could never be delivered), the supervisor (it has its own route), and the
-/// boot-time probes and one-time fixups that have nothing to restart.
-#[cfg(test)]
-const NOT_RESTARTABLE: &[&str] = &[
-    "ados-control",
-    "ados-supervisor",
-    "ados-camera-probe",
-    "ados-display-probe",
-    "ados-fbcon-detach",
-    "ados-usb-otg-host",
-];
+/// Every unit the restart route may touch, as `ados-<name>` stems.
+pub fn allowed_units() -> impl Iterator<Item = &'static str> {
+    ados_protocol::units::UNITS
+        .iter()
+        .filter(|u| u.api_restartable)
+        .map(|u| u.stem())
+}
 
 /// The supervisor unit `POST /api/v1/system/restart-supervisor` restarts. It owns
 /// the agent process tree, so restarting it cycles every child through the same
@@ -163,7 +130,7 @@ async fn restart_service_result(name: &str) -> Value {
     } else {
         format!("ados-{name}")
     };
-    if !ALLOWED_UNITS.contains(&svc_name.as_str()) {
+    if !restart_allowed(&svc_name) {
         return json!({
             "status": "error",
             "message": format!("Unknown service: {name}"),
@@ -516,7 +483,7 @@ mod tests {
         // Each allowlisted unit clears the name guard (it does not produce an
         // "Unknown service" rejection). On a dev host the subsequent restart
         // fails to spawn, which is a different, non-rejection error body.
-        for unit in ALLOWED_UNITS {
+        for unit in allowed_units() {
             // Strip the `ados-` prefix to exercise the normalization path too.
             let bare = unit.strip_prefix("ados-").unwrap();
             let body = restart_service_result(bare).await;
@@ -547,19 +514,31 @@ mod tests {
     }
 
     #[test]
-    fn the_allowlist_is_exactly_the_shipped_restartable_units() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
-        let mut shipped: Vec<String> = std::fs::read_dir(&dir)
-            .expect("the shipped unit directory")
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .filter_map(|name| name.strip_suffix(".service").map(str::to_string))
-            .filter(|name| name.starts_with("ados-"))
-            .filter(|name| !NOT_RESTARTABLE.contains(&name.as_str()))
+    fn allowed_units_derived() {
+        // Every shipped unit except the six with nothing to restart through
+        // this route: this process, the supervisor and the boot oneshots.
+        let refused: Vec<&str> = ados_protocol::units::UNITS
+            .iter()
+            .map(|u| u.stem())
+            .filter(|stem| !restart_allowed(stem))
             .collect();
-        shipped.sort();
-        let mut allowed: Vec<String> = ALLOWED_UNITS.iter().map(|s| s.to_string()).collect();
-        allowed.sort();
-        assert_eq!(allowed, shipped, "the allowlist drifted from data/systemd");
+        assert_eq!(
+            refused,
+            [
+                "ados-supervisor",
+                "ados-control",
+                "ados-fbcon-detach",
+                "ados-display-probe",
+                "ados-camera-probe",
+                "ados-usb-otg-host",
+            ]
+        );
+        assert_eq!(
+            allowed_units().count(),
+            ados_protocol::units::UNITS.len() - 6
+        );
+        assert!(restart_allowed("ados-mesh-pairing"));
+        assert!(!restart_allowed("ados-sshd"));
     }
 
     #[test]

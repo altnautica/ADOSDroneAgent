@@ -5,8 +5,8 @@
 //! or RC link or changes flight behaviour:
 //!
 //! - rebooting the companion and restarting the supervisor;
-//! - restarting a link-carrying unit ([`LINK_DROPPING_UNITS`] and every
-//!   `ados-wfb*` unit), directly or through a peripheral action;
+//! - restarting a link-carrying unit (a unit-table row with `drops_link`),
+//!   directly or through a peripheral action;
 //! - hopping the radio channel, changing its TX power, unpairing a radio, and
 //!   opening a local radio bind;
 //! - changing the node's profile or role, and a ground-station factory reset;
@@ -94,27 +94,18 @@ const GUARDED_EXACT: &[(&str, &str)] = &[
     ("POST", "/api/plugins/install_builtin"),
 ];
 
-/// Shipped units whose restart drops the command, telemetry, video, RC, mesh,
-/// access-point or cloud link. Every `ados-wfb*` unit is covered as well.
-pub const LINK_DROPPING_UNITS: &[&str] = &[
-    "ados-mavlink",
-    "ados-supervisor",
-    "ados-crsf",
-    "ados-pic",
-    "ados-input",
-    "ados-batman",
-    "ados-hostapd",
-    "ados-dnsmasq-gs",
-    "ados-cloud",
-    "ados-uplink-router",
-    "ados-video",
-    "ados-mediamtx-gs",
-    "ados-swarmbus",
-];
-
-/// Whether restarting `unit` (without the `.service` suffix) drops a link.
+/// Whether restarting `unit` drops the command, telemetry, video, RC, mesh,
+/// access-point or cloud link: the unit table's `drops_link` column. The name
+/// is normalized the way the restart route normalizes it (a bare `wfb` is
+/// `ados-wfb`), so the guard and the route always judge the same unit.
 fn restart_drops_link(unit: &str) -> bool {
-    LINK_DROPPING_UNITS.contains(&unit) || unit.starts_with("ados-wfb")
+    let unit = unit.strip_suffix(".service").unwrap_or(unit);
+    let found = if unit.starts_with("ados-") {
+        ados_protocol::units::find(unit)
+    } else {
+        ados_protocol::units::find(&format!("ados-{unit}"))
+    };
+    found.is_some_and(|u| u.drops_link)
 }
 
 /// Config keys whose write switches the profile or role, or retunes the radio

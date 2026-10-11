@@ -336,7 +336,7 @@ EMITTERS = {
     "capabilities": emit_capabilities,
     "manifest": emit_manifest,
     "boards": emit_boards,
-    "units": lambda: cargo_json("-p", "ados-control", "--example", "units"),
+    "units": lambda: cargo_json("-p", "ados-protocol", "--example", "units"),
     "installer-flags": lambda: cargo_json("-p", "ados-installer", "--example", "flags"),
     "dashboard-routes": emit_dashboard_routes,
 }

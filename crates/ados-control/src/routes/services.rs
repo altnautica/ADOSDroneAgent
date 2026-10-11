@@ -233,21 +233,21 @@ fn unit_for_service(name: &str) -> Option<String> {
     short_name_to_unit(name).map(str::to_string)
 }
 
-/// Map an in-process service short name onto the systemd unit that owns its cgroup on a
-/// stock multi-process install. Names absent here have no dedicated unit and resolve to
-/// `None`.
+/// Map an in-process service short name onto the unit-table row that owns its
+/// cgroup on a stock multi-process install. Names absent here have no
+/// dedicated unit and resolve to `None`.
 fn short_name_to_unit(name: &str) -> Option<&'static str> {
-    match name {
-        "fc-connection" => Some("ados-mavlink.service"),
-        "video-pipeline" => Some("ados-video.service"),
-        "wfb-link" => Some("ados-wfb.service"),
-        "rest-api" => Some("ados-api.service"),
-        "cloud-command-poll" => Some("ados-cloud.service"),
-        "agent-heartbeat" => Some("ados-cloud.service"),
-        "pairing-beacon" => Some("ados-cloud.service"),
-        "pairing-heartbeat" => Some("ados-cloud.service"),
-        _ => None,
-    }
+    let stem = match name {
+        "fc-connection" => "ados-mavlink",
+        "video-pipeline" => "ados-video",
+        "wfb-link" => "ados-wfb",
+        "rest-api" => "ados-api",
+        "cloud-command-poll" | "agent-heartbeat" | "pairing-beacon" | "pairing-heartbeat" => {
+            "ados-cloud"
+        }
+        _ => return None,
+    };
+    ados_protocol::units::find(stem).map(|u| u.name)
 }
 
 /// Sum PSS (MiB, one decimal) per `ados-*.service` unit across all running PIDs.

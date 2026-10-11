@@ -1,9 +1,10 @@
 //! Ground-station mesh roles: which units each role owns, the boot apply, and
 //! the operator role transition.
 //!
-//! This is the one definition of the role unit sets. The boot apply and the
-//! transition here read it, the hardware pass reads it, the REST role route
-//! reports it, and a test holds the service registry's role gates to it.
+//! The role unit sets come from the unit table's `roles` column
+//! (`ados_protocol::units`), the same column the service registry's role gates
+//! are built from. The boot apply and the transition here read them, the
+//! hardware pass reads them, and the REST role route reports them.
 //!
 //! The transition executes in this process. Each role's units are the processes
 //! a transition stops, so code running inside one of them (the data plane's
@@ -15,20 +16,27 @@
 
 use std::path::Path;
 
+use ados_protocol::units::{role_unit_count, role_unit_names};
 use serde_json::{json, Value};
 
 use crate::config::VALID_ROLES;
 use crate::lifecycle::Supervisor;
 use crate::process_manager::ProcessManager;
 
-/// The units `role` owns, in start order. The direct role owns the single-node
-/// receive plane; relay and receiver bring up batman before the WFB plane that
-/// binds to its interface. Any other value reads as direct, like the sentinel.
+static DIRECT_UNITS: [&str; role_unit_count(Some("direct"))] = role_unit_names(Some("direct"));
+static RELAY_UNITS: [&str; role_unit_count(Some("relay"))] = role_unit_names(Some("relay"));
+static RECEIVER_UNITS: [&str; role_unit_count(Some("receiver"))] =
+    role_unit_names(Some("receiver"));
+
+/// The units `role` owns, in start order (the unit table's `roles` column, in
+/// table order). The direct role owns the single-node receive plane; relay and
+/// receiver bring up batman before the WFB plane that binds to its interface.
+/// Any other value reads as direct, like the sentinel.
 pub fn role_units(role: &str) -> &'static [&'static str] {
     match role {
-        "relay" => &["ados-batman.service", "ados-wfb-relay.service"],
-        "receiver" => &["ados-batman.service", "ados-wfb-receiver.service"],
-        _ => &["ados-wfb-rx.service"],
+        "relay" => &RELAY_UNITS,
+        "receiver" => &RECEIVER_UNITS,
+        _ => &DIRECT_UNITS,
     }
 }
 
@@ -40,12 +48,7 @@ pub fn role_plane(role: &str) -> &'static str {
 }
 
 /// Every role-owned unit: the union of the role unit sets.
-pub const ALL_ROLE_UNITS: [&str; 4] = [
-    "ados-wfb-rx.service",
-    "ados-batman.service",
-    "ados-wfb-relay.service",
-    "ados-wfb-receiver.service",
-];
+pub const ALL_ROLE_UNITS: [&str; role_unit_count(None)] = role_unit_names(None);
 
 /// The registry row name of a role unit (the unit name without `.service`).
 pub fn service_name(unit: &str) -> &str {

@@ -17,25 +17,6 @@ use crate::env::{CONFIG_DIR, SERVICE_NAME};
 use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 
-/// The ground-station units the start step kicks with `--no-block` (the START
-/// half of `enable_ground_station_units`; the ENABLE half ran in `systemd`).
-///
-/// No OTG gadget unit is here: the native `ados-net` daemon composes the gadget
-/// in-process and the packaged unit is retired.
-const GROUND_STATION_START_UNITS: &[&str] = &[
-    "ados-wfb-rx.service",
-    "ados-mesh-pairing.service",
-    "ados-mediamtx-gs.service",
-    "ados-oled.service",
-    "ados-hostapd.service",
-    "ados-dnsmasq-gs.service",
-    "ados-setup-captive.service",
-    "ados-kiosk.service",
-    "ados-input.service",
-    "ados-pic.service",
-    "ados-uplink-router.service",
-];
-
 /// Start the top-level supervisor unit (+ the GS unit set on a ground station).
 pub struct Start;
 
@@ -85,52 +66,23 @@ impl Step for Start {
             );
         }
 
-        // The native plugin host owns the per-plugin sockets. It is PartOf and
-        // WantedBy the supervisor, so the restart above cycles it or pulls it
-        // up; the explicit start covers a unit that was left inactive before this
-        // install. There is no longer a packaged host to pin instead, so this is
-        // unconditional; the unit's ConditionPathExists keeps a box whose binary
-        // has not landed yet inactive rather than restart-looping. Cross-profile
-        // (every profile fetches the binary).
-        {
-            let _ = exec::run(
-                "systemctl",
-                &["start", "--no-block", "ados-plugin-host.service"],
-            );
-            tracing::info!(
-                unit = "ados-plugin-host.service",
-                "native plugin host started (--no-block)"
-            );
-        }
-
-        // The native control surface owns :8080, the operator's API. The restart
-        // above cycles it through PartOf=, but the process it replaced is the
-        // PREVIOUS release's supervisor, and that shutdown used to run
-        // `systemctl stop` on every unit it had adopted, this one included,
-        // after systemd had already restarted it. Start it so an upgrade from
-        // such a release comes back with its API; on a current supervisor it is
-        // already active and this is a no-op. The health gate waits for it.
-        {
-            let _ = exec::run(
-                "systemctl",
-                &["start", "--no-block", "ados-control.service"],
-            );
-            tracing::info!(
-                unit = "ados-control.service",
-                "native control surface started (--no-block)"
-            );
-        }
-
-        // On a ground station, kick the GS unit set with --no-block. Several are
-        // WantedBy=multi-user.target, which a supervisor restart never pulls in,
-        // and the previous release's supervisor stopped the adopted ones on its
-        // way out; this brings them up now rather than at the next boot.
-        // Best-effort: a unit that is not deployed / not enabled is a no-op.
-        if ctx.profile == "ground_station" {
-            for unit in GROUND_STATION_START_UNITS {
-                let _ = exec::run("systemctl", &["start", "--no-block", unit]);
-            }
-            tracing::info!("ground-station unit set started (--no-block)");
+        // Kick the profile's start set (the unit table's `start_on_install`
+        // rows) with --no-block:
+        // - the native plugin host and the control front are PartOf the
+        //   supervisor, so the restart above cycles them, but a unit left
+        //   inactive before this install (or stopped on its way out by the
+        //   previous release's supervisor, which stopped every unit it had
+        //   adopted) needs the explicit start; the health gate waits for the
+        //   control front;
+        // - on a ground station, the GS unit set: several are
+        //   WantedBy=multi-user.target, which a supervisor restart never pulls
+        //   in, so this brings them up now rather than at the next boot.
+        // Best-effort: a unit that is not deployed / not enabled is a no-op,
+        // and a ConditionPathExists keeps a box whose binary has not landed
+        // inactive rather than restart-looping.
+        for unit in crate::steps::systemd::start_units(&ctx.profile) {
+            let _ = exec::run("systemctl", &["start", "--no-block", unit]);
+            tracing::info!(unit, "unit started (--no-block)");
         }
 
         StepOutcome::Ok
@@ -139,38 +91,22 @@ impl Step for Start {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn gs_start_set_matches_the_enable_set_minus_gadget_setup() {
-        // The start set must not include the supervisor (started above) and
-        // must include the receive + AP + setup units.
-        assert!(!GROUND_STATION_START_UNITS.contains(&"ados-supervisor.service"));
-        assert!(GROUND_STATION_START_UNITS.contains(&"ados-wfb-rx.service"));
-        assert!(GROUND_STATION_START_UNITS.contains(&"ados-hostapd.service"));
-        assert!(GROUND_STATION_START_UNITS.contains(&"ados-setup-captive.service"));
+    fn gs_start_set_has_the_receive_ap_and_pairing_units() {
+        let gs = crate::steps::systemd::start_units("ground_station");
+        // The supervisor is restarted above, never kicked again here.
+        assert!(!gs.contains(&"ados-supervisor.service"));
+        assert!(gs.contains(&"ados-wfb-rx.service"));
+        assert!(gs.contains(&"ados-hostapd.service"));
+        assert!(gs.contains(&"ados-setup-captive.service"));
         // Every REST pairing call reaches this daemon over its socket; a
         // ground station that never starts it cannot pair anything.
-        assert!(GROUND_STATION_START_UNITS.contains(&"ados-mesh-pairing.service"));
-        for unit in GROUND_STATION_START_UNITS {
-            assert!(
-                crate::steps::systemd::GROUND_STATION_ENABLE_UNITS.contains(unit),
-                "{unit} is started but not enabled, so it would not come back after a reboot"
-            );
-        }
-    }
-
-    #[test]
-    fn a_retired_unit_is_never_started() {
-        // The systemd step prunes every retired unit before this step runs.
-        // Starting one here would name a unit file that no longer exists.
-        // Checked against the retired list itself so a new entry cannot
-        // quietly reacquire the defect.
-        for unit in crate::steps::systemd::RETIRED_UNITS {
-            assert!(
-                !GROUND_STATION_START_UNITS.contains(unit),
-                "{unit} is retired and must not be started"
-            );
+        assert!(gs.contains(&"ados-mesh-pairing.service"));
+        // The front and plugin host come back on every profile.
+        for profile in ["drone", "ground_station", "workstation", "compute"] {
+            let set = crate::steps::systemd::start_units(profile);
+            assert!(set.contains(&"ados-control.service"), "{profile}");
+            assert!(set.contains(&"ados-plugin-host.service"), "{profile}");
         }
     }
 }

@@ -304,38 +304,49 @@ fn setup_reset_is_not_guarded() {
     assert!(!is_guarded("POST", "/api/v1/setup/reset"));
 }
 
-/// Every shipped unit's restart verdict follows the link-dropping list, and
-/// every name on that list is a shipped unit.
+/// Every unit's restart verdict is its table `drops_link` value, in the file
+/// name, stem and bare forms the restart route accepts.
 #[test]
-fn each_link_dropping_unit_is_guarded_and_allowed() {
-    let systemd = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd");
-    for name in LINK_DROPPING_UNITS {
-        assert!(
-            systemd.join(format!("{name}.service")).is_file(),
-            "{name} is not a shipped unit"
-        );
+fn guard_verdict_per_unit() {
+    for unit in ados_protocol::units::UNITS {
+        let stem = unit.stem();
+        let bare = stem.strip_prefix("ados-").unwrap();
+        for name in [unit.name, stem, bare] {
+            let path = format!("/api/services/{name}/restart");
+            assert_eq!(is_guarded("POST", &path), unit.drops_link, "{name}");
+        }
     }
-    let mut checked = 0;
-    for entry in std::fs::read_dir(&systemd).unwrap() {
-        let file = entry.unwrap().file_name().into_string().unwrap();
-        let Some(unit) = file.strip_suffix(".service") else {
-            continue;
-        };
-        let expected = LINK_DROPPING_UNITS.contains(&unit) || unit.starts_with("ados-wfb");
-        let path = format!("/api/services/{unit}/restart");
-        assert_eq!(is_guarded("POST", &path), expected, "{unit}");
-        checked += 1;
-    }
-    assert!(checked > 0, "no shipped units found under {systemd:?}");
-    for unit in [
-        "ados-wfb",
-        "ados-wfb-rx",
-        "ados-wfb-relay",
-        "ados-wfb-receiver",
-    ] {
-        assert!(is_guarded("POST", &format!("/api/services/{unit}/restart")));
-    }
-    for unit in ["ados-radio", "ados-groundlink"] {
+    // The exact link-dropping set, so a table edit that drops a link from
+    // the interlock is a visible test change.
+    let mut dropping: Vec<&str> = ados_protocol::units::UNITS
+        .iter()
+        .filter(|u| u.drops_link)
+        .map(|u| u.stem())
+        .collect();
+    dropping.sort_unstable();
+    assert_eq!(
+        dropping,
+        [
+            "ados-batman",
+            "ados-cloud",
+            "ados-crsf",
+            "ados-dnsmasq-gs",
+            "ados-hostapd",
+            "ados-input",
+            "ados-mavlink",
+            "ados-mediamtx-gs",
+            "ados-pic",
+            "ados-supervisor",
+            "ados-swarmbus",
+            "ados-uplink-router",
+            "ados-video",
+            "ados-wfb",
+            "ados-wfb-receiver",
+            "ados-wfb-relay",
+            "ados-wfb-rx",
+        ]
+    );
+    for unit in ["ados-radio", "ados-groundlink", "ados-wfbx"] {
         assert!(!is_guarded(
             "POST",
             &format!("/api/services/{unit}/restart")

@@ -60,24 +60,13 @@ use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 
 /// The set of systemd units that MUST be enabled for a profile's install to be
-/// complete (`expected_profile_units`). Drone needs only the supervisor (its
-/// children are started dynamically). Ground station needs the supervisor plus
-/// the receive + AP + setup units that the systemd step enable-links. Kept a
-/// strict subset of what gets enabled so completeness never demands a unit the
-/// installer does not create.
-pub fn expected_profile_units(profile: &str) -> &'static [&'static str] {
-    match profile {
-        "ground_station" => &[
-            "ados-supervisor.service",
-            "ados-wfb-rx.service",
-            "ados-mesh-pairing.service",
-            "ados-mediamtx-gs.service",
-            "ados-hostapd.service",
-            "ados-dnsmasq-gs.service",
-            "ados-setup-captive.service",
-        ],
-        _ => &["ados-supervisor.service"],
-    }
+/// complete: the unit table's `health_check` rows for the profile. Drone needs
+/// only the supervisor (its children are started dynamically). Ground station
+/// needs the supervisor plus the receive + AP + setup units that the systemd
+/// step enable-links. Every one is enabled by that step, so completeness never
+/// demands a unit the installer does not create.
+pub fn expected_profile_units(profile: &str) -> Vec<&'static str> {
+    crate::steps::systemd::health_units(profile)
 }
 
 /// True when `systemctl is-enabled <unit>` reports a state that means "will be
