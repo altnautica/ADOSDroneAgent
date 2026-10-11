@@ -6,17 +6,233 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.103.0] - 2026-10-11
+
+One day and 56 commits after 0.102.6. The range is a review pass over the
+whole agent: safety interlocks, the native HTTP edge, the radio and network
+services, plugin trust, video, and the installer. Most changes fix a surface
+that showed one thing while the node did another, and the agent now reports
+what it measured instead of what it was configured to do.
+
+Three threads run through it. First, the vehicle's armed state now guards
+every route that can drop the link or restart a service: a setup apply, a
+config key that restarts the radio, a plugin install or a network change
+answers `409` while armed unless the caller asks to force it, and the
+installer refuses an armed upgrade without `--force-armed`. Second, the
+agent addresses the flight controller by the system id it actually heard,
+holds an optional MAVLink signing key of its own, and tells the operator when
+the autopilot will reject its unsigned traffic. Third, the agent got lighter:
+three Python services are gone, ground video and `/whep` are served natively,
+and edge installs fetch every binary from one signed manifest.
+
+Large source files were split into smaller modules across the daemons, the
+Python tree and the dashboard, with no change in behaviour, and a size check
+keeps them that way.
+
 ### Added
 
-- Hero leases on `/api/video/profile`: `POST {"profile":"hero","holder":"<id>","lease_s":N}`
-  holds a drone on the hero profile for 5-120 s (default 30) and renews on
-  repeat; `{"profile":"thumbnail","holder":"<id>"}` or
+- **Armed interlock.** Setup apply, link-affecting config keys, the units that
+  carry the radio or uplink, plugin lifecycle routes and network routes answer
+  `409 E_ARMED` while the vehicle is armed. Send `"force": true` in the body or
+  `?force=1` to proceed; the dashboard offers a confirm-and-force retry.
+- **Hero leases on `/api/video/profile`.** `POST
+  {"profile":"hero","holder":"<id>","lease_s":N}` holds a drone on the hero
+  profile for 5-120 s (default 30) and renews on repeat;
+  `{"profile":"thumbnail","holder":"<id>"}` or
   `DELETE /api/video/profile?holder=<id>` releases it, and an expired lease
   reverts the encoder with no further request. A plain set (no holder) still
-  moves the base profile. `GET /api/video/profile` returns the state, and every
-  reply now carries `base_profile` and `leases`. While a vision engine is
-  attached to the frame tap the drone holds an internal `vision` lease, so the
-  tap never reads a thumbnail-rate stream.
+  moves the base profile. Every reply carries `base_profile` and `leases`.
+  While a vision engine reads the frame tap the drone holds an internal
+  `vision` lease, so vision never sees a thumbnail-rate stream.
+- **Flight controller identity.** Commands, parameters, camera control and
+  signing address the system id the router latched from the autopilot, and
+  `MAV_SYSID` is accepted. An optional fleet id reconciler (off by default)
+  reports its outcome in a status sidecar. Land picks the right command for
+  the vehicle type.
+- **Agent-held MAVLink signing.** Enrolling the flight controller with
+  `agent_holds_key` stores the key on the node (mode 0600) so the agent signs
+  its own frames, with persisted timestamps. Off by default.
+- **New status blocks.** Full status carries the flight controller identity,
+  the proxy listening posture per edge, the unsigned-command risk, the
+  injector arbitration mode and the agent signing state.
+- **Plugin failure reasons and locales.** Plugin list and detail carry
+  `failure_reason`, cleared by a successful enable. Plugin locale bundles are
+  served at `/api/plugins/{id}/locales/{lang}`.
+- **`ados plugin logs --service`** picks one plugin unit, and the command
+  prints a hint when the journal is not readable by the caller.
+- **Profile redetect.** A route reruns profile detection and the detection
+  result is kept as a snapshot.
+- **Model downloads as jobs.** A model download returns `202` with a
+  `status_url` to poll.
+- **Recording segments.** Recordings are written as segments, and the ground
+  station recording result lists `segments` and `interrupted_count`.
+- **Video passthrough and mock target.** A camera that already emits H.264 can
+  be passed through without re-encoding, and a mock target is available for
+  vision testing.
+- **Telemetry subscribe in the Python SDK**, and a per-stream telemetry
+  capability for extensions.
+- **Reference exporters.** The CLI, routes, config keys, capabilities,
+  manifest fields, boards, systemd units, installer flags and dashboard routes
+  are exported as reference tables for the documentation, with a drift check.
+- **Display render examples.** The OLED frame builder lives in the display
+  library, and render examples cover the receiver mesh page and the role
+  picker with synthetic data.
+
+### Changed
+
+- **Native `/whep`.** WebRTC playback is served by the native control service;
+  the Python WHEP proxy is gone.
+- **Native ground video.** `ados-groundlink --ground-video` serves ground
+  station video with a native UDP/RTP source and a stall watchdog.
+- **Edge installs.** CI publishes one cached release build as `rev-<sha>` and
+  a signed `prebuilt-main/manifest.json`. An edge install resolves every binary
+  from that manifest and refuses bytes that do not match its sha256 and size.
+- **One unit table** drives the supervisor registry, the installer unit lists,
+  the restart allowlist and the armed interlock.
+- **Config writes** are validated against the full model in the native writer,
+  with enums and cross-field rules; the schema covers every native key. A
+  drone refuses `mavlink.injector_arbitration`, which needs a ground station.
+- **Services skipped on an unmet start condition** (for example the Hailo unit
+  on a board without the accelerator) read `idle` with reason
+  `condition_unmet` instead of inactive.
+- **Mesh capability** is derived live from the attached radios.
+- **Uplinks.** Cellular and wired uplinks are resolved by driver, modem bearer
+  liveness and static IPv4 are handled, failover is immediate, and a route
+  apply is checked and re-applied until it lands (`route_applied` in uplink
+  state).
+- **Radio.** TX power is bounded by the ceiling and reports the measured
+  value; the hop channel survives a respawn; drone and ground share one
+  regulatory posture; revoked relays are excluded and the mesh key is rotated.
+- **Router.** A per-client framer forwards unknown messages, replies addressed
+  to one client go to that client, the listener retries its bind, the serial
+  port to the flight controller is exclusive, and WebSocket messages are size
+  capped. The banner request repeats until the autopilot is identified.
+- **Video.** The software encoder fallback is no longer permanent, a failing
+  encoder restarts alone, SEI is injected natively, a lost source recovers in
+  about 2 s, and mediamtx keeps arrival timestamps so readers get the first
+  frames at once.
+- **Status** samples CPU in the background and caches the slow blocks.
+- **Front panel.** The touch reader keeps retrying, OLED status reads support
+  contrast and re-init, and button pins come from the board file.
+- **Plugin units and log names** are read from the host, driver kinds map to
+  catalog capabilities, and the endpoint type defaults to websocket.
+- **Dashboard.** Vision backends come from the schema, pairing and flight
+  controller tiles were added, polling pauses when the tab is hidden, and every
+  visible string goes through translation keys.
+- **Installer.** The config header links the configuration page, template keys
+  are trimmed, retired repository keys are pruned, the migration step waits for
+  its lock, the closing summary prints each failed step's reason, and a
+  rollback restores the previous wheel and config. A non ground station install
+  removes the ground station avahi service file. The terminal UI update follows
+  the install channel.
+- **`ados update`** checks the armed state first; WFB apply goes through the
+  native routes.
+
+### Fixed
+
+- **Cloud fields** that the node could not read are reported as absent instead
+  of with placeholder values.
+- **Detections** report `available: false` when no vision engine runs.
+- **A LAN pair** is honoured at once, and the dashboard pairing tile reads
+  paired for a LAN-paired node in local cloud mode.
+- **Cloud relays** restart when pairing changes, and the pilot-in-command
+  state is refreshed every watchdog tick.
+- **Profile set** keeps the other config keys; the setup access point retries
+  until it comes up.
+- **MAVLink 2 messages** with extension fields are accepted by the decoder.
+- **Cockpit flight timer** starts only on an observed arming edge, and the Pair
+  screen reports invite read failures.
+- **Log store** keeps disk headroom.
+- **Supervisor restart** no longer stops the services systemd is already
+  restarting with it, so each service starts once and a service left off is not
+  reported as failed.
+- **CRSF lane** stops when it is turned off instead of reloading and staying
+  resident.
+- **Parameter cache** is cleared when a different flight controller connects,
+  and a complete download drops names the controller no longer reports, so a
+  cache left by a previous controller no longer inflates the count or marks a
+  partial download complete.
+- **Terminal dashboard** counts services from the full status, so the Services
+  panel and the overall health reflect the running units.
+- **Dashboard security settings** read the pairing state: a paired node shows
+  its key as set, and a configured second key is labelled as such.
+- **Dashboard logs** say when the log store is off and how to turn it on,
+  instead of an empty list with a buffer hint.
+- **Peripheral matching** can check a sysfs attribute of the matched device
+  node (`match.sysfs`). The SPI LCD seed matches the panel's framebuffer driver
+  and the UVC camera seed matches the `uvcvideo` driver, so a console
+  framebuffer or a codec node no longer reads as a connected device.
+- **Idle exits are final.** `ados-video` on a ground station (or with video
+  off) and `ados-setup-captive` once setup is done exit cleanly and stay down,
+  instead of being restarted every 3 s.
+- **One mDNS record per node.** A ground station no longer installs a second
+  static `_ados._tcp` record; the control service's advert covers every
+  interface, the access point included, and an upgrade removes the old file.
+- **HDMI cockpit on a ground station** reads the flight controller link from
+  the node status, so flight skills are available when the link is up.
+
+### Security
+
+- **Config reload fails closed.** Security settings reload live, and an
+  unreadable config refuses off-box mutations with `E_CONFIG_UNREADABLE`.
+- **Node-wide PIN budget.** Failed dashboard PIN attempts count against the
+  whole node, keyed by IPv6 and tunnel peers too; the lockout reads
+  `E_PIN_LOCKED` with `scope: "node"` and `retry_after_s`.
+- **Upload digests.** Large uploads are signed over `X-Content-SHA256` and the
+  streamed bytes must match it; one archive is admitted at a time (`429`
+  otherwise) and metadata is capped.
+- **WebSocket tickets** are available to an unpaired node's PIN session; the
+  same-origin setup wizard shortcut works only while unpaired.
+- **Plugin trust.** Board identity matches by HAL profile, SoC or wildcard;
+  first-party keys are pinned; revocation works by signer, archive hash or
+  release and is merged daily; revocation and auto-update wait until disarmed;
+  rollback and crash restore are guarded; plugin units cannot open the flight
+  controller serial port; installs are checked for tampering on reconcile and
+  enable; the plugin socket checks peer credentials; manifests are checked
+  strictly.
+- **Swarm setpoints** are gated on pilot-in-command, and swarm rekey clears
+  stale rows.
+- **Phone receiver invites** refuse low-order keys.
+- **The `ados-api` sandbox** is narrower, the log store authenticates before
+  rate limiting, support bundles are redacted, and the pairing code is no
+  longer written to the log.
+
+### Removed
+
+- **`ados-discovery`, `ados-health` and `ados-wifi-client`** units and the
+  Python code only they reached, plus unused dependencies.
+- **The Python ground media package** and the Python WHEP proxy.
+- **The captive portal token route.**
+- **Dead MQTT config keys** and retired OLED keys (now rejected).
+
+### Notes
+
+For Mission Control and other API clients:
+
+- **Guarded routes** may answer `409` with
+  `{"error":"E_ARMED","message":"Vehicle is armed","override":"force"}`.
+  Retry with `"force": true` in the body or `?force=1` after the operator
+  confirms.
+- **`E_CONFIG_UNREADABLE`** is returned for off-box mutations while
+  `config.yaml` cannot be read.
+- **`E_PIN_LOCKED`** now carries `scope: "node"`: the lockout applies to every
+  client of that node.
+- **Uploads** should send `X-Content-SHA256` (lowercase hex). A mismatch
+  answers `401`; a busy upload slot answers `429`.
+- **New wire fields:** `fc_system_id` (status and ground station slots),
+  `mavlink_proxy_posture` with `tcp_listening`, `udp_listening` and
+  `ws_listening`, `agent_commands_unsigned_rejected_risk`,
+  `injector_arbitration`, `agent_signing`, `agent_holds_key` on signing
+  enrol, `route_applied` in uplink state, `segments` and `interrupted_count`
+  on recordings, `failure_reason` on plugins, `status_url` on a `202` model
+  download, `available` on detections, `reason: "condition_unmet"` on service
+  rows, and `base_profile` and `leases` on the video profile.
+- **Removed units:** `ados-discovery`, `ados-health` and `ados-wifi-client`
+  no longer exist; an upgrade drops them.
+- **`/whep`** is served natively at the same path.
+- **Edge installs** read `prebuilt-main/manifest.json` and fetch assets from
+  the `rev-<sha>` release it names.
+- **Upgrading while armed** needs `--force-armed` on the installer.
 
 ## [0.102.6] - 2026-10-10
 
