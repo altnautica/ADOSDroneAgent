@@ -25,30 +25,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "ados-agent"
-version = "0.102.6"
-dependencies = [
- "ados-cloud",
- "ados-config-tunnel",
- "ados-control",
- "ados-crsf",
- "ados-display",
- "ados-gpio",
- "ados-groundlink",
- "ados-hal-probe",
- "ados-hid",
- "ados-logd",
- "ados-mavlink-router",
- "ados-net",
- "ados-plugin-host",
- "ados-radio",
- "ados-supervisor",
- "ados-swarmbus",
- "ados-video",
- "mimalloc",
-]
-
-[[package]]
 name = "ados-capabilities-codegen"
 version = "0.102.6"
 dependencies = [
