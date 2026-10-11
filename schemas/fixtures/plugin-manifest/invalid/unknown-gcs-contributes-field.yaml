@@ -1,0 +1,10 @@
+id: com.example.corpus
+version: 1.0.0
+name: Corpus Example
+risk: low
+compatibility:
+  ados_version: ">=0.1.0,<99.0.0"
+gcs:
+  entrypoint: gcs/index.js
+  contributes:
+    widgets: []

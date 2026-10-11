@@ -433,12 +433,42 @@ struct Connection<H: HostServices> {
     shared_topics: Arc<SharedTopics>,
 }
 
+/// Whether a peer may use a plugin's socket: root, this daemon's own user, or
+/// the plugin's own account. The token alone is not enough, because every
+/// plugin user shares the socket group. A plugin without a system account
+/// (an unsandboxed host such as macOS, or a dev run) skips the check; so
+/// does a peer whose credentials cannot be read.
+fn peer_uid_permitted(peer: Option<u32>, plugin_uid: Option<u32>, own_uid: u32) -> bool {
+    if cfg!(target_os = "macos") {
+        return true;
+    }
+    let (Some(peer), Some(plugin_uid)) = (peer, plugin_uid) else {
+        return true;
+    };
+    peer == 0 || peer == own_uid || peer == plugin_uid
+}
+
 impl<H: HostServices> Connection<H> {
     /// Run the `hello` handshake: read one bounded frame, verify the token
     /// against this socket's plugin, answer `ready`. `Ok(None)` when the peer
     /// closed or was refused (the refusal was already sent).
     async fn handshake(&self, stream: UnixStream) -> Result<Option<Handshake>, ServerError> {
+        let peer_uid = stream.peer_cred().ok().map(|c| c.uid());
         let (mut read_half, mut write_half) = stream.into_split();
+        if !peer_uid_permitted(
+            peer_uid,
+            crate::plugin_account::plugin_uid(&self.plugin_id),
+            nix::unistd::geteuid().as_raw(),
+        ) {
+            tracing::warn!(plugin_id = %self.plugin_id, peer_uid = ?peer_uid, "plugin socket peer uid refused");
+            send_error(
+                &mut write_half,
+                "-",
+                "peer uid is not this plugin's account",
+            )
+            .await?;
+            return Ok(None);
+        }
         let Some(env) = read_envelope_capped(&mut read_half, HELLO_MAX_FRAME).await? else {
             return Ok(None); // clean EOF before any frame
         };
@@ -2318,6 +2348,19 @@ mod tests {
     use super::*;
     use crate::host::NoopHost;
     use std::time::Duration;
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn wrong_uid_refused() {
+        // Another plugin's account, holding a stolen token, is refused.
+        assert!(!peer_uid_permitted(Some(61002), Some(61001), 1000));
+        // The plugin's own account, root and the daemon's own user pass.
+        assert!(peer_uid_permitted(Some(61001), Some(61001), 1000));
+        assert!(peer_uid_permitted(Some(0), Some(61001), 1000));
+        assert!(peer_uid_permitted(Some(1000), Some(61001), 1000));
+        // No plugin account (unsandboxed host): the token alone gates.
+        assert!(peer_uid_permitted(Some(61002), None, 1000));
+    }
 
     #[tokio::test]
     async fn stop_plugin_removes_the_socket_file() {

@@ -1,0 +1,18 @@
+id: com.example.corpus
+version: 1.0.0
+name: Corpus Example
+risk: low
+compatibility:
+  ados_version: ">=0.1.0,<99.0.0"
+agent:
+  entrypoint: bin:tool
+  runtime: rust
+  isolation: subprocess
+  binaries:
+    tool:
+      aarch64-linux: bin/tool
+  contributes:
+    services:
+      - name: server
+        command: bin:tool
+        profiles: []

@@ -1,0 +1,40 @@
+id: com.example.corpus
+version: 1.0.0
+name: Corpus Example
+risk: low
+compatibility:
+  ados_version: ">=0.1.0,<99.0.0"
+agent:
+  entrypoint: plugin:Corpus
+  isolation: subprocess
+author: Example
+license: MIT
+homepage: https://example.com
+description: Short.
+description_long: Longer text.
+documentation_url: https://example.com/docs
+features: [one, two]
+telemetry_fields: [speed]
+hardware_requirements:
+  cameras: any
+  fc_firmware: ArduPilot 4.5
+  boards: [cm4]
+  optional: [gps]
+resource_impact:
+  cpu_percent_peak: 400
+  ram_mb: 64
+  pids: 4
+  startup_time_seconds: 1.5
+  output_rate_hz: 30
+required_fc_parameters:
+  ardupilot:
+    - param: FLOW_TYPE
+      value: 5
+      note: Enable flow.
+  px4:
+    - param: SENS_FLOW_ROT
+screenshots:
+  - url: https://example.com/shot.png
+    caption: Main view
+extra:
+  anything: [1, 2]

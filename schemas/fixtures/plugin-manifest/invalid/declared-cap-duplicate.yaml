@@ -1,0 +1,14 @@
+id: com.example.corpus
+version: 1.0.0
+name: Corpus Example
+risk: low
+compatibility:
+  ados_version: ">=0.1.0,<99.0.0"
+agent:
+  entrypoint: plugin:Corpus
+  isolation: subprocess
+  declared_capabilities:
+    - id: plugin.corpus.read
+      risk: low
+    - id: plugin.corpus.read
+      risk: high

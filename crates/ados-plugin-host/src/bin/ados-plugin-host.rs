@@ -399,12 +399,13 @@ async fn wire(paths: &Paths, vehicle_armed: Arc<VehicleArmedProbe>) -> WiredDaem
             .with_token_mint(mint.clone()),
     );
 
-    let reconciler = Arc::new(PluginReconciler::new(
-        server.clone(),
-        mint,
-        state_path,
-        install_dir,
-    ));
+    let reconciler = Arc::new(
+        PluginReconciler::new(server.clone(), mint, state_path, install_dir).with_unit_control(
+            Arc::new(DaemonUnits(paths.clone())),
+            paths.run_dir.join("state.sock"),
+            paths.run_dir.clone(),
+        ),
+    );
 
     // The on-box control socket: the native `ados-control` plugin routes reach
     // this daemon through it — a GCS skill toggle / per-drone config write for a
@@ -476,6 +477,24 @@ fn production_supervisor(paths: &Paths) -> PluginSupervisor {
         .with_profile(ados_config::node_profile())
         .with_board_tier(board_tier)
         .with_accounts(ados_plugin_host::plugin_account::local_accounts())
+}
+
+/// The reconciler's unit side, backed by a fresh lifecycle controller per
+/// call so it acts on the state on disk now.
+struct DaemonUnits(Paths);
+
+impl ados_plugin_host::reconcile::UnitControl for DaemonUnits {
+    fn refresh_units(&self) {
+        let mut supervisor = production_supervisor(&self.0);
+        if let Err(e) = supervisor.discover() {
+            tracing::warn!(error = %e, "plugin discovery failed before a unit refresh");
+        }
+        supervisor.refresh_all_units();
+    }
+
+    fn stop_plugin_units(&self, plugin_id: &str) {
+        production_supervisor(&self.0).stop_tampered(plugin_id);
+    }
 }
 
 /// `guard-load`: ensure the plugin groups exist, reload the guard, and exit

@@ -1,0 +1,71 @@
+schema_version: 3
+id: com.example.corpus
+version: 1.0.0
+name: Corpus Example
+risk: low
+compatibility:
+  ados_version: ">=0.1.0,<99.0.0"
+agent:
+  entrypoint: bin:corpus
+  runtime: rust
+  isolation: subprocess
+  permissions:
+    - mavlink.read
+    - id: network.listen
+      required: false
+      degraded_behavior: no local listener
+    - network.outbound
+    - process.spawn
+  resources:
+    class: standard
+    max_ram_mb: 256
+    max_cpu_percent: 50
+    max_pids: 32
+  subprocess_spawn: [helper]
+  per_drone_config: true
+  http: true
+  target_profiles: [drone, compute]
+  contains_vendor_binary: true
+  vendor_attribution:
+    - name: example-upstream
+      license: MIT
+      source_url: https://example.com/source
+  test_fixtures:
+    hover: fixtures/hover.yaml
+  mavlink_components:
+    - component_id: 100
+      component_kind: camera
+      sub_id: 1
+  binaries:
+    corpus:
+      aarch64-linux: bin/aarch64/corpus
+      x86_64-linux: bin/x86_64/corpus
+  payloads:
+    - path: models/weights.bin
+      source: https://example.com/weights.bin
+      sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      size_bytes: 1024
+      profiles: [compute]
+      arch_os: aarch64-linux
+  declared_capabilities:
+    - id: plugin.corpus.read
+      risk: low
+      description: Read the shared map.
+  contributes:
+    services:
+      - name: server
+        command: bin:corpus --serve
+        ready_check: http://127.0.0.1:8090/health
+        restart: always
+        profiles: [compute]
+        listen_ports: [8090]
+      - legacy-name
+    shared_topics:
+      - topic: plugin.corpus.map
+        subscribe_capability: plugin.corpus.read
+    tools:
+      - name: corpus.ping
+    vision:
+      models:
+        - id: tiny
+          runtime: onnx

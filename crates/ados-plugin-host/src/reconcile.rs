@@ -53,7 +53,21 @@ use crate::host::HostServices;
 use crate::manifest::{PluginManifest, SharedTopicDecl};
 use crate::server::PluginIpcServer;
 use crate::state::{self, PluginStatus};
+use crate::supervisor::{InstallVerifier, TAMPERED_REASON};
 use crate::token_secret::TokenMint;
+
+/// The unit operations the reconciler cannot do itself: it serves sockets
+/// and tokens, while the service manager runs the units. The daemon backs
+/// this with its lifecycle controller.
+pub trait UnitControl: Send + Sync {
+    /// Re-render every installed plugin's units (the FC port mask moved).
+    fn refresh_units(&self);
+    /// Stop every unit of a plugin that failed its tamper check.
+    fn stop_plugin_units(&self, plugin_id: &str);
+}
+
+/// How long one read of the router state socket may take inside a poll.
+const FC_STATE_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// How often the state file is re-read when nothing pokes the control socket.
 ///
@@ -101,6 +115,11 @@ pub struct PluginReconciler<H: HostServices> {
     /// manifest mtime it was read at, so an unchanged manifest is not re-parsed
     /// every poll.
     manifests: Mutex<BTreeMap<String, (SystemTime, ManifestFacts)>>,
+    /// The single tamper check, cached by the stat stamp of the files it reads.
+    verifier: InstallVerifier,
+    /// The unit side, the router state socket and the run dir the live FC
+    /// device is recorded in. `None` in a host that runs no units.
+    units: Option<(Arc<dyn UnitControl>, PathBuf, PathBuf)>,
 }
 
 /// The parts of a manifest the reconciler acts on.
@@ -127,6 +146,55 @@ impl<H: HostServices> PluginReconciler<H> {
             served: Mutex::new(BTreeMap::new()),
             minted: Mutex::new(BTreeMap::new()),
             manifests: Mutex::new(BTreeMap::new()),
+            verifier: InstallVerifier::default(),
+            units: None,
+        }
+    }
+
+    /// Give the reconciler the unit side: it stops a tampered plugin's units,
+    /// and re-renders every unit when the router's live FC device (read from
+    /// `state_socket`) moves, recording it under `run_dir`.
+    pub fn with_unit_control(
+        mut self,
+        units: Arc<dyn UnitControl>,
+        state_socket: PathBuf,
+        run_dir: PathBuf,
+    ) -> Self {
+        self.units = Some((units, state_socket, run_dir));
+        self
+    }
+
+    /// Record the router's live FC device and re-render the plugin units when
+    /// it moved. A missing socket or a null device (a network source, or a
+    /// link down between reconnects) keeps the last recorded device masked.
+    pub async fn watch_fc_device(&self) {
+        let Some((units, socket, run_dir)) = &self.units else {
+            return;
+        };
+        let Some((_, snapshot)) =
+            ados_protocol::armed::read_state_snapshot(socket, FC_STATE_READ_TIMEOUT).await
+        else {
+            return;
+        };
+        let Some(device) = snapshot.get("fc_device").and_then(|v| v.as_str()) else {
+            return;
+        };
+        if !device.starts_with("/dev/") {
+            return;
+        }
+        match crate::systemd::record_live_fc_device(run_dir, device) {
+            Ok(false) => {}
+            Ok(true) => {
+                tracing::info!(
+                    fc_device = device,
+                    "fc device moved; re-rendering plugin units"
+                );
+                let units = units.clone();
+                if let Err(e) = tokio::task::spawn_blocking(move || units.refresh_units()).await {
+                    tracing::warn!(error = %e, "plugin unit refresh task failed");
+                }
+            }
+            Err(e) => tracing::warn!(error = %e, "could not record the live fc device"),
         }
     }
 
@@ -163,6 +231,7 @@ impl<H: HostServices> PluginReconciler<H> {
         // socket, and a disabled one must not have a bound socket or a live
         // token.
         let mut wanted: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut tampered: Vec<(String, String)> = Vec::new();
         for install in &installs {
             if !matches!(
                 install.status,
@@ -173,7 +242,15 @@ impl<H: HostServices> PluginReconciler<H> {
             if !self.is_subprocess_agent(&install.plugin_id) {
                 continue;
             }
+            if let Err(detail) = self.verifier.verify(&self.install_dir, install) {
+                tampered.push((install.plugin_id.clone(), detail));
+                continue;
+            }
             wanted.insert(install.plugin_id.clone(), state::granted_caps(install));
+        }
+        self.verifier.retain(|id| wanted.contains_key(id));
+        if !tampered.is_empty() {
+            self.mark_tampered(&tampered);
         }
         if let Ok(mut cache) = self.manifests.lock() {
             cache.retain(|id, _| wanted.contains_key(id));
@@ -384,6 +461,41 @@ impl<H: HostServices> PluginReconciler<H> {
             self.server.stop_plugin(&id);
         }
     }
+
+    /// Record each tampered plugin as `Failed` with the tamper reason and stop
+    /// its units. The socket and token go in the same pass, because a failed
+    /// plugin is no longer wanted.
+    fn mark_tampered(&self, tampered: &[(String, String)]) {
+        for (id, detail) in tampered {
+            tracing::error!(plugin_id = %id, detail = %detail, "plugin_tampered; stopped serving it");
+        }
+        match state::StateLock::acquire(Some(&self.state_path)) {
+            Ok(_lock) => match state::load_state_checked(Some(&self.state_path)) {
+                Ok(mut installs) => {
+                    for (id, detail) in tampered {
+                        if let Some(install) = state::find_install_mut(&mut installs, id) {
+                            install.status = PluginStatus::Failed;
+                            install.failure_reason = Some(format!("{TAMPERED_REASON}: {detail}"));
+                        }
+                    }
+                    if let Err(e) = state::save_state(&installs, Some(&self.state_path)) {
+                        tracing::warn!(error = %e, "could not record the tampered plugins");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "plugin state unreadable; tamper not recorded")
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "plugin state lock unavailable; tamper not recorded")
+            }
+        }
+        if let Some((units, _, _)) = &self.units {
+            for (id, _) in tampered {
+                units.stop_plugin_units(id);
+            }
+        }
+    }
 }
 
 impl<H: HostServices> crate::control::LifecycleControl for PluginReconciler<H> {
@@ -478,6 +590,7 @@ pub fn spawn_loops<H: HostServices + 'static>(
         loop {
             ticker.tick().await;
             let report = poll_target.reconcile();
+            poll_target.watch_fc_device().await;
             if report.started > 0 || report.stopped > 0 {
                 tracing::info!(
                     started = report.started,
@@ -534,5 +647,110 @@ mod tests {
         // inert for minutes, so this is pinned rather than left to taste.
         assert!(POLL_INTERVAL >= Duration::from_secs(2));
         assert!(POLL_INTERVAL <= Duration::from_secs(5));
+    }
+
+    struct RecordingUnits(Mutex<Vec<String>>);
+
+    impl UnitControl for RecordingUnits {
+        fn refresh_units(&self) {}
+        fn stop_plugin_units(&self, plugin_id: &str) {
+            if let Ok(mut stopped) = self.0.lock() {
+                stopped.push(plugin_id.to_string());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn tampered_binary_stops_plugin() {
+        use sha2::{Digest, Sha256};
+        const ID: &str = "com.example.tamper";
+        let dir = tempfile::tempdir().unwrap();
+        let socket_dir = dir.path().join("sockets");
+        let state_path = dir.path().join("state/plugin-state.json");
+        let install_dir = dir.path().join("plugins");
+        std::fs::create_dir_all(&socket_dir).unwrap();
+        let plugin_dir = install_dir.join(ID);
+        std::fs::create_dir_all(plugin_dir.join("bin")).unwrap();
+        let manifest = format!(
+            "id: {ID}\nversion: 1.0.0\nrisk: medium\ncompatibility:\n  ados_version: \
+             \">=0.1.0,<99.0.0\"\nagent:\n  entrypoint: plugin:Tamper\n  isolation: subprocess\n"
+        );
+        std::fs::write(plugin_dir.join("manifest.yaml"), &manifest).unwrap();
+        std::fs::write(plugin_dir.join("bin/tool"), b"original").unwrap();
+        let hex = |b: &[u8]| hex::encode(Sha256::digest(b));
+        let digests: BTreeMap<String, String> = [
+            ("bin/tool".to_string(), hex(b"original")),
+            ("manifest.yaml".to_string(), hex(manifest.as_bytes())),
+        ]
+        .into();
+        crate::attestation::Attestation::new(None, &digests, &[])
+            .write_to(&plugin_dir)
+            .unwrap();
+        let install = state::PluginInstall {
+            plugin_id: ID.to_string(),
+            version: "1.0.0".to_string(),
+            source: state::PluginSource::LocalFile,
+            source_uri: None,
+            signer_id: None,
+            manifest_hash: hex(manifest.as_bytes()),
+            status: PluginStatus::Running,
+            installed_at: 1,
+            enabled_at: Some(1),
+            failure_reason: None,
+            permissions: BTreeMap::new(),
+            auto_update: false,
+            pinned_version: None,
+            last_update_check_at: None,
+            last_update_attempt: None,
+            reenable_pending: false,
+            model_status: None,
+            service_status: None,
+            revocation_pending: false,
+            archive_sha256: None,
+        };
+        state::save_state(&[install], Some(&state_path)).unwrap();
+
+        let issuer =
+            Arc::new(crate::shared_issuer(&dir.path().join("secrets/token-secret")).unwrap());
+        let mint = Arc::new(TokenMint::new(
+            issuer.clone(),
+            state_path.clone(),
+            socket_dir.clone(),
+            dir.path().join("plugin-data"),
+            String::new(),
+        ));
+        let server = Arc::new(
+            PluginIpcServer::new(
+                &socket_dir,
+                issuer,
+                Arc::new(crate::EventBus::new()),
+                Arc::new(crate::NoopHost),
+            )
+            .with_token_mint(mint.clone()),
+        );
+        let units = Arc::new(RecordingUnits(Mutex::new(Vec::new())));
+        let reconciler = PluginReconciler::new(server, mint, state_path.clone(), install_dir)
+            .with_unit_control(
+                units.clone(),
+                dir.path().join("state.sock"),
+                dir.path().into(),
+            );
+
+        assert_eq!(reconciler.reconcile().serving, 1);
+        // Same size, different bytes: the digest decides, not the size.
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(plugin_dir.join("bin/tool"), b"modified").unwrap();
+        let report = reconciler.reconcile();
+        assert_eq!(report.stopped, 1);
+        assert_eq!(report.serving, 0);
+        let installs = state::load_state_checked(Some(&state_path)).unwrap();
+        assert_eq!(installs[0].status, PluginStatus::Failed);
+        assert!(installs[0]
+            .failure_reason
+            .as_deref()
+            .is_some_and(|r| r.starts_with(TAMPERED_REASON)));
+        assert_eq!(units.0.lock().map(|s| s.clone()).unwrap_or_default(), [ID]);
+        // A failed plugin is not wanted, so the next pass changes nothing.
+        assert_eq!(reconciler.reconcile(), ReconcileReport::default());
     }
 }

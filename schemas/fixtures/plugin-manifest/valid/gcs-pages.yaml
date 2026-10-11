@@ -1,0 +1,24 @@
+id: com.example.corpus
+version: 1.0.0
+name: Corpus Example
+risk: low
+compatibility:
+  ados_version: ">=0.1.0,<99.0.0"
+gcs:
+  entrypoint: gcs/index.js
+  isolation: iframe
+  permissions: [ui.panel]
+  locales: [en]
+  contributes:
+    agent_pages:
+      - id: overview
+        title: Overview
+        profile: [drone]
+      - id: overview-setup
+        title: Setup
+        setup_for: overview
+    node_surfaces:
+      - id: status-card
+        title: Status
+        profile: [ground_station]
+        group: status

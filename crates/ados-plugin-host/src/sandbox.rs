@@ -332,10 +332,11 @@ pub fn sandbox_directives(
     lines
 }
 
-/// The line that masks the flight controller's configured serial port from a
+/// The line that masks the flight controller's serial port from a
 /// UART-granted plugin, so the grant cannot write raw MAVLink to the FC past
-/// the `mavlink.write` and pose gates. Empty without the grant or when no
-/// `/dev` port is configured.
+/// the `mavlink.write` and pose gates. The port is the router's live device,
+/// else the configured one (see [`crate::systemd::fc_serial_port_in`]). Empty
+/// without the grant or without a `/dev` port.
 pub fn fc_port_exclusion(granted: &BTreeSet<String>, fc_serial_port: Option<&str>) -> Vec<String> {
     match fc_serial_port {
         Some(port)

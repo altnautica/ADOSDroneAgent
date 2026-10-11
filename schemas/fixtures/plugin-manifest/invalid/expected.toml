@@ -1,0 +1,240 @@
+# The rule each invalid fixture breaks. Both the Rust install parser and the
+# schema-source model must refuse every fixture listed here, and every
+# fixture in this directory must be listed.
+
+[agent-page-bad-id]
+rule = "agent page id pattern"
+
+[agent-page-duplicate]
+rule = "agent page ids are unique"
+
+[agent-page-setup-missing]
+rule = "setup_for names a page"
+
+[agent-page-setup-self]
+rule = "setup_for is another page"
+
+[agent-page-title-too-long]
+rule = "agent page title is 1-80 characters"
+
+[agent-page-unknown-field]
+rule = "no unknown agent page field"
+
+[attribution-without-flag]
+rule = "attribution needs contains_vendor_binary"
+
+[attribution-without-license]
+rule = "attribution carries a license"
+
+[binaries-bad-arch]
+rule = "binaries keys are <arch>-<os>"
+
+[binaries-bad-name]
+rule = "binaries names match the bin-name pattern"
+
+[binaries-path-traversal]
+rule = "binaries paths are relative"
+
+[declared-cap-bad-risk]
+rule = "declared capability risk is a known level"
+
+[declared-cap-duplicate]
+rule = "declared capability ids are unique"
+
+[declared-cap-wrong-namespace]
+rule = "declared capabilities live under plugin.<leaf>."
+
+[documentation-url-http]
+rule = "documentation_url uses https"
+
+[empty-ados-version]
+rule = "compatibility.ados_version is non-empty"
+
+[entrypoint-bin-missing]
+rule = "a bin: entrypoint names a binaries key"
+
+[entrypoint-bin-python-runtime]
+rule = "a bin: entrypoint needs runtime rust"
+
+[entrypoint-traversal]
+rule = "entrypoint is a relative path or module:Class"
+
+[fc-parameter-empty]
+rule = "fc parameter name is non-empty"
+
+[fc-parameter-unknown-firmware]
+rule = "required_fc_parameters names known firmware"
+
+[features-not-strings]
+rule = "features are strings"
+
+[gcs-bundle-without-entrypoint]
+rule = "bundle contributions need gcs.entrypoint"
+
+[gcs-entrypoint-traversal]
+rule = "gcs.entrypoint is relative"
+
+[gcs-isolation-unknown]
+rule = "gcs isolation is iframe or inline"
+
+[id-single-segment]
+rule = "id has at least two segments"
+
+[id-uppercase]
+rule = "id is reverse-DNS lowercase"
+
+[isolation-unknown]
+rule = "isolation is subprocess or inprocess"
+
+[mavlink-component-id-range]
+rule = "component_id is 0..=255"
+
+[mavlink-component-kind]
+rule = "component_kind is a known kind"
+
+[min-tier-out-of-range]
+rule = "compatibility.min_tier is 1..=4"
+
+[no-halves]
+rule = "at least one of agent or gcs"
+
+[node-surface-bad-group]
+rule = "node surface group is a known group"
+
+[node-surface-empty-profile]
+rule = "node surface profile is non-empty"
+
+[payload-bad-arch]
+rule = "payload arch_os is <arch>-<os>"
+
+[payload-bad-sha]
+rule = "payload sha256 is 64 lowercase hex"
+
+[payload-duplicate-path]
+rule = "payload paths are unique"
+
+[payload-http-source]
+rule = "payload source is https"
+
+[payload-path-traversal]
+rule = "payload path is relative"
+
+[payload-size-zero]
+rule = "payload size_bytes is 1..=1 GiB"
+
+[per-drone-config-not-bool]
+rule = "per_drone_config is a boolean"
+
+[resource-impact-cpu-range]
+rule = "resource_impact.cpu_percent_peak is 0..=1000"
+
+[resource-impact-unknown-field]
+rule = "no unknown resource_impact field"
+
+[resources-floor]
+rule = "resource floors"
+
+[resources-standard-ceiling]
+rule = "standard class ceilings"
+
+[risk-unknown]
+rule = "risk is low, medium, high or critical"
+
+[rust-inprocess]
+rule = "rust runtime needs subprocess isolation"
+
+[schema-version-out-of-range]
+rule = "schema_version is 1..=3"
+
+[screenshot-empty-url]
+rule = "screenshot url is non-empty"
+
+[service-bad-name]
+rule = "service name pattern"
+
+[service-bad-ready-check]
+rule = "an http ready_check targets 127.0.0.1"
+
+[service-bad-restart]
+rule = "service restart is always, on-failure or no"
+
+[service-bad-slice]
+rule = "service slice is the plugin slice"
+
+[service-bin-missing]
+rule = "a service bin: names a binaries key"
+
+[service-empty-profiles]
+rule = "service profiles is non-empty when present"
+
+[service-port-duplicate]
+rule = "service ports are unique"
+
+[service-port-low]
+rule = "service ports are 1024..=65535"
+
+[service-ports-without-network-caps]
+rule = "a listener needs network.listen and network.outbound"
+
+[service-too-many-ports]
+rule = "at most four service ports"
+
+[shared-topic-duplicate]
+rule = "shared topics are unique"
+
+[shared-topic-unknown-cap]
+rule = "shared topic subscribe_capability is known or declared"
+
+[shared-topic-wrong-prefix]
+rule = "shared topics live under plugin.<leaf>."
+
+[subprocess-spawn-without-cap]
+rule = "subprocess_spawn needs process.spawn"
+
+[target-profile-unknown]
+rule = "target_profiles names known profiles"
+
+[target-profiles-empty]
+rule = "target_profiles is non-empty"
+
+[test-fixture-traversal]
+rule = "test_fixtures paths are relative"
+
+[top-level-not-mapping]
+rule = "the manifest top level is a mapping"
+
+[unknown-agent-contributes-field]
+rule = "no unknown agent.contributes field"
+
+[unknown-agent-field]
+rule = "no unknown agent field"
+
+[unknown-compatibility-field]
+rule = "no unknown compatibility field"
+
+[unknown-gcs-contributes-field]
+rule = "no unknown gcs.contributes field"
+
+[unknown-gcs-field]
+rule = "no unknown gcs field"
+
+[unknown-payload-field]
+rule = "no unknown payload field"
+
+[unknown-permission-field]
+rule = "no unknown permission field"
+
+[unknown-resources-field]
+rule = "no unknown resources field"
+
+[unknown-service-field]
+rule = "no unknown service field"
+
+[unknown-top-level-field]
+rule = "no unknown top-level field"
+
+[vendor-binary-without-attribution]
+rule = "a vendor binary needs attribution"
+
+[version-not-semver]
+rule = "version is semver"

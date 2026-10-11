@@ -231,13 +231,61 @@ pub fn build_unit_spec(
     Ok(Some(spec))
 }
 
-/// The configured flight-controller serial port, read from the agent config
-/// (`ADOS_CONFIG`) at render time.
+/// The run-dir sidecar the plugin-host daemon records the router's live FC
+/// device in (the `fc_device` state extra), so every process that renders a
+/// plugin unit masks the port the router actually latched, not only a
+/// configured one.
+pub const FC_DEVICE_SIDECAR: &str = "plugin-fc-device";
+
+/// The flight-controller serial port to mask, resolved at render time from the
+/// run dir (`ADOS_RUN_DIR`) and the agent config (`ADOS_CONFIG`).
 pub(crate) fn fc_serial_port() -> Option<String> {
-    let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".into());
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|yaml| configured_fc_serial_port(&yaml))
+    let run_dir = std::env::var_os("ADOS_RUN_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(crate::supervisor::DEFAULT_RUN_DIR));
+    let config = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".into());
+    fc_serial_port_in(&run_dir, Path::new(&config))
+}
+
+/// The FC port: the router's live device from the sidecar under `run_dir`
+/// first, else the configured `/dev/*` port in `config`, canonicalized so a
+/// symlink such as `/dev/serial0` masks the node it points at.
+pub fn fc_serial_port_in(run_dir: &Path, config: &Path) -> Option<String> {
+    let port = read_live_fc_device(run_dir).or_else(|| {
+        std::fs::read_to_string(config)
+            .ok()
+            .and_then(|yaml| configured_fc_serial_port(&yaml))
+    })?;
+    Some(canonical_device(&port))
+}
+
+/// The live FC device recorded under `run_dir`, when it names a `/dev` path.
+pub fn read_live_fc_device(run_dir: &Path) -> Option<String> {
+    let body = std::fs::read_to_string(run_dir.join(FC_DEVICE_SIDECAR)).ok()?;
+    let device = body.trim();
+    device.starts_with("/dev/").then(|| device.to_string())
+}
+
+/// Record the router's live FC device under `run_dir`. Returns whether the
+/// recorded value changed (the caller re-renders the plugin units then).
+pub fn record_live_fc_device(run_dir: &Path, device: &str) -> std::io::Result<bool> {
+    let device = canonical_device(device);
+    if read_live_fc_device(run_dir).as_deref() == Some(device.as_str()) {
+        return Ok(false);
+    }
+    ados_protocol::sidecar::write_atomic(
+        &run_dir.join(FC_DEVICE_SIDECAR),
+        format!("{device}\n").as_bytes(),
+        0o644,
+    )?;
+    Ok(true)
+}
+
+fn canonical_device(port: &str) -> String {
+    std::fs::canonicalize(port)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| port.to_string())
 }
 
 /// The installed plugin-host binary (`ADOS_PLUGIN_HOST_BIN`, else
@@ -424,6 +472,49 @@ mod tests {
     /// The production layout, independent of the test process environment.
     fn fhs() -> Paths {
         crate::supervisor::tests_support::fhs_paths()
+    }
+
+    #[test]
+    fn sidecar_fc_device_masked() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        // A ground station or auto-detect drone: no configured port.
+        std::fs::write(&config, "mavlink:\n  serial_port: ''\n").unwrap();
+        assert_eq!(fc_serial_port_in(dir.path(), &config), None);
+
+        // The router latched a port at runtime; the daemon records it.
+        assert!(record_live_fc_device(dir.path(), "/dev/ttyACM0").unwrap());
+        assert!(!record_live_fc_device(dir.path(), "/dev/ttyACM0").unwrap());
+        let port = fc_serial_port_in(dir.path(), &config);
+        assert_eq!(port.as_deref(), Some("/dev/ttyACM0"));
+        let uart: BTreeSet<String> = [crate::sandbox::UART_CAP.to_string()].into();
+        assert_eq!(
+            fc_port_exclusion(&uart, port.as_deref()),
+            ["InaccessiblePaths=-/dev/ttyACM0"]
+        );
+
+        // The live device wins over a configured one.
+        std::fs::write(&config, "mavlink:\n  serial_port: /dev/ttyAMA0\n").unwrap();
+        assert_eq!(
+            fc_serial_port_in(dir.path(), &config).as_deref(),
+            Some("/dev/ttyACM0")
+        );
+        assert!(record_live_fc_device(dir.path(), "/dev/ttyAMA0").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_configured_port_masks_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("ttyAMA0");
+        std::fs::write(&target, b"").unwrap();
+        let link = dir.path().join("serial0");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let expected = std::fs::canonicalize(&target).unwrap();
+        assert_eq!(
+            canonical_device(link.to_str().unwrap()),
+            expected.to_string_lossy()
+        );
     }
 
     fn render(
