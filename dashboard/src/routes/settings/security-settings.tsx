@@ -8,13 +8,11 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { useConfig } from "@/hooks/use-config";
+import { usePairingInfo } from "@/hooks/use-pairing";
+import { apiKeyView } from "@/lib/api-key-state";
 import { putConfigChecked } from "@/lib/apply-actions";
 import { fetchPinStatus } from "@/lib/pin";
 import { toast, toastFromError } from "@/lib/toast";
-
-/** The GET /api/config redaction sentinel: a non-empty api_key comes back as
- * this. We only ever read the set/unset state, never the value. */
-const REDACTED = "***";
 
 /** Read-only state row with a coloured badge. */
 function StateCard({
@@ -114,6 +112,7 @@ function WsEnforceToggle({ value }: { value: boolean | undefined }) {
 export function SecuritySettings() {
   const { t } = useTranslation();
   const config = useConfig();
+  const pairing = usePairingInfo();
   const pin = useQuery({
     queryKey: ["dashboard-pin-status"],
     queryFn: ({ signal }) => fetchPinStatus(signal),
@@ -132,21 +131,42 @@ export function SecuritySettings() {
   }
 
   const security = config.data?.security;
-  const apiKeySet = security?.api?.api_key === REDACTED;
+  const apiKey = apiKeyView({
+    pairing: pairing.data,
+    pairingError: pairing.isError,
+    configuredApiKey: security?.api?.api_key,
+  });
 
   return (
     <div className="space-y-6">
-      {/* API key — read-only state, never the value. */}
+      {/* API key — read-only state, never the value. A key is required
+          exactly when the node is paired. */}
       <StateCard
         title={t("settingsMore.security.apiKeyTitle")}
-        badge={apiKeySet ? t("settingsMore.security.badgeSet") : t("settingsMore.security.badgeNotSet")}
-        badgeVariant={apiKeySet ? "ok" : "default"}
+        badge={
+          apiKey.state === "loading"
+            ? "…"
+            : apiKey.state === "unknown"
+              ? t("settingsMore.security.badgeUnknown")
+              : apiKey.state === "required"
+                ? t("settingsMore.security.badgeSet")
+                : t("settingsMore.security.badgeNotSet")
+        }
+        badgeVariant={apiKey.state === "required" ? "ok" : "default"}
       >
-        {apiKeySet ? (
-          <>{t("settingsMore.security.apiKeySet")}</>
-        ) : (
-          <>{t("settingsMore.security.apiKeyNotSet")}</>
-        )}
+        {apiKey.state === "unknown" ? (
+          <>{t("settingsMore.security.apiKeyReadError")}</>
+        ) : apiKey.state === "required" ? (
+          <>
+            {t("settingsMore.security.apiKeySet")}
+            {apiKey.configuredKey && <> {t("settingsMore.security.apiKeySecondKey")}</>}
+          </>
+        ) : apiKey.state === "notRequired" ? (
+          <>
+            {t("settingsMore.security.apiKeyNotSet")}
+            {apiKey.configuredKey && <> {t("settingsMore.security.apiKeyConfiguredUnpaired")}</>}
+          </>
+        ) : null}
       </StateCard>
 
       {/* Dashboard PIN — read-only; management lives on the access gate. */}

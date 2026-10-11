@@ -838,8 +838,11 @@
       "badgeNotSet": "not set",
       "badgeUnknown": "unknown",
       "badgeLocked": "locked",
-      "apiKeySet": "A data-plane key is set. Off-box clients must present it to reach the agent's data routes. The value is never shown here; re-pair this node from Mission Control to rotate it.",
-      "apiKeyNotSet": "No data-plane key is set, so the agent is open to any client on the LAN. Pair this node from Mission Control to mint one.",
+      "apiKeySet": "This node is paired, so off-box clients must present its pairing key to reach the agent's data routes. The value is never shown here; re-pair this node from Mission Control to rotate it.",
+      "apiKeySecondKey": "The operator-configured key in security.api.api_key is accepted too.",
+      "apiKeyNotSet": "This node is not paired, so no key is required yet. Its data routes answer the node itself and its hotspot, USB and link-local connections; a browser elsewhere on the LAN needs the dashboard PIN, and remote callers are refused. Pair this node from Mission Control to require a key.",
+      "apiKeyConfiguredUnpaired": "A key is configured in security.api.api_key, but it is only enforced once the node is paired.",
+      "apiKeyReadError": "Could not read the pairing state from this node.",
       "pinTitle": "Dashboard access PIN",
       "pinReadError": "Could not read the dashboard PIN state from this node.",
       "pinSet": "A PIN gates off-box access to this on-box dashboard. Set or reset it from the access splash on a fresh visit, or from Mission Control's dashboard-access card. It is managed there, not here.",
@@ -1342,14 +1345,16 @@
     },
     "status": {
       "poll": " (poll)",
-      "live": " (live)",
-      "buffer": "buffer {{size}}/{{cap}}"
+      "live": " (live)"
     },
     "empty": {
       "loading": "loading…",
       "noMatch": "no log entries match the filter.",
-      "noEntries": "no log entries buffered yet.",
-      "hint": "The agent buffers up to {{cap}} entries since process start. Drop filters or restart a service to see fresh activity."
+      "noEntries": "no log entries yet.",
+      "hint": "Drop filters or restart a service to see fresh activity.",
+      "storeOff": "The logging store is off or not answering, so this node has no log history to show.",
+      "storeOffHint": "It is off by default. While it is off the system journal is the log of record (journalctl -u ados-supervisor -f). To keep logs here, set logging.store.enabled: true in /etc/ados/config.yaml, then re-run the installer or `ados update`.",
+      "storeError": "The logging store could not answer: {{warning}}."
     }
   },
   "diagnostics": {

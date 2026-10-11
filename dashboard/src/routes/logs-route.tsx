@@ -8,6 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useResource } from "@/hooks/use-resource";
+import { logsEmptyState } from "@/lib/logs-empty";
 
 interface LogEntry {
   seq?: number;
@@ -23,15 +24,15 @@ interface LogsResponse {
   total: number;
   limit: number;
   offset: number;
-  buffer_size?: number;
-  buffer_cap?: number;
+  /** Set when the logging store could not answer (off by default). */
+  warning?: string;
 }
 
 const LEVELS = ["", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] as const;
 type Level = (typeof LEVELS)[number];
 
-// Max entries the live tail keeps in memory on the dashboard. The agent
-// buffers 5000; we keep half to bound DOM cost as the page stays open.
+// Max entries the live tail keeps in memory on the dashboard, to bound DOM
+// cost as the page stays open.
 const LIVE_TAIL_CAP = 2500;
 
 const TONE: Record<string, string> = {
@@ -57,9 +58,8 @@ export function LogsRoute() {
   const [paused, setPaused] = useState(false);
 
   // Polling fallback used when SSE returns 503 (subscriber cap hit) or
-  // any other error. Also drives the buffer_size / buffer_cap hint
-  // even when SSE is active so the dashboard always knows the buffer
-  // wrap state.
+  // any other error. Also polled while SSE is active so the page always
+  // knows whether the logging store is answering at all (its `warning`).
   const path = `/api/logs?limit=200${level ? `&level=${level}` : ""}${
     service ? `&service=${encodeURIComponent(service)}` : ""
   }`;
@@ -182,6 +182,11 @@ export function LogsRoute() {
   // - SSE failed and fell back to polling → /api/logs entries.
   const fallbackEntries = logs.data?.entries ?? [];
   const entries = pollFallback ? fallbackEntries : liveEntries;
+  const empty = logsEmptyState({
+    loading: logs.isLoading && pollFallback,
+    filtered: Boolean(service || level),
+    warning: logs.data?.warning,
+  });
 
   return (
     <PageShell
@@ -237,14 +242,6 @@ export function LogsRoute() {
               {entries.length}
               {pollFallback ? t("logs.status.poll") : t("logs.status.live")}
             </div>
-            {logs.data?.buffer_size != null && (
-              <div className="text-[10px] opacity-70">
-                {t("logs.status.buffer", {
-                  size: logs.data.buffer_size,
-                  cap: logs.data.buffer_cap ?? "?",
-                })}
-              </div>
-            )}
           </div>
         </CardContent>
       </Card>
@@ -256,17 +253,21 @@ export function LogsRoute() {
               <ScrollText className="h-4 w-4 mt-0.5" />
               <div className="space-y-1">
                 <div>
-                  {logs.isLoading && pollFallback
+                  {empty.kind === "loading"
                     ? t("logs.empty.loading")
-                    : service || level
-                      ? t("logs.empty.noMatch")
-                      : t("logs.empty.noEntries")}
+                    : empty.kind === "storeOff"
+                      ? t("logs.empty.storeOff")
+                      : empty.kind === "storeError"
+                        ? t("logs.empty.storeError", { warning: empty.warning })
+                        : empty.kind === "noMatch"
+                          ? t("logs.empty.noMatch")
+                          : t("logs.empty.noEntries")}
                 </div>
-                {!logs.isLoading && (
-                  <div className="text-xs opacity-70">
-                    {t("logs.empty.hint", { cap: logs.data?.buffer_cap ?? 5000 })}
-                  </div>
-                )}
+                {empty.kind === "storeOff" ? (
+                  <div className="text-xs opacity-70">{t("logs.empty.storeOffHint")}</div>
+                ) : empty.kind === "noMatch" || empty.kind === "noEntries" ? (
+                  <div className="text-xs opacity-70">{t("logs.empty.hint")}</div>
+                ) : null}
               </div>
             </div>
           ) : (
