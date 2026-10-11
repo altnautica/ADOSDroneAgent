@@ -153,14 +153,19 @@ pub fn read_bind_sentinel_active() -> bool {
         .unwrap_or(false)
 }
 
+/// Serialize tests that mutate the `ADOS_RUN_DIR` process-global env var.
+/// Shared by every test module in the lib test binary (`paths`, the daemon
+/// sidecar); compiled only for tests.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Serialize tests that mutate the `ADOS_RUN_DIR` process-global env var.
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|p| p.into_inner())
+        TEST_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     #[test]

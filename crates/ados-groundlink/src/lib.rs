@@ -18,6 +18,10 @@ pub mod app_lane;
 pub mod aux_consumer;
 pub mod aux_peers;
 pub mod cmdsock;
+// The service entry (signal handling is unix-only; the pure-logic core above
+// still builds and tests on a non-Linux host).
+#[cfg(unix)]
+pub mod daemon;
 pub mod fanout;
 pub mod fleet;
 pub mod fleet_hero;

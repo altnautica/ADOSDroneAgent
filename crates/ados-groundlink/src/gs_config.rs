@@ -8,7 +8,7 @@
 //! Python dataclasses so a node reads the same values regardless of which
 //! language drives the loop.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 fn default_receiver_mdns_service() -> String {
     "_ados-receiver._tcp".to_string()
@@ -24,7 +24,7 @@ fn default_bat_iface() -> String {
 }
 
 /// Relay-role config (`ground_station.wfb_relay`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WfbRelayConfig {
     /// mDNS service type the receiver advertises and the relay resolves.
     #[serde(default = "default_receiver_mdns_service")]
@@ -44,7 +44,7 @@ impl Default for WfbRelayConfig {
 }
 
 /// Receiver-role config (`ground_station.wfb_receiver`).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WfbReceiverConfig {
     /// Aggregator UDP listen port for inbound relay forwards.
     #[serde(default = "default_port")]
@@ -64,7 +64,7 @@ impl Default for WfbReceiverConfig {
 }
 
 /// Mesh fabric config (`ground_station.mesh`) — the subset the loops read.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeshConfig {
     /// The batman-adv carrier interface (default `bat0`).
     #[serde(default = "default_bat_iface")]
@@ -80,7 +80,7 @@ impl Default for MeshConfig {
 }
 
 /// The `ground_station:` config subset the relay/receiver loops consume.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct GroundStationConfig {
     #[serde(default)]
     pub wfb_relay: WfbRelayConfig,
@@ -89,6 +89,9 @@ pub struct GroundStationConfig {
     #[serde(default)]
     pub mesh: MeshConfig,
 }
+
+/// JSON pointer of the `ground_station` slice in the agent config.
+pub const CONFIG_POINTER: &str = "/ground_station";
 
 impl GroundStationConfig {
     /// Load from the `ground_station:` block in the agent config file. A missing
@@ -103,17 +106,17 @@ impl GroundStationConfig {
     /// Like [`load_from`](Self::load_from) but also returns the parse-error
     /// message so the startup path can surface it. `None` on success or a
     /// missing/unreadable file; `Some(msg)` on a present-but-malformed file.
+    ///
+    /// The slice is read from the effective config (schema defaults overlaid
+    /// with the file), so an absent key is the schema default.
     pub fn load_reporting(path: &std::path::Path) -> (Self, Option<String>) {
-        #[derive(Debug, Default, Deserialize)]
-        struct RawConfig {
-            #[serde(default)]
-            ground_station: GroundStationConfig,
-        }
-        let Ok(text) = std::fs::read_to_string(path) else {
+        if !path.exists() {
             return (GroundStationConfig::default(), None);
-        };
-        let (raw, error): (RawConfig, _) = ados_config::yaml_reporting(&text, "ground_station");
-        (raw.ground_station, error)
+        }
+        match ados_config::schema::load_slice::<GroundStationConfig>(path, CONFIG_POINTER) {
+            Ok(cfg) => (cfg, None),
+            Err(e) => (GroundStationConfig::default(), Some(e)),
+        }
     }
 
     /// Read the config once at service startup and publish its config-status
@@ -127,49 +130,4 @@ impl GroundStationConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_file_yields_python_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let c = GroundStationConfig::load_from(&dir.path().join("nope.yaml"));
-        assert_eq!(c.wfb_relay.receiver_mdns_service, "_ados-receiver._tcp");
-        assert_eq!(c.wfb_relay.receiver_port, 5800);
-        assert_eq!(c.wfb_receiver.listen_port, 5800);
-        assert!(c.wfb_receiver.accept_local_nic);
-        assert_eq!(c.mesh.bat_iface, "bat0");
-    }
-
-    #[test]
-    fn reads_ground_station_block() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.yaml");
-        std::fs::write(
-            &cfg,
-            "ground_station:\n  wfb_relay:\n    receiver_port: 5900\n  wfb_receiver:\n    listen_port: 5901\n    accept_local_nic: false\n  mesh:\n    bat_iface: bat1\n",
-        )
-        .unwrap();
-        let c = GroundStationConfig::load_from(&cfg);
-        assert_eq!(c.wfb_relay.receiver_port, 5900);
-        assert_eq!(c.wfb_receiver.listen_port, 5901);
-        assert!(!c.wfb_receiver.accept_local_nic);
-        assert_eq!(c.mesh.bat_iface, "bat1");
-        // Unset relay mDNS service falls back to the default.
-        assert_eq!(c.wfb_relay.receiver_mdns_service, "_ados-receiver._tcp");
-    }
-
-    #[test]
-    fn other_blocks_dont_break_parse() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = dir.path().join("config.yaml");
-        std::fs::write(
-            &cfg,
-            "agent:\n  profile: ground_station\nvideo:\n  wfb:\n    channel: 36\n",
-        )
-        .unwrap();
-        let c = GroundStationConfig::load_from(&cfg);
-        // No ground_station block → all defaults.
-        assert_eq!(c.wfb_receiver.listen_port, 5800);
-    }
-}
+mod tests;
