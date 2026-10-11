@@ -300,5 +300,4 @@ pub async fn armed_guard(State(state): State<AppState>, request: Request, next: 
 }
 
 #[cfg(test)]
-#[path = "armed_guard_tests.rs"]
 mod tests;

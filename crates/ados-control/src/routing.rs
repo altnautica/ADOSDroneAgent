@@ -204,5 +204,4 @@ pub fn is_permanent_python_path(path: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "routing_tests.rs"]
 mod tests;

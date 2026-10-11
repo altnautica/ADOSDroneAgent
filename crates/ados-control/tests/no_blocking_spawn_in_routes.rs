@@ -99,9 +99,9 @@ const SCAN_ROOTS: &[&str] = &[
     "ados-swarmbus/src",
     "ados-macpin/src",
     // Daemon crates: only the modules `ados-control` imports.
-    "ados-video/src/config.rs",
-    "ados-video/src/recorder.rs",
-    "ados-video/src/mediamtx.rs",
+    "ados-video/src/config",
+    "ados-video/src/recorder",
+    "ados-video/src/mediamtx",
     "ados-video/src/profile",
     "ados-groundlink/src/lib.rs",
     "ados-groundlink/src/fleet.rs",
@@ -335,7 +335,10 @@ fn nothing_reachable_from_a_route_wraps_a_blocking_spawn_in_spawn_blocking() {
 /// through the mtime-keyed caches (`config::config_snapshot`, the PIN record
 /// cache); anything else belongs in `spawn_blocking`.
 const NO_SYNC_FS: &[&str] = &[
-    "ados-control/src/serve.rs",
+    "ados-control/src/serve/mod.rs",
+    "ados-control/src/serve/edge.rs",
+    "ados-control/src/serve/listener.rs",
+    "ados-control/src/serve/ws_ticket.rs",
     "ados-control/src/armed_guard.rs",
 ];
 
