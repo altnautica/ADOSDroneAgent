@@ -26,6 +26,7 @@ pub mod bank;
 pub mod channels;
 pub mod cmdsock;
 pub mod config;
+pub mod daemon;
 pub mod frame;
 pub mod hid;
 pub mod injector;

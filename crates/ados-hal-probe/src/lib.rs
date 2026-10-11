@@ -22,6 +22,7 @@
 
 pub mod board_sidecar;
 pub mod camera_probe;
+pub mod daemon;
 pub mod probe;
 pub mod runner;
 

@@ -34,18 +34,29 @@ pub fn write_sidecar(path: &str, value: &serde_json::Value) -> std::io::Result<(
 }
 
 /// Serialize tests that mutate the `ADOS_RUN_DIR` process-global env var.
-/// Shared across this crate's test modules; compiled only for tests.
+/// Shared across this crate's test modules (sync and async); compiled only
+/// for tests. A `tokio` Mutex so the async daemon tests can hold it across
+/// `.await` points.
 #[cfg(test)]
-pub(crate) fn test_env_guard() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|p| p.into_inner())
+static TEST_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Take the shared `ADOS_RUN_DIR` lock from a synchronous test.
+#[cfg(test)]
+pub(crate) fn test_env_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    TEST_ENV_LOCK.blocking_lock()
+}
+
+/// Take the shared `ADOS_RUN_DIR` lock from an async test.
+#[cfg(test)]
+pub(crate) async fn test_env_guard_async() -> tokio::sync::MutexGuard<'static, ()> {
+    TEST_ENV_LOCK.lock().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    fn env_guard() -> tokio::sync::MutexGuard<'static, ()> {
         test_env_guard()
     }
 

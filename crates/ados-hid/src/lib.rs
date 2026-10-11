@@ -39,6 +39,8 @@
 pub mod affine;
 pub mod buttons;
 pub mod buttons_ipc;
+#[cfg(unix)]
+pub mod daemon;
 pub mod eventbus;
 pub mod hid_cmd;
 pub mod input;

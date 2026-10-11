@@ -8,6 +8,8 @@
 pub mod cmd;
 pub mod cmdsock;
 pub mod config;
+#[cfg(unix)]
+pub mod daemon;
 pub mod data_cap;
 pub mod firewall;
 pub mod iw_scan;

@@ -69,6 +69,7 @@ pub mod beacon;
 pub mod bus;
 pub mod config;
 pub mod crypto;
+pub mod daemon;
 pub mod fleet_join;
 pub mod frame;
 pub mod ingest;

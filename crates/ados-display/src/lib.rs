@@ -37,6 +37,7 @@
 pub mod button_source;
 pub mod calibration;
 pub mod conf;
+pub mod daemon;
 pub mod fb_geometry;
 pub mod fb_writer;
 pub mod graphics;

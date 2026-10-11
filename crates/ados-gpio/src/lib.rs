@@ -20,6 +20,8 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+pub mod daemon;
 pub mod sidecar;
 
 #[cfg(target_os = "linux")]

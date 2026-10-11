@@ -45,6 +45,7 @@ use std::time::Duration;
 pub mod cmdsock;
 pub mod config;
 pub mod config_client;
+pub mod daemon;
 pub mod injector;
 pub mod message;
 pub mod paths;
