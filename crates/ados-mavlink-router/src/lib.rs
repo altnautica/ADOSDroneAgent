@@ -19,6 +19,7 @@ pub mod aux_uplink_consumer;
 pub mod cadence;
 pub mod config;
 pub mod connection;
+pub mod daemon;
 pub mod demo;
 pub mod frame_ingest;
 pub mod param_cache;
