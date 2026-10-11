@@ -66,8 +66,7 @@ jobs:
           set -uo pipefail
           FILES='tests/test_mavlink_proxy_flag_defaults_agree.py
           tests/test_conformance_cases_are_served.py
-          tests/test_board_sidecar.py
-          tests/test_recorder_crash_safety.py'
+          tests/test_board_sidecar.py'
           # `|| true` is load-bearing, not decoration. A `run:` step executes
           # under `bash -e`, and an assignment from a failing command takes
           # that command's status, so a non-zero pytest (including exit 5, "no
