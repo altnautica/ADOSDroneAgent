@@ -180,11 +180,11 @@ pub(crate) async fn write_then_flush(w: &mut BoxedWriteHalf, data: &[u8]) -> std
     w.flush().await
 }
 
-/// The latest serialised parameter cache waiting to be written, and whether a
-/// writer is already draining it.
+/// The latest serialised snapshot per file waiting to be written, in the order
+/// first queued, and whether a writer is already draining them.
 #[derive(Default)]
 struct PersistQueue {
-    pending: Option<(std::path::PathBuf, Vec<u8>)>,
+    pending: std::collections::VecDeque<(std::path::PathBuf, Vec<u8>)>,
     writing: bool,
 }
 
@@ -195,9 +195,11 @@ struct PersistQueue {
 /// from a ground station produces a burst of snapshots. Handing each to its own
 /// blocking task let several writers truncate and rename the same temp file
 /// concurrently: a reader could catch a half-written cache and an older
-/// snapshot could be renamed in last. Here a single writer drains the queue;
-/// a snapshot that arrives while it is busy replaces the one waiting, so the
-/// last write to land is always the newest state.
+/// snapshot could be renamed in last. Here a single writer drains the queue; a
+/// snapshot that arrives while it is busy replaces the one waiting for the same
+/// file, so the last write to land is always the newest state. Different files
+/// are written in the order they were first queued: the cache an FC change
+/// cleared lands before the identity that change recorded.
 #[derive(Clone)]
 pub(crate) struct ParamPersister {
     queue: std::sync::Arc<std::sync::Mutex<PersistQueue>>,
@@ -221,7 +223,10 @@ impl ParamPersister {
     pub(crate) fn persist(&self, path: std::path::PathBuf, body: Vec<u8>) {
         {
             let mut q = self.queue.lock().unwrap_or_else(|p| p.into_inner());
-            q.pending = Some((path, body));
+            match q.pending.iter_mut().find(|(queued, _)| *queued == path) {
+                Some(slot) => slot.1 = body,
+                None => q.pending.push_back((path, body)),
+            }
             if q.writing {
                 return;
             }
@@ -232,7 +237,7 @@ impl ParamPersister {
         tokio::task::spawn_blocking(move || loop {
             let next = {
                 let mut q = queue.lock().unwrap_or_else(|p| p.into_inner());
-                match q.pending.take() {
+                match q.pending.pop_front() {
                     Some(next) => next,
                     None => {
                         q.writing = false;

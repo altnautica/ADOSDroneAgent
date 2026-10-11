@@ -151,3 +151,86 @@ fn path_accessor_returns_backing_path() {
     let c = ParamCache::new(&path);
     assert_eq!(c.path(), path.as_path());
 }
+
+const COPTER: FcIdentity = FcIdentity {
+    system_id: 1,
+    autopilot: 3,
+    vehicle_type: 2,
+};
+const PLANE: FcIdentity = FcIdentity {
+    system_id: 1,
+    autopilot: 3,
+    vehicle_type: 1,
+};
+
+/// Record a parameter the way a sweep delivers it: value plus its slot.
+fn fetch(c: &mut ParamCache, name: &str, index: u16, count: u16) -> usize {
+    c.set(name, 1.0, 9);
+    c.note_fetched(name, index, count)
+}
+
+#[test]
+fn a_different_flight_controller_clears_the_cache_and_persists_its_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("params.json");
+    {
+        let mut c = ParamCache::new(&path);
+        assert!(c.adopt_fc(COPTER), "a first identity is recorded");
+        c.set("ACRO_TRAINER", 2.0, 2);
+        c.save().unwrap();
+        write_atomic(&c.fc_path(), &c.serialize_fc().unwrap()).unwrap();
+    }
+    // The same FC after a restart keeps its cache.
+    let mut c = ParamCache::new(&path);
+    c.load().unwrap();
+    assert!(!c.adopt_fc(COPTER));
+    assert_eq!(c.get("ACRO_TRAINER"), Some(2.0));
+    // A different vehicle on the same port drops every cached name.
+    let generation = c.generation();
+    assert!(c.adopt_fc(PLANE));
+    assert_eq!(c.count(), 0);
+    assert!(c.generation() > generation, "consumers must refetch");
+}
+
+#[test]
+fn a_cache_of_unknown_origin_is_cleared_at_the_first_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = ParamCache::new(dir.path().join("params.json"));
+    c.set("ACRO_TRAINER", 2.0, 2);
+    assert!(c.adopt_fc(PLANE));
+    assert_eq!(c.count(), 0);
+}
+
+#[test]
+fn a_complete_fetch_prunes_names_the_fc_no_longer_has() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = ParamCache::new(dir.path().join("params.json"));
+    c.set("STALE", 1.0, 9);
+    assert_eq!(fetch(&mut c, "A", 0, 3), 0);
+    assert_eq!(fetch(&mut c, "B", 1, 3), 0);
+    // A PARAM_SET echo carries no slot and does not count toward completion.
+    assert_eq!(c.note_fetched("A", u16::MAX, 3), 0);
+    assert_eq!(c.get("STALE"), Some(1.0));
+    let generation = c.generation();
+    assert_eq!(fetch(&mut c, "C", 2, 3), 1);
+    assert_eq!(c.get("STALE"), None);
+    assert_eq!(c.count(), 3);
+    assert!(c.generation() > generation);
+}
+
+#[test]
+fn a_partial_fetch_never_prunes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut c = ParamCache::new(dir.path().join("params.json"));
+    c.set("STALE", 1.0, 9);
+    // Two of three slots, one delivered twice: still incomplete.
+    fetch(&mut c, "A", 0, 3);
+    fetch(&mut c, "A", 0, 3);
+    fetch(&mut c, "B", 1, 3);
+    // A count change starts the tally afresh, so slots from the old count
+    // never complete the new one.
+    assert_eq!(fetch(&mut c, "C", 2, 4), 0);
+    assert_eq!(fetch(&mut c, "D", 3, 4), 0);
+    assert_eq!(c.get("STALE"), Some(1.0));
+    assert_eq!(c.count(), 5);
+}

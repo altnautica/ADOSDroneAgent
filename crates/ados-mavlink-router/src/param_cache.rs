@@ -1,9 +1,11 @@
 //! Persistent parameter cache.
 //!
 //! Survives across FC reboots and agent restarts so the GCS does not re-sweep every
-//! parameter on each reconnect.
+//! parameter on each reconnect. The cache belongs to one flight controller: its
+//! identity is persisted beside it and a different FC starts it empty, and a
+//! complete fetch drops any name that FC no longer reports.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -19,6 +21,24 @@ struct Entry {
     last_updated: f64,
 }
 
+/// The flight controller a cache's entries came from, as its HEARTBEAT names
+/// it. A different system id, autopilot or vehicle type is a different FC whose
+/// parameter set shares nothing reliable with the cached one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FcIdentity {
+    pub system_id: u8,
+    pub autopilot: u8,
+    pub vehicle_type: u8,
+}
+
+/// The indexed `PARAM_VALUE`s seen against one `param_count`.
+#[derive(Debug, Default)]
+struct Fetch {
+    count: u16,
+    names: BTreeMap<u16, String>,
+    complete: bool,
+}
+
 /// In-memory parameter cache with atomic JSON persistence.
 #[derive(Debug)]
 pub struct ParamCache {
@@ -27,6 +47,8 @@ pub struct ParamCache {
     /// Bumped once per [`set`](ParamCache::set) that actually changed an entry.
     /// Deliberately NOT persisted — see [`generation`](ParamCache::generation).
     generation: u64,
+    fc: Option<FcIdentity>,
+    fetch: Fetch,
 }
 
 fn now_unix() -> f64 {
@@ -43,6 +65,8 @@ impl ParamCache {
             path: path.as_ref().to_path_buf(),
             params: BTreeMap::new(),
             generation: 0,
+            fc: None,
+            fetch: Fetch::default(),
         }
     }
 
@@ -89,6 +113,72 @@ impl ParamCache {
         changed
     }
 
+    /// Bind the cache to the flight controller now heartbeating, returning
+    /// whether the recorded identity changed (so the caller persists the cache
+    /// and then [`serialize_fc`](Self::serialize_fc)).
+    ///
+    /// A cache recorded for another FC, or of unknown origin (written before
+    /// identities were kept), is cleared: serving it would show one vehicle's
+    /// parameters on another, and its size would read as an already-complete
+    /// download of the new FC's set.
+    pub fn adopt_fc(&mut self, id: FcIdentity) -> bool {
+        if self.fc == Some(id) {
+            return false;
+        }
+        if !self.params.is_empty() {
+            tracing::info!(
+                cleared = self.params.len(),
+                system_id = id.system_id,
+                autopilot = id.autopilot,
+                vehicle_type = id.vehicle_type,
+                "param_cache_cleared_for_new_fc"
+            );
+            self.params.clear();
+            self.generation += 1;
+        }
+        self.fetch = Fetch::default();
+        self.fc = Some(id);
+        true
+    }
+
+    /// Note that the FC reported `name` in slot `index` of `count`, returning
+    /// how many cached names were pruned.
+    ///
+    /// Once every slot `0..count` has been seen, the fetch is complete and any
+    /// cached name the FC did not report is dropped. A slot outside `0..count`
+    /// (the `u16::MAX` a `PARAM_SET` echo carries) never counts, and a change of
+    /// `count` starts the tally afresh, so a partial fetch never prunes.
+    pub fn note_fetched(&mut self, name: &str, index: u16, count: u16) -> usize {
+        if index >= count {
+            return 0;
+        }
+        if self.fetch.count != count {
+            self.fetch = Fetch {
+                count,
+                ..Fetch::default()
+            };
+        }
+        if self.fetch.complete {
+            return 0;
+        }
+        self.fetch.names.insert(index, name.to_string());
+        if self.fetch.names.len() < usize::from(count) {
+            return 0;
+        }
+        self.fetch.complete = true;
+        let reported: HashSet<String> = std::mem::take(&mut self.fetch.names)
+            .into_values()
+            .collect();
+        let before = self.params.len();
+        self.params.retain(|name, _| reported.contains(name));
+        let pruned = before - self.params.len();
+        if pruned > 0 {
+            tracing::info!(pruned, count, "param_cache_pruned_after_complete_fetch");
+            self.generation += 1;
+        }
+        pruned
+    }
+
     /// How many times a cached parameter actually changed since this process
     /// started.
     ///
@@ -108,6 +198,25 @@ impl ParamCache {
     /// The on-disk path this cache persists to.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Where the identity of the cache's flight controller persists: beside the
+    /// cache, never inside it, since every reader of the cache treats each
+    /// top-level key as a parameter name.
+    pub fn fc_path(&self) -> PathBuf {
+        self.path.with_extension("fc.json")
+    }
+
+    /// The recorded FC identity as the JSON bytes [`write_atomic`] persists at
+    /// [`fc_path`](Self::fc_path), or `None` before any FC was adopted.
+    pub fn serialize_fc(&self) -> Option<Vec<u8>> {
+        let id = self.fc?;
+        serde_json::to_vec(&json!({
+            "system_id": id.system_id,
+            "autopilot": id.autopilot,
+            "vehicle_type": id.vehicle_type,
+        }))
+        .ok()
     }
 
     /// Serialise the cache to the JSON bytes that [`write_atomic`] persists.
@@ -143,9 +252,10 @@ impl ParamCache {
         write_atomic(&self.path, &body)
     }
 
-    /// Load the cache from disk. A missing file is not an error (returns an
-    /// empty cache). Malformed entries are skipped.
+    /// Load the cache and its FC identity from disk. A missing file is not an
+    /// error (returns an empty cache). Malformed entries are skipped.
     pub fn load(&mut self) -> std::io::Result<()> {
+        self.fc = load_fc(&self.fc_path());
         let body = match std::fs::read(&self.path) {
             Ok(b) => b,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -176,6 +286,21 @@ impl ParamCache {
         }
         Ok(())
     }
+}
+
+/// Read a persisted [`FcIdentity`]; absent or malformed reads as unknown.
+fn load_fc(path: &Path) -> Option<FcIdentity> {
+    let doc: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let field = |key: &str| {
+        doc.get(key)
+            .and_then(Value::as_u64)
+            .and_then(|v| u8::try_from(v).ok())
+    };
+    Some(FcIdentity {
+        system_id: field("system_id")?,
+        autopilot: field("autopilot")?,
+        vehicle_type: field("vehicle_type")?,
+    })
 }
 
 /// Write `body` to `path` atomically (temp file + rename) creating the parent

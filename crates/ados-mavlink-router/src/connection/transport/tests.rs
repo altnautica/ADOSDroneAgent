@@ -42,6 +42,51 @@ async fn a_burst_of_cache_writes_is_serialised_and_ends_on_the_newest() {
     assert_eq!(std::fs::read(&path).unwrap(), vec![5u8]);
 }
 
+/// The file names each write landed on, in order.
+static ORDER: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn ordered_write(path: &std::path::Path, body: &[u8]) -> std::io::Result<()> {
+    std::thread::sleep(Duration::from_millis(15));
+    std::fs::write(path, body)?;
+    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+    ORDER.lock().unwrap_or_else(|p| p.into_inner()).push(name);
+    Ok(())
+}
+
+/// Two files queued together keep their queue order, and each still ends on
+/// its newest snapshot: a cleared cache lands before the FC identity recorded
+/// with it.
+#[tokio::test]
+async fn queued_files_keep_their_order_and_their_newest_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (cache, fc) = (
+        dir.path().join("params.json"),
+        dir.path().join("params.fc.json"),
+    );
+    let persister = ParamPersister::with_writer(ordered_write);
+    persister.persist(dir.path().join("busy.json"), vec![0]);
+    persister.persist(cache.clone(), vec![1]);
+    persister.persist(fc.clone(), vec![2]);
+    persister.persist(cache.clone(), vec![3]);
+    for _ in 0..200 {
+        let idle = !persister
+            .queue
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .writing;
+        if idle {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        *ORDER.lock().unwrap_or_else(|p| p.into_inner()),
+        vec!["busy.json", "params.json", "params.fc.json"]
+    );
+    assert_eq!(std::fs::read(&cache).unwrap(), vec![3u8]);
+    assert_eq!(std::fs::read(&fc).unwrap(), vec![2u8]);
+}
+
 #[test]
 fn parse_net_spec_detects_tcp_and_udp() {
     assert_eq!(

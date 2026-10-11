@@ -15,6 +15,10 @@ impl FcConnection {
     /// (`param_priming`) the debounce holds, which is where the write volume
     /// actually is.
     ///
+    /// Pruning happens here too: `slot` is the frame's `(param_index,
+    /// param_count)`, and the frame that completes a fetch drops every cached
+    /// name the FC did not report and is written at once.
+    ///
     /// Serialising happens under the params lock; the caller does the blocking
     /// write off-reactor through [`ParamPersister`], so neither the lock nor a
     /// worker thread is held across disk I/O.
@@ -23,12 +27,15 @@ impl FcConnection {
         name: &str,
         value: f64,
         param_type: i64,
+        slot: (u16, u16),
         since_save: &mut Instant,
     ) -> Option<(std::path::PathBuf, Vec<u8>)> {
         let mut pc = self.params.lock().await;
         let changed = pc.set(name, value, param_type);
+        let pruned = pc.note_fetched(name, slot.0, slot.1) > 0;
         let sweeping = self.param_priming.load(Ordering::Relaxed);
-        let write_now = (changed && !sweeping) || since_save.elapsed() >= PARAM_SAVE_DEBOUNCE;
+        let write_now =
+            pruned || (changed && !sweeping) || since_save.elapsed() >= PARAM_SAVE_DEBOUNCE;
         if !write_now {
             return None;
         }
@@ -36,6 +43,24 @@ impl FcConnection {
         pc.serialize()
             .ok()
             .map(|body| (pc.path().to_path_buf(), body))
+    }
+
+    /// Bind the parameter cache to the FC heartbeating on this link. A
+    /// different FC than the one the cache was recorded for clears it; the
+    /// emptied cache is queued before the new identity, so a crash between the
+    /// two writes leaves a mismatch that clears again rather than a stale cache
+    /// filed under the new FC.
+    pub(super) async fn adopt_fc(&self, id: crate::param_cache::FcIdentity) {
+        let mut pc = self.params.lock().await;
+        if !pc.adopt_fc(id) {
+            return;
+        }
+        if let Ok(body) = pc.serialize() {
+            self.param_persister.persist(pc.path().to_path_buf(), body);
+        }
+        if let Some(body) = pc.serialize_fc() {
+            self.param_persister.persist(pc.fc_path(), body);
+        }
     }
 
     /// Connect-and-read loop. Returns only on shutdown via `cancel`.
@@ -218,7 +243,7 @@ impl FcConnection {
                             // Same off-reactor persistence as the live read loop:
                             // serialise under the lock, then write off the reactor.
                             if let Some((path, body)) = self
-                                .record_param(&name, value, ptype, &mut since_save)
+                                .record_param(&name, value, ptype, param_slot(&msg), &mut since_save)
                                 .await
                             {
                                 self.param_persister.persist(path, body);
@@ -253,6 +278,9 @@ impl FcConnection {
         // Which component on this link is the vehicle. Per session: a re-opened
         // link latches afresh from its first autopilot HEARTBEAT.
         let mut vehicle = VehicleSource::default();
+        // The cache is bound to the FC at the first vehicle HEARTBEAT of each
+        // session: a different FC can only appear across a reconnect.
+        let mut fc_adopted = false;
         loop {
             let n = match reader.read(&mut chunk).await {
                 Ok(0) => return, // EOF: link gone
@@ -357,8 +385,17 @@ impl FcConnection {
                         continue;
                     }
                     self.note_vehicle_frame(&frame);
-                    if let MavMessage::HEARTBEAT(_) = &msg {
+                    if let MavMessage::HEARTBEAT(hb) = &msg {
                         self.latch_fc_identity(header.system_id, header.component_id);
+                        if !fc_adopted {
+                            fc_adopted = true;
+                            self.adopt_fc(crate::param_cache::FcIdentity {
+                                system_id: header.system_id,
+                                autopilot: hb.autopilot as u8,
+                                vehicle_type: hb.mavtype as u8,
+                            })
+                            .await;
+                        }
                         self.link_proven.store(true, Ordering::Relaxed);
                         *self.last_heartbeat_at.lock().await = Some(Instant::now());
                         // A real FC HEARTBEAT clears any MSP suspicion so a link
@@ -384,7 +421,7 @@ impl FcConnection {
                         // write off-reactor so neither the params lock nor a
                         // worker thread is held across blocking I/O.
                         if let Some((path, body)) = self
-                            .record_param(&name, value, ptype, &mut since_save)
+                            .record_param(&name, value, ptype, param_slot(&msg), &mut since_save)
                             .await
                         {
                             self.param_persister.persist(path, body);
@@ -393,5 +430,14 @@ impl FcConnection {
                 }
             }
         }
+    }
+}
+
+/// The `(param_index, param_count)` of a `PARAM_VALUE`; any other message has
+/// no slot, which [`ParamCache::note_fetched`] ignores.
+fn param_slot(msg: &MavMessage) -> (u16, u16) {
+    match msg {
+        MavMessage::PARAM_VALUE(m) => (m.param_index, m.param_count),
+        _ => (u16::MAX, 0),
     }
 }
