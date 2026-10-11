@@ -70,12 +70,24 @@ def is_known_agent_capability(cap: str) -> bool:
     return cap in AGENT_CAPABILITIES
 
 
+# GCS capabilities the bridge scopes with a topic suffix: a plugin declares
+# and is granted `telemetry.subscribe.<topic>` (for example
+# `telemetry.subscribe.gimbal`), which the GCS resolves to the base entry.
+_PER_STREAM_GCS_BASES = ("telemetry.subscribe",)
+
+
 def is_known_gcs_capability(cap: str) -> bool:
     """Return True if ``cap`` is a known GCS-half capability.
 
     The browser-side runtime owns the GCS catalog metadata; the agent
     keeps only the id set so a manifest's ``gcs`` block can warn (never
     reject) on an unrecognised GCS capability, symmetric with the
-    agent-half check above.
+    agent-half check above. A topic-scoped per-stream form of a base the
+    GCS scopes per stream is known when its topic is non-empty.
     """
-    return cap in GCS_CAPABILITIES
+    if cap in GCS_CAPABILITIES:
+        return True
+    return any(
+        cap.startswith(f"{base}.") and len(cap) > len(base) + 1
+        for base in _PER_STREAM_GCS_BASES
+    )

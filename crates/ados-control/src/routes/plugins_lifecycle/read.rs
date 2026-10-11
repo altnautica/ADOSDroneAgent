@@ -63,6 +63,9 @@ pub(crate) struct InstallDto {
     status: Value,
     installed_at: i64,
     enabled_at: Option<i64>,
+    /// Why the host stopped or refused the plugin (`tampered: <detail>`,
+    /// `signer_revoked`, ...), `null` when it has not failed.
+    failure_reason: Option<String>,
     permissions: BTreeMap<String, GrantDto>,
     revocation_pending: bool,
 }
@@ -79,6 +82,7 @@ impl From<&PluginInstall> for InstallDto {
             status: serde_json::to_value(install.status).unwrap_or(Value::Null),
             installed_at: install.installed_at,
             enabled_at: install.enabled_at,
+            failure_reason: install.failure_reason.clone(),
             permissions: install
                 .permissions
                 .iter()
@@ -358,6 +362,50 @@ pub async fn get_gcs_asset(
         .await;
     respond(result.map(|(content_type, body)| {
         (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response()
+    }))
+}
+
+/// `GET /api/plugins/{plugin_id}/locales/{lang}`: the installed plugin's
+/// `locales/<lang>.json` bundle, so the GCS renders the plugin's declarative
+/// strings (parameter groups, labels) in the plugin's own words. `lang` is a
+/// bare tag (letters, digits, `-`, `_`); anything else is refused.
+pub async fn get_locale(
+    State(state): State<AppState>,
+    AxumPath((plugin_id, lang)): AxumPath<(String, String)>,
+) -> Response {
+    let result = state
+        .plugins
+        .read(move |sup| {
+            if sup.find_install(&plugin_id).is_none() || !is_plugin_id(&plugin_id) {
+                return Err(Refusal::not_installed(&plugin_id));
+            }
+            let tag_ok = !lang.is_empty()
+                && lang.len() <= 16
+                && lang
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if !tag_ok {
+                return Err(Refusal::new(
+                    12,
+                    "manifest_invalid",
+                    "locale tag must be letters, digits, '-' or '_'",
+                    StatusCode::BAD_REQUEST,
+                ));
+            }
+            let root = sup.paths().install_dir.join(&plugin_id).join("locales");
+            let target = resolve_gcs_asset(&root, &format!("{lang}.json"))?
+                .ok_or_else(|| Refusal::not_found(format!("locale {lang:?} not found")))?;
+            std::fs::read(&target)
+                .map_err(|e| Refusal::host_io(format!("read of locale failed: {e}")))
+        })
+        .await;
+    respond(result.map(|body| {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            body,
+        )
+            .into_response()
     }))
 }
 

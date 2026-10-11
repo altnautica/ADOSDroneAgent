@@ -1420,7 +1420,7 @@ impl PluginSupervisor {
             .into());
         }
         let is_subprocess = manifest.is_subprocess_agent();
-        {
+        let already_running = {
             let install = self.require_install_ref(plugin_id)?;
             if let Some(reason) = self.revocation_refusal(install) {
                 return Err(SupervisorError(format!(
@@ -1428,14 +1428,21 @@ impl PluginSupervisor {
                 ))
                 .into());
             }
-            if install.status == PluginStatus::Running {
-                return Ok(());
+            install.status == PluginStatus::Running
+        };
+        if already_running {
+            // Running is not failed: drop a reason left by an earlier stop.
+            let install = self.require_install_mut(plugin_id)?;
+            if install.failure_reason.take().is_some() {
+                save_state(&self.installs, Some(&self.paths.state_path))?;
             }
+            return Ok(());
         }
         if !is_subprocess {
             let install = self.require_install_mut(plugin_id)?;
             install.status = PluginStatus::Enabled;
             install.enabled_at = Some(now_ms());
+            install.failure_reason = None;
             install.reenable_pending = false;
             save_state(&self.installs, Some(&self.paths.state_path))?;
             return Ok(());
@@ -1473,6 +1480,8 @@ impl PluginSupervisor {
         let install = self.require_install_mut(plugin_id)?;
         install.status = PluginStatus::Running;
         install.enabled_at = Some(now_ms());
+        // A plugin that runs again has no standing failure to report.
+        install.failure_reason = None;
         install.service_status = service_status;
         install.reenable_pending = false;
         save_state(&self.installs, Some(&self.paths.state_path))?;
@@ -3905,6 +3914,21 @@ mod tests {
             format!("{err}").starts_with("refused: signer_revoked"),
             "{err}"
         );
+        // Once the signer is no longer revoked, an enable runs the plugin
+        // again and the stale reason is gone from the record.
+        std::fs::write(&revocations, "[]").unwrap();
+        sup.enable(id).unwrap();
+        let record = sup.find_install(id).unwrap();
+        assert_eq!(record.status, PluginStatus::Running);
+        assert_eq!(record.failure_reason, None);
+        // A record that still carries a reason while running (written before
+        // enables cleared it) is cleaned by an idempotent enable.
+        sup.update_record(id, |i| {
+            i.failure_reason = Some(SIGNER_REVOKED_REASON.into())
+        })
+        .unwrap();
+        sup.enable(id).unwrap();
+        assert_eq!(sup.find_install(id).unwrap().failure_reason, None);
     }
 
     #[test]

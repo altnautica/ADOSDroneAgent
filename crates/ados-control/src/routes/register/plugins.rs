@@ -80,6 +80,10 @@ pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
         plugins_lifecycle::get_gcs_asset,
     )
     .get(
+        "/api/plugins/{plugin_id}/locales/{lang}",
+        plugins_lifecycle::get_locale,
+    )
+    .get(
         "/api/plugins/{plugin_id}/manifest",
         plugins_lifecycle::get_manifest,
     )

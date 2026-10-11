@@ -525,6 +525,33 @@ async fn gcs_assets_manifest_and_attestation_are_served_from_the_install() {
 }
 
 #[tokio::test]
+async fn the_locale_bundle_is_served_and_a_bad_tag_is_refused() {
+    let f = fixture();
+    install_web(&f).await;
+    let locales = f.paths.install_dir.join(WEB_ID).join("locales");
+    std::fs::create_dir_all(&locales).unwrap();
+    std::fs::write(locales.join("en.json"), br#"{"settings.title":"Settings"}"#).unwrap();
+
+    let (status, body) = get(&f.state, "/api/plugins/com.example.web/locales/en").await;
+    assert_eq!(status, StatusCode::OK);
+    let bundle: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(bundle["settings.title"], json!("Settings"));
+
+    let (status, _) = get(&f.state, "/api/plugins/com.example.web/locales/de").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, body) = get(
+        &f.state,
+        "/api/plugins/com.example.web/locales/..%2fmanifest",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(envelope(&body), (12, "manifest_invalid"));
+    let (status, _) = get(&f.state, "/api/plugins/com.example.missing/locales/en").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn the_capability_token_needs_a_pairing_and_carries_the_grants() {
     let f = fixture();
     install_web(&f).await;
@@ -878,6 +905,48 @@ agent:\n  entrypoint: agent/bin/com.example.rustplug\n  runtime: rust\n  permiss
             .to_string_lossy())
     );
     assert_eq!(body["install"]["revocation_pending"], json!(false));
+}
+
+#[tokio::test]
+async fn list_and_detail_carry_the_failure_reason() {
+    let f = fixture();
+    let (status, body) = upload(
+        &f.state,
+        "/api/plugins/install?requested_permissions=event.publish",
+        &web_archive(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // A healthy install reads `failure_reason: null` on both reads.
+    let (_, list) = get(&f.state, "/api/plugins").await;
+    let list: Value = serde_json::from_slice(&list).unwrap();
+    assert_eq!(list["installs"][0]["failure_reason"], Value::Null);
+    assert!(list["installs"][0]
+        .as_object()
+        .unwrap()
+        .contains_key("failure_reason"));
+
+    // The host records a tamper stop on the install; both reads expose it.
+    let state_path = f.paths.state_path.clone();
+    let mut installs = ados_plugin_host::state::load_state(Some(&state_path));
+    installs[0].status = ados_plugin_host::state::PluginStatus::Failed;
+    installs[0].failure_reason = Some("tampered: agent/py/x.py digest mismatch".to_string());
+    ados_plugin_host::state::save_state(&installs, Some(&state_path)).unwrap();
+
+    let (_, list) = get(&f.state, "/api/plugins").await;
+    let list: Value = serde_json::from_slice(&list).unwrap();
+    assert_eq!(list["installs"][0]["status"], json!("failed"));
+    assert_eq!(
+        list["installs"][0]["failure_reason"],
+        json!("tampered: agent/py/x.py digest mismatch")
+    );
+    let (status, detail) = get(&f.state, &format!("/api/plugins/{WEB_ID}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let detail: Value = serde_json::from_slice(&detail).unwrap();
+    assert_eq!(
+        detail["install"]["failure_reason"],
+        json!("tampered: agent/py/x.py digest mismatch")
+    );
 }
 
 async fn delete(state: &AppState, uri: &str) -> (StatusCode, Value) {

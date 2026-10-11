@@ -242,6 +242,27 @@ def test_unknown_gcs_capability_warns_but_still_loads() -> None:
     assert any(e.get("capability") == "ui.slot.not-a-real-slot" for e in warnings)
 
 
+def test_per_stream_telemetry_subscribe_is_a_known_gcs_capability() -> None:
+    # The GCS bridge gates `telemetry.subscribe` per topic, so a plugin
+    # declares the topic-scoped form; only a bare trailing dot is unknown.
+    raw = _good_manifest_dict()
+    raw["gcs"]["permissions"] = [
+        "telemetry.subscribe",
+        "telemetry.subscribe.gimbal",
+        "telemetry.subscribe.camera.thermal.frame",
+        "telemetry.subscribe.",
+        "command.send.gimbal",
+    ]
+    with capture_logs() as logs:
+        PluginManifest.from_yaml_text(_yaml(raw))
+    flagged = {
+        e.get("capability")
+        for e in logs
+        if e.get("event") == "plugin_manifest_unknown_gcs_capability"
+    }
+    assert flagged == {"telemetry.subscribe.", "command.send.gimbal"}
+
+
 # ── profiles ─────────────────────────────────────────────────
 
 

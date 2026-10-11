@@ -516,6 +516,15 @@
     {
       "method": "GET",
       "notes": null,
+      "path": "/api/plugins/{plugin_id}/locales/{lang}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
       "path": "/api/plugins/{plugin_id}/manifest",
       "public": false,
       "relay_forbidden": false,

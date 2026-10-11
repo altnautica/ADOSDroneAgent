@@ -78,6 +78,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/plugins/{plugin_id}/enable` |  |
 | GET | `/api/plugins/{plugin_id}/gcs/{*asset_path}` |  |
 | POST | `/api/plugins/{plugin_id}/grant` |  |
+| GET | `/api/plugins/{plugin_id}/locales/{lang}` |  |
 | GET | `/api/plugins/{plugin_id}/manifest` |  |
 | DELETE | `/api/plugins/{plugin_id}/perms/{permission_id}` |  |
 | POST | `/api/plugins/{plugin_id}/pin` |  |
@@ -233,7 +234,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-208 native routes.
+209 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

@@ -71,8 +71,8 @@ pub use manage::{
     set_auto_update, unpin_plugin,
 };
 pub use read::{
-    get_attestation, get_catalog, get_gcs_asset, get_manifest, get_plugin, get_readiness,
-    list_plugins,
+    get_attestation, get_catalog, get_gcs_asset, get_locale, get_manifest, get_plugin,
+    get_readiness, list_plugins,
 };
 pub use token::mint_capability_token;
 
