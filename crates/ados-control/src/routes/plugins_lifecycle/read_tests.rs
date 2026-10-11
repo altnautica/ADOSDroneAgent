@@ -13,7 +13,10 @@ const RELEASE_BASE: &str = "https://github.com/altnautica/ADOSExtensions/release
 #[test]
 fn bundled_catalog_entries_are_pinned_github_release_assets() {
     let catalog = bundled_catalog();
-    assert!(catalog.get("error").is_none(), "catalog does not parse: {catalog}");
+    assert!(
+        catalog.get("error").is_none(),
+        "catalog does not parse: {catalog}"
+    );
     let plugins = catalog["plugins"].as_array().expect("plugins array");
     assert!(!plugins.is_empty());
 
@@ -25,7 +28,10 @@ fn bundled_catalog_entries_are_pinned_github_release_assets() {
 
         let sha = entry["archive_sha256"].as_str().unwrap_or_default();
         assert!(
-            sha.len() == 64 && sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            sha.len() == 64
+                && sha
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "{id}: archive_sha256 {sha:?} is not 64 lowercase hex digits"
         );
 
@@ -36,7 +42,10 @@ fn bundled_catalog_entries_are_pinned_github_release_assets() {
         let (tag, file) = rest
             .split_once('/')
             .unwrap_or_else(|| panic!("{id}: {url} has no tag segment"));
-        assert!(!file.contains('/'), "{id}: tag {tag:?} is not a single path segment");
+        assert!(
+            !file.contains('/'),
+            "{id}: tag {tag:?} is not a single path segment"
+        );
         assert!(
             tag.ends_with(&format!("-v{version}")),
             "{id}: tag {tag} does not name version {version}"
@@ -45,6 +54,10 @@ fn bundled_catalog_entries_are_pinned_github_release_assets() {
             file.ends_with(&format!("-{version}.signed.adosplug")),
             "{id}: asset {file} does not end -{version}.signed.adosplug"
         );
-        assert_eq!(file, format!("{id}-{version}.signed.adosplug"), "{id}: asset name");
+        assert_eq!(
+            file,
+            format!("{id}-{version}.signed.adosplug"),
+            "{id}: asset name"
+        );
     }
 }
