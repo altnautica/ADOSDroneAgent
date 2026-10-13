@@ -247,6 +247,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "health": health,
         "fc_connected": fc_connected,
         "fc_port": fc_port,
+        "sim": ados_config::simulation::simulation_enabled(),
         "fc_baud": fc_baud,
         "transportOpen": liveness.transport_open,
         "mavlinkAlive": liveness.mavlink_alive,

@@ -104,6 +104,17 @@ class LogStoreConfig(BaseModel):
     enabled: bool = False
 
 
+class SimulationConfig(BaseModel):
+    """Whether this node is running against a simulator.
+
+    Set by whoever wires the node to a simulated flight controller and camera.
+    The status routes report it as ``sim`` so a ground station can mark the node
+    as simulated. Off unless set explicitly.
+    """
+
+    enabled: bool = False
+
+
 class LoggingConfig(BaseModel):
     level: str = "info"
     max_size_mb: int = Field(default=50, ge=0, le=U32_MAX)

@@ -188,6 +188,10 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     payload.insert("health".to_string(), health);
     payload.insert("fc_connected".to_string(), fc_connected);
     payload.insert("fc_port".to_string(), fc_port);
+    payload.insert(
+        "sim".to_string(),
+        json!(ados_config::simulation::simulation_enabled()),
+    );
     payload.insert("fc_baud".to_string(), fc_baud);
     payload.insert(
         "transportOpen".to_string(),

@@ -20,6 +20,7 @@
   "fc_baud": 0,
   "fc_connected": false,
   "fc_port": "",
+  "sim": false,
   "fcSource": "auto",
   "fcLinkHint": "none",
   "fcCommandDownGated": false,

@@ -20,6 +20,7 @@ from .system import (
     DiscoveryConfig,
     LoggingConfig,
     PairingConfig,
+    SimulationConfig,
     SwarmConfig,
     UiConfig,
     VisionConfig,
@@ -66,6 +67,7 @@ class ADOSConfig(BaseModel):
     mcp: McpConfig = McpConfig()
     storage: StorageConfig = StorageConfig()
     hardware: HardwareConfig = HardwareConfig()
+    simulation: SimulationConfig = SimulationConfig()
 
     model_config = {"extra": "ignore"}
 

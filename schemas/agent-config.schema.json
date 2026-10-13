@@ -1965,6 +1965,18 @@
       "title": "ServerConfig",
       "type": "object"
     },
+    "SimulationConfig": {
+      "description": "Whether this node is running against a simulator.\n\nSet by whoever wires the node to a simulated flight controller and camera.\nThe status routes report it as ``sim`` so a ground station can mark the node\nas simulated. Off unless set explicitly.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "SimulationConfig",
+      "type": "object"
+    },
     "StorageConfig": {
       "properties": {
         "janitor": {
@@ -3540,6 +3552,12 @@
           "mqtt_port": 8883,
           "url": ""
         }
+      }
+    },
+    "simulation": {
+      "$ref": "#/$defs/SimulationConfig",
+      "default": {
+        "enabled": false
       }
     },
     "storage": {

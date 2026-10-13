@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.103.2] - 2026-10-13
+
+### Added
+
+- **Simulation mode flag.** `simulation.enabled` (default `false`) marks a node
+  wired to a simulated flight controller and camera. `/api/status` and
+  `/api/status/full` report it as `sim`.
+
 ## [0.103.1] - 2026-10-11
 
 ### Changed

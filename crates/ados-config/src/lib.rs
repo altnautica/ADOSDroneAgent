@@ -27,6 +27,7 @@ pub mod log_store;
 mod profile;
 pub mod schema;
 pub mod side_effects;
+pub mod simulation;
 
 pub use profile::{
     ground_station_role, mesh_role_path, node_profile, node_profile_at, normalize_profile,
