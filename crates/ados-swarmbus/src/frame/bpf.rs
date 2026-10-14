@@ -29,15 +29,16 @@ pub struct SockFilter {
 pub const BPF_PROGRAM_LEN: usize = 12;
 
 // Classic BPF opcode composition, spelled out so the pinned program below can be
-// read against the kernel's `bpf_common.h` without a decoder ring.
-const LD_B_ABS: u16 = 0x30; // BPF_LD  | BPF_B | BPF_ABS
-const LD_H_IND: u16 = 0x48; // BPF_LD  | BPF_H | BPF_IND
-const LD_W_IND: u16 = 0x40; // BPF_LD  | BPF_W | BPF_IND
-const ALU_LSH_K: u16 = 0x64; // BPF_ALU | BPF_LSH | BPF_K
-const ALU_OR_X: u16 = 0x4c; // BPF_ALU | BPF_OR  | BPF_X
-const MISC_TAX: u16 = 0x07; // BPF_MISC | BPF_TAX
-const JMP_JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
-const RET_K: u16 = 0x06; // BPF_RET | BPF_K
+// read against the kernel's `bpf_common.h` without a decoder ring. Shared with
+// the software evaluator in `bpf_run`, which runs the same program in userspace.
+pub(super) const LD_B_ABS: u16 = 0x30; // BPF_LD  | BPF_B | BPF_ABS
+pub(super) const LD_H_IND: u16 = 0x48; // BPF_LD  | BPF_H | BPF_IND
+pub(super) const LD_W_IND: u16 = 0x40; // BPF_LD  | BPF_W | BPF_IND
+pub(super) const ALU_LSH_K: u16 = 0x64; // BPF_ALU | BPF_LSH | BPF_K
+pub(super) const ALU_OR_X: u16 = 0x4c; // BPF_ALU | BPF_OR  | BPF_X
+pub(super) const MISC_TAX: u16 = 0x07; // BPF_MISC | BPF_TAX
+pub(super) const JMP_JEQ_K: u16 = 0x15; // BPF_JMP | BPF_JEQ | BPF_K
+pub(super) const RET_K: u16 = 0x06; // BPF_RET | BPF_K
 
 /// Build the kernel filter that accepts only this fleet's swarm frames.
 ///

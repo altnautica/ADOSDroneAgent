@@ -31,6 +31,7 @@ use crate::fleet_join::{load_device_ids, FLEET_REGISTRY_PATH};
 use crate::ingest::Ingest;
 use crate::neighbors::{NeighborTable, SenderMarks};
 use crate::publish::{encode_line, neighbors_payload};
+use crate::radio::{Transport, LOOPBACK_IFACE};
 use crate::schedule::{beacon_delay, random_word, BEACON_PERIOD};
 use crate::vehicle::{beacon_from_state, OWN_STATE_STALE};
 
@@ -403,23 +404,39 @@ impl TxFailures {
 
 /// Resolve an interface and open the bus, retrying until it works or `cancel`
 /// fires.
+///
+/// The loopback transport needs no monitor interface, so it opens with
+/// [`LOOPBACK_IFACE`] when none is configured or reported.
 async fn open_bus(
     cfg: &SwarmBusConfig,
     cipher: &Arc<SwarmCipher>,
     cancel: &watch::Receiver<bool>,
 ) -> Option<SwarmBus> {
     loop {
-        match resolve_interface(cfg) {
-            Some(iface) => {
-                match SwarmBus::open(&iface, cfg.fleet_id, cfg.fleet_slot, cipher.clone()) {
-                    Ok(bus) => return Some(bus),
-                    Err(e) => tracing::warn!(
-                        %iface, error = %e,
-                        "swarm_radio_open_failed: is the adapter in monitor mode?"
+        match Transport::from_env() {
+            Err(e) => tracing::error!(error = %e, "swarm_transport_invalid"),
+            Ok(transport) => {
+                let iface = resolve_interface(cfg)
+                    .or_else(|| transport.is_loopback().then(|| LOOPBACK_IFACE.to_string()));
+                match iface {
+                    Some(iface) => match SwarmBus::open_on(
+                        &transport,
+                        &iface,
+                        cfg.fleet_id,
+                        cfg.fleet_slot,
+                        cipher.clone(),
+                    ) {
+                        Ok(bus) => return Some(bus),
+                        Err(e) => tracing::warn!(
+                            %iface, loopback = transport.is_loopback(), error = %e,
+                            "swarm_radio_open_failed: is the adapter in monitor mode or the relay up?"
+                        ),
+                    },
+                    None => tracing::debug!(
+                        "swarm_radio_interface_unknown: waiting for the radio manager"
                     ),
                 }
             }
-            None => tracing::debug!("swarm_radio_interface_unknown: waiting for the radio manager"),
         }
         tokio::select! {
             _ = cancelled(cancel) => return None,

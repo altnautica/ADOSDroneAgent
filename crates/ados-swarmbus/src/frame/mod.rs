@@ -40,9 +40,11 @@
 //! multicast and locally administered — which is what a broadcast beacon is.
 
 mod bpf;
+mod bpf_run;
 mod radiotap;
 
 pub use bpf::{bpf_program, SockFilter, BPF_PROGRAM_LEN};
+pub use bpf_run::bpf_run;
 pub use radiotap::{
     radiotap_flags, radiotap_header, radiotap_rssi, BEACON_MCS_INDEX, FCS_LEN, RADIOTAP_TX_LEN,
     RT_F_BADFCS, RT_F_FCS,

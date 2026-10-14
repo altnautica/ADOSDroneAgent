@@ -23,7 +23,8 @@
 //!   it out of the video stream sharing the adapter.
 //! - [`crypto`] — the fleet-keyed ChaCha20-Poly1305 seal.
 //! - [`radio`] — the only platform-specific code: `AF_PACKET` on Linux, a refusing
-//!   stub elsewhere.
+//!   stub elsewhere, and a loopback backend (`ADOS_SWARMBUS_TRANSPORT=loopback`)
+//!   that carries the same frames over UDP to a shared-medium relay on any OS.
 //! - [`bus`] — transmit and receive over one interface.
 //! - [`ingest`] — captured bytes to table effect, as one pure function.
 //! - [`neighbors`] — the table, its counters and the replay window.

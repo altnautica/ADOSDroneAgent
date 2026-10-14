@@ -17,7 +17,7 @@ use crate::crypto::SwarmCipher;
 use crate::frame::{build_frame, SwarmFrameKind, MAX_FRAME_LEN};
 use crate::ingest::{ingest_frame, Ingest};
 use crate::neighbors::NeighborTable;
-use crate::radio::Radio;
+use crate::radio::{Radio, Transport};
 
 /// One fleet's swarm bus on one monitor interface.
 pub struct SwarmBus {
@@ -41,14 +41,28 @@ impl SwarmBus {
     /// Fails when the interface is absent, is not a radiotap monitor interface, or
     /// the process lacks `CAP_NET_RAW` — all operational conditions the caller
     /// retries, since the radio manager may simply not have selected an adapter or
-    /// switched it to monitor mode yet.
+    /// switched it to monitor mode yet. The backend is the one
+    /// `ADOS_SWARMBUS_TRANSPORT` selects ([`Transport::from_env`]); an unknown
+    /// value is an error too.
     pub fn open(
         iface: &str,
         fleet_id: u16,
         slot: u8,
         cipher: Arc<SwarmCipher>,
     ) -> anyhow::Result<Self> {
-        let radio = Radio::open(iface, fleet_id)?;
+        Self::open_on(&Transport::from_env()?, iface, fleet_id, slot, cipher)
+    }
+
+    /// [`SwarmBus::open`] on an explicit [`Transport`] rather than the one the
+    /// environment selects. A loopback bus ignores `iface`.
+    pub fn open_on(
+        transport: &Transport,
+        iface: &str,
+        fleet_id: u16,
+        slot: u8,
+        cipher: Arc<SwarmCipher>,
+    ) -> anyhow::Result<Self> {
+        let radio = Radio::open_on(transport, iface, fleet_id)?;
         Ok(Self {
             radio,
             cipher,

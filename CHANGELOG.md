@@ -6,6 +6,22 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.103.3] - 2026-10-14
+
+### Added
+
+- **Swarm bus loopback transport.** `ADOS_SWARMBUS_TRANSPORT=loopback` runs
+  `ados-swarmbus` without a monitor-mode adapter: the exact frames the
+  `AF_PACKET` backend injects travel over UDP to a shared-medium relay
+  (register on control TCP `ADOS_SWARMBUS_RELAY_PORT`, default 7900; frames
+  on the next port; deliveries on a local downlink socket). The kernel BPF
+  program is evaluated in userspace on receive, so another fleet's frames and
+  non-swarm frames are dropped where the kernel would drop them. Settings:
+  `ADOS_SWARMBUS_RELAY_HOST`, `ADOS_SWARMBUS_RELAY_PORT`, `ADOS_SWARMBUS_NODE`
+  (required, unique per node), `ADOS_SWARMBUS_NODE_ADDR`,
+  `ADOS_SWARMBUS_LISTEN`. An unknown transport value is refused. Unset keeps
+  the native radio.
+
 ## [0.103.2] - 2026-10-13
 
 ### Added
