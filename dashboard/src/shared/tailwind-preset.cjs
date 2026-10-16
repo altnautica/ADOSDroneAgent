@@ -43,7 +43,6 @@ module.exports = {
           foreground: "hsl(var(--destructive-foreground) / <alpha-value>)",
         },
         subtle: "hsl(var(--subtle-foreground) / <alpha-value>)",
-        signature: "hsl(var(--signature) / <alpha-value>)",
         border: {
           DEFAULT: "hsl(var(--border) / <alpha-value>)",
           strong: "hsl(var(--border-strong) / <alpha-value>)",

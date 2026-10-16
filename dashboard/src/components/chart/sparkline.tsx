@@ -39,7 +39,7 @@ export function Sparkline({ data, tone = "primary", height = 56 }: Props) {
       height,
       layout: {
         background: { type: ColorType.Solid, color: "transparent" },
-        textColor: "rgba(148, 163, 184, 0.6)",
+        textColor: "rgba(180, 180, 180, 0.6)",
         attributionLogo: false,
       },
       grid: {

@@ -329,9 +329,9 @@ export function HudCanvas() {
     const v = (name: string, fallback: string) => css.getPropertyValue(name).trim() || fallback;
     const palette: Palette = {
       primary: v("--hud-primary", "#5B9AFF"),
-      ink: v("--hud-ink", "#F8FAFC"),
-      ink2: v("--hud-ink-2", "#94A3B8"),
-      glass: v("--hud-glass-strong", "rgba(9,15,28,0.78)"),
+      ink: v("--hud-ink", "#EDEDED"),
+      ink2: v("--hud-ink-2", "#B4B4B4"),
+      glass: v("--hud-glass-strong", "rgba(0,0,0,0.78)"),
     };
     let w = 0;
     let h = 0;

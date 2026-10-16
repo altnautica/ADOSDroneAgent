@@ -44,7 +44,6 @@ pub struct Palette {
     pub text_secondary: Rgb888,
     pub text_tertiary: Rgb888,
     pub accent_primary: Rgb888,
-    pub accent_secondary: Rgb888,
     pub border_default: Rgb888,
     pub border_strong: Rgb888,
     pub status_success: Rgb888,
@@ -60,7 +59,7 @@ pub enum ThresholdDirection {
     LowerIsBetter,
 }
 
-/// The dark theme (brand-dark) — a navy ground with near-white primary text.
+/// The dark theme (brand-dark) — a black ground with off-white primary text.
 /// This is the default; a fresh rig with an unreadable or absent theme config
 /// falls back here.
 pub const DARK: Palette = Palette {
@@ -72,7 +71,6 @@ pub const DARK: Palette = Palette {
     text_secondary: rgb(tokens::BRAND_DARK_FG_SECONDARY),
     text_tertiary: rgb(tokens::BRAND_DARK_FG_TERTIARY),
     accent_primary: rgb(tokens::BRAND_DARK_ACCENT_PRIMARY),
-    accent_secondary: rgb(tokens::BRAND_DARK_ACCENT_SECONDARY),
     border_default: rgb(tokens::BRAND_DARK_BORDER_DEFAULT),
     border_strong: rgb(tokens::BRAND_DARK_BORDER_STRONG),
     status_success: rgb(tokens::BRAND_DARK_STATUS_SUCCESS),
@@ -90,7 +88,6 @@ pub const LIGHT: Palette = Palette {
     text_secondary: rgb(tokens::BRAND_LIGHT_FG_SECONDARY),
     text_tertiary: rgb(tokens::BRAND_LIGHT_FG_TERTIARY),
     accent_primary: rgb(tokens::BRAND_LIGHT_ACCENT_PRIMARY),
-    accent_secondary: rgb(tokens::BRAND_LIGHT_ACCENT_SECONDARY),
     border_default: rgb(tokens::BRAND_LIGHT_BORDER_DEFAULT),
     border_strong: rgb(tokens::BRAND_LIGHT_BORDER_STRONG),
     status_success: rgb(tokens::BRAND_LIGHT_STATUS_SUCCESS),
@@ -164,9 +161,9 @@ mod tests {
     }
 
     #[test]
-    fn dark_is_the_brand_navy_ground() {
-        assert_eq!(DARK.text_primary, Rgb888::new(0xF8, 0xFA, 0xFC));
-        assert_eq!(DARK.bg_primary, Rgb888::new(0x0A, 0x0A, 0x0F));
+    fn dark_is_the_brand_black_ground() {
+        assert_eq!(DARK.text_primary, Rgb888::new(0xED, 0xED, 0xED));
+        assert_eq!(DARK.bg_primary, Rgb888::new(0x00, 0x00, 0x00));
         assert_eq!(DARK.accent_primary, Rgb888::new(0x3A, 0x82, 0xFF));
     }
 
