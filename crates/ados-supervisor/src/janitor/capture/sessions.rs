@@ -76,11 +76,24 @@ pub fn newest_write(dir: &Path) -> i64 {
     newest
 }
 
-/// Whether the session at `path` is being recorded at `now_unix`: it carries
-/// `.recording` and was written within [`ACTIVE_WINDOW_S`].
-pub fn is_active(path: &Path, now_unix: i64) -> bool {
+/// What decides whether a `.recording` session is still being captured.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Liveness {
+    /// Wall time, unix s, compared against file mtimes.
+    pub now_unix: i64,
+    /// The capture-active marker (`<run>/capture/active`). While it exists a
+    /// capture is running, and a paused session can be silent for longer than
+    /// [`ACTIVE_WINDOW_S`], so every `.recording` session counts as active.
+    pub capture_marker: PathBuf,
+}
+
+/// Whether the session at `path` is being recorded: it carries `.recording`
+/// and either a capture is running (the marker exists) or it was written
+/// within [`ACTIVE_WINDOW_S`].
+pub fn is_active(path: &Path, live: &Liveness) -> bool {
     path.join(cs::RECORDING_MARKER).exists()
-        && now_unix.saturating_sub(newest_write(path)) <= ACTIVE_WINDOW_S
+        && (live.capture_marker.exists()
+            || live.now_unix.saturating_sub(newest_write(path)) <= ACTIVE_WINDOW_S)
 }
 
 /// Every session under `root`, oldest first: directories holding
@@ -93,7 +106,7 @@ pub fn is_active(path: &Path, now_unix: i64) -> bool {
 pub fn scan_sessions(
     root: &Path,
     cache: &mut SizeCache,
-    now_unix: i64,
+    live: &Liveness,
     keepalive: &dyn Fn(),
 ) -> Vec<Session> {
     let Ok(dir) = std::fs::read_dir(root) else {
@@ -126,7 +139,7 @@ pub fn scan_sessions(
             if !recording {
                 seen.insert(path.clone(), bytes);
             }
-            let active = recording && is_active(&path, now_unix);
+            let active = recording && is_active(&path, live);
             keepalive();
             Some(Session {
                 bytes,
@@ -186,13 +199,18 @@ pub fn plan_evictions(sessions: &[Session], need: u64, evict_unuploaded: bool) -
 const REMOVE_CHUNK: usize = 256;
 
 /// Remove one session directory, returning the bytes freed. A session that is
-/// active at `now_unix` (it may have resumed since the scan), or sits under a
-/// protected root, stays. The tree is removed entry by entry with `keepalive`
-/// every [`REMOVE_CHUNK`] entries, so a session of many thousand frames cannot
-/// hold the monitor pass silent for the length of one `remove_dir_all`.
-pub fn remove_session(root: &Path, session: &Session, now_unix: i64, keepalive: &dyn Fn()) -> u64 {
+/// active now (it may have resumed since the scan), or sits under a protected
+/// root, stays. The tree is removed entry by entry with `keepalive` every
+/// [`REMOVE_CHUNK`] entries, so a session of many thousand frames cannot hold
+/// the monitor pass silent for the length of one `remove_dir_all`.
+pub fn remove_session(
+    root: &Path,
+    session: &Session,
+    live: &Liveness,
+    keepalive: &dyn Fn(),
+) -> u64 {
     let path = root.join(&session.name);
-    if reclaim::is_protected(&path) || is_active(&path, now_unix) {
+    if reclaim::is_protected(&path) || is_active(&path, live) {
         return 0;
     }
     let mut count = 0usize;

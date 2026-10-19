@@ -27,8 +27,8 @@ use ados_config::capture_storage::{
 
 mod sessions;
 pub use sessions::{
-    excess_bytes, is_active, plan_evictions, remove_session, scan_sessions, Session, SizeCache,
-    ACTIVE_WINDOW_S,
+    excess_bytes, is_active, plan_evictions, remove_session, scan_sessions, Liveness, Session,
+    SizeCache, ACTIVE_WINDOW_S,
 };
 
 /// Bytes the write probe writes.
@@ -55,22 +55,33 @@ pub enum PassMode {
     Evict,
 }
 
-/// The two clocks a pass reads: host monotonic for the sidecar's
-/// `updated_ns`, wall time (unix s) to compare against file mtimes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What a pass reads besides the disk: host monotonic for the sidecar's
+/// `updated_ns`, and the wall time plus capture-active marker that decide
+/// whether a `.recording` session is still being captured.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PassTime {
     pub mono_ns: u64,
-    pub unix_s: i64,
+    pub live: Liveness,
+}
+
+/// The capture-active marker: `<run dir>/capture/active`.
+pub fn capture_active_marker() -> PathBuf {
+    ados_protocol::paths::run_dir()
+        .join("capture")
+        .join("active")
 }
 
 impl PassTime {
     pub fn now() -> Self {
         PassTime {
             mono_ns: mono_ns(),
-            unix_s: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
+            live: Liveness {
+                now_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0),
+                capture_marker: capture_active_marker(),
+            },
         }
     }
 }
@@ -108,7 +119,7 @@ pub fn run_pass(
     if mode != PassMode::Refresh {
         cache.clear();
     }
-    let mut sessions = scan_sessions(&root, cache, now.unix_s, keepalive);
+    let mut sessions = scan_sessions(&root, cache, &now.live, keepalive);
     let mut volume = current_volume(&root, sys);
     let mut freed = 0u64;
     if mode == PassMode::Evict {
@@ -125,15 +136,11 @@ pub fn run_pass(
         let picked = plan_evictions(&sessions, need, cfg.capture_evict_unuploaded);
         if !picked.is_empty() {
             for i in picked {
-                freed = freed.saturating_add(remove_session(
-                    &root,
-                    &sessions[i],
-                    now.unix_s,
-                    keepalive,
-                ));
+                freed =
+                    freed.saturating_add(remove_session(&root, &sessions[i], &now.live, keepalive));
                 keepalive();
             }
-            sessions = scan_sessions(&root, cache, now.unix_s, keepalive);
+            sessions = scan_sessions(&root, cache, &now.live, keepalive);
             volume = current_volume(&root, sys);
         }
     }

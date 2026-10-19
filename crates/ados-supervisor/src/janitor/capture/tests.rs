@@ -69,11 +69,15 @@ fn session(root: &Path, name: &str, bytes: usize, uploaded: bool, recording: boo
     }
 }
 
-/// The pass clock: `mono_ns` as given, wall time now plus `ahead_s`.
+/// The pass clock: `mono_ns` as given, wall time now plus `ahead_s`, and a
+/// capture-active marker that does not exist.
 fn at(mono_ns: u64, ahead_s: i64) -> PassTime {
     PassTime {
         mono_ns,
-        unix_s: PassTime::now().unix_s + ahead_s,
+        live: Liveness {
+            now_unix: PassTime::now().live.now_unix + ahead_s,
+            capture_marker: PathBuf::from("/nonexistent/ados-test/capture/active"),
+        },
     }
 }
 
@@ -166,11 +170,11 @@ fn recording_sessions_are_counted_and_judged_by_their_newest_write() {
     assert!(now.sidecar.capture.used_bytes >= 2000);
     assert!(now.sidecar.capture.used_bytes < 4000);
 
-    let sessions = scan_sessions(&root, &mut SizeCache::new(), at(0, 0).unix_s, &|| {});
+    let sessions = scan_sessions(&root, &mut SizeCache::new(), &at(0, 0).live, &|| {});
     let live = sessions.iter().find(|s| s.name == "live").unwrap();
     assert!(live.recording && live.active);
-    let later = at(0, ACTIVE_WINDOW_S + 60).unix_s;
-    let sessions = scan_sessions(&root, &mut SizeCache::new(), later, &|| {});
+    let later = at(0, ACTIVE_WINDOW_S + 60).live;
+    let sessions = scan_sessions(&root, &mut SizeCache::new(), &later, &|| {});
     let live = sessions.iter().find(|s| s.name == "live").unwrap();
     assert!(
         live.recording && !live.active,
@@ -209,7 +213,7 @@ fn a_crashed_session_is_counted_and_evicted_only_with_the_flag() {
         PassMode::Evict,
         None,
         &mut SizeCache::new(),
-        silent,
+        silent.clone(),
         &|| {},
     );
     assert_eq!(kept.freed, 0);
@@ -230,6 +234,43 @@ fn a_crashed_session_is_counted_and_evicted_only_with_the_flag() {
     assert!(gone.freed >= 1000);
     assert!(!root.join("crashed").exists());
     assert_eq!(gone.sidecar.capture.sessions, 0);
+}
+
+#[test]
+fn a_running_capture_keeps_every_recording_session() {
+    let (tmp, sys, root) = fixture(100 * GIB, GIB);
+    session(&root, "paused", 1000, false, true);
+    // Silent for 20 minutes, eviction of un-uploaded sessions allowed.
+    let mut silent = at(1, 20 * 60);
+    let marker = tmp.path().join("run/capture/active");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(&marker, b"").unwrap();
+    silent.live.capture_marker = marker.clone();
+
+    let kept = run_pass(
+        &cfg_for(&root, true),
+        &sys,
+        PassMode::Evict,
+        None,
+        &mut SizeCache::new(),
+        silent.clone(),
+        &|| {},
+    );
+    assert_eq!(kept.freed, 0);
+    assert!(root.join("paused").exists(), "a capture is running");
+
+    fs::remove_file(&marker).unwrap();
+    let gone = run_pass(
+        &cfg_for(&root, true),
+        &sys,
+        PassMode::Evict,
+        None,
+        &mut SizeCache::new(),
+        silent,
+        &|| {},
+    );
+    assert!(gone.freed >= 1000);
+    assert!(!root.join("paused").exists(), "no capture running: crashed");
 }
 
 #[test]
@@ -356,10 +397,10 @@ fn a_large_session_is_removed_with_progress_inside_it() {
     for i in 0..600 {
         fs::write(root.join(format!("big/frames/f{i}.bin")), b"x").unwrap();
     }
-    let now = at(0, 0).unix_s;
-    let s = scan_sessions(root, &mut SizeCache::new(), now, &|| {}).remove(0);
+    let now = at(0, 0).live;
+    let s = scan_sessions(root, &mut SizeCache::new(), &now, &|| {}).remove(0);
     let ticks = std::cell::Cell::new(0u32);
-    let freed = remove_session(root, &s, now, &|| ticks.set(ticks.get() + 1));
+    let freed = remove_session(root, &s, &now, &|| ticks.set(ticks.get() + 1));
     assert_eq!(freed, s.bytes);
     assert!(!root.join("big").exists());
     assert!(ticks.get() >= 2, "{}", ticks.get());
