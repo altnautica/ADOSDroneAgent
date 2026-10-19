@@ -23,6 +23,7 @@
 //! (`drone` / `ground-station` / `workstation` / `compute` / `visor`) from `agent.profile`
 //! and `profile.conf`, the one resolution every service shares.
 
+pub mod cameras;
 pub mod capture_storage;
 pub mod log_store;
 mod profile;

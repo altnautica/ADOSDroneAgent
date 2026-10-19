@@ -29,9 +29,11 @@
 //! (see [`crate::rollback`]). After migrating, the profile's injector
 //! arbitration policy is applied ([`arbitration`]): a drone has a single
 //! injector and drops `mavlink.injector_arbitration: true`; a ground station
-//! gains it when absent.
+//! gains it when absent. The retired `video.cameras` / `vision.cameras` lists
+//! then move into the top-level `cameras[]` list ([`cameras`]).
 
 mod arbitration;
+mod cameras;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -188,6 +190,9 @@ impl Step for ConfigMigrate {
         }
         if let Err(e) = arbitration::apply_policy(config, &config_lock_path(), &ctx.profile) {
             return StepOutcome::Failed(format!("injector arbitration policy: {e}"));
+        }
+        if let Err(e) = cameras::apply(config, &config_lock_path()) {
+            return StepOutcome::Failed(format!("camera list migration: {e}"));
         }
         outcome
     }
