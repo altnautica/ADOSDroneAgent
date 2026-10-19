@@ -46,7 +46,6 @@ pub struct NavPvt {
     pub lon_deg: f64,
     pub h_ellipsoid_m: f64,
     pub h_msl_m: f64,
-    pub pdop: f64,
     /// UTC of the solution epoch, when date and time are valid and resolved.
     pub utc_ns: Option<i64>,
 }
@@ -74,7 +73,6 @@ pub fn nav_pvt(p: &[u8]) -> Option<NavPvt> {
         lat_deg: i32_at(p, 28) as f64 * 1e-7,
         h_ellipsoid_m: i32_at(p, 32) as f64 / 1000.0,
         h_msl_m: i32_at(p, 36) as f64 / 1000.0,
-        pdop: u16_at(p, 76) as f64 / 100.0,
         utc_ns,
     })
 }

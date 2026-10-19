@@ -140,7 +140,7 @@ fn off_leaves_base_mode() {
     let mut b = Base::new(300, 2.0);
     b.apply(survey(), &cap(None), 0).unwrap();
     let bytes = b.apply(BaseMode::Off, &cap(None), S).unwrap();
-    assert_eq!(bytes, Some(valset::off()));
+    assert_eq!(bytes, Some(valset::off(RxPort::Uart1)));
     let v = b.view();
     assert_eq!((v.mode, v.state, v.fixed), ("off", BaseState::Off, None));
     assert!(!b.active());

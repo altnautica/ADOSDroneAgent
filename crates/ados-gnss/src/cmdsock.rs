@@ -2,8 +2,10 @@
 //!
 //! `{"cmd":"set_base","base":{"mode":"off"|"survey"|"fixed",...}}` →
 //! `{"ok":true,"base":<base object>}` or
-//! `{"ok":false,"error":"E_GNSS_...","detail":"..."}`. The change is applied
-//! live and not persisted; the REST layer writes the config.
+//! `{"ok":false,"error":"E_GNSS_...","detail":"..."}`. The mode is written
+//! to the base receiver at once (RAM layer; `off` sends TMODE 0 and stops the
+//! RTCM3 output). This service does not write `gnss.base` to the agent
+//! config: `PUT /api/v1/gnss/base` saves it after this reply is `ok`.
 
 use std::path::{Path, PathBuf};
 

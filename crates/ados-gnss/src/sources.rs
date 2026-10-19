@@ -85,7 +85,7 @@ pub async fn run(ingest: Ingest, source: Source, bus: PathBuf, shutdown: Shutdow
 async fn drive(mut ingest: Ingest, source: Source, bus: PathBuf) {
     match source {
         Source::Serial { path, baud } => serial(&mut ingest, &path, baud).await,
-        Source::Udp(port) => udp(&mut ingest, port).await,
+        Source::Udp { port, peer } => udp(&mut ingest, port, peer).await,
         Source::Hub => hub(&mut ingest, &bus).await,
     }
 }
@@ -131,7 +131,7 @@ pub async fn bind_udp(port: u16) -> std::io::Result<UdpSocket> {
     UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], port))).await
 }
 
-async fn udp(ingest: &mut Ingest, port: u16) {
+async fn udp(ingest: &mut Ingest, port: u16, peer: Option<SocketAddr>) {
     let sock = loop {
         match bind_udp(port).await {
             Ok(s) => break s,
@@ -141,26 +141,40 @@ async fn udp(ingest: &mut Ingest, port: u16) {
             }
         }
     };
-    serve_udp(ingest, sock).await;
+    serve_udp(ingest, sock, peer).await;
 }
 
-/// Read datagrams from `sock`; writes go back to the latest sender.
-pub async fn serve_udp(ingest: &mut Ingest, sock: UdpSocket) {
+/// Read datagrams from `sock`. Writes go to the configured `peer`, else to
+/// the sender of the latest datagram. The receiver is attached (and sent its
+/// configuration) once a destination is known, and again whenever the
+/// sender changes, so nothing is written into the void before the first
+/// datagram.
+pub async fn serve_udp(ingest: &mut Ingest, sock: UdpSocket, peer: Option<SocketAddr>) {
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(WRITE_QUEUE);
-    ingest.shared.lock().on_attach(ingest.idx, tx, mono_ns());
-    let mut peer: Option<SocketAddr> = None;
+    let fixed_peer = peer.is_some();
+    let mut dest = peer;
+    if fixed_peer {
+        ingest
+            .shared
+            .lock()
+            .on_attach(ingest.idx, tx.clone(), mono_ns());
+    }
     let mut buf = vec![0u8; 65_536];
     loop {
         tokio::select! {
             r = sock.recv_from(&mut buf) => match r {
                 Ok((n, from)) => {
-                    peer = Some(from);
+                    if !fixed_peer && dest != Some(from) {
+                        tracing::info!(id = %ingest.id, peer = %from, "gnss_udp_peer");
+                        dest = Some(from);
+                        ingest.shared.lock().on_attach(ingest.idx, tx.clone(), mono_ns());
+                    }
                     ingest.push(&buf[..n]);
                 }
                 Err(e) => tracing::debug!(error = %e, "gnss_udp_recv_error"),
             },
             Some(bytes) = rx.recv() => {
-                if let Some(to) = peer {
+                if let Some(to) = dest {
                     let _ = sock.send_to(&bytes, to).await;
                 }
             }

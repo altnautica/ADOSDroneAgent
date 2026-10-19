@@ -51,6 +51,7 @@ async fn fake_gnss(
     reply: Value,
 ) -> Arc<tokio::sync::Mutex<Option<Value>>> {
     let seen = Arc::new(tokio::sync::Mutex::new(None));
+    let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock).unwrap();
     let s = seen.clone();
     tokio::spawn(async move {
@@ -66,31 +67,74 @@ async fn fake_gnss(
     seen
 }
 
+fn config_doc(path: &Path) -> serde_norway::Value {
+    serde_norway::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
 #[tokio::test]
-async fn the_base_write_forwards_and_returns_the_base_object() {
+async fn the_base_write_forwards_saves_and_returns_the_base_object() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gnss-cmd.sock");
-    let base = json!({"mode":"survey","state":"surveying","elapsed_s":0,"min_dur_s":300,"accuracy_m":null,
+    let config = dir.path().join("config.yaml");
+    std::fs::write(
+        &config,
+        "agent:\n  profile: visor\ngnss:\n  receivers: []\n",
+    )
+    .unwrap();
+    // The service fills the accuracy the request left out.
+    let base = json!({"mode":"survey","state":"surveying","elapsed_s":0,"min_dur_s":120,"accuracy_m":null,
         "target_accuracy_m":2.0,"fixed":null,"rtcm_out":{"msgs_per_s":0.0,"bytes_total":0,"targets":0}});
     let seen = fake_gnss(sock.clone(), json!({"ok": true, "base": base})).await;
-    let req = json!({"mode": "survey", "min_dur_s": 300, "accuracy_m": 2.0});
-    let (status, body) = json_of(put_base_at(&sock, req.clone()).await).await;
+    let req = json!({"mode": "survey", "min_dur_s": 120});
+    let (status, body) = json_of(put_base_at(&sock, &config, req.clone()).await).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, base);
     assert_eq!(
         seen.lock().await.clone().unwrap(),
         json!({"cmd": "set_base", "base": req})
     );
+    let doc = config_doc(&config);
+    assert_eq!(doc["agent"]["profile"].as_str(), Some("visor"));
+    assert!(doc["gnss"]["receivers"].is_sequence());
+    let saved = &doc["gnss"]["base"];
+    assert_eq!(saved["mode"].as_str(), Some("survey"));
+    assert_eq!(saved["min_dur_s"].as_u64(), Some(120));
+    assert_eq!(saved["accuracy_m"].as_f64(), Some(2.0));
+
+    // A fixed position is saved with the mode; the survey settings stay.
+    let fixed = json!({"mode":"fixed","lat_deg":12.5,"lon_deg":77.5,"h_ellipsoid_m":900.25});
+    fake_gnss(sock.clone(), json!({"ok": true, "base": {"mode": "fixed"}})).await;
+    let (status, _) = json_of(put_base_at(&sock, &config, fixed).await).await;
+    assert_eq!(status, StatusCode::OK);
+    let saved = config_doc(&config)["gnss"]["base"].clone();
+    assert_eq!(saved["mode"].as_str(), Some("fixed"));
+    assert_eq!(saved["lat_deg"].as_f64(), Some(12.5));
+    assert_eq!(saved["h_ellipsoid_m"].as_f64(), Some(900.25));
+    assert_eq!(saved["min_dur_s"].as_u64(), Some(120));
+}
+
+#[test]
+fn base_keys_per_mode() {
+    let base = json!({"min_dur_s": 300, "target_accuracy_m": 1.5});
+    assert_eq!(
+        Value::Object(base_keys(&json!({"mode": "off"}), &base)),
+        json!({"mode": "off"})
+    );
+    assert_eq!(
+        Value::Object(base_keys(&json!({"mode": "survey"}), &base)),
+        json!({"mode": "survey", "min_dur_s": 300, "accuracy_m": 1.5})
+    );
 }
 
 #[tokio::test]
-async fn base_write_errors_map_to_status_codes() {
+async fn base_write_errors_map_to_status_codes_and_save_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gnss-cmd.sock");
-    let (status, body) = json_of(put_base_at(&sock, json!({"mode": "bogus"})).await).await;
+    let config = dir.path().join("config.yaml");
+    let (status, body) = json_of(put_base_at(&sock, &config, json!({"mode": "bogus"})).await).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "E_GNSS_BAD_REQUEST");
-    let (status, body) = json_of(put_base_at(&sock, json!({"mode": "off"})).await).await;
+    let (status, body) = json_of(put_base_at(&sock, &config, json!({"mode": "off"})).await).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "E_GNSS_UNAVAILABLE");
     fake_gnss(
@@ -98,21 +142,24 @@ async fn base_write_errors_map_to_status_codes() {
         json!({"ok": false, "error": "E_GNSS_UNSUPPORTED", "detail": "receiver cannot survey"}),
     )
     .await;
-    let (status, body) = json_of(put_base_at(&sock, json!({"mode": "survey"})).await).await;
+    let (status, body) =
+        json_of(put_base_at(&sock, &config, json!({"mode": "survey"})).await).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "E_GNSS_UNSUPPORTED");
+    assert!(!config.exists(), "a refused write saves nothing");
 }
 
 #[tokio::test]
 async fn rtcm_is_published_on_the_bus_and_fragments_are_counted() {
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("sensors.sock");
+    let one = rtcm::encode_rtcm3(&[7]);
     // Down bus: refused, never a fake ok.
-    let (status, body) = json_of(post_rtcm_at(&sock, &[0xD3, 0, 1, 7, 0, 0, 0]).await).await;
+    let (status, body) = json_of(post_rtcm_at(&sock, &one).await).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(body["error"], "E_SENSOR_BUS_DOWN");
 
-    let listener = UnixListener::bind(&sock).unwrap();
+    let listener = ados_protocol::ipc::bind_command_socket(&sock, 0o660).unwrap();
     let (tap, mut taps) = tokio::sync::mpsc::channel(4);
     tokio::spawn(ados_sensorbus::broker::serve(
         listener,
@@ -120,10 +167,8 @@ async fn rtcm_is_published_on_the_bus_and_fragments_are_counted() {
         Arc::new(Default::default()),
     ));
     // One 20-byte payload frame and one 300-byte one: 1 + 2 fragments.
-    let mut bytes = vec![0xD3, 0, 20];
-    bytes.extend([1u8; 23]);
-    bytes.extend([0xD3, 0x01, 0x2C]);
-    bytes.extend([2u8; 303]);
+    let mut bytes = rtcm::encode_rtcm3(&[1u8; 20]);
+    bytes.extend(rtcm::encode_rtcm3(&[2u8; 300]));
     let (status, body) = json_of(post_rtcm_at(&sock, &bytes).await).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, json!({"ok": true, "fragments": 3}));
@@ -134,7 +179,18 @@ async fn rtcm_is_published_on_the_bus_and_fragments_are_counted() {
 
     let (status, _) = json_of(post_rtcm_at(&sock, &[]).await).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    let (status, body) = json_of(post_rtcm_at(&sock, &[0u8; 900]).await).await;
+    // No CRC-valid frame: refused and nothing published.
+    let mut corrupt = rtcm::encode_rtcm3(&[3u8; 20]);
+    corrupt[10] ^= 0xFF;
+    for bad in [corrupt, vec![0u8; 900]] {
+        let (status, body) = json_of(post_rtcm_at(&sock, &bad).await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "E_RTCM_INVALID");
+    }
+    // A valid frame longer than four fragments carry.
+    let long = rtcm::encode_rtcm3(&[4u8; 800]);
+    let (status, body) = json_of(post_rtcm_at(&sock, &long).await).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "E_RTCM_TOO_LONG");
+    assert!(taps.try_recv().is_err(), "refused bodies are not published");
 }

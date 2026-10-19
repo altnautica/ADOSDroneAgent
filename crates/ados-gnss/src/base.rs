@@ -122,16 +122,14 @@ impl Base {
         self.commanded_ns = None;
     }
 
-    /// Apply a requested mode. `Ok(bytes)` are to be written to the receiver
-    /// (none when it cannot be written and none are needed); `Err` is the
-    /// error code and detail of a refused request, which also leaves the
-    /// machine `failed`.
-    pub fn apply(
-        &mut self,
-        mode: BaseMode,
-        cap: &Capability,
-        now: u64,
-    ) -> Result<Option<Vec<u8>>, (&'static str, String)> {
+    /// Record the configured mode while the receiver port is not open yet.
+    /// Nothing is claimed: the state stays `off` until [`Base::apply`]
+    /// commands the receiver.
+    pub fn request(&mut self, mode: BaseMode) {
+        self.reset(mode);
+    }
+
+    fn reset(&mut self, mode: BaseMode) {
         self.mode = mode;
         self.reason = None;
         self.confirmed = false;
@@ -148,8 +146,21 @@ impl Base {
             self.min_dur_s = min_dur_s;
             self.target_accuracy_m = accuracy_m;
         }
+    }
+
+    /// Apply a requested mode. `Ok(bytes)` are to be written to the receiver
+    /// (none when it cannot be written and none are needed); `Err` is the
+    /// error code and detail of a refused request, which also leaves the
+    /// machine `failed`.
+    pub fn apply(
+        &mut self,
+        mode: BaseMode,
+        cap: &Capability,
+        now: u64,
+    ) -> Result<Option<Vec<u8>>, (&'static str, String)> {
+        self.reset(mode);
         if mode == BaseMode::Off {
-            return Ok(cap.writable.then(valset::off));
+            return Ok(cap.writable.then(|| valset::off(cap.port)));
         }
         if !cap.writable {
             let detail = "the receiver is attached through the sensor hub and cannot be configured";

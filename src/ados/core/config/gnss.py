@@ -5,7 +5,8 @@ idle. ``source`` names where a receiver's bytes come from:
 
 * ``serial:/dev/ttyUSB0`` or ``serial:/dev/ttyUSB0@115200`` -- a serial port;
 * ``udp:7800`` -- UDP datagrams on that local port (each datagram carries
-  receiver bytes; replies go back to the sender);
+  receiver bytes; configuration goes back to the latest sender), or
+  ``udp:7800@192.168.1.50:7801`` to send configuration to a fixed address;
 * ``hub`` -- the sensor hub's GNSS passthrough on the sensor bus (read only:
   the receiver cannot be configured through the hub).
 
@@ -21,7 +22,9 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-_SOURCE_RE = re.compile(r"^(hub|udp:\d{1,5}|serial:[^@\s]+(@\d+)?)$")
+_SOURCE_RE = re.compile(
+    r"^(hub|udp:(\d{1,5})(@\d{1,3}(\.\d{1,3}){3}:\d{1,5})?|serial:[^@\s]+(@\d+)?)$"
+)
 
 
 class GnssReceiverConfig(BaseModel):
@@ -35,13 +38,18 @@ class GnssReceiverConfig(BaseModel):
     @field_validator("source")
     @classmethod
     def _source_shape(cls, v: str) -> str:
-        if not _SOURCE_RE.match(v):
+        m = _SOURCE_RE.match(v)
+        if not m:
             raise ValueError(
-                "gnss receiver source must be 'hub', 'udp:<port>' or "
-                "'serial:<device>[@<baud>]'"
+                "gnss receiver source must be 'hub', 'udp:<port>[@<ipv4>:<port>]' "
+                "or 'serial:<device>[@<baud>]'"
             )
-        if v.startswith("udp:") and not 1 <= int(v[4:]) <= 65535:
-            raise ValueError("gnss receiver udp port must be 1-65535")
+        if v.startswith("udp:"):
+            ports = [int(m.group(2))]
+            if m.group(3):
+                ports.append(int(m.group(3).rsplit(":", 1)[1]))
+            if not all(1 <= p <= 65535 for p in ports):
+                raise ValueError("gnss receiver udp ports must be 1-65535")
         return v
 
 

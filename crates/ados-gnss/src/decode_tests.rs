@@ -25,7 +25,6 @@ fn nav_pvt_decodes_position_time_and_quality() {
     assert!((pvt.lon_deg - 77.5946).abs() < 1e-9);
     assert!((pvt.h_ellipsoid_m - 920.4).abs() < 1e-9);
     assert!((pvt.h_msl_m - 1006.1).abs() < 1e-9);
-    assert!((pvt.pdop - 1.2).abs() < 1e-9);
     assert_eq!(pvt.utc_ns, Some(1_792_404_900_250_000_000));
     assert_eq!(ubx::days_from_civil(1970, 1, 1), 0);
     assert_eq!(ubx::days_from_civil(2026, 10, 19), 20_745);
@@ -157,7 +156,8 @@ fn solution_prefers_fresh_ubx_and_nav_dop() {
     rx.on_pvt(1, pvt);
     let s = rx.solution(2);
     assert_eq!((s.fix, s.sats), (Fix::ThreeD, 14));
-    assert_eq!(s.hdop, Some(1.2)); // pDOP until NAV-DOP arrives
+    // No NAV-DOP yet: hdop is unknown (PDOP is never reported as hdop).
+    assert_eq!(s.hdop, None);
     rx.on_dop(2, 0.8);
     assert_eq!(rx.solution(3).hdop, Some(0.8));
     // UBX stale, GGA re-sent: NMEA fallback.

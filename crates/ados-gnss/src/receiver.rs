@@ -122,11 +122,12 @@ impl ReceiverState {
         if let Some(p) = fresh(&self.pvt, now) {
             let fix = fix_from_pvt(p);
             let has = fix != Fix::None;
-            let hdop = fresh(&self.dop, now).copied().unwrap_or(p.pdop);
+            // NAV-PVT carries only the position DOP; hdop comes from NAV-DOP.
+            let hdop = fresh(&self.dop, now).copied();
             return Solution {
                 fix,
                 sats: p.num_sv,
-                hdop: Some(hdop),
+                hdop,
                 lat_deg: has.then_some(p.lat_deg),
                 lon_deg: has.then_some(p.lon_deg),
                 h_ellipsoid_m: has.then_some(p.h_ellipsoid_m),

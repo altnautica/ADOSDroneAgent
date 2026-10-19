@@ -90,11 +90,48 @@ fn fixed_sets_llh_with_high_precision_parts() {
 }
 
 #[test]
-fn off_and_mon_ver_poll() {
-    let (_, items) = decode(&off());
-    assert_eq!(items, vec![(TMODE_MODE, vec![0])]);
+fn off_leaves_tmode_and_stops_rtcm_output() {
+    let (layers, items) = decode(&off(RxPort::Uart1));
+    assert_eq!(layers, LAYER_RAM);
+    assert_eq!(items[0], (TMODE_MODE, vec![0]));
+    let rtcm: Vec<(u32, Vec<u8>)> = [
+        0x2091_02BE,
+        0x2091_035F,
+        0x2091_0364,
+        0x2091_0369,
+        0x2091_036E,
+        0x2091_0304,
+    ]
+    .into_iter()
+    .map(|k| (k, vec![0]))
+    .collect();
+    assert_eq!(items[1..], rtcm[..]);
+    let (_, usb) = decode(&off(RxPort::Usb));
+    assert_eq!(usb[1], (0x2091_02C0, vec![0]));
     assert_eq!(
         poll_mon_ver(),
         vec![0xB5, 0x62, 0x0A, 0x04, 0x00, 0x00, 0x0E, 0x34]
     );
+}
+
+#[test]
+fn nav_outputs_enable_the_decoded_messages() {
+    let keys = |b: Vec<u8>| -> Vec<(u32, Vec<u8>)> { decode(&b).1 };
+    let one = |ks: &[u32]| -> Vec<(u32, Vec<u8>)> { ks.iter().map(|&k| (k, vec![1])).collect() };
+    // A rover: NAV-PVT and NAV-DOP.
+    assert_eq!(
+        keys(nav_outputs(RxPort::Uart1, false, false)),
+        one(&[0x2091_0007, 0x2091_0039])
+    );
+    // The base: plus TIM-TP and NAV-SVIN.
+    assert_eq!(
+        keys(nav_outputs(RxPort::Uart1, true, false)),
+        one(&[0x2091_0007, 0x2091_0039, 0x2091_017E, 0x2091_0089])
+    );
+    // A heading rover on USB: plus NAV-RELPOSNED.
+    assert_eq!(
+        keys(nav_outputs(RxPort::Usb, false, true)),
+        one(&[0x2091_0009, 0x2091_003B, 0x2091_0090])
+    );
+    assert_eq!(decode(&nav_outputs(RxPort::Usb, true, true)).0, LAYER_RAM);
 }

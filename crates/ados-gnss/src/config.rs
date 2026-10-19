@@ -1,5 +1,6 @@
 //! The `gnss` config slice this service reads.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -13,8 +14,16 @@ pub const DEFAULT_BAUD: u32 = 38_400;
 /// Where a receiver's bytes come from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    Serial { path: String, baud: u32 },
-    Udp(u16),
+    Serial {
+        path: String,
+        baud: u32,
+    },
+    /// Datagrams on a local port. Configuration goes to `peer` when set,
+    /// else to the sender of the latest datagram.
+    Udp {
+        port: u16,
+        peer: Option<SocketAddr>,
+    },
     Hub,
 }
 
@@ -24,8 +33,13 @@ impl Source {
         if s == "hub" {
             return Some(Self::Hub);
         }
-        if let Some(port) = s.strip_prefix("udp:") {
-            return port.parse().ok().filter(|p| *p != 0).map(Self::Udp);
+        if let Some(rest) = s.strip_prefix("udp:") {
+            let (port, peer) = match rest.split_once('@') {
+                Some((p, peer)) => (p, Some(peer.parse().ok()?)),
+                None => (rest, None),
+            };
+            let port = port.parse().ok().filter(|p| *p != 0)?;
+            return Some(Self::Udp { port, peer });
         }
         let dev = s.strip_prefix("serial:")?;
         let (path, baud) = match dev.split_once('@') {
@@ -38,11 +52,16 @@ impl Source {
         })
     }
 
-    /// The `source` field of the status: `hub`, `udp:7800`, `serial:/dev/ttyUSB0`.
+    /// The `source` field of the status: `hub`, `udp:7800`,
+    /// `udp:7800@192.168.1.50:7801`, `serial:/dev/ttyUSB0`.
     pub fn label(&self) -> String {
         match self {
             Self::Serial { path, .. } => format!("serial:{path}"),
-            Self::Udp(p) => format!("udp:{p}"),
+            Self::Udp { port, peer: None } => format!("udp:{port}"),
+            Self::Udp {
+                port,
+                peer: Some(peer),
+            } => format!("udp:{port}@{peer}"),
             Self::Hub => "hub".to_string(),
         }
     }
@@ -201,7 +220,24 @@ mod tests {
     #[test]
     fn sources_parse() {
         assert_eq!(Source::parse("hub"), Some(Source::Hub));
-        assert_eq!(Source::parse("udp:7800"), Some(Source::Udp(7800)));
+        let udp = Source::parse("udp:7800").unwrap();
+        assert_eq!(
+            udp,
+            Source::Udp {
+                port: 7800,
+                peer: None
+            }
+        );
+        let peered = Source::parse("udp:7800@192.168.1.50:7801").unwrap();
+        assert_eq!(
+            peered,
+            Source::Udp {
+                port: 7800,
+                peer: Some("192.168.1.50:7801".parse().unwrap())
+            }
+        );
+        assert_eq!(peered.label(), "udp:7800@192.168.1.50:7801");
+        assert_eq!(Source::parse("udp:7800@nowhere"), None);
         assert_eq!(
             Source::parse("serial:/dev/ttyUSB0@115200"),
             Some(Source::Serial {
@@ -218,7 +254,7 @@ mod tests {
         );
         assert_eq!(Source::parse("udp:0"), None);
         assert_eq!(Source::parse("tcp:1"), None);
-        assert_eq!(Source::Udp(7800).label(), "udp:7800");
+        assert_eq!(udp.label(), "udp:7800");
     }
 
     #[test]

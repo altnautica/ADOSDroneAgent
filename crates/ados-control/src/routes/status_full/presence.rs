@@ -4,10 +4,12 @@
 //! present, so Mission Control shows a tab only for a lane that can work.
 
 use std::path::Path;
+use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
 use crate::routes::sensing::storage::CAPTURE_PROFILES;
+use crate::routes::sensing::FRESH;
 
 fn unit_on(unit: &str, profile: &str) -> bool {
     ados_protocol::units::find(unit).is_some_and(|u| u.on_profile(profile))
@@ -18,14 +20,22 @@ pub(crate) fn presence_flags(
     profile: &str,
     run_dir: &Path,
     etc_dir: &Path,
+    now: SystemTime,
 ) -> [(&'static str, bool); 4] {
     let clock = unit_on("ados-clock", profile);
     let sensor_hub = unit_on("ados-sensorhub", profile)
         && (run_dir.join("sensor-hub-present").exists()
             || etc_dir.join("sensorhub-enabled").exists());
-    // ados-gnss writes its sidecar only when receivers are configured (it
-    // exits idle otherwise), so the file is the configuration marker.
-    let gnss = unit_on("ados-gnss", profile) && run_dir.join("gnss.json").is_file();
+    // ados-gnss writes its sidecar every second only while receivers are
+    // configured (it exits idle otherwise); a file left by a stopped service
+    // goes stale, so only a fresh one marks the lane as working.
+    let gnss = unit_on("ados-gnss", profile)
+        && ados_protocol::sidecar::read_fresh_at::<Value>(
+            &run_dir.join("gnss.json"),
+            Some(FRESH),
+            now,
+        )
+        .is_fresh();
     let capture_storage =
         CAPTURE_PROFILES.contains(&profile) && run_dir.join("capture-storage.json").is_file();
     [
@@ -42,7 +52,7 @@ pub(super) fn insert_presence_flags(
     run_dir: &Path,
     etc_dir: &Path,
 ) {
-    for (k, v) in presence_flags(profile, run_dir, etc_dir) {
+    for (k, v) in presence_flags(profile, run_dir, etc_dir, SystemTime::now()) {
         payload.insert(k.to_string(), Value::Bool(v));
     }
 }
@@ -52,7 +62,11 @@ mod tests {
     use super::*;
 
     fn flags(profile: &str, run: &Path, etc: &Path) -> Vec<bool> {
-        presence_flags(profile, run, etc)
+        flags_at(profile, run, etc, SystemTime::now())
+    }
+
+    fn flags_at(profile: &str, run: &Path, etc: &Path, now: SystemTime) -> Vec<bool> {
+        presence_flags(profile, run, etc, now)
             .iter()
             .map(|f| f.1)
             .collect()
@@ -78,5 +92,18 @@ mod tests {
         );
         // A workstation runs none of these lanes.
         assert_eq!(flags("workstation", &run, &etc), [false; 4]);
+    }
+
+    #[test]
+    fn a_stale_gnss_sidecar_is_not_presence() {
+        let dir = tempfile::tempdir().unwrap();
+        let (run, etc) = (dir.path().join("run"), dir.path().join("etc"));
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(run.join("gnss.json"), "{}").unwrap();
+        let later = SystemTime::now() + FRESH + std::time::Duration::from_secs(5);
+        assert!(!flags_at("ground_station", &run, &etc, later)[2]);
+        // Unparseable is not presence either.
+        std::fs::write(run.join("gnss.json"), "not json").unwrap();
+        assert!(!flags("ground_station", &run, &etc)[2]);
     }
 }

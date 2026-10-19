@@ -3,7 +3,13 @@
 //! and the command socket read it.
 //!
 //! The first configured receiver is the base and the PPS receiver.
+//!
+//! Every port open (and, for a UDP receiver, every new peer) re-sends the
+//! receiver's whole configuration: the MON-VER poll, the UBX output enables
+//! and the base command (or the explicit base-off), all to the RAM layer, so
+//! a power-cycled or factory-default receiver comes back configured.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -29,9 +35,26 @@ struct Rx {
     writer: Option<mpsc::Sender<Vec<u8>>>,
 }
 
+/// What an expected CFG-VALSET acknowledgement belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ack {
+    /// No acknowledgement (a poll).
+    None,
+    /// A configuration write the base machine does not track.
+    Other,
+    /// The base command.
+    Base,
+}
+
+/// Most acknowledgements kept outstanding; older ones are forgotten.
+const MAX_PENDING_ACKS: usize = 8;
+
 pub struct Service {
     rx: Vec<Rx>,
     base: Base,
+    /// CFG-VALSET writes to the base receiver awaiting ACK/NAK, in order (a
+    /// u-blox receiver acknowledges in the order it received them).
+    pending_acks: VecDeque<Ack>,
     rtcm: RtcmCounter,
     heading: Heading,
     heading_enabled: bool,
@@ -39,7 +62,9 @@ pub struct Service {
 }
 
 impl Service {
-    /// Build the state and apply the configured base mode.
+    /// Build the state. A configured base mode is commanded when the base
+    /// receiver's port opens; a hub receiver, which cannot be configured,
+    /// reports `failed` at once.
     pub fn new(cfg: &GnssConfig, now: u64) -> Self {
         let mut svc = Self {
             rx: cfg
@@ -52,13 +77,19 @@ impl Service {
                 })
                 .collect(),
             base: Base::new(cfg.survey_min_dur_s, cfg.survey_accuracy_m),
+            pending_acks: VecDeque::new(),
             rtcm: RtcmCounter::default(),
             heading: Heading::default(),
             heading_enabled: cfg.heading_enabled && cfg.receivers.len() >= 2,
             pairer: crate::pps::Pairer::default(),
         };
+        let hub_base = svc.rx.first().is_some_and(|r| r.cfg.source == Source::Hub);
         if cfg.base != BaseMode::Off {
-            let _ = svc.set_base(cfg.base, now);
+            if hub_base {
+                let _ = svc.set_base(cfg.base, now);
+            } else {
+                svc.base.request(cfg.base);
+            }
         }
         svc
     }
@@ -83,24 +114,46 @@ impl Service {
         })
     }
 
-    fn write(&self, idx: usize, bytes: Vec<u8>) {
-        match self.rx.get(idx).and_then(|r| r.writer.as_ref()) {
-            Some(w) => {
-                if w.try_send(bytes).is_err() {
-                    tracing::warn!(id = %self.rx[idx].cfg.id, "gnss_write_dropped");
-                }
+    fn send(&mut self, idx: usize, bytes: Vec<u8>, ack: Ack) {
+        let Some(r) = self.rx.get(idx) else {
+            return;
+        };
+        let Some(w) = r.writer.as_ref() else {
+            tracing::debug!(id = %r.cfg.id, "gnss_write_no_port");
+            return;
+        };
+        if w.try_send(bytes).is_err() {
+            tracing::warn!(id = %r.cfg.id, "gnss_write_dropped");
+            return;
+        }
+        if idx == 0 && ack != Ack::None {
+            if self.pending_acks.len() == MAX_PENDING_ACKS {
+                self.pending_acks.pop_front();
             }
-            None => tracing::debug!(idx, "gnss_write_no_port"),
+            self.pending_acks.push_back(ack);
         }
     }
 
-    /// A source opened its port: keep its writer, ask for the model, and
-    /// re-send the base command to the base receiver.
+    /// A source opened its port (or a UDP receiver showed a new peer): keep
+    /// its writer and send the receiver its configuration.
     pub fn on_attach(&mut self, idx: usize, writer: mpsc::Sender<Vec<u8>>, now: u64) {
         self.rx[idx].writer = Some(writer);
-        self.write(idx, valset::poll_mon_ver());
-        if idx == 0 && self.base.mode() != BaseMode::Off {
-            let _ = self.set_base(self.base.mode(), now);
+        let port = self.rx[idx].cfg.port;
+        let is_base = idx == 0;
+        if is_base {
+            self.pending_acks.clear();
+        }
+        self.send(idx, valset::poll_mon_ver(), Ack::None);
+        let heading = self.heading_enabled && !is_base;
+        self.send(idx, valset::nav_outputs(port, is_base, heading), Ack::Other);
+        if !is_base {
+            return;
+        }
+        match self.base.mode() {
+            BaseMode::Off => self.send(0, valset::off(port), Ack::Other),
+            mode => {
+                let _ = self.set_base(mode, now);
+            }
         }
     }
 
@@ -114,7 +167,7 @@ impl Service {
             return Err((E_NO_RECEIVER, "no GNSS receiver is configured".to_string()));
         };
         if let Some(bytes) = self.base.apply(mode, &cap, now)? {
-            self.write(0, bytes);
+            self.send(0, bytes, Ack::Base);
         }
         Ok(())
     }
@@ -181,7 +234,12 @@ impl Service {
             (ubx::CLS_ACK, ubx::ACK_ACK | ubx::ACK_NAK)
                 if is_base && ubx::ack_target(p) == Some((ubx::CLS_CFG, ubx::CFG_VALSET)) =>
             {
-                self.base.on_valset_ack(id == ubx::ACK_ACK);
+                let ok = id == ubx::ACK_ACK;
+                match self.pending_acks.pop_front() {
+                    Some(Ack::Base) => self.base.on_valset_ack(ok),
+                    _ if !ok => tracing::debug!("gnss_config_write_refused"),
+                    _ => {}
+                }
             }
             _ => {}
         }

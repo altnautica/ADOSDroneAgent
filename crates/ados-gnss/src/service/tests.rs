@@ -90,13 +90,36 @@ fn status_has_exactly_the_contract_fields() {
 }
 
 #[test]
-fn fixed_base_object_has_the_position_fields() {
+fn fixed_base_is_commanded_on_attach_and_confirmed_by_its_own_ack() {
     let pos = Llh {
         lat_deg: 1.0,
         lon_deg: 2.0,
         h_ellipsoid_m: 3.0,
     };
     let mut svc = Service::new(&cfg(&["udp:7800"], BaseMode::Fixed(pos)), 0);
+    // Not attached yet: nothing commanded, nothing claimed.
+    let v = serde_json::to_value(svc.status(0, 0)).unwrap();
+    assert_eq!(
+        (v["base"]["mode"].clone(), v["base"]["state"].clone()),
+        (json!("fixed"), json!("off"))
+    );
+    svc.tick(60 * S);
+    assert_eq!(svc.base_state(), BaseState::Off);
+
+    let (tx, mut rx) = mpsc::channel(8);
+    svc.on_attach(0, tx, S);
+    assert_eq!(rx.try_recv().unwrap(), valset::poll_mon_ver());
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        valset::nav_outputs(valset::RxPort::Uart1, true, false)
+    );
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        valset::fixed(valset::RxPort::Uart1, 1.0, 2.0, 3.0)
+    );
+    // The first ACK belongs to the output enables, not the base command.
+    feed(&mut svc, 0, &fixtures::ack(true, 0x06, 0x8A), S);
+    assert_eq!(svc.base_state(), BaseState::Off);
     feed(&mut svc, 0, &fixtures::ack(true, 0x06, 0x8A), S);
     let v = serde_json::to_value(svc.status(S, 0)).unwrap();
     assert_eq!(v["base"]["state"], "fixed");
@@ -104,6 +127,22 @@ fn fixed_base_object_has_the_position_fields() {
         v["base"]["fixed"],
         json!({"lat_deg": 1.0, "lon_deg": 2.0, "h_ellipsoid_m": 3.0})
     );
+}
+
+#[test]
+fn a_refused_output_enable_does_not_fail_the_base() {
+    let mode = BaseMode::Survey {
+        min_dur_s: 10,
+        accuracy_m: 1.0,
+    };
+    let mut svc = Service::new(&cfg(&["udp:7800"], mode), 0);
+    let (tx, _rx) = mpsc::channel(8);
+    svc.on_attach(0, tx, S);
+    assert_eq!(svc.base_state(), BaseState::Surveying);
+    feed(&mut svc, 0, &fixtures::ack(false, 0x06, 0x8A), S);
+    assert_eq!(svc.base_state(), BaseState::Surveying);
+    feed(&mut svc, 0, &fixtures::ack(false, 0x06, 0x8A), S);
+    assert_eq!(svc.base_state(), BaseState::Failed);
 }
 
 #[test]
@@ -148,11 +187,18 @@ fn hub_base_fails_and_writes_reach_attached_ports() {
     assert_eq!(svc.base_state(), BaseState::Failed);
     assert!(svc.base_reason().unwrap().contains("sensor hub"));
 
-    let mut svc = Service::new(&cfg(&["udp:7800"], BaseMode::Off), 0);
+    let mut svc = Service::new(&cfg(&["udp:7800", "udp:7801"], BaseMode::Off), 0);
     assert_eq!(svc.set_base(BaseMode::Off, 0), Ok(()));
+    let uart = valset::RxPort::Uart1;
     let (tx, mut rx) = mpsc::channel(8);
     svc.on_attach(0, tx, 0);
     assert_eq!(rx.try_recv().unwrap(), valset::poll_mon_ver());
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        valset::nav_outputs(uart, true, false)
+    );
+    // Base off is stated explicitly, so a receiver left in base mode stops.
+    assert_eq!(rx.try_recv().unwrap(), valset::off(uart));
     svc.set_base(
         BaseMode::Survey {
             min_dur_s: 10,
@@ -161,18 +207,26 @@ fn hub_base_fails_and_writes_reach_attached_ports() {
         S,
     )
     .unwrap();
-    assert_eq!(
-        rx.try_recv().unwrap(),
-        valset::survey_in(valset::RxPort::Uart1, 10, 1.0)
-    );
-    // Re-attach re-sends the active base command.
+    assert_eq!(rx.try_recv().unwrap(), valset::survey_in(uart, 10, 1.0));
+    // Re-attach re-sends the whole configuration with the active base command.
     let (tx, mut rx) = mpsc::channel(8);
     svc.on_attach(0, tx, 2 * S);
     assert_eq!(rx.try_recv().unwrap(), valset::poll_mon_ver());
     assert_eq!(
         rx.try_recv().unwrap(),
-        valset::survey_in(valset::RxPort::Uart1, 10, 1.0)
+        valset::nav_outputs(uart, true, false)
     );
+    assert_eq!(rx.try_recv().unwrap(), valset::survey_in(uart, 10, 1.0));
+    assert!(rx.try_recv().is_err());
+    // A heading rover gets NAV-RELPOSNED and no base command.
+    let (tx, mut rx) = mpsc::channel(8);
+    svc.on_attach(1, tx, 2 * S);
+    assert_eq!(rx.try_recv().unwrap(), valset::poll_mon_ver());
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        valset::nav_outputs(uart, false, true)
+    );
+    assert!(rx.try_recv().is_err());
 
     let mut none = Service::new(&cfg(&[], BaseMode::Off), 0);
     assert_eq!(
