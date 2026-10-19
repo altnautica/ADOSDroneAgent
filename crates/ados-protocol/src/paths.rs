@@ -110,6 +110,15 @@ pub const LCD_STATE_JSON: &str = "lcd-state.json";
 pub const LCD_PAGE_REQUEST_JSON: &str = "lcd-page-request.json";
 pub const LCD_PLUGIN_PAGE_JSON: &str = "lcd-plugin-page.json";
 pub const LCD_PLUGIN_TAP_JSON: &str = "lcd-plugin-tap.json";
+pub const CLOCK_JSON: &str = "clock.json";
+pub const CLOCK_MAX_AGE_MS: u64 = 5000;
+pub const SENSORS_JSON: &str = "sensors.json";
+pub const SENSORS_MAX_AGE_MS: u64 = 5000;
+pub const SENSORHUB_JSON: &str = "sensorhub.json";
+pub const SENSORHUB_MAX_AGE_MS: u64 = 5000;
+pub const GNSS_JSON: &str = "gnss.json";
+pub const GNSS_MAX_AGE_MS: u64 = 5000;
+pub const CAPTURE_STORAGE_JSON: &str = "capture-storage.json";
 
 // Socket file names.
 pub const API_INTERNAL_SOCK: &str = "api-internal.sock";
@@ -126,6 +135,7 @@ pub const LOGD_QUERY_SOCK: &str = "logd-query.sock";
 pub const MAVLINK_SOCK: &str = "mavlink.sock";
 pub const MAVLINK_INGEST_SOCK: &str = "mavlink-ingest.sock";
 pub const MSP_SOCK: &str = "msp.sock";
+pub const GNSS_CMD_SOCK: &str = "gnss-cmd.sock";
 pub const PAIRING_SOCK: &str = "pairing.sock";
 pub const PIC_SOCK: &str = "pic.sock";
 pub const RADIO_AUX_SOCK: &str = "radio-aux.sock";
@@ -136,6 +146,7 @@ pub const SWARM_SOCK: &str = "swarm.sock";
 pub const TUNNEL_CONFIG_CMD_SOCK: &str = "tunnel-config-cmd.sock";
 pub const VIDEO_CMD_SOCK: &str = "video-cmd.sock";
 pub const VIDEO_ENCODER_SOCK: &str = "video-encoder.sock";
+pub const SENSOR_BUS_SOCK: &str = "sensors.sock";
 pub const VISION_SOCK: &str = "vision.sock";
 pub const WFB_CMD_SOCK: &str = "wfb-cmd.sock";
 pub const WIFI_CMD_SOCK: &str = "wifi-cmd.sock";
@@ -188,6 +199,11 @@ pub const SIDECARS: &[SidecarPath] = &[
     SidecarPath { id: "lcd-page-request", path: "/run/ados/lcd-page-request.json", max_age_ms: None, writer: "ados-api" },
     SidecarPath { id: "lcd-plugin-page", path: "/run/ados/lcd-plugin-page.json", max_age_ms: None, writer: "ados-plugin-host" },
     SidecarPath { id: "lcd-plugin-tap", path: "/run/ados/lcd-plugin-tap.json", max_age_ms: None, writer: "ados-display" },
+    SidecarPath { id: "clock", path: "/run/ados/clock.json", max_age_ms: Some(5000), writer: "ados-clock" },
+    SidecarPath { id: "sensors", path: "/run/ados/sensors.json", max_age_ms: Some(5000), writer: "ados-clock" },
+    SidecarPath { id: "sensorhub", path: "/run/ados/sensorhub.json", max_age_ms: Some(5000), writer: "ados-sensorhub" },
+    SidecarPath { id: "gnss", path: "/run/ados/gnss.json", max_age_ms: Some(5000), writer: "ados-gnss" },
+    SidecarPath { id: "capture-storage", path: "/run/ados/capture-storage.json", max_age_ms: None, writer: "ados-supervisor" },
 ];
 
 /// Every registered socket.
@@ -207,6 +223,7 @@ pub const SOCKETS: &[SocketPath] = &[
     SocketPath { id: "mavlink", path: "/run/ados/mavlink.sock", owner: "ados-mavlink-router" },
     SocketPath { id: "mavlink-ingest", path: "/run/ados/mavlink-ingest.sock", owner: "ados-mavlink-router" },
     SocketPath { id: "msp", path: "/run/ados/msp.sock", owner: "ados-mavlink-router" },
+    SocketPath { id: "gnss-cmd", path: "/run/ados/gnss-cmd.sock", owner: "ados-gnss" },
     SocketPath { id: "pairing", path: "/run/ados/pairing.sock", owner: "ados-groundlink" },
     SocketPath { id: "pic", path: "/run/ados/pic.sock", owner: "ados-hid" },
     SocketPath { id: "radio-aux", path: "/run/ados/radio-aux.sock", owner: "ados-radio" },
@@ -217,6 +234,7 @@ pub const SOCKETS: &[SocketPath] = &[
     SocketPath { id: "tunnel-config-cmd", path: "/run/ados/tunnel-config-cmd.sock", owner: "ados-config-tunnel" },
     SocketPath { id: "video-cmd", path: "/run/ados/video-cmd.sock", owner: "ados-supervisor" },
     SocketPath { id: "video-encoder", path: "/run/ados/video-encoder.sock", owner: "ados-video" },
+    SocketPath { id: "sensor-bus", path: "/run/ados/sensors.sock", owner: "ados-clock" },
     SocketPath { id: "vision", path: "/run/ados/vision.sock", owner: "ados-vision" },
     SocketPath { id: "wfb-cmd", path: "/run/ados/wfb-cmd.sock", owner: "ados-radio" },
     SocketPath { id: "wifi-cmd", path: "/run/ados/wifi-cmd.sock", owner: "ados-net" },

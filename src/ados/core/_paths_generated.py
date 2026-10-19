@@ -77,6 +77,15 @@ LCD_STATE_JSON = "lcd-state.json"
 LCD_PAGE_REQUEST_JSON = "lcd-page-request.json"
 LCD_PLUGIN_PAGE_JSON = "lcd-plugin-page.json"
 LCD_PLUGIN_TAP_JSON = "lcd-plugin-tap.json"
+CLOCK_JSON = "clock.json"
+CLOCK_MAX_AGE_MS = 5000
+SENSORS_JSON = "sensors.json"
+SENSORS_MAX_AGE_MS = 5000
+SENSORHUB_JSON = "sensorhub.json"
+SENSORHUB_MAX_AGE_MS = 5000
+GNSS_JSON = "gnss.json"
+GNSS_MAX_AGE_MS = 5000
+CAPTURE_STORAGE_JSON = "capture-storage.json"
 
 API_INTERNAL_SOCK = "api-internal.sock"
 AUX_CMD_SOCK = "aux-cmd.sock"
@@ -92,6 +101,7 @@ LOGD_QUERY_SOCK = "logd-query.sock"
 MAVLINK_SOCK = "mavlink.sock"
 MAVLINK_INGEST_SOCK = "mavlink-ingest.sock"
 MSP_SOCK = "msp.sock"
+GNSS_CMD_SOCK = "gnss-cmd.sock"
 PAIRING_SOCK = "pairing.sock"
 PIC_SOCK = "pic.sock"
 RADIO_AUX_SOCK = "radio-aux.sock"
@@ -102,6 +112,7 @@ SWARM_SOCK = "swarm.sock"
 TUNNEL_CONFIG_CMD_SOCK = "tunnel-config-cmd.sock"
 VIDEO_CMD_SOCK = "video-cmd.sock"
 VIDEO_ENCODER_SOCK = "video-encoder.sock"
+SENSOR_BUS_SOCK = "sensors.sock"
 VISION_SOCK = "vision.sock"
 WFB_CMD_SOCK = "wfb-cmd.sock"
 WIFI_CMD_SOCK = "wifi-cmd.sock"
@@ -152,6 +163,11 @@ SIDECAR_PATHS: dict[str, dict[str, object]] = {
     "lcd-page-request": {"path": "/run/ados/lcd-page-request.json", "max_age_ms": None, "writer": "ados-api"},
     "lcd-plugin-page": {"path": "/run/ados/lcd-plugin-page.json", "max_age_ms": None, "writer": "ados-plugin-host"},
     "lcd-plugin-tap": {"path": "/run/ados/lcd-plugin-tap.json", "max_age_ms": None, "writer": "ados-display"},
+    "clock": {"path": "/run/ados/clock.json", "max_age_ms": 5000, "writer": "ados-clock"},
+    "sensors": {"path": "/run/ados/sensors.json", "max_age_ms": 5000, "writer": "ados-clock"},
+    "sensorhub": {"path": "/run/ados/sensorhub.json", "max_age_ms": 5000, "writer": "ados-sensorhub"},
+    "gnss": {"path": "/run/ados/gnss.json", "max_age_ms": 5000, "writer": "ados-gnss"},
+    "capture-storage": {"path": "/run/ados/capture-storage.json", "max_age_ms": None, "writer": "ados-supervisor"},
 }
 
 SOCKET_PATHS: dict[str, dict[str, str]] = {
@@ -169,6 +185,7 @@ SOCKET_PATHS: dict[str, dict[str, str]] = {
     "mavlink": {"path": "/run/ados/mavlink.sock", "owner": "ados-mavlink-router"},
     "mavlink-ingest": {"path": "/run/ados/mavlink-ingest.sock", "owner": "ados-mavlink-router"},
     "msp": {"path": "/run/ados/msp.sock", "owner": "ados-mavlink-router"},
+    "gnss-cmd": {"path": "/run/ados/gnss-cmd.sock", "owner": "ados-gnss"},
     "pairing": {"path": "/run/ados/pairing.sock", "owner": "ados-groundlink"},
     "pic": {"path": "/run/ados/pic.sock", "owner": "ados-hid"},
     "radio-aux": {"path": "/run/ados/radio-aux.sock", "owner": "ados-radio"},
@@ -179,6 +196,7 @@ SOCKET_PATHS: dict[str, dict[str, str]] = {
     "tunnel-config-cmd": {"path": "/run/ados/tunnel-config-cmd.sock", "owner": "ados-config-tunnel"},
     "video-cmd": {"path": "/run/ados/video-cmd.sock", "owner": "ados-supervisor"},
     "video-encoder": {"path": "/run/ados/video-encoder.sock", "owner": "ados-video"},
+    "sensor-bus": {"path": "/run/ados/sensors.sock", "owner": "ados-clock"},
     "vision": {"path": "/run/ados/vision.sock", "owner": "ados-vision"},
     "wfb-cmd": {"path": "/run/ados/wfb-cmd.sock", "owner": "ados-radio"},
     "wifi-cmd": {"path": "/run/ados/wifi-cmd.sock", "owner": "ados-net"},

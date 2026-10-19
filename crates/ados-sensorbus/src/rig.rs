@@ -16,7 +16,10 @@ static SCHEMA: LazyLock<JSONSchema> = LazyLock::new(|| {
     let parse = |s: &str| serde_json::from_str::<Value>(s).expect("vendored schema is JSON");
     JSONSchema::options()
         .with_draft(Draft::Draft202012)
-        .with_document(format!("{BASE}camera_model.schema.json"), parse(CAMERA_MODEL))
+        .with_document(
+            format!("{BASE}camera_model.schema.json"),
+            parse(CAMERA_MODEL),
+        )
         .with_document(format!("{BASE}manifest.schema.json"), parse(MANIFEST))
         .with_document(format!("{BASE}geo_anchor.schema.json"), parse(GEO_ANCHOR))
         .compile(&parse(RIG))

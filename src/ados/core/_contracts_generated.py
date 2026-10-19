@@ -12,12 +12,12 @@ CONTRACT_VERSIONS: dict[str, int] = {
     "logd.ingest": 1,
     "logd.read": 1,
     "framebus.ring": 1,
-    "framebus.descriptor": 1,
-    "tap.frame": 1,
+    "framebus.descriptor": 2,
+    "tap.frame": 2,
     "vision.detection": 2,
     "state.v2": 4,
     "frame": 0,
-    "mavlink.socket": 0,
+    "mavlink.socket": 2,
     "mavlink.ingest": 0,
     "aux.frame": 1,
     "aux.node_status": 2,
@@ -25,6 +25,7 @@ CONTRACT_VERSIONS: dict[str, int] = {
     "state.v1": 1,
     "ws_ticket": 1,
     "cloud-publish": 1,
+    "sensor.v1": 1,
 }
 
 SIDECAR_VERSIONS: dict[str, int] = {
@@ -73,6 +74,11 @@ SIDECAR_VERSIONS: dict[str, int] = {
     "lcd-page-request": 1,
     "lcd-plugin-page": 1,
     "lcd-plugin-tap": 1,
+    "clock": 1,
+    "sensors": 1,
+    "sensorhub": 1,
+    "gnss": 1,
+    "capture-storage": 1,
 }
 
 CONTRACT_CATALOG: dict[str, dict[str, object]] = {
@@ -105,18 +111,18 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "description": "Shared-memory vision frame ring layout: a header plus seqlock-guarded slots.",
     },
     "framebus.descriptor": {
-        "version": 1,
+        "version": 2,
         "wire": "msgpack",
         "transport": "event-bus",
         "status": "active",
-        "description": "The small vision.frame descriptor naming a ring slot and its frame geometry.",
+        "description": "The small vision.frame descriptor naming a ring slot and its frame geometry. v2 replaces ts_ms with ts_ns (host monotonic, exposure-mid when known) and adds ts_sensor_ns, exposure_ns, trigger_seq, timebase and the Gray8/Gray16/Bayer formats.",
     },
     "tap.frame": {
-        "version": 1,
+        "version": 2,
         "wire": "binary",
         "transport": "unix-stream",
         "status": "active",
-        "description": "Vision-tap frame header (ADVT magic) between the video pipeline and the vision engine.",
+        "description": "Vision-tap frame header (ADVT magic) between the video pipeline and the vision engine. v2 adds ts_mono_ns, the host monotonic arrival time of the frame.",
     },
     "vision.detection": {
         "version": 2,
@@ -140,11 +146,11 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "description": "The 4-byte big-endian length transport primitive shared by plugin.rpc, the MAVLink socket, and state.v2. No version of its own.",
     },
     "mavlink.socket": {
-        "version": 0,
+        "version": 2,
         "wire": "binary",
         "transport": "unix-stream",
-        "status": "metadata",
-        "description": "MAVLink frame broadcast socket; framing versioning defers to external MAVLink v1/v2.",
+        "status": "active",
+        "description": "MAVLink frame broadcast socket. v2 prefixes every frame the router fans out with an 8-byte little-endian rx_mono_ns (host CLOCK_MONOTONIC when the router read it); frames written by clients carry no header. MAVLink framing itself defers to external MAVLink v1/v2.",
     },
     "mavlink.ingest": {
         "version": 0,
@@ -194,6 +200,13 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "transport": "unix-stream",
         "status": "active",
         "description": "Plugin data leaving the node through the cloud relay: the plugin host forwards a gated stream message (QoS 0 broker publish) or keyed JSON record (cloud record upsert) to ados-cloud over a root-only socket, one length-prefixed msgpack request and reply per exchange.",
+    },
+    "sensor.v1": {
+        "version": 1,
+        "wire": "msgpack",
+        "transport": "unix-stream",
+        "status": "active",
+        "description": "The sensor bus (seam J): length-prefixed msgpack frames {v, kind, src, payload} brokered by ados-clock on sensors.sock. clock/imu/gnss/trigger payloads are the capture contract ados.capture.v1 protobuf messages, with every t_ns on the host monotonic clock; baro, mag and sync are msgpack; rtcm is raw RTCM3 bytes toward the receivers.",
     },
 }
 
@@ -512,6 +525,41 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "transport": "/run/ados/lcd-plugin-tap.json",
         "status": "sidecar",
         "description": "A pending plugin display action fired by a touch zone or button, for the plugin host to deliver.",
+    },
+    "clock": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/clock.json",
+        "status": "sidecar",
+        "description": "The host timebase and its disciplining sources: the timebase the next capture session uses, the lock verdict, sigma, and per-source offset/skew/sigma (fc, hub, gnss PPS, sim).",
+    },
+    "sensors": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/sensors.json",
+        "status": "sidecar",
+        "description": "Every sensor stream seen on the sensor bus: kind, source id, measured rate, last sample time.",
+    },
+    "sensorhub": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/sensorhub.json",
+        "status": "sidecar",
+        "description": "The sensor hub link: transport, connection, firmware and board from Hello, protocol version, uptime, CRC errors and dropped packets.",
+    },
+    "gnss": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/gnss.json",
+        "status": "sidecar",
+        "description": "GNSS receivers (fix, satellites, position, RTK, PPS lock), the RTK base state (survey-in, fixed position, RTCM out) and the moving-baseline heading.",
+    },
+    "capture-storage": {
+        "version": 1,
+        "wire": "json",
+        "transport": "/run/ados/capture-storage.json",
+        "status": "sidecar",
+        "description": "The capture storage root, its volume, capture usage against the budget and free-space floor, session counts, and the admission state (ok, near_full, full) a new capture session is checked against.",
     },
 }
 

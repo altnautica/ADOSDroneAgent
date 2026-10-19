@@ -20,7 +20,10 @@ const RECONNECT: Duration = Duration::from_millis(500);
 
 /// Read one length-prefixed frame. A frame failing to decode is an
 /// `InvalidData` error; the stream stays aligned for the next one.
-pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R, buf: &mut Vec<u8>) -> io::Result<BusFrame> {
+pub async fn read_frame<R: AsyncRead + Unpin>(
+    r: &mut R,
+    buf: &mut Vec<u8>,
+) -> io::Result<BusFrame> {
     let mut len = [0u8; 4];
     r.read_exact(&mut len).await?;
     let len = u32::from_be_bytes(len) as usize;

@@ -99,7 +99,11 @@ impl ClockFit {
             let r = y - (c + s * x);
             a + r * r
         });
-        let rms = if n > 2 { (rss / (nf - 2.0)).sqrt() } else { 0.0 };
+        let rms = if n > 2 {
+            (rss / (nf - 2.0)).sqrt()
+        } else {
+            0.0
+        };
         self.model = Some(Model { x0, c, s, rms });
     }
 
@@ -284,7 +288,11 @@ mod tests {
         let t = host;
         let want = fc(t) as f64 - t as f64;
         let got = est.fit().offset_ns(t).unwrap();
-        assert!((got - want).abs() < 2_000.0, "offset error {} ns", got - want);
+        assert!(
+            (got - want).abs() < 2_000.0,
+            "offset error {} ns",
+            got - want
+        );
         assert!((est.fit().skew_ppm() - 40.0).abs() < 0.05);
     }
 }

@@ -54,7 +54,11 @@ pub const SENSOR_BUS_VERSION: u16 = 1;
 /// Largest encoded frame body the bus accepts (1 MiB).
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
 
-/// The resolved sensor-bus socket path (`ADOS_RUN_DIR` aware).
+/// The resolved sensor-bus socket path (`ADOS_RUN_DIR` aware), registered as
+/// the socket `sensor-bus` (`/run/ados/sensors.sock`).
 pub fn socket_path() -> std::path::PathBuf {
-    ados_protocol::paths::run_path("sensors")
+    use ados_protocol::paths;
+    paths::socket("sensor-bus")
+        .map(|s| paths::resolve(s.path))
+        .unwrap_or_else(|| paths::run_dir().join("sensors.sock"))
 }

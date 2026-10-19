@@ -26,8 +26,8 @@ fn vendored_contract_is_byte_identical() {
     let v = vendored();
     assert!(!v.files.is_empty());
     for (rel, want) in &v.files {
-        let bytes = std::fs::read(contract_dir().join(rel))
-            .unwrap_or_else(|e| panic!("{rel}: {e}"));
+        let bytes =
+            std::fs::read(contract_dir().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"));
         let got = hex::encode(Sha256::digest(&bytes));
         assert_eq!(&got, want, "{rel} drifted from VENDORED.toml");
     }
