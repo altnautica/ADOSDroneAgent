@@ -2,9 +2,23 @@
 
 use super::*;
 
+/// The sensor plane, in start order: the clock and sensor-bus broker first so
+/// the bus is bound before its producers, then the sensor hub and the GNSS
+/// receivers. No install step enables these units, so the hardware pass is the
+/// only thing that starts them. Each exits 0 when it has nothing to run, the hub
+/// unit self-gates on its presence or enable marker, and the profile gate keeps
+/// each off the profiles it does not serve.
+pub(crate) const SENSOR_PLANE_UNITS: [&str; 3] = ["ados-clock", "ados-sensorhub", "ados-gnss"];
+
 impl Supervisor {
     /// Detect connected hardware and start the matching units.
     pub(super) async fn detect_and_start_hardware(&mut self) {
+        for name in SENSOR_PLANE_UNITS {
+            if self.index_of(name).is_some() {
+                self.start_service(name).await;
+            }
+        }
+
         // Start the video service when video is enabled and a camera source
         // exists: a local camera node, a network camera source (the IP-camera
         // case: the feed is an rtsp://… / http://… URL, so there is no

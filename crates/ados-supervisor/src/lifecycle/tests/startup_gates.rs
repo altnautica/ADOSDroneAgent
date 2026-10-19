@@ -169,6 +169,34 @@ async fn vision_enabled_headless_drone_is_gated_off_not_started() {
 }
 
 #[tokio::test]
+async fn the_sensor_plane_starts_on_the_profiles_it_serves() {
+    // No install step enables ados-clock, ados-sensorhub or ados-gnss, so
+    // the hardware pass must start them, clock first, and only where the
+    // profile gate allows.
+    let started = |profile: &str| {
+        let profile = profile.to_owned();
+        async move {
+            let mock = Arc::new(MockProcessManager::new());
+            let bind = Arc::new(BindOrchestrator::new());
+            let mut sup = Supervisor::with_process_manager(cfg(&profile), bind, mock.clone());
+            sup.detect_and_start_hardware().await;
+            mock.calls()
+                .into_iter()
+                .filter_map(|c| c.strip_prefix("start:").map(str::to_owned))
+                .filter(|u| crate::lifecycle::monitor::SENSOR_PLANE_UNITS.contains(&u.as_str()))
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        started("visor").await,
+        ["ados-clock", "ados-sensorhub", "ados-gnss"]
+    );
+    assert_eq!(started("drone").await, ["ados-clock", "ados-sensorhub"]);
+    assert_eq!(started("ground-station").await, ["ados-clock", "ados-gnss"]);
+    assert!(started("workstation").await.is_empty());
+}
+
+#[tokio::test]
 async fn startup_clears_a_stale_failure_on_a_unit_it_leaves_off() {
     // A previous process can leave an intentionally-off unit `failed`
     // (a stop that landed mid-start). Nothing starts it again, so without a
