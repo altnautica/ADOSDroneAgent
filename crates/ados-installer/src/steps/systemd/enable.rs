@@ -100,13 +100,16 @@ pub(super) fn install_run_dir_tmpfiles() {
 }
 
 /// The run-dir tmpfiles body. `/run/ados/capture` is the capture-session
-/// state dir: setgid operator-group writable, so a sandboxed capture plugin
-/// can create and remove the `active` marker the MAVLink router reads to pick
-/// its capture stream rates, without write access to the rest of `/run/ados`.
+/// state dir: setgid and writable by [`ados_protocol::ipc::CAPTURE_GROUP`]
+/// only, so a sandboxed capture plugin (which joins that group with
+/// `capture.storage.write` and gets the dir bound into its sandbox) can create
+/// and remove the `active` marker the MAVLink router reads to pick its capture
+/// stream rates, without write access to the rest of `/run/ados` and without
+/// the operator group that guards the command sockets.
 pub(super) fn run_dir_tmpfiles_body() -> String {
     format!(
         "d /run/ados 0755 root root -\nd /run/ados/capture 2775 root {} -\n",
-        ados_protocol::ipc::OPERATOR_GROUP
+        ados_protocol::ipc::CAPTURE_GROUP
     )
 }
 
@@ -235,8 +238,9 @@ pub(super) fn enable_if_present(unit: &str) {
 /// memberships run `usermod -aG <grp> ados`. Every plugin runs as its own
 /// `ados-plg-*` user whose primary group is [`ados_protocol::ipc::PLUGIN_GROUP`];
 /// a plugin granted camera frames also carries
-/// [`ados_protocol::vision_rpc::VISION_READERS_GROUP`]. systemd refuses a unit
-/// whose `Group=`/`SupplementaryGroups=` names a missing group, so both exist
+/// [`ados_protocol::vision_rpc::VISION_READERS_GROUP`], and one granted capture
+/// storage [`ados_protocol::ipc::CAPTURE_GROUP`]. systemd refuses a unit
+/// whose `Group=`/`SupplementaryGroups=` names a missing group, so all exist
 /// before any plugin is installed.
 ///
 /// A system account: no login shell, no home directory, allocated below the
@@ -271,6 +275,7 @@ pub(super) fn provision_ados_identity() {
     for grp in [
         ados_protocol::ipc::PLUGIN_GROUP,
         ados_protocol::vision_rpc::VISION_READERS_GROUP,
+        ados_protocol::ipc::CAPTURE_GROUP,
     ] {
         if !exec::run_ok("getent", &["group", grp]) {
             let _ = exec::run("groupadd", &["--system", grp]);

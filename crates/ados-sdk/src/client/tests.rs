@@ -427,3 +427,68 @@ async fn a_rotated_token_is_adopted_and_presented_on_later_requests() {
         "the rotated token must be presented after the push, saw {tokens:?}"
     );
 }
+
+#[tokio::test]
+async fn a_host_tool_invoke_is_answered_by_the_registered_handler() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sock = dir.path().join("p.sock");
+    let listener = tokio::net::UnixListener::bind(&sock).expect("bind");
+    let token = token_string(&["mcp.expose"], 900);
+
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let (mut r, mut w) = stream.into_split();
+        let hello = read_envelope(&mut r).await.expect("hello").expect("frame");
+        w.write_all(&response(&hello.request_id).encode_frame().unwrap())
+            .await
+            .expect("ready");
+        let mut replies = Vec::new();
+        for (id, tool) in [("i1", "echo"), ("i2", "boom")] {
+            let req = Envelope {
+                version: PROTOCOL_VERSION,
+                kind: "request".to_string(),
+                method: TOOL_INVOKE_METHOD.to_string(),
+                capability: "mcp.expose".to_string(),
+                args: Value::Map(vec![
+                    (Value::from("tool"), Value::from(tool)),
+                    (
+                        Value::from("arguments"),
+                        Value::Map(vec![(Value::from("x"), Value::from(7))]),
+                    ),
+                ]),
+                request_id: id.to_string(),
+                token: String::new(),
+                error: None,
+            };
+            w.write_all(&req.encode_frame().unwrap())
+                .await
+                .expect("invoke");
+            replies.push(read_envelope(&mut r).await.expect("read").expect("reply"));
+        }
+        replies
+    });
+
+    let client = PluginIpcClient::new("p", token.as_str(), &sock);
+    client.set_tool_handler(Arc::new(|tool: String, args: Value| {
+        Box::pin(async move {
+            if tool == "echo" {
+                Ok(args)
+            } else {
+                Err("no such tool".to_string())
+            }
+        })
+    }));
+    client.connect().await.expect("connect");
+    let replies = tokio::time::timeout(Duration::from_secs(5), server)
+        .await
+        .expect("bounded")
+        .expect("server");
+    client.close().await;
+
+    assert_eq!(replies[0].kind, "response");
+    assert_eq!(replies[0].request_id, "i1");
+    assert_eq!(replies[0].error, None);
+    assert_eq!(map_get_i64(&replies[0].args, "x"), Some(7));
+    assert_eq!(replies[1].request_id, "i2");
+    assert_eq!(replies[1].error.as_deref(), Some("no such tool"));
+}

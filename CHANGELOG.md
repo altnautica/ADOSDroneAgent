@@ -8,6 +8,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Plugin capabilities `sensor.stream.read` and `capture.storage.write`.**
+  Both are enforced by the generated plugin unit. `sensor.stream.read` binds
+  `/run/ados/sensors.sock` and `/run/ados/clock.json` read-only into the
+  plugin sandbox and joins `ados-operator` (the bus listener's peer group).
+  `capture.storage.write` binds `/run/ados/capture-storage.json` read-only,
+  `/run/ados/capture` read-write, the host capture root (resolved at render
+  time from the janitor sidecar, the persisted `auto` choice, else
+  `/var/ados/capture`) at `/run/ados/capture-root`, sets
+  `ADOS_CAPTURE_ROOT_HOST` / `ADOS_CAPTURE_ROOT_MOUNT`, and joins the new
+  `ados-capture` group, which now owns `/run/ados/capture` (`2775`).
+- **SDK: `ctx.tools.serve(handler)`.** The Rust plugin SDK answers host
+  `tool.invoke` requests (MCP tools declared by a plugin) through a
+  registered handler; a plugin without one answers `tool_handler_missing`.
 - **Sensor bus and host clock.** New seam `/run/ados/sensors.sock` (contract
   `sensor.v1`): length-prefixed msgpack frames `{v, kind, src, origin,
   payload}` whose clock, IMU, GNSS and trigger payloads are the capture

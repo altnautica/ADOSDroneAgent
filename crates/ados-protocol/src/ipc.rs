@@ -604,6 +604,11 @@ impl Drop for IpcBroadcast {
 /// it and adds the human operator; the plugin user is never a member.
 pub const OPERATOR_GROUP: &str = "ados-operator";
 
+/// The group that may write `/run/ados/capture` (the capture-active marker
+/// directory) and the capture root. A capture plugin joins it only while it
+/// holds `capture.storage.write`; it guards nothing else.
+pub const CAPTURE_GROUP: &str = "ados-capture";
+
 /// The group every plugin unit runs in as its primary group. Each plugin has
 /// its own system user; this shared group owns only the per-plugin sockets
 /// ([`bind_plugin_socket`]), which gate every request on the plugin's own

@@ -98,6 +98,8 @@ impl PluginIpcClient {
         let button_callbacks = self.button_callbacks.clone();
         let msp_callbacks = self.msp_callbacks.clone();
         let aux_callbacks = self.aux_callbacks.clone();
+        let tool_handler = self.tool_handler.clone();
+        let writer = self.writer.clone();
         let token = self.token.clone();
         let plugin_id = self.plugin_id.clone();
         let session_lost = self.session_lost.clone();
@@ -130,6 +132,9 @@ impl PluginIpcClient {
                             } else {
                                 dispatch_event(&event_callbacks, &env);
                             }
+                        } else if env.kind == "request" && env.method == TOOL_INVOKE_METHOD {
+                            let handler = tool_handler.lock().expect("tool handler lock").clone();
+                            tokio::spawn(answer_tool_invoke(handler, writer.clone(), env));
                         } else {
                             // request/response: route to the parked waiter.
                             if let Some(tx) = pending
@@ -154,5 +159,48 @@ impl PluginIpcClient {
             pending.lock().expect("pending lock").clear();
             session_lost.send_replace(true);
         })
+    }
+}
+
+/// Run one host-to-plugin `tool.invoke` and write its `response` frame. The
+/// request args are `{tool, arguments}`; the response carries the tool result
+/// as args, or the error string in `err`.
+pub(super) async fn answer_tool_invoke(
+    handler: Option<ToolHandler>,
+    writer: Arc<AsyncMutex<Option<OwnedWriteHalf>>>,
+    req: Envelope,
+) {
+    let outcome = match handler {
+        None => Err("tool_handler_missing".to_string()),
+        Some(h) => match map_get_str(&req.args, "tool") {
+            None => Err("tool name missing".to_string()),
+            Some(tool) => {
+                let arguments = map_get(&req.args, "arguments").unwrap_or(Value::Nil);
+                h(tool.to_string(), arguments).await
+            }
+        },
+    };
+    let (args, error) = match outcome {
+        Ok(v) => (v, None),
+        Err(e) => (Value::Map(Vec::new()), Some(e)),
+    };
+    let reply = Envelope {
+        version: PROTOCOL_VERSION,
+        kind: "response".to_string(),
+        method: TOOL_INVOKE_METHOD.to_string(),
+        capability: req.capability,
+        args,
+        request_id: req.request_id,
+        token: String::new(),
+        error,
+    };
+    let Ok(frame) = reply.encode_frame() else {
+        return;
+    };
+    let mut guard = writer.lock().await;
+    if let Some(w) = guard.as_mut() {
+        if w.write_all(&frame).await.and(w.flush().await).is_err() {
+            tracing::warn!("tool.invoke reply could not be written");
+        }
     }
 }

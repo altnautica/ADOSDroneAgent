@@ -37,7 +37,9 @@ use crate::backend::UnitSpec;
 use crate::errors::SupervisorError;
 use crate::manifest::{bin_reference, host_arch_os, AgentIsolation, AgentRuntime, PluginManifest};
 use crate::plugin_account::{id_hash8, plugin_user_for};
-use crate::sandbox::{configured_fc_serial_port, fc_port_exclusion, sandbox_directives};
+use crate::sandbox::{
+    capture_root_bind, configured_fc_serial_port, fc_port_exclusion, sandbox_directives,
+};
 use crate::server::{plugin_socket_dir, plugin_socket_path};
 use crate::supervisor::Paths;
 use crate::token_secret::{plugin_data_dir, token_credential_path};
@@ -228,6 +230,8 @@ pub fn build_unit_spec(
     spec.sandbox_directives = sandbox_directives(granted, loopback_guard_active, &[]);
     spec.sandbox_directives
         .extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
+    spec.sandbox_directives
+        .extend(capture_root_bind(granted, capture_root().as_deref()));
     Ok(Some(spec))
 }
 
@@ -246,6 +250,35 @@ pub(crate) fn fc_serial_port() -> Option<String> {
         .unwrap_or_else(|| PathBuf::from(crate::supervisor::DEFAULT_RUN_DIR));
     let config = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".into());
     fc_serial_port_in(&run_dir, Path::new(&config))
+}
+
+/// The host capture root to bind into a capture plugin, resolved at render
+/// time: the janitor's sidecar (`capture-storage.json` under the run dir),
+/// else the persisted `auto` choice, else the fallback root.
+pub(crate) fn capture_root() -> Option<String> {
+    let run_dir = std::env::var_os("ADOS_RUN_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(crate::supervisor::DEFAULT_RUN_DIR));
+    Some(capture_root_in(
+        &run_dir,
+        Path::new(ados_config::capture_storage::STICKY_ROOT_FILE),
+    ))
+}
+
+/// [`capture_root`] against explicit locations, for tests.
+pub fn capture_root_in(run_dir: &Path, sticky: &Path) -> String {
+    #[derive(serde::Deserialize)]
+    struct Root {
+        capture_root: String,
+    }
+    std::fs::read(run_dir.join("capture-storage.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Root>(&b).ok())
+        .map(|r| r.capture_root)
+        .filter(|r| !r.is_empty())
+        .or_else(|| ados_config::capture_storage::read_sticky(sticky).map(|s| s.root))
+        .unwrap_or_else(|| ados_config::capture_storage::FALLBACK_ROOT.to_string())
 }
 
 /// The FC port: the router's live device from the sidecar under `run_dir`
@@ -472,6 +505,28 @@ mod tests {
     /// The production layout, independent of the test process environment.
     fn fhs() -> Paths {
         crate::supervisor::tests_support::fhs_paths()
+    }
+
+    #[test]
+    fn capture_root_follows_the_sidecar_then_the_sticky_choice_then_the_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let sticky = dir.path().join("capture-root");
+        assert_eq!(capture_root_in(dir.path(), &sticky), "/var/ados/capture");
+        std::fs::write(
+            &sticky,
+            r#"{"mount":"/mnt/nvme0","root":"/mnt/nvme0/ados/capture"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            capture_root_in(dir.path(), &sticky),
+            "/mnt/nvme0/ados/capture"
+        );
+        std::fs::write(
+            dir.path().join("capture-storage.json"),
+            r#"{"version":1,"capture_root":"/srv/cap"}"#,
+        )
+        .unwrap();
+        assert_eq!(capture_root_in(dir.path(), &sticky), "/srv/cap");
     }
 
     #[test]

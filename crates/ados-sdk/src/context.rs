@@ -527,6 +527,24 @@ impl ButtonClient {
     }
 }
 
+/// `ctx.tools` — the plugin's MCP tools.
+///
+/// The host routes an MCP `tools/call` for one of the plugin's declared tools
+/// to the live plugin as a `tool.invoke` request (gated on `mcp.expose`); the
+/// registered handler runs it and its result is the reply.
+#[derive(Clone)]
+pub struct ToolsClient {
+    ipc: Arc<PluginIpcClient>,
+}
+
+impl ToolsClient {
+    /// Answer every `tool.invoke` with `handler`. Registration is local: no
+    /// host request is made.
+    pub fn serve(&self, handler: crate::client::ToolHandler) {
+        self.ipc.set_tool_handler(handler);
+    }
+}
+
 /// `ctx.flight` — the scoped guided-setpoint sender.
 ///
 /// A flight-behaviour plugin commands the vehicle through this rather than raw
@@ -667,6 +685,8 @@ pub struct PluginContext {
     pub mdns: MdnsClient,
     pub process: ProcessClient,
     pub lifecycle: LifecycleClient,
+    /// The plugin's MCP tool handler registration.
+    pub tools: ToolsClient,
     ipc: Arc<PluginIpcClient>,
 }
 
@@ -709,6 +729,7 @@ impl PluginContext {
             },
             process: ProcessClient { ipc: ipc.clone() },
             lifecycle: LifecycleClient { ipc: ipc.clone() },
+            tools: ToolsClient { ipc: ipc.clone() },
             ipc,
         }
     }

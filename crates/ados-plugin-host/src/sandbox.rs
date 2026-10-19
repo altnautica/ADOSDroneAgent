@@ -140,6 +140,32 @@ pub const NETWORK_OUTBOUND_CAP: &str = "network.outbound";
 /// The capability that unlocks the host filesystem outside the plugin's tree.
 pub const FILESYSTEM_HOST_CAP: &str = "filesystem.host";
 
+/// The capability that lets a plugin subscribe to the sensor bus.
+pub const SENSOR_STREAM_READ_CAP: &str = "sensor.stream.read";
+
+/// Bound read-only into a plugin holding [`SENSOR_STREAM_READ_CAP`]: the sensor
+/// bus socket (an operator-group listener, so the grant also joins
+/// [`ados_protocol::ipc::OPERATOR_GROUP`]; no other operator socket is bound
+/// into the sandbox) and the clock sidecar.
+pub const SENSOR_STREAM_PATHS: &[&str] = &["/run/ados/sensors.sock", "/run/ados/clock.json"];
+
+/// The capability that lets a plugin write capture sessions.
+pub const CAPTURE_STORAGE_WRITE_CAP: &str = "capture.storage.write";
+
+/// Bound read-only into a plugin holding [`CAPTURE_STORAGE_WRITE_CAP`]: the
+/// janitor's capture-storage sidecar (capture root and admission).
+pub const CAPTURE_STORAGE_SIDECAR: &str = "/run/ados/capture-storage.json";
+
+/// Bound read-write with [`CAPTURE_STORAGE_WRITE_CAP`]: the capture-active
+/// marker directory (`2775 root:ados-capture`).
+pub const CAPTURE_STATE_DIR: &str = "/run/ados/capture";
+
+/// Where the host capture root appears inside a plugin holding
+/// [`CAPTURE_STORAGE_WRITE_CAP`]. A fixed path outside the operator data
+/// roots, because a bind whose destination sits under an inaccessible root
+/// (a root on `/mnt` without `filesystem.host`) is hidden by it.
+pub const CAPTURE_ROOT_MOUNT: &str = "/run/ados/capture-root";
+
 /// Paths a plugin never reaches, granted or not: every credential the agent
 /// keeps under `/etc/ados`.
 ///
@@ -217,6 +243,8 @@ pub fn sandbox_enforced_caps() -> BTreeSet<&'static str> {
     set.insert(NETWORK_OUTBOUND_CAP);
     set.insert(NETWORK_LISTEN_CAP);
     set.insert(FILESYSTEM_HOST_CAP);
+    set.insert(SENSOR_STREAM_READ_CAP);
+    set.insert(CAPTURE_STORAGE_WRITE_CAP);
     set
 }
 
@@ -273,6 +301,18 @@ pub fn sandbox_directives(
             ados_protocol::vision_rpc::VISION_READERS_GROUP
         ));
     }
+    if granted.contains(SENSOR_STREAM_READ_CAP) {
+        lines.push(format!(
+            "SupplementaryGroups={}",
+            ados_protocol::ipc::OPERATOR_GROUP
+        ));
+    }
+    if granted.contains(CAPTURE_STORAGE_WRITE_CAP) {
+        lines.push(format!(
+            "SupplementaryGroups={}",
+            ados_protocol::ipc::CAPTURE_GROUP
+        ));
+    }
 
     // ---- sockets ----------------------------------------------------
     if granted.contains(NETWORK_OUTBOUND_CAP) && loopback_guard_active {
@@ -303,6 +343,15 @@ pub fn sandbox_directives(
     for socket in PLUGIN_REACHABLE_SOCKETS {
         lines.push(format!("BindReadOnlyPaths=-{socket}"));
     }
+    if granted.contains(SENSOR_STREAM_READ_CAP) {
+        for path in SENSOR_STREAM_PATHS {
+            lines.push(format!("BindReadOnlyPaths=-{path}"));
+        }
+    }
+    if granted.contains(CAPTURE_STORAGE_WRITE_CAP) {
+        lines.push(format!("BindReadOnlyPaths=-{CAPTURE_STORAGE_SIDECAR}"));
+        lines.push(format!("BindPaths=-{CAPTURE_STATE_DIR}"));
+    }
     let host_fs = granted.contains(FILESYSTEM_HOST_CAP);
     let mut rw: Vec<String> = BASE_READ_WRITE_PATHS
         .iter()
@@ -330,6 +379,30 @@ pub fn sandbox_directives(
     lines.push(format!("InaccessiblePaths={}", inaccessible.join(" ")));
 
     lines
+}
+
+/// The lines that put the host capture root at [`CAPTURE_ROOT_MOUNT`] in a
+/// plugin holding [`CAPTURE_STORAGE_WRITE_CAP`], and tell it which host root
+/// that is (`ADOS_CAPTURE_ROOT_HOST`), so a capture writer can refuse when the
+/// janitor has since moved the root. The root is resolved at render time (see
+/// [`crate::systemd::capture_root`]). Empty without the grant, or for a root
+/// that is not a plain absolute path.
+pub fn capture_root_bind(granted: &BTreeSet<String>, host_root: Option<&str>) -> Vec<String> {
+    match host_root {
+        Some(root)
+            if granted.contains(CAPTURE_STORAGE_WRITE_CAP)
+                && root.starts_with('/')
+                && !root.contains(':')
+                && !root.chars().any(|c| c.is_whitespace() || c.is_control()) =>
+        {
+            vec![
+                format!("BindPaths=-{root}:{CAPTURE_ROOT_MOUNT}"),
+                format!("Environment=ADOS_CAPTURE_ROOT_HOST={root}"),
+                format!("Environment=ADOS_CAPTURE_ROOT_MOUNT={CAPTURE_ROOT_MOUNT}"),
+            ]
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// The line that masks the flight controller's serial port from a
@@ -469,14 +542,21 @@ mod tests {
         let tail = &none[none.len() - NO_GRANT_FILESYSTEM.len()..];
         assert_eq!(tail, NO_GRANT_FILESYSTEM);
 
-        // Granting every sandbox capability reopens only the data roots: the
-        // run dir stays an empty tmpfs, nothing under it becomes writable, and
-        // nothing but the log sink is bound back, least of all another
-        // plugin's socket dir.
+        // Granting every sandbox capability reopens only the data roots and
+        // the named capture/sensor paths: the run dir stays an empty tmpfs,
+        // nothing under it becomes writable but the capture marker dir, and no
+        // other path is bound back, least of all another plugin's socket dir.
+        let allowed = [
+            "BindReadOnlyPaths=-/run/ados/logd.sock",
+            "BindReadOnlyPaths=-/run/ados/sensors.sock",
+            "BindReadOnlyPaths=-/run/ados/clock.json",
+            "BindReadOnlyPaths=-/run/ados/capture-storage.json",
+            "BindPaths=-/run/ados/capture",
+        ];
         let everything: Vec<&str> = sandbox_enforced_caps().into_iter().collect();
-        for lines in [
-            none.clone(),
-            sandbox_directives(&caps(&everything), true, &[]),
+        for (granted, lines) in [
+            (false, none.clone()),
+            (true, sandbox_directives(&caps(&everything), true, &[])),
         ] {
             assert!(lines.contains(&"TemporaryFileSystem=/run/ados:ro".to_string()));
             for line in &lines {
@@ -484,7 +564,11 @@ mod tests {
                     assert!(!paths.contains("/run/ados"), "{line}");
                 }
                 if line.starts_with("BindReadOnlyPaths=") || line.starts_with("BindPaths=") {
-                    assert_eq!(line, "BindReadOnlyPaths=-/run/ados/logd.sock");
+                    if granted {
+                        assert!(allowed.contains(&line.as_str()), "{line}");
+                    } else {
+                        assert_eq!(line, "BindReadOnlyPaths=-/run/ados/logd.sock");
+                    }
                 }
             }
         }
@@ -607,5 +691,53 @@ mod tests {
         let readers = "SupplementaryGroups=ados-vision-readers".to_string();
         assert!(sandbox_directives(&caps(&["vision.frame.read"]), true, &[]).contains(&readers));
         assert!(!sandbox_directives(&caps(&["hardware.gpu"]), true, &[]).contains(&readers));
+    }
+
+    #[test]
+    fn the_sensor_grant_binds_the_bus_and_clock_and_joins_the_operator_group() {
+        let none = sandbox_directives(&caps(&[]), true, &[]);
+        assert!(!none
+            .iter()
+            .any(|l| l.contains("sensors.sock") || l.contains("clock.json")));
+        let lines = sandbox_directives(&caps(&[SENSOR_STREAM_READ_CAP]), true, &[]);
+        let tmpfs = lines
+            .iter()
+            .position(|l| l == "TemporaryFileSystem=/run/ados:ro")
+            .expect("run dir hidden");
+        for path in ["/run/ados/sensors.sock", "/run/ados/clock.json"] {
+            let at = lines
+                .iter()
+                .position(|l| *l == format!("BindReadOnlyPaths=-{path}"))
+                .expect(path);
+            assert!(
+                at > tmpfs,
+                "{path} must be bound after the tmpfs hides the run dir"
+            );
+        }
+        assert!(lines.contains(&"SupplementaryGroups=ados-operator".to_string()));
+        assert!(!lines.iter().any(|l| l.contains("ados-capture")));
+    }
+
+    #[test]
+    fn the_capture_grant_binds_the_marker_dir_sidecar_and_root() {
+        let lines = sandbox_directives(&caps(&[CAPTURE_STORAGE_WRITE_CAP]), true, &[]);
+        assert!(lines.contains(&"BindReadOnlyPaths=-/run/ados/capture-storage.json".to_string()));
+        assert!(lines.contains(&"BindPaths=-/run/ados/capture".to_string()));
+        assert!(lines.contains(&"SupplementaryGroups=ados-capture".to_string()));
+        assert!(!lines.contains(&"SupplementaryGroups=ados-operator".to_string()));
+        let granted = caps(&[CAPTURE_STORAGE_WRITE_CAP]);
+        assert_eq!(
+            capture_root_bind(&granted, Some("/mnt/nvme0/ados/capture")),
+            [
+                "BindPaths=-/mnt/nvme0/ados/capture:/run/ados/capture-root",
+                "Environment=ADOS_CAPTURE_ROOT_HOST=/mnt/nvme0/ados/capture",
+                "Environment=ADOS_CAPTURE_ROOT_MOUNT=/run/ados/capture-root",
+            ]
+        );
+        assert!(capture_root_bind(&caps(&[]), Some("/var/ados/capture")).is_empty());
+        assert!(capture_root_bind(&granted, Some("relative/root")).is_empty());
+        assert!(capture_root_bind(&granted, Some("/a b")).is_empty());
+        assert!(capture_root_bind(&granted, Some("/a:b")).is_empty());
+        assert!(capture_root_bind(&granted, None).is_empty());
     }
 }

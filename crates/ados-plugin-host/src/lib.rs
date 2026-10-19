@@ -148,6 +148,7 @@ pub const HANDLER_GATED_CAPS: &[&str] = &[
 /// constant mirrors it so the doc and the guard tests read from one place, and
 /// `sandbox_list_matches_the_renderer` fails if the two drift.
 pub const SANDBOX_ENFORCED_CAPS: &[&str] = &[
+    "capture.storage.write",
     "filesystem.host",
     "hardware.camera.csi",
     "hardware.gpio",
@@ -159,6 +160,7 @@ pub const SANDBOX_ENFORCED_CAPS: &[&str] = &[
     "hardware.usb.uvc",
     "network.listen",
     "network.outbound",
+    "sensor.stream.read",
 ];
 
 #[cfg(test)]

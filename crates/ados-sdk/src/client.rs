@@ -109,6 +109,23 @@ pub(crate) fn vision_args_error(e: vision_rpc::VisionArgsError) -> ClientError {
 }
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<Envelope>>>>;
+
+/// Runs one host-to-plugin `tool.invoke`: `(tool name, arguments)` to the
+/// tool result, or an error string the host relays to the MCP caller. The
+/// host waits a bounded time (5 s) for the reply, so a long operation returns
+/// a job handle instead of blocking.
+pub type ToolHandler = Arc<
+    dyn Fn(
+            String,
+            Value,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// The method name of a host-to-plugin tool invocation.
+pub const TOOL_INVOKE_METHOD: &str = "tool.invoke";
 type CallbackMap = Arc<Mutex<HashMap<String, Vec<EventCallback>>>>;
 
 /// Async client. One instance per plugin runner process.
@@ -147,6 +164,9 @@ pub struct PluginIpcClient {
     /// datagram has no subject to filter on, so every subscriber sees every
     /// frame (the plugin's own codec routes by channel).
     aux_callbacks: CallbackMap,
+    /// The handler for host-to-plugin `tool.invoke` requests; `None` until the
+    /// plugin registers one, and such a request is then answered with an error.
+    tool_handler: Arc<Mutex<Option<ToolHandler>>>,
     reader_task: Mutex<Option<JoinHandle<()>>>,
     /// `true` once the reader loop ended on its own: the host closed the
     /// session or the stream broke. [`Self::close`] aborts the loop instead, so
@@ -181,6 +201,7 @@ impl PluginIpcClient {
             button_callbacks: Arc::new(Mutex::new(HashMap::new())),
             msp_callbacks: Arc::new(Mutex::new(HashMap::new())),
             aux_callbacks: Arc::new(Mutex::new(HashMap::new())),
+            tool_handler: Arc::new(Mutex::new(None)),
             reader_task: Mutex::new(None),
             session_lost: Arc::new(watch::channel(false).0),
             next_id: AtomicU64::new(0),
@@ -192,6 +213,12 @@ impl PluginIpcClient {
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
+    }
+
+    /// Register the handler that answers host-to-plugin `tool.invoke`
+    /// requests (the plugin's MCP tools). Replaces any earlier handler.
+    pub fn set_tool_handler(&self, handler: ToolHandler) {
+        *self.tool_handler.lock().expect("tool handler lock") = Some(handler);
     }
 
     /// The plugin id this client carries.

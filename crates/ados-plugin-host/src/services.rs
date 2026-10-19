@@ -20,12 +20,13 @@ use crate::backend::{ProbeSpec, UnitSpec};
 use crate::errors::SupervisorError;
 use crate::manifest::{bin_reference, canonical_profile, AgentIsolation, PluginManifest};
 use crate::sandbox::{
-    fc_port_exclusion, sandbox_directives, NETWORK_LISTEN_CAP, NETWORK_OUTBOUND_CAP,
+    capture_root_bind, fc_port_exclusion, sandbox_directives, NETWORK_LISTEN_CAP,
+    NETWORK_OUTBOUND_CAP,
 };
 use crate::supervisor::Paths;
 use crate::systemd::{
-    exec_paths_for, fc_serial_port, path_token, plugin_unit_basename, resolve_program,
-    runner_context, sanitize_unit_name, service_log_path_for, PLUGIN_SLICE_NAME,
+    capture_root, exec_paths_for, fc_serial_port, path_token, plugin_unit_basename,
+    resolve_program, runner_context, sanitize_unit_name, service_log_path_for, PLUGIN_SLICE_NAME,
     PLUGIN_UNIT_PREFIX,
 };
 
@@ -492,6 +493,8 @@ pub fn build_service_spec(
         sandbox_directives(granted, loopback_guard_active, &service.listen_ports);
     spec.sandbox_directives
         .extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
+    spec.sandbox_directives
+        .extend(capture_root_bind(granted, capture_root().as_deref()));
     Ok(spec)
 }
 
@@ -509,6 +512,7 @@ pub fn probe_spec(
     path_token("install dir", &working_dir)?;
     let mut directives = sandbox_directives(granted, loopback_guard_active, &[]);
     directives.extend(fc_port_exclusion(granted, fc_serial_port().as_deref()));
+    directives.extend(capture_root_bind(granted, capture_root().as_deref()));
     Ok(ProbeSpec {
         argv: argv.to_vec(),
         working_dir,
