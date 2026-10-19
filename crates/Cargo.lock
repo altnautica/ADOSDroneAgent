@@ -26,7 +26,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "ados-capabilities-codegen"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "hex",
  "serde",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "ados-clock"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-protocol",
  "ados-sensorbus",
@@ -56,7 +56,7 @@ dependencies = [
 
 [[package]]
 name = "ados-cloud"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-macpin",
@@ -89,7 +89,7 @@ dependencies = [
 
 [[package]]
 name = "ados-config"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-protocol",
  "nix 0.29.0",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "ados-config-tunnel"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "ados-control"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-groundlink",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "ados-crsf"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-hid",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "ados-display"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ab_glyph",
  "ados-config",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "ados-gnss"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "ados-gpio"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "ados-groundlink"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-plugin-host",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hal-probe"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hid"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "ados-installer"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "ados-logd"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "ados-lora"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-gpio",
@@ -422,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "ados-macpin"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-protocol",
  "hex",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "ados-mavlink-router"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -464,7 +464,7 @@ dependencies = [
 
 [[package]]
 name = "ados-net"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -488,14 +488,14 @@ dependencies = [
 
 [[package]]
 name = "ados-offload"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "ados-plugin-host"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "ados-protocol"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "ados-radio"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sdk"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-plugin-host",
  "ados-protocol",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorbus"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-protocol",
  "hex",
@@ -630,7 +630,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorhub"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -649,7 +649,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorhub-proto"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "proptest",
  "serde",
@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "ados-supervisor"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -684,7 +684,7 @@ dependencies = [
 
 [[package]]
 name = "ados-swarm-control"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-swarmbus",
@@ -696,7 +696,7 @@ dependencies = [
 
 [[package]]
 name = "ados-swarmbus"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-protocol",
  "ados-radio",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "ados-tui"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -730,13 +730,14 @@ dependencies = [
 
 [[package]]
 name = "ados-video"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
  "ados-protocol",
  "ados-vision",
  "anyhow",
+ "memmap2",
  "nix 0.29.0",
  "serde",
  "serde_json",
@@ -751,10 +752,11 @@ dependencies = [
 
 [[package]]
 name = "ados-vision"
-version = "0.103.6"
+version = "0.104.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
+ "ados-sensorbus",
  "anyhow",
  "memmap2",
  "nix 0.29.0",
