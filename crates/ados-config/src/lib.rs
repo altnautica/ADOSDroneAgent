@@ -59,6 +59,10 @@ fn report_error(what: &str, msg: &str) {
     }
     seen.insert(what.to_string(), msg.to_string());
     drop(seen);
+    #[cfg(test)]
+    {
+        *tests::LOGGED.lock().entry(what.to_string()).or_default() += 1;
+    }
     tracing::error!(
         config = what,
         error = %msg,
@@ -321,44 +325,25 @@ mod tests {
         );
     }
 
-    /// An `io::Write` sink the test subscriber writes formatted events into.
-    #[derive(Clone, Default)]
-    struct Captured(std::sync::Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
+    /// Error lines `report_error` emitted, per slice. Counted beside the log
+    /// call rather than captured from a subscriber: tracing caches callsite
+    /// interest process-wide, so another test thread reaching the same
+    /// callsite while no subscriber is installed can disable it for a scoped
+    /// subscriber here and make a captured count read zero.
+    pub(super) static LOGGED: LazyLock<Mutex<HashMap<String, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     #[test]
     fn report_dedupes() {
-        let sink = Captured::default();
-        let writer = sink.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        let lines = || {
-            String::from_utf8(sink.0.lock().clone())
-                .unwrap()
-                .matches("config parse failed")
-                .count()
-        };
-        tracing::subscriber::with_default(subscriber, || {
-            for _ in 0..100 {
-                let _: Sample = yaml_or_default("count: not-a-number\n", "dedupe-probe");
-            }
-            assert_eq!(lines(), 1, "one line for one repeated error");
-            let _: Sample = yaml_or_default("count: [1]\n", "dedupe-probe");
-            assert_eq!(lines(), 2, "a different error is logged");
-            let _: Sample = yaml_or_default("count: 3\n", "dedupe-probe");
-            let _: Sample = yaml_or_default("count: [1]\n", "dedupe-probe");
-            assert_eq!(lines(), 3, "a recurrence after a clean parse is logged");
-        });
+        let lines = || LOGGED.lock().get("dedupe-probe").copied().unwrap_or(0);
+        for _ in 0..100 {
+            let _: Sample = yaml_or_default("count: not-a-number\n", "dedupe-probe");
+        }
+        assert_eq!(lines(), 1, "one line for one repeated error");
+        let _: Sample = yaml_or_default("count: [1]\n", "dedupe-probe");
+        assert_eq!(lines(), 2, "a different error is logged");
+        let _: Sample = yaml_or_default("count: 3\n", "dedupe-probe");
+        let _: Sample = yaml_or_default("count: [1]\n", "dedupe-probe");
+        assert_eq!(lines(), 3, "a recurrence after a clean parse is logged");
     }
 }
