@@ -28,18 +28,22 @@ pub enum Source {
 }
 
 impl Source {
+    /// Parse a `source` string exactly as the config model validates it (no
+    /// trimming; the shared vectors in `tests/fixtures/gnss-udp-sources.json`
+    /// hold both sides to one grammar).
     pub fn parse(s: &str) -> Option<Self> {
-        let s = s.trim();
         if s == "hub" {
             return Some(Self::Hub);
         }
         if let Some(rest) = s.strip_prefix("udp:") {
             let (port, peer) = match rest.split_once('@') {
-                Some((p, peer)) => (p, Some(peer.parse().ok()?)),
+                Some((p, peer)) => (p, Some(parse_peer(peer)?)),
                 None => (rest, None),
             };
-            let port = port.parse().ok().filter(|p| *p != 0)?;
-            return Some(Self::Udp { port, peer });
+            return Some(Self::Udp {
+                port: parse_port(port)?,
+                peer,
+            });
         }
         let dev = s.strip_prefix("serial:")?;
         let (path, baud) = match dev.split_once('@') {
@@ -65,6 +69,30 @@ impl Source {
             Self::Hub => "hub".to_string(),
         }
     }
+}
+
+/// A port: one to five ASCII digits, 1-65535.
+fn parse_port(s: &str) -> Option<u16> {
+    if s.is_empty() || s.len() > 5 || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok().filter(|p| *p != 0)
+}
+
+/// `a.b.c.d:port` or `[ipv6]:port` (no zone id).
+fn parse_peer(s: &str) -> Option<SocketAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let (ip, port) = match s.strip_prefix('[') {
+        Some(rest) => {
+            let (host, port) = rest.split_once("]:")?;
+            (IpAddr::V6(host.parse::<Ipv6Addr>().ok()?), port)
+        }
+        None => {
+            let (host, port) = s.split_once(':')?;
+            (IpAddr::V4(host.parse::<Ipv4Addr>().ok()?), port)
+        }
+    };
+    Some(SocketAddr::new(ip, parse_port(port)?))
 }
 
 /// One configured receiver.
@@ -215,6 +243,20 @@ mod tests {
     #[test]
     fn config_slice_conforms() {
         ados_config::schema::assert_slice_conforms::<GnssSection>("/gnss");
+    }
+
+    #[test]
+    fn udp_sources_match_the_shared_vectors() {
+        let doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/gnss-udp-sources.json"
+        ))
+        .unwrap();
+        for (key, want) in [("valid", true), ("invalid", false)] {
+            for s in doc[key].as_array().unwrap() {
+                let s = s.as_str().unwrap();
+                assert_eq!(Source::parse(s).is_some(), want, "{s:?}");
+            }
+        }
     }
 
     #[test]

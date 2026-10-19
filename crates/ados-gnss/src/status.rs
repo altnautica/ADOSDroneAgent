@@ -134,13 +134,39 @@ impl Heading {
     }
 }
 
-/// Number of entries in the linked-peers sidecar (0 when absent).
+/// A linked peer counts while its last decoded beacon is at most this old
+/// (seconds): the radio's peer-stale threshold, after which the drone has
+/// given the link up. The sidecar has no single window; each entry carries its
+/// own `last_seen_unix`.
+pub const LINKED_PEER_FRESH_S: f64 = 25.0;
+
+/// Number of linked peers whose own `last_seen_unix` is fresh (0 when the
+/// sidecar is absent or unreadable).
 pub fn linked_peer_count(path: &Path) -> u32 {
-    std::fs::read(path)
+    let now_unix = ados_sensorbus::time::realtime_ns() as f64 / 1e9;
+    linked_peer_count_at(path, now_unix)
+}
+
+/// [`linked_peer_count`] at wall time `now_unix` (seconds). An entry without
+/// a readable `last_seen_unix`, or one from the future, does not count.
+pub fn linked_peer_count_at(path: &Path, now_unix: f64) -> u32 {
+    let Some(doc) = std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.get("peers").and_then(|p| p.as_array()).map(Vec::len))
-        .unwrap_or(0) as u32
+    else {
+        return 0;
+    };
+    let Some(peers) = doc.get("peers").and_then(|p| p.as_array()) else {
+        return 0;
+    };
+    peers
+        .iter()
+        .filter_map(|p| p.get("last_seen_unix").and_then(serde_json::Value::as_f64))
+        .filter(|seen| {
+            let age = now_unix - seen;
+            (0.0..=LINKED_PEER_FRESH_S).contains(&age)
+        })
+        .count() as u32
 }
 
 /// Write `gnss.json` atomically.

@@ -45,7 +45,13 @@ async fn start(source: &str) -> (tempfile::TempDir, std::path::PathBuf, Shutdown
     let dir = tempfile::tempdir().unwrap();
     let sock = dir.path().join("gnss-cmd.sock");
     let peers = dir.path().join("linked-peers.json");
-    std::fs::write(&peers, r#"{"version":1,"peers":[{"device_id":"d1"}]}"#).unwrap();
+    // One fresh peer and one stale one: only the fresh one is a target.
+    let now = ados_sensorbus::time::realtime_ns() as f64 / 1e9;
+    let doc = json!({"version": 1, "peers": [
+        {"device_id": "d1", "last_seen_unix": now - 1.0},
+        {"device_id": "d2", "last_seen_unix": now - 600.0},
+    ]});
+    std::fs::write(&peers, doc.to_string()).unwrap();
     let shutdown = Shutdown::new();
     tokio::spawn(ados_gnss::cmdsock::serve(
         shared(source),

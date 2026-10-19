@@ -46,16 +46,25 @@ fn heading_needs_validity_freshness_and_the_config_gate() {
 }
 
 #[test]
-fn linked_peers_counts_entries() {
+fn linked_peers_count_only_fresh_entries() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("linked-peers.json");
-    assert_eq!(linked_peer_count(&path), 0);
+    let now = 1_760_000_100.0;
+    assert_eq!(linked_peer_count_at(&path, now), 0);
     std::fs::write(
         &path,
-        r#"{"version":1,"wall_time_unix":1,"peers":[{"device_id":"a"},{"device_id":"b"}]}"#,
+        r#"{"version":1,"wall_time_unix":1760000100,"peers":[
+            {"device_id":"a","last_seen_unix":1760000098.5},
+            {"device_id":"b","last_seen_unix":1760000075.0},
+            {"device_id":"c","last_seen_unix":1760000074.9},
+            {"device_id":"d","last_seen_unix":1760000101.0},
+            {"device_id":"e"}]}"#,
     )
     .unwrap();
-    assert_eq!(linked_peer_count(&path), 2);
+    // a fresh, b exactly at the window edge; c stale, d from the future,
+    // e without a time.
+    assert_eq!(linked_peer_count_at(&path, now), 2);
+    assert_eq!(linked_peer_count_at(&path, now + 30.0), 0);
     std::fs::write(&path, "not json").unwrap();
-    assert_eq!(linked_peer_count(&path), 0);
+    assert_eq!(linked_peer_count_at(&path, now), 0);
 }

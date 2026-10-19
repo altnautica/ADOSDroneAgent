@@ -60,9 +60,19 @@ pub struct Capability {
     pub port: RxPort,
 }
 
-/// A model string names a survey-capable receiver (u-blox F9 / X20).
+/// Modules with the RTK base function (CFG-TMODE survey-in and fixed mode
+/// plus RTCM3 base output), as the MON-VER `MOD=` extension names them. The
+/// ZED-F9R (a sensor-fusion rover) and the ZED-F9T (a timing receiver whose
+/// time mode emits no RTCM3 base messages) are not bases.
+pub const BASE_MODULES: [&str; 3] = ["ZED-F9P", "NEO-F9P", "ZED-X20P"];
+
+/// A model string (`u-blox ZED-F9P`, or the bare `ZED-F9P`) names a module in
+/// [`BASE_MODULES`]: one whitespace-separated word must equal an entry,
+/// ignoring case.
 pub fn survey_capable(model: &str) -> bool {
-    model.contains("F9") || model.contains("X20")
+    model
+        .split_whitespace()
+        .any(|w| BASE_MODULES.iter().any(|m| m.eq_ignore_ascii_case(w)))
 }
 
 /// The base machine.
@@ -113,6 +123,12 @@ impl Base {
     /// True while this receiver acts as a base (its RTCM3 output is forwarded).
     pub fn active(&self) -> bool {
         !matches!(self.mode, BaseMode::Off) && self.state != BaseState::Failed
+    }
+
+    /// The receiver confirmed the current command (a running survey-in
+    /// report, or the fixed-mode acknowledgement).
+    pub fn confirmed(&self) -> bool {
+        self.confirmed && self.state != BaseState::Failed
     }
 
     fn fail(&mut self, reason: String) {

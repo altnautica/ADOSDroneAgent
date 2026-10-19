@@ -16,15 +16,50 @@ enables its RTCM3 output on that port.
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import re
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-_SOURCE_RE = re.compile(
-    r"^(hub|udp:(\d{1,5})(@\d{1,3}(\.\d{1,3}){3}:\d{1,5})?|serial:[^@\s]+(@\d+)?)$"
-)
+_SERIAL_RE = re.compile(r"serial:[^@\s]+(@[0-9]+)?")
+_PORT_RE = re.compile(r"[0-9]{1,5}")
+
+
+def _port_ok(s: str) -> bool:
+    """One to five ASCII digits, 1-65535."""
+    return bool(_PORT_RE.fullmatch(s)) and 1 <= int(s) <= 65535
+
+
+def _peer_ok(s: str) -> bool:
+    """``a.b.c.d:port`` or ``[ipv6]:port`` (no zone id)."""
+    if s.startswith("["):
+        host, sep, port = s[1:].partition("]:")
+        if not sep or "%" in host:
+            return False
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            return False
+        return _port_ok(port)
+    host, sep, port = s.partition(":")
+    if not sep:
+        return False
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        return False
+    return _port_ok(port)
+
+
+def udp_source_ok(v: str) -> bool:
+    """The ``udp:<port>[@<peer>]`` grammar ``ados-gnss`` parses; the shared
+    vectors in ``tests/fixtures/gnss-udp-sources.json`` hold both to it."""
+    if not v.startswith("udp:"):
+        return False
+    port, sep, peer = v[4:].partition("@")
+    return _port_ok(port) and (not sep or _peer_ok(peer))
 
 
 class GnssReceiverConfig(BaseModel):
@@ -38,19 +73,13 @@ class GnssReceiverConfig(BaseModel):
     @field_validator("source")
     @classmethod
     def _source_shape(cls, v: str) -> str:
-        m = _SOURCE_RE.match(v)
-        if not m:
-            raise ValueError(
-                "gnss receiver source must be 'hub', 'udp:<port>[@<ipv4>:<port>]' "
-                "or 'serial:<device>[@<baud>]'"
-            )
-        if v.startswith("udp:"):
-            ports = [int(m.group(2))]
-            if m.group(3):
-                ports.append(int(m.group(3).rsplit(":", 1)[1]))
-            if not all(1 <= p <= 65535 for p in ports):
-                raise ValueError("gnss receiver udp ports must be 1-65535")
-        return v
+        if v == "hub" or udp_source_ok(v) or _SERIAL_RE.fullmatch(v):
+            return v
+        raise ValueError(
+            "gnss receiver source must be 'hub', "
+            "'udp:<port>[@<ipv4>:<port>|@[<ipv6>]:<port>]' or "
+            "'serial:<device>[@<baud>]'"
+        )
 
 
 class GnssBaseConfig(BaseModel):

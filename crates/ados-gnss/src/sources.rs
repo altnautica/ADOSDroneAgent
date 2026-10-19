@@ -146,9 +146,9 @@ async fn udp(ingest: &mut Ingest, port: u16, peer: Option<SocketAddr>) {
 
 /// Read datagrams from `sock`. Writes go to the configured `peer`, else to
 /// the sender of the latest datagram. The receiver is attached (and sent its
-/// configuration) once a destination is known, and again whenever the
-/// sender changes, so nothing is written into the void before the first
-/// datagram.
+/// whole configuration) once a destination is known, so nothing is written
+/// into the void before the first datagram; a later change of sender
+/// re-enables the outputs without restarting a confirmed base.
 pub async fn serve_udp(ingest: &mut Ingest, sock: UdpSocket, peer: Option<SocketAddr>) {
     let (tx, mut rx) = mpsc::channel::<Vec<u8>>(WRITE_QUEUE);
     let fixed_peer = peer.is_some();
@@ -166,8 +166,15 @@ pub async fn serve_udp(ingest: &mut Ingest, sock: UdpSocket, peer: Option<Socket
                 Ok((n, from)) => {
                     if !fixed_peer && dest != Some(from) {
                         tracing::info!(id = %ingest.id, peer = %from, "gnss_udp_peer");
+                        let first = dest.is_none();
                         dest = Some(from);
-                        ingest.shared.lock().on_attach(ingest.idx, tx.clone(), mono_ns());
+                        let now = mono_ns();
+                        let mut svc = ingest.shared.lock();
+                        if first {
+                            svc.on_attach(ingest.idx, tx.clone(), now);
+                        } else {
+                            svc.on_peer_change(ingest.idx, tx.clone(), now);
+                        }
                     }
                     ingest.push(&buf[..n]);
                 }

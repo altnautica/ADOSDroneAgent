@@ -134,15 +134,27 @@ impl Service {
         }
     }
 
-    /// A source opened its port (or a UDP receiver showed a new peer): keep
-    /// its writer and send the receiver its configuration.
+    /// A source opened its port: keep its writer and send the receiver its
+    /// whole configuration, the base command included.
     pub fn on_attach(&mut self, idx: usize, writer: mpsc::Sender<Vec<u8>>, now: u64) {
+        if idx == 0 {
+            self.pending_acks.clear();
+        }
+        self.configure(idx, writer, now, true);
+    }
+
+    /// A UDP receiver's datagrams now come from another address (a bridge
+    /// restarted on a new source port): the same receiver, so its outputs are
+    /// re-enabled (idempotent) but a base command it already confirmed is not
+    /// re-sent, since rewriting CFG-TMODE restarts a running survey-in.
+    pub fn on_peer_change(&mut self, idx: usize, writer: mpsc::Sender<Vec<u8>>, now: u64) {
+        self.configure(idx, writer, now, false);
+    }
+
+    fn configure(&mut self, idx: usize, writer: mpsc::Sender<Vec<u8>>, now: u64, fresh: bool) {
         self.rx[idx].writer = Some(writer);
         let port = self.rx[idx].cfg.port;
         let is_base = idx == 0;
-        if is_base {
-            self.pending_acks.clear();
-        }
         self.send(idx, valset::poll_mon_ver(), Ack::None);
         let heading = self.heading_enabled && !is_base;
         self.send(idx, valset::nav_outputs(port, is_base, heading), Ack::Other);
@@ -151,6 +163,7 @@ impl Service {
         }
         match self.base.mode() {
             BaseMode::Off => self.send(0, valset::off(port), Ack::Other),
+            _ if !fresh && self.base.confirmed() => {}
             mode => {
                 let _ = self.set_base(mode, now);
             }

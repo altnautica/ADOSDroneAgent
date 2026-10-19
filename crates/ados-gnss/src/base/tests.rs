@@ -85,6 +85,36 @@ fn survey_fails_on_an_unsupported_model() {
 }
 
 #[test]
+fn only_listed_base_modules_are_survey_capable() {
+    for m in [
+        "u-blox ZED-F9P",
+        "ZED-F9P",
+        "u-blox NEO-F9P",
+        "u-blox zed-x20p",
+    ] {
+        assert!(survey_capable(m), "{m}");
+    }
+    for m in [
+        "u-blox ZED-F9R",
+        "u-blox ZED-F9T",
+        "u-blox ZED-F9H",
+        "u-blox NEO-F9P-15B-xx",
+        "u-blox ZED-F9P2",
+        "u-blox hw 00190000",
+        "F9",
+        "X20",
+        "",
+    ] {
+        assert!(!survey_capable(m), "{m}");
+    }
+    // A rover module learned from MON-VER fails a requested survey.
+    let mut b = Base::new(300, 2.0);
+    b.apply(survey(), &cap(None), 0).unwrap();
+    b.on_model("u-blox ZED-F9R");
+    assert_eq!(b.state(), BaseState::Failed);
+}
+
+#[test]
 fn survey_fails_without_a_report() {
     let mut b = Base::new(300, 2.0);
     b.apply(survey(), &cap(None), 0).unwrap();

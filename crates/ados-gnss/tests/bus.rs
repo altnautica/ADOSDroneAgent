@@ -187,6 +187,49 @@ async fn udp_base_receiver_reaches_surveying_after_first_datagram() {
 }
 
 #[tokio::test]
+async fn a_new_udp_sender_port_does_not_restart_the_survey() {
+    let (_dir, bus, _stats) = broker().await;
+    let shared = shared(SURVEY);
+    let port = serve(&shared, &bus, None).await;
+    let first = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    first
+        .send_to(&nav_pvt(), ("127.0.0.1", port))
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        recv(&first).await;
+    }
+    first
+        .send_to(&nav_svin_active(40), ("127.0.0.1", port))
+        .await
+        .unwrap();
+    for _ in 0..100 {
+        if shared.lock().base_out(0, 0).base.elapsed_s == 40 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // The bridge comes back on another source port mid-survey.
+    let second = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    second
+        .send_to(&nav_svin_active(41), ("127.0.0.1", port))
+        .await
+        .unwrap();
+    assert_eq!(recv(&second).await, valset::poll_mon_ver());
+    assert_eq!(
+        recv(&second).await,
+        valset::nav_outputs(RxPort::Uart1, true, false)
+    );
+    // No CFG-TMODE rewrite follows.
+    let mut buf = [0u8; 2048];
+    let more = tokio::time::timeout(Duration::from_millis(300), second.recv_from(&mut buf)).await;
+    assert!(more.is_err(), "the survey command was re-sent");
+    let base = shared.lock().base_out(0, 0).base;
+    assert_eq!((base.state, base.elapsed_s), (BaseState::Surveying, 41));
+}
+
+#[tokio::test]
 async fn a_configured_udp_peer_is_configured_before_it_sends() {
     let (_dir, bus, _stats) = broker().await;
     let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
