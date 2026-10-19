@@ -270,7 +270,12 @@ mod tests {
     #[test]
     fn from_args_defaults_profile_and_channel() {
         let ctx = Ctx::from_args(Args::default(), EnvInfo::probe(), Checkpoint::new());
-        assert_eq!(ctx.profile, "drone");
+        // A host with an installed agent keeps its persisted profile; a fresh
+        // host (CI) has none and defaults to `drone`.
+        let want = crate::env::read_persisted_profile()
+            .map(|p| normalize_profile(&p))
+            .unwrap_or_else(|| "drone".to_string());
+        assert_eq!(ctx.profile, want);
         assert_eq!(ctx.channel, "edge");
         assert!(!ctx.force);
     }

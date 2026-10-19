@@ -6,6 +6,8 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.104.0] - 2026-10-20
+
 ### Added
 
 - **Front panel on a visor; GNSS, radios and LoRa on the panel and TUI.**
@@ -54,7 +56,8 @@ the project follows [Semantic Versioning](https://semver.org/).
   captures itself), the installer enables a pps-gpio overlay: the stock
   `pps-gpio` overlay on a Raspberry Pi, a generated and `dtc`-compiled
   `ados-pps` overlay on Rockchip boards (Radxa `/boot/dtbo` + `u-boot-update`,
-  Armbian `user_overlays`), and loads the `pps-gpio` module. Not yet
+  Armbian `user_overlays`), and loads the `pps-gpio` module. Uninstall
+  reverses each of these edits and removes the chrony drop-in. Not yet
   validated on hardware.
 
 - **Dashboard pages for GNSS, LoRa, capture and sensors.** Ground station:
@@ -72,19 +75,27 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - **Plugin capabilities `sensor.stream.read` and `capture.storage.write`.**
   Both are enforced by the generated plugin unit. `sensor.stream.read` binds
-  `/run/ados/sensors.sock` and `/run/ados/clock.json` read-only into the
-  plugin sandbox and joins the new `ados-sensors` group, never
-  `ados-operator`. `capture.storage.write` binds
-  `/run/ados/capture-storage.json` read-only,
+  the `/run/ados/sensing` directory (bus socket `sensors.sock`, sidecar
+  `clock.json`) read-only into the plugin sandbox and joins the new
+  `ados-sensors` group, never `ados-operator`. `capture.storage.write` binds
+  the `/run/ados/capture-storage` directory (janitor sidecar
+  `capture-storage.json`) read-only,
   `/run/ados/capture` read-write, the host capture root (resolved at render
   time from the janitor sidecar, the persisted `auto` choice, else
   `/var/ados/capture`) at `/run/ados/capture-root`, sets
   `ADOS_CAPTURE_ROOT_HOST` / `ADOS_CAPTURE_ROOT_MOUNT`, and joins the new
-  `ados-capture` group, which now owns `/run/ados/capture` (`2775`).
+  `ados-capture` group, which now owns `/run/ados/capture` (`2775`). Both
+  bind directories, never single files: a file bind stays on the inode
+  present at unit start, so a sidecar replaced by rename or a socket
+  re-created by a restarted `ados-clock` would go stale inside the plugin.
+  The installer's run-dir tmpfiles rule creates both directories at boot.
 - **Plugin capabilities `video.whep.relay` and `sensors.rig.write`.** Gated
-  at dispatch. `video.whep.offer` posts a viewer's SDP offer to the media
-  server's loopback WHEP endpoint for a published camera leg and returns the
-  answer plus an opaque `/whep/<session>?camera=<leg>` location;
+  at dispatch. `video.whep.offer {camera_id, sdp}` resolves a configured,
+  enabled camera id to the media leg publishing it (`main` for the primary
+  camera), posts the viewer's SDP offer to the media server's loopback WHEP
+  endpoint for that leg, and returns the answer plus an opaque
+  `/whep/<session>?camera=<leg>` location; any other id is refused as
+  `unknown_camera`;
   `video.whep.close` tears down only a location the host returned to the same
   plugin. `sensors.rig.write` stores a rig through the control plane's
   `PUT /api/v1/sensors/rig` over its Unix socket and returns the route's
@@ -108,14 +119,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **SDK: `ctx.tools.serve(handler)`.** The Rust plugin SDK answers host
   `tool.invoke` requests (MCP tools declared by a plugin) through a
   registered handler; a plugin without one answers `tool_handler_missing`.
-- **Sensor bus and host clock.** New seam `/run/ados/sensors.sock` (contract
+- **Sensor bus and host clock.** New seam `/run/ados/sensing/sensors.sock` (contract
   `sensor.v1`): length-prefixed msgpack frames `{v, kind, src, origin,
   payload}` whose clock, IMU, GNSS and trigger payloads are the capture
   contract `ados.capture.v1` protobuf messages, every `t_ns` on the host
   monotonic clock. `ados-clock` (drone, ground station, visor) brokers the
   bus, fits each time source (flight controller, sensor hub, GNSS PPS,
   simulator) against the host clock over a 60 s window, publishes 1 Hz
-  `ClockSample`s, writes `/run/ados/clock.json` and the per-stream rate table
+  `ClockSample`s, writes `/run/ados/sensing/clock.json` and the per-stream rate table
   `/run/ados/sensors.json`, and feeds a locked PPS to chrony through a SOCK
   refclock (installer step `chrony_ados` writes `/etc/chrony/conf.d/ados.conf`).
 - **REST: `/api/v1/clock`, `/api/v1/sensors`, `PUT /api/v1/sensors/rig`
@@ -130,7 +141,8 @@ the project follows [Semantic Versioning](https://semver.org/).
   while `/run/ados/capture/active` exists; runs a min-RTT TIMESYNC estimator;
   publishes IMU (FLU), barometer and CAMERA_FEEDBACK triggers on the sensor
   bus; and injects every `rtcm` bus frame to the flight controller as
-  fragmented GPS_RTCM_DATA.
+  fragmented GPS_RTCM_DATA. When capture ends, every stream only the capture
+  table asked for returns to the flight controller's default rate.
 - **GNSS service.** `ados-gnss` (ground station, visor) reads receivers over
   serial, UDP (simulator bridge) or the sensor hub; decodes UBX NAV-PVT/DOP/
   SVIN/RELPOSNED, TIM-TP, MON-VER and NMEA GGA/RMC; pairs PPS pulses with UTC
@@ -142,7 +154,7 @@ the project follows [Semantic Versioning](https://semver.org/).
   NVMe volume with 64 GiB free), `capture_budget_pct`, `capture_floor_free_gib`
   and `capture_evict_unuploaded`. The janitor's `capture` category evicts
   uploaded sessions oldest first, never the recording one, measures the write
-  rate, and writes `/run/ados/capture-storage.json`, whose `state: full`
+  rate, and writes `/run/ados/capture-storage/capture-storage.json`, whose `state: full`
   refuses new sessions with `E_STORAGE_FULL`.
 - **Sensor hub service.** `ados-sensorhub` reads the sensor hub's protocol v1
   stream over USB CDC (`1209:ad05`) or TCP (a simulated hub), sends the hub its
@@ -199,6 +211,27 @@ the project follows [Semantic Versioning](https://semver.org/).
   a `battery_gauge` binding in `board.json`, adds a pack with
   `"source": "ina226"` to `GET /api/v1/battery`. A binding missing its shunt
   values leaves the gauge absent with a logged reason.
+- **Rotary encoder on the front panel.** A board profile may declare a KY-040
+  class encoder as `encoder: {a, b, sw}` (CLK, DT and push switch, in the same
+  GPIO numbering as `buttons`); `/run/ados/board.json` publishes it as
+  `encoder`, and a line that is reserved, repeated or shared with a button
+  fails the profile. `ados-pic` reads it next to the buttons: a full-detent
+  quadrature decoder (four transitions per detent, bounce cancels out, a
+  transition with both lines changed is rejected) reports each detent as a
+  `short` press labelled `ENC_CW` or `ENC_CCW`, and the push switch is
+  debounced and classified short/long like a button under `ENC_SW`. Default
+  actions: `ENC_CW_short` `cycle_screen`, `ENC_CCW_short` the new
+  `prev_screen`, `ENC_SW_short` `confirm`, `ENC_SW_long` `back`, remappable in
+  `ground_station.ui.buttons.mapping`; the panel config routes list them
+  when the board declares an encoder. Plugin button subscribers receive the
+  encoder events with those labels. The ROCK 5C / 5C Lite profile declares an
+  encoder on header pins 36/38/15 (GPIO 130/133/140) and the ROCK 5B+ on
+  header pins 36/38/40 (GPIO 105/106/107). The panel input reader now waits
+  on every line at once, so a press on one button is no longer held until
+  another button sees an edge.
+- **Node lane flags in the cloud heartbeat.** The heartbeat carries `gnss`,
+  `lora` and `sim` from the same predicates as `/api/status/full`, so a
+  relay-only node shows the same tabs as on the LAN.
 
 ### Changed
 
@@ -211,15 +244,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **`mavlink.sock` v2.** Every frame the router fans out carries an 8-byte
   little-endian `rx_mono_ns` header (host monotonic read time) inside the
   length prefix; client writes are unchanged.
-- **Sensor bus readers.** `/run/ados/sensors.sock` is now `0660
+- **Sensor bus readers.** `/run/ados/sensing/sensors.sock` is now `0660
   root:ados-sensors`. The broker classifies each peer: services (root, its
   own uid) publish anything, `ados-operator` members sensor data but not
   `sync`/`rtcm`, and members of `ados-sensors` only subscribe. The installer
   creates `ados-sensors`, adds the operator to it, and removes it on purge.
 - **Capture root ownership.** The supervisor's janitor and the installer keep
-  the capture root at `2775 root:ados-capture` (an existing root's owner and
+  the capture root at `3775 root:ados-capture` (an existing root's owner and
   mode are corrected; the sessions under it are not touched), so a sandboxed
-  capture plugin can create session directories.
+  capture plugin can create session directories; the sticky bit stops one
+  writer renaming or removing another's session.
 - **SDK `tool.invoke` always answers.** A handler that panics answers
   `tool_handler_panicked`; a result that cannot be framed answers
   `tool_reply_unencodable: ...`.
@@ -237,6 +271,68 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **`--tile-pack` checks the archive.** The installer stages the pack beside
   its destination and refuses a file that is not a PMTiles v3 archive,
   leaving any existing pack in place.
+- **A captured camera's device stays the vision engine's.** The video
+  service's primary encoder takes the primary camera's configured device when
+  discovery found it and never a device a `capture: true` camera owns, and
+  the vision engine no longer reads the video tap as a second camera when the
+  primary camera is itself captured.
+- **Front-panel writes on a visor.** The installer fetches `ados-pic` on a
+  visor (its unit was skipped for want of the binary), and the control plane
+  serves the PIC, gamepad and Bluetooth writes natively on every profile that
+  runs the panel daemons.
+- **Flight-controller streams after capture.** A stream only the capture
+  table asked for is reset to the flight controller's default rate when
+  capture ends, not disabled.
+- **Sensor rate verdicts.** The hub sidecar publishes the configured trigger
+  rate as `trigger_hz_configured`, and `GET /api/v1/sensors` takes a hub
+  camera's `expected_hz` from it (null when unknown), so an under-delivering
+  trigger is flagged. A ground station's `fc` block is filled (the profile
+  check took the hyphen spelling), and an idle rig GNSS sensor reports
+  `source: gnss` where `ados-gnss` runs.
+- **Visor OLED.** A visor's I2C panel draws its own home (capture state,
+  clock, free space), cameras, sensors and storage screens instead of the
+  ground-station link frame. The LCD cameras page shows each camera's source,
+  and the storage page shows only the volume marked as capture storage.
+- **LoRa transmit state.** `tx_allowed` is false whenever `blocked_reason`
+  is set, transient blocks included, and clears as soon as the rule frees.
+  `PUT /api/v1/lora` answers once the lane reports the new settings (`504`
+  when a running lane has not within 8 s), never the pre-change body.
+- **Dashboard.** The GNSS page is available on a visor; the capture exposure
+  fields render empty, not `null`, before capture runs.
+- **WHEP relay takes a camera id.** `video.whep.offer` resolves the camera
+  id to its media leg and refuses any id that is not a configured, enabled
+  camera.
+- **Uninstall** removes the chrony drop-in and reverses the PPS overlay.
+
+### Security
+
+- **Capture session removal never follows a link.** The janitor removes an
+  evicted session through directory descriptors opened without following
+  symlinks, re-checks right before removal that the session is still a real
+  directory, and unlinks a link it meets instead of descending into it, so a
+  capture writer that swaps its session for a symlink cannot have the root
+  janitor empty the link's target.
+- **System and agent directories are refused as the capture root.** An
+  explicit `storage.capture_root` that is relative, carries a `..`
+  component, is `/` or a shared parent (`/var`, `/tmp`, `/home`, `/mnt`,
+  `/media`, `/srv`, `/opt`), or lies under `/etc`, `/usr`, `/bin`, `/sbin`,
+  `/lib*`, `/boot`, `/dev`, `/proc`, `/sys`, `/run`, `/root`, `/opt/ados`,
+  `/var/lib`, `/var/log`, `/var/cache`, `/var/spool`, or `/var/ados` outside
+  `/var/ados/capture`, is logged and resolved as `auto`. The same check gates
+  the janitor's owner and mode fix, the installer's drop-in and the plugin
+  sandbox's read-write bind of the root.
+- **A visor never commands its flight controller as a vehicle.** On the
+  `visor` profile the control service answers every flight action (the
+  command route, CAN passthrough, RC channel injection, taking
+  pilot-in-command, each also through the relay proxy, and a plugin tool
+  declared `flight`) with `409` `E_NOT_A_VEHICLE`. The MAVLink router drops
+  client frames that change mode, upload or steer a mission, carry manual or
+  RC override input, set attitude, position or actuator targets, or carry a
+  movement, arming, motor-test, servo or relay command, counting them in
+  `visor_flight_frames_dropped`; swarm setpoints are held too. Parameter
+  reads and writes, calibration, message and stream requests, time sync,
+  signing and log download are unchanged, and drones and ground stations
+  behave as before.
 
 ## [0.103.3] - 2026-10-14
 
@@ -2199,7 +2295,6 @@ For Mission Control and other API clients:
     forever, and a gap in it would blank every CPU, memory and disk reading on a
     normally-configured box.
 
-||||||| 6823f261
 ## [0.99.342] - 2026-08-03
 
 ### Fixed
