@@ -10,8 +10,8 @@ use std::time::SystemTime;
 use ados_config::capture_storage::SIDECAR_MAX_AGE;
 use serde_json::{Map, Value};
 
+use crate::routes::sensing::run_relative;
 use crate::routes::sensing::storage::CAPTURE_PROFILES;
-use crate::routes::sensing::FRESH;
 
 fn unit_on(unit: &str, profile: &str) -> bool {
     ados_protocol::units::find(unit).is_some_and(|u| u.on_profile(profile))
@@ -45,13 +45,14 @@ pub(crate) fn presence_flags(
     let sensor_hub = unit_on("ados-sensorhub", profile)
         && (dirs.run.join("sensor-hub-present").exists()
             || dirs.etc.join("sensorhub-enabled").exists());
-    // ados-gnss writes its sidecar every second only while receivers are
-    // configured (it exits idle otherwise); a file left by a stopped service
-    // goes stale, so only a fresh one marks the lane as working.
-    let gnss = unit_on("ados-gnss", profile) && fresh(&dirs.run.join("gnss.json"), FRESH, now);
+    let gnss = ados_protocol::node_presence::gnss_present(profile, dirs.run, now);
     // The same window the session admission check trusts the volume over.
     let capture_storage = CAPTURE_PROFILES.contains(&profile)
-        && fresh(&dirs.run.join("capture-storage.json"), SIDECAR_MAX_AGE, now);
+        && fresh(
+            &dirs.run.join(run_relative("capture-storage")),
+            SIDECAR_MAX_AGE,
+            now,
+        );
     [
         ("clock", clock),
         ("sensor_hub", sensor_hub),
@@ -73,6 +74,7 @@ pub(super) fn insert_presence_flags(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::routes::sensing::FRESH;
     use std::path::PathBuf;
     use std::time::Duration;
 
@@ -117,6 +119,12 @@ mod tests {
         flags_at(profile, f, SystemTime::now())
     }
 
+    fn write_capture_storage(f: &Fixture) {
+        let path = f.run.join(run_relative("capture-storage"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "{}").unwrap();
+    }
+
     #[test]
     fn flags_follow_profile_gates_and_markers() {
         let f = fixture();
@@ -126,7 +134,7 @@ mod tests {
         assert_eq!(flags("visor", &f), [true, false, false, false]);
         std::fs::write(f.run.join("sensor-hub-present"), "").unwrap();
         std::fs::write(f.run.join("gnss.json"), "{}").unwrap();
-        std::fs::write(f.run.join("capture-storage.json"), "{}").unwrap();
+        write_capture_storage(&f);
         assert_eq!(flags("visor", &f), [true; 4]);
         // A drone has no GNSS service; a ground station no hub or capture.
         assert_eq!(flags("drone", &f), [true, true, false, true]);
@@ -151,7 +159,7 @@ mod tests {
     #[test]
     fn capture_storage_needs_a_sidecar_younger_than_thirty_seconds() {
         let f = fixture();
-        std::fs::write(f.run.join("capture-storage.json"), "{}").unwrap();
+        write_capture_storage(&f);
         let now = SystemTime::now();
         assert!(flags_at("drone", &f, now + SIDECAR_MAX_AGE - Duration::from_secs(5))[3]);
         assert!(!flags_at("drone", &f, now + SIDECAR_MAX_AGE + Duration::from_secs(5))[3]);

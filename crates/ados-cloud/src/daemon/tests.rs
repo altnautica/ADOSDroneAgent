@@ -297,31 +297,26 @@ fn config_with_profile(profile: &str) -> CloudConfig {
 fn the_advertised_profile_is_the_wire_form_and_agrees_with_the_bind_role() {
     // The internal form reached the cloud verbatim, so a default install
     // advertised `auto` and a ground station advertised `ground_station` —
-    // neither of which the fleet view classifies.
-    assert_eq!(
-        config_with_profile("ground_station").wire_profile(),
-        "ground-station"
-    );
-    assert_eq!(
-        config_with_profile("ground-station").wire_profile(),
-        "ground-station"
-    );
-    assert_eq!(config_with_profile("drone").wire_profile(), "drone");
-    assert_eq!(
-        config_with_profile("workstation").wire_profile(),
-        "workstation"
-    );
-    assert_eq!(config_with_profile("compute").wire_profile(), "compute");
+    // neither of which the fleet view classifies. A missing profile.conf
+    // keeps the test independent of the host it runs on.
+    let dir = tempfile::tempdir().unwrap();
+    let no_conf = dir.path().join("profile.conf");
+    let wire = |raw: &str| config_with_profile(raw).wire_profile_at(&no_conf);
+    assert_eq!(wire("ground_station"), "ground-station");
+    assert_eq!(wire("ground-station"), "ground-station");
+    assert_eq!(wire("drone"), "drone");
+    assert_eq!(wire("workstation"), "workstation");
+    assert_eq!(wire("compute"), "compute");
     // `auto` / empty / unknown resolve to the drone form, which is also the
     // bind role's safe default — one discrimination, so the two agree.
     for raw in ["auto", "", "nonsense"] {
-        assert_eq!(config_with_profile(raw).wire_profile(), "drone");
+        assert_eq!(wire(raw), "drone");
     }
     for raw in ["ground_station", "ground-station"] {
-        assert_eq!(auto_pair_role(&config_with_profile(raw)), "gs");
+        assert_eq!(pair_role_for(&wire(raw)), "gs");
     }
     for raw in ["drone", "auto", "", "workstation"] {
-        assert_eq!(auto_pair_role(&config_with_profile(raw)), "drone");
+        assert_eq!(pair_role_for(&wire(raw)), "drone");
     }
 }
 

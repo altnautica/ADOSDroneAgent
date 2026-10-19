@@ -102,7 +102,12 @@ pub(super) fn sd_ready() {}
 /// The auto-pair bind role (`drone` | `gs`), read from the relay's one
 /// profile discrimination ([`CloudConfig::wire_profile`]).
 pub(super) fn auto_pair_role(config: &CloudConfig) -> String {
-    if config.wire_profile() == "ground-station" {
+    pair_role_for(&config.wire_profile())
+}
+
+/// The bind role for a resolved wire profile.
+pub(super) fn pair_role_for(wire_profile: &str) -> String {
+    if wire_profile == "ground-station" {
         "gs".to_string()
     } else {
         "drone".to_string()

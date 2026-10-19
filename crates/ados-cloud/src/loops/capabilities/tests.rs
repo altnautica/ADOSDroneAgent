@@ -129,3 +129,27 @@ fn the_wifi_powersave_object_is_reshaped_into_the_array_the_gcs_clamps() {
     assert_eq!(rows[0]["signalDbm"], json!(-54));
     assert_eq!(rows[0]["linkState"], json!("unknown"));
 }
+
+#[test]
+fn node_flags_match_the_lan_presence_rules() {
+    let run = tempfile::tempdir().unwrap();
+    let etc = tempfile::tempdir().unwrap();
+    let now = std::time::SystemTime::now();
+    let flags = node_flags_in("ground-station", run.path(), etc.path(), false, now);
+    assert_eq!(
+        Value::Object(flags),
+        json!({"gnss": false, "lora": false, "sim": false})
+    );
+
+    write(run.path(), "gnss.json", "{}");
+    write(etc.path(), "lora-enabled", "");
+    let flags = node_flags_in("ground-station", run.path(), etc.path(), true, now);
+    assert_eq!(
+        Value::Object(flags),
+        json!({"gnss": true, "lora": true, "sim": true})
+    );
+
+    // A visor runs neither lane's unit, whatever the files say.
+    let flags = node_flags_in("visor", run.path(), etc.path(), false, now);
+    assert_eq!(flags["lora"], json!(false));
+}

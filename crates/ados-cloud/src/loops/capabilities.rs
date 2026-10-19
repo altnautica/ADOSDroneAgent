@@ -255,5 +255,36 @@ pub fn capability_extras_in(dir: &Path, now: f64) -> Map<String, Value> {
     out
 }
 
+/// The `gnss`, `lora` and `sim` node flags `/api/status/full` carries, from the
+/// same predicates, so a relay-only node shows the same tabs as on the LAN.
+/// Always present (a `false` is a real answer, not an unknown).
+pub fn node_flags(profile: &str) -> Map<String, Value> {
+    let config = crate::config::config_path();
+    let etc = config.parent().unwrap_or(Path::new("/etc/ados"));
+    node_flags_in(
+        profile,
+        &run_dir(),
+        etc,
+        ados_config::simulation::simulation_enabled(),
+        std::time::SystemTime::now(),
+    )
+}
+
+/// The path-injectable core of [`node_flags`].
+pub fn node_flags_in(
+    profile: &str,
+    run: &Path,
+    etc: &Path,
+    sim: bool,
+    now: std::time::SystemTime,
+) -> Map<String, Value> {
+    use ados_protocol::node_presence::{gnss_present, lora_present};
+    let mut out = Map::new();
+    out.insert("gnss".into(), json!(gnss_present(profile, run, now)));
+    out.insert("lora".into(), json!(lora_present(profile, etc)));
+    out.insert("sim".into(), json!(sim));
+    out
+}
+
 #[cfg(test)]
 mod tests;

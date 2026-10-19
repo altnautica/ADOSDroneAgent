@@ -120,6 +120,13 @@ pub fn build_payload(
     for (k, v) in crate::loops::capabilities::capability_extras() {
         obj.insert(k, v);
     }
+    // The node lane flags (`gnss`, `lora`, `sim`) from the same predicates the
+    // LAN route uses, so a relay-only ground station shows its GNSS/LoRa tabs.
+    if let Some(profile) = base.profile.as_deref() {
+        for (k, v) in crate::loops::capabilities::node_flags(profile) {
+            obj.insert(k, v);
+        }
+    }
 
     // Fold the enrichment keys over the base.
     if let Some(serde_json::Value::Object(map)) = enrichment {
