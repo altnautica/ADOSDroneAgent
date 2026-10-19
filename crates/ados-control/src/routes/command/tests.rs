@@ -1,8 +1,8 @@
 use super::*;
-use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
 use ados_protocol::mavlink::ardupilotmega::{
     MavResult, MavSeverity, COMMAND_ACK_DATA, STATUSTEXT_DATA,
 };
+use ados_protocol::mavlink_socket::encode_record;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 
@@ -634,7 +634,7 @@ async fn fake_fc(listener: UnixListener, responses: Vec<Vec<u8>>, delay: Duratio
         tokio::time::sleep(delay).await;
     }
     for r in responses {
-        let framed = encode_frame(&r, MAVLINK_MAX_FRAME).unwrap();
+        let framed = encode_record(1, &r).unwrap();
         if wr.write_all(&framed).await.is_err() {
             break;
         }
@@ -850,7 +850,7 @@ async fn targets_the_latched_fc_system_id() {
             MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
             MavResult::MAV_RESULT_ACCEPTED,
         );
-        let framed = encode_frame(&ack, MAVLINK_MAX_FRAME).unwrap();
+        let framed = encode_record(1, &ack).unwrap();
         wr.write_all(&framed).await.unwrap();
         let _ = wr.flush().await;
         tokio::spawn(async move {

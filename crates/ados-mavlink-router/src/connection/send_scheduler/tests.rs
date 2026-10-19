@@ -41,7 +41,7 @@ fn test_connection() -> std::sync::Arc<FcConnection> {
 /// send cadence can be asserted on the frames it actually put on the wire.
 /// A channel rather than a shared buffer keeps the sync `poll_write` free of
 /// any lock.
-struct CapturingWriter(std::sync::mpsc::Sender<Vec<u8>>);
+pub(super) struct CapturingWriter(pub(super) std::sync::mpsc::Sender<Vec<u8>>);
 
 impl AsyncWrite for CapturingWriter {
     fn poll_write(
@@ -95,7 +95,7 @@ async fn stream_refresh_omits_the_legacy_request_by_default() {
     let ids = stream_request_message_ids(false).await;
     assert_eq!(
         ids.iter().filter(|&&id| id == COMMAND_LONG_ID).count(),
-        STREAM_RATES.len(),
+        stream_rates("drone", false).len(),
         "every per-message interval request must still be sent"
     );
     assert!(
@@ -111,7 +111,7 @@ async fn stream_refresh_sends_the_legacy_request_when_the_flag_is_on() {
     let ids = stream_request_message_ids(true).await;
     assert_eq!(
         ids.iter().filter(|&&id| id == COMMAND_LONG_ID).count(),
-        STREAM_RATES.len(),
+        stream_rates("drone", false).len(),
         "the interval requests are unaffected by the flag"
     );
     assert_eq!(

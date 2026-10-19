@@ -174,6 +174,7 @@ impl FcConnection {
             *self.param_sweep_started.lock().await = None;
             *self.param_last_request.lock().await = None;
             self.param_last_cached_count.store(0, Ordering::Relaxed);
+            self.sensor_streams.reset_link();
             tracing::warn!("fc_disconnected");
 
             // Re-open on the fixed interval — no ladder, no cap. A port that
@@ -232,7 +233,7 @@ impl FcConnection {
                         };
                         if let Ok(bytes) = mavlink::serialize_v2(header, &msg) {
                             self.fc_frames_decoded.fetch_add(1, Ordering::Relaxed);
-                            let _ = self.frame_tx.send(bytes.into());
+                            let _ = self.frame_tx.send(RxFrame::now(bytes.into()));
                         }
                         // Drive the shared state through the normal aggregator.
                         let persist = {
@@ -287,6 +288,9 @@ impl FcConnection {
                 Ok(n) => n,
                 Err(_) => return,
             };
+            // Host receive time of every frame completed by this read: the
+            // earliest point this process saw the bytes.
+            let rx_ns = ados_sensorbus::time::mono_ns();
             // An MSP FC speaks MSP (not MAVLink) on FC->host: forward the raw chunk
             // verbatim so a polling MSP GCS receives the FC's responses, and skip
             // MAVLink framing entirely: an MSP stream carries no MAVLink, so
@@ -357,7 +361,7 @@ impl FcConnection {
                 // fan-out is the plugin lane: a subscribed consumer (the MAVLink
                 // socket) receives every frame, including a TUNNEL one, and
                 // filters for its own private payload_type on its side.
-                let _ = self.frame_tx.send(frame.clone());
+                let _ = self.frame_tx.send(RxFrame::new(rx_ns, frame.clone()));
                 self.stamp_last_msg();
                 // Classify a TUNNEL (385) carrying a private (application)
                 // payload_type. The typed parser below rejects an unregistered

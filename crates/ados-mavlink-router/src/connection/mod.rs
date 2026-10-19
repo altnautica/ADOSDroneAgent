@@ -33,6 +33,7 @@
 //! [`FcConnection`] state and the connect/read reconnect FSM.
 
 mod framing;
+pub mod imu_fallback;
 pub mod injector_gate;
 mod link_state;
 mod send_scheduler;
@@ -54,6 +55,7 @@ use tokio::sync::{broadcast, Mutex};
 
 use crate::config::{CrsfMavlinkSource, MavlinkConfig, CRSF_MAVLINK_BAUD};
 use crate::param_cache::ParamCache;
+use crate::rx_frame::RxFrame;
 use crate::state::{VehicleSource, VehicleState};
 
 use ados_protocol::hwcaps::is_rc_bridge_usb_id;
@@ -136,12 +138,13 @@ pub struct FcConnection {
     params: std::sync::Arc<Mutex<ParamCache>>,
     /// Inbound MAVLink frame fan-out.
     ///
-    /// Carries [`Bytes`], not `Vec<u8>`: one frame goes to the IPC socket task,
-    /// the aux tee, the relayed-vehicle projection and one task per connected
+    /// Carries [`RxFrame`] (refcounted [`Bytes`] plus the host receive time),
+    /// not `Vec<u8>`: one frame goes to the IPC socket task, the aux tee, the
+    /// relayed-vehicle projection, the sensor lane and one task per connected
     /// GCS proxy client, so with a `Vec` the per-frame allocation count grew
     /// with the number of attached consumers. The bytes are unchanged — a frame
     /// is still forwarded verbatim.
-    frame_tx: broadcast::Sender<Bytes>,
+    frame_tx: broadcast::Sender<RxFrame>,
     /// Raw FC->host byte lane. Populated only for an MSP FC (Betaflight/iNav),
     /// whose FC->host bytes are MSP responses, not MAVLink frames, so they never
     /// appear on `frame_tx` (extract_frames yields nothing). Empty for a MAVLink
@@ -291,6 +294,8 @@ pub struct FcConnection {
     /// When the firmware banner was last requested (see
     /// `tick_banner_request`); `None` before the first request.
     last_banner_req: Mutex<Option<Instant>>,
+    /// Capture marker and IMU-stream fallback state the stream cadence reads.
+    sensor_streams: imu_fallback::SensorStreams,
 }
 
 impl FcConnection {
@@ -354,17 +359,28 @@ impl FcConnection {
             routes,
             agent_signing,
             last_banner_req: Mutex::new(None),
+            sensor_streams: imu_fallback::SensorStreams::default(),
         })
     }
 
     /// Subscribe to the raw inbound frame stream (the MAVLink socket + proxies).
-    pub fn subscribe(&self) -> broadcast::Receiver<Bytes> {
+    pub fn subscribe(&self) -> broadcast::Receiver<RxFrame> {
         self.frame_tx.subscribe()
     }
 
     /// The route-aware forwarding hub.
     pub fn routes(&self) -> &std::sync::Arc<crate::routing::RouteHub> {
         &self.routes
+    }
+
+    /// Capture marker and IMU-stream fallback state (see [`imu_fallback`]).
+    pub fn sensor_streams(&self) -> &imu_fallback::SensorStreams {
+        &self.sensor_streams
+    }
+
+    /// The resolved agent profile this router runs under.
+    pub fn profile(&self) -> &str {
+        &self.cfg.profile
     }
 
     /// The FC frame source for the consumer of endpoint `labels[0]` (see
@@ -407,9 +423,10 @@ impl FcConnection {
     ///
     /// Returns whether any consumer was subscribed. `false` means the frame was
     /// dropped for want of a listener, which is a normal idle state (no ground
-    /// control station connected) and not an error.
+    /// control station connected) and not an error. The frame is stamped with
+    /// the current host monotonic time, its receive time on this node.
     pub fn inject_frame(&self, frame: Bytes) -> bool {
-        self.frame_tx.send(frame).is_ok()
+        self.frame_tx.send(RxFrame::now(frame)).is_ok()
     }
 
     /// Whether the FC transport is open: the serial node / network socket has

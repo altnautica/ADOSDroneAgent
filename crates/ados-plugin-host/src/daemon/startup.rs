@@ -148,8 +148,8 @@ pub(super) async fn build_host(
 
     // A link that declares an injector also asks the router's PIC gate before
     // queueing, so a refused command answers `pic_refused` instead of `sent`.
-    let link = |sock: &str| {
-        let link = FrameLink::spawn(run_dir.join(sock), declarations());
+    let link = |sock: &str, wire: Wire| {
+        let link = FrameLink::spawn(run_dir.join(sock), wire, declarations());
         if armed {
             link.with_pic_gate(PicGate::new(INJECTOR_CLIENT_ID))
         } else {
@@ -159,7 +159,7 @@ pub(super) async fn build_host(
 
     // (a) MAVLink and MSP router links. MSP carries raw bytes for a Betaflight /
     //     iNav FC; on a node with no MSP FC its link simply stays disconnected.
-    let mavlink = Arc::new(link("mavlink.sock"));
+    let mavlink = Arc::new(link("mavlink.sock", Wire::MavlinkSocket));
     // The host is the only publisher of the public vehicle topics; it derives
     // them from the flight controller's own frames on the router link.
     crate::vehicle_events::spawn_vehicle_events(
@@ -170,7 +170,7 @@ pub(super) async fn build_host(
     );
     host = host
         .with_mavlink(mavlink)
-        .with_msp(Arc::new(link("msp.sock")));
+        .with_msp(Arc::new(link("msp.sock", Wire::Raw)));
 
     // (b) Vision client: a self-healing link to the engine's socket, so the
     //     vision request methods proxy to it and the frame-descriptor stream

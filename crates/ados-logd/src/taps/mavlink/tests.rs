@@ -1,5 +1,5 @@
 use super::*;
-use ados_protocol::frame::encode_frame;
+use ados_protocol::mavlink_socket::encode_record;
 use std::io::Cursor;
 
 /// Build a minimal but valid v1 frame: magic, payload_len, seq, sysid,
@@ -29,12 +29,12 @@ fn v2_frame(sysid: u8, compid: u8, msgid: u32, payload: &[u8]) -> Vec<u8> {
     f
 }
 
-/// Frame a sequence of raw payloads into a length-prefixed byte stream the
-/// deframer reads, the same wire shape the broadcast uses.
+/// Frame a sequence of raw frames into the router's v2 record stream (length
+/// prefix, receive-time header, frame), stamping frame `i` at `1000 + i`.
 fn framed_stream(frames: &[Vec<u8>]) -> Vec<u8> {
     let mut out = Vec::new();
-    for f in frames {
-        out.extend(encode_frame(f, MAVLINK_MAX_FRAME).unwrap());
+    for (i, f) in frames.iter().enumerate() {
+        out.extend(encode_record(1000 + i as u64, f).unwrap());
     }
     out
 }
@@ -88,6 +88,10 @@ async fn a_frame_event_carries_identity_and_a_truncated_head() {
     assert_eq!(e.kind, "mavlink.frame");
     assert_eq!(e.severity, Level::Trace);
     assert_eq!(e.detail.get("msgid").and_then(|v| v.as_u64()), Some(33));
+    assert_eq!(
+        e.detail.get("rx_mono_ns").and_then(|v| v.as_u64()),
+        Some(1000)
+    );
     assert_eq!(
         e.detail.get("mav_version").and_then(|v| v.as_u64()),
         Some(1)
@@ -209,7 +213,7 @@ async fn run_mavlink_tap_reads_a_live_socket_then_reconnects_on_eof() {
     let handle = tokio::spawn(run_mavlink_tap(path.clone(), tx, 1_000_000.0, shutdown));
 
     let (mut a, _addr) = listener.accept().await.unwrap();
-    let frame = encode_frame(&v1_frame(1, 1, 42, &[9, 9, 9]), MAVLINK_MAX_FRAME).unwrap();
+    let frame = encode_record(77, &v1_frame(1, 1, 42, &[9, 9, 9])).unwrap();
     a.write_all(&frame).await.unwrap();
     a.flush().await.unwrap();
     drop(a); // EOF -> reconnect

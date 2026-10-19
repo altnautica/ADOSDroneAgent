@@ -83,7 +83,11 @@ fn an_unresolvable_profile_reads_as_a_drone() {
 fn the_other_profiles_are_not_mistaken_for_drones() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("profile.conf");
-    for (written, expected) in [("workstation", "workstation"), ("compute", "compute")] {
+    for (written, expected) in [
+        ("workstation", "workstation"),
+        ("compute", "compute"),
+        ("visor", "visor"),
+    ] {
         write(&marker, &format!("profile: {written}\n"));
         let resolved = resolve_profile(Some("auto"), &marker);
         assert_eq!(resolved, expected);
@@ -93,6 +97,11 @@ fn the_other_profiles_are_not_mistaken_for_drones() {
         };
         assert!(!cfg.is_drone());
     }
+    // An explicit config value names a visor too.
+    assert_eq!(
+        resolve_profile(Some("visor"), &dir.path().join("absent.conf")),
+        "visor"
+    );
 }
 
 #[test]

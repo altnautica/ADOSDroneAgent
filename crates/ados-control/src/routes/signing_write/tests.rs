@@ -217,9 +217,7 @@ fn fake_router(
             frames.push(read_framed(&mut conn).await);
         }
         for reply in replies {
-            let wire =
-                ados_protocol::frame::encode_frame(&reply, ados_protocol::frame::MAVLINK_MAX_FRAME)
-                    .unwrap();
+            let wire = ados_protocol::mavlink_socket::encode_record(1, &reply).unwrap();
             conn.write_all(&wire).await.unwrap();
         }
         frames

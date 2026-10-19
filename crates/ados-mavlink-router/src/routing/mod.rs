@@ -16,8 +16,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ados_protocol::shutdown::Shutdown;
-use bytes::Bytes;
 use tokio::sync::broadcast::{self, error::RecvError};
+
+use crate::rx_frame::RxFrame;
 
 use table::RouteTable;
 pub use table::{Audience, EndpointCounters, EndpointId};
@@ -38,9 +39,9 @@ const FC_LABEL: &str = "fc";
 #[derive(Debug, Clone)]
 pub enum RoutedFrame {
     /// From the FC, for `audience`.
-    Fc { audience: Audience, frame: Bytes },
+    Fc { audience: Audience, frame: RxFrame },
     /// From client endpoint `src`, for every other client.
-    Client { src: EndpointId, frame: Bytes },
+    Client { src: EndpointId, frame: RxFrame },
 }
 
 /// A registered endpoint: its id and its counters.
@@ -107,12 +108,12 @@ impl RouteHub {
         self.table().learn(ep.id, data, Instant::now());
         let _ = self.lane.send(RoutedFrame::Client {
             src: ep.id,
-            frame: Bytes::copy_from_slice(data),
+            frame: RxFrame::now(bytes::Bytes::copy_from_slice(data)),
         });
     }
 
     /// Classify one FC frame and publish it on the lane.
-    pub fn publish_fc(&self, frame: Bytes) {
+    pub fn publish_fc(&self, frame: RxFrame) {
         self.fc.counters.rx.fetch_add(1, Ordering::Relaxed);
         let audience = self.table().classify(self.fc.id, &frame, Instant::now());
         let _ = self.lane.send(RoutedFrame::Fc { audience, frame });
@@ -123,7 +124,7 @@ impl RouteHub {
     /// of the IPC socket's writers): their frames are not echoed back and FC
     /// frames addressed to them are delivered. With route-aware forwarding off
     /// this is `flat` itself, untouched.
-    pub fn feed(&self, labels: &[&str], flat: broadcast::Receiver<Bytes>) -> FrameFeed {
+    pub fn feed(&self, labels: &[&str], flat: broadcast::Receiver<RxFrame>) -> FrameFeed {
         let Some((first, rest)) = labels.split_first().filter(|_| self.enabled) else {
             return FrameFeed::Flat(flat);
         };
@@ -136,7 +137,7 @@ impl RouteHub {
     pub fn client_feed(
         &self,
         kind: &str,
-        flat: broadcast::Receiver<Bytes>,
+        flat: broadcast::Receiver<RxFrame>,
     ) -> (FrameFeed, Option<Endpoint>) {
         if !self.enabled {
             return (FrameFeed::Flat(flat), None);
@@ -183,13 +184,13 @@ impl RoutedFrame {
 /// by the caller with [`RoutedFrame::accepts`].
 #[derive(Debug)]
 pub enum PeerFeed {
-    Flat(broadcast::Receiver<Bytes>),
+    Flat(broadcast::Receiver<RxFrame>),
     Lane(broadcast::Receiver<RoutedFrame>),
 }
 
 impl PeerFeed {
     /// The source for `hub`, given the flat fan-out to use when it is off.
-    pub fn new(hub: &RouteHub, flat: broadcast::Receiver<Bytes>) -> Self {
+    pub fn new(hub: &RouteHub, flat: broadcast::Receiver<RxFrame>) -> Self {
         if hub.enabled {
             PeerFeed::Lane(hub.lane.subscribe())
         } else {
@@ -198,7 +199,7 @@ impl PeerFeed {
     }
 
     /// The next frame, with its routing when the lane is in use.
-    pub async fn recv(&mut self) -> Result<(Bytes, Option<RoutedFrame>), RecvError> {
+    pub async fn recv(&mut self) -> Result<(RxFrame, Option<RoutedFrame>), RecvError> {
         match self {
             PeerFeed::Flat(rx) => Ok((rx.recv().await?, None)),
             PeerFeed::Lane(rx) => {
@@ -273,7 +274,7 @@ impl PeerEndpoints {
 /// filtered to one endpoint (plus the aliases sharing its transport).
 #[derive(Debug)]
 pub enum FrameFeed {
-    Flat(broadcast::Receiver<Bytes>),
+    Flat(broadcast::Receiver<RxFrame>),
     Routed {
         rx: broadcast::Receiver<RoutedFrame>,
         ep: Endpoint,
@@ -281,8 +282,8 @@ pub enum FrameFeed {
     },
 }
 
-impl From<broadcast::Receiver<Bytes>> for FrameFeed {
-    fn from(rx: broadcast::Receiver<Bytes>) -> Self {
+impl From<broadcast::Receiver<RxFrame>> for FrameFeed {
+    fn from(rx: broadcast::Receiver<RxFrame>) -> Self {
         FrameFeed::Flat(rx)
     }
 }
@@ -290,7 +291,7 @@ impl From<broadcast::Receiver<Bytes>> for FrameFeed {
 impl FrameFeed {
     /// The next frame for this consumer, with the broadcast receiver's error
     /// semantics (`Lagged` after a shed, `Closed` at shutdown).
-    pub async fn recv(&mut self) -> Result<Bytes, RecvError> {
+    pub async fn recv(&mut self) -> Result<RxFrame, RecvError> {
         match self {
             FrameFeed::Flat(rx) => rx.recv().await,
             FrameFeed::Routed { rx, ep, aliases } => loop {
@@ -317,7 +318,7 @@ impl FrameFeed {
 /// Classify every FC frame onto the routed lane until `cancel`.
 pub async fn run_classifier(
     hub: Arc<RouteHub>,
-    mut frames: broadcast::Receiver<Bytes>,
+    mut frames: broadcast::Receiver<RxFrame>,
     cancel: Shutdown,
 ) {
     loop {

@@ -34,7 +34,7 @@ const STREAM_STEP: Duration = Duration::from_secs(5);
 const BANNER_RETRY: Duration = Duration::from_secs(3);
 
 /// Per-message stream rates requested from the FC: `(MAVLink message id, Hz)`.
-const STREAM_RATES: &[(u32, f32)] = &[
+const BASE_RATES: &[(u32, f32)] = &[
     (0, 1.0),   // HEARTBEAT
     (30, 10.0), // ATTITUDE
     (33, 5.0),  // GLOBAL_POSITION_INT
@@ -44,6 +44,36 @@ const STREAM_RATES: &[(u32, f32)] = &[
     (147, 1.0), // BATTERY_STATUS
     (65, 4.0),  // RC_CHANNELS
 ];
+
+/// [`BASE_RATES`] plus the sensor streams a capture session records: the
+/// inertial, attitude, local position, GNSS, clock and pressure streams at
+/// rates a visual-inertial pipeline can use.
+const CAPTURE_RATES: &[(u32, f32)] = &[
+    (0, 1.0),     // HEARTBEAT
+    (30, 10.0),   // ATTITUDE
+    (33, 5.0),    // GLOBAL_POSITION_INT
+    (1, 2.0),     // SYS_STATUS
+    (24, 10.0),   // GPS_RAW_INT
+    (74, 4.0),    // VFR_HUD
+    (147, 1.0),   // BATTERY_STATUS
+    (65, 4.0),    // RC_CHANNELS
+    (105, 200.0), // HIGHRES_IMU
+    (31, 100.0),  // ATTITUDE_QUATERNION
+    (32, 50.0),   // LOCAL_POSITION_NED
+    (2, 1.0),     // SYSTEM_TIME
+    (29, 10.0),   // SCALED_PRESSURE
+];
+
+/// The stream table for a node of `profile`: a visor always records sensor
+/// streams, a drone only while a capture session is active (`capture_active`),
+/// every other profile never.
+pub(crate) fn stream_rates(profile: &str, capture_active: bool) -> &'static [(u32, f32)] {
+    if profile == "visor" || (profile == "drone" && capture_active) {
+        CAPTURE_RATES
+    } else {
+        BASE_RATES
+    }
+}
 
 /// Legacy data-stream groups requested via `REQUEST_DATA_STREAM`: `(MAV_DATA_STREAM
 /// id, Hz)`. Sent only when `mavlink.legacy_stream_request` is on; see
@@ -351,7 +381,10 @@ impl FcConnection {
 }
 
 mod client;
+mod sensor_sends;
 mod ticks;
 
+#[cfg(test)]
+mod stream_rate_tests;
 #[cfg(test)]
 mod tests;

@@ -79,6 +79,7 @@ pub mod logd;
 #[cfg(feature = "mavlink")]
 pub mod mavlink;
 pub mod mavlink_ingest;
+pub mod mavlink_socket;
 pub mod mcp_token;
 pub mod msp;
 pub mod netif;

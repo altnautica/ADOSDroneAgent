@@ -1,5 +1,6 @@
 use super::table::tests::{ack_to, heartbeat};
 use super::*;
+use bytes::Bytes;
 
 /// Recv with a short bound: `None` means nothing was delivered.
 async fn next(feed: &mut FrameFeed) -> Option<Bytes> {
@@ -7,18 +8,23 @@ async fn next(feed: &mut FrameFeed) -> Option<Bytes> {
         .await
         .ok()
         .and_then(Result::ok)
+        .map(|f| f.bytes)
+}
+
+fn fc(frame: &Bytes) -> RxFrame {
+    RxFrame::new(1, frame.clone())
 }
 
 #[tokio::test]
 async fn route_aware_off_is_flat_fanout() {
     let hub = RouteHub::new(false);
-    let (tx, _) = broadcast::channel::<Bytes>(8);
+    let (tx, _) = broadcast::channel::<RxFrame>(8);
     let (mut a, ep_a) = hub.client_feed("tcp", tx.subscribe());
     let (mut b, _) = hub.client_feed("tcp", tx.subscribe());
     assert!(ep_a.is_none());
     assert!(matches!(a, FrameFeed::Flat(_)));
     let frame = Bytes::from(ack_to(255, 190));
-    tx.send(frame.clone()).unwrap();
+    tx.send(fc(&frame)).unwrap();
     assert_eq!(next(&mut a).await, Some(frame.clone()));
     assert_eq!(next(&mut b).await, Some(frame));
 }
@@ -26,7 +32,7 @@ async fn route_aware_off_is_flat_fanout() {
 #[tokio::test]
 async fn addressed_frame_only_to_owner() {
     let hub = RouteHub::new(true);
-    let (tx, _) = broadcast::channel::<Bytes>(8);
+    let (tx, _) = broadcast::channel::<RxFrame>(8);
     let (mut a, ep_a) = hub.client_feed("tcp", tx.subscribe());
     let (mut b, ep_b) = hub.client_feed("tcp", tx.subscribe());
     hub.ingress(ep_a.as_ref().unwrap(), &heartbeat(255, 190));
@@ -35,7 +41,7 @@ async fn addressed_frame_only_to_owner() {
     assert!(next(&mut a).await.is_some());
     assert!(next(&mut b).await.is_some());
     let reply = Bytes::from(ack_to(255, 190));
-    hub.publish_fc(reply.clone());
+    hub.publish_fc(fc(&reply));
     assert_eq!(next(&mut a).await, Some(reply));
     assert_eq!(next(&mut b).await, None);
 }
@@ -43,7 +49,7 @@ async fn addressed_frame_only_to_owner() {
 #[tokio::test]
 async fn broadcast_when_target_zero() {
     let hub = RouteHub::new(true);
-    let (tx, _) = broadcast::channel::<Bytes>(8);
+    let (tx, _) = broadcast::channel::<RxFrame>(8);
     let (mut a, ep_a) = hub.client_feed("tcp", tx.subscribe());
     let (mut b, _) = hub.client_feed("tcp", tx.subscribe());
     hub.ingress(ep_a.as_ref().unwrap(), &heartbeat(255, 190));
@@ -51,7 +57,7 @@ async fn broadcast_when_target_zero() {
     assert!(next(&mut b).await.is_some());
     for frame in [ack_to(0, 0), heartbeat(1, 1)] {
         let frame = Bytes::from(frame);
-        hub.publish_fc(frame.clone());
+        hub.publish_fc(fc(&frame));
         assert_eq!(next(&mut a).await, Some(frame.clone()));
         assert_eq!(next(&mut b).await, Some(frame));
     }
@@ -60,7 +66,7 @@ async fn broadcast_when_target_zero() {
 #[tokio::test]
 async fn no_echo_to_source() {
     let hub = RouteHub::new(true);
-    let (tx, _) = broadcast::channel::<Bytes>(8);
+    let (tx, _) = broadcast::channel::<RxFrame>(8);
     let (mut a, ep_a) = hub.client_feed("tcp", tx.subscribe());
     let (mut b, _) = hub.client_feed("udp", tx.subscribe());
     // The IPC socket also carries the cloud relay: neither hears its own.

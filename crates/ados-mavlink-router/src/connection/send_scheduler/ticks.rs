@@ -1,6 +1,7 @@
 //! The periodic stream cadence, banner request and parameter sweep ticks.
 
 use super::*;
+use crate::connection::imu_fallback::{MSG_HIGHRES_IMU, MSG_RAW_IMU, RAW_IMU_FALLBACK_HZ};
 
 impl FcConnection {
     /// Adaptive stream request. Picks the interval from how long the link has
@@ -27,7 +28,15 @@ impl FcConnection {
             };
         }
         let interval = *self.stream_interval.lock().await;
-        let due = {
+        // The table follows the profile and the capture marker; within the
+        // capture table HIGHRES_IMU gives way to RAW_IMU when the FC never
+        // answered it. A change of either re-requests at once.
+        let now = Instant::now();
+        let rates = stream_rates(&self.cfg.profile, self.sensor_streams.capture_active());
+        let capture_table = rates.iter().any(|&(id, _)| id == MSG_HIGHRES_IMU);
+        let raw = capture_table && self.sensor_streams.poll(now);
+        let changed = self.sensor_streams.changed((capture_table, raw));
+        let due = changed || {
             let last = self.last_stream_req.lock().await;
             last.map(|t| t.elapsed() >= interval).unwrap_or(true)
         };
@@ -35,7 +44,12 @@ impl FcConnection {
             return;
         }
         let target = self.target_system.load(Ordering::Relaxed);
-        for &(msg_id, rate_hz) in STREAM_RATES {
+        for &(msg_id, rate_hz) in rates {
+            let (msg_id, rate_hz) = if raw && msg_id == MSG_HIGHRES_IMU {
+                (MSG_RAW_IMU, RAW_IMU_FALLBACK_HZ)
+            } else {
+                (msg_id, rate_hz)
+            };
             let interval_us = 1_000_000.0 / rate_hz;
             let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
                 target_system: target,
@@ -52,6 +66,7 @@ impl FcConnection {
             });
             self.send_msg(&cmd).await;
         }
+        self.sensor_streams.requested(capture_table, raw, now);
         // The legacy `REQUEST_DATA_STREAM` groups, off by default.
         //
         // This used to be sent unconditionally, on the assumption that a firmware

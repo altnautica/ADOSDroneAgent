@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
 use ados_protocol::ipc::{InboundCommand, IpcBroadcast};
+use ados_protocol::mavlink_socket::encode_record;
 use ados_protocol::shutdown::Shutdown;
 use tokio::sync::mpsc;
 
@@ -13,10 +14,11 @@ use crate::connection::{ClientOrigin, FcConnection};
 
 // FC frames -> MAVLink socket clients. The socket contract is 4-byte
 // big-endian length-prefixed in both directions (the inbound reader decodes
-// the prefix), so each raw FC frame is framed before it is broadcast. The
-// proxies consume the raw frame stream directly and are unaffected. The
-// socket is one endpoint for routing, shared by the on-box clients and the
-// cloud relay that writes through it.
+// the prefix); each outbound body is the v2 record, the frame's 8-byte
+// little-endian host receive time followed by the raw frame
+// ([`ados_protocol::mavlink_socket`]). The proxies consume the raw frame
+// stream directly and are unaffected. The socket is one endpoint for routing,
+// shared by the on-box clients and the cloud relay that writes through it.
 pub(in crate::daemon) fn spawn_fc_to_mavlink(
     fc: &Arc<FcConnection>,
     mavlink_ipc: &Arc<IpcBroadcast>,
@@ -30,7 +32,7 @@ pub(in crate::daemon) fn spawn_fc_to_mavlink(
         loop {
             tokio::select! {
                 frame = rx.recv() => match frame {
-                    Ok(f) => match encode_frame(&f, MAVLINK_MAX_FRAME) {
+                    Ok(f) => match encode_record(f.rx_ns, &f.bytes) {
                         Ok(framed) => mavlink_ipc.broadcast(framed.into()).await,
                         Err(e) => tracing::warn!(error = %e, "mavlink_frame_encode_failed"),
                     },

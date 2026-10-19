@@ -18,7 +18,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use ados_plugin_host::frame_link::FrameLink;
+use ados_plugin_host::frame_link::{FrameLink, Wire};
 use tokio::sync::{mpsc, watch};
 
 use super::mavlink_relay::{drain_publish_queue, BoundedPublishQueue, RelayMetrics, QUEUE_MAXSIZE};
@@ -115,6 +115,7 @@ impl MspMqttRelay {
         // before writing any.
         let ipc = std::sync::Arc::new(FrameLink::spawn(
             ipc_sock,
+            Wire::Raw,
             Box::new(|| vec![ados_protocol::ipc::IPC_DECLARE_OFF_BOX_SOURCE.to_vec()]),
         ));
 

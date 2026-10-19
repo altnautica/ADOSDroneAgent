@@ -398,6 +398,13 @@ fn serial_candidates_probe_flight_controllers_first_and_onboard_uarts_last() {
 }
 
 #[test]
+fn the_sensor_hub_is_told_apart_from_an_ardupilot_board_on_the_same_vendor() {
+    assert!(super::discovery::is_sensor_hub(0x1209, 0xAD05));
+    assert!(!super::discovery::is_sensor_hub(0x1209, 0x5741));
+    assert!(!super::discovery::is_sensor_hub(0x0483, 0xAD05));
+}
+
+#[test]
 fn a_silent_onboard_uart_is_never_opened_on_a_guess_beside_other_candidates() {
     let uart = cand("/dev/ttyAMA0", None);
     let usb = cand("/dev/ttyACM0", Some((0x1209, 0x5741)));

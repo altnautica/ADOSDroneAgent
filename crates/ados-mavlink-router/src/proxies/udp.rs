@@ -63,7 +63,7 @@ pub async fn run_udp_proxy(
             // populated for a given FC, so there is no duplication.
             let (frame, routed) = tokio::select! {
                 r = rx.recv() => match r {
-                    Ok(f) => f,
+                    Ok((f, routed)) => (f.bytes, routed),
                     Err(RecvError::Lagged(_)) => continue,
                     Err(RecvError::Closed) => break,
                 },

@@ -18,6 +18,7 @@ pub fn resolve_profile(config_profile: Option<&str>, profile_conf: &Path) -> Str
     if let Some(v) = from_config {
         match v {
             "drone" => return "drone".to_string(),
+            "visor" => return "visor".to_string(),
             "ground_station" | "ground-station" => return "ground-station".to_string(),
             // Anything else (including `auto`) falls through to the marker.
             _ => {}
@@ -39,6 +40,7 @@ pub fn resolve_profile(config_profile: Option<&str>, profile_conf: &Path) -> Str
             return match value {
                 "ground_station" | "ground-station" => "ground-station".to_string(),
                 "workstation" => "workstation".to_string(),
+                "visor" => "visor".to_string(),
                 "compute" => "compute".to_string(),
                 _ => "drone".to_string(),
             };

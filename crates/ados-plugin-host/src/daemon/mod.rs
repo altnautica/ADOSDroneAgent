@@ -39,7 +39,7 @@ use anyhow::Result;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinHandle;
 
-use crate::frame_link::{Declarations, FrameLink};
+use crate::frame_link::{Declarations, FrameLink, Wire};
 use crate::loopback_guard;
 use crate::manifest::PluginManifest;
 use crate::pic_gate::PicGate;

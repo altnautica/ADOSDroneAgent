@@ -1,11 +1,14 @@
 //! One reconnecting client for the router's length-prefixed byte sockets
 //! (`/run/ados/mavlink.sock` and `/run/ados/msp.sock`).
 //!
-//! Both sockets speak the same wire: a 4-byte big-endian length, then the raw
-//! bytes, in both directions. Bytes written toward the socket are commands
-//! toward the flight controller; FC bytes fan out on the same connection. The
-//! router never parses the MSP stream and forwards MAVLink batches verbatim, so
-//! this link carries opaque byte chunks and knows nothing about either protocol.
+//! Both sockets frame every record with a 4-byte big-endian length, in both
+//! directions. Bytes written toward the socket are commands toward the flight
+//! controller, raw. FC bytes fan out on the same connection: raw chunks on the
+//! MSP socket, and on the MAVLink socket each record carries the router's
+//! 8-byte receive-time header ([`ados_protocol::mavlink_socket`]) ahead of the
+//! frame, which this link strips per [`Wire`]. The router never parses the MSP
+//! stream and forwards MAVLink frames verbatim, so this link carries opaque
+//! byte chunks and knows nothing about either protocol.
 //!
 //! The link owns the socket in one task that reconnects forever at a fixed
 //! interval, so a router restart heals without the host noticing. On every new
@@ -25,6 +28,7 @@ use std::time::Duration;
 
 use ados_protocol::frame::{encode_frame, MAVLINK_MAX_FRAME};
 use ados_protocol::ipc::read_length_prefixed;
+use ados_protocol::mavlink_socket;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::sync::{broadcast, mpsc};
@@ -80,6 +84,16 @@ impl std::fmt::Display for SendError {
     }
 }
 
+/// The inbound record format of a router socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Wire {
+    /// `msp.sock`: each record is one raw chunk.
+    Raw,
+    /// `mavlink.sock`: each record is the receive-time header plus one frame;
+    /// subscribers receive the frame.
+    MavlinkSocket,
+}
+
 /// A self-healing link to one router byte socket.
 pub struct FrameLink {
     outbound: mpsc::Sender<Vec<u8>>,
@@ -95,20 +109,27 @@ impl FrameLink {
     /// Start the link task for `path`. Never fails: an absent socket is retried
     /// every [`RECONNECT_INTERVAL`], and sends report [`SendError::Disconnected`]
     /// until a connection is up.
-    pub fn spawn(path: impl AsRef<Path>, declarations: Declarations) -> Self {
+    pub fn spawn(path: impl AsRef<Path>, wire: Wire, declarations: Declarations) -> Self {
         Self::spawn_with_interval(
             path.as_ref().to_path_buf(),
+            wire,
             declarations,
             RECONNECT_INTERVAL,
         )
     }
 
-    fn spawn_with_interval(path: PathBuf, declarations: Declarations, interval: Duration) -> Self {
+    fn spawn_with_interval(
+        path: PathBuf,
+        wire: Wire,
+        declarations: Declarations,
+        interval: Duration,
+    ) -> Self {
         let (outbound, out_rx) = mpsc::channel::<Vec<u8>>(LINK_DEPTH);
         let (inbound, _rx) = broadcast::channel(LINK_DEPTH);
         let connected = Arc::new(AtomicBool::new(false));
         let task = tokio::spawn(run(
             path,
+            wire,
             declarations,
             interval,
             out_rx,
@@ -180,6 +201,7 @@ impl Drop for FrameLink {
 
 async fn run(
     path: PathBuf,
+    wire: Wire,
     declarations: Declarations,
     interval: Duration,
     mut out_rx: mpsc::Receiver<Vec<u8>>,
@@ -190,7 +212,15 @@ async fn run(
         match UnixStream::connect(&path).await {
             Ok(stream) => {
                 tracing::info!(path = %path.display(), "router socket connected");
-                serve(stream, &declarations, &mut out_rx, &inbound, &connected).await;
+                serve(
+                    stream,
+                    wire,
+                    &declarations,
+                    &mut out_rx,
+                    &inbound,
+                    &connected,
+                )
+                .await;
                 connected.store(false, Ordering::Release);
                 // Commands queued for the lost connection were never delivered.
                 // Drop them rather than replay stale commands onto the next one.
@@ -209,6 +239,7 @@ async fn run(
 /// command writer until either side fails.
 async fn serve(
     stream: UnixStream,
+    wire: Wire,
     declarations: &Declarations,
     out_rx: &mut mpsc::Receiver<Vec<u8>>,
     inbound: &broadcast::Sender<Vec<u8>>,
@@ -229,10 +260,22 @@ async fn serve(
 
     let tx = inbound.clone();
     let mut reader = tokio::spawn(async move {
-        // Zero-length chunks are legal on these sockets (reject_zero = false).
-        while let Ok(Some(frame)) =
-            read_length_prefixed(&mut read_half, MAVLINK_MAX_FRAME, false).await
-        {
+        loop {
+            // Zero-length chunks are legal on these sockets (reject_zero = false).
+            let frame = match wire {
+                Wire::Raw => read_length_prefixed(&mut read_half, MAVLINK_MAX_FRAME, false)
+                    .await
+                    .ok()
+                    .flatten(),
+                Wire::MavlinkSocket => mavlink_socket::read_frame(&mut read_half)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|f| f.frame),
+            };
+            let Some(frame) = frame else {
+                break;
+            };
             // No receivers is fine; the next subscriber resumes at the tail.
             let _ = tx.send(frame);
         }
@@ -280,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_reports_a_missing_router_and_an_oversized_frame() {
-        let link = FrameLink::spawn(temp_sock("absent"), no_declarations());
+        let link = FrameLink::spawn(temp_sock("absent"), Wire::Raw, no_declarations());
         assert_eq!(link.send(b"cmd"), Err(SendError::Disconnected));
         assert_eq!(
             link.send(&vec![0u8; MAVLINK_MAX_FRAME + 1]),
@@ -288,6 +331,8 @@ mod tests {
         );
     }
 
+    /// The MAVLink socket's records carry the receive-time header; subscribers
+    /// get the bare frame.
     #[tokio::test]
     async fn commands_reach_the_router_and_fc_frames_fan_out() {
         let path = temp_sock("roundtrip");
@@ -295,7 +340,7 @@ mod tests {
             .await
             .unwrap();
         let mut inbound = inbound.unwrap();
-        let link = FrameLink::spawn(&path, no_declarations());
+        let link = FrameLink::spawn(&path, Wire::MavlinkSocket, no_declarations());
         assert!(link.connected_within(Duration::from_secs(2)).await);
         let mut rx = link.subscribe();
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -308,7 +353,11 @@ mod tests {
         assert_eq!(got.payload, b"command-toward-fc");
 
         server
-            .broadcast(encode_frame(b"fc-frame", MAVLINK_MAX_FRAME).unwrap().into())
+            .broadcast(
+                mavlink_socket::encode_record(123, b"fc-frame")
+                    .unwrap()
+                    .into(),
+            )
             .await;
         let frame = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -327,6 +376,7 @@ mod tests {
             .unwrap();
         let link = FrameLink::spawn_with_interval(
             path.clone(),
+            Wire::Raw,
             Box::new(|| vec![IPC_DECLARE_OFF_BOX_SOURCE.to_vec()]),
             Duration::from_millis(50),
         );

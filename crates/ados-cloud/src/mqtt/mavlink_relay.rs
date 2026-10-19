@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_plugin_host::frame_link::FrameLink;
+use ados_plugin_host::frame_link::{FrameLink, Wire};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
@@ -288,6 +288,7 @@ impl MavlinkMqttRelay {
         // the broker, so the router must not read it as produced on the node.
         let ipc = std::sync::Arc::new(FrameLink::spawn(
             ipc_sock,
+            Wire::MavlinkSocket,
             Box::new(|| vec![ados_protocol::ipc::IPC_DECLARE_OFF_BOX_SOURCE.to_vec()]),
         ));
 

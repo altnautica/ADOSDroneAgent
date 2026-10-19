@@ -115,7 +115,7 @@ async fn mavlink_fc_frame_path_is_unchanged_and_raw_lane_is_silent() {
     c.read_loop(Box::pin(std::io::Cursor::new(frame.clone())))
         .await;
     // The exact frame bytes, verbatim, no re-encode.
-    assert_eq!(frame_rx.try_recv().unwrap(), frame);
+    assert_eq!(frame_rx.try_recv().unwrap().bytes, frame);
     // The raw lane never fires for a MAVLink FC.
     assert!(matches!(raw_rx.try_recv(), Err(TryRecvError::Empty)));
 }
@@ -130,7 +130,7 @@ async fn a_mavlink_frame_split_across_two_reads_lands_once_on_the_frame_lane() {
     let reader = ChunkReader::new(vec![frame[..split].to_vec(), frame[split..].to_vec()]);
     c.read_loop(Box::pin(reader)).await;
     // Reassembled across the two reads into exactly one frame.
-    assert_eq!(frame_rx.try_recv().unwrap(), frame);
+    assert_eq!(frame_rx.try_recv().unwrap().bytes, frame);
     assert!(
         matches!(frame_rx.try_recv(), Err(TryRecvError::Empty)),
         "exactly one frame, not duplicated"
@@ -244,7 +244,7 @@ async fn the_msp_socket_carries_raw_bytes_while_the_mavlink_socket_stays_silent(
                 tokio::select! {
                     frame = frame_rx.recv() => match frame {
                         Ok(f) => {
-                            if let Ok(framed) = encode_frame(&f, MAVLINK_MAX_FRAME) {
+                            if let Ok(framed) = ados_protocol::mavlink_socket::encode_record(f.rx_ns, &f.bytes) {
                                 mav_ipc.broadcast(framed.into()).await;
                             }
                         }
@@ -286,7 +286,7 @@ async fn the_msp_socket_carries_raw_bytes_while_the_mavlink_socket_stays_silent(
     // the frame lane, so nothing is ever broadcast to it.
     let silent = tokio::time::timeout(
         Duration::from_millis(200),
-        read_length_prefixed(&mut mav_client, MAVLINK_MAX_FRAME, false),
+        ados_protocol::mavlink_socket::read_frame(&mut mav_client),
     )
     .await;
     assert!(

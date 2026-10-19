@@ -220,7 +220,8 @@ impl FcConnection {
     /// the FC port is (mis)configured to the same node — but ONLY while the CRSF
     /// lane is opted in (`radio.crsf.enabled`): the pin is meaningful only for an
     /// active lane, so a stale pin left over from a DISABLED lane must never drop
-    /// the flight controller.
+    /// the flight controller. A sensor hub ([`is_sensor_hub`]) is never an FC
+    /// candidate: its port belongs to the sensor-hub service.
     pub(super) fn candidate_ports(&self) -> Vec<FcCandidate> {
         // A stale device pin from a disabled lane names nothing this router owns,
         // so it must not exclude the FC (an operator who turns the CRSF lane off
@@ -249,6 +250,10 @@ impl FcConnection {
                 let mut candidates: Vec<FcCandidate> = ports
                     .into_iter()
                     .filter(|p| is_candidate_port(&p.port_type, &p.port_name))
+                    .filter(|p| {
+                        !matches!(&p.port_type, tokio_serial::SerialPortType::UsbPort(info)
+                            if is_sensor_hub(info.vid, info.pid))
+                    })
                     .filter(|p| crsf_pin.is_empty() || !same_device(&p.port_name, crsf_pin))
                     .map(|p| FcCandidate {
                         usb: match &p.port_type {
@@ -282,6 +287,13 @@ pub(super) struct FcCandidate {
 /// STMicroelectronics (the STM32 virtual COM port Betaflight, iNav and many
 /// ArduPilot boards present).
 pub(super) const FC_USB_VENDORS: [u16; 5] = [0x1209, 0x26AC, 0x2DAE, 0x3162, 0x0483];
+
+/// Whether a USB id is the sensor hub. Its vendor (pid.codes) is also the
+/// ArduPilot boards' vendor, so it is matched on the full id.
+pub(super) fn is_sensor_hub(vid: u16, pid: u16) -> bool {
+    ados_hal_probe::bindings::parse_vid_pid(ados_hal_probe::bindings::SENSOR_HUB_VID_PID)
+        == Some((vid, pid))
+}
 
 /// Probe order for discovered serial candidates, lowest first: a USB device
 /// from a known flight-controller vendor, then any USB CDC-ACM port (the class

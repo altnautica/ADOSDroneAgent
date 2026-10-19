@@ -86,7 +86,7 @@ pub(super) async fn handle_tcp_client(
             // populated for a given FC, so there is no duplication.
             let bytes = tokio::select! {
                 r = rx.recv() => match r {
-                    Ok(frame) => frame,
+                    Ok(frame) => frame.bytes,
                     Err(RecvError::Lagged(_)) => continue,
                     Err(RecvError::Closed) => break,
                 },

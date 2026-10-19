@@ -197,7 +197,7 @@ async fn run_tee(
     let radio = fake_radio(sock_path.clone(), tx_port, disabled);
     await_socket(&sock_path).await;
 
-    let (tx, rx) = broadcast::channel::<bytes::Bytes>(64);
+    let (tx, rx) = broadcast::channel::<crate::rx_frame::RxFrame>(64);
     let counters = Arc::new(TeeCounters::default());
     let handle = tokio::spawn(run(
         rx,
@@ -208,7 +208,8 @@ async fn run_tee(
     ));
 
     for frame in frames_to_send {
-        tx.send(frame.into()).unwrap();
+        tx.send(crate::rx_frame::RxFrame::new(0, frame.into()))
+            .unwrap();
     }
     // Closing the source ends the loop, which is deterministic where a
     // cancellation notify would race the select.
@@ -418,7 +419,7 @@ async fn a_missing_radio_backs_off_instead_of_reconnecting_per_frame() {
     // means the rest are dropped without touching the command socket.
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("absent.sock");
-    let (tx, rx) = broadcast::channel::<bytes::Bytes>(64);
+    let (tx, rx) = broadcast::channel::<crate::rx_frame::RxFrame>(64);
     let counters = Arc::new(TeeCounters::default());
     let handle = tokio::spawn(run(
         rx,
@@ -428,7 +429,8 @@ async fn a_missing_radio_backs_off_instead_of_reconnecting_per_frame() {
         Shutdown::new(),
     ));
     for _ in 0..8 {
-        tx.send(v2_frame(0, 9).into()).unwrap();
+        tx.send(crate::rx_frame::RxFrame::new(0, v2_frame(0, 9).into()))
+            .unwrap();
     }
     drop(tx);
     handle.await.unwrap();
@@ -446,7 +448,7 @@ async fn a_missing_radio_backs_off_instead_of_reconnecting_per_frame() {
 async fn cancelling_stops_the_tee() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("absent.sock");
-    let (_tx, rx) = broadcast::channel::<bytes::Bytes>(8);
+    let (_tx, rx) = broadcast::channel::<crate::rx_frame::RxFrame>(8);
     let cancel = Shutdown::new();
     let handle = tokio::spawn(run(
         rx,

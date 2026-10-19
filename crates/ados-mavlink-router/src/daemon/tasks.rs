@@ -51,6 +51,23 @@ pub(super) fn spawn_core(
         tasks.push(tokio::spawn(routing::run_sidecar(hub, path, c)));
     }
 
+    // The FC sensor lane on the sensor bus: IMU / baro / camera feedback /
+    // TIMESYNC out through one publisher, RTCM corrections in. Both degrade to
+    // idle when the bus is absent (the publisher drops, the subscriber
+    // retries).
+    {
+        let publisher = ados_sensorbus::Publisher::spawn(
+            ados_sensorbus::socket_path(),
+            ados_sensorbus::Origin::Fc,
+        );
+        let marker = ados_protocol::paths::run_path("capture-active");
+        let lane = crate::fc_sensors::task::run(fc.clone(), publisher, marker, cancel.clone());
+        tasks.push(tokio::spawn(lane));
+        let rtcm =
+            crate::fc_sensors::rtcm::run(fc.clone(), ados_sensorbus::socket_path(), cancel.clone());
+        tasks.push(tokio::spawn(rtcm));
+    }
+
     // Agent-held signing: load the key before the first heartbeat, then
     // re-read it and persist the signing timestamp every 10 s and at shutdown,
     // so an enrolment or a disable reaches this process without a restart.

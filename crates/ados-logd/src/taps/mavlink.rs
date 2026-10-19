@@ -1,10 +1,10 @@
 //! The raw-frame tap.
 //!
-//! Connects to the MAVLink frame broadcast, deframes the 4-byte big-endian
-//! length-prefixed raw frames, and records a rate-limited sample of them as
-//! [`EventFrame`]s for deep diagnosis. This is the durable counterpart to the
-//! raw frame stream that is otherwise only on the network relay and lost the
-//! moment the link drops.
+//! Connects to the MAVLink frame broadcast, deframes the v2 records (4-byte
+//! big-endian length, 8-byte receive-time header, raw frame), and records a
+//! rate-limited sample of them as [`EventFrame`]s for deep diagnosis. This is
+//! the durable counterpart to the raw frame stream that is otherwise only on
+//! the network relay and lost the moment the link drops.
 //!
 //! Deliberately shallow: it reads only the frame header (magic, length, sysid,
 //! compid, msgid) and a short truncated head of the payload. It does NOT run a
@@ -29,9 +29,8 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
-use ados_protocol::frame::MAVLINK_MAX_FRAME;
-use ados_protocol::ipc::read_length_prefixed;
 use ados_protocol::logd::{EventFrame, IngestFrame, Level};
+use ados_protocol::mavlink_socket::read_frame;
 
 use super::{Shutdown, SOURCE_MAVLINK};
 use crate::writer::now_us;
@@ -165,17 +164,17 @@ async fn process_frames<R>(
         let next = tokio::select! {
             biased;
             _ = shutdown.recv() => return,
-            r = read_length_prefixed(&mut reader, MAVLINK_MAX_FRAME, false) => r,
+            r = read_frame(&mut reader) => r,
         };
         match next {
-            Ok(Some(payload)) => {
+            Ok(Some(record)) => {
                 let now = Instant::now();
                 if now.duration_since(last_emit) < interval {
                     // Within the sample window: count nothing, drop the frame.
                     continue;
                 }
                 last_emit = now;
-                let event = build_event(&payload);
+                let event = build_event(&record.frame, record.rx_mono_ns);
                 if tx.send(IngestFrame::Event(event)).await.is_err() {
                     return; // writer side gone
                 }
@@ -189,15 +188,17 @@ async fn process_frames<R>(
     }
 }
 
-/// Build the event row for one sampled raw frame. A frame too short to carry a
-/// header still yields an event (with `payload_len=0` and whatever head bytes
-/// exist) so a truncated or malformed frame is recorded rather than dropped
-/// silently.
-fn build_event(payload: &[u8]) -> EventFrame {
+/// Build the event row for one sampled raw frame received by the router at
+/// host monotonic `rx_mono_ns`. A frame too short to carry a header still
+/// yields an event (with `payload_len=0` and whatever head bytes exist) so a
+/// truncated or malformed frame is recorded rather than dropped silently.
+fn build_event(payload: &[u8], rx_mono_ns: u64) -> EventFrame {
     let ts = now_us();
     let mut ev = EventFrame::new(ts, "mavlink.frame", SOURCE_MAVLINK, Level::Trace);
     let head_len = payload.len().min(PAYLOAD_HEAD_BYTES);
     let head_b64 = base64::engine::general_purpose::STANDARD.encode(&payload[..head_len]);
+    ev.detail
+        .insert("rx_mono_ns".to_string(), rmpv::Value::from(rx_mono_ns));
     ev.detail.insert(
         "frame_bytes".to_string(),
         rmpv::Value::from(payload.len() as u64),

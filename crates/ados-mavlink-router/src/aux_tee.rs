@@ -475,7 +475,7 @@ pub async fn run(
                 continue;
             }
             received = frames.recv() => match received {
-                Ok(frame) => frame,
+                Ok(frame) => frame.bytes,
                 // The runtime discarded frames this tee was too slow to take.
                 // That is the shed working as designed: the fan-out producer was
                 // never blocked. Count what was lost rather than assume none was.

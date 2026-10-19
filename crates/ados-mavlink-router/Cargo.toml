@@ -18,6 +18,11 @@ ados-swarmbus = { path = "../ados-swarmbus" }
 # The PIC-verdict authority half the injector gate consults (ground-profile,
 # so the same verdict propagates over every bearer).
 ados-hid = { path = "../ados-hid" }
+# The sensor bus: FC IMU / baro / camera-feedback / TIMESYNC samples out, RTCM
+# corrections in toward the FC.
+ados-sensorbus = { path = "../ados-sensorbus" }
+# The sensor hub's USB id, so FC discovery never claims the hub's port.
+ados-hal-probe = { path = "../ados-hal-probe" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }

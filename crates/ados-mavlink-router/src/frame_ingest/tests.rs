@@ -81,7 +81,7 @@ async fn a_received_frame_reaches_every_fan_out_consumer_byte_for_byte() {
 
     publish(&fc, &counters, &relayed(), frame.clone());
 
-    assert_eq!(consumer.recv().await.unwrap(), frame);
+    assert_eq!(consumer.recv().await.unwrap().bytes, frame);
     let snap = counters.snapshot();
     assert_eq!(snap.frames_published, 1);
     assert_eq!(snap.bytes_published, frame.len() as u64);
@@ -97,8 +97,8 @@ async fn both_mavlink_versions_are_republished() {
     publish(&fc, &counters, &relayed(), heartbeat());
     publish(&fc, &counters, &relayed(), v1_attitude());
 
-    assert_eq!(consumer.recv().await.unwrap(), heartbeat());
-    assert_eq!(consumer.recv().await.unwrap(), v1_attitude());
+    assert_eq!(consumer.recv().await.unwrap().bytes, heartbeat());
+    assert_eq!(consumer.recv().await.unwrap().bytes, v1_attitude());
     assert_eq!(counters.snapshot().frames_published, 2);
 }
 
@@ -114,7 +114,7 @@ async fn garbage_is_rejected_rather_than_handed_on_as_telemetry() {
     // a lane that latches shut on one bad input.
     publish(&fc, &counters, &relayed(), heartbeat());
 
-    assert_eq!(consumer.recv().await.unwrap(), heartbeat());
+    assert_eq!(consumer.recv().await.unwrap().bytes, heartbeat());
     let snap = counters.snapshot();
     assert_eq!(snap.rejected_malformed, 2);
     assert_eq!(snap.frames_published, 1);
@@ -177,7 +177,7 @@ async fn a_frame_the_projection_does_not_read_is_still_republished() {
 
     publish(&fc, &counters, &relayed, unknown.clone());
 
-    assert_eq!(consumer.recv().await.unwrap(), unknown);
+    assert_eq!(consumer.recv().await.unwrap().bytes, unknown);
     assert_eq!(counters.snapshot().frames_published, 1);
     // It fed nothing, and was not miscounted as corruption.
     assert_eq!(relayed.lock().unwrap().frames_undecodable(), 0);
@@ -225,7 +225,7 @@ async fn the_loop_forwards_from_the_socket_channel_and_stops_on_cancel() {
         cancel.clone(),
     ));
     tx.send(ingested(heartbeat())).await.unwrap();
-    assert_eq!(consumer.recv().await.unwrap(), heartbeat());
+    assert_eq!(consumer.recv().await.unwrap().bytes, heartbeat());
 
     cancel.trigger();
     tokio::time::timeout(Duration::from_secs(2), task)
