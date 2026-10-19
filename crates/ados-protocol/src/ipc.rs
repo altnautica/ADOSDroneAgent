@@ -601,13 +601,23 @@ impl Drop for IpcBroadcast {
 /// The group that owns every agent command-plane socket: the control socket,
 /// the `*-cmd.sock` command sockets, the MAVLink/MSP/state lanes, and the rest
 /// of the sockets bound through [`bind_command_socket`]. The installer creates
-/// it and adds the human operator; the plugin user is never a member.
+/// it and adds the human operator; the plugin user is never a member, whatever
+/// capabilities it holds (a sensor-bus reader joins [`SENSORS_GROUP`]).
 pub const OPERATOR_GROUP: &str = "ados-operator";
 
 /// The group that may write `/run/ados/capture` (the capture-active marker
-/// directory) and the capture root. A capture plugin joins it only while it
-/// holds `capture.storage.write`; it guards nothing else.
+/// directory) and the capture root, which the supervisor's janitor and the
+/// installer keep at `2775 root:ados-capture`. A capture plugin joins it only
+/// while it holds `capture.storage.write`; it guards nothing else.
 pub const CAPTURE_GROUP: &str = "ados-capture";
+
+/// The reader group of the sensor bus (`/run/ados/sensors.sock`), bound with
+/// [`bind_reader_socket`]. A member may connect and subscribe; what it
+/// publishes is dropped. A plugin joins it only while it holds
+/// `sensor.stream.read`, which is how a sandboxed plugin reads the bus
+/// without joining [`OPERATOR_GROUP`]. The installer also adds the human
+/// operator, whose operator membership still decides what it may publish.
+pub const SENSORS_GROUP: &str = "ados-sensors";
 
 /// The group every plugin unit runs in as its primary group. Each plugin has
 /// its own system user; this shared group owns only the per-plugin sockets
@@ -638,19 +648,22 @@ pub fn operator_peer_allowed(
 }
 
 /// A bound command-plane socket. [`accept`](Self::accept) yields only peers
-/// [`operator_peer_allowed`] admits; any other peer is closed before a byte of
-/// it is read.
+/// [`operator_peer_allowed`] admits (plus, on a socket bound with
+/// [`bind_reader_socket`], members of its reader group); any other peer is
+/// closed before a byte of it is read.
 ///
-/// The socket file is already `0o660 root:ados-operator`, so the kernel refuses
-/// `connect()` to anyone outside the group. The per-accept check is the second
-/// line: it holds when the chgrp could not be applied, when the mode is widened
-/// by hand, or when a descriptor to the socket is passed to a process that could
-/// not have opened it.
+/// The socket file is already `0o660 root:ados-operator` (or `root:<reader
+/// group>`), so the kernel refuses `connect()` to anyone outside the group. The
+/// per-accept check is the second line: it holds when the chgrp could not be
+/// applied, when the mode is widened by hand, or when a descriptor to the
+/// socket is passed to a process that could not have opened it.
 pub struct OperatorListener {
     inner: UnixListener,
     path: PathBuf,
     server_uid: u32,
     operator_gid: Option<u32>,
+    /// The reader group's gid on a [`bind_reader_socket`] socket.
+    reader_gid: Option<u32>,
 }
 
 impl OperatorListener {
@@ -660,33 +673,55 @@ impl OperatorListener {
     pub async fn accept(&self) -> io::Result<(UnixStream, tokio::net::unix::SocketAddr)> {
         loop {
             let (stream, addr) = self.inner.accept().await?;
-            if self.admits(&stream) {
+            if self.classify(&stream).is_some() {
                 return Ok((stream, addr));
             }
         }
     }
 
-    fn admits(&self, stream: &UnixStream) -> bool {
+    /// [`accept`](Self::accept), also returning what the admitted peer is
+    /// ([`classify_peer`]), so a server can narrow what each class may do.
+    pub async fn accept_classified(&self) -> io::Result<(UnixStream, PeerClass)> {
+        loop {
+            let (stream, _) = self.inner.accept().await?;
+            if let Some(class) = self.classify(&stream) {
+                return Ok((stream, class));
+            }
+        }
+    }
+
+    fn classify(&self, stream: &UnixStream) -> Option<PeerClass> {
         match peer_credentials(stream) {
             Ok((uid, gids)) => {
-                let allowed = operator_peer_allowed(uid, &gids, self.server_uid, self.operator_gid);
-                if !allowed {
+                let class = classify_peer(
+                    uid,
+                    &gids,
+                    self.server_uid,
+                    self.operator_gid,
+                    self.reader_gid,
+                );
+                if class.is_none() {
                     tracing::warn!(
                         path = %self.path.display(),
                         peer_uid = uid,
                         "command socket refused a peer outside the operator group"
                     );
                 }
-                allowed
+                class
             }
-            Err(err) if peer_hung_up_before_accept(&err) => true,
+            // The narrowest class the socket admits.
+            Err(err) if peer_hung_up_before_accept(&err) => Some(if self.reader_gid.is_some() {
+                PeerClass::Reader
+            } else {
+                PeerClass::Operator
+            }),
             Err(err) => {
                 tracing::warn!(
                     path = %self.path.display(),
                     error = %err,
                     "command socket refused a peer with unreadable credentials"
                 );
-                false
+                None
             }
         }
     }
@@ -826,8 +861,12 @@ pub fn bind_command_socket(path: impl AsRef<Path>, mode: u32) -> io::Result<Oper
         path: path.to_path_buf(),
         server_uid: nix::unistd::geteuid().as_raw(),
         operator_gid,
+        reader_gid: None,
     })
 }
+
+mod peer_class;
+pub use peer_class::{bind_reader_socket, classify_peer, PeerClass};
 
 /// Bind a socket on the plugin-reachable plane: the same hygiene as
 /// [`bind_command_socket`], owned by [`PLUGIN_GROUP`] so a plugin's unit can

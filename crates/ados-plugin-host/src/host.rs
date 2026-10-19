@@ -492,6 +492,43 @@ pub trait HostServices: Send + Sync + 'static {
         std::future::ready(Ok(not_implemented("mdns.browse")))
     }
 
+    /// Open a WHEP playback session on a published camera leg
+    /// ([`ados_protocol::media_relay::WhepOfferRequest`]) and return the
+    /// answer plus an opaque location. A real host remembers the location as
+    /// `plugin_id`'s. Gated at the dispatch level on `video.whep.relay`. The
+    /// default returns `not_implemented`.
+    fn whep_offer(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("video.whep.offer")))
+    }
+
+    /// Close a WHEP session ([`ados_protocol::media_relay::WhepCloseRequest`])
+    /// whose location this host returned to `plugin_id`; any other location
+    /// is refused. Gated at the dispatch level on `video.whep.relay`. The
+    /// default returns `not_implemented`.
+    fn whep_close(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("video.whep.close")))
+    }
+
+    /// Store a rig document through the control plane's rig route
+    /// ([`ados_protocol::media_relay::RigWriteRequest`]) and return its status
+    /// and body. Gated at the dispatch level on `sensors.rig.write`. The
+    /// default returns `not_implemented`.
+    fn sensors_rig_write(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("sensors.rig.write")))
+    }
+
     /// Open a connection session for `plugin_id` and return its id. Resources
     /// the plugin acquires from now on are tagged with it, so a reconnect's
     /// new session and the old session's teardown can overlap without the

@@ -144,9 +144,10 @@ pub const FILESYSTEM_HOST_CAP: &str = "filesystem.host";
 pub const SENSOR_STREAM_READ_CAP: &str = "sensor.stream.read";
 
 /// Bound read-only into a plugin holding [`SENSOR_STREAM_READ_CAP`]: the sensor
-/// bus socket (an operator-group listener, so the grant also joins
-/// [`ados_protocol::ipc::OPERATOR_GROUP`]; no other operator socket is bound
-/// into the sandbox) and the clock sidecar.
+/// bus socket (a reader socket in [`ados_protocol::ipc::SENSORS_GROUP`], which
+/// the grant joins; the bus admits that group for subscribe only, and the
+/// plugin never joins [`ados_protocol::ipc::OPERATOR_GROUP`]) and the clock
+/// sidecar.
 pub const SENSOR_STREAM_PATHS: &[&str] = &["/run/ados/sensors.sock", "/run/ados/clock.json"];
 
 /// The capability that lets a plugin write capture sessions.
@@ -301,10 +302,13 @@ pub fn sandbox_directives(
             ados_protocol::vision_rpc::VISION_READERS_GROUP
         ));
     }
+    // The sensor bus admits its reader group for subscribe only. Never the
+    // operator group: that would make every operator-plane check (log
+    // attribution included) treat the plugin as the operator.
     if granted.contains(SENSOR_STREAM_READ_CAP) {
         lines.push(format!(
             "SupplementaryGroups={}",
-            ados_protocol::ipc::OPERATOR_GROUP
+            ados_protocol::ipc::SENSORS_GROUP
         ));
     }
     if granted.contains(CAPTURE_STORAGE_WRITE_CAP) {
@@ -694,7 +698,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sensor_grant_binds_the_bus_and_clock_and_joins_the_operator_group() {
+    fn the_sensor_grant_binds_the_bus_and_clock_and_joins_the_sensors_group() {
         let none = sandbox_directives(&caps(&[]), true, &[]);
         assert!(!none
             .iter()
@@ -714,8 +718,33 @@ mod tests {
                 "{path} must be bound after the tmpfs hides the run dir"
             );
         }
-        assert!(lines.contains(&"SupplementaryGroups=ados-operator".to_string()));
+        assert!(lines.contains(&"SupplementaryGroups=ados-sensors".to_string()));
+        assert!(!lines.iter().any(|l| l.contains("ados-operator")));
         assert!(!lines.iter().any(|l| l.contains("ados-capture")));
+    }
+
+    /// No grant, alone or all together, puts a plugin in the operator group:
+    /// the operator plane (command sockets, log attribution) would read it as
+    /// the operator.
+    #[test]
+    fn no_grant_joins_the_operator_group() {
+        let every: Vec<&str> = ados_protocol::capabilities::AGENT_CAPABILITIES
+            .iter()
+            .map(|c| c.id)
+            .collect();
+        for cap in every.iter().copied() {
+            let lines = sandbox_directives(&caps(&[cap]), true, &[]);
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.contains(ados_protocol::ipc::OPERATOR_GROUP)),
+                "{cap}"
+            );
+        }
+        let all = sandbox_directives(&caps(&every), true, &[]);
+        assert!(!all
+            .iter()
+            .any(|l| l.contains(ados_protocol::ipc::OPERATOR_GROUP)));
     }
 
     #[test]

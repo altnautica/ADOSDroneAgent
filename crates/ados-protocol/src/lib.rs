@@ -81,6 +81,7 @@ pub mod mavlink;
 pub mod mavlink_ingest;
 pub mod mavlink_socket;
 pub mod mcp_token;
+pub mod media_relay;
 pub mod msp;
 pub mod netif;
 pub mod node_info;

@@ -63,7 +63,7 @@ pub(super) fn spawn_core(
             ados_sensorbus::Origin::Fc,
         );
         // `/run/ados/capture/active`: created by the capture recorder while a
-        // session records (the dir is operator-group writable for it).
+        // session records (the dir is setgid and writable by the capture group).
         let marker = ados_protocol::paths::run_dir()
             .join("capture")
             .join("active");

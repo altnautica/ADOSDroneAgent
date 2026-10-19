@@ -238,10 +238,11 @@ pub(super) fn enable_if_present(unit: &str) {
 /// memberships run `usermod -aG <grp> ados`. Every plugin runs as its own
 /// `ados-plg-*` user whose primary group is [`ados_protocol::ipc::PLUGIN_GROUP`];
 /// a plugin granted camera frames also carries
-/// [`ados_protocol::vision_rpc::VISION_READERS_GROUP`], and one granted capture
-/// storage [`ados_protocol::ipc::CAPTURE_GROUP`]. systemd refuses a unit
-/// whose `Group=`/`SupplementaryGroups=` names a missing group, so all exist
-/// before any plugin is installed.
+/// [`ados_protocol::vision_rpc::VISION_READERS_GROUP`], one granted capture
+/// storage [`ados_protocol::ipc::CAPTURE_GROUP`], and one granted the sensor
+/// bus [`ados_protocol::ipc::SENSORS_GROUP`]. systemd refuses a unit whose
+/// `Group=`/`SupplementaryGroups=` names a missing group, so all exist before
+/// any plugin is installed.
 ///
 /// A system account: no login shell, no home directory, allocated below the
 /// regular-uid range. The group and the user are each created only when absent,
@@ -276,6 +277,7 @@ pub(super) fn provision_ados_identity() {
         ados_protocol::ipc::PLUGIN_GROUP,
         ados_protocol::vision_rpc::VISION_READERS_GROUP,
         ados_protocol::ipc::CAPTURE_GROUP,
+        ados_protocol::ipc::SENSORS_GROUP,
     ] {
         if !exec::run_ok("getent", &["group", grp]) {
             let _ = exec::run("groupadd", &["--system", grp]);
@@ -336,8 +338,13 @@ pub(super) fn add_operator_to_ados_group() {
         return;
     }
     // `ados` for the plugin/log file plane, the operator group for the
-    // command sockets (control, logd query, CLI) that plugins must not reach.
-    for group in ["ados", ados_protocol::ipc::OPERATOR_GROUP] {
+    // command sockets (control, logd query, CLI) that plugins must not reach,
+    // and the sensor bus reader group, which owns the bus socket file.
+    for group in [
+        "ados",
+        ados_protocol::ipc::OPERATOR_GROUP,
+        ados_protocol::ipc::SENSORS_GROUP,
+    ] {
         if exec::run_ok("getent", &["group", group]) {
             let _ = exec::run("usermod", &["-aG", group, operator.as_str()]);
         }

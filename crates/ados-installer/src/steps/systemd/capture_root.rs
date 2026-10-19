@@ -5,7 +5,10 @@
 //! choice. An explicit `storage.capture_root` elsewhere (`/data/capture`) is
 //! granted through a drop-in derived from the config on every install, and
 //! the directory is created here, outside the sandbox, because the supervisor
-//! cannot create a path its namespace mounts read-only.
+//! cannot create a path its namespace mounts read-only. It is created (or
+//! corrected) as `2775 root:ados-capture`, the access the supervisor's janitor
+//! also keeps on every root it resolves, so a sandboxed capture plugin in the
+//! capture group can create its session directories.
 
 use super::*;
 
@@ -92,8 +95,10 @@ pub fn apply_capture_root_dropin(dir: &Path, grant: &CaptureRootGrant) -> bool {
 
 /// Reconcile the capture-root drop-in against the config on a capture
 /// profile (drone, visor); every other profile carries none. Creates an
-/// explicit root, flags an invalid one, and reloads systemd when the drop-in
-/// changed. Idempotent.
+/// explicit root as `2775 root:ados-capture` (an existing root's owner and
+/// mode are corrected, the sessions under it left alone), flags an invalid
+/// one, and reloads systemd when the drop-in changed. Idempotent. Runs after
+/// the identity step has created the capture group.
 pub(super) fn reconcile_capture_root_dropin(profile: &str) {
     let grant = if matches!(profile, "drone" | "visor") {
         let body = std::fs::read_to_string(crate::env::CONFIG_YAML).ok();
@@ -103,8 +108,10 @@ pub(super) fn reconcile_capture_root_dropin(profile: &str) {
     };
     match &grant {
         CaptureRootGrant::Grant(root) => {
-            if let Err(e) = std::fs::create_dir_all(root) {
-                tracing::warn!(root, error = %e, "could not create the capture root");
+            let prepared =
+                ados_config::capture_storage::prepare_capture_root_on_host(Path::new(root));
+            if let Err(e) = prepared {
+                tracing::warn!(root, error = %e, "could not prepare the capture root");
             }
         }
         CaptureRootGrant::Invalid(root) => tracing::warn!(

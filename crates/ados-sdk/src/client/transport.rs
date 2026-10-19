@@ -164,7 +164,11 @@ impl PluginIpcClient {
 
 /// Run one host-to-plugin `tool.invoke` and write its `response` frame. The
 /// request args are `{tool, arguments}`; the response carries the tool result
-/// as args, or the error string in `err`.
+/// as args, or the error string in `err`. Every invocation is answered, so the
+/// host never waits out its timeout for a reply that cannot come: a handler
+/// that panics answers `tool_handler_panicked`, and a result that cannot be
+/// framed (over the frame cap, or not encodable) answers
+/// `tool_reply_unencodable`.
 pub(super) async fn answer_tool_invoke(
     handler: Option<ToolHandler>,
     writer: Arc<AsyncMutex<Option<OwnedWriteHalf>>>,
@@ -176,7 +180,15 @@ pub(super) async fn answer_tool_invoke(
             None => Err("tool name missing".to_string()),
             Some(tool) => {
                 let arguments = map_get(&req.args, "arguments").unwrap_or(Value::Nil);
-                h(tool.to_string(), arguments).await
+                // On its own task so a panic is caught as a JoinError rather
+                // than unwinding through this one.
+                match tokio::spawn(h(tool.to_string(), arguments)).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        tracing::warn!(tool, error = %e, "tool handler did not complete");
+                        Err("tool_handler_panicked".to_string())
+                    }
+                }
             }
         },
     };
@@ -184,7 +196,7 @@ pub(super) async fn answer_tool_invoke(
         Ok(v) => (v, None),
         Err(e) => (Value::Map(Vec::new()), Some(e)),
     };
-    let reply = Envelope {
+    let mut reply = Envelope {
         version: PROTOCOL_VERSION,
         kind: "response".to_string(),
         method: TOOL_INVOKE_METHOD.to_string(),
@@ -194,8 +206,19 @@ pub(super) async fn answer_tool_invoke(
         token: String::new(),
         error,
     };
-    let Ok(frame) = reply.encode_frame() else {
-        return;
+    let frame = match reply.encode_frame() {
+        Ok(frame) => frame,
+        Err(e) => {
+            reply.args = Value::Map(Vec::new());
+            reply.error = Some(format!("tool_reply_unencodable: {e}"));
+            match reply.encode_frame() {
+                Ok(frame) => frame,
+                Err(e) => {
+                    tracing::warn!(error = %e, "tool.invoke error reply could not be framed");
+                    return;
+                }
+            }
+        }
     };
     let mut guard = writer.lock().await;
     if let Some(w) = guard.as_mut() {

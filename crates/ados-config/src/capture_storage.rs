@@ -17,8 +17,13 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 mod root;
+mod root_access;
 mod volumes;
 pub use root::{read_sticky, resolve_capture_root, StickyRoot};
+pub use root_access::{
+    capture_group_gid, chown_to_root, prepare_capture_root, prepare_capture_root_on_host, ChownFn,
+    RootFix, CAPTURE_ROOT_MODE,
+};
 pub use volumes::{list_volumes, list_volumes_live, statvfs_space, volume_for, FsSpace, SysRoots};
 
 /// One GiB.

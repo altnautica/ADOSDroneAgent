@@ -687,6 +687,22 @@ impl HostServices for RealHost {
         self.browse_mdns(args).await
     }
 
+    async fn whep_offer(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.relay_whep_offer(plugin_id, args).await
+    }
+
+    async fn whep_close(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.relay_whep_close(plugin_id, args).await
+    }
+
+    async fn sensors_rig_write(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.relay_rig_write(args).await
+    }
+
     async fn cloud_publish(
         &self,
         plugin_id: &str,

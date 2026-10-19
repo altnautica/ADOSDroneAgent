@@ -38,11 +38,13 @@ pub mod msp;
 pub mod testing;
 pub mod vision;
 
-pub use client::{ClientError, EventCallback, OffloadAdvertisement, PluginIpcClient, ToolHandler};
+pub use client::{
+    ClientError, EventCallback, OffloadAdvertisement, PluginIpcClient, ToolHandler, WhepAnswer,
+};
 pub use context::{
     CameraClient, CloudClient, ConfigClient, EventsClient, LifecycleClient, MavlinkClient,
-    MdnsClient, NodeClient, PeripheralClient, PluginContext, ProcessClient, TelemetryClient,
-    ToolsClient,
+    MdnsClient, NodeClient, PeripheralClient, PluginContext, ProcessClient, SensorsClient,
+    TelemetryClient, ToolsClient, VideoClient,
 };
 pub use lifecycle::{run_plugin, run_plugin_with, Plugin, RunnerArgs, RunnerError};
 pub use vision::{Frame, FrameCallback, Odometry, Pose, VisionClient, VIO_COMPONENT_ID};

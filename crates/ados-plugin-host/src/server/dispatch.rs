@@ -377,9 +377,10 @@ impl<H: HostServices> Connection<H> {
 /// These are the stateless forwards whose reply waits on another process or
 /// the network: the cloud relay (a record write waits out the cloud's own
 /// answer, up to fifteen seconds), the vision engine, the supervisor's
-/// video-pipeline restart, and an mDNS browse (it collects answers for its
-/// whole window). Awaited inline, each would stall every other request and
-/// every push on the connection for its whole round trip.
+/// video-pipeline restart, an mDNS browse (it collects answers for its whole
+/// window), the media server's WHEP exchange and the control plane's rig
+/// write. Awaited inline, each would stall every other request and every push
+/// on the connection for its whole round trip.
 ///
 /// Everything else stays inline, in arrival order: the in-process methods
 /// answer at once, output commands (MAVLink, MSP, GPIO, aux datagrams) must
@@ -397,6 +398,9 @@ pub(super) fn runs_detached(method: Method) -> bool {
             | Method::VisionPublishDetection
             | Method::VisionDesignateTrack
             | Method::MdnsBrowse
+            | Method::WhepOffer
+            | Method::WhepClose
+            | Method::RigWrite
     )
 }
 

@@ -31,7 +31,7 @@
 # Edit here, then run codegen. Do not edit the generated files by hand.
 
 # ===========================================================================
-# AGENT capabilities (55)
+# AGENT capabilities (57)
 # ===========================================================================
 
 [[agent]]
@@ -302,6 +302,24 @@ description = "Lets the plugin declare the camera and stream sources the agent's
 category = "data_network"
 risk = "medium"
 risk_reason = "Reconfigures which video sources the vehicle serves and restarts the video pipeline; a wrong source list can black out the operator's video."
+enforced = true
+
+[[agent]]
+id = "video.whep.relay"
+label = "Relay live video playback sessions"
+description = "Lets the plugin open and close WebRTC playback (WHEP) sessions on the agent's live camera streams on behalf of a viewer it serves: it hands the agent a viewer's SDP offer for a camera and relays the answer back. The agent only plays out streams it already publishes; the plugin cannot change them or reach the media server directly."
+category = "data_network"
+risk = "medium"
+risk_reason = "Gives the plugin the node's live camera video to hand to its own viewers, wherever it can reach them."
+enforced = true
+
+[[agent]]
+id = "sensors.rig.write"
+label = "Store the sensor rig calibration"
+description = "Lets the plugin store the rig document (sensor roles, intrinsics and extrinsics) the agent validates and the sensor hub fuses with, through the same validation the operator's rig write runs. An invalid document is refused and the stored one kept."
+category = "hardware"
+risk = "medium"
+risk_reason = "A wrong but valid calibration skews every fused sensor sample and capture until it is corrected."
 enforced = true
 
 [[agent]]
@@ -876,6 +894,27 @@ required_cap = "sensor.camera.register"
 [[method]]
 id = "video.source.set"
 required_cap = "video.source.set"
+
+# ---- live video relay ----
+# Open a WebRTC playback (WHEP) session on one of the agent's published camera
+# legs for a viewer the plugin serves, and close one the same plugin opened.
+# The host relays to the loopback media server the sandbox cannot reach; the
+# plugin never sees a host address. Fully gated at the dispatch level.
+[[method]]
+id = "video.whep.offer"
+required_cap = "video.whep.relay"
+
+[[method]]
+id = "video.whep.close"
+required_cap = "video.whep.relay"
+
+# ---- sensor rig ----
+# Store a rig document through the control plane's own rig route (the same
+# validation and hub reload the operator's write gets). Fully gated at the
+# dispatch level.
+[[method]]
+id = "sensors.rig.write"
+required_cap = "sensors.rig.write"
 
 # ---- config kv (per-drone / global) ----
 [[method]]

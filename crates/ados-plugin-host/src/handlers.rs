@@ -485,6 +485,9 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::NodeInfo => host.node_info(plugin_id, args).await,
         Method::MdnsAdvertise => host.mdns_advertise(plugin_id, session, args).await,
         Method::MdnsBrowse => host.mdns_browse(plugin_id, args).await,
+        Method::WhepOffer => host.whep_offer(plugin_id, args).await,
+        Method::WhepClose => host.whep_close(plugin_id, args).await,
+        Method::RigWrite => host.sensors_rig_write(plugin_id, args).await,
         // Vision request/response methods proxy to the engine and await its
         // reply. (vision.subscribe_frames is handled in the server, where it
         // arms the frame-descriptor push stream, never reaching here.)

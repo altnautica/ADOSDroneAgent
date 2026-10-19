@@ -319,7 +319,7 @@ fn map_readers_extract_fields() {
     assert!(map_get(&args, "missing").is_none());
 }
 
-fn token_string(caps: &[&str], expires_at: i64) -> String {
+pub(super) fn token_string(caps: &[&str], expires_at: i64) -> String {
     CapabilityToken {
         plugin_id: "p".to_string(),
         session_id: "s".to_string(),
@@ -331,7 +331,7 @@ fn token_string(caps: &[&str], expires_at: i64) -> String {
     .to_token_string()
 }
 
-fn response(request_id: &str) -> Envelope {
+pub(super) fn response(request_id: &str) -> Envelope {
     Envelope {
         version: ados_protocol::plugin::PROTOCOL_VERSION,
         kind: "response".to_string(),

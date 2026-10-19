@@ -174,11 +174,12 @@ fn plugin_users(passwd: &str) -> Vec<String> {
 }
 
 /// The groups a purge removes, after every account in them is gone.
-fn purge_groups() -> [&'static str; 5] {
+fn purge_groups() -> [&'static str; 6] {
     [
         ados_protocol::ipc::PLUGIN_GROUP,
         ados_protocol::vision_rpc::VISION_READERS_GROUP,
         ados_protocol::ipc::CAPTURE_GROUP,
+        ados_protocol::ipc::SENSORS_GROUP,
         ados_protocol::ipc::OPERATOR_GROUP,
         "ados",
     ]
@@ -426,5 +427,22 @@ mod tests {
                       ados-plg-1a2b3c4d:x:997:996::/nonexistent:/usr/sbin/nologin\n\
                       operator:x:1000:1000::/home/operator:/bin/bash\n";
         assert_eq!(plugin_users(passwd), vec!["ados-plg-1a2b3c4d".to_string()]);
+    }
+
+    #[test]
+    fn a_purge_removes_every_group_the_install_creates() {
+        let groups = purge_groups();
+        for g in [
+            ados_protocol::ipc::PLUGIN_GROUP,
+            ados_protocol::vision_rpc::VISION_READERS_GROUP,
+            ados_protocol::ipc::CAPTURE_GROUP,
+            ados_protocol::ipc::SENSORS_GROUP,
+            ados_protocol::ipc::OPERATOR_GROUP,
+            "ados",
+        ] {
+            assert!(groups.contains(&g), "{g}");
+        }
+        // `ados` is the primary group of the legacy plugin account: last.
+        assert_eq!(groups.last(), Some(&"ados"));
     }
 }

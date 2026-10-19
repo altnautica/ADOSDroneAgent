@@ -23,6 +23,9 @@ rmpv = { workspace = true }
 # contract does, so a Rust plugin and the engine agree byte-for-byte.
 rmp-serde = { workspace = true }
 serde = { workspace = true }
+# The rig document `ctx.sensors.put_rig` takes and the route's answer it
+# returns are JSON.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 # Async trait methods on the driver and plugin-lifecycle traits, so a driver
@@ -46,8 +49,6 @@ memmap2 = { workspace = true }
 ados-plugin-host = { path = "../ados-plugin-host" }
 tempfile = "3"
 futures-util = "0.3"
-# The cloud round-trip test reads the record the host re-encoded as JSON.
-serde_json = { workspace = true }
 # Non-poisoning locks for the state the end-to-end tests collect from callbacks.
 parking_lot = { workspace = true }
 # The vision wire tests serve the real engine's `vision.sock` in-process, so

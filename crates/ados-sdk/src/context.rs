@@ -15,6 +15,9 @@ use rmpv::Value;
 use crate::client::{ClientError, EventCallback, PluginIpcClient};
 use crate::vision::VisionClient;
 
+mod media;
+pub use media::{SensorsClient, VideoClient};
+
 /// `ctx.events` — the event bus facade.
 #[derive(Clone)]
 pub struct EventsClient {
@@ -683,6 +686,10 @@ pub struct PluginContext {
     pub node: NodeClient,
     /// Local-network service discovery through the host's mDNS responder.
     pub mdns: MdnsClient,
+    /// WebRTC playback sessions on the agent's camera legs.
+    pub video: VideoClient,
+    /// The sensor rig document.
+    pub sensors: SensorsClient,
     pub process: ProcessClient,
     pub lifecycle: LifecycleClient,
     /// The plugin's MCP tool handler registration.
@@ -723,6 +730,8 @@ impl PluginContext {
             cloud: CloudClient { ipc: ipc.clone() },
             node: NodeClient { ipc: ipc.clone() },
             mdns: MdnsClient { ipc: ipc.clone() },
+            video: VideoClient { ipc: ipc.clone() },
+            sensors: SensorsClient { ipc: ipc.clone() },
             config: ConfigClient {
                 ipc: ipc.clone(),
                 static_config: Arc::new(static_config),

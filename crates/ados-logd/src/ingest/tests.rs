@@ -201,6 +201,38 @@ async fn a_plugin_peer_cannot_write_as_a_core_service() {
     }
 }
 
+/// A plugin holding `sensor.stream.read` carries the sensors reader group as a
+/// supplementary group and nothing on the operator plane. The decision
+/// `is_operator_peer` makes on its credentials keeps it off the operator
+/// plane, so what it writes on the ingest socket stays `plugin:`-attributed.
+#[tokio::test]
+async fn a_sensor_bus_reader_stays_plugin_attributed() {
+    const SERVER_UID: u32 = 0;
+    const OPERATOR_GID: u32 = 988;
+    const SENSORS_GID: u32 = 977;
+    const PLUGINS_GID: u32 = 966;
+    let operator = ados_protocol::ipc::operator_peer_allowed(
+        61_001,
+        &[PLUGINS_GID, SENSORS_GID],
+        SERVER_UID,
+        Some(OPERATOR_GID),
+    );
+    assert!(!operator);
+    let frame = IngestFrame::Log(LogFrame::new(1, "ados-clock", Level::Error, "m"));
+    let (got, _) = serve_wire(frame.encode().unwrap(), operator).await;
+    match &got[..] {
+        [IngestFrame::Log(l)] => assert_eq!(l.source, "plugin:ados-clock"),
+        other => panic!("unexpected frames {other:?}"),
+    }
+    // The same peer with the operator group would be the operator.
+    assert!(ados_protocol::ipc::operator_peer_allowed(
+        61_001,
+        &[PLUGINS_GID, SENSORS_GID, OPERATOR_GID],
+        SERVER_UID,
+        Some(OPERATOR_GID),
+    ));
+}
+
 /// A frame that arrives whole but does not decode is skipped; the frames
 /// the producer batched behind it still reach the writer.
 #[tokio::test]

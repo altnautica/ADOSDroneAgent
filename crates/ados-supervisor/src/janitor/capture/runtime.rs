@@ -24,6 +24,8 @@ pub struct CaptureRuntime {
     root: Option<PathBuf>,
     /// The last capture-root creation failure, logged once per distinct error.
     root_error: Option<String>,
+    /// The last failure to give the root to the capture group, logged the same.
+    root_access_error: Option<String>,
     last: Option<CaptureStorageSidecar>,
     last_refresh: Option<Instant>,
     cache: SizeCache,
@@ -46,6 +48,7 @@ impl CaptureRuntime {
             active: false,
             root: None,
             root_error: None,
+            root_access_error: None,
             last: None,
             last_refresh: None,
             cache: SizeCache::new(),
@@ -108,6 +111,16 @@ impl CaptureRuntime {
             }
         };
         self.note_root_error(&pass.root, pass.root_error.as_deref());
+        if self.root_access_error != pass.root_access_error {
+            if let Some(e) = &pass.root_access_error {
+                tracing::warn!(
+                    root = %pass.root.display(),
+                    error = %e,
+                    "capture root could not be given to the capture group; a sandboxed capture plugin cannot write it"
+                );
+            }
+            self.root_access_error = pass.root_access_error.clone();
+        }
         if let Err(e) = write_sidecar(sidecar_path, &pass.sidecar) {
             tracing::debug!(error = %e, "capture-storage sidecar write failed");
         }

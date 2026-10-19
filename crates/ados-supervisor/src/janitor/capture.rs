@@ -96,15 +96,21 @@ pub struct CapturePass {
     pub root: PathBuf,
     /// Why the capture root could not be created, when it could not.
     pub root_error: Option<String>,
+    /// Why the root could not be brought to `2775 root:ados-capture`, when it
+    /// exists but could not. Sessions are still admitted (the supervisor and
+    /// root writers can use it); a sandboxed capture plugin cannot.
+    pub root_access_error: Option<String>,
     pub sidecar: CaptureStorageSidecar,
 }
 
-/// One capture pass: resolve the root and create it (`mkdir -p`), evict when
-/// `mode` is [`PassMode::Evict`] and over the budget or under the floor, and
-/// build the sidecar from what is left. A root that cannot be created admits
-/// nothing: its sidecar state is `full`. `keepalive` runs between sessions as
-/// they are measured and removed, so a long pass keeps the monitor's progress
-/// marker (and with it the systemd watchdog) fed.
+/// One capture pass: resolve the root and create it as `2775
+/// root:ados-capture` ([`cs::prepare_capture_root_on_host`]: an existing root's
+/// owner and mode are corrected, the sessions under it are left alone), evict
+/// when `mode` is [`PassMode::Evict`] and over the budget or under the floor,
+/// and build the sidecar from what is left. A root that cannot be created
+/// admits nothing: its sidecar state is `full`. `keepalive` runs between
+/// sessions as they are measured and removed, so a long pass keeps the
+/// monitor's progress marker (and with it the systemd watchdog) fed.
 pub fn run_pass(
     cfg: &CaptureStorageConfig,
     sys: &SysRoots,
@@ -115,7 +121,11 @@ pub fn run_pass(
     keepalive: &dyn Fn(),
 ) -> CapturePass {
     let root = cs::resolve_capture_root(cfg, sys);
-    let root_error = std::fs::create_dir_all(&root).err().map(|e| e.to_string());
+    let (root_error, root_access_error) = match cs::prepare_capture_root_on_host(&root) {
+        Ok(_) => (None, None),
+        Err(e) if root.is_dir() => (None, Some(e.to_string())),
+        Err(e) => (Some(e.to_string()), None),
+    };
     if mode != PassMode::Refresh {
         cache.clear();
     }
@@ -152,6 +162,7 @@ pub fn run_pass(
         freed,
         root,
         root_error,
+        root_access_error,
         sidecar,
     }
 }

@@ -313,11 +313,15 @@ mod cloud;
 mod config;
 mod dispatch;
 mod mavlink;
+mod media;
 mod peripheral;
 mod transport;
 mod vision;
 pub use dispatch::driver_kind_capability;
 use dispatch::*;
+pub use media::WhepAnswer;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_host;

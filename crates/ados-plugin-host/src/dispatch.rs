@@ -24,6 +24,7 @@ use std::collections::BTreeSet;
 use ados_protocol::buttons::SUBSCRIBE as BUTTON_SUBSCRIBE;
 use ados_protocol::dispatch::required_cap_for;
 use ados_protocol::framebus::methods as vision_methods;
+use ados_protocol::media_relay::{RIG_WRITE_METHOD, WHEP_CLOSE_METHOD, WHEP_OFFER_METHOD};
 use ados_protocol::node_info::METHOD as NODE_INFO;
 use ados_protocol::plugin_mdns::{
     ADVERTISE_METHOD as MDNS_ADVERTISE, BROWSE_METHOD as MDNS_BROWSE,
@@ -100,6 +101,12 @@ pub enum Method {
     // responder; a sandboxed plugin cannot bind the multicast port.
     MdnsAdvertise,
     MdnsBrowse,
+    // Live video relay: open or close a WHEP playback session on a published
+    // camera leg for a viewer the plugin serves.
+    WhepOffer,
+    WhepClose,
+    // Store a rig document through the control plane's rig route.
+    RigWrite,
     // Vision: frame-descriptor subscribe, model register, inference, and
     // detection publish. The engine owns the cameras and the inference backend;
     // the host proxies these to it over its socket.
@@ -155,6 +162,15 @@ impl Method {
         }
         if name == MDNS_BROWSE {
             return Some(Self::MdnsBrowse);
+        }
+        if name == WHEP_OFFER_METHOD {
+            return Some(Self::WhepOffer);
+        }
+        if name == WHEP_CLOSE_METHOD {
+            return Some(Self::WhepClose);
+        }
+        if name == RIG_WRITE_METHOD {
+            return Some(Self::RigWrite);
         }
         Some(match name {
             "event.publish" => Self::EventPublish,
@@ -242,6 +258,9 @@ impl Method {
             Self::NodeInfo => NODE_INFO,
             Self::MdnsAdvertise => MDNS_ADVERTISE,
             Self::MdnsBrowse => MDNS_BROWSE,
+            Self::WhepOffer => WHEP_OFFER_METHOD,
+            Self::WhepClose => WHEP_CLOSE_METHOD,
+            Self::RigWrite => RIG_WRITE_METHOD,
             Self::VisionSubscribeFrames => vision_methods::SUBSCRIBE_FRAMES,
             Self::VisionRegisterModel => vision_methods::REGISTER_MODEL,
             Self::VisionReadModel => vision_methods::READ_MODEL,
@@ -557,6 +576,9 @@ mod tests {
         Method::VisionSubscribeDetections,
         Method::VisionDesignateTrack,
         Method::ButtonSubscribe,
+        Method::WhepOffer,
+        Method::WhepClose,
+        Method::RigWrite,
     ];
 
     #[test]

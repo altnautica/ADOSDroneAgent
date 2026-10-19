@@ -7,7 +7,8 @@
 //! `config_control` (plugin config and its persistence), `forwards`
 //! (command-socket services), `setpoint` (flight request parsing), `advertise`
 //! (the offload-link advertisement), `display` (the reserved plugin page), `node_info`
-//! (the node facts), `mdns` (DNS-SD advertise and browse), `caps` (the
+//! (the node facts), `mdns` (DNS-SD advertise and browse), `media_relay` (the
+//! WHEP and rig relays), `caps` (the
 //! ungrantable capability set) and `args` (msgpack readers). The argument
 //! validation, the inline capability gates, the error strings and the
 //! success-map shapes are all part of the wire contract a plugin is written
@@ -58,6 +59,7 @@ mod forwards;
 mod host_services;
 mod mavlink_gate;
 mod mdns;
+mod media_relay;
 mod node_info;
 mod setpoint;
 mod telemetry;
@@ -197,6 +199,9 @@ pub struct RealHost {
     /// The responder plugins publish their mDNS records through, and which
     /// connection owns each record.
     mdns: mdns::MdnsRecords,
+    /// Where the WHEP and rig relays reach, and the WHEP sessions each plugin
+    /// opened.
+    media_relay: media_relay::MediaRelay,
 }
 
 impl RealHost {
@@ -229,6 +234,7 @@ impl RealHost {
             fc_identity: Arc::new(FcIdentity::default()),
             node_info_sources: NodeInfoSources::from_env(),
             mdns: mdns::MdnsRecords::default(),
+            media_relay: media_relay::MediaRelay::default(),
         }
     }
 
@@ -263,6 +269,15 @@ impl RealHost {
     /// Production resolves them from the environment in [`Self::new`].
     pub fn with_node_info_sources(mut self, sources: NodeInfoSources) -> Self {
         self.node_info_sources = sources;
+        self
+    }
+
+    /// Override where the WHEP and rig relays reach (builder style, tests):
+    /// the media server's loopback WHEP port and the control plane's socket.
+    /// Production uses the media server's default port and
+    /// `<run dir>/control.sock`.
+    pub fn with_media_relay(mut self, whep_port: u16, control_sock: PathBuf) -> Self {
+        self.media_relay = media_relay::MediaRelay::new(whep_port, control_sock);
         self
     }
 

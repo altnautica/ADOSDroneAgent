@@ -11,13 +11,23 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **Plugin capabilities `sensor.stream.read` and `capture.storage.write`.**
   Both are enforced by the generated plugin unit. `sensor.stream.read` binds
   `/run/ados/sensors.sock` and `/run/ados/clock.json` read-only into the
-  plugin sandbox and joins `ados-operator` (the bus listener's peer group).
-  `capture.storage.write` binds `/run/ados/capture-storage.json` read-only,
+  plugin sandbox and joins the new `ados-sensors` group, never
+  `ados-operator`. `capture.storage.write` binds
+  `/run/ados/capture-storage.json` read-only,
   `/run/ados/capture` read-write, the host capture root (resolved at render
   time from the janitor sidecar, the persisted `auto` choice, else
   `/var/ados/capture`) at `/run/ados/capture-root`, sets
   `ADOS_CAPTURE_ROOT_HOST` / `ADOS_CAPTURE_ROOT_MOUNT`, and joins the new
   `ados-capture` group, which now owns `/run/ados/capture` (`2775`).
+- **Plugin capabilities `video.whep.relay` and `sensors.rig.write`.** Gated
+  at dispatch. `video.whep.offer` posts a viewer's SDP offer to the media
+  server's loopback WHEP endpoint for a published camera leg and returns the
+  answer plus an opaque `/whep/<session>?camera=<leg>` location;
+  `video.whep.close` tears down only a location the host returned to the same
+  plugin. `sensors.rig.write` stores a rig through the control plane's
+  `PUT /api/v1/sensors/rig` over its Unix socket and returns the route's
+  status and JSON body. SDK: `ctx.video.whep_offer` / `whep_close` and
+  `ctx.sensors.put_rig`.
 - **SDK: `ctx.tools.serve(handler)`.** The Rust plugin SDK answers host
   `tool.invoke` requests (MCP tools declared by a plugin) through a
   registered handler; a plugin without one answers `tool_handler_missing`.
@@ -96,6 +106,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **`mavlink.sock` v2.** Every frame the router fans out carries an 8-byte
   little-endian `rx_mono_ns` header (host monotonic read time) inside the
   length prefix; client writes are unchanged.
+- **Sensor bus readers.** `/run/ados/sensors.sock` is now `0660
+  root:ados-sensors`. The broker classifies each peer: services (root, its
+  own uid) publish anything, `ados-operator` members sensor data but not
+  `sync`/`rtcm`, and members of `ados-sensors` only subscribe. The installer
+  creates `ados-sensors`, adds the operator to it, and removes it on purge.
+- **Capture root ownership.** The supervisor's janitor and the installer keep
+  the capture root at `2775 root:ados-capture` (an existing root's owner and
+  mode are corrected; the sessions under it are not touched), so a sandboxed
+  capture plugin can create session directories.
+- **SDK `tool.invoke` always answers.** A handler that panics answers
+  `tool_handler_panicked`; a result that cannot be framed answers
+  `tool_reply_unencodable: ...`.
 
 ## [0.103.3] - 2026-10-14
 
