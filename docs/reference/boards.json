@@ -300,6 +300,28 @@
         "av1_dec",
         "vp9_dec"
       ],
+      "id": "rock-5b-plus",
+      "max_encode_resolution": "7680x4320",
+      "name": "Radxa ROCK 5B+ (RK3588)",
+      "plugin_tokens": [
+        "rock-5b-plus",
+        "rk3588"
+      ],
+      "soc": "RK3588",
+      "vendor": "Radxa",
+      "vio_capable": null
+    },
+    {
+      "arch": "aarch64",
+      "default_tier": 4,
+      "hw_video_codecs": [
+        "h264_enc",
+        "h264_dec",
+        "h265_enc",
+        "h265_dec",
+        "av1_dec",
+        "vp9_dec"
+      ],
       "id": "rock-5c-lite",
       "max_encode_resolution": "3840x2160",
       "name": "Radxa ROCK 5C Lite (RK3582)",

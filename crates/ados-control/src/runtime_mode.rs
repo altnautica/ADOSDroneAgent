@@ -75,7 +75,7 @@ const FLAG_GATED: &[FlagGated] = &[
         name: "hid",
         flag: None,
         binaries: &["ados-pic", "ados-input"],
-        profiles: &["ground-station"],
+        profiles: &["ground-station", "visor"],
         opt_out: false,
     },
     FlagGated {

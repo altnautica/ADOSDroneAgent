@@ -63,30 +63,21 @@ pub fn pin_to_label(pin: u32) -> String {
     }
 }
 
-/// Default mapping, used when `ground_station.ui.buttons.mapping` is empty or
-/// missing. Verbatim from the Python `DEFAULT_BUTTON_MAPPING` /
-/// `_DEFAULT_BUTTONS`.
-pub fn default_button_mapping() -> HashMap<String, String> {
-    [
-        ("B1_short", "cycle_screen"),
-        ("B1_long", "toggle_backlight"),
-        ("B2_short", "show_network"),
-        ("B2_long", "show_qr"),
-        ("B3_short", "confirm"),
-        ("B3_long", "pair_drone"),
-        ("B4_short", "back"),
-        ("B4_long", "menu"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v.to_string()))
-    .collect()
+/// The default mapping for `profile` (underscore wire spelling), used when
+/// `ground_station.ui.buttons.mapping` is empty or missing. Sourced from the
+/// shared panel table so the control surface and the display agree.
+pub fn default_button_mapping(profile: &str) -> HashMap<String, String> {
+    ados_protocol::panel_ui::default_buttons(profile)
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+        .collect()
 }
 
-/// Merge a loaded `ground_station.ui.buttons.mapping` over the defaults. A
-/// partial remap (user only changed `B1_short`) keeps the rest of the defaults
-/// intact. Non-string keys/values in the loaded map are ignored.
-pub fn merge_mapping(loaded: &serde_norway::Value) -> HashMap<String, String> {
-    let mut merged = default_button_mapping();
+/// Merge a loaded `ground_station.ui.buttons.mapping` over the defaults of
+/// `profile`. A partial remap (user only changed `B1_short`) keeps the rest of
+/// the defaults intact. Non-string keys/values in the loaded map are ignored.
+pub fn merge_mapping(profile: &str, loaded: &serde_norway::Value) -> HashMap<String, String> {
+    let mut merged = default_button_mapping(profile);
     if let serde_norway::Value::Mapping(map) = loaded {
         for (k, v) in map {
             if let (Some(k), Some(v)) = (k.as_str(), v.as_str()) {
@@ -147,9 +138,9 @@ pub struct PressClassifier {
 }
 
 impl PressClassifier {
-    /// Build a classifier seeded with the default mapping.
-    pub fn new() -> Self {
-        Self::with_mapping(Arc::new(RwLock::new(default_button_mapping())))
+    /// Build a classifier seeded with the default mapping of `profile`.
+    pub fn new(profile: &str) -> Self {
+        Self::with_mapping(Arc::new(RwLock::new(default_button_mapping(profile))))
     }
 
     /// Build a classifier sharing an externally-owned mapping handle (so the
@@ -218,12 +209,6 @@ impl PressClassifier {
                 })
             }
         }
-    }
-}
-
-impl Default for PressClassifier {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -303,7 +288,7 @@ mod tests {
     use super::*;
 
     fn classifier() -> PressClassifier {
-        PressClassifier::new()
+        PressClassifier::new("ground_station")
     }
 
     #[test]
@@ -394,7 +379,7 @@ mod tests {
 
     #[test]
     fn default_mapping_has_the_eight_entries() {
-        let m = default_button_mapping();
+        let m = default_button_mapping("ground_station");
         assert_eq!(m.len(), 8);
         assert_eq!(m["B1_short"], "cycle_screen");
         assert_eq!(m["B1_long"], "toggle_backlight");
@@ -407,10 +392,29 @@ mod tests {
     }
 
     #[test]
+    fn visor_mapping_leaves_record_and_mark_to_plugins() {
+        let m = default_button_mapping("visor");
+        assert_eq!(m.len(), 8);
+        assert_eq!(m["B1_short"], "passthrough");
+        assert_eq!(m["B2_short"], "passthrough");
+        assert_eq!(m["B1_long"], "shutdown_prompt");
+        assert_eq!(m["B3_short"], "cycle_screen");
+        assert_eq!(m["B4_short"], "back");
+        let mut c = PressClassifier::new("visor");
+        c.on_edge(5, Edge::Falling, 0);
+        let ev = c.on_edge(5, Edge::Rising, 2500).unwrap();
+        assert_eq!(ev.action.as_deref(), Some("shutdown_prompt"));
+        let loaded: serde_norway::Value = serde_norway::from_str("B2_short: back\n").unwrap();
+        let merged = merge_mapping("visor", &loaded);
+        assert_eq!(merged["B2_short"], "back");
+        assert_eq!(merged["B1_short"], "passthrough");
+    }
+
+    #[test]
     fn sighup_merge_overrides_one_key_keeps_the_rest() {
         let loaded: serde_norway::Value =
             serde_norway::from_str("B1_short: my_custom_action\n").unwrap();
-        let merged = merge_mapping(&loaded);
+        let merged = merge_mapping("ground_station", &loaded);
         // Overridden.
         assert_eq!(merged["B1_short"], "my_custom_action");
         // Untouched defaults remain.
@@ -423,7 +427,7 @@ mod tests {
     fn sighup_merge_adds_extra_pin_keys() {
         let loaded: serde_norway::Value =
             serde_norway::from_str("BX26_short: extra_action\n").unwrap();
-        let merged = merge_mapping(&loaded);
+        let merged = merge_mapping("ground_station", &loaded);
         assert_eq!(merged["BX26_short"], "extra_action");
         assert_eq!(merged.len(), 9); // 8 defaults + 1 extra
     }
@@ -432,28 +436,28 @@ mod tests {
     fn sighup_merge_ignores_non_string_and_empty() {
         // Empty mapping -> defaults only.
         let empty: serde_norway::Value = serde_norway::from_str("{}\n").unwrap();
-        assert_eq!(merge_mapping(&empty).len(), 8);
+        assert_eq!(merge_mapping("ground_station", &empty).len(), 8);
         // Non-mapping value -> defaults only.
         let scalar: serde_norway::Value = serde_norway::from_str("not_a_map\n").unwrap();
-        assert_eq!(merge_mapping(&scalar).len(), 8);
+        assert_eq!(merge_mapping("ground_station", &scalar).len(), 8);
         // Non-string value is skipped.
         let mixed: serde_norway::Value =
             serde_norway::from_str("B1_short: 42\nB2_short: ok_action\n").unwrap();
-        let merged = merge_mapping(&mixed);
+        let merged = merge_mapping("ground_station", &mixed);
         assert_eq!(merged["B1_short"], "cycle_screen"); // default kept (42 ignored)
         assert_eq!(merged["B2_short"], "ok_action");
     }
 
     #[test]
     fn live_mapping_swap_is_seen_by_the_next_release() {
-        let handle = Arc::new(RwLock::new(default_button_mapping()));
+        let handle = Arc::new(RwLock::new(default_button_mapping("ground_station")));
         let mut c = PressClassifier::with_mapping(handle.clone());
         c.on_edge(5, Edge::Falling, 0);
         let ev = c.on_edge(5, Edge::Rising, 100).unwrap();
         assert_eq!(ev.action.as_deref(), Some("cycle_screen"));
         // SIGHUP-style swap.
         *handle.write().unwrap() = {
-            let mut m = default_button_mapping();
+            let mut m = default_button_mapping("ground_station");
             m.insert("B1_short".into(), "new_action".into());
             m
         };

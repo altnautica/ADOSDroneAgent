@@ -3,7 +3,7 @@
 //! Where [`crate::graphics`] holds the narrow draw primitives (rect, line,
 //! text, sparkline, bar, dot, QR), this module holds the larger reusable chrome
 //! the pages compose from: the top status bar (hostname, role badge, system
-//! metrics, clock), the bottom tab bar (five tabs with icons + active accent),
+//! metrics, clock), the bottom tab bar (one icon cell per tab + active accent),
 //! the bordered content tile, and the headline big number with a unit suffix.
 //!
 //! The geometry, colors, fonts, and text match the on-device layout one for one
@@ -16,9 +16,7 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, fill_rect_outline, line, text, Canvas};
 use crate::graphics::status_dot::draw_dot;
 use crate::graphics::thresholds;
-use crate::pages::{
-    HitAction, HitZone, BOTTOM_BAR_H, PANEL_W, TAB_COUNT, TAB_PAGE_IDS, TAB_WIDTH, TOP_BAR_H,
-};
+use crate::pages::{tab_width, HitAction, HitZone, BOTTOM_BAR_H, PANEL_W, TOP_BAR_H};
 
 /// Height reserved for a tile's caps title row.
 pub const TILE_TITLE_BAR_H: i32 = 18;
@@ -169,7 +167,9 @@ pub fn draw_top_bar(
 ///
 /// The icons are line-drawn to match the tab semantics the bitmap set carried:
 /// a 2x2 grid for the dashboard, a film frame for video, a gear ring for
-/// settings, a bar trio for link stats, and a step line for channel hops.
+/// settings, a bar trio for link stats, and a step line for channel hops; the
+/// visor tabs get a plug for the plugin page, a camera body for cameras, a
+/// pulse trace for sensors, a disk stack for storage, and an "i" for about.
 fn draw_tab_icon(canvas: &mut Canvas, icon: &str, cx: i32, cy: i32, color: Rgb888) {
     let r = 10; // half the 20 px glyph box inside the 24 px icon
     match icon {
@@ -225,6 +225,44 @@ fn draw_tab_icon(canvas: &mut Canvas, icon: &str, cx: i32, cy: i32, color: Rgb88
             line(canvas, cx + 3, cy - 2, cx + 3, cy + 8, color);
             line(canvas, cx + 3, cy + 8, cx + 9, cy + 8, color);
         }
+        "plugin" => {
+            // A plug: two prongs over a body with a cord below.
+            fill_rect(canvas, cx - 5, cy - r, cx - 3, cy - 4, color);
+            fill_rect(canvas, cx + 3, cy - r, cx + 5, cy - 4, color);
+            fill_rect(canvas, cx - 7, cy - 3, cx + 7, cy + 4, color);
+            fill_rect(canvas, cx - 1, cy + 5, cx + 1, cy + r, color);
+        }
+        "cameras" => {
+            // A camera body: outline box, a viewfinder bump, a solid lens.
+            line(canvas, cx - r, cy - 5, cx + r, cy - 5, color);
+            line(canvas, cx - r, cy + 8, cx + r, cy + 8, color);
+            line(canvas, cx - r, cy - 5, cx - r, cy + 8, color);
+            line(canvas, cx + r, cy - 5, cx + r, cy + 8, color);
+            fill_rect(canvas, cx - 4, cy - 8, cx + 2, cy - 6, color);
+            crate::graphics::primitives::fill_circle(canvas, cx, cy + 1, 4, color, None);
+        }
+        "sensors" => {
+            // A pulse trace: flat, a sharp spike, flat.
+            line(canvas, cx - r, cy + 2, cx - 4, cy + 2, color);
+            line(canvas, cx - 4, cy + 2, cx - 1, cy - 8, color);
+            line(canvas, cx - 1, cy - 8, cx + 2, cy + 8, color);
+            line(canvas, cx + 2, cy + 8, cx + 5, cy + 2, color);
+            line(canvas, cx + 5, cy + 2, cx + r, cy + 2, color);
+        }
+        "storage" => {
+            // A disk stack: three slabs with gaps between them.
+            for k in 0..3 {
+                let y0 = cy - r + k * 7;
+                fill_rect(canvas, cx - 8, y0, cx + 8, y0 + 4, color);
+            }
+        }
+        "details.about" => {
+            // An information mark: a dot over a stem.
+            fill_rect(canvas, cx - 1, cy - 9, cx + 1, cy - 7, color);
+            fill_rect(canvas, cx - 1, cy - 4, cx + 1, cy + 8, color);
+            line(canvas, cx - 4, cy - 4, cx - 1, cy - 4, color);
+            line(canvas, cx - 4, cy + 8, cx + 4, cy + 8, color);
+        }
         _ => {
             crate::graphics::primitives::fill_circle(canvas, cx, cy, 4, color, None);
         }
@@ -238,24 +276,22 @@ fn palette_hole(canvas: &Canvas, cx: i32, cy: i32) -> Rgb888 {
     canvas.pixel(cx + 12, cy)
 }
 
-/// Paint the 44 px bottom tab bar at panel-global `(0, y)` and return the five
-/// tab hit zones (in page-local content coordinates: the bar sits below the
-/// content region, so the zones carry their panel-global y mapped to the
-/// content-local frame by the navigator).
+/// Paint the 44 px bottom tab bar at panel-global `(0, y)`: one cell per entry
+/// of `tabs`, left to right, each [`tab_width`]`(tabs.len())` wide.
 ///
-/// `active_tab` is the page id of the visible top-level tab; the matching tab
-/// gets the primary tint plus a 2 px accent line. The returned zones use a
-/// [`HitAction::GoTab`] keyed to each tab's page id.
-pub fn draw_bottom_bar(canvas: &mut Canvas, palette: &Palette, active_tab: &str) -> Vec<HitZone> {
+/// `active_tab` is the page id of the visible top-level tab; the matching cell
+/// gets the primary tint plus a 2 px accent line. The navigator paints the bar
+/// over every tabbed page and routes taps in it, so pages never carry tab zones.
+pub fn draw_bottom_bar(canvas: &mut Canvas, palette: &Palette, tabs: &[&str], active_tab: &str) {
     let y = (canvas.height() as i32) - BOTTOM_BAR_H as i32;
     let w = PANEL_W as i32;
     let h = BOTTOM_BAR_H as i32;
     fill_rect(canvas, 0, y, w - 1, y + h - 1, palette.bg_secondary);
     line(canvas, 0, y, w - 1, y, palette.border_default);
 
-    let mut zones = Vec::with_capacity(TAB_COUNT);
-    for (i, &page_id) in TAB_PAGE_IDS.iter().enumerate() {
-        let tab_x0 = i as i32 * TAB_WIDTH;
+    let tab_w = tab_width(tabs.len());
+    for (i, &page_id) in tabs.iter().enumerate() {
+        let tab_x0 = i as i32 * tab_w;
         let is_active = page_id == active_tab;
         let icon_color = if is_active {
             palette.text_primary
@@ -265,87 +301,44 @@ pub fn draw_bottom_bar(canvas: &mut Canvas, palette: &Palette, active_tab: &str)
 
         if is_active {
             // 2 px top accent line.
-            line(
+            fill_rect(
                 canvas,
                 tab_x0,
                 y,
-                tab_x0 + TAB_WIDTH - 1,
-                y,
-                palette.accent_primary,
-            );
-            line(
-                canvas,
-                tab_x0,
-                y + 1,
-                tab_x0 + TAB_WIDTH - 1,
+                tab_x0 + tab_w - 1,
                 y + 1,
                 palette.accent_primary,
             );
         }
 
-        let cx = tab_x0 + TAB_WIDTH / 2;
+        let cx = tab_x0 + tab_w / 2;
         let cy = y + h / 2;
         draw_tab_icon(canvas, page_id, cx, cy, icon_color);
-
-        // Zones live in the page-local content frame; the bar is below the
-        // content region so its y is mapped into the same coordinate space the
-        // navigator dispatches against.
-        zones.push(HitZone::new(
-            tab_x0,
-            y - TOP_BAR_H as i32,
-            TAB_WIDTH,
-            h,
-            HitAction::GoTab(page_id),
-        ));
     }
-    zones
-}
-
-/// Return the bottom tab bar's five hit zones without painting.
-///
-/// `hit_zones` implementations call this so the tab targets stay in sync with
-/// [`draw_bottom_bar`] without re-running the paint. Zones are in the page-local
-/// content frame: the bar sits directly below the 480x244 content region.
-pub fn bottom_bar_zones() -> Vec<HitZone> {
-    let bar_top = (PANEL_H_CONTENT) as i32; // page-local y just below the content region
-    TAB_PAGE_IDS
-        .iter()
-        .enumerate()
-        .map(|(i, &page_id)| {
-            HitZone::new(
-                i as i32 * TAB_WIDTH,
-                bar_top,
-                TAB_WIDTH,
-                BOTTOM_BAR_H as i32,
-                HitAction::GoTab(page_id),
-            )
-        })
-        .collect()
 }
 
 /// Paint the tab for `page_id` pressed: an inverse fill of its cell with the
 /// icon knocked out in the background tone. Drawn over a frame that already
-/// carries the bottom bar; an unknown id paints nothing.
-pub fn draw_tab_pulse(canvas: &mut Canvas, palette: &Palette, page_id: &str) {
-    let Some(index) = TAB_PAGE_IDS.iter().position(|id| *id == page_id) else {
+/// carries the bottom bar for the same `tabs`; an id not in `tabs` paints
+/// nothing.
+pub fn draw_tab_pulse(canvas: &mut Canvas, palette: &Palette, tabs: &[&str], page_id: &str) {
+    let Some(index) = tabs.iter().position(|id| *id == page_id) else {
         return;
     };
+    let tab_w = tab_width(tabs.len());
     let y = (canvas.height() as i32) - BOTTOM_BAR_H as i32;
-    let x0 = index as i32 * TAB_WIDTH;
+    let x0 = index as i32 * tab_w;
     fill_rect(
         canvas,
         x0,
         y + 1,
-        x0 + TAB_WIDTH - 1,
+        x0 + tab_w - 1,
         y + BOTTOM_BAR_H as i32 - 1,
         palette.accent_primary,
     );
-    let (cx, cy) = (x0 + TAB_WIDTH / 2, y + BOTTOM_BAR_H as i32 / 2);
-    draw_tab_icon(canvas, TAB_PAGE_IDS[index], cx, cy, palette.bg_primary);
+    let (cx, cy) = (x0 + tab_w / 2, y + BOTTOM_BAR_H as i32 / 2);
+    draw_tab_icon(canvas, page_id, cx, cy, palette.bg_primary);
 }
-
-/// Page-local height of the content region (panel minus both chrome bars).
-const PANEL_H_CONTENT: u32 = crate::pages::CONTENT_H;
 
 /// Paint a bordered content tile at `(x, y, w, h)` and return its inner body box.
 ///
@@ -570,15 +563,24 @@ mod tests {
         assert_eq!(c.pixel(0, TOP_BAR_H as i32 - 1), DARK.border_default);
     }
 
+    /// The accent line sits over the active cell only, for the five ground
+    /// station tabs and for a shorter list whose cells are wider.
     #[test]
-    fn bottom_bar_returns_five_zones() {
-        let mut c = blank_panel(&DARK);
-        let zones = draw_bottom_bar(&mut c, &DARK, "dashboard");
-        assert_eq!(zones.len(), 5);
-        assert_eq!(zones[0].action, HitAction::GoTab("dashboard"));
-        assert_eq!(zones[4].action, HitAction::GoTab("channel_hops"));
-        // The tabs tile the full panel width.
-        assert_eq!(zones[0].w * TAB_COUNT as i32, PANEL_W as i32);
+    fn bottom_bar_accents_the_active_cell() {
+        let y = crate::pages::PANEL_H as i32 - BOTTOM_BAR_H as i32;
+        for (tabs, active) in [
+            (&crate::pages::GS_TAB_IDS[..], 4usize),
+            (&["plugin", "cameras", "storage"][..], 1),
+        ] {
+            let mut c = blank_panel(&DARK);
+            draw_bottom_bar(&mut c, &DARK, tabs, tabs[active]);
+            let w = tab_width(tabs.len());
+            assert_eq!(w * tabs.len() as i32, PANEL_W as i32);
+            for i in 0..tabs.len() as i32 {
+                let accent = c.pixel(i * w + w / 2, y + 1) == DARK.accent_primary;
+                assert_eq!(accent, i == active as i32, "{tabs:?} cell {i}");
+            }
+        }
     }
 
     #[test]

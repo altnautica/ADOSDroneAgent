@@ -1947,6 +1947,15 @@
     {
       "method": "POST",
       "notes": null,
+      "path": "/api/v1/setup/shutdown",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
       "path": "/api/v1/setup/skip",
       "public": false,
       "relay_forbidden": false,

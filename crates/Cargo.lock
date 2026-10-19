@@ -315,6 +315,7 @@ dependencies = [
 name = "ados-hid"
 version = "0.103.5"
 dependencies = [
+ "ados-config",
  "ados-protocol",
  "anyhow",
  "evdev",

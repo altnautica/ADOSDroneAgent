@@ -14,17 +14,24 @@ pub(super) fn body(
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area);
     links_panel(frame, cols[0], dash);
 
-    let cockpit = Layout::vertical([
+    let mut constraints = vec![
         Constraint::Length(9),
         Constraint::Length(3),
         Constraint::Length(5),
         Constraint::Min(4),
-    ])
-    .split(cols[1]);
+    ];
+    if !dash.profile_row.is_empty() {
+        let rows = super::profile_row::packed_lines(dash, cols[1].width.saturating_sub(2)).len();
+        constraints.push(Constraint::Length(rows as u16 + 2));
+    }
+    let cockpit = Layout::vertical(constraints).split(cols[1]);
     autopilot_panel(frame, cockpit[0], dash, history, stale);
     video_panel(frame, cockpit[1], dash);
     link_panel(frame, cockpit[2], dash);
     services_panel(frame, cockpit[3], dash);
+    if let Some(rect) = cockpit.get(4) {
+        super::profile_row::profile_panel(frame, *rect, dash, stale);
+    }
 }
 
 pub(super) fn links_panel(frame: &mut Frame, area: Rect, dash: &Dashboard) {

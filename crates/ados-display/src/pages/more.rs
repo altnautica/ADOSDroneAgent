@@ -1,13 +1,15 @@
 //! More page — overflow menu of secondary actions.
 //!
 //! A short list of operator actions that drill into detail pages or run an
-//! agent action: pair drone, diagnostics, restart agent, about. Restart takes
-//! two taps through [`TwoTapConfirm`]: the first arms it (the row reads "Tap
-//! again to restart") for [`CONFIRM_WINDOW`](crate::pages::CONFIRM_WINDOW), the second sends
-//! `POST /api/v1/system/restart-supervisor`. Each
-//! row is a 48 px list row in the shared list styling — a left-aligned label
-//! with a right-pointing chevron — and the four rows fit inside the content
-//! area without a scroll envelope (`4 * 48 = 192` px).
+//! agent action: pair drone, diagnostics, the GNSS / radios / LoRa detail
+//! pages (each listed only while its service reports present), restart agent,
+//! about. Restart takes two taps through [`TwoTapConfirm`]: the first arms it
+//! (the row reads "Tap again to restart") for
+//! [`CONFIRM_WINDOW`](crate::pages::CONFIRM_WINDOW), the second sends
+//! `POST /api/v1/system/restart-supervisor`. Each row is a list row in the
+//! shared list styling — a left-aligned label with a right-pointing chevron —
+//! [`ROW_H`] tall, shrunk evenly when the rows would overflow the panel so the
+//! list never needs a scroll envelope.
 
 use embedded_graphics::pixelcolor::Rgb888;
 
@@ -16,10 +18,10 @@ use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, line, text, Canvas};
 use crate::pages::{
     blank_panel, AgentRequest, Chrome, HitAction, HitZone, Page, PageContext, PanelAction,
-    TwoTapConfirm, PANEL_W,
+    TwoTapConfirm, PANEL_H, PANEL_W,
 };
 
-/// Height of one overflow list row.
+/// Height of one overflow list row (the tallest a row gets).
 pub const ROW_H: i32 = 48;
 
 /// Pixel padding from the left edge for the label.
@@ -37,20 +39,41 @@ pub struct MorePage {
     restart_confirm: TwoTapConfirm,
 }
 
+/// One overflow row: `(zone key, operator label, drill-into page id)`. A
+/// `None` target marks an agent-action row resolved by [`Page::on_custom`].
+type Row = (&'static str, &'static str, Option<&'static str>);
+
 impl MorePage {
-    /// The rows, in display order: `(zone key, operator label, drill-into page
-    /// id or action)`. A `None` target marks an agent-action row resolved by
-    /// [`Page::on_custom`].
-    const ROWS: [(&'static str, &'static str, Option<&'static str>); 4] = [
-        ("more.pair", "Pair drone", Some("details.pair_drone")),
-        (
-            "more.diagnostics",
-            "Diagnostics",
-            Some("details.diagnostics"),
-        ),
-        (RESTART_KEY, "Restart agent", None),
-        ("more.about", "About", Some("details.about")),
-    ];
+    /// The rows for `ctx`, in display order. The service detail rows appear
+    /// only while their context reports the service present.
+    fn rows(ctx: &PageContext) -> Vec<Row> {
+        let mut rows: Vec<Row> = vec![
+            ("more.pair", "Pair drone", Some("details.pair_drone")),
+            (
+                "more.diagnostics",
+                "Diagnostics",
+                Some("details.diagnostics"),
+            ),
+        ];
+        if ctx.gnss.is_some() {
+            rows.push(("more.gnss", "GNSS", Some("details.gnss")));
+        }
+        if ctx.radio_adapters.is_some() {
+            rows.push(("more.radios", "Radios", Some("details.radios")));
+        }
+        if ctx.lora.is_some() {
+            rows.push(("more.lora", "LoRa", Some("details.lora")));
+        }
+        rows.push((RESTART_KEY, "Restart agent", None));
+        rows.push(("more.about", "About", Some("details.about")));
+        rows
+    }
+}
+
+/// Row height for `count` rows: [`ROW_H`], or the even share of the panel
+/// when that many full rows would overflow it.
+fn row_h(count: usize) -> i32 {
+    ROW_H.min(PANEL_H as i32 / count.max(1) as i32)
 }
 
 impl Page for MorePage {
@@ -66,30 +89,33 @@ impl Page for MorePage {
         2.0
     }
 
-    fn render(&self, _ctx: &PageContext, palette: &Palette) -> Canvas {
+    fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas {
         let mut canvas = blank_panel(palette);
-        for (i, (key, label, _target)) in Self::ROWS.iter().enumerate() {
-            let row_y = i as i32 * ROW_H;
+        let rows = Self::rows(ctx);
+        let h = row_h(rows.len());
+        for (i, (key, label, _target)) in rows.iter().enumerate() {
+            let row_y = i as i32 * h;
             let label = if *key == RESTART_KEY && self.restart_confirm.is_armed(RESTART_KEY) {
                 "Tap again to restart"
             } else {
                 label
             };
-            draw_list_row(&mut canvas, palette, row_y, label);
+            draw_list_row(&mut canvas, palette, row_y, h, label);
         }
         canvas
     }
 
-    fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
-        Self::ROWS
-            .iter()
+    fn hit_zones(&self, ctx: &PageContext) -> Vec<HitZone> {
+        let rows = Self::rows(ctx);
+        let h = row_h(rows.len());
+        rows.iter()
             .enumerate()
             .map(|(i, (key, _label, target))| {
                 let action = match target {
                     Some(page_id) => HitAction::OpenDetail(page_id),
                     None => HitAction::Custom((*key).to_string()),
                 };
-                HitZone::new(0, i as i32 * ROW_H, PANEL_W as i32, ROW_H, action)
+                HitZone::new(0, i as i32 * h, PANEL_W as i32, h, action)
             })
             .collect()
     }
@@ -110,23 +136,23 @@ impl Page for MorePage {
     }
 }
 
-/// Paint one 48 px overflow row at `y`: a left-aligned label in primary text, a
-/// right-pointing chevron, and a 1 px divider closing the bottom edge so the
+/// Paint one `h` px overflow row at `y`: a left-aligned label in primary text,
+/// a right-pointing chevron, and a 1 px divider closing the bottom edge so the
 /// stack reads as one list.
-fn draw_list_row(canvas: &mut Canvas, palette: &Palette, y: i32, label: &str) {
+fn draw_list_row(canvas: &mut Canvas, palette: &Palette, y: i32, h: i32, label: &str) {
     // Row plate so a redraw never keeps a previous surface behind the row.
     fill_rect(
         canvas,
         0,
         y,
         PANEL_W as i32 - 1,
-        y + ROW_H - 1,
+        y + h - 1,
         palette.bg_primary,
     );
 
     let label_font = LoadedFont::new(FontFace::SansRegular, 14);
     let (_, label_h) = label_font.text_size(label);
-    let label_y = y + (ROW_H - label_h as i32) / 2 - 2;
+    let label_y = y + (h - label_h as i32) / 2 - 2;
     text(
         canvas,
         &label_font,
@@ -137,14 +163,14 @@ fn draw_list_row(canvas: &mut Canvas, palette: &Palette, y: i32, label: &str) {
     );
 
     let chevron_x = PANEL_W as i32 - RIGHT_PAD - 8;
-    draw_chevron(canvas, chevron_x, y + ROW_H / 2, palette.text_tertiary);
+    draw_chevron(canvas, chevron_x, y + h / 2, palette.text_tertiary);
 
     line(
         canvas,
         0,
-        y + ROW_H - 1,
+        y + h - 1,
         PANEL_W as i32 - 1,
-        y + ROW_H - 1,
+        y + h - 1,
         palette.border_default,
     );
 }
@@ -222,5 +248,36 @@ mod tests {
             page.on_custom(RESTART_KEY, &ctx),
             Some(PanelAction::Repaint)
         );
+    }
+
+    /// The service detail rows appear only while the service reports present,
+    /// ahead of the restart row, and all rows still fit the panel.
+    #[test]
+    fn service_rows_follow_presence() {
+        use crate::pages::gs_ctx::{GnssCtx, LoraCtx, RadioAdaptersCtx};
+        let page = MorePage::default();
+        let opens = |ctx: &PageContext| -> Vec<HitAction> {
+            page.hit_zones(ctx).into_iter().map(|z| z.action).collect()
+        };
+        let mut ctx = PageContext::default();
+        for id in ["details.gnss", "details.radios", "details.lora"] {
+            assert!(!opens(&ctx).contains(&HitAction::OpenDetail(id)));
+        }
+        ctx.lora = Some(LoraCtx::default());
+        let got = opens(&ctx);
+        assert_eq!(got.len(), 5);
+        assert_eq!(got[2], HitAction::OpenDetail("details.lora"));
+        assert!(!got.contains(&HitAction::OpenDetail("details.gnss")));
+
+        ctx.gnss = Some(GnssCtx::default());
+        ctx.radio_adapters = Some(RadioAdaptersCtx::default());
+        let zones = page.hit_zones(&ctx);
+        assert_eq!(zones.len(), 7);
+        assert_eq!(zones[2].action, HitAction::OpenDetail("details.gnss"));
+        assert_eq!(zones[3].action, HitAction::OpenDetail("details.radios"));
+        assert_eq!(zones[4].action, HitAction::OpenDetail("details.lora"));
+        let last = zones.last().unwrap();
+        assert!(last.y + last.h <= PANEL_H as i32);
+        page.render(&ctx, &DARK);
     }
 }

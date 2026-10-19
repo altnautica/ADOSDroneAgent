@@ -288,6 +288,7 @@ known feature, not on this profile) rather than `404`.
 | POST | `/api/v1/setup/reboot` |  |
 | POST | `/api/v1/setup/remote-access/cloudflare` | relay-forbidden |
 | POST | `/api/v1/setup/reset` | relay-forbidden |
+| POST | `/api/v1/setup/shutdown` |  |
 | POST | `/api/v1/setup/skip` |  |
 | GET | `/api/v1/setup/status` |  |
 | POST | `/api/v1/setup/step/{step_id}/skip` |  |
@@ -298,7 +299,7 @@ known feature, not on this profile) rather than `404`.
 | GET | `/api/vision/models/{model_id}/status` |  |
 | POST | `/api/vision/plugin-models/{plugin_id}/deliver` |  |
 
-38 residual routes.
+39 residual routes.
 
 ## Front fallback — `ados-control` on :8080, outside the route table
 

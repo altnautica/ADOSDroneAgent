@@ -20,7 +20,7 @@ use crate::pages::{
     blank_panel, AgentRequest, Chrome, HitAction, HitZone, LinkCtx, Page, PageContext, PanelAction,
     VideoCtx, CONTENT_H, CONTENT_Y, PANEL_W,
 };
-use crate::widgets::{bottom_bar_zones, draw_bottom_bar, draw_top_bar};
+use crate::widgets::draw_top_bar;
 
 /// Height of the decoded-frame plane at the top of the content region.
 const VIDEO_H: i32 = 176;
@@ -65,22 +65,19 @@ impl Page for VideoPage {
             &ctx.clock,
         );
         render_content(&mut canvas, palette, ctx);
-        draw_bottom_bar(&mut canvas, palette, self.id());
         canvas
     }
 
     fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
         // The REC chip is the one control on the page; the camera chip and the
-        // metrics are read-outs. The bottom-bar tab zones close out the list.
-        let mut zones = vec![HitZone::new(
+        // metrics are read-outs.
+        vec![HitZone::new(
             8,
             8,
             CHIP_W,
             CHIP_H,
             HitAction::Custom(REC_KEY.to_string()),
-        )];
-        zones.extend(bottom_bar_zones());
-        zones
+        )]
     }
 
     fn on_custom(&self, key: &str, ctx: &PageContext) -> Option<PanelAction> {
@@ -389,13 +386,13 @@ mod tests {
     }
 
     #[test]
-    fn video_renders_and_carries_tab_zones() {
+    fn video_renders_and_carries_the_rec_zone() {
         let page = VideoPage;
         let ctx = PageContext::default();
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
-        // REC button + five tabs.
-        assert_eq!(page.hit_zones(&ctx).len(), 6);
+        // The REC button; the navigator owns the tab bar.
+        assert_eq!(page.hit_zones(&ctx).len(), 1);
         assert_eq!(page.id(), "video");
     }
 

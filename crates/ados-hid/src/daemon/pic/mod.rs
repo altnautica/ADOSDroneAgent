@@ -187,12 +187,14 @@ async fn serve() -> Result<()> {
     std::process::exit(0);
 }
 
-/// Load + merge `ground_station.ui.buttons.mapping` over the defaults. A missing
-/// config or block falls back to the defaults verbatim.
+/// Load + merge `ground_station.ui.buttons.mapping` over the defaults of the
+/// node's resolved profile (a visor gets the visor table). A missing config or
+/// block falls back to the defaults verbatim. Re-resolved on every SIGHUP.
 fn load_button_mapping() -> std::collections::HashMap<String, String> {
+    let profile = ados_config::node_profile().replace('-', "_");
     match read_buttons_block() {
-        Some(block) => buttons::merge_mapping(&block),
-        None => default_button_mapping(),
+        Some(block) => buttons::merge_mapping(&profile, &block),
+        None => default_button_mapping(&profile),
     }
 }
 

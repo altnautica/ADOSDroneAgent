@@ -190,17 +190,21 @@ impl StateSource {
             auto_pair_enabled(self.get_json("/api/wfb/pair").as_ref());
         apply_host_identity(&mut ctx.device, HostIdentity::read(&self.host_paths));
         ctx.diagnostics.agent_logs = crate::log_tail::fetch(&self.logd_socket).unwrap_or_default();
+        ctx.sensing = self.sensing_ctx();
+        self.apply_gs_extras(&mut ctx);
         ctx
     }
 
-    /// The narrow read the small status OLED needs: one GET of the
-    /// ground-station status snapshot (the only endpoint carrying the link,
-    /// pairing, role and network blocks the OLED lines show). No setup or
-    /// radio-pair call, no log-tail query, no host-identity reads, and no
-    /// trend-buffer advance.
+    /// The narrow read the small status OLED needs: the ground-station status
+    /// snapshot (the link, pairing, role and network blocks the OLED lines
+    /// show) plus the GNSS, radio-adapter and LoRa routes its service line and
+    /// rotating screens read. No setup or radio-pair call, no log-tail query,
+    /// no host-identity reads, and no trend-buffer advance.
     pub fn status_only(&mut self) -> PageContext {
         let status = self.get_json("/api/v1/ground-station/status");
-        self.map_sources(status.as_ref(), None, None)
+        let mut ctx = self.map_sources(status.as_ref(), None, None);
+        self.apply_gs_extras(&mut ctx);
+        ctx
     }
 
     /// Map the three already-fetched JSON sources into a [`PageContext`],
@@ -314,6 +318,8 @@ impl Default for StateSource {
 
 mod mappers;
 use mappers::*;
+mod gs_extra;
+mod sensing;
 
 /// Read the `X-ADOS-Key` from `pairing.json`. `None` when the file is absent,
 /// unreadable, malformed, or carries no `api_key` — all of which are the

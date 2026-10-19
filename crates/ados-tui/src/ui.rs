@@ -436,6 +436,7 @@ fn update_splash_overlay(frame: &mut Frame, installed: &str, latest: &str) {
 
 mod panels;
 use panels::*;
+mod profile_row;
 
 #[cfg(test)]
 mod tests;

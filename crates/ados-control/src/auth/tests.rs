@@ -184,6 +184,7 @@ fn the_ordinary_operating_surface_still_crosses_the_relay() {
         "/api/plugins/com.example.tool/grant",
         "/api/services/ados-mavlink/restart",
         "/api/v1/setup/reboot",
+        "/api/v1/setup/shutdown",
         "/api/v1/system/restart-supervisor",
     ] {
         assert!(

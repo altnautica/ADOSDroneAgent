@@ -8,9 +8,9 @@ describe("gateDecision", () => {
     expect(gateDecision("auto", "direct", ["drone"])).toBe("pass");
   });
 
-  it("treats a workstation/compute node (unknown) as a mismatch", () => {
-    expect(gateDecision("unknown", "direct", ["drone"])).toBe("mismatch");
-    expect(gateDecision("unknown", "direct", ["drone", "ground_station"])).toBe("mismatch");
+  it("treats an unrecognised profile as unavailable", () => {
+    expect(gateDecision("unknown", "direct", ["drone"])).toBe("unavailable");
+    expect(gateDecision("unknown", "direct", ["drone", "ground_station"])).toBe("unavailable");
   });
 
   it("gates on profile and ground role", () => {

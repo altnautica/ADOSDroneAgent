@@ -177,6 +177,66 @@ video:
       orientation: downward
       notes: "AprilTag landing and survey capture today; the optical-flow estimator and downward VIO both bind here when the operator picks them in the wizard."
 
+# Sensor bindings shared by both bins (same PCB, same device tree, so no
+# separate ROCK 5C profile: one would claim the same fingerprint, and the
+# `variants` block above already names the full RK3588S2 part).
+#
+# Sources:
+#   [hwif]     Radxa Docs, ROCK 5C Hardware interface description, "40 PIN GPIO
+#              Header" (pinout with the Linux GPIO number column) and "MIPI CSI":
+#              https://docs.radxa.com/en/rock5/rock5c/hardware-design/hardware-interface
+#   [dts]      Radxa vendor kernel linux-6.1-stan-rkr4.1, rk3588s.dtsi aliases
+#              (i2cN = &i2cN, serialN = &uartN: controller N is /dev/i2c-N and
+#              /dev/ttySN): https://github.com/radxa/kernel/tree/linux-6.1-stan-rkr4.1
+#   [overlays] https://github.com/radxa-pkg/radxa-overlays,
+#              arch/arm64/boot/dts/rockchip/overlays/ (metadata names the boards
+#              and header pins of each overlay)
+# GPIO numbers are bank * 32 + group * 8 + index ([hwif] "GPIO number"); the
+# line is offset (number % 32) on /dev/gpiochip<number / 32>.
+
+# The single 4-lane CSI connector on csi2_dphy0, bound to the Radxa Camera 4K
+# (Sony IMX415) by overlay rock-5a-radxa-camera-4k, whose metadata lists
+# `compatible = "radxa,rock-5a", "radxa,rock-5c"` and `exclusive = "csi2_dphy0"`
+# [overlays]. Radxa images ship it as `<name>.dtbo.disabled` under /boot/dtbo.
+# Capture nodes and modes are not declared until measured on a unit.
+cameras:
+  supported:
+    - id: csi-cam0
+      type: csi
+      sensor: "Sony IMX415"
+      bus: csi2_dphy0
+      orientation: forward
+      overlay_required: true
+      overlay_source: bsp-disabled
+      overlay_ref: "rock-5a-radxa-camera-4k"
+
+# GNSS on the SBC: UART8_M0, TX pin 32 (GPIO4_B0), RX pin 40 (GPIO4_B1) [hwif],
+# enabled by overlay rk3588-uart8-m0 ("On Radxa ROCK 5C this is TX pin 32 and
+# RX pin 40") [overlays]; /dev/ttyS8 [dts]. It avoids the SPI4-M2 panel pins
+# and the display GPIOs above. PPS lands on header pin 16, GPIO1_A5, Linux GPIO
+# 37 [hwif], free of every binding in this file. No Radxa overlay provides a
+# pps-gpio node; /dev/ppsN appears only once a pps-gpio overlay names this line.
+# Baud and receiver model are per-receiver and left to the service's detection.
+gnss:
+  transport: serial
+  device: /dev/ttyS8
+  pps_gpio: 37
+
+# INA226 on the header I2C8_M2 bus: SDA pin 3 (GPIO1_D7), SCL pin 5 (GPIO1_D6)
+# [hwif], enabled by overlay rk3588-i2c8-m2 ("On Radxa ROCK 5C this is SDA pin 3
+# and SCL pin 5") [overlays]; /dev/i2c-8 [dts]. Address 0x40 is the A1=A0=GND
+# strap (TI INA226 datasheet, "Serial Bus Address":
+# https://www.ti.com/lit/ds/symlink/ina226.pdf). shunt_ohm/max_current_a describe
+# the common INA226 breakout's on-board R100 (0.1 ohm) shunt, 81.92 mV full
+# scale = 0.8192 A; a gauge on a larger shunt needs these two values set to its
+# shunt. A unit without the chip resolves the gauge as absent at bring-up.
+battery_gauge:
+  type: ina226
+  i2c_bus: 8
+  addr: 64            # 0x40
+  shunt_ohm: 0.1
+  max_current_a: 0.8
+
 power:
   typical_watts: 4.0
   max_watts: 8.5

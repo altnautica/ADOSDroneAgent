@@ -27,6 +27,9 @@ path = "src/bin/ados-oled-i2c.rs"
 # The button + touch gesture FSMs (pure, host-portable) the navigator drives
 # the physical input from: front-panel press classification + touch strokes.
 ados-hid = { path = "../ados-hid" }
+# The node profile resolver (config `agent.profile`, then `profile.conf`) the
+# panel page set keys on.
+ados-config = { path = "../ados-config" }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
 ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }

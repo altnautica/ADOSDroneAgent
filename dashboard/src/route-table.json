@@ -112,6 +112,43 @@
     "roles": null
   },
   {
+    "key": "gnss",
+    "path": "/gnss",
+    "label": "GNSS",
+    "profiles": [
+      "ground_station"
+    ],
+    "roles": null
+  },
+  {
+    "key": "lora",
+    "path": "/lora",
+    "label": "LoRa",
+    "profiles": [
+      "ground_station"
+    ],
+    "roles": null
+  },
+  {
+    "key": "capture",
+    "path": "/capture",
+    "label": "Capture",
+    "profiles": [
+      "visor"
+    ],
+    "roles": null
+  },
+  {
+    "key": "sensors",
+    "path": "/sensors",
+    "label": "Sensors",
+    "profiles": [
+      "drone",
+      "visor"
+    ],
+    "roles": null
+  },
+  {
     "key": "settings-profile",
     "path": "/settings/profile",
     "label": "Profile",
@@ -204,6 +241,25 @@
     "key": "settings-camera",
     "path": "/settings/camera",
     "label": "Camera",
+    "profiles": [
+      "drone",
+      "visor"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-capture",
+    "path": "/settings/capture",
+    "label": "Capture",
+    "profiles": [
+      "visor"
+    ],
+    "roles": null
+  },
+  {
+    "key": "settings-sensors",
+    "path": "/settings/sensors",
+    "label": "Sensors",
     "profiles": [
       "drone",
       "visor"

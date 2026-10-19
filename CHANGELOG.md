@@ -8,6 +8,42 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Front panel on a visor; GNSS, radios and LoRa on the panel and TUI.**
+  The panel config routes (`/api/v1/ground-station/ui*`) accept a visor and
+  serve profile defaults from one shared table: the visor screens are the
+  capture HUD plugin page, cameras, sensors, storage and about, and its B1/B2
+  short presses carry the new `passthrough` action, which only plugin button
+  subscribers act on. `ados-pic` (the button reader) runs on a visor. The
+  LCD tab bar follows the configured screens; new LCD pages `cameras`,
+  `sensors`, `storage`, `details.gnss`, `details.radios`, `details.lora` and a
+  `shutdown_prompt` power-off confirmation backed by
+  `POST /api/v1/setup/shutdown`. The I2C OLED status frame gains
+  `gnss <fix> <sats>` and `radios <n>` and rotates through the configured
+  `gnss`, `radios` and `lora` screens when those services are present; the
+  LoRa views show region, duty use and the transmit state with its reason.
+  The TUI adds a per-profile row (visor capture, storage, clock and hub IMU;
+  ground-station radios, GNSS and LoRa; drone sensor rates).
+
+- **ROCK 5B+ board profile, ROCK 5C sensor bindings.** `rock-5b-plus`
+  (detected from `radxa,rock-5b-plus` / "Radxa ROCK 5B+"; a plain ROCK 5B
+  does not match) declares both 4-lane CSI connectors with their Radxa
+  Camera 4K overlays, GNSS on UART7-M1 (`/dev/ttyS7`) with PPS on header pin
+  16 (GPIO 100), the USB sensor hub, and an INA226 gauge on `/dev/i2c-8` at
+  0x40. The shared ROCK 5C / 5C Lite profile gains its CSI connector, GNSS on
+  UART8-M0 (`/dev/ttyS8`) with PPS on header pin 16 (GPIO 37), and an INA226
+  gauge on `/dev/i2c-8`. The ROCK 5B+ builds the RTL8812EU driver on device.
+
+- **Dashboard pages for GNSS, LoRa, capture and sensors.** Ground station:
+  `/gnss` (receivers, survey/off base mode, RTCM out) and `/lora` (region,
+  TX line with pause countdown, one meter per governor rule, refusals,
+  admin region picker with confirm, beacons, mismatch chips). Visor:
+  `/capture` (REC/STOP/MARK through the world-engine plugin route, health
+  chips, refusal codes) and `/settings/capture` (storage, exposure). Drone
+  and visor: `/sensors` and `/settings/sensors` (hub, rig upload, clock
+  sources). A node with an unrecognised profile sees a neutral
+  "not available on this node" state. The cockpit ignores `passthrough`
+  button actions, which are reserved for plugins.
+
 - **Plugin capabilities `sensor.stream.read` and `capture.storage.write`.**
   Both are enforced by the generated plugin unit. `sensor.stream.read` binds
   `/run/ados/sensors.sock` and `/run/ados/clock.json` read-only into the

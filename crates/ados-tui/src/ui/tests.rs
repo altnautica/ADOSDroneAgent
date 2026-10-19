@@ -173,3 +173,82 @@ fn a_stale_snapshot_hides_its_flight_readings() {
     assert!(hung.contains("STALE"), "{hung}");
     assert!(!hung.contains("HEALTHY"), "{hung}");
 }
+
+fn profile_dash(profile: &str, routes: &crate::model::ProfileRoutes) -> Dashboard {
+    let mut dash = Dashboard::from_status(&json!({
+        "version": "0.99.108", "device_name": "ados-x", "profile": profile,
+        "paired": true, "mavlink": {"connected": false}
+    }));
+    dash.merge_services(&json!({"services": [{"state": "active"}]}));
+    dash.merge_profile(routes);
+    dash
+}
+
+#[test]
+fn visor_renders_its_panel_row() {
+    let routes = crate::model::profile_tests::visor_routes(true, false);
+    let text = buffer_text(Some(&profile_dash("visor", &routes)), None, false);
+    assert!(text.contains("Visor"), "{text}");
+    // The row wraps at a segment boundary in the 120-column test terminal.
+    assert!(
+        text.contains("capture REC 06:41 │ visor-1-…-a1c3 │ storage 34 %"),
+        "{text}"
+    );
+    assert!(text.contains("clock σ 0.04 ms │ hub imu 1000 Hz"), "{text}");
+    assert!(text.contains("HEALTHY"), "{text}");
+}
+
+#[test]
+fn ground_station_renders_radios_gnss_and_lora() {
+    let routes = crate::model::profile_tests::gs_routes();
+    let text = buffer_text(Some(&profile_dash("ground_station", &routes)), None, false);
+    assert!(text.contains("Ground station"), "{text}");
+    assert!(
+        text.contains("wlan1   rxtx   -48 dBm  loss 0.1 %"),
+        "{text}"
+    );
+    assert!(text.contains("GNSS 3d 14 sats base survey"), "{text}");
+    assert!(
+        text.contains("LoRa IN865 duty 0.4%/1% pwr 25/25mW TX ok  refused 0"),
+        "{text}"
+    );
+    // The existing cockpit panels are still drawn.
+    assert!(
+        text.contains("Links") && text.contains("Services"),
+        "{text}"
+    );
+}
+
+#[test]
+fn drone_adds_only_the_sensor_line() {
+    let routes = crate::model::ProfileRoutes {
+        sensors: Some(crate::model::profile_tests::sensors_fixture(false, true)),
+        ..Default::default()
+    };
+    let with = buffer_text(Some(&profile_dash("drone", &routes)), None, false);
+    assert!(with.contains("sensors imu 1000/1000 Hz"), "{with}");
+    let without = buffer_text(
+        Some(&profile_dash(
+            "drone",
+            &crate::model::ProfileRoutes::default(),
+        )),
+        None,
+        false,
+    );
+    assert!(!without.contains("sensors imu"), "{without}");
+    assert!(without.contains("Services") && with.contains("Services"));
+}
+
+#[test]
+fn a_stale_snapshot_hides_the_profile_row() {
+    let routes = crate::model::profile_tests::gs_routes();
+    let text = draw_text(
+        Some(&profile_dash("ground_station", &routes)),
+        None,
+        false,
+        None,
+        true,
+    );
+    assert!(!text.contains("LoRa IN865"), "{text}");
+    assert!(text.contains("readings hidden (stale)"), "{text}");
+}

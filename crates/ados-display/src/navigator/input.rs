@@ -50,8 +50,9 @@ impl PageNavigator {
     /// open modal first so the operator lands at the tab root. Records the tap
     /// for the pulse regardless of whether the route changed.
     pub(super) fn route_tab_tap(&mut self, start_x: i32, now_ms: i64) -> Dispatch {
-        let index = (start_x / TAB_WIDTH).clamp(0, TAB_COUNT as i32 - 1) as usize;
-        let page_id = TAB_PAGE_IDS[index];
+        let count = self.tabs.len();
+        let index = (start_x / tab_width(count)).clamp(0, count as i32 - 1) as usize;
+        let page_id = self.tabs[index];
         self.tab_tap = Some((page_id, now_ms));
         if !self.registry.contains_key(page_id) {
             return Dispatch::None;
@@ -87,19 +88,35 @@ impl PageNavigator {
         }
     }
 
-    /// Route one front-panel button event through its resolved action name. The
-    /// LCD page system reuses the ground-station button mapping: `back` pops the
-    /// modal stack, `cycle_screen` advances to the next tab, and the menu /
-    /// pairing / network / qr actions jump to their routes. `confirm`,
-    /// `toggle_backlight`, and any unmapped action are returned as a
-    /// [`Dispatch::Custom`] so the service can act on them (backlight, confirm a
-    /// modal's primary action) without the navigator owning hardware.
+    /// Route one front-panel button event through its resolved action name.
+    /// `back` pops the modal stack, `cycle_screen` advances to the next tab,
+    /// `shutdown_prompt` opens the power-off confirmation (and confirms it when
+    /// it is already on top), `passthrough` is left to the plugin that
+    /// subscribed to the press, and the menu / pairing / network / qr actions
+    /// jump to their routes. `confirm`, `toggle_backlight`, and any unmapped
+    /// action are returned as a [`Dispatch::Custom`] so the service can act on
+    /// them (backlight, confirm a modal's primary action) without the
+    /// navigator owning hardware.
     pub fn on_button(&mut self, event: &ButtonEvent) -> Dispatch {
         let Some(action) = event.action.as_deref() else {
             return Dispatch::None;
         };
         match action {
-            // Back: pop one modal, or leave a non-tab route for the dashboard.
+            // A plugin's press: never a navigation, and never a custom key (on
+            // the plugin page a custom key is forwarded as a zone tap).
+            ados_protocol::panel_ui::PASSTHROUGH => Dispatch::None,
+            // Power off: the first press asks, a press on the open prompt is
+            // the answer (resolved by the power page as the shutdown write).
+            ados_protocol::panel_ui::SHUTDOWN_PROMPT => {
+                if self.current_page_id() == POWER_PAGE_ID {
+                    Dispatch::Custom(POWER_OFF_KEY.to_string())
+                } else if self.push_modal(POWER_PAGE_ID) {
+                    Dispatch::ModalChanged(POWER_PAGE_ID.to_string())
+                } else {
+                    Dispatch::None
+                }
+            }
+            // Back: pop one modal, or leave a non-tab route for the first tab.
             "back" => self.back(),
             // Carousel-style next: advance to the next tab in bar order, wrapping.
             "cycle_screen" => {
@@ -143,15 +160,18 @@ impl PageNavigator {
         }
     }
 
-    /// Pop one modal. With no modal open, a non-tab route (the overflow menu or
-    /// the plugin page, reached by a button or a remote page request) returns to
-    /// the dashboard, so a painted Back is never inert. On a tab root it is.
+    /// Pop one modal. With no modal open, a route with no tab bar to leave by
+    /// (a non-tab route such as the overflow menu, or a full-screen tab such as
+    /// a visor's plugin or about page) returns to the first tab, so a painted
+    /// Back is never inert. On a tabbed tab root it is.
     pub(super) fn back(&mut self) -> Dispatch {
         if self.pop_modal().is_some() {
             return Dispatch::ModalChanged(self.current_page_id().to_string());
         }
-        if !TAB_PAGE_IDS.contains(&self.active_page_id.as_str()) && self.go(DEFAULT_PAGE_ID) {
-            return Dispatch::RouteChanged(DEFAULT_PAGE_ID.to_string());
+        let first = self.default_page_id();
+        let is_tab = self.tabs.contains(&self.active_page_id.as_str());
+        if (!is_tab || !self.current_page().chrome().has_tab_bar()) && self.go(first) {
+            return Dispatch::RouteChanged(first.to_string());
         }
         Dispatch::None
     }
@@ -160,12 +180,10 @@ impl PageNavigator {
     /// is not itself a tab (a remote page-request set a non-tab route), this
     /// starts the cycle at the first tab.
     pub(super) fn next_tab_id(&self) -> &'static str {
-        let here = TAB_PAGE_IDS
-            .iter()
-            .position(|id| *id == self.active_page_id);
+        let here = self.tabs.iter().position(|id| *id == self.active_page_id);
         match here {
-            Some(i) => TAB_PAGE_IDS[(i + 1) % TAB_COUNT],
-            None => TAB_PAGE_IDS[0],
+            Some(i) => self.tabs[(i + 1) % self.tabs.len()],
+            None => self.tabs[0],
         }
     }
 

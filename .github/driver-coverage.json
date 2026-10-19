@@ -35,6 +35,7 @@
     "jetson-orin-nano",
     "rdk-x3",
     "rk3576",
+    "rock-5b-plus",
     "rv1126b"
   ],
 
@@ -51,6 +52,12 @@
       "stable feed entirely), and monitor-mode injection is broken on it anyway,",
       "so a prebuilt module would build fast and still not carry a radio link.",
       "Adding it later means a new matrix row pointing at the beta feed."
+    ],
+    "rock-5b-plus": [
+      "Left on builds_on_device although an RK3588 board on the Armbian",
+      "vendor-rk35xx kernel would vermagic-match the armbian-rk35xx row: no",
+      "unit of this board has validated a published module. Moving it to that",
+      "flavor needs the built module loaded and injecting on a real ROCK 5B+."
     ],
     "builds_on_device": [
       "No matrix row: either the kernel line is not one we run, or we have no",

@@ -1,12 +1,24 @@
-//! The I2C status OLED's frame builder: hostname, LAN IP, link and status lines
-//! laid out top-down on a 1bpp canvas, then packed for the controller.
+//! The I2C status OLED's frame builders: the `home` status frame (hostname,
+//! LAN IP, link and status lines laid out top-down on a 1bpp canvas) and the
+//! rotating ground-station service screens in [`screens`], then packed for
+//! the controller.
+//!
+//! Home layout. A 128x64 panel paints the bold hostname then body lines for
+//! the LAN IP, link and status. When a GNSS service or a radio receive plane
+//! reports, a fifth service line (`gnss <fix> <sats> radios <n>`) is added and
+//! the four body lines share the height under the title at an even pitch. A
+//! 128x32 panel keeps the hostname and IP only.
 //!
 //! PURE (no I2C), so the `ados-oled-i2c` daemon, the unit tests and the
 //! `render_oled` example all paint the exact same frame.
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::oled::{self, OledGeometry};
+use crate::pages::gs_ctx::fix_short;
 use crate::pages::PageContext;
+
+pub mod screens;
+use screens::OledScreen;
 
 /// The fonts the status OLED paints with: bold 13 px title, regular 11 px body.
 pub fn status_fonts() -> (LoadedFont, LoadedFont) {
@@ -41,6 +53,23 @@ pub fn status_line(ctx: &PageContext) -> String {
     }
 }
 
+/// The service line: `gnss <fix> <sats>` and `radios <n>`, each present only
+/// while its service reports. `None` when neither does.
+pub fn service_line(ctx: &PageContext) -> Option<String> {
+    let gnss = ctx.gnss.as_ref().map(|g| {
+        let sats = g.sats.map_or("--".to_string(), |s| s.to_string());
+        format!("gnss {} {sats}", fix_short(g.fix.as_deref()))
+    });
+    let radios = ctx
+        .radio_adapters
+        .as_ref()
+        .map(|r| format!("radios {}", r.adapters.len()));
+    match (gnss, radios) {
+        (Some(g), Some(r)) => Some(format!("{g} {r}")),
+        (g, r) => g.or(r),
+    }
+}
+
 /// Draw one line of text onto a 1bpp canvas (grayscale coverage > 0.5 -> on),
 /// clipped to the canvas bounds.
 fn draw_line(canvas: &mut [u8], w: usize, h: usize, font: &LoadedFont, text: &str, x: i32, y: i32) {
@@ -69,26 +98,28 @@ pub fn render_canvas(
 
     let title_h = title_font.line_height() as i32;
     let body_h = body_font.line_height() as i32;
-    let mut y = 0;
+    let mut lines = vec![ip.to_string(), link_line(ctx), status_line(ctx)];
+    if let Some(service) = service_line(ctx).filter(|_| h >= 64) {
+        lines.push(service);
+    }
+    // Body pitch: the font's line height, tightened so every line fits.
+    let pitch = body_h.min((h as i32 - title_h) / lines.len() as i32);
     // Line 1: hostname (bold).
     let host = if ctx.hostname.is_empty() {
         "ADOS ground"
     } else {
         &ctx.hostname
     };
-    draw_line(&mut canvas, w, h, title_font, host, 0, y);
-    y += title_h;
-    // Line 2: LAN IP.
-    draw_line(&mut canvas, w, h, body_font, ip, 0, y);
-    y += body_h;
-    // Line 3: link (only room for it / line 4 on a 64px panel).
-    if (y as usize) < h {
-        draw_line(&mut canvas, w, h, body_font, &link_line(ctx), 0, y);
-        y += body_h;
-    }
-    // Line 4: pairing / role / ready.
-    if (y as usize) < h {
-        draw_line(&mut canvas, w, h, body_font, &status_line(ctx), 0, y);
+    draw_line(&mut canvas, w, h, title_font, host, 0, 0);
+    // Then IP, link, status (and the service line), as far as the panel
+    // has room: the IP always, the rest only while they start on-panel.
+    let mut y = title_h;
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 && (y as usize) >= h {
+            break;
+        }
+        draw_line(&mut canvas, w, h, body_font, line, 0, y);
+        y += if h >= 64 { pitch } else { body_h };
     }
     canvas
 }
@@ -102,6 +133,25 @@ pub fn build_frame(
     body_font: &LoadedFont,
 ) -> Vec<u8> {
     let canvas = render_canvas(ctx, ip, geom, title_font, body_font);
+    oled::pack_page_buffer(&canvas, geom).unwrap_or_else(|| vec![0u8; geom.frame_bytes()])
+}
+
+/// Build the packed frame for one rotation `screen`: the status frame for
+/// `home`, else the service screen's lines (falling back to the status frame
+/// when the service has gone absent since the rotation was resolved).
+pub fn build_screen_frame(
+    screen: OledScreen,
+    ctx: &PageContext,
+    ip: &str,
+    geom: OledGeometry,
+    title_font: &LoadedFont,
+    body_font: &LoadedFont,
+    screen_font: &LoadedFont,
+) -> Vec<u8> {
+    let canvas = match screens::screen_lines(screen, ctx) {
+        Some(lines) => screens::render_lines(&lines, geom, screen_font),
+        None => render_canvas(ctx, ip, geom, title_font, body_font),
+    };
     oled::pack_page_buffer(&canvas, geom).unwrap_or_else(|| vec![0u8; geom.frame_bytes()])
 }
 
@@ -164,5 +214,61 @@ mod tests {
         ctx.pairing.window_active = true;
         ctx.pairing.window_remaining_seconds = Some(42.0);
         assert_eq!(status_line(&ctx), "PAIRING 42s");
+    }
+
+    fn gs_ctx(adapters: usize) -> PageContext {
+        use crate::pages::gs_ctx::{GnssCtx, RadioAdaptersCtx};
+        use ados_protocol::radio_adapters::RadioAdaptersBody;
+        let body: RadioAdaptersBody = serde_json::from_value(serde_json::json!({
+            "present": true,
+            "adapters": (0..adapters).map(|i| serde_json::json!({
+                "iface": format!("wlan{i}"), "mac": null, "usb_path": null,
+                "driver": "rtl88x2eu", "role": "rx", "antenna": null, "tx_active": false,
+                "rssi_dbm": [-50], "packets": 100, "lost": 0, "fec_rec": null, "verified": true
+            })).collect::<Vec<_>>(),
+        }))
+        .unwrap();
+        PageContext {
+            gnss: Some(GnssCtx {
+                fix: Some("3d".into()),
+                sats: Some(14),
+                ..GnssCtx::default()
+            }),
+            radio_adapters: Some(RadioAdaptersCtx {
+                adapters: body.adapters,
+                diversity: body.diversity,
+            }),
+            ..ctx_with_host("gs")
+        }
+    }
+
+    #[test]
+    fn service_line_shows_present_services_only() {
+        assert_eq!(service_line(&ctx_with_host("gs")), None);
+        let mut ctx = gs_ctx(3);
+        assert_eq!(service_line(&ctx).as_deref(), Some("gnss 3d 14 radios 3"));
+        ctx.radio_adapters = None;
+        assert_eq!(service_line(&ctx).as_deref(), Some("gnss 3d 14"));
+        ctx = gs_ctx(3);
+        ctx.gnss = None;
+        assert_eq!(service_line(&ctx).as_deref(), Some("radios 3"));
+    }
+
+    /// The service line adds a fifth line that still lands on a 64 px panel;
+    /// the bottom rows carry ink only once it is shown.
+    #[test]
+    fn the_service_line_fits_the_64px_panel() {
+        let geom = OledGeometry::W128_H64;
+        let (title, body) = status_fonts();
+        let lit_rows = |ctx: &PageContext| {
+            let c = render_canvas(ctx, "10.0.0.5", geom, &title, &body);
+            (0..64)
+                .filter(|y| c[y * 128..(y + 1) * 128].contains(&1))
+                .max()
+        };
+        let plain = lit_rows(&ctx_with_host("gs")).unwrap();
+        let with_service = lit_rows(&gs_ctx(3)).unwrap();
+        assert!(with_service > plain, "{with_service} vs {plain}");
+        assert!(with_service < 64);
     }
 }

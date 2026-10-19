@@ -326,8 +326,10 @@ class ImuBinding(BaseModel):
 
 
 class GnssBinding(BaseModel):
-    """Where the board's GNSS receiver bytes come from. ``pps_gpio`` is the BCM
-    line carrying the receiver's PPS, when wired to the host."""
+    """Where the board's GNSS receiver bytes come from. ``pps_gpio`` is the GPIO
+    number of the line carrying the receiver's PPS, when wired to the host: BCM
+    numbering on a Raspberry Pi, the Linux GPIO number (``bank * 32 + line``,
+    the vendor pinout's "GPIO number" column) on Rockchip."""
 
     transport: Literal["fc", "hub", "serial", "udp"]
     device: str | None = None

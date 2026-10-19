@@ -13,7 +13,7 @@ pub struct OledUpdate {
 
 /// `PUT .../ui/oled` → the full UI config blob with the OLED section mutated.
 ///
-/// `404` off a ground-station node; `422` on an out-of-range bound (the GCS never
+/// `404` off a panel profile; `422` on an out-of-range bound (the GCS never
 /// sends those). Applies the supplied OLED fields over the persisted value,
 /// persists the merged section into the YAML config, signals the OLED service to
 /// reload, and echoes the full UI config blob. A persist fault is a
@@ -30,10 +30,10 @@ pub async fn put_ui_oled(
         return resp;
     }
     // `deny_unknown_fields` already rejected any retired key during extraction.
-    if !is_ground_station(&state) {
+    let Some(profile) = panel_profile(&state) else {
         return profile_mismatch();
-    }
-    let resp = put_ui_oled_at(&config_yaml_path(&state), &update);
+    };
+    let resp = put_ui_oled_at(&config_yaml_path(&state), &profile, &update);
     if resp.status().is_success() {
         signal_oled_reload().await;
     }
@@ -43,8 +43,8 @@ pub async fn put_ui_oled(
 /// The OLED-write logic against an explicit config path. The public
 /// handler resolves both from the app state; this takes them directly so a test can
 /// point them at temp paths.
-pub(super) fn put_ui_oled_at(config_path: &Path, update: &OledUpdate) -> Response {
-    let mut data = load_ui_config(&read_gs_section(config_path, "ui"));
+pub(super) fn put_ui_oled_at(config_path: &Path, profile: &str, update: &OledUpdate) -> Response {
+    let mut data = load_ui_config(profile, &read_gs_section(config_path, "ui"));
     // The mutated section starts from the loaded `oled` block (defaults⊕persisted).
     let mut oled = match data.get("oled") {
         Some(Value::Object(m)) => m.clone(),
@@ -79,7 +79,7 @@ pub struct ButtonsUpdate {
 
 /// `PUT .../ui/buttons` → the full UI config blob with the button section replaced.
 ///
-/// `404` off a ground-station node. When `mapping` is supplied, the WHOLE buttons
+/// `404` off a panel profile. When `mapping` is supplied, the WHOLE buttons
 /// section becomes `{"mapping": <mapping>}` (wholesale replace, matching the
 /// FastAPI handler — NOT a merge); when omitted, the buttons section keeps its
 /// loaded value. Persists the section into the YAML config, signals the button
@@ -89,10 +89,10 @@ pub async fn put_ui_buttons(
     State(state): State<AppState>,
     Json(update): Json<ButtonsUpdate>,
 ) -> Response {
-    if !is_ground_station(&state) {
+    let Some(profile) = panel_profile(&state) else {
         return profile_mismatch();
-    }
-    let resp = put_ui_buttons_at(&config_yaml_path(&state), &update);
+    };
+    let resp = put_ui_buttons_at(&config_yaml_path(&state), &profile, &update);
     if resp.status().is_success() {
         signal_buttons_reload().await;
     }
@@ -100,8 +100,12 @@ pub async fn put_ui_buttons(
 }
 
 /// The button-write logic against an explicit config path.
-pub(super) fn put_ui_buttons_at(config_path: &Path, update: &ButtonsUpdate) -> Response {
-    let mut data = load_ui_config(&read_gs_section(config_path, "ui"));
+pub(super) fn put_ui_buttons_at(
+    config_path: &Path,
+    profile: &str,
+    update: &ButtonsUpdate,
+) -> Response {
+    let mut data = load_ui_config(profile, &read_gs_section(config_path, "ui"));
     if let Some(mapping) = &update.mapping {
         // Wholesale replace: the FastAPI handler sets
         // `data["buttons"] = {"mapping": dict(update.mapping)}`. The mapping is a
@@ -144,7 +148,7 @@ pub struct ScreensUpdate {
 
 /// `PUT .../ui/screens` → the full UI config blob with the screens section mutated.
 ///
-/// `404` off a ground-station node. Applies the supplied `order` / `enabled` lists
+/// `404` off a panel profile. Applies the supplied `order` / `enabled` lists
 /// over the loaded section (each replaces the whole list when present), persists
 /// the merged section into the YAML config, signals the OLED service to reload, and
 /// echoes the full UI config blob. A persist fault is a `500 E_UI_SAVE_FAILED`.
@@ -152,10 +156,10 @@ pub async fn put_ui_screens(
     State(state): State<AppState>,
     Json(update): Json<ScreensUpdate>,
 ) -> Response {
-    if !is_ground_station(&state) {
+    let Some(profile) = panel_profile(&state) else {
         return profile_mismatch();
-    }
-    let resp = put_ui_screens_at(&config_yaml_path(&state), &update);
+    };
+    let resp = put_ui_screens_at(&config_yaml_path(&state), &profile, &update);
     if resp.status().is_success() {
         signal_oled_reload().await;
     }
@@ -163,8 +167,12 @@ pub async fn put_ui_screens(
 }
 
 /// The screen-write logic against an explicit config path.
-pub(super) fn put_ui_screens_at(config_path: &Path, update: &ScreensUpdate) -> Response {
-    let mut data = load_ui_config(&read_gs_section(config_path, "ui"));
+pub(super) fn put_ui_screens_at(
+    config_path: &Path,
+    profile: &str,
+    update: &ScreensUpdate,
+) -> Response {
+    let mut data = load_ui_config(profile, &read_gs_section(config_path, "ui"));
     let mut screens = match data.get("screens") {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),

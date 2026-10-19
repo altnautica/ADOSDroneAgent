@@ -221,6 +221,32 @@ async fn the_real_router_refuses_an_armed_proxied_reboot() {
 }
 
 #[tokio::test]
+async fn armed_proxied_shutdown_is_refused_before_the_proxy() {
+    let (_dir, state) = armed_drone();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = guarded_router(state, Arc::clone(&hits));
+    let (status, body) = send(router, "POST", "/api/v1/setup/shutdown", "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "E_ARMED");
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    let (_dir, state) = armed_drone();
+    let router = crate::routes::build_router(state, false);
+    let (status, _) = send(router, "POST", "/api/v1/setup/shutdown", "").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn a_node_without_a_vehicle_may_shut_down() {
+    let (_dir, state) = state_for_profile("compute");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let router = guarded_router(state, Arc::clone(&hits));
+    let (status, _) = send(router, "POST", "/api/v1/setup/shutdown", "").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn apply_with_profile_section_is_refused_while_armed() {
     let body = r#"{"profile":{"profile":"ground_station"},"auto_restart":true}"#;
     let (status, hits) = send_armed("POST", "/api/v1/setup/apply", body).await;
@@ -378,6 +404,8 @@ fn the_guarded_set_covers_each_link_dropping_action() {
     for (method, path) in [
         ("POST", "/api/v1/setup/reboot"),
         ("POST", "/api/v1/setup/reboot/"),
+        ("POST", "/api/v1/setup/shutdown"),
+        ("POST", "/api/v1/setup/shutdown/"),
         ("POST", "/api/v1/system/restart-supervisor"),
         ("POST", "/api/services/ados-mavlink/restart"),
         ("POST", "/api/services/ados-wfb-rx/restart"),

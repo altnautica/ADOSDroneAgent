@@ -1,42 +1,11 @@
 use super::*;
-use crate::pages::PANEL_W;
-use crate::pages::{
-    about::AboutDetailPage, access_point::AccessPointDetailPage, channel_hops::ChannelHopsPage,
-    dashboard::DashboardPage, diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage,
-    link_stats::LinkStatsPage, mesh::MeshDetailPage, more::MorePage,
-    pair_drone::PairDroneDetailPage, plugin::PluginPage, radio_link::RadioLinkDetailPage,
-    settings::SettingsPage, uplink::UplinkDetailPage, video::VideoPage,
-};
+use crate::daemon::display::all_pages;
+use crate::pages::{GS_TAB_IDS, PANEL_W};
 use ados_hid::buttons::PressKind;
 use ados_hid::touch::{TouchGesture, TouchMove};
 
-/// Build the full set of registered pages the LCD service ships, matching
-/// the Python bootstrap registration plus the detail pages the dashboard /
-/// more page drill into.
-fn all_pages() -> Vec<Box<dyn Page>> {
-    vec![
-        Box::new(DashboardPage),
-        Box::new(VideoPage),
-        Box::new(SettingsPage),
-        Box::new(LinkStatsPage),
-        Box::new(ChannelHopsPage),
-        Box::new(MorePage::default()),
-        Box::new(RadioLinkDetailPage::new()),
-        Box::new(UplinkDetailPage),
-        Box::new(DroneDetailPage),
-        Box::new(MeshDetailPage::new()),
-        Box::new(AboutDetailPage),
-        // How to join this ground station's own WiFi. A panel is the only
-        // surface that helps when the box is the thing you cannot reach.
-        Box::new(AccessPointDetailPage),
-        Box::new(PairDroneDetailPage::default()),
-        Box::new(DiagnosticsDetailPage),
-        Box::new(PluginPage::new()),
-    ]
-}
-
 fn nav(dir: &std::path::Path) -> PageNavigator {
-    PageNavigator::with_state_path(all_pages(), dir.join("lcd-state.json"))
+    PageNavigator::with_state_path(all_pages(), &GS_TAB_IDS, dir.join("lcd-state.json"))
 }
 
 fn tap(x: i32, y: i32) -> TouchGesture {
@@ -285,7 +254,7 @@ fn every_zone_resolves_where_its_control_is_painted() {
     for id in ids {
         n.pop_all_modals();
         if id.starts_with("details.") {
-            n.go(DEFAULT_PAGE_ID);
+            n.go(n.default_page_id());
             assert!(n.push_modal(id));
         } else {
             n.go(id);
@@ -439,7 +408,7 @@ fn routes_to_the_reserved_plugin_page_and_renders_it() {
     let mut n = nav(dir.path());
     // The reserved page is registered (a non-tab route).
     assert!(n.has("plugin"));
-    assert!(!TAB_PAGE_IDS.contains(&"plugin"));
+    assert!(!n.tabs().contains(&"plugin"));
 
     // A page-switch request for the reserved id routes to it, exactly the
     // path a remote page request takes.
@@ -498,9 +467,9 @@ fn a_tapped_tab_is_painted_pressed_then_released() {
     let released = n.render_active(&ctx, palette, 1000 + TAP_FEEDBACK_LINGER_MS);
     // The video tab's cell (band 1) differs between the two frames; the
     // content above the bar does not.
-    let cell_differs = (TAB_BAR_TOP_Y + 2..PANEL_H as i32).any(|y| {
-        (TAB_WIDTH + 2..2 * TAB_WIDTH - 2).any(|x| pressed.pixel(x, y) != released.pixel(x, y))
-    });
+    let w = tab_width(n.tabs().len());
+    let cell_differs = (TAB_BAR_TOP_Y + 2..PANEL_H as i32)
+        .any(|y| (w + 2..2 * w - 2).any(|x| pressed.pixel(x, y) != released.pixel(x, y)));
     assert!(cell_differs, "the tapped tab must be painted pressed");
     let content_same = (40..TAB_BAR_TOP_Y - 1)
         .all(|y| (0..PANEL_W as i32).all(|x| pressed.pixel(x, y) == released.pixel(x, y)));
@@ -510,8 +479,12 @@ fn a_tapped_tab_is_painted_pressed_then_released() {
 #[test]
 fn tab_geometry_matches_the_chrome() {
     // Five 96 px tabs filling the 480 px panel.
-    assert_eq!(TAB_WIDTH, 96);
-    assert_eq!(TAB_COUNT, 5);
+    let dir = tempfile::tempdir().unwrap();
+    let n = nav(dir.path());
+    assert_eq!(n.tabs(), GS_TAB_IDS);
+    assert_eq!(tab_width(n.tabs().len()), 96);
     assert_eq!(TAB_BAR_TOP_Y, 276);
-    assert_eq!(TAB_PAGE_IDS.len(), TAB_COUNT);
+    assert_eq!(n.default_page_id(), "dashboard");
 }
+
+mod visor;

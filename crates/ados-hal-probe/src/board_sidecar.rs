@@ -222,6 +222,10 @@ pub const BOARD_PROFILE_YAML: &[(&str, &str)] = &[
         include_str!("../../../src/ados/hal/boards/rk3588s2.yaml"),
     ),
     (
+        "rock-5b-plus",
+        include_str!("../../../src/ados/hal/boards/rock-5b-plus.yaml"),
+    ),
+    (
         "rock-5c-lite",
         include_str!("../../../src/ados/hal/boards/rock-5c-lite.yaml"),
     ),
@@ -1007,6 +1011,12 @@ mod tests {
             ("rockchip,rk3566", "RK3566 EVB", 4, "Radxa CM3 (RK3566)"),
             ("radxa,cm4", "Radxa CM4", 8, "Radxa CM4 (RK3588S2)"),
             (
+                "radxa,rock-5b-plus",
+                "Radxa ROCK 5B+",
+                8,
+                "Radxa ROCK 5B+ (RK3588)",
+            ),
+            (
                 "raspberrypi,4-model-b",
                 "Raspberry Pi 4 Model B Rev 1.4",
                 4,
@@ -1035,6 +1045,14 @@ mod tests {
                 fp.name
             );
         }
+        // The plain ROCK 5B is a substring prefix of the 5B+ strings, never the
+        // other way round, so it must not resolve to the 5B+ profile.
+        let fp = resolve(&profiles, &facts("radxa,rock-5b", "Radxa ROCK 5B"));
+        assert_ne!(
+            fp.profile, "rock-5b-plus",
+            "ROCK 5B resolved to {}",
+            fp.name
+        );
     }
 
     #[test]

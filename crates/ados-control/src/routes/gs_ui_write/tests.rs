@@ -1,6 +1,9 @@
 use super::*;
 use serde_json::json;
 
+const GS: &str = "ground_station";
+const GS_SCREENS: [&str; 9] = ados_protocol::panel_ui::GROUND_STATION_SCREENS;
+
 /// Read a response body as JSON.
 async fn body_json(resp: Response) -> Value {
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -117,7 +120,7 @@ async fn put_oled_applies_fields_persists_and_echoes_full_blob() {
     let update = OledUpdate {
         brightness: Some(120),
     };
-    let resp = put_ui_oled_at(&cfg, &update);
+    let resp = put_ui_oled_at(&cfg, GS, &update);
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     // The full UI blob, with the oled section mutated, and nothing but the
@@ -128,10 +131,7 @@ async fn put_oled_applies_fields_persists_and_echoes_full_blob() {
         body["buttons"]["mapping"]["B1_short"],
         json!("cycle_screen")
     );
-    assert_eq!(
-        body["screens"]["order"],
-        json!(["home", "link", "drone", "network", "system", "qr"])
-    );
+    assert_eq!(body["screens"]["order"], json!(GS_SCREENS));
 
     // The mutated section landed under ground_station.ui.oled, agent.name survived.
     let parsed: serde_norway::Value =
@@ -168,7 +168,7 @@ async fn put_oled_strips_retired_keys_from_the_persisted_section() {
         )
         .unwrap();
 
-    let resp = put_ui_oled_at(&cfg, &OledUpdate::default());
+    let resp = put_ui_oled_at(&cfg, GS, &OledUpdate::default());
     let body = body_json(resp).await;
     assert_eq!(body["oled"], json!({"brightness": 40}));
     let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
@@ -183,9 +183,9 @@ async fn a_second_write_keeps_what_the_first_one_persisted() {
     let first = OledUpdate {
         brightness: Some(90),
     };
-    assert_eq!(put_ui_oled_at(&cfg, &first).status(), StatusCode::OK);
+    assert_eq!(put_ui_oled_at(&cfg, GS, &first).status(), StatusCode::OK);
     let second = OledUpdate::default();
-    let body = body_json(put_ui_oled_at(&cfg, &second)).await;
+    let body = body_json(put_ui_oled_at(&cfg, GS, &second)).await;
     assert_eq!(body["oled"]["brightness"], json!(90));
     // The read route serves the same persisted section.
     let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
@@ -203,6 +203,7 @@ async fn put_oled_persist_fault_is_a_500_e_ui_save_failed() {
 
     let resp = put_ui_oled_at(
         &cfg,
+        GS,
         &OledUpdate {
             brightness: Some(50),
         },
@@ -226,7 +227,7 @@ async fn put_buttons_replaces_the_mapping_wholesale() {
     let update = ButtonsUpdate {
         mapping: Some(mapping),
     };
-    let resp = put_ui_buttons_at(&cfg, &update);
+    let resp = put_ui_buttons_at(&cfg, GS, &update);
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     // The whole buttons section is now exactly {"mapping": <supplied>}, NOT a
@@ -258,13 +259,37 @@ async fn put_buttons_with_no_mapping_keeps_the_loaded_section() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.yaml");
 
-    let resp = put_ui_buttons_at(&cfg, &ButtonsUpdate::default());
+    let resp = put_ui_buttons_at(&cfg, GS, &ButtonsUpdate::default());
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(
         body["buttons"]["mapping"]["B1_short"],
         json!("cycle_screen")
     );
+}
+
+#[tokio::test]
+async fn visor_buttons_default_and_write_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.yaml");
+    let body = body_json(put_ui_buttons_at(&cfg, "visor", &ButtonsUpdate::default())).await;
+    assert_eq!(body["buttons"]["mapping"]["B1_short"], json!("passthrough"));
+    assert_eq!(
+        body["buttons"]["mapping"]["B1_long"],
+        json!("shutdown_prompt")
+    );
+
+    let mut mapping = std::collections::BTreeMap::new();
+    mapping.insert("B2_short".to_string(), "back".to_string());
+    let update = ButtonsUpdate {
+        mapping: Some(mapping),
+    };
+    assert_eq!(
+        put_ui_buttons_at(&cfg, "visor", &update).status(),
+        StatusCode::OK
+    );
+    let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
+    assert_eq!(read["buttons"], json!({"mapping": {"B2_short": "back"}}));
 }
 
 // ── /ui/screens ───────────────────────────────────────────────────────────
@@ -278,7 +303,7 @@ async fn put_screens_applies_order_and_enabled() {
         order: Some(vec!["home".to_string(), "link".to_string()]),
         enabled: Some(vec!["home".to_string()]),
     };
-    let resp = put_ui_screens_at(&cfg, &update);
+    let resp = put_ui_screens_at(&cfg, GS, &update);
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["screens"]["order"], json!(["home", "link"]));
@@ -307,186 +332,11 @@ async fn put_screens_with_only_order_keeps_default_enabled() {
         order: Some(vec!["home".to_string()]),
         enabled: None,
     };
-    let resp = put_ui_screens_at(&cfg, &update);
+    let resp = put_ui_screens_at(&cfg, GS, &update);
     let body = body_json(resp).await;
     assert_eq!(body["screens"]["order"], json!(["home"]));
     // enabled keeps the full default list.
-    assert_eq!(
-        body["screens"]["enabled"],
-        json!(["home", "link", "drone", "network", "system", "qr"])
-    );
-}
-
-// ── /display ──────────────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn put_display_applies_fields_and_persists_to_config() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = dir.path().join("config.yaml");
-    std::fs::write(&cfg, "agent:\n  name: gs-1\n").unwrap();
-
-    let update = DisplayUpdate {
-        resolution: Some("1080p".to_string()),
-        kiosk_enabled: Some(true),
-        kiosk_target_url: Some("http://localhost:8080/hud".to_string()),
-    };
-    let resp = put_display_at(&cfg, &update);
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = body_json(resp).await;
-    // The wire body keeps the {resolution, kiosk_enabled, kiosk_target_url} shape.
-    assert_eq!(
-        body,
-        json!({
-            "resolution": "1080p",
-            "kiosk_enabled": true,
-            "kiosk_target_url": "http://localhost:8080/hud",
-        })
-    );
-    // Persisted under ground_station.kiosk with the config field names; the
-    // unrelated agent.name key survives the merge.
-    let parsed: serde_norway::Value =
-        serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
-    let kiosk = parsed
-        .get("ground_station")
-        .and_then(|g| g.get("kiosk"))
-        .unwrap();
-    assert_eq!(
-        kiosk
-            .get("resolution")
-            .and_then(serde_norway::Value::as_str),
-        Some("1080p")
-    );
-    assert_eq!(
-        kiosk.get("enabled").and_then(serde_norway::Value::as_bool),
-        Some(true)
-    );
-    assert_eq!(
-        kiosk
-            .get("target_url")
-            .and_then(serde_norway::Value::as_str),
-        Some("http://localhost:8080/hud")
-    );
-    assert_eq!(
-        parsed
-            .get("agent")
-            .and_then(|a| a.get("name"))
-            .and_then(|n| n.as_str()),
-        Some("gs-1")
-    );
-}
-
-#[tokio::test]
-async fn put_display_partial_update_keeps_unset_defaults() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = dir.path().join("config.yaml");
-    let update = DisplayUpdate {
-        resolution: Some("720p".to_string()),
-        ..Default::default()
-    };
-    let resp = put_display_at(&cfg, &update);
-    let body = body_json(resp).await;
-    assert_eq!(body["resolution"], json!("720p"));
-    // The unset fields keep their defaults.
-    assert_eq!(body["kiosk_enabled"], json!(true));
-    assert_eq!(body["kiosk_target_url"], json!(null));
-}
-
-#[tokio::test]
-async fn put_display_seeds_from_existing_kiosk_and_preserves_other_keys() {
-    // An existing kiosk section (a stored target_url + an operator-set
-    // minimal_layer) seeds the response; a partial update changes only the
-    // supplied field and the merge preserves minimal_layer + a sibling config key.
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = dir.path().join("config.yaml");
-    std::fs::write(
-            &cfg,
-            "ground_station:\n  share_uplink: true\n  kiosk:\n    target_url: http://old/hud\n    minimal_layer: true\n",
-        )
-        .unwrap();
-
-    let update = DisplayUpdate {
-        resolution: Some("720p".to_string()),
-        ..Default::default()
-    };
-    let resp = put_display_at(&cfg, &update);
-    let body = body_json(resp).await;
-    // resolution takes the request; target_url seeds from the stored value;
-    // kiosk_enabled falls to the default (the stored section had no `enabled`).
-    assert_eq!(body["resolution"], json!("720p"));
-    assert_eq!(body["kiosk_target_url"], json!("http://old/hud"));
-    assert_eq!(body["kiosk_enabled"], json!(true));
-
-    let parsed: serde_norway::Value =
-        serde_norway::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
-    let kiosk = parsed
-        .get("ground_station")
-        .and_then(|g| g.get("kiosk"))
-        .unwrap();
-    assert_eq!(
-        kiosk
-            .get("resolution")
-            .and_then(serde_norway::Value::as_str),
-        Some("720p")
-    );
-    assert_eq!(
-        kiosk
-            .get("target_url")
-            .and_then(serde_norway::Value::as_str),
-        Some("http://old/hud")
-    );
-    // The operator-set minimal_layer is NOT clobbered by the display write.
-    assert_eq!(
-        kiosk
-            .get("minimal_layer")
-            .and_then(serde_norway::Value::as_bool),
-        Some(true)
-    );
-    // A sibling ground_station key survives the merge.
-    assert_eq!(
-        parsed
-            .get("ground_station")
-            .and_then(|g| g.get("share_uplink"))
-            .and_then(serde_norway::Value::as_bool),
-        Some(true)
-    );
-}
-
-#[tokio::test]
-async fn put_display_invalid_resolution_is_a_400() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = dir.path().join("config.yaml");
-    let update = DisplayUpdate {
-        resolution: Some("4k".to_string()),
-        ..Default::default()
-    };
-    let resp = put_display_at(&cfg, &update);
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    let body = body_json(resp).await;
-    assert_eq!(
-        body,
-        json!({"detail": {"error": {"code": "E_INVALID_RESOLUTION"}}})
-    );
-    // The config was NOT written (the validation short-circuits the persist).
-    assert!(!cfg.exists());
-}
-
-#[tokio::test]
-async fn put_display_persist_fault_is_a_500_e_ui_save_failed() {
-    // A config path whose parent cannot be created → persist fails → 500.
-    let dir = tempfile::tempdir().unwrap();
-    let blocker = dir.path().join("blocker");
-    std::fs::write(&blocker, b"x").unwrap();
-    let cfg = blocker.join("config.yaml");
-    let resp = put_display_at(
-        &cfg,
-        &DisplayUpdate {
-            kiosk_enabled: Some(true),
-            ..Default::default()
-        },
-    );
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    let body = body_json(resp).await;
-    assert_eq!(body["detail"]["error"]["code"], json!("E_UI_SAVE_FAILED"));
+    assert_eq!(body["screens"]["enabled"], json!(GS_SCREENS));
 }
 
 #[test]

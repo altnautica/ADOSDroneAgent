@@ -1,4 +1,4 @@
-"""Cloud posture + Cloudflare tunnel routes (configure, verify, log stream, reboot)."""
+"""Cloud posture + Cloudflare tunnel routes (configure, verify, log stream, reboot, shutdown)."""
 
 from __future__ import annotations
 
@@ -24,7 +24,8 @@ from ._models import (
 
 router = APIRouter()
 
-# Scheduled reboots, held so the task is not garbage-collected mid-sleep.
+# Scheduled reboots and power-offs, held so the task is not garbage-collected
+# mid-sleep.
 _REBOOT_TASKS: set[asyncio.Task[None]] = set()
 
 
@@ -70,6 +71,23 @@ async def trigger_reboot() -> SetupActionResult:
     )
 
 
+@router.post("/shutdown", response_model=SetupActionResult)
+async def trigger_shutdown() -> SetupActionResult:
+    """Power the agent host off on a short delay so the response delivers first.
+
+    The front-panel shutdown prompt posts here after the operator confirms.
+    Same delay and fallback chain as the reboot route.
+    """
+    task = asyncio.create_task(_poweroff_after_delay(3.0))
+    _REBOOT_TASKS.add(task)
+    task.add_done_callback(_REBOOT_TASKS.discard)
+    log.info("shutdown_scheduled", delay_seconds=3)
+    return SetupActionResult(
+        ok=True,
+        message="Power-off scheduled in 3 seconds.",
+    )
+
+
 async def _reboot_after_delay(seconds: float) -> None:
     """Sleep then issue the reboot.
 
@@ -77,11 +95,23 @@ async def _reboot_after_delay(seconds: float) -> None:
     that runs but exits non-zero (an inhibitor, a polkit refusal) is logged
     and the next candidate is tried.
     """
+    await _power_action_after_delay("reboot", seconds)
+
+
+async def _poweroff_after_delay(seconds: float) -> None:
+    """Sleep then power off: systemctl first, then ``/sbin/poweroff``, then
+    ``poweroff``, with the same fallback rules as the reboot."""
+    await _power_action_after_delay("poweroff", seconds)
+
+
+async def _power_action_after_delay(action: str, seconds: float) -> None:
+    """Sleep then run ``action`` (``reboot`` or ``poweroff``) through the
+    first command that exits zero."""
     await asyncio.sleep(seconds)
     candidates: list[list[str]] = [
-        ["systemctl", "reboot"],
-        ["/sbin/reboot"],
-        ["reboot"],
+        ["systemctl", action],
+        [f"/sbin/{action}"],
+        [action],
     ]
     for cmd in candidates:
         try:
@@ -94,12 +124,12 @@ async def _reboot_after_delay(seconds: float) -> None:
         except FileNotFoundError:
             continue
         except Exception as exc:  # noqa: BLE001
-            log.warning("reboot_command_failed", cmd=cmd, error=str(exc))
+            log.warning(f"{action}_command_failed", cmd=cmd, error=str(exc))
             continue
         if returncode == 0:
             return
-        log.warning("reboot_command_failed", cmd=cmd, returncode=returncode)
-    log.error("reboot_all_commands_failed")
+        log.warning(f"{action}_command_failed", cmd=cmd, returncode=returncode)
+    log.error(f"{action}_all_commands_failed")
 
 
 def _log_unit(service_name: object) -> str:

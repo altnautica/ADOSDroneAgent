@@ -91,6 +91,7 @@ fn visor_unit_set() {
         "ados-oled.service",
         "ados-oled-i2c.service",
         "ados-input.service",
+        "ados-pic.service",
         "ados-uplink-router.service",
         "ados-control.service",
         "ados-clock.service",
@@ -111,7 +112,6 @@ fn visor_unit_set() {
         "ados-mediamtx-gs.service",
         "ados-mesh-pairing.service",
         "ados-setup-captive.service",
-        "ados-pic.service",
     ] {
         assert!(!names.contains(&gone), "visor gets {gone}");
     }

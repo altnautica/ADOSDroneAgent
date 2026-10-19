@@ -167,17 +167,22 @@ mod page_ui;
 #[cfg(target_os = "linux")]
 use page_ui::run_page_ui;
 
-/// The full set of pages the native page UI registers — the five tab roots plus
-/// the detail pages the dashboard / more overflow drill into. Mirrors the
-/// Python bootstrap registration order.
-#[cfg(target_os = "linux")]
-fn all_pages() -> Vec<Box<dyn crate::pages::Page>> {
+/// The full set of pages the native page UI registers: the ground-station tab
+/// roots, the visor tab pages, the detail pages the dashboard / more overflow
+/// drill into, and the power-off prompt. Every profile registers every page;
+/// the panel config only decides which are tabs, and a remote page request may
+/// still reach any of them, so the persisted `route_ids` stay truthful.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn all_pages() -> Vec<Box<dyn crate::pages::Page>> {
     use crate::pages::{
-        about::AboutDetailPage, access_point::AccessPointDetailPage, channel_hops::ChannelHopsPage,
-        dashboard::DashboardPage, diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage,
-        link_stats::LinkStatsPage, mesh::MeshDetailPage, more::MorePage,
-        pair_drone::PairDroneDetailPage, plugin::PluginPage, radio_link::RadioLinkDetailPage,
-        settings::SettingsPage, uplink::UplinkDetailPage, video::VideoPage, Page,
+        about::AboutDetailPage, access_point::AccessPointDetailPage, cameras::CamerasPage,
+        channel_hops::ChannelHopsPage, dashboard::DashboardPage,
+        diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage, gnss::GnssPage,
+        link_stats::LinkStatsPage, lora::LoraPage, mesh::MeshDetailPage, more::MorePage,
+        pair_drone::PairDroneDetailPage, plugin::PluginPage, power::PowerPage,
+        radio_link::RadioLinkDetailPage, radios::RadiosPage, sensors::SensorsPage,
+        settings::SettingsPage, storage::StoragePage, uplink::UplinkDetailPage, video::VideoPage,
+        Page,
     };
     let pages: Vec<Box<dyn Page>> = vec![
         Box::new(DashboardPage),
@@ -196,9 +201,21 @@ fn all_pages() -> Vec<Box<dyn crate::pages::Page>> {
         Box::new(AccessPointDetailPage),
         Box::new(PairDroneDetailPage::default()),
         Box::new(DiagnosticsDetailPage),
-        // The reserved data-driven page a plugin contributes content to. Not a
-        // tab; reachable via a page-switch request for the `plugin` id.
+        // Ground-station detail pages for the GNSS base, the receive radios
+        // and the LoRa link.
+        Box::new(GnssPage),
+        Box::new(RadiosPage),
+        Box::new(LoraPage),
+        // The reserved data-driven page a plugin contributes content to. A
+        // visor tab; elsewhere reachable via a page-switch request for the
+        // `plugin` id.
         Box::new(PluginPage::new()),
+        // The visor status tabs.
+        Box::new(CamerasPage),
+        Box::new(SensorsPage),
+        Box::new(StoragePage),
+        // The power-off prompt a `shutdown_prompt` press opens.
+        Box::new(PowerPage),
     ];
     pages
 }

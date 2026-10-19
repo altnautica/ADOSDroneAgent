@@ -29,7 +29,7 @@ use crate::graphics::thresholds;
 use crate::pages::{
     blank_panel, Chrome, HitZone, Page, PageContext, CONTENT_H, CONTENT_Y, PANEL_W,
 };
-use crate::widgets::{bottom_bar_zones, draw_bottom_bar, draw_top_bar};
+use crate::widgets::draw_top_bar;
 
 /// Content-region width.
 const PAGE_W: i32 = PANEL_W as i32;
@@ -78,13 +78,12 @@ impl Page for LinkStatsPage {
         draw_link_band(&mut canvas, palette, ctx, OY, LINK_H);
         draw_dec_band(&mut canvas, palette, ctx, OY + LINK_H, DEC_H);
         draw_sys_band(&mut canvas, palette, ctx, OY + LINK_H + DEC_H, SYS_H);
-
-        draw_bottom_bar(&mut canvas, palette, self.id());
         canvas
     }
 
     fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
-        bottom_bar_zones()
+        // A read-out page; the navigator owns the tab bar.
+        Vec::new()
     }
 }
 
@@ -438,12 +437,12 @@ mod tests {
     }
 
     #[test]
-    fn link_stats_renders_and_carries_tab_zones() {
+    fn link_stats_renders_with_no_zones() {
         let page = LinkStatsPage;
         let ctx = ctx_with_stats();
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
-        assert_eq!(page.hit_zones(&ctx).len(), 5);
+        assert!(page.hit_zones(&ctx).is_empty());
         assert_eq!(page.id(), "link_stats");
     }
 

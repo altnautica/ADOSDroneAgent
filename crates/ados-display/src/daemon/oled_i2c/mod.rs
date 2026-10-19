@@ -12,18 +12,27 @@
 //! and exits cleanly (rc 0) — a board with no OLED never churns.
 //!
 //! Reuse: status comes from [`crate::state_source::StateSource::status_only`]
-//! (one GET of the ground-station status every 2 s); the frame is painted by
-//! [`crate::oled_frame`] (grayscale glyph coverage thresholded to 1bpp) and
-//! packed + uploaded by [`crate::oled`], which re-initialises the panel after
-//! repeated upload failures (a brownout). The configured
-//! `ground_station.ui.oled.brightness` is applied as the controller contrast
-//! whenever it changes. The frame builder is pure and unit-tested; only the
-//! I2C open/write is Linux-gated.
+//! (the ground-station status plus the GNSS, radio-adapter and LoRa routes,
+//! every 2 s); the frames are painted by [`crate::oled_frame`] (grayscale glyph
+//! coverage thresholded to 1bpp) and packed + uploaded by [`crate::oled`],
+//! which re-initialises the panel after repeated upload failures (a brownout).
+//! The configured `ground_station.ui.oled.brightness` is applied as the
+//! controller contrast whenever it changes.
+//!
+//! Screens: the panel rotates through the renderable entries of the
+//! configured `ground_station.ui.screens` (order ∩ enabled, profile defaults
+//! when unset; see [`crate::panel_conf`]): `home` is the status frame, and
+//! `gnss` / `radios` / `lora` are shown while their service reports present.
+//! Each dwells 5 s; one renderable screen stays up statically. The rules live
+//! in [`crate::oled_frame::screens`]. The frame builders are pure and
+//! unit-tested; only the I2C open/write is Linux-gated.
 
 use crate::oled::{self, Controller, OledGeometry};
-use crate::oled_frame::{build_frame, status_fonts};
+use crate::oled_frame::screens::{rotation, screen_font, Rotator};
+use crate::oled_frame::{build_screen_frame, status_fonts};
 #[cfg(not(target_os = "linux"))]
 use crate::pages::PageContext;
+use crate::panel_conf::PanelConf;
 
 /// Read a `u8` env var with a fallback (for ops overrides; the defaults match a
 /// standard Raspberry Pi header OLED).
@@ -137,35 +146,40 @@ fn configured_brightness(config_yaml: Option<&str>) -> i64 {
         .unwrap_or(DEFAULT_BRIGHTNESS)
 }
 
-/// Re-reads the agent config only when its modification time changes.
-struct BrightnessWatch {
+/// Re-reads the agent config only when its modification time changes: the
+/// OLED contrast and the resolved screen list.
+struct ConfigWatch {
     path: std::path::PathBuf,
     mtime: Option<std::time::SystemTime>,
-    value: i64,
+    brightness: i64,
+    screens: Vec<String>,
     loaded: bool,
 }
 
-impl BrightnessWatch {
+impl ConfigWatch {
     fn new(path: std::path::PathBuf) -> Self {
         Self {
             path,
             mtime: None,
-            value: configured_brightness(None),
+            brightness: configured_brightness(None),
+            screens: Vec::new(),
             loaded: false,
         }
     }
 
-    fn current(&mut self) -> i64 {
+    /// Reload when the config file changed since the last read.
+    fn refresh(&mut self) {
         let mtime = std::fs::metadata(&self.path)
             .and_then(|m| m.modified())
             .ok();
         if !self.loaded || mtime != self.mtime {
             let text = std::fs::read_to_string(&self.path).ok();
-            self.value = configured_brightness(text.as_deref());
+            self.brightness = configured_brightness(text.as_deref());
+            self.screens =
+                PanelConf::load_from(&self.path, &ados_config::profile_conf_path()).screens;
             self.mtime = mtime;
             self.loaded = true;
         }
-        self.value
     }
 }
 
@@ -220,28 +234,53 @@ fn drive() {
     );
 
     let (title_font, body_font) = status_fonts();
+    let screen_face = screen_font();
     let mut src = StateSource::new();
     let mut ip = CachedIp::new();
     let mut link = crate::oled_link::OledLink::new();
-    let mut brightness = BrightnessWatch::new(std::path::PathBuf::from(
+    let mut config = ConfigWatch::new(std::path::PathBuf::from(
         std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".to_string()),
     ));
+    let mut rotator = Rotator::default();
+    let mut ctx = src.status_only();
+    let mut polled_at = std::time::Instant::now();
 
+    // A 1 s tick so a screen change lands on its 5 s dwell; the agent state is
+    // re-read every 2 s.
     loop {
-        let contrast = crate::oled_link::brightness_to_contrast(brightness.current());
+        config.refresh();
+        let contrast = crate::oled_link::brightness_to_contrast(config.brightness);
         if let Err(e) = link.apply_contrast(&mut dev, contrast) {
             tracing::debug!(error = %e, "OLED contrast write failed; retrying next tick");
         }
-        let ctx = src.status_only();
-        let packed = build_frame(&ctx, ip.get(), geom, &title_font, &body_font);
+        let now = std::time::Instant::now();
+        if now.duration_since(polled_at) >= STATE_POLL {
+            ctx = src.status_only();
+            polled_at = now;
+        }
+        let screens = rotation(&config.screens, &ctx, geom);
+        let screen = rotator.current(&screens, now);
+        let packed = build_screen_frame(
+            screen,
+            &ctx,
+            ip.get(),
+            geom,
+            &title_font,
+            &body_font,
+            &screen_face,
+        );
         if let Err(e) = link.upload(&mut dev, &packed, geom, controller) {
             // A transient bus error should not kill the service; the link
             // re-initialises the panel after repeated failures.
             tracing::warn!(error = %e, "OLED frame upload failed; retrying");
         }
-        std::thread::sleep(Duration::from_secs(2));
+        std::thread::sleep(Duration::from_secs(1));
     }
 }
+
+/// How often the daemon re-reads the agent state.
+#[cfg(target_os = "linux")]
+const STATE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 
 #[cfg(not(target_os = "linux"))]
 fn drive() {
@@ -251,16 +290,22 @@ fn drive() {
     let geom = geometry_from_env();
     let _ = controller_from_env();
     let _ = addresses_to_probe();
-    let mut brightness = BrightnessWatch::new(std::path::PathBuf::from("/etc/ados/config.yaml"));
-    let _ = crate::oled_link::brightness_to_contrast(brightness.current());
+    let mut config = ConfigWatch::new(std::path::PathBuf::from("/etc/ados/config.yaml"));
+    config.refresh();
+    let _ = crate::oled_link::brightness_to_contrast(config.brightness);
     let mut ip = CachedIp::new();
     let (title_font, body_font) = status_fonts();
-    let frame = build_frame(
-        &PageContext::default(),
+    let ctx = PageContext::default();
+    let screens = rotation(&config.screens, &ctx, geom);
+    let screen = Rotator::default().current(&screens, std::time::Instant::now());
+    let frame = build_screen_frame(
+        screen,
+        &ctx,
         ip.get(),
         geom,
         &title_font,
         &body_font,
+        &screen_font(),
     );
     eprintln!(
         "ados-oled-i2c drives a Linux I2C device; not supported on this host ({} bytes/frame)",

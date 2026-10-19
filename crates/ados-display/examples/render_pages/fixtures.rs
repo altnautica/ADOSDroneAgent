@@ -239,6 +239,7 @@ pub fn connected_context() -> PageContext {
                 "INFO  cloud: mqtt connected, rtt 96 ms".to_string(),
             ],
         },
+        ..PageContext::default()
     }
 }
 
@@ -381,6 +382,7 @@ pub fn unpaired_context() -> PageContext {
                 "INFO  cloud: broadcasting pair code 4KD9TZ".to_string(),
             ],
         },
+        ..PageContext::default()
     }
 }
 

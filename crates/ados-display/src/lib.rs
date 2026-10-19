@@ -25,6 +25,8 @@
 //! * [`pages`] — the full-panel page composers.
 //! * [`navigator`] — the page-navigation state machine driven by buttons/touch.
 //! * [`panel_action`] — performs the agent writes the panel's controls ask for.
+//! * [`panel_conf`] — the panel's page set from the node profile and the
+//!   persisted `ground_station.ui.screens` order / enabled lists.
 //! * [`render_loop`] — the tick loop that paints the active page and feeds the
 //!   off-thread framebuffer writer.
 //! * [`touch_input`] — the touchscreen evdev reader: raw ADS7846 ABS samples ->
@@ -52,6 +54,7 @@ pub mod oled_link;
 pub mod pack;
 pub mod pages;
 pub mod panel_action;
+pub mod panel_conf;
 pub mod probe;
 pub mod render_loop;
 pub mod sidecar;

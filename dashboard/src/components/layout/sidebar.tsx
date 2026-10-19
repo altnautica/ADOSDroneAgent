@@ -12,6 +12,10 @@ import {
   Network,
   Layers,
   Gamepad2,
+  Activity,
+  Aperture,
+  Satellite,
+  RadioTower,
   type LucideIcon,
 } from "lucide-react";
 import type { ParseKeys } from "i18next";
@@ -47,6 +51,7 @@ function droneItems(): NavItem[] {
     { to: "/telemetry", labelKey: "nav.telemetry", icon: Radio },
     { to: "/video", labelKey: "nav.video", icon: Video },
     { to: "/transmit", labelKey: "nav.transmit", icon: Antenna },
+    { to: "/sensors", labelKey: "nav.sensors", icon: Activity },
   ];
 }
 
@@ -55,6 +60,8 @@ function visorItems(): NavItem[] {
   return [
     { to: "/telemetry", labelKey: "nav.telemetry", icon: Radio },
     { to: "/video", labelKey: "nav.video", icon: Video },
+    { to: "/capture", labelKey: "nav.capture", icon: Aperture },
+    { to: "/sensors", labelKey: "nav.sensors", icon: Activity },
   ];
 }
 
@@ -62,6 +69,8 @@ function groundItems(role: GroundRole): NavItem[] {
   const items: NavItem[] = [
     { to: "/receive", labelKey: "nav.receive", icon: Antenna },
     { to: "/io", labelKey: "nav.io", icon: Gamepad2 },
+    { to: "/gnss", labelKey: "nav.gnss", icon: Satellite },
+    { to: "/lora", labelKey: "nav.lora", icon: RadioTower },
   ];
   if (role === "relay" || role === "receiver") {
     items.push({ to: "/mesh", labelKey: "nav.mesh", icon: Network });

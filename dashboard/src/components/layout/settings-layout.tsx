@@ -16,6 +16,8 @@ import {
   UserCog,
   Wifi,
   type LucideIcon,
+  Activity,
+  Aperture,
 } from "lucide-react";
 import { Suspense } from "react";
 import type { ParseKeys } from "i18next";
@@ -147,6 +149,23 @@ const SECTIONS: SectionLink[] = [
     blurbKey: "layout.settings.cameraBlurb",
     group: "Video & vision",
     // Only a camera node (drone or visor) owns an encode pipeline.
+    allow: ["drone", "visor"],
+  },
+  {
+    to: "/settings/capture",
+    labelKey: "nav.capture",
+    icon: Aperture,
+    blurbKey: "layout.settings.captureBlurb",
+    group: "Video & vision",
+    // Capture sessions run on a visor.
+    allow: ["visor"],
+  },
+  {
+    to: "/settings/sensors",
+    labelKey: "nav.sensors",
+    icon: Activity,
+    blurbKey: "layout.settings.sensorsBlurb",
+    group: "Video & vision",
     allow: ["drone", "visor"],
   },
   {

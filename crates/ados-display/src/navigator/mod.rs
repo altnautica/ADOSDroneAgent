@@ -9,23 +9,26 @@
 //! -------
 //!
 //! * Every page names its [`crate::pages::Chrome`]. A tabbed page paints the
-//!   32 px top bar and the 44 px bottom tab bar: a tap in the bottom strip maps
-//!   its x position to one of the five tabs (dashboard, video, settings,
-//!   link-stats, channel-hops), and any other tap is shifted into the page's
-//!   content-local frame (subtract the top bar). A full-screen page (detail
-//!   pages, the overflow menu, the plugin page) paints the whole panel with no
-//!   tab bar, so its zones are panel-global and the bottom strip is page area.
+//!   32 px top bar and its content; the navigator paints the 44 px bottom tab
+//!   bar over it from the tab list it owns (1 to 5 page ids, the
+//!   ground-station set by default, a visor's screens when the panel config
+//!   names them). A tap in the bottom strip maps its x position to one of
+//!   those tabs, and any other tap is shifted into the page's content-local
+//!   frame (subtract the top bar). A full-screen page (detail pages, the
+//!   overflow menu, the plugin page) paints the whole panel with no tab bar,
+//!   so its zones are panel-global and the bottom strip is page area.
 //! * The shifted tap is tested against the active page's
 //!   [`crate::pages::HitZone`]s. The first zone that contains the point has its
 //!   [`crate::pages::HitAction`] dispatched: `GoTab` switches tabs, `OpenDetail`
 //!   pushes a detail page as a modal, `Back` pops the modal stack (or returns a
-//!   non-tab route to the dashboard), and `Custom` is handed back to the caller
-//!   as a [`Dispatch::Custom`], which resolves it through
+//!   full-screen or non-tab route to the first tab), and `Custom` is handed
+//!   back to the caller as a [`Dispatch::Custom`], which resolves it through
 //!   [`PageNavigator::custom_action`].
 //! * The four front-panel buttons resolve their action through the
 //!   [`ados_hid::buttons`] mapping; the navigator maps `back` to a modal pop,
-//!   `cycle_screen` to the next tab, and the menu / pairing / network / qr
-//!   actions to their target routes.
+//!   `cycle_screen` to the next tab, `shutdown_prompt` to the power-off
+//!   confirmation, `passthrough` to nothing (a plugin owns that press), and the
+//!   menu / pairing / network / qr actions to their target routes.
 //!
 //! Persistence
 //! -----------
@@ -45,16 +48,12 @@ use ados_hid::touch::{GestureKind, TouchGesture};
 
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
+use crate::pages::power::{POWER_OFF_KEY, POWER_PAGE_ID};
 use crate::pages::{
-    HitAction, Page, PageContext, PanelAction, BOTTOM_BAR_H, PANEL_H, TAB_COUNT, TAB_PAGE_IDS,
-    TAB_WIDTH,
+    tab_width, HitAction, Page, PageContext, PanelAction, BOTTOM_BAR_H, MAX_TABS, PANEL_H,
 };
 use crate::sidecar::{self, LcdState, LCD_PAGE_REQUEST_PATH, LCD_STATE_PATH};
-use crate::widgets::draw_tab_pulse;
-
-/// The route the navigator falls back to when no page is persisted (and the
-/// first tab in the tab bar).
-pub const DEFAULT_PAGE_ID: &str = "dashboard";
+use crate::widgets::{draw_bottom_bar, draw_tab_pulse};
 
 /// How long the inverse-fill pulse on a tapped tab lingers, in milliseconds.
 /// Long enough for one or two frames at the post-tap boosted render rate.
@@ -96,6 +95,10 @@ pub struct PageNavigator {
     /// Insertion order of the registry, so `current_page` can fall through to a
     /// stable first page if the active id ever desyncs.
     order: Vec<&'static str>,
+    /// The bottom-bar tabs, left to right: registered ids only, 1..=5 of them.
+    /// The first is the default route and the target of a Back off a non-tab
+    /// or full-screen route.
+    tabs: Vec<&'static str>,
     active_page_id: String,
     /// Detail pages stacked above the active page, top of stack last. Stored as
     /// route ids resolved against the registry at render time.
@@ -106,15 +109,19 @@ pub struct PageNavigator {
 }
 
 impl PageNavigator {
-    /// Build a navigator over `pages`, restoring the persisted active id from
-    /// the default `/run/ados/lcd-state.json`.
-    pub fn new(pages: Vec<Box<dyn Page>>) -> Self {
-        Self::with_state_path(pages, PathBuf::from(LCD_STATE_PATH))
+    /// Build a navigator over `pages` with the bottom-bar `tabs`, restoring
+    /// the persisted active id from the default `/run/ados/lcd-state.json`.
+    pub fn new(pages: Vec<Box<dyn Page>>, tabs: &[&'static str]) -> Self {
+        Self::with_state_path(pages, tabs, PathBuf::from(LCD_STATE_PATH))
     }
 
     /// Build a navigator with an explicit state-file path (used by tests so the
     /// persistence round-trips without touching `/run`).
-    pub fn with_state_path(pages: Vec<Box<dyn Page>>, state_path: PathBuf) -> Self {
+    pub fn with_state_path(
+        pages: Vec<Box<dyn Page>>,
+        tabs: &[&'static str],
+        state_path: PathBuf,
+    ) -> Self {
         let mut registry: HashMap<&'static str, Box<dyn Page>> = HashMap::new();
         let mut order: Vec<&'static str> = Vec::with_capacity(pages.len());
         for page in pages {
@@ -124,8 +131,9 @@ impl PageNavigator {
             }
             registry.insert(id, page);
         }
+        let tabs = resolve_tabs(&registry, &order, tabs);
 
-        let mut active_page_id = DEFAULT_PAGE_ID.to_string();
+        let mut active_page_id = tabs[0].to_string();
         // Restore the previous active id when it still resolves to a registered
         // page. A persisted id for a renamed/removed page falls back to the
         // default rather than leaving the loop with an unresolvable route.
@@ -138,6 +146,7 @@ impl PageNavigator {
         let nav = Self {
             registry,
             order,
+            tabs,
             active_page_id,
             modal_stack: Vec::new(),
             tab_tap: None,
@@ -150,6 +159,34 @@ impl PageNavigator {
         // which accepts exactly those.
         nav.persist_active_id();
         nav
+    }
+
+    /// Replace the bottom-bar tab list in place (a panel config reload).
+    /// Unregistered ids are dropped and the list is capped at five; an empty
+    /// result keeps the ground-station tabs. When the active route was a tab
+    /// that the new list no longer carries, the panel lands on the new first
+    /// tab. Returns `true` when the visible route changed.
+    pub fn set_tabs(&mut self, tabs: &[&'static str]) -> bool {
+        let old = std::mem::replace(
+            &mut self.tabs,
+            resolve_tabs(&self.registry, &self.order, tabs),
+        );
+        let active = self.active_page_id.as_str();
+        if old.contains(&active) && !self.tabs.contains(&active) {
+            let first = self.tabs[0];
+            return self.go(first);
+        }
+        false
+    }
+
+    /// The bottom-bar tabs, left to right.
+    pub fn tabs(&self) -> &[&'static str] {
+        &self.tabs
+    }
+
+    /// The first tab: the default route and where Back leaves a non-tab route.
+    pub fn default_page_id(&self) -> &'static str {
+        self.tabs[0]
     }
 
     // ── registry ────────────────────────────────────────────────────
@@ -261,14 +298,16 @@ impl PageNavigator {
     // ── render ──────────────────────────────────────────────────────
 
     /// Paint the currently-resolved page (topmost modal or active tab) into a
-    /// full-panel canvas. On a page that paints the tab bar, a tab tapped less
-    /// than [`TAP_FEEDBACK_LINGER_MS`] before `now_ms` is painted pressed.
+    /// full-panel canvas. Over a tabbed page the navigator paints the bottom
+    /// tab bar (the visible tab accented), and a tab tapped less than
+    /// [`TAP_FEEDBACK_LINGER_MS`] before `now_ms` is painted pressed.
     pub fn render_active(&self, ctx: &PageContext, palette: &Palette, now_ms: i64) -> Canvas {
         let page = self.current_page();
         let mut canvas = page.render(ctx, palette);
         if page.chrome().has_tab_bar() {
+            draw_bottom_bar(&mut canvas, palette, &self.tabs, page.id());
             if let Some(tab) = self.tab_pulse(now_ms) {
-                draw_tab_pulse(&mut canvas, palette, tab);
+                draw_tab_pulse(&mut canvas, palette, &self.tabs, tab);
             }
         }
         canvas
@@ -339,6 +378,40 @@ impl PageNavigator {
         };
         let _ = ados_protocol::sidecar::write_atomic(&self.state_path, &body, 0o644);
     }
+}
+
+/// The usable tab list from `wanted`: registered ids only, first occurrence
+/// kept, at most [`MAX_TABS`]. An empty result falls back to the registered
+/// ground-station tabs, then to the first registered page, so the list is
+/// never empty.
+fn resolve_tabs(
+    registry: &HashMap<&'static str, Box<dyn Page>>,
+    order: &[&'static str],
+    wanted: &[&'static str],
+) -> Vec<&'static str> {
+    let pick = |ids: &mut dyn Iterator<Item = &'static str>| -> Vec<&'static str> {
+        let mut tabs: Vec<&'static str> = Vec::with_capacity(MAX_TABS);
+        for id in ids {
+            if tabs.len() == MAX_TABS {
+                break;
+            }
+            if registry.contains_key(id) && !tabs.contains(&id) {
+                tabs.push(id);
+            }
+        }
+        tabs
+    };
+    let tabs = pick(&mut wanted.iter().copied());
+    if !tabs.is_empty() {
+        return tabs;
+    }
+    let tabs = pick(&mut crate::pages::GS_TAB_IDS.iter().copied());
+    if !tabs.is_empty() {
+        return tabs;
+    }
+    vec![*order
+        .first()
+        .expect("navigator built with at least one page")]
 }
 
 mod input;
