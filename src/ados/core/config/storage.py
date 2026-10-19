@@ -1,8 +1,9 @@
 """Storage housekeeping and hardware-gate configuration.
 
-Both blocks are read only by native code: ``storage.janitor`` by the
-supervisor's disk janitor, ``hardware`` by the installer. They are modelled
-here so their defaults are stated once, in the schema every surface reads.
+Both blocks are read only by native code: ``storage`` by the supervisor's
+disk janitor (``storage.janitor`` plus the ``capture_*`` keys for capture
+session storage), ``hardware`` by the installer. They are modelled here so
+their defaults are stated once, in the schema every surface reads.
 """
 
 from __future__ import annotations
@@ -49,6 +50,17 @@ class JanitorConfig(BaseModel):
 
 class StorageConfig(BaseModel):
     janitor: JanitorConfig = JanitorConfig()
+    # Where capture sessions are written: ``auto`` picks the first mounted
+    # NVMe volume with at least 64 GiB free (``<mount>/ados/capture``), else
+    # ``/var/ados/capture``. Any other value is an absolute directory.
+    capture_root: str = "auto"
+    # Share of the capture volume's size capture sessions may occupy.
+    capture_budget_pct: int = Field(default=85, ge=1, le=100)
+    # Free space, in GiB, below which new capture sessions are refused.
+    capture_floor_free_gib: int = Field(default=5, ge=0, le=1_000_000)
+    # Allow the janitor to delete capture sessions that were never uploaded
+    # (oldest first) when the budget or the floor is breached.
+    capture_evict_unuploaded: bool = False
 
 
 class HardwareConfig(BaseModel):

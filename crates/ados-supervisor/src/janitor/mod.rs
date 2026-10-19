@@ -52,6 +52,7 @@
 //! under its cap and reclaims nothing.
 
 pub mod budget;
+pub mod capture;
 pub mod plan;
 pub mod reclaim;
 
@@ -97,6 +98,9 @@ pub struct Reclaimed {
     pub recordings: u64,
     pub journal: u64,
     pub quarantined_stores: u64,
+    /// Capture sessions evicted against the capture budget and floor. Not
+    /// part of the footprint budget: capture has its own, on its own volume.
+    pub capture: u64,
 }
 
 impl Reclaimed {
@@ -110,6 +114,7 @@ impl Reclaimed {
             self.recordings,
             self.journal,
             self.quarantined_stores,
+            self.capture,
         ]
         .iter()
         .fold(0u64, |a, b| a.saturating_add(*b))
@@ -127,11 +132,12 @@ impl Reclaimed {
         self.quarantined_stores = self
             .quarantined_stores
             .saturating_add(other.quarantined_stores);
+        self.capture = self.capture.saturating_add(other.capture);
     }
 
     /// The per-category pairs, for the event detail and the sidecar. One place
     /// so the two can never disagree about what a pass did.
-    pub fn pairs(&self) -> [(&'static str, u64); 7] {
+    pub fn pairs(&self) -> [(&'static str, u64); 8] {
         [
             ("apt_archives", self.apt_archives),
             ("apt_lists", self.apt_lists),
@@ -140,6 +146,7 @@ impl Reclaimed {
             ("recordings", self.recordings),
             ("journal", self.journal),
             ("quarantined_stores", self.quarantined_stores),
+            ("capture", self.capture),
         ]
     }
 }
@@ -220,6 +227,7 @@ pub fn measure_footprint(roots: &Roots) -> budget::Footprint {
 pub struct Janitor {
     last_tick: Option<Instant>,
     events: EventEmitter,
+    capture: capture::CaptureRuntime,
 }
 
 impl Janitor {
@@ -227,18 +235,26 @@ impl Janitor {
         Janitor {
             last_tick: None,
             events,
+            capture: capture::CaptureRuntime::new(),
         }
     }
 
     /// One reconcile. Cheap when nothing is over its cap: a handful of directory
     /// reads and two `statvfs` calls.
+    ///
+    /// The capture category runs on drone and visor nodes whether or not the
+    /// rest of the janitor is enabled, because its sidecar is what capture
+    /// admission reads; it only evicts while the janitor is enabled.
     pub async fn tick(&mut self) {
         #[cfg(target_os = "linux")]
         {
-            let cfg = read_config();
-            if !cfg.enabled {
-                return;
+            let capture_sidecar =
+                ados_protocol::paths::run_path(ados_config::capture_storage::SIDECAR_ID);
+            if self.capture.active() {
+                self.capture.service_probe(&capture_sidecar).await;
             }
+
+            let cfg = read_config();
             let now = Instant::now();
             let due = match self.last_tick {
                 None => true,
@@ -249,12 +265,29 @@ impl Janitor {
             }
             self.last_tick = Some(now);
 
+            self.capture
+                .set_active(capture::active_for(&ados_config::node_profile()));
+            let capture_freed = if self.capture.active() {
+                let (capture_cfg, _) = ados_config::capture_storage::CaptureStorageConfig::load(
+                    std::path::Path::new(CONFIG_YAML),
+                );
+                self.capture
+                    .pass(capture_cfg, cfg.enabled, &capture_sidecar)
+                    .await
+            } else {
+                0
+            };
+            if !cfg.enabled {
+                return;
+            }
+
             let roots = Roots::default();
             let before = reclaim::free_pct(std::path::Path::new(PRESSURE_PATH));
             // The recordings volume's own headroom, which may be a different
             // filesystem from the one the rung is chosen on.
             let record_free = reclaim::free_bytes(&roots.recordings);
-            let (rung, freed) = sweep(&roots, &cfg, before, record_free).await;
+            let (rung, mut freed) = sweep(&roots, &cfg, before, record_free).await;
+            freed.capture = capture_freed;
             let after = reclaim::free_pct(std::path::Path::new(PRESSURE_PATH));
 
             // Measured AFTER the sweep, so the sidecar answers "what is left to

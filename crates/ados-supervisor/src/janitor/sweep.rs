@@ -182,6 +182,9 @@ pub async fn sweep(
         recordings,
         journal,
         quarantined_stores,
+        // The capture category runs its own pass against its own budget; the
+        // reconciler folds its figure in.
+        capture: 0,
     };
 
     // Then the caps. Re-measure first: the sweep above has already taken things
@@ -245,5 +248,8 @@ pub fn reclaimable(roots: &Roots, cfg: &JanitorConfig) -> Reclaimed {
         recordings,
         journal,
         quarantined_stores,
+        // Capture sessions are evicted only against the capture budget and
+        // floor, which `capture-storage.json` reports.
+        capture: 0,
     }
 }

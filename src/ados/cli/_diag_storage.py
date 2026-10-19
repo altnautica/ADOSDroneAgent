@@ -40,6 +40,7 @@ _JANITOR_CATEGORIES = {
     "recordings": "recordings",
     "journal": "journal",
     "quarantined_stores": "quarantined stores",
+    "capture": "capture sessions",
 }
 
 
