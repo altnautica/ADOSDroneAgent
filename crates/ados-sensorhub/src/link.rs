@@ -61,14 +61,19 @@ pub async fn run_link(p: LinkParams, shutdown: Shutdown, reload: Arc<Notify>) ->
             }
             Some(ep) => {
                 lock(&state).transport = ep.label();
-                match open(&ep).await {
+                let opened = tokio::select! {
+                    biased;
+                    why = stop_signal(&shutdown, &reload) => break why,
+                    opened = open(&ep) => opened,
+                };
+                match opened {
                     Err(e) => {
                         tracing::warn!(transport = %ep.label(), error = %e, "sensor hub open failed");
                         backoff
                     }
                     Ok(io) => {
                         tracing::info!(transport = %ep.label(), "sensor hub connected");
-                        lock(&state).connected = true;
+                        lock(&state).begin_session(p.cfg.imu_odr_hz);
                         let ctx = SessionCtx {
                             cfg: &p.cfg,
                             ext: &p.ext,
@@ -78,7 +83,7 @@ pub async fn run_link(p: LinkParams, shutdown: Shutdown, reload: Arc<Notify>) ->
                         };
                         let (end, packets) =
                             run_session(io, ctx, stop_signal(&shutdown, &reload)).await;
-                        lock(&state).connected = false;
+                        lock(&state).end_session();
                         if packets > 0 {
                             backoff = MIN_BACKOFF;
                         }
@@ -117,7 +122,8 @@ pub async fn run_link(p: LinkParams, shutdown: Shutdown, reload: Arc<Notify>) ->
     let _ = sidecar.await;
     // A last write so a stopping service does not leave `connected: true`.
     let body = RateMeter::default().body(&lock(&state), mono_ns());
-    let _ = write_sidecar(&p.sidecar, &body);
+    let path = p.sidecar.clone();
+    let _ = tokio::task::spawn_blocking(move || write_sidecar(&path, &body)).await;
     why
 }
 
@@ -151,7 +157,11 @@ async fn sidecar_loop(path: PathBuf, state: SharedState) {
             let st = lock(&state);
             meter.body(&st, mono_ns())
         };
-        match write_sidecar(&path, &body) {
+        let target = path.clone();
+        let written = tokio::task::spawn_blocking(move || write_sidecar(&target, &body))
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+        match written {
             Ok(()) => reported = false,
             Err(e) if !reported => {
                 tracing::warn!(path = %path.display(), error = %e, "sensorhub sidecar write failed");
@@ -166,4 +176,40 @@ async fn sidecar_loop(path: PathBuf, state: SharedState) {
 /// attached hub for `auto`.
 pub fn has_target(spec: &TransportSpec, tty_root: &std::path::Path) -> bool {
     resolve(spec, tty_root).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_is_honoured_while_the_transport_cannot_be_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        // TEST-NET-1: never answers, so the connect hangs or fails outright.
+        let params = LinkParams {
+            cfg: HubConfig {
+                transport: TransportSpec::Tcp("192.0.2.1:7600".into()),
+                ..HubConfig::default()
+            },
+            tty_root: dir.path().join("tty"),
+            ext: Extrinsics::default(),
+            socket: dir.path().join("sensors.sock"),
+            sidecar: dir.path().join("sensorhub.json"),
+        };
+        let shutdown = Shutdown::new();
+        let link = tokio::spawn(run_link(params, shutdown.clone(), Arc::new(Notify::new())));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        shutdown.trigger();
+        let why = tokio::time::timeout(Duration::from_secs(1), link)
+            .await
+            .expect("the link stops within 1 s")
+            .unwrap();
+        assert_eq!(why, Stop::Shutdown);
+        let body: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("sensorhub.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["connected"], false);
+        assert_eq!(body["transport"], "tcp:192.0.2.1:7600");
+    }
 }

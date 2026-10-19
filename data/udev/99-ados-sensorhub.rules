@@ -1,0 +1,13 @@
+# ADOS sensor hub hot-plug.
+#
+# The hub firmware enumerates as a USB CDC-ACM port with id 1209:ad05 (the
+# same boards running stock ArduPilot are 1209:5741 and stay flight
+# controllers, so they are not matched here). On add, the presence marker the
+# ados-sensorhub unit gates on is created and the unit is pulled in; on
+# remove, the marker is cleared. The board probe writes the same marker at
+# boot, and the installer's `udevadm trigger` replays add for a hub already
+# attached.
+
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="1209", ENV{ID_MODEL_ID}=="ad05", RUN+="/bin/sh -c 'mkdir -p /run/ados && touch /run/ados/sensor-hub-present'", TAG+="systemd", ENV{SYSTEMD_WANTS}+="ados-sensorhub.service"
+
+ACTION=="remove", SUBSYSTEM=="tty", KERNEL=="ttyACM*", ENV{ID_VENDOR_ID}=="1209", ENV{ID_MODEL_ID}=="ad05", RUN+="/bin/rm -f /run/ados/sensor-hub-present"

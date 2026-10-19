@@ -31,14 +31,37 @@ pub struct HubState {
     /// `serial:/dev/ttyACM0` or `tcp:host:port`; empty until a transport is
     /// resolved.
     pub transport: String,
+    /// Identity from this session's `Hello`; cleared when a session starts.
     pub hello: Option<HelloInfo>,
     pub uptime_s: Option<u32>,
     pub crc_errors: u64,
     pub dropped: u64,
+    /// IMU samples received in the current session.
     pub imu_samples: u64,
     pub triggers: u64,
     /// `Pps.locked` / `Health.pps_state` (0 none … 3 holdover), once reported.
     pub pps_state: Option<u8>,
+    /// The per-IMU output data rate this session configured the hub with.
+    pub imu_odr_hz: Option<u16>,
+}
+
+impl HubState {
+    /// A session opened: nothing learnt from an earlier session is current.
+    pub fn begin_session(&mut self, imu_odr_hz: u16) {
+        self.connected = true;
+        self.hello = None;
+        self.uptime_s = None;
+        self.pps_state = None;
+        self.imu_samples = 0;
+        self.imu_odr_hz = Some(imu_odr_hz);
+    }
+
+    /// The session ended: the link facts stop being live.
+    pub fn end_session(&mut self) {
+        self.connected = false;
+        self.uptime_s = None;
+        self.imu_odr_hz = None;
+    }
 }
 
 pub type SharedState = Arc<Mutex<HubState>>;
@@ -59,25 +82,27 @@ pub struct SidecarBody {
     pub trigger_hz: Option<f64>,
 }
 
-/// Turns successive state snapshots into sidecar bodies, measuring the IMU
-/// sample and trigger rates between them.
+/// Turns successive state snapshots into sidecar bodies, measuring the
+/// trigger rate between them.
 #[derive(Debug, Default)]
 pub struct RateMeter {
-    last: Option<(u64, u64, u64)>,
+    last: Option<(u64, u64)>,
 }
 
 impl RateMeter {
-    /// The body for `s` taken at host time `now_ns`. Rates are `null` while
-    /// disconnected or until a previous snapshot exists.
+    /// The body for `s` taken at host time `now_ns`. `imu_odr_hz` is the
+    /// configured per-IMU rate once IMU samples flow this session; the trigger
+    /// rate is measured. Both are `null` while disconnected.
     pub fn body(&mut self, s: &HubState, now_ns: u64) -> SidecarBody {
-        let prev = self.last.replace((now_ns, s.imu_samples, s.triggers));
-        let rates = prev.filter(|_| s.connected).and_then(|(t0, imu0, trig0)| {
+        let prev = self.last.replace((now_ns, s.triggers));
+        let trigger_hz = prev.filter(|_| s.connected).and_then(|(t0, trig0)| {
             let dt = now_ns.checked_sub(t0).filter(|d| *d > 0)? as f64 / 1e9;
-            Some((
-                s.imu_samples.saturating_sub(imu0) as f64 / dt,
-                s.triggers.saturating_sub(trig0) as f64 / dt,
-            ))
+            Some(s.triggers.saturating_sub(trig0) as f64 / dt)
         });
+        let imu_odr_hz = s
+            .imu_odr_hz
+            .filter(|_| s.connected && s.imu_samples > 0)
+            .map(f64::from);
         let hello = s.hello.as_ref();
         SidecarBody {
             version: SENSORHUB_SIDECAR_VERSION,
@@ -89,8 +114,8 @@ impl RateMeter {
             uptime_s: s.uptime_s,
             crc_errors: s.crc_errors,
             dropped: s.dropped,
-            imu_odr_hz: rates.map(|r| r.0),
-            trigger_hz: rates.map(|r| r.1),
+            imu_odr_hz,
+            trigger_hz,
         }
     }
 }
@@ -119,14 +144,15 @@ mod tests {
     ];
 
     #[test]
-    fn the_body_has_the_contract_keys_in_order_and_measures_rates() {
+    fn the_body_has_the_contract_keys_in_order_and_reports_rates() {
         let mut meter = RateMeter::default();
         let mut s = HubState {
-            connected: true,
             transport: "tcp:127.0.0.1:7600".into(),
             ..HubState::default()
         };
+        s.begin_session(1000);
         let first = meter.body(&s, 1_000_000_000);
+        // No IMU sample yet: no rate claimed.
         assert_eq!(first.imu_odr_hz, None);
         assert_eq!(first.fw, None);
         let text = serde_json::to_string(&first).unwrap();
@@ -138,7 +164,8 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v.as_object().unwrap().len(), KEYS.len());
 
-        s.imu_samples = 2_000;
+        // Two IMUs at 1 kHz each: the per-IMU rate, not the 2 kHz sum.
+        s.imu_samples = 4_000;
         s.triggers = 40;
         s.hello = Some(HelloInfo {
             fw: "ados-sensorhub 0.1.0".into(),
@@ -146,13 +173,25 @@ mod tests {
             proto_ver: 1,
             caps: 0,
         });
+        s.uptime_s = Some(9);
         let second = meter.body(&s, 3_000_000_000);
         assert_eq!(second.imu_odr_hz, Some(1000.0));
         assert_eq!(second.trigger_hz, Some(20.0));
         assert_eq!(second.proto_ver, Some(1));
 
-        s.connected = false;
-        assert_eq!(meter.body(&s, 4_000_000_000).imu_odr_hz, None);
+        s.end_session();
+        let down = meter.body(&s, 4_000_000_000);
+        assert_eq!(
+            (down.imu_odr_hz, down.trigger_hz, down.uptime_s),
+            (None, None, None)
+        );
+
+        // A new session forgets the previous hub's identity.
+        s.begin_session(2000);
+        let next = meter.body(&s, 5_000_000_000);
+        assert!(next.connected);
+        assert_eq!((next.fw, next.board, next.proto_ver), (None, None, None));
+        assert_eq!(next.imu_odr_hz, None);
     }
 
     #[test]

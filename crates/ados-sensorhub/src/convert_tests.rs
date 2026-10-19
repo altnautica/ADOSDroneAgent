@@ -178,4 +178,18 @@ fn closed_buckets_publish_sync_pairs_and_hello_is_recorded() {
     assert_eq!(conv.unsupported_proto, None);
     run(&mut conv, &mut st, hello(2), 2_000_003_000);
     assert_eq!(conv.unsupported_proto, Some(2));
+    // The state reports the version the hub announced.
+    assert_eq!(st.hello.as_ref().unwrap().proto_ver, 2);
+    // Packets after it are not read as v1: nothing published or counted.
+    let samples = [ImuSample::default(); 4];
+    let imu_before = st.imu_samples;
+    assert!(run(
+        &mut conv,
+        &mut st,
+        batch(&samples, 3_000_000_000, 0),
+        4_000_000_000
+    )
+    .is_empty());
+    assert!(run(&mut conv, &mut st, health(3_000_000_000), 5_000_000_000).is_empty());
+    assert_eq!(st.imu_samples, imu_before);
 }

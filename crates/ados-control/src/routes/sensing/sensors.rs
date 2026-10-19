@@ -4,8 +4,10 @@
 //! The table joins the stream table `ados-clock` keeps of everything on the
 //! sensor bus (`sensors.json`) with the rig document (roles, and rig sensors
 //! not yet streaming), the hub link (`sensorhub.json`), the clock sigmas
-//! (`clock.json`), the GNSS fix (`gnss.json`) and the flight-controller link.
+//! (`clock.json`), the GNSS fix (`gnss.json`) and the flight-controller link
+//! (with the stream rates the router requested, `mavlink-router.json`).
 
+use std::future::Future;
 use std::time::SystemTime;
 
 use axum::extract::State;
@@ -41,12 +43,28 @@ pub async fn get_sensors(State(state): State<AppState>) -> Json<Value> {
             autopilot: l.fc_firmware.as_str().map(str::to_string),
         }
     });
-    Json(sensors_body(
-        &paths,
-        SystemTime::now(),
-        ados_sensorbus::time::mono_ns(),
-        fc,
-    ))
+    let body = tokio::task::spawn_blocking(move || {
+        sensors_body(
+            &paths,
+            SystemTime::now(),
+            ados_sensorbus::time::mono_ns(),
+            fc,
+        )
+    })
+    .await
+    .unwrap_or_else(|_| absent_body());
+    Json(body)
+}
+
+/// The body with no sensor service running: every block empty.
+fn absent_body() -> Value {
+    let mut rest = Map::new();
+    for key in ["rig_id", "calib_version", "hub", "fc"] {
+        rest.insert(key.into(), Value::Null);
+    }
+    rest.insert("sensors".into(), json!([]));
+    rest.insert("gnss".into(), Value::Null);
+    with_present(false, rest)
 }
 
 pub(crate) fn read_rig(paths: &SensingPaths) -> Option<RigSummary> {
@@ -61,8 +79,9 @@ pub(crate) fn sensors_body(
     now_mono_ns: u64,
     fc: Option<FcView>,
 ) -> Value {
-    let streams = fresh_map(&paths.sidecar("sensors.json"), Some(FRESH), now);
-    let present = streams.is_some();
+    let Some(streams) = fresh_map(&paths.sidecar("sensors.json"), Some(FRESH), now) else {
+        return absent_body();
+    };
     let clock = clock_body(paths, now);
     let hub_side =
         read_fresh_at::<Map<String, Value>>(&paths.sidecar("sensorhub.json"), Some(FRESH), now);
@@ -75,12 +94,18 @@ pub(crate) fn sensors_body(
     };
     let hub = hub_block(hub_side);
     let rig = read_rig(paths);
+    // The per-stream rates the router asked the flight controller for.
+    let fc_rates = fresh_map(&paths.sidecar("mavlink-router.json"), None, now)
+        .and_then(|mut m| m.remove("sensor_rates_hz"))
+        .and_then(|v| match v {
+            Value::Object(m) => Some(m),
+            _ => None,
+        });
 
     let mut sensors: Vec<Value> = Vec::new();
     let empty = Vec::new();
     let list = streams
-        .as_ref()
-        .and_then(|m| m.get("streams"))
+        .get("streams")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
     let mut highres = false;
@@ -99,12 +124,14 @@ pub(crate) fn sensors_body(
         if origin == "fc" && id == "fc_imu" && rate > 0.0 {
             highres = true;
         }
-        let expected = match (origin, kind, id) {
-            ("hub", "imu", _) => hub_rates.0,
-            ("hub", "camera", _) => hub_rates.1,
-            ("fc", "imu", "fc_imu") => Some(200.0),
-            ("fc", "imu", "fc_raw_imu") => Some(50.0),
-            ("fc", "baro", _) => Some(10.0),
+        // The hub's per-IMU ODR applies to each hub IMU stream.
+        let expected = match (origin, kind) {
+            ("hub", "imu") => hub_rates.0,
+            ("hub", "camera") => hub_rates.1,
+            ("fc", _) => fc_rates
+                .as_ref()
+                .and_then(|r| r.get(id))
+                .and_then(Value::as_f64),
             _ => None,
         };
         let last_t = s["last_t_ns"].as_u64().unwrap_or(0);
@@ -158,7 +185,7 @@ pub(crate) fn sensors_body(
     rest.insert("fc".into(), fc.unwrap_or(Value::Null));
     rest.insert("sensors".into(), Value::Array(sensors));
     rest.insert("gnss".into(), gnss_summary(paths, now));
-    with_present(present, rest)
+    with_present(true, rest)
 }
 
 fn role(rig: Option<&RigSummary>, id: &str, kind: &str) -> String {
@@ -208,18 +235,50 @@ fn gnss_summary(paths: &SensingPaths, now: SystemTime) -> Value {
     }
 }
 
+/// The unit command that makes the hub service re-read the rig extrinsics.
+const RELOAD_HUB: [&str; 3] = ["--no-block", "reload-or-restart", "ados-sensorhub.service"];
+
 /// `PUT /api/v1/sensors/rig`: validate a contract `rig.json` and store it.
 pub async fn put_rig(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
-    put_rig_at(&SensingPaths::from_state(&state), &body)
+    put_rig_with(SensingPaths::from_state(&state), body, |program, args| {
+        crate::probe::status_only(program, args, crate::probe::PROBE_TIMEOUT)
+    })
+    .await
 }
 
-pub(crate) fn put_rig_at(paths: &SensingPaths, body: &[u8]) -> Response {
+/// Store the rig off the reactor, then have the hub service reload it through
+/// `run` (`systemctl` in production).
+pub(crate) async fn put_rig_with<F, Fut>(
+    paths: SensingPaths,
+    body: axum::body::Bytes,
+    run: F,
+) -> Response
+where
+    F: FnOnce(&'static str, &'static [&'static str]) -> Fut,
+    Fut: Future<Output = bool>,
+{
+    let (resp, stored) = match tokio::task::spawn_blocking(move || put_rig_at(&paths, &body)).await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "E_RIG_WRITE", "detail": e.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    if stored && !run("systemctl", &RELOAD_HUB).await {
+        tracing::warn!("sensor hub reload after the rig write failed");
+    }
+    resp
+}
+
+/// Validate and store; the flag is true when the rig landed on disk.
+pub(crate) fn put_rig_at(paths: &SensingPaths, body: &[u8]) -> (Response, bool) {
     let invalid = |detail: String| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "E_RIG_INVALID", "detail": detail})),
-        )
-            .into_response()
+        let body = Json(json!({"error": "E_RIG_INVALID", "detail": detail}));
+        ((StatusCode::BAD_REQUEST, body).into_response(), false)
     };
     let doc: Value = match serde_json::from_slice(body) {
         Ok(v) => v,
@@ -231,14 +290,14 @@ pub(crate) fn put_rig_at(paths: &SensingPaths, body: &[u8]) -> Response {
     };
     let pretty = serde_json::to_vec_pretty(&doc).unwrap_or_default();
     if let Err(e) = write_atomic(&paths.rig(), &pretty) {
+        let body = Json(json!({"error": "E_RIG_WRITE", "detail": e.to_string()}));
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "E_RIG_WRITE", "detail": e.to_string()})),
-        )
-            .into_response();
+            (StatusCode::INTERNAL_SERVER_ERROR, body).into_response(),
+            false,
+        );
     }
-    Json(json!({"ok": true, "rig_id": summary.rig_id, "calib_version": summary.calib_version}))
-        .into_response()
+    let ok = json!({"ok": true, "rig_id": summary.rig_id, "calib_version": summary.calib_version});
+    (Json(ok).into_response(), true)
 }
 
 #[cfg(test)]

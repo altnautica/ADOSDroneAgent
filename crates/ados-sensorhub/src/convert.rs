@@ -53,7 +53,8 @@ impl Converter {
     }
 
     /// Convert one packet that arrived at host time `arrival_ns`, folding link
-    /// facts into `st` and emitting bus frames.
+    /// facts into `st` and emitting bus frames. Once the hub has announced a
+    /// protocol version this build cannot read, nothing more is interpreted.
     pub fn handle(
         &mut self,
         pkt: &Packet<'_>,
@@ -61,6 +62,9 @@ impl Converter {
         st: &mut HubState,
         emit: &mut dyn FnMut(BusFrame),
     ) {
+        if self.unsupported_proto.is_some() {
+            return;
+        }
         if let Some(hub_ns) = newest_stamp(pkt) {
             let obs = self.clock.observe(arrival_ns, hub_ns);
             if obs.reset {

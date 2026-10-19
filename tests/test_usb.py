@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from ados.hal.usb import (
     UsbCategory,
     _parse_lsusb_output,
@@ -90,6 +92,18 @@ def test_categorize_ardupilot_pid_codes_stays_fc():
     """Stock ArduPilot on the same boards (1209:5741) stays a flight controller."""
     _, cat = categorize_device(0x1209, 0x5741, "")
     assert cat == UsbCategory.FC
+
+
+def test_a_board_hub_binding_accepts_only_the_firmware_id():
+    """A board profile cannot declare the stock-ArduPilot id as its hub."""
+    from pydantic import ValidationError
+
+    from ados.hal.detect import SensorHubBinding
+
+    assert SensorHubBinding().usb_vid_pid == "1209:ad05"
+    assert SensorHubBinding(usb_vid_pid="1209:AD05").usb_vid_pid == "1209:AD05"
+    with pytest.raises(ValidationError):
+        SensorHubBinding(usb_vid_pid="1209:5741")
 
 
 # --- _parse_lsusb_output ---

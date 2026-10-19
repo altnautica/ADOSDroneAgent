@@ -2,6 +2,7 @@
 //! hub). Both carry the same byte stream.
 
 use std::path::Path;
+use std::time::Duration;
 
 use ados_hal_probe::bindings::{parse_vid_pid, SENSOR_HUB_VID_PID};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -46,6 +47,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> HubIo for T {}
 /// Line rate requested on the serial node. A CDC-ACM device ignores it; the
 /// port is opened raw 8N1 with no flow control.
 const SERIAL_BAUD: u32 = 115_200;
+/// A simulated hub that does not answer the connect within this is retried.
+pub const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Open the endpoint.
 pub async fn open(ep: &Endpoint) -> std::io::Result<Box<dyn HubIo>> {
@@ -60,7 +63,12 @@ pub async fn open(ep: &Endpoint) -> std::io::Result<Box<dyn HubIo>> {
             Ok(Box::new(stream))
         }
         Endpoint::Tcp(addr) => {
-            let stream = tokio::net::TcpStream::connect(addr).await?;
+            let connect = tokio::net::TcpStream::connect(addr);
+            let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, connect)
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timed out")
+                })??;
             stream.set_nodelay(true)?;
             Ok(Box::new(stream))
         }

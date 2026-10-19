@@ -26,6 +26,7 @@ fn seed(p: &SensingPaths) {
           {"kind":"imu","src":"imu0","origin":"hub","rate_hz":1000.0,"last_t_ns":1000,"last_rx_ns":2000000,"count":9},
           {"kind":"trigger","src":"cam0","origin":"hub","rate_hz":20.0,"last_t_ns":900,"last_rx_ns":1000000,"count":3},
           {"kind":"imu","src":"fc_imu","origin":"fc","rate_hz":200.0,"last_t_ns":800,"last_rx_ns":1500000,"count":3},
+          {"kind":"baro","src":"fc_baro","origin":"fc","rate_hz":10.0,"last_t_ns":800,"last_rx_ns":1500000,"count":3},
           {"kind":"rtcm","src":"rest","origin":"host","rate_hz":1.0,"last_t_ns":0,"last_rx_ns":1,"count":1}]}"#,
     );
     write(
@@ -39,6 +40,10 @@ fn seed(p: &SensingPaths) {
         r#"{"version":1,"timebase":"hub_freerun","locked":true,"sigma_ns":420000,"t_ns":1,"utc_ns":null,
           "sources":[{"id":"fc","kind":"fc","locked":true,"offset_ns":0,"skew_ppm":0,"sigma_ns":800000,"last_update_ns":1},
                      {"id":"hub","kind":"hub","locked":true,"offset_ns":0,"skew_ppm":0,"sigma_ns":420000,"last_update_ns":1}]}"#,
+    );
+    write(
+        p.sidecar("mavlink-router.json"),
+        r#"{"version":1,"routes":[],"sensor_rates_hz":{"fc_imu":200.0}}"#,
     );
     write(p.rig(), RIG);
 }
@@ -82,8 +87,8 @@ fn the_table_joins_streams_rig_hub_clock_and_fc() {
         json!({"connected": true, "autopilot": "ardupilot", "highres_imu": true})
     );
     let sensors = body["sensors"].as_array().unwrap();
-    // 3 streams (the host rtcm stream is not a sensor) + gnss0 from the rig.
-    assert_eq!(sensors.len(), 4);
+    // 4 streams (the host rtcm stream is not a sensor) + gnss0 from the rig.
+    assert_eq!(sensors.len(), 5);
     let imu = &sensors[0];
     let mut keys: Vec<&str> = imu
         .as_object()
@@ -114,7 +119,12 @@ fn the_table_joins_streams_rig_hub_clock_and_fc() {
     assert_eq!(sensors[1]["role"], "front_left");
     assert_eq!(sensors[1]["expected_hz"], 20.0);
     assert_eq!(sensors[2]["sigma_ns"], 800000);
-    let gnss = &sensors[3];
+    // FC rates come from what the router requested; an unrequested stream
+    // has no expectation.
+    assert_eq!(sensors[2]["expected_hz"], 200.0);
+    assert_eq!(sensors[3]["id"], "fc_baro");
+    assert_eq!(sensors[3]["expected_hz"], Value::Null);
+    let gnss = &sensors[4];
     assert_eq!(gnss["id"], "gnss0");
     assert_eq!(gnss["last_t_ns"], 0);
     assert_eq!(gnss["age_ms"], Value::Null);
@@ -134,42 +144,110 @@ fn nothing_running_is_not_present_with_null_blocks() {
 }
 
 #[test]
+fn a_stale_stream_table_empties_every_block() {
+    // The sidecars exist, but ados-clock stopped rewriting them: nothing is
+    // reported from them, not the rig, the hub, the FC nor GNSS.
+    let dir = tempfile::tempdir().unwrap();
+    let p = paths(dir.path());
+    seed(&p);
+    write(
+        p.sidecar("gnss.json"),
+        r#"{"version":1,"receivers":[{"fix":"3d","sats":9,"hdop":0.9,"rtk":"none"}]}"#,
+    );
+    let later = SystemTime::now() + Duration::from_secs(30);
+    let fc = FcView {
+        connected: true,
+        autopilot: None,
+    };
+    let body = sensors_body(&p, later, 0, Some(fc));
+    assert_eq!(body["present"], false);
+    for key in ["hub", "fc", "gnss", "rig_id", "calib_version"] {
+        assert_eq!(body[key], Value::Null, "{key}");
+    }
+    assert_eq!(body["sensors"], json!([]));
+}
+
+#[test]
 fn a_stale_hub_reads_as_configured_but_disconnected() {
     let dir = tempfile::tempdir().unwrap();
     let p = paths(dir.path());
     seed(&p);
-    let later = SystemTime::now() + Duration::from_secs(30);
-    let body = sensors_body(&p, later, 0, None);
-    assert_eq!(body["present"], false);
+    let hub = std::fs::File::options()
+        .write(true)
+        .open(p.sidecar("sensorhub.json"))
+        .unwrap();
+    hub.set_modified(SystemTime::now() - Duration::from_secs(30))
+        .unwrap();
+    let body = sensors_body(&p, SystemTime::now(), 0, None);
+    assert_eq!(body["present"], true);
     assert_eq!(body["hub"]["connected"], false);
+    // No live hub rate: hub streams carry no expectation.
+    assert_eq!(body["sensors"][0]["expected_hz"], Value::Null);
+}
+
+#[test]
+fn each_hub_imu_expects_the_per_imu_odr() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = paths(dir.path());
+    seed(&p);
+    write(
+        p.sidecar("sensors.json"),
+        r#"{"version":1,"updated_ns":5,"streams":[
+          {"kind":"imu","src":"imu0","origin":"hub","rate_hz":1000.0,"last_t_ns":1,"last_rx_ns":1,"count":9},
+          {"kind":"imu","src":"imu1","origin":"hub","rate_hz":1000.0,"last_t_ns":1,"last_rx_ns":1,"count":9}]}"#,
+    );
+    let body = sensors_body(&p, SystemTime::now(), 0, None);
+    assert_eq!(body["sensors"][0]["expected_hz"], 1000.0);
+    assert_eq!(body["sensors"][1]["expected_hz"], 1000.0);
+}
+
+async fn json_of(resp: Response) -> Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
 }
 
 #[tokio::test]
-async fn the_rig_write_validates_then_stores() {
+async fn the_rig_write_validates_stores_then_reloads_the_hub() {
+    use std::sync::{Arc, Mutex};
     let dir = tempfile::tempdir().unwrap();
     let p = paths(dir.path());
-    let ok = put_rig_at(&p, RIG.as_bytes());
+    let calls: Arc<Mutex<Vec<String>>> = Arc::default();
+    let put = |body: &'static [u8]| {
+        let calls = calls.clone();
+        put_rig_with(
+            p.clone(),
+            axum::body::Bytes::from_static(body),
+            move |program, args| {
+                calls
+                    .lock()
+                    .unwrap()
+                    .push(format!("{program} {}", args.join(" ")));
+                async { true }
+            },
+        )
+    };
+
+    let ok = put(RIG.as_bytes()).await;
     assert_eq!(ok.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(ok.into_body(), 1 << 16).await.unwrap();
-    let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(
-        v,
+        json_of(ok).await,
         json!({"ok": true, "rig_id": "visor-pro-01", "calib_version": "2026-10-19a"})
     );
     assert_eq!(read_rig(&p).unwrap().sensors.len(), 3);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        ["systemctl --no-block reload-or-restart ados-sensorhub.service"]
+    );
 
-    let bad = put_rig_at(&p, br#"{"contract":"ados.capture/1","rig_id":"x"}"#);
+    let bad = put(br#"{"contract":"ados.capture/1","rig_id":"x"}"#).await;
     assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-    let bytes = axum::body::to_bytes(bad.into_body(), 1 << 16)
-        .await
-        .unwrap();
-    let v: Value = serde_json::from_slice(&bytes).unwrap();
+    let v = json_of(bad).await;
     assert_eq!(v["error"], "E_RIG_INVALID");
     assert!(v["detail"].as_str().is_some());
-    assert_eq!(
-        put_rig_at(&p, b"not json").status(),
-        StatusCode::BAD_REQUEST
-    );
-    // The stored rig is the earlier valid one.
+    assert_eq!(put(b"not json").await.status(), StatusCode::BAD_REQUEST);
+    // A refused write reloads nothing, and the stored rig is the earlier one.
+    assert_eq!(calls.lock().unwrap().len(), 1);
     assert_eq!(read_rig(&p).unwrap().rig_id, "visor-pro-01");
 }

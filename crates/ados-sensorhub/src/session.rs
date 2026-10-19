@@ -127,3 +127,65 @@ async fn forward_rtcm<W: AsyncWrite + Unpin>(
 pub fn lock(state: &SharedState) -> std::sync::MutexGuard<'_, crate::state::HubState> {
     state.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ados_sensorbus::Origin;
+    use ados_sensorhub_proto::{Hello, ImuBatch, ImuSample, ImuSamples};
+
+    #[tokio::test]
+    async fn an_unsupported_hello_ends_the_session_without_reading_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let publisher = Publisher::spawn(dir.path().join("sensors.sock"), Origin::Hub);
+        let (_tx, mut rtcm) = mpsc::channel(1);
+        let state = SharedState::default();
+        let cfg = HubConfig::default();
+        let ext = Extrinsics::default();
+        let (host, mut hub) = tokio::io::duplex(1 << 16);
+
+        // One write: a v2 Hello, then an IMU batch the v1 decoder could parse.
+        let samples = [ImuSample::default(); 4];
+        let mut wire = encode(&Packet::Hello(Hello {
+            proto_ver: 2,
+            fw_major: 1,
+            fw_minor: 0,
+            fw_patch: 0,
+            board_id: 0,
+            caps: 0,
+            uid: [0; 12],
+            board_name: [0; 16],
+        }))
+        .unwrap();
+        wire.extend(
+            encode(&Packet::ImuBatch(ImuBatch {
+                t0_ns: 1,
+                dt_ns: 1_000_000,
+                imu_id: 0,
+                flags: 0,
+                seq0: 0,
+                samples: ImuSamples::Typed(&samples),
+            }))
+            .unwrap(),
+        );
+        hub.write_all(&wire).await.unwrap();
+
+        let ctx = SessionCtx {
+            cfg: &cfg,
+            ext: &ext,
+            publisher: &publisher,
+            rtcm: &mut rtcm,
+            state: &state,
+        };
+        let (end, _) = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_session(Box::new(host), ctx, std::future::pending()),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(end, SessionEnd::Unsupported(2)), "{end:?}");
+        let st = lock(&state);
+        assert_eq!(st.imu_samples, 0);
+        assert_eq!(st.hello.as_ref().map(|h| h.proto_ver), Some(2));
+    }
+}

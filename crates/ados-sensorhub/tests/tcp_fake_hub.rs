@@ -16,7 +16,7 @@ use ados_sensorhub::session::Stop;
 use ados_sensorhub::stream::{encode, StreamDecoder};
 use ados_sensorhub_proto::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, UnixListener};
+use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Notify};
 
 const RTCM_LEN: usize = 1500;
@@ -129,7 +129,7 @@ async fn a_fake_hub_session_reaches_the_bus_and_rtcm_reaches_the_hub() {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("sensors.sock");
     let sidecar = dir.path().join("sensorhub.json");
-    let listener = UnixListener::bind(&socket).unwrap();
+    let listener = ados_protocol::ipc::bind_command_socket(&socket, 0o660).unwrap();
     tokio::spawn(serve(listener, None, Arc::new(BrokerStats::default())));
 
     let hub = TcpListener::bind("127.0.0.1:0").await.unwrap();

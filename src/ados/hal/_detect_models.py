@@ -337,9 +337,13 @@ class GnssBinding(BaseModel):
 
 
 class SensorHubBinding(BaseModel):
-    """A USB sensor hub the board carries, matched by its CDC VID:PID."""
+    """A USB sensor hub the board carries.
 
-    usb_vid_pid: str = "1209:ad05"
+    Only the hub firmware's CDC id ``1209:ad05`` is a hub; the same boards on
+    stock ArduPilot (``1209:5741``) are flight controllers, never a hub.
+    """
+
+    usb_vid_pid: str = Field(default="1209:ad05", pattern=r"^1209:(ad05|AD05)$")
     board: str | None = None
 
 

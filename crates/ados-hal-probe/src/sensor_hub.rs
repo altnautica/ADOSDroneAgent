@@ -77,21 +77,21 @@ pub struct SensorHubPresence {
 /// nodes (pure). A board that declares a hub always gets an object
 /// (`present: false` while unplugged); a board that declares none gets one
 /// only when a hub is actually attached.
+///
+/// Only the hub firmware's `1209:ad05` is a hub. The same boards running stock
+/// ArduPilot (`1209:5741`) are flight controllers the MAVLink router owns, so
+/// a binding naming any other id is refused (logged) rather than claiming an
+/// FC port as a hub.
 pub fn detect(binding: Option<&SensorHubBinding>, ttys: &[UsbTty]) -> Option<SensorHubPresence> {
-    let declared = binding
-        .map(|b| b.usb_vid_pid.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| SENSOR_HUB_VID_PID.to_string());
-    let (vid_pid, (vid, pid)) = match parse_vid_pid(&declared) {
-        Some(ids) => (declared, ids),
-        None => {
+    let (vid, pid) = parse_vid_pid(SENSOR_HUB_VID_PID)?;
+    if let Some(b) = binding {
+        if parse_vid_pid(&b.usb_vid_pid) != Some((vid, pid)) {
             tracing::warn!(
-                usb_vid_pid = %declared,
-                "sensor hub binding VID:PID unparseable; using the firmware default"
+                usb_vid_pid = %b.usb_vid_pid,
+                "sensor hub binding names a USB id other than the hub firmware's; ignored"
             );
-            let ids = parse_vid_pid(SENSOR_HUB_VID_PID)?;
-            (SENSOR_HUB_VID_PID.to_string(), ids)
         }
-    };
+    }
     let device = ttys
         .iter()
         .find(|t| t.vid == vid && t.pid == pid)
@@ -102,7 +102,7 @@ pub fn detect(binding: Option<&SensorHubBinding>, ttys: &[UsbTty]) -> Option<Sen
     Some(SensorHubPresence {
         present: device.is_some(),
         device,
-        vid_pid,
+        vid_pid: SENSOR_HUB_VID_PID.to_string(),
     })
 }
 
@@ -194,14 +194,56 @@ mod tests {
         let p = detect(Some(&binding), std::slice::from_ref(&fc)).unwrap();
         assert!(!p.present);
         assert_eq!(p.device, None);
-        // A declared custom id matches that id only.
-        let custom = SensorHubBinding {
+        // A binding naming the stock-ArduPilot id never turns the FC into a
+        // hub: only the firmware id counts.
+        let ardupilot = SensorHubBinding {
             usb_vid_pid: "1209:5741".into(),
             board: None,
         };
-        let p = detect(Some(&custom), &[fc, hub]).unwrap();
-        assert_eq!(p.device.as_deref(), Some("/dev/ttyACM0"));
-        assert_eq!(p.vid_pid, "1209:5741");
+        let p = detect(Some(&ardupilot), std::slice::from_ref(&fc)).unwrap();
+        assert!(!p.present);
+        assert_eq!(p.vid_pid, "1209:ad05");
+        let p = detect(Some(&ardupilot), &[fc, hub]).unwrap();
+        assert_eq!(p.device.as_deref(), Some("/dev/ttyACM1"));
+    }
+
+    /// The shipped hot-plug rule keys on exactly the hub firmware id and keeps
+    /// the same marker this module writes at boot.
+    #[test]
+    fn the_udev_rule_mirrors_the_hub_presence_marker() {
+        let rule = include_str!("../../../data/udev/99-ados-sensorhub.rules");
+        let active: Vec<&str> = rule
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+            .collect();
+        let joined = active.join("\n");
+        let (vid, pid) = SENSOR_HUB_VID_PID.split_once(':').unwrap();
+        let add = active
+            .iter()
+            .find(|l| l.contains("ACTION==\"add\""))
+            .unwrap();
+        let remove = active
+            .iter()
+            .find(|l| l.contains("ACTION==\"remove\""))
+            .unwrap();
+        for line in [add, remove] {
+            assert!(
+                line.contains(&format!("ENV{{ID_VENDOR_ID}}==\"{vid}\"")),
+                "{line}"
+            );
+            assert!(
+                line.contains(&format!("ENV{{ID_MODEL_ID}}==\"{pid}\"")),
+                "{line}"
+            );
+            assert!(line.contains("KERNEL==\"ttyACM*\""), "{line}");
+        }
+        assert!(add.contains("touch /run/ados/sensor-hub-present"));
+        assert!(add.contains("ENV{SYSTEMD_WANTS}+=\"ados-sensorhub.service\""));
+        assert!(add.contains("TAG+=\"systemd\""));
+        assert!(remove.contains("rm -f /run/ados/sensor-hub-present"));
+        assert!(!joined.contains("5741"));
+        // The marker the rule writes is the one the board probe writes.
+        assert!(marker_path().ends_with("sensor-hub-present"));
     }
 
     #[test]

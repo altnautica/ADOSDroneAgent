@@ -1,8 +1,9 @@
 [Unit]
 Description=ADOS Sensor Hub (USB IMU / trigger / GNSS co-processor)
 PartOf=ados-supervisor.service
-# Runs when a hub is attached (the hardware probe drops the present marker on
-# a matching USB device) or the config names an explicit transport (the
+# Runs when a hub is attached (the boot hardware probe and the hot-plug
+# ados-sensorhub udev rules keep the present marker in step with a
+# 1209:ad05 device) or the config names an explicit transport (the
 # enabled marker mirrors sensors.hub.transport). Either one suffices.
 ConditionPathExists=|/run/ados/sensor-hub-present
 ConditionPathExists=|/etc/ados/sensorhub-enabled

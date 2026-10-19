@@ -73,6 +73,7 @@ pub fn dropin_files() -> Vec<&'static str> {
         "/etc/udev/rules.d/99-ados-wifi-powersave.rules",
         "/etc/udev/rules.d/99-ados-usb-no-autosuspend.rules",
         "/etc/udev/rules.d/99-ados-eth-no-eee.rules",
+        "/etc/udev/rules.d/99-ados-sensorhub.rules",
         "/etc/NetworkManager/conf.d/99-ados-wifi-powersave.conf",
         "/etc/modprobe.d/ados-aic8800.conf",
         "/etc/systemd/logind.conf.d/90-ados-no-idle.conf",
