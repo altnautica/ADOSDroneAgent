@@ -19,7 +19,7 @@ use super::args::{
 /// is the domain's permitted set (empty = could not determine); `posture` is
 /// the regulatory posture the receive plane runs under (the same resolver the
 /// drone uses), `None` when it was not resolved. Resolved by
-/// `prepare_interface` and stored on the manager so every sidecar write carries
+/// `prepare_interfaces` and stored on the manager so every sidecar write carries
 /// the same regulatory truth instead of nothing.
 #[derive(Debug, Clone, Default)]
 pub struct GsRegSnapshot {
@@ -43,7 +43,7 @@ fn reg_posture_json(posture: Option<&Posture>) -> serde_json::Value {
 }
 
 /// The posture from the agent config, for the sidecar writers that run before
-/// `prepare_interface` resolved one.
+/// `prepare_interfaces` resolved one.
 fn configured_posture() -> GsRegSnapshot {
     GsRegSnapshot {
         posture: Some(Posture::load(std::path::Path::new(
@@ -71,7 +71,7 @@ pub struct GsChannelTruth {
 ///
 /// Default (no adapter resolved yet) is the honest unknown: no chipset, no
 /// injection claim, no USB speed reading, no degraded verdict. A resolved
-/// adapter always carries a chipset (`From<&SelectedAdapter>` sets it), so
+/// adapter always carries a chipset (`From<&DetectedAdapter>` sets it), so
 /// `chipset.is_some()` is the resolved marker the sidecar keys its verdicts
 /// on: an unresolved record emits `null` for both `adapter_injection_ok` and
 /// `adapter_usb_degraded` — never a confident boolean about hardware nothing
@@ -105,12 +105,12 @@ impl GsAdapterInfo {
     }
 }
 
-impl From<&ados_radio::adapter::SelectedAdapter> for GsAdapterInfo {
-    fn from(sel: &ados_radio::adapter::SelectedAdapter) -> Self {
+impl From<&ados_radio::adapter::DetectedAdapter> for GsAdapterInfo {
+    fn from(adapter: &ados_radio::adapter::DetectedAdapter) -> Self {
         Self::new(
-            Some(sel.chipset.clone()),
-            sel.injection_ok,
-            sel.usb_speed_mbps,
+            Some(adapter.chipset.clone()),
+            adapter.verified,
+            adapter.usb_speed_mbps,
         )
     }
 }
@@ -196,7 +196,7 @@ pub fn write_reg_blocked_sidecar(
 /// USB speed/degraded facts ride verbatim so the panel shows WHY the link is
 /// stuck rather than a blank. Atomic via the Contract E writer.
 ///
-/// The regulatory gate has not run in this arm (it precedes `prepare_interface`),
+/// The regulatory gate has not run in this arm (it precedes `prepare_interfaces`),
 /// so the live reg picture is the honest unknown default — never a stale claim
 /// from a prior generation; only the configured posture rides.
 ///
@@ -385,7 +385,7 @@ pub fn build_gs_stats(
     // measurement) rather than shipping -100 dBm as if it were a real weak-signal
     // reading (the same gate the drone-side sidecar uses, so both rigs agree).
     let measured = snap.packets_received > 0;
-    serde_json::json!({
+    let mut body = serde_json::json!({
         // Sidecar schema version (best-effort drift signal for readers). Shared
         // with the drone-side writer via the one const so both rigs agree.
         "version": ados_radio::paths::WFB_STATS_SIDECAR_VERSION,
@@ -394,6 +394,8 @@ pub fn build_gs_stats(
         "state": state,
         // The state-machine state under its own key, mirroring the drone side.
         "link_state": state,
+        // The transmit (primary) adapter. Every adapter, receive-only ones
+        // included, is listed under `adapters`.
         "interface": interface,
         "adapter_chipset": adapter.chipset,
         // A verdict only once an adapter was actually resolved (a chipset is
@@ -499,7 +501,15 @@ pub fn build_gs_stats(
         "bitrate_kbps": snap.bitrate_kbps,
         "loss_percent": snap.loss_percent,
         "timestamp": snap.timestamp,
-    })
+    });
+    // Version 2: the per-adapter list and the diversity block. Empty here; the
+    // stats reader overwrites both from the live stream, so every other writer
+    // (blocked, no adapter, reg-blocked) carries the honest empty shape.
+    super::adapter_stats::insert_body(
+        &mut body,
+        &ados_protocol::radio_adapters::RadioAdaptersBody::default(),
+    );
+    body
 }
 
 /// Convert a JSON object into the logging store's open detail map (`Fields`), so
@@ -1131,10 +1141,13 @@ mod tests {
         // The resolved adapter record is the one source the sidecar reads, so no
         // fact may be dropped on the way through (the drop is what left the
         // ground sidecar reporting a default chipset and a fixed injection claim).
-        let sel = ados_radio::adapter::SelectedAdapter {
+        let sel = ados_radio::adapter::DetectedAdapter {
             ifname: "wlan1".to_string(),
+            mac: None,
+            usb_path: None,
+            driver: "rtl88x2eu".to_string(),
             chipset: "rtl88x2eu".to_string(),
-            injection_ok: true,
+            verified: true,
             usb_speed_mbps: Some(12),
             usb_degraded: true,
         };

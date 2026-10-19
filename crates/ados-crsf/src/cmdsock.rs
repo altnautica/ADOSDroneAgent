@@ -8,10 +8,10 @@
 //! {"op":"status"}
 //!     -> {"ok":true, …the current sidecar body…}
 //! {"op":"set_channels","channels":[992, …16 values…],"ttl_ms":1000,
-//!  "client_id":"ai-1","client_ticket":"v1|crsf.inject:ai-1|…"}
-//!     -> {"ok":true,"channels":[…],"ttl_ms":1000,"channel_source":"inject","authority":"…"}
+//!  "client_id":"ai-1","client_ticket":"v1|crsf.inject:ai-1|…","module":"m1"}
+//!     -> {"ok":true,"channels":[…],"ttl_ms":1000,"channel_source":"inject","authority":"…","module":"m1"}
 //! {"op":"set_channel","index":4,"value":1811,"ttl_ms":1000,"client_id":"ai-1"}
-//!     -> {"ok":true,"index":4,"value":1811,"ttl_ms":1000,"channel_source":"inject","authority":"…"}
+//!     -> {"ok":true,"index":4,"value":1811,"ttl_ms":1000,"channel_source":"inject","authority":"…","module":"m0"}
 //! {"op":"param_write","field_index":3,"data":[2]}
 //!     -> {"ok":true,"field_index":3,"queued":true}
 //! ```
@@ -23,6 +23,16 @@
 //! codec itself. `queued:true` means the frame is on the wire lane, not that
 //! the module acknowledged it; the module's response (a settings entry)
 //! arrives on the telemetry stream.
+//!
+//! `module` addresses one RC module of the lane by id. Absent, or naming the
+//! pilot module, the injection lands on the pilot lane's merge (the configured
+//! channel-source authority). Naming an `autonomy` module lands it on that
+//! module's inject-only merge. Any other id is refused with
+//! `E_UNKNOWN_MODULE`. The reply echoes the module the injection landed on.
+//! The socket is served for the whole service pass, so each module is
+//! addressable on its own; a write (injection or `param_write`, which targets
+//! the pilot module) to a module whose serial port is down is refused with
+//! `E_MODULE_DISCONNECTED`.
 //!
 //! Every injection carries a time-to-live (`ttl_ms`, clamped into the allowed
 //! window, defaulting when absent): a silent injector stops feeding the lane
@@ -48,6 +58,7 @@
 //! a human. Naming the holder is no longer enough to become them.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -73,16 +84,84 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
 /// The shared lane state the command handlers touch: the source merge (the
 /// injection writer's target and the TX task's reader) and the latest sidecar
-/// body the status verb serves. Both outlive a single serial bring-up.
+/// body the status verb serves. All of it outlives a single serial bring-up:
+/// the socket is served for the whole service pass, so an autonomy module stays
+/// addressable while the pilot module's port is down.
 #[derive(Clone)]
 pub struct CmdState {
     pub merge: Arc<Mutex<SourceMerge>>,
     pub latest_status: Arc<Mutex<Value>>,
-    /// The out-of-band frame lane the TX task drains between RC frames;
-    /// parameter writes ride it.
+    /// The pilot module's out-of-band frame lane the TX task drains between
+    /// RC frames; parameter writes ride it. Emptied at every bring-up so a
+    /// frame queued for a dead port never fires on a fresh one.
     pub oob: Arc<OobQueue>,
     /// Turns a claimed injector name into an attested one, or into nothing.
     pub injector_auth: Arc<InjectorAuth>,
+    /// The lane's module addressing for channel injection.
+    pub modules: Arc<ModuleTargets>,
+}
+
+/// One autonomy module as the command socket addresses it.
+pub struct ModuleTarget {
+    pub id: String,
+    /// Its inject-only merge.
+    pub merge: Arc<Mutex<SourceMerge>>,
+    /// True while its serial transport is open.
+    pub connected: Arc<AtomicBool>,
+}
+
+/// Where an injection addressed by module id lands: the pilot module (its
+/// merge is [`CmdState::merge`]) and each autonomy module. A module whose
+/// transport is down refuses writes with `E_MODULE_DISCONNECTED`: nothing
+/// would carry them, and accepting them would read as a live lane.
+pub struct ModuleTargets {
+    pub pilot_id: Option<String>,
+    /// True while the pilot module's serial transport is open.
+    pub pilot_connected: Arc<AtomicBool>,
+    pub autonomy: Vec<ModuleTarget>,
+}
+
+fn disconnected_reply(id: Option<&str>) -> Value {
+    error_reply(format!("E_MODULE_DISCONNECTED: {}", id.unwrap_or("pilot")))
+}
+
+impl ModuleTargets {
+    /// Refuse a pilot-lane write while the pilot transport is down.
+    fn pilot_ready(&self) -> Result<(), Value> {
+        if self.pilot_connected.load(Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err(disconnected_reply(self.pilot_id.as_deref()))
+        }
+    }
+
+    /// The merge an injection addressed to `module` lands on, with the module
+    /// id to echo. `Err` carries the refusal reply for an unknown id or a
+    /// module whose transport is down.
+    fn target<'a>(
+        &'a self,
+        pilot: &'a Arc<Mutex<SourceMerge>>,
+        module: Option<&str>,
+    ) -> Result<(&'a Arc<Mutex<SourceMerge>>, Option<&'a str>), Value> {
+        let pilot_id = self.pilot_id.as_deref();
+        match module {
+            Some(id) if Some(id) != pilot_id => {
+                let target = self
+                    .autonomy
+                    .iter()
+                    .find(|t| t.id == id)
+                    .ok_or_else(|| error_reply(format!("E_UNKNOWN_MODULE: {id}")))?;
+                if !target.connected.load(Ordering::Relaxed) {
+                    return Err(disconnected_reply(Some(&target.id)));
+                }
+                Ok((&target.merge, Some(target.id.as_str())))
+            }
+            _ => {
+                self.pilot_ready()?;
+                Ok((pilot, pilot_id))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,6 +183,8 @@ struct Request {
     field_index: Option<u8>,
     #[serde(default)]
     data: Option<Vec<u8>>,
+    #[serde(default)]
+    module: Option<String>,
 }
 
 /// Bind the command socket and serve one-shot requests until the listener
@@ -135,12 +216,14 @@ enum Command {
         channels: [u16; CHANNEL_COUNT],
         ttl: Duration,
         claim: InjectorClaim,
+        module: Option<String>,
     },
     SetChannel {
         index: usize,
         value: u16,
         ttl: Duration,
         claim: InjectorClaim,
+        module: Option<String>,
     },
     ParamWrite {
         field_index: u8,
@@ -223,6 +306,7 @@ fn parse_command(line: &[u8]) -> Parsed {
                     client_id: req.client_id,
                     ticket: req.client_ticket,
                 },
+                module: req.module,
             })
         }
         "set_channel" => {
@@ -246,6 +330,7 @@ fn parse_command(line: &[u8]) -> Parsed {
                     client_id: req.client_id,
                     ticket: req.client_ticket,
                 },
+                module: req.module,
             })
         }
         "param_write" => {
@@ -293,10 +378,15 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
             channels,
             ttl,
             claim,
+            module,
         } => {
+            let (target, module_id) = match state.modules.target(&state.merge, module.as_deref()) {
+                Ok(t) => t,
+                Err(reply) => return reply,
+            };
             let verified = claim.resolve(&state.injector_auth);
             let now = Instant::now();
-            let mut merge = state.merge.lock().await;
+            let mut merge = target.lock().await;
             match merge.inject_all(channels, ttl, now, verified) {
                 Ok(()) => json!({
                     "ok": true,
@@ -304,6 +394,7 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
                     "ttl_ms": ttl.as_millis() as u64,
                     "channel_source": crate::sources::ChannelSource::Inject.as_str(),
                     "authority": merge.authority(now).as_str(),
+                    "module": module_id,
                 }),
                 Err(e) => bank_error_reply(e),
             }
@@ -313,10 +404,15 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
             value,
             ttl,
             claim,
+            module,
         } => {
+            let (target, module_id) = match state.modules.target(&state.merge, module.as_deref()) {
+                Ok(t) => t,
+                Err(reply) => return reply,
+            };
             let verified = claim.resolve(&state.injector_auth);
             let now = Instant::now();
-            let mut merge = state.merge.lock().await;
+            let mut merge = target.lock().await;
             match merge.inject_one(index, value, ttl, now, verified) {
                 Ok(()) => json!({
                     "ok": true,
@@ -325,11 +421,15 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
                     "ttl_ms": ttl.as_millis() as u64,
                     "channel_source": crate::sources::ChannelSource::Inject.as_str(),
                     "authority": merge.authority(now).as_str(),
+                    "module": module_id,
                 }),
                 Err(e) => bank_error_reply(e),
             }
         }
         Command::ParamWrite { field_index, data } => {
+            if let Err(reply) = state.modules.pilot_ready() {
+                return reply;
+            }
             // Frame the write toward the RC module (handset-originated) and
             // queue it on the out-of-band lane; the transmitter drains it
             // after the next RC frame.
@@ -365,333 +465,4 @@ fn bank_error_reply(e: BankError) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::sources::{ChannelSourceMode, MAX_INJECT_TTL, MIN_INJECT_TTL};
-
-    fn state() -> CmdState {
-        state_with(ChannelSourceMode::Inject)
-    }
-
-    fn state_with(mode: ChannelSourceMode) -> CmdState {
-        CmdState {
-            merge: Arc::new(Mutex::new(SourceMerge::new(mode))),
-            latest_status: Arc::new(Mutex::new(Value::Null)),
-            oob: Arc::new(OobQueue::default()),
-            // An unpaired node: no key exists, so a claimed name stands, which
-            // is the posture every native surface takes while unclaimed.
-            injector_auth: Arc::new(InjectorAuth::new(std::path::PathBuf::from(
-                "/nonexistent/pairing.json",
-            ))),
-        }
-    }
-
-    #[test]
-    fn parse_rejects_malformed_json() {
-        match parse_command(b"not json") {
-            Parsed::Reply(v) => {
-                assert_eq!(v["ok"], false);
-                assert!(v["error"].as_str().unwrap().starts_with("E_BAD_REQUEST"));
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_rejects_unknown_op_and_missing_fields() {
-        match parse_command(br#"{"op":"reboot"}"#) {
-            Parsed::Reply(v) => assert_eq!(v["error"], "E_UNKNOWN_OP: reboot"),
-            other => panic!("unexpected {other:?}"),
-        }
-        match parse_command(br#"{"op":"set_channels"}"#) {
-            Parsed::Reply(v) => assert_eq!(v["error"], "E_MISSING_CHANNELS"),
-            other => panic!("unexpected {other:?}"),
-        }
-        match parse_command(br#"{"op":"set_channel","index":1}"#) {
-            Parsed::Reply(v) => assert_eq!(v["error"], "E_MISSING_VALUE"),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_rejects_wrong_count_and_out_of_range_values() {
-        match parse_command(br#"{"op":"set_channels","channels":[992, 992]}"#) {
-            Parsed::Reply(v) => assert_eq!(v["error"], "E_BAD_CHANNEL_COUNT"),
-            other => panic!("unexpected {other:?}"),
-        }
-        let mut chans = vec![992u16; 16];
-        chans[3] = 2000;
-        let line = serde_json::to_vec(&json!({"op":"set_channels","channels":chans})).unwrap();
-        match parse_command(&line) {
-            Parsed::Reply(v) => assert_eq!(v["error"], "E_BAD_CHANNEL_VALUE: 2000"),
-            other => panic!("unexpected {other:?}"),
-        }
-        match parse_command(br#"{"op":"set_channel","index":16,"value":992}"#) {
-            Parsed::Reply(v) => assert_eq!(v["error"], "E_BAD_CHANNEL_INDEX: 16"),
-            other => panic!("unexpected {other:?}"),
-        }
-        match parse_command(br#"{"op":"set_channel","index":0,"value":171}"#) {
-            Parsed::Reply(v) => assert_eq!(v["error"], "E_BAD_CHANNEL_VALUE: 171"),
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_accepts_valid_commands_with_ttl_and_client() {
-        assert_eq!(
-            parse_command(br#"{"op":"status"}"#),
-            Parsed::Cmd(Command::Status)
-        );
-        assert_eq!(
-            parse_command(
-                br#"{"op":"set_channel","index":4,"value":1811,"ttl_ms":700,"client_id":"ai"}"#
-            ),
-            Parsed::Cmd(Command::SetChannel {
-                index: 4,
-                value: 1811,
-                ttl: Duration::from_millis(700),
-                claim: InjectorClaim {
-                    client_id: Some("ai".to_string()),
-                    ticket: None,
-                },
-            })
-        );
-        // Absent ttl defaults; out-of-window ttl clamps at parse time.
-        match parse_command(br#"{"op":"set_channel","index":0,"value":992}"#) {
-            Parsed::Cmd(Command::SetChannel { ttl, .. }) => {
-                assert_eq!(ttl, DEFAULT_INJECT_TTL);
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-        match parse_command(br#"{"op":"set_channel","index":0,"value":992,"ttl_ms":1}"#) {
-            Parsed::Cmd(Command::SetChannel { ttl, .. }) => assert_eq!(ttl, MIN_INJECT_TTL),
-            other => panic!("unexpected {other:?}"),
-        }
-        match parse_command(br#"{"op":"set_channel","index":0,"value":992,"ttl_ms":999999}"#) {
-            Parsed::Cmd(Command::SetChannel { ttl, .. }) => assert_eq!(ttl, MAX_INJECT_TTL),
-            other => panic!("unexpected {other:?}"),
-        }
-        let line =
-            serde_json::to_vec(&json!({"op":"set_channels","channels":vec![992u16;16]})).unwrap();
-        match parse_command(&line) {
-            Parsed::Cmd(Command::SetChannels {
-                channels,
-                ttl,
-                claim,
-            }) => {
-                assert_eq!(channels, [992u16; 16]);
-                assert_eq!(ttl, DEFAULT_INJECT_TTL);
-                assert_eq!(claim, InjectorClaim::default());
-            }
-            other => panic!("unexpected {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn apply_set_channels_updates_the_merge() {
-        let st = state();
-        let resp = dispatch(
-            &serde_json::to_vec(&json!({"op":"set_channels","channels":vec![1000u16;16]})).unwrap(),
-            &st,
-        )
-        .await;
-        assert_eq!(resp["ok"], true);
-        assert_eq!(resp["channel_source"], "inject");
-        assert_eq!(resp["authority"], "inject");
-        assert_eq!(resp["ttl_ms"], DEFAULT_INJECT_TTL.as_millis() as u64);
-        let (values, src) = st.merge.lock().await.current(Instant::now()).unwrap();
-        assert_eq!(values, [1000u16; 16]);
-        assert_eq!(src.as_str(), "inject");
-    }
-
-    #[tokio::test]
-    async fn apply_set_channel_updates_one_slot() {
-        let st = state();
-        let resp = dispatch(br#"{"op":"set_channel","index":7,"value":1500}"#, &st).await;
-        assert_eq!(resp["ok"], true);
-        let (values, _) = st.merge.lock().await.current(Instant::now()).unwrap();
-        assert_eq!(values[7], 1500);
-    }
-
-    #[tokio::test]
-    async fn injection_under_hid_authority_reports_it() {
-        // In hid mode the injection is stored but the HID path holds
-        // authority; the reply must say so, never imply the values fly.
-        let st = state_with(ChannelSourceMode::Hid);
-        let resp = dispatch(
-            &serde_json::to_vec(&json!({"op":"set_channels","channels":vec![1000u16;16]})).unwrap(),
-            &st,
-        )
-        .await;
-        assert_eq!(resp["ok"], true);
-        assert_eq!(resp["authority"], "hid");
-        // Nothing is transmitted (no HID data): the injection did not leak
-        // through.
-        assert!(st.merge.lock().await.current(Instant::now()).is_none());
-    }
-
-    #[test]
-    fn parse_validates_param_write() {
-        match parse_command(br#"{"op":"param_write"}"#) {
-            Parsed::Reply(v) => assert_eq!(v["error"], "E_MISSING_FIELD_INDEX"),
-            other => panic!("unexpected {other:?}"),
-        }
-        let oversize = serde_json::to_vec(
-            &json!({"op":"param_write","field_index":1,"data":vec![0u8;MAX_PARAM_DATA+1]}),
-        )
-        .unwrap();
-        match parse_command(&oversize) {
-            Parsed::Reply(v) => assert!(v["error"]
-                .as_str()
-                .unwrap()
-                .starts_with("E_PARAM_DATA_TOO_LARGE")),
-            other => panic!("unexpected {other:?}"),
-        }
-        assert_eq!(
-            parse_command(br#"{"op":"param_write","field_index":3,"data":[2]}"#),
-            Parsed::Cmd(Command::ParamWrite {
-                field_index: 3,
-                data: vec![2],
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn param_write_queues_a_valid_wire_frame() {
-        let st = state();
-        let resp = dispatch(br#"{"op":"param_write","field_index":3,"data":[2]}"#, &st).await;
-        assert_eq!(resp["ok"], true);
-        assert_eq!(resp["field_index"], 3);
-        assert_eq!(resp["queued"], true);
-        let frames = st.oob.drain();
-        assert_eq!(frames.len(), 1);
-        let (frame, _) = crate::frame::parse_frame(&frames[0]).unwrap();
-        assert_eq!(frame.frame_type, crate::frame::TYPE_PARAMETER_WRITE);
-        let decoded = ParameterWrite::decode(&frame.payload).unwrap();
-        assert_eq!(decoded.dest, ADDR_TRANSMITTER_MODULE);
-        assert_eq!(decoded.origin, ADDR_HANDSET);
-        assert_eq!(decoded.field_index, 3);
-        assert_eq!(decoded.data, vec![2]);
-    }
-
-    #[tokio::test]
-    async fn param_write_reports_a_full_queue() {
-        let st = state();
-        for _ in 0..crate::transport::OOB_QUEUE_CAP {
-            let resp = dispatch(br#"{"op":"param_write","field_index":1,"data":[0]}"#, &st).await;
-            assert_eq!(resp["ok"], true);
-        }
-        let resp = dispatch(br#"{"op":"param_write","field_index":1,"data":[0]}"#, &st).await;
-        assert_eq!(resp["ok"], false);
-        assert_eq!(resp["error"], "E_QUEUE_FULL");
-    }
-
-    #[tokio::test]
-    async fn status_merges_the_latest_sidecar_body() {
-        let st = state();
-        // Before any heartbeat: honest null status.
-        let resp = dispatch(br#"{"op":"status"}"#, &st).await;
-        assert_eq!(resp["ok"], true);
-        assert!(resp["status"].is_null());
-        // After a heartbeat wrote a body: the body rides under ok:true.
-        *st.latest_status.lock().await = json!({"state": "ready", "rssi_dbm": null});
-        let resp = dispatch(br#"{"op":"status"}"#, &st).await;
-        assert_eq!(resp["ok"], true);
-        assert_eq!(resp["state"], "ready");
-        assert!(resp["rssi_dbm"].is_null());
-    }
-
-    #[tokio::test]
-    async fn end_to_end_over_a_real_unix_socket() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let dir = tempfile::tempdir().unwrap();
-        let sock = dir.path().join("crsf-cmd.sock");
-        let st = state();
-        let server = tokio::spawn({
-            let st = st.clone();
-            let sock = sock.clone();
-            async move {
-                let _ = serve(st, &sock).await;
-            }
-        });
-        // Wait for the socket to appear.
-        for _ in 0..100 {
-            if sock.exists() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let mut stream = tokio::net::UnixStream::connect(&sock).await.unwrap();
-        stream
-            .write_all(b"{\"op\":\"set_channel\",\"index\":2,\"value\":992}\n")
-            .await
-            .unwrap();
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.unwrap();
-        let resp: Value = serde_json::from_slice(&buf).unwrap();
-        assert_eq!(resp["ok"], true);
-        let (values, _) = st.merge.lock().await.current(Instant::now()).unwrap();
-        assert_eq!(values[2], 992);
-        server.abort();
-    }
-
-    /// A paired node: the command socket is group-reachable and the current
-    /// pilot-in-command holder's name is readable from the claim routes, so
-    /// echoing that name back used to hand the transmit lane to the caller.
-    #[tokio::test]
-    async fn naming_the_holder_no_longer_takes_the_lane_from_them() {
-        use crate::sources::PicView;
-
-        let dir = tempfile::tempdir().unwrap();
-        let pairing = dir.path().join("pairing.json");
-        std::fs::write(&pairing, r#"{"paired": true, "api_key": "node-key"}"#).unwrap();
-
-        let st = CmdState {
-            merge: Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Hybrid))),
-            latest_status: Arc::new(Mutex::new(Value::Null)),
-            oob: Arc::new(OobQueue::default()),
-            injector_auth: Arc::new(InjectorAuth::new(pairing.clone())),
-        };
-        // The human holds the claim, and the arbiter is reporting it.
-        st.merge.lock().await.set_pic(Some(PicView {
-            claimed: true,
-            holder: Some("operator-a".to_string()),
-        }));
-
-        // An injector that simply says it is the holder.
-        let resp = dispatch(
-            &serde_json::to_vec(&json!({
-                "op": "set_channels",
-                "channels": vec![1811u16; 16],
-                "client_id": "operator-a",
-            }))
-            .unwrap(),
-            &st,
-        )
-        .await;
-        assert_eq!(resp["ok"], true, "the injection is still accepted");
-        assert_eq!(
-            resp["authority"], "hid",
-            "an unattested claim on the holder's name must not win the lane"
-        );
-
-        // The same injector, now carrying a ticket the node minted for it.
-        let ticket = crate::injector::mint_injector_ticket(&pairing, "operator-a", 60).unwrap();
-        let resp = dispatch(
-            &serde_json::to_vec(&json!({
-                "op": "set_channels",
-                "channels": vec![1811u16; 16],
-                "client_id": "operator-a",
-                "client_ticket": ticket,
-            }))
-            .unwrap(),
-            &st,
-        )
-        .await;
-        assert_eq!(
-            resp["authority"], "inject",
-            "an attested holder is the one case the programmatic lane wins"
-        );
-    }
-}
+mod tests;

@@ -1,8 +1,11 @@
 //! One service pass of the `ados-crsf` daemon under one loaded config.
 
+use super::modules::{
+    autonomy_lanes, module_statuses, module_targets, publish_unconfigured, run_autonomy_module,
+    serve_command_socket,
+};
 use super::*;
 
-#[allow(unused_variables)] // `pass_scope` feeds the Linux-only HID source.
 pub(super) async fn run_service_pass(
     cfg: &CrsfLaneConfig,
     config_path: &Path,
@@ -109,6 +112,25 @@ pub(super) async fn run_service_pass(
         }
     }
 
+    // ── Module set ───────────────────────────────────────────────────────
+    // The pilot module is the RC lane this pass drives below; each autonomy
+    // module runs its own transport for the life of the pass (stopped by the
+    // pass-scope latch), injected through the command socket by module id.
+    let modules = cfg.resolved_modules();
+    let pilot = modules
+        .iter()
+        .find(|m| m.role == crate::modules::ModuleRole::Pilot)
+        .cloned();
+    let pilot_port = pilot.as_ref().map(|m| m.port.as_str()).unwrap_or("");
+    let autonomy = autonomy_lanes(&modules);
+    for lane in &autonomy {
+        tokio::spawn(run_autonomy_module(
+            lane.clone(),
+            cfg.packet_rate_hz,
+            pass_scope.clone(),
+        ));
+    }
+
     // Lane state shared across serial respawns: the channel-source merge the
     // TX task reads and the latest sidecar body the status verb serves.
     let merge = Arc::new(Mutex::new(SourceMerge::new(cfg.channel_source)));
@@ -117,6 +139,22 @@ pub(super) async fn run_service_pass(
     // attested one. Built once and shared: the read behind it is cached, so the
     // command path does not touch the filesystem per request.
     let injector_auth = Arc::new(crate::injector::InjectorAuth::from_env());
+    // The pilot module's out-of-band lane and transport flag, shared with the
+    // command socket, which is served for the whole pass so an autonomy module
+    // stays addressable while the pilot port is down.
+    let oob = Arc::new(crate::transport::OobQueue::default());
+    let pilot_connected = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _cmd_socket = serve_command_socket(CmdState {
+        merge: merge.clone(),
+        latest_status: latest_status.clone(),
+        oob: oob.clone(),
+        injector_auth,
+        modules: Arc::new(module_targets(
+            pilot.as_ref(),
+            pilot_connected.clone(),
+            &autonomy,
+        )),
+    });
 
     // The HID/PIC source: stick + switch intent from the primary gamepad,
     // fed into the merge for the whole service lifetime (the gamepad is
@@ -138,15 +176,9 @@ pub(super) async fn run_service_pass(
         }
 
         // ── Device guard ─────────────────────────────────────────────────
-        if cfg.device.is_empty() {
+        if pilot_port.is_empty() {
             tracing::info!("crsf_no_device_pinned");
-            let body = build_stats_value(LaneState::Unconfigured, &StatsInputs::default());
-            *latest_status.lock().await = body;
-            write_stats_sidecar(
-                LaneState::Unconfigured,
-                &StatsInputs::default(),
-                Some(&metrics),
-            );
+            publish_unconfigured(&latest_status, &metrics, pilot.as_ref(), &autonomy).await;
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown_flag(&mut shutdown) => return RunExit::Shutdown,
@@ -154,15 +186,9 @@ pub(super) async fn run_service_pass(
                 _ = tokio::time::sleep(RETRY_INTERVAL) => continue,
             }
         }
-        let Some(stream) = open_serial(&cfg.device, CRSF_BAUD) else {
-            tracing::warn!(device = %cfg.device, "crsf_serial_open_failed");
-            let body = build_stats_value(LaneState::Unconfigured, &StatsInputs::default());
-            *latest_status.lock().await = body;
-            write_stats_sidecar(
-                LaneState::Unconfigured,
-                &StatsInputs::default(),
-                Some(&metrics),
-            );
+        let Some(stream) = open_serial(pilot_port, CRSF_BAUD) else {
+            tracing::warn!(device = %pilot_port, "crsf_serial_open_failed");
+            publish_unconfigured(&latest_status, &metrics, pilot.as_ref(), &autonomy).await;
             tokio::select! {
                 biased;
                 _ = wait_for_shutdown_flag(&mut shutdown) => return RunExit::Shutdown,
@@ -170,7 +196,7 @@ pub(super) async fn run_service_pass(
                 _ = tokio::time::sleep(RETRY_INTERVAL) => continue,
             }
         };
-        tracing::info!(device = %cfg.device, baud = CRSF_BAUD, rate_hz = cfg.packet_rate_hz, "crsf_serial_open");
+        tracing::info!(device = %pilot_port, baud = CRSF_BAUD, rate_hz = cfg.packet_rate_hz, "crsf_serial_open");
 
         // ── Regulatory posture at link bring-up ──────────────────────────
         // One durable record per link session: the operator posture
@@ -186,9 +212,9 @@ pub(super) async fn run_service_pass(
         let (read_half, write_half) = tokio::io::split(stream);
         let counters = Arc::new(WireCounters::default());
         let telemetry = Arc::new(Mutex::new(TelemetryState::default()));
-        // Per-bring-up out-of-band lane: parameter frames queued for a port
-        // that dies die with it (a stale write must not fire on a fresh port).
-        let oob = Arc::new(crate::transport::OobQueue::default());
+        // Parameter frames queued for a port that died die with it: a stale
+        // write must not fire on a fresh port.
+        drop(oob.drain());
         let task_cancel = Shutdown::new();
 
         // Bridge the latched shutdown onto the per-bring-up cancel notify so
@@ -223,24 +249,7 @@ pub(super) async fn run_service_pass(
             merge.clone(),
             task_cancel.clone(),
         ));
-        let cmd_state = CmdState {
-            merge: merge.clone(),
-            latest_status: latest_status.clone(),
-            oob: oob.clone(),
-            injector_auth: injector_auth.clone(),
-        };
-        let cmd_cancel = task_cancel.clone();
-        let cmd_task = tokio::spawn(async move {
-            let sock = crate::paths::run_path("crsf-cmd.sock");
-            tokio::select! {
-                r = cmdsock::serve(cmd_state, Path::new(&sock)) => {
-                    if let Err(e) = r {
-                        tracing::warn!(error = %e, "crsf command socket failed");
-                    }
-                }
-                _ = cmd_cancel.wait() => {}
-            }
-        });
+        pilot_connected.store(true, Ordering::Relaxed);
 
         // ── Heartbeat loop ───────────────────────────────────────────────
         // When RC frames started flowing continuously. `None` while the lane
@@ -333,6 +342,8 @@ pub(super) async fn run_service_pass(
                 _ => None,
             };
             let source = merge.lock().await.current(now).map(|(_, s)| s.as_str());
+            let module_list =
+                module_statuses(pilot.as_ref(), true, fresh_link.as_ref(), &autonomy, now).await;
             let inputs = StatsInputs {
                 link: fresh_link.as_ref(),
                 // The operating band is a measurement the lane does not have
@@ -352,17 +363,18 @@ pub(super) async fn run_service_pass(
                 // MAVLink-over-ELRS command source to gate (config-derived, so
                 // it stays honest if the predicate ever changes).
                 fc_command_down_gated: cfg.fc_command_down_gated(),
+                modules: &module_list,
             };
             *latest_status.lock().await = build_stats_value(state, &inputs);
             write_stats_sidecar(state, &inputs, Some(&metrics));
         };
 
         // ── Teardown ─────────────────────────────────────────────────────
+        pilot_connected.store(false, Ordering::Relaxed);
         task_cancel.trigger();
         tx_task.abort();
         rx_task.abort();
         watchdog_task.abort();
-        cmd_task.abort();
         cancel_bridge.abort();
 
         if *shutdown.borrow() {
@@ -372,13 +384,7 @@ pub(super) async fn run_service_pass(
             return RunExit::Reload;
         }
         tracing::info!(reason = exit_reason, "crsf_lane_respawning");
-        let body = build_stats_value(LaneState::Unconfigured, &StatsInputs::default());
-        *latest_status.lock().await = body;
-        write_stats_sidecar(
-            LaneState::Unconfigured,
-            &StatsInputs::default(),
-            Some(&metrics),
-        );
+        publish_unconfigured(&latest_status, &metrics, pilot.as_ref(), &autonomy).await;
         tokio::select! {
             biased;
             _ = wait_for_shutdown_flag(&mut shutdown) => return RunExit::Shutdown,

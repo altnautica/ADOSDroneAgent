@@ -26,6 +26,7 @@ use ados_radio::link_quality::{LinkQualityMonitor, LinkStats};
 
 use crate::watchdog::{Clock, SharedRxHealth, RX_HEALTH_SILENCE_THRESHOLD_S};
 
+use super::adapter_stats::AdapterStatsTracker;
 use super::args::{RX_HEALTH_POLL_INTERVAL_S, STATE_ACTIVE, STATE_SEARCHING};
 use super::seams::{live_channel, DataRxHandle, SharedValidCounter};
 use super::stats::{
@@ -145,10 +146,10 @@ impl PublishGate {
     }
 }
 
-/// Read `wfb_rx` stdout line-by-line, feed the link monitor, update the shared
-/// counter + LinkStats + the stdout-liveness stamp, and write the ground
-/// `wfb-stats.json` sidecar when the snapshot moves. Ends on EOF (process death)
-/// or task abort.
+/// Read `wfb_rx` stdout line-by-line, feed the link monitor and the per-adapter
+/// tracker, update the shared counter + LinkStats + the stdout-liveness stamp,
+/// and write the ground `wfb-stats.json` sidecar when the snapshot moves. Ends
+/// on EOF (process death) or task abort.
 #[allow(clippy::too_many_arguments)]
 pub async fn stats_reader_loop(
     stdout: tokio::process::ChildStdout,
@@ -162,6 +163,7 @@ pub async fn stats_reader_loop(
     reg: GsRegSnapshot,
     cfg: WfbConfig,
     adapter: GsAdapterInfo,
+    mut adapters: AdapterStatsTracker,
     health: Option<SharedRxHealth>,
     zombie_kills: Arc<AtomicU32>,
     ingest: Option<IngestEmitter>,
@@ -184,6 +186,7 @@ pub async fn stats_reader_loop(
             continue;
         }
         let now_iso = now_iso();
+        adapters.feed_line(line);
         if let Some(snap) = mon.feed_line(line, &now_iso) {
             // Per-interval valid-decode count feeds the cumulative counter the
             // watchdog/acquirer poll.
@@ -251,6 +254,7 @@ pub async fn stats_reader_loop(
             // packets climbing but `fanout_forwarded` flat isolates the fault to
             // the fan-out; both climbing but the media server's bytesReceived
             // flat isolates it to the mediamtx-gs `udp+rtp` source).
+            adapters.insert_into(&mut payload);
             if let Some(obj) = payload.as_object_mut() {
                 obj.insert("fanout_forwarded".to_string(), fanout.forwarded().into());
                 obj.insert("fanout_drops".to_string(), fanout.drops().into());

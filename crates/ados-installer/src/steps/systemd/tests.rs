@@ -312,6 +312,15 @@ fn parse_tunnel_enabled_gate() {
 }
 
 #[test]
+fn parse_lora_enabled_gate() {
+    assert!(parse_lora_enabled("lora:\n  enabled: true\n"));
+    assert!(!parse_lora_enabled("lora:\n  enabled: false\n"));
+    assert!(!parse_lora_enabled("lora:\n  transport: e22\n"));
+    assert!(!parse_lora_enabled("agent:\n  name: x\n"));
+    assert!(!parse_lora_enabled(": : not yaml"));
+}
+
+#[test]
 fn parse_hotspot_enabled_gate() {
     assert!(parse_hotspot_enabled(
         "network:\n  hotspot:\n    enabled: true\n"

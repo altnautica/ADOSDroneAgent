@@ -4,11 +4,15 @@
 
 use serde::{Deserialize, Serialize};
 
+mod adapters;
 mod fleet;
 mod link;
 mod profile;
 mod regulatory;
 
+pub use adapters::{
+    AdapterEntry, AdapterMatch, AdapterRole, RadioAdaptersConfig, RADIO_CONFIG_POINTER,
+};
 pub use fleet::*;
 pub use link::{link_preset_trio, BackendChoice};
 pub use profile::{ground_station_from_config_text, profile_is_ground_station, PROFILE_CONF};

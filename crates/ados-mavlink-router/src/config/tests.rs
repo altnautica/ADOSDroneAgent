@@ -235,6 +235,23 @@ fn crsf_device_pin_reads_from_the_radio_section() {
 }
 
 #[test]
+fn crsf_module_ports_read_from_the_radio_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.yaml");
+    write(
+        &cfg,
+        "radio:\n  crsf:\n    enabled: true\n    modules:\n      - id: m0\n        port: /dev/ttyACM1\n        role: pilot\n      - id: m1\n        port: \" /dev/ttyACM2 \"\n        role: autonomy\n",
+    );
+    let c = MavlinkConfig::load_from(&cfg);
+    assert_eq!(c.crsf_module_ports, vec!["/dev/ttyACM1", "/dev/ttyACM2"]);
+    assert_eq!(c.crsf_device, "");
+    // No modules block: no module ports.
+    assert!(MavlinkConfig::load_from(&dir.path().join("nope.yaml"))
+        .crsf_module_ports
+        .is_empty());
+}
+
+#[test]
 fn crsf_device_pin_defaults_empty() {
     let dir = tempfile::tempdir().unwrap();
     // Missing file, and a config with no radio block, both read no pin.

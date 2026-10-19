@@ -1,4 +1,5 @@
 use super::*;
+use crate::modules::ModuleRole;
 use std::io::Write;
 
 fn write_file(dir: &tempfile::TempDir, name: &str, body: &str) -> std::path::PathBuf {
@@ -22,6 +23,82 @@ fn missing_file_reads_defaults() {
     assert_eq!(cfg.mavlink_transport, MavlinkTransport::Serial);
     assert_eq!(cfg.relay_role, RelayRole::None);
     assert!(!cfg.mavlink_command_enabled);
+    assert!(cfg.modules.is_empty());
+    assert!(cfg.resolved_modules().is_empty());
+}
+
+/// Parse a `radio.crsf` slice body straight through the section type.
+fn from_yaml(body: &str) -> CrsfLaneConfig {
+    CrsfLaneConfig::from_section(serde_norway::from_str(body).unwrap())
+}
+
+#[test]
+fn two_module_config_parses_and_resolves() {
+    let cfg = from_yaml(
+        "enabled: true\nmodules:\n  - id: m0\n    port: /dev/ttyACM0\n    role: pilot\n  - id: m1\n    port: \" /dev/ttyACM1 \"\n    role: autonomy\n    link: survey-a\n",
+    );
+    let resolved = cfg.resolved_modules();
+    assert_eq!(
+        resolved,
+        vec![
+            ModuleConfig {
+                id: "m0".to_string(),
+                port: "/dev/ttyACM0".to_string(),
+                role: ModuleRole::Pilot,
+                link: None,
+            },
+            ModuleConfig {
+                id: "m1".to_string(),
+                port: "/dev/ttyACM1".to_string(),
+                role: ModuleRole::Autonomy,
+                link: Some("survey-a".to_string()),
+            },
+        ]
+    );
+    // The configured list wins over a legacy pin.
+    let both = from_yaml(
+        "device: /dev/ttyUSB0\nmodules:\n  - id: m1\n    port: /dev/ttyACM1\n    role: autonomy\n",
+    );
+    let resolved = both.resolved_modules();
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[0].id, "m1");
+}
+
+#[test]
+fn legacy_single_port_config_resolves_to_one_pilot_m0() {
+    let cfg = from_yaml("enabled: true\ndevice: /dev/ttyUSB0\n");
+    assert!(cfg.modules.is_empty());
+    assert_eq!(
+        cfg.resolved_modules(),
+        vec![ModuleConfig {
+            id: "m0".to_string(),
+            port: "/dev/ttyUSB0".to_string(),
+            role: ModuleRole::Pilot,
+            link: None,
+        }]
+    );
+    // No pin and no list: no module at all, never a portless m0.
+    assert!(from_yaml("enabled: true\ndevice: null\n")
+        .resolved_modules()
+        .is_empty());
+}
+
+#[test]
+fn invalid_module_entries_are_dropped() {
+    let cfg = from_yaml(
+        "modules:\n  - id: m0\n    port: /dev/ttyACM0\n  - id: m1\n    port: /dev/ttyACM1\n    role: pilot\n  - id: m2\n    port: /dev/ttyACM0\n    role: autonomy\n  - id: m0\n    port: /dev/ttyACM3\n    role: autonomy\n  - port: /dev/ttyACM4\n    role: autonomy\n  - id: m5\n    role: autonomy\n  - id: m6\n    port: /dev/ttyACM6\n    role: copilot\n  - id: m7\n    port: /dev/ttyACM7\n    role: autonomy\n",
+    );
+    // An absent role reads pilot; a second pilot, a repeated port or id, a
+    // missing id or port, and an unknown role are each dropped.
+    let ids: Vec<(&str, ModuleRole)> = cfg
+        .modules
+        .iter()
+        .map(|m| (m.id.as_str(), m.role))
+        .collect();
+    assert_eq!(
+        ids,
+        vec![("m0", ModuleRole::Pilot), ("m7", ModuleRole::Autonomy)]
+    );
 }
 
 #[test]

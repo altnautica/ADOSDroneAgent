@@ -191,6 +191,7 @@ async fn run_service(
     exit
 }
 
+mod modules;
 mod pass;
 use pass::run_service_pass;
 

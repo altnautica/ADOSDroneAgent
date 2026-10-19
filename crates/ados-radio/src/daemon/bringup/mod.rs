@@ -94,14 +94,21 @@ pub(super) async fn bring_up_group(
     gates::domain_gate(svc, rendezvous_ch).await?;
 
     // ── Adapter selection ─────────────────────────────────────────────
-    // Detect every adapter (the full list feeds the adapters sidecar) and
-    // pick the verified injection radio. The outcome carries the scan
-    // counts for the loud no-injection diagnostic.
-    let outcome = adapter::detect_and_select(&cfg.interface).await;
+    // Detect and verify every adapter (the full list feeds the adapters
+    // sidecar), resolve the configured roles, and transmit on the adapter
+    // the roles select. The outcome carries the scan counts for the loud
+    // no-injection diagnostic. The air side has no mesh carrier.
+    let outcome = adapter::detect_all(&cfg.interface).await;
     // Publish the full detected list so the GCS panel + the permanent-Python
     // seam see the scan verdict regardless of whether a radio was found.
-    write_adapters_sidecar(&outcome.adapters);
-    let Some(adapter) = outcome.selected.clone() else {
+    write_adapters_sidecar(&outcome.scanned);
+    let roles_cfg = crate::config::RadioAdaptersConfig::load_from(Path::new(super::CONFIG_YAML));
+    let plan = adapter::AdapterPlan::new(adapter::resolve_roles(
+        &outcome.verified(),
+        &roles_cfg,
+        false,
+    ));
+    let Some(adapter) = plan.map(|p| p.tx().adapter.clone()) else {
         // No RTL injection-capable adapter could be proven. Fail LOUDLY with
         // the diagnostic counts (total detected + compatible-and-monitor),
         // and keep the sidecar's stranded-radio signal — adapter chipset
@@ -140,7 +147,7 @@ pub(super) async fn bring_up_group(
     tracing::info!(
         iface = %adapter.ifname,
         chipset = %adapter.chipset,
-        injection_ok = adapter.injection_ok,
+        verified = adapter.verified,
         "adapter_selected"
     );
 
@@ -325,7 +332,7 @@ pub(super) async fn bring_up_group(
     let adapter_info = AdapterInfo {
         interface: iface.clone(),
         chipset: adapter.chipset.clone(),
-        injection_ok: adapter.injection_ok,
+        injection_ok: adapter.verified,
         usb_speed_mbps: adapter.usb_speed_mbps,
         usb_degraded: adapter.usb_degraded,
     };

@@ -192,6 +192,10 @@ limiter, pairing gate, MCP-scope admission.
 | WS | `/api/v1/ground-station/ws/buttons` | unauthenticated by design |
 | WS | `/api/v1/ground-station/ws/mesh` | unauthenticated by design |
 | WS | `/api/v1/ground-station/ws/uplink` | unauthenticated by design |
+| GET | `/api/v1/lora` |  |
+| PUT | `/api/v1/lora` |  |
+| GET | `/api/v1/lora/beacons` |  |
+| GET | `/api/v1/lora/regions` |  |
 | DELETE | `/api/v1/network/client` |  |
 | GET | `/api/v1/network/client/configured` |  |
 | DELETE | `/api/v1/network/client/configured/{name}` |  |
@@ -203,6 +207,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/network/mac/pin` |  |
 | DELETE | `/api/v1/network/mac/{iface}` |  |
 | GET | `/api/v1/plugins/catalog` |  |
+| GET | `/api/v1/radio/adapters` |  |
 | GET | `/api/v1/sensors` |  |
 | PUT | `/api/v1/sensors/rig` |  |
 | GET | `/api/v1/storage` |  |
@@ -243,7 +248,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-218 native routes.
+223 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

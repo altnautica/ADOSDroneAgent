@@ -11,6 +11,15 @@
     },
     {
       "category": "data_network",
+      "description": "Lets the plugin read the capture-storage state and write capture session directories under the agent's capture root, and raise the capture-active marker that switches the flight controller to its capture sensor rates. The agent's storage janitor still owns the budget, admission and eviction.",
+      "enforced": true,
+      "id": "capture.storage.write",
+      "label": "Write capture sessions to the capture storage volume",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
       "description": "Lets the plugin publish small messages (at most 64 KiB each) on its own cloud stream through the agent's cloud relay, so a signed-in operator can receive them off the local network. Publishing detections onto the shared detection topic additionally needs vision.detection.publish.",
       "enforced": true,
       "id": "cloud.publish",
@@ -488,6 +497,24 @@
     },
     {
       "category": "data_network",
+      "description": "Lets the plugin subscribe to the agent's sensor bus: timestamped IMU batches, raw GNSS receiver bytes, camera trigger records, barometer, magnetometer and clock samples, plus the clock state file. Used by capture and odometry plugins that need every sample on the host timebase.",
+      "enforced": true,
+      "id": "sensor.stream.read",
+      "label": "Read the sensor bus (IMU, GNSS, triggers, clock)",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "hardware",
+      "description": "Lets the plugin store the rig document (sensor roles, intrinsics and extrinsics) the agent validates and the sensor hub fuses with, through the same validation the operator's rig write runs. An invalid document is refused and the stored one kept.",
+      "enforced": true,
+      "id": "sensors.rig.write",
+      "label": "Store the sensor rig calibration",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
       "description": "Lets the plugin add new fields to the telemetry stream that ships to the GCS. Used by sensor plugins that surface custom readings on the dashboard.",
       "enforced": true,
       "id": "telemetry.extend",
@@ -636,6 +663,15 @@
       "enforced": true,
       "id": "video.source.set",
       "label": "Configure the agent's video stream sources",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin open and close WebRTC playback (WHEP) sessions on the agent's live camera streams on behalf of a viewer it serves: it hands the agent a viewer's SDP offer for a camera and relays the answer back. The agent only plays out streams it already publishes; the plugin cannot change them or reach the media server directly.",
+      "enforced": true,
+      "id": "video.whep.relay",
+      "label": "Relay live video playback sessions",
       "risk": "medium",
       "side": "agent"
     },

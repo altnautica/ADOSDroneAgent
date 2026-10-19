@@ -63,6 +63,11 @@ pub struct RelayState {
     pub fragments_forwarded: Option<i64>,
     pub up: bool,
     pub mesh_iface: String,
+    /// The WFB adapter the role resolver left to the mesh carrier (role
+    /// `mesh`), which the mesh manager binds to batman-adv. `None` when no
+    /// adapter has that role and the mesh manager keeps its own pick.
+    #[serde(default)]
+    pub mesh_adapter: Option<String>,
 }
 
 impl Default for RelayState {
@@ -77,6 +82,7 @@ impl Default for RelayState {
             fragments_forwarded: None,
             up: false,
             mesh_iface: "bat0".to_string(),
+            mesh_adapter: None,
         }
     }
 }
@@ -130,21 +136,22 @@ impl RelayState {
     }
 }
 
-/// Build the `wfb_rx -f` FEC-forward args for the drone-facing adapter. Uses the rx key
-/// (decrypts the drone uplink).
+/// Build the `wfb_rx -f` FEC-forward args for the drone-facing adapters. Uses the
+/// rx key (decrypts the drone uplink). Every receiving adapter trails the
+/// options, so the forwarder captures on all of them.
 ///
 /// `link_id` is the transmitting drone's (`link_id(fleet_id, slot)`). `wfb_rx`
 /// filters on a `channel_id` built from it, so a forwarder without `-i` sits on
 /// wfb-ng's default link id 0, which no drone transmits on, and forwards
 /// nothing.
 pub fn forward_args(
-    drone_iface: &str,
+    drone_ifaces: &[String],
     receiver_ip: &str,
     receiver_port: u16,
     rx_key: &Path,
     link_id: u32,
 ) -> Vec<String> {
-    vec![
+    let mut args: Vec<String> = vec![
         "-p".into(),
         "0".into(),
         "-i".into(),
@@ -153,21 +160,22 @@ pub fn forward_args(
         format!("{receiver_ip}:{receiver_port}"),
         "-K".into(),
         rx_key.to_string_lossy().into_owned(),
-        drone_iface.into(),
-    ]
+    ];
+    args.extend(drone_ifaces.iter().cloned());
+    args
 }
 
 /// Spawn the FEC forwarder for `(receiver_ip, receiver_port)` on the
-/// drone-facing adapter, in its own process group (setsid/killpg). The
+/// drone-facing adapters, in its own process group (setsid/killpg). The
 /// forwarder prints no stats; stderr goes to its log file.
 pub async fn spawn_forwarder(
-    drone_iface: &str,
+    drone_ifaces: &[String],
     receiver_ip: &str,
     receiver_port: u16,
     link_id: u32,
 ) -> std::io::Result<GsWfbProcess> {
     let rx_key = Path::new(ados_radio::paths::WFB_RX_KEY);
-    let args = forward_args(drone_iface, receiver_ip, receiver_port, rx_key, link_id);
+    let args = forward_args(drone_ifaces, receiver_ip, receiver_port, rx_key, link_id);
     GsWfbProcess::spawn("wfb_rx", &args, Stdout::Null, Some(FORWARDER_LOG)).await
 }
 
@@ -186,8 +194,9 @@ fn forwarder_needs_respawn(held: bool, running: bool) -> bool {
 
 /// Run the relay role to completion (until `shutdown` fires).
 ///
-/// Detects the drone-facing adapter + monitor mode (via the shared radio
-/// selector), then loops: re-resolve the receiver over mDNS on `bat0`; on a
+/// Detects the drone-facing adapters + monitor mode (via the shared adapter
+/// resolver, with the last adapter left to the mesh carrier when no roles are
+/// configured), then loops: re-resolve the receiver over mDNS on `bat0`; on a
 /// receiver change tear down the old forwarder and spawn a fresh one (emitting
 /// `relay_connected`); on receiver loss past the grace window mark the link
 /// down and emit `receiver_unreachable`; write `wfb-relay.json` every poll. On
@@ -207,16 +216,17 @@ pub async fn run(
         ..Default::default()
     }));
 
-    // Detect the drone-facing adapter and put it into monitor mode (the shared
-    // selector denies the control iface + AIC8800 and verifies the readback).
-    // With none usable, publish the down state and retry on a fixed interval,
-    // stamping progress so a correctly parked relay is not restarted by the
-    // systemd watchdog; an adapter plugged in later is picked up.
+    // Detect the drone-facing adapters and put them into monitor mode (the
+    // shared resolver denies the control iface + management WiFi and verifies
+    // the readback). With none usable, publish the down state and retry on a
+    // fixed interval, stamping progress so a correctly parked relay is not
+    // restarted by the systemd watchdog; an adapter plugged in later is
+    // picked up.
     let mut reported_missing = false;
-    let drone_iface = loop {
+    let plan = loop {
         progress.mark();
-        if let Some(iface) = resolve_drone_iface(!reported_missing).await {
-            break iface;
+        if let Some(plan) = resolve_drone_plan(!reported_missing).await {
+            break plan;
         }
         if !reported_missing {
             tracing::error!("wfb_relay_no_adapter");
@@ -229,7 +239,15 @@ pub async fn run(
             _ = tokio::time::sleep(ADAPTER_RETRY) => {}
         }
     };
-    state.lock().await.drone_iface = drone_iface.clone();
+    let drone_ifaces = plan.rx_ifaces();
+    {
+        // The sidecar names the first drone-facing adapter (the forwarder
+        // captures on all of them) and the adapter left to the mesh carrier,
+        // which the mesh manager binds to batman-adv.
+        let mut s = state.lock().await;
+        s.drone_iface = drone_ifaces[0].clone();
+        s.mesh_adapter = plan.mesh().map(|m| m.ifname().to_string());
+    }
 
     if !Path::new(ados_radio::paths::WFB_RX_KEY).exists() {
         tracing::warn!("wfb_relay_keys_missing");
@@ -279,7 +297,7 @@ pub async fn run(
                     s.receiver_ip = Some(ip.clone());
                     s.receiver_port = port as i64;
                 }
-                match spawn_forwarder(&drone_iface, &ip, port, link_id).await {
+                match spawn_forwarder(&drone_ifaces, &ip, port, link_id).await {
                     Ok(proc) => {
                         forwarder = Some(proc);
                         state.lock().await.up = true;
@@ -347,20 +365,22 @@ pub async fn run(
         s.up = false;
     }
     let _ = state.lock().await.write_and_emit(ingest.as_ref());
-    // Restore the drone-facing adapter to managed mode so the kernel /
-    // NetworkManager can re-enumerate it instead of finding it stranded in
+    // Restore the drone-facing adapters to managed mode so the kernel /
+    // NetworkManager can re-enumerate them instead of finding them stranded in
     // monitor mode after the unit stops (the mirror of the drone-side teardown).
-    tracing::info!(interface = %drone_iface, "restoring drone-facing adapter to managed mode");
-    ados_radio::adapter::set_managed_mode(&drone_iface).await;
+    for iface in &drone_ifaces {
+        tracing::info!(interface = %iface, "restoring drone-facing adapter to managed mode");
+        ados_radio::adapter::set_managed_mode(iface).await;
+    }
     tracing::info!("wfb_relay_stopped");
 }
 
-/// Detect and monitor-mode the drone-facing adapter via the shared radio
-/// selector. Returns the interface name on success. The selector denies the
-/// control iface + AIC8800 and verifies the monitor-mode readback (4× retry).
+/// Detect and monitor-mode the drone-facing adapters via the shared adapter
+/// resolver, returning the resolved layout. The resolver denies the control
+/// iface + management WiFi and verifies the monitor-mode readback (4× retry).
 /// `report` emits the adapter-missing event (the first failure only, so a
 /// fixed-interval retry does not flood the event log).
-async fn resolve_drone_iface(report: bool) -> Option<String> {
+async fn resolve_drone_plan(report: bool) -> Option<ados_radio::adapter::AdapterPlan> {
     let emit = |reason: &str, detail: String| {
         if report {
             mesh_events::emit(
@@ -369,22 +389,23 @@ async fn resolve_drone_iface(report: bool) -> Option<String> {
             );
         }
     };
-    let Some(selected) = ados_radio::adapter::select_interface("").await else {
-        emit(
-            "adapter_not_found",
-            "No monitor-capable WFB adapter detected on the relay node.".to_string(),
-        );
-        return None;
-    };
-    if selected.injection_ok {
-        Some(selected.ifname)
-    } else {
-        tracing::warn!(iface = %selected.ifname, "wfb_relay_monitor_mode_failed");
-        emit(
-            "monitor_mode_failed",
-            format!("Could not put {} into monitor mode.", selected.ifname),
-        );
-        None
+    match crate::adapter_plan::resolve("", true).await {
+        crate::adapter_plan::Resolution::Ready(plan) => Some(plan),
+        crate::adapter_plan::Resolution::NoInjection(sel) => {
+            tracing::warn!(iface = %sel.ifname, "wfb_relay_monitor_mode_failed");
+            emit(
+                "monitor_mode_failed",
+                format!("Could not put {} into monitor mode.", sel.ifname),
+            );
+            None
+        }
+        crate::adapter_plan::Resolution::NoAdapter => {
+            emit(
+                "adapter_not_found",
+                "No monitor-capable WFB adapter detected on the relay node.".to_string(),
+            );
+            None
+        }
     }
 }
 
@@ -399,7 +420,7 @@ mod tests {
         // fleet drone, which transmits on link_id(fleet_id, slot >= 1).
         let link = ados_radio::config::link_id(1, 2);
         let a = forward_args(
-            "wlan0",
+            &["wlan0".to_string(), "wlan1".to_string()],
             "10.0.0.5",
             5800,
             Path::new("/etc/ados/wfb/rx.key"),
@@ -416,7 +437,8 @@ mod tests {
                 "10.0.0.5:5800",
                 "-K",
                 "/etc/ados/wfb/rx.key",
-                "wlan0"
+                "wlan0",
+                "wlan1"
             ]
         );
         assert_eq!(link, 258);
@@ -459,6 +481,7 @@ mod tests {
             "fragments_forwarded",
             "up",
             "mesh_iface",
+            "mesh_adapter",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
@@ -500,7 +523,8 @@ mod tests {
             "fragments_seen": 12345,
             "fragments_forwarded": 12000,
             "up": true,
-            "mesh_iface": "bat0"
+            "mesh_iface": "bat0",
+            "mesh_adapter": "wlan2"
         }"#;
         let s: RelayState = serde_json::from_str(fixture).expect("deserialize relay fixture");
         assert_eq!(s.role, "relay");
@@ -512,6 +536,7 @@ mod tests {
         assert_eq!(s.fragments_forwarded, Some(12000));
         assert!(s.up);
         assert_eq!(s.mesh_iface, "bat0");
+        assert_eq!(s.mesh_adapter.as_deref(), Some("wlan2"));
 
         // Round-trip back to the same key set + values as the fixture.
         let re = serde_json::to_value(&s).unwrap();

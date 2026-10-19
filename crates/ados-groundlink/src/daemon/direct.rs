@@ -42,18 +42,24 @@ pub(super) async fn run_direct(
     // a fatal socket error and surfaces a restart counter on a GS sidecar, so a
     // listener fault never permanently freezes the watchdog's presence input.
     let presence_cache = GsPresenceCache::new();
-    // Shared resolved-iface cell, written by the receive loop once it auto-detects
-    // the injection adapter. Created here (before the listener spawn) so the hop
-    // follower can read the live receive interface to retune it on a drone hop;
-    // the shutdown path below also restores that adapter to managed mode.
-    let resolved_iface: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    // The hop follower retunes the GS receive radio to a drone-announced channel
-    // when its countdown expires, so a coordinated hop is a brief retune rather
-    // than a blackout the valid-packet watchdog has to sweep out of. It verifies
-    // each follow against the receive generation's valid-packet counter, which
-    // the receive loop hands it per generation.
-    let hop_follower =
-        presence::HopFollower::new(Arc::new(IwChannelSetter), resolved_iface.clone());
+    // Shared radio-group cell, written by the receive loop once it resolves the
+    // WFB adapters (transmit adapter first). Created here (before the listener
+    // spawn) so the hop follower can retune every adapter on a drone hop; the
+    // shutdown path below also restores each one to managed mode.
+    let radio_group: wfb_rx::RadioGroup = Arc::new(Mutex::new(Vec::new()));
+    // The hop follower retunes the GS receive radios to a drone-announced
+    // channel when its countdown expires, so a coordinated hop is a brief
+    // retune rather than a blackout the valid-packet watchdog has to sweep out
+    // of. It verifies each follow against the receive generation's valid-packet
+    // counter, which the receive loop hands it per generation. The group setter
+    // keeps every receive adapter on the followed channel.
+    let hop_follower = presence::HopFollower::new(
+        Arc::new(wfb_rx::GroupChannelSetter::new(
+            Arc::new(IwChannelSetter),
+            radio_group.clone(),
+        )),
+        radio_group.clone(),
+    );
     tokio::spawn(presence::listen_supervisor(
         presence_cache.clone(),
         Some(hop_follower.clone()),
@@ -236,20 +242,20 @@ pub(super) async fn run_direct(
         aux_shutdown.clone(),
     ));
 
-    // The receive adapter is auto-detected inside the receive loop (config's
-    // interface is often empty). The shared `resolved_iface` cell (created above
-    // for the hop follower) is the seam the loop writes once it resolves the
-    // injection adapter; on a shutdown signal this side restores that adapter to
-    // managed mode, the mirror of the drone-side teardown, so the
-    // kernel/NetworkManager can re-enumerate the RTL instead of finding it
-    // stranded in monitor mode after the unit stops.
+    // The adapters are auto-detected inside the receive loop (config's
+    // interface is often empty). The shared `radio_group` cell (created above
+    // for the hop follower) is the seam the loop writes once it resolves them;
+    // on a shutdown signal this side restores each to managed mode, the mirror
+    // of the drone-side teardown, so the kernel/NetworkManager can re-enumerate
+    // the RTLs instead of finding them stranded in monitor mode after the unit
+    // stops.
 
     // Run the receive loop until a shutdown signal arrives.
     tokio::select! {
         _ = receive_loop(
             &config,
             presence_cache,
-            resolved_iface.clone(),
+            radio_group.clone(),
             hop_follower,
             aux_counters,
             progress,
@@ -280,8 +286,8 @@ pub(super) async fn run_direct(
         t.abort();
     }
 
-    // Restore the resolved injection adapter to managed mode on the way out.
-    restore_managed_if_resolved(&resolved_iface).await;
+    // Restore the resolved WFB adapters to managed mode on the way out.
+    restore_managed_if_resolved(&radio_group).await;
     Ok(())
 }
 
@@ -357,21 +363,21 @@ pub(super) async fn wait_for_fleet_identity(
     }
 }
 
-/// Restore the receive-plane adapter to managed mode on shutdown when one was
-/// resolved this run. A no-op when the loop never selected an adapter (nothing
-/// to restore). The read decision is split into [`iface_to_restore`] so the
+/// Restore every receive-plane adapter to managed mode on shutdown when the
+/// loop resolved any this run. A no-op when it never did (nothing to restore).
+/// The read decision is split into [`ifaces_to_restore`] so the
 /// capture-then-restore path is unit-testable without a real NIC.
-pub(super) async fn restore_managed_if_resolved(resolved: &Arc<Mutex<Option<String>>>) {
-    if let Some(iface) = iface_to_restore(resolved).await {
+pub(super) async fn restore_managed_if_resolved(group: &wfb_rx::RadioGroup) {
+    for iface in ifaces_to_restore(group).await {
         tracing::info!(interface = %iface, "restoring receive adapter to managed mode");
         ados_radio::adapter::set_managed_mode(&iface).await;
     }
 }
 
-/// Read the shared "last resolved iface" cell and return the interface to
-/// restore (`Some`) or nothing to do (`None`). Pure over the cell, so the
-/// capture (write from the receive loop) and the read (shutdown side) can be
-/// asserted in a unit test without touching a NIC.
-pub(super) async fn iface_to_restore(resolved: &Arc<Mutex<Option<String>>>) -> Option<String> {
-    resolved.lock().await.clone()
+/// Read the shared radio-group cell and return the interfaces to restore
+/// (empty when nothing was resolved). Pure over the cell, so the capture
+/// (write from the receive loop) and the read (shutdown side) can be asserted
+/// in a unit test without touching a NIC.
+pub(super) async fn ifaces_to_restore(group: &wfb_rx::RadioGroup) -> Vec<String> {
+    group.lock().await.clone()
 }

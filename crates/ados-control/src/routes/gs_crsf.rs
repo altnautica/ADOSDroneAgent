@@ -1,16 +1,16 @@
 //! Ground-station CRSF RC-lane routes.
 //!
 //! - **`GET /api/v1/ground-station/crsf`** — the RC lane's state sidecar
-//!   (`crsf-stats.json`), staleness-gated: the lane daemon rewrites it ~1 Hz
-//!   while running and every 5 s while idling, so a file older than the
-//!   window is an orphan of a dead service and reads `404`, never a stale
-//!   reading served as current.
+//!   (`crsf-stats.json`, including the per-module `modules[]` list),
+//!   staleness-gated: the lane daemon rewrites it ~1 Hz while running and
+//!   every 5 s while idling, so a file older than the window is an orphan of
+//!   a dead service and reads `404`, never a stale reading served as current.
 //! - **`POST /api/v1/ground-station/crsf/channels`** — programmatic channel
 //!   injection, forwarded as a `set_channels` op to the lane daemon's command
 //!   socket at `crsf-cmd.sock`. The body carries the 16 channel values plus
-//!   an optional time-to-live, client id and client ticket; the daemon
-//!   validates the values, applies its TTL discipline, and replies with the
-//!   live authority.
+//!   an optional time-to-live, client id, client ticket and target module id
+//!   (absent: the pilot module); the daemon validates the values, applies its
+//!   TTL discipline, and replies with the live authority.
 //! - **`POST /api/v1/ground-station/crsf/params`** — an RC-module
 //!   configuration parameter write (the packet-rate / TX-power / telemetry
 //!   surface), forwarded as a `param_write` op; the daemon frames it and
@@ -31,10 +31,11 @@
 //!
 //! Profile gate first: these are ground-station routes, `404
 //! E_PROFILE_MISMATCH` elsewhere. An unreachable command socket is a `503`
-//! (the lane is not running — it is opt-in and only serves its socket while
-//! the serial module is up). A daemon-side rejection (`ok:false`, e.g. an
-//! out-of-range channel value) is the caller's error: `400` carrying the
-//! daemon's `E_*` code.
+//! (the lane is not running — it is opt-in and serves its socket only while
+//! the RC lane runs). A write addressed to a module whose serial port is down
+//! (`E_MODULE_DISCONNECTED`) is also a `503`: nothing would carry it. Any
+//! other daemon-side rejection (`ok:false`, e.g. an out-of-range channel
+//! value) is the caller's error: `400` carrying the daemon's `E_*` code.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -145,9 +146,9 @@ async fn crsf_cmd(socket: &Path, request: &Value) -> Option<Value> {
         .ok()
 }
 
-/// Map a command round-trip outcome onto the HTTP reply: transport failure →
-/// `503` (the lane is not running), a daemon `ok:false` → `400` with the
-/// daemon's error code, success → the daemon's reply verbatim.
+/// Map a command round-trip outcome onto the HTTP reply: transport failure or
+/// a disconnected target module → `503`, any other daemon `ok:false` → `400`
+/// with the daemon's error code, success → the daemon's reply verbatim.
 fn command_response(outcome: Option<Value>) -> Response {
     match outcome {
         None => detail(
@@ -160,7 +161,12 @@ fn command_response(outcome: Option<Value>) -> Response {
                 .and_then(Value::as_str)
                 .unwrap_or("E_CRSF_COMMAND_FAILED")
                 .to_string();
-            detail(StatusCode::BAD_REQUEST, code)
+            let status = if code.starts_with("E_MODULE_DISCONNECTED") {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            detail(status, code)
         }
         Some(reply) => (StatusCode::OK, Json(reply)).into_response(),
     }
@@ -183,6 +189,10 @@ pub struct CrsfChannelsBody {
     pub client_id: Option<String>,
     #[serde(default)]
     pub client_ticket: Option<String>,
+    /// The RC module the injection targets (`m0`, `m1`, ...). Absent: the
+    /// pilot module.
+    #[serde(default)]
+    pub module: Option<String>,
 }
 
 /// `POST /api/v1/ground-station/crsf/channels` → inject the transmitted
@@ -217,6 +227,9 @@ fn channels_request(body: CrsfChannelsBody) -> Value {
             request["client_ticket"] = json!(ticket);
         }
         request["client_id"] = json!(client_id);
+    }
+    if let Some(module) = body.module {
+        request["module"] = json!(module);
     }
     request
 }
@@ -327,6 +340,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serves_the_per_module_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crsf-stats.json");
+        let body = json!({
+            "v": 2,
+            "state": "link_ok",
+            "flyable": true,
+            "modules": [
+                {"id": "m0", "port": "/dev/ttyACM0", "role": "pilot",
+                 "link": {"rssi_dbm": [-60, -62], "lq": 100, "snr_db": 8,
+                          "tx_power_mw": 250, "rf_mode": "500Hz"},
+                 "connected": true, "domain": null},
+                {"id": "m1", "port": "/dev/ttyACM1", "role": "autonomy",
+                 "link": null, "connected": false, "domain": null},
+            ],
+        });
+        std::fs::write(&path, serde_json::to_string(&body).unwrap()).unwrap();
+        let resp = read_status(&path, SystemTime::now());
+        assert_eq!(resp.status(), StatusCode::OK);
+        let got = body_json(resp).await;
+        assert_eq!(got["modules"], body["modules"]);
+        assert_eq!(got["modules"][0]["link"]["rf_mode"], "500Hz");
+    }
+
+    #[tokio::test]
     async fn an_absent_sidecar_is_a_404() {
         let dir = tempfile::tempdir().unwrap();
         let resp = read_status(&dir.path().join("nope.json"), SystemTime::now());
@@ -420,6 +458,7 @@ mod tests {
             ttl_ms: None,
             client_id: Some("pilot".into()),
             client_ticket: None,
+            module: None,
         });
         assert_eq!(bare["client_id"], "pilot");
         assert!(bare.get("client_ticket").is_none());
@@ -428,7 +467,32 @@ mod tests {
             ttl_ms: None,
             client_id: Some("pilot".into()),
             client_ticket: Some("issued-at-claim".into()),
+            module: None,
         });
         assert_eq!(attested["client_ticket"], "issued-at-claim");
+        assert!(attested.get("module").is_none());
+    }
+
+    #[test]
+    fn a_target_module_is_forwarded() {
+        let req = channels_request(CrsfChannelsBody {
+            channels: vec![992; 16],
+            ttl_ms: None,
+            client_id: None,
+            client_ticket: None,
+            module: Some("m1".into()),
+        });
+        assert_eq!(req["op"], "set_channels");
+        assert_eq!(req["module"], "m1");
+    }
+
+    #[tokio::test]
+    async fn a_disconnected_module_maps_to_a_503() {
+        let resp = command_response(Some(
+            json!({"ok": false, "error": "E_MODULE_DISCONNECTED: m1"}),
+        ));
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let resp = command_response(Some(json!({"ok": false, "error": "E_UNKNOWN_MODULE: m9"})));
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 }

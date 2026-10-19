@@ -606,7 +606,7 @@
       "type": "object"
     },
     "CrsfConfig": {
-      "description": "The ExpressLRS / CRSF RC control lane.\n\n``device`` pins the serial node the RC transmitter module is attached to\n(e.g. ``/dev/ttyUSB0``). A pinned device is excluded from flight-controller\nserial discovery and (in ``crsf_rc`` / ``airport`` mode) owned by the RC\nlane, so plugging the module can never disturb the FC link. ``None`` = no\npin, and the lane stands by unconfigured: a device must be pinned for the\nlane to run \u2014 it never auto-probes for a bridge.\n\n``enabled`` opts the lane in. It is what makes the pinned ``device`` an\nADOS radio-lane port: while the lane is off the pin names nothing this\nagent owns, so flight-controller discovery treats every serial node \u2014 the\npinned one included \u2014 as an FC candidate. Node classification is by the pin\nand the lane ``mode`` alone, never by a USB bridge id: a bridge VID\n(CP2102/CH340/ESP32-S3) cannot tell an FC behind that bridge apart from an\nRC module, so only the pinned device is ever taken for the RC module.\n\n``band`` selects the module's operating band class: ``dual`` (a dual-band\nGemini module running both links), ``900`` (sub-GHz only), or ``2p4``\n(2.4 GHz only). A target for the module, surfaced on the lane's status;\nthe module's own parameter system owns the actual band change.\n\n``packet_rate_hz`` is the RC frame cadence the lane transmits at (the\nprotocol supports 50 to 500 frames per second; the service clamps an\nout-of-range value and logs it).\n\n``tx_power_dbm`` is the requested conducted TX power for the module.\n``None`` (the default) leaves the module at its own configured default \u2014\nthe lane never fabricates a power figure; the measured power comes back\non link-statistics telemetry.\n\n``mode`` selects what the attached module carries \u2014 and who owns its\nport: ``crsf_rc`` (the RC channel lane this service transmits; the\nMAVLink router excludes the pin from FC candidacy), ``mavlink`` (the\nmodule runs its native MAVLink mode \u2014 the module firmware owns the CRSF\nair protocol internally \u2014 and the MAVLink router ingests the carrier as\nits FC source: the pinned ``device`` at the fixed MAVLink-mode baud of\n460800 when ``mavlink_transport`` is ``serial``, or a UDP listen on port\n14550 for ``backpack_wifi``; the RC lane holds off the port entirely and\nstands by at state ``ready`` with the mode reported. By default this\nsource is telemetry-up / command-down gated \u2014 the router reads inbound\nMAVLink so the drone appears and telemetry flows, but transmits nothing\ntoward the FC over the RC lane until ``mavlink_command_enabled`` is set;\nsee that field), or ``airport`` (a generic serial data pipe with no ADOS\nowner yet; the lane reads ``disabled``).\n\n``mavlink_command_enabled`` opens the host-to-FC command direction for\n``mode: mavlink``. It is OFF by default and is NOT implied by opting the\nlane in or selecting ``mode: mavlink``: a fresh MAVLink-over-ELRS source\ningests telemetry only, with the command-down direction gated closed,\nuntil an operator explicitly sets this for a bench-validated command\nlane. It applies solely to the MAVLink-over-ELRS source and never affects\nany other flight-controller link.\n\n``channel_source`` decides what feeds the transmitted channels in\n``crsf_rc`` mode: ``hid`` (the handset/gamepad path only \u2014 the default),\n``inject`` (the programmatic API only), or ``hybrid`` (both, with the PIC\narbiter's holder deciding authority).\n\n``mavlink_transport`` selects the carrier for ``mode: mavlink``:\n``serial`` (the module's USB-serial port) or ``backpack_wifi`` (the\nmodule's WiFi backpack UDP bridge).\n\n``relay_role`` declares this node's part in an RC relay chain: ``none``\n(not relaying \u2014 the default), ``repeater`` (a pure CRSF repeater), or\n``agent_last_mile`` (an agent relay driving the ELRS last mile).",
+      "description": "The ExpressLRS / CRSF RC control lane.\n\n``device`` pins the serial node the RC transmitter module is attached to\n(e.g. ``/dev/ttyUSB0``). A pinned device is excluded from flight-controller\nserial discovery and (in ``crsf_rc`` / ``airport`` mode) owned by the RC\nlane, so plugging the module can never disturb the FC link. ``None`` = no\npin, and the lane stands by unconfigured: a device must be pinned for the\nlane to run \u2014 it never auto-probes for a bridge.\n\n``enabled`` opts the lane in. It is what makes the pinned ``device`` an\nADOS radio-lane port: while the lane is off the pin names nothing this\nagent owns, so flight-controller discovery treats every serial node \u2014 the\npinned one included \u2014 as an FC candidate. Node classification is by the pin\nand the lane ``mode`` alone, never by a USB bridge id: a bridge VID\n(CP2102/CH340/ESP32-S3) cannot tell an FC behind that bridge apart from an\nRC module, so only the pinned device is ever taken for the RC module.\n\n``band`` selects the module's operating band class: ``dual`` (a dual-band\nGemini module running both links), ``900`` (sub-GHz only), or ``2p4``\n(2.4 GHz only). A target for the module, surfaced on the lane's status;\nthe module's own parameter system owns the actual band change.\n\n``packet_rate_hz`` is the RC frame cadence the lane transmits at (the\nprotocol supports 50 to 500 frames per second; the service clamps an\nout-of-range value and logs it).\n\n``tx_power_dbm`` is the requested conducted TX power for the module.\n``None`` (the default) leaves the module at its own configured default \u2014\nthe lane never fabricates a power figure; the measured power comes back\non link-statistics telemetry.\n\n``mode`` selects what the attached module carries \u2014 and who owns its\nport: ``crsf_rc`` (the RC channel lane this service transmits; the\nMAVLink router excludes the pin from FC candidacy), ``mavlink`` (the\nmodule runs its native MAVLink mode \u2014 the module firmware owns the CRSF\nair protocol internally \u2014 and the MAVLink router ingests the carrier as\nits FC source: the pinned ``device`` at the fixed MAVLink-mode baud of\n460800 when ``mavlink_transport`` is ``serial``, or a UDP listen on port\n14550 for ``backpack_wifi``; the RC lane holds off the port entirely and\nstands by at state ``ready`` with the mode reported. By default this\nsource is telemetry-up / command-down gated \u2014 the router reads inbound\nMAVLink so the drone appears and telemetry flows, but transmits nothing\ntoward the FC over the RC lane until ``mavlink_command_enabled`` is set;\nsee that field), or ``airport`` (a generic serial data pipe with no ADOS\nowner yet; the lane reads ``disabled``).\n\n``mavlink_command_enabled`` opens the host-to-FC command direction for\n``mode: mavlink``. It is OFF by default and is NOT implied by opting the\nlane in or selecting ``mode: mavlink``: a fresh MAVLink-over-ELRS source\ningests telemetry only, with the command-down direction gated closed,\nuntil an operator explicitly sets this for a bench-validated command\nlane. It applies solely to the MAVLink-over-ELRS source and never affects\nany other flight-controller link.\n\n``channel_source`` decides what feeds the transmitted channels in\n``crsf_rc`` mode: ``hid`` (the handset/gamepad path only \u2014 the default),\n``inject`` (the programmatic API only), or ``hybrid`` (both, with the PIC\narbiter's holder deciding authority).\n\n``mavlink_transport`` selects the carrier for ``mode: mavlink``:\n``serial`` (the module's USB-serial port) or ``backpack_wifi`` (the\nmodule's WiFi backpack UDP bridge).\n\n``relay_role`` declares this node's part in an RC relay chain: ``none``\n(not relaying \u2014 the default), ``repeater`` (a pure CRSF repeater), or\n``agent_last_mile`` (an agent relay driving the ELRS last mile).\n\n``modules`` lists the RC transmitter modules the lane runs, each with its\nown serial transport and link statistics. Empty (the default) means the\nsingle pinned ``device`` is the one pilot module ``m0``; when the list\nhas entries it replaces that pin for the RC lane.",
       "properties": {
         "band": {
           "default": "dual",
@@ -669,6 +669,14 @@
           "title": "Mode",
           "type": "string"
         },
+        "modules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/CrsfModuleConfig"
+          },
+          "title": "Modules",
+          "type": "array"
+        },
         "packet_rate_hz": {
           "default": 150,
           "maximum": 65535,
@@ -702,6 +710,46 @@
         }
       },
       "title": "CrsfConfig",
+      "type": "object"
+    },
+    "CrsfModuleConfig": {
+      "description": "One RC transmitter module of the CRSF lane (``radio.crsf.modules[]``).\n\n``id`` is the module's stable name (``m0``, ``m1``, ...), unique in the\nlist. ``port`` is the serial device it is attached to. ``role`` is\n``pilot`` (the operator RC lane under ``channel_source``; at most one) or\n``autonomy`` (a programmatic RC lane fed only by channel injection\naddressed to this ``id``). ``link`` is an optional operator label naming\nthe vehicle link the module serves; the lane does not interpret it.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "link": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Link"
+        },
+        "port": {
+          "title": "Port",
+          "type": "string"
+        },
+        "role": {
+          "default": "pilot",
+          "enum": [
+            "pilot",
+            "autonomy"
+          ],
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "port"
+      ],
+      "title": "CrsfModuleConfig",
       "type": "object"
     },
     "DiscoveryConfig": {
@@ -1330,6 +1378,273 @@
       "title": "LoggingConfig",
       "type": "object"
     },
+    "LoraConfig": {
+      "properties": {
+        "air_rate": {
+          "const": "2.4k",
+          "default": "2.4k",
+          "title": "Air Rate",
+          "type": "string"
+        },
+        "antenna_gain_dbi": {
+          "default": 2.15,
+          "maximum": 20,
+          "minimum": -10,
+          "title": "Antenna Gain Dbi",
+          "type": "number"
+        },
+        "beacon_interval_s": {
+          "default": 30,
+          "maximum": 3600,
+          "minimum": 1,
+          "title": "Beacon Interval S",
+          "type": "integer"
+        },
+        "bw_khz": {
+          "default": 125,
+          "maximum": 500,
+          "minimum": 7,
+          "title": "Bw Khz",
+          "type": "integer"
+        },
+        "cable_loss_db": {
+          "default": 0.0,
+          "maximum": 30,
+          "minimum": 0,
+          "title": "Cable Loss Db",
+          "type": "number"
+        },
+        "cr": {
+          "default": 1,
+          "maximum": 4,
+          "minimum": 1,
+          "title": "Cr",
+          "type": "integer"
+        },
+        "e22": {
+          "$ref": "#/$defs/LoraE22Config",
+          "default": {
+            "baud": 9600,
+            "gpio_chip": "gpiochip0",
+            "m0_gpio": null,
+            "m1_gpio": null,
+            "module_band": "850-930",
+            "port": "/dev/ttyUSB0"
+          }
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "erp_mw": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "maximum": 4000,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Erp Mw"
+        },
+        "freq_mhz": {
+          "anyOf": [
+            {
+              "maximum": 6000,
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Freq Mhz"
+        },
+        "ledger_path": {
+          "default": "/var/ados/lora/airtime.jsonl",
+          "title": "Ledger Path",
+          "type": "string"
+        },
+        "loopback": {
+          "$ref": "#/$defs/LoraLoopbackConfig",
+          "default": {
+            "bind": "0.0.0.0:7810",
+            "module_band": "any",
+            "peer": "127.0.0.1:7811"
+          }
+        },
+        "meshtastic": {
+          "$ref": "#/$defs/LoraMeshtasticConfig",
+          "default": {
+            "enabled": false,
+            "port": null
+          }
+        },
+        "node_id": {
+          "default": 1,
+          "maximum": 65535,
+          "minimum": 0,
+          "title": "Node Id",
+          "type": "integer"
+        },
+        "preamble": {
+          "default": 8,
+          "maximum": 65535,
+          "minimum": 6,
+          "title": "Preamble",
+          "type": "integer"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "sf": {
+          "default": 9,
+          "maximum": 12,
+          "minimum": 7,
+          "title": "Sf",
+          "type": "integer"
+        },
+        "transport": {
+          "default": "e22",
+          "enum": [
+            "e22",
+            "meshtastic",
+            "loopback"
+          ],
+          "title": "Transport",
+          "type": "string"
+        }
+      },
+      "title": "LoraConfig",
+      "type": "object"
+    },
+    "LoraE22Config": {
+      "description": "The Ebyte E22 UART module.",
+      "properties": {
+        "baud": {
+          "default": 9600,
+          "maximum": 115200,
+          "minimum": 1200,
+          "title": "Baud",
+          "type": "integer"
+        },
+        "gpio_chip": {
+          "default": "gpiochip0",
+          "title": "Gpio Chip",
+          "type": "string"
+        },
+        "m0_gpio": {
+          "anyOf": [
+            {
+              "maximum": 1023,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "M0 Gpio"
+        },
+        "m1_gpio": {
+          "anyOf": [
+            {
+              "maximum": 1023,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "M1 Gpio"
+        },
+        "module_band": {
+          "default": "850-930",
+          "enum": [
+            "850-930",
+            "410-493"
+          ],
+          "title": "Module Band",
+          "type": "string"
+        },
+        "port": {
+          "default": "/dev/ttyUSB0",
+          "title": "Port",
+          "type": "string"
+        }
+      },
+      "title": "LoraE22Config",
+      "type": "object"
+    },
+    "LoraLoopbackConfig": {
+      "description": "The UDP stand-in radio for simulation.",
+      "properties": {
+        "bind": {
+          "default": "0.0.0.0:7810",
+          "title": "Bind",
+          "type": "string"
+        },
+        "module_band": {
+          "default": "any",
+          "enum": [
+            "any",
+            "850-930",
+            "410-493",
+            "863-928"
+          ],
+          "title": "Module Band",
+          "type": "string"
+        },
+        "peer": {
+          "default": "127.0.0.1:7811",
+          "title": "Peer",
+          "type": "string"
+        }
+      },
+      "title": "LoraLoopbackConfig",
+      "type": "object"
+    },
+    "LoraMeshtasticConfig": {
+      "description": "The Meshtastic node bridge.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "port": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Port"
+        }
+      },
+      "title": "LoraMeshtasticConfig",
+      "type": "object"
+    },
     "MacPinConfig": {
       "properties": {
         "apply_live_allowed": {
@@ -1793,8 +2108,86 @@
       "title": "PairingConfig",
       "type": "object"
     },
+    "RadioAdapterEntry": {
+      "description": "One WFB adapter role assignment (``radio.adapters[]``).\n\n``role`` is ``rxtx`` (receives and carries the transmit lanes), ``rx``\n(receives only), ``tx`` (transmits only) or ``mesh`` (left out of WFB for\nthe mesh carrier). ``antenna`` is a free-form label surfaced per adapter.",
+      "properties": {
+        "antenna": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Antenna"
+        },
+        "match": {
+          "$ref": "#/$defs/RadioAdapterMatch",
+          "default": {
+            "mac": null,
+            "usb_path": null
+          }
+        },
+        "role": {
+          "enum": [
+            "rxtx",
+            "rx",
+            "tx",
+            "mesh"
+          ],
+          "title": "Role",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role"
+      ],
+      "title": "RadioAdapterEntry",
+      "type": "object"
+    },
+    "RadioAdapterMatch": {
+      "description": "How a ``radio.adapters[]`` entry names a detected WFB adapter: by MAC\naddress (case-insensitive) or by USB device path (``1-1.2``). Interface\nnames are not accepted because they can swap between reboots.",
+      "properties": {
+        "mac": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mac"
+        },
+        "usb_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Usb Path"
+        }
+      },
+      "title": "RadioAdapterMatch",
+      "type": "object"
+    },
     "RadioConfig": {
       "properties": {
+        "adapters": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/RadioAdapterEntry"
+          },
+          "title": "Adapters",
+          "type": "array"
+        },
         "crsf": {
           "$ref": "#/$defs/CrsfConfig",
           "default": {
@@ -1805,6 +2198,7 @@
             "mavlink_command_enabled": false,
             "mavlink_transport": "serial",
             "mode": "crsf_rc",
+            "modules": [],
             "packet_rate_hz": 150,
             "relay_role": "none",
             "tx_power_dbm": null
@@ -3621,6 +4015,43 @@
         }
       }
     },
+    "lora": {
+      "$ref": "#/$defs/LoraConfig",
+      "default": {
+        "air_rate": "2.4k",
+        "antenna_gain_dbi": 2.15,
+        "beacon_interval_s": 30,
+        "bw_khz": 125,
+        "cable_loss_db": 0.0,
+        "cr": 1,
+        "e22": {
+          "baud": 9600,
+          "gpio_chip": "gpiochip0",
+          "m0_gpio": null,
+          "m1_gpio": null,
+          "module_band": "850-930",
+          "port": "/dev/ttyUSB0"
+        },
+        "enabled": false,
+        "erp_mw": null,
+        "freq_mhz": null,
+        "ledger_path": "/var/ados/lora/airtime.jsonl",
+        "loopback": {
+          "bind": "0.0.0.0:7810",
+          "module_band": "any",
+          "peer": "127.0.0.1:7811"
+        },
+        "meshtastic": {
+          "enabled": false,
+          "port": null
+        },
+        "node_id": 1,
+        "preamble": 8,
+        "region": null,
+        "sf": 9,
+        "transport": "e22"
+      }
+    },
     "mavlink": {
       "$ref": "#/$defs/MavlinkConfig",
       "default": {
@@ -3742,6 +4173,7 @@
     "radio": {
       "$ref": "#/$defs/RadioConfig",
       "default": {
+        "adapters": [],
         "crsf": {
           "band": "dual",
           "channel_source": "hid",
@@ -3750,6 +4182,7 @@
           "mavlink_command_enabled": false,
           "mavlink_transport": "serial",
           "mode": "crsf_rc",
+          "modules": [],
           "packet_rate_hz": 150,
           "relay_role": "none",
           "tx_power_dbm": null

@@ -311,6 +311,17 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: GS_VISOR,
     },
+    // The LoRa beacon lane. Best-effort and opt-in: the unit gates on the
+    // lora-enabled marker (mirroring lora.enabled) and its ExecStart guard
+    // execs /bin/true until the binary lands. Fetched where the lane's unit
+    // runs: the drone and the ground station.
+    PrebuiltBinary {
+        service: "ados-lora",
+        asset: "ados-lora-aarch64",
+        dest: "/opt/ados/bin/ados-lora",
+        gate: Gate::BestEffort,
+        profiles: FC,
+    },
     // The video relay the pipeline streams through. It is a mirrored
     // third-party binary rather than an `ados-*` service, so it lands in the
     // system bin dir. Best-effort: a missing relay degrades video without

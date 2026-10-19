@@ -1,0 +1,50 @@
+[package]
+name = "ados-lora"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LoRa beacon and mesh lane: compiled regional band plans, the per-region transmit governor (duty cycle, dwell time, listen-before-talk, power), the persisted airtime ledger, and the E22, Meshtastic and loopback transports."
+
+[lib]
+name = "ados_lora"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-lora"
+path = "src/main.rs"
+required-features = ["daemon"]
+
+[features]
+default = ["daemon"]
+# The service: transports, the daemon loop and its tokio/serial dependencies.
+# The control surface links the library with this off, for the region table,
+# the plan validation and the status shapes only.
+daemon = ["dep:tokio", "dep:tokio-serial", "dep:tracing-subscriber", "dep:ados-config", "dep:nix", "dep:ados-gpio"]
+
+[dependencies]
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+# CRC-16/CCITT-FALSE for the frame trailer.
+ados-sensorhub-proto = { path = "../ados-sensorhub-proto" }
+ados-config = { path = "../ados-config", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+# Async serial for the E22 UART and the Meshtastic node, declared per crate
+# like the other serial consumers in the workspace.
+tokio-serial = { version = "5.4", optional = true }
+# CLOCK_MONOTONIC, the timeline the airtime ledger keeps within one boot.
+nix = { workspace = true, features = ["time"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The E22 M0/M1 mode lines, driven through the GPIO output service's
+# character-device line driver.
+ados-gpio = { path = "../ados-gpio", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

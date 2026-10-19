@@ -157,6 +157,9 @@ impl Step for Systemd {
         //     idiom: an opted-in config has the unit up after this install with
         //     no manual systemctl, an opted-out config leaves it skipped.
         reconcile_tunnel_marker();
+        //     The LoRa lane's `lora-enabled` marker mirrors `lora.enabled`
+        //     the same way.
+        reconcile_lora_marker();
 
         // 5a-quater. Mirror `network.hotspot.enabled` onto the marker the
         //     ados-dnsmasq-gs unit's ConditionPathExists gates on. hostapd
