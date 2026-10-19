@@ -545,7 +545,7 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
     "clock": {
         "version": 1,
         "wire": "json",
-        "transport": "/run/ados/clock.json",
+        "transport": "/run/ados/sensing/clock.json",
         "status": "sidecar",
         "description": "The host timebase and its disciplining sources: the timebase the next capture session uses, the lock verdict, sigma, and per-source offset/skew/sigma (fc, hub, gnss PPS, sim).",
     },
@@ -573,7 +573,7 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
     "capture-storage": {
         "version": 1,
         "wire": "json",
-        "transport": "/run/ados/capture-storage.json",
+        "transport": "/run/ados/capture-storage/capture-storage.json",
         "status": "sidecar",
         "description": "The capture storage root, its volume, capture usage against the budget and free-space floor, session counts, and the admission state (ok, near_full, full) a new capture session is checked against.",
     },

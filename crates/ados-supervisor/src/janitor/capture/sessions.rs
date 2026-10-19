@@ -200,9 +200,11 @@ const REMOVE_CHUNK: usize = 256;
 
 /// Remove one session directory, returning the bytes freed. A session that is
 /// active now (it may have resumed since the scan), or sits under a protected
-/// root, stays. The tree is removed entry by entry with `keepalive` every
-/// [`REMOVE_CHUNK`] entries, so a session of many thousand frames cannot hold
-/// the monitor pass silent for the length of one `remove_dir_all`.
+/// root, stays, and so does a session path that is no longer a real directory:
+/// a symlink renamed into its place after the scan is never followed. The tree
+/// is removed entry by entry with `keepalive` every [`REMOVE_CHUNK`] entries,
+/// so a session of many thousand frames cannot hold the monitor pass silent
+/// for the length of one `remove_dir_all`.
 pub fn remove_session(
     root: &Path,
     session: &Session,
@@ -213,31 +215,126 @@ pub fn remove_session(
     if reclaim::is_protected(&path) || is_active(&path, live) {
         return 0;
     }
+    if !is_real_dir(&path) {
+        tracing::warn!(path = %path.display(), "capture session is no longer a directory; not removed");
+        return 0;
+    }
     let mut count = 0usize;
-    match remove_tree(&path, &mut count, keepalive) {
+    match remove_tree(root, &session.name, &mut count, keepalive) {
         Ok(()) => session.bytes,
         Err(e) => {
             tracing::debug!(path = %path.display(), error = %e, "janitor could not remove capture session");
-            session.bytes.saturating_sub(reclaim::tree_bytes(&path))
+            let left = if is_real_dir(&path) {
+                reclaim::tree_bytes(&path)
+            } else {
+                0
+            };
+            session.bytes.saturating_sub(left)
         }
     }
 }
 
-/// `remove_dir_all` with a progress callback. Symlinks are removed, never
-/// followed.
-fn remove_tree(dir: &Path, count: &mut usize, keepalive: &dyn Fn()) -> std::io::Result<()> {
-    for entry in std::fs::read_dir(dir)? {
+/// Whether `path` is a directory itself, not a link to one.
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
+}
+
+/// Remove `<root>/<name>` and everything under it, never following a link.
+///
+/// Every directory is opened relative to its parent's descriptor with
+/// `O_NOFOLLOW | O_DIRECTORY`, and every entry is unlinked relative to the
+/// descriptor of the directory it was listed in. A writer that renames a
+/// directory and puts a symlink in its place mid-removal therefore only has
+/// the symlink itself removed; the walk never leaves the session tree.
+#[cfg(target_os = "linux")]
+fn remove_tree(
+    root: &Path,
+    name: &str,
+    count: &mut usize,
+    keepalive: &dyn Fn(),
+) -> std::io::Result<()> {
+    use nix::dir::Dir;
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
+    use nix::unistd::{unlinkat, UnlinkatFlags};
+    use std::os::fd::AsRawFd;
+
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC;
+    let parent = Dir::open(root, flags, Mode::empty())?;
+    let mut session = open_dir_nofollow(parent.as_raw_fd(), name)?;
+    clear_dir(&mut session, count, keepalive)?;
+    drop(session);
+    unlinkat(Some(parent.as_raw_fd()), name, UnlinkatFlags::RemoveDir)?;
+    Ok(())
+}
+
+/// Open the directory `name` under `dirfd`; a symlink fails with `ELOOP`
+/// and anything that is not a directory with `ENOTDIR`.
+#[cfg(target_os = "linux")]
+fn open_dir_nofollow<P: ?Sized + nix::NixPath>(
+    dirfd: std::os::fd::RawFd,
+    name: &P,
+) -> nix::Result<nix::dir::Dir> {
+    use nix::fcntl::OFlag;
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    nix::dir::Dir::openat(Some(dirfd), name, flags, nix::sys::stat::Mode::empty())
+}
+
+/// Empty the open directory `dir`, depth first, through descriptors only.
+#[cfg(target_os = "linux")]
+fn clear_dir(
+    dir: &mut nix::dir::Dir,
+    count: &mut usize,
+    keepalive: &dyn Fn(),
+) -> std::io::Result<()> {
+    use nix::dir::Type;
+    use nix::errno::Errno;
+    use nix::unistd::{unlinkat, UnlinkatFlags};
+    use std::os::fd::AsRawFd;
+
+    let fd = dir.as_raw_fd();
+    for entry in dir.iter() {
         let entry = entry?;
-        let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            remove_tree(&path, count, keepalive)?;
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+        // An entry of unknown type is tried as a directory: the no-follow
+        // open refuses a link or a file, which is then unlinked.
+        if matches!(entry.file_type(), Some(Type::Directory) | None) {
+            match open_dir_nofollow(fd, name) {
+                Ok(mut child) => {
+                    clear_dir(&mut child, count, keepalive)?;
+                    drop(child);
+                    unlinkat(Some(fd), name, UnlinkatFlags::RemoveDir)?;
+                }
+                Err(Errno::ELOOP | Errno::ENOTDIR) => {
+                    unlinkat(Some(fd), name, UnlinkatFlags::NoRemoveDir)?;
+                }
+                Err(e) => return Err(e.into()),
+            }
         } else {
-            std::fs::remove_file(&path)?;
+            unlinkat(Some(fd), name, UnlinkatFlags::NoRemoveDir)?;
         }
         *count += 1;
         if (*count).is_multiple_of(REMOVE_CHUNK) {
             keepalive();
         }
     }
-    std::fs::remove_dir(dir)
+    Ok(())
+}
+
+/// Off Linux: std's `remove_dir_all`, which does not follow links either,
+/// with one `keepalive` for the whole session.
+#[cfg(not(target_os = "linux"))]
+fn remove_tree(
+    root: &Path,
+    name: &str,
+    count: &mut usize,
+    keepalive: &dyn Fn(),
+) -> std::io::Result<()> {
+    std::fs::remove_dir_all(root.join(name))?;
+    *count += 1;
+    keepalive();
+    Ok(())
 }

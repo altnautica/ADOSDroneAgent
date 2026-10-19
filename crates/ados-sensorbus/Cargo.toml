@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "The sensor bus (/run/ados/sensors.sock, contract sensor.v1): frame codec, publisher/subscriber clients, the capture-contract v1 message types, clock-fit math, GPS_RTCM_DATA fragmentation and rig.json validation."
+description = "The sensor bus (/run/ados/sensing/sensors.sock, contract sensor.v1): frame codec, publisher/subscriber clients, the capture-contract v1 message types, clock-fit math, GPS_RTCM_DATA fragmentation and rig.json validation."
 
 [lib]
 name = "ados_sensorbus"

@@ -105,10 +105,16 @@ pub(super) fn install_run_dir_tmpfiles() {
 /// `capture.storage.write` and gets the dir bound into its sandbox) can create
 /// and remove the `active` marker the MAVLink router reads to pick its capture
 /// stream rates, without write access to the rest of `/run/ados` and without
-/// the operator group that guards the command sockets.
+/// the operator group that guards the command sockets. `/run/ados/sensing`
+/// (the sensor bus socket and the clock sidecar) and
+/// `/run/ados/capture-storage` (the janitor's capture-storage sidecar) are
+/// bound whole into the plugins granted them, so they must exist before any
+/// plugin starts: a missing bind source is skipped, and the plugin would then
+/// never see the files appear.
 pub(super) fn run_dir_tmpfiles_body() -> String {
     format!(
-        "d /run/ados 0755 root root -\nd /run/ados/capture 2775 root {} -\n",
+        "d /run/ados 0755 root root -\nd /run/ados/capture 2775 root {} -\n\
+         d /run/ados/sensing 0755 root root -\nd /run/ados/capture-storage 0755 root root -\n",
         ados_protocol::ipc::CAPTURE_GROUP
     )
 }

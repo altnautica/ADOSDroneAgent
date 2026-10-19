@@ -6,9 +6,11 @@
 //! granted through a drop-in derived from the config on every install, and
 //! the directory is created here, outside the sandbox, because the supervisor
 //! cannot create a path its namespace mounts read-only. It is created (or
-//! corrected) as `2775 root:ados-capture`, the access the supervisor's janitor
+//! corrected) as `3775 root:ados-capture`, the access the supervisor's janitor
 //! also keeps on every root it resolves, so a sandboxed capture plugin in the
-//! capture group can create its session directories.
+//! capture group can create its session directories. A root the shared
+//! [`ados_config::capture_storage::capture_root_refusal`] check refuses (a
+//! system or agent directory) is flagged, never granted or prepared.
 
 use super::*;
 
@@ -16,8 +18,9 @@ use super::*;
 pub(super) const SUPERVISOR_DROPIN_DIR: &str = "/etc/systemd/system/ados-supervisor.service.d";
 pub(super) const CAPTURE_ROOT_DROPIN_NAME: &str = "capture-root.conf";
 
-/// Roots the supervisor unit already makes writable.
-const COVERED: &[&str] = &["/mnt", "/media", "/var/ados", "/var/lib/ados"];
+/// Roots the supervisor unit already makes writable. Under `/var/ados` only
+/// the capture subtree passes the refusal check.
+const COVERED: &[&str] = &["/mnt", "/media", "/var/ados"];
 
 /// What the config asks of the supervisor's sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,8 +29,9 @@ pub enum CaptureRootGrant {
     Covered,
     /// An explicit root the unit does not cover.
     Grant(String),
-    /// A value that cannot be granted (not absolute, `/` itself, `..`, or
-    /// characters a unit file would read differently). Flagged, not granted.
+    /// A value that cannot be granted (refused by the shared capture-root
+    /// check, or characters a unit file would read differently). Flagged, not
+    /// granted.
     Invalid(String),
 }
 
@@ -52,10 +56,8 @@ pub fn capture_root_grant(config_body: Option<&str>) -> CaptureRootGrant {
     let unit_safe = !root
         .chars()
         .any(|c| c.is_whitespace() || c.is_control() || "%\\\"';".contains(c));
-    let normal = path
-        .components()
-        .all(|c| !matches!(c, std::path::Component::ParentDir));
-    if !path.is_absolute() || root == "/" || !unit_safe || !normal {
+    let refused = ados_config::capture_storage::capture_root_refusal(path).is_some();
+    if !unit_safe || refused {
         return CaptureRootGrant::Invalid(root.to_string());
     }
     if COVERED.iter().any(|c| path.starts_with(c)) {
@@ -95,7 +97,7 @@ pub fn apply_capture_root_dropin(dir: &Path, grant: &CaptureRootGrant) -> bool {
 
 /// Reconcile the capture-root drop-in against the config on a capture
 /// profile (drone, visor); every other profile carries none. Creates an
-/// explicit root as `2775 root:ados-capture` (an existing root's owner and
+/// explicit root as `3775 root:ados-capture` (an existing root's owner and
 /// mode are corrected, the sessions under it left alone), flags an invalid
 /// one, and reloads systemd when the drop-in changed. Idempotent. Runs after
 /// the identity step has created the capture group.
@@ -116,8 +118,9 @@ pub(super) fn reconcile_capture_root_dropin(profile: &str) {
         }
         CaptureRootGrant::Invalid(root) => tracing::warn!(
             root,
-            "storage.capture_root must be auto or an absolute path; the supervisor is not \
-             granted write access to it and capture sessions will be refused"
+            "storage.capture_root must be auto or an absolute path outside the system and \
+             agent directories; the supervisor is not granted write access to it and \
+             capture sessions use the auto root"
         ),
         CaptureRootGrant::Covered => {}
     }
@@ -147,7 +150,7 @@ mod tests {
             "/mnt/nvme/cap",
             "/media/usb/cap",
             "/var/ados/capture",
-            "/var/lib/ados/c",
+            "/var/ados/capture/ssd",
         ] {
             assert_eq!(
                 grant(&format!("storage:\n  capture_root: {root}\n")),
@@ -182,6 +185,12 @@ mod tests {
             "/data/../etc",
             "\"/data/my cap\"",
             "/data/100%",
+            "/etc",
+            "/etc/ados/capture",
+            "/var/ados",
+            "/var/ados/plugins",
+            "/var/lib/ados/c",
+            "/run/ados/capture",
         ] {
             assert!(
                 matches!(

@@ -253,8 +253,8 @@ pub(crate) fn fc_serial_port() -> Option<String> {
 }
 
 /// The host capture root to bind into a capture plugin, resolved at render
-/// time: the janitor's sidecar (`capture-storage.json` under the run dir),
-/// else the persisted `auto` choice, else the fallback root.
+/// time: the janitor's sidecar (`capture-storage` in the path registry, under
+/// the run dir), else the persisted `auto` choice, else the fallback root.
 pub(crate) fn capture_root() -> Option<String> {
     let run_dir = std::env::var_os("ADOS_RUN_DIR")
         .filter(|v| !v.is_empty())
@@ -272,7 +272,7 @@ pub fn capture_root_in(run_dir: &Path, sticky: &Path) -> String {
     struct Root {
         capture_root: String,
     }
-    std::fs::read(run_dir.join("capture-storage.json"))
+    std::fs::read(ados_config::capture_storage::sidecar_path_in(run_dir))
         .ok()
         .and_then(|b| serde_json::from_slice::<Root>(&b).ok())
         .map(|r| r.capture_root)
@@ -521,11 +521,9 @@ mod tests {
             capture_root_in(dir.path(), &sticky),
             "/mnt/nvme0/ados/capture"
         );
-        std::fs::write(
-            dir.path().join("capture-storage.json"),
-            r#"{"version":1,"capture_root":"/srv/cap"}"#,
-        )
-        .unwrap();
+        let sidecar = dir.path().join("capture-storage/capture-storage.json");
+        std::fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar, r#"{"version":1,"capture_root":"/srv/cap"}"#).unwrap();
         assert_eq!(capture_root_in(dir.path(), &sticky), "/srv/cap");
     }
 

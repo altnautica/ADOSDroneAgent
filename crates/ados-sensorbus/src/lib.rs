@@ -1,4 +1,5 @@
-//! The sensor bus: seam J, `/run/ados/sensors.sock`, contract `sensor.v1`.
+//! The sensor bus: seam J, `/run/ados/sensing/sensors.sock`, contract
+//! `sensor.v1`.
 //!
 //! `ados-clock` binds the socket and brokers it. Producers (the MAVLink
 //! router, the sensor hub, the GNSS service) connect and publish frames;
@@ -55,10 +56,7 @@ pub const SENSOR_BUS_VERSION: u16 = 1;
 pub const MAX_FRAME_BYTES: usize = 1 << 20;
 
 /// The resolved sensor-bus socket path (`ADOS_RUN_DIR` aware), registered as
-/// the socket `sensor-bus` (`/run/ados/sensors.sock`).
+/// the socket `sensor-bus` (`/run/ados/sensing/sensors.sock`).
 pub fn socket_path() -> std::path::PathBuf {
-    use ados_protocol::paths;
-    paths::socket("sensor-bus")
-        .map(|s| paths::resolve(s.path))
-        .unwrap_or_else(|| paths::run_dir().join("sensors.sock"))
+    ados_protocol::paths::run_path("sensor-bus")
 }

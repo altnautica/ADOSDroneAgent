@@ -207,11 +207,11 @@ pub const SIDECARS: &[SidecarPath] = &[
     SidecarPath { id: "lcd-page-request", path: "/run/ados/lcd-page-request.json", max_age_ms: None, writer: "ados-api" },
     SidecarPath { id: "lcd-plugin-page", path: "/run/ados/lcd-plugin-page.json", max_age_ms: None, writer: "ados-plugin-host" },
     SidecarPath { id: "lcd-plugin-tap", path: "/run/ados/lcd-plugin-tap.json", max_age_ms: None, writer: "ados-display" },
-    SidecarPath { id: "clock", path: "/run/ados/clock.json", max_age_ms: Some(5000), writer: "ados-clock" },
+    SidecarPath { id: "clock", path: "/run/ados/sensing/clock.json", max_age_ms: Some(5000), writer: "ados-clock" },
     SidecarPath { id: "sensors", path: "/run/ados/sensors.json", max_age_ms: Some(5000), writer: "ados-clock" },
     SidecarPath { id: "sensorhub", path: "/run/ados/sensorhub.json", max_age_ms: Some(5000), writer: "ados-sensorhub" },
     SidecarPath { id: "gnss", path: "/run/ados/gnss.json", max_age_ms: Some(5000), writer: "ados-gnss" },
-    SidecarPath { id: "capture-storage", path: "/run/ados/capture-storage.json", max_age_ms: Some(30000), writer: "ados-supervisor" },
+    SidecarPath { id: "capture-storage", path: "/run/ados/capture-storage/capture-storage.json", max_age_ms: Some(30000), writer: "ados-supervisor" },
 ];
 
 /// Every registered socket.
@@ -242,7 +242,7 @@ pub const SOCKETS: &[SocketPath] = &[
     SocketPath { id: "tunnel-config-cmd", path: "/run/ados/tunnel-config-cmd.sock", owner: "ados-config-tunnel" },
     SocketPath { id: "video-cmd", path: "/run/ados/video-cmd.sock", owner: "ados-supervisor" },
     SocketPath { id: "video-encoder", path: "/run/ados/video-encoder.sock", owner: "ados-video" },
-    SocketPath { id: "sensor-bus", path: "/run/ados/sensors.sock", owner: "ados-clock" },
+    SocketPath { id: "sensor-bus", path: "/run/ados/sensing/sensors.sock", owner: "ados-clock" },
     SocketPath { id: "vision", path: "/run/ados/vision.sock", owner: "ados-vision" },
     SocketPath { id: "wfb-cmd", path: "/run/ados/wfb-cmd.sock", owner: "ados-radio" },
     SocketPath { id: "wifi-cmd", path: "/run/ados/wifi-cmd.sock", owner: "ados-net" },

@@ -24,8 +24,10 @@ WatchdogSec=30
 Environment=RUST_LOG=info
 EnvironmentFile=-/etc/ados/env
 
-# Binds /run/ados/sensors.sock, writes the clock and sensors sidecars, and
-# sends PPS samples to chrony's refclock socket (/run/chrony.ados.sock).
+# Binds /run/ados/sensing/sensors.sock and writes /run/ados/sensing/clock.json
+# (the directory plugins granted sensor.stream.read get bound) plus the
+# sensors sidecar, and sends PPS samples to chrony's refclock socket
+# (/run/chrony.ados.sock).
 # Sending to an existing AF_UNIX socket needs no write access to its
 # directory, so /run stays read-only. No devices, no network.
 DevicePolicy=closed

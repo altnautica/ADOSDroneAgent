@@ -391,5 +391,8 @@ fn run_dir_tmpfiles_creates_the_capture_group_writable_dir() {
     let body = enable::run_dir_tmpfiles_body();
     assert!(body.contains("d /run/ados 0755 root root -\n"));
     assert!(body.contains("d /run/ados/capture 2775 root ados-capture -\n"));
+    // The plugin-bound run subdirectories exist before any plugin starts.
+    assert!(body.contains("d /run/ados/sensing 0755 root root -\n"));
+    assert!(body.contains("d /run/ados/capture-storage 0755 root root -\n"));
     assert!(!body.contains(ados_protocol::ipc::OPERATOR_GROUP));
 }

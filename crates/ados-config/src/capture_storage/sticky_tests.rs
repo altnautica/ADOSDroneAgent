@@ -96,6 +96,91 @@ fn an_explicit_root_ignores_the_sticky_choice() {
     );
 }
 
+#[test]
+fn system_and_agent_directories_are_refused_as_capture_roots() {
+    for root in [
+        "/",
+        "/etc",
+        "/etc/ados/capture",
+        "/usr/share/capture",
+        "/bin",
+        "/sbin/c",
+        "/lib",
+        "/lib64/c",
+        "/libx32",
+        "/boot/firmware",
+        "/dev/shm",
+        "/proc",
+        "/sys/c",
+        "/run",
+        "/run/ados/capture",
+        "/root/c",
+        "/var",
+        "/var/ados",
+        "/var/ados/plugins",
+        "/var/ados/plugin-data/x",
+        "/var/lib/ados/c",
+        "/var/log/c",
+        "/opt/ados/c",
+        "/opt",
+        "/tmp",
+        "/var/tmp",
+        "/home",
+        "/mnt",
+        "/media",
+        "/srv",
+        "/data/../etc",
+        "data/capture",
+    ] {
+        assert!(
+            capture_root_refusal(std::path::Path::new(root)).is_some(),
+            "{root}"
+        );
+    }
+    for root in [
+        "/var/ados/capture",
+        "/var/ados/capture/ssd",
+        "/mnt/nvme/ados/capture",
+        "/media/usb/capture",
+        "/data/capture",
+        "/srv/capture",
+        "/home/ados/captures",
+        "/library/capture",
+        "/etcetera/capture",
+    ] {
+        assert_eq!(
+            capture_root_refusal(std::path::Path::new(root)),
+            None,
+            "{root}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_root_resolves_as_auto() {
+    let mut f = Fake::new();
+    f.disk("nvme0n1", "0", &["nvme0n1p1"]);
+    let nvme = f.mount("/dev/nvme0n1p1", "mnt/nvme", "ext4", 1000 * GIB, 800 * GIB);
+    let chosen = nvme.join("ados/capture");
+    for root in ["/etc", "/var/ados", "/var/lib/ados/capture", "/data/../etc"] {
+        let cfg = CaptureStorageConfig {
+            capture_root: root.into(),
+            ..auto()
+        };
+        assert_eq!(resolve_capture_root(&cfg, &f.roots), chosen, "{root}");
+    }
+
+    // A persisted choice naming a refused root is passed over.
+    let refused = StickyRoot {
+        mount: nvme.display().to_string(),
+        root: "/etc/capture".into(),
+    };
+    let sticky = &f.roots.sticky_file;
+    fs::create_dir_all(sticky.parent().unwrap()).unwrap();
+    fs::write(sticky, serde_json::to_vec(&refused).unwrap()).unwrap();
+    assert_eq!(resolve_capture_root(&auto(), &f.roots), chosen);
+}
+
 fn sidecar(state: CaptureState) -> CaptureStorageSidecar {
     let mut capture = usage(1, 850 * GIB, 1, 0, false);
     capture.state = state;
@@ -156,4 +241,14 @@ fn the_freshness_window_outlasts_the_refresh_and_matches_the_registry() {
     if let Some(registered) = ados_protocol::paths::max_age(SIDECAR_ID) {
         assert_eq!(registered, SIDECAR_MAX_AGE);
     }
+}
+
+/// The sidecar sits alone in its own run subdirectory, which capture plugins
+/// get bound, so a plugin follows the janitor's rename-replace.
+#[test]
+fn the_sidecar_lives_in_its_own_run_subdirectory() {
+    assert_eq!(
+        sidecar_path_in(std::path::Path::new("/tmp/run")),
+        std::path::PathBuf::from("/tmp/run/capture-storage/capture-storage.json")
+    );
 }

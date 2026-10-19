@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Host clock service: brokers the sensor bus (/run/ados/sensors.sock), fits every time source against the host monotonic clock, picks the session timebase, publishes clock samples, writes the clock and sensor-stream sidecars, and feeds a GNSS PPS lock to chrony."
+description = "Host clock service: brokers the sensor bus (/run/ados/sensing/sensors.sock), fits every time source against the host monotonic clock, picks the session timebase, publishes clock samples, writes the clock and sensor-stream sidecars, and feeds a GNSS PPS lock to chrony."
 
 [lib]
 name = "ados_clock"

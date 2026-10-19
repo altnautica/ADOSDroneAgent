@@ -96,14 +96,14 @@ pub struct CapturePass {
     pub root: PathBuf,
     /// Why the capture root could not be created, when it could not.
     pub root_error: Option<String>,
-    /// Why the root could not be brought to `2775 root:ados-capture`, when it
+    /// Why the root could not be brought to `3775 root:ados-capture`, when it
     /// exists but could not. Sessions are still admitted (the supervisor and
     /// root writers can use it); a sandboxed capture plugin cannot.
     pub root_access_error: Option<String>,
     pub sidecar: CaptureStorageSidecar,
 }
 
-/// One capture pass: resolve the root and create it as `2775
+/// One capture pass: resolve the root and create it as `3775
 /// root:ados-capture` ([`cs::prepare_capture_root_on_host`]: an existing root's
 /// owner and mode are corrected, the sessions under it are left alone), evict
 /// when `mode` is [`PassMode::Evict`] and over the budget or under the floor,

@@ -2,7 +2,8 @@
 //! volume, capture usage against the budget, and the write-rate probe.
 //!
 //! Capture usage and admission come from the supervisor janitor's
-//! `capture-storage.json`, rewritten every 10 s; the volume list is read live.
+//! `capture-storage.json` (in its own run subdirectory, which capture plugins
+//! get bound), rewritten every 10 s; the volume list is read live.
 //! A sidecar older than its 30 s window is a supervisor that is not watching
 //! the volume, so the route answers `present: false` rather than old numbers
 //! (and capture admission refuses on the same condition). Capture storage
@@ -56,7 +57,7 @@ pub(crate) fn storage_body(
         .contains(&profile)
         .then(|| {
             fresh_map(
-                &paths.sidecar("capture-storage.json"),
+                &paths.registered("capture-storage"),
                 Some(SIDECAR_MAX_AGE),
                 now,
             )
@@ -117,6 +118,13 @@ mod tests {
         }
     }
 
+    /// Write [`SIDECAR`] where the janitor writes it under `p`.
+    fn write_sidecar(p: &SensingPaths) {
+        let path = p.registered("capture-storage");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, SIDECAR).unwrap();
+    }
+
     #[test]
     fn the_body_marks_the_capture_volume_and_carries_usage() {
         let dir = tempfile::tempdir().unwrap();
@@ -124,7 +132,7 @@ mod tests {
             run_dir: dir.path().to_path_buf(),
             etc_dir: dir.path().to_path_buf(),
         };
-        std::fs::write(p.sidecar("capture-storage.json"), SIDECAR).unwrap();
+        write_sidecar(&p);
         let vols = [vol("/", "mmcblk0p2"), vol("/mnt/nvme0", "nvme0n1")];
         let body = storage_body(&p, "visor", &vols, SystemTime::now());
         let mut keys: Vec<&str> = body
@@ -197,7 +205,7 @@ mod tests {
             run_dir: dir.path().to_path_buf(),
             etc_dir: dir.path().to_path_buf(),
         };
-        std::fs::write(p.sidecar("capture-storage.json"), SIDECAR).unwrap();
+        write_sidecar(&p);
         let vols = [vol("/mnt/nvme0", "nvme0n1")];
         let fresh = storage_body(&p, "drone", &vols, SystemTime::now());
         assert_eq!(fresh["present"], true);

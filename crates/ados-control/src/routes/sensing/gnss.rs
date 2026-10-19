@@ -153,7 +153,7 @@ async fn command(sock: &Path, base: &Value) -> std::io::Result<Value> {
 }
 
 pub async fn post_rtcm(State(state): State<AppState>, body: axum::body::Bytes) -> Response {
-    let sock = SensingPaths::from_state(&state).sidecar("sensors.sock");
+    let sock = SensingPaths::from_state(&state).registered("sensor-bus");
     post_rtcm_at(&sock, &body).await
 }
 

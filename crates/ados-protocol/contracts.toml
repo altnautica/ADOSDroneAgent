@@ -618,10 +618,12 @@ writer = "ados-display"
 rust_const = "ados_display::sidecar::LCD_PLUGIN_TAP_PATH"
 description = "A pending plugin display action fired by a touch zone or button, for the plugin host to deliver."
 
+# In the sensing directory with the sensor bus socket: plugins granted
+# sensor.stream.read get that directory bound, so they follow every rename.
 [[sidecar]]
 id = "clock"
 version = 1
-path = "/run/ados/clock.json"
+path = "/run/ados/sensing/clock.json"
 max_age_ms = 5000
 writer = "ados-clock"
 description = "The host timebase and its disciplining sources: the timebase the next capture session uses, the lock verdict, sigma, and per-source offset/skew/sigma (fc, hub, gnss PPS, sim)."
@@ -650,10 +652,12 @@ max_age_ms = 5000
 writer = "ados-gnss"
 description = "GNSS receivers (fix, satellites, position, RTK, PPS lock), the RTK base state (survey-in, fixed position, RTCM out) and the moving-baseline heading."
 
+# Alone in its directory, which capture.storage.write plugins get bound
+# read-only, so they follow every rename.
 [[sidecar]]
 id = "capture-storage"
 version = 1
-path = "/run/ados/capture-storage.json"
+path = "/run/ados/capture-storage/capture-storage.json"
 max_age_ms = 30000
 writer = "ados-supervisor"
 description = "The capture storage root, its volume, capture usage against the budget and free-space floor, session counts, and the admission state (ok, near_full, full) a new capture session is checked against."
@@ -789,7 +793,7 @@ owner = "ados-video"
 
 [[socket]]
 id = "sensor-bus"
-path = "/run/ados/sensors.sock"
+path = "/run/ados/sensing/sensors.sock"
 owner = "ados-clock"
 
 [[socket]]

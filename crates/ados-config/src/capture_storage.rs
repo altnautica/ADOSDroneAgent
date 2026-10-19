@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 mod root;
 mod root_access;
 mod volumes;
-pub use root::{read_sticky, resolve_capture_root, StickyRoot};
+pub use root::{capture_root_refusal, read_sticky, resolve_capture_root, StickyRoot};
 pub use root_access::{
     capture_group_gid, chown_to_root, prepare_capture_root, prepare_capture_root_on_host, ChownFn,
     RootFix, CAPTURE_ROOT_MODE,
@@ -34,6 +34,17 @@ pub const E_STORAGE_FULL: &str = "E_STORAGE_FULL";
 
 /// Registry id of the sidecar the janitor writes.
 pub const SIDECAR_ID: &str = "capture-storage";
+
+/// The janitor's sidecar under `run_dir`, where the path registry places it
+/// relative to the default run directory (its own subdirectory, which capture
+/// plugins get bound).
+pub fn sidecar_path_in(run_dir: &Path) -> std::path::PathBuf {
+    use ados_protocol::paths;
+    let relative = paths::sidecar(SIDECAR_ID)
+        .and_then(|s| s.path.strip_prefix(paths::RUN_DIR_DEFAULT))
+        .map_or(paths::CAPTURE_STORAGE_JSON, |p| p.trim_start_matches('/'));
+    run_dir.join(relative)
+}
 
 /// Schema version of `capture-storage.json`. Kept in step with the registry.
 pub const SIDECAR_VERSION: u16 = 1;
@@ -164,7 +175,7 @@ pub struct WriteProbe {
     pub measured_at_ns: u64,
 }
 
-/// `/run/ados/capture-storage.json`.
+/// `/run/ados/capture-storage/capture-storage.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CaptureStorageSidecar {
     pub version: u16,

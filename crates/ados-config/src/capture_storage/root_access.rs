@@ -2,17 +2,21 @@
 //!
 //! A capture plugin runs as its own system user and joins
 //! [`ados_protocol::ipc::CAPTURE_GROUP`] only while it holds
-//! `capture.storage.write`. The root is `2775 root:ados-capture`: group
+//! `capture.storage.write`. The root is `3775 root:ados-capture`: group
 //! writable so that plugin can create its session directories, setgid so every
-//! session created under it stays in the capture group. Only the root itself is
-//! corrected; the sessions under it keep what their writer gave them.
+//! session created under it stays in the capture group, and sticky so one
+//! writer cannot rename or remove a session another writer owns. Only the root
+//! itself is corrected; the sessions under it keep what their writer gave them.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
-/// Mode of the capture root: setgid, rwx for owner and group, r-x for others.
-pub const CAPTURE_ROOT_MODE: u32 = 0o2775;
+use super::root::capture_root_refusal;
+
+/// Mode of the capture root: sticky and setgid, rwx for owner and group, r-x
+/// for others.
+pub const CAPTURE_ROOT_MODE: u32 = 0o3775;
 
 /// Hands a directory to `root:<gid>`. Production passes [`chown_to_root`];
 /// tests pass a recorder so they run unprivileged.
@@ -27,12 +31,20 @@ pub struct RootFix {
     pub chmodded: bool,
 }
 
-/// Create `root` (`mkdir -p`) and bring it to `2775 root:<gid>`. With `gid`
-/// `None` (the capture group is absent, a development host) the directory is
-/// only created: widening it to group write for a group that does not exist
-/// would hand it to whatever group it happens to carry. The owner is fixed
-/// before the mode, so the setgid bit is set last and nothing clears it.
+/// Create `root` (`mkdir -p`) and bring it to `3775 root:<gid>`. A root
+/// [`capture_root_refusal`] refuses is neither created nor touched
+/// (`PermissionDenied`). With `gid` `None` (the capture group is absent, a
+/// development host) the directory is only created: widening it to group write
+/// for a group that does not exist would hand it to whatever group it happens
+/// to carry. The owner is fixed before the mode, so the setgid bit is set last
+/// and nothing clears it.
 pub fn prepare_capture_root(root: &Path, gid: Option<u32>, chown: ChownFn) -> io::Result<RootFix> {
+    if let Some(reason) = capture_root_refusal(root) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("capture root {} refused: {reason}", root.display()),
+        ));
+    }
     std::fs::create_dir_all(root)?;
     let mut fix = RootFix::default();
     let Some(gid) = gid else {

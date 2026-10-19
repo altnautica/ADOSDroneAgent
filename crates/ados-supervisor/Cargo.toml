@@ -40,13 +40,14 @@ getrandom = { workspace = true }
 time = { version = "0.3", features = ["std", "formatting", "macros"] }
 
 # Linux-only edges (systemd notify + journald + USB presence enumeration for
-# the hot-plug poller + setsid/killpg + flock). Confined to a target section so
+# the hot-plug poller + setsid/killpg + flock + descriptor-relative capture
+# session removal that never follows a link). Confined to a target section so
 # the pure-logic core still builds and `cargo test`s on a non-Linux dev host;
 # the edge call sites are cfg-gated with inert fallbacks.
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
-nix = { workspace = true, features = ["time"] }
+nix = { workspace = true, features = ["time", "dir"] }
 
 [dev-dependencies]
 tempfile = "3"

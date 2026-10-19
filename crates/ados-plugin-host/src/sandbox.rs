@@ -57,6 +57,7 @@
 //! the security-control-that-reports-itself-applied failure this map replaced.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 /// One device capability and the cgroup device rules it unlocks.
 ///
@@ -143,19 +144,25 @@ pub const FILESYSTEM_HOST_CAP: &str = "filesystem.host";
 /// The capability that lets a plugin subscribe to the sensor bus.
 pub const SENSOR_STREAM_READ_CAP: &str = "sensor.stream.read";
 
-/// Bound read-only into a plugin holding [`SENSOR_STREAM_READ_CAP`]: the sensor
-/// bus socket (a reader socket in [`ados_protocol::ipc::SENSORS_GROUP`], which
-/// the grant joins; the bus admits that group for subscribe only, and the
-/// plugin never joins [`ados_protocol::ipc::OPERATOR_GROUP`]) and the clock
-/// sidecar.
-pub const SENSOR_STREAM_PATHS: &[&str] = &["/run/ados/sensors.sock", "/run/ados/clock.json"];
+/// Bound read-only into a plugin holding [`SENSOR_STREAM_READ_CAP`]: the
+/// sensing run directory, which holds only the sensor bus socket (a reader
+/// socket in [`ados_protocol::ipc::SENSORS_GROUP`], which the grant joins; the
+/// bus admits that group for subscribe only, and the plugin never joins
+/// [`ados_protocol::ipc::OPERATOR_GROUP`]) and the clock sidecar. A directory
+/// bind, because a file bind stays on the inode present at unit start: the
+/// sidecar is replaced by rename every second and the socket is re-created
+/// when `ados-clock` restarts, and the plugin must see both.
+pub const SENSOR_STREAM_DIR: &str = "/run/ados/sensing";
 
 /// The capability that lets a plugin write capture sessions.
 pub const CAPTURE_STORAGE_WRITE_CAP: &str = "capture.storage.write";
 
 /// Bound read-only into a plugin holding [`CAPTURE_STORAGE_WRITE_CAP`]: the
-/// janitor's capture-storage sidecar (capture root and admission).
-pub const CAPTURE_STORAGE_SIDECAR: &str = "/run/ados/capture-storage.json";
+/// directory holding only the janitor's capture-storage sidecar (capture root
+/// and admission). A directory bind for the same reason as
+/// [`SENSOR_STREAM_DIR`]: the janitor replaces the sidecar by rename every
+/// refresh, and admission reads its freshness.
+pub const CAPTURE_STORAGE_DIR: &str = "/run/ados/capture-storage";
 
 /// Bound read-write with [`CAPTURE_STORAGE_WRITE_CAP`]: the capture-active
 /// marker directory (`2775 root:ados-capture`).
@@ -348,12 +355,10 @@ pub fn sandbox_directives(
         lines.push(format!("BindReadOnlyPaths=-{socket}"));
     }
     if granted.contains(SENSOR_STREAM_READ_CAP) {
-        for path in SENSOR_STREAM_PATHS {
-            lines.push(format!("BindReadOnlyPaths=-{path}"));
-        }
+        lines.push(format!("BindReadOnlyPaths=-{SENSOR_STREAM_DIR}"));
     }
     if granted.contains(CAPTURE_STORAGE_WRITE_CAP) {
-        lines.push(format!("BindReadOnlyPaths=-{CAPTURE_STORAGE_SIDECAR}"));
+        lines.push(format!("BindReadOnlyPaths=-{CAPTURE_STORAGE_DIR}"));
         lines.push(format!("BindPaths=-{CAPTURE_STATE_DIR}"));
     }
     let host_fs = granted.contains(FILESYSTEM_HOST_CAP);
@@ -389,13 +394,16 @@ pub fn sandbox_directives(
 /// plugin holding [`CAPTURE_STORAGE_WRITE_CAP`], and tell it which host root
 /// that is (`ADOS_CAPTURE_ROOT_HOST`), so a capture writer can refuse when the
 /// janitor has since moved the root. The root is resolved at render time (see
-/// [`crate::systemd::capture_root`]). Empty without the grant, or for a root
-/// that is not a plain absolute path.
+/// [`crate::systemd::capture_root`]). Empty without the grant, for a root
+/// [`ados_config::capture_storage::capture_root_refusal`] refuses (a system or
+/// agent directory, a relative path, a `..` component), or for one a unit file
+/// would read differently.
 pub fn capture_root_bind(granted: &BTreeSet<String>, host_root: Option<&str>) -> Vec<String> {
     match host_root {
         Some(root)
             if granted.contains(CAPTURE_STORAGE_WRITE_CAP)
-                && root.starts_with('/')
+                && ados_config::capture_storage::capture_root_refusal(Path::new(root))
+                    .is_none()
                 && !root.contains(':')
                 && !root.chars().any(|c| c.is_whitespace() || c.is_control()) =>
         {
@@ -552,9 +560,8 @@ mod tests {
         // other path is bound back, least of all another plugin's socket dir.
         let allowed = [
             "BindReadOnlyPaths=-/run/ados/logd.sock",
-            "BindReadOnlyPaths=-/run/ados/sensors.sock",
-            "BindReadOnlyPaths=-/run/ados/clock.json",
-            "BindReadOnlyPaths=-/run/ados/capture-storage.json",
+            "BindReadOnlyPaths=-/run/ados/sensing",
+            "BindReadOnlyPaths=-/run/ados/capture-storage",
             "BindPaths=-/run/ados/capture",
         ];
         let everything: Vec<&str> = sandbox_enforced_caps().into_iter().collect();
@@ -697,25 +704,36 @@ mod tests {
         assert!(!sandbox_directives(&caps(&["hardware.gpu"]), true, &[]).contains(&readers));
     }
 
+    /// The bus socket and the clock sidecar are bound as their directory: the
+    /// sidecar is replaced by rename and the socket re-created on restart, and
+    /// a single-file bind would pin the inode present at unit start.
     #[test]
-    fn the_sensor_grant_binds_the_bus_and_clock_and_joins_the_sensors_group() {
+    fn the_sensor_grant_binds_the_sensing_dir_and_joins_the_sensors_group() {
         let none = sandbox_directives(&caps(&[]), true, &[]);
-        assert!(!none
-            .iter()
-            .any(|l| l.contains("sensors.sock") || l.contains("clock.json")));
+        assert!(!none.iter().any(|l| l.contains(SENSOR_STREAM_DIR)));
         let lines = sandbox_directives(&caps(&[SENSOR_STREAM_READ_CAP]), true, &[]);
         let tmpfs = lines
             .iter()
             .position(|l| l == "TemporaryFileSystem=/run/ados:ro")
             .expect("run dir hidden");
-        for path in ["/run/ados/sensors.sock", "/run/ados/clock.json"] {
-            let at = lines
-                .iter()
-                .position(|l| *l == format!("BindReadOnlyPaths=-{path}"))
-                .expect(path);
-            assert!(
-                at > tmpfs,
-                "{path} must be bound after the tmpfs hides the run dir"
+        let at = lines
+            .iter()
+            .position(|l| l == "BindReadOnlyPaths=-/run/ados/sensing")
+            .expect("sensing dir bound");
+        assert!(at > tmpfs, "bound after the tmpfs hides the run dir");
+        assert!(!lines
+            .iter()
+            .any(|l| l.contains("sensors.sock") || l.contains("clock.json")));
+        // The registry places both files in the bound directory.
+        for id in ["sensor-bus", "clock"] {
+            let registered = ados_protocol::paths::socket(id)
+                .map(|s| s.path)
+                .or_else(|| ados_protocol::paths::sidecar(id).map(|s| s.path))
+                .expect(id);
+            assert_eq!(
+                Path::new(registered).parent(),
+                Some(Path::new(SENSOR_STREAM_DIR)),
+                "{id}"
             );
         }
         assert!(lines.contains(&"SupplementaryGroups=ados-sensors".to_string()));
@@ -748,9 +766,15 @@ mod tests {
     }
 
     #[test]
-    fn the_capture_grant_binds_the_marker_dir_sidecar_and_root() {
+    fn the_capture_grant_binds_the_marker_dir_sidecar_dir_and_root() {
         let lines = sandbox_directives(&caps(&[CAPTURE_STORAGE_WRITE_CAP]), true, &[]);
-        assert!(lines.contains(&"BindReadOnlyPaths=-/run/ados/capture-storage.json".to_string()));
+        assert!(lines.contains(&"BindReadOnlyPaths=-/run/ados/capture-storage".to_string()));
+        assert!(!lines.iter().any(|l| l.contains("capture-storage.json")));
+        let sidecar = ados_protocol::paths::sidecar("capture-storage").unwrap();
+        assert_eq!(
+            Path::new(sidecar.path).parent(),
+            Some(Path::new(CAPTURE_STORAGE_DIR))
+        );
         assert!(lines.contains(&"BindPaths=-/run/ados/capture".to_string()));
         assert!(lines.contains(&"SupplementaryGroups=ados-capture".to_string()));
         assert!(!lines.contains(&"SupplementaryGroups=ados-operator".to_string()));
@@ -767,6 +791,13 @@ mod tests {
         assert!(capture_root_bind(&granted, Some("relative/root")).is_empty());
         assert!(capture_root_bind(&granted, Some("/a b")).is_empty());
         assert!(capture_root_bind(&granted, Some("/a:b")).is_empty());
+        // System and agent directories are never bound read-write.
+        for refused in ["/", "/etc", "/var/ados", "/var/lib/ados/c", "/mnt/../etc"] {
+            assert!(
+                capture_root_bind(&granted, Some(refused)).is_empty(),
+                "{refused}"
+            );
+        }
         assert!(capture_root_bind(&granted, None).is_empty());
     }
 }

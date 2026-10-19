@@ -86,7 +86,7 @@ pub struct SourceReport {
     pub last_update_ns: u64,
 }
 
-/// The `/run/ados/clock.json` document (the `GET /api/v1/clock` body without
+/// The `/run/ados/sensing/clock.json` document (the `GET /api/v1/clock` body without
 /// `present`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ClockReport {

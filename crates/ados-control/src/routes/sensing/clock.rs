@@ -19,7 +19,7 @@ pub async fn get_clock(State(state): State<AppState>) -> Json<Value> {
 }
 
 pub(crate) fn clock_body(paths: &SensingPaths, now: SystemTime) -> Value {
-    match fresh_map(&paths.sidecar("clock.json"), Some(FRESH), now) {
+    match fresh_map(&paths.registered("clock"), Some(FRESH), now) {
         Some(m) => with_present(true, m),
         None => with_present(false, empty()),
     }
@@ -69,10 +69,17 @@ mod tests {
                    {"id":"gnss","kind":"gnss_pps","locked":false,"offset_ns":0,"skew_ppm":0.0,"sigma_ns":-1,"last_update_ns":0},
                    {"id":"sim","kind":"sim","locked":false,"offset_ns":0,"skew_ppm":0.0,"sigma_ns":-1,"last_update_ns":0}]}"#;
 
+    /// Write [`SIDECAR`] where ados-clock writes it under `dir`.
+    fn write_clock(dir: &std::path::Path) {
+        let path = paths(dir).registered("clock");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, SIDECAR).unwrap();
+    }
+
     #[test]
     fn a_fresh_sidecar_is_served_with_present_and_without_version() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("clock.json"), SIDECAR).unwrap();
+        write_clock(dir.path());
         let body = clock_body(&paths(dir.path()), SystemTime::now());
         let mut keys: Vec<&str> = body
             .as_object()
@@ -110,7 +117,7 @@ mod tests {
         assert_eq!(absent["sigma_ns"], -1);
         assert_eq!(absent["utc_ns"], Value::Null);
         assert_eq!(absent["sources"], json!([]));
-        std::fs::write(dir.path().join("clock.json"), SIDECAR).unwrap();
+        write_clock(dir.path());
         let later = SystemTime::now() + Duration::from_secs(30);
         assert_eq!(clock_body(&paths(dir.path()), later)["present"], false);
     }

@@ -171,11 +171,11 @@ SIDECAR_PATHS: dict[str, dict[str, object]] = {
     "lcd-page-request": {"path": "/run/ados/lcd-page-request.json", "max_age_ms": None, "writer": "ados-api"},
     "lcd-plugin-page": {"path": "/run/ados/lcd-plugin-page.json", "max_age_ms": None, "writer": "ados-plugin-host"},
     "lcd-plugin-tap": {"path": "/run/ados/lcd-plugin-tap.json", "max_age_ms": None, "writer": "ados-display"},
-    "clock": {"path": "/run/ados/clock.json", "max_age_ms": 5000, "writer": "ados-clock"},
+    "clock": {"path": "/run/ados/sensing/clock.json", "max_age_ms": 5000, "writer": "ados-clock"},
     "sensors": {"path": "/run/ados/sensors.json", "max_age_ms": 5000, "writer": "ados-clock"},
     "sensorhub": {"path": "/run/ados/sensorhub.json", "max_age_ms": 5000, "writer": "ados-sensorhub"},
     "gnss": {"path": "/run/ados/gnss.json", "max_age_ms": 5000, "writer": "ados-gnss"},
-    "capture-storage": {"path": "/run/ados/capture-storage.json", "max_age_ms": 30000, "writer": "ados-supervisor"},
+    "capture-storage": {"path": "/run/ados/capture-storage/capture-storage.json", "max_age_ms": 30000, "writer": "ados-supervisor"},
 }
 
 SOCKET_PATHS: dict[str, dict[str, str]] = {
@@ -204,7 +204,7 @@ SOCKET_PATHS: dict[str, dict[str, str]] = {
     "tunnel-config-cmd": {"path": "/run/ados/tunnel-config-cmd.sock", "owner": "ados-config-tunnel"},
     "video-cmd": {"path": "/run/ados/video-cmd.sock", "owner": "ados-supervisor"},
     "video-encoder": {"path": "/run/ados/video-encoder.sock", "owner": "ados-video"},
-    "sensor-bus": {"path": "/run/ados/sensors.sock", "owner": "ados-clock"},
+    "sensor-bus": {"path": "/run/ados/sensing/sensors.sock", "owner": "ados-clock"},
     "vision": {"path": "/run/ados/vision.sock", "owner": "ados-vision"},
     "wfb-cmd": {"path": "/run/ados/wfb-cmd.sock", "owner": "ados-radio"},
     "wifi-cmd": {"path": "/run/ados/wifi-cmd.sock", "owner": "ados-net"},

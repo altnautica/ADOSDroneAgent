@@ -86,6 +86,7 @@ fn the_applied_mode_admits_a_group_member_to_create_sessions() {
     let mode = mode_of(&root);
     assert_eq!(mode & 0o070, 0o070, "group rwx");
     assert_eq!(mode & 0o2000, 0o2000, "setgid");
+    assert_eq!(mode & 0o1000, 0o1000, "sticky");
     assert_eq!(mode & 0o002, 0, "others may not write");
     // Setgid in effect: a session made here carries the root's group.
     let session = root.join("s1");
@@ -94,6 +95,22 @@ fn the_applied_mode_admits_a_group_member_to_create_sessions() {
         std::fs::metadata(&session).unwrap().gid(),
         std::fs::metadata(&root).unwrap().gid()
     );
+}
+
+#[test]
+fn a_refused_root_is_neither_created_nor_handed_to_the_group() {
+    for root in [
+        "/etc",
+        "/etc/ados/capture",
+        "/var/ados",
+        "/var/lib/ados/c",
+        "rel/capture",
+    ] {
+        let chown = |_: &Path, _: u32| -> io::Result<()> { panic!("no chown for {root}") };
+        let path = Path::new(root);
+        let err = prepare_capture_root(path, Some(0), &chown).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{root}");
+    }
 }
 
 /// The real permission check, with a second identity. Needs root, so it is
