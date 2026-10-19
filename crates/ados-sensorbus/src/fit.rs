@@ -18,7 +18,11 @@ pub struct ClockFit {
 struct Model {
     /// Reference host time the line is centred on.
     x0: u64,
-    /// Offset at `x0`, ns.
+    /// Integer reference offset (the window's mean `source - host`), ns. The
+    /// float terms are relative to it, so a UTC-scale offset (~1.8e18 ns)
+    /// keeps nanosecond precision.
+    y0: i128,
+    /// Offset at `x0` relative to `y0`, ns.
     c: f64,
     /// Slope: ns of offset per ns of host time (skew).
     s: f64,
@@ -82,10 +86,12 @@ impl ClockFit {
             return;
         }
         let x0 = self.pts.back().unwrap().0;
+        let sum: i128 = self.pts.iter().map(|&(h, s)| s as i128 - h as i128).sum();
+        let y0 = sum / n as i128;
         let pts = || {
             self.pts
                 .iter()
-                .map(move |&(h, s)| (h as f64 - x0 as f64, (s as i128 - h as i128) as f64))
+                .map(move |&(h, s)| (h as f64 - x0 as f64, (s as i128 - h as i128 - y0) as f64))
         };
         let nf = n as f64;
         let (sx, sy) = pts().fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
@@ -104,27 +110,43 @@ impl ClockFit {
         } else {
             0.0
         };
-        self.model = Some(Model { x0, c, s, rms });
+        self.model = Some(Model { x0, y0, c, s, rms });
     }
 
-    /// Offset `source - host` at host time `host_ns`, ns.
+    /// Offset relative to the model's integer reference at `host_ns`.
+    fn rel_offset(m: &Model, host_ns: u64) -> f64 {
+        m.c + m.s * (host_ns as f64 - m.x0 as f64)
+    }
+
+    /// Offset `source - host` at host time `host_ns`, ns. A float, so a
+    /// UTC-scale offset is only good to ~256 ns here; [`Self::offset_i64`]
+    /// and [`Self::to_source`] are exact.
     pub fn offset_ns(&self, host_ns: u64) -> Option<f64> {
         let m = self.model?;
-        Some(m.c + m.s * (host_ns as f64 - m.x0 as f64))
+        Some(m.y0 as f64 + Self::rel_offset(&m, host_ns))
+    }
+
+    /// Offset `source - host` at host time `host_ns`, rounded to whole ns.
+    pub fn offset_i64(&self, host_ns: u64) -> Option<i64> {
+        let m = self.model?;
+        Some((m.y0 + Self::rel_offset(&m, host_ns).round() as i128) as i64)
     }
 
     /// Source time at host time `host_ns`.
     pub fn to_source(&self, host_ns: u64) -> Option<i64> {
-        self.offset_ns(host_ns)
-            .map(|o| (host_ns as i128 + o.round() as i128) as i64)
+        self.offset_i64(host_ns)
+            .map(|o| (host_ns as i128 + o as i128) as i64)
     }
 
     /// Host time at source time `source_ns` (inverse of [`Self::to_source`]).
     pub fn to_host(&self, source_ns: i64) -> Option<u64> {
         let m = self.model?;
-        // source = host + c + s (host - x0)  =>  host = (source - c + s x0) / (1 + s)
-        let host = (source_ns as f64 - m.c + m.s * m.x0 as f64) / (1.0 + m.s);
-        (host >= 0.0).then_some(host.round() as u64)
+        // source = host + y0 + c + s (host - x0); with u = host - x0:
+        // u = (source - y0 - x0 - c) / (1 + s)
+        let d = (source_ns as i128 - m.y0 - m.x0 as i128) as f64;
+        let u = (d - m.c) / (1.0 + m.s);
+        let host = m.x0 as i128 + u.round() as i128;
+        u64::try_from(host).ok()
     }
 
     /// Skew of the source against the host, parts per million.
@@ -240,6 +262,25 @@ mod tests {
         assert!(f.sigma_ns() <= 1);
         let src = f.to_source(h).unwrap();
         assert!((f.to_host(src).unwrap() as i64 - h as i64).abs() <= 1);
+    }
+
+    /// A UTC-scale source (offset ~1.76e18 ns) keeps nanosecond precision:
+    /// exact data recovers the offset to the ns and a zero sigma.
+    #[test]
+    fn utc_scale_offset_keeps_nanosecond_precision() {
+        let utc_offset: i64 = 1_760_860_000_123_456_789;
+        let mut f = ClockFit::sixty_seconds();
+        for i in 0..20u64 {
+            let h = 400_000_000_000 + i * 1_000_000_000;
+            f.push(h, h as i64 + utc_offset);
+        }
+        let h = 400_000_000_000 + 19 * 1_000_000_000 + 250_000_000;
+        let want = h as i64 + utc_offset;
+        let got = f.to_source(h).unwrap();
+        assert!(got.abs_diff(want) <= 2, "error {} ns", got - want);
+        assert!(f.offset_i64(h).unwrap().abs_diff(utc_offset) <= 2);
+        assert_eq!(f.sigma_ns(), 0);
+        assert!(f.to_host(want).unwrap().abs_diff(h) <= 2);
     }
 
     #[test]
