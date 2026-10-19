@@ -10,11 +10,13 @@ from .agent import AgentConfig
 from .api import ApiConfig
 from .battery import BatteryConfig
 from .cloud import RemoteAccessConfig, ServerConfig
+from .gnss import GnssConfig
 from .ground_station import GroundStationConfig
 from .mavlink import MavlinkConfig
 from .network import NetworkConfig
 from .radio import RadioConfig
 from .security import McpConfig, SecurityConfig
+from .sensors import SensorsConfig
 from .storage import HardwareConfig, StorageConfig
 from .system import (
     DiscoveryConfig,
@@ -68,6 +70,8 @@ class ADOSConfig(BaseModel):
     storage: StorageConfig = StorageConfig()
     hardware: HardwareConfig = HardwareConfig()
     simulation: SimulationConfig = SimulationConfig()
+    gnss: GnssConfig = Field(default_factory=GnssConfig)
+    sensors: SensorsConfig = Field(default_factory=SensorsConfig)
 
     model_config = {"extra": "ignore"}
 

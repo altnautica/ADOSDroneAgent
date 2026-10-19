@@ -75,6 +75,7 @@ pub mod plugins_state;
 pub mod plugins_tools;
 pub mod reachable_addr;
 pub mod relay_secret;
+pub mod sensing;
 pub mod service_control;
 pub mod services;
 pub mod signing;

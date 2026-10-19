@@ -29,6 +29,9 @@ ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
 # report the same tier the drone runs on, not a second implementation.
 ados-offload = { path = "../ados-offload" }
 ados-config = { path = "../ados-config" }
+# The sensor bus: rig validation against the capture contract, RTCM
+# fragment counting and the one-shot publish the RTCM route injects with.
+ados-sensorbus = { path = "../ados-sensorbus" }
 # The Wi-Fi-client manager and its command-socket server, served in-process on
 # nodes that run no uplink daemon.
 ados-net = { path = "../ados-net" }

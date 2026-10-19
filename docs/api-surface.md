@@ -101,8 +101,12 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/telemetry` |  |
 | GET | `/api/time` |  |
 | GET | `/api/v1/battery` |  |
+| GET | `/api/v1/clock` |  |
 | GET | `/api/v1/dashboard/snapshot` |  |
 | GET | `/api/v1/diagnostics` |  |
+| GET | `/api/v1/gnss` |  |
+| PUT | `/api/v1/gnss/base` |  |
+| POST | `/api/v1/gnss/rtcm` |  |
 | POST | `/api/v1/ground-station/bluetooth/pair` |  |
 | GET | `/api/v1/ground-station/bluetooth/paired` |  |
 | POST | `/api/v1/ground-station/bluetooth/scan` |  |
@@ -197,6 +201,9 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/network/mac/pin` |  |
 | DELETE | `/api/v1/network/mac/{iface}` |  |
 | GET | `/api/v1/plugins/catalog` |  |
+| GET | `/api/v1/sensors` |  |
+| PUT | `/api/v1/sensors/rig` |  |
+| GET | `/api/v1/storage` |  |
 | POST | `/api/v1/system/restart-supervisor` |  |
 | GET | `/api/v2/observability/{*upstream_path}` |  |
 | GET | `/api/version` | unauthenticated by design |
@@ -234,7 +241,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-209 native routes.
+216 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

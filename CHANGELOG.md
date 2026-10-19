@@ -6,6 +6,74 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Sensor bus and host clock.** New seam `/run/ados/sensors.sock` (contract
+  `sensor.v1`): length-prefixed msgpack frames `{v, kind, src, origin,
+  payload}` whose clock, IMU, GNSS and trigger payloads are the capture
+  contract `ados.capture.v1` protobuf messages, every `t_ns` on the host
+  monotonic clock. `ados-clock` (drone, ground station, visor) brokers the
+  bus, fits each time source (flight controller, sensor hub, GNSS PPS,
+  simulator) against the host clock over a 60 s window, publishes 1 Hz
+  `ClockSample`s, writes `/run/ados/clock.json` and the per-stream rate table
+  `/run/ados/sensors.json`, and feeds a locked PPS to chrony through a SOCK
+  refclock (installer step `chrony_ados` writes `/etc/chrony/conf.d/ados.conf`).
+- **REST: `/api/v1/clock`, `/api/v1/sensors`, `PUT /api/v1/sensors/rig`
+  (stored at `/etc/ados/rig.json` after validation against the capture
+  contract rig schema), `/api/v1/storage`, `/api/v1/gnss`,
+  `PUT /api/v1/gnss/base`, `POST /api/v1/gnss/rtcm`.** A route whose service
+  is absent answers `present: false`. `/api/status/full` gains the booleans
+  `clock`, `sensor_hub`, `gnss` and `capture_storage`.
+- **Flight-controller sensor lane.** The router requests HIGHRES_IMU 200 Hz
+  (RAW_IMU 50 Hz fallback), ATTITUDE_QUATERNION, LOCAL_POSITION_NED,
+  GPS_RAW_INT, SYSTEM_TIME and SCALED_PRESSURE on a visor, and on a drone
+  while `/run/ados/capture-active` exists; runs a min-RTT TIMESYNC estimator;
+  publishes IMU (FLU), barometer and CAMERA_FEEDBACK triggers on the sensor
+  bus; and injects every `rtcm` bus frame to the flight controller as
+  fragmented GPS_RTCM_DATA.
+- **GNSS service.** `ados-gnss` (ground station, visor) reads receivers over
+  serial, UDP (simulator bridge) or the sensor hub; decodes UBX NAV-PVT/DOP/
+  SVIN/RELPOSNED, TIM-TP, MON-VER and NMEA GGA/RMC; pairs PPS pulses with UTC
+  for the clock; runs an RTK base (survey-in or fixed position via
+  CFG-VALSET) whose RTCM3 output goes onto the sensor bus toward paired
+  drones; and reports moving-baseline heading. State in `/run/ados/gnss.json`,
+  commands on `/run/ados/gnss-cmd.sock`. Config block `gnss`.
+- **Capture storage.** Config `storage.capture_root` (`auto` picks the first
+  NVMe volume with 64 GiB free), `capture_budget_pct`, `capture_floor_free_gib`
+  and `capture_evict_unuploaded`. The janitor's `capture` category evicts
+  uploaded sessions oldest first, never the recording one, measures the write
+  rate, and writes `/run/ados/capture-storage.json`, whose `state: full`
+  refuses new sessions with `E_STORAGE_FULL`.
+- **Sensor hub service.** `ados-sensorhub` reads the sensor hub's protocol v1
+  stream over USB CDC (`1209:ad05`) or TCP (a simulated hub), sends the hub its
+  `Config`, maps hub time onto the host monotonic clock (per-second lower
+  envelope of arrival pairs, published as `sync` frames), and publishes IMU
+  (body FLU, SI units, rotated with the stored rig extrinsics), trigger,
+  barometer, magnetometer and GNSS passthrough frames on the sensor bus.
+  `rtcm` frames on the bus are forwarded to the hub. Link state is written to
+  `/run/ados/sensorhub.json`. Config block `sensors.hub` (`transport`:
+  `auto` | `serial:<device>` | `tcp:<host>:<port>`, `imu_odr_hz`,
+  `trigger_hz`, `exposure_us`, `gnss_forward`); an explicit transport sets
+  the `/etc/ados/sensorhub-enabled` marker.
+- **Sensor hub and battery gauge in `board.json`.** The board probe reports a
+  `sensor_hub` object (`present`, `device`, `vid_pid`) and touches
+  `/run/ados/sensor-hub-present` while a hub is attached, and copies a
+  profile's `battery_gauge` binding. Board profiles accept optional `imu`,
+  `gnss`, `sensor_hub` and `battery_gauge` bindings. USB discovery classifies
+  `1209:ad05` as `sensor_hub`.
+
+### Changed
+
+- **Framebus descriptor v2.** `ts_ms` is replaced by `ts_ns` (host
+  monotonic) plus optional `ts_sensor_ns`, `exposure_ns`, `trigger_seq` and a
+  `timebase`; formats `gray8`, `gray16`, `bayerrggb8`, `bayerrggb16` are
+  added; `read_slot` is replaced by the buffer-reusing `read_slot_into`. The
+  vision tap header (v2) carries `ts_mono_ns`. Detection batches now stamp
+  `ts_ms` from the frame's monotonic time.
+- **`mavlink.sock` v2.** Every frame the router fans out carries an 8-byte
+  little-endian `rx_mono_ns` header (host monotonic read time) inside the
+  length prefix; client writes are unchanged.
+
 ## [0.103.3] - 2026-10-14
 
 ### Added

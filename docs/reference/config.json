@@ -198,6 +198,143 @@
       "type": "string"
     },
     {
+      "default": 2.0,
+      "description": "Accuracy M",
+      "enum": null,
+      "key": "gnss.base.accuracy_m",
+      "maximum": null,
+      "minimum": 0,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": null,
+      "description": "H Ellipsoid M",
+      "enum": null,
+      "key": "gnss.base.h_ellipsoid_m",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": null,
+      "description": "Lat Deg",
+      "enum": null,
+      "key": "gnss.base.lat_deg",
+      "maximum": 90,
+      "minimum": -90,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": null,
+      "description": "Lon Deg",
+      "enum": null,
+      "key": "gnss.base.lon_deg",
+      "maximum": 180,
+      "minimum": -180,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": 300,
+      "description": "Min Dur S",
+      "enum": null,
+      "key": "gnss.base.min_dur_s",
+      "maximum": null,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "off",
+      "description": "Mode",
+      "enum": [
+        "off",
+        "survey",
+        "fixed"
+      ],
+      "key": "gnss.base.mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "gnss.heading.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": null,
+      "description": "Pps Device",
+      "enum": null,
+      "key": "gnss.pps_device",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": [],
+      "description": "Receivers",
+      "enum": null,
+      "key": "gnss.receivers",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": "gnss0",
+      "description": "Id",
+      "enum": null,
+      "key": "gnss.receivers[].id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Model",
+      "enum": null,
+      "key": "gnss.receivers[].model",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": "uart1",
+      "description": "Port",
+      "enum": [
+        "uart1",
+        "usb"
+      ],
+      "key": "gnss.receivers[].port",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "hub",
+      "description": "Source",
+      "enum": null,
+      "key": "gnss.receivers[].source",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": "auto",
       "description": "Cloud Uplink",
       "enum": [
@@ -1546,6 +1683,60 @@
       "type": "boolean"
     },
     {
+      "default": 4000,
+      "description": "Exposure Us",
+      "enum": null,
+      "key": "sensors.hub.exposure_us",
+      "maximum": 1000000,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Gnss Forward",
+      "enum": null,
+      "key": "sensors.hub.gnss_forward",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 1000,
+      "description": "Imu Odr Hz",
+      "enum": [
+        500,
+        1000,
+        2000
+      ],
+      "key": "sensors.hub.imu_odr_hz",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "auto",
+      "description": "Transport",
+      "enum": null,
+      "key": "sensors.hub.transport",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 20,
+      "description": "Trigger Hz",
+      "enum": null,
+      "key": "sensors.hub.trigger_hz",
+      "maximum": 1000,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": "mqtt.altnautica.com",
       "description": "Mqtt Broker",
       "enum": null,
@@ -1658,6 +1849,46 @@
       "minimum": null,
       "secret": false,
       "type": "boolean"
+    },
+    {
+      "default": 85,
+      "description": "Capture Budget Pct",
+      "enum": null,
+      "key": "storage.capture_budget_pct",
+      "maximum": 100,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Capture Evict Unuploaded",
+      "enum": null,
+      "key": "storage.capture_evict_unuploaded",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 5,
+      "description": "Capture Floor Free Gib",
+      "enum": null,
+      "key": "storage.capture_floor_free_gib",
+      "maximum": 1000000,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "auto",
+      "description": "Capture Root",
+      "enum": null,
+      "key": "storage.capture_root",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
     },
     {
       "default": 4,

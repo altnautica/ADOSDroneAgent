@@ -82,6 +82,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 mod blocks;
+mod presence;
 
 pub(crate) use blocks::{
     base::*, camera::*, crsf::*, fc_identity::*, mesh::*, peers::*, radio::*, reconcilers::*,
@@ -191,6 +192,16 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     payload.insert(
         "sim".to_string(),
         json!(ados_config::simulation::simulation_enabled()),
+    );
+    presence::insert_presence_flags(
+        &mut payload,
+        &resolved_profile,
+        &state.run_dir,
+        state
+            .pairing_paths
+            .config
+            .parent()
+            .unwrap_or_else(|| Path::new("/etc/ados")),
     );
     payload.insert("fc_baud".to_string(), fc_baud);
     payload.insert(

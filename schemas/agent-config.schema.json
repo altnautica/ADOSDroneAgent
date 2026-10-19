@@ -766,6 +766,158 @@
       "title": "EndpointConfig",
       "type": "object"
     },
+    "GnssBaseConfig": {
+      "description": "RTK base station mode of the first receiver.",
+      "properties": {
+        "accuracy_m": {
+          "default": 2.0,
+          "exclusiveMinimum": 0,
+          "title": "Accuracy M",
+          "type": "number"
+        },
+        "h_ellipsoid_m": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "H Ellipsoid M"
+        },
+        "lat_deg": {
+          "anyOf": [
+            {
+              "maximum": 90,
+              "minimum": -90,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lat Deg"
+        },
+        "lon_deg": {
+          "anyOf": [
+            {
+              "maximum": 180,
+              "minimum": -180,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Lon Deg"
+        },
+        "min_dur_s": {
+          "default": 300,
+          "minimum": 1,
+          "title": "Min Dur S",
+          "type": "integer"
+        },
+        "mode": {
+          "default": "off",
+          "enum": [
+            "off",
+            "survey",
+            "fixed"
+          ],
+          "title": "Mode",
+          "type": "string"
+        }
+      },
+      "title": "GnssBaseConfig",
+      "type": "object"
+    },
+    "GnssConfig": {
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/GnssBaseConfig"
+        },
+        "heading": {
+          "$ref": "#/$defs/GnssHeadingConfig"
+        },
+        "pps_device": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pps Device"
+        },
+        "receivers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/GnssReceiverConfig"
+          },
+          "title": "Receivers",
+          "type": "array"
+        }
+      },
+      "title": "GnssConfig",
+      "type": "object"
+    },
+    "GnssHeadingConfig": {
+      "description": "Moving-baseline heading from two receivers.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        }
+      },
+      "title": "GnssHeadingConfig",
+      "type": "object"
+    },
+    "GnssReceiverConfig": {
+      "description": "One GNSS receiver attached to this node.",
+      "properties": {
+        "id": {
+          "default": "gnss0",
+          "pattern": "^[a-z0-9_]+$",
+          "title": "Id",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "port": {
+          "default": "uart1",
+          "enum": [
+            "uart1",
+            "usb"
+          ],
+          "title": "Port",
+          "type": "string"
+        },
+        "source": {
+          "default": "hub",
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "title": "GnssReceiverConfig",
+      "type": "object"
+    },
     "GroundStationConfig": {
       "properties": {
         "cloud_uplink": {
@@ -1923,6 +2075,64 @@
       "title": "SelfHostedServerConfig",
       "type": "object"
     },
+    "SensorHubConfig": {
+      "description": "The sensor hub link and the configuration sent to the hub on connect.\n\n``transport`` is ``auto`` (the first ``/dev/ttyACM*`` whose USB id is the\nhub firmware's ``1209:ad05``), ``serial:<device>`` or\n``tcp:<host>:<port>`` (a simulated hub).",
+      "properties": {
+        "exposure_us": {
+          "default": 4000,
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Exposure Us",
+          "type": "integer"
+        },
+        "gnss_forward": {
+          "default": true,
+          "title": "Gnss Forward",
+          "type": "boolean"
+        },
+        "imu_odr_hz": {
+          "default": 1000,
+          "enum": [
+            500,
+            1000,
+            2000
+          ],
+          "title": "Imu Odr Hz",
+          "type": "integer"
+        },
+        "transport": {
+          "default": "auto",
+          "pattern": "^(auto|serial:/\\S+|tcp:\\S+:\\d{1,5})$",
+          "title": "Transport",
+          "type": "string"
+        },
+        "trigger_hz": {
+          "default": 20,
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Trigger Hz",
+          "type": "integer"
+        }
+      },
+      "title": "SensorHubConfig",
+      "type": "object"
+    },
+    "SensorsConfig": {
+      "properties": {
+        "hub": {
+          "$ref": "#/$defs/SensorHubConfig",
+          "default": {
+            "exposure_us": 4000,
+            "gnss_forward": true,
+            "imu_odr_hz": 1000,
+            "transport": "auto",
+            "trigger_hz": 20
+          }
+        }
+      },
+      "title": "SensorsConfig",
+      "type": "object"
+    },
     "ServerConfig": {
       "properties": {
         "cloud": {
@@ -1980,6 +2190,30 @@
     },
     "StorageConfig": {
       "properties": {
+        "capture_budget_pct": {
+          "default": 85,
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Capture Budget Pct",
+          "type": "integer"
+        },
+        "capture_evict_unuploaded": {
+          "default": false,
+          "title": "Capture Evict Unuploaded",
+          "type": "boolean"
+        },
+        "capture_floor_free_gib": {
+          "default": 5,
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Capture Floor Free Gib",
+          "type": "integer"
+        },
+        "capture_root": {
+          "default": "auto",
+          "title": "Capture Root",
+          "type": "string"
+        },
         "janitor": {
           "$ref": "#/$defs/JanitorConfig",
           "default": {
@@ -3303,6 +3537,9 @@
         "service_type": "_ados._tcp.local."
       }
     },
+    "gnss": {
+      "$ref": "#/$defs/GnssConfig"
+    },
     "ground_station": {
       "$ref": "#/$defs/GroundStationConfig",
       "default": {
@@ -3536,6 +3773,9 @@
         "setup_token_required": false
       }
     },
+    "sensors": {
+      "$ref": "#/$defs/SensorsConfig"
+    },
     "server": {
       "$ref": "#/$defs/ServerConfig",
       "default": {
@@ -3564,6 +3804,10 @@
     "storage": {
       "$ref": "#/$defs/StorageConfig",
       "default": {
+        "capture_budget_pct": 85,
+        "capture_evict_unuploaded": false,
+        "capture_floor_free_gib": 5,
+        "capture_root": "auto",
         "janitor": {
           "audit_keep_mb": 4,
           "audit_max_mb": 16,

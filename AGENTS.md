@@ -28,7 +28,7 @@ apply through the normal install or upgrade path.
 ## Stack and Commands
 
 - Rust, stable toolchain, MSRV 1.93. The workspace manifest is
-  `crates/Cargo.toml` with 28 members; `cargo` must be run from `crates/`,
+  `crates/Cargo.toml` with 32 members; `cargo` must be run from `crates/`,
   there is no manifest at the repository root.
 - Python 3.11+, Click, Pydantic, Rich, structlog, and systemd-oriented
   services. FastAPI is the residual HTTP surface that runs behind the native
@@ -77,7 +77,7 @@ you touched and do not treat the full run as a gate.
 
 ## Architecture Map
 
-Rust, under `crates/`, 28 workspace members. The flight-critical path:
+Rust, under `crates/`, 32 workspace members. The flight-critical path:
 
 - Service supervision: `crates/ados-supervisor/`
 - MAVLink routing: `crates/ados-mavlink-router/`
@@ -104,6 +104,11 @@ Rust, under `crates/`, 28 workspace members. The flight-critical path:
 - Sensor hub wire protocol: `crates/ados-sensorhub-proto/` (`no_std`, MIT
   licensed, unlike the rest of the workspace, because the hub firmware and
   the simulator link it; keep it dependency-free)
+- Sensor bus and time: `crates/ados-sensorbus/` (the `sensors.sock` frame
+  codec, broker, clients and clock-fit math, with the vendored MIT capture
+  contract `.proto`/schema files), `crates/ados-clock/` (brokers the bus,
+  owns the host timebase), `crates/ados-sensorhub/` (sensor hub host side),
+  `crates/ados-gnss/` (GNSS receivers, PPS, RTK base)
 
 Python, under `src/ados/`:
 

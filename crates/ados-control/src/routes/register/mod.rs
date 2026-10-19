@@ -9,6 +9,7 @@ mod mcp;
 mod network;
 mod pairing;
 mod plugins;
+mod sensing;
 mod system;
 mod video;
 mod wfb;
@@ -29,6 +30,7 @@ pub(super) fn register_all(r: Routes<AppState>, hid_native: bool) -> Routes<AppS
     let r = network::register(r);
     let r = mcp::register(r);
     let r = logs::register(r);
+    let r = sensing::register(r);
     if hid_native {
         hid::register(r)
     } else {

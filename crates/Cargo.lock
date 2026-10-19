@@ -35,6 +35,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-clock"
+version = "0.103.4"
+dependencies = [
+ "ados-protocol",
+ "ados-sensorbus",
+ "anyhow",
+ "nix 0.29.0",
+ "prost",
+ "rmp-serde",
+ "sd-notify",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ados-cloud"
 version = "0.103.4"
 dependencies = [
@@ -72,6 +92,7 @@ name = "ados-config"
 version = "0.103.4"
 dependencies = [
  "ados-protocol",
+ "nix 0.29.0",
  "parking_lot",
  "serde",
  "serde_json",
@@ -113,6 +134,7 @@ dependencies = [
  "ados-plugin-host",
  "ados-protocol",
  "ados-radio",
+ "ados-sensorbus",
  "ados-supervisor",
  "ados-swarmbus",
  "ados-video",
@@ -200,6 +222,26 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "ureq 2.12.1",
+]
+
+[[package]]
+name = "ados-gnss"
+version = "0.103.4"
+dependencies = [
+ "ados-config",
+ "ados-protocol",
+ "ados-sensorbus",
+ "nix 0.29.0",
+ "parking_lot",
+ "sd-notify",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-serial",
+ "tracing",
+ "tracing-journald",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -375,8 +417,10 @@ name = "ados-mavlink-router"
 version = "0.103.4"
 dependencies = [
  "ados-config",
+ "ados-hal-probe",
  "ados-hid",
  "ados-protocol",
+ "ados-sensorbus",
  "ados-swarm-control",
  "ados-swarmbus",
  "anyhow",
@@ -560,6 +604,25 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "ados-sensorhub"
+version = "0.103.4"
+dependencies = [
+ "ados-config",
+ "ados-hal-probe",
+ "ados-protocol",
+ "ados-sensorbus",
+ "ados-sensorhub-proto",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-serial",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

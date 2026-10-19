@@ -16,6 +16,7 @@ per-domain files alongside this barrel:
   friends
 * ``security.py`` — :class:`SecurityConfig` and friends, :class:`McpConfig`,
   plus :data:`DEFAULT_CORS_ORIGINS`
+* ``sensors.py`` — :class:`SensorsConfig`, :class:`SensorHubConfig`
 * ``storage.py`` — :class:`StorageConfig` (the disk janitor) and
   :class:`HardwareConfig`
 * ``api.py`` — :class:`ApiConfig`, :class:`RestApiConfig`
@@ -57,6 +58,12 @@ from .cloud import (
     SelfHostedServerConfig,
     ServerConfig,
 )
+from .gnss import (
+    GnssBaseConfig,
+    GnssConfig,
+    GnssHeadingConfig,
+    GnssReceiverConfig,
+)
 from .ground_station import (
     GroundStationConfig,
     GroundStationUiConfig,
@@ -81,6 +88,7 @@ from .security import (
     McpConfig,
     SecurityConfig,
 )
+from .sensors import SensorHubConfig, SensorsConfig
 from .storage import HardwareConfig, StorageConfig
 from .system import (
     DiscoveryConfig,
@@ -110,6 +118,11 @@ __all__ = [
     "RestApiConfig",
     # battery
     "BatteryConfig",
+    # gnss
+    "GnssBaseConfig",
+    "GnssConfig",
+    "GnssHeadingConfig",
+    "GnssReceiverConfig",
     # mavlink
     "EndpointConfig",
     "MavlinkConfig",
@@ -139,6 +152,9 @@ __all__ = [
     "DEFAULT_CORS_ORIGINS",
     "McpConfig",
     "SecurityConfig",
+    # sensors
+    "SensorHubConfig",
+    "SensorsConfig",
     # storage
     "HardwareConfig",
     "StorageConfig",

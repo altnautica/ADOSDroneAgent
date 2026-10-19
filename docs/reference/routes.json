@@ -723,6 +723,15 @@
     {
       "method": "GET",
       "notes": null,
+      "path": "/api/v1/clock",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
       "path": "/api/v1/dashboard/snapshot",
       "public": false,
       "relay_forbidden": false,
@@ -781,6 +790,33 @@
       "public": false,
       "relay_forbidden": false,
       "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/gnss",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/gnss/base",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/gnss/rtcm",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
       "websocket": false
     },
     {
@@ -1666,6 +1702,24 @@
       "websocket": false
     },
     {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/sensors",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/sensors/rig",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
       "method": "POST",
       "notes": "relay-forbidden",
       "path": "/api/v1/setup/apply",
@@ -1852,6 +1906,15 @@
       "public": false,
       "relay_forbidden": false,
       "served_by": "residual",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/storage",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
       "websocket": false
     },
     {
