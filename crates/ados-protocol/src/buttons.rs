@@ -42,12 +42,17 @@ pub const DELIVER: &str = "button.deliver";
 /// live mapping for that (button, kind) pair and is `None` for an unmapped
 /// button — a subscriber sees the press either way and decides for itself
 /// whether an unmapped button means anything.
+///
+/// A board with a rotary encoder delivers it through the same event: one detent
+/// is a `short` press labelled `ENC_CW` or `ENC_CCW` (`pin` is the encoder's A
+/// line), and its push switch is a `short`/`long` press labelled `ENC_SW`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ButtonPress {
     /// Board GPIO line of the button.
     pub pin: u32,
-    /// Front-panel button label (`B1`..`B4`, `BX<pin>` for an extra button);
-    /// `None` from a host that predates the field.
+    /// Front-panel button label (`B1`..`B4`, `BX<pin>` for an extra button,
+    /// `ENC_CW` / `ENC_CCW` / `ENC_SW` for the rotary encoder); `None` from a
+    /// host that predates the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     /// `"short"` or `"long"`, decoded by the host on the release edge.

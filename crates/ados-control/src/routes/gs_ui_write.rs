@@ -82,8 +82,8 @@ use serde_json::{json, Map, Value};
 
 use crate::config_store::{section_path, update_config};
 use crate::routes::gs_ui_read::{
-    default_buttons, default_screens, is_ground_station, panel_profile, profile_mismatch,
-    read_gs_section,
+    board_has_encoder, default_buttons, default_screens, is_ground_station, panel_profile,
+    profile_mismatch, read_gs_section,
 };
 use crate::state::AppState;
 

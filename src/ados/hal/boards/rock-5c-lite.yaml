@@ -241,8 +241,20 @@ gnss:
 #   back   pin 35  GPIO4_A0  128
 buttons: {up: 42, down: 41, select: 44, back: 128}
 
-# Lines bound to something other than a button; the loader rejects a button on
-# any of them (the GNSS PPS line is added from `gnss.pps_gpio`). [hwif]
+# Rotary encoder (KY-040 class), by Linux GPIO number ([hwif] "GPIO number"
+# column), the same numbering as `buttons`. Header pins 36/38/15, each a plain
+# GPIO with no function bound in this file. Power the module's `+` from 3.3 V
+# (pin 1 or 17, never 5 V: [hwif] puts the header GPIO maximum at 3.63 V) and
+# its GND to pin 14 or 39; CLK and DT are pulled up on the module, SW switches
+# to ground. One detent is four quadrature transitions.
+#   a  (CLK) pin 36  GPIO4_A2  130   /dev/gpiochip4 line 2
+#   b  (DT)  pin 38  GPIO4_A5  133   /dev/gpiochip4 line 5
+#   sw (SW)  pin 15  GPIO4_B4  140   /dev/gpiochip4 line 12
+encoder: {a: 130, b: 133, sw: 140}
+
+# Lines bound to something other than a panel input; the loader rejects a button
+# or encoder line on any of them (the GNSS PPS line is added from
+# `gnss.pps_gpio`). [hwif]
 reserved_gpio:
   - {gpio: 13, header_pin: 8, use: "debug console UART2_M0 TX (GPIO0_B5)"}
   - {gpio: 14, header_pin: 10, use: "debug console UART2_M0 RX (GPIO0_B6)"}

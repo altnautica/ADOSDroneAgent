@@ -105,8 +105,9 @@ pub const BUTTON_EVENT_QUEUE_DEPTH: usize = 64;
 pub struct ButtonBusEvent {
     /// The board GPIO number of the button.
     pub button: u32,
-    /// The friendly id (`B1`..`B4`, else `BX<pin>`) the classifier resolved
-    /// from the board's button binding.
+    /// The friendly id (`B1`..`B4`, else `BX<pin>`; `ENC_CW` / `ENC_CCW` /
+    /// `ENC_SW` for the rotary encoder) the reader resolved from the board
+    /// binding.
     pub label: String,
     /// "short" or "long".
     pub kind: &'static str,

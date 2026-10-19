@@ -115,7 +115,7 @@ fn ui_config_of_an_absent_side_file_is_the_all_defaults_shape() {
     // With no ground-station-ui.json the blob is empty, so every section is the
     // built-in default. This is the golden shape the GCS reads on a fresh GS.
     let blob = Map::new();
-    let got = build_ui_config("ground_station", &blob);
+    let got = build_ui_config("ground_station", false, &blob);
     let want = json!({
         "oled": {
             "brightness": 204,
@@ -149,7 +149,7 @@ fn ui_config_merges_a_stored_section_over_the_defaults() {
         "oled".to_string(),
         json!({"brightness": 120, "auto_dim_enabled": false, "screen_cycle_seconds": 9}),
     );
-    let got = build_ui_config("ground_station", &blob);
+    let got = build_ui_config("ground_station", false, &blob);
     // The stored contrast wins; the retired keys are not served.
     assert_eq!(got["oled"], json!({"brightness": 120}));
     // Untouched sections are the full defaults.
@@ -167,9 +167,28 @@ fn ui_config_replaces_screen_lists_wholesale() {
         "screens".to_string(),
         json!({"order": ["home", "link"], "enabled": ["home"]}),
     );
-    let got = build_ui_config("ground_station", &blob);
+    let got = build_ui_config("ground_station", false, &blob);
     assert_eq!(got["screens"]["order"], json!(["home", "link"]));
     assert_eq!(got["screens"]["enabled"], json!(["home"]));
+}
+
+#[test]
+fn the_board_sidecar_decides_the_encoder_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board.json");
+    // Absent sidecar, a null encoder and an unparseable file: no encoder.
+    assert!(!board_has_encoder(&board));
+    std::fs::write(&board, r#"{"encoder": null}"#).unwrap();
+    assert!(!board_has_encoder(&board));
+    std::fs::write(&board, "not json").unwrap();
+    assert!(!board_has_encoder(&board));
+    std::fs::write(&board, r#"{"encoder": {"a": 130, "b": 133, "sw": 140}}"#).unwrap();
+    assert!(board_has_encoder(&board));
+    let got = build_ui_config("ground_station", true, &Map::new());
+    assert_eq!(
+        got["buttons"]["mapping"]["ENC_CCW_short"],
+        json!("prev_screen")
+    );
 }
 
 #[test]

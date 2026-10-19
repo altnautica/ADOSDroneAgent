@@ -33,7 +33,8 @@ pub async fn put_ui_oled(
     let Some(profile) = panel_profile(&state) else {
         return profile_mismatch();
     };
-    let resp = put_ui_oled_at(&config_yaml_path(&state), &profile, &update);
+    let encoder = board_has_encoder(&state.board_path);
+    let resp = put_ui_oled_at(&config_yaml_path(&state), &profile, encoder, &update);
     if resp.status().is_success() {
         signal_oled_reload().await;
     }
@@ -43,8 +44,13 @@ pub async fn put_ui_oled(
 /// The OLED-write logic against an explicit config path. The public
 /// handler resolves both from the app state; this takes them directly so a test can
 /// point them at temp paths.
-pub(super) fn put_ui_oled_at(config_path: &Path, profile: &str, update: &OledUpdate) -> Response {
-    let mut data = load_ui_config(profile, &read_gs_section(config_path, "ui"));
+pub(super) fn put_ui_oled_at(
+    config_path: &Path,
+    profile: &str,
+    encoder: bool,
+    update: &OledUpdate,
+) -> Response {
+    let mut data = load_ui_config(profile, encoder, &read_gs_section(config_path, "ui"));
     // The mutated section starts from the loaded `oled` block (defaults⊕persisted).
     let mut oled = match data.get("oled") {
         Some(Value::Object(m)) => m.clone(),
@@ -92,7 +98,8 @@ pub async fn put_ui_buttons(
     let Some(profile) = panel_profile(&state) else {
         return profile_mismatch();
     };
-    let resp = put_ui_buttons_at(&config_yaml_path(&state), &profile, &update);
+    let encoder = board_has_encoder(&state.board_path);
+    let resp = put_ui_buttons_at(&config_yaml_path(&state), &profile, encoder, &update);
     if resp.status().is_success() {
         signal_buttons_reload().await;
     }
@@ -103,9 +110,10 @@ pub async fn put_ui_buttons(
 pub(super) fn put_ui_buttons_at(
     config_path: &Path,
     profile: &str,
+    encoder: bool,
     update: &ButtonsUpdate,
 ) -> Response {
-    let mut data = load_ui_config(profile, &read_gs_section(config_path, "ui"));
+    let mut data = load_ui_config(profile, encoder, &read_gs_section(config_path, "ui"));
     if let Some(mapping) = &update.mapping {
         // Wholesale replace: the FastAPI handler sets
         // `data["buttons"] = {"mapping": dict(update.mapping)}`. The mapping is a
@@ -159,7 +167,8 @@ pub async fn put_ui_screens(
     let Some(profile) = panel_profile(&state) else {
         return profile_mismatch();
     };
-    let resp = put_ui_screens_at(&config_yaml_path(&state), &profile, &update);
+    let encoder = board_has_encoder(&state.board_path);
+    let resp = put_ui_screens_at(&config_yaml_path(&state), &profile, encoder, &update);
     if resp.status().is_success() {
         signal_oled_reload().await;
     }
@@ -170,9 +179,10 @@ pub async fn put_ui_screens(
 pub(super) fn put_ui_screens_at(
     config_path: &Path,
     profile: &str,
+    encoder: bool,
     update: &ScreensUpdate,
 ) -> Response {
-    let mut data = load_ui_config(profile, &read_gs_section(config_path, "ui"));
+    let mut data = load_ui_config(profile, encoder, &read_gs_section(config_path, "ui"));
     let mut screens = match data.get("screens") {
         Some(Value::Object(m)) => m.clone(),
         _ => Map::new(),

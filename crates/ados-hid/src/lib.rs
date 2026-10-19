@@ -10,9 +10,9 @@
 //!   which other processes reach the single arbiter instance the `ados-pic`
 //!   daemon owns (closes the per-process split-brain).
 //! * [`eventbus`] — the PIC transition fanout bus (drop-on-full broadcast).
-//! * [`buttons`] — the GPIO front-panel button service: pure press
-//!   classification (debounce, short/long/cancel, SIGHUP mapping merge) plus a
-//!   target-gated character-device read loop.
+//! * [`buttons`] — the GPIO front-panel button and rotary-encoder service: pure
+//!   press classification (debounce, short/long/cancel, SIGHUP mapping merge),
+//!   pure quadrature decode, plus a target-gated character-device read loop.
 //! * [`buttons_ipc`] — a dedicated Unix-domain fanout socket
 //!   (`/run/ados/buttons.sock`) streaming already-classified front-panel presses
 //!   as newline-JSON, the seam the HDMI cockpit relay subscribes to (sibling of

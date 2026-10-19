@@ -94,17 +94,21 @@ def test_the_declared_document_reports_a_real_accelerator():
     assert plain["has_accelerator"] is False
 
 
-def test_the_document_carries_the_profile_stem_and_button_pins():
+def test_the_document_carries_the_profile_stem_button_and_encoder_pins():
     from ados.hal.detect import _board_from_profile, _load_board_profiles
 
     profiles = {p.stem: p for p in _load_board_profiles()}
     cm5 = _board_from_profile(profiles["cm5"], "Raspberry Pi CM5", 4096, 4).to_dict()
     assert cm5["profile"] == "cm5"
     assert cm5["buttons"] is None
+    assert cm5["encoder"] is None
 
     rpi4 = _board_from_profile(profiles["rpi4b"], "", 4096, 4).to_dict()
     assert rpi4["profile"] == "rpi4b"
     assert rpi4["buttons"] == {"up": 5, "down": 6, "select": 13, "back": 19}
+
+    rock5c = _board_from_profile(profiles["rock-5c-lite"], "", 16000, 8).to_dict()
+    assert rock5c["encoder"] == {"a": 130, "b": 133, "sw": 140}
 
 
 def test_python_no_longer_writes_the_sidecar():

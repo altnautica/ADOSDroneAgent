@@ -120,7 +120,7 @@ async fn put_oled_applies_fields_persists_and_echoes_full_blob() {
     let update = OledUpdate {
         brightness: Some(120),
     };
-    let resp = put_ui_oled_at(&cfg, GS, &update);
+    let resp = put_ui_oled_at(&cfg, GS, false, &update);
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     // The full UI blob, with the oled section mutated, and nothing but the
@@ -168,7 +168,7 @@ async fn put_oled_strips_retired_keys_from_the_persisted_section() {
         )
         .unwrap();
 
-    let resp = put_ui_oled_at(&cfg, GS, &OledUpdate::default());
+    let resp = put_ui_oled_at(&cfg, GS, false, &OledUpdate::default());
     let body = body_json(resp).await;
     assert_eq!(body["oled"], json!({"brightness": 40}));
     let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
@@ -183,9 +183,12 @@ async fn a_second_write_keeps_what_the_first_one_persisted() {
     let first = OledUpdate {
         brightness: Some(90),
     };
-    assert_eq!(put_ui_oled_at(&cfg, GS, &first).status(), StatusCode::OK);
+    assert_eq!(
+        put_ui_oled_at(&cfg, GS, false, &first).status(),
+        StatusCode::OK
+    );
     let second = OledUpdate::default();
-    let body = body_json(put_ui_oled_at(&cfg, GS, &second)).await;
+    let body = body_json(put_ui_oled_at(&cfg, GS, false, &second)).await;
     assert_eq!(body["oled"]["brightness"], json!(90));
     // The read route serves the same persisted section.
     let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
@@ -204,6 +207,7 @@ async fn put_oled_persist_fault_is_a_500_e_ui_save_failed() {
     let resp = put_ui_oled_at(
         &cfg,
         GS,
+        false,
         &OledUpdate {
             brightness: Some(50),
         },
@@ -227,7 +231,7 @@ async fn put_buttons_replaces_the_mapping_wholesale() {
     let update = ButtonsUpdate {
         mapping: Some(mapping),
     };
-    let resp = put_ui_buttons_at(&cfg, GS, &update);
+    let resp = put_ui_buttons_at(&cfg, GS, false, &update);
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     // The whole buttons section is now exactly {"mapping": <supplied>}, NOT a
@@ -259,20 +263,41 @@ async fn put_buttons_with_no_mapping_keeps_the_loaded_section() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.yaml");
 
-    let resp = put_ui_buttons_at(&cfg, GS, &ButtonsUpdate::default());
+    let resp = put_ui_buttons_at(&cfg, GS, false, &ButtonsUpdate::default());
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(
         body["buttons"]["mapping"]["B1_short"],
         json!("cycle_screen")
     );
+    // No encoder on the board: no encoder keys in the defaults.
+    assert!(body["buttons"]["mapping"].get("ENC_CW_short").is_none());
+}
+
+#[tokio::test]
+async fn an_encoder_board_serves_the_encoder_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.yaml");
+    let resp = put_ui_buttons_at(&cfg, GS, true, &ButtonsUpdate::default());
+    let mapping = &body_json(resp).await["buttons"]["mapping"];
+    assert_eq!(mapping["ENC_CW_short"], json!("cycle_screen"));
+    assert_eq!(mapping["ENC_CCW_short"], json!("prev_screen"));
+    assert_eq!(mapping["ENC_SW_short"], json!("confirm"));
+    assert_eq!(mapping["ENC_SW_long"], json!("back"));
+    assert_eq!(mapping["B1_short"], json!("cycle_screen"));
 }
 
 #[tokio::test]
 async fn visor_buttons_default_and_write_persist() {
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.yaml");
-    let body = body_json(put_ui_buttons_at(&cfg, "visor", &ButtonsUpdate::default())).await;
+    let body = body_json(put_ui_buttons_at(
+        &cfg,
+        "visor",
+        false,
+        &ButtonsUpdate::default(),
+    ))
+    .await;
     assert_eq!(body["buttons"]["mapping"]["B1_short"], json!("passthrough"));
     assert_eq!(
         body["buttons"]["mapping"]["B1_long"],
@@ -285,7 +310,7 @@ async fn visor_buttons_default_and_write_persist() {
         mapping: Some(mapping),
     };
     assert_eq!(
-        put_ui_buttons_at(&cfg, "visor", &update).status(),
+        put_ui_buttons_at(&cfg, "visor", false, &update).status(),
         StatusCode::OK
     );
     let read = crate::routes::gs_ui_read::read_gs_section(&cfg, "ui");
@@ -303,7 +328,7 @@ async fn put_screens_applies_order_and_enabled() {
         order: Some(vec!["home".to_string(), "link".to_string()]),
         enabled: Some(vec!["home".to_string()]),
     };
-    let resp = put_ui_screens_at(&cfg, GS, &update);
+    let resp = put_ui_screens_at(&cfg, GS, false, &update);
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_json(resp).await;
     assert_eq!(body["screens"]["order"], json!(["home", "link"]));
@@ -332,7 +357,7 @@ async fn put_screens_with_only_order_keeps_default_enabled() {
         order: Some(vec!["home".to_string()]),
         enabled: None,
     };
-    let resp = put_ui_screens_at(&cfg, GS, &update);
+    let resp = put_ui_screens_at(&cfg, GS, false, &update);
     let body = body_json(resp).await;
     assert_eq!(body["screens"]["order"], json!(["home"]));
     // enabled keeps the full default list.

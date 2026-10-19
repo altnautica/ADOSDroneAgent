@@ -7,6 +7,12 @@
 //! action mapping merged over the defaults, and the skip-clean posture when the
 //! board has no buttons to read.
 //!
+//! A board that declares a rotary encoder (see [`encoder`]) is read by the same
+//! loop: each detent is a `short` press of `ENC_CW` / `ENC_CCW`, and the push
+//! switch is classified like a button under `ENC_SW`. Their actions resolve
+//! through the same mapping (`ENC_CW_short`, `ENC_CCW_short`, `ENC_SW_short`,
+//! `ENC_SW_long`).
+//!
 //! The classification ([`PressClassifier`]) is pure and host-portable: it takes
 //! synthetic `(pin, edge, ts_ms)` events, so the debounce guard, the short/long
 //! thresholds, the cancel-drop, and the mapping merge are all unit-testable
@@ -17,11 +23,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 pub mod board;
+pub mod encoder;
 
 pub use board::{
-    board_button_pins, board_pins_or_default, button_lines, ButtonLine, ButtonsSkip, GpioNumbering,
-    BOARD_SIDECAR, BUTTON_PINS,
+    board_button_pins, board_encoder_switch, board_pins_or_default, button_lines, encoder_lines,
+    ButtonLine, ButtonsSkip, EncoderLines, EncoderSkip, GpioNumbering, BOARD_SIDECAR, BUTTON_PINS,
 };
+pub use encoder::{Channel, QuadratureDecoder, Rotation, ENC_CCW, ENC_CW, ENC_SW};
 
 /// Held >= this fires a "long" press (on release, never at the mark).
 pub const LONG_PRESS_SECONDS: f64 = 2.0;
@@ -43,11 +51,13 @@ pub fn pin_label(pins: &[u32; 4], pin: u32) -> String {
 }
 
 /// The default mapping for `profile` (underscore wire spelling), used when
-/// `ground_station.ui.buttons.mapping` is empty or missing. Sourced from the
-/// shared panel table so the control surface and the display agree.
+/// `ground_station.ui.buttons.mapping` is empty or missing: the profile's button
+/// table plus the encoder table. Sourced from the shared panel tables so the
+/// control surface and the display agree.
 pub fn default_button_mapping(profile: &str) -> HashMap<String, String> {
     ados_protocol::panel_ui::default_buttons(profile)
         .iter()
+        .chain(ados_protocol::panel_ui::ENCODER_BUTTONS.iter())
         .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
         .collect()
 }
@@ -117,6 +127,8 @@ pub struct PressClassifier {
     mapping: Arc<RwLock<HashMap<String, String>>>,
     /// The board's button pins in role order; a pin's slot is its `B<n>` label.
     pins: [u32; 4],
+    /// The encoder push-switch line, labelled [`ENC_SW`], when the board has one.
+    switch_pin: Option<u32>,
 }
 
 impl PressClassifier {
@@ -138,7 +150,15 @@ impl PressClassifier {
             last_press_ms: HashMap::new(),
             mapping,
             pins,
+            switch_pin: None,
         }
+    }
+
+    /// Label `pin` as the encoder push switch ([`ENC_SW`]): its presses
+    /// classify like a button's and resolve `ENC_SW_short` / `ENC_SW_long`.
+    pub fn with_encoder_switch(mut self, pin: u32) -> Self {
+        self.switch_pin = Some(pin);
+        self
     }
 
     /// The shared mapping handle. A SIGHUP handler rebuilds and swaps the inner
@@ -147,14 +167,35 @@ impl PressClassifier {
         self.mapping.clone()
     }
 
-    /// The friendly id (`B1`..`B4`, else `BX<pin>`) of `pin` on this board.
+    /// The friendly id of `pin` on this board: `ENC_SW` for the encoder switch,
+    /// `B1`..`B4` for a panel button, else `BX<pin>`.
     pub fn label(&self, pin: u32) -> String {
+        if self.switch_pin == Some(pin) {
+            return ENC_SW.to_string();
+        }
         pin_label(&self.pins, pin)
     }
 
-    fn resolve_action(&self, pin: u32, kind: PressKind) -> Option<String> {
-        let key = format!("{}_{}", self.label(pin), kind.as_str());
+    fn resolve_label(&self, label: &str, kind: PressKind) -> Option<String> {
+        let key = format!("{label}_{}", kind.as_str());
         self.mapping.read().ok()?.get(&key).cloned()
+    }
+
+    fn resolve_action(&self, pin: u32, kind: PressKind) -> Option<String> {
+        self.resolve_label(&self.label(pin), kind)
+    }
+
+    /// The event of one encoder detent: a `short` press of [`ENC_CW`] /
+    /// [`ENC_CCW`] on the encoder's A line `pin`, with the action the live
+    /// mapping binds to `ENC_CW_short` / `ENC_CCW_short`. A detent has no hold
+    /// time, so it is never long and never cancelled.
+    pub fn on_rotation(&self, rotation: Rotation, pin: u32, ts_ms: u64) -> ButtonEvent {
+        ButtonEvent {
+            pin,
+            kind: PressKind::Short,
+            action: self.resolve_label(rotation.label(), PressKind::Short),
+            timestamp_ms: ts_ms,
+        }
     }
 
     /// Feed one edge. Returns `Some(event)` only on a release that classifies as
@@ -205,71 +246,10 @@ impl PressClassifier {
     }
 }
 
-/// Run the GPIO edge-event read loop on Linux, classifying presses and invoking
-/// `on_event` for each emitted [`ButtonEvent`]. Opens each line's own
-/// `/dev/gpiochip<N>`, requests both edges, and blocks reading edge events.
-/// Returns when the reader errors. The chip-open is the only hardware-coupled
-/// step; the classification stays in [`PressClassifier`].
 #[cfg(target_os = "linux")]
-pub fn run_event_loop<F>(
-    lines: &[ButtonLine],
-    classifier: &mut PressClassifier,
-    mut on_event: F,
-) -> anyhow::Result<()>
-where
-    F: FnMut(ButtonEvent),
-{
-    use anyhow::Context;
-    use gpio_cdev::{Chip, EventRequestFlags, EventType, LineRequestFlags};
-    use std::time::Instant;
-
-    let base = Instant::now();
-    let mut chips: HashMap<u32, Chip> = HashMap::new();
-
-    // Request both edges on every line and collect the event iterators.
-    let mut handles = Vec::new();
-    for button in lines {
-        let chip = match chips.entry(button.chip) {
-            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-            std::collections::hash_map::Entry::Vacant(e) => e.insert(
-                Chip::new(button.chip_path())
-                    .with_context(|| format!("open {}", button.chip_path()))?,
-            ),
-        };
-        let events = chip
-            .get_line(button.line)
-            .and_then(|line| {
-                line.events(
-                    LineRequestFlags::INPUT,
-                    EventRequestFlags::BOTH_EDGES,
-                    "ados-pic-buttons",
-                )
-            })
-            .with_context(|| format!("request {} line {}", button.chip_path(), button.line))?;
-        handles.push((button.gpio, events));
-    }
-
-    // gpio-cdev's per-line iterators block; poll them in turn. With four
-    // front-panel buttons this round-robin is cheap. The synchronous loop runs
-    // on a blocking task in the daemon.
-    loop {
-        for (pin, events) in handles.iter_mut() {
-            // next() blocks until an edge arrives on this line.
-            let Some(evt) = events.next() else {
-                return Ok(());
-            };
-            let evt = evt?;
-            let edge = match evt.event_type() {
-                EventType::FallingEdge => Edge::Falling,
-                EventType::RisingEdge => Edge::Rising,
-            };
-            let ts_ms = base.elapsed().as_millis() as u64;
-            if let Some(ev) = classifier.on_edge(*pin, edge, ts_ms) {
-                on_event(ev);
-            }
-        }
-    }
-}
+mod reader;
+#[cfg(target_os = "linux")]
+pub use reader::run_event_loop;
 
 #[cfg(test)]
 mod tests {
@@ -384,9 +364,9 @@ mod tests {
     }
 
     #[test]
-    fn default_mapping_has_the_eight_entries() {
+    fn default_mapping_has_the_eight_button_and_four_encoder_entries() {
         let m = default_button_mapping("ground_station");
-        assert_eq!(m.len(), 8);
+        assert_eq!(m.len(), 12);
         assert_eq!(m["B1_short"], "cycle_screen");
         assert_eq!(m["B1_long"], "toggle_backlight");
         assert_eq!(m["B2_short"], "show_network");
@@ -400,7 +380,7 @@ mod tests {
     #[test]
     fn visor_mapping_leaves_record_and_mark_to_plugins() {
         let m = default_button_mapping("visor");
-        assert_eq!(m.len(), 8);
+        assert_eq!(m.len(), 12);
         assert_eq!(m["B1_short"], "passthrough");
         assert_eq!(m["B2_short"], "passthrough");
         assert_eq!(m["B1_long"], "shutdown_prompt");
@@ -426,7 +406,7 @@ mod tests {
         // Untouched defaults remain.
         assert_eq!(merged["B1_long"], "toggle_backlight");
         assert_eq!(merged["B4_long"], "menu");
-        assert_eq!(merged.len(), 8);
+        assert_eq!(merged.len(), 12);
     }
 
     #[test]
@@ -435,17 +415,17 @@ mod tests {
             serde_norway::from_str("BX26_short: extra_action\n").unwrap();
         let merged = merge_mapping("ground_station", &loaded);
         assert_eq!(merged["BX26_short"], "extra_action");
-        assert_eq!(merged.len(), 9); // 8 defaults + 1 extra
+        assert_eq!(merged.len(), 13); // 12 defaults + 1 extra
     }
 
     #[test]
     fn sighup_merge_ignores_non_string_and_empty() {
         // Empty mapping -> defaults only.
         let empty: serde_norway::Value = serde_norway::from_str("{}\n").unwrap();
-        assert_eq!(merge_mapping("ground_station", &empty).len(), 8);
+        assert_eq!(merge_mapping("ground_station", &empty).len(), 12);
         // Non-mapping value -> defaults only.
         let scalar: serde_norway::Value = serde_norway::from_str("not_a_map\n").unwrap();
-        assert_eq!(merge_mapping("ground_station", &scalar).len(), 8);
+        assert_eq!(merge_mapping("ground_station", &scalar).len(), 12);
         // Non-string value is skipped.
         let mixed: serde_norway::Value =
             serde_norway::from_str("B1_short: 42\nB2_short: ok_action\n").unwrap();
@@ -484,5 +464,87 @@ mod tests {
         let e5 = c.on_edge(5, Edge::Rising, 2500).unwrap();
         assert_eq!(e5.pin, 5);
         assert_eq!(e5.kind, PressKind::Long);
+    }
+
+    #[test]
+    fn encoder_defaults_step_screens_and_select_on_every_panel_profile() {
+        for profile in ["ground_station", "visor"] {
+            let m = default_button_mapping(profile);
+            assert_eq!(m[&format!("{ENC_CW}_short")], "cycle_screen", "{profile}");
+            assert_eq!(
+                m[&format!("{ENC_CCW}_short")],
+                ados_protocol::panel_ui::PREV_SCREEN,
+                "{profile}"
+            );
+            assert_eq!(m[&format!("{ENC_SW}_short")], "confirm", "{profile}");
+            assert_eq!(m[&format!("{ENC_SW}_long")], "back", "{profile}");
+        }
+    }
+
+    #[test]
+    fn a_detent_is_a_short_press_of_its_rotation_label() {
+        let c = classifier();
+        let cw = c.on_rotation(Rotation::Cw, 130, 700);
+        assert_eq!(cw.pin, 130);
+        assert_eq!(cw.kind, PressKind::Short);
+        assert_eq!(cw.action.as_deref(), Some("cycle_screen"));
+        assert_eq!(cw.timestamp_ms, 700);
+        let ccw = c.on_rotation(Rotation::Ccw, 130, 800);
+        assert_eq!(ccw.action.as_deref(), Some("prev_screen"));
+    }
+
+    #[test]
+    fn decoded_detents_resolve_through_the_live_mapping() {
+        // The full path the reader runs: edges -> decoder -> classifier.
+        let handle = Arc::new(RwLock::new(default_button_mapping("ground_station")));
+        let c = PressClassifier::with_pins(handle.clone(), [42, 41, 44, 128]);
+        let mut d = QuadratureDecoder::new(true, true);
+        let mut events = Vec::new();
+        for (channel, high) in [
+            (Channel::A, false),
+            (Channel::B, false),
+            (Channel::A, true),
+            (Channel::B, true),
+        ] {
+            if let Some(rotation) = d.on_edge(channel, high) {
+                events.push((rotation.label(), c.on_rotation(rotation, 130, 1)));
+            }
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "ENC_CW");
+        assert_eq!(events[0].1.action.as_deref(), Some("cycle_screen"));
+        // An operator remap of the encoder is seen by the next detent.
+        handle
+            .write()
+            .unwrap()
+            .insert("ENC_CW_short".into(), "show_qr".into());
+        let ev = c.on_rotation(Rotation::Cw, 130, 2);
+        assert_eq!(ev.action.as_deref(), Some("show_qr"));
+    }
+
+    #[test]
+    fn the_encoder_switch_is_debounced_and_classified_like_a_button() {
+        let mapping = Arc::new(RwLock::new(default_button_mapping("ground_station")));
+        let mut c = PressClassifier::with_pins(mapping, [42, 41, 44, 128]).with_encoder_switch(140);
+        assert_eq!(c.label(140), "ENC_SW");
+        assert_eq!(c.label(42), "B1");
+        // A bouncing press edge inside the window is ignored; the release
+        // classifies from the first press.
+        assert!(c.on_edge(140, Edge::Falling, 1000).is_none());
+        assert!(c.on_edge(140, Edge::Falling, 1008).is_none());
+        let ev = c.on_edge(140, Edge::Rising, 1300).unwrap();
+        assert_eq!(ev.pin, 140);
+        assert_eq!(ev.kind, PressKind::Short);
+        assert_eq!(ev.action.as_deref(), Some("confirm"));
+        // A spurious release with no press is dropped.
+        assert!(c.on_edge(140, Edge::Rising, 1400).is_none());
+        // Held past the long threshold: the long mapping.
+        c.on_edge(140, Edge::Falling, 5000);
+        let ev = c.on_edge(140, Edge::Rising, 7500).unwrap();
+        assert_eq!(ev.kind, PressKind::Long);
+        assert_eq!(ev.action.as_deref(), Some("back"));
+        // Held past the cancel threshold: dropped.
+        c.on_edge(140, Edge::Falling, 10_000);
+        assert!(c.on_edge(140, Edge::Rising, 16_500).is_none());
     }
 }

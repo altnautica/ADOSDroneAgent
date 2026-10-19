@@ -28,6 +28,10 @@ pub const PASSTHROUGH: &str = "passthrough";
 /// Button action that opens the power-off confirmation on the panel.
 pub const SHUTDOWN_PROMPT: &str = "shutdown_prompt";
 
+/// Button action that steps the panel to the previous screen (the reverse of
+/// `cycle_screen`).
+pub const PREV_SCREEN: &str = "prev_screen";
+
 /// Prefix of a screen id that names a plugin-filled page.
 pub const PLUGIN_SCREEN_PREFIX: &str = "plugin:";
 
@@ -57,6 +61,17 @@ pub const VISOR_BUTTONS: [(&str, &str); 8] = [
     ("B3_long", PASSTHROUGH),
     ("B4_short", "back"),
     ("B4_long", PASSTHROUGH),
+];
+
+/// Default mapping of a board's rotary encoder, the same on every panel
+/// profile and used only on a board that declares one. A detent is a `short`
+/// press of `ENC_CW` (next screen) or `ENC_CCW` (previous screen); the push
+/// switch is short (select) or long (back) like a button.
+pub const ENCODER_BUTTONS: [(&str, &str); 4] = [
+    ("ENC_CW_short", "cycle_screen"),
+    ("ENC_CCW_short", PREV_SCREEN),
+    ("ENC_SW_short", "confirm"),
+    ("ENC_SW_long", "back"),
 ];
 
 /// Ground-station default screen order (also the default enabled set).
@@ -136,5 +151,20 @@ mod tests {
         assert_eq!(plugin_screen_name("plugin:"), None);
         assert_eq!(plugin_screen_name("cameras"), None);
         assert!(has_panel("visor") && has_panel("ground_station") && !has_panel("drone"));
+    }
+
+    #[test]
+    fn encoder_defaults_mirror_the_screen_carousel_and_never_shadow_a_button() {
+        let map: std::collections::HashMap<_, _> = ENCODER_BUTTONS.iter().copied().collect();
+        assert_eq!(map["ENC_CW_short"], "cycle_screen");
+        assert_eq!(map["ENC_CCW_short"], PREV_SCREEN);
+        assert_eq!(map["ENC_SW_short"], "confirm");
+        assert_eq!(map["ENC_SW_long"], "back");
+        for profile in PANEL_PROFILES {
+            let buttons = default_buttons(profile);
+            assert!(ENCODER_BUTTONS
+                .iter()
+                .all(|(key, _)| buttons.iter().all(|(b, _)| b != key)));
+        }
     }
 }

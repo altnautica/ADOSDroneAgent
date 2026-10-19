@@ -45,9 +45,14 @@ pub(super) fn json_object(value: Value) -> Map<String, Value> {
 
 /// The defaults-merged UI config blob `{oled, buttons, screens}` from a persisted
 /// blob, byte-identical to the Python `_load_ui_config`, with the button and
-/// screen defaults of `profile`. The base for the in-memory section overlay the
-/// response body returns.
-pub(super) fn load_ui_config(profile: &str, blob: &Map<String, Value>) -> Map<String, Value> {
+/// screen defaults of `profile` (plus the encoder keys when the board has an
+/// encoder). The base for the in-memory section overlay the response body
+/// returns.
+pub(super) fn load_ui_config(
+    profile: &str,
+    encoder: bool,
+    blob: &Map<String, Value>,
+) -> Map<String, Value> {
     let mut out = Map::new();
     out.insert(
         "oled".to_string(),
@@ -56,7 +61,7 @@ pub(super) fn load_ui_config(profile: &str, blob: &Map<String, Value>) -> Map<St
     out.insert(
         "buttons".to_string(),
         Value::Object(merge_over_defaults(
-            default_buttons(profile),
+            default_buttons(profile, encoder),
             blob.get("buttons"),
         )),
     );

@@ -89,6 +89,24 @@ impl ButtonPins {
     }
 }
 
+/// The rotary encoder (KY-040 class) a board wires, from the profile's
+/// optional `encoder:` block, in the same numbering as [`ButtonPins`]: the
+/// quadrature outputs `a` (`CLK`) and `b` (`DT`) and the push switch `sw`.
+/// Absent means the board has no encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncoderPins {
+    pub a: u32,
+    pub b: u32,
+    pub sw: u32,
+}
+
+impl EncoderPins {
+    /// The three pins in role order.
+    pub fn pins(&self) -> [u32; 3] {
+        [self.a, self.b, self.sw]
+    }
+}
+
 /// One GPIO line a board profile reserves for a bus, a console or a
 /// peripheral (`reserved_gpio:` entries). Only the number is parsed; the
 /// header pin and the use are documentation for the reader of the YAML.
@@ -157,6 +175,8 @@ pub struct BoardProfile {
     #[serde(default)]
     pub buttons: Option<ButtonPins>,
     #[serde(default)]
+    pub encoder: Option<EncoderPins>,
+    #[serde(default)]
     pub imu: Option<ImuBinding>,
     #[serde(default)]
     pub gnss: Option<GnssBinding>,
@@ -191,19 +211,29 @@ impl BoardProfile {
         lines
     }
 
-    /// Why the declared buttons cannot be used, if they cannot: two roles on
-    /// one line, or a role on a reserved line.
-    pub fn button_conflict(&self) -> Option<String> {
-        let pins = self.buttons?.pins();
-        for (i, pin) in pins.iter().enumerate() {
-            if pins[..i].contains(pin) {
-                return Some(format!("button gpio {pin} is declared twice"));
-            }
+    /// Why the declared panel inputs cannot be used, if they cannot: a line
+    /// declared twice (within the buttons, within the encoder, or shared
+    /// between them), or a button or encoder line on a reserved line.
+    pub fn panel_conflict(&self) -> Option<String> {
+        let mut declared: Vec<(&str, u32)> = Vec::new();
+        if let Some(buttons) = self.buttons {
+            declared.extend(buttons.pins().map(|p| ("button", p)));
+        }
+        if let Some(encoder) = self.encoder {
+            declared.extend(encoder.pins().map(|p| ("encoder", p)));
         }
         let reserved = self.reserved_lines();
-        pins.iter()
-            .find(|p| reserved.contains(p))
-            .map(|p| format!("button gpio {p} is a reserved line"))
+        let mut seen: Vec<u32> = Vec::new();
+        for (role, pin) in declared {
+            if seen.contains(&pin) {
+                return Some(format!("{role} gpio {pin} is declared twice"));
+            }
+            if reserved.contains(&pin) {
+                return Some(format!("{role} gpio {pin} is a reserved line"));
+            }
+            seen.push(pin);
+        }
+        None
     }
 }
 
@@ -331,7 +361,7 @@ pub fn load_profiles() -> Vec<BoardProfile> {
 /// Parse and validate one board-profile YAML body.
 pub fn parse_profile(body: &str) -> Result<BoardProfile, String> {
     let profile = serde_norway::from_str::<BoardProfile>(body).map_err(|e| e.to_string())?;
-    match profile.button_conflict() {
+    match profile.panel_conflict() {
         Some(conflict) => Err(conflict),
         None => Ok(profile),
     }
@@ -399,6 +429,9 @@ pub struct BoardFingerprint {
     /// Panel button pins from the profile's optional `buttons:` block.
     #[serde(default)]
     pub buttons: Option<ButtonPins>,
+    /// Rotary-encoder pins from the profile's optional `encoder:` block.
+    #[serde(default)]
+    pub encoder: Option<EncoderPins>,
     /// The USB sensor hub: present when the board declares one or one is
     /// attached; omitted otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -575,6 +608,7 @@ fn from_profile(profile: &BoardProfile, model_string: &str, facts: &HostFacts) -
         has_local_inference: !matches!(local_inference.as_str(), "" | "none"),
         local_inference,
         buttons: profile.buttons,
+        encoder: profile.encoder,
         sensor_hub: crate::sensor_hub::detect(profile.sensor_hub.as_ref(), &facts.usb_ttys),
         battery_gauge: profile.battery_gauge.clone(),
         reserved_gpio: profile.reserved_lines(),
@@ -658,6 +692,7 @@ pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint
         local_inference: "none".to_string(),
         has_local_inference: false,
         buttons: None,
+        encoder: None,
         sensor_hub: crate::sensor_hub::detect(None, &facts.usb_ttys),
         battery_gauge: None,
         reserved_gpio: Vec::new(),
@@ -885,6 +920,7 @@ mod tests {
                 "arch",
                 "buttons",
                 "cpu_cores",
+                "encoder",
                 "has_accelerator",
                 "has_local_inference",
                 "hw_video_codecs",
@@ -963,11 +999,12 @@ mod tests {
         );
         let cm5 = profiles.iter().find(|p| p.stem == "cm5").expect("cm5");
         assert_eq!(from_profile(cm5, "", &facts("", "")).buttons, None);
-        // An older sidecar without either field still reads.
+        // An older sidecar without these fields still reads.
         let old = r#"{"version":1,"name":"x","model":"x","tier":2,"ram_mb":1,"cpu_cores":1,"vendor":"v","soc":"s","arch":"a","hw_video_codecs":[],"npu_tops":0.0,"has_accelerator":false,"local_inference":"none","has_local_inference":false}"#;
         let fp: BoardFingerprint = serde_json::from_str(old).unwrap();
         assert_eq!(fp.profile, "");
         assert_eq!(fp.buttons, None);
+        assert_eq!(fp.encoder, None);
     }
 
     #[test]

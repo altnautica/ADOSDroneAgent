@@ -145,6 +145,15 @@ class TestRock5BPlusBindings:
         }
         assert not set(profile.buttons.pins()) & set(profile.reserved_lines())
 
+    def test_encoder_is_on_free_header_gpio_numbers(self):
+        profile = _profile("rock-5b-plus")
+        assert profile.encoder is not None and profile.buttons is not None
+        # Header pins 36/38/40: GPIO3_B1, GPIO3_B2, GPIO3_B3.
+        assert profile.encoder.pins() == [105, 106, 107]
+        assert [divmod(p, 32) for p in profile.encoder.pins()] == [(3, 9), (3, 10), (3, 11)]
+        assert not set(profile.encoder.pins()) & set(profile.reserved_lines())
+        assert not set(profile.encoder.pins()) & set(profile.buttons.pins())
+
     def test_no_header_uart_is_offered_as_a_flight_controller(self):
         """The GNSS UART must never be probed as an FC link."""
         profile = _profile("rock-5b-plus")
@@ -176,6 +185,29 @@ class TestRock5CBindings:
         # Header pins 29/31/33/35: GPIO1_B2, GPIO1_B1, GPIO1_B4, GPIO4_A0.
         assert profile.buttons.pins() == [42, 41, 44, 128]
         assert not set(profile.buttons.pins()) & set(profile.reserved_lines())
+
+    def test_encoder_is_on_free_header_gpio_numbers(self):
+        profile = _profile("rock-5c-lite")
+        assert profile.encoder is not None and profile.buttons is not None
+        # Header pins 36/38/15: GPIO4_A2, GPIO4_A5, GPIO4_B4.
+        assert profile.encoder.pins() == [130, 133, 140]
+        assert [divmod(p, 32) for p in profile.encoder.pins()] == [(4, 2), (4, 5), (4, 12)]
+        assert not set(profile.encoder.pins()) & set(profile.reserved_lines())
+        assert not set(profile.encoder.pins()) & set(profile.buttons.pins())
+
+    def test_encoder_avoids_every_display_pin(self):
+        profile = _profile("rock-5c-lite")
+        assert profile.encoder is not None
+        encoder = set(profile.encoder.pins())
+        for display in profile.displays.supported:
+            pins = list(display.gpio.values())
+            if display.touch is not None:
+                pins.append(display.touch.irq)
+            for gpio in pins:
+                assert gpio.header_pin not in (36, 38, 15), f"{display.id} {gpio.pin}"
+                bank, rest = gpio.pin.removeprefix("GPIO").split("_")
+                number = int(bank) * 32 + "ABCD".index(rest[0]) * 8 + int(rest[1:])
+                assert number not in encoder, f"{display.id} {gpio.pin}"
 
     def test_every_panel_gpio_is_a_reserved_line(self):
         """The display bindings name pins as GPIO<bank>_<group><index>; each must
@@ -219,6 +251,39 @@ class TestButtonValidation:
     def test_a_button_on_a_bound_line_is_rejected(self, buttons, message):
         with pytest.raises(ValueError, match=message):
             BoardProfile(**self._BASE, buttons=buttons)
+
+    def test_a_board_without_an_encoder_loads(self):
+        assert BoardProfile(**self._BASE).encoder is None
+
+    def test_a_clear_encoder_loads(self):
+        profile = BoardProfile(
+            **self._BASE,
+            buttons={"up": 63, "down": 47, "select": 103, "back": 110},
+            encoder={"a": 105, "b": 106, "sw": 107},
+        )
+        assert profile.encoder is not None
+        assert profile.encoder.pins() == [105, 106, 107]
+
+    @pytest.mark.parametrize(
+        ("encoder", "message"),
+        [
+            ({"a": 13, "b": 106, "sw": 107}, "encoder gpio 13 is a reserved"),
+            ({"a": 105, "b": 100, "sw": 107}, "encoder gpio 100 is a reserved"),
+            ({"a": 105, "b": 105, "sw": 107}, "encoder gpio 105 is declared twice"),
+            ({"a": 105, "b": 106, "sw": 110}, "encoder gpio 110 is declared twice"),
+        ],
+    )
+    def test_an_encoder_on_a_bound_line_is_rejected(self, encoder, message):
+        with pytest.raises(ValueError, match=message):
+            BoardProfile(
+                **self._BASE,
+                buttons={"up": 63, "down": 47, "select": 103, "back": 110},
+                encoder=encoder,
+            )
+
+    def test_an_incomplete_encoder_is_rejected(self):
+        with pytest.raises(ValueError):
+            BoardProfile(**self._BASE, encoder={"a": 105, "b": 106})
 
     @pytest.mark.parametrize(
         "gauge",

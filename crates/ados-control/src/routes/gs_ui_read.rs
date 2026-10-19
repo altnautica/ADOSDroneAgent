@@ -198,15 +198,31 @@ fn oled_section(stored: Option<&Value>) -> Value {
 }
 
 /// The default button section for `profile`: the shared panel table nested
-/// under `mapping`.
-pub(crate) fn default_buttons(profile: &str) -> Map<String, Value> {
+/// under `mapping`, plus the rotary-encoder keys (`ENC_*`) when the board
+/// declares an encoder.
+pub(crate) fn default_buttons(profile: &str, encoder: bool) -> Map<String, Value> {
+    let encoder_keys: &[(&str, &str)] = if encoder {
+        &ados_protocol::panel_ui::ENCODER_BUTTONS
+    } else {
+        &[]
+    };
     let mapping: Map<String, Value> = ados_protocol::panel_ui::default_buttons(profile)
         .iter()
+        .chain(encoder_keys.iter())
         .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
         .collect();
     let mut out = Map::new();
     out.insert("mapping".to_string(), Value::Object(mapping));
     out
+}
+
+/// Whether the HAL board sidecar (`board.json`) declares a rotary encoder. An
+/// absent or unreadable sidecar means no encoder.
+pub(crate) fn board_has_encoder(board_path: &Path) -> bool {
+    std::fs::read_to_string(board_path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|board| board.get("encoder").is_some_and(Value::is_object))
 }
 
 /// The default screen section for `profile`: the shared screen list as both the
@@ -254,17 +270,18 @@ pub async fn get_ui(State(state): State<AppState>) -> Response {
     let Some(profile) = panel_profile(&state) else {
         return profile_mismatch();
     };
+    let encoder = board_has_encoder(&state.board_path);
     let blob = read_gs_section(&config_yaml_path(&state), "ui");
-    Json(build_ui_config(&profile, &blob)).into_response()
+    Json(build_ui_config(&profile, encoder, &blob)).into_response()
 }
 
 /// Compose the `/ui` body from the persisted `ground_station.ui` map: each section the defaults merged
 /// with the blob's matching section. Split out so the merge + the default key set
 /// are unit-tested without filesystem IO.
-fn build_ui_config(profile: &str, blob: &Map<String, Value>) -> Value {
+fn build_ui_config(profile: &str, encoder: bool, blob: &Map<String, Value>) -> Value {
     json!({
         "oled": oled_section(blob.get("oled")),
-        "buttons": merge_over_defaults(default_buttons(profile), blob.get("buttons")),
+        "buttons": merge_over_defaults(default_buttons(profile, encoder), blob.get("buttons")),
         "screens": merge_over_defaults(default_screens(profile), blob.get("screens")),
     })
 }

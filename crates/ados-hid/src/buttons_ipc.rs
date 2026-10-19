@@ -489,6 +489,90 @@ mod tests {
         server.abort();
     }
 
+    #[test]
+    fn an_injected_encoder_switch_press_publishes_under_enc_sw() {
+        use std::sync::RwLock;
+        let _guard = INJECT_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(INJECT_ENABLE_ENV, "1");
+        let bus = ButtonEventBus::new();
+        let mut rx = bus.subscribe();
+        let mapping = Arc::new(RwLock::new(crate::buttons::default_button_mapping(
+            "ground_station",
+        )));
+        let classifier = Mutex::new(
+            PressClassifier::with_pins(mapping, [42, 41, 44, 128]).with_encoder_switch(140),
+        );
+        for (edge, ts) in [("press", 1000), ("release", 1100)] {
+            let req = format!(r#"{{"op":"inject","pin":140,"edge":"{edge}","ts_ms":{ts}}}"#);
+            classify_injected(&line(&req), &bus, Some(&classifier));
+        }
+        let ev = rx.try_recv().expect("the switch press was published");
+        assert_eq!(ev.button, 140);
+        assert_eq!(ev.label, "ENC_SW");
+        assert_eq!(ev.kind, "short");
+        assert_eq!(ev.action.as_deref(), Some("confirm"));
+        std::env::remove_var(INJECT_ENABLE_ENV);
+    }
+
+    #[tokio::test]
+    async fn subscribers_receive_encoder_events_with_their_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("buttons.sock");
+        let buttons = ButtonEventBus::new();
+        let server = tokio::spawn({
+            let buttons = buttons.clone();
+            let sock = sock.clone();
+            async move { serve(buttons, &sock).await }
+        });
+        for _ in 0..50 {
+            if sock.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let sub = UnixStream::connect(&sock).await.unwrap();
+        let mut sub = BufReader::new(sub);
+        sub.get_mut()
+            .write_all(b"{\"op\":\"subscribe\"}\n")
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            if buttons.receiver_count() > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // What the reader publishes for a CW detent, a CCW detent and a switch
+        // press: ordinary short presses, so every subscriber parses them.
+        let published = [
+            (130, crate::buttons::ENC_CW, "cycle_screen"),
+            (130, crate::buttons::ENC_CCW, "prev_screen"),
+            (140, crate::buttons::ENC_SW, "confirm"),
+        ];
+        for (button, label, action) in published {
+            buttons.publish(ButtonBusEvent {
+                button,
+                label: label.into(),
+                kind: "short",
+                action: Some(action.into()),
+                timestamp_ms: 1,
+            });
+        }
+        for (button, label, action) in published {
+            let mut line = String::new();
+            sub.read_line(&mut line).await.unwrap();
+            let ev: Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(ev["button"], button);
+            // The bus spells labels lower-case; the plugin host restores the
+            // mapping spelling (`ENC_CW`) for `button.subscribe` subscribers.
+            assert_eq!(ev["label"], label.to_lowercase());
+            assert_eq!(ev["kind"], "short");
+            assert_eq!(ev["action"], action);
+        }
+
+        server.abort();
+    }
+
     #[tokio::test]
     async fn an_unknown_op_gets_an_error_line_not_a_stream() {
         let dir = tempfile::tempdir().unwrap();

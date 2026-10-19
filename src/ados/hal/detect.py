@@ -25,6 +25,7 @@ from ados.hal._detect_models import (
     DisplayGpio,
     DisplaysSection,
     DisplayTouch,
+    EncoderPins,
     FcInterface,
     FlightControllerSection,
     GnssBinding,
@@ -54,6 +55,7 @@ __all__ = [
     "DisplayGpio",
     "DisplayTouch",
     "DisplaysSection",
+    "EncoderPins",
     "FcInterface",
     "FlightControllerSection",
     "GnssBinding",
@@ -276,6 +278,7 @@ def _board_from_profile(
         local_inference=profile.compute.local_inference,
         profile=profile.stem,
         buttons=profile.buttons,
+        encoder=profile.encoder,
     )
 
 

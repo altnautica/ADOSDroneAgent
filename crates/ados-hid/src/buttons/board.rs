@@ -16,6 +16,11 @@
 //! The sidecar may also carry `reserved_gpio`: the GPIO numbers the profile
 //! binds to a bus, a console or another sensor. A button on one of them is
 //! refused rather than requested.
+//!
+//! A board may also declare a rotary encoder (KY-040 class) in an optional
+//! `encoder:` block (`{a, b, sw}`: the quadrature outputs `CLK` and `DT`, and
+//! the push switch), in the same numbering as `buttons`. The encoder is read
+//! independently of the buttons: a board may carry either or both.
 
 /// Reference-panel lines (BCM), used only on a Raspberry Pi that declares no
 /// buttons.
@@ -100,6 +105,48 @@ impl ButtonsSkip {
     }
 }
 
+/// A board's rotary-encoder lines: quadrature output `a` (the module's `CLK`),
+/// output `b` (`DT`) and the push switch `sw`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderLines {
+    pub a: ButtonLine,
+    pub b: ButtonLine,
+    pub sw: ButtonLine,
+}
+
+impl EncoderLines {
+    /// The three lines in role order (a, b, sw).
+    pub fn lines(&self) -> [ButtonLine; 3] {
+        [self.a, self.b, self.sw]
+    }
+}
+
+/// Why a declared encoder is not read on this board. Each maps to one log
+/// event name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncoderSkip {
+    /// The sidecar is missing or does not parse.
+    SidecarUnreadable,
+    /// The board declares an encoder but its GPIO numbering is unknown.
+    NumberingUnknown { soc: String },
+    /// An encoder line sits on a line the board reserves for something else.
+    Reserved { gpio: u32 },
+    /// An encoder line is declared twice, or is also a panel button line.
+    Conflict { gpio: u32 },
+}
+
+impl EncoderSkip {
+    /// The structured log event name for this skip.
+    pub fn event(&self) -> &'static str {
+        match self {
+            Self::SidecarUnreadable => "board_sidecar_unreadable",
+            Self::NumberingUnknown { .. } => "encoder_numbering_unknown",
+            Self::Reserved { .. } => "encoder_pin_reserved",
+            Self::Conflict { .. } => "encoder_pin_conflict",
+        }
+    }
+}
+
 /// The `buttons` block of a board sidecar, top level or under a `board`
 /// object, as GPIO numbers in role order (up, down, select, back). All four
 /// roles must be present.
@@ -119,6 +166,22 @@ fn declared_pins(board: &serde_json::Value) -> Option<[u32; 4]> {
     let block = board.get("buttons")?;
     let pin = |role: &str| -> Option<u32> { u32::try_from(block.get(role)?.as_u64()?).ok() };
     Some([pin("up")?, pin("down")?, pin("select")?, pin("back")?])
+}
+
+/// The `encoder` block as GPIO numbers in role order (a, b, sw). All three
+/// roles must be present.
+fn declared_encoder(board: &serde_json::Value) -> Option<[u32; 3]> {
+    let block = board.get("encoder")?;
+    let pin = |role: &str| -> Option<u32> { u32::try_from(block.get(role)?.as_u64()?).ok() };
+    Some([pin("a")?, pin("b")?, pin("sw")?])
+}
+
+fn soc_of(board: &serde_json::Value) -> String {
+    board
+        .get("soc")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 fn reserved_gpio(board: &serde_json::Value) -> Vec<u32> {
@@ -143,13 +206,8 @@ pub fn button_lines(sidecar_json: &str) -> Result<[ButtonLine; 4], ButtonsSkip> 
     let pins = match (declared_pins(board), numbering) {
         (Some(pins), Some(_)) => pins,
         (Some(_), None) => {
-            return Err(ButtonsSkip::NumberingUnknown {
-                soc: board
-                    .get("soc")
-                    .and_then(|s| s.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-            })
+            let soc = soc_of(board);
+            return Err(ButtonsSkip::NumberingUnknown { soc });
         }
         (None, Some(GpioNumbering::RaspberryPi)) => BUTTON_PINS,
         (None, _) => return Err(ButtonsSkip::NotDeclared),
@@ -163,6 +221,54 @@ pub fn button_lines(sidecar_json: &str) -> Result<[ButtonLine; 4], ButtonsSkip> 
         let (chip, line) = numbering.chip_line(gpio);
         ButtonLine { gpio, chip, line }
     }))
+}
+
+/// The rotary encoder the board at a sidecar declares, as the lines the reader
+/// requests: `Ok(None)` when the board declares none, `Err` when it declares
+/// one that cannot be read safely (unknown numbering, a reserved line, a line
+/// repeated or shared with a panel button).
+pub fn encoder_lines(sidecar_json: &str) -> Result<Option<EncoderLines>, EncoderSkip> {
+    let v: serde_json::Value =
+        serde_json::from_str(sidecar_json).map_err(|_| EncoderSkip::SidecarUnreadable)?;
+    let board = board_object(&v);
+    let Some(pins) = declared_encoder(board) else {
+        return Ok(None);
+    };
+    let Some(numbering) = GpioNumbering::of_board(board) else {
+        let soc = soc_of(board);
+        return Err(EncoderSkip::NumberingUnknown { soc });
+    };
+    let reserved = reserved_gpio(board);
+    if let Some(&gpio) = pins.iter().find(|p| reserved.contains(p)) {
+        return Err(EncoderSkip::Reserved { gpio });
+    }
+    // The button lines the reader would request: the declared ones, else the
+    // reference panel on a Raspberry Pi.
+    let buttons = declared_pins(board).or(match numbering {
+        GpioNumbering::RaspberryPi => Some(BUTTON_PINS),
+        GpioNumbering::Rockchip => None,
+    });
+    for (i, &gpio) in pins.iter().enumerate() {
+        if pins[..i].contains(&gpio) || buttons.is_some_and(|b| b.contains(&gpio)) {
+            return Err(EncoderSkip::Conflict { gpio });
+        }
+    }
+    let line = |gpio: u32| {
+        let (chip, line) = numbering.chip_line(gpio);
+        ButtonLine { gpio, chip, line }
+    };
+    Ok(Some(EncoderLines {
+        a: line(pins[0]),
+        b: line(pins[1]),
+        sw: line(pins[2]),
+    }))
+}
+
+/// The encoder push-switch GPIO of the board at `sidecar`, for labelling an
+/// injected press `ENC_SW`. `None` when the board has no readable encoder.
+pub fn board_encoder_switch(sidecar: &std::path::Path) -> Option<u32> {
+    let text = std::fs::read_to_string(sidecar).ok()?;
+    encoder_lines(&text).ok().flatten().map(|e| e.sw.gpio)
 }
 
 /// The button GPIO numbers of the board at `sidecar`, for matching a press to
@@ -264,5 +370,93 @@ mod tests {
         std::fs::write(&path, ROCK).unwrap();
         assert_eq!(board_pins_or_default(&path), [63, 47, 103, 110]);
         assert_eq!(board_pins_or_default(&dir.path().join("none")), BUTTON_PINS);
+    }
+
+    /// The ROCK 5C sidecar shape: buttons, an encoder and the reserved lines.
+    const ROCK_5C: &str = r#"{"vendor":"Radxa","soc":"RK3588S2",
+        "buttons":{"up":42,"down":41,"select":44,"back":128},
+        "encoder":{"a":130,"b":133,"sw":140},
+        "reserved_gpio":[13,14,37,62,63,136,137]}"#;
+
+    #[test]
+    fn a_declared_encoder_resolves_to_chip_and_line() {
+        let enc = encoder_lines(ROCK_5C).unwrap().expect("declared");
+        assert_eq!(
+            enc.lines().map(|l| (l.gpio, l.chip, l.line)),
+            [(130, 4, 2), (133, 4, 5), (140, 4, 12)]
+        );
+        assert_eq!(enc.sw.chip_path(), "/dev/gpiochip4");
+        // The buttons of the same board are unaffected by the encoder block.
+        assert_eq!(
+            button_lines(ROCK_5C).unwrap().map(|l| l.gpio),
+            [42, 41, 44, 128]
+        );
+        // Under a `board` object too.
+        let nested = r#"{"board":{"vendor":"Raspberry Pi","soc":"BCM2711",
+            "encoder":{"a":17,"b":27,"sw":22}}}"#;
+        let enc = encoder_lines(nested).unwrap().unwrap();
+        assert_eq!(
+            enc.lines().map(|l| (l.chip, l.line)),
+            [(0, 17), (0, 27), (0, 22)]
+        );
+    }
+
+    #[test]
+    fn a_board_without_an_encoder_has_none() {
+        assert_eq!(encoder_lines(ROCK), Ok(None));
+        // An incomplete block is not an encoder.
+        let partial = r#"{"vendor":"Radxa","soc":"RK3588","encoder":{"a":130,"b":133}}"#;
+        assert_eq!(encoder_lines(partial), Ok(None));
+        assert_eq!(
+            encoder_lines("not json"),
+            Err(EncoderSkip::SidecarUnreadable)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(board_encoder_switch(&dir.path().join("none")), None);
+        let path = dir.path().join("board.json");
+        std::fs::write(&path, ROCK_5C).unwrap();
+        assert_eq!(board_encoder_switch(&path), Some(140));
+    }
+
+    #[test]
+    fn an_encoder_that_cannot_be_read_safely_is_refused() {
+        let a733 = r#"{"vendor":"Radxa","soc":"Allwinner A733",
+            "encoder":{"a":1,"b":2,"sw":3}}"#;
+        let skip = encoder_lines(a733).unwrap_err();
+        assert_eq!(
+            skip,
+            EncoderSkip::NumberingUnknown {
+                soc: "Allwinner A733".into()
+            }
+        );
+        assert_eq!(skip.event(), "encoder_numbering_unknown");
+
+        let on_console = r#"{"vendor":"Radxa","soc":"RK3588",
+            "encoder":{"a":130,"b":13,"sw":140},"reserved_gpio":[13]}"#;
+        assert_eq!(
+            encoder_lines(on_console),
+            Err(EncoderSkip::Reserved { gpio: 13 })
+        );
+
+        let repeated = r#"{"vendor":"Radxa","soc":"RK3588","encoder":{"a":130,"b":130,"sw":140}}"#;
+        assert_eq!(
+            encoder_lines(repeated),
+            Err(EncoderSkip::Conflict { gpio: 130 })
+        );
+
+        let on_button = r#"{"vendor":"Radxa","soc":"RK3588",
+            "buttons":{"up":63,"down":47,"select":103,"back":110},
+            "encoder":{"a":130,"b":133,"sw":110}}"#;
+        let skip = encoder_lines(on_button).unwrap_err();
+        assert_eq!(skip, EncoderSkip::Conflict { gpio: 110 });
+        assert_eq!(skip.event(), "encoder_pin_conflict");
+
+        // A Pi without declared buttons keeps the reference panel lines.
+        let on_reference_pin = r#"{"vendor":"Raspberry Pi","soc":"BCM2711",
+            "encoder":{"a":17,"b":27,"sw":5}}"#;
+        assert_eq!(
+            encoder_lines(on_reference_pin),
+            Err(EncoderSkip::Conflict { gpio: 5 })
+        );
     }
 }

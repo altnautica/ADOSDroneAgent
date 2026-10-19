@@ -170,6 +170,31 @@ mod tests {
     }
 
     #[test]
+    fn encoder_events_reach_subscribers_under_their_encoder_labels() {
+        for (line, label, action) in [
+            (
+                r#"{"button":130,"label":"enc_cw","kind":"short","action":"cycle_screen"}"#,
+                "ENC_CW",
+                "cycle_screen",
+            ),
+            (
+                r#"{"button":130,"label":"enc_ccw","kind":"short","action":"prev_screen"}"#,
+                "ENC_CCW",
+                "prev_screen",
+            ),
+            (
+                r#"{"button":140,"label":"enc_sw","kind":"long","action":"back"}"#,
+                "ENC_SW",
+                "back",
+            ),
+        ] {
+            let press = decode(line).expect("an encoder event re-encodes");
+            assert_eq!(press.label.as_deref(), Some(label));
+            assert_eq!(press.action.as_deref(), Some(action));
+        }
+    }
+
+    #[test]
     fn an_unmapped_button_is_still_delivered() {
         let press = decode(r#"{"button":5,"kind":"short","action":null,"timestamp_ms":1}"#)
             .expect("an unmapped button is a real press");

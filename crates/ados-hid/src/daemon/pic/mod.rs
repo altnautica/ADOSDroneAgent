@@ -5,10 +5,11 @@
 //! runs the session watchdog (auto-release after the heartbeat timeout), and
 //! reads the front-panel GPIO buttons. Modelled on `ados-supervisor`'s main.
 //!
-//! The button reader runs only on a board whose sidecar binds buttons it can
-//! map to GPIO lines (see [`crate::buttons::board`]); otherwise it is skipped
-//! with a logged reason and the daemon stays up for the PIC seam alone, which
-//! every ground station needs regardless of whether it has physical buttons.
+//! The panel input reader runs only on a board whose sidecar binds buttons or a
+//! rotary encoder it can map to GPIO lines (see [`crate::buttons::board`]);
+//! otherwise it is skipped with a logged reason and the daemon stays up for the
+//! PIC seam alone, which every ground station needs regardless of whether it
+//! has physical buttons.
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -126,12 +127,15 @@ async fn serve() -> Result<()> {
         // reader, so a synthetic press resolves the same action a real one would
         // and a SIGHUP remap reaches both. It stays inert unless the operator
         // sets ADOS_BUTTONS_ALLOW_INJECT=1 (the op checks the env itself).
-        let inject = Arc::new(std::sync::Mutex::new(
-            crate::buttons::PressClassifier::with_pins(
-                mapping.clone(),
-                buttons::board_pins_or_default(Path::new(buttons::BOARD_SIDECAR)),
-            ),
-        ));
+        let sidecar = Path::new(buttons::BOARD_SIDECAR);
+        let mut classifier = crate::buttons::PressClassifier::with_pins(
+            mapping.clone(),
+            buttons::board_pins_or_default(sidecar),
+        );
+        if let Some(sw) = buttons::board_encoder_switch(sidecar) {
+            classifier = classifier.with_encoder_switch(sw);
+        }
+        let inject = Arc::new(std::sync::Mutex::new(classifier));
         let button_bus = button_bus.clone();
         tokio::spawn(async move {
             let path = Path::new(BUTTONS_SOCK);
@@ -221,18 +225,24 @@ fn read_buttons_block() -> Option<serde_norway::Value> {
 #[cfg(target_os = "linux")]
 const SIDECAR_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Spawn the button reader on a blocking task. It waits for the board sidecar,
-/// resolves the board's button lines, and skips with a logged reason when the
-/// board binds none it can read. Only the chip-open is hardware-coupled; the
-/// classification runs through the shared [`PressClassifier`]. Each classified
-/// press is published to `button_bus` so the display/OLED subscriber acts on it
-/// (and logged for the journal).
+/// Spawn the panel input reader on a blocking task. It waits for the board
+/// sidecar, resolves the board's button lines and its rotary encoder, and skips
+/// each with a logged reason when the board binds none it can read; with
+/// neither readable there is no reader. Only the chip-open is hardware-coupled;
+/// presses classify through the shared [`PressClassifier`] and detents decode
+/// through the encoder's quadrature decoder. Each event is published to
+/// `button_bus` under its front-panel label (`B1`..`B4`, `ENC_CW`, `ENC_CCW`,
+/// `ENC_SW`) so the display and the plugin subscribers act on it (and logged
+/// for the journal).
 #[cfg(target_os = "linux")]
 fn spawn_button_reader(
     mapping: Arc<RwLock<std::collections::HashMap<String, String>>>,
     button_bus: ButtonEventBus,
 ) {
-    use crate::buttons::{button_lines, ButtonEvent, ButtonsSkip, PressClassifier, BOARD_SIDECAR};
+    use crate::buttons::{
+        button_lines, encoder_lines, ButtonEvent, ButtonsSkip, EncoderSkip, PressClassifier,
+        BOARD_SIDECAR, BUTTON_PINS,
+    };
     use crate::eventbus::ButtonBusEvent;
 
     tokio::task::spawn_blocking(move || {
@@ -246,11 +256,13 @@ fn spawn_button_reader(
                 Err(_) => break None,
             }
         };
-        let lines = text
-            .ok_or(ButtonsSkip::SidecarUnreadable)
-            .and_then(|text| button_lines(&text));
-        let lines = match lines {
-            Ok(lines) => lines,
+        let Some(text) = text else {
+            let skip = ButtonsSkip::SidecarUnreadable;
+            tracing::info!(sidecar = BOARD_SIDECAR, "{}", skip.event());
+            return;
+        };
+        let lines = match button_lines(&text) {
+            Ok(lines) => Some(lines),
             Err(skip) => {
                 match &skip {
                     ButtonsSkip::NumberingUnknown { soc } => {
@@ -259,18 +271,47 @@ fn spawn_button_reader(
                     ButtonsSkip::Reserved { gpio } => tracing::warn!(gpio, "{}", skip.event()),
                     _ => tracing::info!(sidecar = BOARD_SIDECAR, "{}", skip.event()),
                 }
-                return;
+                None
             }
         };
-        let pins = lines.map(|l| l.gpio);
+        let encoder = match encoder_lines(&text) {
+            Ok(encoder) => encoder,
+            Err(skip) => {
+                match &skip {
+                    EncoderSkip::NumberingUnknown { soc } => {
+                        tracing::warn!(soc = %soc, "{}", skip.event())
+                    }
+                    EncoderSkip::Reserved { gpio } | EncoderSkip::Conflict { gpio } => {
+                        tracing::warn!(gpio, "{}", skip.event())
+                    }
+                    EncoderSkip::SidecarUnreadable => {
+                        tracing::info!(sidecar = BOARD_SIDECAR, "{}", skip.event())
+                    }
+                }
+                None
+            }
+        };
+        if lines.is_none() && encoder.is_none() {
+            return;
+        }
+        // Without readable buttons the reference pins only seed the labels; no
+        // line is requested for them, so none of them ever reports a press.
+        let pins = lines.map_or(BUTTON_PINS, |lines| lines.map(|l| l.gpio));
         let mut classifier = PressClassifier::with_pins(mapping, pins);
+        if let Some(enc) = &encoder {
+            classifier = classifier.with_encoder_switch(enc.sw.gpio);
+        }
+        let button_set: &[buttons::ButtonLine] = match &lines {
+            Some(lines) => lines,
+            None => &[],
+        };
         tracing::info!(
-            lines = ?lines.map(|l| (l.chip, l.line)),
-            gpio = ?pins,
+            lines = ?button_set.iter().map(|l| (l.chip, l.line)).collect::<Vec<_>>(),
+            gpio = ?button_set.iter().map(|l| l.gpio).collect::<Vec<_>>(),
+            encoder = ?encoder.map(|e| e.lines().map(|l| l.gpio)),
             "button reader started"
         );
-        let on_event = |ev: ButtonEvent| {
-            let label = buttons::pin_label(&pins, ev.pin);
+        let on_event = |label: String, ev: ButtonEvent| {
             tracing::info!(
                 pin = ev.pin,
                 label = %label,
@@ -278,7 +319,7 @@ fn spawn_button_reader(
                 action = ?ev.action,
                 "button event"
             );
-            // Fan out to the display/OLED consumer over the control socket.
+            // Fan out to the display/OLED consumer and the plugin host.
             button_bus.publish(ButtonBusEvent {
                 button: ev.pin,
                 label,
@@ -287,7 +328,9 @@ fn spawn_button_reader(
                 timestamp_ms: ev.timestamp_ms,
             });
         };
-        if let Err(e) = buttons::run_event_loop(&lines, &mut classifier, on_event) {
+        let result =
+            buttons::run_event_loop(button_set, encoder.as_ref(), &mut classifier, on_event);
+        if let Err(e) = result {
             // A read error here is not fatal to the PIC seam; log and let the
             // daemon stay up serving the socket.
             tracing::warn!(error = %e, "button reader exited");

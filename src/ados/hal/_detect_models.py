@@ -294,9 +294,24 @@ class ButtonPins(BaseModel):
         return [self.up, self.down, self.select, self.back]
 
 
+class EncoderPins(BaseModel):
+    """The rotary encoder (KY-040 class) a board wires, by the same GPIO
+    numbering as ``buttons``: quadrature outputs ``a`` (CLK) and ``b`` (DT) and
+    the push switch ``sw``. Optional: a board without the ``encoder:`` block has
+    no encoder."""
+
+    a: int = Field(ge=0)
+    b: int = Field(ge=0)
+    sw: int = Field(ge=0)
+
+    def pins(self) -> list[int]:
+        """The three pins in role order (a, b, sw)."""
+        return [self.a, self.b, self.sw]
+
+
 class ReservedGpio(BaseModel):
     """A GPIO line the board binds to a bus, a console or a peripheral, by the
-    same numbering as ``buttons``. A button may not sit on one."""
+    same numbering as ``buttons``. A button or encoder line may not sit on one."""
 
     gpio: int = Field(ge=0)
     header_pin: int | None = None
@@ -388,6 +403,7 @@ class BoardProfile(BaseModel):
     gpio_outputs: list[GpioOutput] = Field(default_factory=list)
     gpio_buttons: list[GpioButton] = Field(default_factory=list)
     buttons: ButtonPins | None = None
+    encoder: EncoderPins | None = None
     uart_paths: list[str] = []
     hw_video_codecs: list[str] = []
 
@@ -436,16 +452,20 @@ class BoardProfile(BaseModel):
         return sorted(lines)
 
     @model_validator(mode="after")
-    def _buttons_clear_of_reserved_lines(self) -> BoardProfile:
-        if self.buttons is None:
-            return self
-        pins = self.buttons.pins()
-        repeated = sorted({p for p in pins if pins.count(p) > 1})
-        if repeated:
-            raise ValueError(f"button gpio {repeated[0]} is declared twice")
-        clash = sorted(set(pins) & set(self.reserved_lines()))
-        if clash:
-            raise ValueError(f"button gpio {clash[0]} is a reserved line")
+    def _panel_inputs_clear_of_reserved_lines(self) -> BoardProfile:
+        declared: list[tuple[str, int]] = []
+        if self.buttons is not None:
+            declared += [("button", p) for p in self.buttons.pins()]
+        if self.encoder is not None:
+            declared += [("encoder", p) for p in self.encoder.pins()]
+        reserved = set(self.reserved_lines())
+        seen: set[int] = set()
+        for role, pin in declared:
+            if pin in seen:
+                raise ValueError(f"{role} gpio {pin} is declared twice")
+            if pin in reserved:
+                raise ValueError(f"{role} gpio {pin} is a reserved line")
+            seen.add(pin)
         return self
 
 
@@ -474,6 +494,8 @@ class BoardInfo:
     profile: str = ""
     # Panel button pins from the profile's optional ``buttons:`` block.
     buttons: ButtonPins | None = None
+    # Rotary-encoder pins from the profile's optional ``encoder:`` block.
+    encoder: EncoderPins | None = None
 
     @property
     def has_accelerator(self) -> bool:
@@ -514,5 +536,6 @@ class BoardInfo:
             "has_accelerator": self.has_accelerator,
             "local_inference": self.local_inference,
             "buttons": self.buttons.model_dump() if self.buttons else None,
+            "encoder": self.encoder.model_dump() if self.encoder else None,
             "has_local_inference": self.has_local_inference,
         }

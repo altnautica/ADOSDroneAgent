@@ -38,6 +38,66 @@ fn rock_boards_publish_header_buttons_clear_of_reserved_lines() {
 }
 
 #[test]
+fn rock_boards_publish_an_encoder_on_free_header_lines() {
+    // ROCK 5C / 5C Lite: header pins 36 (A), 38 (B), 15 (SW).
+    let fp = fingerprint("rock-5c-lite");
+    let enc = fp.encoder.expect("5C declares an encoder");
+    assert_eq!(enc.pins(), [130, 133, 140]);
+    assert_eq!(
+        enc.pins().map(|p| (p / 32, p % 32)),
+        [(4, 2), (4, 5), (4, 12)]
+    );
+    let v = serde_json::to_value(&fp).unwrap();
+    assert_eq!(
+        v["encoder"],
+        serde_json::json!({"a": 130, "b": 133, "sw": 140})
+    );
+    // ROCK 5B+: header pins 36 (A), 38 (B), 40 (SW).
+    let fp = fingerprint("rock-5b-plus");
+    assert_eq!(fp.encoder.map(|e| e.pins()), Some([105, 106, 107]));
+    for stem in ["rock-5c-lite", "rock-5b-plus"] {
+        let fp = fingerprint(stem);
+        let buttons = fp.buttons.expect("buttons").pins();
+        for pin in fp.encoder.expect("encoder").pins() {
+            assert!(
+                !fp.reserved_gpio.contains(&pin),
+                "{stem} encoder {pin} reserved"
+            );
+            assert!(!buttons.contains(&pin), "{stem} encoder {pin} is a button");
+        }
+    }
+    // A board without the block publishes none.
+    assert_eq!(fingerprint("cm5").encoder, None);
+}
+
+#[test]
+fn an_encoder_on_a_reserved_button_or_repeated_line_rejects_the_profile() {
+    let base = "name: Test\nreserved_gpio:\n  - {gpio: 13, header_pin: 8, use: console}\n\
+                gnss: {transport: serial, pps_gpio: 100}\n\
+                buttons: {up: 63, down: 47, select: 103, back: 110}\n";
+    let ok = format!("{base}encoder: {{a: 105, b: 106, sw: 107}}\n");
+    assert_eq!(
+        parse_profile(&ok).unwrap().encoder.map(|e| e.pins()),
+        Some([105, 106, 107])
+    );
+    let on_pps = format!("{base}encoder: {{a: 105, b: 100, sw: 107}}\n");
+    assert_eq!(
+        parse_profile(&on_pps).unwrap_err(),
+        "encoder gpio 100 is a reserved line"
+    );
+    let on_button = format!("{base}encoder: {{a: 105, b: 106, sw: 110}}\n");
+    assert_eq!(
+        parse_profile(&on_button).unwrap_err(),
+        "encoder gpio 110 is declared twice"
+    );
+    let repeated = format!("{base}encoder: {{a: 105, b: 105, sw: 107}}\n");
+    assert!(parse_profile(&repeated).is_err());
+    // An incomplete block does not parse.
+    let partial = format!("{base}encoder: {{a: 105, b: 106}}\n");
+    assert!(parse_profile(&partial).is_err());
+}
+
+#[test]
 fn rock_boards_carry_no_default_battery_gauge() {
     // The shunt is a property of the rig's wiring, not of the board.
     for stem in ["rock-5b-plus", "rock-5c-lite"] {
