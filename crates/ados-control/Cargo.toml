@@ -172,6 +172,9 @@ webpki-roots = "0.26"
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls-manual-roots-no-provider",
 ] }
+# Reads the ground station's field tile packs (`*.pmtiles`): the header for the
+# pack listing, and one tile per request through the async mmap backend.
+pmtiles = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -185,6 +188,8 @@ ados-mavlink-router = { path = "../ados-mavlink-router" }
 tokio = { workspace = true, features = ["test-util"] }
 # Builds `.adosplug` fixtures for the native plugin lifecycle route tests.
 zip = { workspace = true }
+# Writes small PMTiles fixtures for the field tile pack route tests.
+pmtiles = { workspace = true, features = ["write"] }
 
 # Linux-only edge: systemd readiness/watchdog notify + journald log layer for
 # the daemon, and the nix group-ownership helper for the trusted socket. Confined

@@ -141,6 +141,13 @@
       "value_name": "<path>"
     },
     {
+      "help": "Place this PMTiles field tile pack (<name>.pmtiles) in the ground station's tiles directory, downloaded from a URL or copied from a local path, so the GCS can render maps from it with no internet. Linux only.",
+      "name": "--tile-pack",
+      "short": null,
+      "takes_value": true,
+      "value_name": "<url|path>"
+    },
+    {
       "help": "Remove the agent",
       "name": "--uninstall",
       "short": null,

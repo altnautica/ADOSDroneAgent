@@ -13,6 +13,7 @@
     "ground_station.profile",
     "signing.mavlink",
     "webrtc.signaling.last_error",
-    "battery.health"
+    "battery.health",
+    "tiles.pack"
   ]
 }

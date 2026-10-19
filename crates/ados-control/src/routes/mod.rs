@@ -46,6 +46,7 @@ pub mod gs_recording_list;
 pub mod gs_relay_proxy;
 pub mod gs_relayed_status;
 pub mod gs_status;
+pub mod gs_tiles;
 pub mod gs_tunnel_config;
 pub mod gs_ui_read;
 pub mod gs_ui_write;

@@ -310,8 +310,11 @@ pub(super) async fn tcp_edge(
     // operator; per caller, a flood exhausts only the flooder. The liveness,
     // version and pairing-handshake paths stay exempt so a watchdog or a fresh
     // GCS is never starved; the PIN login is charged, since it is the one
-    // public path a guesser would loop on.
-    let exempt_from_budget = on_box || (auth::is_public(&path) && !auth::is_pin_login(&path));
+    // public path a guesser would loop on. Field tile reads are exempt too:
+    // they still need the key, but a single map pan fetches dozens of tiles.
+    let exempt_from_budget = on_box
+        || (auth::is_public(&path) && !auth::is_pin_login(&path))
+        || auth::is_tile_read(&path);
     if !exempt_from_budget && !edge.rate.check(peer_key) {
         return detail(
             StatusCode::TOO_MANY_REQUESTS,

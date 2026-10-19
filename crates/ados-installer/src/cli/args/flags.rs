@@ -130,6 +130,14 @@ pub const FLAGS: &[FlagSpec] = &[
         ),
         "-k",
     ),
+    valued(
+        "--tile-pack",
+        "<url|path>",
+        "Place this PMTiles field tile pack (<name>.pmtiles) in the ground\n\
+         station's tiles directory, downloaded from a URL or copied from a\n\
+         local path, so the GCS can render maps from it with no internet.\n\
+         Linux only.",
+    ),
     flag("--uninstall", "Remove the agent"),
     flag("--status", "Print install status and exit"),
     flag("--plain", "Plain line output (no animation/color)"),
@@ -233,6 +241,7 @@ impl Args {
             "--wifi-ssid" => self.wifi_ssid = value,
             "--wifi-pass-file" => self.wifi_pass_file = value,
             "--plugin-key" => self.plugin_key.extend(value),
+            "--tile-pack" => self.tile_pack = value,
             other => unreachable!("flag {other} is in FLAGS but has no apply arm"),
         }
     }

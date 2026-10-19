@@ -9,8 +9,8 @@ use crate::routes::table::Routes;
 use crate::routes::{
     gs_camera_write, gs_crsf, gs_factory_reset, gs_fleet_hero, gs_input_read, gs_mesh,
     gs_mesh_write, gs_network, gs_network_write, gs_pairing, gs_pic, gs_recording,
-    gs_recording_list, gs_relay_proxy, gs_relayed_status, gs_status, gs_tunnel_config, gs_ui_read,
-    gs_ui_write, gs_wfb_invite, gs_wfb_pair, gs_wfb_write, gs_ws,
+    gs_recording_list, gs_relay_proxy, gs_relayed_status, gs_status, gs_tiles, gs_tunnel_config,
+    gs_ui_read, gs_ui_write, gs_wfb_invite, gs_wfb_pair, gs_wfb_write, gs_ws,
 };
 use crate::state::AppState;
 
@@ -178,7 +178,8 @@ fn network(r: Routes<AppState>) -> Routes<AppState> {
     )
 }
 
-/// Mesh pairing, the PIC read, recordings and the camera switch.
+/// Mesh pairing, the PIC read, recordings, the camera switch and the field
+/// tile packs.
 fn pairing_and_media(r: Routes<AppState>) -> Routes<AppState> {
     r.get(
         "/api/v1/ground-station/pair/pending",
@@ -236,6 +237,14 @@ fn pairing_and_media(r: Routes<AppState>) -> Routes<AppState> {
     .post(
         "/api/v1/ground-station/camera/switch",
         gs_camera_write::post_camera_switch,
+    )
+    // Field tile packs: the listing and one tile. The last segment is
+    // `{y}.mvt`; the router has no static-suffix parameters, so the handler
+    // checks the suffix.
+    .get("/api/v1/ground-station/tiles", gs_tiles::get_tile_packs)
+    .get(
+        "/api/v1/ground-station/tiles/{name}/{z}/{x}/{tile}",
+        gs_tiles::get_tile,
     )
 }
 

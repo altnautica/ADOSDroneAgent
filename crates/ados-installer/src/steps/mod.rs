@@ -52,6 +52,7 @@ pub mod reboot;
 pub mod rtl_regulatory;
 pub mod start;
 pub mod systemd;
+pub mod tile_pack;
 pub mod venv_agent;
 pub mod watchdog;
 pub mod wfb_ng;
@@ -99,6 +100,9 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         // and the control surface are up before the World Engine extension is
         // installed and enabled against them.
         Box::new(extensions::Extensions),
+        // Late in the run (it needs only deps), so a large download does not
+        // hold up the node coming up; nothing depends on it.
+        Box::new(tile_pack::TilePack),
         // LAST, after health. Arming a hard-reset-on-stall BEFORE the step that
         // starts every service meant a slow startup reset the board mid-install,
         // and again on every boot after. It is default-off now, but someone will
@@ -122,7 +126,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 27);
+        assert_eq!(order.len(), 28);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -183,6 +187,10 @@ mod tests {
         // the reboot decision is taken after it.
         assert!(pos("health") < pos("extensions"));
         assert!(pos("extensions") < pos("reboot"));
+        // The field tile pack download waits for curl, and runs after the node
+        // is up so a large pack never delays it.
+        assert!(pos("deps") < pos("tile_pack"));
+        assert!(pos("health") < pos("tile_pack"));
         // Config migration runs after the config is written and before
         // anything starts a unit that would load it. This edge is the whole
         // point of the step: it is what keeps migration off eleven concurrent

@@ -275,6 +275,30 @@ fn is_public_is_exactly_the_exempt_paths() {
 }
 
 #[test]
+fn only_the_exact_tile_shape_skips_the_request_budget() {
+    assert!(is_tile_read(
+        "/api/v1/ground-station/tiles/field/14/11720/7570.mvt"
+    ));
+    for p in [
+        // The listing is an ordinary charged read.
+        "/api/v1/ground-station/tiles",
+        "/api/v1/ground-station/tiles/",
+        "/api/v1/ground-station/tiles/field/14/11720",
+        "/api/v1/ground-station/tiles/field/14/11720/7570.mvt/extra",
+        "/api/v1/ground-station/tiles/field//11720/7570.mvt",
+        "/api/v1/ground-station/tiles/../../../status",
+        "/api/v1/ground-station/tiles/../14/11720/7570.mvt",
+        "/api/v1/ground-station/status",
+    ] {
+        assert!(!is_tile_read(p), "{p} must stay charged");
+    }
+    // Exempt from the budget is not public: the key is still required.
+    assert!(!is_public(
+        "/api/v1/ground-station/tiles/field/14/11720/7570.mvt"
+    ));
+}
+
+#[test]
 fn the_operator_ui_is_reachable_while_unpaired() {
     // The shell an operator has to load before they can do anything at all,
     // including read the pairing code that would let them pair.

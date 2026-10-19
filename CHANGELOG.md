@@ -61,6 +61,16 @@ the project follows [Semantic Versioning](https://semver.org/).
   profile's `battery_gauge` binding. Board profiles accept optional `imu`,
   `gnss`, `sensor_hub` and `battery_gauge` bindings. USB discovery classifies
   `1209:ad05` as `sensor_hub`.
+- **Field tile packs on the ground station.** `GET
+  /api/v1/ground-station/tiles` lists the PMTiles archives in
+  `/var/ados/tiles` (`ADOS_TILES_DIR`) as `{name, bounds, minzoom, maxzoom,
+  tile_type, usable, size_bytes, etag}`, and `GET
+  /api/v1/ground-station/tiles/{name}/{z}/{x}/{y}.mvt` serves one vector tile
+  as stored (gzip `Content-Encoding`, one-day `Cache-Control`, `ETag`; `204`
+  for a tile the pack does not hold). Ground-station profile only; the tile
+  route needs the API key but is not charged to the per-caller request
+  budget. New capability flag `tiles.pack`. Installer flag `--tile-pack
+  <url|path>` places a pack in that directory.
 
 ### Changed
 

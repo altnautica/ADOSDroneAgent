@@ -127,6 +127,25 @@ pub fn is_pin_login(path: &str) -> bool {
     matches!(path, "/api/dashboard/pin/verify" | "/api/dashboard/pin/set")
 }
 
+/// A field tile read, `/api/v1/ground-station/tiles/{name}/{z}/{x}/{y}.mvt`:
+/// authenticated like any data route, but not charged to the caller's request
+/// budget, because one map pan fetches dozens of tiles at once. Only the exact
+/// four-segment shape counts, with no empty or dot segment, so the exemption
+/// cannot be stretched over another path by prefixing it.
+pub fn is_tile_read(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("/api/v1/ground-station/tiles/") else {
+        return false;
+    };
+    let mut segments = 0;
+    for s in rest.split('/') {
+        if s.is_empty() || s == "." || s == ".." {
+            return false;
+        }
+        segments += 1;
+    }
+    segments == 4
+}
+
 /// The endpoints that are public on both edges (no key, no rate limit even on
 /// TCP) so a fresh GCS can read the version, walk the local pairing handshake
 /// before it holds a key, and a liveness probe can always hit `/healthz`. This

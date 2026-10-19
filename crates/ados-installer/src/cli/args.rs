@@ -84,6 +84,11 @@ pub struct Args {
     /// itself, so the secret never sits in this process's argv where any local
     /// user can read it.
     pub wifi_pass_file: Option<String>,
+    /// `--tile-pack <url|path>` — a PMTiles field tile pack to place in the
+    /// ground station's tiles directory (`/var/ados/tiles`), downloaded from a
+    /// URL or copied from a local path. The ground station serves it to the
+    /// GCS over the LAN. Absent means no pack is touched.
+    pub tile_pack: Option<String>,
     /// `--uninstall` — remove the agent.
     pub uninstall: bool,
     /// `--status` — print install status and exit.

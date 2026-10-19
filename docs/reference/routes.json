@@ -1389,6 +1389,24 @@
     {
       "method": "GET",
       "notes": null,
+      "path": "/api/v1/ground-station/tiles",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/tiles/{name}/{z}/{x}/{tile}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
       "path": "/api/v1/ground-station/ui",
       "public": false,
       "relay_forbidden": false,
