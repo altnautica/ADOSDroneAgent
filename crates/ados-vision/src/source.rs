@@ -123,6 +123,8 @@ impl BufferPool {
 /// One raw frame plus the metadata needed to size a ring and stamp a descriptor.
 #[derive(Debug, Clone)]
 pub struct RawFrame {
+    /// Frames the source dropped as corrupt just before this one.
+    pub dropped_corrupt: u32,
     pub width: u32,
     pub height: u32,
     pub format: FrameFormat,
@@ -243,6 +245,7 @@ impl FrameSource for TapSource {
             format: hdr.format,
             data,
             timing: FrameTiming::host(hdr.ts_mono_ns),
+            dropped_corrupt: 0,
         })
     }
 
@@ -274,6 +277,7 @@ mod tests {
             format: FrameFormat::Rgb24,
             data: (0..48u8).collect(),
             timing: FrameTiming::host(987_654_321),
+            dropped_corrupt: 0,
         };
         let frame_clone = frame.clone();
         let writer = tokio::spawn(async move {

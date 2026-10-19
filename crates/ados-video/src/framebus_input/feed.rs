@@ -65,6 +65,7 @@ impl FeedSpec {
 pub struct FramebusFeed {
     spec: FeedSpec,
     tasks: [JoinHandle<()>; 2],
+    renew: watch::Sender<u64>,
 }
 
 impl Drop for FramebusFeed {
@@ -80,12 +81,30 @@ impl FramebusFeed {
     pub fn spawn(spec: FeedSpec) -> io::Result<Self> {
         ensure_fifo(&spec.fifo)?;
         let (tx, rx) = watch::channel(None);
+        let (renew, renewed) = watch::channel(0);
         let reader = tokio::spawn(read_descriptors(spec.clone(), tx));
-        let writer = tokio::spawn(write_frames(spec.clone(), rx));
+        let writer = tokio::spawn(write_frames(spec.clone(), rx, renewed));
         Ok(Self {
             spec,
             tasks: [reader, writer],
+            renew,
         })
+    }
+
+    /// Give the next encoder a fresh pipe: unlink and recreate the FIFO, and
+    /// move the writer onto it. Bytes still buffered in the old pipe (a frame
+    /// the previous encoder never read) stay with the old, unlinked pipe, so
+    /// the new reader starts on a frame boundary. Call before every encoder
+    /// spawn that reads this feed.
+    pub fn renew(&self) -> io::Result<()> {
+        match std::fs::remove_file(&self.spec.fifo) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        ensure_fifo(&self.spec.fifo)?;
+        self.renew.send_modify(|g| *g += 1);
+        Ok(())
     }
 
     /// What this feed pumps.
@@ -226,17 +245,32 @@ async fn open_sender(fifo: &Path) -> pipe::Sender {
 }
 
 /// Write every new frame to the pipe; reopen it whenever its reader goes away.
-async fn write_frames(spec: FeedSpec, mut rx: watch::Receiver<Option<FrameDescriptor>>) {
+async fn write_frames(
+    spec: FeedSpec,
+    mut rx: watch::Receiver<Option<FrameDescriptor>>,
+    mut renewed: watch::Receiver<u64>,
+) {
     let mut ring = None;
     let mut pixels = Vec::new();
     loop {
-        let mut sender = open_sender(&spec.fifo).await;
+        renewed.mark_unchanged();
+        let mut sender = tokio::select! {
+            s = open_sender(&spec.fifo) => s,
+            // The pipe was replaced before a reader came: open the new one.
+            _ = renewed.changed() => continue,
+        };
         tracing::info!(camera = %spec.camera_id, "framebus_feed_reader_attached");
         // Start from the next frame, not one queued before this reader came.
         rx.mark_unchanged();
         loop {
-            if rx.changed().await.is_err() {
-                return;
+            tokio::select! {
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                // A new encoder is about to read a fresh pipe.
+                _ = renewed.changed() => break,
             }
             let Some(d) = rx.borrow_and_update().clone() else {
                 continue;

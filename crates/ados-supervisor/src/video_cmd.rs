@@ -33,17 +33,27 @@ pub const VIDEO_CMD_SOCK: &str = "/run/ados/video-cmd.sock";
 const ADOS_VIDEO_UNIT: &str = "ados-video.service";
 
 /// The vision engine unit. It owns the cameras marked `capture: true` and
-/// resolves them once at startup too, so a running engine is restarted with
-/// the pipeline. One that is not running (vision off, or a profile without
-/// it) is left alone: it reads the list when it next starts.
+/// resolves them once at startup too, so it is restarted with the pipeline.
 const ADOS_VISION_UNIT: &str = "ados-vision.service";
 
-/// Restart both camera consumers after a camera-list write. The reply's `ok`
-/// follows the video pipeline, which serves every leg; the engine's restart
-/// is reported beside it.
-async fn restart_camera_consumers(pm: &dyn ProcessManager) -> (bool, bool) {
+/// Restart both camera consumers after a camera-list write, the engine first.
+///
+/// A camera that changed owner must be released before its new owner opens
+/// it: when capture turns off, the engine still holds the device, and a video
+/// encoder started first would find it busy. So the engine goes first. With
+/// captured cameras declared it is (re)started whatever its state; without any
+/// it is restarted only if running, and a restarted engine with no work left
+/// exits, releasing every device before the pipeline comes back.
+///
+/// The reply's `ok` follows the video pipeline, which serves every leg; the
+/// engine's restart is reported beside it.
+async fn restart_camera_consumers(pm: &dyn ProcessManager, captured: usize) -> (bool, bool) {
+    let vision = if captured > 0 {
+        pm.restart(ADOS_VISION_UNIT).await
+    } else {
+        pm.try_restart(ADOS_VISION_UNIT).await
+    };
     let video = pm.restart(ADOS_VIDEO_UNIT).await;
-    let vision = pm.try_restart(ADOS_VISION_UNIT).await;
     (video, vision)
 }
 
@@ -212,7 +222,10 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     // the actual restart (not just the config write). A restart failure is a
     // real failure the caller logs + retries — the config is saved (persisted:
     // true) and will apply on the next start, but the streams are not live yet.
-    let (restarted, vision_restarted) = restart_camera_consumers(pm).await;
+    let captured = std::fs::read_to_string(bind::CONFIG_YAML)
+        .map(|t| ados_config::cameras::declared_cameras_from(&t).captured)
+        .unwrap_or(0);
+    let (restarted, vision_restarted) = restart_camera_consumers(pm, captured).await;
     json!({"ok": restarted, "count": legs.len(), "persisted": true, "restarted": restarted, "vision_restarted": vision_restarted})
 }
 

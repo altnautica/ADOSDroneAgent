@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn write_tmp(yaml: &str) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -252,4 +251,23 @@ fn effective_slot_count_clamps_to_the_header_range() {
         ..VisionConfig::default()
     };
     assert_eq!(tiny.effective_slot_count(), 2);
+}
+
+/// The simulated capture rig's config has no `vision:` block: the engine
+/// still runs, because it owns the captured cameras.
+#[test]
+fn captured_cameras_run_the_engine_without_a_vision_block() {
+    let (_d, p) = write_tmp(include_str!(
+        "../../ados-config/tests/fixtures/sim-capture-config.yaml"
+    ));
+    let c = VisionConfig::load_from(&p);
+    assert!(!c.enabled);
+    assert!(c.should_run());
+    assert!(c.simulation);
+    let ids: Vec<&str> = c.cameras.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["cam_fl", "cam_fr"]);
+    assert!(c.tap_sink.is_none());
+    // Nothing captured and vision off: idle.
+    let (_d2, p2) = write_tmp("agent:\n  profile: drone\n");
+    assert!(!VisionConfig::load_from(&p2).should_run());
 }

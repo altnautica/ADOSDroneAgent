@@ -152,6 +152,11 @@ pub struct AgentConfig {
     /// unit is never started (it is not in any install-time enable set), so a
     /// `vision.enabled: true` config would never bring the vision pipeline up.
     pub vision_enabled: bool,
+    /// What the top-level `cameras[]` list declares: captured cameras start
+    /// `ados-vision` whatever `vision.enabled` says (the engine is their only
+    /// owner), and either a captured or a network entry is a video source with
+    /// no local camera node.
+    pub declared_cameras: ados_config::cameras::DeclaredCameras,
     /// `server.mode` is a cloud posture (`cloud` / `self_hosted`), i.e. the
     /// cloud relay is configured. Default `local` → false. The WFB auto-pair
     /// loop only fails over to the cloud relay when this is true; a local-first
@@ -259,6 +264,9 @@ impl AgentConfig {
             .map(str::to_string);
 
         let vision_enabled = raw.vision.enabled;
+        let declared_cameras = std::fs::read_to_string(config_yaml)
+            .map(|t| ados_config::cameras::declared_cameras_from(&t))
+            .unwrap_or_default();
 
         let cloud_relay_enabled = matches!(raw.server.mode.as_str(), "cloud" | "self_hosted");
 
@@ -274,6 +282,7 @@ impl AgentConfig {
             video_enabled,
             video_network_source,
             vision_enabled,
+            declared_cameras,
             cloud_relay_enabled,
             configured_gs_role,
             headless_mode,

@@ -27,8 +27,16 @@ pub const VISION_STATUS_FILE: &str = "vision-status.json";
 /// The sidecar schema version, stamped on write.
 pub const VISION_STATUS_VERSION: u16 = 1;
 
+/// The last failure of one camera's frame source (open, format negotiation or
+/// stream end), kept until the source next delivers a frame.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceError {
+    pub camera: String,
+    pub error: String,
+}
+
 /// The engine's work state.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisionStatus {
     #[serde(default)]
     pub version: u16,
@@ -37,6 +45,12 @@ pub struct VisionStatus {
     /// Inputs that have delivered a frame since they were last (re)opened and
     /// have not since failed or gone silent.
     pub live_inputs: u32,
+    /// Captured buffers the driver flagged as corrupt and the engine dropped.
+    #[serde(default)]
+    pub error_frames: u64,
+    /// Cameras whose source is currently failing, with the reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_errors: Vec<SourceError>,
 }
 
 impl VisionStatus {
@@ -57,12 +71,13 @@ mod tests {
             version: VISION_STATUS_VERSION,
             frames_consumed: 42,
             live_inputs: 1,
+            ..Default::default()
         };
         assert_eq!(fed.work_counter(), Some(42));
         // No camera, or a silent tap: idle, never a stall.
         let idle = VisionStatus {
             live_inputs: 0,
-            ..fed
+            ..fed.clone()
         };
         assert_eq!(idle.work_counter(), None);
     }
@@ -73,6 +88,11 @@ mod tests {
             version: VISION_STATUS_VERSION,
             frames_consumed: 7,
             live_inputs: 2,
+            error_frames: 1,
+            source_errors: vec![SourceError {
+                camera: "cam_fl".into(),
+                error: "device busy".into(),
+            }],
         };
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<VisionStatus>(&text).unwrap(), s);

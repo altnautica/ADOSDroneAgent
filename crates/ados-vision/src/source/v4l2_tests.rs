@@ -103,9 +103,12 @@ mod layouts {
 
     #[test]
     fn a_single_planar_request_reads_back_its_layout() {
-        let mut f = format_request(sys::BUF_TYPE_VIDEO_CAPTURE, &settings(FrameFormat::Gray8));
-        // The driver pads rows to 1344 bytes (a union field write is safe).
-        f.fmt.pix.bytesperline = 1344;
+        let f = format_request(sys::BUF_TYPE_VIDEO_CAPTURE, &settings(FrameFormat::Gray8));
+        // The driver pads rows to 1344 bytes.
+        let f = sys::Format::single(sys::PixFormat {
+            bytesperline: 1344,
+            ..f.pix()
+        });
         let l = accepted_layout(&f).unwrap();
         assert_eq!((l.width, l.height, l.stride), (1280, 800, 1344));
         assert_eq!(l.pixelformat, sys::fourcc_code(*b"GREY"));
@@ -113,22 +116,20 @@ mod layouts {
 
     #[test]
     fn a_multi_planar_request_uses_plane_zero_and_refuses_split_planes() {
-        let mut f = format_request(
+        let f = format_request(
             sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             &settings(FrameFormat::Nv12),
         );
-        // SAFETY: test access to the POD union the request filled.
-        unsafe {
-            assert_eq!({ f.fmt.pix_mp.num_planes }, 1);
-            f.fmt.pix_mp.plane_fmt[0].bytesperline = 1280;
-        }
-        let l = accepted_layout(&f).unwrap();
+        let mut mp = f.pix_mp();
+        assert_eq!(mp.num_planes, 1);
+        mp.plane_fmt[0].bytesperline = 1280;
+        let l = accepted_layout(&sys::Format::multi(mp)).unwrap();
         assert_eq!(l.buf_type, sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE);
         assert_eq!((l.width, l.height, l.stride), (1280, 800, 1280));
         assert_eq!(l.pixelformat, sys::fourcc_code(*b"NV12"));
         // NV12M: the chroma plane is separate.
-        f.fmt.pix_mp.num_planes = 2;
-        assert!(accepted_layout(&f).is_err());
+        mp.num_planes = 2;
+        assert!(accepted_layout(&sys::Format::multi(mp)).is_err());
     }
 
     #[test]

@@ -126,9 +126,9 @@ pub struct CaptureCamera {
     pub height: u32,
     #[serde(default = "default_fps")]
     pub fps: u32,
-    /// Manual exposure in microseconds; absent leaves the driver's auto
-    /// exposure in charge.
-    #[serde(default)]
+    /// Manual exposure in microseconds (at least 1); absent leaves the
+    /// driver's auto exposure in charge.
+    #[serde(default, deserialize_with = "positive_exposure")]
     pub exposure_us: Option<u32>,
     /// Sensor gain control value written to the driver; absent leaves it.
     #[serde(default)]
@@ -141,9 +141,20 @@ pub struct CaptureCamera {
     pub trigger_channel: Option<u8>,
 }
 
-/// The enabled `capture: true` entries of the `cameras[]` list in `text`, each
-/// with its trigger channel resolved. A missing or malformed list is empty.
-pub fn capture_cameras_from(text: &str) -> Vec<CaptureCamera> {
+/// `exposure_us`, refusing 0 (the Python model's `ge=1`).
+fn positive_exposure<'de, D>(d: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u32>::deserialize(d)? {
+        Some(0) => Err(serde::de::Error::custom("exposure_us must be at least 1")),
+        v => Ok(v),
+    }
+}
+
+/// Every entry of the `cameras[]` list in `text`, trigger channels resolved.
+/// A missing or malformed list is empty.
+fn camera_list(text: &str) -> Vec<CaptureCamera> {
     #[derive(Default, Deserialize)]
     struct Raw {
         #[serde(default)]
@@ -153,12 +164,47 @@ pub fn capture_cameras_from(text: &str) -> Vec<CaptureCamera> {
     raw.cameras
         .into_iter()
         .enumerate()
-        .filter(|(_, c)| c.capture && c.enabled)
         .map(|(i, mut c)| {
             c.trigger_channel = c.trigger_channel.or_else(|| u8::try_from(i).ok());
             c
         })
         .collect()
+}
+
+/// The enabled `capture: true` entries of the `cameras[]` list in `text`, each
+/// with its trigger channel resolved. A missing or malformed list is empty.
+pub fn capture_cameras_from(text: &str) -> Vec<CaptureCamera> {
+    camera_list(text)
+        .into_iter()
+        .filter(|c| c.capture && c.enabled)
+        .collect()
+}
+
+/// What the `cameras[]` list asks the node to run, for the service gates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeclaredCameras {
+    /// Enabled `capture: true` entries: the vision engine must run, and the
+    /// video pipeline encodes them from the frame bus.
+    pub captured: usize,
+    /// An enabled, not captured entry with a network URL source: the video
+    /// pipeline pulls it with no local camera node present.
+    pub network: bool,
+}
+
+/// Summarise the `cameras[]` list in `text`.
+pub fn declared_cameras_from(text: &str) -> DeclaredCameras {
+    let mut out = DeclaredCameras::default();
+    for c in camera_list(text).into_iter().filter(|c| c.enabled) {
+        if c.capture {
+            out.captured += 1;
+        } else {
+            let s = c.source.trim();
+            out.network |= ["rtsp://", "rtsps://", "http://", "https://"]
+                .iter()
+                .any(|p| s.starts_with(p));
+        }
+    }
+    out
 }
 
 fn key(name: &str) -> Value {

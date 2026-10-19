@@ -29,19 +29,6 @@ pub fn frames_socket_path() -> PathBuf {
     ados_protocol::paths::run_dir().join("vision-frames.sock")
 }
 
-/// The ffmpeg `-pix_fmt` of a raw frame-bus format.
-pub fn ffmpeg_pix_fmt(format: FrameFormat) -> &'static str {
-    match format {
-        FrameFormat::Rgb24 => "rgb24",
-        FrameFormat::Nv12 => "nv12",
-        FrameFormat::Yuv420p => "yuv420p",
-        FrameFormat::Gray8 => "gray",
-        FrameFormat::Gray16 => "gray16le",
-        FrameFormat::BayerRggb8 => "bayer_rggb8",
-        FrameFormat::BayerRggb16 => "bayer_rggb16le",
-    }
-}
-
 /// The GStreamer `rawvideoparse format=` of a raw frame-bus format.
 /// `rawvideoparse` has no Bayer formats, so a Bayer mosaic is parsed as the
 /// grey image of the same byte layout: the preview shows the raw mosaic.
@@ -98,6 +85,19 @@ impl Feeds {
         if !want.is_empty() {
             tracing::warn!("framebus_feed_unavailable: the frame-bus input needs Linux");
         }
+    }
+
+    /// Give the encoder about to read `camera_id`'s pipe a fresh one (see
+    /// [`FramebusFeed::renew`]). A camera with no feed is a no-op.
+    pub fn renew(&self, camera_id: &str) {
+        #[cfg(target_os = "linux")]
+        if let Some(feed) = self.running.get(camera_id) {
+            if let Err(e) = feed.renew() {
+                tracing::warn!(camera = %camera_id, error = %e, "framebus_fifo_renew_failed");
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = camera_id;
     }
 }
 

@@ -50,6 +50,43 @@ async fn vision_disabled_does_not_start_the_vision_engine() {
 }
 
 #[tokio::test]
+async fn a_captured_camera_starts_the_engine_and_the_pipeline_without_a_vision_block() {
+    // The config a simulated capture rig is given carries no `vision:` block
+    // and no `video.camera.source`: only `cameras[]` with `capture: true`.
+    // The engine owns those cameras, so it must run, and the video pipeline
+    // must run to encode them off the frame bus.
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("config.yaml");
+    std::fs::write(
+        &cfg_path,
+        include_str!("../../../../ados-config/tests/fixtures/sim-capture-config.yaml"),
+    )
+    .unwrap();
+    let config = crate::config::AgentConfig::load_from(
+        &cfg_path,
+        &dir.path().join("profile.conf"),
+        &dir.path().join("role"),
+    );
+    assert!(!config.vision_enabled);
+    assert_eq!(config.declared_cameras.captured, 2);
+    let mock = Arc::new(MockProcessManager::new());
+    let bind = Arc::new(BindOrchestrator::new());
+    let mut sup = Supervisor::with_process_manager(config, bind, mock.clone());
+
+    sup.detect_and_start_hardware().await;
+
+    let calls = mock.calls();
+    assert!(
+        calls.iter().any(|c| c == "start:ados-vision"),
+        "calls={calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c == "start:ados-video"),
+        "calls={calls:?}"
+    );
+}
+
+#[tokio::test]
 async fn vision_enabled_without_a_camera_source_is_surfaced_not_started() {
     // A genuine hard precondition: vision enabled but no camera source at
     // all. The engine is not started (there are no frames to feed it); the

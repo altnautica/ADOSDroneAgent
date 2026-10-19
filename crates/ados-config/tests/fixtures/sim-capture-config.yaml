@@ -1,0 +1,27 @@
+agent:
+  profile: visor
+  device_id: visor-sim-1
+simulation:
+  enabled: true
+sensors:
+  hub:
+    transport: tcp:192.168.1.50:7600
+cameras:
+  - id: cam_fl
+    role: front_left
+    source: rtsp://192.168.1.50:8554/we_v0_cam_fl
+    width: 1280
+    height: 800
+    fps: 20
+    format: rgb24
+    capture: true
+    trigger: hub
+  - id: cam_fr
+    role: front_right
+    source: rtsp://192.168.1.50:8554/we_v0_cam_fr
+    width: 1280
+    height: 800
+    fps: 20
+    format: rgb24
+    capture: true
+    trigger: hub

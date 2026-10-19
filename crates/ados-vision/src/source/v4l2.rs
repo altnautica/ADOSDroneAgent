@@ -24,6 +24,8 @@ pub const TIMESTAMP_MONOTONIC: u32 = 0x0000_2000;
 /// frame is 0).
 pub const TSTAMP_SRC_MASK: u32 = 0x0007_0000;
 pub const TSTAMP_SRC_SOE: u32 = 0x0001_0000;
+/// `V4L2_BUF_FLAG_ERROR`: the driver filled the buffer but its data is corrupt.
+pub const BUF_FLAG_ERROR: u32 = 0x0000_0040;
 
 /// `V4L2_CID_EXPOSURE_AUTO`, its manual mode, and `V4L2_CID_EXPOSURE_ABSOLUTE`
 /// (units of 100 µs).
@@ -155,6 +157,8 @@ pub(crate) struct Captured {
     pub usec: i64,
     pub exposure_ns: Option<u32>,
     pub arrival_ns: u64,
+    /// Corrupt buffers dropped since the previous handed-off frame.
+    pub dropped_corrupt: u32,
 }
 
 /// The V4L2 capture source for one camera.
@@ -245,6 +249,7 @@ impl FrameSource for V4l2Source {
             format: self.settings.format,
             data: captured.data,
             timing,
+            dropped_corrupt: captured.dropped_corrupt,
         })
     }
 

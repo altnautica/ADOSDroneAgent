@@ -230,6 +230,8 @@ impl VideoOrchestrator {
         // A captured camera's frames reach the encoder through its frame-bus
         // pipe; the pump has to exist before the encoder opens it.
         self.reconcile_framebus_feeds();
+        let source = self.camera_cfg.source.clone();
+        self.renew_framebus_for(&source);
 
         // Spawn the encoder. A PLAIN rate-limited stderr drain (no progress
         // tracker — the encoder is the source, not the wfb tap).

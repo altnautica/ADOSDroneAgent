@@ -33,6 +33,15 @@ impl VideoOrchestrator {
         self.framebus_feeds.reconcile(&want);
     }
 
+    /// Before an encoder reading `source` is spawned: when it is a
+    /// `framebus://` source, give it a fresh pipe so it starts on a frame
+    /// boundary whatever the last encoder left unread.
+    pub(crate) fn renew_framebus_for(&self, source: &str) {
+        if let Some(id) = ados_config::cameras::framebus_camera_id(source) {
+            self.framebus_feeds.renew(id);
+        }
+    }
+
     /// Build + spawn the owned encoders for the LOCAL secondary legs (each
     /// publishes its camera into `rtsp://localhost:<port>/<id>`). Best-effort +
     /// strictly additive: a failure on one leg leaves the primary + the other
@@ -97,6 +106,8 @@ impl VideoOrchestrator {
                     continue;
                 }
             };
+            self.reconcile_framebus_feeds();
+            self.renew_framebus_for(&leg.source);
             match ManagedProcess::spawn(&format!("encoder-{}", leg.id), &cmd[0], &cmd[1..]) {
                 Ok(mut proc) => {
                     if let Some(stderr) = proc.take_stderr() {

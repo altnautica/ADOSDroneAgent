@@ -20,6 +20,7 @@ fn cfg_with_role_path(profile_wire: &str, role_path: &Path) -> AgentConfig {
         video_enabled: true,
         video_network_source: None,
         vision_enabled: false,
+        declared_cameras: Default::default(),
         cloud_relay_enabled: false,
         configured_gs_role: "direct".to_string(),
         headless_mode: false,

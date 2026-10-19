@@ -112,9 +112,56 @@ fn the_hub_trigger_of_the_same_sequence_sets_the_exposure_midpoint() {
 }
 
 #[test]
-fn pixel_formats_map_to_ffmpeg_tokens() {
-    assert_eq!(ffmpeg_pix_fmt(FrameFormat::Rgb24), "rgb24");
-    assert_eq!(ffmpeg_pix_fmt(FrameFormat::Gray8), "gray");
+fn bayer_is_refused_for_a_stream() {
+    assert!(check_format(FrameFormat::BayerRggb8).is_err());
+    assert!(check_format(FrameFormat::BayerRggb16).is_err());
+    for ok in [FrameFormat::Rgb24, FrameFormat::Nv12, FrameFormat::Gray8] {
+        assert!(check_format(ok).is_ok());
+    }
+}
+
+fn pending(seq: u64) -> Pending {
+    Pending {
+        id: Some(WeFrameId { seq, ..ID }),
+        arrival_ns: seq,
+    }
+}
+
+#[test]
+fn decoded_frames_pair_with_pictures_in_order() {
+    let mut p = Pairing::default();
+    for s in 0..3 {
+        p.push(pending(s));
+    }
+    let seqs: Vec<u64> = (0..3).map(|_| p.pop().unwrap().id.unwrap().seq).collect();
+    assert_eq!(seqs, [0, 1, 2]);
+}
+
+#[test]
+fn an_overflow_never_pairs_a_frame_with_a_later_identity() {
+    let mut p = Pairing::default();
+    for s in 0..=MAX_PENDING as u64 {
+        p.push(pending(s));
+    }
+    // The decoder fell behind. Frames already in flight would come out
+    // carrying pictures 0, 1, ...; clearing the queue would have paired them
+    // with whatever arrived next. Instead every frame is refused until the
+    // stream restarts.
+    p.push(pending(1000));
+    assert_eq!(p.pop(), Err(PairingLost));
+    assert_eq!(p.pop(), Err(PairingLost));
+    // The restarted stream starts a fresh pairing, aligned from its first IDR.
+    let mut fresh = Pairing::default();
+    fresh.push(pending(2000));
+    assert_eq!(fresh.pop().unwrap().id.unwrap().seq, 2000);
+}
+
+#[test]
+fn a_frame_no_picture_accounts_for_loses_the_pairing() {
+    let mut p = Pairing::default();
+    assert_eq!(p.pop(), Err(PairingLost));
+    p.push(pending(1));
+    assert_eq!(p.pop(), Err(PairingLost));
 }
 
 #[tokio::test]

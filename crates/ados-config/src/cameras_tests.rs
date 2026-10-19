@@ -4,9 +4,39 @@ fn yaml(text: &str) -> Value {
     serde_norway::from_str(text).unwrap()
 }
 
-/// The `cameras[]` block the World Engine fleet VM writes for a simulated
-/// capture rig (keys exactly as its capture-config script emits them).
-const SIM_RIG: &str = "agent:\n  profile: visor\nsimulation:\n  enabled: true\ncameras:\n  - id: cam_fl\n    role: front_left\n    source: rtsp://192.168.1.50:8554/we_v0_cam_fl\n    width: 1280\n    height: 800\n    fps: 20\n    format: rgb24\n    capture: true\n    trigger: hub\n  - id: cam_fr\n    role: front_right\n    source: rtsp://192.168.1.50:8554/we_v0_cam_fr\n    width: 1280\n    height: 800\n    fps: 20\n    format: rgb24\n    capture: true\n    trigger: hub\n";
+/// The whole config the simulator's fleet VM writes for a capture rig: the
+/// same blocks and keys its capture-config script emits (no `vision:` block,
+/// no `video.camera.source`), with documentation addresses.
+const SIM_RIG: &str = include_str!("../tests/fixtures/sim-capture-config.yaml");
+
+#[test]
+fn the_simulated_rig_declares_two_captured_cameras() {
+    assert_eq!(
+        declared_cameras_from(SIM_RIG),
+        DeclaredCameras {
+            captured: 2,
+            network: false
+        }
+    );
+    let mixed = "cameras:\n  - { id: a, source: rtsp://pod/a }\n  - { id: b, source: /dev/video0, capture: true, enabled: false }\n";
+    assert_eq!(
+        declared_cameras_from(mixed),
+        DeclaredCameras {
+            captured: 0,
+            network: true
+        }
+    );
+    assert_eq!(declared_cameras_from(""), DeclaredCameras::default());
+}
+
+#[test]
+fn a_zero_exposure_is_refused() {
+    assert!(
+        capture_cameras_from("cameras:\n  - { id: a, capture: true, exposure_us: 0 }\n").is_empty()
+    );
+    let ok = capture_cameras_from("cameras:\n  - { id: a, capture: true, exposure_us: 1 }\n");
+    assert_eq!(ok[0].exposure_us, Some(1));
+}
 
 #[test]
 fn the_simulated_rig_block_parses_with_index_trigger_channels() {

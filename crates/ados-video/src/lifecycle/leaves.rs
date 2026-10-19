@@ -68,6 +68,8 @@ impl VideoOrchestrator {
             kill_orphans(&orphan_pattern()).await;
         }
 
+        let source = self.camera_cfg.source.clone();
+        self.renew_framebus_for(&source);
         let mut enc = match cmd.spawn() {
             Ok(p) => p,
             Err(e) => {

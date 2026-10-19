@@ -21,7 +21,7 @@ impl ProcessManager for RecordingPm {
         true
     }
     async fn try_restart(&self, unit: &str) -> bool {
-        self.restarted.lock().unwrap().push(unit.to_string());
+        self.restarted.lock().unwrap().push(format!("try:{unit}"));
         true
     }
     async fn reset_failed(&self, _unit: &str) {}
@@ -65,14 +65,28 @@ async fn video_cameras_set_op_is_routed_not_unknown() {
 }
 
 #[tokio::test]
-async fn a_camera_write_restarts_the_pipeline_and_a_running_engine() {
+async fn a_camera_write_restarts_the_engine_before_the_pipeline() {
+    // Captured cameras declared: the engine is (re)started, then the pipeline.
     let pm = RecordingPm {
         restarted: std::sync::Mutex::new(Vec::new()),
     };
-    assert_eq!(restart_camera_consumers(&pm).await, (true, true));
+    assert_eq!(restart_camera_consumers(&pm, 2).await, (true, true));
     assert_eq!(
         *pm.restarted.lock().unwrap(),
-        vec![ADOS_VIDEO_UNIT.to_string(), ADOS_VISION_UNIT.to_string()]
+        vec![ADOS_VISION_UNIT.to_string(), ADOS_VIDEO_UNIT.to_string()]
+    );
+    // Capture turned off: a running engine is restarted (and, with no work
+    // left, exits) before the pipeline opens the released device.
+    let pm = RecordingPm {
+        restarted: std::sync::Mutex::new(Vec::new()),
+    };
+    restart_camera_consumers(&pm, 0).await;
+    assert_eq!(
+        *pm.restarted.lock().unwrap(),
+        vec![
+            format!("try:{ADOS_VISION_UNIT}"),
+            ADOS_VIDEO_UNIT.to_string()
+        ]
     );
 }
 

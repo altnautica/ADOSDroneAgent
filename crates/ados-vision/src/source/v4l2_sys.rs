@@ -4,8 +4,13 @@
 //!
 //! Layouts are the 64-bit kernel ABI (`unsigned long` and pointers are 8
 //! bytes), declared field for field from `videodev2.h`; each struct size is
-//! asserted in the tests against the size the ioctl number encodes. Every
-//! `unsafe` block of the V4L2 path lives in this module.
+//! asserted in the tests against the size the ioctl number encodes.
+//!
+//! Every `unsafe` block of the V4L2 path lives in this module and its
+//! [`device`] submodule: the raw `ioctl` is private, each request is reached
+//! through a function typed to its struct, the format union is read through
+//! [`Format::pix`] / [`Format::pix_mp`], and a buffer's mapped bytes are only
+//! reachable through the `Dequeued` guard that holds it out of the driver.
 
 use std::io;
 use std::os::fd::RawFd;
@@ -98,9 +103,9 @@ pub struct PixFormatMplane {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub union FormatUnion {
-    pub pix: PixFormat,
-    pub pix_mp: PixFormatMplane,
-    pub raw: [u8; 200],
+    pix: PixFormat,
+    pix_mp: PixFormatMplane,
+    raw: [u8; 200],
     _align: [u64; 25],
 }
 
@@ -109,15 +114,43 @@ pub union FormatUnion {
 #[derive(Clone, Copy)]
 pub struct Format {
     pub type_: u32,
-    pub fmt: FormatUnion,
+    fmt: FormatUnion,
 }
 
 impl Format {
-    pub fn zeroed(type_: u32) -> Self {
+    fn zeroed(type_: u32) -> Self {
         Format {
             type_,
             fmt: FormatUnion { raw: [0; 200] },
         }
+    }
+
+    /// A single-planar capture format request.
+    pub fn single(pix: PixFormat) -> Self {
+        let mut f = Self::zeroed(BUF_TYPE_VIDEO_CAPTURE);
+        f.fmt.pix = pix;
+        f
+    }
+
+    /// A multi-planar capture format request.
+    pub fn multi(pix_mp: PixFormatMplane) -> Self {
+        let mut f = Self::zeroed(BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+        f.fmt.pix_mp = pix_mp;
+        f
+    }
+
+    /// The union read as a single-planar format.
+    pub fn pix(&self) -> PixFormat {
+        // SAFETY: every member is plain integers and the union is fully
+        // initialised (zeroed on construction, then written by the driver or
+        // a constructor), so any bit pattern read through it is valid.
+        unsafe { self.fmt.pix }
+    }
+
+    /// The union read as a multi-planar format.
+    pub fn pix_mp(&self) -> PixFormatMplane {
+        // SAFETY: as in `pix`.
+        unsafe { self.fmt.pix_mp }
     }
 }
 
@@ -254,93 +287,50 @@ unsafe fn ioctl<T>(fd: RawFd, request: u64, arg: *mut T) -> io::Result<()> {
     }
 }
 
-/// A typed `ioctl` on a struct this module declares.
-pub fn xioctl<T>(fd: RawFd, request: u64, arg: &mut T) -> io::Result<()> {
-    // SAFETY: `arg` is a live, exclusively borrowed `T`; every request
-    // constant above encodes the size of the struct it is used with.
-    unsafe { ioctl(fd, request, arg as *mut T) }
+/// Generates one safe function per request, each bound to the one struct the
+/// request number encodes, so a request can never be paired with the wrong
+/// argument type.
+macro_rules! typed_ioctl {
+    ($($(#[$doc:meta])* $name:ident: $req:ident => $t:ty;)*) => {$(
+        $(#[$doc])*
+        pub fn $name(fd: RawFd, arg: &mut $t) -> io::Result<()> {
+            // SAFETY: `$req` encodes `size_of::<$t>()` (asserted in the
+            // tests) and `arg` is a live, exclusively borrowed `$t`.
+            unsafe { ioctl(fd, $req, arg as *mut $t) }
+        }
+    )*};
+}
+
+typed_ioctl! {
+    /// `VIDIOC_QUERYCAP`.
+    query_cap: VIDIOC_QUERYCAP => Capability;
+    /// `VIDIOC_S_FMT`.
+    set_format: VIDIOC_S_FMT => Format;
+    /// `VIDIOC_S_PARM`.
+    set_parm: VIDIOC_S_PARM => StreamParm;
+    /// `VIDIOC_G_CTRL`.
+    get_ctrl: VIDIOC_G_CTRL => Control;
+    /// `VIDIOC_S_CTRL`.
+    set_ctrl: VIDIOC_S_CTRL => Control;
+    /// `VIDIOC_REQBUFS`.
+    request_buffers: VIDIOC_REQBUFS => RequestBuffers;
 }
 
 /// `STREAMON` / `STREAMOFF` for a buffer type.
 pub fn stream(fd: RawFd, on: bool, buf_type: u32) -> io::Result<()> {
     let mut t = buf_type as i32;
-    xioctl(
-        fd,
-        if on {
-            VIDIOC_STREAMON
-        } else {
-            VIDIOC_STREAMOFF
-        },
-        &mut t,
-    )
-}
-
-/// One driver buffer mapped read-only into this process.
-pub struct Mapping {
-    ptr: *mut libc::c_void,
-    len: usize,
-}
-
-// SAFETY: the mapping is plain memory owned by this value; it is only read
-// through `as_slice` while the driver does not own the buffer.
-unsafe impl Send for Mapping {}
-
-impl Mapping {
-    /// Map `len` bytes of the device at `offset`.
-    pub fn map(fd: RawFd, len: usize, offset: u32) -> io::Result<Self> {
-        // SAFETY: a fresh shared read-only mapping of a device buffer the
-        // driver reported with QUERYBUF; unmapped in Drop.
-        let ptr = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ,
-                libc::MAP_SHARED,
-                fd,
-                libc::off_t::from(offset),
-            )
-        };
-        if ptr == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self { ptr, len })
-    }
-
-    /// The mapped bytes. Valid while the buffer is dequeued.
-    pub fn as_slice(&self) -> &[u8] {
-        // SAFETY: `ptr` maps `len` readable bytes for the lifetime of self.
-        unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
-    }
-}
-
-impl Drop for Mapping {
-    fn drop(&mut self) {
-        // SAFETY: unmapping exactly the region `map` created.
-        unsafe {
-            libc::munmap(self.ptr, self.len);
-        }
-    }
-}
-
-/// Wait up to `timeout_ms` for the node to have a buffer ready.
-pub fn poll_readable(fd: RawFd, timeout_ms: i32) -> io::Result<bool> {
-    let mut p = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
+    let req = if on {
+        VIDIOC_STREAMON
+    } else {
+        VIDIOC_STREAMOFF
     };
-    loop {
-        // SAFETY: one valid pollfd.
-        let r = unsafe { libc::poll(&mut p, 1, timeout_ms) };
-        if r >= 0 {
-            return Ok(r > 0);
-        }
-        let e = io::Error::last_os_error();
-        if e.kind() != io::ErrorKind::Interrupted {
-            return Err(e);
-        }
-    }
+    // SAFETY: both requests encode a 4-byte int argument.
+    unsafe { ioctl(fd, req, &mut t as *mut i32) }
 }
+
+#[path = "v4l2_sys_device.rs"]
+mod device;
+pub use device::Device;
 
 /// A NUL-padded byte string field as text.
 pub fn cstr(bytes: &[u8]) -> String {
@@ -354,89 +344,5 @@ pub const fn fourcc_code(c: [u8; 4]) -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::mem::{align_of, offset_of, size_of};
-
-    #[test]
-    fn struct_sizes_match_the_kernel_abi() {
-        assert_eq!(size_of::<Capability>(), 104);
-        assert_eq!(size_of::<PixFormat>(), 48);
-        assert_eq!(size_of::<PlanePixFormat>(), 20);
-        assert_eq!(size_of::<PixFormatMplane>(), 192);
-        assert_eq!(size_of::<FormatUnion>(), 200);
-        assert_eq!(align_of::<FormatUnion>(), 8);
-        assert_eq!(size_of::<Format>(), 208);
-        assert_eq!(offset_of!(Format, fmt), 8);
-        assert_eq!(size_of::<RequestBuffers>(), 20);
-        assert_eq!(size_of::<Buffer>(), 88);
-        assert_eq!(offset_of!(Buffer, timestamp), 24);
-        assert_eq!(offset_of!(Buffer, sequence), 56);
-        assert_eq!(offset_of!(Buffer, m), 64);
-        assert_eq!(offset_of!(Buffer, length), 72);
-        assert_eq!(size_of::<Plane>(), 64);
-        assert_eq!(offset_of!(Plane, data_offset), 16);
-        assert_eq!(size_of::<Control>(), 8);
-        assert_eq!(size_of::<CaptureParm>(), 40);
-        assert_eq!(size_of::<StreamParm>(), 204);
-        assert_eq!(offset_of!(PixFormatMplane, num_planes), 180);
-    }
-
-    #[test]
-    fn ioctl_numbers_match_videodev2() {
-        // Values as the 64-bit kernel headers define them.
-        assert_eq!(VIDIOC_QUERYCAP, 0x8068_5600);
-        assert_eq!(VIDIOC_S_FMT, 0xc0d0_5605);
-        assert_eq!(VIDIOC_REQBUFS, 0xc014_5608);
-        assert_eq!(VIDIOC_QUERYBUF, 0xc058_5609);
-        assert_eq!(VIDIOC_QBUF, 0xc058_560f);
-        assert_eq!(VIDIOC_DQBUF, 0xc058_5611);
-        assert_eq!(VIDIOC_STREAMON, 0x4004_5612);
-        assert_eq!(VIDIOC_STREAMOFF, 0x4004_5613);
-        assert_eq!(VIDIOC_S_PARM, 0xc0cc_5616);
-        assert_eq!(VIDIOC_G_CTRL, 0xc008_561b);
-        assert_eq!(VIDIOC_S_CTRL, 0xc008_561c);
-    }
-
-    #[test]
-    fn capabilities_prefer_the_node_set() {
-        let mut c = Capability {
-            driver: [0; 16],
-            card: [0; 32],
-            bus_info: [0; 32],
-            version: 0,
-            capabilities: CAP_VIDEO_CAPTURE | CAP_STREAMING,
-            device_caps: 0,
-            reserved: [0; 3],
-        };
-        assert_eq!(c.node_caps(), CAP_VIDEO_CAPTURE | CAP_STREAMING);
-        c.capabilities |= CAP_DEVICE_CAPS;
-        c.device_caps = CAP_VIDEO_CAPTURE_MPLANE | CAP_STREAMING;
-        assert_eq!(c.node_caps(), CAP_VIDEO_CAPTURE_MPLANE | CAP_STREAMING);
-        assert_eq!(cstr(b"rkisp\0\0\0"), "rkisp");
-        assert_eq!(fourcc_code(*b"NV12"), 0x3231_564e);
-    }
-
-    #[test]
-    fn the_mplane_format_reads_back_through_the_union() {
-        let mut f = Format::zeroed(BUF_TYPE_VIDEO_CAPTURE_MPLANE);
-        // The driver writes the plane layout into the union.
-        // SAFETY: writing the raw bytes of a POD union in a test.
-        unsafe {
-            let raw = &mut f.fmt.raw;
-            raw[0..4].copy_from_slice(&1280u32.to_le_bytes());
-            raw[4..8].copy_from_slice(&800u32.to_le_bytes());
-            raw[20..24].copy_from_slice(&1_536_000u32.to_le_bytes());
-            raw[24..28].copy_from_slice(&1280u32.to_le_bytes());
-            raw[180] = 1;
-        }
-        // SAFETY: the union is fully initialised POD.
-        let mp = unsafe { f.fmt.pix_mp };
-        let plane0 = mp.plane_fmt[0];
-        assert_eq!({ mp.width }, 1280);
-        assert_eq!({ mp.height }, 800);
-        assert_eq!({ plane0.sizeimage }, 1_536_000);
-        assert_eq!({ plane0.bytesperline }, 1280);
-        assert_eq!(mp.num_planes, 1);
-    }
-}
+#[path = "v4l2_sys_tests.rs"]
+mod tests;

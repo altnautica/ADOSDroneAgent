@@ -1,15 +1,12 @@
-//! World Engine frame identity carried in a simulated camera's H.264 stream.
+//! Simulator frame identity carried in a simulated camera's H.264 stream.
 //!
 //! The simulator's camera daemon puts one `user_data_unregistered` SEI message
-//! (payload type 5) in every encoded frame: a 16-byte UUID followed by a
-//! 24-byte payload `{seq u64, sim_time_ns u64, cam u32, rsv u32}`, every field
-//! little-endian. That layout is the World Engine writer's
-//! (`ADOSWorldEngine/crates/we-video/src/sei.rs`, `FrameId::to_sei`:
-//! `b[16..24] = seq.to_le_bytes()`, `b[24..32] = sim_time_ns.to_le_bytes()`,
-//! `b[32..36] = cam.to_le_bytes()`, `SEI_LEN = 40`), and the UUID is its
-//! `SEI_UUID` (`5745454e-4749-4e45-8000-000000000001`). NVENC writes the
-//! message into the bitstream from frame side data (`udu_sei=1`), so it arrives
-//! with emulation-prevention bytes applied.
+//! (payload type 5, payload size 40) in every encoded frame. The payload is a
+//! 16-byte UUID, `5745454e-4749-4e45-8000-000000000001`, followed by 24 bytes
+//! `{seq u64, sim_time_ns u64, cam u32, rsv u32}`, every field little-endian:
+//! bytes 16..24 are `seq`, 24..32 `sim_time_ns`, 32..36 `cam`, 36..40 reserved
+//! zero. The encoder writes the message into the bitstream from frame side
+//! data, so it arrives with emulation-prevention bytes applied.
 //!
 //! [`AnnexBScanner`] splits an Annex-B byte stream into NAL units as it
 //! arrives, so a caller can pull the identity out of each frame and forward the

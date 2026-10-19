@@ -1,19 +1,19 @@
-//! The World Engine SEI parser against a captured-format byte fixture.
+//! The simulator SEI parser against a captured-format byte fixture.
 //!
 //! `tests/fixtures/we-sei.h264` is two Annex-B access units the way the
 //! simulator's camera daemon emits them (AUD, SPS, PPS, the frame-identity SEI,
 //! then the slice), plus a closing AUD. [`synth_stream`] rebuilds it with the
-//! World Engine writer's encoding (`we-video/src/sei.rs`: `FrameId::to_sei`,
-//! payload type 5, size 40, emulation prevention on), and the test asserts the
-//! committed bytes are exactly that, so the fixture cannot drift from the
-//! writer's format.
+//! writer's encoding (payload type 5, size 40, UUID then little-endian `seq`,
+//! `sim_time_ns`, `cam` and a reserved zero, emulation prevention on), and the
+//! test asserts the committed bytes are exactly that, so the fixture cannot
+//! drift from the format.
 
 use ados_vision::sei::{frame_id_in_sei, nal_type, AnnexBScanner, WeFrameId, WE_SEI_UUID};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/we-sei.h264");
 
-/// `FrameId::to_sei` of the World Engine writer: UUID, then `seq`,
-/// `sim_time_ns`, `cam` and a reserved zero, all little-endian.
+/// The writer's payload: UUID, then `seq`, `sim_time_ns`, `cam` and a
+/// reserved zero, all little-endian.
 fn to_sei(id: &WeFrameId) -> [u8; 40] {
     let mut b = [0u8; 40];
     b[..16].copy_from_slice(&WE_SEI_UUID);

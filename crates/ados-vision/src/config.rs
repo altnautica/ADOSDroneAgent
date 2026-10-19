@@ -442,6 +442,13 @@ impl VisionConfig {
         )
     }
 
+    /// Whether the engine has work: vision is enabled, or a camera is marked
+    /// `capture: true` (the engine is its only owner, whatever
+    /// `vision.enabled` says).
+    pub fn should_run(&self) -> bool {
+        self.enabled || !self.cameras.is_empty()
+    }
+
     /// True when the resolved profile is the ground station (the engine exits).
     pub fn is_ground_station(&self) -> bool {
         matches!(

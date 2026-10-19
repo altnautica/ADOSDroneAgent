@@ -60,7 +60,7 @@ pub(super) fn build_ffmpeg_command(
             .iter()
             .map(|s| s.to_string()),
         );
-        cmd.push(crate::framebus_input::ffmpeg_pix_fmt(fb.raw.format).to_string());
+        cmd.push(fb.raw.format.ffmpeg_pix_fmt().to_string());
         cmd.push("-video_size".into());
         cmd.push(format!("{}x{}", fb.raw.width, fb.raw.height));
         cmd.push("-framerate".into());

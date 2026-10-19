@@ -52,9 +52,10 @@ async fn main() {
         tracing::info!("ados-vision idle: ground-station profile has no vision engine");
         return;
     }
-    // GATE B: the engine is opt-in.
-    if !config.enabled {
-        tracing::info!("ados-vision idle: vision is not enabled");
+    // GATE B: the engine is opt-in, except that it is the only owner of the
+    // `capture: true` cameras, so any such camera runs it.
+    if !config.should_run() {
+        tracing::info!("ados-vision idle: vision is not enabled and no camera is captured");
         return;
     }
 
@@ -224,9 +225,10 @@ async fn main() {
         let cancel = cancel.clone();
         let paces = paces.clone();
         let input = work.input();
+        let work = work.clone();
         let factory = factory.clone();
         tasks.push(tokio::spawn(async move {
-            run_camera(engine, cam, factory, paces, input, cancel).await;
+            run_camera(engine, cam, factory, paces, (input, work), cancel).await;
         }));
     }
 
@@ -314,7 +316,7 @@ async fn run_camera(
     cam: CameraSpec,
     factory: SourceFactory,
     paces: Vec<ModelPace>,
-    mut input: InputLiveness,
+    (mut input, work): (InputLiveness, Arc<WorkStatus>),
     cancel: ados_protocol::shutdown::Shutdown,
 ) {
     let mut frame_id: u64 = 0;
@@ -327,6 +329,9 @@ async fn run_camera(
     // busy is skipped, so capture (and the video ring) never blocks on
     // inference. Decoupled, latest-frame-wins.
     let infer_sem = Arc::new(tokio::sync::Semaphore::new(1));
+    // The last source failure, surfaced in the status sidecar and logged at
+    // warn once per distinct reason, cleared by the next delivered frame.
+    let mut last_error: Option<String> = None;
     loop {
         // Build the source for this attempt.
         let mut source: AnySource = factory.open(&cam);
@@ -351,6 +356,12 @@ async fn run_camera(
                     match frame {
                         Ok(raw) => {
                             input.frame();
+                            if raw.dropped_corrupt > 0 {
+                                work.add_error_frames(u64::from(raw.dropped_corrupt));
+                            }
+                            if last_error.take().is_some() {
+                                work.set_source_error(&camera_id, None);
+                            }
                             frame_id = frame_id.wrapping_add(1);
                             let mut spare = Some(raw.data);
                             let data_ref = spare.as_deref().unwrap_or(&[]);
@@ -409,7 +420,12 @@ async fn run_camera(
                             }
                         }
                         Err(e) => {
-                            tracing::debug!(camera = %camera_id, error = %e, "frame source ended; reopening");
+                            let reason = format!("{e:#}");
+                            if last_error.as_deref() != Some(reason.as_str()) {
+                                tracing::warn!(camera = %camera_id, error = %reason, "frame_source_failed; reopening");
+                                work.set_source_error(&camera_id, Some(reason.clone()));
+                                last_error = Some(reason);
+                            }
                             break;
                         }
                     }

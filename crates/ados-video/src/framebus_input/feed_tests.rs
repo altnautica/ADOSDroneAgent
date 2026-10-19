@@ -10,7 +10,7 @@ use ados_protocol::framebus::{
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
 
-use super::{ffmpeg_pix_fmt, gst_raw_format, FeedSpec, FramebusFeed};
+use super::{gst_raw_format, FeedSpec, FramebusFeed};
 
 const W: u32 = 4;
 const H: u32 = 2;
@@ -126,10 +126,42 @@ async fn whole_frames_reach_the_pipe_and_foreign_frames_do_not() {
 
 #[test]
 fn raw_format_tokens_cover_every_frame_format() {
-    assert_eq!(ffmpeg_pix_fmt(FrameFormat::Gray8), "gray");
-    assert_eq!(ffmpeg_pix_fmt(FrameFormat::Rgb24), "rgb24");
-    assert_eq!(ffmpeg_pix_fmt(FrameFormat::BayerRggb8), "bayer_rggb8");
+    assert_eq!(FrameFormat::Gray8.ffmpeg_pix_fmt(), "gray");
+    assert_eq!(FrameFormat::Rgb24.ffmpeg_pix_fmt(), "rgb24");
+    assert_eq!(FrameFormat::BayerRggb8.ffmpeg_pix_fmt(), "bayer_rggb8");
     assert_eq!(gst_raw_format(FrameFormat::Nv12), "nv12");
     assert_eq!(gst_raw_format(FrameFormat::Yuv420p), "i420");
     assert_eq!(gst_raw_format(FrameFormat::BayerRggb16), "gray16-le");
+}
+
+#[tokio::test]
+async fn renew_replaces_the_pipe_so_a_new_reader_starts_clean() {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let dir = tempfile::tempdir().unwrap();
+    let spec = FeedSpec {
+        camera_id: "cam_fl".to_string(),
+        format: FrameFormat::Gray8,
+        width: W,
+        height: H,
+        fifo: dir.path().join("framebus-cam_fl.fifo"),
+        frames_socket: dir.path().join("vision-frames.sock"),
+        shm_dir: dir.path().to_path_buf(),
+    };
+    let feed = FramebusFeed::spawn(spec.clone()).unwrap();
+    // Hold the old pipe open (as a reader that died mid-frame would leave it
+    // referenced), so its inode number cannot be reused by the new one.
+    let old = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(&spec.fifo)
+        .unwrap();
+    let before = old.metadata().unwrap().ino();
+    feed.renew().unwrap();
+    let meta = std::fs::symlink_metadata(&spec.fifo).unwrap();
+    assert!(std::os::unix::fs::FileTypeExt::is_fifo(&meta.file_type()));
+    assert_ne!(
+        meta.ino(),
+        before,
+        "a renewed feed must hand out a new pipe"
+    );
 }
