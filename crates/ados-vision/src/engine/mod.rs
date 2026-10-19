@@ -26,7 +26,7 @@ use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use crate::backend::{LoadedModel, VisionBackend};
-use crate::ring::{now_ms, FrameTiming, RingWriter};
+use crate::ring::{FrameTiming, RingWriter};
 mod models;
 mod tracking;
 

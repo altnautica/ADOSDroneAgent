@@ -60,7 +60,7 @@ ort = { version = "2.0.0-rc.13", optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
-nix = { workspace = true, features = ["time"] }
+nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

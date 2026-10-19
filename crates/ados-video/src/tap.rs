@@ -8,8 +8,9 @@
 //! configured frame rate, downscales, and emits headerless `rawvideo` (rgb24 /
 //! nv12 / yuv420p) to its **stdout pipe**. A small in-process **reframer**
 //! ([`run_vision_tap_server`]) reads those fixed-size frames, prepends the
-//! 16-byte `ADVT` header, and serves them on a unix socket the vision engine
-//! connects to as a client. A crash or stall on this leg is contained — the
+//! 24-byte `ADVT` header (stamped with the host monotonic arrival time), and
+//! serves them on a unix socket the vision engine connects to as a client. A
+//! crash or stall on this leg is contained — the
 //! orchestrator restarts it on its own ladder and the encode + radio path is
 //! untouched.
 //!
@@ -32,7 +33,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_protocol::framebus::FrameFormat;
+use ados_protocol::framebus::{mono_ns, FrameFormat};
 use ados_protocol::tap::write_tap_frame;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::net::UnixListener;
@@ -115,14 +116,6 @@ pub fn frame_format_from_str(pixel_format: &str) -> FrameFormat {
         "yuv420p" => FrameFormat::Yuv420p,
         _ => FrameFormat::Rgb24,
     }
-}
-
-/// Host CLOCK_MONOTONIC in nanoseconds, the clock the tap header carries.
-pub fn mono_ns() -> u64 {
-    use nix::time::{clock_gettime, ClockId};
-    clock_gettime(ClockId::CLOCK_MONOTONIC)
-        .map(|t| t.tv_sec() as u64 * 1_000_000_000 + t.tv_nsec() as u64)
-        .unwrap_or(0)
 }
 
 /// Spawn the decoupled vision tap ffmpeg through [`ManagedProcess`]
@@ -385,13 +378,6 @@ mod tests {
         let got = vision_tap_args("rtsp://localhost:8554/main", 0, 640, 480, "rgb24");
         let vf = got.iter().position(|t| t == "-vf").unwrap();
         assert_eq!(got[vf + 1], "fps=1,scale=640:480");
-    }
-
-    #[test]
-    fn mono_ns_advances() {
-        let a = mono_ns();
-        let b = mono_ns();
-        assert!(a > 0 && b >= a);
     }
 
     #[test]

@@ -16,6 +16,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use ados_protocol::framebus::mono_ns;
 use ados_protocol::framebus::{FrameFormat, ModelKind};
 use ados_vision::backend::{select_backend, BackendPrefs};
 use ados_vision::config::{CameraEntry, VisionConfig};
@@ -24,7 +25,6 @@ use ados_vision::detection_bus;
 use ados_vision::engine::VisionEngine;
 use ados_vision::frame_bus;
 use ados_vision::perception_scheduler::PerceptionScheduler;
-use ados_vision::ring::now_ms;
 use ados_vision::source::{
     discover_cameras_default, AnySource, CaptureSource, FrameSource, TapSource,
 };
@@ -428,7 +428,7 @@ async fn run_camera(
                                         if let Ok(permit) =
                                             infer_sem.clone().try_acquire_owned()
                                         {
-                                            let due = scheduler.take_due(now_ms() as u64);
+                                            let due = scheduler.take_due(mono_ns() / 1_000_000);
                                             if !due.is_empty() {
                                                 let eng = engine.clone();
                                                 let data = spare.take().unwrap_or_default();

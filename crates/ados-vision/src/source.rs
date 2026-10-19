@@ -24,8 +24,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use crate::ring::{mono_ns, FrameTiming};
-use ados_protocol::framebus::FrameFormat;
+use crate::ring::FrameTiming;
+use ados_protocol::framebus::{mono_ns, FrameFormat};
 use ados_protocol::tap::{decode_tap_header, TAP_HEADER_LEN};
 use anyhow::{anyhow, Result};
 use serde::Deserialize;

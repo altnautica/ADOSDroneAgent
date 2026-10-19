@@ -132,6 +132,9 @@ pub const TIMEBASE_SENSOR: u8 = 1;
 /// `ts_sensor_ns` is simulation time in ns.
 pub const TIMEBASE_SIM: u8 = 2;
 
+mod clock;
+pub use clock::mono_ns;
+
 /// The small message published on `vision.frame`. It names the ring slot a
 /// consumer should read and carries the `seq` that the per-slot seqlock must
 /// still hold for the read to be valid.
@@ -661,7 +664,7 @@ pub struct Detection {
 /// stamped with any other version fails loudly rather than silently mis-parsing.
 /// Mirrors the `vision.detection` entry in the contract registry
 /// (`contracts.toml`).
-pub const VISION_DETECTION_VERSION: u16 = 2;
+pub const VISION_DETECTION_VERSION: u16 = 3;
 
 /// The payload on `vision.detection`, labelled by source model and frame so
 /// overlays and consumers can align boxes to the frame they came from.
@@ -676,6 +679,8 @@ pub struct DetectionBatch {
     pub model_id: String,
     pub camera_id: String,
     pub frame_id: u64,
+    /// Capture time of the source frame: the frame's host CLOCK_MONOTONIC
+    /// timestamp in milliseconds (`FrameDescriptor::ts_ns / 1_000_000`).
     pub ts_ms: i64,
     /// The source frame's pixel size, so a consumer scales the pixel-space boxes
     /// to the rendered frame. `0` when the source did not report it (the consumer
@@ -1165,6 +1170,13 @@ mod contract_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mono_ns_is_monotonic() {
+        let a = mono_ns();
+        let b = mono_ns();
+        assert!(a > 0 && b >= a);
+    }
 
     #[test]
     fn frame_bytes_matches_format() {

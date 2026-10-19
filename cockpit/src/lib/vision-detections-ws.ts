@@ -39,7 +39,7 @@ const DEFAULT_FRAME_HEIGHT = 480;
  *  is present but does NOT equal this is DROPPED rather than mis-mapped onto a
  *  shape a newer version may have reshaped — never present garbage as data. A
  *  batch with no `v` (a transport that omits it) maps normally. */
-const SUPPORTED_DETECTION_VERSION = 2;
+const SUPPORTED_DETECTION_VERSION = 3;
 
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 10_000;

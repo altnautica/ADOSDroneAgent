@@ -363,24 +363,6 @@ impl Drop for RingWriter {
     }
 }
 
-/// Convenience: the current capture timestamp in milliseconds since the unix
-/// epoch, the clock the engine stamps frames with.
-pub fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
-
-/// Host CLOCK_MONOTONIC in nanoseconds, the clock frame descriptors carry.
-pub fn mono_ns() -> u64 {
-    use nix::time::{clock_gettime, ClockId};
-    clock_gettime(ClockId::CLOCK_MONOTONIC)
-        .map(|t| t.tv_sec() as u64 * 1_000_000_000 + t.tv_nsec() as u64)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

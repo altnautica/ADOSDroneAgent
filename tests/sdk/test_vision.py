@@ -233,7 +233,7 @@ def test_detection_batch_carries_frame_size_both_ways():
     # consumer scales the pixel-space boxes to the rendered frame instead of
     # guessing. The Python SDK must read it back (previously it was dropped).
     rust_shaped = {
-        "v": 2,
+        "v": 3,
         "model_id": "m",
         "camera_id": "uvc-0",
         "frame_id": 3,

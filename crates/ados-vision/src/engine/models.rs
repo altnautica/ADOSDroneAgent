@@ -266,7 +266,8 @@ impl VisionEngine {
         let result = run_blocking(|| loaded.infer(frame, width, height, format));
         let latency_ms = t0.elapsed().as_secs_f32() * 1000.0;
         if result.is_ok() {
-            self.record_timing(&key, latency_ms, now_ms()).await;
+            let now_ms = (ados_protocol::framebus::mono_ns() / 1_000_000) as i64;
+            self.record_timing(&key, latency_ms, now_ms).await;
         }
         result
     }

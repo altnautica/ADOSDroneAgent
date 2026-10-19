@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import { mapWireBatch, parseWireDetectionJson } from "@/lib/vision-detections-ws";
 
 describe("mapWireBatch", () => {
-  it("maps a v2 batch onto the store shape (snake_case -> camelCase)", () => {
+  it("maps a v3 batch onto the store shape (snake_case -> camelCase)", () => {
     const mapped = mapWireBatch({
-      v: 2,
+      v: 3,
       model_id: "yolov8n",
       camera_id: "cam-0",
       frame_id: 42,
@@ -38,7 +38,7 @@ describe("mapWireBatch", () => {
   });
 
   it("DROPS a batch whose wire version we do not speak (never mis-maps)", () => {
-    expect(mapWireBatch({ v: 3, detections: [] })).toBeNull();
+    expect(mapWireBatch({ v: 2, detections: [] })).toBeNull();
     expect(mapWireBatch({ v: 1, detections: [] })).toBeNull();
   });
 
@@ -49,14 +49,14 @@ describe("mapWireBatch", () => {
   });
 
   it("defaults absent frame dimensions to the engine's normalized size", () => {
-    const mapped = mapWireBatch({ v: 2, detections: [] });
+    const mapped = mapWireBatch({ v: 3, detections: [] });
     expect(mapped!.frameWidth).toBe(640);
     expect(mapped!.frameHeight).toBe(480);
   });
 
   it("only accepts the three valid lock states, else null", () => {
     const mapped = mapWireBatch({
-      v: 2,
+      v: 3,
       detections: [
         { class_label: "a", confidence: 0.5, lock_state: "uncertain" },
         { class_label: "b", confidence: 0.5, lock_state: "lost" },
@@ -74,7 +74,7 @@ describe("mapWireBatch", () => {
 
   it("carries a box-less percept through with no bbox", () => {
     const mapped = mapWireBatch({
-      v: 2,
+      v: 3,
       detections: [{ class_label: "region", confidence: 0.4 }],
     });
     expect(mapped!.detections[0].bbox).toBeUndefined();
@@ -82,7 +82,7 @@ describe("mapWireBatch", () => {
 
   it("coerces a non-numeric track id to null", () => {
     const mapped = mapWireBatch({
-      v: 2,
+      v: 3,
       detections: [{ class_label: "x", confidence: 0.5, track_id: "nope" }],
     });
     expect(mapped!.detections[0].trackId).toBeNull();
@@ -92,7 +92,7 @@ describe("mapWireBatch", () => {
 describe("parseWireDetectionJson", () => {
   it("parses valid JSON into a batch", () => {
     const mapped = parseWireDetectionJson(
-      JSON.stringify({ v: 2, model_id: "m", camera_id: "c", detections: [] }),
+      JSON.stringify({ v: 3, model_id: "m", camera_id: "c", detections: [] }),
     );
     expect(mapped).not.toBeNull();
     expect(mapped!.cameraId).toBe("c");
