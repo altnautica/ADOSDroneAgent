@@ -12,14 +12,14 @@
 //! the rule.
 
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+mod root;
 mod volumes;
-pub use volumes::{
-    list_volumes, list_volumes_live, resolve_capture_root, statvfs_space, volume_for, FsSpace,
-    SysRoots,
-};
+pub use root::{read_sticky, resolve_capture_root, StickyRoot};
+pub use volumes::{list_volumes, list_volumes_live, statvfs_space, volume_for, FsSpace, SysRoots};
 
 /// One GiB.
 pub const GIB: u64 = 1 << 30;
@@ -32,6 +32,16 @@ pub const SIDECAR_ID: &str = "capture-storage";
 
 /// Schema version of `capture-storage.json`. Kept in step with the registry.
 pub const SIDECAR_VERSION: u16 = 1;
+
+/// How often the supervisor rewrites `capture-storage.json`.
+pub const SIDECAR_REFRESH: Duration = Duration::from_secs(10);
+
+/// Freshness window of `capture-storage.json` (the registry's `max_age_ms`).
+/// An older file says nothing about the volume now.
+pub const SIDECAR_MAX_AGE: Duration = Duration::from_secs(30);
+
+/// Where the `auto` choice of an NVMe capture root is persisted.
+pub const STICKY_ROOT_FILE: &str = "/var/lib/ados/capture-root";
 
 /// The free space an NVMe volume needs before `auto` will put captures on it.
 pub const AUTO_MIN_FREE_BYTES: u64 = 64 * GIB;
@@ -205,6 +215,41 @@ pub fn admit_new_session(usage: &CaptureUsage, volume: &Volume) -> Result<(), St
     Ok(())
 }
 
+/// Why the sidecar refused a new session. Both map to `E_STORAGE_FULL`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Refused {
+    /// The sidecar is missing, unparseable or older than [`SIDECAR_MAX_AGE`]:
+    /// nobody has measured the volume recently, so there is no evidence it has
+    /// room. Unknown is treated as full, never as ok.
+    Unknown(&'static str),
+    /// The supervisor's last measurement says `full`.
+    Full,
+}
+
+impl Refused {
+    pub fn code(&self) -> &'static str {
+        E_STORAGE_FULL
+    }
+}
+
+/// Admission for a capture writer, read from `capture-storage.json` at `path`.
+///
+/// Fresh and not `full` admits and hands back the sidecar (its `capture_root`
+/// is where the session goes). A missing, malformed or stale sidecar refuses
+/// with [`Refused::Unknown`]: a dead or wedged supervisor must not let a
+/// session start on a volume nobody is watching.
+pub fn admit_from_sidecar(path: &Path, now: SystemTime) -> Result<CaptureStorageSidecar, Refused> {
+    use ados_protocol::sidecar::{read_fresh_at, Reading};
+    match read_fresh_at::<CaptureStorageSidecar>(path, Some(SIDECAR_MAX_AGE), now) {
+        Reading::Fresh(s) if s.capture.state == CaptureState::Full => Err(Refused::Full),
+        Reading::Fresh(s) => Ok(s),
+        Reading::Stale(_) => Err(Refused::Unknown("capture-storage.json is stale")),
+        _ => Err(Refused::Unknown(
+            "capture-storage.json is missing or unreadable",
+        )),
+    }
+}
+
 /// The admission state: `full` when [`admit_new_session`] refuses, `near_full`
 /// when free space is under twice the floor or usage is at 90 % of the budget,
 /// else `ok`. The `state` field of `usage` is not read.
@@ -223,5 +268,7 @@ pub fn capture_state(usage: &CaptureUsage, volume: &Volume) -> CaptureState {
     }
 }
 
+#[cfg(test)]
+mod sticky_tests;
 #[cfg(test)]
 mod tests;

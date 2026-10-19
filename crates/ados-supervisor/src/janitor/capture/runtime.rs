@@ -1,15 +1,16 @@
-//! The capture category's state across janitor passes: the last sidecar, the
-//! resolved root, and the write probe running on a blocking thread.
+//! The capture category's state across janitor ticks: the last sidecar, the
+//! resolved root, the settled-session size cache, the refresh cadence, and
+//! the write probe running on a blocking thread.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ados_config::capture_storage::{
-    CaptureStorageConfig, CaptureStorageSidecar, SysRoots, WriteProbe,
+    CaptureStorageConfig, CaptureStorageSidecar, SysRoots, WriteProbe, SIDECAR_REFRESH,
 };
 use tokio::task::JoinHandle;
 
-use super::{measure_write, mono_ns, probe_due, run_pass, write_sidecar, PROBE_BYTES};
+use super::{measure_write, mono_ns, probe_due, run_pass, write_sidecar, SizeCache, PROBE_BYTES};
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct CaptureRuntime {
@@ -18,6 +19,8 @@ pub struct CaptureRuntime {
     active: bool,
     root: Option<PathBuf>,
     last: Option<CaptureStorageSidecar>,
+    last_refresh: Option<Instant>,
+    cache: SizeCache,
     probe: Option<WriteProbe>,
     last_probe: Option<Instant>,
     probe_task: Option<JoinHandle<Option<WriteProbe>>>,
@@ -37,6 +40,8 @@ impl CaptureRuntime {
             active: false,
             root: None,
             last: None,
+            last_refresh: None,
+            cache: SizeCache::new(),
             probe: None,
             last_probe: None,
             probe_task: None,
@@ -51,21 +56,41 @@ impl CaptureRuntime {
         self.active = active;
     }
 
+    /// Whether the sidecar is due its short-cadence rewrite at `now`.
+    pub fn refresh_due(&self, now: Instant) -> bool {
+        self.last_refresh
+            .is_none_or(|t| now.duration_since(t) >= SIDECAR_REFRESH)
+    }
+
     /// One capture pass on a blocking thread (directory walks and session
-    /// removal), then the sidecar write. Returns the bytes evicted.
+    /// removal), then the sidecar write. Evicts only when `evict`; otherwise
+    /// it measures. Returns the bytes evicted.
     pub async fn pass(
         &mut self,
         cfg: CaptureStorageConfig,
         evict: bool,
         sidecar_path: &Path,
     ) -> u64 {
+        self.last_refresh = Some(Instant::now());
         let probe = self.probe.clone();
+        let mut cache = std::mem::take(&mut self.cache);
         let joined = tokio::task::spawn_blocking(move || {
-            run_pass(&cfg, &SysRoots::default(), evict, probe, mono_ns())
+            let pass = run_pass(
+                &cfg,
+                &SysRoots::default(),
+                evict,
+                probe,
+                &mut cache,
+                mono_ns(),
+            );
+            (pass, cache)
         })
         .await;
         let pass = match joined {
-            Ok(pass) => pass,
+            Ok((pass, cache)) => {
+                self.cache = cache;
+                pass
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "capture storage pass did not complete");
                 return 0;

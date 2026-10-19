@@ -244,7 +244,10 @@ impl Janitor {
     ///
     /// The capture category runs on drone and visor nodes whether or not the
     /// rest of the janitor is enabled, because its sidecar is what capture
-    /// admission reads; it only evicts while the janitor is enabled.
+    /// admission reads. It rewrites the sidecar every
+    /// [`SIDECAR_REFRESH`](ados_config::capture_storage::SIDECAR_REFRESH)
+    /// (measure only) and evicts only on the janitor interval while the
+    /// janitor is enabled.
     pub async fn tick(&mut self) {
         #[cfg(target_os = "linux")]
         {
@@ -260,24 +263,25 @@ impl Janitor {
                 None => true,
                 Some(last) => now.duration_since(last) >= cfg.interval,
             };
-            if !due {
-                return;
+            if due {
+                self.last_tick = Some(now);
             }
-            self.last_tick = Some(now);
 
-            self.capture
-                .set_active(capture::active_for(&ados_config::node_profile()));
-            let capture_freed = if self.capture.active() {
-                let (capture_cfg, _) = ados_config::capture_storage::CaptureStorageConfig::load(
-                    std::path::Path::new(CONFIG_YAML),
-                );
+            let mut capture_freed = 0;
+            if due || self.capture.refresh_due(now) {
                 self.capture
-                    .pass(capture_cfg, cfg.enabled, &capture_sidecar)
-                    .await
-            } else {
-                0
-            };
-            if !cfg.enabled {
+                    .set_active(capture::active_for(&ados_config::node_profile()));
+                if self.capture.active() {
+                    let (capture_cfg, _) = ados_config::capture_storage::CaptureStorageConfig::load(
+                        std::path::Path::new(CONFIG_YAML),
+                    );
+                    capture_freed = self
+                        .capture
+                        .pass(capture_cfg, due && cfg.enabled, &capture_sidecar)
+                        .await;
+                }
+            }
+            if !due || !cfg.enabled {
                 return;
             }
 

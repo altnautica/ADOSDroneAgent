@@ -2,7 +2,7 @@
 //! `/api/v1/storage` and `/api/v1/gnss*`.
 //!
 //! Every read is served from the sidecar its owning service rewrites (clock,
-//! sensors and gnss at 1 Hz, capture storage per janitor pass). A route whose
+//! sensors and gnss at 1 Hz, capture storage every 10 s). A route whose
 //! backing service is absent or stale answers 200 with `"present": false` and
 //! empty values, never stale numbers and never a 404.
 

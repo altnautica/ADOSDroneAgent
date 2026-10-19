@@ -7,11 +7,14 @@
 //! go first, oldest first; sessions that were never uploaded go only when
 //! `storage.capture_evict_unuploaded` is on, again oldest first.
 //!
-//! Every pass mirrors the result into `capture-storage.json`, the document a
-//! new capture session is admitted against. The write probe measures the
-//! capture root's sustained write speed once shortly after start and every six
-//! hours after that, on a blocking thread.
+//! `capture-storage.json` is the document a new capture session is admitted
+//! against. It is rewritten every [`cs::SIDECAR_REFRESH`] (measure only) so
+//! its freshness proves the supervisor is watching the volume; eviction runs
+//! on the janitor interval. The write probe measures the capture root's
+//! sustained write speed once shortly after start and every six hours after
+//! that, on a blocking thread.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -45,12 +48,21 @@ pub struct Session {
     pub recording: bool,
 }
 
+/// Measured sizes of settled (not recording) sessions, keyed by path, so the
+/// short-cadence refresh walks only the session being written. An eviction
+/// pass clears it and measures everything afresh.
+pub type SizeCache = HashMap<PathBuf, u64>;
+
 /// Every session under `root`, oldest first. Dot-named entries (the write
 /// probe, scratch) and anything that is not a directory are not sessions.
-pub fn scan_sessions(root: &Path) -> Vec<Session> {
+/// Sizes of settled sessions come from `cache` when present and are stored in
+/// it; entries for sessions that are gone are dropped.
+pub fn scan_sessions(root: &Path, cache: &mut SizeCache) -> Vec<Session> {
     let Ok(dir) = std::fs::read_dir(root) else {
+        cache.clear();
         return Vec::new();
     };
+    let mut seen: HashMap<PathBuf, u64> = HashMap::new();
     let mut out: Vec<Session> = dir
         .flatten()
         .filter_map(|e| {
@@ -66,15 +78,24 @@ pub fn scan_sessions(root: &Path) -> Vec<Session> {
                 .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
+            let recording = path.join(cs::RECORDING_MARKER).exists();
+            let bytes = match cache.get(&path) {
+                Some(b) if !recording => *b,
+                _ => reclaim::tree_bytes(&path),
+            };
+            if !recording {
+                seen.insert(path.clone(), bytes);
+            }
             Some(Session {
-                bytes: reclaim::tree_bytes(&path),
+                bytes,
                 uploaded: path.join(cs::UPLOADED_MARKER).exists(),
-                recording: path.join(cs::RECORDING_MARKER).exists(),
+                recording,
                 name,
                 born,
             })
         })
         .collect();
+    *cache = seen;
     out.sort_by(|a, b| a.born.cmp(&b.born).then_with(|| a.name.cmp(&b.name)));
     out
 }
@@ -144,16 +165,21 @@ pub struct CapturePass {
 }
 
 /// One capture pass: resolve the root, evict when `evict` and over the budget
-/// or under the floor, and build the sidecar from what is left.
+/// or under the floor, and build the sidecar from what is left. An evicting
+/// pass re-measures every session rather than trusting `cache`.
 pub fn run_pass(
     cfg: &CaptureStorageConfig,
     sys: &SysRoots,
     evict: bool,
     write_probe: Option<WriteProbe>,
+    cache: &mut SizeCache,
     now_ns: u64,
 ) -> CapturePass {
     let root = cs::resolve_capture_root(cfg, sys);
-    let mut sessions = scan_sessions(&root);
+    if evict {
+        cache.clear();
+    }
+    let mut sessions = scan_sessions(&root, cache);
     let mut volume = current_volume(&root, sys);
     let mut freed = 0u64;
     if evict {
@@ -172,7 +198,7 @@ pub fn run_pass(
             for i in picked {
                 freed = freed.saturating_add(remove_session(&root, &sessions[i]));
             }
-            sessions = scan_sessions(&root);
+            sessions = scan_sessions(&root, cache);
             volume = current_volume(&root, sys);
         }
     }

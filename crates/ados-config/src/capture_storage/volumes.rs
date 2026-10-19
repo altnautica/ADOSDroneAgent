@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{CaptureStorageConfig, Volume, AUTO_MIN_FREE_BYTES, FALLBACK_ROOT};
+use super::{Volume, FALLBACK_ROOT, STICKY_ROOT_FILE};
 
 /// Size and free space of one filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +23,8 @@ pub struct SysRoots {
     pub mounts: PathBuf,
     /// The capture root when `auto` finds no NVMe volume.
     pub fallback_root: PathBuf,
+    /// Where the `auto` choice of an NVMe root is persisted.
+    pub sticky_file: PathBuf,
     /// Filesystem space reader, `statvfs` on a node.
     pub stat: fn(&Path) -> Option<FsSpace>,
 }
@@ -33,6 +35,7 @@ impl Default for SysRoots {
             sys_block: PathBuf::from("/sys/block"),
             mounts: PathBuf::from("/proc/self/mounts"),
             fallback_root: PathBuf::from(FALLBACK_ROOT),
+            sticky_file: PathBuf::from(STICKY_ROOT_FILE),
             stat: statvfs_space,
         }
     }
@@ -143,7 +146,7 @@ fn device_name(device: &str) -> Option<String> {
 }
 
 /// The whole disk under `/sys/block` that `name` is, or is a partition of.
-fn disk_of(sys_block: &Path, name: &str) -> Option<String> {
+pub(super) fn disk_of(sys_block: &Path, name: &str) -> Option<String> {
     if sys_block.join(name).is_dir() {
         return Some(name.to_string());
     }
@@ -155,7 +158,7 @@ fn disk_of(sys_block: &Path, name: &str) -> Option<String> {
 }
 
 /// `queue/rotational` of a disk; unreadable reads as `None`.
-fn rotational(sys_block: &Path, disk: &str) -> Option<bool> {
+pub(super) fn rotational(sys_block: &Path, disk: &str) -> Option<bool> {
     let text = std::fs::read_to_string(sys_block.join(disk).join("queue/rotational")).ok()?;
     match text.trim() {
         "0" => Some(false),
@@ -212,49 +215,4 @@ pub fn volume_for<'a>(path: &Path, volumes: &'a [Volume]) -> Option<&'a Volume> 
         .iter()
         .filter(|v| path.starts_with(&v.mount))
         .max_by_key(|v| v.mount.len())
-}
-
-/// The capture root for `cfg`. An absolute `capture_root` is taken as given.
-/// `auto` (or anything that is not an absolute path) picks the first mounted,
-/// non-rotational NVMe disk under `/sys/block` with at least 64 GiB free and
-/// writes to `<mount>/ados/capture`; a disk mounted at `/` uses the fallback
-/// root, which then lives on it anyway. No such disk: the fallback root.
-pub fn resolve_capture_root(cfg: &CaptureStorageConfig, roots: &SysRoots) -> PathBuf {
-    let raw = cfg.capture_root.trim();
-    if raw != "auto" {
-        let path = PathBuf::from(raw);
-        if path.is_absolute() {
-            return path;
-        }
-        tracing::warn!(
-            capture_root = raw,
-            "storage.capture_root is neither auto nor an absolute path; resolving as auto"
-        );
-    }
-    auto_root(roots).unwrap_or_else(|| roots.fallback_root.clone())
-}
-
-fn auto_root(roots: &SysRoots) -> Option<PathBuf> {
-    let mut disks: Vec<String> = std::fs::read_dir(&roots.sys_block)
-        .ok()?
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("nvme"))
-        .filter(|name| rotational(&roots.sys_block, name) == Some(false))
-        .collect();
-    disks.sort();
-    let volumes = list_volumes(roots);
-    disks.iter().find_map(|disk| {
-        volumes
-            .iter()
-            .filter(|v| disk_of(&roots.sys_block, &v.device).as_deref() == Some(disk.as_str()))
-            .find(|v| v.free_bytes >= AUTO_MIN_FREE_BYTES)
-            .map(|v| {
-                if v.mount == "/" {
-                    roots.fallback_root.clone()
-                } else {
-                    Path::new(&v.mount).join("ados/capture")
-                }
-            })
-    })
 }

@@ -102,6 +102,25 @@ fn ados_api_unit_paths_narrow() {
 }
 
 #[test]
+fn supervisor_unit_can_write_the_capture_mounts() {
+    let unit =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/systemd/ados-supervisor.service");
+    let body = std::fs::read_to_string(unit).expect("supervisor unit ships");
+    assert!(body.contains("ProtectSystem=strict"));
+    let rw: Vec<&str> = body
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("ReadWritePaths="))
+        .flat_map(str::split_whitespace)
+        .collect();
+    // The NVMe capture root lives under a separate mount; optional so a node
+    // without the directory still starts.
+    assert!(rw.contains(&"-/mnt"), "{rw:?}");
+    assert!(rw.contains(&"-/media"), "{rw:?}");
+    // The sticky capture-root choice is persisted under /var/lib/ados.
+    assert!(rw.contains(&"/var/lib/ados"), "{rw:?}");
+}
+
+#[test]
 fn env_file_carries_the_core_paths() {
     let body = env_file_body("abcd1234abcd");
     assert!(body.contains("ADOS_DEVICE_ID=abcd1234abcd"));

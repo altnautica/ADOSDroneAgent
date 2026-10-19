@@ -2,7 +2,10 @@
 //! volume, capture usage against the budget, and the write-rate probe.
 //!
 //! Capture usage and admission come from the supervisor janitor's
-//! `capture-storage.json`; the volume list is read live. Capture storage
+//! `capture-storage.json`, rewritten every 10 s; the volume list is read live.
+//! A sidecar older than its 30 s window is a supervisor that is not watching
+//! the volume, so the route answers `present: false` rather than old numbers
+//! (and capture admission refuses on the same condition). Capture storage
 //! exists on the camera-owning profiles (drone, visor) only.
 
 use std::time::SystemTime;
@@ -11,7 +14,7 @@ use axum::extract::State;
 use axum::Json;
 use serde_json::{json, Map, Value};
 
-use ados_config::capture_storage::{list_volumes_live, Volume};
+use ados_config::capture_storage::{list_volumes_live, Volume, SIDECAR_MAX_AGE};
 
 use super::{fresh_map, with_present, SensingPaths};
 use crate::state::AppState;
@@ -36,7 +39,13 @@ pub(crate) fn storage_body(
 ) -> Value {
     let side = CAPTURE_PROFILES
         .contains(&profile)
-        .then(|| fresh_map(&paths.sidecar("capture-storage.json"), None, now))
+        .then(|| {
+            fresh_map(
+                &paths.sidecar("capture-storage.json"),
+                Some(SIDECAR_MAX_AGE),
+                now,
+            )
+        })
         .flatten();
     let Some(side) = side else {
         let mut rest = Map::new();
@@ -169,5 +178,22 @@ mod tests {
             body,
             json!({"present": false, "capture_root": null, "volumes": [], "capture": null, "write_probe": null})
         );
+    }
+
+    #[test]
+    fn a_stale_janitor_report_is_not_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = SensingPaths {
+            run_dir: dir.path().to_path_buf(),
+            etc_dir: dir.path().to_path_buf(),
+        };
+        std::fs::write(p.sidecar("capture-storage.json"), SIDECAR).unwrap();
+        let vols = [vol("/mnt/nvme0", "nvme0n1")];
+        let fresh = storage_body(&p, "drone", &vols, SystemTime::now());
+        assert_eq!(fresh["present"], true);
+        let later = SystemTime::now() + SIDECAR_MAX_AGE + std::time::Duration::from_secs(1);
+        let stale = storage_body(&p, "drone", &vols, later);
+        assert_eq!(stale["present"], false);
+        assert_eq!(stale["capture"], Value::Null);
     }
 }

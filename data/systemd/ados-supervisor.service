@@ -43,7 +43,10 @@ PrivateTmp=yes
 # and the bind fails on keygen before any radio frame flows. PrivateTmp=yes
 # (above) already gives the helper scripts a writable /tmp for their mktemp
 # staging dir, so /tmp does not need to be listed here.
-ReadWritePaths=/var/ados /var/lib/ados /etc/ados /run/ados /etc
+# -/mnt and -/media: the capture janitor evicts sessions, runs the write probe
+# and creates `<mount>/ados/capture` on a separately mounted NVMe volume. The
+# `-` prefix keeps namespace setup from failing on a node without them.
+ReadWritePaths=/var/ados /var/lib/ados /etc/ados /run/ados /etc -/mnt -/media
 
 # Logging
 StandardOutput=journal

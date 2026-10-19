@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use super::*;
 
 /// Reads `<mount>/.fake-space` (`<total> <free>`), the stand-in for statvfs.
-fn fake_stat(mount: &Path) -> Option<FsSpace> {
+pub(super) fn fake_stat(mount: &Path) -> Option<FsSpace> {
     let text = fs::read_to_string(mount.join(".fake-space")).ok()?;
     let mut parts = text.split_whitespace().map(|p| p.parse::<u64>().ok());
     Some(FsSpace {
@@ -13,15 +13,16 @@ fn fake_stat(mount: &Path) -> Option<FsSpace> {
     })
 }
 
-struct Fake {
+/// A fake sysfs + mount table + statvfs under one temporary directory.
+pub(super) struct Fake {
     _tmp: tempfile::TempDir,
-    base: PathBuf,
-    roots: SysRoots,
+    pub base: PathBuf,
+    pub roots: SysRoots,
     mounts: Vec<String>,
 }
 
 impl Fake {
-    fn new() -> Self {
+    pub fn new() -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().to_path_buf();
         fs::create_dir_all(base.join("sys/block")).unwrap();
@@ -29,6 +30,7 @@ impl Fake {
             sys_block: base.join("sys/block"),
             mounts: base.join("mounts"),
             fallback_root: base.join("var/ados/capture"),
+            sticky_file: base.join("var/lib/ados/capture-root"),
             stat: fake_stat,
         };
         Fake {
@@ -39,7 +41,7 @@ impl Fake {
         }
     }
 
-    fn disk(&self, disk: &str, rotational: &str, parts: &[&str]) {
+    pub fn disk(&self, disk: &str, rotational: &str, parts: &[&str]) {
         let d = self.roots.sys_block.join(disk);
         fs::create_dir_all(d.join("queue")).unwrap();
         fs::write(d.join("queue/rotational"), format!("{rotational}\n")).unwrap();
@@ -49,10 +51,17 @@ impl Fake {
     }
 
     /// Mount `device` (fs `fs`) at `<base>/<at>` with the given space.
-    fn mount(&mut self, device: &str, at: &str, fs_type: &str, total: u64, free: u64) -> PathBuf {
+    pub fn mount(
+        &mut self,
+        device: &str,
+        at: &str,
+        fs_type: &str,
+        total: u64,
+        free: u64,
+    ) -> PathBuf {
         let mount = self.base.join(at);
         fs::create_dir_all(&mount).unwrap();
-        fs::write(mount.join(".fake-space"), format!("{total} {free}")).unwrap();
+        self.space(at, total, free);
         self.mounts.push(format!(
             "{device} {} {fs_type} rw,relatime 0 0",
             mount.display()
@@ -60,9 +69,28 @@ impl Fake {
         fs::write(&self.roots.mounts, self.mounts.join("\n")).unwrap();
         mount
     }
+
+    /// Change the space a mounted `<base>/<at>` reports.
+    pub fn space(&self, at: &str, total: u64, free: u64) {
+        let mount = self.base.join(at);
+        fs::write(mount.join(".fake-space"), format!("{total} {free}")).unwrap();
+    }
+
+    /// Take `<base>/<at>` out of the mount table (the directory stays).
+    pub fn unmount(&mut self, at: &str) {
+        let needle = format!(" {} ", self.base.join(at).display());
+        self.mounts.retain(|m| !m.contains(&needle));
+        fs::write(&self.roots.mounts, self.mounts.join("\n")).unwrap();
+    }
 }
 
-fn usage(used: u64, budget: u64, sessions: u64, uploaded: u64, evict: bool) -> CaptureUsage {
+pub(super) fn usage(
+    used: u64,
+    budget: u64,
+    sessions: u64,
+    uploaded: u64,
+    evict: bool,
+) -> CaptureUsage {
     CaptureUsage {
         used_bytes: used,
         budget_bytes: budget,
@@ -75,7 +103,7 @@ fn usage(used: u64, budget: u64, sessions: u64, uploaded: u64, evict: bool) -> C
     }
 }
 
-fn volume(free: u64) -> Volume {
+pub(super) fn volume(free: u64) -> Volume {
     Volume {
         mount: "/mnt/nvme".into(),
         device: "nvme0n1p1".into(),

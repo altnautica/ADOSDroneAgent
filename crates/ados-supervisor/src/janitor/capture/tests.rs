@@ -36,6 +36,7 @@ fn fixture(total: u64, free: u64) -> (tempfile::TempDir, SysRoots, PathBuf) {
         sys_block: base.join("sys/block"),
         mounts: base.join("mounts"),
         fallback_root: base.join("fallback"),
+        sticky_file: base.join("capture-root"),
         stat: fake_stat,
     };
     let root = mount.join("ados/capture");
@@ -125,7 +126,14 @@ fn a_pass_evicts_uploaded_sessions_first_and_keeps_the_active_one() {
     session(&root, "s5-active", 1000, false, true);
     fs::write(root.join(".write-probe"), b"x").unwrap();
 
-    let pass = run_pass(&cfg_for(&root, false), &sys, true, None, 42);
+    let pass = run_pass(
+        &cfg_for(&root, false),
+        &sys,
+        true,
+        None,
+        &mut SizeCache::new(),
+        42,
+    );
     assert!(pass.freed >= 2000, "{}", pass.freed);
     assert!(!root.join("s3-uploaded").exists());
     assert!(!root.join("s4-uploaded").exists());
@@ -141,7 +149,14 @@ fn a_pass_evicts_uploaded_sessions_first_and_keeps_the_active_one() {
     assert_eq!(pass.sidecar.capture.state, CaptureState::Full);
 
     // With the flag the un-uploaded, idle session goes too.
-    let pass = run_pass(&cfg_for(&root, true), &sys, true, None, 43);
+    let pass = run_pass(
+        &cfg_for(&root, true),
+        &sys,
+        true,
+        None,
+        &mut SizeCache::new(),
+        43,
+    );
     assert!(!root.join("s1-old-unuploaded").exists());
     assert!(root.join("s2-uploaded-recording").exists());
     assert!(root.join("s5-active").exists());
@@ -152,16 +167,60 @@ fn a_pass_evicts_uploaded_sessions_first_and_keeps_the_active_one() {
 fn a_pass_without_eviction_deletes_nothing() {
     let (_tmp, sys, root) = fixture(100 * GIB, GIB);
     session(&root, "s1", 1000, true, false);
-    let pass = run_pass(&cfg_for(&root, true), &sys, false, None, 1);
+    let pass = run_pass(
+        &cfg_for(&root, true),
+        &sys,
+        false,
+        None,
+        &mut SizeCache::new(),
+        1,
+    );
     assert_eq!(pass.freed, 0);
     assert!(root.join("s1").exists());
+}
+
+#[test]
+fn refresh_passes_reuse_settled_sizes_and_remeasure_the_recording_one() {
+    let (_tmp, sys, root) = fixture(1000 * GIB, 800 * GIB);
+    session(&root, "settled", 1000, true, false);
+    session(&root, "live", 1000, false, true);
+    let cfg = cfg_for(&root, false);
+    let mut cache = SizeCache::new();
+    let first = run_pass(&cfg, &sys, false, None, &mut cache, 1);
+    assert_eq!(cache.len(), 1, "only the settled session is cached");
+
+    // Growth in the recording session shows on the next refresh; a change to
+    // a settled one waits for the eviction pass's full re-measure.
+    fs::write(root.join("live/frames/more.bin"), vec![1u8; 500]).unwrap();
+    fs::write(root.join("settled/frames/late.bin"), vec![1u8; 300]).unwrap();
+    let second = run_pass(&cfg, &sys, false, None, &mut cache, 2);
+    assert_eq!(
+        second.sidecar.capture.used_bytes,
+        first.sidecar.capture.used_bytes + 500
+    );
+    let full = run_pass(&cfg, &sys, true, None, &mut cache, 3);
+    assert_eq!(
+        full.sidecar.capture.used_bytes,
+        first.sidecar.capture.used_bytes + 800
+    );
+
+    fs::remove_dir_all(root.join("settled")).unwrap();
+    run_pass(&cfg, &sys, false, None, &mut cache, 4);
+    assert!(cache.is_empty(), "a vanished session leaves the cache");
 }
 
 #[test]
 fn a_roomy_volume_is_ok_and_untouched() {
     let (_tmp, sys, root) = fixture(1000 * GIB, 800 * GIB);
     session(&root, "s1", 1000, true, false);
-    let pass = run_pass(&cfg_for(&root, false), &sys, true, None, 7);
+    let pass = run_pass(
+        &cfg_for(&root, false),
+        &sys,
+        true,
+        None,
+        &mut SizeCache::new(),
+        7,
+    );
     assert_eq!(pass.freed, 0);
     let c = &pass.sidecar.capture;
     assert_eq!(c.state, CaptureState::Ok);
@@ -182,7 +241,14 @@ fn a_pass_writes_the_sidecar() {
         mbps: 1450.2,
         measured_at_ns: 9,
     };
-    let pass = run_pass(&cfg_for(&root, false), &sys, true, Some(probe), 5);
+    let pass = run_pass(
+        &cfg_for(&root, false),
+        &sys,
+        true,
+        Some(probe),
+        &mut SizeCache::new(),
+        5,
+    );
     let path = tmp.path().join("run/capture-storage.json");
     write_sidecar(&path, &pass.sidecar).unwrap();
     let text = fs::read_to_string(&path).unwrap();
