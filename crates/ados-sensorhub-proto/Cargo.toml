@@ -1,0 +1,26 @@
+[package]
+name = "ados-sensorhub-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# MIT, unlike the rest of the workspace: the sensor-hub firmware and the
+# simulator link this crate, so it stays permissively licensed and
+# dependency-free.
+license = "MIT"
+repository.workspace = true
+description = "Sensor hub wire protocol v1: COBS framing, CRC-16/CCITT-FALSE and the packet structs shared by the hub firmware, the agent and the simulator. no_std, no allocation."
+
+[lib]
+name = "ados_sensorhub_proto"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Derive serde Serialize/Deserialize on the owned packet structs.
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+
+[dev-dependencies]
+proptest = "1"
