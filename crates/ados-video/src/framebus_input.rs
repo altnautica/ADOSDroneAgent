@@ -76,8 +76,7 @@ impl Feeds {
             self.running.retain(|id, feed| {
                 want.iter().any(|(w, raw)| {
                     let s = feed.spec();
-                    w == id
-                        && (s.format, s.width, s.height) == (raw.format, raw.width, raw.height)
+                    w == id && (s.format, s.width, s.height) == (raw.format, raw.width, raw.height)
                 })
             });
             for (id, raw) in want {
@@ -89,7 +88,9 @@ impl Feeds {
                         tracing::info!(camera = %id, "framebus_feed_started");
                         self.running.insert(id.clone(), feed);
                     }
-                    Err(e) => tracing::warn!(camera = %id, error = %e, "framebus_feed_start_failed"),
+                    Err(e) => {
+                        tracing::warn!(camera = %id, error = %e, "framebus_feed_start_failed")
+                    }
                 }
             }
         }

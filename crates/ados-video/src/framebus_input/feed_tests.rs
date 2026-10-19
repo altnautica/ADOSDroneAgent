@@ -5,8 +5,7 @@ use std::time::Duration;
 
 use ados_protocol::frame::encode_frame;
 use ados_protocol::framebus::{
-    write_slot, FrameDescriptor, FrameFormat, RingLayout, FRAMEBUS_DESCRIPTOR_VERSION,
-    TIMEBASE_SIM,
+    write_slot, FrameDescriptor, FrameFormat, RingLayout, FRAMEBUS_DESCRIPTOR_VERSION, TIMEBASE_SIM,
 };
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixListener;
@@ -83,10 +82,20 @@ async fn whole_frames_reach_the_pipe_and_foreign_frames_do_not() {
     let (mut conn, _) = listener.accept().await.unwrap();
     for seq in 1..=200u64 {
         let slot = (seq % 4) as u32;
-        write_slot(&mut region, &layout, slot, seq, &vec![seq as u8; (W * H) as usize]).unwrap();
+        write_slot(
+            &mut region,
+            &layout,
+            slot,
+            seq,
+            &vec![seq as u8; (W * H) as usize],
+        )
+        .unwrap();
         // Another camera, and this camera at a size the encoder was not built
         // for: neither may reach the pipe.
-        for d in [descriptor("cam_fr", seq, W, slot), descriptor("cam_fl", seq, W * 2, slot)] {
+        for d in [
+            descriptor("cam_fr", seq, W, slot),
+            descriptor("cam_fl", seq, W * 2, slot),
+        ] {
             conn.write_all(&encode_frame(&d.to_msgpack().unwrap(), 1 << 20).unwrap())
                 .await
                 .unwrap();
@@ -106,7 +115,10 @@ async fn whole_frames_reach_the_pipe_and_foreign_frames_do_not() {
         .unwrap();
     let mut last = 0u8;
     for frame in frames {
-        assert!(frame.iter().all(|b| *b == frame[0]), "a torn frame: {frame:?}");
+        assert!(
+            frame.iter().all(|b| *b == frame[0]),
+            "a torn frame: {frame:?}"
+        );
         assert!(frame[0] > last, "frames arrive in order");
         last = frame[0];
     }

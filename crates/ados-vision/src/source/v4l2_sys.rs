@@ -264,7 +264,15 @@ pub fn xioctl<T>(fd: RawFd, request: u64, arg: &mut T) -> io::Result<()> {
 /// `STREAMON` / `STREAMOFF` for a buffer type.
 pub fn stream(fd: RawFd, on: bool, buf_type: u32) -> io::Result<()> {
     let mut t = buf_type as i32;
-    xioctl(fd, if on { VIDIOC_STREAMON } else { VIDIOC_STREAMOFF }, &mut t)
+    xioctl(
+        fd,
+        if on {
+            VIDIOC_STREAMON
+        } else {
+            VIDIOC_STREAMOFF
+        },
+        &mut t,
+    )
 }
 
 /// One driver buffer mapped read-only into this process.

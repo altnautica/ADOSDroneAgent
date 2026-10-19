@@ -149,7 +149,11 @@ impl VideoOrchestrator {
         // The `/main` sweep is PUBLISHER-scoped: every tap reads that same URI,
         // so a plain pattern sweep would kill a cloud push or SEI tap that a
         // partial teardown legitimately left running.
-        kill_orphans(&format!("-i {}", crate::encoder::input_locator(&device_path))).await;
+        kill_orphans(&format!(
+            "-i {}",
+            crate::encoder::input_locator(&device_path)
+        ))
+        .await;
         kill_orphans("rpicam-vid").await;
         let pipe_uri = self.pipe_uri();
         kill_publisher_orphans(&pipe_uri).await;

@@ -9,7 +9,9 @@
 use ados_config::cameras::CaptureCamera;
 
 use crate::config::VisionConfig;
-use crate::source::{AnySource, RtspSettings, RtspSource, SimClock, TapSource, V4l2Settings, V4l2Source};
+use crate::source::{
+    AnySource, RtspSettings, RtspSource, SimClock, TapSource, V4l2Settings, V4l2Source,
+};
 use crate::trigger::{trigger_stream, CameraTriggers, TriggerFeed, TriggerJoiner};
 
 /// The camera id the video pipeline's tap is read as.
@@ -36,7 +38,12 @@ impl CameraSpec {
 /// The cameras of `config`: every owned camera, then the tap when it is on and
 /// no owned camera already uses its id.
 pub fn camera_specs(config: &VisionConfig) -> Vec<CameraSpec> {
-    let mut specs: Vec<CameraSpec> = config.cameras.iter().cloned().map(CameraSpec::Owned).collect();
+    let mut specs: Vec<CameraSpec> = config
+        .cameras
+        .iter()
+        .cloned()
+        .map(CameraSpec::Owned)
+        .collect();
     if let Some(socket) = &config.tap_sink {
         if !specs.iter().any(|s| s.id() == TAP_CAMERA_ID) {
             specs.push(CameraSpec::Tap {
@@ -50,9 +57,9 @@ pub fn camera_specs(config: &VisionConfig) -> Vec<CameraSpec> {
 
 /// Whether any owned camera takes trigger records off the sensor bus.
 pub fn needs_triggers(specs: &[CameraSpec]) -> bool {
-    specs.iter().any(|s| {
-        matches!(s, CameraSpec::Owned(c) if trigger_stream(c.trigger, 0).is_some())
-    })
+    specs
+        .iter()
+        .any(|s| matches!(s, CameraSpec::Owned(c) if trigger_stream(c.trigger, 0).is_some()))
 }
 
 /// Whether a capture source is a network stream rather than a local device.
@@ -84,19 +91,23 @@ impl SourceFactory {
     /// A fresh source for `spec`.
     pub fn open(&self, spec: &CameraSpec) -> AnySource {
         match spec {
-            CameraSpec::Tap { id, socket } => AnySource::Tap(TapSource::new(id.clone(), socket.clone())),
-            CameraSpec::Owned(cam) if is_rtsp(&cam.source) => AnySource::Rtsp(RtspSource::new(
-                cam.id.clone(),
-                RtspSettings {
-                    url: cam.source.trim().to_string(),
-                    width: cam.width,
-                    height: cam.height,
-                    format: cam.format.frame_format(),
-                },
-                self.triggers_for(cam, true),
-                self.sim.clone(),
-            )),
-            CameraSpec::Owned(cam) => AnySource::V4l2(V4l2Source::new(
+            CameraSpec::Tap { id, socket } => {
+                AnySource::Tap(TapSource::new(id.clone(), socket.clone()))
+            }
+            CameraSpec::Owned(cam) if is_rtsp(&cam.source) => {
+                AnySource::Rtsp(Box::new(RtspSource::new(
+                    cam.id.clone(),
+                    RtspSettings {
+                        url: cam.source.trim().to_string(),
+                        width: cam.width,
+                        height: cam.height,
+                        format: cam.format.frame_format(),
+                    },
+                    self.triggers_for(cam, true),
+                    self.sim.clone(),
+                )))
+            }
+            CameraSpec::Owned(cam) => AnySource::V4l2(Box::new(V4l2Source::new(
                 cam.id.clone(),
                 V4l2Settings {
                     device: cam.source.trim().to_string(),
@@ -108,7 +119,7 @@ impl SourceFactory {
                     gain: cam.gain,
                 },
                 self.triggers_for(cam, false),
-            )),
+            ))),
         }
     }
 }
@@ -132,7 +143,9 @@ mod tests {
         let specs = camera_specs(&config(RIG));
         let ids: Vec<&str> = specs.iter().map(CameraSpec::id).collect();
         assert_eq!(ids, ["cam_fl", "nav", "free", "main"]);
-        assert!(matches!(&specs[3], CameraSpec::Tap { socket, .. } if socket == "/run/ados/vision-tap-main.sock"));
+        assert!(
+            matches!(&specs[3], CameraSpec::Tap { socket, .. } if socket == "/run/ados/vision-tap-main.sock")
+        );
         assert!(needs_triggers(&specs));
         // No tap and no captured camera: nothing to run.
         assert!(camera_specs(&config("agent:\n  profile: drone\n")).is_empty());
@@ -154,9 +167,13 @@ mod tests {
             })
             .collect();
         assert_eq!(kinds, ["rtsp", "v4l2", "v4l2", "tap"]);
-        let CameraSpec::Owned(nav) = &specs[1] else { panic!() };
+        let CameraSpec::Owned(nav) = &specs[1] else {
+            panic!()
+        };
         assert!(factory.triggers_for(nav, false).is_some());
-        let CameraSpec::Owned(free) = &specs[2] else { panic!() };
+        let CameraSpec::Owned(free) = &specs[2] else {
+            panic!()
+        };
         assert!(factory.triggers_for(free, false).is_none());
     }
 }

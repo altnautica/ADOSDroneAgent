@@ -155,9 +155,7 @@ pub fn capture_cameras_from(text: &str) -> Vec<CaptureCamera> {
         .enumerate()
         .filter(|(_, c)| c.capture && c.enabled)
         .map(|(i, mut c)| {
-            c.trigger_channel = c
-                .trigger_channel
-                .or_else(|| u8::try_from(i).ok());
+            c.trigger_channel = c.trigger_channel.or_else(|| u8::try_from(i).ok());
             c
         })
         .collect()
@@ -191,13 +189,18 @@ fn fold_vision_entry(list: &mut Vec<Value>, entry: &Value) {
     if kind != "capture" {
         return;
     }
-    let Some(id) = entry.get("id").and_then(Value::as_str).filter(|s| !s.is_empty()) else {
+    let Some(id) = entry
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
         return;
     };
     let device = entry.get("device_path").and_then(Value::as_str);
-    let existing = list.iter_mut().filter_map(Value::as_mapping_mut).find(|leg| {
-        leg.get("id").and_then(Value::as_str).unwrap_or("main") == id
-    });
+    let existing = list
+        .iter_mut()
+        .filter_map(Value::as_mapping_mut)
+        .find(|leg| leg.get("id").and_then(Value::as_str).unwrap_or("main") == id);
     if let Some(leg) = existing {
         leg.insert(key("capture"), Value::Bool(true));
         if let (None, Some(d)) = (leg.get("source"), device) {

@@ -102,7 +102,8 @@ fn ensure_fifo(path: &Path) -> io::Result<()> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    nix::unistd::mkfifo(path, nix::sys::stat::Mode::from_bits_truncate(0o660)).map_err(io::Error::from)
+    nix::unistd::mkfifo(path, nix::sys::stat::Mode::from_bits_truncate(0o660))
+        .map_err(io::Error::from)
 }
 
 /// Keep the newest accepted descriptor in `tx`, reconnecting to the socket
@@ -115,10 +116,7 @@ async fn read_descriptors(spec: FeedSpec, tx: watch::Sender<Option<FrameDescript
             tokio::time::sleep(RETRY).await;
             continue;
         };
-        loop {
-            let Ok(len) = stream.read_u32().await else {
-                break;
-            };
+        while let Ok(len) = stream.read_u32().await {
             if len as usize > STATE_V2_MAX_FRAME {
                 break;
             }
@@ -193,7 +191,12 @@ impl Ring {
 }
 
 /// Read `d`'s pixels into `out`, mapping (or re-mapping a replaced) ring.
-fn read_frame(ring: &mut Option<Ring>, shm_dir: &Path, d: &FrameDescriptor, out: &mut Vec<u8>) -> bool {
+fn read_frame(
+    ring: &mut Option<Ring>,
+    shm_dir: &Path,
+    d: &FrameDescriptor,
+    out: &mut Vec<u8>,
+) -> bool {
     let path = shm_dir.join(&d.shm_name);
     if let Some(r) = ring.as_mut() {
         if d.seq > r.last_seq && r.read(d, out) {
@@ -214,7 +217,9 @@ async fn open_sender(fifo: &Path) -> pipe::Sender {
             Ok(s) => return s,
             // ENXIO: no reader yet (the encoder has not started).
             Err(e) if e.raw_os_error() == Some(nix::libc::ENXIO) => {}
-            Err(e) => tracing::debug!(error = %e, fifo = %fifo.display(), "framebus_fifo_open_failed"),
+            Err(e) => {
+                tracing::debug!(error = %e, fifo = %fifo.display(), "framebus_fifo_open_failed")
+            }
         }
         tokio::time::sleep(RETRY).await;
     }

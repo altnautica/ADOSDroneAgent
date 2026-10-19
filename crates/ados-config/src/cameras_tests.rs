@@ -15,7 +15,10 @@ fn the_simulated_rig_block_parses_with_index_trigger_channels() {
     assert_eq!(cams[0].id, "cam_fl");
     assert_eq!(cams[0].role.as_deref(), Some("front_left"));
     assert_eq!(cams[0].source, "rtsp://192.168.1.50:8554/we_v0_cam_fl");
-    assert_eq!((cams[0].width, cams[0].height, cams[0].fps), (1280, 800, 20));
+    assert_eq!(
+        (cams[0].width, cams[0].height, cams[0].fps),
+        (1280, 800, 20)
+    );
     assert_eq!(cams[0].format, CaptureFormat::Rgb24);
     assert_eq!(cams[0].trigger, CameraTrigger::Hub);
     assert_eq!(cams[0].trigger_channel, Some(0));
@@ -97,7 +100,8 @@ fn the_migration_round_trips_through_yaml_and_is_idempotent() {
 
 #[test]
 fn an_existing_top_level_list_wins_and_only_the_retired_keys_go() {
-    let mut doc = yaml("cameras:\n  - id: a\nvideo:\n  cameras:\n    - id: b\nvision:\n  cameras: []\n");
+    let mut doc =
+        yaml("cameras:\n  - id: a\nvideo:\n  cameras:\n    - id: b\nvision:\n  cameras: []\n");
     assert!(migrate_legacy_camera_lists(&mut doc));
     assert_eq!(doc, yaml("cameras:\n  - id: a\nvideo: {}\nvision: {}\n"));
 }

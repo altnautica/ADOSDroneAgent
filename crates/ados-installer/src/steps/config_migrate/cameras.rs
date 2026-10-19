@@ -77,6 +77,9 @@ mod tests {
         let config = dir.path().join("config.yaml");
         std::fs::write(&config, "video: [unclosed\n").unwrap();
         assert!(apply(&config, &dir.path().join("lock")).is_err());
-        assert_eq!(std::fs::read_to_string(&config).unwrap(), "video: [unclosed\n");
+        assert_eq!(
+            std::fs::read_to_string(&config).unwrap(),
+            "video: [unclosed\n"
+        );
     }
 }

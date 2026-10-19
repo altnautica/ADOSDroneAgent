@@ -70,7 +70,14 @@ fn a_frame_with_an_identity_is_on_the_sim_timebase() {
     assert_eq!(t.timebase, TIMEBASE_SIM);
     // No identity: host arrival only.
     assert_eq!(
-        frame_timing(Some(Pending { id: None, arrival_ns: 7 }), 9, None),
+        frame_timing(
+            Some(Pending {
+                id: None,
+                arrival_ns: 7
+            }),
+            9,
+            None
+        ),
         FrameTiming::host(7)
     );
     assert_eq!(frame_timing(None, 9, None), FrameTiming::host(9));
@@ -130,7 +137,9 @@ async fn the_sim_clock_publishes_sync_pairs_on_the_bus() {
     .unwrap();
     clock.observe(1_000, 2_000);
     let mut buf = Vec::new();
-    let frame = ados_sensorbus::client::read_frame(&mut conn, &mut buf).await.unwrap();
+    let frame = ados_sensorbus::client::read_frame(&mut conn, &mut buf)
+        .await
+        .unwrap();
     assert_eq!(frame.kind, Kind::Sync);
     assert_eq!(frame.src, "sim");
     let obs: SyncObs = frame.decode_msgpack().unwrap();

@@ -178,6 +178,334 @@
       "type": "integer"
     },
     {
+      "default": null,
+      "description": "Cameras",
+      "enum": null,
+      "key": "cameras",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": 4000,
+      "description": "Bitrate Kbps",
+      "enum": null,
+      "key": "cameras[].bitrate_kbps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Calibration",
+      "enum": null,
+      "key": "cameras[].calibration",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": false,
+      "description": "Capture",
+      "enum": null,
+      "key": "cameras[].capture",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "h264",
+      "description": "Codec",
+      "enum": null,
+      "key": "cameras[].codec",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "cameras[].enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "auto",
+      "description": "Encoder",
+      "enum": [
+        "auto",
+        "omx",
+        "v4l2m2m",
+        "software"
+      ],
+      "key": "cameras[].encoder",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Exposure Us",
+      "enum": null,
+      "key": "cameras[].exposure_us",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": "rgb24",
+      "description": "Format",
+      "enum": [
+        "gray8",
+        "gray16",
+        "rgb24",
+        "nv12",
+        "yuv420p",
+        "bayer",
+        "bayer_rggb8",
+        "bayer_rggb16"
+      ],
+      "key": "cameras[].format",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Fov Deg",
+      "enum": null,
+      "key": "cameras[].fov_deg",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": 30,
+      "description": "Fps",
+      "enum": null,
+      "key": "cameras[].fps",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Gain",
+      "enum": null,
+      "key": "cameras[].gain",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": 720,
+      "description": "Height",
+      "enum": null,
+      "key": "cameras[].height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": false,
+      "description": "Hflip",
+      "enum": null,
+      "key": "cameras[].hflip",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": "main",
+      "description": "Id",
+      "enum": null,
+      "key": "cameras[].id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 0,
+      "description": "Keyframe Interval",
+      "enum": null,
+      "key": "cameras[].keyframe_interval",
+      "maximum": 30,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Csi Port",
+      "enum": null,
+      "key": "cameras[].match.csi_port",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "Csi Sensor",
+      "enum": null,
+      "key": "cameras[].match.csi_sensor",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Usb",
+      "enum": null,
+      "key": "cameras[].match.usb",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Mount Pitch Deg",
+      "enum": null,
+      "key": "cameras[].mount_pitch_deg",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": null,
+      "description": "Name",
+      "enum": null,
+      "key": "cameras[].name",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Orientation",
+      "enum": null,
+      "key": "cameras[].orientation",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Owner",
+      "enum": null,
+      "key": "cameras[].owner",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Purpose",
+      "enum": null,
+      "key": "cameras[].purpose",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Role",
+      "enum": null,
+      "key": "cameras[].role",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": 0,
+      "description": "Rotation",
+      "enum": null,
+      "key": "cameras[].rotation",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "csi",
+      "description": "Source",
+      "enum": null,
+      "key": "cameras[].source",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "none",
+      "description": "Trigger",
+      "enum": [
+        "none",
+        "hub",
+        "fc"
+      ],
+      "key": "cameras[].trigger",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Trigger Channel",
+      "enum": null,
+      "key": "cameras[].trigger_channel",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": false,
+      "description": "Vflip",
+      "enum": null,
+      "key": "cameras[].vflip",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 1280,
+      "description": "Width",
+      "enum": null,
+      "key": "cameras[].width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": true,
       "description": "Mdns Enabled",
       "enum": null,
@@ -1717,6 +2045,19 @@
       "type": "integer"
     },
     {
+      "default": [
+        "gnss",
+        "host"
+      ],
+      "description": "Rtcm Origins",
+      "enum": null,
+      "key": "sensors.hub.rtcm_origins",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
       "default": "auto",
       "description": "Transport",
       "enum": null,
@@ -2483,261 +2824,6 @@
       "type": "integer"
     },
     {
-      "default": [],
-      "description": "Cameras",
-      "enum": null,
-      "key": "video.cameras",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "array"
-    },
-    {
-      "default": 4000,
-      "description": "Bitrate Kbps",
-      "enum": null,
-      "key": "video.cameras[].bitrate_kbps",
-      "maximum": 4294967295,
-      "minimum": 0,
-      "secret": false,
-      "type": "integer"
-    },
-    {
-      "default": null,
-      "description": "Calibration",
-      "enum": null,
-      "key": "video.cameras[].calibration",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
-    },
-    {
-      "default": "h264",
-      "description": "Codec",
-      "enum": null,
-      "key": "video.cameras[].codec",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string"
-    },
-    {
-      "default": true,
-      "description": "Enabled",
-      "enum": null,
-      "key": "video.cameras[].enabled",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "boolean"
-    },
-    {
-      "default": "auto",
-      "description": "Encoder",
-      "enum": [
-        "auto",
-        "omx",
-        "v4l2m2m",
-        "software"
-      ],
-      "key": "video.cameras[].encoder",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string"
-    },
-    {
-      "default": null,
-      "description": "Fov Deg",
-      "enum": null,
-      "key": "video.cameras[].fov_deg",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "number|null"
-    },
-    {
-      "default": 30,
-      "description": "Fps",
-      "enum": null,
-      "key": "video.cameras[].fps",
-      "maximum": 4294967295,
-      "minimum": 0,
-      "secret": false,
-      "type": "integer"
-    },
-    {
-      "default": 720,
-      "description": "Height",
-      "enum": null,
-      "key": "video.cameras[].height",
-      "maximum": 4294967295,
-      "minimum": 0,
-      "secret": false,
-      "type": "integer"
-    },
-    {
-      "default": false,
-      "description": "Hflip",
-      "enum": null,
-      "key": "video.cameras[].hflip",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "boolean"
-    },
-    {
-      "default": "main",
-      "description": "Id",
-      "enum": null,
-      "key": "video.cameras[].id",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string"
-    },
-    {
-      "default": 0,
-      "description": "Keyframe Interval",
-      "enum": null,
-      "key": "video.cameras[].keyframe_interval",
-      "maximum": 30,
-      "minimum": 0,
-      "secret": false,
-      "type": "integer"
-    },
-    {
-      "default": null,
-      "description": "Csi Port",
-      "enum": null,
-      "key": "video.cameras[].match.csi_port",
-      "maximum": 4294967295,
-      "minimum": 0,
-      "secret": false,
-      "type": "integer|null"
-    },
-    {
-      "default": null,
-      "description": "Csi Sensor",
-      "enum": null,
-      "key": "video.cameras[].match.csi_sensor",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
-    },
-    {
-      "default": null,
-      "description": "Usb",
-      "enum": null,
-      "key": "video.cameras[].match.usb",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
-    },
-    {
-      "default": null,
-      "description": "Mount Pitch Deg",
-      "enum": null,
-      "key": "video.cameras[].mount_pitch_deg",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "number|null"
-    },
-    {
-      "default": null,
-      "description": "Name",
-      "enum": null,
-      "key": "video.cameras[].name",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
-    },
-    {
-      "default": null,
-      "description": "Orientation",
-      "enum": null,
-      "key": "video.cameras[].orientation",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
-    },
-    {
-      "default": null,
-      "description": "Owner",
-      "enum": null,
-      "key": "video.cameras[].owner",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
-    },
-    {
-      "default": null,
-      "description": "Purpose",
-      "enum": null,
-      "key": "video.cameras[].purpose",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "array"
-    },
-    {
-      "default": null,
-      "description": "Role",
-      "enum": null,
-      "key": "video.cameras[].role",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
-    },
-    {
-      "default": 0,
-      "description": "Rotation",
-      "enum": null,
-      "key": "video.cameras[].rotation",
-      "maximum": 4294967295,
-      "minimum": 0,
-      "secret": false,
-      "type": "integer"
-    },
-    {
-      "default": "csi",
-      "description": "Source",
-      "enum": null,
-      "key": "video.cameras[].source",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string"
-    },
-    {
-      "default": false,
-      "description": "Vflip",
-      "enum": null,
-      "key": "video.cameras[].vflip",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "boolean"
-    },
-    {
-      "default": 1280,
-      "description": "Width",
-      "enum": null,
-      "key": "video.cameras[].width",
-      "maximum": 4294967295,
-      "minimum": 0,
-      "secret": false,
-      "type": "integer"
-    },
-    {
       "default": "",
       "description": "Cloud Relay Url",
       "enum": null,
@@ -3434,56 +3520,6 @@
       "minimum": null,
       "secret": false,
       "type": "string"
-    },
-    {
-      "default": [],
-      "description": "Cameras",
-      "enum": null,
-      "key": "vision.cameras",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "array"
-    },
-    {
-      "default": null,
-      "description": "Device Path",
-      "enum": null,
-      "key": "vision.cameras[].device_path",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
-    },
-    {
-      "default": "",
-      "description": "Id",
-      "enum": null,
-      "key": "vision.cameras[].id",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string"
-    },
-    {
-      "default": "tap",
-      "description": "Kind",
-      "enum": null,
-      "key": "vision.cameras[].kind",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string"
-    },
-    {
-      "default": null,
-      "description": "Tap Socket",
-      "enum": null,
-      "key": "vision.cameras[].tap_socket",
-      "maximum": null,
-      "minimum": null,
-      "secret": false,
-      "type": "string|null"
     },
     {
       "default": 0.5,

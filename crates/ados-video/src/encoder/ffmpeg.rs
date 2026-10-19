@@ -48,9 +48,17 @@ pub(super) fn build_ffmpeg_command(
         // Raw frames the vision engine already captured: no device to probe
         // and nothing to demux, so the input is fully described up front.
         cmd.extend(
-            ["-fflags", "nobuffer", "-flags", "low_delay", "-f", "rawvideo", "-pix_fmt"]
-                .iter()
-                .map(|s| s.to_string()),
+            [
+                "-fflags",
+                "nobuffer",
+                "-flags",
+                "low_delay",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
         );
         cmd.push(crate::framebus_input::ffmpeg_pix_fmt(fb.raw.format).to_string());
         cmd.push("-video_size".into());

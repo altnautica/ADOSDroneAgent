@@ -34,7 +34,6 @@ fn default_shm_budget_mb() -> u32 {
     (crate::ring::DEFAULT_RING_BUDGET_BYTES / (1024 * 1024)) as u32
 }
 
-
 fn default_detector_dim() -> u32 {
     640
 }
@@ -443,7 +442,6 @@ impl VisionConfig {
         )
     }
 
-
     /// True when the resolved profile is the ground station (the engine exits).
     pub fn is_ground_station(&self) -> bool {
         matches!(
@@ -525,7 +523,10 @@ cameras:
         assert_eq!(c.cameras.len(), 1);
         assert_eq!(c.cameras[0].id, "cam_fl");
         assert_eq!(c.cameras[0].trigger_channel, Some(1));
-        assert_eq!(c.tap_sink.as_deref(), Some("/run/ados/vision-tap-main.sock"));
+        assert_eq!(
+            c.tap_sink.as_deref(),
+            Some("/run/ados/vision-tap-main.sock")
+        );
         assert!(c.simulation);
         assert_eq!(c.vision_socket_path(), "/tmp/run/vision.sock");
         assert_eq!(c.rknn_socket_path(), "/tmp/run/vision-rknn.sock");

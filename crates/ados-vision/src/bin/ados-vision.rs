@@ -194,8 +194,11 @@ async fn main() {
     // Triggered cameras join their frames to the sensor bus trigger records;
     // on a simulated node each frame's simulator time is a clock pair.
     let mut factory = SourceFactory::default();
-    let trigger_task = needs_triggers(&cameras)
-        .then(|| factory.triggers.spawn_subscriber(ados_sensorbus::socket_path()));
+    let trigger_task = needs_triggers(&cameras).then(|| {
+        factory
+            .triggers
+            .spawn_subscriber(ados_sensorbus::socket_path())
+    });
     if config.simulation {
         factory.sim = SimClock::publishing(ados_sensorbus::Publisher::spawn(
             ados_sensorbus::socket_path(),

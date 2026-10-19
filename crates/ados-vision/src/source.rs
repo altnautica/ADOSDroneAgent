@@ -150,8 +150,8 @@ pub trait FrameSource: Send {
 /// holds this enum instead of a `Box<dyn FrameSource>` and dispatches per call.
 pub enum AnySource {
     Tap(TapSource),
-    V4l2(V4l2Source),
-    Rtsp(RtspSource),
+    V4l2(Box<V4l2Source>),
+    Rtsp(Box<RtspSource>),
 }
 
 impl FrameSource for AnySource {

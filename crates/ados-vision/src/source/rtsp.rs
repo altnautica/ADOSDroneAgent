@@ -202,9 +202,22 @@ impl RtspSource {
     fn spawn(&self) -> Result<Running> {
         let s = &self.settings;
         let mut demux = Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-rtsp_transport", "tcp"])
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-rtsp_transport",
+                "tcp",
+            ])
             .args(["-fflags", "nobuffer", "-flags", "low_delay", "-i", &s.url])
-            .args(["-map", "0:v:0", "-c:v", "copy", "-bsf:v", "h264_mp4toannexb"])
+            .args([
+                "-map",
+                "0:v:0",
+                "-c:v",
+                "copy",
+                "-bsf:v",
+                "h264_mp4toannexb",
+            ])
             .args(["-f", "h264", "-"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -214,16 +227,35 @@ impl RtspSource {
         let scale = format!("scale={}:{}", s.width, s.height);
         let mut decode = Command::new("ffmpeg")
             .args(["-hide_banner", "-loglevel", "error", "-fflags", "nobuffer"])
-            .args(["-flags", "low_delay", "-f", "h264", "-i", "-", "-an", "-vf", &scale])
+            .args([
+                "-flags",
+                "low_delay",
+                "-f",
+                "h264",
+                "-i",
+                "-",
+                "-an",
+                "-vf",
+                &scale,
+            ])
             .args(["-pix_fmt", ffmpeg_pix_fmt(s.format), "-f", "rawvideo", "-"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        let mut annexb = demux.stdout.take().ok_or_else(|| anyhow!("demuxer has no stdout"))?;
-        let mut sink = decode.stdin.take().ok_or_else(|| anyhow!("decoder has no stdin"))?;
-        let frames = decode.stdout.take().ok_or_else(|| anyhow!("decoder has no stdout"))?;
+        let mut annexb = demux
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("demuxer has no stdout"))?;
+        let mut sink = decode
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("decoder has no stdin"))?;
+        let frames = decode
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("decoder has no stdout"))?;
         let pending = Arc::new(Mutex::new(VecDeque::new()));
         let queue = pending.clone();
         let camera = self.camera_id.clone();
@@ -273,7 +305,10 @@ impl FrameSource for RtspSource {
             self.running = Some(self.spawn()?);
         }
         let running = self.running.as_mut().expect("spawned above");
-        let bytes = self.settings.format.frame_bytes(self.settings.width, self.settings.height);
+        let bytes = self
+            .settings
+            .format
+            .frame_bytes(self.settings.width, self.settings.height);
         let mut data = self.pool.take(bytes);
         if let Err(e) = running.frames.read_exact(&mut data).await {
             self.running = None;

@@ -285,7 +285,10 @@ fn persist_video_cameras_writes_the_leg_list_and_preserves_the_rest() {
     assert_eq!(outcome, CamerasPersist::Written);
     let reloaded = try_load_config_mapping(&cfg).unwrap();
     let video = reloaded.get("video").and_then(Value::as_mapping).unwrap();
-    let legs = reloaded.get("cameras").and_then(Value::as_sequence).unwrap();
+    let legs = reloaded
+        .get("cameras")
+        .and_then(Value::as_sequence)
+        .unwrap();
     assert_eq!(legs.len(), 2);
     let first = legs[0].as_mapping().unwrap();
     assert_eq!(first.get("id").unwrap(), &Value::String("main".into()));

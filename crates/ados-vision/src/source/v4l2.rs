@@ -46,7 +46,9 @@ const HANDOFF: usize = 2;
 
 /// Exposure in ns from a `V4L2_CID_EXPOSURE_ABSOLUTE` value (100 µs units).
 pub fn exposure_ns_from_absolute(value: i64) -> Option<u32> {
-    u32::try_from(value.checked_mul(100_000)?).ok().filter(|ns| *ns > 0)
+    u32::try_from(value.checked_mul(100_000)?)
+        .ok()
+        .filter(|ns| *ns > 0)
 }
 
 /// The descriptor timing of a dequeued buffer.
@@ -257,7 +259,7 @@ impl FrameSource for V4l2Source {
 /// Exposure in ns read back from the device, polled every
 /// [`EXPOSURE_POLL_FRAMES`] frames.
 pub(crate) fn poll_due(frame: u64) -> bool {
-    frame % EXPOSURE_POLL_FRAMES == 0
+    frame.is_multiple_of(EXPOSURE_POLL_FRAMES)
 }
 
 #[cfg(target_os = "linux")]

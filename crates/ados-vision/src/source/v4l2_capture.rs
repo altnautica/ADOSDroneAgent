@@ -28,7 +28,9 @@ pub(super) fn row_bytes(format: FrameFormat, width: u32) -> usize {
     match format {
         FrameFormat::Rgb24 => w * 3,
         FrameFormat::Gray16 | FrameFormat::BayerRggb16 => w * 2,
-        FrameFormat::Gray8 | FrameFormat::BayerRggb8 | FrameFormat::Nv12 | FrameFormat::Yuv420p => w,
+        FrameFormat::Gray8 | FrameFormat::BayerRggb8 | FrameFormat::Nv12 | FrameFormat::Yuv420p => {
+            w
+        }
     }
 }
 
@@ -167,7 +169,11 @@ fn buffer(layout: &Layout, index: u32, planes: &mut [sys::Plane; 1]) -> sys::Buf
 }
 
 /// Offset, length and used bytes of a buffer's (only) plane.
-fn plane_of(layout: &Layout, b: &sys::Buffer, planes: &[sys::Plane; 1]) -> (u32, usize, usize, usize) {
+fn plane_of(
+    layout: &Layout,
+    b: &sys::Buffer,
+    planes: &[sys::Plane; 1],
+) -> (u32, usize, usize, usize) {
     if layout.buf_type == sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE {
         let p = planes[0];
         (
@@ -204,7 +210,10 @@ impl Node {
         sys::xioctl(fd, sys::VIDIOC_QUERYCAP, &mut cap)?;
         let caps = cap.node_caps();
         let buf_type = buffer_type(caps).ok_or_else(|| {
-            invalid(format!("{} is not a streaming capture node (caps {caps:#x})", s.device))
+            invalid(format!(
+                "{} is not a streaming capture node (caps {caps:#x})",
+                s.device
+            ))
         })?;
         let mut f = format_request(buf_type, s);
         sys::xioctl(fd, sys::VIDIOC_S_FMT, &mut f)?;
@@ -252,7 +261,11 @@ impl Node {
             sys::xioctl(fd, sys::VIDIOC_QUERYBUF, &mut b)?;
             let (offset, len, _, _) = plane_of(&layout, &b, &planes);
             maps.push(sys::Mapping::map(fd, len, offset)?);
-            sys::xioctl(fd, sys::VIDIOC_QBUF, &mut buffer(&layout, index, &mut planes))?;
+            sys::xioctl(
+                fd,
+                sys::VIDIOC_QBUF,
+                &mut buffer(&layout, index, &mut planes),
+            )?;
         }
         sys::stream(fd, true, buf_type)?;
         Ok(Self { file, layout, maps })
@@ -310,7 +323,11 @@ pub(super) fn run(
         let (sequence, flags, ts) = (b.sequence, b.flags, b.timestamp);
         // Hand the buffer back to the driver before the frame leaves.
         let index = b.index;
-        sys::xioctl(fd, sys::VIDIOC_QBUF, &mut buffer(&node.layout, index, &mut planes))?;
+        sys::xioctl(
+            fd,
+            sys::VIDIOC_QBUF,
+            &mut buffer(&node.layout, index, &mut planes),
+        )?;
         if !copied {
             if !short_logged {
                 tracing::warn!(device = %s.device, used, frame_bytes, "v4l2_short_buffer_dropped");

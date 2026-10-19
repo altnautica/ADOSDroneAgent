@@ -11,6 +11,15 @@
     },
     {
       "category": "data_network",
+      "description": "Lets the plugin read the capture-storage state and write capture session directories under the agent's capture root, and raise the capture-active marker that switches the flight controller to its capture sensor rates. The agent's storage janitor still owns the budget, admission and eviction.",
+      "enforced": true,
+      "id": "capture.storage.write",
+      "label": "Write capture sessions to the capture storage volume",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
       "description": "Lets the plugin publish small messages (at most 64 KiB each) on its own cloud stream through the agent's cloud relay, so a signed-in operator can receive them off the local network. Publishing detections onto the shared detection topic additionally needs vision.detection.publish.",
       "enforced": true,
       "id": "cloud.publish",
@@ -483,6 +492,15 @@
       "enforced": false,
       "id": "sensor.payload.register",
       "label": "Register a payload device as a system sensor",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
+      "category": "data_network",
+      "description": "Lets the plugin subscribe to the agent's sensor bus: timestamped IMU batches, raw GNSS receiver bytes, camera trigger records, barometer, magnetometer and clock samples, plus the clock state file. Used by capture and odometry plugins that need every sample on the host timebase.",
+      "enforced": true,
+      "id": "sensor.stream.read",
+      "label": "Read the sensor bus (IMU, GNSS, triggers, clock)",
       "risk": "medium",
       "side": "agent"
     },

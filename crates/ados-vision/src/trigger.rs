@@ -59,7 +59,11 @@ impl TriggerFeed {
     }
 
     /// Run `f` over the records of one stream (empty when none arrived yet).
-    pub fn with_stream<R>(&self, stream: &(Origin, String), f: impl FnOnce(&VecDeque<TriggerRecord>) -> R) -> R {
+    pub fn with_stream<R>(
+        &self,
+        stream: &(Origin, String),
+        f: impl FnOnce(&VecDeque<TriggerRecord>) -> R,
+    ) -> R {
         let streams = self.streams.lock().expect("trigger feed lock");
         match streams.get(stream) {
             Some(ring) => f(ring),
@@ -185,8 +189,9 @@ impl CameraTriggers {
     /// Join frame `frame_seq` captured around `frame_ns` to its trigger record.
     pub fn join(&mut self, frame_seq: u64, frame_ns: u64) -> Option<TriggerRecord> {
         let joiner = &mut self.joiner;
-        self.feed
-            .with_stream(&self.stream, |records| joiner.join(records, frame_seq, frame_ns))
+        self.feed.with_stream(&self.stream, |records| {
+            joiner.join(records, frame_seq, frame_ns)
+        })
     }
 }
 

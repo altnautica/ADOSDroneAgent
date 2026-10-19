@@ -89,7 +89,10 @@ mod layouts {
     #[test]
     fn the_capture_api_follows_the_node_capabilities() {
         let s = sys::CAP_STREAMING;
-        assert_eq!(buffer_type(s | sys::CAP_VIDEO_CAPTURE), Some(sys::BUF_TYPE_VIDEO_CAPTURE));
+        assert_eq!(
+            buffer_type(s | sys::CAP_VIDEO_CAPTURE),
+            Some(sys::BUF_TYPE_VIDEO_CAPTURE)
+        );
         assert_eq!(
             buffer_type(s | sys::CAP_VIDEO_CAPTURE_MPLANE),
             Some(sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE)
@@ -101,9 +104,8 @@ mod layouts {
     #[test]
     fn a_single_planar_request_reads_back_its_layout() {
         let mut f = format_request(sys::BUF_TYPE_VIDEO_CAPTURE, &settings(FrameFormat::Gray8));
-        // The driver pads rows to 1344 bytes.
-        // SAFETY: test access to the POD union the request filled.
-        unsafe { f.fmt.pix.bytesperline = 1344 };
+        // The driver pads rows to 1344 bytes (a union field write is safe).
+        f.fmt.pix.bytesperline = 1344;
         let l = accepted_layout(&f).unwrap();
         assert_eq!((l.width, l.height, l.stride), (1280, 800, 1344));
         assert_eq!(l.pixelformat, sys::fourcc_code(*b"GREY"));
@@ -125,8 +127,7 @@ mod layouts {
         assert_eq!((l.width, l.height, l.stride), (1280, 800, 1280));
         assert_eq!(l.pixelformat, sys::fourcc_code(*b"NV12"));
         // NV12M: the chroma plane is separate.
-        // SAFETY: as above.
-        unsafe { f.fmt.pix_mp.num_planes = 2 };
+        f.fmt.pix_mp.num_planes = 2;
         assert!(accepted_layout(&f).is_err());
     }
 

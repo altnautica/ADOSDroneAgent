@@ -45,7 +45,10 @@ fn a_framebus_source_is_read_as_raw_video_from_its_pipe() {
     assert!(!has_pair(&cmd, "-f", "v4l2"), "{cmd:?}");
     assert!(!cmd.iter().any(|t| t.contains("framebus://")), "{cmd:?}");
     assert!(has_pair(&cmd, "-c:v", "libx264"), "{cmd:?}");
-    assert!(!cmd.iter().any(|t| t == "-s"), "no rescale at the captured size: {cmd:?}");
+    assert!(
+        !cmd.iter().any(|t| t == "-s"),
+        "no rescale at the captured size: {cmd:?}"
+    );
 }
 
 #[test]
@@ -64,8 +67,14 @@ fn an_attention_switch_rescales_instead_of_misreading_the_pipe() {
     let line = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rk_mpp())
         .unwrap()
         .join(" ");
-    assert!(line.contains("rawvideoparse width=1280 height=800"), "{line}");
-    assert!(line.contains("video/x-raw,format=NV12,width=320,height=180"), "{line}");
+    assert!(
+        line.contains("rawvideoparse width=1280 height=800"),
+        "{line}"
+    );
+    assert!(
+        line.contains("video/x-raw,format=NV12,width=320,height=180"),
+        "{line}"
+    );
 }
 
 #[test]
@@ -74,17 +83,26 @@ fn a_framebus_source_takes_the_rockchip_vpu_when_mpp_is_present() {
     let cmd = build_encoder_command(&p, SRC, RTSP_OUT, Some(&framebus_cam()), &rk_mpp()).unwrap();
     assert_eq!(cmd[0], "gst-launch-1.0", "{cmd:?}");
     let line = cmd.join(" ");
-    assert!(line.contains(&format!("filesrc location={}", fifo())), "{line}");
+    assert!(
+        line.contains(&format!("filesrc location={}", fifo())),
+        "{line}"
+    );
     assert!(
         line.contains("rawvideoparse width=1280 height=800 format=rgb framerate=20/1"),
         "{line}"
     );
-    assert!(line.contains("video/x-raw,format=NV12,width=1280,height=800"), "{line}");
+    assert!(
+        line.contains("video/x-raw,format=NV12,width=1280,height=800"),
+        "{line}"
+    );
     assert!(line.contains("mpph264enc"), "{line}");
     assert!(line.contains("rc-mode=vbr"), "{line}");
     assert!(!line.contains("v4l2src"), "{line}");
     assert!(!line.contains("rga"), "{line}");
-    assert_eq!(encoder_label(EncoderKind::Gstreamer, &cmd), "gstreamer-mpph264enc");
+    assert_eq!(
+        encoder_label(EncoderKind::Gstreamer, &cmd),
+        "gstreamer-mpph264enc"
+    );
 }
 
 #[test]
@@ -106,7 +124,10 @@ fn the_forced_software_fallback_leaves_the_vpu() {
     let line = build_encoder_command(&gst, SRC, RTSP_OUT, Some(&framebus_cam()), &rk_mpp())
         .unwrap()
         .join(" ");
-    assert!(line.contains("x264enc") && !line.contains("mpph264enc"), "{line}");
+    assert!(
+        line.contains("x264enc") && !line.contains("mpph264enc"),
+        "{line}"
+    );
 }
 
 #[test]

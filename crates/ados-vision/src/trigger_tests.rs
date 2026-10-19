@@ -23,11 +23,15 @@ fn the_offset_is_learned_from_time_then_followed_by_sequence() {
     let records = hub_records(20);
     let mut j = TriggerJoiner::learning(PERIOD / 2);
     // Frame 0 of the V4L2 stream, stamped 3 ms after the mid of trigger 1005.
-    let first = j.join(&records, 0, 10_000_000_000 + 5 * PERIOD + 3_000_000).unwrap();
+    let first = j
+        .join(&records, 0, 10_000_000_000 + 5 * PERIOD + 3_000_000)
+        .unwrap();
     assert_eq!(first.seq, 1005);
     // Later frames follow the sequence even with a stamp skewed by 20 ms
     // (still inside the tolerance), never snapping to a nearer record.
-    let next = j.join(&records, 3, 10_000_000_000 + 8 * PERIOD + 20_000_000).unwrap();
+    let next = j
+        .join(&records, 3, 10_000_000_000 + 8 * PERIOD + 20_000_000)
+        .unwrap();
     assert_eq!(next.seq, 1008);
     assert_eq!(next.t_mid_ns, 10_000_000_000 + 8 * PERIOD);
 }
@@ -39,7 +43,8 @@ fn a_dropped_frame_does_not_shift_the_match() {
     j.join(&records, 10, 10_000_000_000 + 2 * PERIOD).unwrap();
     // Frames 11 and 12 were dropped by the driver; 13 still maps to 1005.
     assert_eq!(
-        j.join(&records, 13, 10_000_000_000 + 5 * PERIOD).map(|r| r.seq),
+        j.join(&records, 13, 10_000_000_000 + 5 * PERIOD)
+            .map(|r| r.seq),
         Some(1005)
     );
 }
@@ -54,7 +59,8 @@ fn a_disagreeing_match_relearns_the_offset() {
     let got = j.join(&records, 0, 10_000_000_000 + 10 * PERIOD).unwrap();
     assert_eq!(got.seq, 1010);
     assert_eq!(
-        j.join(&records, 1, 10_000_000_000 + 11 * PERIOD).map(|r| r.seq),
+        j.join(&records, 1, 10_000_000_000 + 11 * PERIOD)
+            .map(|r| r.seq),
         Some(1011)
     );
 }
@@ -73,7 +79,10 @@ fn a_simulated_camera_joins_by_sequence_alone() {
     // arrival by the encode and stream latency, far past any tolerance.
     let records: VecDeque<_> = (40..45).map(|s| rec(s, s * PERIOD)).collect();
     let mut j = TriggerJoiner::same_sequence();
-    assert_eq!(j.join(&records, 42, 999 * PERIOD).map(|r| r.t_mid_ns), Some(42 * PERIOD));
+    assert_eq!(
+        j.join(&records, 42, 999 * PERIOD).map(|r| r.t_mid_ns),
+        Some(42 * PERIOD)
+    );
     assert!(j.join(&records, 50, 50 * PERIOD).is_none());
     // A miss never re-learns a fixed offset.
     assert_eq!(j.join(&records, 43, 0).map(|r| r.seq), Some(43));
