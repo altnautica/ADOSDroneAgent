@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::lane::{AnyTransport, Lane};
 use super::{beacon_interval_s, now_at, utc_trusted};
+use crate::band::{self, ModuleCaps};
 use crate::config::LoraConfig;
 use crate::governor::power::{conducted_cap_dbm, pick_step, Antenna};
 use crate::governor::{max_window_s, Governor, Setup};
@@ -129,13 +130,48 @@ fn lane(
     })
 }
 
-/// The plan clamp as a conducted step on the Meshtastic node, for its
-/// `tx_power`.
-fn meshtastic_power(plan: &Plan, channel: f64, caps_steps: &[i8], bw: u32, ant: &Antenna) -> i8 {
-    plan.sub_band_for(channel, bw)
-        .and_then(|s| s.power)
-        .and_then(|rule| pick_step(caps_steps, conducted_cap_dbm(&rule, ant, bw), 0))
-        .unwrap_or(0)
+/// The Meshtastic node's transmit slot under `plan`: the accounted channel and
+/// the plan clamp as a conducted step for its `tx_power`. `None` when the node
+/// cannot transmit inside the plan (no preset, no overlapping sub-band, a
+/// plan it cannot meet, or no power step under the clamp): the node is then
+/// configured with transmit off.
+pub fn meshtastic_slot(
+    plan: &Plan,
+    preset: Option<&'static str>,
+    caps: &ModuleCaps,
+    bw: u32,
+    ant: &Antenna,
+) -> Option<(&'static str, f64, i8)> {
+    let preset = preset?;
+    if !band::supported(plan, caps, bw) {
+        return None;
+    }
+    let f = meshtastic_channel(plan, preset)?;
+    let rule = plan.sub_band_for(f, bw)?.power?;
+    let step = pick_step(&caps.power_steps_dbm, conducted_cap_dbm(&rule, ant, bw), 0)?;
+    Some((preset, f, step))
+}
+
+/// Configure a Meshtastic node for the resolved plan; returns the accounted
+/// channel, or `None` with the node's transmit turned off.
+async fn apply_meshtastic(
+    m: &mut Meshtastic,
+    resolved: Option<Resolved>,
+    ant: &Antenna,
+) -> io::Result<Option<f64>> {
+    let slot = resolved
+        .and_then(|r| meshtastic_slot(r.plan, r.plan.meshtastic, m.caps(), m.modem().bw_khz, ant));
+    match slot {
+        Some((preset, f, step)) => {
+            m.apply_plan(Some(preset), step).await?;
+            Ok(Some(f))
+        }
+        None => {
+            tracing::warn!("lora_meshtastic_tx_off: the node cannot transmit inside the plan");
+            m.apply_plan(None, 0).await?;
+            Ok(None)
+        }
+    }
 }
 
 /// Read the config and build the lane; `Ok(None)` when it is not enabled.
@@ -150,6 +186,8 @@ pub async fn build(config_path: &Path) -> io::Result<Option<Built>> {
     let resolved = regions::resolve(cfg.region.as_deref(), country);
     let kind = TransportKind::parse(&cfg.transport)
         .ok_or_else(|| invalid(format!("unknown lora.transport {:?}", cfg.transport)))?;
+    crate::validate::check_strapped_e22(&cfg.transport, cfg.e22.strapped(), cfg.freq_mhz)
+        .map_err(invalid)?;
     let origin = Instant::now();
     let origin_mono_ns = monotonic_ns()?;
     let now = now_at(origin, origin_mono_ns, utc_trusted());
@@ -167,13 +205,7 @@ pub async fn build(config_path: &Path) -> io::Result<Option<Built>> {
                 .await?;
         }
         AnyTransport::Meshtastic(m) => {
-            freq = resolved
-                .zip(preset)
-                .and_then(|(r, p)| meshtastic_channel(r.plan, p));
-            let power = resolved.zip(freq).map_or(0, |(r, f)| {
-                meshtastic_power(r.plan, f, &m.caps().power_steps_dbm, m.modem().bw_khz, &ant)
-            });
-            m.apply_plan(preset, power).await?;
+            freq = apply_meshtastic(m, resolved, &ant).await?;
         }
         AnyTransport::Loopback(_) => {}
     }
@@ -199,39 +231,23 @@ pub async fn build(config_path: &Path) -> io::Result<Option<Built>> {
         region_preset: preset,
     };
     let bridge = if cfg.meshtastic.enabled && kind != TransportKind::Meshtastic {
-        match (resolved, preset) {
-            (Some(r), Some(p)) => match Meshtastic::open(&cfg).await {
-                Ok(mut m) => {
-                    let f = meshtastic_channel(r.plan, p);
-                    let power = f.map_or(0, |f| {
-                        meshtastic_power(
-                            r.plan,
-                            f,
-                            &m.caps().power_steps_dbm,
-                            m.modem().bw_khz,
-                            &ant,
-                        )
-                    });
-                    m.apply_plan(Some(p), power).await?;
-                    mesh_state.connected = true;
-                    let path =
-                        PathBuf::from(&cfg.ledger_path).with_file_name("airtime-meshtastic.jsonl");
-                    Some(lane(
-                        &cfg,
-                        AnyTransport::Meshtastic(Box::new(m)),
-                        resolved,
-                        f,
-                        &path,
-                        now,
-                    )?)
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "lora_meshtastic_bridge_unavailable");
-                    None
-                }
-            },
-            _ => {
-                tracing::info!("lora_meshtastic_bridge_disabled_for_region");
+        match Meshtastic::open(&cfg).await {
+            Ok(mut m) => {
+                let f = apply_meshtastic(&mut m, resolved, &ant).await?;
+                mesh_state.connected = true;
+                let path =
+                    PathBuf::from(&cfg.ledger_path).with_file_name("airtime-meshtastic.jsonl");
+                Some(lane(
+                    &cfg,
+                    AnyTransport::Meshtastic(Box::new(m)),
+                    resolved,
+                    f,
+                    &path,
+                    now,
+                )?)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "lora_meshtastic_bridge_unavailable");
                 None
             }
         }
@@ -240,13 +256,12 @@ pub async fn build(config_path: &Path) -> io::Result<Option<Built>> {
     };
 
     let gov = &primary.governor;
-    let charge = gov.charge_us(crate::validate::BEACON_FRAME_LEN);
     let budget_s = gov.current_channel().and_then(|f| {
         let plan = gov.plan()?;
         let d = plan.sub_band_for(f, gov.setup().modem.bw_khz)?.duty?;
         Some(d.budget_us() as f64 / 1e6)
     });
-    let interval_s = beacon_interval_s(cfg.beacon_interval_s, charge, budget_s);
+    let interval_s = beacon_interval_s(cfg.beacon_interval_s, primary.cycle_charge_us()?, budget_s);
     let lane_state = LaneState {
         transport: kind.as_str(),
         module_band: primary.transport.caps().band.clone(),
@@ -280,5 +295,41 @@ mod tests {
         let f = meshtastic_channel(by_code("MY").unwrap(), "MY_919").unwrap();
         assert!((f - 923.5).abs() < 1e-9);
         assert!(meshtastic_channel(by_code("IN").unwrap(), "NONE").is_none());
+    }
+
+    #[test]
+    fn the_meshtastic_node_transmits_only_when_a_step_fits_inside_the_plan() {
+        let mesh = ModuleCaps::meshtastic_863_928();
+        let dipole = Antenna {
+            gain_dbi: 2.15,
+            cable_loss_db: 0.0,
+        };
+        let india = by_code("IN").unwrap();
+        // 25 mW ERP with a dipole: 13 dBm conducted.
+        assert_eq!(
+            meshtastic_slot(india, india.meshtastic, &mesh, 125, &dipole),
+            Some(("IN", 866.0, 13))
+        );
+        // A 20 dBi antenna leaves no 1 dB step under the clamp: transmit off.
+        let big = Antenna {
+            gain_dbi: 20.0,
+            cable_loss_db: 0.0,
+        };
+        assert_eq!(
+            meshtastic_slot(india, india.meshtastic, &mesh, 125, &big),
+            None
+        );
+        // Japan needs a listen the host cannot take through the node.
+        let jp = by_code("JP").unwrap();
+        assert_eq!(
+            meshtastic_slot(jp, jp.meshtastic, &mesh, 125, &dipole),
+            None
+        );
+        // No preset for the plan.
+        let vn = by_code("VN").unwrap();
+        assert_eq!(
+            meshtastic_slot(vn, vn.meshtastic, &mesh, 125, &dipole),
+            None
+        );
     }
 }

@@ -395,3 +395,37 @@ fn from_radio_round_trips() {
     put_uint(&mut want, 3, 42);
     assert_eq!(msg::want_config(42), want);
 }
+
+#[tokio::test]
+async fn a_beacon_is_charged_on_the_packet_the_node_radiates() {
+    let (mesh, _node) = connect().await;
+    let beacon = Frame {
+        node_id: 1,
+        kind: Kind::Beacon,
+        payload: Beacon {
+            position: Some((12.971_6, 77.594_6)),
+            alt_m: Some(920.0),
+            battery_pct: Some(81),
+            mode: "AUTO".into(),
+        }
+        .to_payload(),
+    }
+    .encode()
+    .unwrap();
+    // 16 header + Data{portnum 2, payload 2 + Position 13} + 8 firmware reserve.
+    assert_eq!(mesh.on_air_len(&beacon).unwrap(), Some(41));
+    assert!(mesh.on_air_len(&beacon).unwrap().unwrap() > beacon.len());
+    let status = Frame {
+        node_id: 1,
+        kind: Kind::Status,
+        payload: Status {
+            about_node: 2,
+            rssi_dbm: -90,
+            snr_db: 3.0,
+        }
+        .to_payload(),
+    }
+    .encode()
+    .unwrap();
+    assert_eq!(mesh.on_air_len(&status).unwrap(), None);
+}

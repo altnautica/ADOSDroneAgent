@@ -14,8 +14,10 @@
 //! - otherwise it is treated as having occurred at service start.
 //!
 //! A corrupt last line (a torn write) is dropped. Any other corrupt line moves
-//! the file aside as `.bad` and every duty rule starts exhausted for one full
-//! window.
+//! the file aside as `.bad`, and a fsync'd `reset` entry starts every duty
+//! rule exhausted for one full window; the entry is aged like a charge, so a
+//! reload, restart or reboot inside the window keeps the lockout. Every
+//! rename is followed by a directory fsync.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -40,6 +42,10 @@ pub struct Now {
 pub enum EntryKind {
     Tx,
     Seen,
+    /// The ledger was found corrupt: every duty rule is exhausted for
+    /// `window_s` from this entry's time. Persisted, so a reload or restart
+    /// inside the window cannot restore the budget.
+    Reset,
 }
 
 /// One ledger line.
@@ -58,6 +64,25 @@ pub struct Entry {
     pub airtime_us: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_s: Option<u32>,
+}
+
+impl Entry {
+    fn marker(kind: EntryKind, boot_id: &str, now: Now) -> Self {
+        Entry {
+            kind,
+            boot_id: boot_id.to_string(),
+            t_mono_ns: now.mono_ns,
+            t_utc_ms: now.utc_ms,
+            utc_trusted: now.utc_trusted,
+            sub_band: None,
+            channel_mhz: None,
+            airtime_us: 0,
+            plan_id: None,
+            window_s: None,
+        }
+    }
 }
 
 /// A charged transmission placed on this boot's monotonic timeline.
@@ -85,6 +110,8 @@ pub struct Ledger {
     file: Option<File>,
     boot_id: String,
     spends: Vec<Spend>,
+    /// Reset entries still in force, kept through compaction.
+    resets: Vec<Spend>,
     /// The newest heartbeat per boot, kept through compaction.
     seen: HashMap<String, Entry>,
     exhausted_until_ns: Option<i64>,
@@ -130,6 +157,7 @@ impl Ledger {
             file: None,
             boot_id: boot_id.to_string(),
             spends: Vec::new(),
+            resets: Vec::new(),
             seen: HashMap::new(),
             exhausted_until_ns: None,
         };
@@ -138,22 +166,46 @@ impl Ledger {
             bad.push(".bad");
             std::fs::rename(path, &bad)?;
             report.reset = true;
-            ledger.exhausted_until_ns = Some(now.mono_ns + i64::from(max_window_s) * 1000 * MS);
             entries.clear();
         }
-        ledger.place(entries, now, &mut report);
-        if report.torn_tail {
-            // Rewrite without the torn line so the next append starts clean.
+        let adopted = ledger.place(entries, now, &mut report);
+        if report.torn_tail || adopted {
+            // Rewrite without the torn line, and with previous-boot entries
+            // re-stamped onto this boot's timeline.
             ledger.rewrite()?;
         }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         ledger.file = Some(OpenOptions::new().create(true).append(true).open(path)?);
+        if reset {
+            let mut e = Entry::marker(EntryKind::Reset, boot_id, now);
+            e.window_s = Some(max_window_s);
+            ledger.append(&e)?;
+            sync_dir(path)?;
+            ledger.note_reset(now.mono_ns, e);
+        }
         Ok((ledger, report))
     }
 
-    fn place(&mut self, entries: Vec<Entry>, now: Now, report: &mut LoadReport) {
+    fn note_reset(&mut self, at_ns: i64, e: Entry) {
+        let until = at_ns + i64::from(e.window_s.unwrap_or(0)) * 1000 * MS;
+        self.exhausted_until_ns = Some(self.exhausted_until_ns.map_or(until, |u| u.max(until)));
+        self.resets.push(Spend {
+            at_ns,
+            channel_mhz: 0.0,
+            airtime_us: 0,
+            entry: e,
+        });
+    }
+
+    /// Place every entry on this boot's monotonic timeline. An entry from a
+    /// previous boot is re-stamped as this boot's at the time it was placed
+    /// (`true` when any was), so a later reopen in this boot keeps it where it
+    /// is rather than placing it at that service start again (which would
+    /// keep it in the window for as long as the service restarts).
+    fn place(&mut self, entries: Vec<Entry>, now: Now, report: &mut LoadReport) -> bool {
+        let mut adopted = false;
         // The latest trusted wall-clock instant each previous boot is known
         // to have been alive at.
         let mut alive: HashMap<&str, i64> = HashMap::new();
@@ -175,11 +227,21 @@ impl Ledger {
             } else {
                 now.mono_ns
             };
+            let mut e = e.clone();
+            if e.boot_id != self.boot_id {
+                e.boot_id = self.boot_id.clone();
+                e.t_mono_ns = at_ns;
+                adopted = true;
+            }
+            if e.kind == EntryKind::Reset {
+                self.note_reset(at_ns, e);
+                continue;
+            }
             spends.push(Spend {
                 at_ns,
                 channel_mhz: e.channel_mhz.unwrap_or(0.0),
                 airtime_us: e.airtime_us,
-                entry: e.clone(),
+                entry: e,
             });
         }
         for e in entries {
@@ -196,6 +258,7 @@ impl Ledger {
         report.entries = spends.len();
         spends.sort_by_key(|s| s.at_ns);
         self.spends = spends;
+        adopted
     }
 
     fn append(&mut self, e: &Entry) -> io::Result<()> {
@@ -218,17 +281,11 @@ impl Ledger {
         airtime_us: u64,
         plan_id: &str,
     ) -> io::Result<()> {
-        let e = Entry {
-            kind: EntryKind::Tx,
-            boot_id: self.boot_id.clone(),
-            t_mono_ns: now.mono_ns,
-            t_utc_ms: now.utc_ms,
-            utc_trusted: now.utc_trusted,
-            sub_band: Some(sub_band.to_string()),
-            channel_mhz: Some(channel_mhz),
-            airtime_us,
-            plan_id: Some(plan_id.to_string()),
-        };
+        let mut e = Entry::marker(EntryKind::Tx, &self.boot_id, now);
+        e.sub_band = Some(sub_band.to_string());
+        e.channel_mhz = Some(channel_mhz);
+        e.airtime_us = airtime_us;
+        e.plan_id = Some(plan_id.to_string());
         self.append(&e)?;
         self.spends.push(Spend {
             at_ns: now.mono_ns,
@@ -241,17 +298,7 @@ impl Ledger {
 
     /// Persist a `seen` heartbeat.
     pub fn heartbeat(&mut self, now: Now) -> io::Result<()> {
-        let e = Entry {
-            kind: EntryKind::Seen,
-            boot_id: self.boot_id.clone(),
-            t_mono_ns: now.mono_ns,
-            t_utc_ms: now.utc_ms,
-            utc_trusted: now.utc_trusted,
-            sub_band: None,
-            channel_mhz: None,
-            airtime_us: 0,
-            plan_id: None,
-        };
+        let e = Entry::marker(EntryKind::Seen, &self.boot_id, now);
         self.append(&e)?;
         self.seen.insert(self.boot_id.clone(), e);
         Ok(())
@@ -278,10 +325,14 @@ impl Ledger {
         self.exhausted_until_ns
     }
 
-    /// Drop spends older than `max_window_s` and rewrite the file atomically.
+    /// Drop spends older than `max_window_s` and resets no longer in force,
+    /// and rewrite the file atomically.
     pub fn compact(&mut self, now: Now, max_window_s: u32) -> io::Result<()> {
         let cutoff = now.mono_ns - i64::from(max_window_s) * 1000 * MS;
         self.spends.retain(|s| s.at_ns > cutoff);
+        self.resets.retain(|r| {
+            r.at_ns + i64::from(r.entry.window_s.unwrap_or(0)) * 1000 * MS > now.mono_ns
+        });
         self.rewrite()?;
         self.file = Some(OpenOptions::new().append(true).open(&self.path)?);
         Ok(())
@@ -296,15 +347,30 @@ impl Ledger {
         let tmp = PathBuf::from(tmp);
         {
             let mut f = File::create(&tmp)?;
-            let seen = self.seen.values();
-            for e in seen.chain(self.spends.iter().map(|s| &s.entry)) {
+            let kept = self
+                .resets
+                .iter()
+                .chain(self.spends.iter())
+                .map(|s| &s.entry);
+            for e in self.seen.values().chain(kept) {
                 let mut line = serde_json::to_vec(e).map_err(io::Error::other)?;
                 line.push(b'\n');
                 f.write_all(&line)?;
             }
             f.sync_all()?;
         }
-        std::fs::rename(&tmp, &self.path)
+        std::fs::rename(&tmp, &self.path)?;
+        // The rename is durable only once the directory entry is.
+        sync_dir(&self.path)
+    }
+}
+
+/// fsync the directory holding `path`, so a rename or create in it survives a
+/// power loss.
+fn sync_dir(path: &Path) -> io::Result<()> {
+    match path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        Some(dir) => File::open(dir)?.sync_all(),
+        None => Ok(()),
     }
 }
 

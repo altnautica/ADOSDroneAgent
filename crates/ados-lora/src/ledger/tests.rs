@@ -131,3 +131,57 @@ fn compaction_drops_spends_older_than_the_window() {
     let (l, _) = Ledger::open(&p, "boot-a", now(4002, 4002, false), 3600).unwrap();
     assert_eq!(l.spent_in(0.0, 1000.0, 0), 5);
 }
+
+#[test]
+fn the_corrupt_ledger_lockout_survives_a_reload_and_a_reboot() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("airtime.jsonl");
+    std::fs::write(&p, "garbage\n{\"kind\":\"seen\",\"boot_id\":\"a\",\"t_mono_ns\":1,\"t_utc_ms\":1,\"utc_trusted\":false}\n").unwrap();
+    let (l, report) = Ledger::open(&p, "boot-a", now(100, 100, false), 3600).unwrap();
+    assert!(report.reset);
+    drop(l);
+    // A SIGHUP reload in the same boot keeps the lockout end.
+    let (l, report) = Ledger::open(&p, "boot-a", now(200, 200, false), 3600).unwrap();
+    assert!(!report.reset);
+    assert_eq!(l.exhausted_until_ns(), Some(3700 * S));
+    drop(l);
+    // Compaction inside the window keeps the reset entry.
+    let (mut l, _) = Ledger::open(&p, "boot-a", now(300, 300, false), 3600).unwrap();
+    l.compact(now(300, 300, false), 3600).unwrap();
+    drop(l);
+    // A reboot with no trusted clock counts the reset from service start.
+    let (l, _) = Ledger::open(&p, "boot-b", now(10, 400, false), 3600).unwrap();
+    assert_eq!(l.exhausted_until_ns(), Some(3610 * S));
+    drop(l);
+    // Once the window has passed, compaction drops it.
+    let (mut l, _) = Ledger::open(&p, "boot-b", now(4000, 4400, false), 3600).unwrap();
+    l.compact(now(4000, 4400, false), 3600).unwrap();
+    drop(l);
+    let (l, _) = Ledger::open(&p, "boot-b", now(4001, 4401, false), 3600).unwrap();
+    assert_eq!(l.exhausted_until_ns(), None);
+}
+
+#[test]
+fn a_previous_boot_spend_ages_out_across_service_restarts() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("airtime.jsonl");
+    let (mut l, _) = Ledger::open(&p, "boot-a", now(5_000, 9_000, false), 3600).unwrap();
+    l.charge(
+        now(5_000, 9_000, false),
+        866.125,
+        "865.0-867.0",
+        30_000_000,
+        "IN865",
+    )
+    .unwrap();
+    drop(l);
+    // Placed at the first start of the next boot ...
+    let (l, _) = Ledger::open(&p, "boot-b", now(20, 9_100, false), 3600).unwrap();
+    assert_eq!(l.spends()[0].at_ns, 20 * S);
+    drop(l);
+    // ... and kept there by a later restart in that boot, so it leaves the
+    // window one hour later instead of being re-placed at every start.
+    let (l, _) = Ledger::open(&p, "boot-b", now(3_700, 12_800, false), 3600).unwrap();
+    assert_eq!(l.spends()[0].at_ns, 20 * S);
+    assert_eq!(l.spent_in(865.0, 867.0, 3_700 * S - 3_600 * S), 0);
+}

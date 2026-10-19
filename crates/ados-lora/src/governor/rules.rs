@@ -98,7 +98,15 @@ pub fn duty_wait_ns(
     }
     let window = i64::from(rule.window_s) * S;
     let since = now_ns - window;
-    let mut excess = used + airtime_us - budget;
+    let own_used = ledger.spent_in(sb.lo_mhz, sb.hi_mhz, since);
+    let excess = used + airtime_us - budget;
+    if own_used < used {
+        // The radio's own reported utilisation dominates and has no entries to
+        // age out. A rolling figure falls at most as fast as time passes, so
+        // the excess is the shortest possible wait; admit re-checks then.
+        return Some(wait.max(excess as i64 * 1000));
+    }
+    let mut excess = excess;
     let own: Vec<&Spend> = ledger
         .spends()
         .iter()
@@ -111,7 +119,5 @@ pub fn duty_wait_ns(
         }
         excess -= s.airtime_us;
     }
-    // A reported utilisation above the own ledger has no entries to age out:
-    // wait one full window.
     Some(wait.max(window))
 }

@@ -96,6 +96,20 @@ pub trait Transport {
         None
     }
 
+    /// The bytes the radio actually puts on the air for this encoded lane
+    /// frame (what time on air is charged on), or `None` when the transport
+    /// does not radiate it at all.
+    fn on_air_len(&self, frame_bytes: &[u8]) -> io::Result<Option<usize>> {
+        Ok(Some(frame_bytes.len()))
+    }
+
+    /// Bring the radio to the frame's channel and power ahead of the send, so
+    /// listen-before-talk can be taken right before the write. `send` must
+    /// still work without it.
+    async fn prepare(&mut self, _frame: &TxFrame) -> io::Result<()> {
+        Ok(())
+    }
+
     /// One ambient RSSI sample on `channel_mhz`, for listen-before-talk.
     /// `Ok(None)` when the radio cannot measure.
     async fn ambient_rssi_dbm(&mut self, channel_mhz: f64) -> io::Result<Option<i16>>;

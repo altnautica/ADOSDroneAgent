@@ -52,6 +52,12 @@ impl Transport for AnyTransport {
     fn reported_air_util_pct(&self) -> Option<f64> {
         each!(self, t => t.reported_air_util_pct())
     }
+    fn on_air_len(&self, frame_bytes: &[u8]) -> io::Result<Option<usize>> {
+        each!(self, t => t.on_air_len(frame_bytes))
+    }
+    async fn prepare(&mut self, frame: &TxFrame) -> io::Result<()> {
+        each!(self, t => t.prepare(frame).await)
+    }
     async fn ambient_rssi_dbm(&mut self, channel_mhz: f64) -> io::Result<Option<i16>> {
         each!(self, t => t.ambient_rssi_dbm(channel_mhz).await)
     }
@@ -82,6 +88,9 @@ pub struct Lane {
 pub enum TxOutcome {
     Sent,
     Refused(Refusal),
+    /// The transport does not radiate this frame (a Meshtastic bridge drops
+    /// status frames and beacons without a fix); nothing was charged.
+    NotRadiated,
 }
 
 /// A small xorshift for the listen-before-talk back-off.
@@ -102,38 +111,98 @@ impl Lane {
         self.transport.recv().await
     }
 
-    /// Listen before talk on `channel`. `true` when clear within
-    /// [`lbt::MAX_ATTEMPTS`]; each busy listen is recorded.
-    async fn listen(&mut self, rule: &LbtRule, channel: f64) -> io::Result<bool> {
+    /// The longest beacon frame this node sends (a fix, altitude, battery and
+    /// a full-length mode).
+    pub fn max_beacon(&self) -> Frame {
+        let beacon = Beacon {
+            position: Some((-89.999_999_9, -179.999_999_9)),
+            alt_m: Some(-32_000.0),
+            battery_pct: Some(100),
+            mode: "M".repeat(crate::frame::MAX_MODE),
+        };
+        Frame {
+            node_id: self.node_id,
+            kind: Kind::Beacon,
+            payload: beacon.to_payload(),
+        }
+    }
+
+    /// Bytes the radio radiates for the longest beacon.
+    pub fn max_beacon_on_air(&self) -> io::Result<usize> {
+        let bytes = self
+            .max_beacon()
+            .encode()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        Ok(self.transport.on_air_len(&bytes)?.unwrap_or(0))
+    }
+
+    /// Charged airtime of one beacon cycle: the longest beacon plus the share
+    /// of a status frame (one every [`super::STATUS_EVERY`] beacons).
+    pub fn cycle_charge_us(&self) -> io::Result<u64> {
+        let status = Frame {
+            node_id: self.node_id,
+            kind: Kind::Status,
+            payload: Status {
+                about_node: 0,
+                rssi_dbm: 0,
+                snr_db: 0.0,
+            }
+            .to_payload(),
+        }
+        .encode()
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let charge = |len: Option<usize>| len.map_or(0, |l| self.governor.charge_us(l));
+        let beacon = charge(Some(self.max_beacon_on_air()?).filter(|l| *l > 0));
+        let status = charge(self.transport.on_air_len(&status)?);
+        Ok(beacon + status.div_ceil(super::STATUS_EVERY))
+    }
+
+    /// One listen interval on `channel`: `Some(last sample time)` when every
+    /// sample was at or below the threshold. A radio that returns no sample
+    /// cannot prove the channel clear, so that counts as busy.
+    async fn listen_once(&mut self, rule: &LbtRule, channel: f64) -> io::Result<Option<Instant>> {
         let listen = Duration::from_micros(u64::from(rule.listen_us));
-        let gap_max = Duration::from_micros(u64::from(rule.gap_max_us));
-        for _ in 0..lbt::MAX_ATTEMPTS {
-            let start = Instant::now();
-            let mut samples = Vec::new();
-            loop {
-                match self.transport.ambient_rssi_dbm(channel).await? {
-                    Some(v) => samples.push(v),
-                    // The radio runs its own channel-activity detection.
-                    None => return Ok(true),
-                }
-                if start.elapsed() >= listen {
+        let start = Instant::now();
+        let mut samples = Vec::new();
+        loop {
+            match self.transport.ambient_rssi_dbm(channel).await? {
+                Some(v) => samples.push(v),
+                None => {
+                    samples.clear();
                     break;
                 }
-                tokio::time::sleep(listen / 5).await;
             }
-            let last_sample = Instant::now();
-            let last = samples.last().copied();
-            if lbt::clear(&samples, rule) && last_sample.elapsed() <= gap_max {
-                self.governor.note_lbt(last, false);
-                return Ok(true);
+            if start.elapsed() >= listen {
+                break;
             }
-            self.governor.note_lbt(last, true);
+            tokio::time::sleep(listen / 5).await;
+        }
+        let at = Instant::now();
+        let clear = lbt::clear(&samples, rule);
+        self.governor.note_lbt(samples.last().copied(), !clear);
+        Ok(clear.then_some(at))
+    }
+
+    /// Listen before talk with back-off, up to [`lbt::MAX_ATTEMPTS`]; the
+    /// time of the last clear sample, or `None` (busy).
+    async fn listen(&mut self, rule: &LbtRule, channel: f64) -> io::Result<Option<Instant>> {
+        for _ in 0..lbt::MAX_ATTEMPTS {
+            if let Some(at) = self.listen_once(rule, channel).await? {
+                return Ok(Some(at));
+            }
             tokio::time::sleep(Duration::from_micros(lbt::backoff_us(rule, jitter()))).await;
         }
-        Ok(false)
+        Ok(None)
     }
 
     /// Put `frame` on the air through the governor.
+    ///
+    /// Order: admit on the bytes the radio actually radiates, bring the radio
+    /// to the granted channel and power, listen (plans with `lbt`), charge the
+    /// ledger (fsync'd, so a crash over-counts), then, if the gap since the
+    /// last clear sample has grown past `gap_max_us` while charging, listen
+    /// once more right before the write. A busy re-listen refuses the frame
+    /// with its charge kept (over-counting, never under-counting).
     pub async fn transmit(
         &mut self,
         frame: &Frame,
@@ -142,27 +211,40 @@ impl Lane {
         let bytes = frame
             .encode()
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
+        let Some(on_air) = self.transport.on_air_len(&bytes)? else {
+            return Ok(TxOutcome::NotRadiated);
+        };
         self.governor
             .set_reported_air_util(self.transport.reported_air_util_pct());
-        let grant = match self.governor.admit(bytes.len(), None, now()) {
+        let grant = match self.governor.admit(on_air, None, now()) {
             Ok(g) => g,
             Err(r) => return Ok(TxOutcome::Refused(r)),
         };
-        if let Some(rule) = self.governor.plan().and_then(|p| p.lbt) {
-            if !self.listen(&rule, grant.channel_mhz).await? {
+        let tx = TxFrame {
+            channel_mhz: grant.channel_mhz,
+            power_dbm: grant.power_dbm,
+            bytes,
+        };
+        self.transport.prepare(&tx).await?;
+        let lbt = self.governor.plan().and_then(|p| p.lbt);
+        let mut clear_at = None;
+        if let Some(rule) = lbt {
+            clear_at = self.listen(&rule, grant.channel_mhz).await?;
+            if clear_at.is_none() {
                 self.governor.refuse(Refusal::LbtBusy, now());
                 return Ok(TxOutcome::Refused(Refusal::LbtBusy));
             }
         }
-        // Charge first: a crash between here and the air over-counts.
         self.governor.commit(&grant, now())?;
-        self.transport
-            .send(&TxFrame {
-                channel_mhz: grant.channel_mhz,
-                power_dbm: grant.power_dbm,
-                bytes,
-            })
-            .await?;
+        if let (Some(rule), Some(at)) = (lbt, clear_at) {
+            let gap_max = Duration::from_micros(u64::from(rule.gap_max_us));
+            if at.elapsed() > gap_max && self.listen_once(&rule, grant.channel_mhz).await?.is_none()
+            {
+                self.governor.refuse(Refusal::LbtBusy, now());
+                return Ok(TxOutcome::Refused(Refusal::LbtBusy));
+            }
+        }
+        self.transport.send(&tx).await?;
         Ok(TxOutcome::Sent)
     }
 

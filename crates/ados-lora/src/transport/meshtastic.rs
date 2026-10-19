@@ -394,6 +394,38 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Meshtastic<S> {
     }
 }
 
+/// The unencrypted packet header the node puts in front of every packet on
+/// the air (to, from, id, flags, channel hash, next hop, relay node).
+const MESH_HEADER_LEN: usize = 16;
+/// Fields the node firmware may add to a client packet before transmitting
+/// it (`Data.bitfield`, `Position.time`), charged so the ledger never
+/// undercounts. The `Data` body is encrypted with AES-CTR, which keeps its
+/// length.
+const MESH_FIRMWARE_RESERVE: usize = 8;
+
+/// The `(portnum, payload)` a lane frame becomes on the mesh, or `None` for a
+/// frame the bridge does not forward (status frames, beacons without a fix).
+fn mesh_payload(frame_bytes: &[u8]) -> io::Result<Option<(u32, Vec<u8>)>> {
+    let (f, _) = Frame::decode(frame_bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("lane frame: {e}")))?;
+    Ok(match f.kind {
+        Kind::Beacon => {
+            let b = Beacon::from_payload(&f.payload)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("beacon: {e}")))?;
+            b.position.map(|(lat, lon)| {
+                let pos = Position {
+                    latitude_i: Some((lat * 1e7).round() as i32),
+                    longitude_i: Some((lon * 1e7).round() as i32),
+                    altitude: b.alt_m.map(|a| a.round() as i32),
+                };
+                (port::POSITION_APP, pos.encode())
+            })
+        }
+        Kind::Text => Some((port::TEXT_MESSAGE_APP, f.payload)),
+        Kind::Status => None,
+    })
+}
+
 impl<S: AsyncRead + AsyncWrite + Unpin> Transport for Meshtastic<S> {
     fn kind(&self) -> TransportKind {
         TransportKind::Meshtastic
@@ -411,37 +443,23 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Transport for Meshtastic<S> {
         self.air_util_tx
     }
 
-    /// The node runs its own channel-activity detection.
+    /// The host cannot sample the node's channel (its caps say so, which keeps
+    /// plans that require listen-before-talk off this transport).
     async fn ambient_rssi_dbm(&mut self, _channel_mhz: f64) -> io::Result<Option<i16>> {
         Ok(None)
+    }
+
+    fn on_air_len(&self, frame_bytes: &[u8]) -> io::Result<Option<usize>> {
+        Ok(mesh_payload(frame_bytes)?.map(|(portnum, payload)| {
+            MESH_HEADER_LEN + msg::data(portnum, &payload).len() + MESH_FIRMWARE_RESERVE
+        }))
     }
 
     /// The channel and power of `frame` are not used: the node transmits on
     /// its preset slot at the power set by [`Meshtastic::apply_plan`].
     async fn send(&mut self, frame: &TxFrame) -> io::Result<()> {
-        let (f, _) = Frame::decode(&frame.bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("lane frame: {e}")))?;
-        let (portnum, payload) = match f.kind {
-            Kind::Beacon => {
-                let b = Beacon::from_payload(&f.payload).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidInput, format!("beacon: {e}"))
-                })?;
-                let Some((lat, lon)) = b.position else {
-                    tracing::debug!("beacon without a position not forwarded to the mesh");
-                    return Ok(());
-                };
-                let pos = Position {
-                    latitude_i: Some((lat * 1e7).round() as i32),
-                    longitude_i: Some((lon * 1e7).round() as i32),
-                    altitude: b.alt_m.map(|a| a.round() as i32),
-                };
-                (port::POSITION_APP, pos.encode())
-            }
-            Kind::Text => (port::TEXT_MESSAGE_APP, f.payload),
-            Kind::Status => {
-                tracing::debug!("status frame not forwarded to the mesh");
-                return Ok(());
-            }
+        let Some((portnum, payload)) = mesh_payload(&frame.bytes)? else {
+            return Ok(());
         };
         let hop_limit = match self.lora.hop_limit {
             0 => DEFAULT_HOP_LIMIT,

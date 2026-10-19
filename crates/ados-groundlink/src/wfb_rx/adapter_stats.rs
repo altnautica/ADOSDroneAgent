@@ -18,9 +18,10 @@
 //!
 //! Per interval the decoder saw `uniq + lost` frames. An adapter's frames are
 //! the largest count across its chains (every chain of one radio hears the same
-//! frame), and what it did not hear of that total is its own loss. Comparing the
-//! best single adapter's loss with the decoder's combined loss over the same
-//! window is the diversity gain.
+//! frame), and what it did not hear of that total is its estimated loss. It is
+//! an estimate: the per-antenna counts include FEC parity frames while the
+//! decoder's lost count is data-only. Comparing the best single adapter's loss
+//! with the decoder's combined loss over the same window is the diversity gain.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -154,9 +155,11 @@ impl AdapterStatsTracker {
         });
     }
 
-    /// The `{adapters, diversity}` body as of the last closed interval.
+    /// The body as of the last closed interval. A live tracker is a reporting
+    /// receive plane, so `present` is true.
     pub fn body(&self) -> RadioAdaptersBody {
         RadioAdaptersBody {
+            present: true,
             adapters: self.reports.clone(),
             diversity: self.diversity(),
         }

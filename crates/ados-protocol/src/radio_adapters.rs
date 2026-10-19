@@ -63,10 +63,15 @@ pub struct RadioAdapterReport {
     pub rssi_dbm: Vec<i32>,
     /// Frames this adapter received since the receive chain started.
     pub packets: u64,
-    /// Frames this adapter missed since the receive chain started.
+    /// Frames this adapter missed since the receive chain started. An
+    /// estimate with more than one receive adapter: the decoder's frame total
+    /// minus what this adapter's chains counted, where the per-antenna counts
+    /// include FEC parity frames and the decoder's lost count is data-only.
+    /// Exact (the decoder's own count) with a single receive adapter.
     pub lost: u64,
-    /// FEC recoveries attributable to this adapter. The decoder reports one
-    /// combined count, so this is only set when a single adapter receives.
+    /// FEC recoveries for this adapter: the decoder's count with a single
+    /// receive adapter. The decoder reports one combined count, so this is
+    /// `None` (null) whenever more than one adapter receives.
     pub fec_rec: Option<u64>,
     /// Monitor mode was set and read back on this adapter.
     pub verified: bool,
@@ -85,10 +90,16 @@ pub struct DiversityReport {
     pub best_single_loss_pct: Option<f64>,
 }
 
-/// The `{adapters, diversity}` body. Default is the honest empty shape served
-/// when no receive plane is reporting.
+/// The `{present, adapters, diversity}` body. Default is the honest empty shape
+/// served when no receive plane is reporting (`present: false`, no adapters,
+/// null loss figures).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RadioAdaptersBody {
+    /// True when a receive plane is reporting a current per-adapter picture.
+    /// The receive plane writes only `adapters` and `diversity` into the
+    /// `wfb-stats` sidecar; the reader sets this.
+    #[serde(default)]
+    pub present: bool,
     #[serde(default)]
     pub adapters: Vec<RadioAdapterReport>,
     #[serde(default)]
@@ -105,6 +116,7 @@ mod tests {
         assert_eq!(
             v,
             serde_json::json!({
+                "present": false,
                 "adapters": [],
                 "diversity": {
                     "rx_adapters": 0,

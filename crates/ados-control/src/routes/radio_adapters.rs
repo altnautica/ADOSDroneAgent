@@ -1,13 +1,15 @@
 //! `GET /api/v1/radio/adapters` — the WFB adapters the receive plane runs on.
 //!
-//! Serves the `adapters` list and the `diversity` block of the `wfb-stats`
-//! sidecar (version 2) verbatim: per adapter its identity, role, antenna label,
-//! whether it carries the transmit lanes, per-chain RSSI and its receive
+//! Serves `present` plus the `adapters` list and the `diversity` block of the
+//! `wfb-stats` sidecar (version 2): per adapter its identity, role, antenna
+//! label, whether it carries the transmit lanes, per-chain RSSI and its receive
 //! counters, plus the combined-versus-best-single loss over the same window.
-//! A sidecar that is absent, stale past its registry window, or written by a
-//! producer without the per-adapter block answers 200 with the empty shape
-//! (`adapters: []`, `rx_adapters: 0`, null loss figures), never a 404 and never
-//! a last-known reading dressed up as live.
+//! `present` is true only when the sidecar is fresh and was written by a
+//! receive plane (the only writer of the per-adapter block). A sidecar that is
+//! absent, stale past its registry window, or written by a producer without
+//! the per-adapter block (the drone side) answers 200 with `present: false`
+//! and the empty shape (`adapters: []`, `rx_adapters: 0`, null loss figures),
+//! never a 404 and never a last-known reading dressed up as live.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -21,7 +23,7 @@ use ados_protocol::sidecar::{read_fresh_at, Reading};
 
 use crate::state::AppState;
 
-/// `GET /api/v1/radio/adapters` → `{adapters, diversity}`. Always 200.
+/// `GET /api/v1/radio/adapters` → `{present, adapters, diversity}`. Always 200.
 pub async fn get_radio_adapters(State(state): State<AppState>) -> Json<RadioAdaptersBody> {
     Json(adapters_body_from(
         &state.run_dir.join(paths::WFB_STATS_JSON),
@@ -30,13 +32,24 @@ pub async fn get_radio_adapters(State(state): State<AppState>) -> Json<RadioAdap
 }
 
 /// The path-injectable core of [`get_radio_adapters`]: the sidecar's
-/// `{adapters, diversity}` when it was written inside the `wfb-stats` window,
-/// else the empty shape.
+/// `{adapters, diversity}` with `present: true` when it was written inside the
+/// `wfb-stats` window by a receive plane, else the empty `present: false`
+/// shape.
 pub(crate) fn adapters_body_from(path: &Path, now: SystemTime) -> RadioAdaptersBody {
     let window = Some(Duration::from_millis(paths::WFB_STATS_MAX_AGE_MS));
-    match read_fresh_at::<RadioAdaptersBody>(path, window, now) {
-        Reading::Fresh(body) => body,
-        Reading::Stale(_) | Reading::Absent | Reading::Malformed(_) => RadioAdaptersBody::default(),
+    let Reading::Fresh(raw) = read_fresh_at::<serde_json::Value>(path, window, now) else {
+        return RadioAdaptersBody::default();
+    };
+    // Only a receive plane writes the per-adapter block.
+    if !raw.get("adapters").is_some_and(serde_json::Value::is_array) {
+        return RadioAdaptersBody::default();
+    }
+    match serde_json::from_value::<RadioAdaptersBody>(raw) {
+        Ok(body) => RadioAdaptersBody {
+            present: true,
+            ..body
+        },
+        Err(_) => RadioAdaptersBody::default(),
     }
 }
 
@@ -70,22 +83,40 @@ mod tests {
 
     fn empty() -> serde_json::Value {
         json!({
+            "present": false,
             "adapters": [],
             "diversity": {"rx_adapters": 0, "combined_loss_pct": null, "best_single_loss_pct": null}
         })
     }
 
     #[test]
-    fn a_fresh_sidecar_is_served_in_the_contract_shape() {
+    fn a_fresh_receive_plane_sidecar_is_present_in_the_contract_shape() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(paths::WFB_STATS_JSON);
         std::fs::write(&path, serde_json::to_vec(&sidecar()).unwrap()).unwrap();
         let body = serde_json::to_value(adapters_body_from(&path, SystemTime::now())).unwrap();
         let want = sidecar();
+        assert_eq!(body["present"], true);
         assert_eq!(body["adapters"], want["adapters"]);
         assert_eq!(body["diversity"], want["diversity"]);
-        // Only the two contract keys are served, not the whole sidecar.
-        assert_eq!(body.as_object().unwrap().len(), 2);
+        // Only the three contract keys are served, not the whole sidecar.
+        assert_eq!(body.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_receive_plane_with_no_adapter_yet_is_present_and_empty() {
+        // A blocked receive plane (unpaired, no adapter) still writes the
+        // per-adapter block, empty: the plane is there, it has nothing to list.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(paths::WFB_STATS_JSON);
+        std::fs::write(
+            &path,
+            br#"{"version":2,"state":"no_adapter","adapters":[],"diversity":{"rx_adapters":0,"combined_loss_pct":null,"best_single_loss_pct":null}}"#,
+        )
+        .unwrap();
+        let body = adapters_body_from(&path, SystemTime::now());
+        assert!(body.present);
+        assert!(body.adapters.is_empty());
     }
 
     #[test]

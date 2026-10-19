@@ -94,13 +94,19 @@ pub struct OutPacket {
     pub hop_limit: u32,
 }
 
+/// mesh.proto `Data { portnum = 1, payload = 2 }`.
+pub fn data(portnum: u32, payload: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    put_uint(&mut data, 1, u64::from(portnum));
+    put_bytes(&mut data, 2, payload);
+    data
+}
+
 /// `ToRadio { packet = 1: MeshPacket { to = 2, decoded = 4: Data { portnum = 1,
 /// payload = 2 }, hop_limit = 9 } }`. `from` and `id` are left 0: the node
 /// fills them for packets from its client.
 pub fn to_radio_packet(p: &OutPacket) -> Vec<u8> {
-    let mut data = Vec::new();
-    put_uint(&mut data, 1, u64::from(p.portnum));
-    put_bytes(&mut data, 2, &p.payload);
+    let data = data(p.portnum, &p.payload);
     let mut pkt = Vec::new();
     put_fixed32(&mut pkt, 2, p.to);
     put_bytes(&mut pkt, 4, &data);

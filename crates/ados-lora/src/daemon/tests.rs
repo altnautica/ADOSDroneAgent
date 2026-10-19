@@ -20,6 +20,15 @@ fn fixed_now() -> Now {
 
 /// A loopback lane talking to a test peer socket.
 async fn loopback_lane(dir: &std::path::Path, code: Option<&str>) -> (Lane, UdpSocket) {
+    loopback_lane_charged(dir, code, 1).await
+}
+
+/// The same, with an airtime charge factor (2 = the E22 charge).
+async fn loopback_lane_charged(
+    dir: &std::path::Path,
+    code: Option<&str>,
+    factor: u64,
+) -> (Lane, UdpSocket) {
     let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let mut cfg = LoraConfig::default();
     cfg.loopback.bind = "127.0.0.1:0".into();
@@ -35,7 +44,7 @@ async fn loopback_lane(dir: &std::path::Path, code: Option<&str>) -> (Lane, UdpS
             resolved,
             caps: t.caps().clone(),
             modem: t.modem(),
-            airtime_factor: 1,
+            airtime_factor: factor,
             freq_mhz: None,
             erp_mw: None,
             antenna: Antenna {
@@ -151,9 +160,55 @@ async fn region_unset_blocks_transmit_but_still_lists_received_beacons() {
 }
 
 #[test]
-fn the_india_beacon_interval_stretches_for_the_e22_charge() {
-    // 411.648 ms charged per beacon against a 36 s budget at 80 %.
-    assert_eq!(beacon_interval_s(30, 411_648, Some(36.0)), 52);
-    assert_eq!(beacon_interval_s(60, 411_648, Some(36.0)), 60);
-    assert_eq!(beacon_interval_s(30, 411_648, None), 30);
+fn the_beacon_interval_stretches_with_the_charge() {
+    assert_eq!(beacon_interval_s(30, 565_760, Some(36.0)), 71);
+    assert_eq!(beacon_interval_s(90, 565_760, Some(36.0)), 90);
+    assert_eq!(beacon_interval_s(30, 565_760, None), 30);
+}
+
+#[tokio::test]
+async fn india_on_the_e22_charge_beacons_for_three_hours_inside_36_s_an_hour() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut lane, _peer) = loopback_lane_charged(dir.path(), Some("IN"), 2).await;
+    // Longest beacon 31 B (493.568 ms at 2x) plus a quarter of an 11 B status
+    // frame (288.768 ms at 2x).
+    assert_eq!(
+        lane.max_beacon_on_air().unwrap(),
+        crate::frame::BEACON_MAX_FRAME_LEN
+    );
+    let cycle = lane.cycle_charge_us().unwrap();
+    assert_eq!(cycle, 493_568 + 72_192);
+    let interval = i64::from(beacon_interval_s(30, cycle, Some(36.0)));
+    let status_len = crate::frame::STATUS_FRAME_LEN;
+    let at = |s: i64| Now {
+        mono_ns: s * 1_000_000_000,
+        utc_ms: 1_760_000_000_000 + s * 1000,
+        utc_trusted: false,
+    };
+    let mut sent = 0u64;
+    let mut t = 0;
+    while t < 3 * 3600 {
+        let g = lane
+            .governor
+            .admit(crate::frame::BEACON_MAX_FRAME_LEN, None, at(t));
+        lane.governor
+            .commit(&g.expect("beacon refused"), at(t))
+            .unwrap();
+        sent += 1;
+        if sent.is_multiple_of(4) {
+            let g = lane.governor.admit(status_len, None, at(t));
+            lane.governor
+                .commit(&g.expect("status refused"), at(t))
+                .unwrap();
+        }
+        t += interval;
+    }
+    let st = lane
+        .governor
+        .status(crate::frame::BEACON_MAX_FRAME_LEN, at(t));
+    assert_eq!(st.tx["refused"], 0);
+    let used = st.governor["rules"][1]["airtime_ms_window"]
+        .as_u64()
+        .unwrap();
+    assert!(used <= 36_000, "{used} ms in the last hour");
 }

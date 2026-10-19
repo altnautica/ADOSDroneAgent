@@ -6,8 +6,9 @@ use crate::band::{self, ModuleCaps};
 use crate::governor::power::{conducted_cap_dbm, dbm_to_mw, Antenna};
 use crate::regions::Plan;
 
-/// The beacon frame size the dwell check is held to at `PUT` time.
-pub const BEACON_FRAME_LEN: usize = 23;
+/// The beacon frame size the dwell check is held to at `PUT` time: the
+/// longest beacon.
+pub const BEACON_FRAME_LEN: usize = crate::frame::BEACON_MAX_FRAME_LEN;
 
 /// The values a `PUT` may change, merged over the current config.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +18,27 @@ pub struct Proposed {
     pub modem: Modem,
     pub transport: String,
     pub antenna: Antenna,
+    /// An E22 whose M0/M1 mode lines are strapped (not wired to GPIO).
+    pub e22_strapped: bool,
+}
+
+/// A strapped E22 cannot be put in configuration mode, so it cannot be
+/// retuned: it runs on the channel it was configured for, which must be
+/// stated as `lora.freq_mhz`. `Err` names the fix.
+pub fn check_strapped_e22(
+    transport: &str,
+    strapped: bool,
+    freq_mhz: Option<f64>,
+) -> Result<(), String> {
+    if transport == "e22" && strapped && freq_mhz.is_none() {
+        return Err(
+            "the E22 mode lines are strapped (lora.e22.m0_gpio / m1_gpio unset), so the module \
+             cannot be retuned: set lora.freq_mhz to the channel it is configured for, or wire \
+             the mode lines"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// The ERP ceiling of the sub-band `mhz` sits in, in mW.
@@ -30,6 +52,7 @@ pub fn check(plan: &Plan, caps: Option<&ModuleCaps>, p: &Proposed) -> Result<(),
     let any = ModuleCaps::any();
     let caps = caps.unwrap_or(&any);
     let bw = p.modem.bw_khz;
+    check_strapped_e22(&p.transport, p.e22_strapped, p.freq_mhz)?;
     if !(7..=12).contains(&p.modem.sf) {
         return Err(format!("sf {} is outside 7..=12", p.modem.sf));
     }
@@ -99,6 +122,7 @@ mod tests {
                 gain_dbi: 2.15,
                 cable_loss_db: 0.0,
             },
+            e22_strapped: false,
         }
     }
 
@@ -120,5 +144,17 @@ mod tests {
         let mut lb = proposed(None, None);
         lb.transport = "loopback".into();
         assert!(check(us, None, &lb).is_ok());
+    }
+
+    #[test]
+    fn a_strapped_e22_needs_its_channel_stated() {
+        let p = by_code("IN").unwrap();
+        let mut strapped = proposed(None, None);
+        strapped.e22_strapped = true;
+        let err = check(p, Some(&ModuleCaps::e22_900()), &strapped).unwrap_err();
+        assert!(err.contains("lora.freq_mhz"), "{err}");
+        strapped.freq_mhz = Some(866.125);
+        assert!(check(p, Some(&ModuleCaps::e22_900()), &strapped).is_ok());
+        assert!(check_strapped_e22("loopback", true, None).is_ok());
     }
 }

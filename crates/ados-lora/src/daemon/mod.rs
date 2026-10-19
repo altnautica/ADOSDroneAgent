@@ -132,8 +132,9 @@ async fn serve() -> std::process::ExitCode {
     }
 }
 
-/// The beacon interval: the configured one, stretched so beacons use at most
-/// 80 % of the tightest duty budget in force on the beacon channel.
+/// The beacon interval: the configured one, stretched so one beacon cycle
+/// (`cycle_charge_us`: the longest beacon plus its share of status frames)
+/// uses at most 80 % of the tightest duty budget on the beacon channel.
 pub fn beacon_interval_s(configured_s: u32, charge_us: u64, budget_s: Option<f64>) -> u32 {
     let stretched = budget_s.map_or(0, |b| {
         (charge_us as f64 / 1e6 * 3600.0 / (0.8 * b)).ceil() as u32
@@ -152,7 +153,7 @@ async fn run_lane(built: Built) -> std::io::Result<()> {
         origin_mono_ns,
     } = built;
     let now = || now_at(origin, origin_mono_ns, utc_trusted());
-    let beacon_len = crate::validate::BEACON_FRAME_LEN;
+    let beacon_len = primary.max_beacon_on_air()?;
     let mut beacons: VecDeque<Value> = VecDeque::new();
     let mut beacon_tick = tokio::time::interval(Duration::from_secs(u64::from(interval_s)));
     let mut sidecar_tick = tokio::time::interval(SIDECAR_INTERVAL);

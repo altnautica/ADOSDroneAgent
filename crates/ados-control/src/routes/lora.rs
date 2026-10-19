@@ -205,6 +205,7 @@ pub(crate) fn plan_change(
             gain_dbi: cfg.antenna_gain_dbi,
             cable_loss_db: cfg.cable_loss_db,
         },
+        e22_strapped: cfg.enabled && cfg.e22.strapped(),
     };
     if touches_radio || body.contains_key("region") {
         validate::check(r.plan, caps, &proposed)?;

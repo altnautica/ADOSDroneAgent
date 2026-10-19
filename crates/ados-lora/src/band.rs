@@ -2,9 +2,10 @@
 //!
 //! A plan is supported by the module when at least one tunable channel has its
 //! whole occupied bandwidth inside a plan sub-band, on the plan's channel grid
-//! where the plan has one, and the module offers at least the plan's minimum
-//! hop-channel count. Otherwise transmit is blocked with
-//! `module_band_mismatch`: a hardware fact no amount of waiting clears.
+//! where the plan has one, the module offers at least the plan's minimum
+//! hop-channel count, and, for a plan that requires listen-before-talk, the
+//! host can measure ambient RSSI through it. Otherwise transmit is blocked
+//! with `module_band_mismatch`: a hardware fact no amount of waiting clears.
 
 use crate::regions::Plan;
 
@@ -35,6 +36,9 @@ pub struct ModuleCaps {
     pub tuning: Tuning,
     /// Conducted output steps the module can be set to, in dBm, descending.
     pub power_steps_dbm: Vec<i8>,
+    /// Whether the host can sample ambient RSSI through the transport, which
+    /// listen-before-talk needs.
+    pub measures_rssi: bool,
 }
 
 /// The spacing used to place channels inside a sub-band on a continuously
@@ -52,6 +56,7 @@ impl ModuleCaps {
                 count: 81,
             },
             power_steps_dbm: vec![22, 17, 13, 10],
+            measures_rssi: true,
         }
     }
 
@@ -65,11 +70,13 @@ impl ModuleCaps {
                 count: 84,
             },
             power_steps_dbm: vec![22, 17, 13, 10],
+            measures_rssi: true,
         }
     }
 
     /// A Meshtastic node on an SX1262 covering 863..928 MHz: one preset slot,
-    /// 1 dB power steps up to 22 dBm.
+    /// 1 dB power steps up to 22 dBm. The node does its own channel-activity
+    /// detection; the host cannot sample its channel.
     pub fn meshtastic_863_928() -> Self {
         Self {
             band: "863-928".into(),
@@ -79,6 +86,7 @@ impl ModuleCaps {
                 hops: false,
             },
             power_steps_dbm: (1..=22).rev().collect(),
+            measures_rssi: false,
         }
     }
 
@@ -92,6 +100,7 @@ impl ModuleCaps {
                 hops: true,
             },
             power_steps_dbm: (0..=30).rev().collect(),
+            measures_rssi: true,
         }
     }
 
@@ -180,6 +189,9 @@ pub fn candidates(plan: &Plan, caps: &ModuleCaps, bw_khz: u32) -> Vec<f64> {
 /// Whether the module meets `plan`: a usable channel exists and the module
 /// offers the plan's minimum hop-channel count.
 pub fn supported(plan: &Plan, caps: &ModuleCaps, bw_khz: u32) -> bool {
+    if plan.lbt.is_some() && !caps.measures_rssi {
+        return false;
+    }
     let n = candidates(plan, caps, bw_khz).len() as u32;
     if n == 0 {
         return false;
@@ -231,6 +243,20 @@ mod tests {
             125
         ));
         assert!(supported(by_code("JP").unwrap(), &ModuleCaps::any(), 125));
+    }
+
+    #[test]
+    fn japan_on_a_meshtastic_node_is_a_mismatch_without_an_rssi_listen() {
+        let jp = by_code("JP").unwrap();
+        let mesh = ModuleCaps::meshtastic_863_928();
+        // The grid is reachable (922.0 MHz), but listen-before-talk is not.
+        assert!(!candidates(jp, &mesh, 125).is_empty());
+        assert!(!supported(jp, &mesh, 125));
+        let measuring = ModuleCaps {
+            measures_rssi: true,
+            ..mesh
+        };
+        assert!(supported(jp, &measuring, 125));
     }
 
     #[test]

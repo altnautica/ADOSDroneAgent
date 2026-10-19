@@ -69,7 +69,24 @@ async fn run(mut feed: Feed, emitter: IngestEmitter, mut stop: oneshot::Receiver
             _ = &mut stop => break,
             _ = tick.tick() => {}
         }
-        for transition in feed.step() {
+        // A step is blocking I/O end to end: the config file, the board dict,
+        // and the gauge's I2C bring-up and register reads. It runs on the
+        // blocking pool so a slow card or a slow bus never stalls a reactor
+        // worker; the feed moves in and comes back with the transitions.
+        let stepped = tokio::task::spawn_blocking(move || {
+            let transitions = feed.step();
+            (feed, transitions)
+        })
+        .await;
+        let (next, transitions) = match stepped {
+            Ok(stepped) => stepped,
+            Err(e) => {
+                tracing::error!(error = %e, "battery feed step failed; battery task stopped");
+                return;
+            }
+        };
+        feed = next;
+        for transition in transitions {
             record(&emitter, &transition);
         }
     }
@@ -287,6 +304,65 @@ mod tests {
         fake.regs
             .insert(crate::battery::ina226::REG_MANUFACTURER_ID, 0x1234);
         Ok(Box::new(fake))
+    }
+
+    /// How long the slow fake holds every register access.
+    const SLOW_REG: Duration = Duration::from_millis(150);
+
+    /// A genuine INA226 behind a bus that takes [`SLOW_REG`] per access.
+    struct SlowRegs(FakeRegs);
+
+    impl I2cRegisters for SlowRegs {
+        fn read_reg(&mut self, reg: u8) -> std::io::Result<u16> {
+            std::thread::sleep(SLOW_REG);
+            self.0.read_reg(reg)
+        }
+
+        fn write_reg(&mut self, reg: u8, value: u16) -> std::io::Result<()> {
+            std::thread::sleep(SLOW_REG);
+            self.0.write_reg(reg, value)
+        }
+    }
+
+    fn slow_ina226(_: &GaugeBinding) -> std::io::Result<Box<dyn I2cRegisters>> {
+        Ok(Box::new(SlowRegs(FakeRegs::ina226())))
+    }
+
+    /// On a single-threaded runtime, a gauge access made on the reactor would
+    /// freeze every other task for the whole bring-up and read (eight slow
+    /// accesses). The step runs on the blocking pool, so a short timer on the
+    /// same runtime still fires on time, and the reading still lands.
+    #[tokio::test]
+    async fn a_slow_gauge_never_stalls_the_reactor() {
+        let dir = tempfile::tempdir().unwrap();
+        let feed = feed_with(dir.path(), Some(gauge_board()), slow_ina226);
+        let engine = Arc::clone(&feed.engine);
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let started = Instant::now();
+        let task = tokio::spawn(run(feed, IngestEmitter::new("ados-control"), stop_rx));
+        // Hand the reactor to the task so it takes its first tick and starts
+        // the step before the timer below is measured.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            started.elapsed() < SLOW_REG * 2,
+            "the reactor stalled for {:?} behind the gauge",
+            started.elapsed()
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while engine
+                .lock()
+                .snapshot(epoch_ms(SystemTime::now()))
+                .packs
+                .is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the gauge reading lands from the blocking pool");
+        let _ = stop_tx.send(());
+        task.await.unwrap();
     }
 
     fn feed_with(dir: &Path, board: Option<serde_json::Value>, open: OpenBus) -> Feed {

@@ -12,6 +12,10 @@ const TRAILER: usize = 2;
 pub const MAX_FRAME: usize = HEADER + MAX_PAYLOAD + TRAILER;
 /// Longest mode string a beacon carries.
 pub const MAX_MODE: usize = 12;
+/// The longest beacon frame: position, altitude, battery and a full mode.
+pub const BEACON_MAX_FRAME_LEN: usize = HEADER + 12 + MAX_MODE + TRAILER;
+/// A status frame.
+pub const STATUS_FRAME_LEN: usize = HEADER + 4 + TRAILER;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {

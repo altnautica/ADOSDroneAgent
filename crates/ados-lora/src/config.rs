@@ -40,6 +40,14 @@ impl Default for E22Config {
     }
 }
 
+impl E22Config {
+    /// The M0/M1 mode lines are not both wired, so the module cannot enter
+    /// configuration mode.
+    pub fn strapped(&self) -> bool {
+        self.m0_gpio.is_none() || self.m1_gpio.is_none()
+    }
+}
+
 /// `lora.meshtastic`: the Meshtastic node bridge.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]

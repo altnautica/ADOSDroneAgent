@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class LoraE22Config(BaseModel):
@@ -66,3 +66,16 @@ class LoraConfig(BaseModel):
     e22: LoraE22Config = LoraE22Config()
     meshtastic: LoraMeshtasticConfig = LoraMeshtasticConfig()
     loopback: LoraLoopbackConfig = LoraLoopbackConfig()
+
+    @model_validator(mode="after")
+    def _strapped_e22_needs_a_channel(self) -> LoraConfig:
+        # A strapped E22 (mode lines not wired) cannot enter configuration
+        # mode, so it cannot be retuned; the lane must be told its channel.
+        strapped = self.e22.m0_gpio is None or self.e22.m1_gpio is None
+        if self.enabled and self.transport == "e22" and strapped and self.freq_mhz is None:
+            raise ValueError(
+                "lora.e22 mode lines are strapped (m0_gpio / m1_gpio unset): set "
+                "lora.freq_mhz to the channel the module is configured for, or wire "
+                "the mode lines"
+            )
+        return self

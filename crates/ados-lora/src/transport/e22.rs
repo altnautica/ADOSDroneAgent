@@ -345,8 +345,10 @@ where
         Ok(v.first().map(|v| proto::rssi_dbm(*v)))
     }
 
-    async fn send(&mut self, frame: &TxFrame) -> io::Result<()> {
-        let chan = self.channel(frame.channel_mhz)?;
+    /// Set the output step for `frame` (a configuration-mode round trip when
+    /// it changes), so the send itself is only the UART write.
+    async fn prepare(&mut self, frame: &TxFrame) -> io::Result<()> {
+        self.channel(frame.channel_mhz)?;
         if frame.power_dbm != self.power_dbm {
             if self.pins.is_none() {
                 return Err(invalid(format!(
@@ -360,6 +362,12 @@ where
             self.write_temp(proto::REG_REG1, reg1).await?;
             self.power_dbm = frame.power_dbm;
         }
+        Ok(())
+    }
+
+    async fn send(&mut self, frame: &TxFrame) -> io::Result<()> {
+        self.prepare(frame).await?;
+        let chan = self.channel(frame.channel_mhz)?;
         let [addh, addl] = proto::BROADCAST_ADDR;
         let mut out = Vec::with_capacity(3 + frame.bytes.len());
         out.extend_from_slice(&[addh, addl, chan]);

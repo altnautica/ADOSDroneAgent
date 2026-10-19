@@ -305,3 +305,23 @@ fn e22_frames_are_charged_twice_the_formula() {
     g.setup.airtime_factor = 2;
     assert_eq!(g.charge_us(22), 411_648);
 }
+
+#[test]
+fn japan_through_a_meshtastic_node_is_a_band_mismatch() {
+    // The node cannot hand the host an RSSI listen, and JP requires one.
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = governor(
+        dir.path(),
+        "b",
+        Some("JP"),
+        ModuleCaps::meshtastic_863_928(),
+        Modem::SF9_BW125,
+        None,
+        at(0),
+    );
+    assert_eq!(g.admit(41, None, at(0)), Err(Refusal::ModuleBandMismatch));
+    assert_eq!(
+        g.status(41, at(0)).blocked_reason,
+        Some("module_band_mismatch")
+    );
+}
