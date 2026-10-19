@@ -52,11 +52,14 @@ fn cfg_for(root: &Path, evict_unuploaded: bool) -> CaptureStorageConfig {
     }
 }
 
-/// A session of `bytes` with the given markers.
+/// A session of `bytes` with the given markers. A recording session has no
+/// manifest yet, as the recorder writes it at finish.
 fn session(root: &Path, name: &str, bytes: usize, uploaded: bool, recording: bool) {
     let dir = root.join(name);
     fs::create_dir_all(dir.join("frames")).unwrap();
-    fs::write(dir.join(cs::MANIFEST_NAME), b"{}").unwrap();
+    if !recording {
+        fs::write(dir.join(cs::MANIFEST_NAME), b"{}").unwrap();
+    }
     fs::write(dir.join("frames/data.bin"), vec![7u8; bytes]).unwrap();
     if uploaded {
         fs::write(dir.join(".uploaded"), b"").unwrap();
@@ -66,7 +69,15 @@ fn session(root: &Path, name: &str, bytes: usize, uploaded: bool, recording: boo
     }
 }
 
-/// `run_pass` with a no-op keepalive.
+/// The pass clock: `mono_ns` as given, wall time now plus `ahead_s`.
+fn at(mono_ns: u64, ahead_s: i64) -> PassTime {
+    PassTime {
+        mono_ns,
+        unix_s: PassTime::now().unix_s + ahead_s,
+    }
+}
+
+/// `run_pass` at the current wall time with a no-op keepalive.
 fn run(
     cfg: &CaptureStorageConfig,
     sys: &SysRoots,
@@ -75,7 +86,7 @@ fn run(
     cache: &mut SizeCache,
     now_ns: u64,
 ) -> CapturePass {
-    run_pass(cfg, sys, mode, probe, cache, now_ns, &|| {})
+    run_pass(cfg, sys, mode, probe, cache, at(now_ns, 0), &|| {})
 }
 
 fn s(name: &str, bytes: u64, uploaded: bool, recording: bool) -> Session {
@@ -85,6 +96,7 @@ fn s(name: &str, bytes: u64, uploaded: bool, recording: bool) -> Session {
         bytes,
         uploaded,
         recording,
+        active: recording,
     }
 }
 
@@ -114,6 +126,110 @@ fn eviction_order_uploaded_oldest_first() {
     assert_eq!(plan_evictions(&sessions, 10_000, true), [1, 3, 0, 4]);
     assert_eq!(plan_evictions(&sessions, 250, true), [1, 3, 0]);
     assert!(plan_evictions(&sessions, 0, true).is_empty());
+
+    // A crashed session (`.recording`, silent past the window) goes with the
+    // un-uploaded ones, only under the flag, and never when it is uploaded.
+    let crashed = |name: &str, uploaded| Session {
+        active: false,
+        ..s(name, 100, uploaded, true)
+    };
+    let sessions = [
+        crashed("x", false),
+        s("y", 100, true, false),
+        crashed("z", true),
+    ];
+    assert_eq!(plan_evictions(&sessions, 10_000, false), [1]);
+    assert_eq!(plan_evictions(&sessions, 10_000, true), [1, 0]);
+}
+
+#[test]
+fn recording_sessions_are_counted_and_judged_by_their_newest_write() {
+    let (_tmp, sys, root) = fixture(100 * GIB, 800 * GIB);
+    session(&root, "live", 1000, false, true);
+    session(&root, "done", 1000, false, false);
+    fs::create_dir_all(root.join("unmarked")).unwrap();
+    fs::write(root.join("unmarked/x.bin"), vec![0u8; 4000]).unwrap();
+
+    let cfg = cfg_for(&root, true);
+    let now = run(
+        &cfg,
+        &sys,
+        PassMode::Refresh,
+        None,
+        &mut SizeCache::new(),
+        1,
+    );
+    assert_eq!(
+        now.sidecar.capture.sessions, 2,
+        "in-progress counted, unmarked not"
+    );
+    assert!(now.sidecar.capture.used_bytes >= 2000);
+    assert!(now.sidecar.capture.used_bytes < 4000);
+
+    let sessions = scan_sessions(&root, &mut SizeCache::new(), at(0, 0).unix_s, &|| {});
+    let live = sessions.iter().find(|s| s.name == "live").unwrap();
+    assert!(live.recording && live.active);
+    let later = at(0, ACTIVE_WINDOW_S + 60).unix_s;
+    let sessions = scan_sessions(&root, &mut SizeCache::new(), later, &|| {});
+    let live = sessions.iter().find(|s| s.name == "live").unwrap();
+    assert!(
+        live.recording && !live.active,
+        "silent past the window: crashed"
+    );
+}
+
+#[test]
+fn an_in_progress_session_is_never_evicted() {
+    // Under the floor, eviction of un-uploaded sessions allowed.
+    let (_tmp, sys, root) = fixture(100 * GIB, GIB);
+    session(&root, "live", 1000, false, true);
+    let pass = run(
+        &cfg_for(&root, true),
+        &sys,
+        PassMode::Evict,
+        None,
+        &mut SizeCache::new(),
+        1,
+    );
+    assert_eq!(pass.freed, 0);
+    assert!(root.join("live").exists());
+    assert_eq!(pass.sidecar.capture.sessions, 1);
+}
+
+#[test]
+fn a_crashed_session_is_counted_and_evicted_only_with_the_flag() {
+    let (_tmp, sys, root) = fixture(100 * GIB, GIB);
+    session(&root, "crashed", 1000, false, true);
+    let silent = at(1, ACTIVE_WINDOW_S + 60);
+
+    // Flag off: counted, kept.
+    let kept = run_pass(
+        &cfg_for(&root, false),
+        &sys,
+        PassMode::Evict,
+        None,
+        &mut SizeCache::new(),
+        silent,
+        &|| {},
+    );
+    assert_eq!(kept.freed, 0);
+    assert!(root.join("crashed").exists());
+    assert_eq!(kept.sidecar.capture.sessions, 1);
+    assert!(kept.sidecar.capture.used_bytes >= 1000);
+
+    // Flag on: evicted with the un-uploaded sessions.
+    let gone = run_pass(
+        &cfg_for(&root, true),
+        &sys,
+        PassMode::Evict,
+        None,
+        &mut SizeCache::new(),
+        silent,
+        &|| {},
+    );
+    assert!(gone.freed >= 1000);
+    assert!(!root.join("crashed").exists());
+    assert_eq!(gone.sidecar.capture.sessions, 0);
 }
 
 #[test]
@@ -146,7 +262,7 @@ fn a_pass_evicts_uploaded_sessions_first_and_keeps_the_active_one() {
         PassMode::Evict,
         None,
         &mut SizeCache::new(),
-        42,
+        at(42, 0),
         &|| ticks.set(ticks.get() + 1),
     );
     assert!(
@@ -240,9 +356,10 @@ fn a_large_session_is_removed_with_progress_inside_it() {
     for i in 0..600 {
         fs::write(root.join(format!("big/frames/f{i}.bin")), b"x").unwrap();
     }
-    let s = scan_sessions(root, &mut SizeCache::new(), &|| {}).remove(0);
+    let now = at(0, 0).unix_s;
+    let s = scan_sessions(root, &mut SizeCache::new(), now, &|| {}).remove(0);
     let ticks = std::cell::Cell::new(0u32);
-    let freed = remove_session(root, &s, &|| ticks.set(ticks.get() + 1));
+    let freed = remove_session(root, &s, now, &|| ticks.set(ticks.get() + 1));
     assert_eq!(freed, s.bytes);
     assert!(!root.join("big").exists());
     assert!(ticks.get() >= 2, "{}", ticks.get());

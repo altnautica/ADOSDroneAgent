@@ -1,12 +1,14 @@
 //! The capture category: capture sessions under the capture root, held to a
 //! share of their volume and to a free-space floor.
 //!
-//! A session is a directory `<root>/<session_id>/` holding `manifest.json`;
-//! nothing else under the root is counted or deleted. A `.uploaded` marker inside
-//! makes it evictable; a `.recording` marker marks the session being written,
-//! which is never evicted. Over the budget or under the floor, uploaded sessions
-//! go first, oldest first; sessions that were never uploaded go only when
-//! `storage.capture_evict_unuploaded` is on, again oldest first.
+//! A session is a directory `<root>/<session_id>/` holding `manifest.json`
+//! (finished) or `.recording` (started, not yet finished); nothing else under
+//! the root is counted or deleted. A `.recording` session written within the
+//! last ten minutes is active and never evicted; one silent for longer crashed
+//! and is treated as un-uploaded. Over the budget or under the floor, finished
+//! uploaded sessions go first, oldest first; sessions that were never uploaded
+//! (crashed ones included) go only when `storage.capture_evict_unuploaded` is
+//! on, again oldest first.
 //!
 //! `capture-storage.json` is the document a new capture session is admitted
 //! against. It is rewritten every [`cs::SIDECAR_REFRESH`] (measure only) so
@@ -25,7 +27,8 @@ use ados_config::capture_storage::{
 
 mod sessions;
 pub use sessions::{
-    excess_bytes, plan_evictions, remove_session, scan_sessions, Session, SizeCache,
+    excess_bytes, is_active, plan_evictions, remove_session, scan_sessions, Session, SizeCache,
+    ACTIVE_WINDOW_S,
 };
 
 /// Bytes the write probe writes.
@@ -50,6 +53,26 @@ pub enum PassMode {
     Remeasure,
     /// The janitor-interval pass: re-measure, then evict to the budget/floor.
     Evict,
+}
+
+/// The two clocks a pass reads: host monotonic for the sidecar's
+/// `updated_ns`, wall time (unix s) to compare against file mtimes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassTime {
+    pub mono_ns: u64,
+    pub unix_s: i64,
+}
+
+impl PassTime {
+    pub fn now() -> Self {
+        PassTime {
+            mono_ns: mono_ns(),
+            unix_s: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+        }
+    }
 }
 
 fn current_volume(root: &Path, sys: &SysRoots) -> Option<Volume> {
@@ -77,7 +100,7 @@ pub fn run_pass(
     mode: PassMode,
     write_probe: Option<WriteProbe>,
     cache: &mut SizeCache,
-    now_ns: u64,
+    now: PassTime,
     keepalive: &dyn Fn(),
 ) -> CapturePass {
     let root = cs::resolve_capture_root(cfg, sys);
@@ -85,7 +108,7 @@ pub fn run_pass(
     if mode != PassMode::Refresh {
         cache.clear();
     }
-    let mut sessions = scan_sessions(&root, cache, keepalive);
+    let mut sessions = scan_sessions(&root, cache, now.unix_s, keepalive);
     let mut volume = current_volume(&root, sys);
     let mut freed = 0u64;
     if mode == PassMode::Evict {
@@ -102,14 +125,19 @@ pub fn run_pass(
         let picked = plan_evictions(&sessions, need, cfg.capture_evict_unuploaded);
         if !picked.is_empty() {
             for i in picked {
-                freed = freed.saturating_add(remove_session(&root, &sessions[i], keepalive));
+                freed = freed.saturating_add(remove_session(
+                    &root,
+                    &sessions[i],
+                    now.unix_s,
+                    keepalive,
+                ));
                 keepalive();
             }
-            sessions = scan_sessions(&root, cache, keepalive);
+            sessions = scan_sessions(&root, cache, now.unix_s, keepalive);
             volume = current_volume(&root, sys);
         }
     }
-    let mut sidecar = build_sidecar(cfg, &root, volume, &sessions, write_probe, now_ns);
+    let mut sidecar = build_sidecar(cfg, &root, volume, &sessions, write_probe, now.mono_ns);
     if root_error.is_some() {
         sidecar.capture.state = CaptureState::Full;
     }

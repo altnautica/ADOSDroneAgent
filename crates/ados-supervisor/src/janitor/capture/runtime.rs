@@ -11,7 +11,8 @@ use ados_config::capture_storage::{
 use tokio::task::JoinHandle;
 
 use super::{
-    measure_write, mono_ns, probe_due, run_pass, write_sidecar, PassMode, SizeCache, PROBE_BYTES,
+    measure_write, mono_ns, probe_due, run_pass, write_sidecar, PassMode, PassTime, SizeCache,
+    PROBE_BYTES,
 };
 use crate::sdnotify::MonitorProgress;
 
@@ -90,7 +91,7 @@ impl CaptureRuntime {
                 mode,
                 probe,
                 &mut cache,
-                mono_ns(),
+                PassTime::now(),
                 &keepalive,
             );
             (pass, cache)
