@@ -57,3 +57,27 @@ def test_agent_profile_literal_covers_contract() -> None:
 def test_normalize_profile_keeps_each_profile(value: str) -> None:
     # Wire form is the hyphen spelling; single-word profiles are unchanged.
     assert normalize_profile(value) == value.replace("_", "-")
+
+
+# Hand-written TypeScript profile unions in the agent's own web bundles. Each
+# lists exactly the contract profiles, plus the `unknown` sentinel where the
+# union also models an unreported profile.
+_TS_UNIONS = [
+    ("web-shared/src/use-profile.ts", "AgentProfile", {"unknown"}),
+    ("cockpit/src/shared/use-profile.ts", "AgentProfile", {"unknown"}),
+    ("dashboard/src/shared/use-profile.ts", "AgentProfile", {"unknown"}),
+    ("dashboard/src/lib/types.ts", "Profile", {"auto", "unknown"}),
+    ("dashboard/src/lib/node-identity.ts", "AllowedProfile", None),
+]
+
+
+def _ts_union(text: str, name: str) -> set[str]:
+    match = re.search(rf"export type {name}\s*=\s*([^;]+);", text)
+    assert match, f"type {name} not found"
+    return set(re.findall(r'"([^"]+)"', match.group(1)))
+
+
+@pytest.mark.parametrize(("rel", "name", "extra"), _TS_UNIONS)
+def test_hand_written_ts_unions_match_contract(rel: str, name: str, extra: set[str] | None) -> None:
+    members = _ts_union((_REPO / rel).read_text(encoding="utf-8"), name)
+    assert members - (extra or set()) == set(_contract_profiles()), rel

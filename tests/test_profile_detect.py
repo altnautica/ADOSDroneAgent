@@ -23,7 +23,7 @@ def _stub_probes(monkeypatch, **points: tuple) -> None:
     """Replace each named probe with a callable returning the given tuple.
 
     Any probe not listed in ``points`` reports zero contribution.
-    ``probe_sensor_hub`` returns ``(visor_points, detected)``.
+    ``probe_sensor_hub`` returns the hub kind string (``""`` = none).
     """
     defaults: dict[str, tuple] = {
         "probe_i2c_oled": (0, 0, False),
@@ -33,7 +33,7 @@ def _stub_probes(monkeypatch, **points: tuple) -> None:
         "probe_gps_serial": (0, 0, False),
         "probe_fc_heartbeat": (0, 0, False),
         "probe_uplink_type": (0, 0, False),
-        "probe_sensor_hub": (0, False),
+        "probe_sensor_hub": "",
     }
     for name, value in points.items():
         defaults[name] = value

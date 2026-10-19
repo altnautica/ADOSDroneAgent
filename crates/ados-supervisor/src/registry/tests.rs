@@ -189,12 +189,12 @@ fn mavlink_is_core_on_the_fc_profiles_only() {
 
 #[test]
 fn the_swarm_bus_is_core_on_both_fc_profiles_and_kept_headless() {
-    // Gated exactly like ados-mavlink, and for the same reason: the bus is that
-    // seam seen from either end. A drone fills its beacon from the router's
-    // state socket; a ground station listens so the operator's fleet view is
-    // local-first. Gating it to `drone` alone would make the fleet view depend
-    // on a cloud round-trip, and gating it wider would start it on an FC-less
-    // compute node that never fetches the binary.
+    // Gated like ados-mavlink on the FC-bearing vehicle profiles, and for the
+    // same reason: the bus is that seam seen from either end. A drone fills its
+    // beacon from the router's state socket; a ground station listens so the
+    // operator's fleet view is local-first. Gating it to `drone` alone would
+    // make the fleet view depend on a cloud round-trip, and gating it wider
+    // would start it on an FC-less compute node that never fetches the binary.
     let specs = build_specs();
     let bus = specs
         .iter()
@@ -206,10 +206,15 @@ fn the_swarm_bus_is_core_on_both_fc_profiles_and_kept_headless() {
     // Onboard collision avoidance reads this table, so a lean headless flight
     // node that keeps the router must keep the bus that feeds separation.
     assert!(bus.headless_keep);
-    // A Visor runs the router for its stage-A sensor hub but has no fleet
-    // slot, so the bus stays off it.
+    // Same gate as the router except the Visor, which runs the router for its
+    // stage-A sensor hub but has no fleet slot.
     let mav = specs.iter().find(|s| s.name == "ados-mavlink").unwrap();
-    assert_eq!(mav.profile_gate, Some("drone|ground_station|visor"));
+    assert_eq!(
+        mav.profile_gate.map(|g| g.replace("|visor", "")).as_deref(),
+        bus.profile_gate,
+        "same gate as the router, minus the visor"
+    );
+    assert_eq!(bus.profile_gate, Some("drone|ground_station"));
 }
 
 #[test]

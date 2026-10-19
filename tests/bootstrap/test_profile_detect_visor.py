@@ -10,8 +10,13 @@ import yaml
 
 from ados.bootstrap import _profile_detect_visor, profile_detect
 
+V = _profile_detect_visor
+# A stock ArduPilot FC on USB: matched vendor serial port plus a heartbeat.
+FC = {"probe_mavlink_serial": (0, 6, True), "probe_fc_heartbeat": (0, 3, True)}
+WFB = {"probe_rtl8812": (1, 1, True)}
 
-def _stub(monkeypatch, *, hub: tuple[int, bool] = (0, False), prior=None, **points) -> None:
+
+def _stub(monkeypatch, *, hub: str = "", prior=None, **points) -> None:
     defaults = {
         "probe_i2c_oled": (0, 0, False),
         "probe_gpio_buttons": (0, 0, False),
@@ -35,82 +40,78 @@ def _stub_lsusb(monkeypatch, stdout: str, returncode: int = 0) -> None:
     def _run(argv, *_a, **_k):
         return SimpleNamespace(returncode=returncode, stdout=stdout)
 
-    monkeypatch.setattr(_profile_detect_visor.subprocess, "run", _run)
+    monkeypatch.setattr(V.subprocess, "run", _run)
 
 
 # ---- probe_sensor_hub --------------------------------------------------------
 
 
-def test_sensor_hub_firmware_is_strong_visor_signal(monkeypatch) -> None:
+def test_sensor_hub_firmware_is_classified(monkeypatch) -> None:
     _stub_lsusb(monkeypatch, "Bus 001 Device 004: ID 1209:ad05 ADOS Sensor Hub\n")
-    monkeypatch.setattr(
-        _profile_detect_visor, "probe_csi_cameras", lambda: pytest.fail("not needed")
-    )
-    assert _profile_detect_visor.probe_sensor_hub() == (
-        _profile_detect_visor.SENSOR_HUB_VISOR_POINTS,
-        True,
-    )
+    monkeypatch.setattr(V, "probe_csi_cameras", lambda: pytest.fail("not needed"))
+    assert V.probe_sensor_hub() == V.HUB_FIRMWARE
 
 
-@pytest.mark.parametrize(("cameras", "expected"), [(2, (2, True)), (3, (2, True)), (1, (0, False))])
+@pytest.mark.parametrize(
+    ("cameras", "expected"),
+    [(2, V.HUB_ARDUPILOT_MULTICAM), (3, V.HUB_ARDUPILOT_MULTICAM), (1, "")],
+)
 def test_ardupilot_usb_counts_only_with_two_csi_cameras(monkeypatch, cameras, expected) -> None:
     _stub_lsusb(monkeypatch, "Bus 001 Device 005: ID 1209:5741 ArduPilot\n")
-    monkeypatch.setattr(_profile_detect_visor, "probe_csi_cameras", lambda: cameras)
-    assert _profile_detect_visor.probe_sensor_hub() == expected
+    monkeypatch.setattr(V, "probe_csi_cameras", lambda: cameras)
+    assert V.probe_sensor_hub() == expected
 
 
-def test_sensor_hub_zero_without_matching_device(monkeypatch) -> None:
+def test_sensor_hub_empty_without_matching_device(monkeypatch) -> None:
     _stub_lsusb(monkeypatch, "Bus 001 Device 002: ID 0bda:8812 Realtek\n")
-    monkeypatch.setattr(
-        _profile_detect_visor, "probe_csi_cameras", lambda: pytest.fail("not needed")
-    )
-    assert _profile_detect_visor.probe_sensor_hub() == (0, False)
+    monkeypatch.setattr(V, "probe_csi_cameras", lambda: pytest.fail("not needed"))
+    assert V.probe_sensor_hub() == ""
 
 
-def test_sensor_hub_zero_when_lsusb_missing(monkeypatch) -> None:
+def test_sensor_hub_empty_when_lsusb_missing(monkeypatch) -> None:
     def _missing(*_a, **_k):
         raise FileNotFoundError("lsusb")
 
-    monkeypatch.setattr(_profile_detect_visor.subprocess, "run", _missing)
-    assert _profile_detect_visor.probe_sensor_hub() == (0, False)
+    monkeypatch.setattr(V.subprocess, "run", _missing)
+    assert V.probe_sensor_hub() == ""
 
 
 # ---- detect_profile ----------------------------------------------------------
 
 
-def test_sensor_hub_outweighs_its_own_mavlink_serial_and_heartbeat(monkeypatch) -> None:
-    _stub(
-        monkeypatch,
-        hub=(_profile_detect_visor.SENSOR_HUB_VISOR_POINTS, True),
-        probe_mavlink_serial=(0, 6, True),
-        probe_fc_heartbeat=(0, 3, True),
-    )
+def test_sensor_hub_firmware_is_visor_over_its_own_serial_and_heartbeat(monkeypatch) -> None:
+    _stub(monkeypatch, hub=V.HUB_FIRMWARE, **FC)
     result = profile_detect.detect_profile(config_override=None)
     assert result["profile"] == "visor"
     assert result["source"] == "detected"
-    assert result["visor_score"] == _profile_detect_visor.SENSOR_HUB_VISOR_POINTS
-    assert result["air_score"] == 9
+    assert result["air_score"] == 0
+    assert result["visor_score"] > result["air_score"]
     assert result["signals"]["sensor_hub"] is True
 
 
-def test_ardupilot_multicam_alone_reads_as_visor(monkeypatch) -> None:
-    _stub(monkeypatch, hub=(2, True))
+def test_sensor_hub_firmware_is_visor_even_next_to_wfb_and_gps(monkeypatch) -> None:
+    _stub(monkeypatch, hub=V.HUB_FIRMWARE, probe_gps_serial=(0, 2, True), **FC, **WFB)
+    assert profile_detect.detect_profile(config_override=None)["profile"] == "visor"
+
+
+def test_stage_a_ardupilot_multicam_without_wfb_is_visor(monkeypatch) -> None:
+    _stub(monkeypatch, hub=V.HUB_ARDUPILOT_MULTICAM, probe_gps_serial=(0, 2, True), **FC)
     result = profile_detect.detect_profile(config_override=None)
     assert result["profile"] == "visor"
+    assert result["source"] == "detected"
 
 
-def test_visor_tie_uses_persisted_profile(monkeypatch) -> None:
-    _stub(monkeypatch, hub=(2, True), prior="visor", probe_gps_serial=(0, 2, True))
-    result = profile_detect.detect_profile(config_override=None)
-    assert result["profile"] == "visor"
-    assert result["source"] == "tiebreaker"
-
-
-def test_tie_prior_outside_leaders_falls_back_to_default(monkeypatch) -> None:
-    _stub(monkeypatch, hub=(2, True), prior="ground_station", probe_gps_serial=(0, 2, True))
+def test_stage_a_ardupilot_multicam_with_wfb_is_a_stereo_drone(monkeypatch) -> None:
+    _stub(monkeypatch, hub=V.HUB_ARDUPILOT_MULTICAM, **FC, **WFB)
     result = profile_detect.detect_profile(config_override=None)
     assert result["profile"] == "drone"
-    assert result["source"] == "default"
+    assert result["visor_score"] == 0
+    assert result["air_score"] == 10
+
+
+def test_ardupilot_fc_without_cameras_stays_drone(monkeypatch) -> None:
+    _stub(monkeypatch, hub="", **FC)
+    assert profile_detect.detect_profile(config_override=None)["profile"] == "drone"
 
 
 def test_visor_override_short_circuits(monkeypatch) -> None:

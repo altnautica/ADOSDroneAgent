@@ -53,7 +53,6 @@ pub fn radio_unit(profile: &str) -> Option<&'static str> {
     match profile {
         "drone" => Some("ados-wfb"),
         "ground_station" => Some("ados-wfb-rx"),
-        "visor" => None,
         _ => None,
     }
 }

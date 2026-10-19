@@ -7,9 +7,12 @@ scores, with a stable tiebreaker on the last persisted profile (when it
 is among the tied leaders) and a final `drone` default so a fresh-flashed
 board with no signals still boots into a known state.
 
-Visor signals come from the USB sensor hub probe: the ADOS Sensor Hub
-firmware is a strong visor signal; a stock ArduPilot USB board counts
-toward visor only next to two or more CSI cameras. A GNSS fix counts
+Visor is a rule, not a score: the ADOS Sensor Hub firmware on USB, or a
+stock ArduPilot USB board next to two or more CSI cameras with no
+long-range WFB adapter, makes the node a visor outright, and the flight
+controller's own serial and heartbeat points do not count against it. An
+ArduPilot board with cameras and a WFB adapter is a stereo drone. A GNSS
+fix counts
 toward air only when no OLED is present, since a handheld visor carries
 both.
 
@@ -68,6 +71,8 @@ from ados.bootstrap._profile_detect_uplink import (
     probe_uplink_type,
 )
 from ados.bootstrap._profile_detect_visor import (
+    HUB_ARDUPILOT_MULTICAM,
+    HUB_FIRMWARE,
     probe_csi_cameras,
     probe_sensor_hub,
 )
@@ -195,9 +200,21 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
             except Exception:
                 probes[name] = (0, 0, False)
         try:
-            visor_score, hub_detected = hub_future.result()
+            hub_kind = hub_future.result()
         except Exception:
-            visor_score, hub_detected = 0, False
+            hub_kind = ""
+    hub_detected = bool(hub_kind)
+    wfb_present = probes["rtl8812"][2]
+    is_visor_rig = hub_kind == HUB_FIRMWARE or (
+        hub_kind == HUB_ARDUPILOT_MULTICAM and not wfb_present
+    )
+    visor_score = 0
+    if is_visor_rig:
+        # The hub (or stage-A FC) is the visor's own sensor board: its MAVLink
+        # serial port and heartbeat are not evidence of an aircraft.
+        for name in ("mavlink_serial", "fc_heartbeat"):
+            g, _a, d = probes[name]
+            probes[name] = (g, 0, d)
 
     # A GNSS fix next to an OLED is a handheld visor, not evidence of a drone.
     if probes["oled_i2c"][2]:
@@ -227,10 +244,15 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
         visor_score += HOSTNAME_WEIGHT
         hostname_source = "hostname"
 
+    if is_visor_rig:
+        visor_score = max(air_score, ground_score) + 1
     scores = {"drone": air_score, "ground_station": ground_score, "visor": visor_score}
     top = max(scores.values())
     leaders = [name for name in _DETECTABLE if scores[name] == top]
-    if len(leaders) == 1:
+    if is_visor_rig:
+        profile = "visor"
+        source = "detected"
+    elif len(leaders) == 1:
         profile = leaders[0]
         source = hostname_source or "detected"
     else:

@@ -103,22 +103,24 @@ where
     // natively only on a ground station, the only profile that runs the daemons
     // binding their command sockets (ados-pic's pic.sock, ados-input's
     // hid-cmd.sock); on any other node they fall through to the residual.
-    let is_ground_station = {
+    let profile = {
         let cfg = crate::config::PairingConfig::cached(&paths.config_path);
         crate::profile::current_profile_and_role_at(
             &cfg.agent.profile,
             &paths.profile_conf_path,
             &paths.mesh_role_path,
         )
-        .0 == "ground-station"
+        .0
     };
+    let is_ground_station = profile == "ground-station";
     let hid_native = is_ground_station;
 
     // The Wi-Fi client routes talk to the Wi-Fi command socket on every profile.
-    // A ground station's ados-net uplink daemon owns it; every other node has no
-    // uplink daemon, so this process serves the socket itself with the same
-    // Wi-Fi-client manager (the owner of the station's advisory radio lock).
-    if !is_ground_station {
+    // Where the ados-net uplink daemon runs (ground station, visor) it owns the
+    // socket; every other node has no uplink daemon, so this process serves the
+    // socket itself with the same Wi-Fi-client manager (the owner of the
+    // station's advisory radio lock). The unit table decides which is which.
+    if !ados_protocol::units::net_daemon_owns_wifi(&profile) {
         let sock = crate::routes::network_write::wifi_cmd_sock();
         let runner: Arc<dyn ados_net::cmd::CmdRunner> = Arc::new(ados_net::cmd::TokioCmdRunner);
         let wifi = Arc::new(tokio::sync::Mutex::new(

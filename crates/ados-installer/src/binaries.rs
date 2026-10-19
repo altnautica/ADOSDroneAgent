@@ -144,9 +144,11 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: GROUND,
     },
-    // The network daemon: uplinks, Wi-Fi station and the setup access point
-    // (it renders the hostapd conf `ados-hostapd.service` gates on), so every
-    // profile that ships the AP units fetches it.
+    // The network daemon, exec'd by `ados-uplink-router.service` on the
+    // ground station and the visor: uplinks, the Wi-Fi station and the setup
+    // access point (it renders `/etc/ados/hostapd-gs.conf`, which
+    // `ados-hostapd.service` starts from), so the AP only comes up where the
+    // uplink-router unit runs.
     PrebuiltBinary {
         service: "ados-net",
         asset: "ados-net-aarch64",

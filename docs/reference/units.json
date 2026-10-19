@@ -497,7 +497,8 @@
       "memory_max": "96M",
       "name": "ados-uplink-router",
       "profiles": [
-        "ground_station"
+        "ground_station",
+        "visor"
       ],
       "roles": [],
       "start_on_install": true

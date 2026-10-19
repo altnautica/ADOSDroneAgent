@@ -91,6 +91,7 @@ fn visor_unit_set() {
         "ados-oled.service",
         "ados-oled-i2c.service",
         "ados-input.service",
+        "ados-uplink-router.service",
         "ados-control.service",
     ] {
         assert!(names.contains(&want), "visor lacks {want}");
@@ -105,7 +106,6 @@ fn visor_unit_set() {
         "ados-batman.service",
         "ados-kiosk.service",
         "ados-mediamtx-gs.service",
-        "ados-uplink-router.service",
         "ados-mesh-pairing.service",
         "ados-setup-captive.service",
         "ados-pic.service",
@@ -153,4 +153,15 @@ fn a_unit_that_exits_zero_when_done_is_not_restarted_for_it() {
         checked += 1;
     }
     assert!(checked > 0);
+}
+
+#[test]
+fn the_net_daemon_owns_wifi_on_ground_station_and_visor_only() {
+    use ados_protocol::units::net_daemon_owns_wifi;
+    for p in ["ground_station", "ground-station", "visor"] {
+        assert!(net_daemon_owns_wifi(p), "{p}");
+    }
+    for p in ["drone", "workstation", "compute", "unknown"] {
+        assert!(!net_daemon_owns_wifi(p), "{p}");
+    }
 }

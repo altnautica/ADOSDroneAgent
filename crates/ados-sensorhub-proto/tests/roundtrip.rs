@@ -13,6 +13,24 @@ fn roundtrip(pkt: &Packet<'_>) {
 }
 
 #[test]
+fn sample_time_wraps_instead_of_panicking() {
+    let b = ImuBatch {
+        t0_ns: u64::MAX - 5,
+        dt_ns: u32::MAX,
+        imu_id: 0,
+        flags: 0,
+        seq0: 0,
+        samples: ImuSamples::Raw(&[]),
+    };
+    assert_eq!(b.sample_t_ns(0), u64::MAX - 5);
+    assert_eq!(
+        b.sample_t_ns(1),
+        (u64::MAX - 5).wrapping_add(u64::from(u32::MAX))
+    );
+    let _ = b.sample_t_ns(u32::MAX);
+}
+
+#[test]
 fn crc_check_value() {
     assert_eq!(crc::crc16(b"123456789"), 0x29B1);
 }

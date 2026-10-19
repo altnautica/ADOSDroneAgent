@@ -39,6 +39,8 @@ pub struct SysProbe {
     pub i2c_addrs: Vec<u8>,
     /// A render GPU is present (`/dev/dri/card*` or an lspci VGA/3D line).
     pub gpu: bool,
+    /// Raw `ip -4 neigh show` output (empty when the tool is absent).
+    pub ip_neigh: String,
 }
 
 /// USB ids of the long-range radio family, for the presence hint. The radio
@@ -91,6 +93,7 @@ pub fn snapshot() -> SysProbe {
         hdmi_connected: read_hdmi_connected(),
         i2c_addrs: read_i2c_addrs(),
         gpu: read_gpu_present(),
+        ip_neigh: exec::run("ip", &["-4", "neigh", "show"]).stdout,
     }
 }
 
@@ -276,6 +279,22 @@ pub fn lsusb_has_sensor_hub(output: &str) -> bool {
         parse_lsusb_id(l)
             .map(|(v, p)| SENSOR_HUB_USB_IDS.contains(&(v, p)))
             .unwrap_or(false)
+    })
+}
+
+/// The address of a Livox LiDAR seen on the LAN, from `ip -4 neigh` output
+/// (pure). Livox Mid-360 units ship on the static address `192.168.1.1XX`
+/// (XX from the serial number) and answer ARP once the host shares that
+/// subnet; a reachable neighbour in that range with a link-layer address is
+/// the sensor.
+pub fn livox_in_neigh(output: &str) -> Option<String> {
+    output.lines().find_map(|l| {
+        let mut tokens = l.split_whitespace();
+        let ip = tokens.next()?;
+        let host = ip.strip_prefix("192.168.1.1")?;
+        let reachable = l.contains("lladdr") && !l.contains("FAILED");
+        (host.len() == 2 && host.chars().all(|c| c.is_ascii_digit()) && reachable)
+            .then(|| ip.to_string())
     })
 }
 

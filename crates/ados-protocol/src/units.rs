@@ -381,7 +381,11 @@ pub const UNITS: &[UnitSpec] = &[
         drops_link: true,
         ..gs_unit("ados-pic.service", Some(Hardware))
     },
+    // The ados-net uplink daemon: uplinks, the Wi-Fi station (it serves the
+    // Wi-Fi command socket) and the access-point config the hostapd unit
+    // gates on. A visor's AP needs it, so it runs there too.
     UnitSpec {
+        profiles: GS_VISOR,
         drops_link: true,
         ..gs_unit("ados-uplink-router.service", Some(Hardware))
     },
@@ -452,6 +456,15 @@ pub fn find(name: &str) -> Option<&'static UnitSpec> {
 /// The rows the supervisor manages, in catalog order.
 pub fn supervised() -> impl Iterator<Item = &'static UnitSpec> {
     UNITS.iter().filter(|u| u.category.is_some())
+}
+
+/// Whether the ados-net uplink daemon (`ados-uplink-router`) runs on
+/// `profile`, and so owns the Wi-Fi command socket. Accepts the underscore or
+/// the hyphen spelling. Every other node serves that socket from the control
+/// surface.
+pub fn net_daemon_owns_wifi(profile: &str) -> bool {
+    let profile = profile.replace('-', "_");
+    find("ados-uplink-router").is_some_and(|u| u.on_profile(&profile))
 }
 
 /// The units installed on `profile`, in table order.

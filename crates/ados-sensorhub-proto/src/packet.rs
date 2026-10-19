@@ -158,9 +158,11 @@ pub mod imu_flags {
 }
 
 impl ImuBatch<'_> {
-    /// Hub time of sample `k`.
+    /// Hub time of sample `k`. Wraps on overflow, like the hub timebase, so a
+    /// hostile `t0_ns` cannot panic a debug build.
     pub fn sample_t_ns(&self, k: u32) -> u64 {
-        self.t0_ns + u64::from(k) * u64::from(self.dt_ns)
+        self.t0_ns
+            .wrapping_add(u64::from(k).wrapping_mul(u64::from(self.dt_ns)))
     }
 }
 

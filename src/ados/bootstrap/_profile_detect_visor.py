@@ -14,15 +14,14 @@ import subprocess
 # ADOS Sensor Hub firmware USB CDC identity (pid.codes).
 _SENSOR_HUB_ID = (0x1209, 0xAD05)
 # Stock ArduPilot USB identity (pid.codes). Also a drone flight controller,
-# so it counts toward visor only on a multi-camera rig.
+# so it marks a visor only on a multi-camera rig with no long-range radio
+# (the detector applies the radio rule).
 _ARDUPILOT_USB_ID = (0x1209, 0x5741)
-
-# The sensor hub firmware also enumerates as a MAVLink serial device and can
-# publish a heartbeat, which earns up to 9 air points (6 serial + 3
-# heartbeat). The visor weight sits above that so the firmware identity wins.
-SENSOR_HUB_VISOR_POINTS = 10
-ARDUPILOT_MULTICAM_VISOR_POINTS = 2
 MIN_VISOR_CSI_CAMERAS = 2
+
+# Hub signal kinds returned by ``probe_sensor_hub``.
+HUB_FIRMWARE = "sensor_hub"
+HUB_ARDUPILOT_MULTICAM = "ardupilot_multicam"
 
 
 def _lsusb_text() -> str:
@@ -56,21 +55,21 @@ def probe_csi_cameras() -> int:
         return 0
 
 
-def probe_sensor_hub() -> tuple[int, bool]:
-    """Score the USB sensor hub signal toward the visor profile.
+def probe_sensor_hub() -> str:
+    """Classify the USB sensor-hub signal.
 
-    Returns ``(visor_points, detected)``. The ADOS Sensor Hub firmware
-    (``1209:ad05``) is a strong visor signal. A stock ArduPilot board
-    (``1209:5741``) earns a small visor score only when at least
-    ``MIN_VISOR_CSI_CAMERAS`` CSI cameras are present; the camera probe
-    runs only in that case.
+    Returns ``HUB_FIRMWARE`` when the ADOS Sensor Hub firmware
+    (``1209:ad05``) is on USB, ``HUB_ARDUPILOT_MULTICAM`` when a stock
+    ArduPilot board (``1209:5741``) sits next to at least
+    ``MIN_VISOR_CSI_CAMERAS`` CSI cameras (the camera probe runs only then),
+    and ``""`` otherwise.
     """
     text = _lsusb_text()
     if not text:
-        return 0, False
+        return ""
     if _usb_id_present(text, _SENSOR_HUB_ID):
-        return SENSOR_HUB_VISOR_POINTS, True
+        return HUB_FIRMWARE
     if _usb_id_present(text, _ARDUPILOT_USB_ID):
         if probe_csi_cameras() >= MIN_VISOR_CSI_CAMERAS:
-            return ARDUPILOT_MULTICAM_VISOR_POINTS, True
-    return 0, False
+            return HUB_ARDUPILOT_MULTICAM
+    return ""

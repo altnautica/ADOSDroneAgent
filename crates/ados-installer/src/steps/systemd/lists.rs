@@ -182,7 +182,8 @@ mod tests {
         );
     }
 
-    /// A visor runs the access point, the panel and the buttons, keeps its
+    /// A visor runs the access point (and the ados-net daemon that renders
+    /// it), the panel and the buttons, keeps its
     /// camera pipeline, and tears down every radio, receive and kiosk unit.
     #[test]
     fn visor_lists() {
@@ -194,6 +195,7 @@ mod tests {
                 "ados-hostapd.service",
                 "ados-dnsmasq-gs.service",
                 "ados-input.service",
+                "ados-uplink-router.service",
             ]
         );
         assert_eq!(
@@ -207,7 +209,6 @@ mod tests {
                 "ados-setup-captive.service",
                 "ados-kiosk.service",
                 "ados-pic.service",
-                "ados-uplink-router.service",
                 "ados-batman.service",
             ])
         );
@@ -220,6 +221,7 @@ mod tests {
                 "ados-hostapd.service",
                 "ados-dnsmasq-gs.service",
                 "ados-input.service",
+                "ados-uplink-router.service",
             ]
         );
         assert_eq!(

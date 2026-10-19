@@ -152,6 +152,13 @@ pub const CATALOG: &[HwCategory] = &[
     },
     // ── visor ───────────────────────────────────────────────────────────────
     HwCategory {
+        id: "livox",
+        label: "LiDAR",
+        note: "A Livox scanner on the rig's Ethernet port, for depth and mapping.",
+        profiles: &[Visor],
+        availability: Now,
+    },
+    HwCategory {
         id: "sensor_hub",
         label: "Sensor hub",
         note: "The IMU, timing and camera-trigger board of a handheld capture rig.",
@@ -184,7 +191,7 @@ pub const CATALOG: &[HwCategory] = &[
         id: "lidar",
         label: "LiDAR",
         note: "Dense distance scanning for mapping and avoidance.",
-        profiles: &[Drone, Visor],
+        profiles: &[Drone],
         availability: Planned,
     },
     HwCategory {
@@ -274,6 +281,7 @@ pub fn detect(cat: &HwCategory, sys: &SysProbe) -> Detection {
         "camera" => opt(hw::pick_lowest_video(&sys.dev_names).map(|n| format!("/dev/{n}"))),
         "gps" => flag(hw::lsusb_has_gps(&sys.lsusb), "USB GNSS"),
         "sensor_hub" => flag(hw::lsusb_has_sensor_hub(&sys.lsusb), "USB sensor hub"),
+        "livox" => opt(hw::livox_in_neigh(&sys.ip_neigh)),
         "modem" => flag(hw::lsusb_has_modem(&sys.lsusb), "USB modem"),
         "radio" => flag(hw::lsusb_has_radio(&sys.lsusb), "USB adapter"),
         "mesh" => {
@@ -351,7 +359,7 @@ mod tests {
         }
         // A visor has cameras and a hub but no flight controller and no radio.
         let vi: Vec<&str> = catalog_for(Profile::Visor).iter().map(|c| c.id).collect();
-        for want in ["camera", "sensor_hub", "gps", "lidar", "oled"] {
+        for want in ["camera", "sensor_hub", "gps", "livox", "oled"] {
             assert!(vi.contains(&want), "visor missing {want}");
         }
         assert!(!vi.contains(&"fc") && !vi.contains(&"radio"));
@@ -402,6 +410,9 @@ mod tests {
             hdmi_connected: true,
             i2c_addrs: vec![0x3c],
             gpu: true,
+            ip_neigh: "192.168.1.1 dev eth0 lladdr aa:bb:cc:00:00:01 REACHABLE\n\
+                       192.168.1.112 dev eth1 lladdr aa:bb:cc:00:00:02 REACHABLE"
+                .into(),
         };
         let by_id = |id: &str| {
             let cat = CATALOG.iter().find(|c| c.id == id).unwrap();
@@ -412,6 +423,8 @@ mod tests {
         assert!(matches!(by_id("radio"), Detection::Found(_)));
         assert!(matches!(by_id("gps"), Detection::Found(_)));
         assert!(matches!(by_id("sensor_hub"), Detection::Found(_)));
+        assert_eq!(by_id("livox"), Detection::Found("192.168.1.112".into()));
+        assert_eq!(hw::livox_in_neigh("192.168.1.150 dev eth1  FAILED"), None);
         assert!(matches!(by_id("oled"), Detection::Found(_)));
         assert!(matches!(by_id("hdmi"), Detection::Found(_)));
         assert!(matches!(by_id("joystick"), Detection::Found(_)));
