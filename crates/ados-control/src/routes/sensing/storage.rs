@@ -22,13 +22,28 @@ use crate::state::AppState;
 /// The profiles that record capture sessions.
 pub(crate) const CAPTURE_PROFILES: &[&str] = &["drone", "visor"];
 
+/// The volume walk (`statvfs` per mount) and the sidecar read both run on a
+/// blocking thread, off the async runtime.
 pub async fn get_storage(State(state): State<AppState>) -> Json<Value> {
     let profile = super::profile(&state);
     let paths = SensingPaths::from_state(&state);
-    let volumes = tokio::task::spawn_blocking(list_volumes_live)
-        .await
-        .unwrap_or_default();
-    Json(storage_body(&paths, &profile, &volumes, SystemTime::now()))
+    let body = tokio::task::spawn_blocking(move || {
+        let volumes = list_volumes_live();
+        storage_body(&paths, &profile, &volumes, SystemTime::now())
+    })
+    .await
+    .unwrap_or_else(|_| absent_body());
+    Json(body)
+}
+
+/// The `present: false` body.
+fn absent_body() -> Value {
+    let mut rest = Map::new();
+    rest.insert("capture_root".into(), Value::Null);
+    rest.insert("volumes".into(), json!([]));
+    rest.insert("capture".into(), Value::Null);
+    rest.insert("write_probe".into(), Value::Null);
+    with_present(false, rest)
 }
 
 pub(crate) fn storage_body(
@@ -48,12 +63,7 @@ pub(crate) fn storage_body(
         })
         .flatten();
     let Some(side) = side else {
-        let mut rest = Map::new();
-        rest.insert("capture_root".into(), Value::Null);
-        rest.insert("volumes".into(), json!([]));
-        rest.insert("capture".into(), Value::Null);
-        rest.insert("write_probe".into(), Value::Null);
-        return with_present(false, rest);
+        return absent_body();
     };
     let capture_mount = side
         .get("volume")

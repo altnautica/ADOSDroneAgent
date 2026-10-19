@@ -30,6 +30,7 @@ const SYSTEMD_DIR: &str = "/etc/systemd/system";
 /// The udev rules dir.
 const UDEV_RULES_DIR: &str = "/etc/udev/rules.d";
 
+mod capture_root;
 mod enable;
 mod hardening;
 mod lists;
@@ -37,6 +38,7 @@ mod reconcile;
 mod render;
 mod teardown;
 
+pub use capture_root::*;
 use enable::*;
 pub use hardening::*;
 pub(crate) use lists::*;
@@ -180,6 +182,10 @@ impl Step for Systemd {
         //     (enabled with the cross-profile set above): bind it to the LAN
         //     port and keep the residual API on the internal socket behind it.
         reconcile_front_unit();
+
+        // 5b-ter. Grant the supervisor write access to an explicit capture
+        //     root outside the paths its unit already covers (drone, visor).
+        reconcile_capture_root_dropin(&ctx.profile);
 
         // 6. Profile-specific enable + teardown.
         for unit in profile_enable_units(&ctx.profile) {

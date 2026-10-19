@@ -49,6 +49,11 @@ pub const AUTO_MIN_FREE_BYTES: u64 = 64 * GIB;
 /// The capture root used when `auto` finds no qualifying NVMe volume.
 pub const FALLBACK_ROOT: &str = "/var/ados/capture";
 
+/// A directory under the capture root is a capture session only when it
+/// holds this file; anything else there is not the janitor's to count or
+/// delete.
+pub const MANIFEST_NAME: &str = "manifest.json";
+
 /// Present inside a session directory once the session has been uploaded.
 pub const UPLOADED_MARKER: &str = ".uploaded";
 

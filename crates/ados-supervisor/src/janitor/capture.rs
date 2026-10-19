@@ -1,7 +1,8 @@
 //! The capture category: capture sessions under the capture root, held to a
 //! share of their volume and to a free-space floor.
 //!
-//! A session is a directory `<root>/<session_id>/`. A `.uploaded` marker inside
+//! A session is a directory `<root>/<session_id>/` holding `manifest.json`;
+//! nothing else under the root is counted or deleted. A `.uploaded` marker inside
 //! makes it evictable; a `.recording` marker marks the session being written,
 //! which is never evicted. Over the budget or under the floor, uploaded sessions
 //! go first, oldest first; sessions that were never uploaded go only when
@@ -14,16 +15,18 @@
 //! sustained write speed once shortly after start and every six hours after
 //! that, on a blocking thread.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use ados_config::capture_storage::{
     self as cs, CaptureState, CaptureStorageConfig, CaptureStorageSidecar, CaptureUsage, SysRoots,
     Volume, WriteProbe,
 };
 
-use super::reclaim;
+mod sessions;
+pub use sessions::{
+    excess_bytes, plan_evictions, remove_session, scan_sessions, Session, SizeCache,
+};
 
 /// Bytes the write probe writes.
 pub const PROBE_BYTES: u64 = 64 * 1024 * 1024;
@@ -37,120 +40,16 @@ pub fn active_for(profile: &str) -> bool {
     matches!(profile, "drone" | "visor")
 }
 
-/// One session directory under the capture root.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Session {
-    pub name: String,
-    /// Creation time (modification time where the filesystem has none), unix s.
-    pub born: i64,
-    pub bytes: u64,
-    pub uploaded: bool,
-    pub recording: bool,
-}
-
-/// Measured sizes of settled (not recording) sessions, keyed by path, so the
-/// short-cadence refresh walks only the session being written. An eviction
-/// pass clears it and measures everything afresh.
-pub type SizeCache = HashMap<PathBuf, u64>;
-
-/// Every session under `root`, oldest first. Dot-named entries (the write
-/// probe, scratch) and anything that is not a directory are not sessions.
-/// Sizes of settled sessions come from `cache` when present and are stored in
-/// it; entries for sessions that are gone are dropped.
-pub fn scan_sessions(root: &Path, cache: &mut SizeCache) -> Vec<Session> {
-    let Ok(dir) = std::fs::read_dir(root) else {
-        cache.clear();
-        return Vec::new();
-    };
-    let mut seen: HashMap<PathBuf, u64> = HashMap::new();
-    let mut out: Vec<Session> = dir
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') || !e.file_type().ok()?.is_dir() {
-                return None;
-            }
-            let path = e.path();
-            let born = e
-                .metadata()
-                .ok()
-                .and_then(|m| m.created().or_else(|_| m.modified()).ok())
-                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let recording = path.join(cs::RECORDING_MARKER).exists();
-            let bytes = match cache.get(&path) {
-                Some(b) if !recording => *b,
-                _ => reclaim::tree_bytes(&path),
-            };
-            if !recording {
-                seen.insert(path.clone(), bytes);
-            }
-            Some(Session {
-                bytes,
-                uploaded: path.join(cs::UPLOADED_MARKER).exists(),
-                recording,
-                name,
-                born,
-            })
-        })
-        .collect();
-    *cache = seen;
-    out.sort_by(|a, b| a.born.cmp(&b.born).then_with(|| a.name.cmp(&b.name)));
-    out
-}
-
-/// Bytes that must come off the volume: the larger of the overrun of the
-/// budget (`budget == 0` means unknown, never enforced) and the shortfall
-/// under the floor (`free == None` means unmeasured, never enforced).
-pub fn excess_bytes(used: u64, budget: u64, free: Option<u64>, floor: u64) -> u64 {
-    let over = if budget > 0 {
-        used.saturating_sub(budget)
-    } else {
-        0
-    };
-    let short = free.map_or(0, |f| floor.saturating_sub(f));
-    over.max(short)
-}
-
-/// Indexes into `sessions` (oldest first) to evict to free `need` bytes:
-/// uploaded sessions first, then un-uploaded ones when `evict_unuploaded`.
-/// A recording session is never picked.
-pub fn plan_evictions(sessions: &[Session], need: u64, evict_unuploaded: bool) -> Vec<usize> {
-    let uploaded = sessions
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| !s.recording && s.uploaded);
-    let unuploaded = sessions
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| evict_unuploaded && !s.recording && !s.uploaded);
-    let mut picked = Vec::new();
-    let mut freed = 0u64;
-    for (i, s) in uploaded.chain(unuploaded) {
-        if freed >= need {
-            break;
-        }
-        picked.push(i);
-        freed = freed.saturating_add(s.bytes);
-    }
-    picked
-}
-
-/// Remove one session directory, returning the bytes freed. A session that
-/// started recording since the scan, or sits under a protected root, stays.
-fn remove_session(root: &Path, session: &Session) -> u64 {
-    let path = root.join(&session.name);
-    if reclaim::is_protected(&path) || path.join(cs::RECORDING_MARKER).exists() {
-        return 0;
-    }
-    match std::fs::remove_dir_all(&path) {
-        Ok(()) => session.bytes,
-        Err(e) => {
-            tracing::debug!(path = %path.display(), error = %e, "janitor could not remove capture session");
-            session.bytes.saturating_sub(reclaim::tree_bytes(&path))
-        }
-    }
+/// What one capture pass does beyond rewriting the sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PassMode {
+    /// The short-cadence rewrite: settled session sizes come from the cache.
+    Refresh,
+    /// The janitor-interval pass with the janitor disabled: every session is
+    /// re-measured, nothing is deleted.
+    Remeasure,
+    /// The janitor-interval pass: re-measure, then evict to the budget/floor.
+    Evict,
 }
 
 fn current_volume(root: &Path, sys: &SysRoots) -> Option<Volume> {
@@ -161,28 +60,35 @@ fn current_volume(root: &Path, sys: &SysRoots) -> Option<Volume> {
 pub struct CapturePass {
     pub freed: u64,
     pub root: PathBuf,
+    /// Why the capture root could not be created, when it could not.
+    pub root_error: Option<String>,
     pub sidecar: CaptureStorageSidecar,
 }
 
-/// One capture pass: resolve the root, evict when `evict` and over the budget
-/// or under the floor, and build the sidecar from what is left. An evicting
-/// pass re-measures every session rather than trusting `cache`.
+/// One capture pass: resolve the root and create it (`mkdir -p`), evict when
+/// `mode` is [`PassMode::Evict`] and over the budget or under the floor, and
+/// build the sidecar from what is left. A root that cannot be created admits
+/// nothing: its sidecar state is `full`. `keepalive` runs between sessions as
+/// they are measured and removed, so a long pass keeps the monitor's progress
+/// marker (and with it the systemd watchdog) fed.
 pub fn run_pass(
     cfg: &CaptureStorageConfig,
     sys: &SysRoots,
-    evict: bool,
+    mode: PassMode,
     write_probe: Option<WriteProbe>,
     cache: &mut SizeCache,
     now_ns: u64,
+    keepalive: &dyn Fn(),
 ) -> CapturePass {
     let root = cs::resolve_capture_root(cfg, sys);
-    if evict {
+    let root_error = std::fs::create_dir_all(&root).err().map(|e| e.to_string());
+    if mode != PassMode::Refresh {
         cache.clear();
     }
-    let mut sessions = scan_sessions(&root, cache);
+    let mut sessions = scan_sessions(&root, cache, keepalive);
     let mut volume = current_volume(&root, sys);
     let mut freed = 0u64;
-    if evict {
+    if mode == PassMode::Evict {
         let used = sessions.iter().fold(0u64, |a, s| a.saturating_add(s.bytes));
         let budget = volume
             .as_ref()
@@ -196,16 +102,21 @@ pub fn run_pass(
         let picked = plan_evictions(&sessions, need, cfg.capture_evict_unuploaded);
         if !picked.is_empty() {
             for i in picked {
-                freed = freed.saturating_add(remove_session(&root, &sessions[i]));
+                freed = freed.saturating_add(remove_session(&root, &sessions[i], keepalive));
+                keepalive();
             }
-            sessions = scan_sessions(&root, cache);
+            sessions = scan_sessions(&root, cache, keepalive);
             volume = current_volume(&root, sys);
         }
     }
-    let sidecar = build_sidecar(cfg, &root, volume, &sessions, write_probe, now_ns);
+    let mut sidecar = build_sidecar(cfg, &root, volume, &sessions, write_probe, now_ns);
+    if root_error.is_some() {
+        sidecar.capture.state = CaptureState::Full;
+    }
     CapturePass {
         freed,
         root,
+        root_error,
         sidecar,
     }
 }

@@ -2100,6 +2100,25 @@
           "title": "Imu Odr Hz",
           "type": "integer"
         },
+        "rtcm_origins": {
+          "default": [
+            "gnss",
+            "host"
+          ],
+          "items": {
+            "enum": [
+              "gnss",
+              "host",
+              "fc",
+              "vision",
+              "lidar",
+              "sim"
+            ],
+            "type": "string"
+          },
+          "title": "Rtcm Origins",
+          "type": "array"
+        },
         "transport": {
           "default": "auto",
           "pattern": "^(auto|serial:/\\S+|tcp:\\S+:\\d{1,5})$",
@@ -2125,6 +2144,10 @@
             "exposure_us": 4000,
             "gnss_forward": true,
             "imu_odr_hz": 1000,
+            "rtcm_origins": [
+              "gnss",
+              "host"
+            ],
             "transport": "auto",
             "trigger_hz": 20
           }

@@ -246,9 +246,13 @@ impl Janitor {
     /// rest of the janitor is enabled, because its sidecar is what capture
     /// admission reads. It rewrites the sidecar every
     /// [`SIDECAR_REFRESH`](ados_config::capture_storage::SIDECAR_REFRESH)
-    /// (measure only) and evicts only on the janitor interval while the
-    /// janitor is enabled.
-    pub async fn tick(&mut self) {
+    /// from cached session sizes, re-measures every session on the janitor
+    /// interval, and evicts on that interval only while the janitor is
+    /// enabled. `progress` is stamped between capture sessions so a long
+    /// eviction keeps the systemd watchdog fed.
+    pub async fn tick(&mut self, progress: &crate::sdnotify::MonitorProgress) {
+        #[cfg(not(target_os = "linux"))]
+        let _ = progress;
         #[cfg(target_os = "linux")]
         {
             let capture_sidecar =
@@ -275,9 +279,14 @@ impl Janitor {
                     let (capture_cfg, _) = ados_config::capture_storage::CaptureStorageConfig::load(
                         std::path::Path::new(CONFIG_YAML),
                     );
+                    let mode = match (due, cfg.enabled) {
+                        (true, true) => capture::PassMode::Evict,
+                        (true, false) => capture::PassMode::Remeasure,
+                        (false, _) => capture::PassMode::Refresh,
+                    };
                     capture_freed = self
                         .capture
-                        .pass(capture_cfg, due && cfg.enabled, &capture_sidecar)
+                        .pass(capture_cfg, mode, &capture_sidecar, progress.clone())
                         .await;
                 }
             }

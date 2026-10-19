@@ -56,6 +56,7 @@ fn cfg_for(root: &Path, evict_unuploaded: bool) -> CaptureStorageConfig {
 fn session(root: &Path, name: &str, bytes: usize, uploaded: bool, recording: bool) {
     let dir = root.join(name);
     fs::create_dir_all(dir.join("frames")).unwrap();
+    fs::write(dir.join(cs::MANIFEST_NAME), b"{}").unwrap();
     fs::write(dir.join("frames/data.bin"), vec![7u8; bytes]).unwrap();
     if uploaded {
         fs::write(dir.join(".uploaded"), b"").unwrap();
@@ -63,6 +64,18 @@ fn session(root: &Path, name: &str, bytes: usize, uploaded: bool, recording: boo
     if recording {
         fs::write(dir.join(".recording"), b"").unwrap();
     }
+}
+
+/// `run_pass` with a no-op keepalive.
+fn run(
+    cfg: &CaptureStorageConfig,
+    sys: &SysRoots,
+    mode: PassMode,
+    probe: Option<WriteProbe>,
+    cache: &mut SizeCache,
+    now_ns: u64,
+) -> CapturePass {
+    run_pass(cfg, sys, mode, probe, cache, now_ns, &|| {})
 }
 
 fn s(name: &str, bytes: u64, uploaded: bool, recording: bool) -> Session {
@@ -126,13 +139,20 @@ fn a_pass_evicts_uploaded_sessions_first_and_keeps_the_active_one() {
     session(&root, "s5-active", 1000, false, true);
     fs::write(root.join(".write-probe"), b"x").unwrap();
 
+    let ticks = std::cell::Cell::new(0u32);
     let pass = run_pass(
         &cfg_for(&root, false),
         &sys,
-        true,
+        PassMode::Evict,
         None,
         &mut SizeCache::new(),
         42,
+        &|| ticks.set(ticks.get() + 1),
+    );
+    assert!(
+        ticks.get() >= 2 + 5,
+        "progress is reported per measured and per removed session: {}",
+        ticks.get()
     );
     assert!(pass.freed >= 2000, "{}", pass.freed);
     assert!(!root.join("s3-uploaded").exists());
@@ -149,10 +169,10 @@ fn a_pass_evicts_uploaded_sessions_first_and_keeps_the_active_one() {
     assert_eq!(pass.sidecar.capture.state, CaptureState::Full);
 
     // With the flag the un-uploaded, idle session goes too.
-    let pass = run_pass(
+    let pass = run(
         &cfg_for(&root, true),
         &sys,
-        true,
+        PassMode::Evict,
         None,
         &mut SizeCache::new(),
         43,
@@ -167,16 +187,97 @@ fn a_pass_evicts_uploaded_sessions_first_and_keeps_the_active_one() {
 fn a_pass_without_eviction_deletes_nothing() {
     let (_tmp, sys, root) = fixture(100 * GIB, GIB);
     session(&root, "s1", 1000, true, false);
-    let pass = run_pass(
+    for mode in [PassMode::Refresh, PassMode::Remeasure] {
+        let pass = run(
+            &cfg_for(&root, true),
+            &sys,
+            mode,
+            None,
+            &mut SizeCache::new(),
+            1,
+        );
+        assert_eq!(pass.freed, 0);
+        assert!(root.join("s1").exists());
+    }
+}
+
+#[test]
+fn only_directories_with_a_manifest_are_sessions() {
+    let (_tmp, sys, root) = fixture(100 * GIB, GIB);
+    session(&root, "s1", 1000, true, false);
+    fs::create_dir_all(root.join("not-a-session/frames")).unwrap();
+    fs::write(root.join("not-a-session/frames/x.bin"), vec![0u8; 5000]).unwrap();
+    fs::create_dir_all(root.join("uploaded-no-manifest")).unwrap();
+    fs::write(root.join("uploaded-no-manifest/.uploaded"), b"").unwrap();
+    fs::write(root.join("stray.bin"), vec![0u8; 100]).unwrap();
+    let pass = run(
         &cfg_for(&root, true),
         &sys,
-        false,
+        PassMode::Evict,
         None,
         &mut SizeCache::new(),
         1,
     );
-    assert_eq!(pass.freed, 0);
-    assert!(root.join("s1").exists());
+    assert_eq!(pass.sidecar.capture.sessions, 0, "s1 was evicted");
+    assert!(!root.join("s1").exists());
+    assert!(
+        pass.sidecar.capture.used_bytes < 5000,
+        "foreign bytes are not counted"
+    );
+    assert!(
+        root.join("not-a-session").exists(),
+        "never the janitor's to delete"
+    );
+    assert!(root.join("uploaded-no-manifest").exists());
+    assert!(root.join("stray.bin").exists());
+}
+
+#[test]
+fn a_large_session_is_removed_with_progress_inside_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    session(root, "big", 10, true, false);
+    for i in 0..600 {
+        fs::write(root.join(format!("big/frames/f{i}.bin")), b"x").unwrap();
+    }
+    let s = scan_sessions(root, &mut SizeCache::new(), &|| {}).remove(0);
+    let ticks = std::cell::Cell::new(0u32);
+    let freed = remove_session(root, &s, &|| ticks.set(ticks.get() + 1));
+    assert_eq!(freed, s.bytes);
+    assert!(!root.join("big").exists());
+    assert!(ticks.get() >= 2, "{}", ticks.get());
+}
+
+#[test]
+fn the_capture_root_is_created_or_reported_full() {
+    let (_tmp, sys, root) = fixture(1000 * GIB, 800 * GIB);
+    let fresh = root.join("nested/capture");
+    let pass = run(
+        &cfg_for(&fresh, false),
+        &sys,
+        PassMode::Refresh,
+        None,
+        &mut SizeCache::new(),
+        1,
+    );
+    assert!(fresh.is_dir(), "mkdir -p");
+    assert!(pass.root_error.is_none());
+    assert_eq!(pass.sidecar.capture.state, CaptureState::Ok);
+
+    // A file where a parent directory should be: the root cannot be created.
+    fs::write(root.join("blocker"), b"x").unwrap();
+    let blocked = root.join("blocker/capture");
+    let pass = run(
+        &cfg_for(&blocked, false),
+        &sys,
+        PassMode::Refresh,
+        None,
+        &mut SizeCache::new(),
+        2,
+    );
+    assert!(pass.root_error.is_some());
+    assert_eq!(pass.sidecar.capture.state, CaptureState::Full);
+    assert_eq!(pass.sidecar.capture_root, blocked.display().to_string());
 }
 
 #[test]
@@ -186,26 +287,27 @@ fn refresh_passes_reuse_settled_sizes_and_remeasure_the_recording_one() {
     session(&root, "live", 1000, false, true);
     let cfg = cfg_for(&root, false);
     let mut cache = SizeCache::new();
-    let first = run_pass(&cfg, &sys, false, None, &mut cache, 1);
+    let first = run(&cfg, &sys, PassMode::Refresh, None, &mut cache, 1);
     assert_eq!(cache.len(), 1, "only the settled session is cached");
 
     // Growth in the recording session shows on the next refresh; a change to
-    // a settled one waits for the eviction pass's full re-measure.
+    // a settled one waits for the janitor-interval re-measure, which runs
+    // whether or not eviction is enabled.
     fs::write(root.join("live/frames/more.bin"), vec![1u8; 500]).unwrap();
     fs::write(root.join("settled/frames/late.bin"), vec![1u8; 300]).unwrap();
-    let second = run_pass(&cfg, &sys, false, None, &mut cache, 2);
+    let second = run(&cfg, &sys, PassMode::Refresh, None, &mut cache, 2);
     assert_eq!(
         second.sidecar.capture.used_bytes,
         first.sidecar.capture.used_bytes + 500
     );
-    let full = run_pass(&cfg, &sys, true, None, &mut cache, 3);
+    let full = run(&cfg, &sys, PassMode::Remeasure, None, &mut cache, 3);
     assert_eq!(
         full.sidecar.capture.used_bytes,
         first.sidecar.capture.used_bytes + 800
     );
 
     fs::remove_dir_all(root.join("settled")).unwrap();
-    run_pass(&cfg, &sys, false, None, &mut cache, 4);
+    run(&cfg, &sys, PassMode::Refresh, None, &mut cache, 4);
     assert!(cache.is_empty(), "a vanished session leaves the cache");
 }
 
@@ -213,10 +315,10 @@ fn refresh_passes_reuse_settled_sizes_and_remeasure_the_recording_one() {
 fn a_roomy_volume_is_ok_and_untouched() {
     let (_tmp, sys, root) = fixture(1000 * GIB, 800 * GIB);
     session(&root, "s1", 1000, true, false);
-    let pass = run_pass(
+    let pass = run(
         &cfg_for(&root, false),
         &sys,
-        true,
+        PassMode::Evict,
         None,
         &mut SizeCache::new(),
         7,
@@ -241,10 +343,10 @@ fn a_pass_writes_the_sidecar() {
         mbps: 1450.2,
         measured_at_ns: 9,
     };
-    let pass = run_pass(
+    let pass = run(
         &cfg_for(&root, false),
         &sys,
-        true,
+        PassMode::Evict,
         Some(probe),
         &mut SizeCache::new(),
         5,

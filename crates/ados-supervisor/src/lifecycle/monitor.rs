@@ -261,8 +261,9 @@ impl Supervisor {
         // plugin logs and audit trail, aged recordings, and — once free space is
         // short — the package index, journal history, and older quarantined
         // stores. Cheap on the ticks it is not due, and a no-op on the ones it
-        // is when nothing is over its cap.
-        self.janitor.tick().await;
+        // is when nothing is over its cap. The capture category stamps progress
+        // between sessions, so a long eviction does not starve the watchdog.
+        self.janitor.tick(&self.progress).await;
         self.progress.mark();
     }
 }
