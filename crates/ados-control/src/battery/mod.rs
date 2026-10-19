@@ -9,12 +9,13 @@
 //! - [`config`] is the `battery:` block of the agent config.
 //! - [`rules`] and [`predict`] are pure functions over samples.
 //! - [`engine`] holds the per-pack sample window, live anomalies and history.
-//! - [`task`] is the only I/O: it feeds the engine from the state socket,
-//!   hot-reloads the config, and records each anomaly transition in the
-//!   logging store.
+//! - [`task`] is the only I/O: it feeds the engine from the state socket and
+//!   the board-bound [`ina226`] gauge, hot-reloads the config, and records
+//!   each anomaly transition in the logging store.
 
 pub mod config;
 pub mod engine;
+pub mod ina226;
 pub mod predict;
 pub mod rules;
 mod task;
@@ -27,6 +28,16 @@ pub use task::{spawn, BatteryTaskHandle};
 /// the whole-pack voltage in `voltages[0]` when it has no per-cell monitor.
 pub const PLAUSIBLE_CELL_V: std::ops::RangeInclusive<f64> = 2.5..=4.5;
 
+/// Where a pack's readings come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PackSource {
+    /// The flight controller's BATTERY_STATUS / SYS_STATUS over MAVLink.
+    Mavlink,
+    /// The node's own INA226 gauge on I2C.
+    Ina226,
+}
+
 /// One battery reading at one instant, as the rules see it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sample {
@@ -38,10 +49,13 @@ pub struct Sample {
     pub cells_plausible: bool,
     pub voltage_v: Option<f64>,
     pub current_a: Option<f64>,
+    /// Measured pack power; only a power monitor reports it.
+    pub power_w: Option<f64>,
     pub remaining_pct: Option<i64>,
     pub temperature_c: Option<f64>,
     pub consumed_mah: Option<i64>,
     pub consumed_wh: Option<f64>,
+    pub source: PackSource,
 }
 
 impl Sample {

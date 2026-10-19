@@ -12,6 +12,7 @@ from .battery import BatteryConfig
 from .cloud import RemoteAccessConfig, ServerConfig
 from .gnss import GnssConfig
 from .ground_station import GroundStationConfig
+from .lora import LoraConfig
 from .mavlink import MavlinkConfig
 from .network import NetworkConfig
 from .radio import RadioConfig
@@ -72,6 +73,7 @@ class ADOSConfig(BaseModel):
     simulation: SimulationConfig = SimulationConfig()
     gnss: GnssConfig = Field(default_factory=GnssConfig)
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
+    lora: LoraConfig = LoraConfig()
 
     model_config = {"extra": "ignore"}
 

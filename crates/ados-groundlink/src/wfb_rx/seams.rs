@@ -84,6 +84,55 @@ impl ChannelSetter for IwChannelSetter {
     }
 }
 
+/// The WFB interfaces of the running receive plane, transmit adapter first. The
+/// receive loop writes it once the adapters are resolved; the channel setters,
+/// the hop follower and the shutdown restore read it. Empty until resolved.
+pub type RadioGroup = Arc<Mutex<Vec<String>>>;
+
+/// A channel setter that keeps every adapter of the receive group on one
+/// channel. A diversity receiver whose adapters sit on different channels
+/// combines nothing, so every retune (the acquirer sweep, a coordinated hop
+/// follow, a revert) lands on the requested interface and then on each other
+/// group member. The verdict is the requested interface's: the others are
+/// best-effort and logged, so one wedged receive-only adapter cannot fail a
+/// hop the transmit adapter completed.
+pub struct GroupChannelSetter {
+    inner: Arc<dyn ChannelSetter>,
+    group: RadioGroup,
+}
+
+impl GroupChannelSetter {
+    pub fn new(inner: Arc<dyn ChannelSetter>, group: RadioGroup) -> Self {
+        Self { inner, group }
+    }
+}
+
+impl ChannelSetter for GroupChannelSetter {
+    fn set_channel<'a>(
+        &'a self,
+        interface: &'a str,
+        channel: u8,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            let ok = self.inner.set_channel(interface, channel).await;
+            let others: Vec<String> = self
+                .group
+                .lock()
+                .await
+                .iter()
+                .filter(|i| i.as_str() != interface)
+                .cloned()
+                .collect();
+            for other in others {
+                if !self.inner.set_channel(&other, channel).await {
+                    tracing::warn!(interface = %other, channel, "ground_group_retune_failed");
+                }
+            }
+            ok
+        })
+    }
+}
+
 /// Run one retune command under `budget`, reporting success only on exit 0.
 ///
 /// Takes the built command rather than the program name so the bound itself is
@@ -240,6 +289,55 @@ mod tests {
         let mut cmd = tokio::process::Command::new("sleep");
         cmd.arg("600");
         cmd
+    }
+
+    /// Records every `(iface, channel)` call; fails on `fail_on`.
+    struct Recording {
+        calls: std::sync::Mutex<Vec<(String, u8)>>,
+        fail_on: &'static str,
+    }
+
+    impl ChannelSetter for Recording {
+        fn set_channel<'a>(
+            &'a self,
+            interface: &'a str,
+            channel: u8,
+        ) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((interface.to_string(), channel));
+            let ok = interface != self.fail_on;
+            Box::pin(async move { ok })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_group_retune_tunes_every_receive_adapter() {
+        let inner = Arc::new(Recording {
+            calls: std::sync::Mutex::new(Vec::new()),
+            fail_on: "wlan3",
+        });
+        let group: RadioGroup = Arc::new(Mutex::new(vec![
+            "wlan1".into(),
+            "wlan2".into(),
+            "wlan3".into(),
+        ]));
+        let setter = GroupChannelSetter::new(inner.clone(), group);
+        // A failing secondary adapter does not fail the requested retune.
+        assert!(setter.set_channel("wlan1", 157).await);
+        assert_eq!(
+            *inner.calls.lock().unwrap(),
+            vec![
+                ("wlan1".to_string(), 157),
+                ("wlan2".to_string(), 157),
+                ("wlan3".to_string(), 157),
+            ]
+        );
+        // The requested interface's own failure is the verdict.
+        inner.calls.lock().unwrap().clear();
+        assert!(!setter.set_channel("wlan3", 161).await);
+        assert_eq!(inner.calls.lock().unwrap().len(), 3);
     }
 
     #[tokio::test]

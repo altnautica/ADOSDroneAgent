@@ -4,6 +4,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::modules::{ModuleConfig, ModuleSection};
 use crate::sources::ChannelSourceMode;
 
 /// Default RC frame cadence when the config does not pin one: the standard
@@ -194,6 +195,10 @@ pub struct CrsfLaneConfig {
     /// flag so it can report the gate honestly on its own status surface (see
     /// [`Self::fc_command_down_gated`]).
     pub mavlink_command_enabled: bool,
+    /// The configured RC modules (`radio.crsf.modules`), validated. Empty in
+    /// the legacy single-port config; [`Self::resolved_modules`] is the set
+    /// the lane runs.
+    pub modules: Vec<ModuleConfig>,
 }
 
 impl Default for CrsfLaneConfig {
@@ -209,6 +214,7 @@ impl Default for CrsfLaneConfig {
             mavlink_transport: MavlinkTransport::Serial,
             relay_role: RelayRole::None,
             mavlink_command_enabled: false,
+            modules: Vec::new(),
         }
     }
 }
@@ -240,6 +246,8 @@ struct CrsfSection {
     relay_role: Option<String>,
     #[serde(default)]
     mavlink_command_enabled: bool,
+    #[serde(default)]
+    modules: Vec<ModuleSection>,
 }
 
 impl Default for CrsfSection {
@@ -255,6 +263,7 @@ impl Default for CrsfSection {
             mavlink_transport: Some("serial".to_string()),
             relay_role: Some("none".to_string()),
             mavlink_command_enabled: false,
+            modules: Vec::new(),
         }
     }
 }
@@ -337,7 +346,14 @@ impl CrsfLaneConfig {
                 RelayRole::parse,
             ),
             mavlink_command_enabled: crsf.mavlink_command_enabled,
+            modules: crate::modules::validate(crsf.modules),
         }
+    }
+
+    /// The module set the lane runs: the configured `modules` when present,
+    /// else the legacy `device` pin as one pilot module `m0`.
+    pub fn resolved_modules(&self) -> Vec<ModuleConfig> {
+        crate::modules::resolve(&self.modules, &self.device)
     }
 
     /// Whether a MAVLink-over-ELRS command source exists on this lane and, if so,

@@ -111,6 +111,7 @@ mod tests {
             keys(pack),
             BTreeSet::from([
                 "id",
+                "source",
                 "stale",
                 "cells_plausible",
                 "cell_voltages_v",
@@ -120,6 +121,7 @@ mod tests {
                 "divergence_mv",
                 "voltage_v",
                 "current_a",
+                "power_w",
                 "remaining_pct",
                 "temperature_c",
                 "consumed_mah",
@@ -129,6 +131,8 @@ mod tests {
                 "history",
             ])
         );
+        assert_eq!(pack["source"], json!("mavlink"));
+        assert!(pack["power_w"].is_null());
         assert_eq!(
             keys(&pack["prediction"]),
             BTreeSet::from(["state", "eta_s", "drop_pct_per_s", "mean_current_a"])

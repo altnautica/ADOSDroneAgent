@@ -248,6 +248,42 @@ pub(super) fn reconcile_tunnel_marker() {
     }
 }
 
+/// Parse `lora.enabled` from config.yaml text. Absent / malformed /
+/// not-present → false (the LoRa lane is opt-in). Pure.
+pub fn parse_lora_enabled(text: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        lora: Option<Lora>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Lora {
+        #[serde(default)]
+        enabled: bool,
+    }
+    serde_norway::from_str::<Raw>(text)
+        .ok()
+        .and_then(|r| r.lora)
+        .map(|l| l.enabled)
+        .unwrap_or(false)
+}
+
+/// Reconcile the `/etc/ados/lora-enabled` marker the ados-lora unit gates on
+/// from `lora.enabled`. Idempotent; runs on every install.
+pub(super) fn reconcile_lora_marker() {
+    let enabled = std::fs::read_to_string(crate::env::CONFIG_YAML)
+        .map(|text| parse_lora_enabled(&text))
+        .unwrap_or(false);
+    let marker = Path::new(CONFIG_DIR).join("lora-enabled");
+    if enabled {
+        if let Err(e) = std::fs::write(&marker, b"") {
+            tracing::warn!(error = %e, "lora enable marker write failed");
+        }
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+}
+
 /// Decide whether the logging and telemetry store unit should be enabled, from
 /// the config body. Pure, so the default and the override are asserted without
 /// a filesystem or a systemd.

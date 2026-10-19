@@ -75,6 +75,8 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
         Method::PUT => match path {
             "/api/wfb/tx-power" | "/api/wfb/pair/auto-pair" => Some(Admin),
             "/api/vision/detector" => Some(Admin),
+            // The LoRa region / channel / power write.
+            "/api/v1/lora" => Some(Admin),
             p if is_plugin_config(p) => Some(Admin),
             p if p.starts_with("/api/v1/network/") => Some(Admin),
             p if p.starts_with("/api/v1/ground-station/") => Some(Admin),

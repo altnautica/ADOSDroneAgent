@@ -86,6 +86,7 @@ env:
     ados-clock-aarch64
     ados-sensorhub-aarch64
     ados-gnss-aarch64
+    ados-lora-aarch64
     mediamtx-aarch64
     ados-vision-onnx-aarch64
     libonnxruntime-aarch64.so

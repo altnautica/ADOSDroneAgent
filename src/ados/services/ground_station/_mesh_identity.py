@@ -3,12 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
+import time
 from pathlib import Path
 
 from ados.core.config import ADOSConfig
-from ados.core.paths import MESH_ID_PATH
+from ados.core.paths import ADOS_RUN_DIR, MESH_ID_PATH
+
+# The role sidecars the native relay / receiver loops write every couple of
+# seconds. Each carries `mesh_adapter`: the WFB adapter the native adapter-role
+# resolver left to the mesh carrier (role `mesh` in `radio.adapters`, or the
+# last adapter under automatic roles).
+_ROLE_SIDECARS = {"relay": "wfb-relay.json", "receiver": "wfb-receiver.json"}
+# The registry freshness window for both sidecars. An older file is a stopped
+# writer, not a current assignment.
+_ROLE_SIDECAR_MAX_AGE_S = 10.0
 
 
 class MeshIdentityMissing(RuntimeError):
@@ -68,16 +79,44 @@ def _ensure_mesh_identity(role: str, config: ADOSConfig) -> tuple[str, bytes]:
     return mesh_id, psk
 
 
-def _pick_mesh_iface(configured: str | None) -> str | None:
+def _published_mesh_adapter(
+    role: str,
+    run_dir: Path | None = None,
+    now: float | None = None,
+) -> str | None:
+    """The WFB adapter the native resolver assigned to the mesh, read from this
+    role's sidecar, or None when the sidecar is absent, stale, unparseable or
+    names no adapter."""
+    name = _ROLE_SIDECARS.get(role)
+    if name is None:
+        return None
+    path = (run_dir or ADOS_RUN_DIR) / name
+    try:
+        age = (time.time() if now is None else now) - path.stat().st_mtime
+        body = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not 0 <= age <= _ROLE_SIDECAR_MAX_AGE_S or not isinstance(body, dict):
+        return None
+    adapter = body.get("mesh_adapter")
+    return adapter if isinstance(adapter, str) and adapter else None
+
+
+def _pick_mesh_iface(configured: str | None, role: str) -> str | None:
     """Return the wireless interface batman-adv should bind to.
 
-    Priority: explicit config > the mesh role from the single driver-keyed
-    role resolver. The resolver never assigns the WFB flight radio to the
-    mesh (it is by construction a non-WFB radio), and decides by the bound
-    kernel driver, not by the racing interface name.
+    Priority: explicit config > the WFB adapter the native adapter-role
+    resolver assigned to the mesh (published on this role's sidecar) > the mesh
+    role from the single driver-keyed role resolver. That last resolver never
+    assigns the WFB flight radio to the mesh (it is by construction a non-WFB
+    radio), and decides by the bound kernel driver, not by the racing
+    interface name.
     """
     if configured:
         return configured
+    published = _published_mesh_adapter(role)
+    if published:
+        return published
 
     from ados.services.network.interface_roles import assign_roles
 

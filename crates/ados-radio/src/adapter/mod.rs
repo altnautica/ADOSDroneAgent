@@ -6,15 +6,17 @@
 //! Python agent reads its results over the adapter sidecar.
 //!
 //! All OS calls (iw, nmcli, ip) are Linux-only. On non-Linux hosts this
-//! module compiles but `select_interface` always returns None.
+//! module compiles but `detect_all` always returns no adapters.
 //!
 //! Grouped into focused sub-modules — `detect` (interface discovery +
-//! classification + selection), `monitor` (monitor-mode set / verify / restore),
-//! `reg` (regulatory domain set / verify / reconcile + channel gating), and
-//! `txpower` (TX-power ramp + muted-readback policy) — and re-exported here so
-//! the `ados_radio::adapter::*` contract callers use is unchanged. The shared
-//! subprocess runners + the control-interface guard live in this barrel because
-//! every sub-module relies on them.
+//! classification), `select` (candidate ranking + monitor-mode verification of
+//! every adapter), `roles` (per-adapter role assignment), `monitor`
+//! (monitor-mode set / verify / restore), `reg` (regulatory domain set /
+//! verify / reconcile + channel gating), and `txpower` (TX-power ramp +
+//! muted-readback policy) — and re-exported here so callers use one
+//! `ados_radio::adapter::*` contract. The shared subprocess runners + the
+//! control-interface guard live in this barrel because every sub-module relies
+//! on them.
 
 #[cfg(feature = "bench-adapters")]
 mod bench;
@@ -22,12 +24,11 @@ mod detect;
 mod info;
 mod monitor;
 mod reg;
+mod roles;
+mod select;
 mod txpower;
 
-pub use detect::{
-    detect_and_select, detect_wfb_adapters, select_interface, usb_speed_degraded, SelectedAdapter,
-    SelectionOutcome, WifiAdapterInfo,
-};
+pub use detect::{detect_wfb_adapters, usb_speed_degraded, WifiAdapterInfo};
 pub use info::{parse_iface_channel, parse_iface_info, read_iface_info, IfaceInfo};
 pub use monitor::{
     get_interface_mode, restore_monitor_if_needed, set_managed_mode, set_monitor_mode_verified,
@@ -36,6 +37,8 @@ pub use reg::{
     assert_reg_ready, dfs_channels, enabled_channels, read_reg_status, reconcile_reg_domain,
     set_reg_domain, ReassertOutcome, RegError, RegStatus,
 };
+pub use roles::{resolve_roles, tx_adapter, AdapterPlan, ResolvedAdapter};
+pub use select::{detect_all, DetectedAdapter, DetectionOutcome};
 #[cfg(test)]
 pub(crate) use txpower::ScriptedTxPower;
 pub use txpower::{

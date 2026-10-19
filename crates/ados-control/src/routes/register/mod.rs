@@ -5,6 +5,7 @@ mod config;
 mod ground_station;
 mod hid;
 mod logs;
+mod lora;
 mod mcp;
 mod network;
 mod pairing;
@@ -31,6 +32,7 @@ pub(super) fn register_all(r: Routes<AppState>, hid_native: bool) -> Routes<AppS
     let r = mcp::register(r);
     let r = logs::register(r);
     let r = sensing::register(r);
+    let r = lora::register(r);
     if hid_native {
         hid::register(r)
     } else {

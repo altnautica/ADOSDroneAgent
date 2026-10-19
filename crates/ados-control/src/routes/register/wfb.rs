@@ -1,7 +1,7 @@
 //! The node's own WFB radio link: status, history, pairing and the writes.
 
 use crate::routes::table::Routes;
-use crate::routes::{wfb, wfb_local_bind, wfb_pair_write, wfb_write};
+use crate::routes::{radio_adapters, wfb, wfb_local_bind, wfb_pair_write, wfb_write};
 use crate::state::AppState;
 
 pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
@@ -21,4 +21,7 @@ pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
         // The auto-pair arm flag (a surgical config merge; a re-arm on a paired
         // rig is refused without a persist).
         .put("/api/wfb/pair/auto-pair", wfb_pair_write::put_auto_pair)
+        // Every WFB adapter with its role, per-adapter receive counters and
+        // the receive-diversity block.
+        .get("/api/v1/radio/adapters", radio_adapters::get_radio_adapters)
 }

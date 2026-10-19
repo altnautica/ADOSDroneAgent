@@ -45,29 +45,40 @@
 //! Module layout:
 //! - `args`: the receive-chain arg builders, ports, lifecycle-state strings,
 //!   `DEFAULT_REG_DOMAIN`, and the shared rx-key path.
-//! - `seams`: the shared counter / channel setter / clock / data-RX handle that
-//!   implement the watchdog + acquirer seams, plus the live-channel read.
+//! - `seams`: the shared counter / channel setters / clock / data-RX handle
+//!   that implement the watchdog + acquirer seams, plus the live-channel read.
 //! - `stats`: `build_gs_stats` + the reg-blocked sidecar writer.
+//! - `adapter_stats`: the per-adapter receive counters and the diversity block.
 //! - `loops`: the stdout stats reader + the stdout-silence zombie watchdog.
-//! - this module root: the `WfbRxManager` (config + interface bring-up + chain
-//!   spawn + watchdog assembly).
+//! - `prepare`: interface bring-up on every WFB adapter.
+//! - `spawn`: the primary chain + per-slot receiver spawns.
+//! - this module root: the `WfbRxManager` (config + resolved adapters +
+//!   watchdog assembly).
+//!
+//! Every receiver listens on all receiving adapters at once (`wfb_rx` combines
+//! their frames before FEC decode); the transmitters run on the one transmit
+//! adapter the role resolver selects.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use ados_radio::adapter::AdapterPlan;
 use ados_radio::config::WfbConfig;
 use ados_radio::reg_gate::Posture;
 
 use crate::acquire::{ChannelAcquirer, ChannelSetter};
 use crate::presence::GsPresenceCache;
-use crate::process_spawn::{GsWfbProcess, Stdout};
 use crate::watchdog::{Clock, FileLockedChannelHint, LockedChannelHint, ValidPacketWatchdog};
 
+pub mod adapter_stats;
 pub mod args;
 pub mod loops;
+mod prepare;
 pub mod seams;
+mod spawn;
 pub mod stats;
 
+pub use adapter_stats::AdapterStatsTracker;
 pub use args::{
     aux_rx_port, control_rx_port, data_rx_args, gs_aux_rx_args, gs_aux_tx_args, gs_rx_control_args,
     gs_tx_control_args, video_rx_port, AUX_TX_PORT, DEFAULT_REG_DOMAIN, RX_HEALTH_POLL_INTERVAL_S,
@@ -75,7 +86,10 @@ pub use args::{
     STATE_SEARCHING, TX_CONTROL_PORT,
 };
 pub use loops::{stats_reader_loop, zombie_watchdog};
-pub use seams::{DataRxHandle, IwChannelSetter, SharedValidCounter, SystemClock};
+pub use seams::{
+    DataRxHandle, GroupChannelSetter, IwChannelSetter, RadioGroup, SharedValidCounter, SystemClock,
+};
+pub use spawn::{PrimaryChain, SlotReceivers};
 pub use stats::{
     build_gs_stats, write_blocked_unpaired_sidecar, write_no_adapter_sidecar,
     write_no_injection_sidecar, write_reg_blocked_sidecar, GsAdapterInfo, GsChannelTruth,
@@ -85,52 +99,6 @@ pub use stats::{
 // Re-exported so the run loop can build the shared receive-health seam through
 // the same module that owns the stats reader.
 pub use crate::watchdog::SharedRxHealth;
-
-use args::rx_key_path;
-
-/// One generation's primary receive chain: the anchor slot's three receivers
-/// plus the fleet's two single ground transmitters.
-///
-/// `video`'s stdout is piped — it is both the stats stream and the liveness
-/// anchor, so the generation ends when it exits. Every other field is held only
-/// so its `Drop` (killpg) tears the process group down with the generation.
-pub struct PrimaryChain {
-    /// The fleet slot this chain is anchored on (the lowest registered slot).
-    pub slot: u8,
-    pub video: GsWfbProcess,
-    pub aux: GsWfbProcess,
-    pub control: GsWfbProcess,
-    pub tx_control: GsWfbProcess,
-    pub aux_tx: GsWfbProcess,
-}
-
-/// The receive trio for one non-primary fleet slot. Additive to the primary
-/// chain: spawned when the slot registers, dropped (killpg) when it releases or
-/// when the generation ends.
-///
-/// `video` is OPTIONAL and spawned apart from `aux`/`control`: only the HERO
-/// slot's video egress is read (every other slot's video port has no consumer),
-/// so a non-hero secondary slot decodes a full-FEC stream nothing reads — pure
-/// waste on the ground adapter. `aux` (the general-purpose application lane) and
-/// `control` (HopAnnounce/Presence) stay UNCONDITIONAL: a linked ground station
-/// must receive whatever a drone sends it on those lanes regardless of whether it
-/// is the hero. Video is brought back when the slot becomes the hero, driven off
-/// the 1 s hero poll — see `main.rs`'s video reconcile.
-pub struct SlotReceivers {
-    pub slot: u8,
-    /// The video receiver (p0), or `None` when this slot is not the hero and its
-    /// video port is therefore unwatched. Dropping a set receiver killpg's it.
-    pub video: Option<GsWfbProcess>,
-    pub aux: GsWfbProcess,
-    pub control: GsWfbProcess,
-}
-
-impl SlotReceivers {
-    /// Whether this slot currently decodes video.
-    pub fn decoding_video(&self) -> bool {
-        self.video.is_some()
-    }
-}
 
 /// The fleet slots this ground station receives on, ascending.
 ///
@@ -156,20 +124,29 @@ pub const FIRST_DRONE_SLOT: u8 = 1;
 /// loop wires together.
 pub struct WfbRxManager {
     config: WfbConfig,
+    /// The transmit adapter (the primary interface the sidecar reports and
+    /// the channel acquirer retunes through the group setter).
     interface: String,
+    /// The interfaces every receiver listens on, in `wfb_rx` order.
+    rx_ifaces: Vec<String>,
+    /// Every WFB interface (transmit first), the set bring-up configures.
+    radio_ifaces: Vec<String>,
+    /// The resolved adapter layout, `None` until the run loop resolves one.
+    plan: Option<AdapterPlan>,
     channel: u8,
     /// The selected receive adapter's facts, surfaced on every sidecar write.
     adapter: GsAdapterInfo,
     /// The regulatory-permitted channel set for the receive interface, resolved
-    /// once `prepare_interface` has applied the domain + read the wiphy back.
+    /// once `prepare_interfaces` has applied the domain + read the wiphy back.
     /// Empty until then (and on a board where the set cannot be determined); the
     /// acquirer treats an empty set as "do not restrict".
     enabled_channels: BTreeSet<u8>,
     /// The regulatory picture (live domain + verified + permitted set) resolved
-    /// by `prepare_interface`, surfaced on every sidecar write so the panel sees
-    /// the same regulatory truth as the drone. Default (unknown) until prepared.
+    /// by `prepare_interfaces`, surfaced on every sidecar write so the panel
+    /// sees the same regulatory truth as the drone. Default (unknown) until
+    /// prepared.
     reg_snapshot: GsRegSnapshot,
-    /// The regulatory posture `prepare_interface` brought the interface up
+    /// The regulatory posture `prepare_interfaces` brought the interfaces up
     /// under. `None` until it first runs.
     posture: Option<Posture>,
 }
@@ -182,7 +159,10 @@ impl WfbRxManager {
         let interface = config.interface.clone();
         Self {
             config,
+            rx_ifaces: vec![interface.clone()],
+            radio_ifaces: vec![interface.clone()],
             interface,
+            plan: None,
             channel,
             adapter: GsAdapterInfo::default(),
             enabled_channels: BTreeSet::new(),
@@ -191,13 +171,13 @@ impl WfbRxManager {
         }
     }
 
-    /// The regulatory picture resolved by `prepare_interface`. Default (unknown)
-    /// until that runs.
+    /// The regulatory picture resolved by `prepare_interfaces`. Default
+    /// (unknown) until that runs.
     pub fn reg_snapshot(&self) -> &GsRegSnapshot {
         &self.reg_snapshot
     }
 
-    /// The regulatory posture resolved by the last `prepare_interface`, `None`
+    /// The regulatory posture resolved by the last `prepare_interfaces`, `None`
     /// before it first ran.
     pub fn posture(&self) -> Option<&Posture> {
         self.posture.as_ref()
@@ -209,15 +189,31 @@ impl WfbRxManager {
         self.config.rendezvous_channel()
     }
 
+    /// The transmit adapter's interface (the primary one).
     pub fn interface(&self) -> &str {
         &self.interface
+    }
+
+    /// The interfaces every receiver listens on, in `wfb_rx` order.
+    pub fn rx_ifaces(&self) -> &[String] {
+        &self.rx_ifaces
+    }
+
+    /// Every WFB interface, transmit adapter first.
+    pub fn radio_ifaces(&self) -> &[String] {
+        &self.radio_ifaces
+    }
+
+    /// The resolved adapter layout, `None` until one was set.
+    pub fn plan(&self) -> Option<&AdapterPlan> {
+        self.plan.as_ref()
     }
 
     pub fn channel(&self) -> u8 {
         self.channel
     }
 
-    /// The regulatory-permitted channel set resolved by `prepare_interface`.
+    /// The regulatory-permitted channel set resolved by `prepare_interfaces`.
     /// Empty until that runs, or on a board where the wiphy channel list could
     /// not be read.
     pub fn enabled_channels(&self) -> &BTreeSet<u8> {
@@ -237,360 +233,20 @@ impl WfbRxManager {
         &self.adapter
     }
 
-    /// Adopt the receive interface the run loop resolved (the auto-detected RTL
-    /// injection adapter, or the operator's `video.wfb.interface` override). The
-    /// receive chain and the sidecar both read `self.interface`, so the run loop
-    /// sets it here once an adapter is chosen instead of relying on a config
-    /// value that is empty when no external detector populated it.
-    pub fn set_interface(&mut self, iface: String) {
-        self.interface = iface;
-    }
-
-    /// Bring `iface` to the receive-ready state BEFORE the wfb_rx spawn, in the
-    /// order the kernel requires:
-    ///
-    ///  1. **Regulatory gate first** (`iw reg set` + verify) under the shared
-    ///     [`Posture`]: the same resolver the drone uses, so both ends set the
-    ///     same domain and apply the same strictness (the unrestricted default
-    ///     forces no domain and never blocks; a pinned region sets it and the
-    ///     raw `reg_gate_strict` knob applies). The kernel maps the permitted
-    ///     channel set and the per-channel TX-power ceiling when the driver
-    ///     initialises, so a domain set after monitor-mode bring-up is too late.
-    ///     A strict verify failure returns `Err` and the run loop parks in
-    ///     `reg_blocked` rather than spawning the receive chain on a capped radio.
-    ///  2. **Channel readiness assertion** (pinned region only): once the wiphy
-    ///     is known, assert the rendezvous channel is in the enabled set and is
-    ///     non-DFS. A mismatch returns `Err` under the strict gate. The
-    ///     unrestricted posture skips it, as the drone does.
-    ///  3. **Monitor mode** on the interface the run loop resolved.
-    ///     `set_monitor_mode_verified` re-asserts it with the 4× verify retry and
-    ///     guards the operator's control path so it can never sever the
-    ///     management link.
-    ///  4. **TX power** on the monitor interface, ramped only inside
-    ///     `tx_power_max_dbm`. Without it the dongle runs at the driver default
-    ///     (~17-20 dBm) and risks brownout on a host-VBUS USB topology.
-    ///  5. **Channel set** to the rendezvous home. wfb_rx receives on whatever
-    ///     channel the netdev is set to; it does not retune itself.
-    ///
-    /// As a side effect it reads the wiphy's enabled channel set back so the
-    /// acquirer can intersect its sweep candidates with what this domain permits.
-    /// Returns `Err(RegError)` only when the regulatory gate fails under the
-    /// strict gate; the monitor / TX-power / channel sub-steps remain best-effort
-    /// (a failed sub-step is logged and the chain still spawns).
-    pub async fn prepare_interface(
-        &mut self,
-        iface: &str,
-    ) -> Result<(), ados_radio::adapter::RegError> {
-        // 1. Regulatory domain set + verify, before anything touches monitor
-        // mode. A global per-phy call; needs no interface.
-        let posture = Posture::load(std::path::Path::new(crate::paths::CONFIG_YAML));
-        self.posture = Some(posture.clone());
-        let strict = posture.strict;
-        let unrestricted = posture.is_unrestricted();
-        if let Err(e) = ados_radio::adapter::set_reg_domain(&posture.domain_to_set).await {
-            if strict {
-                tracing::error!(
-                    interface = iface,
-                    domain = %posture.domain_to_set,
-                    reason = e.reason_code(),
-                    "ground_wfb_reg_gate_blocked"
-                );
-                return Err(e);
-            }
-            tracing::warn!(
-                interface = iface,
-                domain = %posture.domain_to_set,
-                reason = e.reason_code(),
-                "ground_wfb_reg_gate_proceeding_best_effort"
-            );
-        }
-
-        // Read back the regulatory-permitted channel set + the DFS set so the
-        // acquirer can intersect its sweep and the gate can assert the home
-        // channel. An empty enabled set means "could not determine".
-        self.enabled_channels = ados_radio::adapter::enabled_channels(iface).await;
-        let dfs = ados_radio::adapter::dfs_channels(iface).await;
-
-        // 2. Assert the rendezvous channel is enabled + non-DFS now the wiphy is
-        // known, before any monitor / channel operation. Skipped under the
-        // unrestricted posture (the operator owns local compliance).
-        let rendezvous_ch = self.config.rendezvous_channel();
-        let ready = if unrestricted {
-            Ok(())
-        } else {
-            ados_radio::adapter::assert_reg_ready(
-                rendezvous_ch,
-                &self.enabled_channels,
-                &dfs,
-                self.config.dfs_allowed,
-            )
-        };
-        if let Err(e) = ready {
-            if strict {
-                tracing::error!(
-                    interface = iface,
-                    channel = rendezvous_ch,
-                    reason = e.reason_code(),
-                    "ground_wfb_reg_gate_channel_blocked"
-                );
-                return Err(e);
-            }
-            tracing::warn!(
-                interface = iface,
-                channel = rendezvous_ch,
-                reason = e.reason_code(),
-                "ground_wfb_reg_gate_channel_proceeding_best_effort"
-            );
-        }
-
-        if self.enabled_channels.is_empty() {
-            tracing::info!(interface = iface, "ground_wfb_enabled_channels_unknown");
-        } else {
-            tracing::info!(
-                interface = iface,
-                channels = ?self.enabled_channels,
-                "ground_wfb_enabled_channels"
-            );
-        }
-
-        // Capture the regulatory picture (live domain + verified + permitted set
-        // + posture) so every sidecar write surfaces the same truth as the drone
-        // side. The live read is a cheap `iw reg get` against the posture's
-        // wanted domain.
-        let reg_status = ados_radio::adapter::read_reg_status(&posture.wanted_domain).await;
-        self.reg_snapshot = GsRegSnapshot {
-            domain: reg_status.domain,
-            verified: reg_status.verified,
-            enabled_channels: self.enabled_channels.iter().copied().collect(),
-            posture: Some(posture),
-        };
-
-        // 3. Monitor mode on the config-supplied interface (the Python override
-        // path). 4× verify retry + the control-iface guard live in the helper.
-        if !ados_radio::adapter::set_monitor_mode_verified(iface, 4).await {
-            tracing::warn!(interface = iface, "ground_wfb_monitor_not_verified");
-        }
-
-        // 4. TX power, before the wfb_rx spawn, held inside the ceiling.
-        if ados_radio::adapter::set_tx_power_modal(
-            iface,
-            self.config.tx_power_dbm,
-            self.config.tx_power_max_dbm,
-            unrestricted,
-        )
-        .await
-        .is_none()
-        {
-            tracing::warn!(
-                interface = iface,
-                requested = self.config.tx_power_dbm,
-                max_dbm = self.config.tx_power_max_dbm,
-                "ground_wfb_txpower_not_applied"
-            );
-        }
-
-        // 5. Tune the netdev to the rendezvous home channel.
-        if IwChannelSetter.set_channel(iface, self.channel).await {
-            tracing::info!(
-                interface = iface,
-                channel = self.channel,
-                "ground_wfb_channel_set"
-            );
-        } else {
-            tracing::warn!(
-                interface = iface,
-                channel = self.channel,
-                "ground_wfb_channel_set_failed"
-            );
-        }
-
-        Ok(())
+    /// Adopt the adapter layout the run loop resolved. The receive chain, the
+    /// bring-up and the sidecar all read it here, rather than a config value
+    /// that is empty when no external detector populated it.
+    pub fn set_plan(&mut self, plan: &AdapterPlan) {
+        self.interface = plan.tx().ifname().to_string();
+        self.rx_ifaces = plan.rx_ifaces();
+        self.radio_ifaces = plan.radio_ifaces();
+        self.plan = Some(plan.clone());
     }
 
     /// The fleet this receive plane belongs to. Every `link_id` the chain is
     /// keyed with is derived from it.
     pub fn fleet_id(&self) -> u16 {
         self.config.fleet_id
-    }
-
-    /// Spawn the receive chain anchored on `primary_slot`, plus the two single
-    /// ground transmitters.
-    ///
-    /// The primary slot's video RX has its stdout piped: it is the generation's
-    /// stats stream AND its liveness anchor (the channel acquirer sweeps for
-    /// this link, and the generation ends when it exits). Every other process —
-    /// the primary's aux + control receivers and the two transmitters — is
-    /// additive and torn down with the generation.
-    ///
-    /// The two transmitters are keyed to the ground station's own slot 0 and
-    /// there is exactly ONE of each regardless of fleet size: every drone's
-    /// uplink receiver listens on that same `channel_id`, so a fleet-wide
-    /// command is one transmission, not N.
-    ///
-    /// Adapter detection and monitor-mode setup are assumed already applied to
-    /// `iface`.
-    pub async fn spawn_receive_chain(
-        &self,
-        iface: &str,
-        primary_slot: u8,
-    ) -> std::io::Result<PrimaryChain> {
-        let rx_key = rx_key_path();
-        let fleet = self.config.fleet_id;
-        let ground = ados_radio::config::link_id(fleet, ados_radio::config::SLOT_GROUND);
-        let drone = ados_radio::config::link_id(fleet, primary_slot);
-
-        // Data RX: stdout piped for the stats reader, in its own process group.
-        let video = GsWfbProcess::spawn(
-            "wfb_rx",
-            &data_rx_args(iface, &rx_key, video_rx_port(primary_slot), drone),
-            Stdout::Piped,
-            None,
-        )
-        .await?;
-        let control = GsWfbProcess::spawn(
-            "wfb_rx",
-            &gs_rx_control_args(iface, &rx_key, control_rx_port(primary_slot), drone),
-            Stdout::Null,
-            Some("/run/ados/wfb-gs-rx-control.log"),
-        )
-        .await?;
-        // Aux application lane. The drone half has always been complete
-        // (`wfb_tx -p 2` behind the radio-aux socket) but this receiver was
-        // written, unit-tested, and then never spawned, so nothing on the
-        // ground ever decoded p2 and the lane carried no traffic in either
-        // direction. It is spawned unconditionally rather than behind the aux
-        // consumer's enable flag: a linked ground station must be able to
-        // receive whatever the drone chooses to send, and an idle wfb_rx with
-        // no inbound frames costs essentially nothing.
-        let aux = GsWfbProcess::spawn(
-            "wfb_rx",
-            &gs_aux_rx_args(iface, &rx_key, aux_rx_port(primary_slot), drone),
-            Stdout::Null,
-            Some("/run/ados/wfb-gs-aux-rx.log"),
-        )
-        .await?;
-        // stdout PIPED, not discarded: the per-second `PKT` stats line is the
-        // only per-transmitter proof that bytes offered to this `wfb_tx`
-        // actually reached the radio. Nothing read it before, so a silently
-        // dead transmitter took down HopAck / presence (here) or the whole
-        // uplink (below) while every surface still read `active`. See
-        // [`ados_radio::tx_liveness`]. The caller MUST drain it — an unread 64 KiB
-        // pipe blocks the transmitter in `fprintf(stdout)`.
-        let tx_control = GsWfbProcess::spawn(
-            "wfb_tx",
-            &gs_tx_control_args(iface, &rx_key, self.config.mcs_index, ground),
-            Stdout::Piped,
-            Some("/run/ados/wfb-gs-tx-control.log"),
-        )
-        .await?;
-        // Aux UPLINK. The counterpart to the receiver above, and the half that
-        // made the lane one-directional: the drone has always listened on
-        // radio_id 3, but nothing on the ground ever transmitted there, so a
-        // client's request could reach the ground station and go no further.
-        // Spawned unconditionally for the same reason as the receiver — a
-        // linked ground station must be able to answer the drone it can hear,
-        // and an idle wfb_tx with no ingress traffic costs essentially nothing.
-        let aux_tx = GsWfbProcess::spawn(
-            "wfb_tx",
-            &gs_aux_tx_args(
-                iface,
-                &rx_key,
-                self.config.mcs_index,
-                ground,
-                self.config.aux_tx_port,
-            ),
-            Stdout::Piped,
-            Some("/run/ados/wfb-gs-aux-tx.log"),
-        )
-        .await?;
-        Ok(PrimaryChain {
-            slot: primary_slot,
-            video,
-            aux,
-            control,
-            tx_control,
-            aux_tx,
-        })
-    }
-
-    /// Spawn the receive trio for one NON-primary fleet slot: aux (p2) and
-    /// control (p1) unconditionally, plus the video receiver (p0) only when
-    /// `with_video` is true. Each is keyed to that slot's `link_id` and decodes
-    /// to that slot's loopback egress ports.
-    ///
-    /// The split is the unwatched-video-slots fix: a non-hero slot's video port
-    /// is never read (only the hero's egress is fanned out), so decoding its
-    /// full-FEC stream is pure adapter waste. `aux` + `control` stay
-    /// unconditional — a linked ground station must hear whatever a drone sends
-    /// on those lanes. Video is brought back via [`Self::spawn_slot_video`] when
-    /// the slot becomes the hero, driven off the 1 s hero poll.
-    ///
-    /// All instances bind the SAME `iface` as the primary chain. That is legal,
-    /// not a workaround: `wfb_rx` opens a promiscuous, non-exclusive pcap handle
-    /// and compiles a per-instance kernel BPF on `channel_id`
-    /// (`vendor/wfb-ng/src/rx.cpp:70,84`), so each receiver sees only its own
-    /// drone's frames and N drones need N receivers, not N radios.
-    ///
-    /// stdout is discarded: only the primary slot's video RX drives the stats
-    /// reader and the channel acquirer.
-    pub async fn spawn_slot_receivers(
-        &self,
-        iface: &str,
-        slot: u8,
-        with_video: bool,
-    ) -> std::io::Result<SlotReceivers> {
-        let rx_key = rx_key_path();
-        let drone = ados_radio::config::link_id(self.config.fleet_id, slot);
-        let video = if with_video {
-            Some(
-                GsWfbProcess::spawn(
-                    "wfb_rx",
-                    &data_rx_args(iface, &rx_key, video_rx_port(slot), drone),
-                    Stdout::Null,
-                    Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-        let aux = GsWfbProcess::spawn(
-            "wfb_rx",
-            &gs_aux_rx_args(iface, &rx_key, aux_rx_port(slot), drone),
-            Stdout::Null,
-            Some(&format!("/run/ados/wfb-gs-aux-rx-{slot}.log")),
-        )
-        .await?;
-        let control = GsWfbProcess::spawn(
-            "wfb_rx",
-            &gs_rx_control_args(iface, &rx_key, control_rx_port(slot), drone),
-            Stdout::Null,
-            Some(&format!("/run/ados/wfb-gs-rx-control-{slot}.log")),
-        )
-        .await?;
-        Ok(SlotReceivers {
-            slot,
-            video,
-            aux,
-            control,
-        })
-    }
-
-    /// Bring the video receiver (p0) up for a slot, the bring-back half of the
-    /// unwatched-video-slots split. Called when the slot becomes the hero, off the
-    /// 1 s hero poll. The process is created anew because `GsWfbProcess` is not
-    /// `Clone` (it owns a process group); the previous one, if any, was dropped
-    /// (killpg'd) when it was unpromoted.
-    pub async fn spawn_slot_video(&self, iface: &str, slot: u8) -> std::io::Result<GsWfbProcess> {
-        let rx_key = rx_key_path();
-        let drone = ados_radio::config::link_id(self.config.fleet_id, slot);
-        GsWfbProcess::spawn(
-            "wfb_rx",
-            &data_rx_args(iface, &rx_key, video_rx_port(slot), drone),
-            Stdout::Null,
-            Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
-        )
-        .await
     }
 
     /// Build the chunk-2 watchdog for this receive generation, wired to the
@@ -607,7 +263,7 @@ impl WfbRxManager {
         hint: Arc<dyn LockedChannelHint>,
     ) -> ValidPacketWatchdog {
         // Feed the regulatory-permitted channel set resolved by
-        // `prepare_interface` so the sweep skips channels this domain forbids
+        // `prepare_interfaces` so the sweep skips channels this domain forbids
         // (those fail `iw set channel` with -22 and waste a dwell). An empty set
         // (board where it could not be read) is passed through as "do not
         // restrict" by the acquirer.
@@ -649,7 +305,7 @@ mod tests {
 
     #[test]
     fn manager_enabled_channels_default_empty() {
-        // Until prepare_interface runs, the permitted set is empty (the acquirer
+        // Until prepare_interfaces runs, the permitted set is empty (the acquirer
         // reads empty as "do not restrict").
         let m = WfbRxManager::new(WfbConfig::default());
         assert!(m.enabled_channels().is_empty());

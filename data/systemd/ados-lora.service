@@ -1,0 +1,51 @@
+[Unit]
+Description=ADOS LoRa Beacon Lane
+PartOf=ados-supervisor.service
+# Opt-in: the lane runs only on a node whose config enables it. The marker
+# mirrors `lora.enabled` and is reconciled by the installer and the config
+# persist path, so a node that never opts in skips this unit cleanly at boot.
+ConditionPathExists=/etc/ados/lora-enabled
+StartLimitIntervalSec=0
+
+[Service]
+Slice=ados.slice
+Type=simple
+# The native lane binary is fetched best-effort (the lane is opt-in
+# hardware); until it lands the guard execs /bin/true so the unit is a clean
+# no-op rather than a restart loop.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-lora ]; then exec /opt/ados/bin/ados-lora; else exec /bin/true; fi'
+# In-process config reload: SIGHUP re-reads /etc/ados/config.yaml and rebuilds
+# the lane (region, radio, governor) without dropping the unit.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+# Exit 0 means the lane is not enabled on this node; do not respawn.
+RestartPreventExitStatus=0
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/ados/env
+
+# The LoRa radio is a UART module (ttyUSB/ttyACM/ttyS/ttyAMA) or a Meshtastic
+# node on USB CDC; the E22 mode lines are GPIO character devices. The airtime
+# ledger persists under /var/ados/lora so a reboot cannot reset the duty
+# budget. The SITL loopback transport uses a UDP socket.
+SupplementaryGroups=dialout gpio
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyACM rw
+DeviceAllow=char-ttyS rw
+DeviceAllow=char-ttyAMA rw
+DeviceAllow=char-gpiochip rw
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/run/ados /var/ados
+
+MemoryMax=64M
+CPUQuota=20%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-lora
+
+[Install]
+WantedBy=ados-supervisor.service

@@ -57,6 +57,9 @@ ados-video = { path = "../ados-video" }
 # route so it enumerates the same slot table the pair route writes and the
 # receive-chain reconciler drives. Read-only here; groundlink owns the writes.
 ados-groundlink = { path = "../ados-groundlink" }
+# The LoRa region table, plan validation and status shapes the lora routes
+# serve; the library only, without the lane daemon.
+ados-lora = { path = "../ados-lora", default-features = false }
 # The ground-station role table (`role::role_units` / `ALL_ROLE_UNITS`) the role
 # read reports, and the control-socket name the role write forwards `set_role`
 # to: the supervisor executes role transitions, so both halves read its

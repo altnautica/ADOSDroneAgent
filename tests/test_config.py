@@ -146,7 +146,7 @@ def test_crsf_pin_round_trips_through_a_full_save():
     assert cfg.radio.crsf.mavlink_command_enabled is True
     assert cfg.radio.crsf.relay_role == "repeater"
     dumped = cfg.model_dump()
-    assert dumped["radio"]["crsf"] == data["radio"]["crsf"]
+    assert dumped["radio"]["crsf"] == {**data["radio"]["crsf"], "modules": []}
 
 
 def test_crsf_unset_nullables_dump_as_null():

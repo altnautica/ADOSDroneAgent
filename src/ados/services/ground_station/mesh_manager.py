@@ -83,7 +83,12 @@ from ._mesh_conf import (
 from ._mesh_conf import (
     _check_conf_value as _check_conf_value,
 )
-from ._mesh_identity import MeshIdentityMissing, _ensure_mesh_identity, _pick_mesh_iface
+from ._mesh_identity import (
+    MeshIdentityMissing,
+    _ensure_mesh_identity,
+    _pick_mesh_iface,
+    _published_mesh_adapter,
+)
 from .role_manager import get_current_role
 
 log = get_logger("ground_station.mesh_manager")
@@ -308,7 +313,9 @@ class MeshManager:
         self._mesh_id = mesh_id
         self._psk = psk
 
-        iface = _pick_mesh_iface(self._config.ground_station.mesh.interface_override)
+        iface = _pick_mesh_iface(
+            self._config.ground_station.mesh.interface_override, self._role
+        )
         if not iface:
             log.error("mesh_iface_not_found")
             return False
@@ -357,12 +364,31 @@ class MeshManager:
         iface = self._mesh_iface
         if not iface or not (_SYS_CLASS_NET / iface).exists():
             return "iface_missing"
+        if self._reassigned_iface() is not None:
+            return "iface_reassigned"
         if self._wpa is None or self._wpa.poll() is not None:
             return "wpa_supplicant_dead"
         if not _iface_joined(iface, self._carrier, self._mesh_id):
             return "not_joined"
         if not _bat_member(iface, self._bat_iface):
             return "not_in_bat"
+        return None
+
+    def _reassigned_iface(self) -> str | None:
+        """The adapter the native resolver now assigns to the mesh, when it is
+        present and differs from the one in use. The native relay / receiver
+        loop publishes it once it has resolved the WFB adapters, which can be
+        after this service picked its fallback; an operator interface override
+        always wins and is never reassigned."""
+        if self._config.ground_station.mesh.interface_override:
+            return None
+        published = _published_mesh_adapter(self._role)
+        if (
+            published
+            and published != self._mesh_iface
+            and (_SYS_CLASS_NET / published).exists()
+        ):
+            return published
         return None
 
     def _update_gateway_mode(self) -> str | None:
@@ -385,11 +411,14 @@ class MeshManager:
         if fault is not None:
             if fault != self._fault:
                 log.warning("mesh_link_lost", iface=self._mesh_iface, reason=fault)
-            if fault == "iface_missing":
-                # A replugged dongle can come back under another name.
+            if fault in ("iface_missing", "iface_reassigned"):
+                # A replugged dongle can come back under another name, and the
+                # native resolver can hand the mesh a different adapter.
                 self._stop_wpa()
+                if fault == "iface_reassigned" and self._mesh_iface:
+                    _run(["batctl", "if", "del", self._mesh_iface], timeout=5.0)
                 iface = _pick_mesh_iface(
-                    self._config.ground_station.mesh.interface_override
+                    self._config.ground_station.mesh.interface_override, self._role
                 )
                 if iface and (_SYS_CLASS_NET / iface).exists():
                     self._mesh_iface = iface

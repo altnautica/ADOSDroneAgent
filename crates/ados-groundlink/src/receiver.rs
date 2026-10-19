@@ -1,7 +1,7 @@
 //! WFB receiver: FEC-combine fragments from the local NIC + remote relays.
 //!
-//! `wfb_rx -p 0 -c 127.0.0.1 -u 5600 -a <listen_port> [<drone_iface>]`
-//! aggregates fragments arriving on the local monitor adapter AND from relays
+//! `wfb_rx -p 0 -c 127.0.0.1 -u 5600 -a <listen_port> [<drone_iface>...]`
+//! aggregates fragments arriving on the local monitor adapters AND from relays
 //! forwarding over batman-adv into the aggregator UDP port, FEC-combines them,
 //! and emits the decoded stream to localhost UDP 5600 where the existing
 //! mediamtx-gs pipeline republishes it. The stdout `PKT` stats line drives
@@ -67,6 +67,11 @@ pub struct ReceiverState {
     pub fec_repaired: i64,
     pub output_kbps: i64,
     pub up: bool,
+    /// The WFB adapter the role resolver left to the mesh carrier (role
+    /// `mesh`), which the mesh manager binds to batman-adv. `None` when no
+    /// adapter has that role and the mesh manager keeps its own pick.
+    #[serde(default)]
+    pub mesh_adapter: Option<String>,
 }
 
 /// Per-relay fragment stats (one entry in the `relays` list). `fragments` is
@@ -92,6 +97,7 @@ impl Default for ReceiverState {
             fec_repaired: 0,
             output_kbps: 0,
             up: false,
+            mesh_adapter: None,
         }
     }
 }
@@ -149,22 +155,22 @@ impl ReceiverState {
     }
 }
 
-/// Build the `wfb_rx -a` aggregator args. With `accept_local_nic` the local monitor
-/// adapter is appended so its fragments are aggregated too; without it the receiver
-/// trusts only relay forwards.
+/// Build the `wfb_rx -a` aggregator args. With `accept_local_nic` every local
+/// receiving adapter is appended so its fragments are aggregated too; without
+/// it the receiver trusts only relay forwards.
 ///
 /// `link_id` is the transmitting drone's (`link_id(fleet_id, slot)`). The
 /// aggregator checks every session against the `channel_id` built from it, so
 /// without `-i` it sat on wfb-ng's default link id 0 and accepted no fleet
 /// drone's stream.
 pub fn aggregate_args(
-    drone_iface: &str,
+    drone_ifaces: &[String],
     listen_port: u16,
     accept_local_nic: bool,
     rx_key: &Path,
     link_id: u32,
 ) -> Vec<String> {
-    let mut args = vec![
+    let mut args: Vec<String> = vec![
         "-p".into(),
         "0".into(),
         "-i".into(),
@@ -179,7 +185,7 @@ pub fn aggregate_args(
         rx_key.to_string_lossy().into_owned(),
     ];
     if accept_local_nic {
-        args.push(drone_iface.into());
+        args.extend(drone_ifaces.iter().cloned());
     }
     args
 }
@@ -192,13 +198,13 @@ const AGGREGATOR_LOG: &str = "/run/ados/wfb-gs-aggregator.log";
 /// stdout is piped: `wfb_rx` prints its per-interval `PKT` stats line there
 /// (`vendor/wfb-ng/src/rx.cpp` `Aggregator::dump_stats`, `IPC_MSG` = stdout).
 pub async fn spawn_aggregator(
-    drone_iface: &str,
+    drone_ifaces: &[String],
     listen_port: u16,
     accept_local_nic: bool,
     link_id: u32,
 ) -> std::io::Result<GsWfbProcess> {
     let rx_key = Path::new(ados_radio::paths::WFB_RX_KEY);
-    let args = aggregate_args(drone_iface, listen_port, accept_local_nic, rx_key, link_id);
+    let args = aggregate_args(drone_ifaces, listen_port, accept_local_nic, rx_key, link_id);
     GsWfbProcess::spawn("wfb_rx", &args, Stdout::Piped, Some(AGGREGATOR_LOG)).await
 }
 
@@ -421,7 +427,7 @@ async fn watch_relay_churn(state: Arc<Mutex<ReceiverState>>, mesh_iface: String)
 
 /// Run the receiver role to completion (until `shutdown` fires).
 ///
-/// Detects the local drone-facing adapter (when `accept_local_nic`), spawns the
+/// Detects the local drone-facing adapters (when `accept_local_nic`), spawns the
 /// `wfb_rx` aggregator once, advertises `_ados-receiver._tcp` on `bat0`, then
 /// runs the stats tail + relay-churn watcher + periodic state writer
 /// concurrently. On shutdown (or aggregator exit) all tasks are cancelled, the
@@ -478,17 +484,26 @@ pub async fn run(
 
     // Supervise the aggregator: bring it up, watch it, and on an exit or a
     // stalled stats stream tear it down and bring it up again on a fixed
-    // interval. The local adapter is re-detected on every attempt that has none,
-    // so an adapter plugged in after boot joins the aggregation.
-    let mut drone_iface = String::new();
+    // interval. The local adapters are re-detected on every attempt that has
+    // none, so an adapter plugged in after boot joins the aggregation.
+    let mut drone_ifaces: Vec<String> = Vec::new();
     loop {
-        if accept_local_nic && drone_iface.is_empty() {
-            drone_iface = detect_local_adapter().await.unwrap_or_default();
-            state.lock().await.drone_iface = drone_iface.clone();
+        if accept_local_nic && drone_ifaces.is_empty() {
+            let plan = detect_local_adapters().await;
+            drone_ifaces = plan.as_ref().map(|p| p.rx_ifaces()).unwrap_or_default();
+            // The sidecar names the first local adapter (every one is
+            // aggregated) and the adapter left to the mesh carrier, which the
+            // mesh manager binds to batman-adv.
+            let mut s = state.lock().await;
+            s.drone_iface = drone_ifaces.first().cloned().unwrap_or_default();
+            s.mesh_adapter = plan
+                .as_ref()
+                .and_then(|p| p.mesh())
+                .map(|m| m.ifname().to_string());
         }
         // With no local adapter the receiver trusts only relay forwards (the
-        // iface arg is dropped by `aggregate_args`).
-        let use_local = accept_local_nic && !drone_iface.is_empty();
+        // iface args are dropped by `aggregate_args`).
+        let use_local = accept_local_nic && !drone_ifaces.is_empty();
         let Some(link_id) = crate::fleet_hero::served_video_link_id() else {
             // No registered drone: there is no link to aggregate.
             state.lock().await.up = false;
@@ -498,7 +513,7 @@ pub async fn run(
             }
             continue;
         };
-        match spawn_aggregator(&drone_iface, listen_port, use_local, link_id).await {
+        match spawn_aggregator(&drone_ifaces, listen_port, use_local, link_id).await {
             Ok(mut aggregator) => {
                 state.lock().await.up = true;
                 let lines_seen = Arc::new(AtomicU64::new(0));
@@ -548,24 +563,25 @@ pub async fn run(
     }
     state.lock().await.up = false;
     let _ = state.lock().await.write_and_emit(ingest.as_ref());
-    // Restore the local monitor adapter to managed mode when one was resolved
-    // (only with local-NIC aggregation). Empty when the receiver trusts relay
-    // forwards alone, so there is nothing to restore in that case (the mirror of
-    // the drone-side teardown).
-    if !drone_iface.is_empty() {
-        tracing::info!(interface = %drone_iface, "restoring local monitor adapter to managed mode");
-        ados_radio::adapter::set_managed_mode(&drone_iface).await;
+    // Restore the local monitor adapters to managed mode when any were
+    // resolved (only with local-NIC aggregation). Empty when the receiver
+    // trusts relay forwards alone, so there is nothing to restore in that case
+    // (the mirror of the drone-side teardown).
+    for iface in &drone_ifaces {
+        tracing::info!(interface = %iface, "restoring local monitor adapter to managed mode");
+        ados_radio::adapter::set_managed_mode(iface).await;
     }
     tracing::info!("wfb_receiver_stopped");
 }
 
-/// Select + monitor-mode the local adapter for aggregation, emitting the
+/// Resolve + monitor-mode the local adapters for aggregation (the last one is
+/// left to the mesh carrier when no roles are configured), emitting the
 /// adapter-missing event on failure. `None` leaves the receiver on relay
 /// forwards alone until the next attempt.
-async fn detect_local_adapter() -> Option<String> {
-    match ados_radio::adapter::select_interface("").await {
-        Some(sel) if sel.injection_ok => Some(sel.ifname),
-        Some(sel) => {
+async fn detect_local_adapters() -> Option<ados_radio::adapter::AdapterPlan> {
+    match crate::adapter_plan::resolve("", true).await {
+        crate::adapter_plan::Resolution::Ready(plan) => Some(plan),
+        crate::adapter_plan::Resolution::NoInjection(sel) => {
             tracing::warn!(iface = %sel.ifname, "wfb_receiver_monitor_mode_failed");
             mesh_events::emit(
                 mesh_events::KIND_WFB_ADAPTER_MISSING,
@@ -577,7 +593,7 @@ async fn detect_local_adapter() -> Option<String> {
             );
             None
         }
-        None => {
+        crate::adapter_plan::Resolution::NoAdapter => {
             // Local aggregation requested but no adapter: the receiver still
             // serves relay forwards, but the operator must know local
             // reception is gone.
@@ -621,9 +637,9 @@ mod tests {
 
     #[test]
     fn aggregate_args_with_local_nic() {
-        // wfb_rx -p 0 -i <link> -c 127.0.0.1 -u 5600 -a 5800 -K <rx.key> <iface>
+        // wfb_rx -p 0 -i <link> -c 127.0.0.1 -u 5600 -a 5800 -K <rx.key> <iface>...
         let a = aggregate_args(
-            "wlan0",
+            &["wlan0".to_string(), "wlan1".to_string()],
             5800,
             true,
             Path::new("/etc/ados/wfb/rx.key"),
@@ -644,14 +660,15 @@ mod tests {
                 "5800",
                 "-K",
                 "/etc/ados/wfb/rx.key",
-                "wlan0"
+                "wlan0",
+                "wlan1"
             ]
         );
     }
 
     #[test]
     fn aggregate_args_without_local_nic_drops_iface() {
-        let a = aggregate_args("wlan0", 5800, false, Path::new("/k"), 257);
+        let a = aggregate_args(&["wlan0".to_string()], 5800, false, Path::new("/k"), 257);
         assert!(!a.contains(&"wlan0".to_string()));
         // The aggregator still listens on the relay forward port.
         let ai = a.iter().position(|x| x == "-a").unwrap();
@@ -702,6 +719,7 @@ mod tests {
             "fec_repaired",
             "output_kbps",
             "up",
+            "mesh_adapter",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}");
         }
@@ -824,7 +842,8 @@ mod tests {
             "fragments_after_dedup": 8000,
             "fec_repaired": 24,
             "output_kbps": 4200,
-            "up": true
+            "up": true,
+            "mesh_adapter": "wlan3"
         }"#;
         let s: ReceiverState = serde_json::from_str(fixture).expect("deserialize receiver fixture");
         assert_eq!(s.role, "receiver");
@@ -840,6 +859,7 @@ mod tests {
         assert_eq!(s.fec_repaired, 24);
         assert_eq!(s.output_kbps, 4200);
         assert!(s.up);
+        assert_eq!(s.mesh_adapter.as_deref(), Some("wlan3"));
 
         // Round-trip back to the same key set + values as the fixture.
         let re = serde_json::to_value(&s).unwrap();
@@ -923,6 +943,8 @@ mod tests {
             "up": false
         }"#;
         let s: ReceiverState = serde_json::from_str(fixture).expect("deserialize empty relays");
+        // A sidecar written before the mesh adapter was published reads as none.
+        assert!(s.mesh_adapter.is_none());
         assert!(s.relays.is_empty());
         assert!(!s.accept_local_nic);
         assert!(!s.up);

@@ -85,6 +85,31 @@ the project follows [Semantic Versioning](https://semver.org/).
   budget. New capability flag `tiles.pack`. Installer flag `--tile-pack
   <url|path>` places a pack in that directory.
 
+- **LoRa beacon lane (`ados-lora`).** Opt-in (`lora.enabled`, marker
+  `/etc/ados/lora-enabled`) on drone and ground-station nodes. Transports
+  `e22` (Ebyte UART module), `meshtastic` (serial client API) and `loopback`
+  (UDP, for simulation). Every frame passes a per-region governor built from a
+  compiled band-plan table (32 rows; uncited regions are receive-only): region
+  from `lora.region`, else `network.regulatory.region`, else transmit blocked
+  (`region_unset`); module-band check; `max_power` (ERP/EIRP/conducted, PSD,
+  antenna gain, adaptive power control); `dwell_time`; per-sub-band
+  `duty_cycle` over a rolling window with a persisted, fsync'd
+  charge-then-send airtime ledger (`/var/ados/lora/airtime.jsonl`) so a
+  restart cannot reset the budget; `lbt`. E22 frames are charged at twice the
+  computed time on air. REST `GET/PUT /api/v1/lora` (PUT is admin scope; a
+  region change is refused while armed), `GET /api/v1/lora/regions`,
+  `GET /api/v1/lora/beacons`; sidecars `lora.json`, `lora-beacons.json`;
+  `lora` flag in `/api/status/full`.
+- **Multiple WFB adapters.** `radio.adapters[]` assigns roles
+  (`rxtx|rx|tx|mesh`, matched by MAC or USB path; empty = auto). Every rx/rxtx
+  adapter feeds `wfb_rx` (receive diversity); `wfb-stats` v2 carries
+  per-adapter `adapters[]` and `diversity`; `GET /api/v1/radio/adapters`.
+- **Several ELRS modules.** `radio.crsf.modules[]` (`pilot|autonomy`);
+  `crsf-stats` v2 and `GET /api/v1/ground-station/crsf` carry `modules[]`
+  with per-module link statistics and the reported ELRS `domain`.
+- **INA226 battery gauge.** A `battery_gauge` binding in `board.json` adds a
+  pack with `"source": "ina226"` to `GET /api/v1/battery`.
+
 ### Changed
 
 - **Framebus descriptor v2.** `ts_ms` is replaced by `ts_ns` (host

@@ -10,7 +10,7 @@ use serde_json::Value;
 use super::config::BatteryConfig;
 use super::predict::{predict, Point, Prediction};
 use super::rules::{evaluate, RuleId, Severity};
-use super::{cells_plausible, divergence_mv, Sample};
+use super::{cells_plausible, divergence_mv, PackSource, Sample};
 
 /// Readings kept per pack: 300 s at the 2 Hz the task samples, which covers
 /// the longest configurable projection window.
@@ -24,6 +24,9 @@ pub const STALE_AFTER_MS: i64 = 5000;
 /// Packs tracked. The router caps the ids it publishes at the same number;
 /// this bounds the engine against any other producer.
 pub const MAX_PACKS: usize = 8;
+/// The pack id of the node's own battery gauge, outside the ids FC packs use.
+/// An FC pack carrying this id is ignored rather than merged into the gauge.
+pub const GAUGE_PACK_ID: u8 = u8::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -248,13 +251,26 @@ impl BatteryEngine {
         self.updated_at_ms = now_ms;
         let mut transitions = Vec::new();
         for (id, sample) in readings(now_ms, snapshot) {
-            if !self.packs.contains_key(&id) && self.packs.len() >= MAX_PACKS {
+            let fc_packs = self.packs.keys().filter(|&&k| k != GAUGE_PACK_ID).count();
+            if id == GAUGE_PACK_ID || (!self.packs.contains_key(&id) && fc_packs >= MAX_PACKS) {
                 continue;
             }
             let pack = self.packs.entry(id).or_default();
             transitions.extend(pack.ingest(id, sample, &self.config));
         }
         transitions
+    }
+
+    /// Ingest one reading of the node's own battery gauge as pack
+    /// [`GAUGE_PACK_ID`]. Independent of the FC link: the gauge measures the
+    /// pack directly, so a lost FC never freezes it.
+    pub fn ingest_gauge(&mut self, sample: Sample) -> Vec<AnomalyTransition> {
+        if !self.config.enabled {
+            return Vec::new();
+        }
+        self.updated_at_ms = self.updated_at_ms.max(sample.t_ms);
+        let pack = self.packs.entry(GAUGE_PACK_ID).or_default();
+        pack.ingest(GAUGE_PACK_ID, sample, &self.config)
     }
 
     /// The `/api/v1/battery` read model at `now_ms` (epoch ms).
@@ -268,6 +284,7 @@ impl BatteryEngine {
                     let extremes = latest.cell_extremes();
                     Some(PackHealth {
                         id,
+                        source: latest.source,
                         stale: now_ms - latest.t_ms > STALE_AFTER_MS,
                         cells_plausible: latest.cells_plausible,
                         cell_voltages_v: &latest.cells,
@@ -277,6 +294,7 @@ impl BatteryEngine {
                         divergence_mv: extremes.map(|(_, min, max)| divergence_mv(min, max)),
                         voltage_v: latest.voltage_v,
                         current_a: latest.current_a,
+                        power_w: latest.power_w,
                         remaining_pct: latest.remaining_pct,
                         temperature_c: latest.temperature_c,
                         consumed_mah: latest.consumed_mah,
@@ -313,6 +331,8 @@ pub struct BatteryHealth<'a> {
 #[derive(Debug, Serialize)]
 pub struct PackHealth<'a> {
     pub id: u8,
+    /// Where the readings come from (`mavlink` or `ina226`).
+    pub source: PackSource,
     /// No fresh reading from this pack for [`STALE_AFTER_MS`]: its stream
     /// stopped, so the values below are its last report, not its state.
     pub stale: bool,
@@ -324,6 +344,7 @@ pub struct PackHealth<'a> {
     pub divergence_mv: Option<f64>,
     pub voltage_v: Option<f64>,
     pub current_a: Option<f64>,
+    pub power_w: Option<f64>,
     pub remaining_pct: Option<i64>,
     pub temperature_c: Option<f64>,
     pub consumed_mah: Option<i64>,
@@ -371,10 +392,12 @@ fn readings(t_ms: i64, snapshot: &Value) -> Vec<(u8, Sample)> {
             cells_plausible: plausible,
             voltage_v,
             current_a: field(keys.current).and_then(Value::as_f64),
+            power_w: None,
             remaining_pct,
             temperature_c: field(keys.temperature).and_then(Value::as_f64),
             consumed_mah: field("consumed_mah").and_then(Value::as_i64),
             consumed_wh: field("consumed_wh").and_then(Value::as_f64),
+            source: PackSource::Mavlink,
         }
     };
 

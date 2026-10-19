@@ -846,10 +846,10 @@ pub enum FollowOutcome {
     RevertedNoTraffic,
 }
 
-/// Drives the GS receive radio to follow a drone-announced channel hop. Holds the
-/// same `ChannelSetter` the acquirer uses plus the resolved-iface cell the
-/// receive loop writes, so on a verified HopAnnounce the listener retunes the
-/// live receive interface to the announced channel when the countdown expires —
+/// Drives the GS receive radios to follow a drone-announced channel hop. Holds
+/// the same group `ChannelSetter` the acquirer uses plus the radio-group cell
+/// the receive loop writes, so on a verified HopAnnounce the listener retunes
+/// the live receive adapters to the announced channel when the countdown expires —
 /// the coordinated counterpart to the drone's flip. Without this the GS only
 /// learned the new channel into its cache and waited for the valid-packet
 /// watchdog to notice the blackout and sweep, costing a guaranteed gap on every
@@ -862,7 +862,7 @@ pub enum FollowOutcome {
 #[derive(Clone)]
 pub struct HopFollower {
     setter: Arc<dyn ChannelSetter>,
-    resolved_iface: Arc<tokio::sync::Mutex<Option<String>>>,
+    radio_group: crate::wfb_rx::RadioGroup,
     /// The current receive generation's valid-decode counter. Replaced on every
     /// generation; `None` before the first.
     valid: Arc<Mutex<Option<SharedValidCounter>>>,
@@ -874,13 +874,10 @@ pub struct HopFollower {
 }
 
 impl HopFollower {
-    pub fn new(
-        setter: Arc<dyn ChannelSetter>,
-        resolved_iface: Arc<tokio::sync::Mutex<Option<String>>>,
-    ) -> Self {
+    pub fn new(setter: Arc<dyn ChannelSetter>, radio_group: crate::wfb_rx::RadioGroup) -> Self {
         Self {
             setter,
-            resolved_iface,
+            radio_group,
             valid: Arc::new(Mutex::new(None)),
             pending: Arc::new(Mutex::new(None)),
             verify_window: FOLLOW_VERIFY_WINDOW,
@@ -900,9 +897,10 @@ impl HopFollower {
         self
     }
 
-    /// The resolved receive interface, if any.
+    /// The resolved primary (transmit) interface, if any. The group setter
+    /// carries every retune of it to the other receive adapters.
     async fn iface(&self) -> Option<String> {
-        self.resolved_iface.lock().await.clone()
+        self.radio_group.lock().await.first().cloned()
     }
 
     /// Claim the follow toward `channel`. False when one is already scheduled.
@@ -1479,7 +1477,7 @@ mod tests {
         };
         let follower = HopFollower::new(
             RecordingSetter::ok(),
-            Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string()))),
+            Arc::new(tokio::sync::Mutex::new(vec!["wlan1".to_string()])),
         );
 
         let announce = build_hop_announce(0, 157, HopTrigger::Reactive, &pair_key);
@@ -1553,7 +1551,7 @@ mod tests {
         let setter = RecordingSetter::ok();
         let follower = HopFollower::new(
             setter.clone(),
-            Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string()))),
+            Arc::new(tokio::sync::Mutex::new(vec!["wlan1".to_string()])),
         );
         let announce = build_hop_announce(0, 157, HopTrigger::Reactive, &test_key());
         let fleet = ControlContext {
@@ -1584,7 +1582,7 @@ mod tests {
         let cache = GsPresenceCache::new();
         let follower = HopFollower::new(
             RecordingSetter::ok(),
-            Arc::new(tokio::sync::Mutex::new(None)),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
         );
         let announce = build_hop_announce(0, 157, HopTrigger::Periodic, &test_key());
         assert!(!acked(&announce, &cache, Some(&follower), SOLO).await);
@@ -1780,7 +1778,7 @@ mod tests {
     #[tokio::test]
     async fn a_follow_that_carries_traffic_holds() {
         let setter = RecordingSetter::ok();
-        let iface = Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string())));
+        let iface = Arc::new(tokio::sync::Mutex::new(vec!["wlan1".to_string()]));
         let follower =
             HopFollower::new(setter.clone(), iface).with_verify_window(Duration::from_millis(50));
         let counter = SharedValidCounter::new();
@@ -1808,7 +1806,7 @@ mod tests {
         // The drone acked path failed on its side: nothing arrives on the target.
         // The station returns to the channel it left instead of staying deaf.
         let setter = RecordingSetter::ok();
-        let iface = Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string())));
+        let iface = Arc::new(tokio::sync::Mutex::new(vec!["wlan1".to_string()]));
         let follower =
             HopFollower::new(setter.clone(), iface).with_verify_window(Duration::from_millis(20));
         follower.set_valid_counter(SharedValidCounter::new());
@@ -1870,7 +1868,7 @@ mod tests {
         };
 
         let setter = RecordingSetter::ok();
-        let iface = Arc::new(tokio::sync::Mutex::new(Some("wlan1".to_string())));
+        let iface = Arc::new(tokio::sync::Mutex::new(vec!["wlan1".to_string()]));
         let follower = HopFollower::new(setter.clone(), iface);
 
         // A zero countdown so the spawned retune fires immediately.
