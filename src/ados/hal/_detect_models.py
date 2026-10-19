@@ -316,6 +316,43 @@ class BoardVariant(BaseModel):
     default_tier: int | None = None
 
 
+class ImuBinding(BaseModel):
+    """Where the board's primary IMU is read from: a host SPI/I2C chip, the
+    USB sensor hub, or the flight controller over MAVLink."""
+
+    bus: Literal["spi", "i2c", "hub", "fc"]
+    model: str | None = None
+    rate_hz: int | None = None
+
+
+class GnssBinding(BaseModel):
+    """Where the board's GNSS receiver bytes come from. ``pps_gpio`` is the BCM
+    line carrying the receiver's PPS, when wired to the host."""
+
+    transport: Literal["fc", "hub", "serial", "udp"]
+    device: str | None = None
+    baud: int | None = None
+    pps_gpio: int | None = None
+    model: str | None = None
+
+
+class SensorHubBinding(BaseModel):
+    """A USB sensor hub the board carries, matched by its CDC VID:PID."""
+
+    usb_vid_pid: str = "1209:ad05"
+    board: str | None = None
+
+
+class BatteryGaugeBinding(BaseModel):
+    """A host-I2C battery current/voltage gauge."""
+
+    type: Literal["ina226"]
+    i2c_bus: int
+    addr: int
+    shunt_ohm: float
+    max_current_a: float
+
+
 class BoardProfile(BaseModel):
     """Pydantic model for YAML board profile validation."""
 
@@ -352,6 +389,13 @@ class BoardProfile(BaseModel):
         default_factory=FlightControllerSection
     )
     variants: list[BoardVariant] = Field(default_factory=list)
+
+    # Optional sensor bindings for capture rigs and gauge-equipped boards.
+    # Absent on boards that carry none of them.
+    imu: ImuBinding | None = None
+    gnss: GnssBinding | None = None
+    sensor_hub: SensorHubBinding | None = None
+    battery_gauge: BatteryGaugeBinding | None = None
 
     # The profile's YAML filename stem (``cubie-a7s``, ``rock-5c-lite``). Not a
     # YAML key: ``_load_board_profiles`` stamps it from the file name, and it is

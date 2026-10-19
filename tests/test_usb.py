@@ -79,6 +79,19 @@ def test_categorize_unknown_empty_name():
     assert desc == "Unknown USB Device"
 
 
+def test_categorize_sensor_hub_firmware():
+    """The ADOS Sensor Hub firmware VID:PID is its own category."""
+    desc, cat = categorize_device(0x1209, 0xAD05, "")
+    assert cat == UsbCategory.SENSOR_HUB
+    assert "Sensor Hub" in desc
+
+
+def test_categorize_ardupilot_pid_codes_stays_fc():
+    """Stock ArduPilot on the same boards (1209:5741) stays a flight controller."""
+    _, cat = categorize_device(0x1209, 0x5741, "")
+    assert cat == UsbCategory.FC
+
+
 # --- _parse_lsusb_output ---
 
 def test_parse_lsusb_single_device():

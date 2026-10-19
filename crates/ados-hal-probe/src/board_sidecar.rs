@@ -27,6 +27,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+use crate::bindings::{BatteryGaugeBinding, GnssBinding, ImuBinding, SensorHubBinding};
+use crate::host_facts::probe_host_facts;
+use crate::sensor_hub::{SensorHubPresence, UsbTty};
+
 /// The canonical sidecar path. Honours `ADOS_RUN_DIR` like the sibling
 /// daemons, so a rootless per-user install lands it under `$HOME/.ados/run`.
 pub fn sidecar_path() -> std::path::PathBuf {
@@ -134,6 +138,14 @@ pub struct BoardProfile {
     pub variants: Vec<BoardVariant>,
     #[serde(default)]
     pub buttons: Option<ButtonPins>,
+    #[serde(default)]
+    pub imu: Option<ImuBinding>,
+    #[serde(default)]
+    pub gnss: Option<GnssBinding>,
+    #[serde(default)]
+    pub sensor_hub: Option<SensorHubBinding>,
+    #[serde(default)]
+    pub battery_gauge: Option<BatteryGaugeBinding>,
     /// The profile's YAML filename stem (`cubie-a7s`, `rock-5c-lite`). Not a
     /// YAML key: [`load_profiles`] stamps it from the embedded file name, and it
     /// is the ONE canonical token `/etc/ados/board_override` accepts.
@@ -320,6 +332,14 @@ pub struct BoardFingerprint {
     /// Panel button pins from the profile's optional `buttons:` block.
     #[serde(default)]
     pub buttons: Option<ButtonPins>,
+    /// The USB sensor hub: present when the board declares one or one is
+    /// attached; omitted otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sensor_hub: Option<SensorHubPresence>,
+    /// The profile's battery gauge binding, copied verbatim; omitted when the
+    /// board declares none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_gauge: Option<BatteryGaugeBinding>,
 }
 
 /// The host facts detection needs, injected so the whole pipeline is testable
@@ -342,6 +362,8 @@ pub struct HostFacts {
     /// `/etc/ados/board_override`: the board-profile YAML filename STEM
     /// (`cubie-a7s`, `rock-5c-lite`). Empty when unset.
     pub board_override: String,
+    /// The USB-backed `ttyACM*` nodes, for sensor-hub presence.
+    pub usb_ttys: Vec<UsbTty>,
 }
 
 /// Which profile a resolution matched, and the model string to record with it.
@@ -481,6 +503,8 @@ fn from_profile(profile: &BoardProfile, model_string: &str, facts: &HostFacts) -
         has_local_inference: !matches!(local_inference.as_str(), "" | "none"),
         local_inference,
         buttons: profile.buttons,
+        sensor_hub: crate::sensor_hub::detect(profile.sensor_hub.as_ref(), &facts.usb_ttys),
+        battery_gauge: profile.battery_gauge.clone(),
     }
 }
 
@@ -561,6 +585,8 @@ pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint
         local_inference: "none".to_string(),
         has_local_inference: false,
         buttons: None,
+        sensor_hub: crate::sensor_hub::detect(None, &facts.usb_ttys),
+        battery_gauge: None,
     }
 }
 
@@ -612,182 +638,22 @@ pub fn publish() -> std::io::Result<BoardFingerprint> {
     let facts = probe_host_facts();
     let fp = resolve(&load_profiles(), &facts);
     write_sidecar(&sidecar_path(), &fp)?;
+    let hub_present = crate::sensor_hub::publish_presence(fp.sensor_hub.as_ref());
     tracing::info!(
         board = %fp.name,
         tier = fp.tier,
         npu_tops = fp.npu_tops,
         ram_mb = fp.ram_mb,
+        sensor_hub = hub_present,
         "board fingerprint published"
     );
     Ok(fp)
 }
 
-/// Read the host facts detection keys on. Linux reads procfs/sysfs; elsewhere
-/// the fields stay empty and detection lands on the generic fallback, which is
-/// the honest answer on a dev host.
-pub fn probe_host_facts() -> HostFacts {
-    HostFacts {
-        model: read_device_tree_model(),
-        compatible: read_device_tree_compatible(),
-        cpuinfo_model: read_cpuinfo_model(),
-        ram_mb: read_ram_mb(),
-        cpu_cores: read_cpu_cores(),
-        machine: read_machine(),
-        os: std::env::consts::OS.to_string(),
-        board_override: read_board_override(),
-    }
-}
-
-/// The path of the board-override file, honouring `ADOS_ETC_DIR` like the
-/// Python `ados.setup.advanced` writer and the install scripts.
-pub fn board_override_path() -> std::path::PathBuf {
-    match std::env::var_os("ADOS_ETC_DIR") {
-        Some(dir) => std::path::PathBuf::from(dir).join("board_override"),
-        None => std::path::PathBuf::from("/etc/ados/board_override"),
-    }
-}
-
-/// The operator's forced board — a board-profile YAML filename STEM — or `""`.
-///
-/// This writer used to ignore the override entirely, so a correctly-spelled
-/// override reached the Python detector and never reached `/run/ados/board.json`
-/// (and therefore never reached `/api/status` or Mission Control): the two
-/// halves reported different boards on the same node.
-pub fn read_board_override() -> String {
-    std::fs::read_to_string(board_override_path())
-        .map(|s| s.trim().trim_matches('\0').trim().to_string())
-        .unwrap_or_default()
-}
-
-fn read_device_tree_model() -> String {
-    std::fs::read("/proc/device-tree/model")
-        .map(|b| {
-            String::from_utf8_lossy(&b)
-                .trim_end_matches('\0')
-                .trim()
-                .to_string()
-        })
-        .unwrap_or_default()
-}
-
-/// The FIRST token of the NUL-separated `compatible` list: the most specific
-/// one, which uniquely identifies the board. Generic SoC-family tokens later in
-/// the list must never enter pattern matching.
-fn read_device_tree_compatible() -> String {
-    let Ok(bytes) = std::fs::read("/proc/device-tree/compatible") else {
-        return String::new();
-    };
-    bytes
-        .split(|b| *b == 0)
-        .map(|t| String::from_utf8_lossy(t).trim().to_string())
-        .find(|t| !t.is_empty())
-        .unwrap_or_default()
-}
-
-fn read_cpuinfo_model() -> String {
-    let Ok(text) = std::fs::read_to_string("/proc/cpuinfo") else {
-        return String::new();
-    };
-    parse_cpuinfo_model(&text)
-}
-
-/// The `Hardware:` / `model:` value from a `/proc/cpuinfo` body. Pure.
-pub fn parse_cpuinfo_model(text: &str) -> String {
-    for line in text.lines() {
-        let lower = line.to_ascii_lowercase();
-        if lower.starts_with("hardware") || lower.starts_with("model") {
-            if let Some((_, value)) = line.split_once(':') {
-                let value = value.trim();
-                if !value.is_empty() {
-                    return value.to_string();
-                }
-            }
-        }
-    }
-    String::new()
-}
-
-fn read_ram_mb() -> i64 {
-    std::fs::read_to_string("/proc/meminfo")
-        .map(|t| parse_mem_total_mb(&t))
-        .unwrap_or(0)
-}
-
-/// MemTotal in MiB from a `/proc/meminfo` body. Pure.
-pub fn parse_mem_total_mb(text: &str) -> i64 {
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("MemTotal:") {
-            let kb: i64 = rest
-                .split_whitespace()
-                .next()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0);
-            return kb / 1024;
-        }
-    }
-    0
-}
-
-fn read_cpu_cores() -> i64 {
-    // The online-CPU list is the authority; `/proc/cpuinfo` processor lines are
-    // the fallback on a kernel that does not expose it.
-    if let Ok(text) = std::fs::read_to_string("/sys/devices/system/cpu/online") {
-        let n = parse_cpu_online(&text);
-        if n > 0 {
-            return n;
-        }
-    }
-    std::fs::read_to_string("/proc/cpuinfo")
-        .map(|t| {
-            t.lines()
-                .filter(|l| l.to_ascii_lowercase().starts_with("processor"))
-                .count() as i64
-        })
-        .unwrap_or(0)
-}
-
-/// Count the CPUs in a `/sys/devices/system/cpu/online` range list
-/// (`0-3`, `0,2-3`). Pure.
-pub fn parse_cpu_online(text: &str) -> i64 {
-    let mut total = 0i64;
-    for part in text.trim().split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        match part.split_once('-') {
-            Some((lo, hi)) => {
-                if let (Ok(lo), Ok(hi)) = (lo.trim().parse::<i64>(), hi.trim().parse::<i64>()) {
-                    if hi >= lo {
-                        total += hi - lo + 1;
-                    }
-                }
-            }
-            None => {
-                if part.parse::<i64>().is_ok() {
-                    total += 1;
-                }
-            }
-        }
-    }
-    total
-}
-
-#[cfg(target_os = "linux")]
-fn read_machine() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/arch")
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|_| "aarch64".to_string())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn read_machine() -> String {
-    std::env::consts::ARCH.to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::host_facts::{parse_cpu_online, parse_cpuinfo_model, parse_mem_total_mb};
 
     fn facts(compatible: &str, model: &str) -> HostFacts {
         HostFacts {
@@ -799,6 +665,7 @@ mod tests {
             machine: "aarch64".to_string(),
             os: "linux".to_string(),
             board_override: String::new(),
+            usb_ttys: Vec::new(),
         }
     }
 
@@ -1195,5 +1062,59 @@ mod tests {
         assert_eq!(fp.name, "macOS (dev)");
         assert_eq!(fp.tier, detect_tier(8192));
         assert_eq!(fp.vendor, "unknown");
+    }
+
+    #[test]
+    fn the_document_carries_the_hub_and_gauge_only_when_there_is_one() {
+        let mut rig: BoardProfile = serde_norway::from_str(
+            "name: Test Rig\nmodel_patterns: [test rig]\n\
+             imu: {bus: hub, model: ICM-42688-P, rate_hz: 1000}\n\
+             gnss: {transport: hub}\n\
+             sensor_hub: {board: matek_h743_slim_v3}\n\
+             battery_gauge: {type: ina226, i2c_bus: 1, addr: 64, shunt_ohm: 0.0005, max_current_a: 60.0}\n",
+        )
+        .unwrap();
+        rig.stem = "test-rig".into();
+        assert_eq!(rig.imu.as_ref().unwrap().rate_hz, Some(1000));
+
+        // Declared hub, unplugged: present false, null device; gauge copied.
+        let fp = from_profile(&rig, "Test Rig", &facts("", ""));
+        let v = serde_json::to_value(&fp).unwrap();
+        assert_eq!(
+            v["sensor_hub"],
+            serde_json::json!({"present": false, "device": null, "vid_pid": "1209:ad05"})
+        );
+        assert_eq!(
+            v["battery_gauge"],
+            serde_json::json!({"type": "ina226", "i2c_bus": 1, "addr": 64,
+                               "shunt_ohm": 0.0005, "max_current_a": 60.0})
+        );
+
+        // Plugged in: the node is reported.
+        let mut f = facts("", "");
+        f.usb_ttys = vec![UsbTty {
+            device: "/dev/ttyACM0".into(),
+            vid: 0x1209,
+            pid: 0xAD05,
+        }];
+        let fp = from_profile(&rig, "Test Rig", &f);
+        let hub = fp.sensor_hub.as_ref().unwrap();
+        assert!(hub.present);
+        assert_eq!(hub.device.as_deref(), Some("/dev/ttyACM0"));
+        // Round-trips through the reader.
+        let back: BoardFingerprint =
+            serde_json::from_str(&serde_json::to_string(&fp).unwrap()).unwrap();
+        assert_eq!(back, fp);
+
+        // A board declaring neither omits both keys; an attached hub still shows.
+        let profiles = load_profiles();
+        let pi5 = facts("raspberrypi,5-model-b", "Raspberry Pi 5");
+        let v = serde_json::to_value(resolve(&profiles, &pi5)).unwrap();
+        assert!(v.get("sensor_hub").is_none());
+        assert!(v.get("battery_gauge").is_none());
+        let mut pi5_hub = pi5;
+        pi5_hub.usb_ttys = f.usb_ttys;
+        let fp = resolve(&profiles, &pi5_hub);
+        assert!(fp.sensor_hub.unwrap().present);
     }
 }

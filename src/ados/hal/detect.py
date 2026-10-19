@@ -11,6 +11,7 @@ import yaml
 from ados.core.logging import get_logger
 from ados.core.paths import BOARD_OVERRIDE_PATH as _BOARD_OVERRIDE_PATH
 from ados.hal._detect_models import (
+    BatteryGaugeBinding,
     BoardInfo,
     BoardProfile,
     BoardVariant,
@@ -26,16 +27,20 @@ from ados.hal._detect_models import (
     DisplayTouch,
     FcInterface,
     FlightControllerSection,
+    GnssBinding,
     GpioButton,
     GpioOutput,
+    ImuBinding,
     RadioBinding,
     RadiosSection,
+    SensorHubBinding,
     VideoSection,
 )
 
 __all__ = [
     "BOARDS_DIR",
     "BOARD_OVERRIDE_PATH",
+    "BatteryGaugeBinding",
     "BoardInfo",
     "BoardProfile",
     "BoardVariant",
@@ -51,10 +56,13 @@ __all__ = [
     "DisplaysSection",
     "FcInterface",
     "FlightControllerSection",
+    "GnssBinding",
     "GpioButton",
     "GpioOutput",
+    "ImuBinding",
     "RadioBinding",
     "RadiosSection",
+    "SensorHubBinding",
     "VideoSection",
     "detect_board",
     "detect_board_profile",

@@ -1,0 +1,169 @@
+//! The link supervisor: resolve and open the transport, run sessions with
+//! reconnect backoff, forward RTCM from the bus, and write the sidecar.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use ados_protocol::shutdown::Shutdown;
+use ados_sensorbus::time::mono_ns;
+use ados_sensorbus::{Kind, Origin, Publisher, Subscriber};
+use tokio::sync::{mpsc, Notify};
+
+use crate::config::{HubConfig, TransportSpec};
+use crate::rig::Extrinsics;
+use crate::session::{lock, run_session, SessionCtx, SessionEnd, Stop};
+use crate::state::{write_sidecar, RateMeter, SharedState};
+use crate::transport::{open, resolve};
+
+const MIN_BACKOFF: Duration = Duration::from_millis(500);
+const MAX_BACKOFF: Duration = Duration::from_secs(10);
+/// Backoff after the hub reported a protocol version this build cannot read.
+const UNSUPPORTED_BACKOFF: Duration = Duration::from_secs(30);
+const SIDECAR_INTERVAL: Duration = Duration::from_secs(1);
+const BUS_RETRY: Duration = Duration::from_secs(1);
+/// RTCM payloads queued toward the hub before new ones are dropped.
+const RTCM_QUEUE: usize = 64;
+
+/// Everything one link run needs.
+pub struct LinkParams {
+    pub cfg: HubConfig,
+    /// The `/sys/class/tty`-shaped root `auto` resolves against.
+    pub tty_root: PathBuf,
+    pub ext: Extrinsics,
+    /// The sensor-bus socket.
+    pub socket: PathBuf,
+    pub sidecar: PathBuf,
+}
+
+async fn stop_signal(shutdown: &Shutdown, reload: &Notify) -> Stop {
+    tokio::select! {
+        biased;
+        _ = shutdown.wait() => Stop::Shutdown,
+        _ = reload.notified() => Stop::Reload,
+    }
+}
+
+/// Run the link until shutdown or a reload request.
+pub async fn run_link(p: LinkParams, shutdown: Shutdown, reload: Arc<Notify>) -> Stop {
+    let state = SharedState::default();
+    let publisher = Publisher::spawn(p.socket.clone(), Origin::Hub);
+    let (rtcm_tx, mut rtcm_rx) = mpsc::channel(RTCM_QUEUE);
+    let forwarder = tokio::spawn(rtcm_from_bus(p.socket.clone(), rtcm_tx));
+    let sidecar = tokio::spawn(sidecar_loop(p.sidecar.clone(), state.clone()));
+
+    let mut backoff = MIN_BACKOFF;
+    let why = loop {
+        let wait = match resolve(&p.cfg.transport, &p.tty_root) {
+            None => {
+                tracing::debug!("sensor hub not attached");
+                backoff
+            }
+            Some(ep) => {
+                lock(&state).transport = ep.label();
+                match open(&ep).await {
+                    Err(e) => {
+                        tracing::warn!(transport = %ep.label(), error = %e, "sensor hub open failed");
+                        backoff
+                    }
+                    Ok(io) => {
+                        tracing::info!(transport = %ep.label(), "sensor hub connected");
+                        lock(&state).connected = true;
+                        let ctx = SessionCtx {
+                            cfg: &p.cfg,
+                            ext: &p.ext,
+                            publisher: &publisher,
+                            rtcm: &mut rtcm_rx,
+                            state: &state,
+                        };
+                        let (end, packets) =
+                            run_session(io, ctx, stop_signal(&shutdown, &reload)).await;
+                        lock(&state).connected = false;
+                        if packets > 0 {
+                            backoff = MIN_BACKOFF;
+                        }
+                        match end {
+                            SessionEnd::Stopped(why) => break why,
+                            SessionEnd::Closed => {
+                                tracing::warn!(packets, "sensor hub closed the link");
+                                backoff
+                            }
+                            SessionEnd::Io(e) => {
+                                tracing::warn!(packets, error = %e, "sensor hub link error");
+                                backoff
+                            }
+                            SessionEnd::Unsupported(v) => {
+                                tracing::error!(
+                                    proto_ver = v,
+                                    "sensor hub protocol version unsupported; not streaming"
+                                );
+                                UNSUPPORTED_BACKOFF
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        tokio::select! {
+            biased;
+            why = stop_signal(&shutdown, &reload) => break why,
+            _ = tokio::time::sleep(wait) => {}
+        }
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    };
+
+    forwarder.abort();
+    sidecar.abort();
+    let _ = sidecar.await;
+    // A last write so a stopping service does not leave `connected: true`.
+    let body = RateMeter::default().body(&lock(&state), mono_ns());
+    let _ = write_sidecar(&p.sidecar, &body);
+    why
+}
+
+/// Subscribe to `rtcm` frames and queue their payloads toward the hub,
+/// reconnecting to the bus as needed. A full queue drops the newest payload.
+async fn rtcm_from_bus(socket: PathBuf, tx: mpsc::Sender<Vec<u8>>) {
+    loop {
+        if let Ok(mut sub) = Subscriber::connect(&socket, &[Kind::Rtcm]).await {
+            loop {
+                match sub.recv().await {
+                    Ok(f) if f.kind == Kind::Rtcm => {
+                        let _ = tx.try_send(f.payload);
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        tokio::time::sleep(BUS_RETRY).await;
+    }
+}
+
+async fn sidecar_loop(path: PathBuf, state: SharedState) {
+    let mut meter = RateMeter::default();
+    let mut tick = tokio::time::interval(SIDECAR_INTERVAL);
+    let mut reported = false;
+    loop {
+        tick.tick().await;
+        let body = {
+            let st = lock(&state);
+            meter.body(&st, mono_ns())
+        };
+        match write_sidecar(&path, &body) {
+            Ok(()) => reported = false,
+            Err(e) if !reported => {
+                tracing::warn!(path = %path.display(), error = %e, "sensorhub sidecar write failed");
+                reported = true;
+            }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Whether the service has anything to do: an explicit transport, or an
+/// attached hub for `auto`.
+pub fn has_target(spec: &TransportSpec, tty_root: &std::path::Path) -> bool {
+    resolve(spec, tty_root).is_some()
+}

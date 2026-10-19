@@ -20,11 +20,14 @@
 //! [`ProbePhase`] permits it (`Setup` / `BootPreArm`, never armed `Runtime`).
 //! Read-only probes (CPU, SoC, USB, serial) run in any phase.
 
+pub mod bindings;
 pub mod board_sidecar;
 pub mod camera_probe;
 pub mod daemon;
+pub mod host_facts;
 pub mod probe;
 pub mod runner;
+pub mod sensor_hub;
 
 pub use ados_protocol::hwcaps::{
     AbsenceReason, CoreCluster, EncoderDevice, Evidence, HardwareCapabilities, Midr, ProbePhase,

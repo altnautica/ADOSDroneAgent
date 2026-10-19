@@ -112,6 +112,7 @@ def _classify_usb(vid: int, pid: int) -> str:
         UsbCategory.RADIO: "video",
         UsbCategory.GPS: "sensor",
         UsbCategory.LORA: "video",
+        UsbCategory.SENSOR_HUB: "sensor",
         UsbCategory.OTHER: "compute",
     }
     return category_map.get(category, "compute")

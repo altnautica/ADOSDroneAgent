@@ -1,6 +1,6 @@
 //! What a config write must do beyond the file itself.
 //!
-//! Four lanes mirror a config change onto the node, and every config writer
+//! Five lanes mirror a config change onto the node, and every config writer
 //! (the native `PUT /api/config`, and the Python writer through
 //! `ados-control --apply-config-side-effects`) runs them through [`apply`]:
 //!
@@ -17,6 +17,11 @@
 //!   `enabled`; a slice change `try-restart`s `ados-hostapd` and either
 //!   `reload-or-restart`s `ados-dnsmasq-gs` (enabled) or clears its latched
 //!   failure and stops it (disabled).
+//! * **Sensor hub** (`sensors.hub`): the `sensorhub-enabled` marker mirrors an
+//!   explicit `transport` (`serial:...` / `tcp:...`; absent for `auto`, where
+//!   the hub's USB presence marker gates the unit instead). A slice change
+//!   kicks `ados-sensorhub` with `reload-or-restart`: in `auto` the service
+//!   still runs when a hub is attached, so a change never means stop.
 //! * **Remote access** (`remote_access`): when the tunnel posture or the unit
 //!   name changes, `enable --now` or `disable --now` the tunnel unit (a renamed
 //!   unit stops the old one first). Only names starting with `cloudflared` are
@@ -62,6 +67,7 @@ pub fn apply(
     fx.tunnel(old, new);
     fx.hotspot(old, new);
     fx.remote_access(old, new);
+    fx.sensorhub(old, new);
     fx.report
 }
 
@@ -143,6 +149,15 @@ pub fn tunnel_unit_allowed(unit: &str) -> bool {
         rest.chars()
             .all(|c| c.is_ascii_alphanumeric() || "@._-".contains(c))
     })
+}
+
+/// True when a `sensors.hub.transport` value names an explicit transport
+/// (`serial:<device>` or `tcp:<host>:<port>`) rather than `auto`.
+pub fn sensorhub_transport_explicit(transport: &str) -> bool {
+    let t = transport.trim();
+    t.strip_prefix("serial:")
+        .or_else(|| t.strip_prefix("tcp:"))
+        .is_some_and(|rest| !rest.trim().is_empty())
 }
 
 impl Effects<'_> {
@@ -257,6 +272,21 @@ impl Effects<'_> {
         }
         let verb = if wanted { "enable" } else { "disable" };
         self.systemctl(&["--no-block", verb, "--now", unit]);
+    }
+
+    fn sensorhub(&mut self, old: &Value, new: &Value) {
+        let (before, after) = (
+            slice(old, &["sensors", "hub"]),
+            slice(new, &["sensors", "hub"]),
+        );
+        let explicit = after
+            .get("transport")
+            .and_then(Value::as_str)
+            .is_some_and(sensorhub_transport_explicit);
+        let flipped = self.marker("sensorhub-enabled", explicit);
+        if flipped || before != after {
+            self.systemctl(&["--no-block", "reload-or-restart", "ados-sensorhub.service"]);
+        }
     }
 }
 
@@ -396,5 +426,52 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert!(!tunnel_unit_allowed("cloudflared;rm"));
         assert!(tunnel_unit_allowed("cloudflared-tunnel.service"));
+    }
+
+    #[test]
+    fn sensorhub_marker_mirrors_an_explicit_transport() {
+        let etc = tempfile::tempdir().unwrap();
+        let hub = |transport: &str| json!({"sensors": {"hub": {"transport": transport}}});
+        let marker = etc.path().join("sensorhub-enabled");
+        let kick = vec!["systemctl --no-block reload-or-restart ados-sensorhub.service"];
+
+        let (report, calls) = run_with(json!({}), hub("serial:/dev/ttyACM0"), etc.path());
+        assert!(marker.exists());
+        assert_eq!(report.markers_changed, vec!["sensorhub-enabled"]);
+        assert_eq!(calls, kick);
+
+        // Explicit to explicit keeps the marker and kicks the unit.
+        let (report, calls) = run_with(
+            hub("serial:/dev/ttyACM0"),
+            hub("tcp:192.168.1.50:7600"),
+            etc.path(),
+        );
+        assert!(marker.exists());
+        assert!(report.markers_changed.is_empty());
+        assert_eq!(calls, kick);
+
+        // Back to auto removes the marker but never stops the unit: auto still
+        // runs it when a hub is attached.
+        let (report, calls) = run_with(hub("tcp:192.168.1.50:7600"), hub("auto"), etc.path());
+        assert!(!marker.exists());
+        assert_eq!(report.markers_changed, vec!["sensorhub-enabled"]);
+        assert_eq!(calls, kick);
+
+        // An edit elsewhere in the slice kicks; an unchanged slice does not.
+        let rate = json!({"sensors": {"hub": {"transport": "auto", "imu_odr_hz": 2000}}});
+        let (_, calls) = run_with(hub("auto"), rate.clone(), etc.path());
+        assert_eq!(calls, kick);
+        let (_, calls) = run_with(rate.clone(), rate, etc.path());
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn sensorhub_transport_explicit_reads_only_named_transports() {
+        assert!(sensorhub_transport_explicit("serial:/dev/ttyACM0"));
+        assert!(sensorhub_transport_explicit(" tcp:127.0.0.1:7600 "));
+        assert!(!sensorhub_transport_explicit("auto"));
+        assert!(!sensorhub_transport_explicit("serial:"));
+        assert!(!sensorhub_transport_explicit("tcp: "));
+        assert!(!sensorhub_transport_explicit(""));
     }
 }

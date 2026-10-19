@@ -19,6 +19,7 @@ class UsbCategory(StrEnum):
     CAMERA = "camera"
     GPS = "gps"
     LORA = "lora"
+    SENSOR_HUB = "sensor_hub"
     OTHER = "other"
 
 
@@ -58,6 +59,9 @@ VID_PID_TABLE: dict[tuple[int, int], tuple[str, UsbCategory]] = {
     (0x1546, 0x01A8): ("u-blox 8 GPS", UsbCategory.GPS),
     (0x1546, 0x01A7): ("u-blox 7 GPS", UsbCategory.GPS),
     (0x1209, 0x5741): ("SpeedyBee F405 V4", UsbCategory.FC),
+    # ADOS Sensor Hub firmware USB CDC (pid.codes); the same boards running
+    # stock ArduPilot enumerate as 1209:5741 and stay FC.
+    (0x1209, 0xAD05): ("ADOS Sensor Hub", UsbCategory.SENSOR_HUB),
     (0x0EDE, 0x8093): ("HZ USB Camera", UsbCategory.CAMERA),
 }
 

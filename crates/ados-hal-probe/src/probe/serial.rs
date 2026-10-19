@@ -135,7 +135,7 @@ fn enumerate_from_root(tty_root: &Path, crsf_pin: Option<&str>) -> Vec<SerialPor
 /// True if `name` is `prefix` followed by one or more decimal digits
 /// (`ttyACM0`, `ttyUSB12`), so we skip `tty`, `ttyprintk`, and similar.
 #[allow(dead_code)]
-fn has_indexed_prefix(name: &str, prefix: &str) -> bool {
+pub(crate) fn has_indexed_prefix(name: &str, prefix: &str) -> bool {
     match name.strip_prefix(prefix) {
         Some(rest) => !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()),
         None => false,
@@ -149,7 +149,7 @@ fn has_indexed_prefix(name: &str, prefix: &str) -> bool {
 /// until a directory carries both files. Returns `None` for SoC UARTs (no USB
 /// ancestor) or unreadable links.
 #[allow(dead_code)]
-fn resolve_usb_id(device_link: &Path) -> Option<UsbId> {
+pub(crate) fn resolve_usb_id(device_link: &Path) -> Option<UsbId> {
     use std::path::PathBuf;
 
     // Canonicalize follows the symlink into /sys/devices/...; fall back to the
