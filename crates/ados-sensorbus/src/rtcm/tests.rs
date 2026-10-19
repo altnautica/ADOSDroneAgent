@@ -131,3 +131,40 @@ fn stream_splits_on_crc_valid_frames_and_resyncs() {
     assert!(split_rtcm3(&[1, 2, 3, 4, 5, 6, 7]).is_empty());
     assert_eq!(fragment_count(&[0u8; 900]), Ok(0));
 }
+
+#[test]
+fn splitter_joins_a_frame_split_at_every_byte_boundary() {
+    let a = encode_rtcm3(&(0..40u8).collect::<Vec<_>>());
+    let b = encode_rtcm3(&[9u8; 300]);
+    let mut stream = vec![0x00, 0xD3];
+    stream.extend(&a);
+    stream.extend(&b);
+    for cut in 0..=stream.len() {
+        let mut s = Rtcm3Splitter::default();
+        let mut got = s.push(&stream[..cut]);
+        got.extend(s.push(&stream[cut..]));
+        assert_eq!(got, vec![a.clone(), b.clone()], "cut at {cut}");
+        assert_eq!(s.pending(), 0, "cut at {cut}");
+    }
+}
+
+#[test]
+fn splitter_holds_only_a_bounded_partial_frame_and_resyncs() {
+    let mut s = Rtcm3Splitter::default();
+    // Junk without a preamble is not held.
+    assert!(s.push(&[1u8; 5000]).is_empty());
+    assert_eq!(s.pending(), 0);
+    // A stray preamble claiming a long frame is held until it cannot be a
+    // frame, then a real one behind it still comes through.
+    let good = encode_rtcm3(&[4u8; 50]);
+    assert!(s.push(&[0xD3, 0x03, 0xFF, 7, 7]).is_empty());
+    assert!(s.pending() < 1029);
+    assert_eq!(s.push(&good), vec![good.clone()]);
+    assert_eq!(s.pending(), 0);
+    // A corrupt frame is dropped, the next one survives.
+    let mut bad = encode_rtcm3(&[5u8; 20]);
+    bad[10] ^= 1;
+    let mut chunk = bad;
+    chunk.extend(&good);
+    assert_eq!(s.push(&chunk), vec![good]);
+}

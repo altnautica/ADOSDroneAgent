@@ -29,6 +29,13 @@ pub const SIDECAR_NAME: &str = "mavlink-router.json";
 /// How often the sidecar is considered for a rewrite.
 pub const SIDECAR_INTERVAL: Duration = Duration::from_secs(2);
 
+/// An unchanged sidecar is still rewritten this often, so its age tells a
+/// reader the router is alive (readers treat it as stale past 10 s).
+pub const SIDECAR_REFRESH: Duration = Duration::from_secs(5);
+
+/// The last sidecar body written and when.
+pub type SidecarLast = Option<(Vec<u8>, Instant)>;
+
 /// Depth of the routed lane, matching the FC fan-out.
 const LANE_CAP: usize = 256;
 
@@ -334,13 +341,14 @@ pub async fn run_classifier(
 }
 
 /// Write the route table and the requested FC sensor-stream rates to `path`
-/// every [`SIDECAR_INTERVAL`], only when the body changed, until `cancel`.
+/// every [`SIDECAR_INTERVAL`] when the body changed, and at least every
+/// [`SIDECAR_REFRESH`] regardless, until `cancel`.
 pub async fn run_sidecar(
     fc: Arc<crate::connection::FcConnection>,
     path: PathBuf,
     cancel: Shutdown,
 ) {
-    let mut last: Option<Vec<u8>> = None;
+    let mut last: SidecarLast = None;
     let mut tick = tokio::time::interval(SIDECAR_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -352,22 +360,23 @@ pub async fn run_sidecar(
                 } else {
                     serde_json::Map::new()
                 };
-                write_if_changed(fc.routes(), rates, &path, &mut last);
+                write_if_due(fc.routes(), rates, &path, &mut last, Instant::now());
             }
             _ = cancel.wait() => break,
         }
     }
 }
 
-/// One sidecar pass: serialise the route table plus `sensor_rates_hz`
-/// (`{"fc_imu": 200.0, ...}`, the FC sensor streams currently requested),
-/// and write only a body that differs from the last one written. Returns
-/// whether it wrote.
-pub fn write_if_changed(
+/// One sidecar pass at `now`: serialise the route table plus
+/// `sensor_rates_hz` (`{"fc_imu": 200.0, ...}`, the FC sensor streams
+/// currently requested), and write it when it differs from the last body
+/// written or that write is [`SIDECAR_REFRESH`] old. Returns whether it wrote.
+pub fn write_if_due(
     hub: &RouteHub,
     sensor_rates_hz: serde_json::Map<String, serde_json::Value>,
     path: &std::path::Path,
-    last: &mut Option<Vec<u8>>,
+    last: &mut SidecarLast,
+    now: Instant,
 ) -> bool {
     let mut snapshot = hub.snapshot();
     if let Some(obj) = snapshot.as_object_mut() {
@@ -379,12 +388,14 @@ pub fn write_if_changed(
     let Ok(body) = serde_json::to_vec(&snapshot) else {
         return false;
     };
-    if last.as_deref() == Some(body.as_slice()) {
-        return false;
+    if let Some((prev, at)) = last.as_ref() {
+        if *prev == body && now.saturating_duration_since(*at) < SIDECAR_REFRESH {
+            return false;
+        }
     }
     match ados_protocol::sidecar::write_durable(path, &body) {
         Ok(()) => {
-            *last = Some(body);
+            *last = Some((body, now));
             true
         }
         Err(e) => {

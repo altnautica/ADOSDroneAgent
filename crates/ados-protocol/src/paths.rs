@@ -96,6 +96,7 @@ pub const GPIO_OUTPUT_JSON: &str = "gpio-output.json";
 pub const BOARD_JSON: &str = "board.json";
 pub const FC_IDENTITY_JSON: &str = "fc-identity.json";
 pub const MAVLINK_ROUTER_JSON: &str = "mavlink-router.json";
+pub const MAVLINK_ROUTER_MAX_AGE_MS: u64 = 15000;
 pub const LINK_FEEDBACK_JSON: &str = "link-feedback.json";
 pub const PLUGIN_LOOPBACK_GUARD_JSON: &str = "plugin-loopback-guard.json";
 pub const PLUGIN_STATE_MAX_AGE_MS: u64 = 10000;
@@ -187,7 +188,7 @@ pub const SIDECARS: &[SidecarPath] = &[
     SidecarPath { id: "board", path: "/run/ados/board.json", max_age_ms: None, writer: "ados-hal-probe" },
     SidecarPath { id: "config-status", path: "/run/ados/config-status-<service>.json", max_age_ms: None, writer: "ados-config" },
     SidecarPath { id: "fc-identity", path: "/run/ados/fc-identity.json", max_age_ms: None, writer: "ados-control" },
-    SidecarPath { id: "mavlink-router", path: "/run/ados/mavlink-router.json", max_age_ms: None, writer: "ados-mavlink-router" },
+    SidecarPath { id: "mavlink-router", path: "/run/ados/mavlink-router.json", max_age_ms: Some(15000), writer: "ados-mavlink-router" },
     SidecarPath { id: "link-feedback", path: "/run/ados/link-feedback.json", max_age_ms: None, writer: "ados-mavlink-router" },
     SidecarPath { id: "plugin-loopback-guard", path: "/run/ados/plugin-loopback-guard.json", max_age_ms: None, writer: "ados-plugin-host" },
     SidecarPath { id: "plugin-state", path: "/run/ados/plugins/<plugin_id>-state.json", max_age_ms: Some(10000), writer: "ados-plugin-host" },

@@ -91,10 +91,11 @@ fn sidecar_written_on_change() {
     let ipc = hub.register("ipc");
     let mut last = None;
     let none = serde_json::Map::new;
-    assert!(write_if_changed(&hub, none(), &path, &mut last));
-    assert!(!write_if_changed(&hub, none(), &path, &mut last));
+    let t0 = std::time::Instant::now();
+    assert!(write_if_due(&hub, none(), &path, &mut last, t0));
+    assert!(!write_if_due(&hub, none(), &path, &mut last, t0));
     hub.ingress(&ipc, &heartbeat(255, 190));
-    assert!(write_if_changed(&hub, none(), &path, &mut last));
+    assert!(write_if_due(&hub, none(), &path, &mut last, t0));
     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(body["version"], 1);
     assert_eq!(body["routes"][0]["sysid"], 255);
@@ -105,11 +106,44 @@ fn sidecar_written_on_change() {
     let mut rates = serde_json::Map::new();
     rates.insert("fc_imu".into(), serde_json::json!(200.0));
     rates.insert("fc_baro".into(), serde_json::json!(10.0));
-    assert!(write_if_changed(&hub, rates.clone(), &path, &mut last));
-    assert!(!write_if_changed(&hub, rates, &path, &mut last));
+    assert!(write_if_due(&hub, rates.clone(), &path, &mut last, t0));
+    assert!(!write_if_due(&hub, rates.clone(), &path, &mut last, t0));
     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(
         body["sensor_rates_hz"],
         serde_json::json!({"fc_imu": 200.0, "fc_baro": 10.0})
     );
+}
+
+#[test]
+fn an_unchanged_sidecar_is_refreshed_every_five_seconds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(SIDECAR_NAME);
+    let hub = RouteHub::new(false);
+    let mut last = None;
+    let none = serde_json::Map::new;
+    let t0 = std::time::Instant::now();
+    assert!(write_if_due(&hub, none(), &path, &mut last, t0));
+    std::fs::remove_file(&path).unwrap();
+    let just_before = t0 + SIDECAR_REFRESH - Duration::from_millis(1);
+    assert!(!write_if_due(&hub, none(), &path, &mut last, just_before));
+    assert!(!path.exists());
+    let due = t0 + SIDECAR_REFRESH;
+    assert!(write_if_due(&hub, none(), &path, &mut last, due));
+    assert!(path.exists(), "the refresh rewrites the same body");
+    // The refresh clock restarts from that write.
+    assert!(!write_if_due(
+        &hub,
+        none(),
+        &path,
+        &mut last,
+        due + Duration::from_secs(1)
+    ));
+    assert!(write_if_due(
+        &hub,
+        none(),
+        &path,
+        &mut last,
+        due + SIDECAR_REFRESH
+    ));
 }

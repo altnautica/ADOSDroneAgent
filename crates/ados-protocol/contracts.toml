@@ -500,8 +500,9 @@ description = "Flight-controller identity reconciler outcome: whether the write 
 id = "mavlink-router"
 version = 1
 path = "/run/ados/mavlink-router.json"
+max_age_ms = 15000
 writer = "ados-mavlink-router"
-description = "The router's learned routes (sysid, compid, endpoint), per-endpoint rx/tx counters, and sensor_rates_hz (the flight-controller sensor streams currently requested, by sensor-bus stream id), rewritten on change."
+description = "The router's learned routes (sysid, compid, endpoint), per-endpoint rx/tx counters, and sensor_rates_hz (the flight-controller sensor streams currently requested, by sensor-bus stream id), rewritten on change and at least every 5 s."
 
 [[sidecar]]
 id = "link-feedback"

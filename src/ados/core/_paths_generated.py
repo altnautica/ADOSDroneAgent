@@ -63,6 +63,7 @@ GPIO_OUTPUT_JSON = "gpio-output.json"
 BOARD_JSON = "board.json"
 FC_IDENTITY_JSON = "fc-identity.json"
 MAVLINK_ROUTER_JSON = "mavlink-router.json"
+MAVLINK_ROUTER_MAX_AGE_MS = 15000
 LINK_FEEDBACK_JSON = "link-feedback.json"
 PLUGIN_LOOPBACK_GUARD_JSON = "plugin-loopback-guard.json"
 PLUGIN_STATE_MAX_AGE_MS = 10000
@@ -151,7 +152,7 @@ SIDECAR_PATHS: dict[str, dict[str, object]] = {
     "board": {"path": "/run/ados/board.json", "max_age_ms": None, "writer": "ados-hal-probe"},
     "config-status": {"path": "/run/ados/config-status-<service>.json", "max_age_ms": None, "writer": "ados-config"},
     "fc-identity": {"path": "/run/ados/fc-identity.json", "max_age_ms": None, "writer": "ados-control"},
-    "mavlink-router": {"path": "/run/ados/mavlink-router.json", "max_age_ms": None, "writer": "ados-mavlink-router"},
+    "mavlink-router": {"path": "/run/ados/mavlink-router.json", "max_age_ms": 15000, "writer": "ados-mavlink-router"},
     "link-feedback": {"path": "/run/ados/link-feedback.json", "max_age_ms": None, "writer": "ados-mavlink-router"},
     "plugin-loopback-guard": {"path": "/run/ados/plugin-loopback-guard.json", "max_age_ms": None, "writer": "ados-plugin-host"},
     "plugin-state": {"path": "/run/ados/plugins/<plugin_id>-state.json", "max_age_ms": 10000, "writer": "ados-plugin-host"},

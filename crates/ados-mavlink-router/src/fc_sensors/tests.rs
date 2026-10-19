@@ -2,13 +2,12 @@ use ados_protocol::mavlink::ardupilotmega::{
     MavMessage, CAMERA_FEEDBACK_DATA, HIGHRES_IMU_DATA, RAW_IMU_DATA, SCALED_PRESSURE_DATA,
     SYSTEM_TIME_DATA, TIMESYNC_DATA,
 };
-use ados_sensorbus::rtcm::Fragmenter;
 use ados_sensorbus::v1::TriggerRecord;
 use ados_sensorbus::SyncSource;
 
 use super::convert::{self, frd_to_flu, Unwrapper, GRAVITY_MSS};
 use super::lane::{BusOut, LaneCore, IMU_SRC, RAW_IMU_SRC};
-use super::rtcm::rtcm_messages;
+use super::rtcm::RtcmInjector;
 use super::timesync::{Reply, TimesyncTracker};
 
 fn close(a: f64, b: f64) -> bool {
@@ -273,9 +272,9 @@ fn rtcm3(total_len: usize) -> Vec<u8> {
 
 #[test]
 fn a_400_byte_rtcm_frame_becomes_three_gps_rtcm_data_messages() {
-    let mut fragmenter = Fragmenter::default();
+    let mut inj = RtcmInjector::default();
     let frame = rtcm3(400);
-    let msgs = rtcm_messages(&mut fragmenter, &frame);
+    let msgs = inj.messages("gnss0", &frame);
     assert_eq!(msgs.len(), 3);
     assert_eq!(
         msgs.iter().map(|m| m.len).collect::<Vec<_>>(),
@@ -287,24 +286,43 @@ fn a_400_byte_rtcm_frame_becomes_three_gps_rtcm_data_messages() {
     assert_eq!(&msgs[0].data[..180], &frame[..180]);
     assert_eq!(&msgs[2].data[..40], &frame[360..]);
     // The next message advances the sequence.
-    let next = rtcm_messages(&mut fragmenter, &frame);
+    let next = inj.messages("gnss0", &frame);
     for (id, m) in next.iter().enumerate() {
         assert_eq!(m.flags, 0x01 | (id as u8) << 1 | 1 << 3);
     }
     // Two frames in one payload, the short one unfragmented.
     let mut both = rtcm3(30);
     both.extend(rtcm3(400));
-    let msgs = rtcm_messages(&mut fragmenter, &both);
+    let msgs = inj.messages("gnss0", &both);
     assert_eq!(msgs.len(), 4);
     assert_eq!((msgs[0].flags, msgs[0].len), (0, 30));
     assert_eq!(msgs[1].flags, 0x01 | 2 << 3);
     // A 360-byte frame ends with a zero-length terminator; junk is skipped.
     let mut junk = vec![0x00, 0x11];
     junk.extend(rtcm3(360));
-    let msgs = rtcm_messages(&mut fragmenter, &junk);
+    let msgs = inj.messages("gnss0", &junk);
     assert_eq!(
         msgs.iter().map(|m| m.len).collect::<Vec<_>>(),
         vec![180, 180, 0]
     );
-    assert!(rtcm_messages(&mut fragmenter, &[0xD3, 0, 1, 7, 0, 0, 0]).is_empty());
+    assert!(inj.messages("rest", &[0xD3, 0, 1, 7, 0, 0, 0]).is_empty());
+}
+
+#[test]
+fn a_message_split_across_bus_frames_is_injected_once_whole() {
+    let frame = rtcm3(400);
+    for cut in 1..frame.len() {
+        let mut inj = RtcmInjector::default();
+        assert!(inj.messages("gnss0", &frame[..cut]).is_empty(), "cut {cut}");
+        // Another source in between does not disturb the partial frame.
+        assert_eq!(inj.messages("rest", &rtcm3(30)).len(), 1);
+        let msgs = inj.messages("gnss0", &frame[cut..]);
+        assert_eq!(msgs.len(), 3, "cut {cut}");
+        assert_eq!(&msgs[2].data[..40], &frame[360..]);
+    }
+    // A gap in the stream drops the partial frame rather than splicing it.
+    let mut inj = RtcmInjector::default();
+    inj.messages("gnss0", &frame[..100]);
+    inj.reset_streams();
+    assert!(inj.messages("gnss0", &frame[100..]).is_empty());
 }

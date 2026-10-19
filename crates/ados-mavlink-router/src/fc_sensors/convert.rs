@@ -65,13 +65,14 @@ pub fn baro(m: &SCALED_PRESSURE_DATA, t_ns: u64) -> Baro {
 }
 
 /// The trigger record for one `CAMERA_FEEDBACK`. The message carries neither
-/// exposure nor gain, so both are 0 (unknown).
+/// exposure nor gain, so both stay unset: proto3 scalars have no presence, and
+/// the contract reads `exposure_ns == 0` / `gain == 0.0` as "not reported" (a
+/// real gain is never 0; unity is 1.0).
 pub fn trigger(seq: u64, t_mid_ns: u64) -> TriggerRecord {
     TriggerRecord {
         seq,
         t_mid_ns,
-        exposure_ns: 0,
-        gain: 0.0,
+        ..TriggerRecord::default()
     }
 }
 

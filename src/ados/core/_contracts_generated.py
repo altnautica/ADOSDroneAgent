@@ -440,7 +440,7 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "wire": "json",
         "transport": "/run/ados/mavlink-router.json",
         "status": "sidecar",
-        "description": "The router's learned routes (sysid, compid, endpoint), per-endpoint rx/tx counters, and sensor_rates_hz (the flight-controller sensor streams currently requested, by sensor-bus stream id), rewritten on change.",
+        "description": "The router's learned routes (sysid, compid, endpoint), per-endpoint rx/tx counters, and sensor_rates_hz (the flight-controller sensor streams currently requested, by sensor-bus stream id), rewritten on change and at least every 5 s.",
     },
     "link-feedback": {
         "version": 1,

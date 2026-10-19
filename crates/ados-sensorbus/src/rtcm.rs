@@ -124,34 +124,82 @@ pub fn encode_rtcm3(payload: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Split a byte stream into whole RTCM3 frames (`0xD3`, 6 reserved bits,
-/// 10-bit length, payload, 24-bit CRC-24Q). Bytes before a preamble are
-/// skipped, and a preamble whose frame fails its CRC (or runs past the end of
-/// the stream) is skipped by one byte so the scan resyncs on the next one.
-/// Only CRC-valid frames are returned.
-pub fn split_rtcm3(bytes: &[u8]) -> Vec<&[u8]> {
-    let mut out = Vec::new();
+/// Scan `bytes` for whole CRC-valid RTCM3 frames (`0xD3`, 6 reserved bits,
+/// 10-bit length, payload, 24-bit CRC-24Q), calling `frame` with the range of
+/// each in order. Bytes before a preamble are skipped; a preamble whose frame
+/// fails its CRC is skipped by one byte so the scan resyncs on the next one.
+/// Returns where the incomplete tail starts: the earliest preamble whose frame
+/// runs past the end of `bytes` and that no later valid frame overlaps (it may
+/// complete with more bytes), else `bytes.len()`. The tail is shorter than
+/// one maximum frame (1029 bytes).
+fn scan(bytes: &[u8], mut frame: impl FnMut(std::ops::Range<usize>)) -> usize {
+    let mut tail: Option<usize> = None;
     let mut i = 0;
-    while i + 6 <= bytes.len() {
+    while i < bytes.len() {
         if bytes[i] != PREAMBLE {
             i += 1;
             continue;
         }
+        if i + 3 > bytes.len() {
+            tail.get_or_insert(i);
+            break;
+        }
         let len = (((bytes[i + 1] & 0x03) as usize) << 8) | bytes[i + 2] as usize;
         let body_end = i + 3 + len;
         let end = body_end + 3;
-        if end <= bytes.len() {
-            let want =
-                u32::from_be_bytes([0, bytes[body_end], bytes[body_end + 1], bytes[body_end + 2]]);
-            if crc24q(&bytes[i..body_end]) == want {
-                out.push(&bytes[i..end]);
-                i = end;
-                continue;
-            }
+        if end > bytes.len() {
+            tail.get_or_insert(i);
+            i += 1;
+            continue;
         }
-        i += 1;
+        let want =
+            u32::from_be_bytes([0, bytes[body_end], bytes[body_end + 1], bytes[body_end + 2]]);
+        if crc24q(&bytes[i..body_end]) == want {
+            // A valid frame inside a pending candidate's span proves the
+            // candidate was a stray preamble.
+            tail = None;
+            frame(i..end);
+            i = end;
+        } else {
+            i += 1;
+        }
     }
+    tail.unwrap_or(bytes.len())
+}
+
+/// Split one byte buffer into its whole CRC-valid RTCM3 frames (see
+/// [`Rtcm3Splitter`] for a stream that arrives in pieces). An incomplete
+/// frame at the end is dropped.
+pub fn split_rtcm3(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut out = Vec::new();
+    scan(bytes, |r| out.push(&bytes[r]));
     out
+}
+
+/// Splits an RTCM3 byte stream delivered in arbitrary pieces into whole
+/// CRC-valid frames, carrying a partial frame over to the next push. The
+/// carried tail is bounded by one maximum frame; junk and corrupt frames are
+/// skipped with the same resync as [`split_rtcm3`].
+#[derive(Debug, Default, Clone)]
+pub struct Rtcm3Splitter {
+    buf: Vec<u8>,
+}
+
+impl Rtcm3Splitter {
+    /// Append `bytes` and return every frame completed by them.
+    pub fn push(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        self.buf.extend_from_slice(bytes);
+        let mut out = Vec::new();
+        let buf = &self.buf;
+        let tail = scan(buf, |r| out.push(buf[r].to_vec()));
+        self.buf.drain(..tail);
+        out
+    }
+
+    /// Bytes held for a frame not yet complete.
+    pub fn pending(&self) -> usize {
+        self.buf.len()
+    }
 }
 
 #[cfg(test)]
