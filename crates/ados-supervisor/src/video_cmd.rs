@@ -47,14 +47,34 @@ const ADOS_VISION_UNIT: &str = "ados-vision.service";
 ///
 /// The reply's `ok` follows the video pipeline, which serves every leg; the
 /// engine's restart is reported beside it.
-async fn restart_camera_consumers(pm: &dyn ProcessManager, captured: usize) -> (bool, bool) {
-    let vision = if captured > 0 {
+///
+/// The engine is touched only when its profile and headless gate let it run
+/// on this node (`vision_allowed`, the gate every supervisor start uses); on a
+/// node where it is gated off it is never started, and is reported as not
+/// restarted.
+async fn restart_camera_consumers(
+    pm: &dyn ProcessManager,
+    captured: usize,
+    vision_allowed: bool,
+) -> (bool, bool) {
+    let vision = if !vision_allowed {
+        false
+    } else if captured > 0 {
         pm.restart(ADOS_VISION_UNIT).await
     } else {
         pm.try_restart(ADOS_VISION_UNIT).await
     };
     let video = pm.restart(ADOS_VIDEO_UNIT).await;
     (video, vision)
+}
+
+/// Whether the vision engine's profile and headless gate allow it on the node
+/// `config` describes.
+fn vision_allowed(config: &crate::config::AgentConfig) -> bool {
+    crate::registry::build_specs()
+        .iter()
+        .find(|s| s.name == "ados-vision")
+        .is_some_and(|s| crate::lifecycle::gate_allows(s, config))
 }
 
 /// Cap a request so a peer that never sends a newline cannot grow the buffer
@@ -225,7 +245,12 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     let captured = std::fs::read_to_string(bind::CONFIG_YAML)
         .map(|t| ados_config::cameras::declared_cameras_from(&t).captured)
         .unwrap_or(0);
-    let (restarted, vision_restarted) = restart_camera_consumers(pm, captured).await;
+    let allowed = vision_allowed(&crate::config::AgentConfig::load_from(
+        Path::new(bind::CONFIG_YAML),
+        &ados_config::profile_conf_path(),
+        Path::new(ados_config::MESH_ROLE_PATH),
+    ));
+    let (restarted, vision_restarted) = restart_camera_consumers(pm, captured, allowed).await;
     json!({"ok": restarted, "count": legs.len(), "persisted": true, "restarted": restarted, "vision_restarted": vision_restarted})
 }
 

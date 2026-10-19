@@ -6,7 +6,7 @@
 //! block yields a disabled engine, which is the safe default on a rig that
 //! does not run vision.
 
-use ados_config::cameras::{capture_cameras_from, CaptureCamera};
+use ados_config::cameras::{camera_entries, CaptureCamera, InvalidCamera};
 use ados_protocol::framebus::{
     DetectionHead, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
 };
@@ -186,6 +186,10 @@ pub struct VisionConfig {
     /// reports to the clock.
     #[serde(skip)]
     pub simulation: bool,
+    /// `cameras[]` entries that do not validate: skipped by every consumer,
+    /// reported in the status sidecar's `source_errors`.
+    #[serde(skip)]
+    pub invalid_cameras: Vec<InvalidCamera>,
     /// Width frames are downscaled to before publishing.
     #[serde(default = "default_downscale_width")]
     pub downscale_width: u32,
@@ -247,6 +251,7 @@ impl Default for VisionConfig {
             cameras: Vec::new(),
             tap_sink: None,
             simulation: false,
+            invalid_cameras: Vec::new(),
             downscale_width: default_downscale_width(),
             downscale_height: default_downscale_height(),
             slot_count: default_slot_count(),
@@ -331,7 +336,14 @@ impl VisionConfig {
             return VisionConfig::default();
         };
         let raw: RawConfig = ados_config::yaml_or_default(&text, "vision");
-        let cameras = capture_cameras_from(&text);
+        let entries = camera_entries(&text);
+        let cameras: Vec<CaptureCamera> = entries
+            .valid
+            .into_iter()
+            .map(|(_, _, c)| c)
+            .filter(|c| c.capture && c.enabled)
+            .collect();
+        let invalid_cameras = entries.invalid;
         let simulation = ados_config::simulation::read_gate_from(&text).enabled;
         let tap_sink = raw.video.vision.enabled.then(|| {
             raw.video
@@ -348,6 +360,7 @@ impl VisionConfig {
                 cameras,
                 tap_sink,
                 simulation,
+                invalid_cameras,
                 ..VisionConfig::default()
             };
         };
@@ -359,6 +372,7 @@ impl VisionConfig {
             cameras,
             tap_sink,
             simulation,
+            invalid_cameras,
             downscale_width: v.downscale_width,
             downscale_height: v.downscale_height,
             slot_count: v.slot_count,

@@ -113,7 +113,7 @@ pub union FormatUnion {
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Format {
-    pub type_: u32,
+    type_: u32,
     fmt: FormatUnion,
 }
 
@@ -137,6 +137,11 @@ impl Format {
         let mut f = Self::zeroed(BUF_TYPE_VIDEO_CAPTURE_MPLANE);
         f.fmt.pix_mp = pix_mp;
         f
+    }
+
+    /// The buffer type the format is for (single- or multi-planar capture).
+    pub fn buf_type(&self) -> u32 {
+        self.type_
     }
 
     /// The union read as a single-planar format.

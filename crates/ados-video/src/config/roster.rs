@@ -42,8 +42,6 @@ impl RosterVideoConfig {
             agent: AgentSection,
             #[serde(default)]
             video: VideoSection,
-            #[serde(default)]
-            cameras: Vec<CameraLeg>,
         }
         #[derive(Debug, Default, Deserialize)]
         struct AgentSection {
@@ -64,7 +62,7 @@ impl RosterVideoConfig {
         Self {
             profile: raw.video.profile.or(raw.agent.profile),
             camera: raw.video.camera,
-            cameras: raw.cameras,
+            cameras: super::legs::legs_from(&text),
         }
     }
 

@@ -83,7 +83,7 @@ pub(super) fn format_request(buf_type: u32, s: &V4l2Settings) -> sys::Format {
 
 /// The layout the driver accepted, or why it cannot carry the frame.
 pub(super) fn accepted_layout(f: &sys::Format) -> io::Result<Layout> {
-    if f.type_ == sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE {
+    if f.buf_type() == sys::BUF_TYPE_VIDEO_CAPTURE_MPLANE {
         let mp = f.pix_mp();
         if mp.num_planes != 1 {
             return Err(invalid(format!(
@@ -93,7 +93,7 @@ pub(super) fn accepted_layout(f: &sys::Format) -> io::Result<Layout> {
         }
         let plane = mp.plane_fmt[0];
         Ok(Layout {
-            buf_type: f.type_,
+            buf_type: f.buf_type(),
             width: mp.width,
             height: mp.height,
             pixelformat: mp.pixelformat,
@@ -102,7 +102,7 @@ pub(super) fn accepted_layout(f: &sys::Format) -> io::Result<Layout> {
     } else {
         let pix = f.pix();
         Ok(Layout {
-            buf_type: f.type_,
+            buf_type: f.buf_type(),
             width: pix.width,
             height: pix.height,
             pixelformat: pix.pixelformat,

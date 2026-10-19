@@ -96,12 +96,14 @@ fn plane_of(buf_type: u32, b: &Buffer, planes: &[Plane; 1]) -> (u32, usize, usiz
 
 /// An open capture node.
 pub struct Device {
-    file: File,
-    buf_type: u32,
+    // Fields drop in declaration order, after `Drop::drop` has stopped the
+    // stream: the buffers unmap first, then the file closes last.
     maps: Vec<Mapping>,
+    buf_type: u32,
     streaming: bool,
     /// A requeue that failed in a guard's drop, reported on the next dequeue.
     requeue_error: Option<io::Error>,
+    file: File,
 }
 
 impl Device {
@@ -119,11 +121,11 @@ impl Device {
         };
         query_cap(file.as_raw_fd(), &mut cap)?;
         let dev = Self {
-            file,
-            buf_type: 0,
             maps: Vec::new(),
+            buf_type: 0,
             streaming: false,
             requeue_error: None,
+            file,
         };
         Ok((dev, cap))
     }
@@ -208,7 +210,7 @@ impl Drop for Device {
         if self.streaming {
             let _ = stream(self.fd(), false, self.buf_type);
         }
-        // The mappings unmap after this, and the file closes last.
+        // Then the fields drop: `maps` unmaps, `file` closes last.
     }
 }
 

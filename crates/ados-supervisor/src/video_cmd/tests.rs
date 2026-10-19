@@ -70,7 +70,7 @@ async fn a_camera_write_restarts_the_engine_before_the_pipeline() {
     let pm = RecordingPm {
         restarted: std::sync::Mutex::new(Vec::new()),
     };
-    assert_eq!(restart_camera_consumers(&pm, 2).await, (true, true));
+    assert_eq!(restart_camera_consumers(&pm, 2, true).await, (true, true));
     assert_eq!(
         *pm.restarted.lock().unwrap(),
         vec![ADOS_VISION_UNIT.to_string(), ADOS_VIDEO_UNIT.to_string()]
@@ -80,7 +80,7 @@ async fn a_camera_write_restarts_the_engine_before_the_pipeline() {
     let pm = RecordingPm {
         restarted: std::sync::Mutex::new(Vec::new()),
     };
-    restart_camera_consumers(&pm, 0).await;
+    restart_camera_consumers(&pm, 0, true).await;
     assert_eq!(
         *pm.restarted.lock().unwrap(),
         vec![
@@ -139,3 +139,34 @@ async fn a_plugin_source_write_cannot_claim_the_operator_owner() {
 // and is exercised on-rig: the config merge is unit-tested in bind::keys and
 // the restart is a single call after a successful write. A dispatch test of
 // it here would touch the host's real config path, so it stays bench-gated.
+
+#[tokio::test]
+async fn a_gated_off_engine_is_never_restarted_by_a_camera_write() {
+    let pm = RecordingPm {
+        restarted: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(restart_camera_consumers(&pm, 2, false).await, (true, false));
+    assert_eq!(
+        *pm.restarted.lock().unwrap(),
+        vec![ADOS_VIDEO_UNIT.to_string()]
+    );
+}
+
+#[test]
+fn the_vision_gate_follows_the_profile_and_headless_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let gate = |body: &str| {
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(&cfg, body).unwrap();
+        vision_allowed(&crate::config::AgentConfig::load_from(
+            &cfg,
+            &dir.path().join("profile.conf"),
+            &dir.path().join("role"),
+        ))
+    };
+    assert!(gate("agent:\n  profile: visor\n"));
+    assert!(gate("agent:\n  profile: drone\n"));
+    assert!(!gate("agent:\n  profile: workstation\n"));
+    assert!(!gate("agent:\n  profile: ground_station\n"));
+    assert!(!gate("agent:\n  profile: drone\n  headless: true\n"));
+}

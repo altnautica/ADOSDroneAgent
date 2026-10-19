@@ -164,6 +164,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_errors_and_corrupt_frames_reach_the_snapshot() {
+        let status = WorkStatus::new();
+        status.add_error_frames(3);
+        status.set_source_error("cam_fr", Some("invalid cameras[1] entry".into()));
+        let s = status.snapshot();
+        assert_eq!(s.error_frames, 3);
+        assert_eq!(s.source_errors.len(), 1);
+        assert_eq!(s.source_errors[0].camera, "cam_fr");
+        status.set_source_error("cam_fr", None);
+        assert!(status.snapshot().source_errors.is_empty());
+    }
+
+    #[test]
     fn an_input_is_live_from_its_first_frame_until_it_is_lost_or_dropped() {
         let status = WorkStatus::new();
         let mut a = status.input();

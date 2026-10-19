@@ -177,6 +177,18 @@ impl CameraLeg {
     }
 }
 
+/// The legs of the top-level `cameras[]` list in `text`: every entry that
+/// validates for all camera consumers (`ados_config::cameras::camera_entries`),
+/// so an entry the vision engine or the supervisor skips is skipped here too
+/// and one bad entry never takes the others down.
+pub fn legs_from(text: &str) -> Vec<CameraLeg> {
+    ados_config::cameras::camera_entries(text)
+        .valid
+        .into_iter()
+        .filter_map(|(_, entry, _)| serde_norway::from_value::<CameraLeg>(entry).ok())
+        .collect()
+}
+
 /// A resolved video leg — what the orchestrator actually drives. Exactly one leg
 /// is the primary (the WFB/cloud stream); the rest are LAN-WHEP-only
 /// secondaries. A secondary with a network source is a mediamtx `sourceOnDemand`

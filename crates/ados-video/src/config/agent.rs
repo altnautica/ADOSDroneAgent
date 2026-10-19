@@ -71,8 +71,6 @@ impl AgentVideoConfig {
             agent: AgentSection,
             #[serde(default)]
             video: VideoSection,
-            #[serde(default)]
-            cameras: Vec<CameraLeg>,
         }
         #[derive(Debug, Default, Deserialize)]
         struct AgentSection {
@@ -128,7 +126,7 @@ impl AgentVideoConfig {
             cloud_relay_url: raw.video.cloud_relay_url,
             wfb: raw.video.wfb,
             vision: raw.video.vision,
-            cameras: raw.cameras,
+            cameras: super::legs::legs_from(&text),
             recording: raw.video.recording,
         }
     }

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from .agent import AgentConfig
 from .api import ApiConfig
@@ -78,6 +79,31 @@ class ADOSConfig(BaseModel):
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
 
     model_config = {"extra": "ignore"}
+
+    @field_validator("cameras", mode="before")
+    @classmethod
+    def skip_invalid_cameras(cls, value: Any) -> Any:
+        """Drop a ``cameras`` entry that does not validate, keeping the rest.
+
+        The native consumers (video pipeline, vision engine, supervisor) skip
+        such an entry the same way, so one bad camera never takes the whole
+        list, or the whole config, down on any of them.
+        """
+        if not isinstance(value, list):
+            return value
+        kept: list[Any] = []
+        for index, entry in enumerate(value):
+            try:
+                kept.append(CameraLeg.model_validate(entry))
+            except ValidationError as exc:
+                ident = entry.get("id") if isinstance(entry, dict) else None
+                logging.getLogger(__name__).warning(
+                    "cameras[%d] (%s) skipped: %s",
+                    index,
+                    ident if isinstance(ident, str) else f"cameras[{index}]",
+                    exc.errors()[0].get("msg", "invalid"),
+                )
+        return kept
 
     @model_validator(mode="before")
     @classmethod

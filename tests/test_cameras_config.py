@@ -44,3 +44,17 @@ def test_the_retired_lists_are_not_model_fields() -> None:
     assert "cameras" not in VideoConfig.model_fields
     assert "cameras" not in ADOSConfig.model_fields["vision"].annotation.model_fields  # type: ignore[union-attr]
     assert "cameras" in ADOSConfig.model_fields
+
+
+def test_one_invalid_entry_is_skipped_not_the_whole_list() -> None:
+    cfg = ADOSConfig.model_validate(
+        {
+            "cameras": [
+                {"id": "eo", "source": "/dev/video0"},
+                {"id": "bad", "capture": True, "exposure_us": 0},
+                {"id": "ir", "source": "rtsp://pod/ir", "encoder": "turbo"},
+                {"id": "belly", "source": "/dev/video4"},
+            ]
+        }
+    )
+    assert [c.id for c in cfg.cameras] == ["eo", "belly"]

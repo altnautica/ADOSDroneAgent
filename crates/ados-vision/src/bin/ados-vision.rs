@@ -210,6 +210,17 @@ async fn main() {
     // The work counters the supervisor judges this engine on, published to the
     // status sidecar about once a second.
     let work = WorkStatus::new();
+    // Entries of `cameras[]` that do not validate are skipped (by every
+    // camera consumer) and listed with the reason.
+    for bad in &config.invalid_cameras {
+        work.set_source_error(
+            &bad.id,
+            Some(format!(
+                "invalid cameras[{}] entry: {}",
+                bad.index, bad.error
+            )),
+        );
+    }
     {
         let work = work.clone();
         let cancel = cancel.clone();

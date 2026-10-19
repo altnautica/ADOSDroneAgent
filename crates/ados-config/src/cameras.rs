@@ -152,22 +152,126 @@ where
     }
 }
 
-/// Every entry of the `cameras[]` list in `text`, trigger channels resolved.
-/// A missing or malformed list is empty.
-fn camera_list(text: &str) -> Vec<CaptureCamera> {
+/// A `cameras[]` entry that does not validate, skipped by every consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidCamera {
+    /// Position in the list.
+    pub index: usize,
+    /// The entry's `id` when it has a string one, else `cameras[<index>]`.
+    pub id: String,
+    pub error: String,
+}
+
+/// The video-plane keys of an entry, typed exactly as the video pipeline
+/// reads them, so an entry is valid for every consumer or for none.
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct VideoPlane {
+    codec: Option<String>,
+    bitrate_kbps: Option<u32>,
+    name: Option<String>,
+    orientation: Option<String>,
+    purpose: Option<Vec<String>>,
+    owner: Option<String>,
+    fov_deg: Option<f32>,
+    mount_pitch_deg: Option<f32>,
+    calibration: Option<String>,
+    #[serde(rename = "match")]
+    camera_match: Option<MatchShape>,
+    rotation: Option<u32>,
+    hflip: Option<bool>,
+    vflip: Option<bool>,
+    encoder: Option<EncoderChoice>,
+    keyframe_interval: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+struct MatchShape {
+    usb: Option<String>,
+    csi_sensor: Option<String>,
+    csi_port: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "lowercase")]
+enum EncoderChoice {
+    Auto,
+    Omx,
+    V4l2m2m,
+    Software,
+}
+
+/// The validated `cameras[]` list.
+#[derive(Debug, Clone, Default)]
+pub struct CameraEntries {
+    /// Each valid entry with its position in the list, as the raw mapping
+    /// (every consumer deserializes its own view from it).
+    pub valid: Vec<(usize, Value, CaptureCamera)>,
+    pub invalid: Vec<InvalidCamera>,
+}
+
+/// Invalid entries already warned about, so a config re-read on every
+/// request logs each problem once.
+static WARNED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Validate the `cameras[]` list in `text` entry by entry. One bad entry is
+/// skipped (and warned about once) without taking the others down; a
+/// missing list, or a document that does not parse, has no entries.
+pub fn camera_entries(text: &str) -> CameraEntries {
     #[derive(Default, Deserialize)]
     struct Raw {
         #[serde(default)]
-        cameras: Vec<CaptureCamera>,
+        cameras: Option<Value>,
     }
     let raw: Raw = crate::yaml_or_default(text, "cameras");
-    raw.cameras
+    let mut out = CameraEntries::default();
+    let list = match raw.cameras {
+        None | Some(Value::Null) => return out,
+        Some(Value::Sequence(list)) => list,
+        Some(_) => {
+            warn_once("cameras: not a list; no camera is configured".to_string());
+            return out;
+        }
+    };
+    for (index, entry) in list.into_iter().enumerate() {
+        let checked = serde_norway::from_value::<CaptureCamera>(entry.clone())
+            .and_then(|c| serde_norway::from_value::<VideoPlane>(entry.clone()).map(|_| c));
+        match checked {
+            Ok(mut c) => {
+                c.trigger_channel = c.trigger_channel.or_else(|| u8::try_from(index).ok());
+                out.valid.push((index, entry, c));
+            }
+            Err(e) => {
+                let id = entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("cameras[{index}]"));
+                let error = e.to_string();
+                warn_once(format!("cameras[{index}] ({id}) skipped: {error}"));
+                out.invalid.push(InvalidCamera { index, id, error });
+            }
+        }
+    }
+    out
+}
+
+fn warn_once(msg: String) {
+    if WARNED.lock().insert(msg.clone()) {
+        tracing::warn!(problem = %msg, "camera_config_invalid");
+    }
+}
+
+/// Every valid entry of the `cameras[]` list in `text`, trigger channels
+/// resolved.
+fn camera_list(text: &str) -> Vec<CaptureCamera> {
+    camera_entries(text)
+        .valid
         .into_iter()
-        .enumerate()
-        .map(|(i, mut c)| {
-            c.trigger_channel = c.trigger_channel.or_else(|| u8::try_from(i).ok());
-            c
-        })
+        .map(|(_, _, c)| c)
         .collect()
 }
 

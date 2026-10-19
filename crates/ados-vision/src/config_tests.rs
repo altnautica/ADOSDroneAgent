@@ -271,3 +271,18 @@ fn captured_cameras_run_the_engine_without_a_vision_block() {
     let (_d2, p2) = write_tmp("agent:\n  profile: drone\n");
     assert!(!VisionConfig::load_from(&p2).should_run());
 }
+
+/// One invalid captured entry does not take the other cameras down; it is
+/// kept aside for the status sidecar.
+#[test]
+fn an_invalid_entry_is_reported_and_the_rest_run() {
+    let (_d, p) = write_tmp(
+        "cameras:\n  - { id: cam_fl, source: /dev/video0, capture: true }\n  - { id: cam_fr, source: /dev/video2, capture: true, trigger: sometimes }\n",
+    );
+    let c = VisionConfig::load_from(&p);
+    let ids: Vec<&str> = c.cameras.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["cam_fl"]);
+    assert_eq!(c.invalid_cameras.len(), 1);
+    assert_eq!(c.invalid_cameras[0].id, "cam_fr");
+    assert_eq!(c.invalid_cameras[0].index, 1);
+}

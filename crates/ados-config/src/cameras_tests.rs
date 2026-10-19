@@ -156,3 +156,26 @@ fn tap_only_vision_entries_leave_no_list_behind() {
     assert!(migrate_legacy_camera_lists(&mut doc));
     assert_eq!(doc, yaml("vision: {}\n"));
 }
+
+#[test]
+fn one_invalid_entry_is_skipped_and_reported_without_taking_down_the_list() {
+    let text = "cameras:\n  - { id: a, source: /dev/video0, capture: true }\n  - { id: bad, capture: true, exposure_us: 0 }\n  - { id: worse, width: wide }\n  - { source: /dev/video4, encoder: turbo }\n  - { id: c, source: rtsp://pod/c }\n";
+    let e = camera_entries(text);
+    let ids: Vec<&str> = e.valid.iter().map(|(_, _, c)| c.id.as_str()).collect();
+    assert_eq!(ids, ["a", "c"]);
+    // Positions are kept, so trigger channels do not shift.
+    assert_eq!(e.valid[1].0, 4);
+    assert_eq!(e.valid[1].2.trigger_channel, Some(4));
+    let bad: Vec<(usize, &str)> = e.invalid.iter().map(|i| (i.index, i.id.as_str())).collect();
+    assert_eq!(bad, [(1, "bad"), (2, "worse"), (3, "cameras[3]")]);
+    assert!(e.invalid[0].error.contains("exposure_us"));
+    assert_eq!(
+        declared_cameras_from(text),
+        DeclaredCameras {
+            captured: 1,
+            network: true
+        }
+    );
+    // Not a list at all: nothing configured, nothing valid.
+    assert!(camera_entries("cameras: 3\n").valid.is_empty());
+}

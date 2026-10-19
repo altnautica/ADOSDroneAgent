@@ -423,3 +423,23 @@ fn the_simulated_rig_is_served_from_the_frame_bus() {
     let primary = cfg.primary_camera_config(CameraConfig::load_from(&path));
     assert_eq!(primary.framebus_camera(), Some("cam_fl"));
 }
+
+/// One invalid `cameras[]` entry is skipped here exactly as the vision engine
+/// and the supervisor skip it; the other legs are still served.
+#[test]
+fn an_invalid_entry_is_skipped_and_the_rest_are_served() {
+    let yaml = "\
+cameras:
+  - { id: eo, source: /dev/video0, role: primary }
+  - { id: bad, source: /dev/video2, capture: true, exposure_us: 0 }
+  - { id: ir, source: rtsp://pod/ir, encoder: turbo }
+  - { id: belly, source: /dev/video4 }
+";
+    let (_dir, path) = write_tmp(yaml);
+    let cfg = AgentVideoConfig::load_from(&path);
+    let ids: Vec<&str> = cfg.cameras.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["eo", "belly"]);
+    assert_eq!(RosterVideoConfig::load_from(&path).cameras.len(), 2);
+    // The rest of the config still loads (the list no longer fails it whole).
+    assert_eq!(cfg.mode, "wfb");
+}
