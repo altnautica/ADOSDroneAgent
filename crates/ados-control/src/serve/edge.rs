@@ -310,11 +310,18 @@ pub(super) async fn tcp_edge(
     // operator; per caller, a flood exhausts only the flooder. The liveness,
     // version and pairing-handshake paths stay exempt so a watchdog or a fresh
     // GCS is never starved; the PIN login is charged, since it is the one
-    // public path a guesser would loop on. Field tile reads are exempt too:
-    // they still need the key, but a single map pan fetches dozens of tiles.
+    // public path a guesser would loop on. Field tile reads that present a
+    // valid key are exempt too, since a single map pan fetches dozens of
+    // tiles; a keyless or wrong-key tile read is charged like any request.
+    let tile_read_authed = auth::is_tile_read(&path)
+        && request
+            .headers()
+            .get("X-ADOS-Key")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|k| edge.pairing.authorize(&path, Some(k)));
     let exempt_from_budget = on_box
         || (auth::is_public(&path) && !auth::is_pin_login(&path))
-        || auth::is_tile_read(&path);
+        || tile_read_authed;
     if !exempt_from_budget && !edge.rate.check(peer_key) {
         return detail(
             StatusCode::TOO_MANY_REQUESTS,

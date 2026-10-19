@@ -77,15 +77,42 @@ fn copy_into_place(src: &Path, dest: &Path) -> Result<(), String> {
     result
 }
 
-/// Place `source` in `dir`, returning the stored path.
+/// The first bytes of every PMTiles v3 archive.
+const PMTILES_MAGIC: &[u8; 8] = b"PMTiles\x03";
+
+/// Whether the file at `path` starts with the PMTiles v3 magic.
+fn is_pmtiles_v3(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 8];
+    std::fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok()
+        && &head == PMTILES_MAGIC
+}
+
+/// Place `source` in `dir`, returning the stored path. The bytes land in a
+/// `<dest>.staging` sibling first and are only renamed over `dest` once they
+/// carry the PMTiles v3 magic, so an error page or a wrong file never replaces
+/// a working pack.
 pub fn place_pack(source: &str, dir: &Path) -> Result<PathBuf, String> {
     let file = pack_file_name(source)?;
     std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     let dest = dir.join(&file);
+    let mut staging = dest.as_os_str().to_owned();
+    staging.push(".staging");
+    let staging = PathBuf::from(staging);
     if is_url(source) {
-        crate::net::fetch(source, &dest).map_err(|e| format!("download failed: {e:#}"))?;
+        crate::net::fetch(source, &staging).map_err(|e| format!("download failed: {e:#}"))?;
     } else {
-        copy_into_place(Path::new(source), &dest)?;
+        copy_into_place(Path::new(source), &staging)?;
+    }
+    if !is_pmtiles_v3(&staging) {
+        let _ = std::fs::remove_file(&staging);
+        return Err("not a PMTiles v3 archive".into());
+    }
+    if let Err(e) = std::fs::rename(&staging, &dest) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("rename into place failed: {e}"));
     }
     Ok(dest)
 }
@@ -162,20 +189,43 @@ mod tests {
         }
     }
 
+    /// A minimal file carrying the PMTiles v3 magic followed by `body`.
+    fn pack_bytes(body: &[u8]) -> Vec<u8> {
+        let mut bytes = PMTILES_MAGIC.to_vec();
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
     #[test]
     fn a_local_pack_is_copied_into_place_and_replaced_atomically() {
         let src_dir = tempfile::tempdir().unwrap();
         let tiles = tempfile::tempdir().unwrap();
         let dir = tiles.path().join("tiles");
         let src = src_dir.path().join("field.pmtiles");
-        std::fs::write(&src, b"first").unwrap();
+        std::fs::write(&src, pack_bytes(b"first")).unwrap();
         let dest = place_pack(src.to_str().unwrap(), &dir).unwrap();
         assert_eq!(dest, dir.join("field.pmtiles"));
-        assert_eq!(std::fs::read(&dest).unwrap(), b"first");
-        std::fs::write(&src, b"second").unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), pack_bytes(b"first"));
+        std::fs::write(&src, pack_bytes(b"second")).unwrap();
         place_pack(src.to_str().unwrap(), &dir).unwrap();
-        assert_eq!(std::fs::read(&dest).unwrap(), b"second");
+        assert_eq!(std::fs::read(&dest).unwrap(), pack_bytes(b"second"));
         assert!(!dir.join("field.pmtiles.tmp").exists());
+        assert!(!dir.join("field.pmtiles.staging").exists());
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_pmtiles_archive_is_refused_and_the_old_pack_kept() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let tiles = tempfile::tempdir().unwrap();
+        let dir = tiles.path();
+        let dest = dir.join("field.pmtiles");
+        std::fs::write(&dest, pack_bytes(b"working")).unwrap();
+        let src = src_dir.path().join("field.pmtiles");
+        std::fs::write(&src, b"<!doctype html><html>Not found</html>").unwrap();
+        let err = place_pack(src.to_str().unwrap(), dir).unwrap_err();
+        assert_eq!(err, "not a PMTiles v3 archive");
+        assert_eq!(std::fs::read(&dest).unwrap(), pack_bytes(b"working"));
+        assert!(!dir.join("field.pmtiles.staging").exists());
     }
 
     #[test]

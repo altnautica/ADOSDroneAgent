@@ -253,6 +253,8 @@ async fn list_packs(dir: &Path) -> Vec<PackInfo> {
             }
         }
     }
+    // A pack deleted from the directory releases its memory map.
+    READERS.lock().retain(|path, _| path.exists());
     packs.sort_by(|a, b| a.name.cmp(&b.name));
     packs
 }

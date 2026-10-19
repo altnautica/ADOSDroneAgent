@@ -144,6 +144,16 @@ the project follows [Semantic Versioning](https://semver.org/).
   `tool_handler_panicked`; a result that cannot be framed answers
   `tool_reply_unencodable: ...`.
 
+### Fixed
+
+- **Field tile budget exemption needs a valid key.** Only a tile read that
+  presents a valid `X-ADOS-Key` skips the per-caller request budget; a
+  keyless or wrong-key tile read is charged like any request. The tile pack
+  list also releases the memory map of a pack deleted from the directory.
+- **`--tile-pack` checks the archive.** The installer stages the pack beside
+  its destination and refuses a file that is not a PMTiles v3 archive,
+  leaving any existing pack in place.
+
 ## [0.103.3] - 2026-10-14
 
 ### Added

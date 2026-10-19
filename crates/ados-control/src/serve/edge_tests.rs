@@ -257,3 +257,44 @@ async fn tunnelled_callers_do_not_share_a_rate_bucket() {
         StatusCode::OK
     );
 }
+
+/// Only a tile read that presents a valid key skips the request budget: a
+/// keyless tile flood is charged and refused like any other request.
+#[tokio::test]
+async fn only_keyed_tile_reads_skip_the_request_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut edge = live_edge(dir.path(), "agent:\n  name: test\n");
+    edge.rate = Arc::new(RateLimiter::new(2, Duration::from_secs(60)));
+    let app = app(edge);
+    const TILE: &str = "/api/v1/ground-station/tiles/p/1/2/3.mvt";
+    let keyless = || {
+        Request::builder()
+            .method("GET")
+            .uri(TILE)
+            .extension(PeerAddr(SocketAddr::from(LAN)))
+            .body(Body::empty())
+            .unwrap()
+    };
+    status_of(&app, keyless()).await;
+    status_of(&app, keyless()).await;
+    assert_eq!(
+        status_of(&app, keyless()).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    let keyed = || {
+        Request::builder()
+            .method("GET")
+            .uri(TILE)
+            .header("X-ADOS-Key", KEY)
+            .extension(PeerAddr(SocketAddr::from(([192, 168, 1, 51], 45678))))
+            .body(Body::empty())
+            .unwrap()
+    };
+    for _ in 0..3 {
+        assert_ne!(
+            status_of(&app, keyed()).await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+}
