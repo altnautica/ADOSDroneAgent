@@ -48,8 +48,9 @@ the project follows [Semantic Versioning](https://semver.org/).
   Raspberry Pi lines. Plugin button presses carry the panel `label` (`B1`..)
   next to the board `pin`.
 
-- **PPS overlay at install.** When the board profile declares
-  `gnss.pps_gpio`, the installer enables a pps-gpio overlay: the stock
+- **PPS overlay at install.** On a ground station or visor whose board
+  profile declares `gnss.pps_gpio` for a serial or sensor-hub receiver (never
+  on a drone or other profile), the installer enables a pps-gpio overlay: the stock
   `pps-gpio` overlay on a Raspberry Pi, a generated and `dtc`-compiled
   `ados-pps` overlay on Rockchip boards (Radxa `/boot/dtbo` + `u-boot-update`,
   Armbian `user_overlays`), and loads the `pps-gpio` module. Not yet

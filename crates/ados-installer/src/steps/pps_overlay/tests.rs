@@ -229,3 +229,65 @@ fn generated_overlays_compile_when_dtc_is_present() {
         assert_eq!(&dtbo[..4], &[0xd0, 0x0d, 0xfe, 0xed], "{stem}: FDT magic");
     }
 }
+
+fn board_gnss(stem: &str) -> Option<ados_hal_probe::bindings::GnssBinding> {
+    let profiles = load_profiles();
+    profiles
+        .iter()
+        .find(|p| p.stem == stem)
+        .expect(stem)
+        .gnss
+        .clone()
+}
+
+#[test]
+fn a_drone_never_gets_the_overlay() {
+    for stem in ["rock-5b-plus", "rock-5c-lite"] {
+        assert_eq!(
+            gate::pps_gpio_for("drone", board_gnss(stem).as_ref()),
+            None,
+            "{stem}"
+        );
+    }
+    for profile in ["workstation", "compute"] {
+        assert_eq!(
+            gate::pps_gpio_for(profile, board_gnss("rock-5b-plus").as_ref()),
+            None
+        );
+    }
+}
+
+#[test]
+fn a_visor_or_ground_station_with_a_wired_receiver_gets_it() {
+    assert_eq!(
+        gate::pps_gpio_for("visor", board_gnss("rock-5b-plus").as_ref()),
+        Some(100)
+    );
+    assert_eq!(
+        gate::pps_gpio_for("ground_station", board_gnss("rock-5c-lite").as_ref()),
+        Some(37)
+    );
+    assert_eq!(
+        gate::pps_gpio_for("ground-station", board_gnss("rock-5c-lite").as_ref()),
+        Some(37)
+    );
+}
+
+#[test]
+fn a_ground_station_without_a_usable_gnss_source_is_skipped() {
+    use ados_hal_probe::bindings::{GnssBinding, GnssTransport};
+    assert_eq!(gate::pps_gpio_for("ground_station", None), None);
+    let mut gnss: GnssBinding = board_gnss("rock-5c-lite").expect("gnss binding");
+    for transport in [GnssTransport::Fc, GnssTransport::Udp] {
+        gnss.transport = transport;
+        assert_eq!(
+            gate::pps_gpio_for("ground_station", Some(&gnss)),
+            None,
+            "{transport:?}"
+        );
+    }
+    gnss.transport = GnssTransport::Hub;
+    assert_eq!(gate::pps_gpio_for("visor", Some(&gnss)), Some(37));
+    gnss.pps_gpio = None;
+    assert_eq!(gate::pps_gpio_for("visor", Some(&gnss)), None);
+}

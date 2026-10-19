@@ -18,7 +18,9 @@
 //! Every boot-config edit goes through [`boot_config`], whose keep-first
 //! snapshot preserves the pristine baseline the display probe restores from.
 //!
-//! Fails safe: a board with no `pps_gpio`, an unknown SoC family, an
+//! Gated by [`gate::pps_gpio_for`]: only a ground station or visor whose board
+//! GNSS receiver (serial or sensor hub) drives the PPS line. Fails safe: a
+//! board with no `pps_gpio`, an unknown SoC family, an
 //! out-of-range line, a missing `dtc` or an unrecognised boot mechanism leaves
 //! the boot configuration untouched and logs why. Idempotent: a re-run with the
 //! overlay already enabled changes nothing and asks for no reboot.
@@ -453,14 +455,15 @@ impl Step for PpsOverlay {
         // A PPS problem degrades the install, never aborts it.
         StepKind::Optional
     }
-    fn run(&self, _ctx: &mut Ctx) -> StepOutcome {
+    fn run(&self, ctx: &mut Ctx) -> StepOutcome {
         let profiles = load_profiles();
         let facts = probe_host_facts();
         let Some(matched) = resolve_profile(&profiles, &facts) else {
             return StepOutcome::Skipped;
         };
         let profile = matched.profile;
-        let Some(gpio) = profile.gnss.as_ref().and_then(|g| g.pps_gpio) else {
+        let Some(gpio) = gate::pps_gpio_for(&ctx.profile, profile.gnss.as_ref()) else {
+            tracing::info!(profile = %ctx.profile, board = %profile.stem, "pps-gpio overlay not needed on this node");
             return StepOutcome::Skipped;
         };
         match provision(&profile.soc, gpio) {
@@ -482,6 +485,8 @@ impl Step for PpsOverlay {
         }
     }
 }
+
+mod gate;
 
 #[cfg(test)]
 mod tests;
