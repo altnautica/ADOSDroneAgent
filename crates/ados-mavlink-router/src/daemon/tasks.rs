@@ -62,7 +62,11 @@ pub(super) fn spawn_core(
             ados_sensorbus::socket_path(),
             ados_sensorbus::Origin::Fc,
         );
-        let marker = ados_protocol::paths::run_path("capture-active");
+        // `/run/ados/capture/active`: created by the capture recorder while a
+        // session records (the dir is operator-group writable for it).
+        let marker = ados_protocol::paths::run_dir()
+            .join("capture")
+            .join("active");
         let lane = crate::fc_sensors::task::run(fc.clone(), publisher, marker, cancel.clone());
         tasks.push(tokio::spawn(lane));
         let rtcm =

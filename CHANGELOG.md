@@ -27,7 +27,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **Flight-controller sensor lane.** The router requests HIGHRES_IMU 200 Hz
   (RAW_IMU 50 Hz fallback), ATTITUDE_QUATERNION, LOCAL_POSITION_NED,
   GPS_RAW_INT, SYSTEM_TIME and SCALED_PRESSURE on a visor, and on a drone
-  while `/run/ados/capture-active` exists; runs a min-RTT TIMESYNC estimator;
+  while `/run/ados/capture/active` exists; runs a min-RTT TIMESYNC estimator;
   publishes IMU (FLU), barometer and CAMERA_FEEDBACK triggers on the sensor
   bus; and injects every `rtcm` bus frame to the flight controller as
   fragmented GPS_RTCM_DATA.

@@ -92,11 +92,22 @@ pub(super) fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> std::io::
 /// Create `/run/ados` (+ tmpfiles rule) so the Unix sockets have a home that
 /// survives reboot. Idempotent.
 pub(super) fn install_run_dir_tmpfiles() {
+    const DEST: &str = "/etc/tmpfiles.d/ados.conf";
     let _ = std::fs::create_dir_all("/run/ados");
-    let _ = std::fs::write(
-        "/etc/tmpfiles.d/ados.conf",
-        "d /run/ados 0755 root root -\n",
-    );
+    if std::fs::write(DEST, run_dir_tmpfiles_body()).is_ok() {
+        let _ = exec::run("systemd-tmpfiles", &["--create", DEST]);
+    }
+}
+
+/// The run-dir tmpfiles body. `/run/ados/capture` is the capture-session
+/// state dir: setgid operator-group writable, so a sandboxed capture plugin
+/// can create and remove the `active` marker the MAVLink router reads to pick
+/// its capture stream rates, without write access to the rest of `/run/ados`.
+pub(super) fn run_dir_tmpfiles_body() -> String {
+    format!(
+        "d /run/ados 0755 root root -\nd /run/ados/capture 2775 root {} -\n",
+        ados_protocol::ipc::OPERATOR_GROUP
+    )
 }
 
 /// Write the `/etc/ados/env` file from the persisted device id.

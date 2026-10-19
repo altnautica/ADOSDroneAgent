@@ -372,3 +372,15 @@ fn dropin_paths_match_the_uninstall_removal_list() {
         );
     }
 }
+
+/// The capture state dir is recreated every boot, operator-group writable
+/// and setgid, so a sandboxed capture plugin can drop the `active` marker.
+#[test]
+fn run_dir_tmpfiles_creates_the_operator_writable_capture_dir() {
+    let body = enable::run_dir_tmpfiles_body();
+    assert!(body.contains("d /run/ados 0755 root root -\n"));
+    assert!(body.contains(&format!(
+        "d /run/ados/capture 2775 root {} -\n",
+        ados_protocol::ipc::OPERATOR_GROUP
+    )));
+}
