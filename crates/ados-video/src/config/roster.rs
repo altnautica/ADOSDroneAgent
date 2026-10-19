@@ -27,7 +27,7 @@ pub struct RosterVideoConfig {
     /// The legacy single-camera `video.camera` block, or `None` when the config
     /// declared no such block.
     pub camera: Option<CameraConfig>,
-    /// The explicit multi-leg `video.cameras[]` list (empty when absent).
+    /// The explicit multi-leg top-level `cameras[]` list (empty when absent).
     pub cameras: Vec<CameraLeg>,
 }
 
@@ -42,6 +42,8 @@ impl RosterVideoConfig {
             agent: AgentSection,
             #[serde(default)]
             video: VideoSection,
+            #[serde(default)]
+            cameras: Vec<CameraLeg>,
         }
         #[derive(Debug, Default, Deserialize)]
         struct AgentSection {
@@ -54,8 +56,6 @@ impl RosterVideoConfig {
             profile: Option<String>,
             #[serde(default)]
             camera: Option<CameraConfig>,
-            #[serde(default)]
-            cameras: Vec<CameraLeg>,
         }
         let Ok(text) = std::fs::read_to_string(path) else {
             return Self::default();
@@ -64,7 +64,7 @@ impl RosterVideoConfig {
         Self {
             profile: raw.video.profile.or(raw.agent.profile),
             camera: raw.video.camera,
-            cameras: raw.video.cameras,
+            cameras: raw.cameras,
         }
     }
 
@@ -80,7 +80,7 @@ impl RosterVideoConfig {
 
     /// The capture/encode settings the primary encoder runs from (the stream
     /// served at `main`), resolved exactly as the video service resolves them:
-    /// the primary `video.cameras` leg, else the `video.camera` block, else that
+    /// the primary `cameras` leg, else the `video.camera` block, else that
     /// block's defaults.
     pub fn primary_camera(&self) -> CameraConfig {
         primary_camera_from(&self.cameras, self.camera.clone().unwrap_or_default())

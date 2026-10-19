@@ -11,10 +11,11 @@ fn default_video_mode() -> String {
 }
 
 /// The agent-level video config the orchestrator gates on: the `video:` block
-/// (mode / cloud relay / wfb sub-block / vision / cameras / recording) plus the
-/// resolved agent `profile`. Every field is `#[serde(default)]` so a partial /
-/// malformed config never blocks the pipeline — a missing `video:` block yields
-/// the defaults (mode "wfb", no cloud relay).
+/// (mode / cloud relay / wfb sub-block / vision / recording), the top-level
+/// `cameras:` list, plus the resolved agent `profile`. Every field is
+/// `#[serde(default)]` so a partial / malformed config never blocks the
+/// pipeline — a missing `video:` block yields the defaults (mode "wfb", no
+/// cloud relay).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentVideoConfig {
     /// `video.mode`: "wfb" (default) | "cloud" | "disabled" | ...
@@ -35,9 +36,9 @@ pub struct AgentVideoConfig {
     /// The `video.vision:` sub-block (the additive frame tap). Default OFF.
     #[serde(default)]
     pub vision: VisionTapConfig,
-    /// The optional `video.cameras:` list — more than one video leg the node
-    /// exposes concurrently (a smart pod, a dual-camera rig). Empty ⇒ the single
-    /// legacy `video.camera` path (fully backward compatible).
+    /// The top-level `cameras:` list — more than one video leg the node exposes
+    /// concurrently (a smart pod, a dual-camera rig, a capture rig). Empty ⇒
+    /// the single legacy `video.camera` path (fully backward compatible).
     #[serde(default)]
     pub cameras: Vec<CameraLeg>,
     /// The `video.recording:` sub-block. Drives mediamtx's native fMP4
@@ -70,6 +71,8 @@ impl AgentVideoConfig {
             agent: AgentSection,
             #[serde(default)]
             video: VideoSection,
+            #[serde(default)]
+            cameras: Vec<CameraLeg>,
         }
         #[derive(Debug, Default, Deserialize)]
         struct AgentSection {
@@ -92,8 +95,6 @@ impl AgentVideoConfig {
             #[serde(default)]
             vision: VisionTapConfig,
             #[serde(default)]
-            cameras: Vec<CameraLeg>,
-            #[serde(default)]
             recording: RecordingConfig,
         }
         impl Default for VideoSection {
@@ -104,7 +105,6 @@ impl AgentVideoConfig {
                     cloud_relay_url: None,
                     wfb: WfbVideoConfig::default(),
                     vision: VisionTapConfig::default(),
-                    cameras: Vec::new(),
                     recording: RecordingConfig::default(),
                 }
             }
@@ -128,7 +128,7 @@ impl AgentVideoConfig {
             cloud_relay_url: raw.video.cloud_relay_url,
             wfb: raw.video.wfb,
             vision: raw.video.vision,
-            cameras: raw.video.cameras,
+            cameras: raw.cameras,
             recording: raw.video.recording,
         }
     }
@@ -141,13 +141,15 @@ impl AgentVideoConfig {
 
     /// Resolve the effective video legs the orchestrator drives.
     ///
-    /// Back-compat: an empty `video.cameras` yields a single `main` primary leg
+    /// Back-compat: an empty `cameras` list yields a single `main` primary leg
     /// built from the legacy `video.camera` block, so the pipeline is
     /// byte-identical to the single-stream path. Otherwise the leg whose role is
     /// `"primary"` (else the first) is the primary — always an owned encoder, so
     /// a network-primary keeps its ffmpeg bridge — and every other leg with a
     /// network source becomes a mediamtx `sourceOnDemand` pull. A secondary leg
-    /// the operator disabled is dropped entirely; the primary always streams.
+    /// the operator disabled is dropped entirely; the primary always streams. A
+    /// captured leg (`capture: true`) is encoded from the frame bus
+    /// (`framebus://<id>`), never from its device.
     ///
     /// The primary leg is always served at the fixed path/id `"main"` — the WFB
     /// radio, cloud relay, and vision tap all key on `main`. Secondary legs keep
@@ -172,6 +174,7 @@ impl AgentVideoConfig {
                 vflip: camera.vflip,
                 encoder: camera.encoder.clone(),
                 keyframe_interval: camera.keyframe_interval,
+                framebus_format: None,
             }];
         };
         self.cameras
@@ -198,7 +201,7 @@ impl AgentVideoConfig {
                     } else {
                         c.id.clone()
                     },
-                    source: c.source.clone(),
+                    source: c.pipeline_source(),
                     role,
                     codec: c.codec.clone(),
                     is_primary,
@@ -212,6 +215,7 @@ impl AgentVideoConfig {
                     vflip: c.vflip,
                     encoder: c.encoder.clone(),
                     keyframe_interval: c.keyframe_interval,
+                    framebus_format: c.capture.then(|| c.format.frame_format()),
                 }
             })
             .collect()
@@ -241,7 +245,7 @@ impl AgentVideoConfig {
     }
 }
 
-/// The index of the primary leg in a `video.cameras` list: the leg whose role is
+/// The index of the primary leg in a `cameras` list: the leg whose role is
 /// `"primary"`, else the first. `None` when no legs are declared.
 fn primary_leg_index(cameras: &[CameraLeg]) -> Option<usize> {
     if cameras.is_empty() {
@@ -257,8 +261,9 @@ fn primary_leg_index(cameras: &[CameraLeg]) -> Option<usize> {
 
 /// The capture/encode settings the PRIMARY encoder runs from.
 ///
-/// With no `video.cameras` declared that is the legacy `video.camera` block,
-/// unchanged. With legs declared, the primary leg's source and encode-plane
+/// With no `cameras` declared that is the legacy `video.camera` block,
+/// unchanged. With legs declared, the primary leg's source (`framebus://<id>`
+/// for a captured leg) and encode-plane
 /// keys (codec, geometry, fps, bitrate, orientation, encoder override,
 /// keyframe interval) replace the block's, so an edit to the primary leg
 /// reaches the primary encoder. The block's `thumbnail` profile stays: the
@@ -268,7 +273,7 @@ pub(super) fn primary_camera_from(cameras: &[CameraLeg], camera: CameraConfig) -
         return camera;
     };
     CameraConfig {
-        source: leg.source.clone(),
+        source: leg.pipeline_source(),
         codec: leg.codec.clone(),
         width: leg.width,
         height: leg.height,

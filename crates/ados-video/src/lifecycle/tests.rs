@@ -32,6 +32,7 @@ fn encoder_params(kind: EncoderKind, rtp_fanout: bool) -> EncoderParams {
         keyframe_interval: 0,
         rtp_fanout,
         passthrough: false,
+        framebus_input: None,
     }
 }
 

@@ -207,6 +207,12 @@ impl CameraConfig {
         is_network_url(s).then_some(s)
     }
 
+    /// The camera id of a `framebus://<id>` source — a camera the vision
+    /// engine captures, encoded from the frame bus — or `None`.
+    pub fn framebus_camera(&self) -> Option<&str> {
+        ados_config::cameras::framebus_camera_id(&self.source)
+    }
+
     /// Load the `/video/camera` slice of the effective agent config (schema
     /// defaults overlaid with the file). A malformed file or slice is logged by
     /// the slice loader and yields the defaults, so config loading never blocks

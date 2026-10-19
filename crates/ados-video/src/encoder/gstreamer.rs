@@ -8,13 +8,16 @@ use super::*;
 /// On Rockchip with `mpph264enc` present: hardware VPU encode. Otherwise
 /// software `x264enc`. RTSP output uses `rtspclientsink` (RTSP RECORD) when the
 /// element is available, else pipes the elementary stream through ffmpeg for
-/// RTSP muxing. File output uses a direct `filesink` pipeline.
+/// RTSP muxing. File output uses a direct `filesink` pipeline. A frame-bus source reads the
+/// leg's raw frames out of its pipe (`filesrc ! rawvideoparse`) and hands the
+/// encoder NV12.
 pub(super) fn build_gstreamer_command(
     params: &EncoderParams,
     source: &str,
     output: &str,
     camera: Option<&CameraInfo>,
     env: &EncoderEnv,
+    framebus: Option<&FramebusInput>,
 ) -> Vec<String> {
     let safe_source = gst_quote(source);
 
@@ -116,7 +119,22 @@ pub(super) fn build_gstreamer_command(
     // caps pin a `framerate` — in either case the encoder silently falls back to
     // its 176x144 default and the pipeline fails to preroll. So set neither here;
     // the framerate flows from the `image/jpeg` source caps.
-    let core = if use_omx {
+    let core = if let Some(fb) = framebus {
+        // Parse at the captured geometry, scale to the leg's current profile.
+        format!(
+            "filesrc location={} ! rawvideoparse width={} height={} format={} \
+             framerate={}/1 ! videoconvert ! {flip}videoscale ! \
+             video/x-raw,format=NV12,width={},height={} ! \
+             queue max-size-buffers=4 leaky=downstream ! {encoder}",
+            gst_quote(&fb.fifo),
+            fb.raw.width,
+            fb.raw.height,
+            crate::framebus_input::gst_raw_format(fb.raw.format),
+            fb.raw.fps,
+            params.width,
+            params.height
+        )
+    } else if use_omx {
         format!(
             "v4l2src device={safe_source} io-mode=mmap ! {src_caps} ! \
              {decode} ! {flip}video/x-raw,format=NV12,width={},height={} ! \

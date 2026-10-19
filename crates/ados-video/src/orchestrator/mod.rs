@@ -103,7 +103,7 @@ pub struct VideoOrchestrator {
     /// added to the mediamtx config so mediamtx serves each at `:8889/<id>/whep`
     /// independently — one dead secondary source cannot wedge the primary or a
     /// sibling (per-path isolation is mediamtx's, not the orchestrator's). An
-    /// empty `video.cameras` resolves to a single `main` leg (back-compat).
+    /// empty `cameras` list resolves to a single `main` leg (back-compat).
     pub(crate) legs: Vec<ResolvedLeg>,
 
     /// Per-leg inbound-byte watchdog state (last counter value + when it last
@@ -135,6 +135,9 @@ pub struct VideoOrchestrator {
     /// only when `video.vision.enabled`. Additive: a crash here never touches
     /// the encode or wfb path.
     pub(crate) vision_tap: Option<tokio::task::JoinHandle<()>>,
+    /// The frame-bus pumps feeding the encoders of captured cameras
+    /// (`framebus://<id>` legs), one per camera.
+    pub(crate) framebus_feeds: crate::framebus_input::Feeds,
     pub(crate) wfb_tee_progress: ProgressTracker,
     /// Output-progress clock for the cloud relay push. Process liveness is
     /// never proof of work: a cloud push wedged on a half-open relay socket
@@ -311,6 +314,7 @@ impl VideoOrchestrator {
             cloud_push: None,
             sei_tap: None,
             vision_tap: None,
+            framebus_feeds: crate::framebus_input::Feeds::default(),
             wfb_tee_progress: ProgressTracker::new(),
             cloud_push_progress: ProgressTracker::new(),
             sei_tap_started_at: None,

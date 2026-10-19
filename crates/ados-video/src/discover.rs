@@ -114,6 +114,29 @@ impl DiscoveryResult {
         }
     }
 
+    /// A single-camera result standing in for a camera the vision engine
+    /// captures (`framebus://<camera_id>`): a [`CameraType::Framebus`] primary
+    /// whose encoder reads the frame bus, with no local probe.
+    pub fn for_framebus_source(camera_id: &str) -> Self {
+        let source = ados_config::cameras::framebus_source(camera_id);
+        Self {
+            cameras: vec![DiscoveredCamera {
+                name: camera_id.to_string(),
+                camera_type: "framebus".to_string(),
+                device_path: source.clone(),
+                width: 0,
+                height: 0,
+                capabilities: vec!["framebus".to_string()],
+                hardware_role: "primary".to_string(),
+            }],
+            primary: Some(Primary {
+                device_path: source,
+                name: camera_id.to_string(),
+            }),
+            total_cameras: 1,
+        }
+    }
+
     /// The `CameraInfo` the encoder builder reads for the primary, if any.
     /// Resolves the primary's `device_path` against the full camera list so
     /// the encoder gets the capability list (which the `primary` block does
@@ -155,6 +178,7 @@ impl DiscoveredCamera {
         match self.camera_type.as_str() {
             "csi" => CameraType::Csi,
             "ip" => CameraType::Ip,
+            "framebus" => CameraType::Framebus,
             // "usb" and anything unexpected → USB / ffmpeg path.
             _ => CameraType::Usb,
         }

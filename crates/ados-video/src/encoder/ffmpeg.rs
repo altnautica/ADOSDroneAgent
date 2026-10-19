@@ -4,18 +4,21 @@ use super::rpicam::select_input_format;
 use super::tap_splice::ffmpeg_output_stage;
 use super::*;
 
-/// `ffmpeg` command for USB / IP camera encoding.
+/// `ffmpeg` command for USB / IP / frame-bus camera encoding.
 ///
 /// Network sources skip the v4l2 wrapper. V4L2 sources prepend the
-/// low-latency input flags and the capability-selected `-input_format`. The
-/// output tuning differs by codec: `libx264` gets the full low-latency
-/// browser-compat block + x264-params; `h264_v4l2m2m` gets a leaner HW block.
+/// low-latency input flags and the capability-selected `-input_format`. A
+/// frame-bus source reads headerless raw video of the leg's geometry out of its
+/// pipe. The output tuning differs by codec: `libx264` gets the full
+/// low-latency browser-compat block + x264-params; `h264_v4l2m2m` gets a
+/// leaner HW block.
 pub(super) fn build_ffmpeg_command(
     params: &EncoderParams,
     source: &str,
     output: &str,
     camera: Option<&CameraInfo>,
     env: &EncoderEnv,
+    framebus: Option<&FramebusInput>,
 ) -> Vec<String> {
     // Use the HW H.264 encoder only when the HAL probe confirmed a real V4L2
     // encoder device is Present; otherwise map the codec to a sw encoder. A
@@ -41,7 +44,22 @@ pub(super) fn build_ffmpeg_command(
 
     let mut cmd: Vec<String> = vec!["ffmpeg".into(), "-y".into()];
 
-    if crate::config::is_network_url(source) {
+    if let Some(fb) = framebus {
+        // Raw frames the vision engine already captured: no device to probe
+        // and nothing to demux, so the input is fully described up front.
+        cmd.extend(
+            ["-fflags", "nobuffer", "-flags", "low_delay", "-f", "rawvideo", "-pix_fmt"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        cmd.push(crate::framebus_input::ffmpeg_pix_fmt(fb.raw.format).to_string());
+        cmd.push("-video_size".into());
+        cmd.push(format!("{}x{}", fb.raw.width, fb.raw.height));
+        cmd.push("-framerate".into());
+        cmd.push(fb.raw.fps.to_string());
+        cmd.push("-i".into());
+        cmd.push(fb.fifo.clone());
+    } else if crate::config::is_network_url(source) {
         // Network / IP camera source. Low-latency input; force TCP for RTSP so a
         // lossy link cannot drop RTP packets and truncate frames. UDP is the
         // ffmpeg default for RTSP and a single lost packet shreds an H.264 frame
@@ -118,6 +136,14 @@ pub(super) fn build_ffmpeg_command(
     // hint and deliver at native rate).
     cmd.push("-r".into());
     cmd.push(params.fps.to_string());
+    // A frame-bus input arrives at its captured size; the encoded size is the
+    // leg's current profile (an attention switch shrinks it).
+    if let Some(fb) = framebus {
+        if (fb.raw.width, fb.raw.height) != (params.width, params.height) {
+            cmd.push("-s".into());
+            cmd.push(format!("{}x{}", params.width, params.height));
+        }
+    }
 
     // Image orientation: when rotation/hflip/vflip are set, insert a `-vf`
     // transform before encode. On the HW paths (h264_v4l2m2m) this is a CPU

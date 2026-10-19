@@ -61,10 +61,11 @@ pub fn detect_encoder_for_camera(
                 None
             }
         }
-        CameraType::Usb | CameraType::Ip => {
-            // mpph264enc (Rockchip VPU) is disabled — fall back to ffmpeg
-            // libx264, then gstreamer x264enc. See this function's doc comment
-            // for the exact retest procedure before re-enabling it.
+        CameraType::Usb | CameraType::Ip | CameraType::Framebus => {
+            // mpph264enc (Rockchip VPU) is disabled for USB/IP — fall back to
+            // ffmpeg libx264, then gstreamer x264enc. See this function's doc
+            // comment for the exact retest procedure before re-enabling it. A
+            // frame-bus source takes the VPU in `resolve_kind` instead.
             if has_ffmpeg {
                 Some(EncoderKind::Ffmpeg)
             } else if has_gst_launch {

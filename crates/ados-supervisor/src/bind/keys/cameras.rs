@@ -1,5 +1,5 @@
 //! Video camera-leg persistence: merging operator and driver-owned legs into
-//! `video.cameras` in `config.yaml`.
+//! the top-level `cameras` list in `config.yaml`.
 
 use super::*;
 
@@ -117,8 +117,8 @@ pub(super) fn merge_camera_legs(
 }
 
 /// Merge the writer's `cameras` (attributed to `owner`) into the existing
-/// `video.cameras` list on the config mapping, then mirror the resulting primary
-/// leg's source into `video.camera.source`. A non-array `cameras` leaves the
+/// top-level `cameras` list on the config mapping, then mirror the resulting
+/// primary leg's source into `video.camera.source`. A non-array `cameras` leaves the
 /// config untouched — the caller validates the list shape before this is reached,
 /// so this is defence-in-depth. A write that would take over another owner's leg
 /// (see [`merge_camera_legs`]) is refused with the config untouched.
@@ -132,11 +132,9 @@ pub fn apply_video_cameras(
     };
 
     // The existing declared legs, read back as JSON so the merge works in one data
-    // model (an absent / non-sequence `video.cameras` reads as empty).
+    // model (an absent / non-sequence `cameras` reads as empty).
     let existing: Vec<serde_json::Value> = root
-        .get("video")
-        .and_then(Value::as_mapping)
-        .and_then(|v| v.get("cameras"))
+        .get("cameras")
         .and_then(Value::as_sequence)
         .map(|seq| {
             seq.iter()
@@ -166,8 +164,7 @@ pub fn apply_video_cameras(
     let Ok(value) = serde_norway::to_value(&merged) else {
         return Ok(());
     };
-    let video = ensure_map(root, "video");
-    video.insert(Value::String("cameras".to_string()), value);
+    root.insert(Value::String("cameras".to_string()), value);
     Ok(())
 }
 
@@ -182,7 +179,7 @@ pub enum CamerasPersist {
     Failed,
 }
 
-/// Load → merge `video.cameras` by `owner` → atomically rewrite the config,
+/// Load → merge `cameras` by `owner` → atomically rewrite the config,
 /// serialised by the same flock and euid-0 gate as [`persist_pair_state`] (the
 /// file is 0600 root). A non-root caller on Linux gets `Failed` (no write).
 /// The video pipeline reads the new source list on its next start, so the caller

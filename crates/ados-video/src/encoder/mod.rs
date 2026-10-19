@@ -83,6 +83,9 @@ pub enum CameraType {
     Usb,
     /// Network / RTSP camera (ffmpeg network-input path).
     Ip,
+    /// A camera the vision engine captures, read back off the frame bus as raw
+    /// video through its `framebus-<id>.fifo` pipe.
+    Framebus,
 }
 
 /// Encoder invocation parameters.
@@ -118,6 +121,22 @@ pub struct EncoderParams {
     /// camera's own GOP and bitrate then reach the radio unchanged, which is
     /// why it is opt-in. Ignored for local devices.
     pub passthrough: bool,
+    /// The raw frames a `framebus://` source delivers. Required for that source
+    /// (the encoder reads headerless raw video) and ignored otherwise. Its
+    /// geometry is the captured frame's; `width`/`height`/`fps` above stay the
+    /// encoded output's, so an attention switch rescales instead of misreading
+    /// the pipe.
+    pub framebus_input: Option<RawInput>,
+}
+
+/// The format and geometry of the raw frames a `framebus://` source carries:
+/// what the vision engine publishes for that camera.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawInput {
+    pub format: ados_protocol::framebus::FrameFormat,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
 }
 
 impl EncoderParams {
@@ -138,12 +157,14 @@ impl EncoderParams {
             keyframe_interval: cfg.keyframe_interval,
             rtp_fanout: false,
             passthrough: cfg.passthrough,
+            framebus_input: None,
         }
     }
 }
 
 /// Allowlist for camera source / output strings: alphanumeric, slashes, dots,
-/// hyphens, underscores, colons. `-` (stdin/stdout) is allowed verbatim.
+/// hyphens, underscores, colons. `-` (stdin/stdout) is allowed verbatim. A
+/// `framebus://<id>` source passes as is; the builder turns it into the pipe.
 fn validate_source(source: &str) -> Result<&str, EncoderError> {
     if source == "-" {
         return Ok(source);
@@ -194,6 +215,9 @@ pub enum EncoderError {
     /// without breaking the radio and browser legs. Only `h264` is accepted;
     /// the `Display` text carries the full reason.
     UnsupportedCodec(String),
+    /// A `framebus://` source was given without the raw frame format the
+    /// encoder must read it in.
+    MissingFramebusFormat(String),
 }
 
 impl std::fmt::Display for EncoderError {
@@ -212,6 +236,11 @@ impl std::fmt::Display for EncoderError {
                  96 (H.264, RFC 6184) against a fixed receiver SDP — so any other \
                  codec goes on air untuned and undecodable. Set \
                  video.camera.codec to \"h264\"."
+            ),
+            EncoderError::MissingFramebusFormat(s) => write!(
+                f,
+                "Frame-bus source {s:?} has no raw frame format; the camera's \
+                 cameras[].format must reach the encoder."
             ),
         }
     }
@@ -334,18 +363,47 @@ fn use_omx_encoder(params: &EncoderParams, env: &EncoderEnv) -> bool {
 ///
 /// A network source never takes the OMX path: that pipeline starts with
 /// `v4l2src`, which cannot open a URL, so it keeps the probed base kind.
+///
+/// A frame-bus source on a Rockchip board with `mpph264enc` takes the
+/// GStreamer VPU path. The frames arrive as raw video the agent already holds,
+/// so the encoder is fed NV12 with no RGA stage — the configuration the retest
+/// procedure on [`detect_encoder_for_camera`] calls for. The software fallback
+/// still applies: once the health tick has forced `encoder: "software"`, the
+/// leg keeps its probed base kind and a software codec.
 fn resolve_kind(
     base: EncoderKind,
     params: &EncoderParams,
     env: &EncoderEnv,
     network_source: bool,
+    framebus: bool,
 ) -> EncoderKind {
-    let omx = !network_source && env.encoder_api == "vendor" && env.has_omxh264videoenc;
+    let omx =
+        !network_source && !framebus && env.encoder_api == "vendor" && env.has_omxh264videoenc;
     match params.encoder.as_str() {
         "v4l2m2m" => EncoderKind::Ffmpeg,
         "software" => base,
+        _ if framebus && env.has_mpph264enc => EncoderKind::Gstreamer,
         _ if omx => EncoderKind::Gstreamer,
         _ => base,
+    }
+}
+
+/// A `framebus://<id>` source resolved to the pipe its feed writes and the raw
+/// frames in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FramebusInput {
+    pub fifo: String,
+    pub raw: RawInput,
+}
+
+/// The input an encoder for `source` actually opens: the frame-bus pipe for a
+/// `framebus://` source, else the source itself. Orphan sweeps match on it.
+pub fn input_locator(source: &str) -> String {
+    match ados_config::cameras::framebus_camera_id(source) {
+        Some(id) => crate::framebus_input::fifo_path(id)
+            .to_string_lossy()
+            .into_owned(),
+        None => source.to_string(),
     }
 }
 
@@ -368,6 +426,15 @@ pub fn build_encoder_command(
     // the GStreamer arm ignores `codec` entirely and the rpicam arm forwards it
     // verbatim, so a per-arm check would disagree with itself.
     validate_codec(&params.codec)?;
+    let framebus = match ados_config::cameras::framebus_camera_id(source) {
+        Some(_) => Some(FramebusInput {
+            fifo: input_locator(source),
+            raw: params
+                .framebus_input
+                .ok_or_else(|| EncoderError::MissingFramebusFormat(source.to_string()))?,
+        }),
+        None => None,
+    };
     // Apply the per-camera encoder override + board HAL encoder_api before
     // dispatching (builder-private; the probed base kind stays on `params.kind`).
     let kind = resolve_kind(
@@ -375,11 +442,16 @@ pub fn build_encoder_command(
         params,
         env,
         crate::config::is_network_url(source),
+        framebus.is_some(),
     );
     let cmd = match kind {
         EncoderKind::RpicamVid => build_rpicam_command(params, source, output, env),
-        EncoderKind::Ffmpeg => build_ffmpeg_command(params, source, output, camera, env),
-        EncoderKind::Gstreamer => build_gstreamer_command(params, source, output, camera, env),
+        EncoderKind::Ffmpeg => {
+            build_ffmpeg_command(params, source, output, camera, env, framebus.as_ref())
+        }
+        EncoderKind::Gstreamer => {
+            build_gstreamer_command(params, source, output, camera, env, framebus.as_ref())
+        }
     };
     Ok(cmd)
 }

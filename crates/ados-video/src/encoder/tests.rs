@@ -197,6 +197,7 @@ fn params(kind: EncoderKind, w: u32, h: u32, fps: u32, kbps: u32) -> EncoderPara
         // mediamtx. Ignored by the rpicam / GStreamer arms.
         rtp_fanout: true,
         passthrough: false,
+        framebus_input: None,
     }
 }
 
@@ -2409,3 +2410,6 @@ fn a_network_source_never_takes_the_omx_capture_pipeline() {
     );
     assert!(local.join(" ").contains("omxh264videoenc"));
 }
+
+#[path = "framebus_tests.rs"]
+mod framebus;

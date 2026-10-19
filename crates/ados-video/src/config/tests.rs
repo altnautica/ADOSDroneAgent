@@ -223,11 +223,11 @@ fn agent_video_malformed_yaml_falls_back_to_default() {
     assert!(c.profile.is_none());
 }
 
-// --- video.cameras[] / resolve_legs -------------------------------
+// --- cameras[] / resolve_legs -------------------------------------
 
 #[test]
 fn cameras_absent_synthesizes_single_main_leg() {
-    // No `video.cameras` ⇒ one primary "main" leg from the legacy block,
+    // No `cameras` ⇒ one primary "main" leg from the legacy block,
     // byte-identical to the single-stream path.
     let cfg = AgentVideoConfig::default();
     let cam = CameraConfig {
@@ -249,11 +249,10 @@ fn cameras_absent_synthesizes_single_main_leg() {
 #[test]
 fn cameras_parse_multi_leg_and_resolve() {
     let yaml = "\
-video:
-  cameras:
-    - { id: eo-zoom, source: rtsp://192.168.144.25:8554/main, role: eo, codec: h265 }
-    - { id: eo-wide, source: rtsp://192.168.144.25:8554/sub, role: eo_wide, codec: h264 }
-    - { id: ir, source: rtsp://192.168.144.25:8554/ir, role: ir }
+cameras:
+  - { id: eo-zoom, source: rtsp://192.168.144.25:8554/main, role: eo, codec: h265 }
+  - { id: eo-wide, source: rtsp://192.168.144.25:8554/sub, role: eo_wide, codec: h264 }
+  - { id: ir, source: rtsp://192.168.144.25:8554/ir, role: ir }
 ";
     let (_dir, path) = write_tmp(yaml);
     let cfg = AgentVideoConfig::load_from(&path);
@@ -278,10 +277,9 @@ video:
 #[test]
 fn resolve_legs_honours_explicit_primary_role() {
     let yaml = "\
-video:
-  cameras:
-    - { id: ir, source: rtsp://10.0.0.9/ir, role: ir }
-    - { id: main-eo, source: /dev/video0, role: primary }
+cameras:
+  - { id: ir, source: rtsp://10.0.0.9/ir, role: ir }
+  - { id: main-eo, source: /dev/video0, role: primary }
 ";
     let (_dir, path) = write_tmp(yaml);
     let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
@@ -301,10 +299,9 @@ fn resolve_legs_keeps_the_primary_declared_role_label() {
     // label map resolves — it is NOT clobbered to "primary". (The SIYI ZT30
     // shape: first leg EO-zoom on main, second IR on sub.)
     let yaml = "\
-video:
-  cameras:
-    - { id: eo-zoom, source: rtsp://192.168.144.25:8554/main, role: eo }
-    - { id: sub,     source: rtsp://192.168.144.25:8554/sub,  role: ir }
+cameras:
+  - { id: eo-zoom, source: rtsp://192.168.144.25:8554/main, role: eo }
+  - { id: sub,     source: rtsp://192.168.144.25:8554/sub,  role: ir }
 ";
     let (_dir, path) = write_tmp(yaml);
     let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
@@ -316,11 +313,10 @@ video:
 #[test]
 fn a_disabled_secondary_leg_is_not_served_but_the_primary_always_is() {
     let yaml = "\
-video:
-  cameras:
-    - { id: eo, source: /dev/video0, role: primary, enabled: false }
-    - { id: belly, source: /dev/video2, enabled: false }
-    - { id: ir, source: rtsp://192.168.144.25:8554/ir }
+cameras:
+  - { id: eo, source: /dev/video0, role: primary, enabled: false }
+  - { id: belly, source: /dev/video2, enabled: false }
+  - { id: ir, source: rtsp://192.168.144.25:8554/ir }
 ";
     let (_dir, path) = write_tmp(yaml);
     let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
@@ -340,19 +336,19 @@ video:
     height: 720
     rotation: 0
     thumbnail: { width: 160, height: 90, fps: 1, bitrate_kbps: 30 }
-  cameras:
-    - { id: ir, source: rtsp://192.168.144.25:8554/ir, role: ir }
-    - id: eo
-      source: rtsp://192.168.144.25:8554/main
-      role: primary
-      width: 1920
-      height: 1080
-      fps: 25
-      bitrate_kbps: 2500
-      rotation: 180
-      hflip: true
-      encoder: software
-      keyframe_interval: 12
+cameras:
+  - { id: ir, source: rtsp://192.168.144.25:8554/ir, role: ir }
+  - id: eo
+    source: rtsp://192.168.144.25:8554/main
+    role: primary
+    width: 1920
+    height: 1080
+    fps: 25
+    bitrate_kbps: 2500
+    rotation: 180
+    hflip: true
+    encoder: software
+    keyframe_interval: 12
 ";
     let (_dir, path) = write_tmp(yaml);
     let cfg = AgentVideoConfig::load_from(&path);
@@ -384,9 +380,8 @@ fn without_declared_legs_the_camera_block_is_used_verbatim() {
 #[test]
 fn camera_leg_partial_fields_fill_defaults() {
     let yaml = "\
-video:
-  cameras:
-    - { id: solo, source: /dev/video0 }
+cameras:
+  - { id: solo, source: /dev/video0 }
 ";
     let (_dir, path) = write_tmp(yaml);
     let cfg = AgentVideoConfig::load_from(&path);
@@ -430,21 +425,20 @@ fn camera_leg_management_fields_parse_and_resolve_unchanged() {
     // the resolved leg is byte-identical to one without them (the pipeline
     // reads none of the metadata — it stays on id/source/role/codec/geometry).
     let yaml = "\
-video:
-  cameras:
-    - id: belly
-      source: /dev/video2
-      role: primary
-      codec: h265
-      name: Belly cam
-      orientation: down
-      purpose: [detect, precision-landing]
-      enabled: false
-      owner: operator
-      fov_deg: 82.5
-      mount_pitch_deg: -45.0
-      calibration: belly-v1
-      match: { usb: \"046d:0825:ABC123\" }
+cameras:
+  - id: belly
+    source: /dev/video2
+    role: primary
+    codec: h265
+    name: Belly cam
+    orientation: down
+    purpose: [detect, precision-landing]
+    enabled: false
+    owner: operator
+    fov_deg: 82.5
+    mount_pitch_deg: -45.0
+    calibration: belly-v1
+    match: { usb: \"046d:0825:ABC123\" }
 ";
     let (_dir, path) = write_tmp(yaml);
     let cfg = AgentVideoConfig::load_from(&path);
@@ -478,7 +472,7 @@ fn camera_leg_id_defaults_to_main_matching_python() {
     // A leg written without an explicit `id` resolves to "main" (the legacy
     // single-camera identity), matching the Python CameraLeg.id default so the
     // two halves parse an id-less leg the same way.
-    let yaml = "video:\n  cameras:\n    - { source: /dev/video0 }\n";
+    let yaml = "cameras:\n  - { source: /dev/video0 }\n";
     let (_dir, path) = write_tmp(yaml);
     let cfg = AgentVideoConfig::load_from(&path);
     assert_eq!(cfg.cameras.len(), 1);
@@ -488,11 +482,10 @@ fn camera_leg_id_defaults_to_main_matching_python() {
 #[test]
 fn camera_match_csi_fingerprint_parses() {
     let yaml = "\
-video:
-  cameras:
-    - id: nadir
-      source: /dev/video0
-      match: { csi_sensor: imx219, csi_port: 1 }
+cameras:
+  - id: nadir
+    source: /dev/video0
+    match: { csi_sensor: imx219, csi_port: 1 }
 ";
     let (_dir, path) = write_tmp(yaml);
     let cfg = AgentVideoConfig::load_from(&path);
@@ -515,9 +508,9 @@ agent:
   profile: drone
 video:
   camera: { source: usb, codec: h265 }
-  cameras:
-    - { id: eo, source: /dev/video0, role: primary }
-    - { id: ir, source: rtsp://pod/ir, role: ir }
+cameras:
+  - { id: eo, source: /dev/video0, role: primary }
+  - { id: ir, source: rtsp://pod/ir, role: ir }
 ";
     let (_dir, path) = write_tmp(yaml);
     let cfg = RosterVideoConfig::load_from(&path);
@@ -562,11 +555,10 @@ fn roster_config_profile_override_and_defaults() {
 #[test]
 fn resolved_leg_ownership_and_camera_config() {
     let yaml = "\
-video:
-  cameras:
-    - { id: main, source: /dev/video0, role: eo, codec: h264 }
-    - { id: belly, source: /dev/video1, role: eo_wide, codec: h265, width: 640, height: 480, fps: 15 }
-    - { id: ir, source: rtsp://pod/ir, role: ir }
+cameras:
+  - { id: main, source: /dev/video0, role: eo, codec: h264 }
+  - { id: belly, source: /dev/video1, role: eo_wide, codec: h265, width: 640, height: 480, fps: 15 }
+  - { id: ir, source: rtsp://pod/ir, role: ir }
 ";
     let (_dir, path) = write_tmp(yaml);
     let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
@@ -591,19 +583,18 @@ fn camera_leg_encode_plane_keys_reach_to_camera_config() {
     // must survive `resolve_legs` → `to_camera_config` (the per-leg encoder
     // command is built from that CameraConfig view).
     let yaml = "\
-video:
-  cameras:
-    - id: eo
-      source: /dev/video0
-      role: primary
-    - id: belly
-      source: /dev/video1
-      role: eo_wide
-      rotation: 180
-      hflip: true
-      vflip: false
-      encoder: omx
-      keyframe_interval: 5
+cameras:
+  - id: eo
+    source: /dev/video0
+    role: primary
+  - id: belly
+    source: /dev/video1
+    role: eo_wide
+    rotation: 180
+    hflip: true
+    vflip: false
+    encoder: omx
+    keyframe_interval: 5
 ";
     let (_dir, path) = write_tmp(yaml);
     let legs = AgentVideoConfig::load_from(&path).resolve_legs(&CameraConfig::default());
@@ -632,14 +623,14 @@ fn keyframe_interval_is_held_at_the_gop_ceiling() {
 video:
   camera:
     keyframe_interval: 300
-  cameras:
-    - id: eo
-      source: /dev/video0
-      role: primary
-      keyframe_interval: 31
-    - id: belly
-      source: /dev/video1
-      keyframe_interval: 30
+cameras:
+  - id: eo
+    source: /dev/video0
+    role: primary
+    keyframe_interval: 31
+  - id: belly
+    source: /dev/video1
+    keyframe_interval: 30
 ";
     let (_dir, path) = write_tmp(yaml);
     assert_eq!(
@@ -663,4 +654,62 @@ video:
 #[test]
 fn config_slice_conforms() {
     ados_config::schema::assert_slice_conforms::<CameraConfig>("/video/camera");
+}
+
+/// A camera the vision engine captures is never opened by the pipeline: its
+/// leg (primary or secondary, local device or URL) is encoded from the frame
+/// bus at its captured format and geometry.
+#[test]
+fn a_captured_leg_is_encoded_from_the_frame_bus() {
+    let yaml = "\
+cameras:
+  - id: cam_fl
+    role: front_left
+    source: rtsp://192.168.1.50:8554/we_v0_cam_fl
+    width: 1280
+    height: 800
+    fps: 20
+    format: gray8
+    capture: true
+    trigger: hub
+  - { id: cam_fr, source: /dev/video2, capture: true }
+  - { id: belly, source: /dev/video4 }
+";
+    let (_dir, path) = write_tmp(yaml);
+    let cfg = AgentVideoConfig::load_from(&path);
+    let legs = cfg.resolve_legs(&CameraConfig::default());
+    assert_eq!(legs[0].id, "main");
+    assert_eq!(legs[0].role, "front_left");
+    assert_eq!(legs[0].source, "framebus://cam_fl");
+    assert!(legs[0].is_primary && !legs[0].is_network_pull);
+    assert_eq!(
+        legs[0].raw_input(),
+        Some(crate::encoder::RawInput {
+            format: ados_protocol::framebus::FrameFormat::Gray8,
+            width: 1280,
+            height: 800,
+            fps: 20,
+        })
+    );
+    assert_eq!(legs[1].source, "framebus://cam_fr");
+    assert!(legs[1].is_owned_encoder());
+    assert_eq!(
+        legs[1].framebus_format,
+        Some(ados_protocol::framebus::FrameFormat::Rgb24)
+    );
+    assert_eq!(legs[2].source, "/dev/video4");
+    assert_eq!(legs[2].raw_input(), None);
+    let primary = cfg.primary_camera_config(CameraConfig::default());
+    assert_eq!(primary.source, "framebus://cam_fl");
+    assert_eq!(primary.framebus_camera(), Some("cam_fl"));
+    assert!(primary.network_source().is_none());
+}
+
+/// The retired `video.cameras` list is no longer read: the installer moves it
+/// to the top-level list, and the services read only that.
+#[test]
+fn the_retired_video_cameras_list_is_not_read() {
+    let (_dir, path) = write_tmp("video:\n  cameras:\n    - { id: eo, source: /dev/video0 }\n");
+    assert!(AgentVideoConfig::load_from(&path).cameras.is_empty());
+    assert!(RosterVideoConfig::load_from(&path).cameras.is_empty());
 }

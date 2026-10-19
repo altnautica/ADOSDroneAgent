@@ -2,8 +2,9 @@
 //!
 //! The plugin host forwards `video.source.set` here (the gpio / radio command-
 //! socket precedent). The supervisor is the config-write + restart authority: it
-//! persists `video.cameras` under the config flock (0600, euid-0) and restarts
-//! `ados-video.service` so the pipeline resolves + serves the new source list.
+//! persists the top-level `cameras` list under the config flock (0600, euid-0) and restarts
+//! `ados-video.service` (and a running `ados-vision.service`, which owns the
+//! captured cameras) so both resolve + serve the new source list.
 //! One newline-JSON request → one newline-JSON response per connection.
 //!
 //! A driver plugin (e.g. a smart-camera / optical-pod driver) calls the plugin
@@ -30,6 +31,21 @@ pub const VIDEO_CMD_SOCK: &str = "/run/ados/video-cmd.sock";
 /// ados-video resolves its leg list once at startup, so a *restart* (not a
 /// reload) is what makes a new source list take effect.
 const ADOS_VIDEO_UNIT: &str = "ados-video.service";
+
+/// The vision engine unit. It owns the cameras marked `capture: true` and
+/// resolves them once at startup too, so a running engine is restarted with
+/// the pipeline. One that is not running (vision off, or a profile without
+/// it) is left alone: it reads the list when it next starts.
+const ADOS_VISION_UNIT: &str = "ados-vision.service";
+
+/// Restart both camera consumers after a camera-list write. The reply's `ok`
+/// follows the video pipeline, which serves every leg; the engine's restart
+/// is reported beside it.
+async fn restart_camera_consumers(pm: &dyn ProcessManager) -> (bool, bool) {
+    let video = pm.restart(ADOS_VIDEO_UNIT).await;
+    let vision = pm.try_restart(ADOS_VISION_UNIT).await;
+    (video, vision)
+}
 
 /// Cap a request so a peer that never sends a newline cannot grow the buffer
 /// unbounded. A camera list is small; 64 KiB is generous.
@@ -173,7 +189,7 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
         }
     }
 
-    // Persist video.cameras under the config flock (0600, euid-0), merging by
+    // Persist `cameras` under the config flock (0600, euid-0), merging by
     // owner so this write preserves the other owners' legs, then restart the
     // video pipeline so it resolves + serves the new source list. A write that
     // names another owner's leg, or a plugin primary over the operator's, is
@@ -196,8 +212,8 @@ async fn dispatch(req: &[u8], pm: &dyn ProcessManager) -> Value {
     // the actual restart (not just the config write). A restart failure is a
     // real failure the caller logs + retries — the config is saved (persisted:
     // true) and will apply on the next start, but the streams are not live yet.
-    let restarted = pm.restart(ADOS_VIDEO_UNIT).await;
-    json!({"ok": restarted, "count": legs.len(), "persisted": true, "restarted": restarted})
+    let (restarted, vision_restarted) = restart_camera_consumers(pm).await;
+    json!({"ok": restarted, "count": legs.len(), "persisted": true, "restarted": restarted, "vision_restarted": vision_restarted})
 }
 
 #[cfg(test)]

@@ -149,7 +149,7 @@ impl VideoOrchestrator {
         // The `/main` sweep is PUBLISHER-scoped: every tap reads that same URI,
         // so a plain pattern sweep would kill a cloud push or SEI tap that a
         // partial teardown legitimately left running.
-        kill_orphans(&format!("-i {device_path}")).await;
+        kill_orphans(&format!("-i {}", crate::encoder::input_locator(&device_path))).await;
         kill_orphans("rpicam-vid").await;
         let pipe_uri = self.pipe_uri();
         kill_publisher_orphans(&pipe_uri).await;
@@ -223,6 +223,9 @@ impl VideoOrchestrator {
                 return false;
             }
         }
+        // A captured camera's frames reach the encoder through its frame-bus
+        // pipe; the pump has to exist before the encoder opens it.
+        self.reconcile_framebus_feeds();
 
         // Spawn the encoder. A PLAIN rate-limited stderr drain (no progress
         // tracker — the encoder is the source, not the wfb tap).
@@ -334,6 +337,11 @@ impl VideoOrchestrator {
     ) -> Result<PrimaryCommand, StartError> {
         let pipe_uri = self.pipe_uri();
         let mut params = EncoderParams::from_camera_config(kind, &self.camera_cfg);
+        params.framebus_input = self
+            .legs
+            .iter()
+            .find(|l| l.is_primary)
+            .and_then(|l| l.raw_input());
         if self.force_software {
             // The hardware / GStreamer encoder failed to produce video; force
             // the always-runnable software path (ffmpeg libx264) so video keeps
@@ -391,6 +399,12 @@ impl VideoOrchestrator {
         if let Some(url) = self.camera_cfg.network_source().map(str::to_string) {
             tracing::info!(source = %url, "video_streaming_from_network_source");
             self.last_cameras = discover::DiscoveryResult::for_network_source(&url);
+            return;
+        }
+        if let Some(id) = self.camera_cfg.framebus_camera().map(str::to_string) {
+            // The vision engine owns this camera; there is nothing to probe.
+            tracing::info!(camera = %id, "video_streaming_from_framebus");
+            self.last_cameras = discover::DiscoveryResult::for_framebus_source(&id);
             return;
         }
         let fingerprint = crate::sysfs_fingerprint::fingerprint();

@@ -65,6 +65,18 @@ async fn video_cameras_set_op_is_routed_not_unknown() {
 }
 
 #[tokio::test]
+async fn a_camera_write_restarts_the_pipeline_and_a_running_engine() {
+    let pm = RecordingPm {
+        restarted: std::sync::Mutex::new(Vec::new()),
+    };
+    assert_eq!(restart_camera_consumers(&pm).await, (true, true));
+    assert_eq!(
+        *pm.restarted.lock().unwrap(),
+        vec![ADOS_VIDEO_UNIT.to_string(), ADOS_VISION_UNIT.to_string()]
+    );
+}
+
+#[tokio::test]
 async fn non_array_and_empty_and_incomplete_lists_are_rejected() {
     for body in [
         br#"{"op":"video.source.set","cameras":"main"}"#.as_slice(),
