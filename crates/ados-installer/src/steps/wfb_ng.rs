@@ -57,7 +57,7 @@ fn version_drift(vendored: Option<&str>, installed: Option<&str>) -> Option<Stri
 /// True when `bin` resolves on PATH or in the two dirs `setup.py install` writes
 /// console scripts to. Replaces a `command -v` shell-out (a builtin, not a
 /// binary) so the verify never depends on `which` being present.
-fn on_path(bin: &str) -> bool {
+pub(crate) fn on_path(bin: &str) -> bool {
     if let Ok(path) = std::env::var("PATH") {
         if std::env::split_paths(&path).any(|dir| dir.join(bin).is_file()) {
             return true;

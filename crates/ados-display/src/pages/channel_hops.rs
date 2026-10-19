@@ -9,7 +9,7 @@
 //!
 //! The content region is a 480x244 frame that sits below the persistent top
 //! status bar, so every page-local y derives from [`CONTENT_Y`]. The page is a
-//! pure composer: no tap drilldowns, only the bottom-bar tab zones.
+//! pure composer: no tap drilldowns and no zones of its own.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -21,7 +21,7 @@ use crate::graphics::primitives::{fill_circle, fill_rect, fill_rect_outline, lin
 use crate::pages::{
     blank_panel, Chrome, HitZone, HopEntry, Page, PageContext, CONTENT_H, CONTENT_Y, PANEL_W,
 };
-use crate::widgets::{bottom_bar_zones, draw_bottom_bar, draw_top_bar};
+use crate::widgets::draw_top_bar;
 
 /// Content-region width.
 const PAGE_W: i32 = PANEL_W as i32;
@@ -98,13 +98,12 @@ impl Page for ChannelHopsPage {
             draw_chart(&mut canvas, palette, history, radio_channel);
             draw_legend(&mut canvas, palette, history);
         }
-
-        draw_bottom_bar(&mut canvas, palette, self.id());
         canvas
     }
 
     fn hit_zones(&self, _ctx: &PageContext) -> Vec<HitZone> {
-        bottom_bar_zones()
+        // A read-out page; the navigator owns the tab bar.
+        Vec::new()
     }
 }
 
@@ -441,12 +440,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_history_renders_with_tab_zones() {
+    fn empty_history_renders_with_no_zones() {
         let page = ChannelHopsPage;
         let ctx = PageContext::default();
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
-        assert_eq!(page.hit_zones(&ctx).len(), 5);
+        assert!(page.hit_zones(&ctx).is_empty());
         assert_eq!(page.id(), "channel_hops");
     }
 

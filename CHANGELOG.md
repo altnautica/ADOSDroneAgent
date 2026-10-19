@@ -8,6 +8,67 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Front panel on a visor; GNSS, radios and LoRa on the panel and TUI.**
+  The panel config routes (`/api/v1/ground-station/ui*`) accept a visor and
+  serve profile defaults from one shared table: the visor screens are the
+  capture HUD plugin page, cameras, sensors, storage and about, and its B1/B2
+  short presses carry the new `passthrough` action, which only plugin button
+  subscribers act on. `ados-pic` (the button reader) runs on a visor. The
+  LCD tab bar follows the configured screens; new LCD pages `cameras`,
+  `sensors`, `storage`, `details.gnss`, `details.radios`, `details.lora` and a
+  `shutdown_prompt` power-off confirmation backed by
+  `POST /api/v1/setup/shutdown` (refused over the cloud relay: a remote
+  power-off strands the node). The I2C OLED status frame gains
+  `gnss <fix> <sats>` and `radios <n>` and rotates through the configured
+  `gnss`, `radios` and `lora` screens when those services are present; the
+  LoRa views show region, duty use and the transmit state with its reason.
+  The TUI adds a per-profile row (visor capture, storage, clock and hub IMU;
+  ground-station radios, GNSS and LoRa; drone sensor rates).
+
+- **ROCK 5B+ board profile, ROCK 5C sensor bindings.** `rock-5b-plus`
+  (detected from `radxa,rock-5b-plus` / "Radxa ROCK 5B+"; a plain ROCK 5B
+  does not match) declares both 4-lane CSI connectors with their Radxa
+  Camera 4K overlays, GNSS on UART7-M1 (`/dev/ttyS7`) with PPS on header pin
+  16 (GPIO 100), the USB sensor hub, and panel buttons on header pins
+  29/31/33/35. The shared ROCK 5C / 5C Lite profile gains its CSI connector,
+  GNSS on UART8-M0 (`/dev/ttyS8`) with PPS on header pin 16 (GPIO 37), and
+  panel buttons on header pins 29/31/33/35. Neither declares a battery gauge:
+  the shunt is the rig's, bound under `battery.gauge` in the agent config.
+  The ROCK 5B+ builds the RTL8812EU driver on device.
+
+- **Panel buttons follow the board's GPIO numbering.** A board profile's
+  `buttons` are the board's GPIO numbers: BCM lines on a Raspberry Pi,
+  Linux GPIO numbers on Rockchip, read from `/dev/gpiochip<n / 32>` line
+  `n % 32`. B1..B4 follow the up/down/select/back order, so the panel button
+  tables apply on every board, and the button stream's `label` comes from
+  that order. A board profile's `reserved_gpio` lists lines bound to a bus,
+  console or panel; a button on one of them, or on the GNSS PPS line, fails
+  the profile. A board that is not a Raspberry Pi and declares no buttons has
+  no button reader (`buttons_not_declared`) instead of falling back to the
+  Raspberry Pi lines. Plugin button presses carry the panel `label` (`B1`..)
+  next to the board `pin`.
+
+- **PPS overlay at install.** On a ground station or visor whose board
+  profile declares `gnss.pps_gpio` for a serial or sensor-hub receiver (never
+  on a drone or other profile), the installer enables a pps-gpio overlay: the stock
+  `pps-gpio` overlay on a Raspberry Pi, a generated and `dtc`-compiled
+  `ados-pps` overlay on Rockchip boards (Radxa `/boot/dtbo` + `u-boot-update`,
+  Armbian `user_overlays`), and loads the `pps-gpio` module. Not yet
+  validated on hardware.
+
+- **Dashboard pages for GNSS, LoRa, capture and sensors.** Ground station:
+  `/gnss` (receivers, survey/off base mode, RTCM out); ground station and
+  drone: `/lora` (region, TX line with pause countdown, one meter per
+  governor rule, refusals, admin region picker with confirm, locked while
+  armed, beacons, module band / ELRS domain / Meshtastic / airborne chips).
+  Visor:
+  `/capture` (REC/STOP/MARK through the world-engine plugin route, health
+  chips, refusal codes) and `/settings/capture` (storage, exposure). Drone
+  and visor: `/sensors` and `/settings/sensors` (hub, rig upload, clock
+  sources). A node with an unrecognised profile sees a neutral
+  "not available on this node" state. The cockpit ignores `passthrough`
+  button actions, which are reserved for plugins.
+
 - **Plugin capabilities `sensor.stream.read` and `capture.storage.write`.**
   Both are enforced by the generated plugin unit. `sensor.stream.read` binds
   `/run/ados/sensors.sock` and `/run/ados/clock.json` read-only into the
@@ -117,8 +178,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **Several ELRS modules.** `radio.crsf.modules[]` (`pilot|autonomy`);
   `crsf-stats` v2 and `GET /api/v1/ground-station/crsf` carry `modules[]`
   with per-module link statistics and the reported ELRS `domain`.
-- **INA226 battery gauge.** A `battery_gauge` binding in `board.json` adds a
-  pack with `"source": "ina226"` to `GET /api/v1/battery`.
+- **INA226 battery gauge.** A `battery.gauge` binding in the agent config
+  (`type`, `i2c_bus`, `addr`, `shunt_ohm`, `max_current_a`, all required), else
+  a `battery_gauge` binding in `board.json`, adds a pack with
+  `"source": "ina226"` to `GET /api/v1/battery`. A binding missing its shunt
+  values leaves the gauge absent with a logged reason.
 
 ### Changed
 

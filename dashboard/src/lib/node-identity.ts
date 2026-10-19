@@ -12,12 +12,12 @@ export function groundRoleFrom(raw: string | null | undefined): GroundRole {
   return "direct";
 }
 
-export type GateDecision = "pass" | "mismatch";
+export type GateDecision = "pass" | "mismatch" | "unavailable";
 
 /** Whether a page restricted to `allow` (and optionally to ground `roles`)
  *  renders on this node. Only `auto` (the agent has not answered yet) passes
- *  through ungated; `unknown` (a profile this dashboard does not know) is a
- *  mismatch. */
+ *  through ungated; `unknown` (a profile this dashboard does not know) is
+ *  `unavailable`: no gated page applies to it, with no profile to switch to. */
 export function gateDecision(
   profile: Profile,
   role: GroundRole,
@@ -25,7 +25,7 @@ export function gateDecision(
   roles?: readonly GroundRole[],
 ): GateDecision {
   if (profile === "auto") return "pass";
-  if (profile === "unknown") return "mismatch";
+  if (profile === "unknown") return "unavailable";
   if (!allow.includes(profile)) return "mismatch";
   if (profile === "ground_station" && roles && roles.length > 0 && !roles.includes(role)) {
     return "mismatch";

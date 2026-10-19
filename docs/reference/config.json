@@ -128,6 +128,56 @@
       "type": "boolean"
     },
     {
+      "default": null,
+      "description": "Addr",
+      "enum": null,
+      "key": "battery.gauge.addr",
+      "maximum": 119,
+      "minimum": 3,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "I2C Bus",
+      "enum": null,
+      "key": "battery.gauge.i2c_bus",
+      "maximum": 255,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Max Current A",
+      "enum": null,
+      "key": "battery.gauge.max_current_a",
+      "maximum": null,
+      "minimum": 0,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": null,
+      "description": "Shunt Ohm",
+      "enum": null,
+      "key": "battery.gauge.shunt_ohm",
+      "maximum": null,
+      "minimum": 0,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": null,
+      "description": "Type",
+      "enum": null,
+      "key": "battery.gauge.type",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": 3500,
       "description": "Low Cell Mv",
       "enum": null,

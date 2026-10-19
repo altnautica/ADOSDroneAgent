@@ -5,9 +5,10 @@
 //! runs the session watchdog (auto-release after the heartbeat timeout), and
 //! reads the front-panel GPIO buttons. Modelled on `ados-supervisor`'s main.
 //!
-//! On a board with no `/dev/gpiochip*` the button reader is skipped cleanly —
-//! the daemon stays up for the PIC seam alone, which every ground station needs
-//! regardless of whether it has physical buttons.
+//! The button reader runs only on a board whose sidecar binds buttons it can
+//! map to GPIO lines (see [`crate::buttons::board`]); otherwise it is skipped
+//! with a logged reason and the daemon stays up for the PIC seam alone, which
+//! every ground station needs regardless of whether it has physical buttons.
 
 use std::path::Path;
 use std::sync::{Arc, RwLock};
@@ -126,7 +127,10 @@ async fn serve() -> Result<()> {
         // and a SIGHUP remap reaches both. It stays inert unless the operator
         // sets ADOS_BUTTONS_ALLOW_INJECT=1 (the op checks the env itself).
         let inject = Arc::new(std::sync::Mutex::new(
-            crate::buttons::PressClassifier::with_mapping(mapping.clone()),
+            crate::buttons::PressClassifier::with_pins(
+                mapping.clone(),
+                buttons::board_pins_or_default(Path::new(buttons::BOARD_SIDECAR)),
+            ),
         ));
         let button_bus = button_bus.clone();
         tokio::spawn(async move {
@@ -187,12 +191,14 @@ async fn serve() -> Result<()> {
     std::process::exit(0);
 }
 
-/// Load + merge `ground_station.ui.buttons.mapping` over the defaults. A missing
-/// config or block falls back to the defaults verbatim.
+/// Load + merge `ground_station.ui.buttons.mapping` over the defaults of the
+/// node's resolved profile (a visor gets the visor table). A missing config or
+/// block falls back to the defaults verbatim. Re-resolved on every SIGHUP.
 fn load_button_mapping() -> std::collections::HashMap<String, String> {
+    let profile = ados_config::node_profile().replace('-', "_");
     match read_buttons_block() {
-        Some(block) => buttons::merge_mapping(&block),
-        None => default_button_mapping(),
+        Some(block) => buttons::merge_mapping(&profile, &block),
+        None => default_button_mapping(&profile),
     }
 }
 
@@ -210,8 +216,14 @@ fn read_buttons_block() -> Option<serde_norway::Value> {
         .cloned()
 }
 
-/// Spawn the button reader on a blocking task when a GPIO chip exists; otherwise
-/// log the skip and return. Only the chip-open is hardware-coupled; the
+/// How long the reader waits for the supervisor to publish the board sidecar
+/// before giving up on buttons for this run.
+#[cfg(target_os = "linux")]
+const SIDECAR_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Spawn the button reader on a blocking task. It waits for the board sidecar,
+/// resolves the board's button lines, and skips with a logged reason when the
+/// board binds none it can read. Only the chip-open is hardware-coupled; the
 /// classification runs through the shared [`PressClassifier`]. Each classified
 /// press is published to `button_bus` so the display/OLED subscriber acts on it
 /// (and logged for the journal).
@@ -220,23 +232,48 @@ fn spawn_button_reader(
     mapping: Arc<RwLock<std::collections::HashMap<String, String>>>,
     button_bus: ButtonEventBus,
 ) {
-    use crate::buttons::{
-        board_pins_or_default, gpio_subsystem_present, ButtonEvent, PressClassifier, BOARD_SIDECAR,
-    };
+    use crate::buttons::{button_lines, ButtonEvent, ButtonsSkip, PressClassifier, BOARD_SIDECAR};
     use crate::eventbus::ButtonBusEvent;
 
-    if !gpio_subsystem_present() {
-        tracing::info!("button reader skipped: no /dev/gpiochip*");
-        return;
-    }
-    // The board sidecar's `buttons` block wins; boards without one use the
-    // fixed fallback pins.
-    let pins = board_pins_or_default(std::path::Path::new(BOARD_SIDECAR));
     tokio::task::spawn_blocking(move || {
-        let mut classifier = PressClassifier::with_mapping(mapping);
+        let started = std::time::Instant::now();
+        let text = loop {
+            match std::fs::read_to_string(BOARD_SIDECAR) {
+                Ok(text) => break Some(text),
+                Err(_) if started.elapsed() < SIDECAR_WAIT => {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                }
+                Err(_) => break None,
+            }
+        };
+        let lines = text
+            .ok_or(ButtonsSkip::SidecarUnreadable)
+            .and_then(|text| button_lines(&text));
+        let lines = match lines {
+            Ok(lines) => lines,
+            Err(skip) => {
+                match &skip {
+                    ButtonsSkip::NumberingUnknown { soc } => {
+                        tracing::warn!(soc = %soc, "{}", skip.event())
+                    }
+                    ButtonsSkip::Reserved { gpio } => tracing::warn!(gpio, "{}", skip.event()),
+                    _ => tracing::info!(sidecar = BOARD_SIDECAR, "{}", skip.event()),
+                }
+                return;
+            }
+        };
+        let pins = lines.map(|l| l.gpio);
+        let mut classifier = PressClassifier::with_pins(mapping, pins);
+        tracing::info!(
+            lines = ?lines.map(|l| (l.chip, l.line)),
+            gpio = ?pins,
+            "button reader started"
+        );
         let on_event = |ev: ButtonEvent| {
+            let label = buttons::pin_label(&pins, ev.pin);
             tracing::info!(
                 pin = ev.pin,
+                label = %label,
                 kind = ev.kind.as_str(),
                 action = ?ev.action,
                 "button event"
@@ -244,14 +281,13 @@ fn spawn_button_reader(
             // Fan out to the display/OLED consumer over the control socket.
             button_bus.publish(ButtonBusEvent {
                 button: ev.pin,
+                label,
                 kind: ev.kind.as_str(),
                 action: ev.action.clone(),
                 timestamp_ms: ev.timestamp_ms,
             });
         };
-        // gpiochip0 is the conventional primary chip on the supported boards.
-        if let Err(e) = buttons::run_event_loop("/dev/gpiochip0", &pins, &mut classifier, on_event)
-        {
+        if let Err(e) = buttons::run_event_loop(&lines, &mut classifier, on_event) {
             // A read error here is not fatal to the PIC seam; log and let the
             // daemon stay up serving the socket.
             tracing::warn!(error = %e, "button reader exited");

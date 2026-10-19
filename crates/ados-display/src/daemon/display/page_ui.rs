@@ -133,7 +133,16 @@ pub(super) async fn run_page_ui(
     }
     let mut palette: Palette = palette_from_conf(conf_blob);
 
-    let mut navigator = PageNavigator::new(all_pages());
+    // The tab bar follows the node profile and the persisted screen list; it
+    // is rebuilt in place on SIGHUP (the screens write route signals this unit).
+    let panel = crate::panel_conf::PanelConf::load();
+    tracing::info!(profile = %panel.profile, tabs = ?panel.tab_ids(), "panel page set");
+    // The live button mapping: the power prompt names its keys, and the button
+    // reader below resolves board-pin presses through it.
+    let button_layout = crate::button_source::ButtonLayout::load(Path::new(
+        crate::host_identity::BOARD_SIDECAR_PATH,
+    ));
+    let mut navigator = PageNavigator::new(all_pages(&button_layout), &panel.tab_ids());
     // The agent state is read on its own thread; the loop only ever borrows the
     // latest context, so a wedged agent never stalls touch, render or watchdog.
     let poller = StatePoller::spawn(StateSource::new(), STATE_POLL_PERIOD);
@@ -173,9 +182,6 @@ pub(super) async fn run_page_ui(
     // is the transport that lets a press reach the navigator, which has always
     // known what to do with one. A node whose `ados-pic` is absent or down simply
     // never yields an event — the reader retries quietly and the UI is unaffected.
-    let button_layout = crate::button_source::ButtonLayout::load(Path::new(
-        crate::host_identity::BOARD_SIDECAR_PATH,
-    ));
     let mut button_rx = crate::button_source::spawn_button_reader(
         std::path::PathBuf::from(crate::button_source::BUTTONS_SOCK),
         button_layout,
@@ -185,8 +191,8 @@ pub(super) async fn run_page_ui(
     let mut sigint = signal(SignalKind::interrupt())?;
     // SIGHUP is the in-place config-reload signal. The agent's REST handlers
     // SIGHUP this unit after persisting a UI config change; without a handler
-    // the default disposition would terminate the daemon, so the handler must
-    // exist even though the only live-reloadable surface today is the theme.
+    // the default disposition would terminate the daemon. The theme and the
+    // panel page set reload on it.
     let mut sighup = signal(SignalKind::hangup())?;
 
     let mut tick = tokio::time::interval(TICK_GRANULARITY);
@@ -462,12 +468,15 @@ pub(super) async fn run_page_ui(
                 }
             }
             _ = sighup.recv() => {
-                // Re-read the display config and rebuild the palette in place.
-                // Force a render next tick so the new theme paints immediately.
+                // Re-read the display config and rebuild the palette in place,
+                // then the panel page set (the tab list) from the agent config.
+                // Force a render next tick so both paint immediately.
                 let fresh = conf::parse(Path::new(conf::DISPLAY_CONF_PATH));
                 palette = palette_from_conf(&fresh);
+                let panel = crate::panel_conf::PanelConf::load();
+                navigator.set_tabs(&panel.tab_ids());
                 last_render = None;
-                tracing::info!("received SIGHUP; reloaded display config");
+                tracing::info!(tabs = ?navigator.tabs(), "received SIGHUP; reloaded display config");
             }
             _ = sigterm.recv() => {
                 tracing::info!("received SIGTERM");

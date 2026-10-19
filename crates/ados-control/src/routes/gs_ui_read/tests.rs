@@ -1,6 +1,103 @@
 use super::*;
 use serde_json::json;
 
+const GS_SCREENS: [&str; 9] = [
+    "home", "link", "drone", "network", "system", "qr", "gnss", "radios", "lora",
+];
+
+/// An `AppState` rooted in `dir` whose config resolves to `profile`.
+fn state_with_profile(dir: &std::path::Path, profile: &str) -> AppState {
+    std::fs::write(
+        dir.join("config.yaml"),
+        format!("agent:\n  profile: {profile}\n"),
+    )
+    .unwrap();
+    let pairing_paths = crate::state::PairingPaths {
+        config: dir.join("config.yaml"),
+        pairing_json: dir.join("pairing.json"),
+        wfb_key_dir: dir.join("wfb"),
+        bind_state: dir.join("bind-state.json"),
+        profile_conf: dir.join("profile.conf"),
+        mesh_role: dir.join("mesh-role"),
+        relay_secret: dir.join("relay-peer-secret"),
+    };
+    AppState::new(
+        std::sync::Arc::new(crate::auth::PairingState::with_path(
+            dir.join("pairing.json"),
+        )),
+        crate::ipc::StateIpcClient::disconnected(),
+        crate::ipc::MavlinkIpcClient::new(dir.join("absent-mavlink.sock")),
+        crate::ipc::LogdQueryClient::new(dir.join("absent-logd.sock")),
+        dir.join("board.json"),
+        pairing_paths,
+        std::sync::Arc::new(crate::dashboard_pin::DashboardPin::with_path(
+            dir.join("dashboard-pin.json"),
+        )),
+        std::sync::Arc::new(crate::mcp::McpTokenStore::with_path(
+            dir.join("mcp-token.json"),
+        )),
+    )
+}
+
+async fn body_json(resp: Response) -> Value {
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn visor_ui_read_serves_the_visor_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let resp = get_ui(State(state_with_profile(dir.path(), "visor"))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_json(resp).await;
+    let screens = json!([
+        "plugin:capture_hud",
+        "cameras",
+        "sensors",
+        "storage",
+        "about"
+    ]);
+    assert_eq!(body["screens"]["order"], screens);
+    assert_eq!(body["screens"]["enabled"], screens);
+    assert_eq!(body["buttons"]["mapping"]["B1_short"], json!("passthrough"));
+    assert_eq!(
+        body["buttons"]["mapping"]["B1_long"],
+        json!("shutdown_prompt")
+    );
+    assert_eq!(
+        body["buttons"]["mapping"]["B3_short"],
+        json!("cycle_screen")
+    );
+}
+
+#[tokio::test]
+async fn ground_station_ui_read_serves_the_ground_station_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let resp = get_ui(State(state_with_profile(dir.path(), "ground_station"))).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(body_json(resp).await["screens"]["order"], json!(GS_SCREENS));
+}
+
+#[tokio::test]
+async fn drone_ui_read_is_a_profile_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let resp = get_ui(State(state_with_profile(dir.path(), "drone"))).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        body_json(resp).await,
+        json!({"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}})
+    );
+}
+
+#[tokio::test]
+async fn visor_kiosk_display_read_is_a_profile_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let resp = get_display(State(state_with_profile(dir.path(), "visor"))).await;
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
 #[test]
 fn profile_mismatch_is_the_fastapi_404_shape() {
     let resp = profile_mismatch();
@@ -18,7 +115,7 @@ fn ui_config_of_an_absent_side_file_is_the_all_defaults_shape() {
     // With no ground-station-ui.json the blob is empty, so every section is the
     // built-in default. This is the golden shape the GCS reads on a fresh GS.
     let blob = Map::new();
-    let got = build_ui_config(&blob);
+    let got = build_ui_config("ground_station", &blob);
     let want = json!({
         "oled": {
             "brightness": 204,
@@ -31,11 +128,13 @@ fn ui_config_of_an_absent_side_file_is_the_all_defaults_shape() {
                 "B2_long": "show_qr",
                 "B3_short": "confirm",
                 "B3_long": "pair_drone",
+                "B4_short": "back",
+                "B4_long": "menu",
             }
         },
         "screens": {
-            "order": ["home", "link", "drone", "network", "system", "qr"],
-            "enabled": ["home", "link", "drone", "network", "system", "qr"],
+            "order": GS_SCREENS,
+            "enabled": GS_SCREENS,
         },
     });
     assert_eq!(got, want);
@@ -50,15 +149,12 @@ fn ui_config_merges_a_stored_section_over_the_defaults() {
         "oled".to_string(),
         json!({"brightness": 120, "auto_dim_enabled": false, "screen_cycle_seconds": 9}),
     );
-    let got = build_ui_config(&blob);
+    let got = build_ui_config("ground_station", &blob);
     // The stored contrast wins; the retired keys are not served.
     assert_eq!(got["oled"], json!({"brightness": 120}));
     // Untouched sections are the full defaults.
     assert_eq!(got["buttons"]["mapping"]["B1_short"], json!("cycle_screen"));
-    assert_eq!(
-        got["screens"]["order"],
-        json!(["home", "link", "drone", "network", "system", "qr"])
-    );
+    assert_eq!(got["screens"]["order"], json!(GS_SCREENS));
 }
 
 #[test]
@@ -71,7 +167,7 @@ fn ui_config_replaces_screen_lists_wholesale() {
         "screens".to_string(),
         json!({"order": ["home", "link"], "enabled": ["home"]}),
     );
-    let got = build_ui_config(&blob);
+    let got = build_ui_config("ground_station", &blob);
     assert_eq!(got["screens"]["order"], json!(["home", "link"]));
     assert_eq!(got["screens"]["enabled"], json!(["home"]));
 }

@@ -25,6 +25,10 @@ const BUTTON_SCOPE = "gs.button_events";
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 10_000;
 
+/** The panel action that hands a button to plugins (see the agent's
+ *  `panel_ui::PASSTHROUGH`). */
+const PASSTHROUGH_ACTION = "passthrough";
+
 /** Default binding from a raw button identity to a folded command. The panel
  *  owns this table; on-rig the exact identity strings the `ados-pic` reader
  *  emits are confirmed against the live stream and adjusted here. Common
@@ -58,9 +62,13 @@ const BUTTON_BINDINGS: Record<string, NavCommand> = {
  *  classified event per gesture (short/long in `kind`), and `action` is the
  *  mapped SEMANTIC (e.g. `cycle_screen`), never `press`, so gating on `action
  *  === "press"` discarded every real press. The binding keys on the stable
- *  `label` (b1..b4) the emitter now sends, falling back to the raw pin. */
-function eventToCommand(ev: ButtonEvent): NavCommand | null {
+ *  `label` (b1..b4) the emitter now sends, falling back to the raw pin.
+ *
+ *  An event whose `action` is `passthrough` is reserved for plugins and never
+ *  drives the panel navigator. */
+export function eventToCommand(ev: ButtonEvent): NavCommand | null {
   if (ev.kind === "cancel") return null;
+  if (ev.action === PASSTHROUGH_ACTION) return null;
   const id = (ev.label ?? ev.button ?? "")
     .toString()
     .trim()

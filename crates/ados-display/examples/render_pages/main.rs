@@ -25,8 +25,9 @@ use ados_display::pages::{
     diagnostics::DiagnosticsDetailPage, drone::DroneDetailPage, link_stats::LinkStatsPage,
     mesh::MeshDetailPage, more::MorePage, pair_drone::PairDroneDetailPage,
     radio_link::RadioLinkDetailPage, settings::SettingsPage, uplink::UplinkDetailPage,
-    video::VideoPage, Page, PageContext, PanelAction,
+    video::VideoPage, Page, PageContext, PanelAction, GS_TAB_IDS,
 };
+use ados_display::widgets::draw_bottom_bar;
 
 use fixtures::{connected_context, receiver_context, unpaired_context};
 
@@ -140,7 +141,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (variant, ctx) in &variants {
         for entry in &pages {
-            let canvas = entry.page.render(ctx, palette);
+            let mut canvas = entry.page.render(ctx, palette);
+            // The navigator paints the tab bar over a tabbed page on the panel.
+            if entry.page.chrome().has_tab_bar() {
+                draw_bottom_bar(&mut canvas, palette, &GS_TAB_IDS, entry.page.id());
+            }
             let name = format!("{}_{variant}.png", entry.file_id);
             save(&canvas, &out_dir, &name, &mut written)?;
         }

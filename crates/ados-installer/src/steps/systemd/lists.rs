@@ -200,6 +200,7 @@ mod tests {
                 "ados-hostapd.service",
                 "ados-dnsmasq-gs.service",
                 "ados-input.service",
+                "ados-pic.service",
                 "ados-uplink-router.service",
             ]
         );
@@ -213,7 +214,6 @@ mod tests {
                 "ados-mediamtx-gs.service",
                 "ados-setup-captive.service",
                 "ados-kiosk.service",
-                "ados-pic.service",
                 "ados-batman.service",
             ])
         );
@@ -226,6 +226,7 @@ mod tests {
                 "ados-hostapd.service",
                 "ados-dnsmasq-gs.service",
                 "ados-input.service",
+                "ados-pic.service",
                 "ados-uplink-router.service",
             ]
         );

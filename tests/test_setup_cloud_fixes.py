@@ -103,3 +103,48 @@ def test_reboot_falls_back_when_systemctl_fails(monkeypatch) -> None:
     monkeypatch.setattr(cloud.asyncio, "sleep", no_sleep)
     asyncio.run(cloud._reboot_after_delay(0))
     assert ran == [["systemctl", "reboot"], ["/sbin/reboot"]]
+
+
+def test_poweroff_falls_back_when_systemctl_fails(monkeypatch) -> None:
+    import ados.api.routes.setup.cloud as cloud
+
+    ran: list[list[str]] = []
+
+    class _Proc:
+        async def wait(self) -> int:
+            return 1 if ran[-1][0] == "systemctl" else 0
+
+    async def fake_exec(*cmd, **_kw):
+        ran.append(list(cmd))
+        return _Proc()
+
+    async def no_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(cloud.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(cloud.asyncio, "sleep", no_sleep)
+    asyncio.run(cloud._poweroff_after_delay(0))
+    assert ran == [["systemctl", "poweroff"], ["/sbin/poweroff"]]
+
+
+def test_shutdown_route_schedules_poweroff(monkeypatch) -> None:
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import ados.api.routes.setup as setup_routes
+    import ados.api.routes.setup.cloud as cloud
+
+    called: list[float] = []
+
+    def _stub(seconds: float):
+        called.append(seconds)
+        return asyncio.sleep(0)
+
+    monkeypatch.setattr(cloud, "_poweroff_after_delay", _stub)
+    app = FastAPI()
+    app.include_router(setup_routes.router)
+    with TestClient(app) as client:
+        resp = client.post("/v1/setup/shutdown")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert called == [3.0]

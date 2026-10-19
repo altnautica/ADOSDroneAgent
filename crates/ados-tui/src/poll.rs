@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use ados_protocol::rest::RestClient;
 use serde_json::Value;
 
-use crate::model::{Dashboard, History};
+use crate::model::{present, Dashboard, History, ProfileRoutes, RouteSet, CAPTURE_STATE_PATH};
 
 /// One poll of the agent: the setup status the dashboard is built from, the
 /// best-effort native status carrying the FC transport/heartbeat split, and the
@@ -21,6 +21,37 @@ pub struct PollResult {
     pub setup: Result<Value, String>,
     pub fc_status: Option<Value>,
     pub status_full: Option<Value>,
+    /// The per-profile optional routes (sensors, clock, storage, GNSS, LoRa,
+    /// radios, capture), polled only for the profile that shows them.
+    pub profile: ProfileRoutes,
+}
+
+/// Fetch the optional routes the reported profile shows. A failed request or a
+/// `present: false` body leaves the field `None`.
+fn poll_profile(client: &RestClient, setup: &Result<Value, String>) -> ProfileRoutes {
+    let profile = setup
+        .as_ref()
+        .ok()
+        .and_then(|s| s.get("profile"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let set = RouteSet::for_profile(profile);
+    let get = |want: bool, path: &str| {
+        if want {
+            client.get_json(path).ok().and_then(present)
+        } else {
+            None
+        }
+    };
+    ProfileRoutes {
+        sensors: get(set.sensors, "/api/v1/sensors"),
+        clock: get(set.clock, "/api/v1/clock"),
+        storage: get(set.storage, "/api/v1/storage"),
+        gnss: get(set.gnss, "/api/v1/gnss"),
+        lora: get(set.lora, "/api/v1/lora"),
+        radio: get(set.radio, "/api/v1/radio/adapters"),
+        capture: get(set.capture, CAPTURE_STATE_PATH),
+    }
 }
 
 /// Handle to the poller thread.
@@ -41,10 +72,12 @@ impl Poller {
                 .map_err(|e| format!("Agent unreachable: {e}"));
             let fc_status = client.status().ok();
             let status_full = client.get_json("/api/status/full").ok();
+            let profile = poll_profile(&client, &setup);
             let result = PollResult {
                 setup,
                 fc_status,
                 status_full,
+                profile,
             };
             if result_tx.send(result).is_err() {
                 return;
@@ -98,6 +131,7 @@ impl AgentView {
                 if let Some(full) = &result.status_full {
                     dash.merge_services(full);
                 }
+                dash.merge_profile(&result.profile);
                 self.history.record(&dash);
                 self.dash = Some(dash);
                 self.error = None;
@@ -130,6 +164,7 @@ mod tests {
             })),
             fc_status: None,
             status_full: None,
+            profile: ProfileRoutes::default(),
         }
     }
 
@@ -144,6 +179,7 @@ mod tests {
             setup: Err("Agent unreachable: connection refused".into()),
             fc_status: None,
             status_full: None,
+            profile: ProfileRoutes::default(),
         };
         view.apply(failed, t0 + Duration::from_secs(2), "12:00:02".into());
         assert_eq!(
@@ -172,6 +208,7 @@ mod tests {
             setup: Ok(json!({"profile": "drone", "mavlink": {"connected": false}})),
             fc_status: Some(json!({"fcVariant": "inav"})),
             status_full: Some(json!({"services": [{"state": "failed"}]})),
+            profile: ProfileRoutes::default(),
         };
         view.apply(result, Instant::now(), "12:00:00".into());
         let dash = view.dash.unwrap();

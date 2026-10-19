@@ -103,8 +103,11 @@ pub const BUTTON_EVENT_QUEUE_DEPTH: usize = 64;
 /// consumer parses it with `json.loads` and a Rust consumer with serde.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ButtonBusEvent {
-    /// BCM pin number.
+    /// The board GPIO number of the button.
     pub button: u32,
+    /// The friendly id (`B1`..`B4`, else `BX<pin>`) the classifier resolved
+    /// from the board's button binding.
+    pub label: String,
     /// "short" or "long".
     pub kind: &'static str,
     /// Resolved action name from the live mapping; `None` when unmapped.
@@ -225,6 +228,7 @@ mod tests {
         let mut b = bus.subscribe();
         let event = ButtonBusEvent {
             button: 5,
+            label: "B1".into(),
             kind: "short",
             action: Some("cycle_screen".into()),
             timestamp_ms: 1500,
@@ -239,6 +243,7 @@ mod tests {
         let bus = ButtonEventBus::new();
         let event = ButtonBusEvent {
             button: 6,
+            label: "B2".into(),
             kind: "long",
             action: None,
             timestamp_ms: 2000,
@@ -253,6 +258,7 @@ mod tests {
         for i in 0..5u32 {
             bus.publish(ButtonBusEvent {
                 button: i,
+                label: format!("BX{i}"),
                 kind: "short",
                 action: None,
                 timestamp_ms: i as u64,

@@ -1,0 +1,176 @@
+# Radxa ROCK 5B+ (RK3588)
+#
+# The upgraded ROCK 5B: LPDDR5, two 4-lane MIPI CSI camera connectors, an M.2
+# B-key for a cellular module, 2.5 GbE. One profile serves every role the board
+# runs (ground station, visor, compute); the per-role choices (which GNSS
+# receiver the service reads, whether a sensor hub is fitted) live in the agent
+# config, and this file declares only the board's own wiring.
+#
+# Sources (every pin and bus fact below cites one of these):
+#   [brief]    Radxa ROCK 5B+ Product Brief, rev 1.2, §3 Features, §7.1.1 GPIO
+#              Alternate Functions, §7.3 Camera and Display Interfaces:
+#              https://dl.radxa.com/rock5/5b+/docs/radxa_rock5bp_product_brief.pdf
+#   [hwif]     Radxa Docs, ROCK 5B/5B+ Hardware Interface Description, "GPIO"
+#              (40-pin table with the Linux GPIO number column) and "MIPI CSI":
+#              https://docs.radxa.com/en/rock5/rock5b/hardware-design/hardware-interface
+#   [dts]      Radxa vendor kernel, linux-6.1-stan-rkr4.1,
+#              arch/arm64/boot/dts/rockchip/rk3588-rock-5b-plus.dts (model,
+#              compatible) and rk3588s.dtsi (aliases i2cN = &i2cN,
+#              serialN = &uartN, so controller N is /dev/i2c-N and /dev/ttySN):
+#              https://github.com/radxa/kernel/tree/linux-6.1-stan-rkr4.1
+#   [overlays] Radxa overlay sources, arch/arm64/boot/dts/rockchip/overlays/
+#              (each overlay's metadata names the boards and header pins):
+#              https://github.com/radxa-pkg/radxa-overlays
+#
+# GPIO numbering: Rockchip numbers a line bank * 32 + group * 8 + index
+# (GPIO3_A4 = 3 * 32 + 0 * 8 + 4 = 100), which is the "GPIO number" column of
+# [hwif]. The line is offset (number % 32) on /dev/gpiochip<number / 32>.
+
+name: "Radxa ROCK 5B+ (RK3588)"
+vendor: "Radxa"
+soc: "RK3588"
+arch: "aarch64"
+model_patterns:
+  # [dts]: compatible = "radxa,rock-5b-plus", "rockchip,rk3588";
+  #        model = "Radxa ROCK 5B+".
+  # The plain ROCK 5B reports "radxa,rock-5b" / "Radxa ROCK 5B", which none of
+  # these substrings match, so a 5B never resolves to this profile. The bare
+  # SoC token "rk3588" is deliberately NOT listed: every RK3588 board carries it.
+  - "radxa,rock-5b-plus"
+  - "Radxa ROCK 5B+"
+  - "rock-5b-plus"
+default_tier: 4
+
+# No header UART is declared as a flight-controller candidate: the roles this
+# board serves reach a flight controller over USB-ACM, and the header UARTs
+# below are claimed by the GNSS receiver.
+uart_paths: []
+hw_video_codecs:
+  # [brief] §3.1: H.264/H.265 encode up to 8K@30; H.265/H.264/VP9/AV1 decode.
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+  - av1_dec
+  - vp9_dec
+
+compute:
+  cores: 8
+  core_type: "Cortex-A76 x4 + Cortex-A55 x4"   # [brief] §3.1
+  gpu: "Mali-G610 MC4"                          # [brief] §3.1
+  npu_tops: 6.0                                 # [brief] §3.1, up to 6 TOPS
+  ram_type: LPDDR5                              # 4/8/16/24/32 GB SKUs, [brief] §2
+
+video:
+  csi_ports: 2           # [brief] §3.2: 2x four-lane (or 2x two-lane) MIPI CSI
+  csi_connector: "31-pin MIPI CSI FPC, 4-lane, x2 (CAM0, CAM1)"   # [hwif] "MIPI CSI"
+  max_encode_resolution: "7680x4320"
+  max_encode_fps: 30
+  encoder_api: rkmpp
+
+# Both CSI connectors, with the vendor overlay that binds the Radxa Camera 4K
+# (Sony IMX415, `compatible = "sony,imx415"` in the overlay) to each. `bus` is
+# the D-PHY the connector is wired to, as the overlay's `exclusive` metadata
+# names it: CAM0 rides csi2_dphy0 with its sensor on i2c3, CAM1 rides
+# csi2_dphy1 with its sensor on i2c4 [overlays]
+# rock-5b-plus-cam0-radxa-camera-4k.dts / rock-5b-plus-cam1-radxa-camera-4k.dts.
+# Radxa images ship these as `<name>.dtbo.disabled` under /boot/dtbo, so the
+# provisioner enables them in place. Capture nodes and modes depend on the
+# sensor and the rkisp pipeline and are not declared until measured on a unit.
+cameras:
+  supported:
+    - id: csi-cam0
+      type: csi
+      sensor: "Sony IMX415"
+      bus: csi2_dphy0
+      orientation: forward
+      overlay_required: true
+      overlay_source: bsp-disabled
+      overlay_ref: "rock-5b-plus-cam0-radxa-camera-4k"
+    - id: csi-cam1
+      type: csi
+      sensor: "Sony IMX415"
+      bus: csi2_dphy1
+      orientation: forward
+      overlay_required: true
+      overlay_source: bsp-disabled
+      overlay_ref: "rock-5b-plus-cam1-radxa-camera-4k"
+
+# Header I2C. Pins 3/5 carry I2C7_M3 [hwif], but [dts] binds i2c7 to the
+# on-board ES8316 audio codec, so the header bus a panel or a rig's battery
+# gauge uses is I2C8_M4: SDA pin 7 (GPIO3_C3), SCL pin 32 (GPIO3_C2)
+# [brief] §7.1.1, enabled by overlay rk3588-i2c8-m4 ("On Radxa ROCK 5B+ this
+# is SDA pin 7 and SCL pin 32") [overlays]. Pins 13/15 (I2C3_M1) are not used:
+# i2c3 is the CAM0 sensor bus.
+buses:
+  i2c:
+    - id: i2c8
+      path: /dev/i2c-8
+      overlay: rk3588-i2c8-m4
+      notes: "SDA pin 7, SCL pin 32; panel and a rig's battery gauge"
+  uart:
+    - id: uart7
+      path: /dev/ttyS7
+      overlay: rk3588-uart7-m1
+      notes: "TX pin 15, RX pin 11; GNSS receiver"
+
+# GNSS on the SBC: UART7_M1, TX pin 15 (GPIO3_C0), RX pin 11 (GPIO3_C1)
+# [brief] §7.1.1, enabled by overlay rk3588-uart7-m1 ("On Radxa ROCK 5B+ this
+# is RX pin 11 and TX pin 15") [overlays]; this keeps the SPI0_M2 pins
+# (19/21/23/24/26) free for an SPI panel. PPS lands on header pin 16, GPIO3_A4,
+# Linux GPIO 100 [hwif], a pin with no alternate function on this header.
+# No Radxa overlay provides a pps-gpio node; /dev/ppsN appears only once a
+# pps-gpio overlay names this line.
+#
+# `serial` is the board's own wiring. A rig whose receiver rides the USB sensor
+# hub (PPS captured by the hub, not the SBC) selects `source: hub` in the GNSS
+# service config; that needs no board wiring. Baud and receiver model are
+# per-receiver and are left to the service's detection.
+gnss:
+  transport: serial
+  device: /dev/ttyS7
+  pps_gpio: 100
+
+# The USB sensor hub, when a rig carries one (CDC-ACM, hub firmware id).
+sensor_hub:
+  usb_vid_pid: "1209:ad05"
+
+# No battery gauge is declared here: its shunt resistor and full-scale current
+# belong to the rig's power wiring, not to the board, so the gauge is bound per
+# rig in the agent config (`battery.gauge`, shunt_ohm and max_current_a
+# required). An INA226 on this board sits on the header bus above, /dev/i2c-8;
+# 0x40 is its A1=A0=GND address (TI INA226 datasheet, "Serial Bus Address":
+# https://www.ti.com/lit/ds/symlink/ina226.pdf).
+
+# Flight-controller link hint: USB-ACM only (see uart_paths above).
+flight_controller:
+  interfaces:
+    - id: fc-usb
+      type: usb-acm
+      baud_candidates: [921600, 115200, 57600]
+      priority: 1
+
+# Panel buttons, by Linux GPIO number ([hwif] "GPIO number" column): the reader
+# opens /dev/gpiochip<n / 32> line n % 32. Header pins 29/31/33/35, each a plain
+# GPIO with no function bound in this file, with ground on pins 30/34/39.
+# Wire each button from its pin to ground (active-low, pulled up).
+#   up     pin 29  GPIO1_D7  63
+#   down   pin 31  GPIO1_B7  47
+#   select pin 33  GPIO3_A7  103
+#   back   pin 35  GPIO3_B6  110
+buttons: {up: 63, down: 47, select: 103, back: 110}
+
+# Lines bound to something other than a button; the loader rejects a button on
+# any of them (the GNSS PPS line is added from `gnss.pps_gpio`). [hwif]
+reserved_gpio:
+  - {gpio: 13, header_pin: 8, use: "debug console UART2_M0 TX (GPIO0_B5)"}
+  - {gpio: 14, header_pin: 10, use: "debug console UART2_M0 RX (GPIO0_B6)"}
+  - {gpio: 115, header_pin: 7, use: "I2C8_M4 SDA (GPIO3_C3)"}
+  - {gpio: 114, header_pin: 32, use: "I2C8_M4 SCL (GPIO3_C2)"}
+  - {gpio: 113, header_pin: 11, use: "GNSS UART7_M1 RX (GPIO3_C1)"}
+  - {gpio: 112, header_pin: 15, use: "GNSS UART7_M1 TX (GPIO3_C0)"}
+  - {gpio: 42, header_pin: 19, use: "SPI0_M2 MOSI, SPI panel (GPIO1_B2)"}
+  - {gpio: 41, header_pin: 21, use: "SPI0_M2 MISO, SPI panel (GPIO1_B1)"}
+  - {gpio: 43, header_pin: 23, use: "SPI0_M2 CLK, SPI panel (GPIO1_B3)"}
+  - {gpio: 44, header_pin: 24, use: "SPI0_M2 CS0, SPI panel (GPIO1_B4)"}
+  - {gpio: 45, header_pin: 26, use: "SPI0_M2 CS1, SPI panel (GPIO1_B5)"}

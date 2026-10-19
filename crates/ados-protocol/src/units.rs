@@ -405,7 +405,10 @@ pub const UNITS: &[UnitSpec] = &[
         drops_link: true,
         ..gs_unit("ados-input.service", Some(Hardware))
     },
+    // The front-panel button reader lives in-process here, so a visor runs it
+    // too.
     UnitSpec {
+        profiles: GS_VISOR,
         drops_link: true,
         ..gs_unit("ados-pic.service", Some(Hardware))
     },

@@ -111,6 +111,9 @@ pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
     "/api/v1/setup/profile",
     "/api/v1/setup/remote-access/cloudflare",
     "/api/v1/ground-station/factory-reset",
+    // Power-off leaves the node unreachable until someone is on site, so it
+    // stays a panel-local or on-LAN action.
+    "/api/v1/setup/shutdown",
 ];
 
 /// The config write route whose body a relayed request is checked against.

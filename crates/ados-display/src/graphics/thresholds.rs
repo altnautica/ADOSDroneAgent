@@ -81,6 +81,13 @@ pub const BATTERY_PCT: Grade = Grade {
     direction: ThresholdDirection::HigherIsBetter,
 };
 
+/// Measured sensor rate as a percent of its expected rate.
+pub const SENSOR_RATE_PCT: Grade = Grade {
+    success_at: 90.0,
+    warning_at: 50.0,
+    direction: ThresholdDirection::HigherIsBetter,
+};
+
 impl Palette {
     /// Color `value` by `grade`. An absent value reads the muted tertiary tone.
     pub fn grade(&self, value: Option<f64>, grade: Grade) -> Rgb888 {

@@ -4,6 +4,8 @@
 
 import { useTranslation } from "react-i18next";
 
+import { GnssPanel } from "@/components/panels/gnss-panel";
+import { LoraPanel } from "@/components/panels/lora-panel";
 import { MeshPanel } from "@/components/panels/mesh-panel";
 import { SourcesPanel } from "@/components/panels/sources-panel";
 import { WfbRxPanel } from "@/components/panels/wfb-rx-panel";
@@ -58,6 +60,24 @@ export function SourcesRoute() {
       blurb={t("app.pages.sourcesBlurb")}
     >
       <SourcesPanel />
+    </PageShell>
+  );
+}
+
+export function GnssRoute() {
+  const { t } = useTranslation();
+  return (
+    <PageShell title={t("nav.gnss")} blurb={t("app.pages.gnssBlurb")}>
+      <GnssPanel />
+    </PageShell>
+  );
+}
+
+export function LoraRoute() {
+  const { t } = useTranslation();
+  return (
+    <PageShell title={t("nav.lora")} blurb={t("app.pages.loraBlurb")}>
+      <LoraPanel />
     </PageShell>
   );
 }

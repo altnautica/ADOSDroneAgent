@@ -33,6 +33,10 @@ export type RouteKey =
   | "video"
   | "transmit"
   | "io"
+  | "gnss"
+  | "lora"
+  | "capture"
+  | "sensors"
   | "settings-profile"
   | "settings-region"
   | "settings-battery"
@@ -45,6 +49,8 @@ export type RouteKey =
   | "settings-security"
   | "settings-vision"
   | "settings-camera"
+  | "settings-capture"
+  | "settings-sensors"
   | "settings-swarm"
   | "settings-discovery"
   | "settings-display"
@@ -68,6 +74,18 @@ const ReceiveRoute = lazy(() =>
 );
 const SourcesRoute = lazy(() =>
   import("@/routes/ground-pages").then((m) => ({ default: m.SourcesRoute })),
+);
+const GnssRoute = lazy(() =>
+  import("@/routes/ground-pages").then((m) => ({ default: m.GnssRoute })),
+);
+const LoraRoute = lazy(() =>
+  import("@/routes/ground-pages").then((m) => ({ default: m.LoraRoute })),
+);
+const CaptureRoute = lazy(() =>
+  import("@/routes/visor-pages").then((m) => ({ default: m.CaptureRoute })),
+);
+const SensorsRoute = lazy(() =>
+  import("@/routes/visor-pages").then((m) => ({ default: m.SensorsRoute })),
 );
 const IoRoute = lazy(() =>
   import("@/routes/io-route").then((m) => ({ default: m.IoRoute })),
@@ -108,6 +126,16 @@ const CellularSettings = lazy(() =>
 const CameraSettings = lazy(() =>
   import("@/routes/settings/camera-settings").then((m) => ({
     default: m.CameraSettings,
+  })),
+);
+const CaptureSettings = lazy(() =>
+  import("@/routes/settings/capture-settings").then((m) => ({
+    default: m.CaptureSettings,
+  })),
+);
+const SensorsSettings = lazy(() =>
+  import("@/routes/settings/sensors-settings").then((m) => ({
+    default: m.SensorsSettings,
   })),
 );
 const CloudSettings = lazy(() =>
@@ -186,6 +214,10 @@ export const ROUTE_COMPONENTS: Record<RouteKey, ComponentType> = {
   "video": VideoRoute,
   "transmit": TransmitRoute,
   "io": IoRoute,
+  "gnss": GnssRoute,
+  "lora": LoraRoute,
+  "capture": CaptureRoute,
+  "sensors": SensorsRoute,
   "settings-profile": ProfileSettings,
   "settings-region": RegionSettings,
   "settings-battery": BatterySettings,
@@ -198,6 +230,8 @@ export const ROUTE_COMPONENTS: Record<RouteKey, ComponentType> = {
   "settings-security": SecuritySettings,
   "settings-vision": VisionSettings,
   "settings-camera": CameraSettings,
+  "settings-capture": CaptureSettings,
+  "settings-sensors": SensorsSettings,
   "settings-swarm": SwarmSettings,
   "settings-discovery": DiscoverySettings,
   "settings-display": DisplaySettings,

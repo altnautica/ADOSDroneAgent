@@ -58,8 +58,10 @@ const OVERRIDE_BODY_LIMIT: usize = 64 * 1024;
 
 /// Exact `(method, path)` pairs refused while armed.
 const GUARDED_EXACT: &[(&str, &str)] = &[
-    // Companion reboot and the supervisor restart that cycles every service.
+    // Companion reboot and power-off, and the supervisor restart that cycles
+    // every service.
     ("POST", "/api/v1/setup/reboot"),
+    ("POST", "/api/v1/setup/shutdown"),
     ("POST", "/api/v1/system/restart-supervisor"),
     // Ground-station factory reset and the profile and role changes.
     ("POST", "/api/v1/ground-station/factory-reset"),

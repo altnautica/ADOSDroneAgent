@@ -1,7 +1,9 @@
-//! INA226 shunt/bus power monitor over Linux I2C: the board-bound battery gauge.
+//! INA226 shunt/bus power monitor over Linux I2C: the rig's battery gauge.
 //!
-//! The binding comes from the HAL board dict (`/run/ados/board.json`, key
-//! `battery_gauge`):
+//! The binding is per rig, because the shunt resistor and its full-scale
+//! current belong to the rig's power wiring: the agent config's
+//! `battery.gauge` block, else the HAL board dict (`/run/ados/board.json`,
+//! key `battery_gauge`). Both carry the same shape, every key required:
 //!
 //! ```json
 //! {"type":"ina226","i2c_bus":1,"addr":64,"shunt_ohm":0.0005,"max_current_a":80}
@@ -51,7 +53,7 @@ pub trait I2cRegisters: Send {
     fn write_reg(&mut self, reg: u8, value: u16) -> std::io::Result<()>;
 }
 
-/// The `battery_gauge` binding of the board dict.
+/// A `battery.gauge` / `battery_gauge` binding.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GaugeBinding {
     pub i2c_bus: u8,
@@ -64,7 +66,26 @@ impl GaugeBinding {
     /// The INA226 binding of a board dict: `Ok(None)` when the board declares
     /// no gauge, `Err` when it declares one this reader cannot use.
     pub fn from_board(board: &Value) -> Result<Option<Self>, String> {
-        let Some(gauge) = board.get("battery_gauge").filter(|g| !g.is_null()) else {
+        Self::from_block(board.get("battery_gauge"))
+    }
+
+    /// The `battery.gauge` binding of the agent config at `path`: `Ok(None)`
+    /// when the file or the block is absent, `Err` when the file does not parse
+    /// or the block is one this reader cannot use (a missing `shunt_ohm` or
+    /// `max_current_a` included).
+    pub fn from_config_file(path: &std::path::Path) -> Result<Option<Self>, String> {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("config unreadable: {e}")),
+        };
+        let root: Value =
+            serde_norway::from_str(&text).map_err(|e| format!("config unparseable: {e}"))?;
+        Self::from_block(root.get("battery").and_then(|b| b.get("gauge")))
+    }
+
+    fn from_block(gauge: Option<&Value>) -> Result<Option<Self>, String> {
+        let Some(gauge) = gauge.filter(|g| !g.is_null()) else {
             return Ok(None);
         };
         let kind = gauge.get("type").and_then(Value::as_str).unwrap_or("");

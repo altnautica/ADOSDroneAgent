@@ -1,1 +1,0 @@
-import{D as e,c as t}from"./card-BbOJ0ygx.js";function n(){return e({queryKey:[`config`],queryFn:()=>t(`/api/config`),staleTime:3e4,refetchOnWindowFocus:!1})}export{n as t};

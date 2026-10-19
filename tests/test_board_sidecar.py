@@ -59,9 +59,10 @@ def test_the_rust_writer_carries_the_python_field_set_plus_version():
     # sidecar registry declares the board sidecar at version 1, and the Python
     # writer omitted it, so every Rust reader logged a schema-version warning
     # on every boot. `sensor_hub` (a USB probe the Python detector does not
-    # run) and `battery_gauge` (copied from the profile binding) are optional
-    # keys the Rust writer omits when the board has neither.
-    rust_only = {"version", "sensor_hub", "battery_gauge"}
+    # run), `battery_gauge` (copied from the profile binding) and
+    # `reserved_gpio` (the lines the button reader must not request) are
+    # optional keys the Rust writer omits when the board has none.
+    rust_only = {"version", "sensor_hub", "battery_gauge", "reserved_gpio"}
     assert rust_fields == python_fields | rust_only, (
         "the board sidecar's two schema declarations have drifted: "
         f"only in Rust={sorted(rust_fields - python_fields - rust_only)}, "

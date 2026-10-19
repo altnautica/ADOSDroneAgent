@@ -212,12 +212,15 @@ fn classify_injected(
         // inject path down, and on_edge holds no invariant a poisoned state
         // corrupts (a stale press timestamp at worst yields one mis-timed press).
         let mut guard = classifier.lock().unwrap_or_else(|e| e.into_inner());
-        guard.on_edge(req.pin, edge, req.ts_ms)
+        guard
+            .on_edge(req.pin, edge, req.ts_ms)
+            .map(|ev| (guard.label(ev.pin), ev))
     };
     match event {
-        Some(ev) => {
+        Some((label, ev)) => {
             buttons.publish(ButtonBusEvent {
                 button: ev.pin,
+                label,
                 kind: ev.kind.as_str(),
                 action: ev.action.clone(),
                 timestamp_ms: ev.timestamp_ms,
@@ -251,7 +254,7 @@ async fn stream_button_events(
                     "button": ev.button,
                     // The stable friendly id (B1..B4) the cockpit and plugin
                     // bindings key on; additive so no existing reader breaks.
-                    "label": crate::buttons::pin_to_label(ev.button).to_lowercase(),
+                    "label": ev.label.to_lowercase(),
                     "kind": ev.kind,
                     "action": ev.action,
                     "timestamp_ms": ev.timestamp_ms,
@@ -297,7 +300,7 @@ mod tests {
     fn short_mapping() -> Arc<Mutex<PressClassifier>> {
         use std::collections::HashMap;
         use std::sync::RwLock;
-        // Pin 5 maps to label B1 (see buttons::pin_to_label); the classifier's
+        // Pin 5 is the first reference-panel pin, label B1; the classifier's
         // mapping key is "<label>_<kind>".
         let mut m = HashMap::new();
         m.insert("B1_short".to_string(), "commit".to_string());
@@ -336,6 +339,7 @@ mod tests {
 
         let ev = rx.try_recv().expect("a press was published");
         assert_eq!(ev.button, 5);
+        assert_eq!(ev.label, "B1");
         assert_eq!(ev.kind, "short");
         assert_eq!(ev.action.as_deref(), Some("commit"));
         std::env::remove_var(INJECT_ENABLE_ENV);
@@ -422,6 +426,7 @@ mod tests {
         // The daemon's button reader publishes a classified press onto the bus.
         buttons.publish(ButtonBusEvent {
             button: 13,
+            label: "B3".into(),
             kind: "long",
             action: Some("pair_drone".into()),
             timestamp_ms: 4242,
@@ -431,6 +436,7 @@ mod tests {
         sub.read_line(&mut line).await.unwrap();
         let ev: Value = serde_json::from_str(line.trim()).unwrap();
         assert_eq!(ev["button"], 13);
+        assert_eq!(ev["label"], "b3");
         assert_eq!(ev["kind"], "long");
         assert_eq!(ev["action"], "pair_drone");
         assert_eq!(ev["timestamp_ms"], 4242);
@@ -470,6 +476,7 @@ mod tests {
         // an explicit JSON null so the consumer can default it.
         buttons.publish(ButtonBusEvent {
             button: 26,
+            label: "BX26".into(),
             kind: "short",
             action: None,
             timestamp_ms: 7,

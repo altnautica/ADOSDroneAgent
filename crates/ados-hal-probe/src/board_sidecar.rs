@@ -69,14 +69,32 @@ pub struct DisplaysSection {
     pub supported: Vec<DisplayBinding>,
 }
 
-/// The panel button roles a board wires, by BCM pin, from the profile's
-/// optional `buttons:` block. Absent means the panel keeps its built-in pins.
+/// The panel button roles a board wires, from the profile's optional
+/// `buttons:` block. Each value is the board's GPIO number: BCM on a Raspberry
+/// Pi, the Linux GPIO number (`bank * 32 + group * 8 + index`) on Rockchip.
+/// Absent means the board has no panel buttons (a Raspberry Pi keeps the
+/// reference-panel lines).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ButtonPins {
-    pub up: u8,
-    pub down: u8,
-    pub select: u8,
-    pub back: u8,
+    pub up: u32,
+    pub down: u32,
+    pub select: u32,
+    pub back: u32,
+}
+
+impl ButtonPins {
+    /// The four pins in role order.
+    pub fn pins(&self) -> [u32; 4] {
+        [self.up, self.down, self.select, self.back]
+    }
+}
+
+/// One GPIO line a board profile reserves for a bus, a console or a
+/// peripheral (`reserved_gpio:` entries). Only the number is parsed; the
+/// header pin and the use are documentation for the reader of the YAML.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct ReservedGpio {
+    pub gpio: u32,
 }
 
 /// The host facts a variant can be discriminated on.
@@ -146,11 +164,47 @@ pub struct BoardProfile {
     pub sensor_hub: Option<SensorHubBinding>,
     #[serde(default)]
     pub battery_gauge: Option<BatteryGaugeBinding>,
+    #[serde(default)]
+    pub reserved_gpio: Vec<ReservedGpio>,
     /// The profile's YAML filename stem (`cubie-a7s`, `rock-5c-lite`). Not a
     /// YAML key: [`load_profiles`] stamps it from the embedded file name, and it
     /// is the ONE canonical token `/etc/ados/board_override` accepts.
     #[serde(skip)]
     pub stem: String,
+}
+
+impl BoardProfile {
+    /// Every GPIO number the profile binds to something other than a button:
+    /// the `reserved_gpio` entries plus the GNSS PPS line.
+    pub fn reserved_lines(&self) -> Vec<u32> {
+        let mut lines: Vec<u32> = self.reserved_gpio.iter().map(|r| r.gpio).collect();
+        if let Some(pps) = self
+            .gnss
+            .as_ref()
+            .and_then(|g| g.pps_gpio)
+            .and_then(|p| u32::try_from(p).ok())
+        {
+            lines.push(pps);
+        }
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
+
+    /// Why the declared buttons cannot be used, if they cannot: two roles on
+    /// one line, or a role on a reserved line.
+    pub fn button_conflict(&self) -> Option<String> {
+        let pins = self.buttons?.pins();
+        for (i, pin) in pins.iter().enumerate() {
+            if pins[..i].contains(pin) {
+                return Some(format!("button gpio {pin} is declared twice"));
+            }
+        }
+        let reserved = self.reserved_lines();
+        pins.iter()
+            .find(|p| reserved.contains(p))
+            .map(|p| format!("button gpio {p} is a reserved line"))
+    }
 }
 
 fn unknown() -> String {
@@ -222,6 +276,10 @@ pub const BOARD_PROFILE_YAML: &[(&str, &str)] = &[
         include_str!("../../../src/ados/hal/boards/rk3588s2.yaml"),
     ),
     (
+        "rock-5b-plus",
+        include_str!("../../../src/ados/hal/boards/rock-5b-plus.yaml"),
+    ),
+    (
         "rock-5c-lite",
         include_str!("../../../src/ados/hal/boards/rock-5c-lite.yaml"),
     ),
@@ -251,13 +309,13 @@ pub const BOARD_PROFILE_YAML: &[(&str, &str)] = &[
 /// loader walks (`sorted()` over the directory), which is what makes the
 /// first-match scan in [`match_profile`] agree across the two languages.
 ///
-/// A profile that fails to parse is skipped with a warning rather than taking
-/// the whole detection down: one malformed board must not make every board
-/// unknown.
+/// A profile that fails to parse, or whose buttons collide with a reserved
+/// line, is skipped with a warning rather than taking the whole detection
+/// down: one malformed board must not make every board unknown.
 pub fn load_profiles() -> Vec<BoardProfile> {
     let mut out = Vec::with_capacity(BOARD_PROFILE_YAML.len());
     for (stem, body) in BOARD_PROFILE_YAML {
-        match serde_norway::from_str::<BoardProfile>(body) {
+        match parse_profile(body) {
             Ok(mut p) => {
                 // The filename stem is the canonical board-override token; it
                 // is not a YAML key, so it is stamped here.
@@ -268,6 +326,15 @@ pub fn load_profiles() -> Vec<BoardProfile> {
         }
     }
     out
+}
+
+/// Parse and validate one board-profile YAML body.
+pub fn parse_profile(body: &str) -> Result<BoardProfile, String> {
+    let profile = serde_norway::from_str::<BoardProfile>(body).map_err(|e| e.to_string())?;
+    match profile.button_conflict() {
+        Some(conflict) => Err(conflict),
+        None => Ok(profile),
+    }
 }
 
 /// Assign a tier from available RAM. Mirrors the Python `detect_tier` exactly:
@@ -340,6 +407,11 @@ pub struct BoardFingerprint {
     /// board declares none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub battery_gauge: Option<BatteryGaugeBinding>,
+    /// GPIO numbers the profile binds to a bus, a console or a sensor line
+    /// (`reserved_gpio` plus the GNSS PPS line). The button reader refuses a
+    /// button on one of them. Omitted when the board reserves none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reserved_gpio: Vec<u32>,
 }
 
 /// The host facts detection needs, injected so the whole pipeline is testable
@@ -505,6 +577,7 @@ fn from_profile(profile: &BoardProfile, model_string: &str, facts: &HostFacts) -
         buttons: profile.buttons,
         sensor_hub: crate::sensor_hub::detect(profile.sensor_hub.as_ref(), &facts.usb_ttys),
         battery_gauge: profile.battery_gauge.clone(),
+        reserved_gpio: profile.reserved_lines(),
     }
 }
 
@@ -587,6 +660,7 @@ pub fn resolve(profiles: &[BoardProfile], facts: &HostFacts) -> BoardFingerprint
         buttons: None,
         sensor_hub: crate::sensor_hub::detect(None, &facts.usb_ttys),
         battery_gauge: None,
+        reserved_gpio: Vec::new(),
     }
 }
 
@@ -649,6 +723,10 @@ pub fn publish() -> std::io::Result<BoardFingerprint> {
     );
     Ok(fp)
 }
+
+#[cfg(test)]
+#[path = "board_sidecar_bindings_tests.rs"]
+mod bindings_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1007,6 +1085,12 @@ mod tests {
             ("rockchip,rk3566", "RK3566 EVB", 4, "Radxa CM3 (RK3566)"),
             ("radxa,cm4", "Radxa CM4", 8, "Radxa CM4 (RK3588S2)"),
             (
+                "radxa,rock-5b-plus",
+                "Radxa ROCK 5B+",
+                8,
+                "Radxa ROCK 5B+ (RK3588)",
+            ),
+            (
                 "raspberrypi,4-model-b",
                 "Raspberry Pi 4 Model B Rev 1.4",
                 4,
@@ -1035,6 +1119,14 @@ mod tests {
                 fp.name
             );
         }
+        // The plain ROCK 5B is a substring prefix of the 5B+ strings, never the
+        // other way round, so it must not resolve to the 5B+ profile.
+        let fp = resolve(&profiles, &facts("radxa,rock-5b", "Radxa ROCK 5B"));
+        assert_ne!(
+            fp.profile, "rock-5b-plus",
+            "ROCK 5B resolved to {}",
+            fp.name
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! The battery engine's feed: sample the state snapshot and the board-bound
-//! INA226 gauge, hot-reload the `battery:` config, and record every anomaly
-//! transition in the logging store.
+//! The battery engine's feed: sample the state snapshot and the rig's INA226
+//! gauge, hot-reload the `battery:` config (the gauge binding included), and
+//! record every anomaly transition in the logging store.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -95,14 +95,17 @@ async fn run(mut feed: Feed, emitter: IngestEmitter, mut stop: oneshot::Receiver
 /// Opens the I2C device a binding names; injectable so tests use a fake bus.
 type OpenBus = fn(&GaugeBinding) -> std::io::Result<Box<dyn I2cRegisters>>;
 
-/// The board-bound gauge. `Pending` until the board dict exists, then bound
-/// or absent for the life of the task; an absent or rejected gauge logs one
-/// warning and never produces a pack.
+/// The gauge. `Pending` until a binding source exists, then bound or absent
+/// until the config's gauge binding changes; an absent or rejected gauge logs
+/// one warning and never produces a pack.
 enum Gauge {
     Pending,
     Absent,
     Bound { device: Ina226, failing: bool },
 }
+
+/// The config's `battery.gauge` binding as last read.
+type ConfigGauge = Result<Option<GaugeBinding>, String>;
 
 /// One tick's worth of state: the engine, and what the last tick already saw.
 struct Feed {
@@ -110,6 +113,7 @@ struct Feed {
     engine: Arc<Mutex<BatteryEngine>>,
     config_path: PathBuf,
     config_mtime: Option<SystemTime>,
+    config_gauge: ConfigGauge,
     last_arrival: Option<Instant>,
     board_path: PathBuf,
     open_bus: OpenBus,
@@ -127,11 +131,13 @@ impl Feed {
         // two is picked up on the first tick rather than missed.
         let config_mtime = mtime(&config_path);
         let config = BatteryConfig::load_from(&config_path);
+        let config_gauge = GaugeBinding::from_config_file(&config_path);
         Self {
             state,
             engine: Arc::new(Mutex::new(BatteryEngine::new(config))),
             config_path,
             config_mtime,
+            config_gauge,
             last_arrival: None,
             board_path,
             open_bus,
@@ -148,6 +154,12 @@ impl Feed {
             let config = BatteryConfig::load_from(&self.config_path);
             tracing::info!(enabled = config.enabled, "battery config reloaded");
             self.engine.lock().set_config(config);
+            let config_gauge = GaugeBinding::from_config_file(&self.config_path);
+            if config_gauge != self.config_gauge {
+                // A changed binding rebinds from scratch on this tick.
+                self.config_gauge = config_gauge;
+                self.gauge = Gauge::Pending;
+            }
         }
         let mut transitions = self.step_gauge();
         let Some((arrival, snapshot)) = self.state.snapshot_at() else {
@@ -161,10 +173,10 @@ impl Feed {
         transitions
     }
 
-    /// Resolve the gauge once the board dict exists, then take one reading.
+    /// Resolve the gauge once a binding source exists, then take one reading.
     fn step_gauge(&mut self) -> Vec<AnomalyTransition> {
         if matches!(self.gauge, Gauge::Pending) {
-            self.gauge = resolve_gauge(&self.board_path, self.open_bus);
+            self.gauge = resolve_gauge(&self.config_gauge, &self.board_path, self.open_bus);
         }
         let Gauge::Bound { device, failing } = &mut self.gauge else {
             return Vec::new();
@@ -188,24 +200,24 @@ impl Feed {
     }
 }
 
-/// Bind the gauge the board dict declares. `Pending` while the board dict is
-/// not yet written; every other outcome is final and logged once.
-fn resolve_gauge(board_path: &Path, open_bus: OpenBus) -> Gauge {
-    let text = match std::fs::read_to_string(board_path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Gauge::Pending,
-        Err(e) => {
-            tracing::warn!(error = %e, reason = "board unreadable", "battery_gauge_absent");
-            return Gauge::Absent;
-        }
+/// Bind the config's `battery.gauge`, else the board dict's gauge. `Pending`
+/// while neither names one and the board dict is not yet written.
+fn resolve_gauge(config_gauge: &ConfigGauge, board_path: &Path, open_bus: OpenBus) -> Gauge {
+    let binding = match config_gauge {
+        Ok(Some(binding)) => Ok(Some(binding.clone())),
+        Err(reason) => Err(format!("battery.gauge: {reason}")),
+        Ok(None) => match std::fs::read_to_string(board_path) {
+            Ok(text) => serde_json::from_str::<serde_json::Value>(&text)
+                .map_err(|e| format!("board unparseable: {e}"))
+                .and_then(|board| GaugeBinding::from_board(&board)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Gauge::Pending,
+            Err(e) => Err(format!("board unreadable: {e}")),
+        },
     };
-    let binding = serde_json::from_str::<serde_json::Value>(&text)
-        .map_err(|e| format!("board unparseable: {e}"))
-        .and_then(|board| GaugeBinding::from_board(&board));
     let binding = match binding {
         Ok(Some(binding)) => binding,
         Ok(None) => {
-            tracing::warn!(reason = "no battery_gauge binding", "battery_gauge_absent");
+            tracing::warn!(reason = "no battery gauge binding", "battery_gauge_absent");
             return Gauge::Absent;
         }
         Err(reason) => {
@@ -271,6 +283,9 @@ fn record(emitter: &IngestEmitter, t: &AnomalyTransition) {
     emitter.emit_event(EVENT_KIND, level, detail);
 }
 
+#[cfg(test)]
+#[path = "task_gauge_tests.rs"]
+mod gauge_tests;
 #[cfg(test)]
 mod tests {
     use serde_json::json;

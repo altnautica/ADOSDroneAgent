@@ -25,28 +25,6 @@ pub(super) fn default_oled() -> Map<String, Value> {
     }))
 }
 
-/// The default button mapping (the Python `_DEFAULT_BUTTONS`).
-pub(super) fn default_buttons() -> Map<String, Value> {
-    json_object(json!({
-        "mapping": {
-            "B1_short": "cycle_screen",
-            "B1_long": "toggle_backlight",
-            "B2_short": "show_network",
-            "B2_long": "show_qr",
-            "B3_short": "confirm",
-            "B3_long": "pair_drone",
-        }
-    }))
-}
-
-/// The default screen config (the Python `_DEFAULT_SCREENS`).
-pub(super) fn default_screens() -> Map<String, Value> {
-    json_object(json!({
-        "order": ["home", "link", "drone", "network", "system", "qr"],
-        "enabled": ["home", "link", "drone", "network", "system", "qr"],
-    }))
-}
-
 /// The default HDMI kiosk display config (the Python `_DEFAULT_DISPLAY`).
 pub(super) fn default_display() -> Map<String, Value> {
     json_object(json!({
@@ -66,9 +44,10 @@ pub(super) fn json_object(value: Value) -> Map<String, Value> {
 }
 
 /// The defaults-merged UI config blob `{oled, buttons, screens}` from a persisted
-/// blob, byte-identical to the Python `_load_ui_config`. The base for the in-memory
-/// section overlay the response body returns.
-pub(super) fn load_ui_config(blob: &Map<String, Value>) -> Map<String, Value> {
+/// blob, byte-identical to the Python `_load_ui_config`, with the button and
+/// screen defaults of `profile`. The base for the in-memory section overlay the
+/// response body returns.
+pub(super) fn load_ui_config(profile: &str, blob: &Map<String, Value>) -> Map<String, Value> {
     let mut out = Map::new();
     out.insert(
         "oled".to_string(),
@@ -76,11 +55,17 @@ pub(super) fn load_ui_config(blob: &Map<String, Value>) -> Map<String, Value> {
     );
     out.insert(
         "buttons".to_string(),
-        Value::Object(merge_over_defaults(default_buttons(), blob.get("buttons"))),
+        Value::Object(merge_over_defaults(
+            default_buttons(profile),
+            blob.get("buttons"),
+        )),
     );
     out.insert(
         "screens".to_string(),
-        Value::Object(merge_over_defaults(default_screens(), blob.get("screens"))),
+        Value::Object(merge_over_defaults(
+            default_screens(profile),
+            blob.get("screens"),
+        )),
     );
     out
 }

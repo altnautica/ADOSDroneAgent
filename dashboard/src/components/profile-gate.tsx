@@ -92,10 +92,35 @@ function ProfileMismatchPanel({
   );
 }
 
-export function ProfileGate({ allow, roles, children }: ProfileGateProps) {
-  const { profile, role } = useNodeIdentity();
+function NotAvailablePanel() {
+  const { t } = useTranslation();
+  return (
+    <div className="max-w-md space-y-4 py-12">
+      <div className="inline-flex items-center justify-center h-12 w-12 rounded-lg bg-muted">
+        <Ban className="h-5 w-5 text-muted-foreground" />
+      </div>
+      <h1 className="text-xl font-semibold tracking-tight">
+        {t("access.profileGate.unavailableTitle")}
+      </h1>
+      <p className="text-sm text-muted-foreground">{t("access.profileGate.unavailableBody")}</p>
+      <Button asChild variant="outline" size="sm">
+        <Link to="/">{t("common.backToHome")}</Link>
+      </Button>
+    </div>
+  );
+}
 
-  if (gateDecision(profile, role, allow, roles) === "mismatch") {
+interface ProfileGateViewProps extends ProfileGateProps {
+  profile: Profile;
+  role: GroundRole;
+}
+
+/** The gate for a known identity: the page, the mismatch panel, or the
+ *  neutral not-available state for a profile this dashboard does not know. */
+export function ProfileGateView({ profile, role, allow, roles, children }: ProfileGateViewProps) {
+  const decision = gateDecision(profile, role, allow, roles);
+  if (decision === "unavailable") return <NotAvailablePanel />;
+  if (decision === "mismatch") {
     return (
       <ProfileMismatchPanel
         current={profile}
@@ -105,6 +130,14 @@ export function ProfileGate({ allow, roles, children }: ProfileGateProps) {
       />
     );
   }
-
   return <>{children}</>;
+}
+
+export function ProfileGate({ allow, roles, children }: ProfileGateProps) {
+  const { profile, role } = useNodeIdentity();
+  return (
+    <ProfileGateView profile={profile} role={role} allow={allow} roles={roles}>
+      {children}
+    </ProfileGateView>
+  );
 }

@@ -279,13 +279,28 @@ class GpioButton(BaseModel):
 
 
 class ButtonPins(BaseModel):
-    """The panel button roles a board wires, by BCM pin. Optional: a board
-    without the ``buttons:`` block keeps the panel's built-in pin fallback."""
+    """The panel button roles a board wires, by the board's GPIO number: BCM on
+    a Raspberry Pi, the Linux GPIO number (``bank * 32 + group * 8 + index``)
+    on Rockchip. Optional: a board without the ``buttons:`` block has no panel
+    buttons (a Raspberry Pi keeps the reference-panel lines)."""
 
-    up: int
-    down: int
-    select: int
-    back: int
+    up: int = Field(ge=0)
+    down: int = Field(ge=0)
+    select: int = Field(ge=0)
+    back: int = Field(ge=0)
+
+    def pins(self) -> list[int]:
+        """The four pins in role order (up, down, select, back)."""
+        return [self.up, self.down, self.select, self.back]
+
+
+class ReservedGpio(BaseModel):
+    """A GPIO line the board binds to a bus, a console or a peripheral, by the
+    same numbering as ``buttons``. A button may not sit on one."""
+
+    gpio: int = Field(ge=0)
+    header_pin: int | None = None
+    use: str = ""
 
 
 class BoardVariantMatch(BaseModel):
@@ -326,8 +341,10 @@ class ImuBinding(BaseModel):
 
 
 class GnssBinding(BaseModel):
-    """Where the board's GNSS receiver bytes come from. ``pps_gpio`` is the BCM
-    line carrying the receiver's PPS, when wired to the host."""
+    """Where the board's GNSS receiver bytes come from. ``pps_gpio`` is the GPIO
+    number of the line carrying the receiver's PPS, when wired to the host: BCM
+    numbering on a Raspberry Pi, the Linux GPIO number (``bank * 32 + line``,
+    the vendor pinout's "GPIO number" column) on Rockchip."""
 
     transport: Literal["fc", "hub", "serial", "udp"]
     device: str | None = None
@@ -348,13 +365,14 @@ class SensorHubBinding(BaseModel):
 
 
 class BatteryGaugeBinding(BaseModel):
-    """A host-I2C battery current/voltage gauge."""
+    """A host-I2C battery current/voltage gauge. ``shunt_ohm`` and
+    ``max_current_a`` describe the rig's own shunt and are always required."""
 
     type: Literal["ina226"]
     i2c_bus: int
     addr: int
-    shunt_ohm: float
-    max_current_a: float
+    shunt_ohm: float = Field(gt=0)
+    max_current_a: float = Field(gt=0)
 
 
 class BoardProfile(BaseModel):
@@ -401,10 +419,34 @@ class BoardProfile(BaseModel):
     sensor_hub: SensorHubBinding | None = None
     battery_gauge: BatteryGaugeBinding | None = None
 
+    # GPIO lines bound to something other than a button (buses, the debug
+    # console, panel control lines). The GNSS PPS line counts as reserved too.
+    reserved_gpio: list[ReservedGpio] = Field(default_factory=list)
+
     # The profile's YAML filename stem (``cubie-a7s``, ``rock-5c-lite``). Not a
     # YAML key: ``_load_board_profiles`` stamps it from the file name, and it is
     # the ONE canonical token ``/etc/ados/board_override`` accepts.
     stem: str = ""
+
+    def reserved_lines(self) -> list[int]:
+        """Every GPIO number bound to something other than a button."""
+        lines = {r.gpio for r in self.reserved_gpio}
+        if self.gnss is not None and self.gnss.pps_gpio is not None:
+            lines.add(self.gnss.pps_gpio)
+        return sorted(lines)
+
+    @model_validator(mode="after")
+    def _buttons_clear_of_reserved_lines(self) -> BoardProfile:
+        if self.buttons is None:
+            return self
+        pins = self.buttons.pins()
+        repeated = sorted({p for p in pins if pins.count(p) > 1})
+        if repeated:
+            raise ValueError(f"button gpio {repeated[0]} is declared twice")
+        clash = sorted(set(pins) & set(self.reserved_lines()))
+        if clash:
+            raise ValueError(f"button gpio {clash[0]} is a reserved line")
+        return self
 
 
 @dataclass

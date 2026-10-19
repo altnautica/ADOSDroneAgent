@@ -48,6 +48,8 @@
 //!   shared by the router's mode decode and the control surface's mode encode.
 //! - [`shutdown`] — the latching shutdown signal a service's run loops await,
 //!   so a loop that was busy when the stop arrived still sees it.
+//! - [`panel_ui`] — the front-panel defaults (button map, screen order) every
+//!   reader of `ground_station.ui` falls back to, per profile.
 
 pub mod ap_country;
 pub mod armed;
@@ -90,6 +92,7 @@ pub mod nonce_cache;
 pub mod offload_link;
 pub mod pair_proof;
 pub mod pairing_posture;
+pub mod panel_ui;
 pub mod param_codec;
 pub mod paths;
 pub mod plugin;

@@ -46,9 +46,10 @@ const CHANNEL_DEPTH: usize = 16;
 /// The board's four front-panel buttons and the action map they resolve
 /// through.
 ///
-/// The pins come from the HAL board sidecar's optional `buttons` block
-/// (`{"up","down","select","back"}` BCM lines) when the board declares one, else
-/// the fixed [`BUTTON_PINS`]. They are matched in that order to the `B1`..`B4`
+/// The pins come from the HAL board sidecar's `buttons` block (`{"up","down",
+/// "select","back"}`, the board's GPIO numbers) through the same resolution the
+/// `ados-pic` reader uses, else the fixed [`BUTTON_PINS`]. They are matched in
+/// that order to the `B1`..`B4`
 /// mapping slots. An event that arrives without an action (its pin is not one
 /// of the fixed lines, so the publisher had no slot for it) is resolved here
 /// through the configured mapping; an event that already carries an action is
@@ -63,17 +64,19 @@ impl Default for ButtonLayout {
     fn default() -> Self {
         Self {
             pins: BUTTON_PINS,
-            mapping: default_button_mapping(),
+            mapping: default_button_mapping("ground_station"),
         }
     }
 }
 
 impl ButtonLayout {
     /// Read the pins from `board_sidecar` and the mapping from the agent config
-    /// (`$ADOS_CONFIG`, default `/etc/ados/config.yaml`). Any missing or
-    /// malformed source falls back to the built-in default for that part.
+    /// (`$ADOS_CONFIG`, default `/etc/ados/config.yaml`) over the defaults of the
+    /// node's resolved profile. Any missing or malformed source falls back to
+    /// the built-in default for that part.
     pub fn load(board_sidecar: &Path) -> Self {
         let pins = board_pins_or_default(board_sidecar);
+        let profile = ados_config::node_profile().replace('-', "_");
         let config =
             std::env::var("ADOS_CONFIG").unwrap_or_else(|_| "/etc/ados/config.yaml".to_string());
         let mapping = std::fs::read_to_string(config)
@@ -86,8 +89,8 @@ impl ButtonLayout {
                     .get("mapping")
                     .cloned()
             })
-            .map(|block| merge_mapping(&block))
-            .unwrap_or_else(default_button_mapping);
+            .map(|block| merge_mapping(&profile, &block))
+            .unwrap_or_else(|| default_button_mapping(&profile));
         Self { pins, mapping }
     }
 
@@ -107,6 +110,25 @@ impl ButtonLayout {
         }
         event
     }
+
+    /// The mapping key (`B1_long`, `B2_short`, ...) bound to `action`, so a
+    /// page can name the button that answers it. When several keys carry the
+    /// action the lowest button wins, and a short press before a long one.
+    pub fn key_for(&self, action: &str) -> Option<&str> {
+        self.mapping
+            .iter()
+            .filter(|(_, a)| a.as_str() == action)
+            .map(|(k, _)| k.as_str())
+            .min_by_key(|k| (button_number(k), k.ends_with("_long")))
+    }
+}
+
+/// The button number of a `B<n>_<kind>` key; unparsable keys sort last.
+fn button_number(key: &str) -> u32 {
+    key.strip_prefix('B')
+        .and_then(|rest| rest.split('_').next())
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(u32::MAX)
 }
 
 /// Parse one line of the `buttons.sock` stream into a [`ButtonEvent`].
@@ -291,7 +313,7 @@ mod tests {
     fn unmapped_press_on_a_board_pin_resolves_through_its_slot() {
         let layout = ButtonLayout {
             pins: [17, 27, 22, 23],
-            mapping: default_button_mapping(),
+            mapping: default_button_mapping("ground_station"),
         };
         let back = parse_button_line(r#"{"button":23,"kind":"short","action":null}"#).unwrap();
         assert_eq!(layout.resolve(back).action.as_deref(), Some("back"));
@@ -302,5 +324,25 @@ mod tests {
         assert_eq!(layout.resolve(stray).action, None);
         let mapped = parse_button_line(r#"{"button":23,"kind":"short","action":"menu"}"#).unwrap();
         assert_eq!(layout.resolve(mapped).action.as_deref(), Some("menu"));
+    }
+
+    #[test]
+    fn key_for_names_the_button_bound_to_an_action() {
+        let visor = ButtonLayout {
+            pins: BUTTON_PINS,
+            mapping: default_button_mapping("visor"),
+        };
+        assert_eq!(visor.key_for("shutdown_prompt"), Some("B1_long"));
+        assert_eq!(visor.key_for("back"), Some("B4_short"));
+        // The ground-station default has no shutdown binding.
+        assert_eq!(ButtonLayout::default().key_for("shutdown_prompt"), None);
+        let loaded: serde_norway::Value =
+            serde_norway::from_str("B3_short: shutdown_prompt\nB2_long: shutdown_prompt\n")
+                .unwrap();
+        let remapped = ButtonLayout {
+            pins: BUTTON_PINS,
+            mapping: merge_mapping("ground_station", &loaded),
+        };
+        assert_eq!(remapped.key_for("shutdown_prompt"), Some("B2_long"));
     }
 }

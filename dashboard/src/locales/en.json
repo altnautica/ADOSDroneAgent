@@ -2,7 +2,9 @@
   "common": {
     "retry": "Retry",
     "backToHome": "Back to Home",
-    "close": "Close"
+    "close": "Close",
+    "loading": "Loading…",
+    "dash": "—"
   },
   "nav": {
     "home": "Home",
@@ -36,7 +38,11 @@
     "security": "Security",
     "display": "Display",
     "advanced": "Advanced",
-    "primary": "primary"
+    "primary": "primary",
+    "gnss": "GNSS",
+    "lora": "LoRa",
+    "capture": "Capture",
+    "sensors": "Sensors"
   },
   "layout": {
     "settings": {
@@ -62,7 +68,9 @@
       "groupCloud": "Cloud & remote",
       "groupSystem": "System & safety",
       "title": "Settings",
-      "intro": "Live agent configuration. Risky changes (passwords, profile switches, board override) require explicit Save and a confirm prompt."
+      "intro": "Live agent configuration. Risky changes (passwords, profile switches, board override) require explicit Save and a confirm prompt.",
+      "captureBlurb": "Capture storage and camera exposure.",
+      "sensorsBlurb": "Sensor hub, rig file and clock sources."
     },
     "header": {
       "copyHost": "copy {{host}}",
@@ -129,7 +137,9 @@
       "or": " or ",
       "roleSuffix": " ({{role}} role)",
       "title": "Not available on this profile",
-      "body": "This page is for the {{expected}} profile{{expectedRole}}. This node is currently the {{current}} profile{{currentRole}}. Switch profiles from <link>Settings → Profile</link>."
+      "body": "This page is for the {{expected}} profile{{expectedRole}}. This node is currently the {{current}} profile{{currentRole}}. Switch profiles from <link>Settings → Profile</link>.",
+      "unavailableTitle": "Not available on this node",
+      "unavailableBody": "This node reports a profile this dashboard has no pages for. Use the node's own tools or Mission Control."
     }
   },
   "app": {
@@ -147,7 +157,11 @@
       "transmitBlurb": "WFB-tx adapter, channel, bandwidth, MCS index, and TX power.",
       "receiveBlurb": "WFB-rx adapter, channel, link quality, and FEC counters.",
       "meshBlurb": "batman-adv role, gateway election, and partition state.",
-      "sourcesBlurb": "Per-relay aggregation and FEC dedup stats."
+      "sourcesBlurb": "Per-relay aggregation and FEC dedup stats.",
+      "gnssBlurb": "GNSS receivers, base station mode and RTCM output.",
+      "loraBlurb": "LoRa region, transmit governor and beacons heard.",
+      "captureBlurb": "Record a capture session and mark rooms and floors as you walk.",
+      "sensorsBlurb": "Sensor streams with their rate, age and timing uncertainty."
     }
   },
   "home": {
@@ -824,6 +838,57 @@
       "cfTokenPlaceholder": "Set a new token",
       "cfSetToken": "Set token",
       "readingConfig": "Reading config…"
+    },
+    "capture": {
+      "storageTitle": "Capture storage",
+      "storageAbsent": "No capture storage on this node.",
+      "root": "Capture root",
+      "budget": "Budget",
+      "budgetValue": "{{used}}/{{budget}} GB ({{pct}} %)",
+      "sessions": "Sessions",
+      "sessionsValue": "{{sessions}}, {{uploaded}} uploaded",
+      "state": "State",
+      "writeProbe": "Write speed",
+      "mbps": "{{mbps}} MB/s",
+      "exposureTitle": "Capture exposure",
+      "locked": "Lock exposure",
+      "notApplied": "requested, not applied",
+      "exposureUs": "Exposure (µs)",
+      "gain": "Gain",
+      "mode": "Mode",
+      "modes": {
+        "walking": "walking",
+        "slow": "slow",
+        "short": "short"
+      },
+      "exposureSaved": "Exposure updated."
+    },
+    "sensors": {
+      "hubTitle": "Sensor hub",
+      "transport": "Transport",
+      "status": "Status",
+      "firmware": "Firmware",
+      "board": "Board",
+      "errors": "Errors",
+      "errorsValue": "crc {{crc}}, dropped {{dropped}}",
+      "rigTitle": "Rig file",
+      "rigCurrent": "rig {{rig}}, calibration {{calib}}",
+      "rigFile": "rig.json",
+      "rigUpload": "Upload rig",
+      "rigParse": "Not valid JSON: {{detail}}",
+      "rigShape": "The rig file must be a JSON object.",
+      "rigRejected": "Rejected ({{code}}): {{detail}}",
+      "rigSaved": "Rig {{rig}} saved (calibration {{calib}}).",
+      "clockTitle": "Clock sources",
+      "col": {
+        "id": "Source",
+        "kind": "Kind",
+        "locked": "Lock",
+        "offset": "Offset",
+        "skew": "Skew",
+        "sigma": "σ"
+      },
+      "ppm": "{{ppm}} ppm"
     }
   },
   "settingsMore": {
@@ -1401,5 +1466,160 @@
       "confirmDescription": "The agent shuts down all services and asks the kernel to reboot. The dashboard reconnects automatically once the board is back up (typically 30–60 seconds).",
       "confirm": "Reboot"
     }
+  },
+  "lora": {
+    "title": "LoRa",
+    "loadFailed": "Could not read the LoRa status.",
+    "absent": "No LoRa module on this node.",
+    "source": "({{source}})",
+    "regionUnset": "(region not set)",
+    "module": "{{transport}} {{band}} MHz",
+    "channel": "ch {{freq}}",
+    "txAllowed": "TX ALLOWED",
+    "nextTxNow": "next TX now",
+    "nextTxIn": "next TX in {{time}}",
+    "txPaused": "TX PAUSED {{time}} ({{reason}})",
+    "txBusy": "TX BUSY: channel busy, retrying",
+    "txBlocked": "TX BLOCKED: {{reason}}",
+    "reasonShort": {
+      "region_unset": "region",
+      "module_band_mismatch": "band",
+      "duty_exhausted": "duty",
+      "dwell_time": "dwell",
+      "lbt_busy": "lbt",
+      "power_over_limit": "power"
+    },
+    "blocked": {
+      "region_unset": "region not set",
+      "module_band_mismatch": "module cannot tune {{plan}}",
+      "duty_exhausted": "duty limit reached",
+      "dwell_time": "dwell limit reached",
+      "lbt_busy": "channel busy",
+      "power_over_limit": "power over the plan limit"
+    },
+    "rule": {
+      "duty": "duty {{band}}",
+      "dutyValue": "{{used}}/{{budget}} s",
+      "duty_cycle": "duty",
+      "dwell_time": "dwell",
+      "lbt": "listen before talk",
+      "max_power": "power",
+      "dwellValue": "{{last}}/{{limit}} ms",
+      "lbtValue": "{{rssi}} dBm vs {{threshold}} dBm, busy {{busy}}",
+      "powerValue": "{{configured}}/{{limit}} mW ERP"
+    },
+    "refused": "refused  duty {{duty}}  dwell {{dwell}}  lbt {{lbt}}  power {{power}}  region {{region}}",
+    "chip": {
+      "moduleBand": "Module band {{module}} MHz cannot tune {{plan}}",
+      "meshtastic": "Meshtastic preset {{node}}, region expects {{expected}}",
+      "country": "LoRa region {{lora}} differs from country setting {{country}}",
+      "airborne": "Airborne restriction: check the {{code}} plan before flying",
+      "elrs": "ELRS module {{module}} is {{domain}}, region {{code}} expects {{expected}}"
+    },
+    "regionUnsetBanner": "No region is set, so the radio will not transmit.",
+    "openCountry": "Open country setting",
+    "regionPicker": "LoRa region",
+    "followCountry": "Follow country setting ({{country}})",
+    "followShort": "country setting",
+    "regionOption": "{{code}}  {{plan}}  {{rules}} {{module}}",
+    "notVerified": "not verified",
+    "moduleCannot": "(module cannot tune)",
+    "applyRegion": "Apply region",
+    "adminNote": "Admin only, refused while armed.",
+    "confirmTitle": "Change LoRa region",
+    "confirmBody": "Change the LoRa region from {{from}} to {{to}}? You are responsible for using the region where the station operates.",
+    "regionSaved": "LoRa region updated.",
+    "armedLocked": "Region changes are locked while armed.",
+    "beacons": "beacons:",
+    "noBeacons": "none heard",
+    "beacon": "node {{id}} {{age}} s {{rssi}}/{{snr}}"
+  },
+  "gnss": {
+    "title": "GNSS",
+    "loadFailed": "Could not read the GNSS status.",
+    "absent": "No GNSS receiver on this node.",
+    "col": {
+      "id": "Receiver",
+      "model": "Model",
+      "fix": "Fix",
+      "sats": "Sats",
+      "hdop": "HDOP",
+      "pps": "PPS"
+    },
+    "ppsLocked": "lock",
+    "ppsFree": "free",
+    "base": "Base",
+    "surveyProgress": "{{elapsed}}/{{min}} s, acc {{acc}}/{{target}} m",
+    "rtcmOut": "RTCM out {{rate}} msg/s, {{bytes}} bytes, {{targets}} targets",
+    "minDur": "Min duration (s)",
+    "accuracy": "Accuracy (m)",
+    "startSurvey": "Start survey",
+    "baseOff": "Base off",
+    "baseSaved": "Base mode updated."
+  },
+  "sensors": {
+    "title": "Sensors",
+    "loadFailed": "Could not read the sensor status.",
+    "absent": "No sensor service on this node.",
+    "hub": "Sensor hub",
+    "clock": "Clock",
+    "gnss": "GNSS",
+    "notConfigured": "not configured",
+    "connected": "connected",
+    "disconnected": "disconnected",
+    "locked": "locked",
+    "unlocked": "unlocked",
+    "hubLine": "{{state}} {{transport}} crc {{crc}} drop {{dropped}}",
+    "clockLine": "{{timebase}} {{state}} σ {{sigma}}",
+    "gnssLine": "{{fix}} {{sats}} sats hdop {{hdop}} rtk {{rtk}}",
+    "col": {
+      "id": "ID",
+      "kind": "Kind",
+      "role": "Role",
+      "source": "Source",
+      "rate": "Rate",
+      "age": "Age",
+      "sigma": "σ"
+    },
+    "rateOnly": "{{rate}} Hz",
+    "rateVs": "{{rate}}/{{expected}} Hz",
+    "ageMs": "{{ms}} ms",
+    "verdict": {
+      "ok": "ok",
+      "degraded": "degraded",
+      "low": "low"
+    }
+  },
+  "capture": {
+    "title": "Capture",
+    "loadFailed": "Could not read the capture state.",
+    "extensionMissing": "The world-engine extension is not installed on this node.",
+    "state": {
+      "idle": "idle",
+      "recording": "recording",
+      "paused": "paused",
+      "closing": "closing"
+    },
+    "progress": "{{duration}}  segment {{segment}}  {{frames}} frames",
+    "health": {
+      "blur": "blur",
+      "texture": "texture",
+      "flicker": "flicker",
+      "corridor": "corridor",
+      "storage": "storage",
+      "clock": "clock"
+    },
+    "room": "Room",
+    "floor": "Floor",
+    "rec": "REC",
+    "stop": "Stop",
+    "mark": "Mark",
+    "error": {
+      "E_STORAGE_FULL": "Storage is full. Free space or upload sessions before recording.",
+      "E_ALREADY_RECORDING": "A capture is already recording.",
+      "E_CLOCK_NOT_READY": "The clock is not ready yet.",
+      "other": "Capture refused: {{code}}"
+    },
+    "storage": "About {{remaining}} of recording space left."
   }
 }

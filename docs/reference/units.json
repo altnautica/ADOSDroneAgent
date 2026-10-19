@@ -421,7 +421,8 @@
       "memory_max": null,
       "name": "ados-pic",
       "profiles": [
-        "ground_station"
+        "ground_station",
+        "visor"
       ],
       "roles": [],
       "start_on_install": true

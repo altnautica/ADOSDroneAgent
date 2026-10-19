@@ -29,111 +29,32 @@ use crate::graphics::primitives::Canvas;
 pub mod about;
 pub mod access_point;
 pub mod calibration;
+pub mod cameras;
 pub mod channel_hops;
 pub mod dashboard;
 pub mod diagnostics;
 pub mod drone;
+mod geometry;
+pub mod gnss;
+pub mod gs_ctx;
 pub mod link_stats;
+pub mod lora;
 pub mod mesh;
 pub mod more;
 pub mod pair_drone;
 pub mod plugin;
+pub mod power;
 pub mod radio_link;
+pub mod radios;
+pub mod reading;
+pub mod sensing_ctx;
+pub mod sensors;
 pub mod settings;
+pub mod storage;
 pub mod uplink;
 pub mod video;
 
-// ── panel geometry ──────────────────────────────────────────────────
-
-/// Full panel width in landscape orientation.
-pub const PANEL_W: u32 = 480;
-/// Full panel height in landscape orientation.
-pub const PANEL_H: u32 = 320;
-
-/// Height of the persistent top status bar.
-pub const TOP_BAR_H: u32 = 32;
-/// Height of the persistent bottom tab bar.
-pub const BOTTOM_BAR_H: u32 = 44;
-
-/// Width of the page content region (full panel width).
-pub const CONTENT_W: u32 = PANEL_W;
-/// Height of the page content region: panel minus top bar and bottom bar.
-pub const CONTENT_H: u32 = PANEL_H - TOP_BAR_H - BOTTOM_BAR_H;
-/// Top edge (in panel-global y) of the page content region.
-pub const CONTENT_Y: u32 = TOP_BAR_H;
-
-/// Number of bottom-bar tabs.
-pub const TAB_COUNT: usize = 5;
-/// Width of one bottom-bar tab (`480 / 5`).
-pub const TAB_WIDTH: i32 = PANEL_W as i32 / TAB_COUNT as i32;
-/// The bottom-bar tabs, left to right: each id is both the page the tab routes
-/// to and the icon it paints. Index `i` owns the horizontal band
-/// `[i*TAB_WIDTH, (i+1)*TAB_WIDTH)`. The painter and the tap router both read
-/// this one table.
-pub const TAB_PAGE_IDS: [&str; TAB_COUNT] = [
-    "dashboard",
-    "video",
-    "settings",
-    "link_stats",
-    "channel_hops",
-];
-
-/// Outer margin and inter-tile gap for the dashboard's inset 2x2 grid.
-pub const TILE_OUTER_MARGIN: i32 = 8;
-/// Gap between adjacent dashboard tiles.
-pub const TILE_GAP: i32 = 8;
-
-/// A single tile rectangle in page-local coordinates (origin at the top-left of
-/// the content region, not the panel-global origin).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TileRect {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
-}
-
-/// The four dashboard tile rectangles in page-local content coordinates.
-///
-/// Order is top-left, top-right, bottom-left, bottom-right — matching the
-/// `(top_left, top_right, bottom_left, bottom_right)` router order the
-/// dashboard paints in. Tile size derives from the same outer-margin + gap math
-/// the inset dashboard uses: `(CONTENT_W - 2*margin - gap) / 2` wide by
-/// `(CONTENT_H - 2*margin - gap) / 2` tall.
-pub fn tile_rects() -> [TileRect; 4] {
-    let tile_w = (CONTENT_W as i32 - TILE_OUTER_MARGIN * 2 - TILE_GAP) / 2;
-    let tile_h = (CONTENT_H as i32 - TILE_OUTER_MARGIN * 2 - TILE_GAP) / 2;
-    let col_a = TILE_OUTER_MARGIN;
-    let col_b = TILE_OUTER_MARGIN + tile_w + TILE_GAP;
-    let row_a = TILE_OUTER_MARGIN;
-    let row_b = TILE_OUTER_MARGIN + tile_h + TILE_GAP;
-    [
-        TileRect {
-            x: col_a,
-            y: row_a,
-            w: tile_w,
-            h: tile_h,
-        },
-        TileRect {
-            x: col_b,
-            y: row_a,
-            w: tile_w,
-            h: tile_h,
-        },
-        TileRect {
-            x: col_a,
-            y: row_b,
-            w: tile_w,
-            h: tile_h,
-        },
-        TileRect {
-            x: col_b,
-            y: row_b,
-            w: tile_w,
-            h: tile_h,
-        },
-    ]
-}
+pub use geometry::*;
 
 // ── hit zones ───────────────────────────────────────────────────────
 
@@ -600,6 +521,13 @@ pub struct PageContext {
     pub video: VideoCtx,
     pub device: DeviceCtx,
     pub diagnostics: DiagnosticsCtx,
+    pub sensing: sensing_ctx::SensingCtx,
+    /// `GET /api/v1/gnss`; absent when no GNSS service is fitted.
+    pub gnss: reading::Reading<gs_ctx::GnssCtx>,
+    /// `GET /api/v1/lora` + beacons; absent when no LoRa service is fitted.
+    pub lora: reading::Reading<gs_ctx::LoraCtx>,
+    /// `GET /api/v1/radio/adapters`; absent when no receive plane reports.
+    pub radio_adapters: reading::Reading<gs_ctx::RadioAdaptersCtx>,
 }
 
 /// The hosted Mission Control the agent advertises when the operator has not
@@ -669,8 +597,9 @@ impl PageContext {
 /// Which chrome a page paints, and so which coordinate frame its hit zones use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Chrome {
-    /// Top status bar + bottom tab bar. Zones are content-local: y = 0 is the
-    /// first row under the top bar, and taps in the tab band switch tabs.
+    /// Top status bar + bottom tab bar. The page paints the top bar and its
+    /// content; the navigator paints the tab bar and routes taps in its band.
+    /// Zones are content-local: y = 0 is the first row under the top bar.
     Tabbed,
     /// The whole 480x320 panel is the page (detail pages, the overflow menu, the
     /// plugin page). Zones are panel-global and there is no tab band.
@@ -770,7 +699,8 @@ pub trait Page {
     /// Preferred redraw cadence in hertz.
     fn refresh_hz(&self) -> f32;
 
-    /// Paint the full 480x320 panel for this page (chrome included).
+    /// Paint the full 480x320 panel for this page. A tabbed page leaves the
+    /// bottom tab band to the navigator, which paints it after this returns.
     fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas;
 
     /// Return the page's active hit zones, in the frame [`Page::chrome`] names.

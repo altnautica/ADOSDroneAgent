@@ -46,6 +46,7 @@ pub mod legacy_nat;
 pub mod network_mac_pin;
 pub mod npu_provision;
 pub mod portable_python;
+pub mod pps_overlay;
 pub mod preflight;
 pub mod purge_residue;
 pub mod reboot;
@@ -92,6 +93,10 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(appliance::Appliance),
         Box::new(gpu_provision::GpuProvision),
         Box::new(i2c_enable::I2cEnable),
+        // After config_identity, so the display installer's pristine boot-config
+        // snapshot exists before the PPS overlay touches the same file; its
+        // reboot signal is read by `reboot` at the end.
+        Box::new(pps_overlay::PpsOverlay),
         Box::new(chrony_ados::ChronyAdos),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
@@ -126,7 +131,7 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 28);
+        assert_eq!(order.len(), 29);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
@@ -174,6 +179,11 @@ mod tests {
         assert!(pos("deps") < pos("gpu_provision"));
         assert!(pos("config_identity") < pos("gpu_provision"));
         assert!(pos("gpu_provision") < pos("systemd"));
+        // The PPS overlay edits the boot config after the display installer
+        // (inside config_identity) has taken its pristine snapshot, and stages
+        // its reboot before the reboot step reads the signal.
+        assert!(pos("config_identity") < pos("pps_overlay"));
+        assert!(pos("pps_overlay") < pos("reboot"));
         // The hardware watchdog arms after the apt/systemd upgrade is done.
         assert!(pos("deps") < pos("watchdog"));
         // The pending-reboot reader runs after the health gate has had its say

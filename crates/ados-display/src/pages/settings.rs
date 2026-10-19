@@ -16,7 +16,7 @@ use crate::graphics::primitives::{fill_rect, line, text, Canvas};
 use crate::pages::{
     blank_panel, Chrome, HitAction, HitZone, Page, PageContext, CONTENT_H, CONTENT_Y, PANEL_W,
 };
-use crate::widgets::{bottom_bar_zones, draw_bottom_bar, draw_top_bar};
+use crate::widgets::draw_top_bar;
 
 /// Height of one settings list row.
 const ROW_H: i32 = 48;
@@ -127,12 +127,11 @@ impl Page for SettingsPage {
             &ctx.clock,
         );
         render_content(&mut canvas, palette, ctx);
-        draw_bottom_bar(&mut canvas, palette, self.id());
         canvas
     }
 
     fn hit_zones(&self, ctx: &PageContext) -> Vec<HitZone> {
-        let mut zones: Vec<HitZone> = settings_rows(ctx)
+        settings_rows(ctx)
             .iter()
             .enumerate()
             .map(|(i, row)| {
@@ -144,9 +143,7 @@ impl Page for SettingsPage {
                     HitAction::OpenDetail(row.target),
                 )
             })
-            .collect();
-        zones.extend(bottom_bar_zones());
-        zones
+            .collect()
     }
 }
 
@@ -267,8 +264,8 @@ mod tests {
                 HitAction::OpenDetail("details.about"),
             ]
         );
-        // Five rows then the five tabs.
-        assert_eq!(zones.len(), 10);
+        // Five rows; the navigator owns the tab bar.
+        assert_eq!(zones.len(), 5);
         assert!(5 * ROW_H <= CONTENT_H as i32);
     }
 }

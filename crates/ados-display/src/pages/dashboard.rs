@@ -1,7 +1,7 @@
 //! Dashboard page — the 4-tile live status grid.
 //!
-//! The top-level Dashboard tab. It paints the persistent top status bar and
-//! bottom tab bar around a 480x244 content region that holds a 2x2 grid of
+//! The top-level Dashboard tab. It paints the persistent top status bar over a
+//! 480x244 content region (the navigator paints the tab bar below it) that holds a 2x2 grid of
 //! status tiles, with early-life variants swapping in when a slot's primary
 //! data is missing. Each tile is a tap target that drills into the matching
 //! detail page.
@@ -37,7 +37,7 @@ use crate::pages::{
     blank_panel, tile_rects, ArmState, Chrome, DroneCtx, HardwareItem, HitAction, HitZone, LinkCtx,
     MeshCtx, MeshState, NetworkCtx, Page, PageContext, RoleCtx, CONTENT_H, CONTENT_Y, PANEL_W,
 };
-use crate::widgets::{bottom_bar_zones, draw_big_number, draw_bottom_bar, draw_tile, draw_top_bar};
+use crate::widgets::{draw_big_number, draw_tile, draw_top_bar};
 
 /// Cap used for the bitrate meter fill. WFB-ng on the reference RTL8812EU rigs
 /// tops out near here, so the segmented meter reads full at this throughput.
@@ -82,23 +82,20 @@ impl Page for DashboardPage {
             &ctx.clock,
         );
         render_inset(&mut canvas, palette, ctx);
-        draw_bottom_bar(&mut canvas, palette, self.id());
         canvas
     }
 
     fn hit_zones(&self, ctx: &PageContext) -> Vec<HitZone> {
         // The zones follow the same routing the paint uses, so a tap always opens
         // the page behind the tile actually on screen.
-        let mut zones: Vec<HitZone> = tile_rects()
+        tile_rects()
             .iter()
             .zip(route_tiles(ctx))
             .filter_map(|(t, slot)| {
                 slot.detail()
                     .map(|detail| HitZone::new(t.x, t.y, t.w, t.h, HitAction::OpenDetail(detail)))
             })
-            .collect();
-        zones.extend(bottom_bar_zones());
-        zones
+            .collect()
     }
 }
 
@@ -1246,8 +1243,8 @@ mod tests {
                 HitAction::OpenDetail("details.uplink"),
             ]
         );
-        // Five tabs follow the tiles.
-        assert_eq!(page.hit_zones(&early).len(), 3 + 5);
+        // Only the tiles: the navigator owns the tab bar.
+        assert_eq!(page.hit_zones(&early).len(), 3);
 
         // Live rig: every default tile drills into its own detail.
         assert_eq!(

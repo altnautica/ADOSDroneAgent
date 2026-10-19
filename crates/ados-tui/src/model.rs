@@ -154,6 +154,14 @@ pub struct Dashboard {
     pub services_running: usize,
     pub services_total: usize,
     pub next_action: String,
+
+    /// `hub.connected` / `fc.connected` from `/api/v1/sensors` (`None` when the
+    /// route was not polled, absent, or the block is not configured).
+    pub hub_connected: Option<bool>,
+    pub sensors_fc_connected: Option<bool>,
+    /// The per-profile panel row (see [`Dashboard::merge_profile`]); empty when
+    /// the profile has none or no route answered.
+    pub profile_row: Vec<RowLine>,
 }
 
 /// Map a setup-step state to its display label.
@@ -168,7 +176,12 @@ pub fn state_label(value: &str) -> String {
 mod urls;
 use urls::*;
 mod from_status;
+mod profile;
 mod reach;
+pub use profile::{present, Level, ProfileRoutes, RouteSet, RowLine, CAPTURE_STATE_PATH};
+mod profile_gs;
+#[cfg(test)]
+pub(crate) mod profile_tests;
 mod services;
 
 /// A reachable host used to project per-host service URLs (mDNS name or LAN IP).
@@ -301,8 +314,13 @@ impl Dashboard {
             self.services_total > 0 && self.services_running < self.services_total;
         let is_ground_station = self.profile == "ground_station";
         // An identified MSP FC is a live link even though it never sends the
-        // MAVLink heartbeat `mavlink_connected` gates on.
-        let fc_ok = matches!(self.fc_link(), FcLink::Connected | FcLink::Msp) || is_ground_station;
+        // MAVLink heartbeat `mavlink_connected` gates on. A visor counts its
+        // sensor hub or its FC (from `/api/v1/sensors`) as the live link.
+        let visor_link = self.profile == "visor"
+            && (self.hub_connected == Some(true) || self.sensors_fc_connected == Some(true));
+        let fc_ok = matches!(self.fc_link(), FcLink::Connected | FcLink::Msp)
+            || is_ground_station
+            || visor_link;
         let configured = self.paired || (self.has_steps && self.steps_all_complete);
 
         if services_failed {

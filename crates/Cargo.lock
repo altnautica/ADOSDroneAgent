@@ -202,6 +202,7 @@ name = "ados-display"
 version = "0.103.6"
 dependencies = [
  "ab_glyph",
+ "ados-config",
  "ados-hid",
  "ados-protocol",
  "anyhow",
@@ -315,6 +316,7 @@ dependencies = [
 name = "ados-hid"
 version = "0.103.6"
 dependencies = [
+ "ados-config",
  "ados-protocol",
  "anyhow",
  "evdev",

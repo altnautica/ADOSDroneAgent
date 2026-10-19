@@ -263,7 +263,7 @@ def _check_buttons() -> HardwareCheckItem:
             label="Front-panel buttons",
             state="unknown",
             detail=(
-                f"This board declares front-panel buttons on BCM pins {pin_list}. "
+                f"This board declares front-panel buttons on GPIO {pin_list}. "
                 "Whether buttons are wired to them cannot be checked."
             ),
             fix_hint="Optional. Press each button and watch the OLED menu respond.",

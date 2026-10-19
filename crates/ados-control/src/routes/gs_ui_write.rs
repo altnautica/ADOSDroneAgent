@@ -1,7 +1,7 @@
-//! Ground-station persisted-UI write routes.
+//! Front-panel and ground-station persisted-UI write routes.
 //!
 //! The OLED / button / screen UI knobs and the HDMI kiosk display config are
-//! written from the GS setup webapp + the GCS Hardware tab. The read views live
+//! written from the setup webapp + the GCS Hardware tab. The read views live
 //! in [`crate::routes::gs_ui_read`]; this module serves the four writes the front
 //! can reproduce faithfully:
 //!
@@ -65,10 +65,11 @@
 //!
 //! ## The profile gate
 //!
-//! Like every ground-station route, each first gates on the resolved profile being
-//! a ground station and returns the FastAPI
-//! `404 {"detail":{"error":{"code":"E_PROFILE_MISMATCH"}}}` on a drone, the same
-//! body the read module serves.
+//! The three `/ui/*` writes are served on every profile that carries a front
+//! panel (`ground_station`, `visor`); the `/display` write is ground-station
+//! only. Off those profiles each returns the FastAPI
+//! `404 {"detail":{"error":{"code":"E_PROFILE_MISMATCH"}}}`, the same body the
+//! read module serves.
 
 use std::path::{Path, PathBuf};
 
@@ -80,7 +81,10 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use crate::config_store::{section_path, update_config};
-use crate::routes::gs_ui_read::read_gs_section;
+use crate::routes::gs_ui_read::{
+    default_buttons, default_screens, is_ground_station, panel_profile, profile_mismatch,
+    read_gs_section,
+};
 use crate::state::AppState;
 
 mod blob;
@@ -94,29 +98,6 @@ pub use ui_sections::put_ui_oled;
 pub use ui_sections::put_ui_screens;
 #[cfg(test)]
 use ui_sections::*;
-
-// ---------------------------------------------------------------------------
-// Profile gate (mirrors the read module + the Python `_require_ground_profile`).
-// ---------------------------------------------------------------------------
-
-/// True when the node resolves to the ground-station profile, the same way the
-/// FastAPI `_require_ground_profile` gate decides (and the sibling read module).
-fn is_ground_station(state: &AppState) -> bool {
-    let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
-    let (profile, _role) = crate::profile::current_profile_and_role(&cfg.agent.profile);
-    profile == "ground-station"
-}
-
-/// The `404` profile-mismatch response, byte-identical to the FastAPI
-/// `HTTPException(status_code=404, detail={"error": {"code": "E_PROFILE_MISMATCH"}})`
-/// (FastAPI wraps the `detail` dict under a top-level `"detail"` key).
-fn profile_mismatch() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(json!({"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}})),
-    )
-        .into_response()
-}
 
 // ---------------------------------------------------------------------------
 // Error envelopes (matched to the FastAPI handlers' error-object detail shape).
@@ -401,5 +382,7 @@ fn put_display_at(config_path: &Path, update: &DisplayUpdate) -> Response {
     Json(Value::Object(current)).into_response()
 }
 
+#[cfg(test)]
+mod display_tests;
 #[cfg(test)]
 mod tests;

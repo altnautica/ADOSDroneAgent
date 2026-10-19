@@ -1,20 +1,22 @@
-//! Ground-station persisted-UI read routes.
+//! Front-panel and ground-station persisted-UI read routes.
 //!
-//! Two read-only routes the GS setup webapp + the GCS Hardware tab poll to render
-//! the OLED / button / screen UI config and the HDMI kiosk display config. Both
-//! are gated on the node resolving to the ground-station profile: on a drone-profile
-//! node each answers `404` with the body `{"detail": {"error": {"code":
-//! "E_PROFILE_MISMATCH"}}}` — the same shape the FastAPI `_require_ground_profile`
-//! gate raises, so the GCS distinguishes "wrong profile" from "endpoint missing".
+//! Two read-only routes the setup webapp + the GCS Hardware tab poll to render
+//! the OLED / button / screen panel config and the HDMI kiosk display config.
+//! The panel read is served on every profile that carries a front panel
+//! (`ground_station` and `visor`, see [`ados_protocol::panel_ui::has_panel`]);
+//! the kiosk read is ground-station only. Off those profiles each answers `404`
+//! with the body `{"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}}` — the
+//! same shape the FastAPI `_require_ground_profile` gate raises, so the GCS
+//! distinguishes "wrong profile" from "endpoint missing".
 //!
 //! - **`GET /api/v1/ground-station/ui`** — the full persisted UI config blob:
 //!   `{oled, buttons, screens}`, each section the persisted `ground_station.ui`
 //!   value merged over the built-in defaults (`oled.brightness 204`, the SSD1306
 //!   contrast; the retired `auto_dim_enabled` / `screen_cycle_seconds` keys are
-//!   never served, even from an older persisted section), the six-action button
-//!   mapping, the six-screen
-//!   order/enabled lists). An absent / unreadable / unparseable config degrades
-//!   to the all-defaults shape, never a 500.
+//!   never served, even from an older persisted section), the profile's default
+//!   button mapping and screen order/enabled lists from
+//!   [`ados_protocol::panel_ui`]). An absent / unreadable / unparseable config
+//!   degrades to the all-defaults shape, never a 500.
 //! - **`GET /api/v1/ground-station/display`** — the persisted HDMI kiosk display
 //!   config: `{resolution, kiosk_enabled, kiosk_target_url}`, the
 //!   `ground_station.kiosk` section of the agent config projected over the defaults
@@ -42,21 +44,33 @@ use crate::state::AppState;
 // Profile gate.
 // ---------------------------------------------------------------------------
 
-/// True when the node resolves to the ground-station profile, the same way the
-/// FastAPI `_require_ground_profile` gate decides. Resolves through
-/// `current_profile_and_role` (the source of truth the node advertises on the
-/// wire), so a `profile: auto` node that resolves to a ground station via
-/// `profile.conf` passes the gate.
-fn is_ground_station(state: &AppState) -> bool {
+/// The node's resolved profile in its underscore wire spelling
+/// (`ground_station`, `visor`, ...). Resolves through `current_profile_and_role`
+/// (the source of truth the node advertises on the wire), so a `profile: auto`
+/// node that resolves via `profile.conf` passes the gates below.
+fn resolved_profile(state: &AppState) -> String {
     let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
     let (profile, _role) = crate::profile::current_profile_and_role(&cfg.agent.profile);
-    profile == "ground-station"
+    profile.replace('-', "_")
+}
+
+/// The resolved profile when it carries a front panel, else `None`. Gates the
+/// panel (`/ui`) read and writes.
+pub(crate) fn panel_profile(state: &AppState) -> Option<String> {
+    let profile = resolved_profile(state);
+    ados_protocol::panel_ui::has_panel(&profile).then_some(profile)
+}
+
+/// True when the node resolves to the ground-station profile. Gates the kiosk
+/// display routes (a visor has no kiosk).
+pub(crate) fn is_ground_station(state: &AppState) -> bool {
+    resolved_profile(state) == "ground_station"
 }
 
 /// The `404` profile-mismatch response, byte-identical to the FastAPI
 /// `HTTPException(status_code=404, detail={"error": {"code": "E_PROFILE_MISMATCH"}})`
 /// (FastAPI wraps the `detail` dict under a top-level `"detail"` key).
-fn profile_mismatch() -> Response {
+pub(crate) fn profile_mismatch() -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(json!({"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}})),
@@ -183,28 +197,29 @@ fn oled_section(stored: Option<&Value>) -> Value {
     oled
 }
 
-/// The default button mapping, mirroring the Python `_DEFAULT_BUTTONS` (the six
-/// short/long actions for the three physical buttons, nested under `mapping`).
-fn default_buttons() -> Map<String, Value> {
-    json_object(json!({
-        "mapping": {
-            "B1_short": "cycle_screen",
-            "B1_long": "toggle_backlight",
-            "B2_short": "show_network",
-            "B2_long": "show_qr",
-            "B3_short": "confirm",
-            "B3_long": "pair_drone",
-        }
-    }))
+/// The default button section for `profile`: the shared panel table nested
+/// under `mapping`.
+pub(crate) fn default_buttons(profile: &str) -> Map<String, Value> {
+    let mapping: Map<String, Value> = ados_protocol::panel_ui::default_buttons(profile)
+        .iter()
+        .map(|(k, v)| ((*k).to_string(), Value::String((*v).to_string())))
+        .collect();
+    let mut out = Map::new();
+    out.insert("mapping".to_string(), Value::Object(mapping));
+    out
 }
 
-/// The default screen config, mirroring the Python `_DEFAULT_SCREENS` (the six-screen
-/// order + the same set enabled).
-fn default_screens() -> Map<String, Value> {
-    json_object(json!({
-        "order": ["home", "link", "drone", "network", "system", "qr"],
-        "enabled": ["home", "link", "drone", "network", "system", "qr"],
-    }))
+/// The default screen section for `profile`: the shared screen list as both the
+/// order and the enabled set.
+pub(crate) fn default_screens(profile: &str) -> Map<String, Value> {
+    let list: Vec<Value> = ados_protocol::panel_ui::default_screens(profile)
+        .iter()
+        .map(|s| Value::String((*s).to_string()))
+        .collect();
+    let mut out = Map::new();
+    out.insert("order".to_string(), Value::Array(list.clone()));
+    out.insert("enabled".to_string(), Value::Array(list));
+    out
 }
 
 /// The default HDMI kiosk display config, mirroring the Python `_DEFAULT_DISPLAY`.
@@ -231,25 +246,26 @@ fn json_object(value: Value) -> Map<String, Value> {
 
 /// `GET /api/v1/ground-station/ui` → `{oled, buttons, screens}`.
 ///
-/// `404` `E_PROFILE_MISMATCH` off a ground-station node. Otherwise the persisted
-/// `ground_station.ui` section with each part merged over its built-in defaults.
-/// An absent / unreadable config yields the all-defaults shape, never a 500.
+/// `404` `E_PROFILE_MISMATCH` off a panel profile. Otherwise the persisted
+/// `ground_station.ui` section with each part merged over the profile's built-in
+/// defaults. An absent / unreadable config yields the all-defaults shape, never
+/// a 500.
 pub async fn get_ui(State(state): State<AppState>) -> Response {
-    if !is_ground_station(&state) {
+    let Some(profile) = panel_profile(&state) else {
         return profile_mismatch();
-    }
+    };
     let blob = read_gs_section(&config_yaml_path(&state), "ui");
-    Json(build_ui_config(&blob)).into_response()
+    Json(build_ui_config(&profile, &blob)).into_response()
 }
 
 /// Compose the `/ui` body from the persisted `ground_station.ui` map: each section the defaults merged
 /// with the blob's matching section. Split out so the merge + the default key set
 /// are unit-tested without filesystem IO.
-fn build_ui_config(blob: &Map<String, Value>) -> Value {
+fn build_ui_config(profile: &str, blob: &Map<String, Value>) -> Value {
     json!({
         "oled": oled_section(blob.get("oled")),
-        "buttons": merge_over_defaults(default_buttons(), blob.get("buttons")),
-        "screens": merge_over_defaults(default_screens(), blob.get("screens")),
+        "buttons": merge_over_defaults(default_buttons(profile), blob.get("buttons")),
+        "screens": merge_over_defaults(default_screens(profile), blob.get("screens")),
     })
 }
 
