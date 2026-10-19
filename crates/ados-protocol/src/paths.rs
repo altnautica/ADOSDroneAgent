@@ -119,6 +119,7 @@ pub const SENSORHUB_MAX_AGE_MS: u64 = 5000;
 pub const GNSS_JSON: &str = "gnss.json";
 pub const GNSS_MAX_AGE_MS: u64 = 5000;
 pub const CAPTURE_STORAGE_JSON: &str = "capture-storage.json";
+pub const CAPTURE_STORAGE_MAX_AGE_MS: u64 = 30000;
 
 // Socket file names.
 pub const API_INTERNAL_SOCK: &str = "api-internal.sock";
@@ -203,7 +204,7 @@ pub const SIDECARS: &[SidecarPath] = &[
     SidecarPath { id: "sensors", path: "/run/ados/sensors.json", max_age_ms: Some(5000), writer: "ados-clock" },
     SidecarPath { id: "sensorhub", path: "/run/ados/sensorhub.json", max_age_ms: Some(5000), writer: "ados-sensorhub" },
     SidecarPath { id: "gnss", path: "/run/ados/gnss.json", max_age_ms: Some(5000), writer: "ados-gnss" },
-    SidecarPath { id: "capture-storage", path: "/run/ados/capture-storage.json", max_age_ms: None, writer: "ados-supervisor" },
+    SidecarPath { id: "capture-storage", path: "/run/ados/capture-storage.json", max_age_ms: Some(30000), writer: "ados-supervisor" },
 ];
 
 /// Every registered socket.

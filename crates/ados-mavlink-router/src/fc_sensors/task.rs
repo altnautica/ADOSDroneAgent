@@ -59,7 +59,8 @@ pub async fn run(
             },
             _ = flush.tick() => core.flush_due(ados_sensorbus::time::mono_ns(), &mut out),
             _ = slow.tick() => {
-                fc.sensor_streams().set_capture_active(capture_marker.exists());
+                let capturing = tokio::fs::try_exists(&capture_marker).await.unwrap_or(false);
+                fc.sensor_streams().set_capture_active(capturing);
                 if timesync {
                     let ts1 = ados_sensorbus::time::mono_ns();
                     if fc.send_timesync(ts1).await {

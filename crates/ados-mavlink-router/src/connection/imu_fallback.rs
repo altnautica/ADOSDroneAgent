@@ -17,6 +17,8 @@ pub const HIGHRES_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MSG_HIGHRES_IMU: u32 = 105;
 /// `RAW_IMU` message id.
 pub const MSG_RAW_IMU: u32 = 27;
+/// `SCALED_PRESSURE` message id.
+pub const MSG_SCALED_PRESSURE: u32 = 29;
 /// Rate requested for `RAW_IMU` once fallen back.
 pub const RAW_IMU_FALLBACK_HZ: f32 = 50.0;
 
@@ -68,14 +70,15 @@ impl ImuStream {
 }
 
 /// The sensor-stream inputs the stream cadence reads: whether a capture is
-/// recording, and the IMU fallback state.
+/// recording, and the IMU fallback state; plus the table last requested.
 #[derive(Debug)]
 pub struct SensorStreams {
     capture_active: AtomicBool,
     imu: Mutex<ImuStream>,
-    /// `(capture table, raw substitution)` of the last request sent, so a
-    /// change re-requests at once instead of waiting out the cadence.
-    last_sent: Mutex<Option<(bool, bool)>>,
+    /// `(message id, Hz)` of the last request sent (after the `RAW_IMU`
+    /// substitution), so a change re-requests at once instead of waiting out
+    /// the cadence and the streams it dropped can be switched off.
+    last_sent: Mutex<Option<Vec<(u32, f32)>>>,
 }
 
 impl Default for SensorStreams {
@@ -103,7 +106,7 @@ impl SensorStreams {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn last(&self) -> std::sync::MutexGuard<'_, Option<(bool, bool)>> {
+    fn last(&self) -> std::sync::MutexGuard<'_, Option<Vec<(u32, f32)>>> {
         self.last_sent
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -125,8 +128,9 @@ impl SensorStreams {
         s.substitutes_raw()
     }
 
-    /// A request was sent at `now` for the given table.
-    pub fn requested(&self, capture_table: bool, substitutes_raw: bool, now: Instant) {
+    /// The table `sent` was requested at `now`; `capture_table` says whether
+    /// it asks for the IMU.
+    pub fn requested(&self, capture_table: bool, sent: &[(u32, f32)], now: Instant) {
         {
             let mut s = self.imu();
             *s = if capture_table {
@@ -135,12 +139,39 @@ impl SensorStreams {
                 ImuStream::Idle
             };
         }
-        *self.last() = Some((capture_table, substitutes_raw));
+        *self.last() = Some(sent.to_vec());
     }
 
-    /// Whether `key` differs from the last request sent.
-    pub fn changed(&self, key: (bool, bool)) -> bool {
-        *self.last() != Some(key)
+    /// Whether `table` differs from the last request sent.
+    pub fn changed(&self, table: &[(u32, f32)]) -> bool {
+        self.last().as_deref() != Some(table)
+    }
+
+    /// Message ids the last request streamed that `table` no longer asks for:
+    /// each must be switched off at the FC, which otherwise keeps sending it.
+    pub fn dropped_by(&self, table: &[(u32, f32)]) -> Vec<u32> {
+        self.last().as_deref().map_or_else(Vec::new, |last| {
+            last.iter()
+                .map(|&(id, _)| id)
+                .filter(|id| !table.iter().any(|&(t, _)| t == *id))
+                .collect()
+        })
+    }
+
+    /// The FC sensor streams the last request asked for, by bus stream id
+    /// (`fc_imu`, `fc_raw_imu`, `fc_baro`) with their rates.
+    pub fn sensor_rates_hz(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut out = serde_json::Map::new();
+        for &(id, hz) in self.last().as_deref().unwrap_or_default() {
+            let src = match id {
+                MSG_HIGHRES_IMU => "fc_imu",
+                MSG_RAW_IMU => "fc_raw_imu",
+                MSG_SCALED_PRESSURE => "fc_baro",
+                _ => continue,
+            };
+            out.insert(src.into(), serde_json::json!(f64::from(hz)));
+        }
+        out
     }
 
     /// The link dropped: the next FC gets a fresh chance at `HIGHRES_IMU`.

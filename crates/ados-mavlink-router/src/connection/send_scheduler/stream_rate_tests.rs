@@ -78,8 +78,10 @@ fn highres_fallback_state_machine() {
     assert_eq!(answered.poll(t0 + HIGHRES_TIMEOUT * 2), ImuStream::Highres);
 }
 
-/// A visor-profile link with an open transport and a capturing writer.
-async fn visor_link() -> (
+/// A link of `profile` with an open transport and a capturing writer.
+async fn link(
+    profile: &str,
+) -> (
     std::sync::Arc<FcConnection>,
     std::sync::mpsc::Receiver<Vec<u8>>,
 ) {
@@ -88,7 +90,7 @@ async fn visor_link() -> (
         "/tmp/ados-test-params.json",
     )));
     let cfg = MavlinkConfig {
-        profile: "visor".into(),
+        profile: profile.into(),
         ..MavlinkConfig::default()
     };
     let conn = FcConnection::new(cfg, state, params);
@@ -112,7 +114,7 @@ fn intervals(rx: &std::sync::mpsc::Receiver<Vec<u8>>) -> Vec<(u32, f32)> {
 
 #[tokio::test]
 async fn unanswered_highres_request_switches_to_raw_imu_at_once() {
-    let (conn, wrx) = visor_link().await;
+    let (conn, wrx) = link("visor").await;
 
     conn.tick_streams().await;
     let first = intervals(&wrx);
@@ -131,22 +133,59 @@ async fn unanswered_highres_request_switches_to_raw_imu_at_once() {
     assert!(intervals(&wrx).is_empty());
 
     // Age the request past the timeout: the next tick re-requests at once
-    // with RAW_IMU at 50 Hz in place of HIGHRES_IMU.
+    // with RAW_IMU at 50 Hz in place of HIGHRES_IMU, and stops HIGHRES_IMU.
     let aged = Instant::now() - HIGHRES_TIMEOUT - Duration::from_millis(1);
     conn.sensor_streams().reset_link();
-    conn.sensor_streams().requested(true, false, aged);
+    conn.sensor_streams()
+        .requested(true, stream_rates("visor", false), aged);
     conn.tick_streams().await;
     let second = intervals(&wrx);
     assert!(
         second.contains(&(27, 20_000.0)),
         "RAW_IMU at 50 Hz: {second:?}"
     );
-    assert!(!second.iter().any(|e| e.0 == 105));
+    assert!(
+        second.contains(&(105, -1.0)),
+        "HIGHRES_IMU stopped: {second:?}"
+    );
+    assert!(!second.contains(&(105, 5_000.0)));
     assert_eq!(conn.sensor_streams().imu_state(), ImuStream::RawFallback);
+    assert_eq!(
+        serde_json::Value::Object(conn.sensor_streams().sensor_rates_hz()),
+        serde_json::json!({"fc_raw_imu": 50.0, "fc_baro": 10.0})
+    );
 
-    // The FC starts answering HIGHRES_IMU: back to the HIGHRES request.
+    // The FC starts answering HIGHRES_IMU: back to the HIGHRES request, and
+    // RAW_IMU is stopped.
     conn.sensor_streams().highres_seen();
     conn.tick_streams().await;
     let third = intervals(&wrx);
     assert!(third.contains(&(105, 5_000.0)), "{third:?}");
+    assert!(third.contains(&(27, -1.0)), "{third:?}");
+}
+
+#[tokio::test]
+async fn capture_end_stops_every_capture_only_stream() {
+    let (conn, wrx) = link("drone").await;
+    conn.sensor_streams().set_capture_active(true);
+    conn.tick_streams().await;
+    assert!(intervals(&wrx).contains(&(105, 5_000.0)));
+    assert_eq!(
+        serde_json::Value::Object(conn.sensor_streams().sensor_rates_hz()),
+        serde_json::json!({"fc_imu": 200.0, "fc_baro": 10.0})
+    );
+
+    conn.sensor_streams().set_capture_active(false);
+    conn.tick_streams().await;
+    let after = intervals(&wrx);
+    let stopped: Vec<u32> = after.iter().filter(|e| e.1 == -1.0).map(|e| e.0).collect();
+    assert_eq!(stopped, vec![105, 31, 32, 2, 29], "{after:?}");
+    // GPS_RAW_INT stays, back at its base rate.
+    assert!(after.contains(&(24, 500_000.0)), "{after:?}");
+    assert!(conn.sensor_streams().sensor_rates_hz().is_empty());
+    // Nothing more to stop on the next refresh.
+    *conn.last_stream_req.lock().await = None;
+    conn.tick_streams().await;
+    let next = intervals(&wrx);
+    assert!(!next.is_empty() && !next.iter().any(|e| e.1 == -1.0));
 }

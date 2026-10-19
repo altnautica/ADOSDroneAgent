@@ -86,6 +86,7 @@ SENSORHUB_MAX_AGE_MS = 5000
 GNSS_JSON = "gnss.json"
 GNSS_MAX_AGE_MS = 5000
 CAPTURE_STORAGE_JSON = "capture-storage.json"
+CAPTURE_STORAGE_MAX_AGE_MS = 30000
 
 API_INTERNAL_SOCK = "api-internal.sock"
 AUX_CMD_SOCK = "aux-cmd.sock"
@@ -167,7 +168,7 @@ SIDECAR_PATHS: dict[str, dict[str, object]] = {
     "sensors": {"path": "/run/ados/sensors.json", "max_age_ms": 5000, "writer": "ados-clock"},
     "sensorhub": {"path": "/run/ados/sensorhub.json", "max_age_ms": 5000, "writer": "ados-sensorhub"},
     "gnss": {"path": "/run/ados/gnss.json", "max_age_ms": 5000, "writer": "ados-gnss"},
-    "capture-storage": {"path": "/run/ados/capture-storage.json", "max_age_ms": None, "writer": "ados-supervisor"},
+    "capture-storage": {"path": "/run/ados/capture-storage.json", "max_age_ms": 30000, "writer": "ados-supervisor"},
 }
 
 SOCKET_PATHS: dict[str, dict[str, str]] = {

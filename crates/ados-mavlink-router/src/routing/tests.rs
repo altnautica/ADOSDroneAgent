@@ -90,13 +90,26 @@ fn sidecar_written_on_change() {
     let hub = RouteHub::new(true);
     let ipc = hub.register("ipc");
     let mut last = None;
-    assert!(write_if_changed(&hub, &path, &mut last));
-    assert!(!write_if_changed(&hub, &path, &mut last));
+    let none = serde_json::Map::new;
+    assert!(write_if_changed(&hub, none(), &path, &mut last));
+    assert!(!write_if_changed(&hub, none(), &path, &mut last));
     hub.ingress(&ipc, &heartbeat(255, 190));
-    assert!(write_if_changed(&hub, &path, &mut last));
+    assert!(write_if_changed(&hub, none(), &path, &mut last));
     let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(body["version"], 1);
     assert_eq!(body["routes"][0]["sysid"], 255);
     assert_eq!(body["routes"][0]["endpoint"], "ipc");
     assert_eq!(body["per_endpoint"]["ipc"]["rx"], 1);
+    assert_eq!(body["sensor_rates_hz"], serde_json::json!({}));
+    // A change of the requested sensor rates alone rewrites it.
+    let mut rates = serde_json::Map::new();
+    rates.insert("fc_imu".into(), serde_json::json!(200.0));
+    rates.insert("fc_baro".into(), serde_json::json!(10.0));
+    assert!(write_if_changed(&hub, rates.clone(), &path, &mut last));
+    assert!(!write_if_changed(&hub, rates, &path, &mut last));
+    let body: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        body["sensor_rates_hz"],
+        serde_json::json!({"fc_imu": 200.0, "fc_baro": 10.0})
+    );
 }

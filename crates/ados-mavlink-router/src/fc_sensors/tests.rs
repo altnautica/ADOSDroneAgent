@@ -265,12 +265,10 @@ fn imu_samples_batch_per_ten_ms_with_running_seq() {
     assert_eq!(batch.samples[0].seq, 0);
 }
 
+/// A CRC-valid RTCM3 frame of `total_len` bytes.
 fn rtcm3(total_len: usize) -> Vec<u8> {
-    let payload = total_len - 6;
-    let mut v = vec![0xD3, (payload >> 8) as u8 & 0x03, payload as u8];
-    v.extend((0..payload).map(|i| i as u8));
-    v.extend([0xAA, 0xBB, 0xCC]);
-    v
+    let payload: Vec<u8> = (0..total_len - 6).map(|i| i as u8).collect();
+    ados_sensorbus::rtcm::encode_rtcm3(&payload)
 }
 
 #[test]
@@ -300,4 +298,13 @@ fn a_400_byte_rtcm_frame_becomes_three_gps_rtcm_data_messages() {
     assert_eq!(msgs.len(), 4);
     assert_eq!((msgs[0].flags, msgs[0].len), (0, 30));
     assert_eq!(msgs[1].flags, 0x01 | 2 << 3);
+    // A 360-byte frame ends with a zero-length terminator; junk is skipped.
+    let mut junk = vec![0x00, 0x11];
+    junk.extend(rtcm3(360));
+    let msgs = rtcm_messages(&mut fragmenter, &junk);
+    assert_eq!(
+        msgs.iter().map(|m| m.len).collect::<Vec<_>>(),
+        vec![180, 180, 0]
+    );
+    assert!(rtcm_messages(&mut fragmenter, &[0xD3, 0, 1, 7, 0, 0, 0]).is_empty());
 }

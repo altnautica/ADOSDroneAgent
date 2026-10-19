@@ -36,19 +36,21 @@ pub(super) fn spawn_core(
     }
 
     // Route-aware forwarding: one classifier decodes each FC frame once and
-    // picks its audience, and the route table is published every 2 s when it
-    // changed. Off (the default), neither runs and every consumer reads the
-    // flat fan-out.
+    // picks its audience. Off (the default), it does not run and every
+    // consumer reads the flat fan-out. The router sidecar (route table plus
+    // the requested FC sensor-stream rates) is published every 2 s when it
+    // changed, either way.
     if fc.routes().enabled() {
         tracing::info!("mavlink_route_aware_enabled");
         let hub = fc.routes().clone();
         let frames = fc.subscribe();
         let c = cancel.clone();
         tasks.push(tokio::spawn(routing::run_classifier(hub, frames, c)));
-        let hub = fc.routes().clone();
+    }
+    {
         let path = std::path::Path::new(dir).join(routing::SIDECAR_NAME);
         let c = cancel.clone();
-        tasks.push(tokio::spawn(routing::run_sidecar(hub, path, c)));
+        tasks.push(tokio::spawn(routing::run_sidecar(fc.clone(), path, c)));
     }
 
     // The FC sensor lane on the sensor bus: IMU / baro / camera feedback /

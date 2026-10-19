@@ -333,30 +333,50 @@ pub async fn run_classifier(
     }
 }
 
-/// Write the route table to `path` every [`SIDECAR_INTERVAL`], only when it
-/// changed, until `cancel`.
-pub async fn run_sidecar(hub: Arc<RouteHub>, path: PathBuf, cancel: Shutdown) {
+/// Write the route table and the requested FC sensor-stream rates to `path`
+/// every [`SIDECAR_INTERVAL`], only when the body changed, until `cancel`.
+pub async fn run_sidecar(
+    fc: Arc<crate::connection::FcConnection>,
+    path: PathBuf,
+    cancel: Shutdown,
+) {
     let mut last: Option<Vec<u8>> = None;
     let mut tick = tokio::time::interval(SIDECAR_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                write_if_changed(&hub, &path, &mut last);
+                // Only a live link has streams requested from it.
+                let rates = if fc.transport_open() {
+                    fc.sensor_streams().sensor_rates_hz()
+                } else {
+                    serde_json::Map::new()
+                };
+                write_if_changed(fc.routes(), rates, &path, &mut last);
             }
             _ = cancel.wait() => break,
         }
     }
 }
 
-/// One sidecar pass: serialise, and write only a body that differs from the
-/// last one written. Returns whether it wrote.
+/// One sidecar pass: serialise the route table plus `sensor_rates_hz`
+/// (`{"fc_imu": 200.0, ...}`, the FC sensor streams currently requested),
+/// and write only a body that differs from the last one written. Returns
+/// whether it wrote.
 pub fn write_if_changed(
     hub: &RouteHub,
+    sensor_rates_hz: serde_json::Map<String, serde_json::Value>,
     path: &std::path::Path,
     last: &mut Option<Vec<u8>>,
 ) -> bool {
-    let Ok(body) = serde_json::to_vec(&hub.snapshot()) else {
+    let mut snapshot = hub.snapshot();
+    if let Some(obj) = snapshot.as_object_mut() {
+        obj.insert(
+            "sensor_rates_hz".into(),
+            serde_json::Value::Object(sensor_rates_hz),
+        );
+    }
+    let Ok(body) = serde_json::to_vec(&snapshot) else {
         return false;
     };
     if last.as_deref() == Some(body.as_slice()) {

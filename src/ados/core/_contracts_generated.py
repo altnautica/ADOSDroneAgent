@@ -14,7 +14,7 @@ CONTRACT_VERSIONS: dict[str, int] = {
     "framebus.ring": 1,
     "framebus.descriptor": 2,
     "tap.frame": 2,
-    "vision.detection": 2,
+    "vision.detection": 3,
     "state.v2": 4,
     "frame": 0,
     "mavlink.socket": 2,
@@ -125,11 +125,11 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "description": "Vision-tap frame header (ADVT magic) between the video pipeline and the vision engine. v2 adds ts_mono_ns, the host monotonic arrival time of the frame.",
     },
     "vision.detection": {
-        "version": 2,
+        "version": 3,
         "wire": "msgpack",
         "transport": "event-bus",
         "status": "active",
-        "description": "Self-describing detection/percept batches published on the vision.detection topic (v2 adds optional mask, keypoints, depth, world position, and an optional 2D box).",
+        "description": "Self-describing detection/percept batches published on the vision.detection topic (v2 adds optional mask, keypoints, depth, world position, and an optional 2D box; v3 stamps ts_ms from the frame's host monotonic clock, not wall-clock).",
     },
     "state.v2": {
         "version": 4,
@@ -206,7 +206,7 @@ CONTRACT_CATALOG: dict[str, dict[str, object]] = {
         "wire": "msgpack",
         "transport": "unix-stream",
         "status": "active",
-        "description": "The sensor bus (seam J): length-prefixed msgpack frames {v, kind, src, payload} brokered by ados-clock on sensors.sock. clock/imu/gnss/trigger payloads are the capture contract ados.capture.v1 protobuf messages, with every t_ns on the host monotonic clock; baro, mag and sync are msgpack; rtcm is raw RTCM3 bytes toward the receivers.",
+        "description": "The sensor bus (seam J): length-prefixed msgpack frames {v, kind, src, origin, payload} brokered by ados-clock on sensors.sock. clock/imu/gnss/trigger payloads are the capture contract ados.capture.v1 protobuf messages, with every t_ns on the host monotonic clock; baro, mag and sync are msgpack; rtcm is raw RTCM3 bytes toward the receivers.",
     },
 }
 
@@ -440,7 +440,7 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "wire": "json",
         "transport": "/run/ados/mavlink-router.json",
         "status": "sidecar",
-        "description": "The router's learned routes (sysid, compid, endpoint) and per-endpoint rx/tx counters, rewritten on change.",
+        "description": "The router's learned routes (sysid, compid, endpoint), per-endpoint rx/tx counters, and sensor_rates_hz (the flight-controller sensor streams currently requested, by sensor-bus stream id), rewritten on change.",
     },
     "link-feedback": {
         "version": 1,

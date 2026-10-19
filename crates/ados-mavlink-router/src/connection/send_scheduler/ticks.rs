@@ -30,12 +30,24 @@ impl FcConnection {
         let interval = *self.stream_interval.lock().await;
         // The table follows the profile and the capture marker; within the
         // capture table HIGHRES_IMU gives way to RAW_IMU when the FC never
-        // answered it. A change of either re-requests at once.
+        // answered it. A change of either re-requests at once, and every
+        // stream the new table no longer asks for is switched off (interval
+        // -1): the FC otherwise keeps streaming it at the old rate.
         let now = Instant::now();
         let rates = stream_rates(&self.cfg.profile, self.sensor_streams.capture_active());
         let capture_table = rates.iter().any(|&(id, _)| id == MSG_HIGHRES_IMU);
         let raw = capture_table && self.sensor_streams.poll(now);
-        let changed = self.sensor_streams.changed((capture_table, raw));
+        let table: Vec<(u32, f32)> = rates
+            .iter()
+            .map(|&(id, hz)| {
+                if raw && id == MSG_HIGHRES_IMU {
+                    (MSG_RAW_IMU, RAW_IMU_FALLBACK_HZ)
+                } else {
+                    (id, hz)
+                }
+            })
+            .collect();
+        let changed = self.sensor_streams.changed(&table);
         let due = changed || {
             let last = self.last_stream_req.lock().await;
             last.map(|t| t.elapsed() >= interval).unwrap_or(true)
@@ -43,30 +55,15 @@ impl FcConnection {
         if !due {
             return;
         }
-        let target = self.target_system.load(Ordering::Relaxed);
-        for &(msg_id, rate_hz) in rates {
-            let (msg_id, rate_hz) = if raw && msg_id == MSG_HIGHRES_IMU {
-                (MSG_RAW_IMU, RAW_IMU_FALLBACK_HZ)
-            } else {
-                (msg_id, rate_hz)
-            };
-            let interval_us = 1_000_000.0 / rate_hz;
-            let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
-                target_system: target,
-                target_component: 1,
-                command: MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
-                confirmation: 0,
-                param1: msg_id as f32,
-                param2: interval_us,
-                param3: 0.0,
-                param4: 0.0,
-                param5: 0.0,
-                param6: 0.0,
-                param7: 0.0,
-            });
-            self.send_msg(&cmd).await;
+        for &(msg_id, rate_hz) in &table {
+            self.send_message_interval(msg_id, 1_000_000.0 / rate_hz)
+                .await;
         }
-        self.sensor_streams.requested(capture_table, raw, now);
+        for msg_id in self.sensor_streams.dropped_by(&table) {
+            self.send_message_interval(msg_id, -1.0).await;
+        }
+        self.sensor_streams.requested(capture_table, &table, now);
+        let target = self.target_system.load(Ordering::Relaxed);
         // The legacy `REQUEST_DATA_STREAM` groups, off by default.
         //
         // This used to be sent unconditionally, on the assumption that a firmware
@@ -95,6 +92,25 @@ impl FcConnection {
             }
         }
         *self.last_stream_req.lock().await = Some(Instant::now());
+    }
+
+    /// `MAV_CMD_SET_MESSAGE_INTERVAL` for `msg_id`: `interval_us` between
+    /// messages, or -1 to stop the message.
+    async fn send_message_interval(&self, msg_id: u32, interval_us: f32) {
+        let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: self.target_system.load(Ordering::Relaxed),
+            target_component: 1,
+            command: MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+            confirmation: 0,
+            param1: msg_id as f32,
+            param2: interval_us,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        });
+        self.send_msg(&cmd).await;
     }
 
     /// Until ArduPilot's banner has named its firmware, ask for it every

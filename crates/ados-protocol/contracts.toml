@@ -116,11 +116,11 @@ description = "Vision-tap frame header (ADVT magic) between the video pipeline a
 
 [[contract]]
 id = "vision.detection"
-version = 2
+version = 3
 wire = "msgpack"
 transport = "event-bus"
 status = "active"
-description = "Self-describing detection/percept batches published on the vision.detection topic (v2 adds optional mask, keypoints, depth, world position, and an optional 2D box)."
+description = "Self-describing detection/percept batches published on the vision.detection topic (v2 adds optional mask, keypoints, depth, world position, and an optional 2D box; v3 stamps ts_ms from the frame's host monotonic clock, not wall-clock)."
 
 [[contract]]
 id = "state.v2"
@@ -228,7 +228,7 @@ wire = "msgpack"
 transport = "unix-stream"
 status = "active"
 rust_const = "ados_sensorbus::SENSOR_BUS_VERSION"
-description = "The sensor bus (seam J): length-prefixed msgpack frames {v, kind, src, payload} brokered by ados-clock on sensors.sock. clock/imu/gnss/trigger payloads are the capture contract ados.capture.v1 protobuf messages, with every t_ns on the host monotonic clock; baro, mag and sync are msgpack; rtcm is raw RTCM3 bytes toward the receivers."
+description = "The sensor bus (seam J): length-prefixed msgpack frames {v, kind, src, origin, payload} brokered by ados-clock on sensors.sock. clock/imu/gnss/trigger payloads are the capture contract ados.capture.v1 protobuf messages, with every t_ns on the host monotonic clock; baro, mag and sync are msgpack; rtcm is raw RTCM3 bytes toward the receivers."
 
 # ===========================================================================
 # SIDECARS — versioned on-disk state files
@@ -501,7 +501,7 @@ id = "mavlink-router"
 version = 1
 path = "/run/ados/mavlink-router.json"
 writer = "ados-mavlink-router"
-description = "The router's learned routes (sysid, compid, endpoint) and per-endpoint rx/tx counters, rewritten on change."
+description = "The router's learned routes (sysid, compid, endpoint), per-endpoint rx/tx counters, and sensor_rates_hz (the flight-controller sensor streams currently requested, by sensor-bus stream id), rewritten on change."
 
 [[sidecar]]
 id = "link-feedback"
@@ -635,6 +635,7 @@ description = "GNSS receivers (fix, satellites, position, RTK, PPS lock), the RT
 id = "capture-storage"
 version = 1
 path = "/run/ados/capture-storage.json"
+max_age_ms = 30000
 writer = "ados-supervisor"
 description = "The capture storage root, its volume, capture usage against the budget and free-space floor, session counts, and the admission state (ok, near_full, full) a new capture session is checked against."
 
