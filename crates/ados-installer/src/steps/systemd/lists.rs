@@ -118,6 +118,7 @@ mod tests {
         assert_eq!(
             sorted(other_profile_units("ground_station")),
             [
+                "ados-sensorhub.service",
                 "ados-video.service",
                 "ados-vision-hailo.service",
                 "ados-wfb.service",
@@ -137,16 +138,19 @@ mod tests {
             "ados-uplink-router.service",
             "ados-batman.service",
             "ados-mesh-pairing.service",
+            "ados-gnss.service",
         ]);
         assert_eq!(sorted(other_profile_units("drone")), gs_teardown);
-        // A workstation or compute node also stops the air-side units: none of
-        // them runs off a drone.
+        // A workstation or compute node also stops the air-side units and the
+        // sensor plane: none of them runs off a drone, ground station or visor.
         for profile in ["workstation", "compute"] {
             let mut expected = gs_teardown.clone();
             expected.extend([
                 "ados-video.service",
                 "ados-vision-hailo.service",
                 "ados-wfb.service",
+                "ados-clock.service",
+                "ados-sensorhub.service",
             ]);
             assert_eq!(sorted(other_profile_units(profile)), sorted(expected));
         }

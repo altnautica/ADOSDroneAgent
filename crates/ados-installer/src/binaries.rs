@@ -284,6 +284,33 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: FC,
     },
+    // The sensor plane. Best-effort: each unit's ExecStart guard execs
+    // /bin/true until its binary lands, so a missing asset degrades capture
+    // timing and sensor streams, never the C2 path. The clock brokers the
+    // sensor bus on every profile with a MAVLink link; the USB sensor hub is
+    // camera-node hardware; directly attached GNSS receivers live on the
+    // ground node and the visor.
+    PrebuiltBinary {
+        service: "ados-clock",
+        asset: "ados-clock-aarch64",
+        dest: "/opt/ados/bin/ados-clock",
+        gate: Gate::BestEffort,
+        profiles: FC_VISOR,
+    },
+    PrebuiltBinary {
+        service: "ados-sensorhub",
+        asset: "ados-sensorhub-aarch64",
+        dest: "/opt/ados/bin/ados-sensorhub",
+        gate: Gate::BestEffort,
+        profiles: DRONE_VISOR,
+    },
+    PrebuiltBinary {
+        service: "ados-gnss",
+        asset: "ados-gnss-aarch64",
+        dest: "/opt/ados/bin/ados-gnss",
+        gate: Gate::BestEffort,
+        profiles: GS_VISOR,
+    },
     // The video relay the pipeline streams through. It is a mirrored
     // third-party binary rather than an `ados-*` service, so it lands in the
     // system bin dir. Best-effort: a missing relay degrades video without

@@ -3,8 +3,20 @@ use super::*;
 #[test]
 fn registry_has_expected_shape() {
     let specs = build_specs();
-    // ados-discovery and ados-health were removed; ados-vision-hailo added.
-    assert_eq!(specs.len(), 28, "service count drifted from the catalog");
+    // ados-discovery and ados-health were removed; ados-vision-hailo added;
+    // the sensor plane (clock, sensor hub, GNSS) added.
+    assert_eq!(specs.len(), 31, "service count drifted from the catalog");
+    // The sensor plane is Hardware tier, gated to the profiles that carry it.
+    for (name, gate) in [
+        ("ados-clock", "drone|ground_station|visor"),
+        ("ados-sensorhub", "drone|visor"),
+        ("ados-gnss", "ground_station|visor"),
+    ] {
+        let spec = specs.iter().find(|s| s.name == name).unwrap();
+        assert_eq!(spec.profile_gate, Some(gate), "{name}");
+        assert_eq!(spec.category, Category::Hardware, "{name}");
+        assert!(!spec.headless_keep, "{name}");
+    }
     // Core tier members. ados-mavlink/api/cloud/health/logd are the
     // cross-profile always-on core (the single cloud unit serves the gateway
     // + heartbeat on both profiles, spawning the ground-station bridge when

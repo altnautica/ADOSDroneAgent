@@ -165,6 +165,9 @@ fn visor_fetches_the_capture_set_and_no_radio_lanes() {
         "ados-display-probe",
         "ados-oled-i2c",
         "ados-gpio",
+        "ados-clock",
+        "ados-sensorhub",
+        "ados-gnss",
     ] {
         assert!(svcs.contains(&svc), "visor must fetch {svc}: {svcs:?}");
     }

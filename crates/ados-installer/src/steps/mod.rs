@@ -32,6 +32,7 @@ pub mod aic8800_tune;
 pub mod appliance;
 pub mod apt_reclaim;
 pub mod boot_config;
+pub mod chrony_ados;
 pub mod config_identity;
 pub mod config_migrate;
 pub mod deps;
@@ -90,6 +91,7 @@ pub fn full_install_chain() -> Vec<Box<dyn Step>> {
         Box::new(appliance::Appliance),
         Box::new(gpu_provision::GpuProvision),
         Box::new(i2c_enable::I2cEnable),
+        Box::new(chrony_ados::ChronyAdos),
         Box::new(systemd::Systemd),
         Box::new(start::Start),
         Box::new(health::Health),
@@ -120,11 +122,13 @@ mod tests {
     fn full_chain_orders_cleanly() {
         let steps = full_install_chain();
         let order = topo_order(&steps).expect("the install chain must be a valid DAG");
-        assert_eq!(order.len(), 26);
+        assert_eq!(order.len(), 27);
 
         let pos = |id: &str| order.iter().position(|x| x == id).unwrap();
         // Spot-check the load-bearing edges.
         assert!(pos("preflight") < pos("deps"));
+        // The chrony drop-in is written once chrony itself may be installed.
+        assert!(pos("deps") < pos("chrony_ados"));
         // The apt reclaim runs after the packages are installed and before the
         // space-hungry steps that follow, so the freed disk is available to them.
         assert!(pos("deps") < pos("apt_reclaim"));

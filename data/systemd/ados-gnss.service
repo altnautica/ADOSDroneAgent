@@ -1,0 +1,51 @@
+[Unit]
+Description=ADOS GNSS Receivers (rover, survey-in base, PPS)
+PartOf=ados-supervisor.service
+# Publishes receiver bytes and PPS time pairs onto the sensor bus ados-clock
+# brokers.
+After=ados-clock.service
+Wants=ados-clock.service
+StartLimitIntervalSec=0
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
+Slice=ados.slice
+Type=simple
+# The native GNSS binary is fetched best-effort; until it lands the guard
+# execs /bin/true so the unit is a clean no-op rather than a restart loop.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-gnss ]; then exec /opt/ados/bin/ados-gnss; else exec /bin/true; fi'
+Restart=always
+# Exit 0 means no GNSS source is configured on this node; it must not respawn
+# every RestartSec. Any other exit or signal restarts forever.
+RestartPreventExitStatus=0
+RestartSec=3
+# READY at start, WATCHDOG every second.
+WatchdogSec=30
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/ados/env
+
+# Receivers are serial devices (USB CDC-ACM, USB-serial, header UART) or a
+# UDP stream on a configured port; the pulse-per-second line is a kernel PPS
+# device. Serves /run/ados/gnss-cmd.sock and writes /run/ados/gnss.json.
+SupplementaryGroups=dialout
+DeviceAllow=char-ttyACM rw
+DeviceAllow=char-ttyUSB rw
+DeviceAllow=char-ttyS rw
+DeviceAllow=char-ttyAMA rw
+DeviceAllow=char-pps rw
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/ados
+
+MemoryMax=48M
+CPUQuota=20%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-gnss
+
+[Install]
+WantedBy=ados-supervisor.service

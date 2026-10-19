@@ -163,6 +163,19 @@ const fn gs_unit(name: &'static str, category: Option<Category>) -> UnitSpec {
     }
 }
 
+/// A sensor-plane unit the supervisor starts on its profiles and an install
+/// of any other profile tears down. Each exits 0 when it has nothing to run.
+const fn sensor_unit(name: &'static str, profiles: &'static [&'static str]) -> UnitSpec {
+    UnitSpec {
+        name,
+        category: Some(Category::Hardware),
+        profiles,
+        idle_ok: true,
+        teardown: true,
+        ..BASE
+    }
+}
+
 use Category::{Core, Hardware, OnDemand};
 
 /// Every unit in `data/systemd`, in canonical order.
@@ -218,6 +231,12 @@ pub const UNITS: &[UnitSpec] = &[
         idle_ok: true,
         ..BASE
     },
+    // The clock and sensor-bus broker, first in the hardware tier so the bus
+    // is bound before its producers; then the USB sensor hub (marker-gated)
+    // and the directly attached GNSS receivers.
+    sensor_unit("ados-clock.service", FC_VISOR),
+    sensor_unit("ados-sensorhub.service", DRONE_VISOR),
+    sensor_unit("ados-gnss.service", GS_VISOR),
     // The encode pipeline (air side on a drone, preview legs on a visor); exits
     // 0 and idles on other profiles or with video off.
     UnitSpec {

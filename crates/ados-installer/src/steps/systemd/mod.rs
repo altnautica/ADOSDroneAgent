@@ -145,6 +145,10 @@ impl Step for Systemd {
         //     RC lane in has the unit up after this install with no manual
         //     systemctl (and an opted-out config leaves it cleanly skipped).
         reconcile_crsf_marker();
+        // Same idiom for an explicit `sensors.hub.transport`: the
+        //     ados-sensorhub unit gates on `sensorhub-enabled` or on the USB
+        //     presence marker the board probe writes.
+        reconcile_sensorhub_marker();
 
         // 5a-ter. Mirror `radio.tunnel.enabled` onto the marker the
         //     ados-tunnel-config unit's ConditionPathExists gates on, the same

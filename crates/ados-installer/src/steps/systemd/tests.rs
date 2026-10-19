@@ -251,6 +251,27 @@ fn parse_crsf_enabled_gate() {
 }
 
 #[test]
+fn parse_sensorhub_explicit_gate() {
+    assert!(parse_sensorhub_explicit(
+        "sensors:\n  hub:\n    transport: serial:/dev/ttyACM0\n"
+    ));
+    assert!(parse_sensorhub_explicit(
+        "sensors:\n  hub:\n    transport: \"tcp:192.168.1.50:7600\"\n"
+    ));
+    // auto, an absent key or block, an unrelated config and malformed YAML
+    // all leave the marker off.
+    assert!(!parse_sensorhub_explicit(
+        "sensors:\n  hub:\n    transport: auto\n"
+    ));
+    assert!(!parse_sensorhub_explicit(
+        "sensors:\n  hub:\n    imu_odr_hz: 1000\n"
+    ));
+    assert!(!parse_sensorhub_explicit("sensors: {}\n"));
+    assert!(!parse_sensorhub_explicit("agent:\n  name: x\n"));
+    assert!(!parse_sensorhub_explicit(": : not yaml"));
+}
+
+#[test]
 fn parse_tunnel_enabled_gate() {
     assert!(parse_tunnel_enabled(
         "radio:\n  tunnel:\n    enabled: true\n"

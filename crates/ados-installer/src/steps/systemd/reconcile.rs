@@ -49,6 +49,52 @@ pub(super) fn reconcile_crsf_marker() {
     }
 }
 
+/// Parse `sensors.hub.transport` from config.yaml text and report whether it
+/// names an explicit transport (`serial:` / `tcp:`). Absent / `auto` /
+/// malformed → false. Pure.
+pub fn parse_sensorhub_explicit(text: &str) -> bool {
+    #[derive(serde::Deserialize, Default)]
+    struct Raw {
+        #[serde(default)]
+        sensors: Sensors,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Sensors {
+        #[serde(default)]
+        hub: Option<Hub>,
+    }
+    #[derive(serde::Deserialize, Default)]
+    struct Hub {
+        #[serde(default)]
+        transport: Option<String>,
+    }
+    serde_norway::from_str::<Raw>(text)
+        .ok()
+        .and_then(|r| r.sensors.hub)
+        .and_then(|h| h.transport)
+        .is_some_and(|t| ados_config::side_effects::sensorhub_transport_explicit(&t))
+}
+
+/// Reconcile the sensor-hub enable marker from the operator config: the
+/// `/etc/ados/sensorhub-enabled` marker mirrors an explicit
+/// `sensors.hub.transport`, so pinning a serial or TCP hub in config is
+/// sufficient (in `auto` the USB presence marker gates the unit). Idempotent;
+/// the runtime half (a config write through the agent) reconciles the same
+/// marker and kicks the unit itself.
+pub(super) fn reconcile_sensorhub_marker() {
+    let explicit = std::fs::read_to_string(crate::env::CONFIG_YAML)
+        .map(|text| parse_sensorhub_explicit(&text))
+        .unwrap_or(false);
+    let marker = Path::new(CONFIG_DIR).join("sensorhub-enabled");
+    if explicit {
+        if let Err(e) = std::fs::write(&marker, b"") {
+            tracing::warn!(error = %e, "sensorhub enable marker write failed");
+        }
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+}
+
 /// Parse `radio.tunnel.enabled` from config.yaml text. Absent / malformed /
 /// not-present → false (the config-over-radio channel is opt-in). Pure.
 pub fn parse_tunnel_enabled(text: &str) -> bool {

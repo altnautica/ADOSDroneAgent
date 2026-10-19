@@ -63,6 +63,23 @@
     },
     {
       "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS Clock and Sensor Bus",
+      "drops_link": false,
+      "install": "none",
+      "memory_max": "48M",
+      "name": "ados-clock",
+      "profiles": [
+        "drone",
+        "ground_station",
+        "visor"
+      ],
+      "roles": [],
+      "start_on_install": false
+    },
+    {
+      "api_restartable": true,
       "category": "core",
       "condition_paths": [
         "/opt/ados/bin/ados-cloud"
@@ -177,6 +194,22 @@
         "ground_station",
         "workstation",
         "compute",
+        "visor"
+      ],
+      "roles": [],
+      "start_on_install": false
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [],
+      "description": "ADOS GNSS Receivers (rover, survey-in base, PPS)",
+      "drops_link": false,
+      "install": "none",
+      "memory_max": "48M",
+      "name": "ados-gnss",
+      "profiles": [
+        "ground_station",
         "visor"
       ],
       "roles": [],
@@ -410,6 +443,25 @@
         "ground_station",
         "workstation",
         "compute",
+        "visor"
+      ],
+      "roles": [],
+      "start_on_install": false
+    },
+    {
+      "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "|/run/ados/sensor-hub-present",
+        "|/etc/ados/sensorhub-enabled"
+      ],
+      "description": "ADOS Sensor Hub (USB IMU / trigger / GNSS co-processor)",
+      "drops_link": false,
+      "install": "none",
+      "memory_max": "48M",
+      "name": "ados-sensorhub",
+      "profiles": [
+        "drone",
         "visor"
       ],
       "roles": [],

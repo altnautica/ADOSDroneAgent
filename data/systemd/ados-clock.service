@@ -1,0 +1,47 @@
+[Unit]
+Description=ADOS Clock and Sensor Bus
+PartOf=ados-supervisor.service
+# The sensor bus lives in this process: producers on the bus start after it so
+# their first frames find the socket bound.
+Before=ados-mavlink.service ados-sensorhub.service ados-gnss.service
+StartLimitIntervalSec=0
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
+Slice=ados.slice
+Type=simple
+# The native clock binary is fetched best-effort; until it lands the guard
+# execs /bin/true so the unit is a clean no-op rather than a restart loop.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-clock ]; then exec /opt/ados/bin/ados-clock; else exec /bin/true; fi'
+Restart=always
+# Exit 0 means this node has nothing for the unit to run (binary absent) or a
+# clean stop; it must not respawn every RestartSec. Any other exit, signal or
+# watchdog timeout restarts forever (no start limit).
+RestartPreventExitStatus=0
+RestartSec=3
+# Pinged every second from the publish loop.
+WatchdogSec=30
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/ados/env
+
+# Binds /run/ados/sensors.sock, writes the clock and sensors sidecars, and
+# sends PPS samples to chrony's refclock socket (/run/chrony.ados.sock).
+# Sending to an existing AF_UNIX socket needs no write access to its
+# directory, so /run stays read-only. No devices, no network.
+DevicePolicy=closed
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/run/ados
+
+# Lightweight native service; cap it so a runaway can never starve the box.
+MemoryMax=48M
+CPUQuota=20%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-clock
+
+[Install]
+WantedBy=ados-supervisor.service

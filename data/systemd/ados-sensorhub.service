@@ -1,0 +1,50 @@
+[Unit]
+Description=ADOS Sensor Hub (USB IMU / trigger / GNSS co-processor)
+PartOf=ados-supervisor.service
+# Runs when a hub is attached (the hardware probe drops the present marker on
+# a matching USB device) or the config names an explicit transport (the
+# enabled marker mirrors sensors.hub.transport). Either one suffices.
+ConditionPathExists=|/run/ados/sensor-hub-present
+ConditionPathExists=|/etc/ados/sensorhub-enabled
+# Publishes onto the sensor bus ados-clock brokers.
+After=ados-clock.service
+Wants=ados-clock.service
+StartLimitIntervalSec=0
+
+[Service]
+# Join the shared accounting slice so MemoryCurrent/CPUUsage are observable.
+Slice=ados.slice
+Type=simple
+# The native hub binary is fetched best-effort; until it lands the guard execs
+# /bin/true so the unit is a clean no-op rather than a restart loop.
+ExecStart=/bin/sh -c 'if [ -x /opt/ados/bin/ados-sensorhub ]; then exec /opt/ados/bin/ados-sensorhub; else exec /bin/true; fi'
+# SIGHUP re-reads the config and reconnects the transport.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+# Exit 0 means no hub was found on an auto transport; it must not respawn
+# every RestartSec. Any other exit or signal restarts forever.
+RestartPreventExitStatus=0
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/ados/env
+
+# The hub enumerates as a USB CDC-ACM serial port (or a USB-serial adapter).
+# Network stays open for a tcp: transport (a simulated hub).
+SupplementaryGroups=dialout
+DeviceAllow=char-ttyACM rw
+DeviceAllow=char-ttyUSB rw
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+ReadWritePaths=/run/ados
+
+MemoryMax=48M
+CPUQuota=25%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-sensorhub
+
+[Install]
+WantedBy=ados-supervisor.service

@@ -93,6 +93,9 @@ fn visor_unit_set() {
         "ados-input.service",
         "ados-uplink-router.service",
         "ados-control.service",
+        "ados-clock.service",
+        "ados-sensorhub.service",
+        "ados-gnss.service",
     ] {
         assert!(names.contains(&want), "visor lacks {want}");
     }
