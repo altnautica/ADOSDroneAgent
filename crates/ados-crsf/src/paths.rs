@@ -10,7 +10,7 @@ pub const CRSF_STATS_JSON: &str = "/run/ados/crsf-stats.json";
 /// field. Bump when the field set changes incompatibly; a reader compares it
 /// best-effort via `ados_protocol::sidecar::check_sidecar_version` and reads
 /// anyway on a mismatch. Kept in step with the registry in `contracts.toml`.
-pub const CRSF_STATS_SIDECAR_VERSION: u16 = 1;
+pub const CRSF_STATS_SIDECAR_VERSION: u16 = 2;
 
 /// Command socket this service listens on for the status query and the
 /// programmatic channel injection. One newline-JSON request → one

@@ -274,6 +274,24 @@
     },
     {
       "api_restartable": true,
+      "category": "hardware",
+      "condition_paths": [
+        "/etc/ados/lora-enabled"
+      ],
+      "description": "ADOS LoRa Beacon Lane",
+      "drops_link": false,
+      "install": "universal",
+      "memory_max": "64M",
+      "name": "ados-lora",
+      "profiles": [
+        "drone",
+        "ground_station"
+      ],
+      "roles": [],
+      "start_on_install": false
+    },
+    {
+      "api_restartable": true,
       "category": "core",
       "condition_paths": [],
       "description": "ADOS MAVLink Proxy",

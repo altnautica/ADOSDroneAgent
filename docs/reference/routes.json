@@ -1531,6 +1531,42 @@
       "websocket": true
     },
     {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/lora",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/lora",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/lora/beacons",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/lora/regions",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
       "method": "DELETE",
       "notes": null,
       "path": "/api/v1/network/client",
@@ -1660,6 +1696,15 @@
       "method": "GET",
       "notes": null,
       "path": "/api/v1/plugins/catalog",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/radio/adapters",
       "public": false,
       "relay_forbidden": false,
       "served_by": "native",

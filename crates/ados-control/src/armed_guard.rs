@@ -117,6 +117,7 @@ const GUARDED_CONFIG_KEYS: &[&str] = &[
     "video.wfb.tx_power_dbm",
     "video.wfb.mcs",
     "network.regulatory",
+    "lora.region",
 ];
 
 /// Setup-apply sections that restart the supervisor or retune a link.
@@ -134,11 +135,17 @@ fn config_body_is_guarded(body: &Value) -> bool {
         .is_some_and(|key| GUARDED_CONFIG_KEYS.contains(&key))
 }
 
+/// A LoRa write that changes the region (the plan the lane transmits under).
+fn lora_body_is_guarded(body: &Value) -> bool {
+    body.get("region").is_some()
+}
+
 /// The body predicate for a route guarded only for some bodies.
 fn body_rule(method: &str, path: &str) -> Option<fn(&Value) -> bool> {
     match (method, trim_trailing_slash(path)) {
         ("POST", "/api/v1/setup/apply") => Some(apply_body_is_guarded),
         ("PUT", "/api/config") => Some(config_body_is_guarded),
+        ("PUT", "/api/v1/lora") => Some(lora_body_is_guarded),
         _ => None,
     }
 }

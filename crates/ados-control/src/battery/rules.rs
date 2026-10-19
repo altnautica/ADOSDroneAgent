@@ -154,10 +154,12 @@ mod tests {
                 cells[0]
             }),
             current_a: Some(-10.0),
+            power_w: None,
             remaining_pct: Some(80),
             temperature_c: Some(30.0),
             consumed_mah: None,
             consumed_wh: None,
+            source: crate::battery::PackSource::Mavlink,
         }
     }
 

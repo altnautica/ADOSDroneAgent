@@ -36,6 +36,10 @@ WFB_PAIR_PROOF_JSON = "wfb-pair-proof.json"
 BIND_STATE_JSON = "bind-state.json"
 CRSF_STATS_JSON = "crsf-stats.json"
 CRSF_STATS_MAX_AGE_MS = 10000
+LORA_JSON = "lora.json"
+LORA_MAX_AGE_MS = 10000
+LORA_BEACONS_JSON = "lora-beacons.json"
+LORA_BEACONS_MAX_AGE_MS = 10000
 TUNNEL_CONFIG_JSON = "tunnel-config.json"
 TUNNEL_CONFIG_MAX_AGE_MS = 30000
 RELAYED_STATUS_JSON = "relayed-status.json"
@@ -120,6 +124,8 @@ SIDECAR_PATHS: dict[str, dict[str, object]] = {
     "wfb-pair-proof": {"path": "/var/lib/ados/wfb-pair-proof.json", "max_age_ms": None, "writer": "ados-radio, ados-groundlink"},
     "bind-state": {"path": "/run/ados/bind-state.json", "max_age_ms": None, "writer": "ados-radio"},
     "crsf-stats": {"path": "/run/ados/crsf-stats.json", "max_age_ms": 10000, "writer": "ados-crsf"},
+    "lora": {"path": "/run/ados/lora.json", "max_age_ms": 10000, "writer": "ados-lora"},
+    "lora-beacons": {"path": "/run/ados/lora-beacons.json", "max_age_ms": 10000, "writer": "ados-lora"},
     "tunnel-config": {"path": "/run/ados/tunnel-config.json", "max_age_ms": 30000, "writer": "ados-config-tunnel"},
     "relayed-status": {"path": "/run/ados/relayed-status.json", "max_age_ms": 20000, "writer": "ados-groundlink"},
     "linked-peers": {"path": "/run/ados/linked-peers.json", "max_age_ms": None, "writer": "ados-groundlink"},

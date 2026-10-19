@@ -327,3 +327,57 @@ fn pack_ids_past_the_cap_are_ignored() {
     assert_eq!(e.packs.len(), MAX_PACKS);
     assert!(!e.packs.contains_key(&(MAX_PACKS as u8)));
 }
+
+fn gauge_sample(t_ms: i64, voltage_v: f64) -> Sample {
+    crate::battery::ina226::GaugeReading {
+        bus_v: voltage_v,
+        shunt_v: 0.01,
+        current_a: 20.0,
+        power_w: voltage_v * 20.0,
+    }
+    .to_sample(t_ms)
+}
+
+#[test]
+fn a_gauge_reading_is_its_own_pack_beside_the_fc_packs() {
+    let mut e = engine();
+    e.ingest(1000, &snap(json!([pack(0, &HEALTHY)])));
+    e.ingest_gauge(gauge_sample(1000, 16.8));
+    let w = wire(&e, 1000);
+    let packs = w["packs"].as_array().unwrap();
+    assert_eq!(packs.len(), 2);
+    assert_eq!(packs[0]["source"], "mavlink");
+    assert_eq!(packs[1]["id"], u64::from(GAUGE_PACK_ID));
+    assert_eq!(packs[1]["source"], "ina226");
+    assert_eq!(packs[1]["voltage_v"], 16.8);
+    assert_eq!(packs[1]["power_w"], 336.0);
+    assert_eq!(packs[1]["cells_plausible"], false);
+}
+
+#[test]
+fn the_gauge_keeps_reading_with_the_fc_link_down_and_never_counts_against_the_cap() {
+    let mut e = engine();
+    e.ingest_gauge(gauge_sample(1000, 16.8));
+    // A lost FC link skips the snapshot, never the gauge.
+    e.ingest(2000, &json!({"mavlink_alive": false}));
+    e.ingest_gauge(gauge_sample(2000, 16.7));
+    assert_eq!(wire(&e, 2000)["packs"][0]["voltage_v"], 16.7);
+    assert_eq!(wire(&e, 2000)["stale"], false);
+    // A full set of FC packs still fits beside the gauge, and an FC pack
+    // carrying the gauge id never merges into it.
+    let mut packs: Vec<Value> = (0..MAX_PACKS as u8).map(|id| pack(id, &HEALTHY)).collect();
+    packs.push(pack(GAUGE_PACK_ID, &HEALTHY));
+    e.ingest(3000, &snap(Value::Array(packs)));
+    assert_eq!(e.packs.len(), MAX_PACKS + 1);
+    assert_eq!(wire(&e, 3000)["packs"][MAX_PACKS]["source"], "ina226");
+}
+
+#[test]
+fn a_disabled_engine_ignores_the_gauge() {
+    let mut e = BatteryEngine::new(BatteryConfig {
+        enabled: false,
+        ..BatteryConfig::default()
+    });
+    e.ingest_gauge(gauge_sample(1000, 16.8));
+    assert!(e.packs.is_empty());
+}

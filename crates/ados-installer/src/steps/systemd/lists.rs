@@ -94,6 +94,7 @@ mod tests {
                 "ados-gpio.service",
                 "ados-crsf.service",
                 "ados-tunnel-config.service",
+                "ados-lora.service",
             ]
         );
         const GS_ENABLE: [&str; 12] = [

@@ -11,6 +11,7 @@ from .api import ApiConfig
 from .battery import BatteryConfig
 from .cloud import RemoteAccessConfig, ServerConfig
 from .ground_station import GroundStationConfig
+from .lora import LoraConfig
 from .mavlink import MavlinkConfig
 from .network import NetworkConfig
 from .radio import RadioConfig
@@ -68,6 +69,7 @@ class ADOSConfig(BaseModel):
     storage: StorageConfig = StorageConfig()
     hardware: HardwareConfig = HardwareConfig()
     simulation: SimulationConfig = SimulationConfig()
+    lora: LoraConfig = LoraConfig()
 
     model_config = {"extra": "ignore"}
 

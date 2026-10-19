@@ -1,18 +1,22 @@
 //! What a config write must do beyond the file itself.
 //!
-//! Four lanes mirror a config change onto the node, and every config writer
+//! Five lanes mirror a config change onto the node, and every config writer
 //! (the native `PUT /api/config`, and the Python writer through
 //! `ados-control --apply-config-side-effects`) runs them through [`apply`]:
 //!
 //! * **CRSF** (`radio.crsf`): the `crsf-enabled` marker the `ados-crsf` unit
 //!   gates on mirrors `enabled`. A slice change kicks an enabled lane with
 //!   `reload-or-restart` and stops a disabled one; a change to the router's
-//!   view of the slice (the pinned device, the MAVLink-over-ELRS source, the
+//!   view of the slice (the pinned device, the RC module ports, the
+//!   MAVLink-over-ELRS source, the
 //!   command direction) `try-restart`s `ados-mavlink`, which loads that view
 //!   once at startup.
 //! * **Config tunnel** (`radio.tunnel`): the `tunnel-enabled` marker mirrors
 //!   `enabled`; a slice change kicks `ados-tunnel-config` with
 //!   `reload-or-restart`.
+//! * **LoRa** (`lora`): the `lora-enabled` marker mirrors `enabled`; a slice
+//!   change, or a `network.regulatory` change while enabled (the region
+//!   fallback), kicks `ados-lora` with `reload-or-restart` (stop when off).
 //! * **Setup AP** (`network.hotspot`): the `hotspot-enabled` marker mirrors
 //!   `enabled`; a slice change `try-restart`s `ados-hostapd` and either
 //!   `reload-or-restart`s `ados-dnsmasq-gs` (enabled) or clears its latched
@@ -60,6 +64,7 @@ pub fn apply(
     };
     fx.crsf(old, new);
     fx.tunnel(old, new);
+    fx.lora(old, new);
     fx.hotspot(old, new);
     fx.remote_access(old, new);
     fx.report
@@ -102,9 +107,20 @@ fn enabled(slice: &Value) -> bool {
 }
 
 /// The projection of `radio.crsf` the MAVLink router consumes: the pinned
-/// device, the resolved MAVLink-over-ELRS source and the command direction.
-fn router_view(crsf: &Value) -> (Value, Option<&'static str>, bool) {
+/// device, the RC module ports (excluded from FC discovery like the pin), the
+/// resolved MAVLink-over-ELRS source and the command direction.
+fn router_view(crsf: &Value) -> (Value, Vec<Value>, Option<&'static str>, bool) {
     let device = crsf.get("device").cloned().unwrap_or(Value::Null);
+    let module_ports: Vec<Value> = crsf
+        .get("modules")
+        .and_then(Value::as_array)
+        .map(|modules| {
+            modules
+                .iter()
+                .filter_map(|m| m.get("port").cloned())
+                .collect()
+        })
+        .unwrap_or_default();
     if enabled(crsf) && crsf.get("mode").and_then(Value::as_str) == Some("mavlink") {
         let source = match crsf.get("mavlink_transport").and_then(Value::as_str) {
             Some("backpack_wifi") => "backpack_wifi",
@@ -112,11 +128,12 @@ fn router_view(crsf: &Value) -> (Value, Option<&'static str>, bool) {
         };
         (
             device,
+            module_ports,
             Some(source),
             truthy(crsf.get("mavlink_command_enabled")),
         )
     } else {
-        (device, None, false)
+        (device, module_ports, None, false)
     }
 }
 
@@ -215,6 +232,23 @@ impl Effects<'_> {
         }
     }
 
+    /// The LoRa lane follows `lora` and, for its region fallback, the
+    /// country setting `network.regulatory`.
+    fn lora(&mut self, old: &Value, new: &Value) {
+        let (before, after) = (slice(old, &["lora"]), slice(new, &["lora"]));
+        let country_changed =
+            slice(old, &["network", "regulatory"]) != slice(new, &["network", "regulatory"]);
+        let flipped = self.marker("lora-enabled", enabled(after));
+        if flipped || before != after || (country_changed && enabled(after)) {
+            let verb = if enabled(after) {
+                "reload-or-restart"
+            } else {
+                "stop"
+            };
+            self.systemctl(&["--no-block", verb, "ados-lora.service"]);
+        }
+    }
+
     fn hotspot(&mut self, old: &Value, new: &Value) {
         let (before, after) = (
             slice(old, &["network", "hotspot"]),
@@ -281,6 +315,28 @@ mod tests {
     }
 
     #[test]
+    fn lora_marker_follows_enabled_and_a_country_change_reloads_the_lane() {
+        let etc = tempfile::tempdir().unwrap();
+        let on = json!({"lora": {"enabled": true}});
+        let (report, calls) = run_with(json!({}), on.clone(), etc.path());
+        assert!(etc.path().join("lora-enabled").exists());
+        assert_eq!(report.markers_changed, vec!["lora-enabled"]);
+        assert_eq!(
+            calls,
+            vec!["systemctl --no-block reload-or-restart ados-lora.service"]
+        );
+        let moved = json!({"lora": {"enabled": true}, "network": {"regulatory": {"region": "DE"}}});
+        let (_, calls) = run_with(on.clone(), moved, etc.path());
+        assert_eq!(
+            calls,
+            vec!["systemctl --no-block reload-or-restart ados-lora.service"]
+        );
+        let (_, calls) = run_with(on, json!({"lora": {"enabled": false}}), etc.path());
+        assert!(!etc.path().join("lora-enabled").exists());
+        assert_eq!(calls, vec!["systemctl --no-block stop ados-lora.service"]);
+    }
+
+    #[test]
     fn crsf_enable_creates_marker() {
         let etc = tempfile::tempdir().unwrap();
         let on = crsf(json!({"enabled": true}));
@@ -330,6 +386,11 @@ mod tests {
         let wifi = lane(json!({"mavlink_transport": "backpack_wifi"}));
         let (_, calls) = run_with(lane(json!({})), wifi, etc.path());
         let router = "systemctl --no-block try-restart ados-mavlink.service";
+        assert!(calls.iter().any(|c| c == router));
+        // A changed RC module port changes the router's FC exclusion set.
+        let modules =
+            lane(json!({"modules": [{"id": "m1", "port": "/dev/ttyACM1", "role": "autonomy"}]}));
+        let (_, calls) = run_with(lane(json!({})), modules, etc.path());
         assert!(calls.iter().any(|c| c == router));
     }
 

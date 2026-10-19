@@ -4,11 +4,11 @@
 //! service runs and once on every degraded-state entry:
 //!
 //! ```json
-//! { "v": 1, "state": "…", "rssi_dbm": …, "lq_uplink": …, "lq_downlink": …,
+//! { "v": 2, "state": "…", "rssi_dbm": …, "lq_uplink": …, "lq_downlink": …,
 //!   "snr_db": …, "band": …, "packet_rate_hz": …, "tx_power_mw": …,
 //!   "tx_frames_per_s": …, "tx_frames_total": …, "rx_frames_per_s": …,
 //!   "rf_unverified": …, "flyable": …, "mode": …, "channel_source": …, "pic": …,
-//!   "relay_role": …, "fc_command_down_gated": … }
+//!   "relay_role": …, "fc_command_down_gated": …, "modules": [ … ] }
 //! ```
 //!
 //! `state` ∈ `unconfigured|ready|link_ok|degraded|rf_unverified|disabled`.
@@ -18,10 +18,15 @@
 //! boolean gate: true ONLY for a state with a received-side proof (`link_ok`
 //! / `degraded`) — an unproven lane is conservatively not flyable, never
 //! "unknown so maybe".
+//!
+//! The top-level link fields describe the pilot module. `modules` carries one
+//! object per running RC module (see [`crate::modules`]), pilot first; it is
+//! `[]`, never null, when the lane runs no module.
 
 use serde_json::{json, Value};
 
 use crate::link::LaneState;
+use crate::modules::ModuleStatus;
 use crate::paths::{run_path, write_sidecar, CRSF_STATS_SIDECAR_VERSION};
 use crate::telemetry::LinkStatistics;
 
@@ -86,6 +91,8 @@ pub struct StatsInputs<'a> {
     /// the gate is open. Sourced from [`crate::config::CrsfLaneConfig::fc_command_down_gated`],
     /// which mirrors the MAVLink router's own `command_down_gated` predicate.
     pub fc_command_down_gated: Option<bool>,
+    /// One status object per running RC module, pilot first.
+    pub modules: &'a [ModuleStatus],
 }
 
 /// Build the sidecar body — the exact pinned field set, nothing more.
@@ -133,6 +140,7 @@ pub fn build_stats_value(state: LaneState, inputs: &StatsInputs<'_>) -> Value {
         "pic": inputs.pic,
         "relay_role": inputs.relay_role,
         "fc_command_down_gated": inputs.fc_command_down_gated,
+        "modules": inputs.modules,
     })
 }
 
@@ -200,7 +208,7 @@ mod tests {
 
     /// The pinned field set, in one place, so a drift in either direction
     /// (a missing field or an invented one) fails loudly.
-    const PINNED_FIELDS: [&str; 19] = [
+    const PINNED_FIELDS: [&str; 20] = [
         "v",
         "state",
         "rssi_dbm",
@@ -220,6 +228,7 @@ mod tests {
         "pic",
         "relay_role",
         "fc_command_down_gated",
+        "modules",
     ];
 
     fn sample_link() -> LinkStatistics {
@@ -258,15 +267,17 @@ mod tests {
     }
 
     #[test]
-    fn disabled_body_is_all_null_except_version_state_and_flyable() {
+    fn disabled_body_is_all_null_except_version_state_flyable_and_modules() {
         let v = build_stats_value(LaneState::Disabled, &StatsInputs::default());
-        assert_eq!(v["v"], 1);
+        assert_eq!(v["v"], 2);
         assert_eq!(v["state"], "disabled");
         // The flyable gate is a strict boolean, never null: unproven reads
         // false, conservatively.
         assert_eq!(v["flyable"], false);
+        // No module running reads an empty list, never null.
+        assert_eq!(v["modules"], serde_json::json!([]));
         for field in PINNED_FIELDS {
-            if field != "v" && field != "state" && field != "flyable" {
+            if !matches!(field, "v" | "state" | "flyable" | "modules") {
                 assert!(v[field].is_null(), "{field} must be null when unmeasured");
             }
         }
@@ -287,6 +298,7 @@ mod tests {
             pic: Some("unclaimed"),
             relay_role: None,
             fc_command_down_gated: None,
+            modules: &[],
         };
         let v = build_stats_value(LaneState::LinkOk, &inputs);
         assert_eq!(v["state"], "link_ok");

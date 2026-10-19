@@ -175,6 +175,7 @@ fn visor_fetches_the_capture_set_and_no_radio_lanes() {
         "ados-swarmbus",
         "ados-crsf",
         "ados-tunnel-config",
+        "ados-lora",
     ] {
         assert!(!svcs.contains(&svc), "visor must NOT fetch {svc}: {svcs:?}");
     }

@@ -192,6 +192,13 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
         "sim".to_string(),
         json!(ados_config::simulation::simulation_enabled()),
     );
+    payload.insert(
+        "lora".to_string(),
+        json!(crate::routes::lora::lora_present(
+            &state.pairing_paths.config,
+            &resolved_profile
+        )),
+    );
     payload.insert("fc_baud".to_string(), fc_baud);
     payload.insert(
         "transportOpen".to_string(),

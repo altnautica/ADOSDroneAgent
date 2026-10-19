@@ -15,8 +15,9 @@ pub const PEER_PRESENCE_JSON: &str = "/run/ados/peer-presence.json";
 /// (they must agree on the schema version). Bump when the field set changes
 /// incompatibly; a reader compares it best-effort via
 /// `ados_protocol::sidecar::check_sidecar_version` and reads anyway on a
-/// mismatch. Kept in step with the registry in `contracts.toml`.
-pub const WFB_STATS_SIDECAR_VERSION: u16 = 1;
+/// mismatch. Kept in step with the registry in `contracts.toml`. Version 2
+/// adds the ground station's per-adapter `adapters` list and `diversity` block.
+pub const WFB_STATS_SIDECAR_VERSION: u16 = 2;
 
 /// Schema version of the `hop-supervisor.json` sidecar. Written by both the
 /// drone hop supervisor and the ground-station hop-follow persister, so both

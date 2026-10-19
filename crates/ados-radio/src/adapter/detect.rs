@@ -1,11 +1,10 @@
-//! WiFi adapter discovery, WFB-ng classification, and injection selection.
+//! WiFi adapter discovery and WFB-ng classification.
 //!
-//! Scans `/sys/class/net`, classifies each radio against the canonical WFB
-//! compatibility table + driver-name fallback (denying management WiFi first),
-//! ranks RTL-family adapters ahead of bus order, and proves the winner by
-//! setting + reading back monitor mode. The pure classifier
-//! (`build_adapter_info`) and the sysfs parent-walks are unit-testable off a
-//! fixture tree without touching a real SBC.
+//! Scans `/sys/class/net` and classifies each radio against the canonical WFB
+//! compatibility table + driver-name fallback (denying management WiFi first).
+//! The pure classifier (`build_adapter_info`) and the sysfs parent-walks are
+//! unit-testable off a fixture tree without touching a real SBC. Ranking and
+//! monitor-mode verification of the candidates live in `select`.
 
 use serde::Serialize;
 
@@ -20,23 +19,6 @@ use serde::Serialize;
 use ados_protocol::wfb_tables::{
     DENY_DRIVER_PREFIXES, DENY_VID, WFB_COMPATIBLE, WFB_COMPATIBLE_DRIVERS,
 };
-
-/// The result returned to the radio manager.
-#[derive(Debug, Clone)]
-pub struct SelectedAdapter {
-    pub ifname: String,
-    pub chipset: String,
-    pub injection_ok: bool,
-    /// The selected adapter's enumerated USB link speed (Mbps), or `None` when
-    /// not USB-backed / unreadable. Surfaced so the operator sees "12 Mbps".
-    pub usb_speed_mbps: Option<u32>,
-    /// True when the adapter enumerated on a USB link slower than high-speed
-    /// (e.g. 12 Mbps full-speed on a flaky port / companion controller). Such an
-    /// adapter can pass monitor-mode setup and advance its tx_bytes counter yet
-    /// emit no usable RF — the agent must surface this rather than report a
-    /// healthy link.
-    pub usb_degraded: bool,
-}
 
 /// An RTL adapter needs high-speed (480 Mbps) USB to push WFB RF. A reading
 /// below that (12 Mbps full-speed) means the device fell back to a companion
@@ -144,7 +126,7 @@ pub async fn detect_wfb_adapters() -> Vec<WifiAdapterInfo> {
 /// the driver-name fallback. Pure so the classification is unit-testable without
 /// touching sysfs. Mirrors the per-iface body of Python `detect_wfb_adapters`.
 #[cfg(any(target_os = "linux", test))]
-fn build_adapter_info(
+pub(super) fn build_adapter_info(
     interface_name: String,
     driver: String,
     vid_pid: Option<(u16, u16)>,
@@ -217,144 +199,6 @@ fn build_adapter_info(
     }
 }
 
-/// The outcome of one adapter selection pass: the full detected list (for the
-/// `wfb-adapters.json` sidecar + the no-injection diagnostic counts) and the
-/// verified injection adapter if one could be proven.
-#[derive(Debug, Clone)]
-pub struct SelectionOutcome {
-    /// Every detected WiFi adapter, compatible or not — written verbatim to the
-    /// adapters sidecar so the GCS panel can render the full scan verdict.
-    pub adapters: Vec<WifiAdapterInfo>,
-    /// The verified injection adapter, or `None` when none could be proven.
-    pub selected: Option<SelectedAdapter>,
-}
-
-impl SelectionOutcome {
-    /// Total adapters detected (the loud no-injection log's `total_adapters`).
-    pub fn total(&self) -> usize {
-        self.adapters.len()
-    }
-
-    /// Adapters that are WFB-compatible AND advertise monitor mode (the loud
-    /// no-injection log's `compatible` — the real injection-candidate count).
-    pub fn compatible_monitor(&self) -> usize {
-        self.adapters
-            .iter()
-            .filter(|a| a.is_wfb_compatible && a.supports_monitor)
-            .count()
-    }
-}
-
-/// Detect adapters and return the best verified RTL injection adapter, plus the
-/// full detected list. The candidate set is the compatible+monitor adapters,
-/// ranked RTL-family-first so bus order never decides, and each is proven by
-/// setting + reading back monitor mode; the first that verifies wins. This is
-/// the full contract the radio service uses (it needs the detected list for the
-/// adapters sidecar and the scan counts for the no-injection diagnostic).
-/// Callers that only need the selected iface use `select_interface`.
-///
-/// An operator-pinned `override_iface` is preferred only when it names a
-/// detected adapter that passes the same gate (not management WiFi, WFB
-/// compatible, monitor capable). Interface names are not identities — they can
-/// swap between reboots — so a pin that now names the onboard WiFi or a missing
-/// device is logged and ignored rather than put into monitor mode.
-#[cfg(target_os = "linux")]
-pub async fn detect_and_select(override_iface: &str) -> SelectionOutcome {
-    let adapters = detect_wfb_adapters().await;
-    // Bench builds only: a pin on a `dummy` link joins the scan as an adapter
-    // and then faces the same candidate gate and monitor-mode readback.
-    #[cfg(feature = "bench-adapters")]
-    let adapters = super::bench::with_pinned_dummy(adapters, override_iface).await;
-
-    let candidates = injection_candidates(&adapters, override_iface);
-    let mut selected = None;
-    for adapter in candidates {
-        tracing::info!(
-            interface = %adapter.interface_name,
-            chipset = %adapter.chipset,
-            rank = injection_rank(adapter),
-            "wfb_adapter_candidate"
-        );
-        if super::monitor::set_monitor_mode_verified(&adapter.interface_name, 4).await {
-            let usb_degraded = usb_speed_degraded(adapter.usb_speed_mbps);
-            if usb_degraded {
-                tracing::warn!(
-                    interface = %adapter.interface_name,
-                    chipset = %adapter.chipset,
-                    usb_speed_mbps = ?adapter.usb_speed_mbps,
-                    "wfb_adapter_usb_degraded: selected adapter on a slow USB link (needs 480 Mbps); RF may not transmit"
-                );
-            } else {
-                tracing::info!(
-                    interface = %adapter.interface_name,
-                    chipset = %adapter.chipset,
-                    "wfb_adapter_selected"
-                );
-            }
-            selected = Some(SelectedAdapter {
-                ifname: adapter.interface_name.clone(),
-                chipset: adapter.chipset.clone(),
-                injection_ok: true,
-                usb_speed_mbps: adapter.usb_speed_mbps,
-                usb_degraded,
-            });
-            break;
-        }
-        tracing::warn!(
-            interface = %adapter.interface_name,
-            chipset = %adapter.chipset,
-            "wfb_adapter_monitor_rejected"
-        );
-    }
-
-    SelectionOutcome { adapters, selected }
-}
-
-#[cfg(not(target_os = "linux"))]
-pub async fn detect_and_select(_override_iface: &str) -> SelectionOutcome {
-    SelectionOutcome {
-        adapters: Vec::new(),
-        selected: None,
-    }
-}
-
-/// Return the best verified RTL injection adapter, or `None` when none could be
-/// proven. The thin selected-only seam other crates (the GS relay + receiver)
-/// call; the radio service uses `detect_and_select` when it also needs the full
-/// scan list + counts.
-pub async fn select_interface(override_iface: &str) -> Option<SelectedAdapter> {
-    detect_and_select(override_iface).await.selected
-}
-
-/// Rank an adapter so the validated RTL injection radios float to the front
-/// (lower is better): RTL8812EU silicon first, RTL8812AU rebadges next, any
-/// other passing chip last. Makes selection independent of USB bus order so a
-/// management WiFi enumerated first can never win by accident.
-#[cfg(any(target_os = "linux", test))]
-fn injection_rank(adapter: &WifiAdapterInfo) -> u8 {
-    let label = adapter.chipset.to_ascii_uppercase();
-    let driver = adapter.driver.to_ascii_lowercase();
-    let is_eu = label.contains("8812EU")
-        || label.contains("88X2EU")
-        || matches!(driver.as_str(), "8812eu" | "rtl8812eu" | "rtl88x2eu");
-    let is_au = label.contains("8812AU")
-        || label.contains("88XXAU")
-        || matches!(driver.as_str(), "8812au" | "rtl8812au" | "rtl88xxau");
-    let is_known = match (adapter.usb_vid, adapter.usb_pid) {
-        (Some(v), Some(p)) => wfb_compatible_label(v, p).is_some(),
-        _ => false,
-    } || driver_is_wfb_compatible(&adapter.driver);
-    if is_eu {
-        0
-    } else if is_au {
-        1
-    } else if is_known {
-        2
-    } else {
-        3
-    }
-}
-
 #[cfg(any(target_os = "linux", test))]
 fn is_denied(driver: &str, vid_pid: Option<(u16, u16)>) -> bool {
     if DENY_DRIVER_PREFIXES.iter().any(|p| driver.starts_with(p)) {
@@ -392,7 +236,7 @@ fn classify(driver: &str, vid_pid: Option<(u16, u16)>) -> (String, u8) {
 /// Return the chipset label for a (VID, PID) in the known WFB-compatible table,
 /// or `None`. Single lookup against the canonical table.
 #[cfg(any(target_os = "linux", test))]
-fn wfb_compatible_label(vid: u16, pid: u16) -> Option<&'static str> {
+pub(super) fn wfb_compatible_label(vid: u16, pid: u16) -> Option<&'static str> {
     WFB_COMPATIBLE
         .iter()
         .find(|(v, p, _)| *v == vid && *p == pid)
@@ -403,43 +247,9 @@ fn wfb_compatible_label(vid: u16, pid: u16) -> Option<&'static str> {
 /// modules. Authoritative even when the USB ID walk missed the IDs (e.g. a USB
 /// hub layer hides the parent device).
 #[cfg(any(target_os = "linux", test))]
-fn driver_is_wfb_compatible(driver: &str) -> bool {
+pub(super) fn driver_is_wfb_compatible(driver: &str) -> bool {
     let d = driver.trim().to_ascii_lowercase();
     WFB_COMPATIBLE_DRIVERS.contains(&d.as_str())
-}
-
-/// The adapters eligible for injection, in the order selection tries them:
-/// compatible + monitor-capable only (the deny gate already cleared management
-/// WiFi's compatibility flag), ranked RTL-family-first, with an operator pin
-/// moved to the front only when it names one of those. A pin that names
-/// anything else is logged and ignored. Pure so the "a pin never bypasses the
-/// gate" rule is testable off a real SBC.
-#[cfg(any(target_os = "linux", test))]
-fn injection_candidates<'a>(
-    adapters: &'a [WifiAdapterInfo],
-    override_iface: &str,
-) -> Vec<&'a WifiAdapterInfo> {
-    let mut candidates: Vec<&WifiAdapterInfo> = adapters
-        .iter()
-        .filter(|a| a.is_wfb_compatible && a.supports_monitor)
-        .collect();
-    candidates.sort_by_key(|a| injection_rank(a));
-    if !override_iface.is_empty() {
-        match candidates
-            .iter()
-            .position(|a| a.interface_name == override_iface)
-        {
-            Some(idx) => {
-                let pinned = candidates.remove(idx);
-                candidates.insert(0, pinned);
-            }
-            None => tracing::warn!(
-                interface = %override_iface,
-                "wfb_interface_override_ignored: not a detected WFB-compatible monitor-capable adapter"
-            ),
-        }
-    }
-    candidates
 }
 
 #[cfg(target_os = "linux")]
@@ -576,6 +386,52 @@ fn vid_pid_from_device_dir(start: &std::path::Path) -> Option<(u16, u16)> {
     None
 }
 
+/// Read an interface's MAC address from `/sys/class/net/<if>/address`,
+/// lower-cased, or `None` when unreadable or empty.
+#[cfg(target_os = "linux")]
+pub(super) async fn mac_address(iface: &str) -> Option<String> {
+    let path = format!("/sys/class/net/{}/address", iface);
+    tokio::fs::read_to_string(&path)
+        .await
+        .ok()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+}
+
+/// The USB device path (e.g. `1-1.2`) backing a netdev: the name of the USB
+/// device node the `device` symlink's parent-walk lands on. Stable across
+/// reboots for a given port, unlike the interface name. `None` when the iface
+/// is not USB-backed.
+#[cfg(target_os = "linux")]
+pub(super) async fn usb_path(iface: &str) -> Option<String> {
+    let link = format!("/sys/class/net/{}/device", iface);
+    let start = tokio::fs::canonicalize(&link).await.ok()?;
+    usb_path_from_device_dir(&start)
+}
+
+/// Walk UP from a resolved USB interface node to the USB *device* node that
+/// carries `idVendor`, and return that node's directory name (the bus-port
+/// path, e.g. `1-1.2`). Bounded like [`vid_pid_from_device_dir`]; `None` when
+/// no ancestor within the bound is a USB device node.
+#[cfg(any(target_os = "linux", test))]
+fn usb_path_from_device_dir(start: &std::path::Path) -> Option<String> {
+    const MAX_PARENT_HOPS: usize = 4;
+    let mut dir = start.to_path_buf();
+    for _ in 0..=MAX_PARENT_HOPS {
+        if dir.join("idVendor").is_file() {
+            return dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .filter(|n| !n.is_empty());
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent.to_path_buf(),
+            None => break,
+        }
+    }
+    None
+}
+
 /// Parse the `Supported interface modes:` block out of `iw phy <phy> info`.
 /// Each mode sits on its own `* <mode>` line under the header; the block ends at
 /// the next non-`*` line. Returns the mode names (e.g. `managed`, `monitor`) in
@@ -606,407 +462,4 @@ fn parse_supported_modes(info: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn monitor_adapter(name: &str, driver: &str) -> WifiAdapterInfo {
-        build_adapter_info(
-            name.to_string(),
-            driver.to_string(),
-            None,
-            "phy0".to_string(),
-            vec!["managed".to_string(), "monitor".to_string()],
-            true,
-            Some("managed".to_string()),
-        )
-    }
-
-    /// An interface pin can reorder the gated candidates but never add to them:
-    /// a name that now points at the onboard management WiFi (names swap between
-    /// reboots) is ignored, and selection falls back to the RTL adapter.
-    #[test]
-    fn an_interface_pin_never_bypasses_the_injection_gate() {
-        let adapters = vec![
-            monitor_adapter("wlan0", "brcmfmac"),
-            monitor_adapter("wlan1", "rtl88x2eu"),
-            monitor_adapter("wlan2", "rtl8812au"),
-        ];
-        let names = |c: Vec<&WifiAdapterInfo>| -> Vec<String> {
-            c.into_iter().map(|a| a.interface_name.clone()).collect()
-        };
-        // A pin on the management WiFi never makes it a candidate.
-        assert_eq!(
-            names(injection_candidates(&adapters, "wlan0")),
-            vec!["wlan1", "wlan2"]
-        );
-        // A pin on a missing device is ignored the same way.
-        assert_eq!(
-            names(injection_candidates(&adapters, "wlan9")),
-            vec!["wlan1", "wlan2"]
-        );
-        // A pin on a gated adapter moves it to the front.
-        assert_eq!(
-            names(injection_candidates(&adapters, "wlan2")),
-            vec!["wlan2", "wlan1"]
-        );
-    }
-
-    /// Bench builds only: a pin on a `dummy` link becomes the first candidate,
-    /// and the gate still holds for every other pin. Release builds never
-    /// compile this path; there `an_interface_pin_never_bypasses_the_injection_gate`
-    /// is the whole rule.
-    #[cfg(feature = "bench-adapters")]
-    #[test]
-    fn a_bench_build_selects_a_pinned_dummy_link() {
-        let names = |c: Vec<&WifiAdapterInfo>| -> Vec<String> {
-            c.into_iter().map(|a| a.interface_name.clone()).collect()
-        };
-        let mut adapters = vec![
-            monitor_adapter("wlan0", "brcmfmac"),
-            monitor_adapter("wlan2", "rtl8812au"),
-        ];
-        let dummy = super::super::bench::pinned_dummy_adapter(&adapters, "wlan1", Some("dummy"))
-            .expect("a pinned dummy link is a bench adapter");
-        adapters.push(dummy);
-        assert_eq!(
-            names(injection_candidates(&adapters, "wlan1")),
-            vec!["wlan1", "wlan2"]
-        );
-        // The management WiFi pin is still refused in a bench build.
-        assert!(
-            super::super::bench::pinned_dummy_adapter(&adapters, "wlan0", Some("dummy")).is_none()
-        );
-        assert_eq!(
-            names(injection_candidates(&adapters, "wlan0")),
-            vec!["wlan2", "wlan1"]
-        );
-    }
-
-    #[test]
-    fn deny_aic8800_by_driver() {
-        assert!(is_denied("aic8800fwh", None));
-        assert!(is_denied("brcmfmac", None));
-    }
-
-    #[test]
-    fn deny_aic8800_by_vid() {
-        assert!(is_denied("some_driver", Some((0xA69C, 0x1234))));
-    }
-
-    #[test]
-    fn rtl8812eu_classified_rank_0() {
-        let (label, rank) = classify("rtl88x2eu", None);
-        assert_eq!(rank, 0);
-        assert!(label.contains("RTL8812EU"));
-    }
-
-    #[test]
-    fn rtl8812au_classified_rank_1() {
-        let (label, rank) = classify("rtl8812au", None);
-        assert_eq!(rank, 1);
-        assert!(label.contains("RTL8812AU"));
-    }
-
-    #[test]
-    fn vid_pid_a81a_disambiguated_by_driver() {
-        // With EU driver, should be EU.
-        let (label, rank) = classify("rtl88x2eu", Some((0x0BDA, 0xA81A)));
-        assert_eq!(rank, 0);
-        assert!(label.contains("EU"));
-    }
-
-    #[test]
-    fn unknown_is_rank_3() {
-        let (_, rank) = classify("unknown_wifi_driver", None);
-        assert_eq!(rank, 3);
-    }
-
-    #[test]
-    fn vid_pid_parent_walk_finds_ids_on_parent_device() {
-        // Model the sysfs shape: the resolved `device` node is the USB
-        // *interface* (`…:1.0`), which has bInterfaceClass but no id files; the
-        // ids live on its parent USB *device* node. The walk must climb to it.
-        let dir = tempfile::tempdir().unwrap();
-        let device = dir.path().join("1-1");
-        let interface = device.join("1-1:1.0");
-        std::fs::create_dir_all(&interface).unwrap();
-        // Interface node: a class file but NO ids (the trap that returned None).
-        std::fs::write(interface.join("bInterfaceClass"), "ff\n").unwrap();
-        // Parent device node: the real ids.
-        std::fs::write(device.join("idVendor"), "0bda\n").unwrap();
-        std::fs::write(device.join("idProduct"), "a81a\n").unwrap();
-
-        assert_eq!(vid_pid_from_device_dir(&interface), Some((0x0BDA, 0xA81A)));
-    }
-
-    #[test]
-    fn vid_pid_walk_returns_none_when_no_ancestor_has_ids() {
-        // A tree with no id files anywhere within the bound yields None rather
-        // than climbing out to the filesystem root.
-        let dir = tempfile::tempdir().unwrap();
-        let leaf = dir.path().join("a").join("b").join("c");
-        std::fs::create_dir_all(&leaf).unwrap();
-        assert_eq!(vid_pid_from_device_dir(&leaf), None);
-    }
-
-    #[test]
-    fn speed_parent_walk_reads_speed_off_the_device_node() {
-        // `speed` lives on the USB device node (same as the ids), one level up
-        // from the interface node the `device` symlink resolves to.
-        let dir = tempfile::tempdir().unwrap();
-        let device = dir.path().join("1-1");
-        let interface = device.join("1-1:1.0");
-        std::fs::create_dir_all(&interface).unwrap();
-        std::fs::write(device.join("speed"), "480\n").unwrap();
-        assert_eq!(speed_from_device_dir(&interface), Some(480));
-
-        // A full-speed enumeration (the degraded RTL path) reads back as 12.
-        let dir2 = tempfile::tempdir().unwrap();
-        let dev2 = dir2.path().join("8-1");
-        std::fs::create_dir_all(&dev2).unwrap();
-        std::fs::write(dev2.join("speed"), "12\n").unwrap();
-        assert_eq!(speed_from_device_dir(&dev2), Some(12));
-    }
-
-    #[test]
-    fn usb_speed_degraded_flags_full_speed_only() {
-        assert!(usb_speed_degraded(Some(12))); // full-speed RTL = degraded
-        assert!(!usb_speed_degraded(Some(480))); // high-speed = fine
-        assert!(!usb_speed_degraded(Some(5000))); // SuperSpeed = fine
-        assert!(!usb_speed_degraded(None)); // non-USB / unknown is not flagged
-    }
-
-    #[test]
-    fn parse_supported_modes_extracts_bulleted_modes() {
-        let info = "\
-Wiphy phy0
-	Supported interface modes:
-		 * IBSS
-		 * managed
-		 * monitor
-	Band 1:
-		Frequencies:
-";
-        let modes = parse_supported_modes(info);
-        assert_eq!(modes, vec!["IBSS", "managed", "monitor"]);
-    }
-
-    #[test]
-    fn parse_supported_modes_absent_is_empty() {
-        assert!(parse_supported_modes("Wiphy phy0\n\tBand 1:\n").is_empty());
-        assert!(parse_supported_modes("").is_empty());
-    }
-
-    // ── VID:PID classification table ─────────────────────────────────────────
-
-    #[test]
-    fn vid_pid_table_matches_python_compatible_set() {
-        // Every (VID, PID) the Python WFB_COMPATIBLE table carries must classify
-        // as a known WFB adapter with the exact same label.
-        let cases: &[(u16, u16, &str)] = &[
-            (0x0BDA, 0x8812, "RTL8812AU"),
-            (0x0BDA, 0x881A, "RTL8812AU (alt)"),
-            (0x0BDA, 0x881B, "RTL8812AU (alt)"),
-            (0x0BDA, 0x881C, "RTL8812AU (alt)"),
-            (0x0BDA, 0xA81A, "RTL8812AU (a81a)"),
-            (0x0BDA, 0xB812, "RTL8812EU"),
-            (0x2357, 0x0120, "RTL8812AU (TP-Link)"),
-            (0x2357, 0x0101, "RTL8812AU (TP-Link alt)"),
-        ];
-        for (vid, pid, label) in cases {
-            assert_eq!(
-                wfb_compatible_label(*vid, *pid),
-                Some(*label),
-                "table miss for {vid:#06x}:{pid:#06x}"
-            );
-        }
-        // A PID outside the table is not known.
-        assert_eq!(wfb_compatible_label(0x0BDA, 0x0000), None);
-        // The old wrong 0x8812 EU label is gone — 0x8812 is the AU rebadge.
-        assert_eq!(wfb_compatible_label(0x0BDA, 0x8812), Some("RTL8812AU"));
-    }
-
-    #[test]
-    fn build_adapter_info_rtl_eu_driver_is_compatible() {
-        let a = build_adapter_info(
-            "wlan1".to_string(),
-            "rtl88x2eu".to_string(),
-            Some((0x0BDA, 0xB812)),
-            "phy0".to_string(),
-            vec!["managed".to_string(), "monitor".to_string()],
-            true,
-            Some("managed".to_string()),
-        );
-        assert!(a.is_wfb_compatible);
-        assert_eq!(a.chipset, "RTL8812EU");
-        assert_eq!(a.usb_vid, Some(0x0BDA));
-        assert_eq!(a.usb_pid, Some(0xB812));
-        assert!(a.supports_monitor);
-    }
-
-    #[test]
-    fn build_adapter_info_a81a_promoted_to_eu_by_driver() {
-        // The ambiguous A81A PID becomes the EU label when the EU driver bound.
-        let a = build_adapter_info(
-            "wlan1".to_string(),
-            "rtl88x2eu".to_string(),
-            Some((0x0BDA, 0xA81A)),
-            "phy0".to_string(),
-            vec!["monitor".to_string()],
-            true,
-            None,
-        );
-        assert!(a.is_wfb_compatible);
-        assert_eq!(a.chipset, "RTL8812EU (a81a)");
-        // With a non-EU driver it keeps the default AU rebadge label.
-        let b = build_adapter_info(
-            "wlan2".to_string(),
-            "88XXau".to_string(),
-            Some((0x0BDA, 0xA81A)),
-            "phy1".to_string(),
-            vec!["monitor".to_string()],
-            true,
-            None,
-        );
-        assert_eq!(b.chipset, "RTL8812AU (a81a)");
-    }
-
-    #[test]
-    fn build_adapter_info_denies_aic8800() {
-        // The management WiFi can never be flagged compatible, by VID or driver.
-        let a = build_adapter_info(
-            "wlan0".to_string(),
-            "aic8800_fdrv".to_string(),
-            Some((0xA69C, 0x8800)),
-            "phy0".to_string(),
-            vec!["managed".to_string(), "monitor".to_string()],
-            true,
-            Some("managed".to_string()),
-        );
-        assert!(!a.is_wfb_compatible);
-        // Driver-only deny (no USB ID resolved) still denies.
-        let b = build_adapter_info(
-            "wlan0".to_string(),
-            "brcmfmac".to_string(),
-            None,
-            String::new(),
-            vec![],
-            false,
-            None,
-        );
-        assert!(!b.is_wfb_compatible);
-    }
-
-    #[test]
-    fn build_adapter_info_driver_fallback_when_usb_id_missing() {
-        // A USB hub layout can hide the parent IDs; the known DKMS driver name
-        // is enough to flag compatibility.
-        let a = build_adapter_info(
-            "wlan1".to_string(),
-            "8812eu".to_string(),
-            None,
-            "phy0".to_string(),
-            vec!["monitor".to_string()],
-            true,
-            None,
-        );
-        assert!(a.is_wfb_compatible);
-        assert_eq!(a.usb_vid, None);
-        assert_eq!(a.usb_pid, None);
-    }
-
-    #[test]
-    fn build_adapter_info_unknown_is_not_compatible() {
-        let a = build_adapter_info(
-            "wlan3".to_string(),
-            "some_other_wifi".to_string(),
-            Some((0x1234, 0x5678)),
-            "phy0".to_string(),
-            vec!["managed".to_string()],
-            false,
-            Some("managed".to_string()),
-        );
-        assert!(!a.is_wfb_compatible);
-        assert_eq!(a.chipset, "some_other_wifi");
-    }
-
-    #[test]
-    fn injection_rank_orders_eu_before_au_before_known_before_other() {
-        let eu = build_adapter_info(
-            "wlan1".to_string(),
-            "rtl88x2eu".to_string(),
-            Some((0x0BDA, 0xB812)),
-            "phy0".to_string(),
-            vec!["monitor".to_string()],
-            true,
-            None,
-        );
-        let au = build_adapter_info(
-            "wlan2".to_string(),
-            "rtl8812au".to_string(),
-            Some((0x0BDA, 0x8812)),
-            "phy1".to_string(),
-            vec!["monitor".to_string()],
-            true,
-            None,
-        );
-        assert_eq!(injection_rank(&eu), 0);
-        assert_eq!(injection_rank(&au), 1);
-    }
-
-    // ── WifiAdapterInfo JSON serialization (the adapter contract wire shape) ──
-
-    #[test]
-    fn wifi_adapter_info_serializes_with_python_field_names() {
-        let info = WifiAdapterInfo {
-            interface_name: "wlan1".to_string(),
-            driver: "rtl88x2eu".to_string(),
-            chipset: "RTL8812EU".to_string(),
-            supports_monitor: true,
-            current_mode: Some("monitor".to_string()),
-            phy: "phy0".to_string(),
-            usb_vid: Some(0x0BDA),
-            usb_pid: Some(0xB812),
-            usb_speed_mbps: Some(480),
-            is_wfb_compatible: true,
-            capabilities: vec!["managed".to_string(), "monitor".to_string()],
-        };
-        let v = serde_json::to_value(&info).unwrap();
-        assert_eq!(v["interface_name"], "wlan1");
-        assert_eq!(v["driver"], "rtl88x2eu");
-        assert_eq!(v["chipset"], "RTL8812EU");
-        assert_eq!(v["supports_monitor"], true);
-        assert_eq!(v["current_mode"], "monitor");
-        assert_eq!(v["phy"], "phy0");
-        assert_eq!(v["usb_vid"], 0x0BDA);
-        assert_eq!(v["usb_pid"], 0xB812);
-        assert_eq!(v["usb_speed_mbps"], 480);
-        assert_eq!(v["is_wfb_compatible"], true);
-        assert_eq!(v["capabilities"], serde_json::json!(["managed", "monitor"]));
-        // The contract carries the adapter facts the panel + REST read.
-        assert_eq!(v.as_object().unwrap().len(), 11);
-    }
-
-    #[test]
-    fn wifi_adapter_info_unbacked_iface_nulls_mode_and_usb() {
-        let info = WifiAdapterInfo {
-            interface_name: "wlan9".to_string(),
-            driver: "unknown".to_string(),
-            chipset: "unknown".to_string(),
-            supports_monitor: false,
-            current_mode: None,
-            phy: String::new(),
-            usb_vid: None,
-            usb_pid: None,
-            usb_speed_mbps: None,
-            is_wfb_compatible: false,
-            capabilities: vec![],
-        };
-        let v = serde_json::to_value(&info).unwrap();
-        // Missing facts are JSON null, not omitted, so the panel can distinguish
-        // "not USB-backed" from "unread".
-        assert!(v["current_mode"].is_null());
-        assert!(v["usb_vid"].is_null());
-        assert!(v["usb_pid"].is_null());
-    }
-}
+mod tests;

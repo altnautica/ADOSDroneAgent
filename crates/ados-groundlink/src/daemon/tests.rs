@@ -1,4 +1,4 @@
-use super::direct::{aux_slots_to_bind, iface_to_restore};
+use super::direct::{aux_slots_to_bind, ifaces_to_restore};
 use super::*;
 
 fn args(items: &[&str]) -> Vec<String> {
@@ -79,25 +79,17 @@ fn a_role_unit_runs_only_under_its_own_role() {
 }
 
 #[tokio::test]
-async fn resolved_cell_holds_iface_after_capture() {
-    // Mirror what the receive loop does after it resolves the injection
-    // adapter: write the iface into the shared cell. The shutdown side reads
-    // it back via the same helper it uses to decide whether to restore.
-    let cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+async fn the_group_cell_holds_every_iface_after_capture() {
+    // Mirror what the receive loop does after it resolves the adapters: write
+    // every WFB iface into the shared cell. The shutdown side reads them back
+    // via the same helper it uses to decide what to restore.
+    let cell: wfb_rx::RadioGroup = Arc::new(Mutex::new(Vec::new()));
     // Nothing resolved yet → nothing to restore.
-    assert_eq!(iface_to_restore(&cell).await, None);
+    assert!(ifaces_to_restore(&cell).await.is_empty());
 
     // Receive-loop capture point.
-    *cell.lock().await = Some("wlan1".to_string());
+    *cell.lock().await = vec!["wlan1".to_string(), "wlan2".to_string()];
 
-    // Shutdown side reads the captured iface and would restore exactly it.
-    assert_eq!(iface_to_restore(&cell).await, Some("wlan1".to_string()));
-}
-
-#[tokio::test]
-async fn restore_is_noop_when_no_iface_resolved() {
-    // With an empty cell the restore decision yields None, so the shutdown
-    // path performs no managed-mode restore (the no-adapter run).
-    let cell: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    assert!(iface_to_restore(&cell).await.is_none());
+    // Shutdown side reads the captured ifaces and would restore exactly them.
+    assert_eq!(ifaces_to_restore(&cell).await, vec!["wlan1", "wlan2"]);
 }

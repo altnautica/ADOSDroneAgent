@@ -277,6 +277,25 @@ async fn config_put_of_theme_passes_while_armed() {
 }
 
 #[tokio::test]
+async fn lora_region_change_is_refused_while_armed() {
+    let (status, hits) = send_armed("PUT", "/api/v1/lora", r#"{"region":"EU"}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(hits, 0);
+    let (status, _) = send_armed("PUT", "/api/v1/lora", r#"{"region":null}"#).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let body = r#"{"key":"lora.region","value":"EU"}"#;
+    let (status, _) = send_armed("PUT", "/api/config", body).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn lora_power_change_without_a_region_passes_while_armed() {
+    let (status, hits) = send_armed("PUT", "/api/v1/lora", r#"{"erp_mw":14}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(hits, 1);
+}
+
+#[tokio::test]
 async fn force_true_in_body_overrides_a_body_rule() {
     let body = r#"{"wfb":{"channel":149},"force":true}"#;
     let (status, hits) = send_armed("POST", "/api/v1/setup/apply", body).await;

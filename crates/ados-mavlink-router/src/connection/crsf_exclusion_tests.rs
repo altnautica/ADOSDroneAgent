@@ -56,6 +56,44 @@ fn disabled_lane_stale_pin_does_not_exclude_the_fc() {
 }
 
 #[test]
+fn every_crsf_module_port_is_excluded() {
+    // Two RC modules on the lane: neither port may become the FC, and the
+    // legacy pin stays excluded alongside them.
+    let two_modules = |serial_port: &str| MavlinkConfig {
+        serial_port: serial_port.into(),
+        crsf_device: "/dev/ttyUSB0".into(),
+        crsf_module_ports: vec!["/dev/ttyACM1".into(), "/dev/ttyACM2".into()],
+        crsf_enabled: true,
+        ..MavlinkConfig::default()
+    };
+    for port in ["/dev/ttyACM1", "/dev/ttyACM2", "/dev/ttyUSB0"] {
+        let c = conn_with(two_modules(port));
+        assert!(c.candidate_ports().is_empty(), "{port} must be excluded");
+    }
+    let c = conn_with(two_modules("/dev/ttyACM0"));
+    assert_eq!(
+        c.crsf_pins(),
+        vec!["/dev/ttyUSB0", "/dev/ttyACM1", "/dev/ttyACM2"]
+    );
+    assert_eq!(c.candidate_ports()[0].name, "/dev/ttyACM0");
+    // Module ports alone pin the lane, so the unpinned silent-bridge skip is off.
+    let modules_only = conn_with(MavlinkConfig {
+        crsf_module_ports: vec!["/dev/ttyACM1".into()],
+        crsf_enabled: true,
+        crsf_mode: "crsf_rc".into(),
+        ..MavlinkConfig::default()
+    });
+    assert!(!modules_only.crsf_rc_lane_unpinned());
+    // A disabled lane owns none of them.
+    let disabled = conn_with(MavlinkConfig {
+        crsf_enabled: false,
+        ..two_modules("/dev/ttyACM1")
+    });
+    assert!(disabled.crsf_pins().is_empty());
+    assert_eq!(disabled.candidate_ports()[0].name, "/dev/ttyACM1");
+}
+
+#[test]
 fn silent_bridge_candidate_is_opened_when_the_rc_lane_is_disabled() {
     // A budget Betaflight / iNav FC on a CH340 bridge is silent on the
     // passive sweep. With the RC lane OFF there is no RC module to protect,

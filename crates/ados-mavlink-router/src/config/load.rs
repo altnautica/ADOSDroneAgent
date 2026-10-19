@@ -71,9 +71,10 @@ impl MavlinkConfig {
     /// file; `Some(msg)` on a present-but-malformed file.
     ///
     /// Reads the `mavlink:` section plus the foreign `radio.crsf` fields the
-    /// router gates on: the pinned CRSF/ELRS serial device (excluded from FC
-    /// port candidacy in `crsf_rc` mode) and the lane's enable/mode/transport
-    /// (which resolve the MAVLink-over-ELRS ingest source in `mavlink` mode).
+    /// router gates on: the pinned CRSF/ELRS serial device and the RC module
+    /// ports (excluded from FC port candidacy while the lane is opted in) and
+    /// the lane's enable/mode/transport (which resolve the MAVLink-over-ELRS
+    /// ingest source in `mavlink` mode).
     pub(super) fn load_reporting(path: &Path) -> (Self, Option<String>) {
         #[derive(Debug, Default, Deserialize)]
         struct AgentSection {
@@ -100,6 +101,14 @@ impl MavlinkConfig {
             mavlink_transport: Option<String>,
             #[serde(default)]
             mavlink_command_enabled: bool,
+            #[serde(default)]
+            modules: Vec<CrsfModule>,
+        }
+        /// One `radio.crsf.modules[]` entry; only its port matters here.
+        #[derive(Debug, Default, Deserialize)]
+        struct CrsfModule {
+            #[serde(default)]
+            port: Option<String>,
         }
         // Each slice loads on its own off the schema-merged config, so a
         // malformed foreign block costs only its own fields; the first error is
@@ -127,6 +136,13 @@ impl MavlinkConfig {
             }
         };
         cfg.crsf_device = crsf.device.as_deref().unwrap_or("").trim().to_string();
+        cfg.crsf_module_ports = crsf
+            .modules
+            .iter()
+            .filter_map(|m| m.port.as_deref().map(str::trim))
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect();
         cfg.crsf_enabled = crsf.enabled;
         // Absent enum-ish fields read their model defaults, matching the lane
         // service's own parse of the same block.

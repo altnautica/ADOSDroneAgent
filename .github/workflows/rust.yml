@@ -83,6 +83,7 @@ env:
     ados-gpio-aarch64
     ados-crsf-aarch64
     ados-tunnel-config-aarch64
+    ados-lora-aarch64
     mediamtx-aarch64
     ados-vision-onnx-aarch64
     libonnxruntime-aarch64.so

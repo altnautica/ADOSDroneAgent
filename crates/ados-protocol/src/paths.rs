@@ -69,6 +69,10 @@ pub const WFB_PAIR_PROOF_JSON: &str = "wfb-pair-proof.json";
 pub const BIND_STATE_JSON: &str = "bind-state.json";
 pub const CRSF_STATS_JSON: &str = "crsf-stats.json";
 pub const CRSF_STATS_MAX_AGE_MS: u64 = 10000;
+pub const LORA_JSON: &str = "lora.json";
+pub const LORA_MAX_AGE_MS: u64 = 10000;
+pub const LORA_BEACONS_JSON: &str = "lora-beacons.json";
+pub const LORA_BEACONS_MAX_AGE_MS: u64 = 10000;
 pub const TUNNEL_CONFIG_JSON: &str = "tunnel-config.json";
 pub const TUNNEL_CONFIG_MAX_AGE_MS: u64 = 30000;
 pub const RELAYED_STATUS_JSON: &str = "relayed-status.json";
@@ -156,6 +160,8 @@ pub const SIDECARS: &[SidecarPath] = &[
     SidecarPath { id: "wfb-pair-proof", path: "/var/lib/ados/wfb-pair-proof.json", max_age_ms: None, writer: "ados-radio, ados-groundlink" },
     SidecarPath { id: "bind-state", path: "/run/ados/bind-state.json", max_age_ms: None, writer: "ados-radio" },
     SidecarPath { id: "crsf-stats", path: "/run/ados/crsf-stats.json", max_age_ms: Some(10000), writer: "ados-crsf" },
+    SidecarPath { id: "lora", path: "/run/ados/lora.json", max_age_ms: Some(10000), writer: "ados-lora" },
+    SidecarPath { id: "lora-beacons", path: "/run/ados/lora-beacons.json", max_age_ms: Some(10000), writer: "ados-lora" },
     SidecarPath { id: "tunnel-config", path: "/run/ados/tunnel-config.json", max_age_ms: Some(30000), writer: "ados-config-tunnel" },
     SidecarPath { id: "relayed-status", path: "/run/ados/relayed-status.json", max_age_ms: Some(20000), writer: "ados-groundlink" },
     SidecarPath { id: "linked-peers", path: "/run/ados/linked-peers.json", max_age_ms: None, writer: "ados-groundlink" },

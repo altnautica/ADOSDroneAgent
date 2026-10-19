@@ -241,12 +241,12 @@ description = "Drone perception offload-link state: a paired reachable workstati
 
 [[sidecar]]
 id = "wfb-stats"
-version = 1
+version = 2
 path = "/run/ados/wfb-stats.json"
 max_age_ms = 10000
 writer = "ados-radio, ados-groundlink"
 rust_const = "ados_protocol::paths::WFB_STATS_JSON"
-description = "WFB link statistics: RSSI, packet counters, and derived link state."
+description = "WFB link statistics: RSSI, packet counters, derived link state, and per-adapter receive counters with the diversity block."
 
 [[sidecar]]
 id = "hop-supervisor"
@@ -324,12 +324,30 @@ description = "WFB bind-session sentinel and precheck result."
 
 [[sidecar]]
 id = "crsf-stats"
-version = 1
+version = 2
 path = "/run/ados/crsf-stats.json"
 max_age_ms = 10000
 writer = "ados-crsf"
 rust_const = "ados_crsf::paths::CRSF_STATS_JSON"
-description = "CRSF RC-lane state and link statistics: lane state, RSSI/LQ/SNR, frame rates, and the received-side liveness verdict."
+description = "CRSF RC-lane state and link statistics: lane state, RSSI/LQ/SNR, frame rates, and the received-side liveness verdict. v2 adds modules[]: one entry per configured RC module with its role, port, link statistics and reported ELRS domain."
+
+[[sidecar]]
+id = "lora"
+version = 1
+path = "/run/ados/lora.json"
+max_age_ms = 10000
+writer = "ados-lora"
+rust_const = "ados_lora::paths::LORA_JSON"
+description = "LoRa lane state: transport, module band, resolved region and plan, channel and power, the governor's per-rule state (duty, dwell, listen-before-talk, power), TX/RX counters and the Meshtastic bridge."
+
+[[sidecar]]
+id = "lora-beacons"
+version = 1
+path = "/run/ados/lora-beacons.json"
+max_age_ms = 10000
+writer = "ados-lora"
+rust_const = "ados_lora::paths::LORA_BEACONS_JSON"
+description = "Beacons heard on the LoRa lane, newest first, capped at 100."
 
 [[sidecar]]
 id = "tunnel-config"

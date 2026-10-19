@@ -314,6 +314,15 @@ pub const UNITS: &[UnitSpec] = &[
         idle_ok: true,
         ..BASE
     },
+    // LoRa beacon and mesh lane, gated on the lora-enabled marker.
+    UnitSpec {
+        name: "ados-lora.service",
+        category: Some(Hardware),
+        profiles: FC,
+        install: Install::Universal,
+        idle_ok: true,
+        ..BASE
+    },
     // Boot re-assert of the power knobs; the power-hardening step enables it
     // once its helper script is in place.
     UnitSpec {

@@ -179,16 +179,28 @@ impl FcConnection {
     }
 
     /// The RC lane is opted in as a plain RC transmitter (`crsf_rc`) with no
-    /// pinned device — the only configuration where a silent, RC-bridge-VID
-    /// serial candidate might actually be the RC module rather than a flight
-    /// controller. A pinned module is already removed by
+    /// pinned device and no module ports — the only configuration where a
+    /// silent, RC-bridge-VID serial candidate might actually be the RC module
+    /// rather than a flight controller. A pinned module is already removed by
     /// [`Self::candidate_ports`], and a `mavlink`-mode module is the FC carrier
     /// this router WANTS to open, so both sit outside this case. A DISABLED lane
     /// is never in play at all.
     pub(super) fn crsf_rc_lane_unpinned(&self) -> bool {
-        self.cfg.crsf_enabled
-            && self.cfg.crsf_mode == "crsf_rc"
-            && self.cfg.crsf_device.trim().is_empty()
+        self.cfg.crsf_enabled && self.cfg.crsf_mode == "crsf_rc" && self.crsf_pins().is_empty()
+    }
+
+    /// Every serial device the opted-in CRSF lane owns: the legacy device pin
+    /// plus each module port. Empty while the lane is disabled — a stale pin
+    /// from a disabled lane names nothing this router must avoid.
+    pub(super) fn crsf_pins(&self) -> Vec<&str> {
+        if !self.cfg.crsf_enabled {
+            return Vec::new();
+        }
+        std::iter::once(self.cfg.crsf_device.as_str())
+            .chain(self.cfg.crsf_module_ports.iter().map(String::as_str))
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .collect()
     }
 
     /// Whether a silent serial candidate (no heartbeat / MSP on the passive baud
@@ -214,25 +226,18 @@ impl FcConnection {
     }
 
     /// The serial ports the FC link may open, best candidate first (see
-    /// [`candidate_rank`]). The pinned CRSF/ELRS device
-    /// (`radio.crsf.device`) is excluded on BOTH paths — an RC transmitter
-    /// module's port must never be opened or baud-swept by the router, even when
-    /// the FC port is (mis)configured to the same node — but ONLY while the CRSF
-    /// lane is opted in (`radio.crsf.enabled`): the pin is meaningful only for an
-    /// active lane, so a stale pin left over from a DISABLED lane must never drop
-    /// the flight controller.
+    /// [`candidate_rank`]). Every CRSF lane device ([`Self::crsf_pins`]: the
+    /// `radio.crsf.device` pin and each `radio.crsf.modules[].port`) is
+    /// excluded on BOTH paths — an RC transmitter module's port must never be
+    /// opened or baud-swept by the router, even when the FC port is
+    /// (mis)configured to the same node — but ONLY while the CRSF lane is opted
+    /// in (`radio.crsf.enabled`): a stale pin left over from a DISABLED lane
+    /// must never drop the flight controller.
     pub(super) fn candidate_ports(&self) -> Vec<FcCandidate> {
-        // A stale device pin from a disabled lane names nothing this router owns,
-        // so it must not exclude the FC (an operator who turns the CRSF lane off
-        // but leaves `radio.crsf.device` set would otherwise lose the flight
-        // controller whenever the two happen to match).
-        let crsf_pin = if self.cfg.crsf_enabled {
-            self.cfg.crsf_device.trim()
-        } else {
-            ""
-        };
+        let crsf_pins = self.crsf_pins();
+        let is_crsf = |port: &str| crsf_pins.iter().any(|pin| same_device(port, pin));
         if !self.cfg.serial_port.is_empty() {
-            if !crsf_pin.is_empty() && same_device(&self.cfg.serial_port, crsf_pin) {
+            if is_crsf(&self.cfg.serial_port) {
                 tracing::warn!(
                     port = %self.cfg.serial_port,
                     "fc_serial_port_is_the_pinned_crsf_device_no_fc_candidates"
@@ -249,7 +254,7 @@ impl FcConnection {
                 let mut candidates: Vec<FcCandidate> = ports
                     .into_iter()
                     .filter(|p| is_candidate_port(&p.port_type, &p.port_name))
-                    .filter(|p| crsf_pin.is_empty() || !same_device(&p.port_name, crsf_pin))
+                    .filter(|p| !is_crsf(&p.port_name))
                     .map(|p| FcCandidate {
                         usb: match &p.port_type {
                             tokio_serial::SerialPortType::UsbPort(info) => {

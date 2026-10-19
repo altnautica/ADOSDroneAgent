@@ -233,6 +233,12 @@ pub struct MavlinkConfig {
     /// this router owns (see [`MavlinkConfig::crsf_mavlink_source`]).
     #[serde(skip)]
     pub crsf_device: String,
+    /// The serial devices of the RC lane's modules (`radio.crsf.modules[].port`,
+    /// filled in by the loader). Every one is an RC transmitter module the lane
+    /// owns, so while the lane is opted in each is excluded from FC candidacy
+    /// exactly like [`Self::crsf_device`]. Empty in the single-pin config.
+    #[serde(skip)]
+    pub crsf_module_ports: Vec<String>,
     /// Whether the `radio.crsf` lane is opted in (`radio.crsf.enabled`, filled
     /// in by the loader like `crsf_device`). Gates the MAVLink-over-ELRS
     /// source resolution: a lane that is not opted in never owns the FC
@@ -322,6 +328,7 @@ impl Default for MavlinkConfig {
             route_aware: false,
             agent_signing: false,
             crsf_device: String::new(),
+            crsf_module_ports: Vec::new(),
             crsf_enabled: false,
             crsf_mode: "crsf_rc".to_string(),
             crsf_mavlink_transport: "serial".to_string(),

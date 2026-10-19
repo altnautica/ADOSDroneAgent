@@ -106,6 +106,7 @@ dependencies = [
  "ados-config",
  "ados-groundlink",
  "ados-hid",
+ "ados-lora",
  "ados-macpin",
  "ados-mavlink-router",
  "ados-net",
@@ -354,6 +355,25 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
  "zstd",
+]
+
+[[package]]
+name = "ados-lora"
+version = "0.103.4"
+dependencies = [
+ "ados-config",
+ "ados-gpio",
+ "ados-protocol",
+ "ados-sensorhub-proto",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-serial",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

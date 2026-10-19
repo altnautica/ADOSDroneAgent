@@ -504,6 +504,278 @@
       "type": "boolean"
     },
     {
+      "default": "2.4k",
+      "description": "Air Rate",
+      "enum": null,
+      "key": "lora.air_rate",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 2.15,
+      "description": "Antenna Gain Dbi",
+      "enum": null,
+      "key": "lora.antenna_gain_dbi",
+      "maximum": 20,
+      "minimum": -10,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 30,
+      "description": "Beacon Interval S",
+      "enum": null,
+      "key": "lora.beacon_interval_s",
+      "maximum": 3600,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 125,
+      "description": "Bw Khz",
+      "enum": null,
+      "key": "lora.bw_khz",
+      "maximum": 500,
+      "minimum": 7,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 0.0,
+      "description": "Cable Loss Db",
+      "enum": null,
+      "key": "lora.cable_loss_db",
+      "maximum": 30,
+      "minimum": 0,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 1,
+      "description": "Cr",
+      "enum": null,
+      "key": "lora.cr",
+      "maximum": 4,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 9600,
+      "description": "Baud",
+      "enum": null,
+      "key": "lora.e22.baud",
+      "maximum": 115200,
+      "minimum": 1200,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "gpiochip0",
+      "description": "Gpio Chip",
+      "enum": null,
+      "key": "lora.e22.gpio_chip",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "M0 Gpio",
+      "enum": null,
+      "key": "lora.e22.m0_gpio",
+      "maximum": 1023,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": null,
+      "description": "M1 Gpio",
+      "enum": null,
+      "key": "lora.e22.m1_gpio",
+      "maximum": 1023,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
+      "default": "850-930",
+      "description": "Module Band",
+      "enum": [
+        "850-930",
+        "410-493"
+      ],
+      "key": "lora.e22.module_band",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "/dev/ttyUSB0",
+      "description": "Port",
+      "enum": null,
+      "key": "lora.e22.port",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "lora.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": null,
+      "description": "Erp Mw",
+      "enum": null,
+      "key": "lora.erp_mw",
+      "maximum": 4000,
+      "minimum": 0,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": null,
+      "description": "Freq Mhz",
+      "enum": null,
+      "key": "lora.freq_mhz",
+      "maximum": 6000,
+      "minimum": 0,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": "/var/ados/lora/airtime.jsonl",
+      "description": "Ledger Path",
+      "enum": null,
+      "key": "lora.ledger_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "0.0.0.0:7810",
+      "description": "Bind",
+      "enum": null,
+      "key": "lora.loopback.bind",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "any",
+      "description": "Module Band",
+      "enum": [
+        "any",
+        "850-930",
+        "410-493",
+        "863-928"
+      ],
+      "key": "lora.loopback.module_band",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "127.0.0.1:7811",
+      "description": "Peer",
+      "enum": null,
+      "key": "lora.loopback.peer",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "lora.meshtastic.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": null,
+      "description": "Port",
+      "enum": null,
+      "key": "lora.meshtastic.port",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": 1,
+      "description": "Node Id",
+      "enum": null,
+      "key": "lora.node_id",
+      "maximum": 65535,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 8,
+      "description": "Preamble",
+      "enum": null,
+      "key": "lora.preamble",
+      "maximum": 65535,
+      "minimum": 6,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": null,
+      "description": "Region",
+      "enum": null,
+      "key": "lora.region",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": 9,
+      "description": "Sf",
+      "enum": null,
+      "key": "lora.sf",
+      "maximum": 12,
+      "minimum": 7,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "e22",
+      "description": "Transport",
+      "enum": [
+        "e22",
+        "meshtastic",
+        "loopback"
+      ],
+      "key": "lora.transport",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": false,
       "description": "Adopt Slot System Id",
       "enum": null,
@@ -1229,6 +1501,61 @@
       "type": "string"
     },
     {
+      "default": [],
+      "description": "Adapters",
+      "enum": null,
+      "key": "radio.adapters",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Antenna",
+      "enum": null,
+      "key": "radio.adapters[].antenna",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Mac",
+      "enum": null,
+      "key": "radio.adapters[].match.mac",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Usb Path",
+      "enum": null,
+      "key": "radio.adapters[].match.usb_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Role",
+      "enum": [
+        "rxtx",
+        "rx",
+        "tx",
+        "mesh"
+      ],
+      "key": "radio.adapters[].role",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
       "default": "dual",
       "description": "Band",
       "enum": [
@@ -1308,6 +1635,59 @@
         "airport"
       ],
       "key": "radio.crsf.mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": [],
+      "description": "Modules",
+      "enum": null,
+      "key": "radio.crsf.modules",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "array"
+    },
+    {
+      "default": null,
+      "description": "Id",
+      "enum": null,
+      "key": "radio.crsf.modules[].id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Link",
+      "enum": null,
+      "key": "radio.crsf.modules[].link",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Port",
+      "enum": null,
+      "key": "radio.crsf.modules[].port",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "pilot",
+      "description": "Role",
+      "enum": [
+        "pilot",
+        "autonomy"
+      ],
+      "key": "radio.crsf.modules[].role",
       "maximum": null,
       "minimum": null,
       "secret": false,

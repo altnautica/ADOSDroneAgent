@@ -16,6 +16,24 @@ from pydantic import BaseModel, Field
 from ._bounds import I8_MAX, I8_MIN, U16_MAX
 
 
+class CrsfModuleConfig(BaseModel):
+    """One RC transmitter module of the CRSF lane (``radio.crsf.modules[]``).
+
+    ``id`` is the module's stable name (``m0``, ``m1``, ...), unique in the
+    list. ``port`` is the serial device it is attached to. ``role`` is
+    ``pilot`` (the operator RC lane under ``channel_source``; at most one) or
+    ``autonomy`` (a programmatic RC lane fed only by channel injection
+    addressed to this ``id``). ``link`` is an optional operator label naming
+    the vehicle link the module serves; the lane does not interpret it.
+    """
+
+    id: str
+    port: str
+    role: Literal["pilot", "autonomy"] = "pilot"
+    link: str | None = None
+
+
+
 class CrsfConfig(BaseModel):
     """The ExpressLRS / CRSF RC control lane.
 
@@ -83,6 +101,11 @@ class CrsfConfig(BaseModel):
     ``relay_role`` declares this node's part in an RC relay chain: ``none``
     (not relaying — the default), ``repeater`` (a pure CRSF repeater), or
     ``agent_last_mile`` (an agent relay driving the ELRS last mile).
+
+    ``modules`` lists the RC transmitter modules the lane runs, each with its
+    own serial transport and link statistics. Empty (the default) means the
+    single pinned ``device`` is the one pilot module ``m0``; when the list
+    has entries it replaces that pin for the RC lane.
     """
 
     enabled: bool = False
@@ -95,6 +118,7 @@ class CrsfConfig(BaseModel):
     mavlink_transport: Literal["serial", "backpack_wifi"] = "serial"
     mavlink_command_enabled: bool = False
     relay_role: Literal["none", "repeater", "agent_last_mile"] = "none"
+    modules: list[CrsfModuleConfig] = []
 
 
 class TunnelConfig(BaseModel):
@@ -138,6 +162,32 @@ class TunnelConfig(BaseModel):
     rx_port: int = Field(default=5820, ge=0, le=U16_MAX)
 
 
+class RadioAdapterMatch(BaseModel):
+    """How a ``radio.adapters[]`` entry names a detected WFB adapter: by MAC
+    address (case-insensitive) or by USB device path (``1-1.2``). Interface
+    names are not accepted because they can swap between reboots."""
+
+    mac: str | None = None
+    usb_path: str | None = None
+
+
+class RadioAdapterEntry(BaseModel):
+    """One WFB adapter role assignment (``radio.adapters[]``).
+
+    ``role`` is ``rxtx`` (receives and carries the transmit lanes), ``rx``
+    (receives only), ``tx`` (transmits only) or ``mesh`` (left out of WFB for
+    the mesh carrier). ``antenna`` is a free-form label surfaced per adapter.
+    """
+
+    match: RadioAdapterMatch = RadioAdapterMatch()
+    role: Literal["rxtx", "rx", "tx", "mesh"]
+    antenna: str | None = None
+
+
 class RadioConfig(BaseModel):
     crsf: CrsfConfig = CrsfConfig()
     tunnel: TunnelConfig = TunnelConfig()
+    # WFB adapter roles. Empty assigns them automatically: the first adapter
+    # is rxtx and the rest rx, with the last left to the mesh carrier when the
+    # node runs a mesh role. Adapters no entry matches receive.
+    adapters: list[RadioAdapterEntry] = []

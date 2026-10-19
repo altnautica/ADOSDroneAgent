@@ -3,8 +3,9 @@ use super::*;
 #[test]
 fn registry_has_expected_shape() {
     let specs = build_specs();
-    // ados-discovery and ados-health were removed; ados-vision-hailo added.
-    assert_eq!(specs.len(), 28, "service count drifted from the catalog");
+    // ados-discovery and ados-health were removed; ados-vision-hailo and
+    // ados-lora added.
+    assert_eq!(specs.len(), 29, "service count drifted from the catalog");
     // Core tier members. ados-mavlink/api/cloud/health/logd are the
     // cross-profile always-on core (the single cloud unit serves the gateway
     // + heartbeat on both profiles, spawning the ground-station bridge when

@@ -38,10 +38,14 @@ where
     // the routes degrade to rather than fail. The handle stops it on shutdown.
     let (state_client, state_handle) = StateIpcClient::spawn(paths.state_socket.clone());
     // The battery health engine and the task that feeds it from the state
-    // snapshot at 2 Hz, hot-reloading the `battery:` config block and recording
-    // each anomaly transition in the logging store. Stopped with the readers.
-    let (battery, battery_handle) =
-        crate::battery::spawn(state_client.clone(), paths.config_path.clone());
+    // snapshot and the board-bound INA226 gauge at 2 Hz, hot-reloading the
+    // `battery:` config block and recording each anomaly transition in the
+    // logging store. Stopped with the readers.
+    let (battery, battery_handle) = crate::battery::spawn(
+        state_client.clone(),
+        paths.config_path.clone(),
+        paths.board_path.clone(),
+    );
     // The swarm neighbour-table reader. Same posture as the state reader: it
     // reconnects on EOF / an absent socket, and a node not running the bus leaves
     // nothing published, which the routes degrade to. Spawned on EVERY profile — a

@@ -93,6 +93,7 @@ pub mod paths;
 pub mod plugin;
 pub mod plugin_loopback_guard;
 pub mod plugin_mdns;
+pub mod radio_adapters;
 pub mod reach;
 pub mod relay_ticket;
 pub mod rest;

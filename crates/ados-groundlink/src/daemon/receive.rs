@@ -1,5 +1,5 @@
-//! The direct receive manager's generation loop: resolve the adapter, bring
-//! the interface up, spawn the receive chain and its watchdogs, run the
+//! The direct receive manager's generation loop: resolve the adapters, bring
+//! every WFB interface up, spawn the receive chain and its watchdogs, run the
 //! generation to completion, tear down and respawn.
 
 use super::generation::{reconcile_fleet, spawn_link_telemetry};
@@ -11,14 +11,19 @@ use super::*;
 pub(super) async fn receive_loop(
     config: &WfbConfig,
     presence_cache: GsPresenceCache,
-    resolved_iface: Arc<Mutex<Option<String>>>,
+    radio_group: wfb_rx::RadioGroup,
     hop_follower: presence::HopFollower,
     aux_counters: crate::AuxCounters,
     progress: ados_supervisor::sdnotify::MonitorProgress,
 ) {
     let mut manager = WfbRxManager::new(config.clone());
     let clock: Arc<dyn crate::watchdog::Clock> = Arc::new(SystemClock::default());
-    let setter: Arc<dyn crate::acquire::ChannelSetter> = Arc::new(IwChannelSetter);
+    // Every retune (acquirer sweep, hop follow) lands on all WFB adapters at
+    // once, so the diversity receiver never splits across channels.
+    let setter: Arc<dyn crate::acquire::ChannelSetter> = Arc::new(wfb_rx::GroupChannelSetter::new(
+        Arc::new(IwChannelSetter),
+        radio_group.clone(),
+    ));
     let hint = wfb_rx::default_hint();
     // Telemetry emitter for the per-generation receive-link samples shipped to
     // the logging daemon. Constructed once for the service lifetime; each
@@ -62,41 +67,20 @@ pub(super) async fn receive_loop(
         // Paired again: the next unpaired spell publishes immediately rather than
         // waiting out a refresh interval left over from the last one.
         unpaired_published = None;
-        // Resolve the receive adapter. Honors an explicit `video.wfb.interface`
-        // override; otherwise auto-detects the RTL injection adapter (the
-        // management wifi and the operator's control path are excluded and
-        // monitor mode is proven) — symmetric with the drone-side selection, so
-        // the ground station resolves its own adapter instead of idling until an
-        // external detector supplies one.
-        let (interface, adapter) = match ados_radio::adapter::select_interface(&config.interface)
-            .await
-        {
-            Some(sel) if sel.injection_ok => {
-                // Carry the full adapter record (chipset, injection verdict,
-                // USB link health) onto the manager, so every sidecar write
-                // reports the adapter actually in use rather than a default.
-                let adapter = wfb_rx::GsAdapterInfo::from(&sel);
-                if adapter.usb_degraded {
-                    tracing::warn!(
-                        interface = %sel.ifname,
-                        usb_speed_mbps = ?adapter.usb_speed_mbps,
-                        "ground_wfb_adapter_usb_degraded: adapter on a slow USB link (needs 480 Mbps); RF may not be received"
-                    );
-                }
-                manager.set_adapter(adapter.clone());
-                manager.set_interface(sel.ifname.clone());
-                // Record the resolved injection adapter so the shutdown path
-                // (in `run_direct`) can restore it to managed mode.
-                *resolved_iface.lock().await = Some(sel.ifname.clone());
-                (sel.ifname, adapter)
-            }
-            Some(sel) => {
+        // Resolve the adapters. Honors an explicit `video.wfb.interface` pin
+        // (moved to the front when it passes the gate); otherwise every
+        // verified RTL injection adapter is used (the management wifi and the
+        // operator's control path are excluded and monitor mode is proven),
+        // with roles from `radio.adapters`. The direct role runs no mesh
+        // carrier, so no adapter is held back for it.
+        let plan = match crate::adapter_plan::resolve(&config.interface, false).await {
+            crate::adapter_plan::Resolution::Ready(plan) => plan,
+            crate::adapter_plan::Resolution::NoInjection(sel) => {
                 // Injection setup did not establish. A slow USB link is the usual
                 // cause, so keep the USB facts and publish a `no_injection`
                 // sidecar carrying them: a stuck receive plane must self-report
                 // WHY it is deaf rather than going silent while the run
-                // loop retries. Without this write a slow-USB adapter — exactly
-                // what lands a rig in this arm — reports nothing at all.
+                // loop retries.
                 let adapter = wfb_rx::GsAdapterInfo::from(&sel);
                 manager.set_adapter(adapter.clone());
                 wfb_rx::write_no_injection_sidecar(
@@ -115,7 +99,7 @@ pub(super) async fn receive_loop(
                 tokio::time::sleep(RETRY_INTERVAL).await;
                 continue;
             }
-            None => {
+            crate::adapter_plan::Resolution::NoAdapter => {
                 manager.set_adapter(wfb_rx::GsAdapterInfo::default());
                 tracing::warn!("ground_no_wfb_adapter_found");
                 // Replace whatever the last generation published: an adapter
@@ -130,22 +114,39 @@ pub(super) async fn receive_loop(
                 continue;
             }
         };
-        // Stage boundary: the adapter is resolved. Stamped here as well as at the
-        // top of the pass so the regulatory gate + monitor-mode + txpower
+        // Carry the transmit adapter's record (chipset, injection verdict, USB
+        // link health) onto the manager, so every sidecar write reports the
+        // adapter actually in use rather than a default.
+        let adapter = wfb_rx::GsAdapterInfo::from(&plan.tx().adapter);
+        if adapter.usb_degraded {
+            tracing::warn!(
+                interface = %plan.tx().ifname(),
+                usb_speed_mbps = ?adapter.usb_speed_mbps,
+                "ground_wfb_adapter_usb_degraded: adapter on a slow USB link (needs 480 Mbps); RF may not be received"
+            );
+        }
+        manager.set_adapter(adapter.clone());
+        manager.set_plan(&plan);
+        // Record every WFB interface so the group setter retunes all of them
+        // and the shutdown path (in `run_direct`) restores each to managed mode.
+        *radio_group.lock().await = manager.radio_ifaces().to_vec();
+        let interface = manager.interface().to_string();
+        // Stage boundary: the adapters are resolved. Stamped here as well as at
+        // the top of the pass so the regulatory gate + monitor-mode + txpower
         // bring-up below — the longest legitimate single stage on this path —
         // cannot be mistaken for a wedge.
         progress.mark();
 
-        // Bring the interface to receive-ready BEFORE the spawn, in the
+        // Bring the interfaces to receive-ready BEFORE the spawn, in the
         // kernel-required order: the regulatory gate (set + verify the domain,
         // then assert the rendezvous channel is permitted and non-DFS, both
         // before monitor-mode bring-up so the home channel is never capped to the
         // startup domain's limits), then monitor mode, TX power (brownout guard
-        // on marginal USB hosts), and the rendezvous-home channel. Re-applied
-        // each generation. On a strict-gate failure the receive chain is NOT
-        // spawned on a capped radio: park in `reg_blocked`, surface it, and
-        // retry with bounded backoff.
-        if let Err(e) = manager.prepare_interface(&interface).await {
+        // on marginal USB hosts), and the rendezvous-home channel on every WFB
+        // adapter. Re-applied each generation. On a strict-gate failure the
+        // receive chain is NOT spawned on a capped radio: park in `reg_blocked`,
+        // surface it, and retry with bounded backoff.
+        if let Err(e) = manager.prepare_interfaces().await {
             // Surface the live domain vs the wanted one (the manager's snapshot
             // may be partial when the gate failed before reading it), so the panel
             // shows the actual regulatory conflict, not a configured-channel lie.
@@ -178,13 +179,13 @@ pub(super) async fn receive_loop(
         // The lowest registered slot is the PRIMARY: its video RX carries the
         // stats stream, anchors the generation's liveness, and is the link the
         // channel acquirer sweeps for. Every other registered slot gets its own
-        // additive video/aux/control trio on the same interface.
+        // additive video/aux/control trio on the same receiving adapters.
         let mut slots = wfb_rx::fleet_slots(&FleetRegistry::load(std::path::Path::new(
             FLEET_REGISTRY_PATH,
         )));
         slots.sort_unstable();
         let primary_slot = slots[0];
-        let mut chain = match manager.spawn_receive_chain(&interface, primary_slot).await {
+        let mut chain = match manager.spawn_receive_chain(primary_slot).await {
             Ok(chain) => chain,
             Err(e) => {
                 tracing::error!(error = %e, slot = primary_slot, "ground_wfb_rx_failed_to_start");
@@ -198,7 +199,7 @@ pub(super) async fn receive_loop(
         let mut secondaries: std::collections::BTreeMap<u8, SlotReceivers> =
             std::collections::BTreeMap::new();
         for &slot in &slots[1..] {
-            match manager.spawn_slot_receivers(&interface, slot, false).await {
+            match manager.spawn_slot_receivers(slot, false).await {
                 Ok(r) => {
                     secondaries.insert(slot, r);
                 }
@@ -289,6 +290,7 @@ pub(super) async fn receive_loop(
                 manager.reg_snapshot().clone(),
                 config.clone(),
                 manager.adapter().clone(),
+                wfb_rx::AdapterStatsTracker::new(&plan),
                 Some(rx_health.clone()),
                 zombie_kills.clone(),
                 Some(ingest.clone()),
@@ -374,13 +376,7 @@ pub(super) async fn receive_loop(
         // the PRIMARY slot is released: the primary's video RX is the stats
         // stream and the channel acquirer's target, so a new primary has to be
         // chosen by a fresh generation.
-        let reconcile = reconcile_fleet(
-            &manager,
-            &interface,
-            primary_slot,
-            &mut secondaries,
-            &progress,
-        );
+        let reconcile = reconcile_fleet(&manager, primary_slot, &mut secondaries, &progress);
 
         // The generation ends when any of: the data RX exits, the zombie
         // watchdog kills it, the valid-packet watchdog terminates it, either

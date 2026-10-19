@@ -61,7 +61,6 @@ pub(super) fn spawn_link_telemetry(
 /// the PRIMARY slot is released.
 pub(super) async fn reconcile_fleet(
     manager: &WfbRxManager,
-    interface: &str,
     primary_slot: u8,
     secondaries: &mut std::collections::BTreeMap<u8, SlotReceivers>,
     progress: &ados_supervisor::sdnotify::MonitorProgress,
@@ -98,7 +97,7 @@ pub(super) async fn reconcile_fleet(
                     .filter(|s| *s != primary_slot && !secondaries.contains_key(s))
                     .collect();
                 for slot in missing {
-                    match manager.spawn_slot_receivers(interface, slot, false).await {
+                    match manager.spawn_slot_receivers(slot, false).await {
                         Ok(r) => {
                             secondaries.insert(slot, r);
                             tracing::info!(slot, "ground_slot_rx_spawned");
@@ -131,7 +130,7 @@ pub(super) async fn reconcile_fleet(
                 for (slot, rx) in secondaries.iter_mut() {
                     let is_hero = *slot == hero;
                     if is_hero && !rx.decoding_video() {
-                        match manager.spawn_slot_video(interface, *slot).await {
+                        match manager.spawn_slot_video(*slot).await {
                             Ok(v) => {
                                 rx.video = Some(v);
                                 tracing::info!(slot, "ground_slot_video_brought_up");
