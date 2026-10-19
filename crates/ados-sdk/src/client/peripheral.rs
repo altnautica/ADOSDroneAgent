@@ -2,13 +2,15 @@
 
 use ados_protocol::camera_control::{
     CameraControlRequest, CameraControlResult, CAMERA_CONTROL_CAPABILITY, CAMERA_CONTROL_METHOD,
+    ENGINE_WAIT_MS,
 };
 
 use super::*;
 
-/// How long a camera control call waits: the engine applies it between two
-/// frames of the camera and gives up on a stalled one after three seconds.
-const CAMERA_CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long a camera control call waits: the engine's own wait
+/// ([`ENGINE_WAIT_MS`]) plus a second for the two socket hops, so the
+/// engine's answer arrives first.
+const CAMERA_CONTROL_TIMEOUT: Duration = Duration::from_millis(ENGINE_WAIT_MS + 1_000);
 
 impl PluginIpcClient {
     /// Register a driver of the given kind, referenced by an opaque id the host
@@ -90,12 +92,14 @@ impl PluginIpcClient {
             .args)
     }
 
-    /// Set exposure, gain or auto exposure on a camera the vision engine owns
-    /// and return what the camera reads back. Gated on `camera.control.write`
+    /// Set exposure, gain (a multiplier, 1.0 is unity) or auto exposure on a
+    /// `capture: true` camera the vision engine owns and return what the camera
+    /// reads back. Gated on `camera.control.write`
     /// ([`ClientError::CapabilityDenied`] without it). `applied` is true only
-    /// when every requested control was set and reads back as asked; a
-    /// simulated, network or control-less camera answers `applied: false`
-    /// with a [`reason`](ados_protocol::camera_control::reason) code.
+    /// when every requested control was set and reads back as asked; any other
+    /// camera, a simulated or control-less one, or a gain control with no known
+    /// unit gain answers `applied: false` with a
+    /// [`reason`](ados_protocol::camera_control::reason) code.
     pub async fn camera_set_controls(
         &self,
         req: &CameraControlRequest,

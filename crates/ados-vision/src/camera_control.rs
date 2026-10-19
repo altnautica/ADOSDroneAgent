@@ -1,16 +1,20 @@
 //! Routes `camera.control.set` to the capture thread that owns the camera.
 //!
-//! Each source the engine opens registers here under its camera id: a V4L2
-//! capture gets a queue its capture thread drains between buffers, applying
-//! each request on the device handle it streams from; a simulated RTSP rig or
-//! the video pipeline's tap is recorded as having no controls. A reopened
-//! source replaces its camera's route.
+//! Each source the engine opens registers here under its camera id. Only a
+//! camera configured `capture: true` may be controlled: a V4L2 one gets a
+//! queue its capture thread drains between buffers, applying each request on
+//! the device handle it streams from; a simulated RTSP rig has no controls.
+//! Every other camera (the video pipeline's tap, an entry without
+//! `capture: true`) is refused as not a capture camera. A reopened source
+//! replaces its camera's route.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use ados_protocol::camera_control::{reason, CameraControlRequest, CameraControlResult};
+use ados_protocol::camera_control::{
+    reason, CameraControlRequest, CameraControlResult, ENGINE_WAIT_MS,
+};
 use anyhow::{anyhow, Result};
 use rmpv::Value;
 use tokio::sync::{mpsc, oneshot};
@@ -20,13 +24,15 @@ use crate::source::{ControlCall, ControlQueue};
 
 /// Requests one camera may have waiting for its capture thread.
 const QUEUE_DEPTH: usize = 4;
-/// How long a request waits for the capture thread. The thread applies
-/// requests between buffers and a dequeue blocks for at most two seconds.
-pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a request waits for the capture thread
+/// ([`ENGINE_WAIT_MS`]). A request not applied by then is dropped by the
+/// thread, never applied after its answer.
+pub const CONTROL_TIMEOUT: Duration = Duration::from_millis(ENGINE_WAIT_MS);
 
 enum Route {
     Capture(mpsc::Sender<ControlCall>),
     NotV4l2,
+    NotCapture,
 }
 
 /// The control route of every camera the engine runs. Cheap to clone; every
@@ -44,17 +50,24 @@ impl CameraControls {
             .insert(camera_id.to_string(), route);
     }
 
-    /// Route `camera_id` to a V4L2 capture; its capture thread drains the
-    /// returned queue.
+    /// Route the capture camera `camera_id` to a V4L2 capture; its capture
+    /// thread drains the returned queue.
     pub fn register_capture(&self, camera_id: &str) -> ControlQueue {
         let (tx, rx) = mpsc::channel(QUEUE_DEPTH);
         self.insert(camera_id, Route::Capture(tx));
         rx
     }
 
-    /// Record `camera_id` as a source without device controls.
-    pub fn register_other(&self, camera_id: &str) {
+    /// Record the capture camera `camera_id` as a source without device
+    /// controls (a simulated RTSP rig).
+    pub fn register_not_v4l2(&self, camera_id: &str) {
         self.insert(camera_id, Route::NotV4l2);
+    }
+
+    /// Record `camera_id` as a camera plugins may not control: not configured
+    /// `capture: true`.
+    pub fn register_not_capture(&self, camera_id: &str) {
+        self.insert(camera_id, Route::NotCapture);
     }
 
     /// Apply `req` on its camera and return the read-back.
@@ -64,6 +77,9 @@ impl CameraControls {
             match routes.get(&req.camera_id) {
                 None => return CameraControlResult::refused(reason::UNKNOWN_CAMERA),
                 Some(Route::NotV4l2) => return CameraControlResult::refused(reason::NOT_V4L2),
+                Some(Route::NotCapture) => {
+                    return CameraControlResult::refused(reason::NOT_CAPTURE_CAMERA)
+                }
                 Some(Route::Capture(tx)) => tx.clone(),
             }
         };
@@ -101,7 +117,7 @@ mod tests {
     use std::io;
 
     use super::*;
-    use crate::source::controls::{apply, ControlDevice, ControlInfo};
+    use crate::source::controls::{apply, drain, ControlDevice, ControlInfo};
 
     /// `V4L2_CID_EXPOSURE_ABSOLUTE` and `V4L2_CID_EXPOSURE_AUTO`.
     const EXPOSURE_ABSOLUTE: u32 = 0x009a_0902;
@@ -117,6 +133,7 @@ mod tests {
                 minimum: 0,
                 maximum: 10_000,
                 step: 1,
+                default: 1,
             })
         }
         fn set(&mut self, id: u32, value: i32) -> io::Result<()> {
@@ -161,7 +178,7 @@ mod tests {
     #[tokio::test]
     async fn sources_without_a_device_and_unknown_cameras_are_refused() {
         let controls = CameraControls::default();
-        controls.register_other("cam_fl");
+        controls.register_not_v4l2("cam_fl");
         assert_eq!(
             controls.set(&req("cam_fl")).await,
             CameraControlResult::refused(reason::NOT_V4L2)
@@ -170,6 +187,31 @@ mod tests {
             controls.set(&req("nope")).await,
             CameraControlResult::refused(reason::UNKNOWN_CAMERA)
         );
+    }
+
+    #[tokio::test]
+    async fn a_camera_not_configured_for_capture_is_refused() {
+        let controls = CameraControls::default();
+        controls.register_not_capture("main");
+        assert_eq!(
+            controls.set(&req("main")).await,
+            CameraControlResult::refused(reason::NOT_CAPTURE_CAMERA)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_the_engine_gave_up_on_is_never_applied() {
+        let controls = CameraControls::default();
+        let mut queue = controls.register_capture("cam");
+        let started = std::time::Instant::now();
+        let r = controls.set(&req("cam")).await;
+        assert_eq!(r.reason.as_deref(), Some(reason::NOT_STREAMING));
+        assert!(started.elapsed() >= CONTROL_TIMEOUT);
+        assert!(started.elapsed() < CONTROL_TIMEOUT + Duration::from_secs(1));
+        // The capture thread catches up after the answer: nothing is set.
+        let mut device = Device(HashMap::from([(EXPOSURE_ABSOLUTE, 10)]));
+        assert!(!drain(&mut queue, &mut device));
+        assert_eq!(device.0[&EXPOSURE_ABSOLUTE], 10);
     }
 
     #[tokio::test]
@@ -207,7 +249,7 @@ mod tests {
     async fn a_reopened_source_replaces_the_route() {
         let controls = CameraControls::default();
         drop(controls.register_capture("cam"));
-        controls.register_other("cam");
+        controls.register_not_v4l2("cam");
         assert_eq!(
             controls.set(&req("cam")).await.reason.as_deref(),
             Some(reason::NOT_V4L2)
@@ -217,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn the_rpc_handler_decodes_and_answers_the_wire_shape() {
         let engine = VisionEngine::new(Box::new(crate::backend::MockBackend), 4);
-        engine.camera_controls().register_other("cam_fl");
+        engine.camera_controls().register_not_v4l2("cam_fl");
         let reply = handle(&engine, &req("cam_fl").to_args()).await.unwrap();
         assert_eq!(
             CameraControlResult::from_value(&reply).unwrap(),

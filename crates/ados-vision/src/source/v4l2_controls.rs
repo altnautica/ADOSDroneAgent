@@ -5,6 +5,12 @@
 //! so the device is never opened a second time. [`apply`] sets the requested
 //! controls and reads every touched one back; it is written against
 //! [`ControlDevice`] so the decision logic runs without a kernel.
+//!
+//! Gain travels as a multiplier. V4L2 gain controls carry no unit, so the
+//! multiplier maps linearly onto the control's codes with the driver's default
+//! code as 1× (sensor drivers default to unity analogue gain). A control whose
+//! default is not a positive code inside its range has no known unit gain and
+//! is refused, not guessed at.
 
 use std::io;
 
@@ -30,12 +36,13 @@ pub struct ControlCall {
     pub reply: oneshot::Sender<CameraControlResult>,
 }
 
-/// The range of an integer control.
+/// The range and default of an integer control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControlInfo {
     pub minimum: i32,
     pub maximum: i32,
     pub step: i32,
+    pub default: i32,
 }
 
 /// A camera's control surface.
@@ -48,12 +55,16 @@ pub trait ControlDevice {
 }
 
 /// Apply every queued call on `dev`. True when at least one was applied, so
-/// the caller re-reads the exposure it stamps frames with.
+/// the caller re-reads the exposure it stamps frames with. A call whose
+/// requester stopped waiting is dropped unapplied: it was already answered
+/// as not applied.
 pub fn drain(rx: &mut mpsc::Receiver<ControlCall>, dev: &mut impl ControlDevice) -> bool {
     let mut any = false;
     while let Ok(call) = rx.try_recv() {
+        if call.reply.is_closed() {
+            continue;
+        }
         let result = apply(dev, &call.request);
-        // The requester may have timed out; the controls are set regardless.
         let _ = call.reply.send(result);
         any = true;
     }
@@ -79,17 +90,34 @@ impl Present {
     }
 }
 
-/// The exposure in µs and the gain the device reports now.
+/// The driver code of unity gain: the control's default, when it is a
+/// positive code inside the range.
+fn unity_gain(info: ControlInfo) -> Option<i32> {
+    (info.default > 0 && in_range(info.default, info)).then_some(info.default)
+}
+
+/// The driver code for gain multiplier `gain`, snapped to the control's step
+/// grid; `None` when it falls outside the range.
+fn gain_code(gain: f32, info: ControlInfo, unity: i32) -> Option<i32> {
+    let (min, max) = (f64::from(info.minimum), f64::from(info.maximum));
+    let step = f64::from(info.step.max(1));
+    let raw = f64::from(gain) * f64::from(unity);
+    let code = min + ((raw - min) / step).round() * step;
+    // In range, so the cast is exact.
+    (min..=max).contains(&code).then_some(code as i32)
+}
+
+/// The exposure in µs and the gain multiplier the device reports now.
 fn read_back(dev: &mut impl ControlDevice, present: &Present) -> (Option<u32>, Option<f32>) {
     let exposure = present
         .exposure
         .and_then(|_| dev.get(CID_EXPOSURE_ABSOLUTE).ok())
         .and_then(|v| u32::try_from(v).ok())
         .and_then(|v| v.checked_mul(EXPOSURE_UNIT_US));
-    let gain = present
-        .gain
-        .and_then(|(id, _)| dev.get(id).ok())
-        .map(|v| v as f32);
+    let gain = present.gain.and_then(|(id, info)| {
+        let unity = unity_gain(info)?;
+        dev.get(id).ok().map(|v| v as f32 / unity as f32)
+    });
     (exposure, gain)
 }
 
@@ -144,15 +172,20 @@ pub fn apply(dev: &mut impl ControlDevice, req: &CameraControlRequest) -> Camera
     let gain = match (req.gain, present.gain) {
         (None, _) => None,
         (Some(_), None) => return outcome(dev, &present, false, Some(reason::CONTROL_UNSUPPORTED)),
-        // `as` saturates; the range check below refuses a saturated value.
-        (Some(g), Some((id, info))) => Some((id, g.round() as i32, info)),
+        (Some(g), Some((id, info))) => {
+            let Some(unity) = unity_gain(info) else {
+                return outcome(dev, &present, false, Some(reason::GAIN_UNIT_UNKNOWN));
+            };
+            let Some(code) = gain_code(g, info, unity) else {
+                return outcome(dev, &present, false, Some(reason::OUT_OF_RANGE));
+            };
+            Some((id, code, info))
+        }
     };
     if req.auto_exposure.is_some() && present.auto.is_none() {
         return outcome(dev, &present, false, Some(reason::CONTROL_UNSUPPORTED));
     }
-    let ranged = exposure.is_none_or(|(v, info)| in_range(v, info))
-        && gain.is_none_or(|(_, v, info)| in_range(v, info));
-    if !ranged {
+    if !exposure.is_none_or(|(v, info)| in_range(v, info)) {
         return outcome(dev, &present, false, Some(reason::OUT_OF_RANGE));
     }
 

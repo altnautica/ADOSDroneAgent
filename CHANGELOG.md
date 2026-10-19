@@ -91,15 +91,20 @@ the project follows [Semantic Versioning](https://semver.org/).
   status and JSON body. SDK: `ctx.video.whep_offer` / `whep_close` and
   `ctx.sensors.put_rig`.
 - **Plugin capability `camera.control.write`.** Gated at dispatch.
-  `camera.control.set` sets exposure, gain or auto exposure on a camera the
-  vision engine captures: the host relays it over `vision.sock`, and the
+  `camera.control.set` sets exposure, gain or auto exposure on a camera
+  configured `capture: true`: the host relays it over `vision.sock`, and the
   engine applies it on the capture thread's own device handle (the device is
   never opened a second time), reads every touched control back and answers
   `{applied, exposure_us, gain, reason}`. `applied` is true only when each
   requested control reads back as asked (exposure and gain within one driver
-  step); the returned values are the read-back ones. RTSP rig cameras and the
-  video tap answer `not_v4l2`, a driver without the control
-  `control_unsupported`. SDK: `ctx.camera.set_controls`.
+  step); the returned values are the read-back ones. `gain` is a multiplier,
+  mapped linearly onto the driver's codes with its default code as 1×; a gain
+  control without a usable default answers `gain_unit_unknown`. The engine
+  waits `ENGINE_WAIT_MS` (1.5 s) for the capture thread and drops a request it
+  stopped waiting for, so a late request is never applied after its answer.
+  Cameras not configured for capture (the video tap among them) answer
+  `not_capture_camera`, RTSP rig cameras `not_v4l2`, a driver without the
+  control `control_unsupported`. SDK: `ctx.camera.set_controls`.
 - **SDK: `ctx.tools.serve(handler)`.** The Rust plugin SDK answers host
   `tool.invoke` requests (MCP tools declared by a plugin) through a
   registered handler; a plugin without one answers `tool_handler_missing`.

@@ -15,23 +15,30 @@ struct FakeDevice {
     refuse_modes: HashSet<i32>,
 }
 
+/// A control range whose default is its minimum.
 fn info(minimum: i32, maximum: i32, step: i32) -> ControlInfo {
+    gain_info(minimum, maximum, step, minimum)
+}
+
+fn gain_info(minimum: i32, maximum: i32, step: i32, default: i32) -> ControlInfo {
     ControlInfo {
         minimum,
         maximum,
         step,
+        default,
     }
 }
 
 impl FakeDevice {
     /// Exposure (100 µs units, 1..=5000), auto mode (aperture priority) and
-    /// analogue gain (0..=255).
+    /// analogue gain (codes 0..=255, unity at the default code 16).
     fn camera() -> Self {
         let mut d = Self::default();
         d.controls
             .insert(CID_EXPOSURE_ABSOLUTE, (info(1, 5000, 1), 50));
         d.controls.insert(CID_EXPOSURE_AUTO, (info(0, 3, 1), 3));
-        d.controls.insert(CID_ANALOGUE_GAIN, (info(0, 255, 1), 16));
+        d.controls
+            .insert(CID_ANALOGUE_GAIN, (gain_info(0, 255, 1, 16), 16));
         d
     }
 
@@ -94,6 +101,8 @@ fn manual_exposure_and_gain_are_set_and_read_back() {
     // A manual exposure time switches the camera to manual mode first.
     assert_eq!(dev.value(CID_EXPOSURE_AUTO), MANUAL);
     assert_eq!(dev.value(CID_EXPOSURE_ABSOLUTE), 20);
+    // 8× of the unity code 16.
+    assert_eq!(dev.value(CID_ANALOGUE_GAIN), 128);
 }
 
 #[test]
@@ -106,7 +115,7 @@ fn a_read_back_within_one_driver_step_is_applied_with_the_driver_value() {
     let r = apply(&mut dev, &request(Some(2_300), None, None));
     assert!(r.applied, "{r:?}");
     assert_eq!(r.exposure_us, Some(2_100));
-    assert_eq!(r.gain, Some(16.0));
+    assert_eq!(r.gain, Some(1.0));
 }
 
 #[test]
@@ -155,11 +164,50 @@ fn a_missing_or_refused_control_is_not_applied() {
 fn gain_falls_back_to_the_older_control() {
     let mut dev = FakeDevice::camera();
     dev.controls.remove(&CID_ANALOGUE_GAIN);
-    dev.controls.insert(CID_GAIN, (info(0, 100, 1), 0));
+    dev.controls
+        .insert(CID_GAIN, (gain_info(0, 100, 1, 10), 10));
     let r = apply(&mut dev, &request(None, Some(3.4), None));
     assert!(r.applied, "{r:?}");
-    assert_eq!(r.gain, Some(3.0));
-    assert_eq!(dev.value(CID_GAIN), 3);
+    assert_eq!(r.gain, Some(3.4));
+    assert_eq!(dev.value(CID_GAIN), 34);
+}
+
+#[test]
+fn gain_snaps_to_the_driver_step_and_reads_back_as_a_multiplier() {
+    let mut dev = FakeDevice::camera();
+    // Codes 16..=256 in steps of 8, unity at 16: 1.3× is code 20.8, which
+    // snaps to 24, read back as 1.5×.
+    dev.controls
+        .insert(CID_ANALOGUE_GAIN, (gain_info(16, 256, 8, 16), 16));
+    let r = apply(&mut dev, &request(None, Some(1.3), None));
+    assert!(r.applied, "{r:?}");
+    assert_eq!(r.gain, Some(1.5));
+    assert_eq!(dev.value(CID_ANALOGUE_GAIN), 24);
+    // 16× is code 256, the top of the range; 17× is past it.
+    assert!(apply(&mut dev, &request(None, Some(16.0), None)).applied);
+    let r = apply(&mut dev, &request(None, Some(17.0), None));
+    assert_eq!(r.reason.as_deref(), Some(reason::OUT_OF_RANGE));
+}
+
+#[test]
+fn a_gain_control_without_a_unit_gain_is_refused_not_guessed() {
+    for default in [0, -4, 300] {
+        let mut dev = FakeDevice::camera();
+        dev.controls
+            .insert(CID_ANALOGUE_GAIN, (gain_info(0, 255, 1, default), 40));
+        let r = apply(&mut dev, &request(Some(2_000), Some(2.0), None));
+        assert!(!r.applied);
+        assert_eq!(r.reason.as_deref(), Some(reason::GAIN_UNIT_UNKNOWN));
+        // Nothing written, and no raw code reported as a multiplier.
+        assert_eq!(r.gain, None);
+        assert_eq!(dev.value(CID_ANALOGUE_GAIN), 40);
+        assert_eq!(dev.value(CID_EXPOSURE_ABSOLUTE), 50);
+
+        // An exposure-only request does not touch the gain and applies.
+        let r = apply(&mut dev, &request(Some(2_000), None, None));
+        assert!(r.applied, "{r:?}");
+        assert_eq!((r.exposure_us, r.gain), (Some(2_000), None));
+    }
 }
 
 #[test]
@@ -208,7 +256,7 @@ fn an_empty_request_reports_the_current_values() {
         CameraControlResult {
             applied: false,
             exposure_us: Some(5_000),
-            gain: Some(16.0),
+            gain: Some(1.0),
             reason: Some(reason::EMPTY_REQUEST.into()),
         }
     );
@@ -235,4 +283,20 @@ fn drain_answers_every_queued_call() {
         .collect();
     assert_eq!(got, [Some(1_000), Some(3_000)]);
     assert!(!drain(&mut rx, &mut dev));
+}
+
+#[test]
+fn a_call_its_requester_gave_up_on_is_not_applied() {
+    let (tx, mut rx) = mpsc::channel(4);
+    let (reply, answer) = oneshot::channel();
+    tx.try_send(ControlCall {
+        request: request(Some(1_000), None, None),
+        reply,
+    })
+    .unwrap();
+    drop(answer);
+    let mut dev = FakeDevice::camera();
+    assert!(!drain(&mut rx, &mut dev));
+    assert_eq!(dev.value(CID_EXPOSURE_ABSOLUTE), 50);
+    assert_eq!(dev.value(CID_EXPOSURE_AUTO), 3);
 }

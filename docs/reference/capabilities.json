@@ -11,7 +11,7 @@
     },
     {
       "category": "hardware",
-      "description": "Lets the plugin set the exposure time, gain and auto-exposure mode of a camera the vision engine captures, and read back the values the camera actually took. Only local V4L2 cameras the engine already streams from are adjustable; simulated and network cameras answer that nothing was applied.",
+      "description": "Lets the plugin set the exposure time, gain and auto-exposure mode of a capture camera (one configured for capture, which the vision engine streams from), and read back the values the camera actually took. Other cameras, including the video pipeline's own, are refused; simulated and network cameras answer that nothing was applied.",
       "enforced": true,
       "id": "camera.control.write",
       "label": "Set camera exposure and gain",

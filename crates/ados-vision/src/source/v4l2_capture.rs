@@ -167,6 +167,7 @@ impl ControlDevice for FdControls {
             minimum: q.minimum,
             maximum: q.maximum,
             step: q.step,
+            default: q.default_value,
         })
     }
 

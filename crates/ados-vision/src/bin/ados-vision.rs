@@ -194,11 +194,15 @@ async fn main() {
 
     // Triggered cameras join their frames to the sensor bus trigger records;
     // on a simulated node each frame's simulator time is a clock pair. Each
-    // opened source registers its control route on the engine's table.
+    // opened source registers its control route on the engine's table; the
+    // entries the engine does not own are refused as non-capture cameras.
     let mut factory = SourceFactory {
         controls: engine.camera_controls().clone(),
         ..SourceFactory::default()
     };
+    for id in &config.other_camera_ids {
+        factory.controls.register_not_capture(id);
+    }
     let trigger_task = needs_triggers(&cameras).then(|| {
         factory
             .triggers

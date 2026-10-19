@@ -10,6 +10,15 @@
 //! control was set and its read-back matches (exposure and gain within one
 //! driver step); otherwise `reason` carries one of the [`reason`] codes.
 //!
+//! Only cameras configured `capture: true` in `cameras[]` may be controlled;
+//! any other camera is refused with [`reason::NOT_CAPTURE_CAMERA`].
+//!
+//! `gain` is a multiplier (`1.0` is unity gain), on the request and on the
+//! read-back alike. The engine maps it to the driver's gain code linearly,
+//! taking the control's default code as 1×; a control whose default does not
+//! name a unit gain is refused with [`reason::GAIN_UNIT_UNKNOWN`] rather than
+//! guessed at.
+//!
 //! The types are the wire shape on both hops: the SDK encodes the request,
 //! the host and the engine decode it, and the reply travels back unchanged.
 
@@ -20,16 +29,26 @@ use serde::{Deserialize, Serialize};
 pub const CAMERA_CONTROL_METHOD: &str = "camera.control.set";
 /// The capability the method is gated on.
 pub const CAMERA_CONTROL_CAPABILITY: &str = "camera.control.write";
+/// How long the engine waits, per request, for the camera's capture thread to
+/// apply it. A request not applied by then is answered
+/// [`reason::NOT_STREAMING`] and dropped, never applied later.
+pub const ENGINE_WAIT_MS: u64 = 1_500;
 
 /// Why a request was not applied.
 pub mod reason {
-    /// The camera is not a local V4L2 device (a simulated RTSP rig, the video
-    /// pipeline's frame tap): it has no controls this node can set.
+    /// The capture camera is not a local V4L2 device (a simulated RTSP rig):
+    /// it has no controls this node can set.
     pub const NOT_V4L2: &str = "not_v4l2";
     /// The driver lacks a requested control, or reports it read-only.
     pub const CONTROL_UNSUPPORTED: &str = "control_unsupported";
     /// No camera with that id runs on this node.
     pub const UNKNOWN_CAMERA: &str = "unknown_camera";
+    /// The camera is not configured `capture: true`, so a plugin may not
+    /// change its controls (the video pipeline's own camera, for one).
+    pub const NOT_CAPTURE_CAMERA: &str = "not_capture_camera";
+    /// The driver's gain control has no known unit gain, so a multiplier
+    /// cannot be mapped to it.
+    pub const GAIN_UNIT_UNKNOWN: &str = "gain_unit_unknown";
     /// The camera's capture is not running, so there is no open device to
     /// set the controls on.
     pub const NOT_STREAMING: &str = "not_streaming";
@@ -50,7 +69,8 @@ pub mod reason {
 }
 
 /// `camera.control.set` arguments. An absent field leaves that control as it
-/// is. `exposure_us` implies manual exposure.
+/// is. `exposure_us` implies manual exposure; `gain` is a multiplier (1.0 is
+/// unity gain).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct CameraControlRequest {
     pub camera_id: String,
@@ -62,9 +82,9 @@ pub struct CameraControlRequest {
     pub auto_exposure: Option<bool>,
 }
 
-/// `camera.control.set` reply. `exposure_us` and `gain` are the values the
-/// driver reads back (`None` when the camera has no such control or was not
-/// reached), not the requested ones.
+/// `camera.control.set` reply. `exposure_us` and `gain` (a multiplier) are the
+/// values the driver reads back (`None` when the camera has no such control,
+/// its gain unit is unknown, or it was not reached), not the requested ones.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct CameraControlResult {
     pub applied: bool,

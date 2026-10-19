@@ -11,7 +11,8 @@ use ados_config::cameras::CaptureCamera;
 use crate::camera_control::CameraControls;
 use crate::config::VisionConfig;
 use crate::source::{
-    AnySource, RtspSettings, RtspSource, SimClock, TapSource, V4l2Settings, V4l2Source,
+    AnySource, ControlQueue, RtspSettings, RtspSource, SimClock, TapSource, V4l2Settings,
+    V4l2Source,
 };
 use crate::trigger::{trigger_stream, CameraTriggers, TriggerFeed, TriggerJoiner};
 
@@ -91,16 +92,22 @@ impl SourceFactory {
         Some(CameraTriggers::new(self.triggers.clone(), stream, joiner))
     }
 
-    /// A fresh source for `spec`. A V4L2 camera's control requests are routed
-    /// to the new source's capture thread; any other source has no controls.
+    /// A fresh source for `spec`. Only a camera configured `capture: true` may
+    /// be controlled: a V4L2 one's requests are routed to the new source's
+    /// capture thread, a simulated rig has no controls, and the tap (the
+    /// video pipeline's camera) or any non-capture entry is refused.
     pub fn open(&self, spec: &CameraSpec) -> AnySource {
         match spec {
             CameraSpec::Tap { id, socket } => {
-                self.controls.register_other(id);
+                self.controls.register_not_capture(id);
                 AnySource::Tap(TapSource::new(id.clone(), socket.clone()))
             }
             CameraSpec::Owned(cam) if is_rtsp(&cam.source) => {
-                self.controls.register_other(&cam.id);
+                if cam.capture {
+                    self.controls.register_not_v4l2(&cam.id);
+                } else {
+                    self.controls.register_not_capture(&cam.id);
+                }
                 AnySource::Rtsp(Box::new(RtspSource::new(
                     cam.id.clone(),
                     RtspSettings {
@@ -125,8 +132,18 @@ impl SourceFactory {
                     gain: cam.gain,
                 },
                 self.triggers_for(cam, false),
-                Some(self.controls.register_capture(&cam.id)),
+                self.control_queue(cam),
             ))),
+        }
+    }
+
+    /// The control queue of a V4L2 camera, when it is a capture camera.
+    fn control_queue(&self, cam: &CaptureCamera) -> Option<ControlQueue> {
+        if cam.capture {
+            Some(self.controls.register_capture(&cam.id))
+        } else {
+            self.controls.register_not_capture(&cam.id);
+            None
         }
     }
 }
@@ -201,10 +218,26 @@ mod tests {
             let controls = factory.controls.clone();
             async move { controls.set(&req).await.reason }
         };
-        // The simulated rig camera and the tap have no device controls.
+        // The simulated rig camera has no device controls; the tap is the
+        // video pipeline's camera, not a capture camera.
         assert_eq!(why("cam_fl").await.as_deref(), Some(reason::NOT_V4L2));
-        assert_eq!(why("main").await.as_deref(), Some(reason::NOT_V4L2));
+        assert_eq!(
+            why("main").await.as_deref(),
+            Some(reason::NOT_CAPTURE_CAMERA)
+        );
         assert_eq!(why("other").await.as_deref(), Some(reason::UNKNOWN_CAMERA));
+        // An owned entry without `capture: true` is refused too.
+        let CameraSpec::Owned(mut free) = camera_specs(&config(RIG)).remove(2) else {
+            panic!()
+        };
+        free.capture = false;
+        let _uncaptured = factory.open(&CameraSpec::Owned(free));
+        assert_eq!(
+            why("free").await.as_deref(),
+            Some(reason::NOT_CAPTURE_CAMERA)
+        );
+        // The config keeps the ids of the entries the engine does not own.
+        assert_eq!(config(RIG).other_camera_ids, ["main"]);
         // A V4L2 source routes to its capture thread; once the source is gone
         // there is no open device to apply on.
         drop(sources);

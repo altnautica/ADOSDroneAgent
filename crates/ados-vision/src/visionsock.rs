@@ -698,7 +698,7 @@ mod tests {
     async fn camera_control_dispatch_answers_the_read_back() {
         use ados_protocol::camera_control::{reason, CameraControlRequest, CameraControlResult};
         let e = engine();
-        e.camera_controls().register_other("cam_fl");
+        e.camera_controls().register_not_v4l2("cam_fl");
         let req = CameraControlRequest {
             camera_id: "cam_fl".into(),
             exposure_us: Some(1_000),

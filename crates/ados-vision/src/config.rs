@@ -177,6 +177,10 @@ pub struct VisionConfig {
     /// the top-level `cameras[]` list, trigger channels resolved.
     #[serde(skip)]
     pub cameras: Vec<CaptureCamera>,
+    /// Ids of the valid `cameras[]` entries the engine does not own (not
+    /// `capture: true`, or disabled): plugins may not change their controls.
+    #[serde(skip)]
+    pub other_camera_ids: Vec<String>,
     /// The video pipeline's raw frame tap of the primary stream
     /// (`video.vision.sink`) when `video.vision.enabled`; the engine reads it
     /// as camera `main`.
@@ -249,6 +253,7 @@ impl Default for VisionConfig {
             profile: None,
             socket_dir: default_socket_dir(),
             cameras: Vec::new(),
+            other_camera_ids: Vec::new(),
             tap_sink: None,
             simulation: false,
             invalid_cameras: Vec::new(),
@@ -337,12 +342,12 @@ impl VisionConfig {
         };
         let raw: RawConfig = ados_config::yaml_or_default(&text, "vision");
         let entries = camera_entries(&text);
-        let cameras: Vec<CaptureCamera> = entries
+        let (cameras, others): (Vec<CaptureCamera>, Vec<CaptureCamera>) = entries
             .valid
             .into_iter()
             .map(|(_, _, c)| c)
-            .filter(|c| c.capture && c.enabled)
-            .collect();
+            .partition(|c| c.capture && c.enabled);
+        let other_camera_ids: Vec<String> = others.into_iter().map(|c| c.id).collect();
         let invalid_cameras = entries.invalid;
         let simulation = ados_config::simulation::read_gate_from(&text).enabled;
         let tap_sink = raw.video.vision.enabled.then(|| {
@@ -358,6 +363,7 @@ impl VisionConfig {
             return VisionConfig {
                 profile: raw.agent.profile,
                 cameras,
+                other_camera_ids,
                 tap_sink,
                 simulation,
                 invalid_cameras,
@@ -370,6 +376,7 @@ impl VisionConfig {
             profile: v.profile.or(raw.agent.profile),
             socket_dir: v.socket_dir,
             cameras,
+            other_camera_ids,
             tap_sink,
             simulation,
             invalid_cameras,
