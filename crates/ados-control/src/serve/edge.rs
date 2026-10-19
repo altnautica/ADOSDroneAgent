@@ -319,9 +319,8 @@ pub(super) async fn tcp_edge(
             .get("X-ADOS-Key")
             .and_then(|v| v.to_str().ok())
             .is_some_and(|k| edge.pairing.authorize(&path, Some(k)));
-    let exempt_from_budget = on_box
-        || (auth::is_public(&path) && !auth::is_pin_login(&path))
-        || tile_read_authed;
+    let exempt_from_budget =
+        on_box || (auth::is_public(&path) && !auth::is_pin_login(&path)) || tile_read_authed;
     if !exempt_from_budget && !edge.rate.check(peer_key) {
         return detail(
             StatusCode::TOO_MANY_REQUESTS,

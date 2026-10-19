@@ -278,16 +278,20 @@ fn a_ground_station_without_a_usable_gnss_source_is_skipped() {
     use ados_hal_probe::bindings::{GnssBinding, GnssTransport};
     assert_eq!(gate::pps_gpio_for("ground_station", None), None);
     let mut gnss: GnssBinding = board_gnss("rock-5c-lite").expect("gnss binding");
-    for transport in [GnssTransport::Fc, GnssTransport::Udp] {
+    for transport in [GnssTransport::Fc, GnssTransport::Udp, GnssTransport::Hub] {
         gnss.transport = transport;
         assert_eq!(
             gate::pps_gpio_for("ground_station", Some(&gnss)),
             None,
             "{transport:?}"
         );
+        assert_eq!(
+            gate::pps_gpio_for("visor", Some(&gnss)),
+            None,
+            "{transport:?}"
+        );
     }
-    gnss.transport = GnssTransport::Hub;
-    assert_eq!(gate::pps_gpio_for("visor", Some(&gnss)), Some(37));
+    gnss.transport = GnssTransport::Serial;
     gnss.pps_gpio = None;
     assert_eq!(gate::pps_gpio_for("visor", Some(&gnss)), None);
 }

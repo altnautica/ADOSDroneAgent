@@ -2,10 +2,11 @@
 //!
 //! The overlay claims a header line and asks for a reboot, so it is applied
 //! only where the GNSS service runs (`ground_station`, `visor`) and the board's
-//! GNSS binding is a receiver whose PPS output reaches that line: a receiver on
-//! a host UART (`serial`) or behind the sensor hub (`hub`). A drone (its GNSS
-//! belongs to the flight controller), a node without a GNSS binding, and an
-//! `fc`/`udp` source (no wire to the host line) are skipped.
+//! GNSS binding is a receiver on a host UART (`serial`) whose PPS output reaches
+//! that line. A drone (its GNSS belongs to the flight controller), a node
+//! without a GNSS binding, a `hub` source (the sensor hub captures the pulse on
+//! its own timer) and an `fc`/`udp` source (no wire to the host line) are
+//! skipped.
 
 use ados_hal_probe::bindings::{GnssBinding, GnssTransport};
 
@@ -22,7 +23,7 @@ pub fn pps_gpio_for(profile: &str, gnss: Option<&GnssBinding>) -> Option<i64> {
     }
     let gnss = gnss?;
     match gnss.transport {
-        GnssTransport::Serial | GnssTransport::Hub => gnss.pps_gpio,
-        GnssTransport::Fc | GnssTransport::Udp => None,
+        GnssTransport::Serial => gnss.pps_gpio,
+        GnssTransport::Hub | GnssTransport::Fc | GnssTransport::Udp => None,
     }
 }
