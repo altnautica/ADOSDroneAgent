@@ -1,0 +1,38 @@
+[package]
+name = "ados-gnss"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GNSS service: receiver byte sources (serial, UDP, sensor-hub passthrough), UBX/NMEA/RTCM3 stream decode, RTK base survey-in and fixed mode, RTCM3 out to the sensor bus, PPS time pairs, moving-baseline heading, and the gnss.json sidecar."
+
+[lib]
+name = "ados_gnss"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-gnss"
+path = "src/main.rs"
+
+[dependencies]
+ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-config = { path = "../ados-config" }
+ados-sensorbus = { path = "../ados-sensorbus" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+# Serial receivers; same crate and version as the other serial consumers.
+tokio-serial = "5.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# PPS_FETCH ioctl on /dev/ppsN.
+nix = { workspace = true, features = ["ioctl"] }
+sd-notify = { workspace = true }
+tracing-journald = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
