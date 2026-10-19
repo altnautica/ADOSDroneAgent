@@ -1,8 +1,12 @@
 //! Vision engine configuration, read from the `vision:` block of
-//! `/etc/ados/config.yaml`. Every field is `#[serde(default)]` so a partial or
-//! malformed config never blocks startup — a missing `vision:` block yields a
-//! disabled engine, which is the safe default on a rig that does not run vision.
+//! `/etc/ados/config.yaml`, plus the cameras the engine owns (the top-level
+//! `cameras[]` entries marked `capture: true`), the video pipeline's frame tap
+//! (`video.vision`) and the simulation flag. Every field is `#[serde(default)]`
+//! so a partial or malformed config never blocks startup — a missing `vision:`
+//! block yields a disabled engine, which is the safe default on a rig that
+//! does not run vision.
 
+use ados_config::cameras::{capture_cameras_from, CaptureCamera};
 use ados_protocol::framebus::{
     DetectionHead, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
 };
@@ -30,29 +34,6 @@ fn default_shm_budget_mb() -> u32 {
     (crate::ring::DEFAULT_RING_BUDGET_BYTES / (1024 * 1024)) as u32
 }
 
-/// One explicitly-configured camera. When the `cameras` list is empty the
-/// engine falls back to HAL discovery (`python -m ados.hal.camera --json`).
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct CameraEntry {
-    /// Stable camera id the engine labels frames and rings with.
-    pub id: String,
-    /// How the engine gets frames for this camera: "tap" reads the video
-    /// pipeline tap socket; "capture" spawns a direct V4L2/CSI capture.
-    #[serde(default = "default_camera_kind")]
-    pub kind: String,
-    /// For "tap": the unix-socket path the video pipeline writes raw frames to.
-    /// Defaults to `<socket_dir>/vision-tap-<id>.sock` when absent.
-    #[serde(default)]
-    pub tap_socket: Option<String>,
-    /// For "capture": the device path (e.g. `/dev/video0`). Absent ⇒ resolved
-    /// by HAL discovery.
-    #[serde(default)]
-    pub device_path: Option<String>,
-}
-
-fn default_camera_kind() -> String {
-    "tap".to_string()
-}
 
 fn default_detector_dim() -> u32 {
     640
@@ -193,9 +174,19 @@ pub struct VisionConfig {
     /// sidecar socket paths under.
     #[serde(default = "default_socket_dir")]
     pub socket_dir: String,
-    /// Explicit camera list. Empty ⇒ HAL discovery picks the engine cameras.
-    #[serde(default)]
-    pub cameras: Vec<CameraEntry>,
+    /// The cameras this engine owns: the enabled `capture: true` entries of
+    /// the top-level `cameras[]` list, trigger channels resolved.
+    #[serde(skip)]
+    pub cameras: Vec<CaptureCamera>,
+    /// The video pipeline's raw frame tap of the primary stream
+    /// (`video.vision.sink`) when `video.vision.enabled`; the engine reads it
+    /// as camera `main`.
+    #[serde(skip)]
+    pub tap_sink: Option<String>,
+    /// `simulation.enabled`: frames carry simulator time, which the engine
+    /// reports to the clock.
+    #[serde(skip)]
+    pub simulation: bool,
     /// Width frames are downscaled to before publishing.
     #[serde(default = "default_downscale_width")]
     pub downscale_width: u32,
@@ -255,6 +246,8 @@ impl Default for VisionConfig {
             profile: None,
             socket_dir: default_socket_dir(),
             cameras: Vec::new(),
+            tap_sink: None,
+            simulation: false,
             downscale_width: default_downscale_width(),
             downscale_height: default_downscale_height(),
             slot_count: default_slot_count(),
@@ -281,6 +274,20 @@ impl VisionConfig {
             agent: AgentSection,
             #[serde(default)]
             vision: Option<VisionSection>,
+            #[serde(default)]
+            video: VideoSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct VideoSection {
+            #[serde(default)]
+            vision: TapSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct TapSection {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            sink: Option<String>,
         }
         #[derive(Debug, Default, Deserialize)]
         struct AgentSection {
@@ -295,8 +302,6 @@ impl VisionConfig {
             profile: Option<String>,
             #[serde(default = "default_socket_dir")]
             socket_dir: String,
-            #[serde(default)]
-            cameras: Vec<CameraEntry>,
             #[serde(default = "default_downscale_width")]
             downscale_width: u32,
             #[serde(default = "default_downscale_height")]
@@ -327,11 +332,23 @@ impl VisionConfig {
             return VisionConfig::default();
         };
         let raw: RawConfig = ados_config::yaml_or_default(&text, "vision");
+        let cameras = capture_cameras_from(&text);
+        let simulation = ados_config::simulation::read_gate_from(&text).enabled;
+        let tap_sink = raw.video.vision.enabled.then(|| {
+            raw.video
+                .vision
+                .sink
+                .clone()
+                .unwrap_or_else(|| "/run/ados/vision-tap-main.sock".to_string())
+        });
         let Some(v) = raw.vision else {
             // No `vision:` block ⇒ disabled, but still carry the agent profile
             // so the ground-station gate is consistent.
             return VisionConfig {
                 profile: raw.agent.profile,
+                cameras,
+                tap_sink,
+                simulation,
                 ..VisionConfig::default()
             };
         };
@@ -340,7 +357,9 @@ impl VisionConfig {
             // `agent.profile` is canonical; a `vision.profile` override pins it.
             profile: v.profile.or(raw.agent.profile),
             socket_dir: v.socket_dir,
-            cameras: v.cameras,
+            cameras,
+            tap_sink,
+            simulation,
             downscale_width: v.downscale_width,
             downscale_height: v.downscale_height,
             slot_count: v.slot_count,
@@ -424,14 +443,6 @@ impl VisionConfig {
         )
     }
 
-    /// The default tap socket path for a camera id.
-    pub fn tap_socket_for(&self, camera_id: &str) -> String {
-        format!(
-            "{}/vision-tap-{}.sock",
-            self.socket_dir.trim_end_matches('/'),
-            camera_id
-        )
-    }
 
     /// True when the resolved profile is the ground station (the engine exits).
     pub fn is_ground_station(&self) -> bool {
@@ -487,12 +498,19 @@ vision:
   downscale_height: 720
   slot_count: 6
   backend: rknn
-  cameras:
-    - id: uvc-0
-      kind: capture
-      device_path: /dev/video0
-    - id: fpv
-      kind: tap
+simulation:
+  enabled: true
+video:
+  vision:
+    enabled: true
+cameras:
+  - id: main
+    source: /dev/video0
+  - id: cam_fl
+    source: rtsp://192.168.1.50:8554/we_v0_cam_fl
+    format: gray8
+    capture: true
+    trigger: hub
 ";
         let (_d, p) = write_tmp(yaml);
         let c = VisionConfig::load_from(&p);
@@ -502,14 +520,15 @@ vision:
         assert_eq!(c.downscale_width, 1280);
         assert_eq!(c.slot_count, 6);
         assert_eq!(c.backend, "rknn");
-        assert_eq!(c.cameras.len(), 2);
-        assert_eq!(c.cameras[0].id, "uvc-0");
-        assert_eq!(c.cameras[0].kind, "capture");
-        assert_eq!(c.cameras[0].device_path.as_deref(), Some("/dev/video0"));
-        assert_eq!(c.cameras[1].kind, "tap");
+        // Only the captured entry is the engine's; its trigger channel is its
+        // list index.
+        assert_eq!(c.cameras.len(), 1);
+        assert_eq!(c.cameras[0].id, "cam_fl");
+        assert_eq!(c.cameras[0].trigger_channel, Some(1));
+        assert_eq!(c.tap_sink.as_deref(), Some("/run/ados/vision-tap-main.sock"));
+        assert!(c.simulation);
         assert_eq!(c.vision_socket_path(), "/tmp/run/vision.sock");
         assert_eq!(c.rknn_socket_path(), "/tmp/run/vision-rknn.sock");
-        assert_eq!(c.tap_socket_for("fpv"), "/tmp/run/vision-tap-fpv.sock");
         assert_eq!(
             c.detections_socket_path(),
             "/tmp/run/vision-detections.sock"
