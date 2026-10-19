@@ -62,8 +62,18 @@ export interface LoraRegionRow {
   band_mhz: [number, number];
   rules: string[];
   supported_by_module: boolean;
-  meshtastic_preset?: string | null;
+  meshtastic_preset: string | null;
+  /** The ExpressLRS domain this region expects per module band; null = no claim. */
+  elrs_domains: { "2g4": string | null; "900": string | null };
 }
+
+/** One RC module from `GET /api/v1/ground-station/crsf` `modules[]`. */
+export interface CrsfModule {
+  id: string;
+  domain: string | null;
+}
+
+export const CRSF_STATUS_PATH = "/api/v1/ground-station/crsf";
 
 export interface LoraBeacon {
   node_id: number;
@@ -118,17 +128,53 @@ export function dutyFraction(rule: Extract<LoraRule, { kind: "duty_cycle" }>): n
   return Math.min(1, Math.max(0, rule.airtime_ms_window / rule.budget_ms_window));
 }
 
+export type MeterTone = "neutral" | "warn" | "error";
+
+/** Below 70 % of the limit neutral, 70–99 % amber, at the limit red. */
+export function meterTone(fraction: number): MeterTone {
+  if (fraction >= 1) return "error";
+  if (fraction >= 0.7) return "warn";
+  return "neutral";
+}
+
+/** Region codes whose plan carries rows not cleared for airborne use. */
+const AIRBORNE_RESTRICTED: Record<string, true> = { RU: true, GB: true, NO: true };
+
+/** ExpressLRS domain → band; a domain outside the table is unknown (no claim). */
+const ELRS_BAND: Record<string, "2g4" | "900"> = {
+  ISM2G4: "2g4",
+  CE_LBT: "2g4",
+  FCC915: "900",
+  AU915: "900",
+  EU868: "900",
+  IN866: "900",
+  AU433: "900",
+  EU433: "900",
+};
+
 export type LoraChip =
   | { kind: "module_band"; module: string; plan: string }
   | { kind: "meshtastic"; node: string; expected: string }
-  | { kind: "country"; lora: string; country: string };
+  | { kind: "country"; lora: string; country: string }
+  | { kind: "airborne"; code: string }
+  | { kind: "elrs"; module: string; domain: string; code: string; expected: string };
 
 /** Advisory mismatch chips. `country` is the agent's country setting
- *  (`network.regulatory.region`), null when unset. */
-export function loraChips(s: LoraStatus, country: string | null): LoraChip[] {
+ *  (`network.regulatory.region`), null when unset. `row` is the active
+ *  region's row from the regions table and `modules` the RC modules reported
+ *  by the CRSF lane (empty where the node runs none). */
+export function loraChips(
+  s: LoraStatus,
+  country: string | null,
+  row: LoraRegionRow | null = null,
+  modules: readonly CrsfModule[] = [],
+): LoraChip[] {
   const chips: LoraChip[] = [];
   if (s.blocked_reason === "module_band_mismatch" && s.module_band && s.region) {
     chips.push({ kind: "module_band", module: s.module_band, plan: s.region.plan_id });
+  }
+  if (s.region && Object.hasOwn(AIRBORNE_RESTRICTED, s.region.code.toUpperCase())) {
+    chips.push({ kind: "airborne", code: s.region.code });
   }
   const mesh = s.meshtastic;
   const expected = s.region?.meshtastic_preset ?? null;
@@ -137,6 +183,16 @@ export function loraChips(s: LoraStatus, country: string | null): LoraChip[] {
   }
   if (s.region && s.region.source === "lora.region" && country && country !== s.region.code) {
     chips.push({ kind: "country", lora: s.region.code, country });
+  }
+  if (s.region && row) {
+    for (const m of modules) {
+      if (!m.domain) continue;
+      const band = Object.hasOwn(ELRS_BAND, m.domain) ? ELRS_BAND[m.domain] : null;
+      const want = band ? (row.elrs_domains?.[band] ?? null) : null;
+      if (want && want !== m.domain) {
+        chips.push({ kind: "elrs", module: m.id, domain: m.domain, code: s.region.code, expected: want });
+      }
+    }
   }
   return chips;
 }

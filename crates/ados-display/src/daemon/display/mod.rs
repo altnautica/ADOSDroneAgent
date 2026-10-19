@@ -171,9 +171,12 @@ use page_ui::run_page_ui;
 /// roots, the visor tab pages, the detail pages the dashboard / more overflow
 /// drill into, and the power-off prompt. Every profile registers every page;
 /// the panel config only decides which are tabs, and a remote page request may
-/// still reach any of them, so the persisted `route_ids` stay truthful.
+/// still reach any of them, so the persisted `route_ids` stay truthful. The
+/// power prompt names the keys `buttons` binds to its answers.
 #[cfg(any(target_os = "linux", test))]
-pub(crate) fn all_pages() -> Vec<Box<dyn crate::pages::Page>> {
+pub(crate) fn all_pages(
+    buttons: &crate::button_source::ButtonLayout,
+) -> Vec<Box<dyn crate::pages::Page>> {
     use crate::pages::{
         about::AboutDetailPage, access_point::AccessPointDetailPage, cameras::CamerasPage,
         channel_hops::ChannelHopsPage, dashboard::DashboardPage,
@@ -215,7 +218,7 @@ pub(crate) fn all_pages() -> Vec<Box<dyn crate::pages::Page>> {
         Box::new(SensorsPage),
         Box::new(StoragePage),
         // The power-off prompt a `shutdown_prompt` press opens.
-        Box::new(PowerPage),
+        Box::new(PowerPage::new(buttons)),
     ];
     pages
 }

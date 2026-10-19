@@ -120,6 +120,15 @@ fn factory_reset_is_refused_over_the_relay_at_the_edge() {
     assert!(!direct.contains_key(RELAYED_HEADER));
 }
 
+/// Power-off cannot be undone remotely, so the relay never carries it, while
+/// reboot (which comes back on its own) still crosses.
+#[test]
+fn shutdown_is_refused_over_the_relay() {
+    assert!(relay_forbidden("/api/v1/setup/shutdown"));
+    assert!(relay_forbidden("/api/v1/setup/shutdown/"));
+    assert!(!relay_forbidden("/api/v1/setup/reboot"));
+}
+
 /// A denylist entry that matches no served path is the defect this guard
 /// exists for: it reads as protection while the real route is open. Every
 /// literal must resolve against the committed route table, which covers
@@ -184,7 +193,6 @@ fn the_ordinary_operating_surface_still_crosses_the_relay() {
         "/api/plugins/com.example.tool/grant",
         "/api/services/ados-mavlink/restart",
         "/api/v1/setup/reboot",
-        "/api/v1/setup/shutdown",
         "/api/v1/system/restart-supervisor",
     ] {
         assert!(

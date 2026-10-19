@@ -126,6 +126,7 @@
       "label": "LoRa",
       "path": "/lora",
       "profiles": [
+        "drone",
         "ground_station"
       ],
       "roles": null

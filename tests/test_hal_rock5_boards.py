@@ -92,7 +92,8 @@ class TestDetection:
         # The variant renames the part; the sensor bindings are the PCB's.
         assert profile is not None
         assert profile.gnss is not None and profile.gnss.pps_gpio == 37
-        assert profile.battery_gauge is not None
+        assert profile.buttons is not None
+        assert profile.battery_gauge is None
 
 
 class TestRock5BPlusBindings:
@@ -123,13 +124,26 @@ class TestRock5BPlusBindings:
         assert hub is not None
         assert hub.usb_vid_pid.lower() == "1209:ad05"
 
-    def test_battery_gauge_is_an_ina226_on_i2c8(self):
-        gauge = _profile("rock-5b-plus").battery_gauge
-        assert gauge is not None
-        assert gauge.type == "ina226"
-        assert gauge.i2c_bus == 8
-        assert gauge.addr == 0x40
-        assert gauge.shunt_ohm > 0 and gauge.max_current_a > 0
+    def test_no_board_level_battery_gauge(self):
+        """The shunt belongs to the rig, so the board carries no gauge default."""
+        assert _profile("rock-5b-plus").battery_gauge is None
+
+    def test_buttons_are_header_gpio_numbers_clear_of_bound_lines(self):
+        profile = _profile("rock-5b-plus")
+        assert profile.buttons is not None
+        # Header pins 29/31/33/35: GPIO1_D7, GPIO1_B7, GPIO3_A7, GPIO3_B6.
+        assert profile.buttons.pins() == [63, 47, 103, 110]
+        assert [divmod(p, 32) for p in profile.buttons.pins()] == [
+            (1, 31),
+            (1, 15),
+            (3, 7),
+            (3, 14),
+        ]
+        # Debug console, I2C8_M4, GNSS UART7_M1, SPI0_M2 panel lines, PPS.
+        assert set(profile.reserved_lines()) >= {
+            13, 14, 115, 114, 113, 112, 42, 41, 43, 44, 45, 100,
+        }
+        assert not set(profile.buttons.pins()) & set(profile.reserved_lines())
 
     def test_no_header_uart_is_offered_as_a_flight_controller(self):
         """The GNSS UART must never be probed as an FC link."""
@@ -153,10 +167,74 @@ class TestRock5CBindings:
         # GPIO1_A5, header pin 16: bank 1, line 5.
         assert divmod(gnss.pps_gpio or 0, 32) == (1, 5)
 
-    def test_battery_gauge_is_an_ina226_on_i2c8(self):
-        gauge = _profile("rock-5c-lite").battery_gauge
-        assert gauge is not None
-        assert (gauge.type, gauge.i2c_bus, gauge.addr) == ("ina226", 8, 0x40)
+    def test_no_board_level_battery_gauge(self):
+        assert _profile("rock-5c-lite").battery_gauge is None
+
+    def test_buttons_are_header_gpio_numbers_clear_of_bound_lines(self):
+        profile = _profile("rock-5c-lite")
+        assert profile.buttons is not None
+        # Header pins 29/31/33/35: GPIO1_B2, GPIO1_B1, GPIO1_B4, GPIO4_A0.
+        assert profile.buttons.pins() == [42, 41, 44, 128]
+        assert not set(profile.buttons.pins()) & set(profile.reserved_lines())
+
+    def test_every_panel_gpio_is_a_reserved_line(self):
+        """The display bindings name pins as GPIO<bank>_<group><index>; each must
+        be reserved so a button can never take it."""
+        profile = _profile("rock-5c-lite")
+        reserved = set(profile.reserved_lines())
+        for display in profile.displays.supported:
+            pins = list(display.gpio.values())
+            if display.touch is not None:
+                pins.append(display.touch.irq)
+            for gpio in pins:
+                bank, rest = gpio.pin.removeprefix("GPIO").split("_")
+                number = int(bank) * 32 + "ABCD".index(rest[0]) * 8 + int(rest[1:])
+                assert number in reserved, f"{display.id} {gpio.pin} ({number})"
 
     def test_no_sensor_hub_is_declared(self):
         assert _profile("rock-5c-lite").sensor_hub is None
+
+
+class TestButtonValidation:
+    _BASE = {
+        "name": "Test",
+        "reserved_gpio": [{"gpio": 13, "header_pin": 8, "use": "console"}],
+        "gnss": {"transport": "serial", "pps_gpio": 100},
+    }
+
+    def test_clear_buttons_load(self):
+        profile = BoardProfile(
+            **self._BASE, buttons={"up": 63, "down": 47, "select": 103, "back": 110}
+        )
+        assert profile.reserved_lines() == [13, 100]
+
+    @pytest.mark.parametrize(
+        ("buttons", "message"),
+        [
+            ({"up": 13, "down": 47, "select": 103, "back": 110}, "13 is a reserved"),
+            ({"up": 63, "down": 100, "select": 103, "back": 110}, "100 is a reserved"),
+            ({"up": 63, "down": 63, "select": 103, "back": 110}, "63 is declared twice"),
+        ],
+    )
+    def test_a_button_on_a_bound_line_is_rejected(self, buttons, message):
+        with pytest.raises(ValueError, match=message):
+            BoardProfile(**self._BASE, buttons=buttons)
+
+    @pytest.mark.parametrize(
+        "gauge",
+        [
+            {"type": "ina226", "i2c_bus": 8, "addr": 64},
+            {"type": "ina226", "i2c_bus": 8, "addr": 64, "shunt_ohm": 0.001},
+            {"type": "ina226", "i2c_bus": 8, "addr": 64, "max_current_a": 30.0},
+            {
+                "type": "ina226",
+                "i2c_bus": 8,
+                "addr": 64,
+                "shunt_ohm": 0.0,
+                "max_current_a": 30.0,
+            },
+        ],
+    )
+    def test_a_gauge_without_its_shunt_values_is_rejected(self, gauge):
+        with pytest.raises(ValueError):
+            BoardProfile(name="Test", battery_gauge=gauge)

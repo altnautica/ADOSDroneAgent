@@ -7,6 +7,7 @@
 
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
+use crate::pages::reading::Reading;
 use crate::pages::sensing_ctx::{
     fmt_num, fmt_str, paint_absent, paint_frame, paint_status, paint_value, rate_color,
     CaptureCamera, ExposureInfo, SensorInfo, LABEL_X,
@@ -90,14 +91,14 @@ impl Page for CamerasPage {
     fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas {
         let mut canvas = blank_panel(palette);
         paint_frame(&mut canvas, ctx, palette, "CAMERAS");
-        let capture = ctx.sensing.capture.as_ref();
+        let capture = ctx.sensing.capture.present();
         let exp = capture.and_then(|c| c.exposure.as_ref());
         // Camera sensors from the rig; without a sensors read fall back to the
         // capture state's camera list.
         let mut cams: Vec<SensorInfo> = ctx
             .sensing
             .sensors
-            .as_ref()
+            .present()
             .map(|s| {
                 s.sensors
                     .iter()
@@ -121,7 +122,14 @@ impl Page for CamerasPage {
                 .unwrap_or_default();
         }
         if cams.is_empty() {
-            paint_absent(&mut canvas, palette, "Cameras");
+            let failed = matches!(ctx.sensing.sensors, Reading::Unreachable)
+                || matches!(ctx.sensing.capture, Reading::Unreachable);
+            let msg = if failed {
+                "Cameras unreachable"
+            } else {
+                "No cameras fitted"
+            };
+            paint_absent(&mut canvas, palette, msg);
             return canvas;
         }
         for (i, s) in cams.iter().take(MAX_CAMERAS).enumerate() {
@@ -167,7 +175,7 @@ mod tests {
     #[test]
     fn slow_camera_reads_bad() {
         let mut ctx = full_ctx(1000.0);
-        if let Some(c) = ctx.sensing.capture.as_mut() {
+        if let Some(c) = ctx.sensing.capture.present_mut() {
             c.per_camera[0].fps = Some(5.0);
         }
         let c = CamerasPage.render(&ctx, &DARK);

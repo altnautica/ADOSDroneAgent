@@ -1946,10 +1946,10 @@
     },
     {
       "method": "POST",
-      "notes": null,
+      "notes": "relay-forbidden",
       "path": "/api/v1/setup/shutdown",
       "public": false,
-      "relay_forbidden": false,
+      "relay_forbidden": true,
       "served_by": "residual",
       "websocket": false
     },

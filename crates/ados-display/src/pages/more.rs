@@ -55,13 +55,15 @@ impl MorePage {
                 Some("details.diagnostics"),
             ),
         ];
-        if ctx.gnss.is_some() {
+        // A service whose read failed keeps its row, so its detail page can
+        // say it is unreachable rather than vanish.
+        if !ctx.gnss.is_absent() {
             rows.push(("more.gnss", "GNSS", Some("details.gnss")));
         }
-        if ctx.radio_adapters.is_some() {
+        if !ctx.radio_adapters.is_absent() {
             rows.push(("more.radios", "Radios", Some("details.radios")));
         }
-        if ctx.lora.is_some() {
+        if !ctx.lora.is_absent() {
             rows.push(("more.lora", "LoRa", Some("details.lora")));
         }
         rows.push((RESTART_KEY, "Restart agent", None));
@@ -254,7 +256,8 @@ mod tests {
     /// ahead of the restart row, and all rows still fit the panel.
     #[test]
     fn service_rows_follow_presence() {
-        use crate::pages::gs_ctx::{GnssCtx, LoraCtx, RadioAdaptersCtx};
+        use crate::pages::gs_ctx::{GnssCtx, LoraCtx};
+        use crate::pages::reading::Reading;
         let page = MorePage::default();
         let opens = |ctx: &PageContext| -> Vec<HitAction> {
             page.hit_zones(ctx).into_iter().map(|z| z.action).collect()
@@ -263,14 +266,14 @@ mod tests {
         for id in ["details.gnss", "details.radios", "details.lora"] {
             assert!(!opens(&ctx).contains(&HitAction::OpenDetail(id)));
         }
-        ctx.lora = Some(LoraCtx::default());
+        ctx.lora = Reading::Present(LoraCtx::default());
         let got = opens(&ctx);
         assert_eq!(got.len(), 5);
         assert_eq!(got[2], HitAction::OpenDetail("details.lora"));
         assert!(!got.contains(&HitAction::OpenDetail("details.gnss")));
 
-        ctx.gnss = Some(GnssCtx::default());
-        ctx.radio_adapters = Some(RadioAdaptersCtx::default());
+        ctx.gnss = Reading::Present(GnssCtx::default());
+        ctx.radio_adapters = Reading::Unreachable;
         let zones = page.hit_zones(&ctx);
         assert_eq!(zones.len(), 7);
         assert_eq!(zones[2].action, HitAction::OpenDetail("details.gnss"));

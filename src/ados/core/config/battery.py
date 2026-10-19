@@ -1,16 +1,33 @@
-"""Battery health engine thresholds (the ``battery:`` block).
+"""Battery health engine thresholds and the rig's gauge (the ``battery:`` block).
 
-Every field is a bounded integer because the GCS config primitives carry no
+Every threshold is a bounded integer because the GCS config primitives carry no
 float input: voltages are millivolts, the temperature-rise rate is in tenths
 of a degree Celsius per second (``temp_spike_dc_per_s = 50`` means 5.0 °C/s).
 The native battery engine reads the same block and falls back to the default
 field-wise when a stored value is out of bounds; this model rejects such a
 write at the config surface so an operator never stores one.
+
+``gauge`` binds the rig's INA226 current/voltage gauge. The shunt resistor and
+its full-scale current are properties of the rig's power wiring, so the binding
+lives here, per node, and takes precedence over any board-profile gauge. Every
+key is required: a binding without its shunt values reads as no gauge.
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
+
+
+class BatteryGaugeConfig(BaseModel):
+    """The rig's host-I2C battery gauge (``battery.gauge``)."""
+
+    type: Literal["ina226"]
+    i2c_bus: int = Field(ge=0, le=255)
+    addr: int = Field(ge=0x03, le=0x77)
+    shunt_ohm: float = Field(gt=0)
+    max_current_a: float = Field(gt=0)
 
 
 class BatteryConfig(BaseModel):
@@ -29,6 +46,7 @@ class BatteryConfig(BaseModel):
     temp_spike_dc_per_s: int = Field(default=50, ge=5, le=200)
     predictive_window_s: int = Field(default=30, ge=5, le=300)
     reserve_percent: int = Field(default=25, ge=5, le=50)
+    gauge: BatteryGaugeConfig | None = None
 
     @model_validator(mode="after")
     def _critical_below_low(self) -> BatteryConfig:

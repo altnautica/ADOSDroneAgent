@@ -1,7 +1,7 @@
-//! Ground-station service reads for the GNSS, radios and LoRa surfaces: the
-//! `/api/v1/gnss`, `/api/v1/radio/adapters`, `/api/v1/lora` and
-//! `/api/v1/lora/beacons` routes. Each read is independent; a failed read or a
-//! `present: false` body leaves its context `None`.
+//! Service reads for the GNSS, radios and LoRa surfaces: the `/api/v1/gnss`,
+//! `/api/v1/radio/adapters`, `/api/v1/lora` and `/api/v1/lora/beacons`
+//! routes. Each read is independent: a `present: false` body leaves its
+//! context absent, a failed request leaves it unreachable.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,24 +11,30 @@ use super::*;
 use crate::pages::gs_ctx::{
     GnssBaseCtx, GnssCtx, LoraBeacon, LoraCtx, LoraDutyRule, RadioAdaptersCtx,
 };
+use crate::pages::reading::Reading;
 
 /// How many beacons the LoRa surfaces list.
 const BEACONS_SHOWN: usize = 2;
 
 impl StateSource {
-    /// Fetch the GNSS, radio-adapter and LoRa routes into `ctx`.
-    pub(super) fn apply_gs_extras(&self, ctx: &mut PageContext) {
-        ctx.gnss = gnss_ctx(self.get_json("/api/v1/gnss").as_ref());
-        ctx.radio_adapters = radio_adapters_ctx(self.get_json("/api/v1/radio/adapters").as_ref());
-        let lora = self.get_json("/api/v1/lora");
-        // The beacon log is read only when a LoRa service is fitted.
-        ctx.lora = present(lora.as_ref()).and_then(|l| {
-            lora_ctx(
-                Some(l),
-                self.get_json("/api/v1/lora/beacons").as_ref(),
-                now_ms(),
-            )
-        });
+    /// `GET /api/v1/gnss`.
+    pub(super) fn fetch_gnss(&self) -> Reading<GnssCtx> {
+        self.fetch("/api/v1/gnss").and_then(|v| gnss_ctx(Some(&v)))
+    }
+
+    /// `GET /api/v1/radio/adapters`.
+    pub(super) fn fetch_radio_adapters(&self) -> Reading<RadioAdaptersCtx> {
+        self.fetch("/api/v1/radio/adapters")
+            .and_then(|v| radio_adapters_ctx(Some(&v)))
+    }
+
+    /// `GET /api/v1/lora`, plus the beacon log only when a module is fitted.
+    pub(super) fn fetch_lora(&self) -> Reading<LoraCtx> {
+        self.fetch("/api/v1/lora").and_then(|l| {
+            present(Some(&l))?;
+            let beacons = self.fetch("/api/v1/lora/beacons").into_present();
+            lora_ctx(Some(&l), beacons.as_ref(), now_ms())
+        })
     }
 }
 

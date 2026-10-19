@@ -1,5 +1,6 @@
 use super::*;
 use crate::pages::gs_ctx::{GnssBaseCtx, LoraBeacon, LoraDutyRule, RadioAdapterReport};
+use crate::pages::reading::Reading;
 
 fn ids(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
@@ -55,7 +56,7 @@ fn adapter(role: AdapterRole, tx: bool) -> RadioAdapterReport {
 
 fn full_ctx() -> PageContext {
     PageContext {
-        gnss: Some(GnssCtx {
+        gnss: Reading::Present(GnssCtx {
             fix: Some("rtk_fixed".into()),
             sats: Some(24),
             hdop: Some(0.7),
@@ -70,7 +71,7 @@ fn full_ctx() -> PageContext {
             }),
             heading_deg: Some(274.3),
         }),
-        radio_adapters: Some(RadioAdaptersCtx {
+        radio_adapters: Reading::Present(RadioAdaptersCtx {
             adapters: vec![
                 adapter(AdapterRole::Rxtx, true),
                 adapter(AdapterRole::Rx, false),
@@ -78,7 +79,7 @@ fn full_ctx() -> PageContext {
             ],
             ..RadioAdaptersCtx::default()
         }),
-        lora: Some(lora(None, 0)),
+        lora: Reading::Present(lora(None, 0)),
         ..PageContext::default()
     }
 }
@@ -97,8 +98,9 @@ fn rotation_follows_config_order_and_skips_unknown_and_absent() {
         ]
     );
     let mut ctx = full_ctx();
-    ctx.gnss = None;
-    ctx.lora = None;
+    ctx.gnss = Reading::Absent;
+    // A failed read is skipped too, never shown as a blank screen.
+    ctx.lora = Reading::Unreachable;
     assert_eq!(
         rotation(&screens, &ctx, geom),
         vec![OledScreen::Home, OledScreen::Radios]

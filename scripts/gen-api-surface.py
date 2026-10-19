@@ -337,6 +337,7 @@ RELAY_FORBIDDEN = {
     "/api/v1/setup/profile",
     "/api/v1/setup/remote-access/cloudflare",
     "/api/v1/ground-station/factory-reset",
+    "/api/v1/setup/shutdown",
 }
 
 

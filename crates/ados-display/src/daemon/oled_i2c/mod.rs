@@ -12,9 +12,10 @@
 //! and exits cleanly (rc 0) — a board with no OLED never churns.
 //!
 //! Reuse: status comes from [`crate::state_source::StateSource::status_only`]
-//! (the ground-station status plus the GNSS, radio-adapter and LoRa routes,
-//! every 2 s); the frames are painted by [`crate::oled_frame`] (grayscale glyph
-//! coverage thresholded to 1bpp) and packed + uploaded by [`crate::oled`],
+//! (the ground-station status every 2 s, plus the profile's GNSS,
+//! radio-adapter and LoRa routes at most every 5 s); the frames are painted
+//! by [`crate::oled_frame`] (grayscale glyph coverage thresholded to 1bpp)
+//! and packed + uploaded by [`crate::oled`],
 //! which re-initialises the panel after repeated upload failures (a brownout).
 //! The configured `ground_station.ui.oled.brightness` is applied as the
 //! controller contrast whenever it changes.

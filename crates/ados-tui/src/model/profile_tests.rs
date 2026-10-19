@@ -83,6 +83,7 @@ fn route_sets_follow_the_profile() {
         RouteSet::for_profile("drone"),
         RouteSet {
             sensors: true,
+            lora: true,
             ..RouteSet::default()
         }
     );
@@ -143,6 +144,29 @@ fn drone_row_is_one_sensor_rate_line() {
         .unwrap()
         .1;
     assert_eq!(*camera, Level::Warn);
+}
+
+#[test]
+fn drone_row_adds_the_lora_line_when_a_module_is_fitted() {
+    let routes = ProfileRoutes {
+        sensors: Some(sensors_fixture(false, true)),
+        lora: present(lora_fixture()),
+        ..ProfileRoutes::default()
+    };
+    let d = dash("drone", &routes);
+    let lines = texts(&d);
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(
+        lines[1],
+        super::profile_gs::lora_line(&lora_fixture()).text()
+    );
+    // `present: false` drops the body at poll time, so no LoRa line.
+    let absent = ProfileRoutes {
+        sensors: Some(sensors_fixture(false, true)),
+        lora: present(json!({"present": false})),
+        ..ProfileRoutes::default()
+    };
+    assert_eq!(texts(&dash("drone", &absent)).len(), 1);
 }
 
 #[test]

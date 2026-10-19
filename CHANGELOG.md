@@ -17,7 +17,8 @@ the project follows [Semantic Versioning](https://semver.org/).
   LCD tab bar follows the configured screens; new LCD pages `cameras`,
   `sensors`, `storage`, `details.gnss`, `details.radios`, `details.lora` and a
   `shutdown_prompt` power-off confirmation backed by
-  `POST /api/v1/setup/shutdown`. The I2C OLED status frame gains
+  `POST /api/v1/setup/shutdown` (refused over the cloud relay: a remote
+  power-off strands the node). The I2C OLED status frame gains
   `gnss <fix> <sats>` and `radios <n>` and rotates through the configured
   `gnss`, `radios` and `lora` screens when those services are present; the
   LoRa views show region, duty use and the transmit state with its reason.
@@ -28,15 +29,38 @@ the project follows [Semantic Versioning](https://semver.org/).
   (detected from `radxa,rock-5b-plus` / "Radxa ROCK 5B+"; a plain ROCK 5B
   does not match) declares both 4-lane CSI connectors with their Radxa
   Camera 4K overlays, GNSS on UART7-M1 (`/dev/ttyS7`) with PPS on header pin
-  16 (GPIO 100), the USB sensor hub, and an INA226 gauge on `/dev/i2c-8` at
-  0x40. The shared ROCK 5C / 5C Lite profile gains its CSI connector, GNSS on
-  UART8-M0 (`/dev/ttyS8`) with PPS on header pin 16 (GPIO 37), and an INA226
-  gauge on `/dev/i2c-8`. The ROCK 5B+ builds the RTL8812EU driver on device.
+  16 (GPIO 100), the USB sensor hub, and panel buttons on header pins
+  29/31/33/35. The shared ROCK 5C / 5C Lite profile gains its CSI connector,
+  GNSS on UART8-M0 (`/dev/ttyS8`) with PPS on header pin 16 (GPIO 37), and
+  panel buttons on header pins 29/31/33/35. Neither declares a battery gauge:
+  the shunt is the rig's, bound under `battery.gauge` in the agent config.
+  The ROCK 5B+ builds the RTL8812EU driver on device.
+
+- **Panel buttons follow the board's GPIO numbering.** A board profile's
+  `buttons` are the board's GPIO numbers: BCM lines on a Raspberry Pi,
+  Linux GPIO numbers on Rockchip, read from `/dev/gpiochip<n / 32>` line
+  `n % 32`. B1..B4 follow the up/down/select/back order, so the panel button
+  tables apply on every board, and the button stream's `label` comes from
+  that order. A board profile's `reserved_gpio` lists lines bound to a bus,
+  console or panel; a button on one of them, or on the GNSS PPS line, fails
+  the profile. A board that is not a Raspberry Pi and declares no buttons has
+  no button reader (`buttons_not_declared`) instead of falling back to the
+  Raspberry Pi lines. Plugin button presses carry the panel `label` (`B1`..)
+  next to the board `pin`.
+
+- **PPS overlay at install.** When the board profile declares
+  `gnss.pps_gpio`, the installer enables a pps-gpio overlay: the stock
+  `pps-gpio` overlay on a Raspberry Pi, a generated and `dtc`-compiled
+  `ados-pps` overlay on Rockchip boards (Radxa `/boot/dtbo` + `u-boot-update`,
+  Armbian `user_overlays`), and loads the `pps-gpio` module. Not yet
+  validated on hardware.
 
 - **Dashboard pages for GNSS, LoRa, capture and sensors.** Ground station:
-  `/gnss` (receivers, survey/off base mode, RTCM out) and `/lora` (region,
-  TX line with pause countdown, one meter per governor rule, refusals,
-  admin region picker with confirm, beacons, mismatch chips). Visor:
+  `/gnss` (receivers, survey/off base mode, RTCM out); ground station and
+  drone: `/lora` (region, TX line with pause countdown, one meter per
+  governor rule, refusals, admin region picker with confirm, locked while
+  armed, beacons, module band / ELRS domain / Meshtastic / airborne chips).
+  Visor:
   `/capture` (REC/STOP/MARK through the world-engine plugin route, health
   chips, refusal codes) and `/settings/capture` (storage, exposure). Drone
   and visor: `/sensors` and `/settings/sensors` (hub, rig upload, clock
@@ -143,8 +167,11 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **Several ELRS modules.** `radio.crsf.modules[]` (`pilot|autonomy`);
   `crsf-stats` v2 and `GET /api/v1/ground-station/crsf` carry `modules[]`
   with per-module link statistics and the reported ELRS `domain`.
-- **INA226 battery gauge.** A `battery_gauge` binding in `board.json` adds a
-  pack with `"source": "ina226"` to `GET /api/v1/battery`.
+- **INA226 battery gauge.** A `battery.gauge` binding in the agent config
+  (`type`, `i2c_bus`, `addr`, `shunt_ohm`, `max_current_a`, all required), else
+  a `battery_gauge` binding in `board.json`, adds a pack with
+  `"source": "ina226"` to `GET /api/v1/battery`. A binding missing its shunt
+  values leaves the gauge absent with a logged reason.
 
 ### Changed
 

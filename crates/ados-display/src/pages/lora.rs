@@ -40,9 +40,12 @@ impl Page for LoraPage {
     fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas {
         let mut canvas = blank_panel(palette);
         draw_detail_header(&mut canvas, palette, "LoRa");
-        match ctx.lora.as_ref() {
+        match ctx.lora.present() {
             Some(l) => draw_body(&mut canvas, palette, l),
-            None => draw_absent(&mut canvas, palette, "No LoRa module fitted"),
+            None => {
+                let msg = ctx.lora.missing_text("LoRa module").unwrap_or_default();
+                draw_absent(&mut canvas, palette, &msg);
+            }
         }
         canvas
     }
@@ -168,7 +171,7 @@ mod tests {
 
     fn lora(reason: Option<&str>, used: f64) -> PageContext {
         PageContext {
-            lora: Some(LoraCtx {
+            lora: crate::pages::reading::Reading::Present(LoraCtx {
                 region_code: reason
                     .filter(|r| *r == "region_unset")
                     .map_or(Some("IN".into()), |_| None),

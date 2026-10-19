@@ -1,9 +1,10 @@
 //! Sensing reads for the cameras, sensors and storage pages: the sensor, clock
 //! and storage routes plus the world-engine capture state. Each read is
-//! independent and optional; a failed read or a `present: false` body leaves
-//! its block `None`.
+//! independent: a `present: false` body (or a route not served) leaves its
+//! block absent, a failed request leaves it unreachable.
 
 use super::*;
+use crate::pages::reading::Reading;
 use crate::pages::sensing_ctx::{
     CaptureCamera, CaptureInfo, ClockInfo, ExposureInfo, GnssSummary, HubInfo, SensingCtx,
     SensorInfo, SensorsInfo, StorageInfo,
@@ -15,28 +16,28 @@ pub(super) const CAPTURE_STATE_PATH: &str =
 
 impl StateSource {
     /// Fetch every sensing route and map them into a [`SensingCtx`].
-    pub(super) fn sensing_ctx(&self) -> SensingCtx {
+    pub(super) fn fetch_sensing(&self) -> SensingCtx {
         sensing_ctx(
-            self.get_json("/api/v1/sensors").as_ref(),
-            self.get_json("/api/v1/clock").as_ref(),
-            self.get_json("/api/v1/storage").as_ref(),
-            self.get_json(CAPTURE_STATE_PATH).as_ref(),
+            self.fetch("/api/v1/sensors"),
+            self.fetch("/api/v1/clock"),
+            self.fetch("/api/v1/storage"),
+            self.fetch(CAPTURE_STATE_PATH),
         )
     }
 }
 
-/// Map the four fetched bodies into a [`SensingCtx`].
+/// Map the four fetched reads into a [`SensingCtx`].
 pub(super) fn sensing_ctx(
-    sensors: Option<&Value>,
-    clock: Option<&Value>,
-    storage: Option<&Value>,
-    capture: Option<&Value>,
+    sensors: Reading<Value>,
+    clock: Reading<Value>,
+    storage: Reading<Value>,
+    capture: Reading<Value>,
 ) -> SensingCtx {
     SensingCtx {
-        sensors: present(sensors).map(sensors_info),
-        clock: present(clock).map(clock_info),
-        storage: present(storage).map(storage_info),
-        capture: capture.filter(|v| v.is_object()).map(capture_info),
+        sensors: sensors.and_then(|v| present(Some(&v)).map(sensors_info)),
+        clock: clock.and_then(|v| present(Some(&v)).map(clock_info)),
+        storage: storage.and_then(|v| present(Some(&v)).map(storage_info)),
+        capture: capture.and_then(|v| v.is_object().then(|| capture_info(&v))),
     }
 }
 
@@ -185,12 +186,12 @@ mod tests {
     #[test]
     fn full_fixtures_map_into_sensing_ctx() {
         let ctx = sensing_ctx(
-            Some(&sensors_body()),
-            Some(&clock_body()),
-            Some(&storage_body()),
-            Some(&capture_body()),
+            Reading::Present(sensors_body()),
+            Reading::Present(clock_body()),
+            Reading::Present(storage_body()),
+            Reading::Present(capture_body()),
         );
-        let s = ctx.sensors.expect("sensors");
+        let s = ctx.sensors.into_present().expect("sensors");
         let hub = s.hub.expect("hub");
         assert!(hub.connected);
         assert_eq!(hub.fw.as_deref(), Some("ados-sensorhub 0.1.0"));
@@ -205,19 +206,19 @@ mod tests {
         let g = s.gnss.expect("gnss");
         assert_eq!((g.fix.as_deref(), g.sats), (Some("3d"), Some(14)));
 
-        let k = ctx.clock.expect("clock");
+        let k = ctx.clock.into_present().expect("clock");
         assert!(k.locked);
         assert_eq!(k.sigma_ns, Some(420000.0));
         assert_eq!(k.timebase.as_deref(), Some("host_monotonic"));
 
-        let st = ctx.storage.expect("storage");
+        let st = ctx.storage.into_present().expect("storage");
         assert_eq!(st.total_bytes, Some(1000204886016.0));
         assert_eq!(st.free_bytes, Some(812345678901.0));
         assert_eq!(st.pending_upload(), Some(3));
         assert_eq!(st.state.as_deref(), Some("ok"));
         assert_eq!(st.write_mbps, Some(1450.2));
 
-        let cap = ctx.capture.expect("capture");
+        let cap = ctx.capture.into_present().expect("capture");
         assert_eq!(cap.per_camera[0].fps, Some(20.0));
         assert_eq!(cap.per_camera[0].dropped, Some(3));
         let e = cap.exposure.expect("exposure");
@@ -226,27 +227,55 @@ mod tests {
     }
 
     #[test]
-    fn absent_services_and_missing_routes_map_to_none() {
+    fn absent_services_and_missing_routes_map_to_absent() {
         let ctx = sensing_ctx(
-            Some(&json!({"present":false,"hub":null,"fc":null,"sensors":[],"gnss":null})),
-            Some(&json!({"present":false})),
-            None,
-            None,
+            Reading::Present(
+                json!({"present":false,"hub":null,"fc":null,"sensors":[],"gnss":null}),
+            ),
+            Reading::Present(json!({"present":false})),
+            Reading::Absent,
+            Reading::Absent,
         );
         assert_eq!(ctx, SensingCtx::default());
     }
 
     #[test]
+    fn failed_reads_stay_unreachable() {
+        let ctx = sensing_ctx(
+            Reading::Unreachable,
+            Reading::Present(clock_body()),
+            Reading::Unreachable,
+            Reading::Unreachable,
+        );
+        assert_eq!(ctx.sensors, Reading::Unreachable);
+        assert!(ctx.clock.is_present());
+        assert_eq!(ctx.storage, Reading::Unreachable);
+        assert_eq!(ctx.capture, Reading::Unreachable);
+    }
+
+    #[test]
     fn null_blocks_map_to_none() {
         let body = json!({"present":true,"hub":null,"fc":null,"sensors":[],"gnss":null});
-        let s = sensing_ctx(Some(&body), None, None, None)
-            .sensors
-            .expect("sensors");
+        let s = sensing_ctx(
+            Reading::Present(body),
+            Reading::Absent,
+            Reading::Absent,
+            Reading::Absent,
+        )
+        .sensors
+        .into_present()
+        .expect("sensors");
         assert_eq!((s.hub, s.fc_connected, s.gnss), (None, None, None));
         let st = json!({"present":true,"capture_root":"/c","volumes":[],"capture":{},"write_probe":null});
-        let st = sensing_ctx(None, None, Some(&st), None)
-            .storage
-            .expect("storage");
+        let st = sensing_ctx(
+            Reading::Absent,
+            Reading::Absent,
+            Reading::Present(st),
+            Reading::Absent,
+        )
+        .storage
+        .into_present()
+        .expect("storage");
         assert_eq!(
             (st.free_bytes, st.write_mbps, st.pending_upload()),
             (None, None, None)

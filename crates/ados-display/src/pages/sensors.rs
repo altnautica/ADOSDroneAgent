@@ -1,10 +1,11 @@
 //! Sensors page: sensor hub link, IMU rate, clock lock, GNSS and FC link.
 //!
-//! A tabbed read-only surface over [`PageContext::sensing`]. Every block is
-//! optional; an absent block reads `--` or "not present".
+//! A tabbed read-only surface over [`PageContext::sensing`]. A block that is
+//! not fitted reads "not fitted" (or `--`); a failed read reads "unreachable".
 
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
+use crate::pages::reading::Reading;
 use crate::pages::sensing_ctx::{
     bool_color, fmt_num, fmt_str, paint_absent, paint_frame, paint_label, paint_status, rate_color,
     SensorInfo, DASH, VALUE_X,
@@ -40,12 +41,25 @@ impl Page for SensorsPage {
         let mut canvas = blank_panel(palette);
         paint_frame(&mut canvas, ctx, palette, "SENSORS");
         let s = &ctx.sensing;
-        if s.sensors.is_none() && s.clock.is_none() {
-            paint_absent(&mut canvas, palette, "Sensor hub");
+        if !s.sensors.is_present() && !s.clock.is_present() {
+            let failed = matches!(s.sensors, Reading::Unreachable)
+                || matches!(s.clock, Reading::Unreachable);
+            let msg = if failed {
+                "Sensor hub unreachable"
+            } else {
+                "No sensor hub fitted"
+            };
+            paint_absent(&mut canvas, palette, msg);
             return canvas;
         }
         let c = &mut canvas;
-        let sensors = s.sensors.as_ref();
+        let sensors = s.sensors.present();
+        // The text for a block the sensors read did not carry.
+        let missing = if matches!(s.sensors, Reading::Unreachable) {
+            "unreachable"
+        } else {
+            "not fitted"
+        };
 
         paint_label(c, palette, 0, "HUB");
         match sensors.and_then(|x| x.hub.as_ref()) {
@@ -58,7 +72,7 @@ impl Page for SensorsPage {
                 );
                 paint_status(c, 0, VALUE_X, &v, bool_color(palette, Some(h.connected)));
             }
-            None => paint_status(c, 0, VALUE_X, "not present", palette.text_tertiary),
+            None => paint_status(c, 0, VALUE_X, missing, palette.text_tertiary),
         }
 
         paint_label(c, palette, 1, "IMU");
@@ -68,12 +82,15 @@ impl Page for SensorsPage {
         }
 
         paint_label(c, palette, 2, "CLOCK");
-        match s.clock.as_ref() {
+        match s.clock.present() {
             Some(k) => {
                 let state = if k.locked { "locked" } else { "free" };
                 let sigma = fmt_num(k.sigma_ns.map(|n| n / 1.0e6), 2);
                 let v = format!("{state}  σ {sigma} ms  {}", fmt_str(k.timebase.as_deref()));
                 paint_status(c, 2, VALUE_X, &v, bool_color(palette, Some(k.locked)));
+            }
+            None if matches!(s.clock, Reading::Unreachable) => {
+                paint_status(c, 2, VALUE_X, "unreachable", palette.text_tertiary)
             }
             None => paint_status(c, 2, VALUE_X, DASH, palette.text_tertiary),
         }
@@ -86,7 +103,7 @@ impl Page for SensorsPage {
                 let v = format!("{}  {sats} sats", fmt_str(g.fix.as_deref()));
                 paint_status(c, 3, VALUE_X, &v, bool_color(palette, Some(fixed)));
             }
-            None => paint_status(c, 3, VALUE_X, "not present", palette.text_tertiary),
+            None => paint_status(c, 3, VALUE_X, missing, palette.text_tertiary),
         }
 
         paint_label(c, palette, 4, "FC");
@@ -134,11 +151,25 @@ mod tests {
     #[test]
     fn no_expected_rate_means_no_verdict() {
         let mut ctx = full_ctx(10.0);
-        if let Some(s) = ctx.sensing.sensors.as_mut() {
+        if let Some(s) = ctx.sensing.sensors.present_mut() {
             s.sensors[0].expected_hz = None;
         }
         let c = SensorsPage.render(&ctx, &DARK);
         assert!(!row_has_color(&c, 1, VALUE_X, DARK.status_error));
         assert!(row_has_color(&c, 1, VALUE_X, DARK.text_primary));
+    }
+
+    #[test]
+    fn unreachable_reads_differently_from_not_fitted() {
+        let absent = SensorsPage.render(&PageContext::default(), &DARK);
+        let ctx = PageContext {
+            sensing: crate::pages::sensing_ctx::SensingCtx {
+                sensors: Reading::Unreachable,
+                ..Default::default()
+            },
+            ..PageContext::default()
+        };
+        let failed = SensorsPage.render(&ctx, &DARK);
+        assert_ne!(absent.as_rgb888(), failed.as_rgb888());
     }
 }

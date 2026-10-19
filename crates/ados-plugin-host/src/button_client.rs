@@ -101,10 +101,11 @@ async fn pump(sock_path: &PathBuf, tx: &broadcast::Sender<Vec<u8>>) -> std::io::
 
 /// Decode one bus line and re-encode it as the plugin-facing [`ButtonPress`].
 ///
-/// The two shapes differ in exactly one field name — the bus calls the BCM line
-/// `button`, the plugin contract calls it `pin` — so this is where that rename
-/// happens, once, instead of every SDK doing it. Returns `None` for a line that
-/// is not a well-formed press.
+/// The two shapes differ in field names — the bus calls the GPIO line `button`
+/// and sends the label lower-case, the plugin contract calls it `pin` and
+/// carries the label as the mapping spells it (`B1`) — so this is where that
+/// rename happens, once, instead of every SDK doing it. Returns `None` for a
+/// line that is not a well-formed press.
 pub fn reencode_press(line: &str) -> Option<Vec<u8>> {
     let line = line.trim();
     if line.is_empty() {
@@ -122,9 +123,15 @@ pub fn reencode_press(line: &str) -> Option<Vec<u8>> {
         Some(other) => Some(other.as_str()?.to_string()),
     };
     let timestamp_ms = v.get("timestamp_ms").and_then(|t| t.as_u64()).unwrap_or(0);
+    let label = v
+        .get("label")
+        .and_then(serde_json::Value::as_str)
+        .filter(|l| !l.is_empty())
+        .map(str::to_uppercase);
 
     let press = ButtonPress {
         pin,
+        label,
         kind,
         action,
         timestamp_ms,
@@ -151,6 +158,15 @@ mod tests {
         assert_eq!(press.kind, "long");
         assert_eq!(press.action.as_deref(), Some("pair_drone"));
         assert_eq!(press.timestamp_ms, 42);
+        assert_eq!(press.label, None);
+    }
+
+    #[test]
+    fn the_bus_label_is_carried_in_mapping_spelling() {
+        let press = decode(r#"{"button":63,"label":"b1","kind":"short","action":"passthrough"}"#)
+            .expect("a labelled press re-encodes");
+        assert_eq!(press.pin, 63);
+        assert_eq!(press.label.as_deref(), Some("B1"));
     }
 
     #[test]

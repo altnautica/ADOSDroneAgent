@@ -52,6 +52,7 @@ function droneItems(): NavItem[] {
     { to: "/video", labelKey: "nav.video", icon: Video },
     { to: "/transmit", labelKey: "nav.transmit", icon: Antenna },
     { to: "/sensors", labelKey: "nav.sensors", icon: Activity },
+    { to: "/lora", labelKey: "nav.lora", icon: RadioTower },
   ];
 }
 

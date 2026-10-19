@@ -5,10 +5,12 @@
 //! `POST /api/v1/setup/shutdown` through the panel's agent writer, Cancel pops
 //! the modal. A second `shutdown_prompt` press while the page is on top
 //! confirms the same write, and the `back` button cancels, so a panel without
-//! touch can answer it too.
+//! touch can answer it too. The hint names the buttons the live mapping binds
+//! to those two actions, so a remapped panel reads its own keys.
 
 use embedded_graphics::pixelcolor::Rgb888;
 
+use crate::button_source::ButtonLayout;
 use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_rect, fill_rect_outline, text, Canvas};
@@ -25,8 +27,8 @@ pub const SHUTDOWN_PATH: &str = "/api/v1/setup/shutdown";
 
 /// The prompt line.
 const TITLE: &str = "Power off?";
-/// How to answer it from the buttons.
-const HINT: &str = "Hold B1 again to power off, BACK to cancel";
+/// The hint when no button is bound to the prompt: touch only.
+const TOUCH_HINT: &str = "Tap Power off to confirm";
 /// Top edge of the prompt line.
 const TITLE_Y: i32 = 64;
 /// Top edge of the hint line.
@@ -43,7 +45,46 @@ const POWER_BTN_X: i32 = 24;
 const CANCEL_BTN_X: i32 = PANEL_W as i32 - 24 - BTN_W;
 
 /// The power-off confirmation, registered as `details.power`.
-pub struct PowerPage;
+pub struct PowerPage {
+    hint: String,
+}
+
+impl PowerPage {
+    /// The page for the panel's button mapping.
+    pub fn new(buttons: &ButtonLayout) -> Self {
+        Self {
+            hint: power_hint(
+                buttons.key_for(ados_protocol::panel_ui::SHUTDOWN_PROMPT),
+                buttons.key_for("back"),
+            ),
+        }
+    }
+}
+
+/// `B1_long` → `("B1", true)`.
+fn split_key(key: &str) -> (&str, bool) {
+    match key.rsplit_once('_') {
+        Some((button, kind)) => (button, kind == "long"),
+        None => (key, false),
+    }
+}
+
+/// The answer hint for the mapping keys bound to `shutdown_prompt` and
+/// `back`: "Hold B1 again to power off, press B4 to cancel". Without a
+/// prompt key the answer is touch only.
+pub fn power_hint(confirm: Option<&str>, back: Option<&str>) -> String {
+    let mut hint = match confirm.map(split_key) {
+        Some((button, true)) => format!("Hold {button} again to power off"),
+        Some((button, false)) => format!("Press {button} again to power off"),
+        None => TOUCH_HINT.to_string(),
+    };
+    match back.map(split_key) {
+        Some((button, true)) => hint.push_str(&format!(", hold {button} to cancel")),
+        Some((button, false)) => hint.push_str(&format!(", press {button} to cancel")),
+        None => {}
+    }
+    hint
+}
 
 impl Page for PowerPage {
     fn id(&self) -> &'static str {
@@ -64,7 +105,7 @@ impl Page for PowerPage {
         let title = (TITLE, 0, PANEL_W as i32, TITLE_Y);
         centered(&mut canvas, &title_font, title, palette.text_primary);
         let hint_font = LoadedFont::new(FontFace::SansRegular, 14);
-        let hint = (HINT, 0, PANEL_W as i32, HINT_Y);
+        let hint = (self.hint.as_str(), 0, PANEL_W as i32, HINT_Y);
         centered(&mut canvas, &hint_font, hint, palette.text_secondary);
 
         fill_rect(
@@ -138,7 +179,7 @@ mod tests {
 
     #[test]
     fn power_off_target_sends_the_shutdown_write() {
-        let page = PowerPage;
+        let page = PowerPage::new(&ButtonLayout::default());
         let ctx = PageContext::default();
         let c = page.render(&ctx, &DARK);
         assert_eq!(c.width(), PANEL_W);
@@ -161,8 +202,25 @@ mod tests {
 
     #[test]
     fn power_off_target_paints_the_destructive_fill() {
-        let c = PowerPage.render(&PageContext::default(), &DARK);
+        let c = PowerPage::new(&ButtonLayout::default()).render(&PageContext::default(), &DARK);
         assert_eq!(c.pixel(POWER_BTN_X + 4, BTN_Y + 4), DARK.status_error);
         assert_eq!(c.pixel(CANCEL_BTN_X + 4, BTN_Y + 4), DARK.bg_secondary);
+    }
+
+    #[test]
+    fn the_hint_names_the_mapped_buttons() {
+        assert_eq!(
+            power_hint(Some("B1_long"), Some("B4_short")),
+            "Hold B1 again to power off, press B4 to cancel"
+        );
+        assert_eq!(
+            power_hint(Some("B3_short"), Some("B2_long")),
+            "Press B3 again to power off, hold B2 to cancel"
+        );
+        assert_eq!(power_hint(None, None), TOUCH_HINT);
+        assert_eq!(
+            power_hint(None, Some("B4_short")),
+            "Tap Power off to confirm, press B4 to cancel"
+        );
     }
 }

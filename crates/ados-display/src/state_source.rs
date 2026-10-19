@@ -32,6 +32,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::host_identity::{HostIdentity, HostPaths};
+use crate::pages::reading::Reading;
 use crate::pages::{
     CloudCtx, DeviceCtx, DroneCtx, FcCtx, HardwareItem, HopEntry, HoppingCtx, LinkCtx, MeshCtx,
     MeshPeer, NetworkCtx, PageContext, PairedDroneCtx, PairingCtx, RoleCtx, SystemCtx, UplinkCtx,
@@ -111,17 +112,25 @@ pub struct StateSource {
     cpu_history: History,
     temp_history: History,
     battery_history: History,
+    /// The node profile gating the service reads; `None` resolves it from the
+    /// config on each fetch, as the panel page set does.
+    profile: Option<String>,
+    services: services::ServiceCache,
 }
 
 impl StateSource {
     /// Build a source against the default local agent, resolving the api-key
-    /// from `/etc/ados/pairing.json` and the hostname from the OS.
+    /// from `/etc/ados/pairing.json`, the hostname from the OS, and the node
+    /// profile (which gates the service reads) from the config.
     pub fn new() -> Self {
-        Self::with_paths(
-            DEFAULT_API_BASE,
-            Path::new(PAIRING_JSON_PATH),
-            hop_supervisor_path(),
-        )
+        Self {
+            profile: None,
+            ..Self::with_paths(
+                DEFAULT_API_BASE,
+                Path::new(PAIRING_JSON_PATH),
+                hop_supervisor_path(),
+            )
+        }
     }
 
     /// Build a source with explicit base URL and sidecar paths (used by tests
@@ -140,21 +149,42 @@ impl StateSource {
             cpu_history: History::default(),
             temp_history: History::default(),
             battery_history: History::default(),
+            // Explicit paths are the test seam: no service reads unless a
+            // profile is set with [`StateSource::with_profile`].
+            profile: Some(String::new()),
+            services: services::ServiceCache::default(),
         }
     }
 
-    /// GET `path` on the agent's local API and parse the JSON body. Returns
-    /// `None` on any transport / status / decode error so the panel keeps the
-    /// last good frame instead of going blank while the agent restarts.
+    /// Fix the node profile the service reads are gated on instead of
+    /// resolving it from the config.
+    pub fn with_profile(mut self, profile: &str) -> Self {
+        self.profile = Some(profile.to_string());
+        self
+    }
+
+    /// GET `path` on the agent's local API and parse the JSON body. `None` on
+    /// any transport / status / decode error so the panel keeps the last good
+    /// frame instead of going blank while the agent restarts.
     fn get_json(&self, path: &str) -> Option<Value> {
+        self.fetch(path).into_present()
+    }
+
+    /// GET `path` as a [`Reading`]: a 404 (the route is not served on this
+    /// node) is absent, any other transport / status / decode error is
+    /// unreachable.
+    fn fetch(&self, path: &str) -> Reading<Value> {
         let url = format!("{}{}", self.base, path);
         let mut req = self.agent.get(&url);
-        if let Some(ref key) = self.api_key {
+        if let Some(key) = &self.api_key {
             req = req.set("X-ADOS-Key", key);
         }
         match req.call() {
-            Ok(resp) => resp.into_json::<Value>().ok(),
-            Err(_) => None,
+            Ok(resp) => resp
+                .into_json::<Value>()
+                .map_or(Reading::Unreachable, Reading::Present),
+            Err(ureq::Error::Status(404, _)) => Reading::Absent,
+            Err(_) => Reading::Unreachable,
         }
     }
 
@@ -190,20 +220,19 @@ impl StateSource {
             auto_pair_enabled(self.get_json("/api/wfb/pair").as_ref());
         apply_host_identity(&mut ctx.device, HostIdentity::read(&self.host_paths));
         ctx.diagnostics.agent_logs = crate::log_tail::fetch(&self.logd_socket).unwrap_or_default();
-        ctx.sensing = self.sensing_ctx();
-        self.apply_gs_extras(&mut ctx);
+        self.apply_services(&mut ctx);
         ctx
     }
 
     /// The narrow read the small status OLED needs: the ground-station status
     /// snapshot (the link, pairing, role and network blocks the OLED lines
-    /// show) plus the GNSS, radio-adapter and LoRa routes its service line and
-    /// rotating screens read. No setup or radio-pair call, no log-tail query,
-    /// no host-identity reads, and no trend-buffer advance.
+    /// show) plus the profile's service routes its service line and rotating
+    /// screens read. No setup or radio-pair call, no log-tail query, no
+    /// host-identity reads, and no trend-buffer advance.
     pub fn status_only(&mut self) -> PageContext {
         let status = self.get_json("/api/v1/ground-station/status");
         let mut ctx = self.map_sources(status.as_ref(), None, None);
-        self.apply_gs_extras(&mut ctx);
+        self.apply_services(&mut ctx);
         ctx
     }
 
@@ -320,6 +349,7 @@ mod mappers;
 use mappers::*;
 mod gs_extra;
 mod sensing;
+mod services;
 
 /// Read the `X-ADOS-Key` from `pairing.json`. `None` when the file is absent,
 /// unreadable, malformed, or carries no `api_key` — all of which are the

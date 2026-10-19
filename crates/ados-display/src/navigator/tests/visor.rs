@@ -12,7 +12,11 @@ const VISOR_TABS: [&str; 5] = ["plugin", "cameras", "sensors", "storage", "detai
 
 fn visor_nav(dir: &std::path::Path) -> PageNavigator {
     let tabs = tab_ids("visor", &resolve_screens("visor", None));
-    PageNavigator::with_state_path(all_pages(), &tabs, dir.join("lcd-state.json"))
+    PageNavigator::with_state_path(
+        all_pages(&crate::button_source::ButtonLayout::default()),
+        &tabs,
+        dir.join("lcd-state.json"),
+    )
 }
 
 #[test]

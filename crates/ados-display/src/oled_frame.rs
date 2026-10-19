@@ -56,13 +56,13 @@ pub fn status_line(ctx: &PageContext) -> String {
 /// The service line: `gnss <fix> <sats>` and `radios <n>`, each present only
 /// while its service reports. `None` when neither does.
 pub fn service_line(ctx: &PageContext) -> Option<String> {
-    let gnss = ctx.gnss.as_ref().map(|g| {
+    let gnss = ctx.gnss.present().map(|g| {
         let sats = g.sats.map_or("--".to_string(), |s| s.to_string());
         format!("gnss {} {sats}", fix_short(g.fix.as_deref()))
     });
     let radios = ctx
         .radio_adapters
-        .as_ref()
+        .present()
         .map(|r| format!("radios {}", r.adapters.len()));
     match (gnss, radios) {
         (Some(g), Some(r)) => Some(format!("{g} {r}")),
@@ -229,12 +229,12 @@ mod tests {
         }))
         .unwrap();
         PageContext {
-            gnss: Some(GnssCtx {
+            gnss: crate::pages::reading::Reading::Present(GnssCtx {
                 fix: Some("3d".into()),
                 sats: Some(14),
                 ..GnssCtx::default()
             }),
-            radio_adapters: Some(RadioAdaptersCtx {
+            radio_adapters: crate::pages::reading::Reading::Present(RadioAdaptersCtx {
                 adapters: body.adapters,
                 diversity: body.diversity,
             }),
@@ -247,10 +247,10 @@ mod tests {
         assert_eq!(service_line(&ctx_with_host("gs")), None);
         let mut ctx = gs_ctx(3);
         assert_eq!(service_line(&ctx).as_deref(), Some("gnss 3d 14 radios 3"));
-        ctx.radio_adapters = None;
+        ctx.radio_adapters = crate::pages::reading::Reading::Unreachable;
         assert_eq!(service_line(&ctx).as_deref(), Some("gnss 3d 14"));
         ctx = gs_ctx(3);
-        ctx.gnss = None;
+        ctx.gnss = crate::pages::reading::Reading::Absent;
         assert_eq!(service_line(&ctx).as_deref(), Some("radios 3"));
     }
 

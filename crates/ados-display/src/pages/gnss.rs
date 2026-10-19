@@ -96,9 +96,12 @@ impl Page for GnssPage {
     fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas {
         let mut canvas = blank_panel(palette);
         draw_detail_header(&mut canvas, palette, "GNSS");
-        match ctx.gnss.as_ref() {
+        match ctx.gnss.present() {
             Some(gnss) => draw_body(&mut canvas, palette, gnss),
-            None => draw_absent(&mut canvas, palette, "No GNSS receiver fitted"),
+            None => {
+                let msg = ctx.gnss.missing_text("GNSS receiver").unwrap_or_default();
+                draw_absent(&mut canvas, palette, &msg);
+            }
         }
         canvas
     }
@@ -197,6 +200,7 @@ mod tests {
     use super::*;
     use crate::graphics::palette::DARK;
     use crate::pages::gs_ctx::GnssBaseCtx;
+    use crate::pages::reading::Reading;
     use crate::pages::{HitAction, PANEL_W};
 
     fn has_color(c: &Canvas, color: Rgb888) -> bool {
@@ -206,7 +210,7 @@ mod tests {
 
     fn ctx(fix: &str, pps: bool) -> PageContext {
         PageContext {
-            gnss: Some(GnssCtx {
+            gnss: Reading::Present(GnssCtx {
                 fix: Some(fix.into()),
                 sats: Some(14),
                 hdop: Some(0.8),
@@ -249,5 +253,22 @@ mod tests {
     fn no_fix_paints_error() {
         let c = GnssPage.render(&ctx("none", false), &DARK);
         assert!(has_color(&c, DARK.status_error));
+    }
+
+    #[test]
+    fn unreachable_reads_differently_from_not_fitted() {
+        let absent = GnssPage.render(&PageContext::default(), &DARK);
+        let failed = GnssPage.render(
+            &PageContext {
+                gnss: Reading::Unreachable,
+                ..PageContext::default()
+            },
+            &DARK,
+        );
+        assert_ne!(
+            absent.as_rgb888(),
+            failed.as_rgb888(),
+            "the two states must not paint the same notice"
+        );
     }
 }

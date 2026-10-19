@@ -137,7 +137,12 @@ pub(super) async fn run_page_ui(
     // is rebuilt in place on SIGHUP (the screens write route signals this unit).
     let panel = crate::panel_conf::PanelConf::load();
     tracing::info!(profile = %panel.profile, tabs = ?panel.tab_ids(), "panel page set");
-    let mut navigator = PageNavigator::new(all_pages(), &panel.tab_ids());
+    // The live button mapping: the power prompt names its keys, and the button
+    // reader below resolves board-pin presses through it.
+    let button_layout = crate::button_source::ButtonLayout::load(Path::new(
+        crate::host_identity::BOARD_SIDECAR_PATH,
+    ));
+    let mut navigator = PageNavigator::new(all_pages(&button_layout), &panel.tab_ids());
     // The agent state is read on its own thread; the loop only ever borrows the
     // latest context, so a wedged agent never stalls touch, render or watchdog.
     let poller = StatePoller::spawn(StateSource::new(), STATE_POLL_PERIOD);
@@ -177,9 +182,6 @@ pub(super) async fn run_page_ui(
     // is the transport that lets a press reach the navigator, which has always
     // known what to do with one. A node whose `ados-pic` is absent or down simply
     // never yields an event — the reader retries quietly and the UI is unaffected.
-    let button_layout = crate::button_source::ButtonLayout::load(Path::new(
-        crate::host_identity::BOARD_SIDECAR_PATH,
-    ));
     let mut button_rx = crate::button_source::spawn_button_reader(
         std::path::PathBuf::from(crate::button_source::BUTTONS_SOCK),
         button_layout,

@@ -57,13 +57,14 @@ impl OledScreen {
         }
     }
 
-    /// Whether the screen has something to show for `ctx`.
+    /// Whether the screen has something to show for `ctx`. A service that is
+    /// absent or unreachable is skipped.
     fn available(self, ctx: &PageContext) -> bool {
         match self {
             Self::Home => true,
-            Self::Gnss => ctx.gnss.is_some(),
-            Self::Radios => ctx.radio_adapters.is_some(),
-            Self::Lora => ctx.lora.is_some(),
+            Self::Gnss => ctx.gnss.is_present(),
+            Self::Radios => ctx.radio_adapters.is_present(),
+            Self::Lora => ctx.lora.is_present(),
         }
     }
 }
@@ -120,12 +121,12 @@ pub fn screen_font() -> LoadedFont {
 pub fn screen_lines(screen: OledScreen, ctx: &PageContext) -> Option<Vec<String>> {
     match screen {
         OledScreen::Home => None,
-        OledScreen::Gnss => ctx.gnss.as_ref().map(gnss_lines),
+        OledScreen::Gnss => ctx.gnss.present().map(gnss_lines),
         OledScreen::Radios => ctx
             .radio_adapters
-            .as_ref()
+            .present()
             .map(|r| radios_lines(r, ctx.mesh.peer_count)),
-        OledScreen::Lora => ctx.lora.as_ref().map(lora_lines),
+        OledScreen::Lora => ctx.lora.present().map(lora_lines),
     }
 }
 

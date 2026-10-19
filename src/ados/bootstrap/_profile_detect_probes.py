@@ -153,7 +153,8 @@ def probe_i2c_oled(bus: int = _DEFAULT_I2C_BUS) -> tuple[int, int, bool]:
 
 
 def board_button_pins() -> list[int]:
-    """BCM pins the matched HAL board profile declares as front-panel buttons.
+    """GPIO numbers the matched HAL board profile declares as front-panel
+    buttons: the ``buttons`` roles when present, else ``gpio_buttons``.
 
     Empty when the board declares none or the HAL is unavailable.
     """
@@ -165,6 +166,9 @@ def board_button_pins() -> list[int]:
         return []
     if profile is None:
         return []
+    roles = getattr(profile, "buttons", None)
+    if roles is not None:
+        return roles.pins()
     return [button.pin for button in profile.gpio_buttons]
 
 

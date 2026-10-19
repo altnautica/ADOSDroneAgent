@@ -222,20 +222,42 @@ gnss:
   device: /dev/ttyS8
   pps_gpio: 37
 
-# INA226 on the header I2C8_M2 bus: SDA pin 3 (GPIO1_D7), SCL pin 5 (GPIO1_D6)
-# [hwif], enabled by overlay rk3588-i2c8-m2 ("On Radxa ROCK 5C this is SDA pin 3
-# and SCL pin 5") [overlays]; /dev/i2c-8 [dts]. Address 0x40 is the A1=A0=GND
-# strap (TI INA226 datasheet, "Serial Bus Address":
-# https://www.ti.com/lit/ds/symlink/ina226.pdf). shunt_ohm/max_current_a describe
-# the common INA226 breakout's on-board R100 (0.1 ohm) shunt, 81.92 mV full
-# scale = 0.8192 A; a gauge on a larger shunt needs these two values set to its
-# shunt. A unit without the chip resolves the gauge as absent at bring-up.
-battery_gauge:
-  type: ina226
-  i2c_bus: 8
-  addr: 64            # 0x40
-  shunt_ohm: 0.1
-  max_current_a: 0.8
+# No battery gauge is declared here: its shunt resistor and full-scale current
+# belong to the rig's power wiring, not to the board, so the gauge is bound per
+# rig in the agent config (`battery.gauge`, shunt_ohm and max_current_a
+# required). The free header bus for an INA226 is I2C8_M2: SDA pin 3
+# (GPIO1_D7), SCL pin 5 (GPIO1_D6) [hwif], enabled by overlay rk3588-i2c8-m2
+# ("On Radxa ROCK 5C this is SDA pin 3 and SCL pin 5") [overlays]; /dev/i2c-8
+# [dts]. 0x40 is the A1=A0=GND address (TI INA226 datasheet, "Serial Bus
+# Address": https://www.ti.com/lit/ds/symlink/ina226.pdf).
+
+# Panel buttons, by Linux GPIO number ([hwif] "GPIO number" column): the reader
+# opens /dev/gpiochip<n / 32> line n % 32. Header pins 29/31/33/35, each a plain
+# GPIO with no function bound in this file, with ground on pins 30/34/39.
+# Wire each button from its pin to ground (active-low, pulled up).
+#   up     pin 29  GPIO1_B2  42
+#   down   pin 31  GPIO1_B1  41
+#   select pin 33  GPIO1_B4  44
+#   back   pin 35  GPIO4_A0  128
+buttons: {up: 42, down: 41, select: 44, back: 128}
+
+# Lines bound to something other than a button; the loader rejects a button on
+# any of them (the GNSS PPS line is added from `gnss.pps_gpio`). [hwif]
+reserved_gpio:
+  - {gpio: 13, header_pin: 8, use: "debug console UART2_M0 TX (GPIO0_B5)"}
+  - {gpio: 14, header_pin: 10, use: "debug console UART2_M0 RX (GPIO0_B6)"}
+  - {gpio: 63, header_pin: 3, use: "I2C8_M2 SDA (GPIO1_D7)"}
+  - {gpio: 62, header_pin: 5, use: "I2C8_M2 SCL (GPIO1_D6)"}
+  - {gpio: 136, header_pin: 32, use: "GNSS UART8_M0 TX (GPIO4_B0)"}
+  - {gpio: 137, header_pin: 40, use: "GNSS UART8_M0 RX (GPIO4_B1)"}
+  - {gpio: 33, header_pin: 19, use: "SPI4_M2 MOSI, panel (GPIO1_A1)"}
+  - {gpio: 32, header_pin: 21, use: "SPI4_M2 MISO, panel (GPIO1_A0)"}
+  - {gpio: 34, header_pin: 23, use: "SPI4_M2 CLK, panel (GPIO1_A2)"}
+  - {gpio: 35, header_pin: 24, use: "SPI4_M2 CS0, panel (GPIO1_A3)"}
+  - {gpio: 36, header_pin: 26, use: "SPI4_M2 CS1, panel touch (GPIO1_A4)"}
+  - {gpio: 40, header_pin: 18, use: "panel DC (GPIO1_B0)"}
+  - {gpio: 45, header_pin: 22, use: "panel reset (GPIO1_B5)"}
+  - {gpio: 139, header_pin: 11, use: "panel touch PENIRQ (GPIO4_B3)"}
 
 power:
   typical_watts: 4.0

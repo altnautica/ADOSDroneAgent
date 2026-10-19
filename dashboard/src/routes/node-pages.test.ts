@@ -10,7 +10,14 @@ import { LoraView } from "@/components/panels/lora-panel";
 import { SensorsView } from "@/components/panels/sensors-panel";
 import { ProfileGateView } from "@/components/profile-gate";
 import { captureErrorCode, markCapture, startCapture, type CaptureState } from "@/lib/capture";
-import type { LoraStatus } from "@/lib/lora";
+import {
+  loraChips,
+  meterTone,
+  type CrsfModule,
+  type LoraRegionRow,
+  type LoraRule,
+  type LoraStatus,
+} from "@/lib/lora";
 import { rateVerdict, type SensorsStatus } from "@/lib/sensors";
 import { ROUTES } from "@/route-table";
 
@@ -41,17 +48,52 @@ function lora(over: Partial<LoraStatus> = {}): LoraStatus {
   };
 }
 
-function renderLora(status: LoraStatus): string {
+function renderLora(status: LoraStatus, extra: { armed?: boolean } = {}): string {
   return html(
-    createElement(LoraView, { status, regions: [], beacons: [], country: "IN", nowMs: 1000, fetchedAtMs: 1000 }),
+    createElement(
+      MemoryRouter,
+      null,
+      createElement(LoraView, {
+        status,
+        regions: [],
+        beacons: [],
+        country: "IN",
+        nowMs: 1000,
+        fetchedAtMs: 1000,
+        onApplyRegion: async () => {},
+        ...extra,
+      }),
+    ),
   );
 }
+
+function row(over: Partial<LoraRegionRow> = {}): LoraRegionRow {
+  return {
+    code: "EU",
+    name: "Europe",
+    plan_id: "EU868",
+    band_mhz: [863, 870],
+    rules: ["duty_cycle"],
+    supported_by_module: true,
+    meshtastic_preset: "EU_868",
+    elrs_domains: { "2g4": "CE_LBT", "900": "EU868" },
+    ...over,
+  };
+}
+
+const euStatus = (over: Partial<LoraStatus> = {}) =>
+  lora({
+    region: { code: "EU", name: "Europe", plan_id: "EU868", source: "network.regulatory.region", band_mhz: [863, 870] },
+    ...over,
+  });
+
+const elrs = (modules: CrsfModule[]) => loraChips(euStatus(), null, row(), modules).filter((c) => c.kind === "elrs");
 
 describe("route table: node pages", () => {
   it("gates the new pages to their profiles", () => {
     const by = Object.fromEntries(ROUTES.map((r) => [r.path, r.profiles]));
     expect(by["/gnss"]).toEqual(["ground_station"]);
-    expect(by["/lora"]).toEqual(["ground_station"]);
+    expect(by["/lora"]).toEqual(["drone", "ground_station"]);
     expect(by["/capture"]).toEqual(["visor"]);
     expect(by["/sensors"]).toEqual(["drone", "visor"]);
     expect(by["/settings/capture"]).toEqual(["visor"]);
@@ -102,10 +144,77 @@ describe("/lora", () => {
     expect(out).toContain("--");
   });
 
+  it("offers the country setting when the region is unset", () => {
+    const out = renderLora(lora({ region: null, tx_allowed: false, blocked_reason: "region_unset" }));
+    expect(out).toContain("Open country setting");
+    expect(out).toContain('href="/settings/region"');
+  });
+
+  it("shows the not-present state", () => {
+    expect(renderLora(lora({ present: false }))).toContain("No LoRa module on this node.");
+  });
+
+  it("locks Apply while armed", () => {
+    const armed = renderLora(lora(), { armed: true });
+    expect(armed).toContain("Region changes are locked while armed.");
+    expect(armed).toMatch(/<button[^>]*disabled=""[^>]*>Apply region/);
+    expect(renderLora(lora())).not.toContain("locked while armed");
+  });
+
+  it("colours the duty meter by fraction of the limit", () => {
+    expect(meterTone(0.69)).toBe("neutral");
+    expect(meterTone(0.7)).toBe("warn");
+    expect(meterTone(0.99)).toBe("warn");
+    expect(meterTone(1)).toBe("error");
+    const status = lora();
+    const duty = status.governor!.rules[0] as Extract<LoraRule, { kind: "duty_cycle" }>;
+    duty.airtime_ms_window = 30_000;
+    expect(renderLora(status)).toContain('data-tone="warn"');
+  });
+
   it("counts down a duty wait", () => {
     const status = lora({ tx_allowed: false, blocked_reason: "duty_exhausted" });
     status.governor!.next_tx_allowed_ms = 462_000;
     expect(renderLora(status)).toContain("TX PAUSED 07:42 (duty)");
+  });
+});
+
+describe("loraChips", () => {
+  it("flags an ELRS module whose domain differs from the region's", () => {
+    expect(elrs([{ id: "m0", domain: "FCC915" }])).toEqual([
+      { kind: "elrs", module: "m0", domain: "FCC915", code: "EU", expected: "EU868" },
+    ]);
+    expect(elrs([{ id: "m1", domain: "ISM2G4" }])[0]?.expected).toBe("CE_LBT");
+  });
+
+  it("is silent for a match, a null domain or an unknown domain", () => {
+    expect(elrs([{ id: "m0", domain: "EU868" }, { id: "m1", domain: "CE_LBT" }])).toEqual([]);
+    expect(elrs([{ id: "m0", domain: null }])).toEqual([]);
+    expect(elrs([{ id: "m0", domain: "MYSTERY" }])).toEqual([]);
+    expect(loraChips(euStatus(), null, row({ elrs_domains: { "2g4": null, "900": null } }), [
+      { id: "m0", domain: "FCC915" },
+    ])).toEqual([]);
+  });
+
+  it("flags a Meshtastic preset only for an enabled bridge", () => {
+    const mesh = (enabled: boolean) =>
+      loraChips(
+        euStatus({
+          region: { ...euStatus().region!, meshtastic_preset: "EU_868" },
+          meshtastic: { enabled, connected: true, port: null, region_preset: "US" },
+        }),
+        null,
+      );
+    expect(mesh(false)).toEqual([]);
+    expect(mesh(true)).toEqual([{ kind: "meshtastic", node: "US", expected: "EU_868" }]);
+  });
+
+  it("flags airborne-restricted regions", () => {
+    const gb = lora({
+      region: { code: "GB", name: "United Kingdom", plan_id: "EU868", source: "lora.region", band_mhz: [863, 870] },
+    });
+    expect(loraChips(gb, "GB")).toEqual([{ kind: "airborne", code: "GB" }]);
+    expect(loraChips(euStatus(), null)).toEqual([]);
   });
 });
 

@@ -1,5 +1,5 @@
 //! The per-profile panel row: visor capture/clock/hub state, ground-station
-//! radios/GNSS/LoRa, and the drone sensor-rate line.
+//! radios/GNSS/LoRa, and the drone sensor-rate and LoRa lines.
 //!
 //! Each line is built only from route bodies the agent actually answered with
 //! `present` not `false`; a missing route leaves its segment out rather than
@@ -78,6 +78,7 @@ impl RouteSet {
             },
             "drone" => Self {
                 sensors: true,
+                lora: true,
                 ..Self::default()
             },
             "ground_station" => Self {
@@ -144,6 +145,7 @@ impl Dashboard {
                 .as_ref()
                 .and_then(sensor_rates_line)
                 .into_iter()
+                .chain(routes.lora.as_ref().map(super::profile_gs::lora_line))
                 .collect(),
             "ground_station" => super::profile_gs::gs_lines(routes),
             _ => Vec::new(),

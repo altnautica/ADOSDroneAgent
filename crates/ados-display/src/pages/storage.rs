@@ -52,8 +52,13 @@ impl Page for StoragePage {
     fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas {
         let mut canvas = blank_panel(palette);
         paint_frame(&mut canvas, ctx, palette, "STORAGE");
-        let Some(s) = ctx.sensing.storage.as_ref() else {
-            paint_absent(&mut canvas, palette, "Capture storage");
+        let Some(s) = ctx.sensing.storage.present() else {
+            let msg = ctx
+                .sensing
+                .storage
+                .missing_text("capture storage")
+                .unwrap_or_default();
+            paint_absent(&mut canvas, palette, &msg);
             return canvas;
         };
         let c = &mut canvas;
@@ -141,7 +146,7 @@ mod tests {
         let mut ctx = full_ctx(1000.0);
         let c = StoragePage.render(&ctx, &DARK);
         assert!(row_has_color(&c, 4, VALUE_X, DARK.status_success));
-        if let Some(s) = ctx.sensing.storage.as_mut() {
+        if let Some(s) = ctx.sensing.storage.present_mut() {
             s.state = Some("full".into());
         }
         let c = StoragePage.render(&ctx, &DARK);
@@ -152,7 +157,7 @@ mod tests {
     #[test]
     fn pending_is_sessions_minus_uploaded() {
         let ctx = full_ctx(1000.0);
-        let s = ctx.sensing.storage.as_ref().map(|s| s.pending_upload());
+        let s = ctx.sensing.storage.present().map(|s| s.pending_upload());
         assert_eq!(s, Some(Some(3)));
     }
 }

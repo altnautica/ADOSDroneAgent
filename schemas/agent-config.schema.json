@@ -111,6 +111,17 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "gauge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BatteryGaugeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "low_cell_mv": {
           "default": 3500,
           "maximum": 4200,
@@ -148,6 +159,47 @@
         }
       },
       "title": "BatteryConfig",
+      "type": "object"
+    },
+    "BatteryGaugeConfig": {
+      "description": "The rig's host-I2C battery gauge (``battery.gauge``).",
+      "properties": {
+        "addr": {
+          "maximum": 119,
+          "minimum": 3,
+          "title": "Addr",
+          "type": "integer"
+        },
+        "i2c_bus": {
+          "maximum": 255,
+          "minimum": 0,
+          "title": "I2C Bus",
+          "type": "integer"
+        },
+        "max_current_a": {
+          "exclusiveMinimum": 0,
+          "title": "Max Current A",
+          "type": "number"
+        },
+        "shunt_ohm": {
+          "exclusiveMinimum": 0,
+          "title": "Shunt Ohm",
+          "type": "number"
+        },
+        "type": {
+          "const": "ina226",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "i2c_bus",
+        "addr",
+        "shunt_ohm",
+        "max_current_a"
+      ],
+      "title": "BatteryGaugeConfig",
       "type": "object"
     },
     "CameraConfig": {
@@ -3940,6 +3992,7 @@
         "cell_divergence_mv": 50,
         "critical_cell_mv": 3300,
         "enabled": true,
+        "gauge": null,
         "low_cell_mv": 3500,
         "predictive_window_s": 30,
         "reserve_percent": 25,

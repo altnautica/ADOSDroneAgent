@@ -1512,8 +1512,12 @@
     "chip": {
       "moduleBand": "Module band {{module}} MHz cannot tune {{plan}}",
       "meshtastic": "Meshtastic preset {{node}}, region expects {{expected}}",
-      "country": "LoRa region {{lora}} differs from country setting {{country}}"
+      "country": "LoRa region {{lora}} differs from country setting {{country}}",
+      "airborne": "Airborne restriction: check the {{code}} plan before flying",
+      "elrs": "ELRS module {{module}} is {{domain}}, region {{code}} expects {{expected}}"
     },
+    "regionUnsetBanner": "No region is set, so the radio will not transmit.",
+    "openCountry": "Open country setting",
     "regionPicker": "LoRa region",
     "followCountry": "Follow country setting ({{country}})",
     "followShort": "country setting",

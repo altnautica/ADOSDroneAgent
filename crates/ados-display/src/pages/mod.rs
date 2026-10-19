@@ -46,6 +46,7 @@ pub mod plugin;
 pub mod power;
 pub mod radio_link;
 pub mod radios;
+pub mod reading;
 pub mod sensing_ctx;
 pub mod sensors;
 pub mod settings;
@@ -521,12 +522,12 @@ pub struct PageContext {
     pub device: DeviceCtx,
     pub diagnostics: DiagnosticsCtx,
     pub sensing: sensing_ctx::SensingCtx,
-    /// `GET /api/v1/gnss`; `None` when no GNSS service is fitted.
-    pub gnss: Option<gs_ctx::GnssCtx>,
-    /// `GET /api/v1/lora` + beacons; `None` when no LoRa service is fitted.
-    pub lora: Option<gs_ctx::LoraCtx>,
-    /// `GET /api/v1/radio/adapters`; `None` when no receive plane reports.
-    pub radio_adapters: Option<gs_ctx::RadioAdaptersCtx>,
+    /// `GET /api/v1/gnss`; absent when no GNSS service is fitted.
+    pub gnss: reading::Reading<gs_ctx::GnssCtx>,
+    /// `GET /api/v1/lora` + beacons; absent when no LoRa service is fitted.
+    pub lora: reading::Reading<gs_ctx::LoraCtx>,
+    /// `GET /api/v1/radio/adapters`; absent when no receive plane reports.
+    pub radio_adapters: reading::Reading<gs_ctx::RadioAdaptersCtx>,
 }
 
 /// The hosted Mission Control the agent advertises when the operator has not

@@ -1,9 +1,9 @@
 //! Sensing context for the cameras, sensors and storage pages, plus the small
 //! row painters those three pages share.
 //!
-//! Every block is optional: `None` means the route failed, is absent, or the
-//! backing service reported `present: false`. Pages render `--` or
-//! "not present" for a `None` block or field.
+//! Every block is a [`Reading`]: absent (not fitted or `present: false`),
+//! unreachable (the read failed) or present. Pages render "not fitted" or
+//! "unreachable" for a missing block and `--` for a missing field.
 
 use embedded_graphics::pixelcolor::Rgb888;
 
@@ -11,6 +11,7 @@ use crate::graphics::fonts::{FontFace, LoadedFont};
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::{fill_circle, fill_rect, line, text, Canvas};
 use crate::graphics::thresholds::SENSOR_RATE_PCT;
+use crate::pages::reading::Reading;
 use crate::pages::{PageContext, CONTENT_H, CONTENT_Y, PANEL_W};
 use crate::widgets::draw_top_bar;
 
@@ -132,13 +133,15 @@ pub struct CaptureInfo {
     pub exposure: Option<ExposureInfo>,
 }
 
-/// Everything the sensing pages read.
+/// Everything the sensing pages read. Each block is a [`Reading`]: absent
+/// (not fitted, or not read on this profile), unreachable (the read failed)
+/// or present.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SensingCtx {
-    pub sensors: Option<SensorsInfo>,
-    pub clock: Option<ClockInfo>,
-    pub storage: Option<StorageInfo>,
-    pub capture: Option<CaptureInfo>,
+    pub sensors: Reading<SensorsInfo>,
+    pub clock: Reading<ClockInfo>,
+    pub storage: Reading<StorageInfo>,
+    pub capture: Reading<CaptureInfo>,
 }
 
 // ── formatting ──────────────────────────────────────────────────────
@@ -254,15 +257,14 @@ pub fn paint_status(canvas: &mut Canvas, i: i32, x: i32, value: &str, color: Rgb
     paint_value(canvas, i, x + 14, value, color);
 }
 
-/// Paint a centred "not present" body.
-pub fn paint_absent(canvas: &mut Canvas, palette: &Palette, what: &str) {
+/// Paint a centred one-line notice (absent or unreachable) as the body.
+pub fn paint_absent(canvas: &mut Canvas, palette: &Palette, msg: &str) {
     let f = LoadedFont::new(FontFace::SansRegular, 14);
-    let msg = format!("{what} not present");
-    let w = f.text_advance(&msg) as i32;
+    let w = f.text_advance(msg) as i32;
     text(
         canvas,
         &f,
-        &msg,
+        msg,
         (PAGE_W - w) / 2,
         OY + CONTENT_H as i32 / 2,
         palette.text_tertiary,
@@ -278,7 +280,7 @@ pub(crate) mod test_util {
     /// A context with every sensing block filled, imu0 running at `imu_hz`.
     pub fn full_ctx(imu_hz: f64) -> PageContext {
         let sensing = SensingCtx {
-            sensors: Some(SensorsInfo {
+            sensors: Reading::Present(SensorsInfo {
                 hub: Some(HubInfo {
                     connected: true,
                     transport: Some("serial:/dev/ttyACM0".into()),
@@ -309,12 +311,12 @@ pub(crate) mod test_util {
                     sats: Some(14),
                 }),
             }),
-            clock: Some(ClockInfo {
+            clock: Reading::Present(ClockInfo {
                 timebase: Some("hub_freerun".into()),
                 locked: true,
                 sigma_ns: Some(420000.0),
             }),
-            storage: Some(StorageInfo {
+            storage: Reading::Present(StorageInfo {
                 capture_root: Some("/mnt/nvme0/ados/capture".into()),
                 free_bytes: Some(8.0e11),
                 total_bytes: Some(1.0e12),
@@ -325,7 +327,7 @@ pub(crate) mod test_util {
                 state: Some("ok".into()),
                 write_mbps: Some(1450.2),
             }),
-            capture: Some(CaptureInfo {
+            capture: Reading::Present(CaptureInfo {
                 state: Some("recording".into()),
                 per_camera: vec![CaptureCamera {
                     id: "cam_fl".into(),
@@ -350,7 +352,16 @@ pub(crate) mod test_util {
 
     /// Render with full and empty ctx and check the bottom band is background.
     pub fn assert_renders_and_leaves_tab_band(page: &dyn Page) {
-        for ctx in [full_ctx(1000.0), PageContext::default()] {
+        let unreachable = PageContext {
+            sensing: SensingCtx {
+                sensors: Reading::Unreachable,
+                clock: Reading::Unreachable,
+                storage: Reading::Unreachable,
+                capture: Reading::Unreachable,
+            },
+            ..PageContext::default()
+        };
+        for ctx in [full_ctx(1000.0), PageContext::default(), unreachable] {
             let c = page.render(&ctx, &DARK);
             assert_eq!((c.width(), c.height()), (PANEL_W, PANEL_H));
             for y in (PANEL_H - BOTTOM_BAR_H) as i32..PANEL_H as i32 {

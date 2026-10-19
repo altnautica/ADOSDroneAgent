@@ -1,9 +1,10 @@
 //! Ground-station service contexts: GNSS, LoRa and the WFB receive adapters.
 //!
-//! Each is `None` in [`PageContext`](crate::pages::PageContext) when its agent
-//! route answers `present: false` (the service is not fitted) or does not
-//! answer at all, so a page or OLED screen keyed on one is shown only when the
-//! service exists.
+//! Each is a [`Reading`](crate::pages::reading::Reading) in
+//! [`PageContext`](crate::pages::PageContext): absent when its agent route
+//! answers `present: false` (the service is not fitted), unreachable when the
+//! read failed, so a page or OLED screen keyed on one is shown only when the
+//! service exists and a transient failure is not reported as missing hardware.
 //!
 //! The LoRa governor summary (region code, highest duty use, short TX state)
 //! is derived here once, by pure functions the TFT page and the OLED screen

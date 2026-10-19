@@ -1,5 +1,5 @@
 //! The per-profile panel row (visor capture, ground-station radios/GNSS/LoRa,
-//! drone sensor rates), drawn from [`Dashboard::profile_row`].
+//! drone sensor rates and LoRa), drawn from [`Dashboard::profile_row`].
 
 use super::*;
 use crate::model::Level;

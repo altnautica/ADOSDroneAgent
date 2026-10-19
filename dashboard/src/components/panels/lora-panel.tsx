@@ -1,16 +1,20 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { TFunction } from "i18next";
 import { RadioTower } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useResource } from "@/hooks/use-resource";
+import { resourceQueryOptions, useResource } from "@/hooks/use-resource";
+import { useNodeProfile } from "@/hooks/use-node-profile";
+import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
 import {
+  CRSF_STATUS_PATH,
   LORA_BEACONS_PATH,
   LORA_PATH,
   LORA_REGIONS_PATH,
@@ -19,7 +23,9 @@ import {
   formatCountdown,
   loraChips,
   loraTxState,
+  meterTone,
   putLoraRegion,
+  type CrsfModule,
   type LoraBeacon,
   type LoraChip,
   type LoraRegionRow,
@@ -31,6 +37,8 @@ import { toast, toastFromError } from "@/lib/toast";
 import { ApiError } from "@/shared/api-fetch";
 
 const FOLLOW_COUNTRY = "";
+
+const METER_FILL = { neutral: "bg-primary", warn: "bg-warn", error: "bg-destructive" } as const;
 
 function TxLine({ status, elapsedMs, t }: { status: LoraStatus; elapsedMs: number; t: TFunction }) {
   const tx = loraTxState(status);
@@ -68,15 +76,14 @@ function TxLine({ status, elapsedMs, t }: { status: LoraStatus; elapsedMs: numbe
 function RuleRow({ rule, t }: { rule: LoraRule; t: TFunction }) {
   const label = "w-28 shrink-0 text-xs text-muted-foreground";
   if (rule.kind === "duty_cycle") {
-    const pct = Math.round(dutyFraction(rule) * 100);
+    const fraction = dutyFraction(rule);
+    const pct = Math.round(fraction * 100);
+    const tone = rule.exhausted ? "error" : meterTone(fraction);
     return (
       <div className="flex items-center gap-3">
         <span className={label}>{t("lora.rule.duty", { band: rule.sub_band })}</span>
         <div className="h-2 flex-1 rounded bg-muted" role="meter" aria-valuenow={pct}>
-          <div
-            className={rule.exhausted ? "h-2 rounded bg-destructive" : "h-2 rounded bg-primary"}
-            style={{ width: `${pct}%` }}
-          />
+          <div className={`h-2 rounded ${METER_FILL[tone]}`} data-tone={tone} style={{ width: `${pct}%` }} />
         </div>
         <span className="font-mono text-xs">
           {t("lora.rule.dutyValue", {
@@ -104,6 +111,10 @@ function RuleRow({ rule, t }: { rule: LoraRule; t: TFunction }) {
 function chipText(chip: LoraChip, t: TFunction): string {
   if (chip.kind === "module_band") return t("lora.chip.moduleBand", { module: chip.module, plan: chip.plan });
   if (chip.kind === "meshtastic") return t("lora.chip.meshtastic", { node: chip.node, expected: chip.expected });
+  if (chip.kind === "airborne") return t("lora.chip.airborne", { code: chip.code });
+  if (chip.kind === "elrs") {
+    return t("lora.chip.elrs", { module: chip.module, domain: chip.domain, code: chip.code, expected: chip.expected });
+  }
   return t("lora.chip.country", { lora: chip.lora, country: chip.country });
 }
 
@@ -115,12 +126,26 @@ export interface LoraViewProps {
   nowMs: number;
   /** When `status` was fetched; the countdowns run down from it. */
   fetchedAtMs: number;
+  /** RC modules reported by the CRSF lane; empty where none runs. */
+  modules?: readonly CrsfModule[];
+  /** The vehicle reports armed: region changes are locked. */
+  armed?: boolean;
   onApplyRegion?: (region: string | null) => Promise<void>;
 }
 
 /** The compact `/lora` form: region line, TX line, one meter per governor
  *  rule, refusals, region picker, beacons and mismatch chips. */
-export function LoraView({ status, regions, beacons, country, nowMs, fetchedAtMs, onApplyRegion }: LoraViewProps) {
+export function LoraView({
+  status,
+  regions,
+  beacons,
+  country,
+  nowMs,
+  fetchedAtMs,
+  modules = [],
+  armed = false,
+  onApplyRegion,
+}: LoraViewProps) {
   const { t } = useTranslation();
   const current = status.region?.code ?? FOLLOW_COUNTRY;
   const [choice, setChoice] = useState(current);
@@ -132,7 +157,8 @@ export function LoraView({ status, regions, beacons, country, nowMs, fetchedAtMs
   }
   const elapsedMs = Math.max(0, nowMs - fetchedAtMs);
   const refused = status.tx?.refused_by_rule ?? {};
-  const chips = loraChips(status, country);
+  const row = regions.find((r) => r.code === status.region?.code) ?? null;
+  const chips = loraChips(status, country, row, modules);
 
   return (
     <div className="space-y-3 text-sm">
@@ -148,8 +174,16 @@ export function LoraView({ status, regions, beacons, country, nowMs, fetchedAtMs
           <span className="font-mono text-xs">{t("lora.channel", { freq: status.channel.freq_mhz.toFixed(3) })}</span>
         )}
       </div>
-      {chips.map((c) => (
-        <Badge key={c.kind} variant="warn" className="mr-2">
+      {!status.region && (
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-warn">{t("lora.regionUnsetBanner")}</span>
+          <Link to="/settings/region" className="text-primary underline">
+            {t("lora.openCountry")}
+          </Link>
+        </div>
+      )}
+      {chips.map((c, i) => (
+        <Badge key={`${c.kind}-${i}`} variant="warn" className="mr-2">
           {chipText(c, t)}
         </Badge>
       ))}
@@ -188,10 +222,15 @@ export function LoraView({ status, regions, beacons, country, nowMs, fetchedAtMs
               </option>
             ))}
           </select>
-          <Button size="sm" variant="outline" disabled={choice === current} onClick={() => setConfirmOpen(true)}>
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={choice === current || armed}
+            onClick={() => setConfirmOpen(true)}
+          >
             {t("lora.applyRegion")}
           </Button>
-          <span className="text-xs text-muted-foreground">{t("lora.adminNote")}</span>
+          <span className="text-xs text-muted-foreground">{armed ? t("lora.armedLocked") : t("lora.adminNote")}</span>
           <ConfirmDialog
             open={confirmOpen}
             onOpenChange={setConfirmOpen}
@@ -232,6 +271,14 @@ export function LoraPanel() {
   const regions = useResource<{ regions: LoraRegionRow[] }>("lora-regions", LORA_REGIONS_PATH);
   const beacons = useResource<{ beacons: LoraBeacon[] }>("lora-beacons", LORA_BEACONS_PATH, 5_000);
   const status = useStatus();
+  const snapshot = useSnapshot();
+  const profile = useNodeProfile();
+  // The RC lane's modules exist only on a ground station; a drone has no route.
+  const crsf = useQuery({
+    ...resourceQueryOptions<{ modules?: CrsfModule[] }>("crsf", CRSF_STATUS_PATH, 5_000),
+    enabled: profile === "ground_station",
+    retry: false,
+  });
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 1_000);
@@ -264,6 +311,8 @@ export function LoraPanel() {
             regions={regions.data?.regions ?? []}
             beacons={beacons.data?.beacons ?? []}
             country={regionFromStatus(status.data?.regulatory)}
+            modules={crsf.data?.modules ?? []}
+            armed={snapshot.data?.fc?.armed === true}
             nowMs={nowMs}
             fetchedAtMs={lora.dataUpdatedAt}
             onApplyRegion={applyRegion}

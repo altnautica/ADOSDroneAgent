@@ -704,6 +704,7 @@ mod tests {
         // The daemon's button reader publishes a press onto the bus.
         buttons.publish(crate::eventbus::ButtonBusEvent {
             button: 5,
+            label: "B1".into(),
             kind: "short",
             action: Some("cycle_screen".into()),
             timestamp_ms: 1500,

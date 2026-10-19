@@ -97,17 +97,17 @@ cameras:
       overlay_ref: "rock-5b-plus-cam1-radxa-camera-4k"
 
 # Header I2C. Pins 3/5 carry I2C7_M3 [hwif], but [dts] binds i2c7 to the
-# on-board ES8316 audio codec, so the header bus the panel and the gauge share
-# is I2C8_M4: SDA pin 7 (GPIO3_C3), SCL pin 32 (GPIO3_C2) [brief] §7.1.1,
-# enabled by overlay rk3588-i2c8-m4 ("On Radxa ROCK 5B+ this is SDA pin 7 and
-# SCL pin 32") [overlays]. Pins 13/15 (I2C3_M1) are not used: i2c3 is the CAM0
-# sensor bus.
+# on-board ES8316 audio codec, so the header bus a panel or a rig's battery
+# gauge uses is I2C8_M4: SDA pin 7 (GPIO3_C3), SCL pin 32 (GPIO3_C2)
+# [brief] §7.1.1, enabled by overlay rk3588-i2c8-m4 ("On Radxa ROCK 5B+ this
+# is SDA pin 7 and SCL pin 32") [overlays]. Pins 13/15 (I2C3_M1) are not used:
+# i2c3 is the CAM0 sensor bus.
 buses:
   i2c:
     - id: i2c8
       path: /dev/i2c-8
       overlay: rk3588-i2c8-m4
-      notes: "SDA pin 7, SCL pin 32; panel and INA226 gauge"
+      notes: "SDA pin 7, SCL pin 32; panel and a rig's battery gauge"
   uart:
     - id: uart7
       path: /dev/ttyS7
@@ -135,18 +135,12 @@ gnss:
 sensor_hub:
   usb_vid_pid: "1209:ad05"
 
-# INA226 on the header I2C8 bus at its A1=A0=GND address 0x40 (TI INA226
-# datasheet, "Serial Bus Address": https://www.ti.com/lit/ds/symlink/ina226.pdf).
-# shunt_ohm/max_current_a describe the common INA226 breakout's on-board R100
-# (0.1 ohm) shunt, 81.92 mV full scale = 0.8192 A; a gauge on a larger shunt
-# needs these two values set to its shunt. A board without the chip resolves
-# the gauge as absent at bring-up (manufacturer-id check).
-battery_gauge:
-  type: ina226
-  i2c_bus: 8
-  addr: 64            # 0x40
-  shunt_ohm: 0.1
-  max_current_a: 0.8
+# No battery gauge is declared here: its shunt resistor and full-scale current
+# belong to the rig's power wiring, not to the board, so the gauge is bound per
+# rig in the agent config (`battery.gauge`, shunt_ohm and max_current_a
+# required). An INA226 on this board sits on the header bus above, /dev/i2c-8;
+# 0x40 is its A1=A0=GND address (TI INA226 datasheet, "Serial Bus Address":
+# https://www.ti.com/lit/ds/symlink/ina226.pdf).
 
 # Flight-controller link hint: USB-ACM only (see uart_paths above).
 flight_controller:
@@ -156,7 +150,27 @@ flight_controller:
       baud_candidates: [921600, 115200, 57600]
       priority: 1
 
-# Panel buttons are not declared: the button reader opens /dev/gpiochip0 line
-# offsets, and the header's free GPIOs sit on banks 1, 3 and 4 [hwif]. The
-# only bank-0 lines on the header are GPIO0_A0 (pin 37) and the debug console
-# pins 8/10 (GPIO0_B5/B6, UART2_M0).
+# Panel buttons, by Linux GPIO number ([hwif] "GPIO number" column): the reader
+# opens /dev/gpiochip<n / 32> line n % 32. Header pins 29/31/33/35, each a plain
+# GPIO with no function bound in this file, with ground on pins 30/34/39.
+# Wire each button from its pin to ground (active-low, pulled up).
+#   up     pin 29  GPIO1_D7  63
+#   down   pin 31  GPIO1_B7  47
+#   select pin 33  GPIO3_A7  103
+#   back   pin 35  GPIO3_B6  110
+buttons: {up: 63, down: 47, select: 103, back: 110}
+
+# Lines bound to something other than a button; the loader rejects a button on
+# any of them (the GNSS PPS line is added from `gnss.pps_gpio`). [hwif]
+reserved_gpio:
+  - {gpio: 13, header_pin: 8, use: "debug console UART2_M0 TX (GPIO0_B5)"}
+  - {gpio: 14, header_pin: 10, use: "debug console UART2_M0 RX (GPIO0_B6)"}
+  - {gpio: 115, header_pin: 7, use: "I2C8_M4 SDA (GPIO3_C3)"}
+  - {gpio: 114, header_pin: 32, use: "I2C8_M4 SCL (GPIO3_C2)"}
+  - {gpio: 113, header_pin: 11, use: "GNSS UART7_M1 RX (GPIO3_C1)"}
+  - {gpio: 112, header_pin: 15, use: "GNSS UART7_M1 TX (GPIO3_C0)"}
+  - {gpio: 42, header_pin: 19, use: "SPI0_M2 MOSI, SPI panel (GPIO1_B2)"}
+  - {gpio: 41, header_pin: 21, use: "SPI0_M2 MISO, SPI panel (GPIO1_B1)"}
+  - {gpio: 43, header_pin: 23, use: "SPI0_M2 CLK, SPI panel (GPIO1_B3)"}
+  - {gpio: 44, header_pin: 24, use: "SPI0_M2 CS0, SPI panel (GPIO1_B4)"}
+  - {gpio: 45, header_pin: 26, use: "SPI0_M2 CS1, SPI panel (GPIO1_B5)"}

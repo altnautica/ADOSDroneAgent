@@ -35,15 +35,21 @@ pub const DELIVER: &str = "button.deliver";
 
 /// One decoded front-panel press.
 ///
-/// `pin` is the raw BCM line rather than a friendly label so the identity stays
-/// stable if the label table is ever re-spelled; `action` is the host's live
-/// mapping for that (pin, kind) pair and is `None` for an unmapped button — a
-/// subscriber sees the press either way and decides for itself whether an
-/// unmapped button means anything.
+/// `pin` is the board GPIO line (BCM on a Raspberry Pi, the Linux GPIO number
+/// elsewhere); `label` is the front-panel button (`B1`..`B4`, the key the button
+/// mapping uses), which stays the same across boards, so a subscriber that
+/// means "the first panel button" matches on the label. `action` is the host's
+/// live mapping for that (button, kind) pair and is `None` for an unmapped
+/// button — a subscriber sees the press either way and decides for itself
+/// whether an unmapped button means anything.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ButtonPress {
-    /// BCM pin number of the button.
+    /// Board GPIO line of the button.
     pub pin: u32,
+    /// Front-panel button label (`B1`..`B4`, `BX<pin>` for an extra button);
+    /// `None` from a host that predates the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     /// `"short"` or `"long"`, decoded by the host on the release edge.
     pub kind: String,
     /// Resolved action name from the live mapping; `None` when unmapped.
@@ -73,6 +79,7 @@ mod tests {
     fn an_unmapped_button_round_trips_without_an_action_field() {
         let press = ButtonPress {
             pin: 5,
+            label: None,
             kind: "short".to_string(),
             action: None,
             timestamp_ms: 12,
@@ -89,6 +96,7 @@ mod tests {
     fn a_mapped_button_round_trips_with_its_action() {
         let press = ButtonPress {
             pin: 13,
+            label: Some("B3".to_string()),
             kind: "long".to_string(),
             action: Some("pair_drone".to_string()),
             timestamp_ms: 4242,

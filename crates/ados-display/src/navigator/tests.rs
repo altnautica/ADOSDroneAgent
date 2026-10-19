@@ -5,7 +5,11 @@ use ados_hid::buttons::PressKind;
 use ados_hid::touch::{TouchGesture, TouchMove};
 
 fn nav(dir: &std::path::Path) -> PageNavigator {
-    PageNavigator::with_state_path(all_pages(), &GS_TAB_IDS, dir.join("lcd-state.json"))
+    PageNavigator::with_state_path(
+        all_pages(&crate::button_source::ButtonLayout::default()),
+        &GS_TAB_IDS,
+        dir.join("lcd-state.json"),
+    )
 }
 
 fn tap(x: i32, y: i32) -> TouchGesture {
@@ -90,7 +94,10 @@ fn persisted_state_lists_every_registered_route() {
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    let registered: Vec<&str> = all_pages().iter().map(|p| p.id()).collect();
+    let registered: Vec<&str> = all_pages(&crate::button_source::ButtonLayout::default())
+        .iter()
+        .map(|p| p.id())
+        .collect();
     assert_eq!(routes, registered);
     assert!(routes.contains(&"plugin") && routes.contains(&"channel_hops"));
     // The restored page is kept; the modal it no longer shows is not.

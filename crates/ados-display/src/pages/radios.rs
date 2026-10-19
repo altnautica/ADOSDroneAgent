@@ -39,9 +39,15 @@ impl Page for RadiosPage {
     fn render(&self, ctx: &PageContext, palette: &Palette) -> Canvas {
         let mut canvas = blank_panel(palette);
         draw_detail_header(&mut canvas, palette, "Radios");
-        match ctx.radio_adapters.as_ref() {
+        match ctx.radio_adapters.present() {
             Some(r) => draw_body(&mut canvas, palette, r),
-            None => draw_absent(&mut canvas, palette, "No radio receive plane"),
+            None => {
+                let msg = ctx
+                    .radio_adapters
+                    .missing_text("radio receive plane")
+                    .unwrap_or_default();
+                draw_absent(&mut canvas, palette, &msg);
+            }
         }
         canvas
     }
@@ -154,7 +160,7 @@ mod tests {
 
     fn ctx(tx: bool) -> PageContext {
         PageContext {
-            radio_adapters: Some(RadioAdaptersCtx {
+            radio_adapters: crate::pages::reading::Reading::Present(RadioAdaptersCtx {
                 adapters: vec![
                     adapter("wlan1", AdapterRole::Rxtx, tx),
                     adapter("wlan2", AdapterRole::Rx, false),
