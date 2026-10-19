@@ -135,6 +135,12 @@ const EXEMPT: &[(&str, &str)] = &[
          file-granular, so the file needs naming even though the hazard is \
          gone — drop the entry if those sync legs move to the async seam",
     ),
+    (
+        "ados-config/src/capture_storage/root_access_tests.rs",
+        "a `#[cfg(test)]` module loaded by `#[path]`: its `setpriv` run \
+         proves group access as an unprivileged user inside the test only and \
+         is never compiled into a route handler",
+    ),
 ];
 
 /// The workspace directory (`crates/`), the root every scan path is relative to.
