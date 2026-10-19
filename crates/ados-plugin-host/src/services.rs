@@ -10,6 +10,8 @@
 //! `ados.plugins.ready_check`), so a plugin behaves the same whether the LAN
 //! path or the cloud path enabled it.
 
+mod argv;
+
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::time::Duration;
@@ -29,6 +31,8 @@ use crate::systemd::{
     resolve_program, runner_context, sanitize_unit_name, service_log_path_for, PLUGIN_SLICE_NAME,
     PLUGIN_UNIT_PREFIX,
 };
+
+use argv::split_argv;
 
 /// How long an HTTP readiness probe may take.
 const HTTP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -325,67 +329,6 @@ pub fn parse_ready_check(value: &str) -> Result<ReadyCheck, String> {
         return Err("ready_check must not be empty".to_string());
     }
     Ok(ReadyCheck::Command(argv))
-}
-
-/// POSIX shell word splitting (quotes and backslash escapes, no expansion).
-fn split_argv(text: &str) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            c if c.is_whitespace() => {
-                if in_word {
-                    out.push(std::mem::take(&mut word));
-                    in_word = false;
-                }
-            }
-            '\'' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('\'') => break,
-                        Some(c) => word.push(c),
-                        None => return Err("unbalanced single quote".to_string()),
-                    }
-                }
-            }
-            '"' => {
-                in_word = true;
-                loop {
-                    match chars.next() {
-                        Some('"') => break,
-                        Some('\\') => match chars.next() {
-                            Some(c @ ('"' | '\\' | '$' | '`')) => word.push(c),
-                            Some(c) => {
-                                word.push('\\');
-                                word.push(c);
-                            }
-                            None => return Err("unbalanced double quote".to_string()),
-                        },
-                        Some(c) => word.push(c),
-                        None => return Err("unbalanced double quote".to_string()),
-                    }
-                }
-            }
-            '\\' => {
-                in_word = true;
-                match chars.next() {
-                    Some(c) => word.push(c),
-                    None => return Err("trailing backslash".to_string()),
-                }
-            }
-            c => {
-                in_word = true;
-                word.push(c);
-            }
-        }
-    }
-    if in_word {
-        out.push(word);
-    }
-    Ok(out)
 }
 
 /// Split a plugin-authored `command` into its argv, refusing a control

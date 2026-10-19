@@ -63,65 +63,11 @@ use crate::frame;
 /// declassifies itself. It is consumed by the reader and never forwarded on.
 pub const IPC_DECLARE_OFF_BOX_SOURCE: &[u8] = b"\x00ados-ipc/source=off-box";
 
-/// Control-frame prefix a writer uses to declare that it is an AUTONOMOUS
-/// INJECTOR: a producer of commands generated on the node rather than by a
-/// human operator (the plugin host driving guided setpoints, the MSP relay).
-/// The rest of the payload is the writer's `client_id`, optionally followed by
-/// `;ticket=<ticket>` — the attestation the FC-write path verifies against the
-/// pairing key so a spoofed `client_id` cannot claim the injector lane.
-///
-/// Like [`IPC_DECLARE_OFF_BOX_SOURCE`] this is one-way and downward: declaring
-/// injector can only ever SUBJECT the writer to the PIC arbiter (an operator
-/// holding the manual-control claim refuses it), never grant it authority. A
-/// writer that does not declare is treated as the operator/human path and is
-/// NEVER gated — the load-bearing invariant. Sticky for the connection, never
-/// forwarded to the flight controller.
-pub const IPC_DECLARE_INJECTOR_PREFIX: &[u8] = b"\x00ados-ipc/injector=";
-
-/// A writer's declared autonomous-injector identity (see
-/// [`IPC_DECLARE_INJECTOR_PREFIX`]). Carried raw to the FC-write path, which
-/// verifies `ticket` against the pairing key before treating `client_id` as the
-/// attested injector; a `None` ticket is an unverified claim that can never win
-/// the lane away from a human holder.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InjectorClaim {
-    pub client_id: String,
-    pub ticket: Option<String>,
-}
-
-/// Build the [`IPC_DECLARE_INJECTOR_PREFIX`] control frame a writer sends to
-/// declare itself an autonomous injector. The inverse of
-/// [`parse_injector_declaration`], kept beside it so a producer's declaration
-/// and the router's parse cannot drift on the wire format. `ticket` is the
-/// pairing-key attestation for `client_id`; omit it on an unpaired node.
-pub fn encode_injector_declaration(client_id: &str, ticket: Option<&str>) -> Vec<u8> {
-    let mut out = IPC_DECLARE_INJECTOR_PREFIX.to_vec();
-    out.extend_from_slice(client_id.as_bytes());
-    if let Some(t) = ticket {
-        out.extend_from_slice(b";ticket=");
-        out.extend_from_slice(t.as_bytes());
-    }
-    out
-}
-
-/// Parse an [`IPC_DECLARE_INJECTOR_PREFIX`] control frame into an
-/// [`InjectorClaim`]. `None` when the payload is not an injector declaration or
-/// carries an empty client id (a declaration with no identity is not a claim).
-pub fn parse_injector_declaration(payload: &[u8]) -> Option<InjectorClaim> {
-    let body = payload.strip_prefix(IPC_DECLARE_INJECTOR_PREFIX)?;
-    let text = std::str::from_utf8(body).ok()?;
-    let (client_id, ticket) = match text.split_once(";ticket=") {
-        Some((id, tkt)) => (id, (!tkt.is_empty()).then(|| tkt.to_string())),
-        None => (text, None),
-    };
-    if client_id.is_empty() {
-        return None;
-    }
-    Some(InjectorClaim {
-        client_id: client_id.to_string(),
-        ticket,
-    })
-}
+mod injector;
+pub use injector::{
+    encode_injector_declaration, parse_injector_declaration, InjectorClaim,
+    IPC_DECLARE_INJECTOR_PREFIX,
+};
 
 /// Who wrote an inbound payload, as the accepting socket can tell.
 ///
@@ -606,12 +552,13 @@ impl Drop for IpcBroadcast {
 pub const OPERATOR_GROUP: &str = "ados-operator";
 
 /// The group that may write `/run/ados/capture` (the capture-active marker
-/// directory) and the capture root, which the supervisor's janitor and the
-/// installer keep at `2775 root:ados-capture`. A capture plugin joins it only
-/// while it holds `capture.storage.write`; it guards nothing else.
+/// directory, `2775 root:ados-capture`) and the capture root, which the
+/// supervisor's janitor and the installer keep at `3775 root:ados-capture`.
+/// A capture plugin joins it only while it holds `capture.storage.write`; it
+/// guards nothing else.
 pub const CAPTURE_GROUP: &str = "ados-capture";
 
-/// The reader group of the sensor bus (`/run/ados/sensors.sock`), bound with
+/// The reader group of the sensor bus (`/run/ados/sensing/sensors.sock`), bound with
 /// [`bind_reader_socket`]. A member may connect and subscribe; what it
 /// publishes is dropped. A plugin joins it only while it holds
 /// `sensor.stream.read`, which is how a sandboxed plugin reads the bus

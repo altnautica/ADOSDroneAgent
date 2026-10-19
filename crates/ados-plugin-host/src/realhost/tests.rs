@@ -1506,6 +1506,7 @@ async fn a_plugin_registers_only_a_model_file_delivered_to_it() {
 
 #[test]
 fn a_published_batch_is_bound_to_its_plugin() {
+    use super::host_services::vision_bind::bind_published_batch;
     use ados_protocol::framebus::{BoundingBox, Detection, DetectionBatch, LockState};
     let locked = Detection {
         bbox: Some(BoundingBox {
@@ -1539,7 +1540,7 @@ fn a_published_batch_is_bound_to_its_plugin() {
     // Without designation rights: posing as the engine's detector and as a
     // locked follow target are both undone.
     let mut plain = batch.clone();
-    super::host_services::bind_published_batch(&mut plain, "com.example.p", false);
+    bind_published_batch(&mut plain, "com.example.p", false);
     assert_eq!(plain.model_id, "com.example.p/det");
     assert_eq!(plain.detections[0].lock_state, None);
     assert_eq!(plain.detections[0].track_id, None);
@@ -1549,7 +1550,7 @@ fn a_published_batch_is_bound_to_its_plugin() {
     // still the plugin's, and an id it already namespaced is not doubled.
     let mut designating = batch.clone();
     designating.model_id = "com.example.p/det".into();
-    super::host_services::bind_published_batch(&mut designating, "com.example.p", true);
+    bind_published_batch(&mut designating, "com.example.p", true);
     assert_eq!(designating.model_id, "com.example.p/det");
     assert_eq!(designating.detections[0], locked);
 }

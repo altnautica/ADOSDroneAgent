@@ -19,10 +19,10 @@
 //! lifecycle, the stats tail, the churn watcher, and the state file are all
 //! owned here.
 
+mod fold;
 mod rx_ant;
 
-use std::collections::{BTreeSet, HashMap};
-use std::net::Ipv4Addr;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -35,6 +35,8 @@ use tokio::sync::Mutex;
 use crate::gs_config::GroundStationConfig;
 use crate::mesh_events;
 use crate::process_spawn::{GsWfbProcess, Stdout};
+
+use fold::{fold_aggregator_pkt, fold_relay_fragments};
 
 /// Per-relay liveness grace before a silent relay is aged out of the map.
 /// Mirrors the Python `_RELAY_GRACE_MS = 4000`.
@@ -248,37 +250,6 @@ pub fn parse_receiver_stats_line(line: &str) -> Option<AggregatorPkt> {
         fec_recovered: f[6].parse().ok()?,
         bytes_out: f[10].parse().ok()?,
     })
-}
-
-/// Fold one stats line into the published state: the fragment and FEC totals
-/// accumulate (the wire counts reset every interval), the output rate is this
-/// interval's (stats interval = 1 s).
-fn fold_aggregator_pkt(state: &mut ReceiverState, pkt: AggregatorPkt) {
-    state.fragments_after_dedup = state.fragments_after_dedup.saturating_add(pkt.unique);
-    state.fec_repaired = state.fec_repaired.saturating_add(pkt.fec_recovered);
-    state.output_kbps = pkt.bytes_out * 8 / 1000;
-}
-
-/// Fold one interval's per-source packet counts into the relay map. Each relay
-/// MAC is resolved to its mesh IPv4 through the neighbour table `arp`; a
-/// resolved relay adds this interval's count (zero when it forwarded nothing),
-/// an unresolved one keeps its previous value (`null` until first resolved).
-fn fold_relay_fragments(
-    state: &mut ReceiverState,
-    per_source: &HashMap<Ipv4Addr, u64>,
-    arp: &HashMap<Ipv4Addr, String>,
-) {
-    for relay in &mut state.relays {
-        let Some(ip) = arp
-            .iter()
-            .find(|(_, mac)| mac.eq_ignore_ascii_case(&relay.mac))
-            .map(|(ip, _)| ip)
-        else {
-            continue;
-        };
-        let added = per_source.get(ip).copied().unwrap_or(0) as i64;
-        relay.fragments = Some(relay.fragments.unwrap_or(0).saturating_add(added));
-    }
 }
 
 /// Upsert the relays seen this poll (by batman-neighbor MAC) into `state`, refreshing
@@ -634,6 +605,8 @@ async fn watch_aggregator(proc: &mut GsWfbProcess, lines_seen: &AtomicU64) -> &'
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn aggregate_args_with_local_nic() {
