@@ -104,7 +104,7 @@ pub fn apply_to_body(body: &str, profile: &str) -> Option<String> {
 
 /// Take the exclusive config lock, retrying [`LOCK_WAIT_ATTEMPTS`] times
 /// [`LOCK_RETRY`] apart. The lock releases when the returned file drops.
-fn acquire_lock(lock_path: &Path) -> Result<File, String> {
+pub(super) fn acquire_lock(lock_path: &Path) -> Result<File, String> {
     if let Some(parent) = lock_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }

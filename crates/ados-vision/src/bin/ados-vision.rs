@@ -4,8 +4,9 @@
 //! ground-station node or a disabled engine exits cleanly with no work), picks
 //! an inference backend for the board, then starts:
 //!
-//! - one capture task per configured (or HAL-discovered) camera, each opening
-//!   its frame source and publishing normalized frames into the engine's ring,
+//! - one capture task per engine camera (the owned `capture: true` entries of
+//!   `cameras[]` and the video pipeline's tap), each opening its frame source
+//!   and publishing normalized frames into the engine's ring,
 //! - the `/run/ados/vision.sock` request/response server the plugin host
 //!   connects to.
 //!
@@ -17,17 +18,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ados_protocol::framebus::mono_ns;
-use ados_protocol::framebus::{FrameFormat, ModelKind};
+use ados_protocol::framebus::ModelKind;
 use ados_vision::backend::{select_backend, BackendPrefs};
-use ados_vision::config::{CameraEntry, VisionConfig};
+use ados_vision::cameras::{camera_specs, needs_triggers, CameraSpec, SourceFactory};
+use ados_vision::config::VisionConfig;
 use ados_vision::daemon_support::{backoff, board_soc, init_tracing, sd_ready, wait_for_shutdown};
 use ados_vision::detection_bus;
 use ados_vision::engine::VisionEngine;
 use ados_vision::frame_bus;
 use ados_vision::perception_scheduler::PerceptionScheduler;
-use ados_vision::source::{
-    discover_cameras_default, AnySource, CaptureSource, FrameSource, TapSource,
-};
+use ados_vision::source::{AnySource, FrameSource, SimClock};
 use ados_vision::visionsock;
 use ados_vision::work_status::{self, InputLiveness, WorkStatus, INPUT_SILENCE_TIMEOUT};
 
@@ -52,9 +52,10 @@ async fn main() {
         tracing::info!("ados-vision idle: ground-station profile has no vision engine");
         return;
     }
-    // GATE B: the engine is opt-in.
-    if !config.enabled {
-        tracing::info!("ados-vision idle: vision is not enabled");
+    // GATE B: the engine is opt-in, except that it is the only owner of the
+    // `capture: true` cameras, so any such camera runs it.
+    if !config.should_run() {
+        tracing::info!("ados-vision idle: vision is not enabled and no camera is captured");
         return;
     }
 
@@ -184,16 +185,42 @@ async fn main() {
 
     let cancel = ados_protocol::shutdown::Shutdown::new();
 
-    // Resolve the camera set: an explicit config list wins; otherwise HAL
-    // discovery enumerates the engine cameras (each tapped by default).
-    let cameras = resolve_cameras(&config).await;
+    // The engine's cameras: the owned `capture: true` entries of `cameras[]`
+    // and, when the video pipeline taps its flight camera, that tap.
+    let cameras = camera_specs(&config);
     tracing::info!(count = cameras.len(), "vision cameras resolved");
 
     let mut tasks = Vec::new();
 
+    // Triggered cameras join their frames to the sensor bus trigger records;
+    // on a simulated node each frame's simulator time is a clock pair.
+    let mut factory = SourceFactory::default();
+    let trigger_task = needs_triggers(&cameras).then(|| {
+        factory
+            .triggers
+            .spawn_subscriber(ados_sensorbus::socket_path())
+    });
+    if config.simulation {
+        factory.sim = SimClock::publishing(ados_sensorbus::Publisher::spawn(
+            ados_sensorbus::socket_path(),
+            ados_sensorbus::Origin::Vision,
+        ));
+    }
+
     // The work counters the supervisor judges this engine on, published to the
     // status sidecar about once a second.
     let work = WorkStatus::new();
+    // Entries of `cameras[]` that do not validate are skipped (by every
+    // camera consumer) and listed with the reason.
+    for bad in &config.invalid_cameras {
+        work.set_source_error(
+            &bad.id,
+            Some(format!(
+                "invalid cameras[{}] entry: {}",
+                bad.index, bad.error
+            )),
+        );
+    }
     {
         let work = work.clone();
         let cancel = cancel.clone();
@@ -207,11 +234,12 @@ async fn main() {
     for cam in cameras {
         let engine = engine.clone();
         let cancel = cancel.clone();
-        let downscale = (config.downscale_width, config.downscale_height);
         let paces = paces.clone();
         let input = work.input();
+        let work = work.clone();
+        let factory = factory.clone();
         tasks.push(tokio::spawn(async move {
-            run_camera(engine, cam, downscale, paces, input, cancel).await;
+            run_camera(engine, cam, factory, paces, (input, work), cancel).await;
         }));
     }
 
@@ -261,57 +289,13 @@ async fn main() {
     wait_for_shutdown().await;
     tracing::info!("ados-vision stopping");
     cancel.trigger();
+    if let Some(t) = trigger_task {
+        t.abort();
+    }
     for t in tasks {
         let _ = t.await;
     }
     tracing::info!("ados-vision stopped");
-}
-
-/// A resolved camera the engine captures: its id, its source kind, and the
-/// source-specific endpoint (tap socket path or capture device).
-struct ResolvedCamera {
-    id: String,
-    kind: String,
-    tap_socket: String,
-    device_path: Option<String>,
-}
-
-/// Build the camera list. An explicit `vision.cameras` config list is used as
-/// given (tap paths defaulted per id); an empty list triggers HAL discovery,
-/// which yields one tap-source camera per discovered device.
-async fn resolve_cameras(config: &VisionConfig) -> Vec<ResolvedCamera> {
-    if !config.cameras.is_empty() {
-        return config
-            .cameras
-            .iter()
-            .map(|c: &CameraEntry| ResolvedCamera {
-                id: c.id.clone(),
-                kind: c.kind.clone(),
-                tap_socket: c
-                    .tap_socket
-                    .clone()
-                    .unwrap_or_else(|| config.tap_socket_for(&c.id)),
-                device_path: c.device_path.clone(),
-            })
-            .collect();
-    }
-    // No explicit list: discover and default each to a tap source. The video
-    // pipeline writes the tap; a camera the pipeline does not own simply never
-    // produces frames, which the capture task handles as a quiet retry.
-    discover_cameras_default()
-        .await
-        .into_iter()
-        .map(|d| ResolvedCamera {
-            id: d
-                .device_path
-                .replace('/', "-")
-                .trim_start_matches('-')
-                .to_string(),
-            kind: "tap".to_string(),
-            tap_socket: config.tap_socket_for(&d.device_path.replace('/', "-")),
-            device_path: Some(d.device_path),
-        })
-        .collect()
 }
 
 /// One engine-run detection model plus how the perception scheduler paces it.
@@ -324,9 +308,9 @@ struct ModelPace {
     priority: u8,
 }
 
-/// Run one camera's capture loop: open its source, pull frames, downscale-stamp
-/// is left to the source (which publishes its native format), and
-/// publish each into the engine ring. A source error backs off and re-opens.
+/// Run one camera's capture loop: open its source, pull frames (each in the
+/// source's native format), and publish each into the engine ring. A source
+/// error backs off and re-opens.
 ///
 /// Every frame taken off the source is counted on `input`, and the input is
 /// live from its first frame until the source fails, ends or delivers nothing
@@ -340,10 +324,10 @@ struct ModelPace {
 /// every free frame, exactly the old single-detector loop.
 async fn run_camera(
     engine: Arc<VisionEngine>,
-    cam: ResolvedCamera,
-    _downscale: (u32, u32),
+    cam: CameraSpec,
+    factory: SourceFactory,
     paces: Vec<ModelPace>,
-    mut input: InputLiveness,
+    (mut input, work): (InputLiveness, Arc<WorkStatus>),
     cancel: ados_protocol::shutdown::Shutdown,
 ) {
     let mut frame_id: u64 = 0;
@@ -356,32 +340,13 @@ async fn run_camera(
     // busy is skipped, so capture (and the video ring) never blocks on
     // inference. Decoupled, latest-frame-wins.
     let infer_sem = Arc::new(tokio::sync::Semaphore::new(1));
+    // The last source failure, surfaced in the status sidecar and logged at
+    // warn once per distinct reason, cleared by the next delivered frame.
+    let mut last_error: Option<String> = None;
     loop {
         // Build the source for this attempt.
-        let mut source: AnySource = match cam.kind.as_str() {
-            "capture" => {
-                let device = match &cam.device_path {
-                    Some(d) => d.clone(),
-                    None => {
-                        tracing::warn!(camera = %cam.id, "capture camera has no device_path; idling");
-                        if backoff(&cancel).await {
-                            return;
-                        }
-                        continue;
-                    }
-                };
-                // Capture at the downscale target so each frame is a fixed size.
-                AnySource::Capture(CaptureSource::new(
-                    cam.id.clone(),
-                    device,
-                    _downscale.0,
-                    _downscale.1,
-                    FrameFormat::Nv12,
-                ))
-            }
-            // Default and "tap": read the video pipeline tap socket.
-            _ => AnySource::Tap(TapSource::new(cam.id.clone(), cam.tap_socket.clone())),
-        };
+        let mut source: AnySource = factory.open(&cam);
+        let camera_id = cam.id().to_string();
         // Consumed frame buffers go back to this source's pool, so a steady
         // stream reuses a few buffers instead of allocating one per frame.
         let recycle = source.recycler();
@@ -392,7 +357,7 @@ async fn run_camera(
                         Ok(frame) => frame,
                         Err(_) => {
                             tracing::debug!(
-                                camera = %cam.id,
+                                camera = %camera_id,
                                 silent_s = INPUT_SILENCE_TIMEOUT.as_secs(),
                                 "frame source delivered nothing; reopening"
                             );
@@ -402,12 +367,18 @@ async fn run_camera(
                     match frame {
                         Ok(raw) => {
                             input.frame();
+                            if raw.dropped_corrupt > 0 {
+                                work.add_error_frames(u64::from(raw.dropped_corrupt));
+                            }
+                            if last_error.take().is_some() {
+                                work.set_source_error(&camera_id, None);
+                            }
                             frame_id = frame_id.wrapping_add(1);
                             let mut spare = Some(raw.data);
                             let data_ref = spare.as_deref().unwrap_or(&[]);
                             match engine
                                 .publish_frame(
-                                    &cam.id,
+                                    &camera_id,
                                     frame_id,
                                     raw.timing,
                                     raw.width,
@@ -452,7 +423,7 @@ async fn run_camera(
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::warn!(camera = %cam.id, error = %e, "publish_frame_failed");
+                                    tracing::warn!(camera = %camera_id, error = %e, "publish_frame_failed");
                                 }
                             }
                             if let Some(buf) = spare {
@@ -460,7 +431,12 @@ async fn run_camera(
                             }
                         }
                         Err(e) => {
-                            tracing::debug!(camera = %cam.id, error = %e, "frame source ended; reopening");
+                            let reason = format!("{e:#}");
+                            if last_error.as_deref() != Some(reason.as_str()) {
+                                tracing::warn!(camera = %camera_id, error = %reason, "frame_source_failed; reopening");
+                                work.set_source_error(&camera_id, Some(reason.clone()));
+                                last_error = Some(reason);
+                            }
                             break;
                         }
                     }

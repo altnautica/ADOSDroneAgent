@@ -1,8 +1,12 @@
 //! Vision engine configuration, read from the `vision:` block of
-//! `/etc/ados/config.yaml`. Every field is `#[serde(default)]` so a partial or
-//! malformed config never blocks startup — a missing `vision:` block yields a
-//! disabled engine, which is the safe default on a rig that does not run vision.
+//! `/etc/ados/config.yaml`, plus the cameras the engine owns (the top-level
+//! `cameras[]` entries marked `capture: true`), the video pipeline's frame tap
+//! (`video.vision`) and the simulation flag. Every field is `#[serde(default)]`
+//! so a partial or malformed config never blocks startup — a missing `vision:`
+//! block yields a disabled engine, which is the safe default on a rig that
+//! does not run vision.
 
+use ados_config::cameras::{camera_entries, CaptureCamera, InvalidCamera};
 use ados_protocol::framebus::{
     DetectionHead, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
 };
@@ -28,30 +32,6 @@ fn default_slot_count() -> u32 {
 /// resident RAM taken from the same pool the encoder and the model use.
 fn default_shm_budget_mb() -> u32 {
     (crate::ring::DEFAULT_RING_BUDGET_BYTES / (1024 * 1024)) as u32
-}
-
-/// One explicitly-configured camera. When the `cameras` list is empty the
-/// engine falls back to HAL discovery (`python -m ados.hal.camera --json`).
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct CameraEntry {
-    /// Stable camera id the engine labels frames and rings with.
-    pub id: String,
-    /// How the engine gets frames for this camera: "tap" reads the video
-    /// pipeline tap socket; "capture" spawns a direct V4L2/CSI capture.
-    #[serde(default = "default_camera_kind")]
-    pub kind: String,
-    /// For "tap": the unix-socket path the video pipeline writes raw frames to.
-    /// Defaults to `<socket_dir>/vision-tap-<id>.sock` when absent.
-    #[serde(default)]
-    pub tap_socket: Option<String>,
-    /// For "capture": the device path (e.g. `/dev/video0`). Absent ⇒ resolved
-    /// by HAL discovery.
-    #[serde(default)]
-    pub device_path: Option<String>,
-}
-
-fn default_camera_kind() -> String {
-    "tap".to_string()
 }
 
 fn default_detector_dim() -> u32 {
@@ -193,9 +173,23 @@ pub struct VisionConfig {
     /// sidecar socket paths under.
     #[serde(default = "default_socket_dir")]
     pub socket_dir: String,
-    /// Explicit camera list. Empty ⇒ HAL discovery picks the engine cameras.
-    #[serde(default)]
-    pub cameras: Vec<CameraEntry>,
+    /// The cameras this engine owns: the enabled `capture: true` entries of
+    /// the top-level `cameras[]` list, trigger channels resolved.
+    #[serde(skip)]
+    pub cameras: Vec<CaptureCamera>,
+    /// The video pipeline's raw frame tap of the primary stream
+    /// (`video.vision.sink`) when `video.vision.enabled`; the engine reads it
+    /// as camera `main`.
+    #[serde(skip)]
+    pub tap_sink: Option<String>,
+    /// `simulation.enabled`: frames carry simulator time, which the engine
+    /// reports to the clock.
+    #[serde(skip)]
+    pub simulation: bool,
+    /// `cameras[]` entries that do not validate: skipped by every consumer,
+    /// reported in the status sidecar's `source_errors`.
+    #[serde(skip)]
+    pub invalid_cameras: Vec<InvalidCamera>,
     /// Width frames are downscaled to before publishing.
     #[serde(default = "default_downscale_width")]
     pub downscale_width: u32,
@@ -255,6 +249,9 @@ impl Default for VisionConfig {
             profile: None,
             socket_dir: default_socket_dir(),
             cameras: Vec::new(),
+            tap_sink: None,
+            simulation: false,
+            invalid_cameras: Vec::new(),
             downscale_width: default_downscale_width(),
             downscale_height: default_downscale_height(),
             slot_count: default_slot_count(),
@@ -281,6 +278,20 @@ impl VisionConfig {
             agent: AgentSection,
             #[serde(default)]
             vision: Option<VisionSection>,
+            #[serde(default)]
+            video: VideoSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct VideoSection {
+            #[serde(default)]
+            vision: TapSection,
+        }
+        #[derive(Debug, Default, Deserialize)]
+        struct TapSection {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            sink: Option<String>,
         }
         #[derive(Debug, Default, Deserialize)]
         struct AgentSection {
@@ -295,8 +306,6 @@ impl VisionConfig {
             profile: Option<String>,
             #[serde(default = "default_socket_dir")]
             socket_dir: String,
-            #[serde(default)]
-            cameras: Vec<CameraEntry>,
             #[serde(default = "default_downscale_width")]
             downscale_width: u32,
             #[serde(default = "default_downscale_height")]
@@ -327,11 +336,31 @@ impl VisionConfig {
             return VisionConfig::default();
         };
         let raw: RawConfig = ados_config::yaml_or_default(&text, "vision");
+        let entries = camera_entries(&text);
+        let cameras: Vec<CaptureCamera> = entries
+            .valid
+            .into_iter()
+            .map(|(_, _, c)| c)
+            .filter(|c| c.capture && c.enabled)
+            .collect();
+        let invalid_cameras = entries.invalid;
+        let simulation = ados_config::simulation::read_gate_from(&text).enabled;
+        let tap_sink = raw.video.vision.enabled.then(|| {
+            raw.video
+                .vision
+                .sink
+                .clone()
+                .unwrap_or_else(|| "/run/ados/vision-tap-main.sock".to_string())
+        });
         let Some(v) = raw.vision else {
             // No `vision:` block ⇒ disabled, but still carry the agent profile
             // so the ground-station gate is consistent.
             return VisionConfig {
                 profile: raw.agent.profile,
+                cameras,
+                tap_sink,
+                simulation,
+                invalid_cameras,
                 ..VisionConfig::default()
             };
         };
@@ -340,7 +369,10 @@ impl VisionConfig {
             // `agent.profile` is canonical; a `vision.profile` override pins it.
             profile: v.profile.or(raw.agent.profile),
             socket_dir: v.socket_dir,
-            cameras: v.cameras,
+            cameras,
+            tap_sink,
+            simulation,
+            invalid_cameras,
             downscale_width: v.downscale_width,
             downscale_height: v.downscale_height,
             slot_count: v.slot_count,
@@ -424,13 +456,11 @@ impl VisionConfig {
         )
     }
 
-    /// The default tap socket path for a camera id.
-    pub fn tap_socket_for(&self, camera_id: &str) -> String {
-        format!(
-            "{}/vision-tap-{}.sock",
-            self.socket_dir.trim_end_matches('/'),
-            camera_id
-        )
+    /// Whether the engine has work: vision is enabled, or a camera is marked
+    /// `capture: true` (the engine is its only owner, whatever
+    /// `vision.enabled` says).
+    pub fn should_run(&self) -> bool {
+        self.enabled || !self.cameras.is_empty()
     }
 
     /// True when the resolved profile is the ground station (the engine exits).
@@ -443,248 +473,5 @@ impl VisionConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn write_tmp(yaml: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        std::fs::write(&path, yaml).unwrap();
-        (dir, path)
-    }
-
-    #[test]
-    fn missing_file_is_disabled_default() {
-        let c = VisionConfig::load_from(std::path::Path::new("/nonexistent/config.yaml"));
-        assert!(!c.enabled);
-        assert!(c.profile.is_none());
-        assert_eq!(c.downscale_width, 640);
-        assert_eq!(c.downscale_height, 480);
-        assert_eq!(c.slot_count, 4);
-        assert_eq!(c.backend, "auto");
-        assert_eq!(c.vision_socket_path(), "/run/ados/vision.sock");
-    }
-
-    #[test]
-    fn no_vision_block_keeps_profile_but_disabled() {
-        let yaml = "agent:\n  profile: drone\n";
-        let (_d, p) = write_tmp(yaml);
-        let c = VisionConfig::load_from(&p);
-        assert!(!c.enabled);
-        assert_eq!(c.profile.as_deref(), Some("drone"));
-        assert!(!c.is_ground_station());
-    }
-
-    #[test]
-    fn full_vision_block_loads() {
-        let yaml = "\
-agent:
-  profile: drone
-vision:
-  enabled: true
-  socket_dir: /tmp/run
-  downscale_width: 1280
-  downscale_height: 720
-  slot_count: 6
-  backend: rknn
-  cameras:
-    - id: uvc-0
-      kind: capture
-      device_path: /dev/video0
-    - id: fpv
-      kind: tap
-";
-        let (_d, p) = write_tmp(yaml);
-        let c = VisionConfig::load_from(&p);
-        assert!(c.enabled);
-        assert_eq!(c.profile.as_deref(), Some("drone"));
-        assert_eq!(c.socket_dir, "/tmp/run");
-        assert_eq!(c.downscale_width, 1280);
-        assert_eq!(c.slot_count, 6);
-        assert_eq!(c.backend, "rknn");
-        assert_eq!(c.cameras.len(), 2);
-        assert_eq!(c.cameras[0].id, "uvc-0");
-        assert_eq!(c.cameras[0].kind, "capture");
-        assert_eq!(c.cameras[0].device_path.as_deref(), Some("/dev/video0"));
-        assert_eq!(c.cameras[1].kind, "tap");
-        assert_eq!(c.vision_socket_path(), "/tmp/run/vision.sock");
-        assert_eq!(c.rknn_socket_path(), "/tmp/run/vision-rknn.sock");
-        assert_eq!(c.tap_socket_for("fpv"), "/tmp/run/vision-tap-fpv.sock");
-        assert_eq!(
-            c.detections_socket_path(),
-            "/tmp/run/vision-detections.sock"
-        );
-        assert_eq!(c.frames_socket_path(), "/tmp/run/vision-frames.sock");
-    }
-
-    #[test]
-    fn tracker_and_reid_default_off_and_parse() {
-        // A config with no tracker/reid keys leaves both off and the model ids
-        // unset — the engine publishes raw detections exactly as before.
-        let c = VisionConfig::default();
-        assert!(!c.tracker_enabled);
-        assert!(!c.reid_enabled);
-        assert!(c.reid_model_id.is_none());
-        assert!(c.designate_camera.is_none());
-
-        let yaml = "\
-vision:
-  enabled: true
-  tracker_enabled: true
-  reid_enabled: true
-  reid_model_id: com.example.reid-osnet
-  designate_camera: uvc-0
-";
-        let (_d, p) = write_tmp(yaml);
-        let c = VisionConfig::load_from(&p);
-        assert!(c.tracker_enabled);
-        assert!(c.reid_enabled);
-        assert_eq!(c.reid_model_id.as_deref(), Some("com.example.reid-osnet"));
-        assert_eq!(c.designate_camera.as_deref(), Some("uvc-0"));
-
-        // A vision block that omits the new keys keeps them at the safe default.
-        let yaml2 = "vision:\n  enabled: true\n";
-        let (_d2, p2) = write_tmp(yaml2);
-        let c2 = VisionConfig::load_from(&p2);
-        assert!(c2.enabled);
-        assert!(!c2.tracker_enabled);
-        assert!(!c2.reid_enabled);
-    }
-
-    #[test]
-    fn detector_absent_by_default_and_parses_to_metadata() {
-        use ados_protocol::framebus::{DetectionHead, FrameFormat, ModelExecution, ModelKind};
-
-        // No detector key ⇒ the engine drives no inference of its own.
-        assert!(VisionConfig::default().detector.is_none());
-
-        let yaml = "\
-vision:
-  enabled: true
-  detector:
-    model_id: com.example.coco-yolov8n
-    model_path: /var/ados/models/coco_yolov8n_640_int8.rknn
-    class_labels: [person, bicycle, car]
-";
-        let (_d, p) = write_tmp(yaml);
-        let c = VisionConfig::load_from(&p);
-        let det = c.detector.expect("detector parsed");
-        assert_eq!(det.model_id, "com.example.coco-yolov8n");
-        // input dims default to 640 when the YAML omits them.
-        assert_eq!(det.input_width, 640);
-        assert_eq!(det.input_height, 640);
-
-        let meta = det.to_metadata();
-        assert_eq!(meta.id, "com.example.coco-yolov8n");
-        assert!(matches!(meta.kind, ModelKind::Detection));
-        assert!(matches!(meta.execution, ModelExecution::EngineRun));
-        assert!(matches!(meta.input_format, FrameFormat::Rgb24));
-        assert!(matches!(meta.head, DetectionHead::Yolo8));
-        assert_eq!(meta.input_width, 640);
-        assert_eq!(
-            meta.model_path.as_deref(),
-            Some("/var/ados/models/coco_yolov8n_640_int8.rknn")
-        );
-        assert_eq!(meta.output_classes, vec!["person", "bicycle", "car"]);
-
-        // A vision block without a detector keeps it absent.
-        let (_d2, p2) = write_tmp("vision:\n  enabled: true\n");
-        assert!(VisionConfig::load_from(&p2).detector.is_none());
-    }
-
-    #[test]
-    fn reid_absent_by_default_and_parses_to_portrait_metadata() {
-        use ados_protocol::framebus::{FrameFormat, ModelExecution, ModelKind};
-
-        // No reid key ⇒ the tracker stays motion-only.
-        assert!(VisionConfig::default().reid.is_none());
-
-        let yaml = "\
-vision:
-  enabled: true
-  tracker_enabled: true
-  reid_enabled: true
-  reid_model_id: com.example.reid-osnet
-  reid:
-    model_id: com.example.reid-osnet
-    model_path: /var/ados/models/osnet_x0_5_reid.rknn
-";
-        let (_d, p) = write_tmp(yaml);
-        let c = VisionConfig::load_from(&p);
-        assert!(c.reid_enabled);
-        let reid = c.reid.expect("reid parsed");
-        assert_eq!(reid.model_id, "com.example.reid-osnet");
-        // OSNet input defaults: 128 wide x 256 tall (portrait, person-shaped).
-        assert_eq!(reid.input_width, 128);
-        assert_eq!(reid.input_height, 256);
-
-        let meta = reid.to_metadata();
-        assert_eq!(meta.id, "com.example.reid-osnet");
-        assert!(matches!(meta.kind, ModelKind::Tracking));
-        assert!(matches!(meta.execution, ModelExecution::EngineRun));
-        assert!(matches!(meta.input_format, FrameFormat::Rgb24));
-        assert_eq!(meta.input_width, 128);
-        assert_eq!(meta.input_height, 256);
-        assert!(meta.output_classes.is_empty(), "an embedder has no classes");
-        assert_eq!(
-            meta.model_path.as_deref(),
-            Some("/var/ados/models/osnet_x0_5_reid.rknn")
-        );
-    }
-
-    #[test]
-    fn ground_station_gate() {
-        let yaml = "agent:\n  profile: ground_station\nvision:\n  enabled: true\n";
-        let (_d, p) = write_tmp(yaml);
-        assert!(VisionConfig::load_from(&p).is_ground_station());
-        let yaml2 = "agent:\n  profile: ground-station\nvision:\n  enabled: true\n";
-        let (_d2, p2) = write_tmp(yaml2);
-        assert!(VisionConfig::load_from(&p2).is_ground_station());
-    }
-
-    #[test]
-    fn vision_profile_overrides_agent_profile() {
-        let yaml = "\
-agent:
-  profile: drone
-vision:
-  enabled: true
-  profile: ground_station
-";
-        let (_d, p) = write_tmp(yaml);
-        assert!(VisionConfig::load_from(&p).is_ground_station());
-    }
-
-    #[test]
-    fn malformed_yaml_falls_back_to_default() {
-        let yaml = "this: : not [valid yaml }}}";
-        let (_d, p) = write_tmp(yaml);
-        let c = VisionConfig::load_from(&p);
-        assert!(!c.enabled);
-    }
-
-    #[test]
-    fn effective_slot_count_clamps_to_the_header_range() {
-        // The default is in range and unchanged.
-        let c = VisionConfig::default();
-        assert_eq!(c.effective_slot_count(), default_slot_count());
-
-        // A misconfigured huge depth clamps to the header maximum instead of
-        // silently truncating the writer/reader slot math.
-        let huge = VisionConfig {
-            slot_count: 100_000,
-            ..VisionConfig::default()
-        };
-        assert_eq!(
-            huge.effective_slot_count(),
-            ados_protocol::framebus::MAX_SLOT_COUNT
-        );
-
-        // A too-small depth is raised to the two-slot floor.
-        let tiny = VisionConfig {
-            slot_count: 0,
-            ..VisionConfig::default()
-        };
-        assert_eq!(tiny.effective_slot_count(), 2);
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

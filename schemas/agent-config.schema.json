@@ -306,7 +306,7 @@
       "type": "object"
     },
     "CameraLeg": {
-      "description": "One entry of the optional ``video.cameras`` list \u2014 a single video leg the\nnode exposes as its own mediamtx path (and ``:8889/<id>/whep``). Present only\nwhen more than one stream is declared (a smart pod, a dual-camera rig); an\nabsent list falls back to the single ``video.camera`` block. The primary leg\nis always served at the fixed ``main`` path; secondary legs keep their ids.\n\n``id`` is the leg's immutable logical identity; ``source`` is its current\nlocator; ``match`` re-pins ``source`` \u2192 ``id`` across a device rename.\n``role`` is the transport plane (primary \u2192 the fixed ``main`` path / WFB /\ncloud); ``purpose`` is the consumer plane a plugin binds to. The management\nfields (``name`` / ``orientation`` / ``purpose`` / ``enabled`` / ``owner`` /\n``fov_deg`` / ``mount_pitch_deg`` / ``calibration`` / ``match``) are metadata\nsurfaced through the camera roster; the encode + radio pipeline reads none of\nthem, so an existing single-``role`` config resolves byte-identically.",
+      "description": "One entry of the top-level ``cameras`` list \u2014 one physical camera. The\nvideo pipeline serves each as its own mediamtx path (and\n``:8889/<id>/whep``); an absent list falls back to the single\n``video.camera`` block. The primary leg is always served at the fixed\n``main`` path; secondary legs keep their ids.\n\n``id`` is the leg's immutable logical identity; ``source`` is its current\nlocator; ``match`` re-pins ``source`` \u2192 ``id`` across a device rename.\n``role`` is the rig role (``front_left``, ``front_right``, ``left``,\n``right``, ``down``, ``up``, ``back``, ``nav``, ``texture``, ``primary``) or\na stream label; ``primary`` (else the first leg) is the transport primary\n(the fixed ``main`` path / WFB / cloud). ``purpose`` is the consumer plane a\nplugin binds to. The management fields (``name`` / ``orientation`` /\n``purpose`` / ``enabled`` / ``owner`` / ``fov_deg`` / ``mount_pitch_deg`` /\n``calibration`` / ``match``) are metadata surfaced through the camera\nroster; the encode + radio pipeline reads none of them.\n\n``capture: true`` hands the camera to the vision engine, the only process\nthat then opens ``source`` (a V4L2 device or an ``rtsp://`` URL); the video\npipeline encodes its frames off the frame bus instead. Mirrors the Rust\n``CameraLeg`` (video) and ``CaptureCamera`` (vision).",
       "properties": {
         "bitrate_kbps": {
           "default": 4000,
@@ -326,6 +326,11 @@
           ],
           "default": null,
           "title": "Calibration"
+        },
+        "capture": {
+          "default": false,
+          "title": "Capture",
+          "type": "boolean"
         },
         "codec": {
           "default": "h264",
@@ -348,6 +353,35 @@
           "title": "Encoder",
           "type": "string"
         },
+        "exposure_us": {
+          "anyOf": [
+            {
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Exposure Us"
+        },
+        "format": {
+          "default": "rgb24",
+          "enum": [
+            "gray8",
+            "gray16",
+            "rgb24",
+            "nv12",
+            "yuv420p",
+            "bayer",
+            "bayer_rggb8",
+            "bayer_rggb16"
+          ],
+          "title": "Format",
+          "type": "string"
+        },
         "fov_deg": {
           "anyOf": [
             {
@@ -366,6 +400,18 @@
           "minimum": 0,
           "title": "Fps",
           "type": "integer"
+        },
+        "gain": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gain"
         },
         "height": {
           "default": 720,
@@ -480,6 +526,30 @@
           "default": "csi",
           "title": "Source",
           "type": "string"
+        },
+        "trigger": {
+          "default": "none",
+          "enum": [
+            "none",
+            "hub",
+            "fc"
+          ],
+          "title": "Trigger",
+          "type": "string"
+        },
+        "trigger_channel": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trigger Channel"
         },
         "vflip": {
           "default": false,
@@ -3060,13 +3130,6 @@
             "width": 1280
           }
         },
-        "cameras": {
-          "items": {
-            "$ref": "#/$defs/CameraLeg"
-          },
-          "title": "Cameras",
-          "type": "array"
-        },
         "cloud_relay_url": {
           "default": "",
           "title": "Cloud Relay Url",
@@ -3189,47 +3252,6 @@
       "title": "VideoConfig",
       "type": "object"
     },
-    "VisionCameraEntry": {
-      "description": "One explicitly configured camera; an empty list uses HAL discovery.",
-      "properties": {
-        "device_path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Device Path"
-        },
-        "id": {
-          "default": "",
-          "title": "Id",
-          "type": "string"
-        },
-        "kind": {
-          "default": "tap",
-          "title": "Kind",
-          "type": "string"
-        },
-        "tap_socket": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Tap Socket"
-        }
-      },
-      "title": "VisionCameraEntry",
-      "type": "object"
-    },
     "VisionConfig": {
       "properties": {
         "backend": {
@@ -3243,13 +3265,6 @@
           ],
           "title": "Backend",
           "type": "string"
-        },
-        "cameras": {
-          "items": {
-            "$ref": "#/$defs/VisionCameraEntry"
-          },
-          "title": "Cameras",
-          "type": "array"
         },
         "confidence_threshold": {
           "default": 0.5,
@@ -4000,6 +4015,13 @@
         "voltage_drop_mv_per_s": 500
       }
     },
+    "cameras": {
+      "items": {
+        "$ref": "#/$defs/CameraLeg"
+      },
+      "title": "Cameras",
+      "type": "array"
+    },
     "discovery": {
       "$ref": "#/$defs/DiscoveryConfig",
       "default": {
@@ -4402,7 +4424,6 @@
           "vflip": false,
           "width": 1280
         },
-        "cameras": [],
         "cloud_relay_url": "",
         "lcd_fps_cap": 15,
         "mode": "wfb",
@@ -4486,7 +4507,6 @@
       "$ref": "#/$defs/VisionConfig",
       "default": {
         "backend": "auto",
-        "cameras": [],
         "confidence_threshold": 0.5,
         "designate_camera": null,
         "detector": null,

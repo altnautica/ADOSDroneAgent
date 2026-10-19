@@ -59,7 +59,7 @@ async def _main_stream_ready() -> bool:
 
 def _stream_legs(config: Any) -> list[VideoStreamAccess]:
     """The per-leg video streams a node exposes, from the declared
-    ``video.cameras`` list. The primary leg (declared role ``primary`` else the
+    top-level ``cameras`` list. The primary leg (declared role ``primary`` else the
     first) is always served at the fixed ``main`` path; secondary legs keep their
     ids. An absent / empty list yields the single ``main`` stream (back-compat).
     Mirrors the Rust ``resolve_legs`` primary→``main`` normalization so the
@@ -69,7 +69,7 @@ def _stream_legs(config: Any) -> list[VideoStreamAccess]:
     ``/hls/<id>/index.m3u8``), which proxies them to the loopback-only media
     server behind its credential check. A client resolves them against
     whatever host reached the agent."""
-    cameras = list(getattr(getattr(config, "video", None), "cameras", None) or [])
+    cameras = list(getattr(config, "cameras", None) or [])
 
     def leg(sid: str, role: str, codec: str) -> VideoStreamAccess:
         return VideoStreamAccess(
@@ -142,7 +142,7 @@ async def _video_access(
     only through the front's credentialed proxy. The dashboard's video panel
     falls back to HLS when WHEP fails.
 
-    When the node declares more than one video leg (``video.cameras``), each is
+    When the node declares more than one video leg (``cameras``), each is
     advertised in ``streams``; the top-level ``whep_url`` / ``hls_url`` stay the
     primary (`main`) leg for back-compat.
     """

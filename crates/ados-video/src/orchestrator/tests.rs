@@ -342,12 +342,13 @@ fn leg(id: &str, source: &str, role: &str, primary: bool, pull: bool) -> Resolve
         vflip: false,
         encoder: "auto".into(),
         keyframe_interval: 0,
+        framebus_format: None,
     }
 }
 
 #[test]
 fn legs_to_streams_single_main_publisher_backcompat() {
-    // Default config (no video.cameras) → one main publisher, byte-identical
+    // Default config (no cameras) → one main publisher, byte-identical
     // to the single-stream path.
     let o = test_orch();
     assert_eq!(

@@ -16,8 +16,10 @@
 //! Modules:
 //! - [`ring`] — the single-writer frame ring writer over a `/dev/shm` mapping
 //!   (with an in-memory fallback so it builds and tests off Linux).
-//! - [`source`] — the frame sources: a tap reader off the video pipeline and a
-//!   direct V4L2/CSI capture, behind one [`source::FrameSource`] trait.
+//! - [`source`] — the frame sources: a tap reader off the video pipeline, a
+//!   V4L2 capture owner and an RTSP capture owner, behind one [`source::FrameSource`] trait.
+//! - [`sei`] / [`trigger`] — the simulator frame identity in a stream's SEI and
+//!   the sensor-bus trigger records joined to captured frames.
 //! - [`backend`] — the inference backends: a mock, an opt-in ONNX Runtime one,
 //!   and an IPC client to the accelerator sidecar.
 //! - [`yolo`] — YOLO detection-head decoding (the Rust twin of the sidecar's
@@ -40,6 +42,7 @@
 //!   to the `vision-status.json` sidecar the supervisor judges the engine on.
 
 pub mod backend;
+pub mod cameras;
 pub mod config;
 pub mod daemon_support;
 pub mod detection_bus;
@@ -48,8 +51,10 @@ pub mod frame_bus;
 pub mod perception_scheduler;
 pub mod reid;
 pub mod ring;
+pub mod sei;
 pub mod source;
 pub mod tracker;
+pub mod trigger;
 pub mod visionsock;
 pub mod work_status;
 pub mod yolo;

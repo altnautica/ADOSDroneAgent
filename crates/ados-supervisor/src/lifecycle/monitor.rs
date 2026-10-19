@@ -5,19 +5,26 @@ use super::*;
 impl Supervisor {
     /// Detect connected hardware and start the matching units.
     pub(super) async fn detect_and_start_hardware(&mut self) {
-        // Start the video service when video is enabled and either a local
-        // camera node is present OR a network camera source is configured (the
-        // IP-camera case: the feed is an rtsp://… / http://… URL, so there is no
-        // /dev/video node to detect).
-        let has_video_source =
-            crate::hardware::has_camera().await || self.config.video_network_source.is_some();
+        // Start the video service when video is enabled and a camera source
+        // exists: a local camera node, a network camera source (the IP-camera
+        // case: the feed is an rtsp://… / http://… URL, so there is no
+        // /dev/video node to detect), or a `cameras[]` entry that is captured
+        // (encoded off the frame bus) or a network URL.
+        let declared = self.config.declared_cameras;
+        let has_video_source = crate::hardware::has_camera().await
+            || self.config.video_network_source.is_some()
+            || declared.network
+            || declared.captured > 0;
         if self.config.video_enabled && self.index_of("ados-video").is_some() && has_video_source {
             self.start_service("ados-video").await;
         } else if !self.config.video_enabled {
             tracing::info!("video service skipped (video.mode disabled)");
         }
 
-        // Start the vision engine when it is enabled and a camera source exists.
+        // Start the vision engine when it is enabled, or when any camera is
+        // marked `capture: true` (the engine is then that camera's only owner,
+        // so leaving it down leaves the camera dark and the video pipeline's
+        // frame-bus input empty), and a camera source exists.
         // The engine feeds the frame stream the follow / designate plugins and
         // the world-model capture consume, so leaving it unstarted breaks that
         // whole pipeline. It is not in any install-time enable set, so the
@@ -32,7 +39,7 @@ impl Supervisor {
         //     unit's binary is absent; starting it would crash-loop. Report it
         //     instead of leaving the operator's `vision.enabled: true` dark.
         //   * no camera source — the engine has no frames to consume.
-        if self.config.vision_enabled {
+        if self.config.vision_enabled || declared.captured > 0 {
             if let Some(i) = self.index_of("ados-vision") {
                 if !gate_allows(&self.services[i], &self.config) {
                     tracing::warn!(

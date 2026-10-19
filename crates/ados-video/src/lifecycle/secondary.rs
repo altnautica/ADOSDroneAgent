@@ -5,13 +5,40 @@ use super::*;
 impl VideoOrchestrator {
     /// Classify a local secondary leg's bus from its source hint, for encoder
     /// selection. A `/dev/videoN` path or a `"usb"`/`"ip"` hint → USB; a `"csi"`
-    /// hint → CSI. Network legs never reach here (they are mediamtx pulls).
+    /// hint → CSI; a `framebus://` source → the frame bus. Network legs never
+    /// reach here (they are mediamtx pulls).
     fn secondary_camera_type(source: &str) -> CameraType {
         let s = source.trim().to_ascii_lowercase();
         if s == "csi" {
             CameraType::Csi
+        } else if ados_config::cameras::framebus_camera_id(&s).is_some() {
+            CameraType::Framebus
         } else {
             CameraType::Usb
+        }
+    }
+
+    /// Run one frame-bus pump per leg whose source is a captured camera, and
+    /// stop the pumps of legs that are gone. Called before any encoder that
+    /// reads a pipe is spawned.
+    pub(crate) fn reconcile_framebus_feeds(&mut self) {
+        let want: Vec<(String, crate::encoder::RawInput)> = self
+            .legs
+            .iter()
+            .filter_map(|l| {
+                let id = ados_config::cameras::framebus_camera_id(&l.source)?;
+                Some((id.to_string(), l.raw_input()?))
+            })
+            .collect();
+        self.framebus_feeds.reconcile(&want);
+    }
+
+    /// Before an encoder reading `source` is spawned: when it is a
+    /// `framebus://` source, give it a fresh pipe so it starts on a frame
+    /// boundary whatever the last encoder left unread.
+    pub(crate) fn renew_framebus_for(&self, source: &str) {
+        if let Some(id) = ados_config::cameras::framebus_camera_id(source) {
+            self.framebus_feeds.renew(id);
         }
     }
 
@@ -53,7 +80,8 @@ impl VideoOrchestrator {
                 capabilities: Vec::new(),
             };
             let cam_cfg = leg.to_camera_config();
-            let params = EncoderParams::from_camera_config(kind, &cam_cfg);
+            let mut params = EncoderParams::from_camera_config(kind, &cam_cfg);
+            params.framebus_input = leg.raw_input();
             let output = format!("rtsp://localhost:{port}/{}", leg.id);
             let cmd = match build_encoder_command(
                 &params,
@@ -78,6 +106,8 @@ impl VideoOrchestrator {
                     continue;
                 }
             };
+            self.reconcile_framebus_feeds();
+            self.renew_framebus_for(&leg.source);
             match ManagedProcess::spawn(&format!("encoder-{}", leg.id), &cmd[0], &cmd[1..]) {
                 Ok(mut proc) => {
                     if let Some(stderr) = proc.take_stderr() {

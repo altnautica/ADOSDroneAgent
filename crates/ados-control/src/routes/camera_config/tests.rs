@@ -24,6 +24,8 @@ fn leg(id: &str, source: &str) -> CameraLeg {
         vflip: false,
         encoder: "auto".to_string(),
         keyframe_interval: 0,
+        capture: false,
+        format: Default::default(),
     }
 }
 
@@ -54,7 +56,7 @@ fn absent_declared_and_discovered_yields_empty_roster() {
 
 #[test]
 fn declared_legs_empty_when_no_camera_declared_and_none_discovered() {
-    // A camera-less node (no video.cameras[], no video.camera block, no
+    // A camera-less node (no cameras[], no video.camera block, no
     // discovered device) declares no leg — the roster is empty, not a phantom
     // offline `main`.
     let cfg = RosterVideoConfig::default();

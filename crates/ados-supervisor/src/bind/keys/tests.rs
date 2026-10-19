@@ -264,7 +264,7 @@ fn persist_round_trips_via_serde_on_dev_host() {
 
 #[test]
 fn persist_video_cameras_writes_the_leg_list_and_preserves_the_rest() {
-    // Dev-host end-to-end: load → set video.cameras → atomic-write → reload.
+    // Dev-host end-to-end: load → set cameras → atomic-write → reload.
     let dir = tempfile::tempdir().unwrap();
     let cfg = dir.path().join("config.yaml");
     std::fs::write(
@@ -285,7 +285,10 @@ fn persist_video_cameras_writes_the_leg_list_and_preserves_the_rest() {
     assert_eq!(outcome, CamerasPersist::Written);
     let reloaded = try_load_config_mapping(&cfg).unwrap();
     let video = reloaded.get("video").and_then(Value::as_mapping).unwrap();
-    let legs = video.get("cameras").and_then(Value::as_sequence).unwrap();
+    let legs = reloaded
+        .get("cameras")
+        .and_then(Value::as_sequence)
+        .unwrap();
     assert_eq!(legs.len(), 2);
     let first = legs[0].as_mapping().unwrap();
     assert_eq!(first.get("id").unwrap(), &Value::String("main".into()));
@@ -336,15 +339,13 @@ fn apply_video_cameras_ignores_a_non_array() {
     // Defence-in-depth: a non-sequence value never mutates the config.
     let mut root = Mapping::new();
     apply_video_cameras(&mut root, &serde_json::json!({"id": "main"}), "operator").unwrap();
-    assert!(root.get("video").is_none());
+    assert!(root.get("video").is_none() && root.get("cameras").is_none());
     apply_video_cameras(&mut root, &serde_json::json!("main"), "operator").unwrap();
-    assert!(root.get("video").is_none());
+    assert!(root.get("video").is_none() && root.get("cameras").is_none());
 }
 
 fn cameras_after_apply(root: &Mapping) -> Vec<serde_json::Value> {
-    root.get("video")
-        .and_then(Value::as_mapping)
-        .and_then(|v| v.get("cameras"))
+    root.get("cameras")
         .and_then(Value::as_sequence)
         .map(|s| {
             s.iter()
@@ -441,14 +442,11 @@ fn only_the_operator_replaces_a_legacy_ownerless_leg_in_place() {
     // A plugin naming its id is refused with the config untouched; the
     // operator's re-declaration replaces it in place, with no duplicate.
     let mut root = Mapping::new();
-    {
-        let video = ensure_map(&mut root, "video");
-        let seq = serde_json::json!([{"id": "eo", "source": "rtsp://old/eo"}]);
-        video.insert(
-            Value::String("cameras".into()),
-            serde_norway::to_value(&seq).unwrap(),
-        );
-    }
+    let seq = serde_json::json!([{"id": "eo", "source": "rtsp://old/eo"}]);
+    root.insert(
+        Value::String("cameras".into()),
+        serde_norway::to_value(&seq).unwrap(),
+    );
     let refused = apply_video_cameras(
         &mut root,
         &serde_json::json!([{"id": "eo", "source": "rtsp://pod/main"}]),

@@ -3,7 +3,7 @@
 //! write that persists the leg list).
 //!
 //! The roster is the one place the operator sees EVERY camera the node knows
-//! about — the legs declared in `video.cameras[]`, the devices the HAL enumeration
+//! about — the legs declared in the top-level `cameras[]`, the devices the HAL enumeration
 //! discovered (the `cameras-discovered.json` sidecar), and the live stream state
 //! (`video-streams.json`) — reconciled into one list. Each row carries the leg's
 //! logical identity + management metadata (name / orientation / purpose / owner /
@@ -39,7 +39,7 @@ use reconcile::*;
 // ---------------------------------------------------------------------------
 
 /// The config file (`ADOS_CONFIG`, default `/etc/ados/config.yaml`) the declared
-/// `video.cameras[]` + the legacy `video.camera` block are loaded from.
+/// `cameras[]` + the legacy `video.camera` block are loaded from.
 fn config_path() -> PathBuf {
     PathBuf::from(
         std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()),
@@ -135,7 +135,7 @@ struct LiveSnapshot {
 
 /// `GET /api/video/roster` → the reconciled camera roster.
 ///
-/// Merges the declared legs (`video.cameras[]`, or the legacy single
+/// Merges the declared legs (`cameras[]`, or the legacy single
 /// `video.camera` block synthesised as `main`), the discovered devices, and the
 /// live stream state into one list. Guaranteed 200; degrades to `{"cameras": []}`
 /// when nothing is declared and no device was discovered.
@@ -360,7 +360,7 @@ fn classify_video_reply(reply: Map<String, Value>) -> Response {
     }
 }
 
-/// The declared legs the roster reconciles: the explicit `video.cameras[]` list,
+/// The declared legs the roster reconciles: the explicit `cameras[]` list,
 /// or — when it is empty — a single synthesised `main` leg from the legacy
 /// `video.camera` block (matching `AgentVideoConfig::resolve_legs`), so a
 /// single-camera drone shows its camera as the assigned main stream rather than
@@ -404,6 +404,8 @@ fn declared_legs(cfg: &RosterVideoConfig, has_discovered: bool) -> Vec<CameraLeg
         vflip: false,
         encoder: "auto".to_string(),
         keyframe_interval: 0,
+        capture: false,
+        format: Default::default(),
     }]
 }
 

@@ -3185,12 +3185,12 @@ async fn node_info(host: &RealHost) -> ados_protocol::node_info::NodeInfo {
 async fn node_info_reads_each_fact_from_its_source() {
     use ados_protocol::node_info::*;
     let dir = tempfile::tempdir().unwrap();
-    // The primary leg of `video.cameras` overrides the legacy block, exactly as
-    // the video service resolves the stream it encodes at `main`.
+    // The primary leg of `cameras` overrides the legacy block, exactly as the
+    // video service resolves the stream it encodes at `main`.
     std::fs::write(
         dir.path().join("config.yaml"),
-        "agent:\n  profile: drone\nvideo:\n  camera: { width: 640, height: 480, fps: 15 }\n  \
-         cameras:\n    - { id: ir, source: rtsp://pod/ir, role: ir, width: 320, height: 256 }\n    \
+        "agent:\n  profile: drone\nvideo:\n  camera: { width: 640, height: 480, fps: 15 }\n\
+         cameras:\n  - { id: ir, source: rtsp://pod/ir, role: ir, width: 320, height: 256 }\n  \
          - { id: eo, source: /dev/video0, role: primary, width: 1920, height: 1080, fps: 25 }\n",
     )
     .unwrap();

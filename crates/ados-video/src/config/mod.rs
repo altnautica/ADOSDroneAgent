@@ -16,4 +16,6 @@ pub use roster::RosterVideoConfig;
 pub use sections::{RecordingConfig, VisionTapConfig, WfbVideoConfig};
 
 #[cfg(test)]
+mod legs_tests;
+#[cfg(test)]
 mod tests;

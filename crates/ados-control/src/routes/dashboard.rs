@@ -3,7 +3,7 @@
 //! Three flat slices, each read from a source this process already holds:
 //!
 //! - **`video`** — the configured encoder settings of the stream served at
-//!   `main` (the primary `video.cameras` leg, else `video.camera`, resolved as the
+//!   `main` (the primary `cameras` leg, else `video.camera`, resolved as the
 //!   video service resolves them), the readiness of mediamtx's `main` path, and a
 //!   bitrate measured off that path's received-bytes counter. `bitrate_kbps` is
 //!   null until two readings of a live stream exist, so a configured target never

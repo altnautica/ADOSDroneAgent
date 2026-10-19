@@ -139,6 +139,7 @@ mod tests {
             vflip: false,
             encoder: "auto".into(),
             keyframe_interval: 0,
+            framebus_format: None,
         }
     }
 

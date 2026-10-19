@@ -889,7 +889,7 @@ required_cap = "sensor.camera.register"
 # ---- video source configuration ----
 # Declare the camera/stream source list the agent's video pipeline serves (one
 # primary leg plus optional secondary legs). The host forwards it to the
-# supervisor's video command socket, which persists video.cameras and restarts
+# supervisor's video command socket, which persists the top-level cameras list and restarts
 # the video service. Fully gated at the dispatch level on the video-source cap.
 [[method]]
 id = "video.source.set"

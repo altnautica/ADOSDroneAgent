@@ -6,12 +6,15 @@
 //! it consumes and marks its input live while that input delivers, and
 //! [`run_writer`] publishes both about once a second.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ados_protocol::vision_status::{VisionStatus, VISION_STATUS_FILE, VISION_STATUS_VERSION};
+use ados_protocol::vision_status::{
+    SourceError, VisionStatus, VISION_STATUS_FILE, VISION_STATUS_VERSION,
+};
 
 /// How often the sidecar is rewritten.
 pub const WRITE_INTERVAL: Duration = Duration::from_secs(1);
@@ -27,6 +30,8 @@ pub const INPUT_SILENCE_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct WorkStatus {
     frames_consumed: AtomicU64,
     live_inputs: AtomicU32,
+    error_frames: AtomicU64,
+    source_errors: Mutex<BTreeMap<String, String>>,
 }
 
 impl WorkStatus {
@@ -36,10 +41,37 @@ impl WorkStatus {
 
     /// The current state, as the sidecar carries it.
     pub fn snapshot(&self) -> VisionStatus {
+        let errors = self.source_errors.lock().expect("source errors lock");
         VisionStatus {
             version: VISION_STATUS_VERSION,
             frames_consumed: self.frames_consumed.load(Ordering::Relaxed),
             live_inputs: self.live_inputs.load(Ordering::Relaxed),
+            error_frames: self.error_frames.load(Ordering::Relaxed),
+            source_errors: errors
+                .iter()
+                .map(|(camera, error)| SourceError {
+                    camera: camera.clone(),
+                    error: error.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    /// `n` more corrupt buffers were dropped.
+    pub fn add_error_frames(&self, n: u64) {
+        self.error_frames.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Record (or, with `None`, clear) a camera's source failure.
+    pub fn set_source_error(&self, camera: &str, error: Option<String>) {
+        let mut errors = self.source_errors.lock().expect("source errors lock");
+        match error {
+            Some(e) => {
+                errors.insert(camera.to_string(), e);
+            }
+            None => {
+                errors.remove(camera);
+            }
         }
     }
 
@@ -130,6 +162,19 @@ pub async fn run_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_errors_and_corrupt_frames_reach_the_snapshot() {
+        let status = WorkStatus::new();
+        status.add_error_frames(3);
+        status.set_source_error("cam_fr", Some("invalid cameras[1] entry".into()));
+        let s = status.snapshot();
+        assert_eq!(s.error_frames, 3);
+        assert_eq!(s.source_errors.len(), 1);
+        assert_eq!(s.source_errors[0].camera, "cam_fr");
+        status.set_source_error("cam_fr", None);
+        assert!(status.snapshot().source_errors.is_empty());
+    }
 
     #[test]
     fn an_input_is_live_from_its_first_frame_until_it_is_lost_or_dropped() {

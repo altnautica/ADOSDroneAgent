@@ -1,6 +1,8 @@
-//! The optional `video.cameras:` list: per-leg declarations and the resolved
-//! legs the orchestrator drives.
+//! The top-level `cameras:` list as stream legs: per-leg declarations and the
+//! resolved legs the orchestrator drives.
 
+use ados_config::cameras::{framebus_source, CaptureFormat};
+use ados_protocol::framebus::FrameFormat;
 use serde::{Deserialize, Serialize};
 
 use super::camera::{
@@ -35,18 +37,17 @@ pub struct CameraMatch {
     pub csi_port: Option<u32>,
 }
 
-/// One entry of the optional `video.cameras:` list — a single video leg the
-/// node exposes as its own mediamtx path (and `:8889/<id>/whep`). Present only
-/// when the operator (or a driver plugin) declares more than one stream; an
-/// absent `video.cameras` falls back to the single legacy `video.camera` block
-/// verbatim (see [`AgentVideoConfig::resolve_legs`](super::AgentVideoConfig::resolve_legs)).
+/// One entry of the top-level `cameras:` list, read as a video leg the node
+/// exposes as its own mediamtx path (and `:8889/<id>/whep`). An absent list
+/// falls back to the single `video.camera` block verbatim (see
+/// [`AgentVideoConfig::resolve_legs`](super::AgentVideoConfig::resolve_legs)).
 ///
 /// `id` is the leg's immutable logical identity; `source` is its current
 /// locator (a device path or a network URL); `match` re-pins `source` back to
-/// `id` when a hot-plug renames the device node. `role` is the TRANSPORT plane
-/// (primary → the fixed `main` mediamtx path / WFB / cloud); `purpose` is the
-/// CONSUMER plane a plugin binds to (feed / detect / navigation / …) — they are
-/// complementary, not merged. The management fields (`name` / `orientation` /
+/// `id` when a hot-plug renames the device node. `role` is the rig role or a
+/// stream label; `primary` (else the first leg) is the TRANSPORT primary (the
+/// fixed `main` mediamtx path / WFB / cloud); `purpose` is the CONSUMER plane a
+/// plugin binds to (feed / detect / navigation / …). The management fields (`name` / `orientation` /
 /// `purpose` / `enabled` / `owner` / `fov_deg` / `mount_pitch_deg` /
 /// `calibration` / `match`) are metadata surfaced through the camera roster and
 /// consumed by plugins; the encode + radio pipeline reads none of them, so an
@@ -142,16 +143,50 @@ pub struct CameraLeg {
         deserialize_with = "bounded_keyframe_interval"
     )]
     pub keyframe_interval: u32,
+    /// The vision engine owns this camera (`capture: true`): the pipeline never
+    /// opens `source` itself and encodes the frames the engine publishes on
+    /// the frame bus instead (`framebus://<id>`).
+    #[serde(default)]
+    pub capture: bool,
+    /// The pixel format the vision engine publishes a captured camera in, and
+    /// so the raw format the frame-bus encoder input reads.
+    #[serde(default)]
+    pub format: CaptureFormat,
 }
 
 impl CameraLeg {
     /// An explicit network capture source (`rtsp://…` / `rtsps://…` / `http://…`
-    /// / `https://…`), or `None` for a local device. Mirrors
-    /// [`CameraConfig::network_source`].
+    /// / `https://…`), or `None` for a local device or a captured camera.
+    /// Mirrors [`CameraConfig::network_source`].
     pub fn network_source(&self) -> Option<&str> {
+        if self.capture {
+            return None;
+        }
         let s = self.source.trim();
         is_network_url(s).then_some(s)
     }
+
+    /// The source the pipeline encodes this leg from: `framebus://<id>` for a
+    /// camera the vision engine captures, else the declared `source`.
+    pub fn pipeline_source(&self) -> String {
+        if self.capture {
+            framebus_source(&self.id)
+        } else {
+            self.source.clone()
+        }
+    }
+}
+
+/// The legs of the top-level `cameras[]` list in `text`: every entry that
+/// validates for all camera consumers (`ados_config::cameras::camera_entries`),
+/// so an entry the vision engine or the supervisor skips is skipped here too
+/// and one bad entry never takes the others down.
+pub fn legs_from(text: &str) -> Vec<CameraLeg> {
+    ados_config::cameras::camera_entries(text)
+        .valid
+        .into_iter()
+        .filter_map(|(_, entry, _)| serde_norway::from_value::<CameraLeg>(entry).ok())
+        .collect()
 }
 
 /// A resolved video leg — what the orchestrator actually drives. Exactly one leg
@@ -181,9 +216,23 @@ pub struct ResolvedLeg {
     pub encoder: String,
     /// Keyframe interval in frames; 0 ⇒ encoder picks a short low-latency GOP.
     pub keyframe_interval: u32,
+    /// The raw frame format of a `framebus://` source (a camera the vision
+    /// engine captures); `None` for every other source.
+    pub framebus_format: Option<FrameFormat>,
 }
 
 impl ResolvedLeg {
+    /// The raw frames this leg's `framebus://` source carries (the captured
+    /// format at the leg's configured geometry), or `None` for any other source.
+    pub fn raw_input(&self) -> Option<crate::encoder::RawInput> {
+        self.framebus_format.map(|format| crate::encoder::RawInput {
+            format,
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+        })
+    }
+
     /// A [`CameraConfig`] view of this leg, so a secondary local-encode leg can
     /// reuse the same encoder command builder as the primary. The `thumbnail`
     /// attention profile is the default and unread: only the PRIMARY leg rides

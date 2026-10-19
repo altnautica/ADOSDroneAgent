@@ -20,6 +20,7 @@ pub mod config;
 pub mod daemon;
 pub mod discover;
 pub mod encoder;
+pub mod framebus_input;
 pub mod health;
 pub mod lifecycle;
 pub mod mediamtx;

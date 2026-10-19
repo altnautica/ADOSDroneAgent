@@ -248,7 +248,7 @@ mod tests {
         let cfg = dir.path().join("config.yaml");
         std::fs::write(
             &cfg,
-            "agent:\n  name: my-drone\nvision:\n  enabled: true\n  backend: rknn\n  cameras:\n    - id: uvc-0\n",
+            "agent:\n  name: my-drone\nvision:\n  enabled: true\n  backend: rknn\n  designate_camera: uvc-0\n",
         )
         .unwrap();
 
@@ -280,7 +280,7 @@ mod tests {
         // Sibling vision keys + the unrelated agent section survive.
         let vision = parsed.get("vision").unwrap();
         assert_eq!(vision.get("backend").and_then(|v| v.as_str()), Some("rknn"));
-        assert!(vision.get("cameras").is_some());
+        assert!(vision.get("designate_camera").is_some());
         assert_eq!(
             parsed
                 .get("agent")

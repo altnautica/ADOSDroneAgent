@@ -116,6 +116,24 @@ impl FrameFormat {
             FrameFormat::Gray16 | FrameFormat::BayerRggb16 => px * 2,
         }
     }
+
+    /// The ffmpeg `-pix_fmt` name of this layout.
+    pub fn ffmpeg_pix_fmt(self) -> &'static str {
+        match self {
+            FrameFormat::Rgb24 => "rgb24",
+            FrameFormat::Nv12 => "nv12",
+            FrameFormat::Yuv420p => "yuv420p",
+            FrameFormat::Gray8 => "gray",
+            FrameFormat::Gray16 => "gray16le",
+            FrameFormat::BayerRggb8 => "bayer_rggb8",
+            FrameFormat::BayerRggb16 => "bayer_rggb16le",
+        }
+    }
+
+    /// A raw Bayer mosaic (not yet demosaiced).
+    pub fn is_bayer(self) -> bool {
+        matches!(self, FrameFormat::BayerRggb8 | FrameFormat::BayerRggb16)
+    }
 }
 
 /// The current wire version of a [`FrameDescriptor`] on the `vision.frame`
