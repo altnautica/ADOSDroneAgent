@@ -91,6 +91,10 @@ impl Converter {
                         seq: u64::from(t.seq),
                         t_mid_ns,
                         exposure_ns: t.exposure_ns,
+                        // Protocol v1 `Trigger` carries no gain, and the
+                        // contract field is a proto3 float without presence,
+                        // so 0 is its "not reported" value. Consumers must
+                        // not read 0 as a measured gain.
                         gain: 0.0,
                     };
                     emit(BusFrame::proto(

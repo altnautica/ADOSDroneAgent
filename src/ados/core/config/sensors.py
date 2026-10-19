@@ -31,6 +31,14 @@ class SensorHubConfig(BaseModel):
     exposure_us: int = Field(default=4000, ge=0, le=1_000_000)
     # Publish the hub's GNSS passthrough bytes on the sensor bus.
     gnss_forward: bool = True
+    # Sensor-bus origins whose RTCM corrections are forwarded to the hub's
+    # GNSS receiver: a base receiver (``gnss``) and the REST upload
+    # (``host``) by default. The hub's own output is never fed back. A literal
+    # default (pydantic copies it) so the schema states it.
+    rtcm_origins: list[Literal["gnss", "host", "fc", "vision", "lidar", "sim"]] = [
+        "gnss",
+        "host",
+    ]
 
 
 class SensorsConfig(BaseModel):

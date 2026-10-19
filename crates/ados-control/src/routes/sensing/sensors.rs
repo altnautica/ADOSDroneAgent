@@ -94,13 +94,18 @@ pub(crate) fn sensors_body(
     };
     let hub = hub_block(hub_side);
     let rig = read_rig(paths);
-    // The per-stream rates the router asked the flight controller for.
-    let fc_rates = fresh_map(&paths.sidecar("mavlink-router.json"), None, now)
-        .and_then(|mut m| m.remove("sensor_rates_hz"))
-        .and_then(|v| match v {
-            Value::Object(m) => Some(m),
-            _ => None,
-        });
+    // The per-stream rates the router asked the flight controller for, only
+    // while its sidecar is inside the registry's freshness window.
+    let fc_rates = fresh_map(
+        &paths.sidecar("mavlink-router.json"),
+        ados_protocol::paths::max_age("mavlink-router"),
+        now,
+    )
+    .and_then(|mut m| m.remove("sensor_rates_hz"))
+    .and_then(|v| match v {
+        Value::Object(m) => Some(m),
+        _ => None,
+    });
 
     let mut sensors: Vec<Value> = Vec::new();
     let empty = Vec::new();

@@ -87,13 +87,56 @@ pub(crate) fn profile(state: &AppState) -> String {
 }
 
 /// Write `bytes` to `path` atomically (temp file + rename in the same dir).
+/// The temp name carries the pid and a per-process counter, so two writers
+/// racing on the same target never share (and truncate) one temp file.
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(dir)?;
     let tmp = dir.join(format!(
-        ".{}.tmp",
-        path.file_name().and_then(|n| n.to_str()).unwrap_or("rig")
+        ".{}.{}.{}.tmp",
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("rig"),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    if let Err(e) = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn concurrent_atomic_writes_never_share_a_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("etc").join("rig.json");
+        let a = vec![b'a'; 64 * 1024];
+        let b = vec![b'b'; 64 * 1024];
+        std::thread::scope(|s| {
+            for body in [&a, &b] {
+                let target = &target;
+                s.spawn(move || {
+                    for _ in 0..50 {
+                        write_atomic(target, body).unwrap();
+                    }
+                });
+            }
+        });
+        // The survivor is one writer's complete body, never a mix, and no
+        // temp file is left behind.
+        let got = std::fs::read(&target).unwrap();
+        assert!(got == a || got == b);
+        let left: Vec<_> = std::fs::read_dir(target.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, [std::ffi::OsString::from("rig.json")]);
+    }
 }

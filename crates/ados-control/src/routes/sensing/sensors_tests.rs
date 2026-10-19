@@ -201,6 +201,32 @@ fn each_hub_imu_expects_the_per_imu_odr() {
     assert_eq!(body["sensors"][1]["expected_hz"], 1000.0);
 }
 
+#[test]
+fn a_stale_router_sidecar_gives_no_fc_expectation() {
+    let window = ados_protocol::paths::max_age("mavlink-router")
+        .expect("the registry declares a freshness window for mavlink-router.json");
+    assert!(window < Duration::from_secs(30));
+    let dir = tempfile::tempdir().unwrap();
+    let p = paths(dir.path());
+    seed(&p);
+    let router = std::fs::File::options()
+        .write(true)
+        .open(p.sidecar("mavlink-router.json"))
+        .unwrap();
+    router
+        .set_modified(SystemTime::now() - Duration::from_secs(30))
+        .unwrap();
+    let body = sensors_body(&p, SystemTime::now(), 0, None);
+    let fc_imu = body["sensors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "fc_imu")
+        .unwrap();
+    assert_eq!(fc_imu["expected_hz"], Value::Null);
+    assert_eq!(fc_imu["rate_hz"], 200.0);
+}
+
 async fn json_of(resp: Response) -> Value {
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
         .await

@@ -213,8 +213,13 @@ async fn a_fake_hub_session_reaches_the_bus_and_rtcm_reaches_the_hub() {
 
     // RTCM published by another bus client reaches the hub, chunked to the
     // packet limit and addressed to the GNSS port.
+    // Corrections from an origin outside `rtcm_origins` (default gnss, host)
+    // are not forwarded; the host's are.
+    let fc = Publisher::spawn(socket.clone(), Origin::Fc);
     let rtcm: Vec<u8> = (0..RTCM_LEN).map(|i| (i % 251) as u8).collect();
     let rest = Publisher::spawn(socket.clone(), Origin::Host);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(fc.raw(Kind::Rtcm, "fc", vec![0xD3, 0x00, 0x01]));
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(rest.raw(Kind::Rtcm, "rest", rtcm.clone()));
     let mut got = Vec::new();

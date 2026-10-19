@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use ados_sensorbus::Origin;
 use ados_sensorhub_proto as proto;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,7 @@ struct HubSection {
     trigger_hz: u16,
     exposure_us: u32,
     gnss_forward: bool,
+    rtcm_origins: Vec<Origin>,
 }
 
 impl Default for HubSection {
@@ -52,6 +54,7 @@ impl Default for HubSection {
             trigger_hz: 20,
             exposure_us: 4000,
             gnss_forward: true,
+            rtcm_origins: vec![Origin::Gnss, Origin::Host],
         }
     }
 }
@@ -64,6 +67,9 @@ pub struct HubConfig {
     pub trigger_hz: u16,
     pub exposure_us: u32,
     pub gnss_forward: bool,
+    /// Bus origins whose `rtcm` frames are forwarded to the hub; never the
+    /// hub itself.
+    pub rtcm_origins: Vec<Origin>,
 }
 
 impl Default for HubConfig {
@@ -104,7 +110,17 @@ impl HubConfig {
             trigger_hz: s.trigger_hz,
             exposure_us: s.exposure_us,
             gnss_forward: s.gnss_forward,
+            rtcm_origins: s
+                .rtcm_origins
+                .into_iter()
+                .filter(|o| *o != Origin::Hub)
+                .collect(),
         }
+    }
+
+    /// Whether an `rtcm` frame from `origin` goes to the hub.
+    pub fn forwards_rtcm_from(&self, origin: Origin) -> bool {
+        origin != Origin::Hub && self.rtcm_origins.contains(&origin)
     }
 
     /// The `Config` packet sent on connect: free-running triggers on every
@@ -180,5 +196,22 @@ mod tests {
         assert_eq!(absent, HubConfig::default());
         assert_eq!(absent.packet().cam_mask, 0xFF);
         assert_eq!(absent.packet().exposure_us, 4000);
+    }
+
+    #[test]
+    fn rtcm_is_forwarded_only_from_the_configured_origins_never_the_hub() {
+        let cfg = HubConfig::default();
+        assert!(cfg.forwards_rtcm_from(Origin::Gnss));
+        assert!(cfg.forwards_rtcm_from(Origin::Host));
+        assert!(!cfg.forwards_rtcm_from(Origin::Fc));
+        assert!(!cfg.forwards_rtcm_from(Origin::Hub));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "sensors:\n  hub:\n    rtcm_origins: [gnss, hub]\n").unwrap();
+        let cfg = HubConfig::load_from(&path);
+        assert_eq!(cfg.rtcm_origins, [Origin::Gnss]);
+        assert!(!cfg.forwards_rtcm_from(Origin::Host));
+        assert!(!cfg.forwards_rtcm_from(Origin::Hub));
     }
 }

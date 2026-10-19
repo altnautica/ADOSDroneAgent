@@ -15,6 +15,13 @@ def test_defaults_match_the_native_reader():
     assert hub.trigger_hz == 20
     assert hub.exposure_us == 4000
     assert hub.gnss_forward is True
+    assert hub.rtcm_origins == ["gnss", "host"]
+
+
+def test_rtcm_origins_never_include_the_hub_itself():
+    assert SensorHubConfig(rtcm_origins=["gnss"]).rtcm_origins == ["gnss"]
+    with pytest.raises(ValidationError):
+        SensorHubConfig(rtcm_origins=["hub"])
 
 
 @pytest.mark.parametrize(

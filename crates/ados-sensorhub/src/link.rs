@@ -49,7 +49,7 @@ pub async fn run_link(p: LinkParams, shutdown: Shutdown, reload: Arc<Notify>) ->
     let state = SharedState::default();
     let publisher = Publisher::spawn(p.socket.clone(), Origin::Hub);
     let (rtcm_tx, mut rtcm_rx) = mpsc::channel(RTCM_QUEUE);
-    let forwarder = tokio::spawn(rtcm_from_bus(p.socket.clone(), rtcm_tx));
+    let forwarder = tokio::spawn(rtcm_from_bus(p.socket.clone(), p.cfg.clone(), rtcm_tx));
     let sidecar = tokio::spawn(sidecar_loop(p.sidecar.clone(), state.clone()));
 
     let mut backoff = MIN_BACKOFF;
@@ -127,14 +127,15 @@ pub async fn run_link(p: LinkParams, shutdown: Shutdown, reload: Arc<Notify>) ->
     why
 }
 
-/// Subscribe to `rtcm` frames and queue their payloads toward the hub,
-/// reconnecting to the bus as needed. A full queue drops the newest payload.
-async fn rtcm_from_bus(socket: PathBuf, tx: mpsc::Sender<Vec<u8>>) {
+/// Subscribe to `rtcm` frames and queue the payloads of the configured origins
+/// toward the hub, reconnecting to the bus as needed. A full queue drops the
+/// newest payload.
+async fn rtcm_from_bus(socket: PathBuf, cfg: HubConfig, tx: mpsc::Sender<Vec<u8>>) {
     loop {
         if let Ok(mut sub) = Subscriber::connect(&socket, &[Kind::Rtcm]).await {
             loop {
                 match sub.recv().await {
-                    Ok(f) if f.kind == Kind::Rtcm => {
+                    Ok(f) if f.kind == Kind::Rtcm && cfg.forwards_rtcm_from(f.origin) => {
                         let _ = tx.try_send(f.payload);
                     }
                     Ok(_) => {}
