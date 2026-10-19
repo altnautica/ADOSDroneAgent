@@ -1,0 +1,38 @@
+[package]
+name = "ados-sensorbus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The sensor bus (/run/ados/sensors.sock, contract sensor.v1): frame codec, publisher/subscriber clients, the capture-contract v1 message types, clock-fit math, GPS_RTCM_DATA fragmentation and rig.json validation."
+
+[lib]
+name = "ados_sensorbus"
+path = "src/lib.rs"
+
+[dependencies]
+ados-protocol = { path = "../ados-protocol" }
+prost = "0.14"
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_bytes = "0.11"
+rmp-serde = { workspace = true }
+thiserror = { workspace = true }
+nix = { workspace = true, features = ["time"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# Rig validation against the vendored contract JSON Schema; already in the
+# lock through the plugin host.
+jsonschema = { version = "0.18", features = ["draft202012"] }
+
+[build-dependencies]
+# The vendored contract .proto files compile in-process (no system protoc).
+prost-build = "0.14"
+protox = "0.10"
+
+[dev-dependencies]
+sha2 = { workspace = true }
+hex = { workspace = true }
+toml = { workspace = true }
+tempfile = "3"

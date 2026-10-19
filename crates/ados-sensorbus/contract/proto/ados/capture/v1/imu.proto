@@ -1,0 +1,24 @@
+// ADOS capture contract ados.capture/1 — IMU samples.
+// SPDX-License-Identifier: MIT
+syntax = "proto3";
+
+package ados.capture.v1;
+
+// One inertial sample in the body frame (FLU: x forward, y left, z up).
+message ImuSample {
+  // Sample time on the session timebase, nanoseconds.
+  uint64 t_ns = 1;
+  // Producer sequence number; gaps mean dropped samples.
+  uint64 seq = 2;
+  // Angular rate x, y, z, rad/s. Always 3 values.
+  repeated double gyro = 3;
+  // Specific force x, y, z, m/s^2. Always 3 values.
+  repeated double accel = 4;
+  // Sensor die temperature, degrees Celsius, when the sensor reports it.
+  optional float temp_c = 5;
+}
+
+// Channel `/imu/<id>`: consecutive samples in time order.
+message ImuBatch {
+  repeated ImuSample samples = 1;
+}

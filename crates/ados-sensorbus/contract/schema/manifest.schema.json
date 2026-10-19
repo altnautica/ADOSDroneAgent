@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://altnautica.com/schemas/ados-capture/1/manifest.schema.json",
+  "title": "Manifest",
+  "description": "`manifest.json` at the root of a capture session directory.",
+  "type": "object",
+  "required": [
+    "contract", "session_id", "device_id", "profile", "timebase", "t0_ns", "utc_at_t0_ns",
+    "sigma_ns", "anchor", "rig", "operator", "segments", "health"
+  ],
+  "properties": {
+    "contract": { "$ref": "#/$defs/ContractId" },
+    "session_id": {
+      "description": "`<device_id>-<UTC yyyymmddThhmmssZ>-<4 hex>`.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4}$"
+    },
+    "device_id": { "type": "string", "minLength": 1 },
+    "profile": {
+      "description": "Producer deployment.",
+      "type": "string",
+      "enum": ["drone", "visor", "sim"]
+    },
+    "timebase": { "$ref": "#/$defs/Timebase" },
+    "t0_ns": {
+      "description": "Session start on the timebase, nanoseconds.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "utc_at_t0_ns": {
+      "description": "UTC (Unix epoch, nanoseconds) at `t0_ns`; null when unknown.",
+      "type": ["integer", "null"],
+      "format": "int64"
+    },
+    "sigma_ns": {
+      "description": "One-sigma timebase uncertainty, nanoseconds; -1 = unmeasured.",
+      "type": "integer",
+      "format": "int64",
+      "minimum": -1
+    },
+    "anchor": {
+      "description": "World-frame origin; null for a session in a local frame.",
+      "anyOf": [{ "$ref": "geo_anchor.schema.json" }, { "type": "null" }]
+    },
+    "rig": { "$ref": "#/$defs/RigRef" },
+    "operator": { "$ref": "#/$defs/Operator" },
+    "segments": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Segment" }
+    },
+    "health": { "$ref": "#/$defs/SessionHealth" }
+  },
+  "$defs": {
+    "ContractId": {
+      "description": "Contract identifier carried by every document.",
+      "type": "string",
+      "enum": ["ados.capture/1"]
+    },
+    "Timebase": {
+      "description": "What every `t_ns` in a session counts: GNSS-disciplined time, the sensor hub's free-running clock, the recording host's CLOCK_MONOTONIC, or simulation time.",
+      "type": "string",
+      "enum": ["gnss", "hub_freerun", "host_monotonic", "sim"]
+    },
+    "RigRef": {
+      "description": "The rig the session was recorded with; the full rig is `rig.json`.",
+      "type": "object",
+      "required": ["rig_id", "calib_version"],
+      "properties": {
+        "rig_id": { "type": "string" },
+        "calib_version": { "type": "string" }
+      }
+    },
+    "Operator": {
+      "description": "Operator metadata entered during capture.",
+      "type": "object",
+      "required": ["rooms"],
+      "properties": {
+        "site": { "description": "Site name or address.", "type": ["string", "null"] },
+        "floor": { "description": "Floor index at session start.", "type": ["integer", "null"], "format": "int32" },
+        "rooms": {
+          "description": "Segments started by MARK, in order.",
+          "type": "array",
+          "items": { "$ref": "#/$defs/Room" }
+        }
+      }
+    },
+    "Room": {
+      "type": "object",
+      "required": ["name", "floor", "t_start_ns", "t_end_ns"],
+      "properties": {
+        "name": { "type": "string" },
+        "floor": { "type": "integer", "format": "int32" },
+        "t_start_ns": { "type": "integer", "format": "uint64", "minimum": 0 },
+        "t_end_ns": { "type": "integer", "format": "uint64", "minimum": 0 }
+      }
+    },
+    "Segment": {
+      "type": "object",
+      "required": ["file", "t_start_ns", "t_end_ns", "bytes"],
+      "properties": {
+        "file": {
+          "description": "Path relative to the session directory, e.g. `segments/000000.mcap`.",
+          "type": "string",
+          "pattern": "^segments/[0-9]{6}\\.mcap$"
+        },
+        "t_start_ns": { "type": "integer", "format": "uint64", "minimum": 0 },
+        "t_end_ns": { "type": "integer", "format": "uint64", "minimum": 0 },
+        "bytes": { "type": "integer", "format": "uint64", "minimum": 0 }
+      }
+    },
+    "SessionHealth": {
+      "description": "Quality flags raised at any point during the session.",
+      "type": "object",
+      "required": ["blur", "texture", "flicker", "corridor", "frames_dropped_pct"],
+      "properties": {
+        "blur": { "type": "boolean" },
+        "texture": { "type": "boolean" },
+        "flicker": { "type": "boolean" },
+        "corridor": { "type": "boolean" },
+        "frames_dropped_pct": { "type": "number", "minimum": 0, "maximum": 100 }
+      }
+    }
+  }
+}

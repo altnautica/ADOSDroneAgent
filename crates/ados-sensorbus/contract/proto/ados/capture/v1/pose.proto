@@ -1,0 +1,17 @@
+// ADOS capture contract ados.capture/1 — pose covariance.
+// SPDX-License-Identifier: MIT
+syntax = "proto3";
+
+package ados.capture.v1;
+
+// Channel `/pose/<source>/cov`: covariance of the `foxglove.PoseInFrame`
+// published on `/pose/<source>` with the same `t_ns`.
+message PoseCov {
+  // Pose time on the session timebase, nanoseconds.
+  uint64 t_ns = 1;
+  // Row-major 6x6 covariance over (x, y, z, rot_x, rot_y, rot_z): metres in
+  // the world frame and radians of a body-frame rotation vector. 36 values.
+  repeated double cov = 2;
+  // Producer health: "good", "degraded" or "lost".
+  string health = 3;
+}

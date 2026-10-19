@@ -1,0 +1,21 @@
+# Byte-identical copy of the capture contract `ados.capture/1` (MIT, see
+# LICENSE in this directory). Upstream: the world-engine extension's
+# `contract/` directory in the ADOSExtensions repository. The
+# `vendored_contract_is_byte_identical` test in this crate checks every file
+# against the hashes below, and against the upstream tree when a sibling
+# checkout is present. Refresh by copying the files and updating the hashes.
+upstream_repo = "https://github.com/altnautica/ADOSExtensions"
+upstream_path = "extensions/world-engine/contract"
+upstream_commit = "3e91558d6d0b3b3028e133166cf9fac7559c4749"
+
+[files]
+"LICENSE" = "8008f798233a3d9ce323f9afd798d75facf3157a53c4cec60bc8fa5386950386"
+"proto/ados/capture/v1/clock.proto" = "f8d7c4fd472083568c92e68c70bcbc01df24fd2ddcccb8d3304bab449396d8de"
+"proto/ados/capture/v1/gnss.proto" = "45c88613b41be8215ad9446becffe0891973dacff2021725ca2e8f1b2a78ade3"
+"proto/ados/capture/v1/imu.proto" = "f685c6d5b444986d4494e2e5a4760ba860bab3ef49daeadc1af2ce3cc33d375d"
+"proto/ados/capture/v1/pose.proto" = "db1c992eb583663d5dccce4ebaed7777eef927cefe562c6d66b0282fe38005c6"
+"proto/ados/capture/v1/trigger.proto" = "08ee1ef05b33a660ccdd972ff4fe5125d789310fe8b3e5dd296a76da3e24cc50"
+"schema/camera_model.schema.json" = "32b0f6dc6e0150007dc90b2ed5147579911771c1c1c783ec841910def465a7bf"
+"schema/geo_anchor.schema.json" = "d7ffeaef33ba32a66320940f39c1e7da15dd269ddf6417a9a90cf33759b9ad07"
+"schema/manifest.schema.json" = "c34a4597bd7e487bc3a8364830667b5c971a13c2c945341519ab4e0a8f693294"
+"schema/rig.schema.json" = "bc07897a1cb45d222a17247b94b9218000c5b9e618e230ef0d38bef70696f2d1"

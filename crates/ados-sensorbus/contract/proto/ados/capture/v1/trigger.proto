@@ -1,0 +1,18 @@
+// ADOS capture contract ados.capture/1 — camera trigger records.
+// SPDX-License-Identifier: MIT
+syntax = "proto3";
+
+package ados.capture.v1;
+
+// Channel `/cam/<id>/trigger`: one record per exposure. The image with the
+// same `seq` is stamped with `t_mid_ns`.
+message TriggerRecord {
+  // Trigger sequence number shared with the image it produced.
+  uint64 seq = 1;
+  // Mid-exposure time on the session timebase, nanoseconds.
+  uint64 t_mid_ns = 2;
+  // Exposure duration, nanoseconds.
+  uint32 exposure_ns = 3;
+  // Analogue gain, linear (1.0 = unity).
+  float gain = 4;
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://altnautica.com/schemas/ados-capture/1/geo_anchor.schema.json",
+  "title": "GeoAnchor",
+  "description": "WGS84 origin of a local ENU world frame. Heights are always ellipsoidal.",
+  "type": "object",
+  "required": ["lat_deg", "lon_deg", "h_ellipsoid_m", "geoid_undulation_m", "datum", "source"],
+  "properties": {
+    "lat_deg": {
+      "description": "Geodetic latitude, degrees.",
+      "type": "number",
+      "minimum": -90,
+      "maximum": 90
+    },
+    "lon_deg": {
+      "description": "Geodetic longitude, degrees.",
+      "type": "number",
+      "minimum": -180,
+      "maximum": 180
+    },
+    "h_ellipsoid_m": {
+      "description": "Height above the WGS84 ellipsoid, metres.",
+      "type": "number"
+    },
+    "geoid_undulation_m": {
+      "description": "Geoid undulation N at the anchor, metres (h = H_msl + N).",
+      "type": "number"
+    },
+    "datum": {
+      "description": "Geodetic datum. Always WGS84.",
+      "type": "string",
+      "enum": ["WGS84"]
+    },
+    "source": {
+      "description": "How the anchor was obtained.",
+      "type": "string",
+      "enum": ["gnss_mean", "rtk_fixed", "operator", "sim"]
+    }
+  }
+}

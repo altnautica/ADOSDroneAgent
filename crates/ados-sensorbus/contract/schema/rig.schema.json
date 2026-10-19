@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://altnautica.com/schemas/ados-capture/1/rig.schema.json",
+  "title": "Rig",
+  "description": "`rig.json`: every sensor on the capture rig with its extrinsics in the body frame (FLU).",
+  "type": "object",
+  "required": ["contract", "rig_id", "calib_version", "sensors"],
+  "properties": {
+    "contract": { "$ref": "manifest.schema.json#/$defs/ContractId" },
+    "rig_id": { "type": "string", "minLength": 1 },
+    "calib_version": {
+      "description": "Calibration store version these values come from.",
+      "type": "string"
+    },
+    "sensors": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/RigSensor" }
+    }
+  },
+  "$defs": {
+    "Transform": {
+      "description": "Row-major 4x4 homogeneous transform `T_<to>_<from>`, metres.",
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 16,
+      "maxItems": 16
+    },
+    "RigSensor": {
+      "type": "object",
+      "required": ["id", "kind", "role", "T_body_sensor", "time_offset_ns"],
+      "properties": {
+        "id": {
+          "description": "Channel id used in MCAP topics (`/cam/<id>/image`, `/imu/<id>`, ...).",
+          "type": "string",
+          "pattern": "^[a-z0-9_]+$"
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["camera", "imu", "lidar", "gnss", "thermal", "baro", "mag"]
+        },
+        "role": {
+          "description": "Mounting role. `primary` is a vehicle's main flight camera.",
+          "type": "string",
+          "enum": ["front_left", "front_right", "left", "right", "down", "up", "back", "nav", "texture", "primary"]
+        },
+        "T_body_sensor": { "$ref": "#/$defs/Transform" },
+        "camera": {
+          "description": "Projection model; present for `camera` and `thermal` sensors.",
+          "$ref": "camera_model.schema.json"
+        },
+        "imu_noise": { "$ref": "#/$defs/ImuNoise" },
+        "time_offset_ns": {
+          "description": "Added to the sensor's own time to reach the session timebase, nanoseconds.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "lever_arm_m": {
+          "description": "GNSS antenna phase centre in the body frame, metres.",
+          "type": "array",
+          "items": { "type": "number" },
+          "minItems": 3,
+          "maxItems": 3
+        }
+      }
+    },
+    "ImuNoise": {
+      "description": "Continuous-time IMU noise densities and random walks (Kalibr units).",
+      "type": "object",
+      "required": ["gyro_nd", "accel_nd", "gyro_rw", "accel_rw"],
+      "properties": {
+        "gyro_nd": { "description": "rad/s/sqrt(Hz)", "type": "number", "minimum": 0 },
+        "accel_nd": { "description": "m/s^2/sqrt(Hz)", "type": "number", "minimum": 0 },
+        "gyro_rw": { "description": "rad/s^2/sqrt(Hz)", "type": "number", "minimum": 0 },
+        "accel_rw": { "description": "m/s^3/sqrt(Hz)", "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+// ADOS capture contract ados.capture/1 — raw GNSS receiver bytes.
+// SPDX-License-Identifier: MIT
+syntax = "proto3";
+
+package ados.capture.v1;
+
+// Channel `/gnss/<id>/raw`: receiver binary output passed through unchanged
+// (UBX for u-blox receivers), stamped at arrival.
+message GnssRaw {
+  // Arrival time of the first byte on the session timebase, nanoseconds.
+  uint64 t_ns = 1;
+  // Receiver bytes, possibly spanning or splitting protocol frames.
+  bytes bytes = 2;
+}

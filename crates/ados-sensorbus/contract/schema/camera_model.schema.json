@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://altnautica.com/schemas/ados-capture/1/camera_model.schema.json",
+  "title": "CameraModel",
+  "description": "Camera projection and distortion in the OpenCV camera frame (x right, y down, z forward). `dist` length is 0 for pinhole, 5 for opencv (k1, k2, p1, p2, k3) and 4 for opencv_fisheye and kb4 (k1..k4).",
+  "type": "object",
+  "required": ["model", "width", "height", "fx", "fy", "cx", "cy", "dist", "calibrated", "readout_ns"],
+  "properties": {
+    "model": {
+      "type": "string",
+      "enum": ["pinhole", "opencv", "opencv_fisheye", "kb4"]
+    },
+    "width": { "description": "Image width, pixels.", "type": "integer", "format": "uint32", "minimum": 1 },
+    "height": { "description": "Image height, pixels.", "type": "integer", "format": "uint32", "minimum": 1 },
+    "fx": { "description": "Focal length x, pixels.", "type": "number", "exclusiveMinimum": 0 },
+    "fy": { "description": "Focal length y, pixels.", "type": "number", "exclusiveMinimum": 0 },
+    "cx": { "description": "Principal point x, pixels.", "type": "number" },
+    "cy": { "description": "Principal point y, pixels.", "type": "number" },
+    "dist": {
+      "description": "Distortion coefficients in the order the model defines.",
+      "type": "array",
+      "items": { "type": "number" }
+    },
+    "calibrated": {
+      "description": "True when the values come from a calibration; false when they are nominal lens values.",
+      "type": "boolean"
+    },
+    "readout_ns": {
+      "description": "Rolling-shutter readout time top row to bottom row, nanoseconds. 0 = global shutter.",
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "model": { "const": "pinhole" } } },
+      "then": { "properties": { "dist": { "maxItems": 0 } } }
+    },
+    {
+      "if": { "properties": { "model": { "const": "opencv" } } },
+      "then": { "properties": { "dist": { "minItems": 5, "maxItems": 5 } } }
+    },
+    {
+      "if": { "properties": { "model": { "enum": ["opencv_fisheye", "kb4"] } } },
+      "then": { "properties": { "dist": { "minItems": 4, "maxItems": 4 } } }
+    }
+  ]
+}

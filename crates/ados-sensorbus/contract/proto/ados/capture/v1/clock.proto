@@ -1,0 +1,20 @@
+// ADOS capture contract ados.capture/1 — session clock samples.
+// SPDX-License-Identifier: MIT
+syntax = "proto3";
+
+package ados.capture.v1;
+
+// Channel `/clock`: the relation between the session timebase, the recording
+// host's monotonic clock and UTC at one instant.
+message ClockSample {
+  // Instant on the session timebase, nanoseconds.
+  uint64 t_ns = 1;
+  // Recording host CLOCK_MONOTONIC at the same instant, nanoseconds.
+  uint64 host_mono_ns = 2;
+  // UTC (Unix epoch) at the same instant, nanoseconds; absent when unknown.
+  optional int64 utc_ns = 3;
+  // True when the timebase is disciplined to its reference.
+  bool locked = 4;
+  // One-sigma uncertainty of the relation, nanoseconds; -1 = unmeasured.
+  int64 sigma_ns = 5;
+}
