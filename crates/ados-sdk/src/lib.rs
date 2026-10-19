@@ -38,6 +38,10 @@ pub mod msp;
 pub mod testing;
 pub mod vision;
 
+/// The `camera.control.set` request and reply ([`CameraClient::set_controls`]).
+/// The `reason` codes of a refused request are in
+/// [`ados_protocol::camera_control::reason`].
+pub use ados_protocol::camera_control::{CameraControlRequest, CameraControlResult};
 pub use client::{
     ClientError, EventCallback, OffloadAdvertisement, PluginIpcClient, ToolHandler, WhepAnswer,
 };

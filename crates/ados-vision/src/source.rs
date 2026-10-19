@@ -31,7 +31,10 @@ mod rtsp;
 mod v4l2;
 
 pub use rtsp::{RtspSettings, RtspSource, SimClock};
-pub use v4l2::{buffer_timing, exposure_ns_from_absolute, V4l2Settings, V4l2Source};
+pub use v4l2::{
+    buffer_timing, controls, exposure_ns_from_absolute, ControlCall, ControlQueue, V4l2Settings,
+    V4l2Source,
+};
 
 /// Buffers a source keeps in circulation. One is being filled, one sits in a
 /// published frame or an in-flight inference, and one is spare.

@@ -8,7 +8,8 @@
 //! (command-socket services), `setpoint` (flight request parsing), `advertise`
 //! (the offload-link advertisement), `display` (the reserved plugin page), `node_info`
 //! (the node facts), `mdns` (DNS-SD advertise and browse), `media_relay` (the
-//! WHEP and rig relays), `caps` (the
+//! WHEP and rig relays), `camera_control` (the camera control relay to the
+//! vision engine), `caps` (the
 //! ungrantable capability set) and `args` (msgpack readers). The argument
 //! validation, the inline capability gates, the error strings and the
 //! success-map shapes are all part of the wire contract a plugin is written
@@ -48,6 +49,7 @@ use crate::vehicle_events::FcIdentity;
 use crate::vision_client::VisionClient;
 
 mod advertise;
+mod camera_control;
 mod caps;
 mod cloud;
 mod config_control;

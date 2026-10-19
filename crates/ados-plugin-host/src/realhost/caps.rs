@@ -133,6 +133,7 @@ pub(super) const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         CameraClaim,
         CameraRelease,
         CameraGetFrame,
+        CameraControlSet,
         VideoSourceSet,
         ConfigGet,
         ConfigSet,

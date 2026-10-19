@@ -274,6 +274,15 @@ impl VisionClient {
             .await
     }
 
+    /// Proxy a `camera.control.set` request to the engine (exposure, gain or
+    /// auto exposure on a camera it owns) and return its response `args`.
+    pub async fn camera_control_set(&self, args: &Value) -> Result<Value, VisionRpcError> {
+        use ados_protocol::camera_control::{CAMERA_CONTROL_CAPABILITY, CAMERA_CONTROL_METHOD};
+        self.shared
+            .request(CAMERA_CONTROL_METHOD, CAMERA_CONTROL_CAPABILITY, args)
+            .await
+    }
+
     /// Ask the engine to drop every model `plugin_id` registered. Host-internal:
     /// no plugin request reaches this method.
     pub async fn unregister_owner(&self, plugin_id: &str) -> Result<Value, VisionRpcError> {

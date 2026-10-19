@@ -20,6 +20,9 @@ fn struct_sizes_match_the_kernel_abi() {
     assert_eq!(size_of::<Plane>(), 64);
     assert_eq!(offset_of!(Plane, data_offset), 16);
     assert_eq!(size_of::<Control>(), 8);
+    assert_eq!(size_of::<QueryCtrl>(), 68);
+    assert_eq!(offset_of!(QueryCtrl, minimum), 40);
+    assert_eq!(offset_of!(QueryCtrl, flags), 56);
     assert_eq!(size_of::<CaptureParm>(), 40);
     assert_eq!(size_of::<StreamParm>(), 204);
     assert_eq!(offset_of!(PixFormatMplane, num_planes), 180);
@@ -39,6 +42,7 @@ fn ioctl_numbers_match_videodev2() {
     assert_eq!(VIDIOC_S_PARM, 0xc0cc_5616);
     assert_eq!(VIDIOC_G_CTRL, 0xc008_561b);
     assert_eq!(VIDIOC_S_CTRL, 0xc008_561c);
+    assert_eq!(VIDIOC_QUERYCTRL, 0xc044_5624);
 }
 
 #[test]

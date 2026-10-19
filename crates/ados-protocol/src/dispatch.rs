@@ -48,6 +48,7 @@ pub const DISPATCH_METHODS: &[DispatchMethod] = &[
     DispatchMethod { method: "video.whep.offer", required_cap: Some("video.whep.relay"), inline: false },
     DispatchMethod { method: "video.whep.close", required_cap: Some("video.whep.relay"), inline: false },
     DispatchMethod { method: "sensors.rig.write", required_cap: Some("sensors.rig.write"), inline: false },
+    DispatchMethod { method: "camera.control.set", required_cap: Some("camera.control.write"), inline: false },
     DispatchMethod { method: "config.get", required_cap: None, inline: false },
     DispatchMethod { method: "config.set", required_cap: None, inline: false },
     DispatchMethod { method: "process.spawn", required_cap: Some("process.spawn"), inline: false },

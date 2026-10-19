@@ -708,6 +708,19 @@ pub trait HostServices: Send + Sync + 'static {
     ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("vision.designate_track")))
     }
+
+    /// Set exposure, gain or auto exposure on a camera the vision engine owns
+    /// ([`ados_protocol::camera_control::CameraControlRequest`]) and return
+    /// the engine's read-back ([`ados_protocol::camera_control::CameraControlResult`]).
+    /// Gated at the dispatch level on `camera.control.write`. Proxied to the
+    /// engine over its socket.
+    fn camera_control_set(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("camera.control.set")))
+    }
 }
 
 /// The default host: every host-coupled method returns `not_implemented`.

@@ -1,6 +1,14 @@
 //! Peripheral drivers, cameras, buttons, GPIO, display and radio aux-stream calls.
 
+use ados_protocol::camera_control::{
+    CameraControlRequest, CameraControlResult, CAMERA_CONTROL_CAPABILITY, CAMERA_CONTROL_METHOD,
+};
+
 use super::*;
+
+/// How long a camera control call waits: the engine applies it between two
+/// frames of the camera and gives up on a stalled one after three seconds.
+const CAMERA_CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
 
 impl PluginIpcClient {
     /// Register a driver of the given kind, referenced by an opaque id the host
@@ -80,6 +88,27 @@ impl PluginIpcClient {
             .send_request("camera.get_frame", "sensor.camera.register", args)
             .await?
             .args)
+    }
+
+    /// Set exposure, gain or auto exposure on a camera the vision engine owns
+    /// and return what the camera reads back. Gated on `camera.control.write`
+    /// ([`ClientError::CapabilityDenied`] without it). `applied` is true only
+    /// when every requested control was set and reads back as asked; a
+    /// simulated, network or control-less camera answers `applied: false`
+    /// with a [`reason`](ados_protocol::camera_control::reason) code.
+    pub async fn camera_set_controls(
+        &self,
+        req: &CameraControlRequest,
+    ) -> Result<CameraControlResult, ClientError> {
+        let reply = self
+            .send_request_within(
+                CAMERA_CONTROL_METHOD,
+                CAMERA_CONTROL_CAPABILITY,
+                req.to_args(),
+                CAMERA_CONTROL_TIMEOUT,
+            )
+            .await?;
+        decode_typed_reply(reply.args, CAMERA_CONTROL_METHOD)
     }
 }
 

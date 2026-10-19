@@ -59,6 +59,7 @@ pub mod aux_ports;
 pub mod aux_rpc;
 pub mod aux_rpc_proxy;
 pub mod buttons;
+pub mod camera_control;
 pub mod capabilities;
 pub mod cloud_link;
 pub mod cloud_publish;

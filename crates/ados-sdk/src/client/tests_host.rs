@@ -239,3 +239,78 @@ async fn relay_refusals_surface_as_typed_errors() {
     server.await.unwrap();
     client.close().await;
 }
+
+#[tokio::test]
+async fn camera_controls_carry_the_request_and_decode_the_read_back() {
+    use ados_protocol::camera_control::{CameraControlRequest, CameraControlResult};
+    let (client, server) = with_host(&["camera.control.write"], |r, w| {
+        answer_requests(r, w, 3, |req| match map_get(&req.args, "camera_id") {
+            Some(id) if id.as_str() == Some("cam_down") => reply_to(
+                req,
+                kv(&[
+                    ("applied", Value::Boolean(true)),
+                    ("exposure_us", Value::from(2_000)),
+                    ("gain", Value::from(4.0)),
+                ]),
+                None,
+            ),
+            Some(id) if id.as_str() == Some("cam_fl") => reply_to(
+                req,
+                kv(&[
+                    ("applied", Value::Boolean(false)),
+                    ("reason", Value::from("not_v4l2")),
+                ]),
+                None,
+            ),
+            _ => reply_to(
+                req,
+                Value::Map(vec![]),
+                Some("capability_denied: camera.control.write"),
+            ),
+        })
+    })
+    .await;
+    client.connect().await.expect("connect");
+
+    let req = CameraControlRequest {
+        camera_id: "cam_down".into(),
+        exposure_us: Some(2_000),
+        gain: Some(4.0),
+        auto_exposure: None,
+    };
+    assert_eq!(
+        client.camera_set_controls(&req).await.unwrap(),
+        CameraControlResult {
+            applied: true,
+            exposure_us: Some(2_000),
+            gain: Some(4.0),
+            reason: None,
+        }
+    );
+    let sim = CameraControlRequest {
+        camera_id: "cam_fl".into(),
+        auto_exposure: Some(true),
+        ..Default::default()
+    };
+    assert_eq!(
+        client.camera_set_controls(&sim).await.unwrap(),
+        CameraControlResult::refused("not_v4l2")
+    );
+    let other = CameraControlRequest {
+        camera_id: "x".into(),
+        ..Default::default()
+    };
+    assert!(matches!(
+        client.camera_set_controls(&other).await,
+        Err(ClientError::CapabilityDenied(c)) if c == "camera.control.write"
+    ));
+
+    let seen = server.await.unwrap();
+    client.close().await;
+    assert_eq!(
+        (seen[0].method.as_str(), seen[0].capability.as_str()),
+        ("camera.control.set", "camera.control.write")
+    );
+    assert_eq!(CameraControlRequest::from_args(&seen[0].args).unwrap(), req);
+    assert_eq!(CameraControlRequest::from_args(&seen[1].args).unwrap(), sim);
+}

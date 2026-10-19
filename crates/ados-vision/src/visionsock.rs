@@ -23,6 +23,9 @@
 //! - `vision.designate_track` — lock a captured camera's tracker onto a box.
 //! - `vision.unregister_owner` — drop every model one plugin registered (sent
 //!   by the host when it stops serving the plugin).
+//! - `camera.control.set` — set exposure, gain or auto exposure on a camera
+//!   this engine captures and answer the read-back
+//!   ([`crate::camera_control`]).
 //!
 //! The `args` of the four plugin-facing requests are the shapes
 //! [`ados_protocol::vision_rpc`] defines, decoded with its decoders so the SDK
@@ -34,6 +37,7 @@
 
 use std::sync::Arc;
 
+use ados_protocol::camera_control::CAMERA_CONTROL_METHOD;
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::framebus::{methods, DetectionBatch, FrameDescriptor, VISION_DETECTION_VERSION};
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
@@ -192,6 +196,7 @@ async fn dispatch(engine: &Arc<VisionEngine>, env: &Envelope) -> (Value, Option<
         m if m == methods::DESIGNATE_TRACK => handle_designate_track(engine, &env.args).await,
         m if m == methods::LIST_MODELS => handle_list_models(engine).await,
         m if m == vision_rpc::UNREGISTER_OWNER => handle_unregister_owner(engine, &env.args).await,
+        m if m == CAMERA_CONTROL_METHOD => crate::camera_control::handle(engine, &env.args).await,
         other => Err(anyhow!("unknown vision method {other}")),
     };
     match result {
@@ -687,6 +692,24 @@ mod tests {
         let (_resp, err) = dispatch(&e, &req_env("vision.bogus", Value::Map(vec![]))).await;
         assert!(err.is_some());
         assert!(err.unwrap().contains("unknown vision method"));
+    }
+
+    #[tokio::test]
+    async fn camera_control_dispatch_answers_the_read_back() {
+        use ados_protocol::camera_control::{reason, CameraControlRequest, CameraControlResult};
+        let e = engine();
+        e.camera_controls().register_other("cam_fl");
+        let req = CameraControlRequest {
+            camera_id: "cam_fl".into(),
+            exposure_us: Some(1_000),
+            ..Default::default()
+        };
+        let (resp, err) = dispatch(&e, &req_env(CAMERA_CONTROL_METHOD, req.to_args())).await;
+        assert_eq!(err, None);
+        assert_eq!(
+            CameraControlResult::from_value(&resp).unwrap(),
+            CameraControlResult::refused(reason::NOT_V4L2)
+        );
     }
 
     #[test]

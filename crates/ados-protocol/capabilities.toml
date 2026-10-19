@@ -323,6 +323,15 @@ risk_reason = "A wrong but valid calibration skews every fused sensor sample and
 enforced = true
 
 [[agent]]
+id = "camera.control.write"
+label = "Set camera exposure and gain"
+description = "Lets the plugin set the exposure time, gain and auto-exposure mode of a camera the vision engine captures, and read back the values the camera actually took. Only local V4L2 cameras the engine already streams from are adjustable; simulated and network cameras answer that nothing was applied."
+category = "hardware"
+risk = "medium"
+risk_reason = "Changes the image every consumer of that camera sees (the operator's video, detection, tracking and capture); a wrong exposure can wash out or black out the picture until it is set back."
+enforced = true
+
+[[agent]]
 id = "mission.read"
 label = "Read mission plans loaded on the agent"
 description = "Lets the plugin read the active mission, waypoints, fences, and rally points stored on the agent."
@@ -915,6 +924,14 @@ required_cap = "video.whep.relay"
 [[method]]
 id = "sensors.rig.write"
 required_cap = "sensors.rig.write"
+
+# ---- camera controls ----
+# Set exposure, gain or auto-exposure on a camera the vision engine owns. The
+# host relays to the engine, which applies it on the device it already streams
+# from and reads the values back. Fully gated at the dispatch level.
+[[method]]
+id = "camera.control.set"
+required_cap = "camera.control.write"
 
 # ---- config kv (per-drone / global) ----
 [[method]]

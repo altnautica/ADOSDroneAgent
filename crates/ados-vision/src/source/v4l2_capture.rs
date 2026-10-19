@@ -10,11 +10,12 @@
 use std::io;
 use std::os::fd::RawFd;
 
+use super::controls::{drain, ControlDevice, ControlInfo};
 use super::v4l2_sys as sys;
 use super::{
-    copy_rows, exposure_ns_from_absolute, fourcc, poll_due, BufferPool, Captured, V4l2Settings,
-    BUF_FLAG_ERROR, CID_ANALOGUE_GAIN, CID_EXPOSURE_ABSOLUTE, CID_EXPOSURE_AUTO, CID_GAIN,
-    DEQUEUE_TIMEOUT, DRIVER_BUFFERS, EXPOSURE_MANUAL,
+    copy_rows, exposure_ns_from_absolute, fourcc, poll_due, BufferPool, Captured, ControlQueue,
+    V4l2Settings, BUF_FLAG_ERROR, CID_ANALOGUE_GAIN, CID_EXPOSURE_ABSOLUTE, CID_EXPOSURE_AUTO,
+    CID_GAIN, DEQUEUE_TIMEOUT, DRIVER_BUFFERS, EXPOSURE_MANUAL,
 };
 use ados_protocol::framebus::{mono_ns, FrameFormat};
 
@@ -149,6 +150,37 @@ fn read_exposure(fd: RawFd) -> Option<u32> {
     exposure_ns_from_absolute(i64::from(c.value))
 }
 
+/// The control surface of the open, streaming device.
+struct FdControls(RawFd);
+
+impl ControlDevice for FdControls {
+    fn query(&mut self, id: u32) -> Option<ControlInfo> {
+        let mut q = sys::QueryCtrl {
+            id,
+            ..Default::default()
+        };
+        sys::query_ctrl(self.0, &mut q).ok()?;
+        if q.flags & (sys::CTRL_FLAG_DISABLED | sys::CTRL_FLAG_READ_ONLY) != 0 {
+            return None;
+        }
+        Some(ControlInfo {
+            minimum: q.minimum,
+            maximum: q.maximum,
+            step: q.step,
+        })
+    }
+
+    fn set(&mut self, id: u32, value: i32) -> io::Result<()> {
+        set_ctrl(self.0, id, value)
+    }
+
+    fn get(&mut self, id: u32) -> io::Result<i32> {
+        let mut c = sys::Control { id, value: 0 };
+        sys::get_ctrl(self.0, &mut c)?;
+        Ok(c.value)
+    }
+}
+
 /// Open, configure and start streaming `s.device`.
 fn open(s: &V4l2Settings) -> io::Result<(sys::Device, Layout)> {
     let (mut dev, cap) = sys::Device::open(&s.device)?;
@@ -201,6 +233,7 @@ pub(super) fn run(
     s: &V4l2Settings,
     mut pool: BufferPool,
     tx: &tokio::sync::mpsc::Sender<io::Result<Captured>>,
+    mut controls: Option<ControlQueue>,
 ) -> io::Result<()> {
     let (mut dev, layout) = open(s)?;
     let fd = dev.fd();
@@ -216,6 +249,13 @@ pub(super) fn run(
     loop {
         if tx.is_closed() {
             return Ok(());
+        }
+        // Control requests are applied between buffers, on this thread's own
+        // handle: the device is never opened a second time.
+        if let Some(queue) = controls.as_mut() {
+            if drain(queue, &mut FdControls(fd)) {
+                exposure = read_exposure(fd);
+            }
         }
         if !dev.poll_readable(timeout_ms)? {
             continue;

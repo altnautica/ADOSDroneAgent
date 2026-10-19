@@ -26,6 +26,7 @@ use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use crate::backend::{LoadedModel, VisionBackend};
+use crate::camera_control::CameraControls;
 use crate::ring::{FrameTiming, RingWriter};
 mod models;
 mod tracking;
@@ -148,6 +149,8 @@ pub struct VisionEngine {
     /// Per-model rolling inference timing (fps + latency), fed by `infer` and read
     /// by `list_models` for the telemetry surface.
     timings: Mutex<HashMap<String, ModelTiming>>,
+    /// Where each camera's exposure and gain requests go.
+    camera_controls: CameraControls,
 }
 
 /// How a camera ring is sized.
@@ -235,6 +238,7 @@ impl VisionEngine {
             reid_enabled,
             reid_model_id,
             timings: Mutex::new(HashMap::new()),
+            camera_controls: CameraControls::default(),
         })
     }
 
@@ -252,6 +256,12 @@ impl VisionEngine {
     /// The backend name (for logs and the socket info reply).
     pub fn backend_name(&self) -> &str {
         self.backend.name()
+    }
+
+    /// The camera control routes. The source factory registers each camera
+    /// it opens; `camera.control.set` looks them up.
+    pub fn camera_controls(&self) -> &CameraControls {
+        &self.camera_controls
     }
 
     /// Whether the engine's loaded backend runs real inference (not the mock).

@@ -193,8 +193,12 @@ async fn main() {
     let mut tasks = Vec::new();
 
     // Triggered cameras join their frames to the sensor bus trigger records;
-    // on a simulated node each frame's simulator time is a clock pair.
-    let mut factory = SourceFactory::default();
+    // on a simulated node each frame's simulator time is a clock pair. Each
+    // opened source registers its control route on the engine's table.
+    let mut factory = SourceFactory {
+        controls: engine.camera_controls().clone(),
+        ..SourceFactory::default()
+    };
     let trigger_task = needs_triggers(&cameras).then(|| {
         factory
             .triggers

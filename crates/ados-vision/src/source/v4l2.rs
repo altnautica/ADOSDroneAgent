@@ -1,4 +1,6 @@
 //! Local V4L2 capture: the single owner of a captured camera's device.
+//! Exposure and gain requests reach the capture thread over a channel and are
+//! applied on the same open device ([`controls`]).
 //!
 //! The device is streamed with MMAP buffers on a dedicated thread (a dequeue
 //! blocks), each buffer copied once into a pooled frame buffer. Timing comes
@@ -169,13 +171,19 @@ pub struct V4l2Source {
     pool: Option<BufferPool>,
     recycle: BufferReturn,
     rx: Option<tokio::sync::mpsc::Receiver<std::io::Result<Captured>>>,
+    /// Control requests for the capture thread, moved into it on start.
+    controls: Option<ControlQueue>,
 }
+
+/// The queue control requests reach a capture thread on.
+pub type ControlQueue = tokio::sync::mpsc::Receiver<ControlCall>;
 
 impl V4l2Source {
     pub fn new(
         camera_id: impl Into<String>,
         settings: V4l2Settings,
         triggers: Option<CameraTriggers>,
+        controls: Option<ControlQueue>,
     ) -> Self {
         let pool = BufferPool::new();
         let recycle = pool.recycler();
@@ -186,6 +194,7 @@ impl V4l2Source {
             pool: Some(pool),
             recycle,
             rx: None,
+            controls,
         }
     }
 
@@ -201,10 +210,11 @@ impl V4l2Source {
         let (tx, rx) = tokio::sync::mpsc::channel(HANDOFF);
         let settings = self.settings.clone();
         let camera = self.camera_id.clone();
+        let controls = self.controls.take();
         std::thread::Builder::new()
             .name(format!("v4l2-{camera}"))
             .spawn(move || {
-                if let Err(e) = capture::run(&settings, pool, &tx) {
+                if let Err(e) = capture::run(&settings, pool, &tx, controls) {
                     let _ = tx.blocking_send(Err(e));
                 }
             })?;
@@ -273,12 +283,13 @@ mod capture;
 
 #[cfg(not(target_os = "linux"))]
 mod capture {
-    use super::{BufferPool, Captured, V4l2Settings};
+    use super::{BufferPool, Captured, ControlQueue, V4l2Settings};
 
     pub(super) fn run(
         _settings: &V4l2Settings,
         _pool: BufferPool,
         _tx: &tokio::sync::mpsc::Sender<std::io::Result<Captured>>,
+        _controls: Option<ControlQueue>,
     ) -> std::io::Result<()> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
@@ -286,6 +297,11 @@ mod capture {
         ))
     }
 }
+
+#[path = "v4l2_controls.rs"]
+pub mod controls;
+pub use controls::ControlCall;
+
 #[cfg(target_os = "linux")]
 #[path = "v4l2_sys.rs"]
 mod v4l2_sys;

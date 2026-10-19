@@ -38,6 +38,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "video.whep.offer": "video.whep.relay",
     "video.whep.close": "video.whep.relay",
     "sensors.rig.write": "sensors.rig.write",
+    "camera.control.set": "camera.control.write",
     "config.get": None,
     "config.set": None,
     "process.spawn": "process.spawn",

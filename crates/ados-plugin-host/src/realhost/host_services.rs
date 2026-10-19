@@ -1192,6 +1192,14 @@ impl HostServices for RealHost {
             .await
             .map_err(|e| HostError::Rpc(e.0))
     }
+
+    async fn camera_control_set(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.relay_camera_control(args).await
+    }
 }
 
 /// Bind a plugin-published detection batch to its publisher before it reaches

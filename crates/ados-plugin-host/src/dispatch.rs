@@ -22,6 +22,7 @@
 use std::collections::BTreeSet;
 
 use ados_protocol::buttons::SUBSCRIBE as BUTTON_SUBSCRIBE;
+use ados_protocol::camera_control::CAMERA_CONTROL_METHOD;
 use ados_protocol::dispatch::required_cap_for;
 use ados_protocol::framebus::methods as vision_methods;
 use ados_protocol::media_relay::{RIG_WRITE_METHOD, WHEP_CLOSE_METHOD, WHEP_OFFER_METHOD};
@@ -63,6 +64,9 @@ pub enum Method {
     CameraClaim,
     CameraRelease,
     CameraGetFrame,
+    // Set exposure, gain or auto exposure on a camera the vision engine owns;
+    // the host relays it to the engine, which applies and reads it back.
+    CameraControlSet,
     // Video: declare the pipeline's camera/stream source list. The host forwards
     // it to the supervisor's video command socket, which persists the source
     // list and restarts the video service.
@@ -172,6 +176,9 @@ impl Method {
         if name == RIG_WRITE_METHOD {
             return Some(Self::RigWrite);
         }
+        if name == CAMERA_CONTROL_METHOD {
+            return Some(Self::CameraControlSet);
+        }
         Some(match name {
             "event.publish" => Self::EventPublish,
             "event.subscribe" => Self::EventSubscribe,
@@ -238,6 +245,7 @@ impl Method {
             Self::CameraClaim => "camera.claim",
             Self::CameraRelease => "camera.release",
             Self::CameraGetFrame => "camera.get_frame",
+            Self::CameraControlSet => CAMERA_CONTROL_METHOD,
             Self::VideoSourceSet => "video.source.set",
             Self::ConfigGet => "config.get",
             Self::ConfigSet => "config.set",
@@ -524,6 +532,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn camera_control_set_gates_on_the_camera_control_capability() {
+        // Refused without the cap (the camera claim cap does not satisfy it),
+        // allowed with it.
+        assert_eq!(
+            gate(
+                "camera.control.set",
+                false,
+                &caps(&["sensor.camera.register", "vision.frame.read"])
+            ),
+            Gate::CapabilityDenied("capability_denied: camera.control.write".to_string())
+        );
+        assert_eq!(
+            gate(
+                "camera.control.set",
+                false,
+                &caps(&["camera.control.write"])
+            ),
+            Gate::Allow(Method::CameraControlSet)
+        );
+    }
+
     /// Every variant the enum can produce. Kept exhaustive by the match in
     /// [`Method::wire_name`] (a new variant forces an arm there), so this list
     /// plus the wire-name mapping is the enum's full surface.
@@ -548,6 +578,7 @@ mod tests {
         Method::CameraClaim,
         Method::CameraRelease,
         Method::CameraGetFrame,
+        Method::CameraControlSet,
         Method::VideoSourceSet,
         Method::ConfigGet,
         Method::ConfigSet,

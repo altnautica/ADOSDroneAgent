@@ -38,10 +38,13 @@
 //!   canonical detection type (the lock primitive follow-me / framing /
 //!   target-lock consumers read).
 //! - [`config`] — the `vision:` block of the agent config.
+//! - [`camera_control`] — routes a camera's exposure and gain requests to the
+//!   capture thread that owns its device.
 //! - [`work_status`] — the frames-consumed and live-input counters, published
 //!   to the `vision-status.json` sidecar the supervisor judges the engine on.
 
 pub mod backend;
+pub mod camera_control;
 pub mod cameras;
 pub mod config;
 pub mod daemon_support;

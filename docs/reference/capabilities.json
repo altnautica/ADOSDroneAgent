@@ -10,6 +10,15 @@
       "side": "agent"
     },
     {
+      "category": "hardware",
+      "description": "Lets the plugin set the exposure time, gain and auto-exposure mode of a camera the vision engine captures, and read back the values the camera actually took. Only local V4L2 cameras the engine already streams from are adjustable; simulated and network cameras answer that nothing was applied.",
+      "enforced": true,
+      "id": "camera.control.write",
+      "label": "Set camera exposure and gain",
+      "risk": "medium",
+      "side": "agent"
+    },
+    {
       "category": "data_network",
       "description": "Lets the plugin read the capture-storage state and write capture session directories under the agent's capture root, and raise the capture-active marker that switches the flight controller to its capture sensor rates. The agent's storage janitor still owns the budget, admission and eviction.",
       "enforced": true,

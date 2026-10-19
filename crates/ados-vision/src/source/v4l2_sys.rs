@@ -231,6 +231,25 @@ pub struct Control {
     pub value: i32,
 }
 
+/// `struct v4l2_queryctrl` (68 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct QueryCtrl {
+    pub id: u32,
+    pub type_: u32,
+    pub name: [u8; 32],
+    pub minimum: i32,
+    pub maximum: i32,
+    pub step: i32,
+    pub default_value: i32,
+    pub flags: u32,
+    pub reserved: [u32; 2],
+}
+
+/// `V4L2_CTRL_FLAG_DISABLED` and `V4L2_CTRL_FLAG_READ_ONLY`.
+pub const CTRL_FLAG_DISABLED: u32 = 0x0001;
+pub const CTRL_FLAG_READ_ONLY: u32 = 0x0004;
+
 /// `struct v4l2_captureparm` (40 bytes).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
@@ -272,6 +291,7 @@ pub const VIDIOC_STREAMOFF: u64 = ioc(WRITE, 19, std::mem::size_of::<i32>());
 pub const VIDIOC_S_PARM: u64 = ioc(READ | WRITE, 22, std::mem::size_of::<StreamParm>());
 pub const VIDIOC_G_CTRL: u64 = ioc(READ | WRITE, 27, std::mem::size_of::<Control>());
 pub const VIDIOC_S_CTRL: u64 = ioc(READ | WRITE, 28, std::mem::size_of::<Control>());
+pub const VIDIOC_QUERYCTRL: u64 = ioc(READ | WRITE, 36, std::mem::size_of::<QueryCtrl>());
 
 /// `ioctl(fd, request, arg)`, retried on `EINTR`.
 ///
@@ -317,6 +337,8 @@ typed_ioctl! {
     get_ctrl: VIDIOC_G_CTRL => Control;
     /// `VIDIOC_S_CTRL`.
     set_ctrl: VIDIOC_S_CTRL => Control;
+    /// `VIDIOC_QUERYCTRL`.
+    query_ctrl: VIDIOC_QUERYCTRL => QueryCtrl;
     /// `VIDIOC_REQBUFS`.
     request_buffers: VIDIOC_REQBUFS => RequestBuffers;
 }

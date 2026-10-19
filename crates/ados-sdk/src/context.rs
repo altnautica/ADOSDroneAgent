@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use ados_protocol::camera_control::{CameraControlRequest, CameraControlResult};
 use rmpv::Value;
 
 use crate::client::{ClientError, EventCallback, PluginIpcClient};
@@ -325,7 +326,8 @@ impl PeripheralClient {
     }
 }
 
-/// `ctx.camera` — path-level claim/release plus a frame-pull primitive.
+/// `ctx.camera` — path-level claim/release, a frame-pull primitive, and the
+/// exposure and gain of cameras the vision engine owns.
 #[derive(Clone)]
 pub struct CameraClient {
     ipc: Arc<PluginIpcClient>,
@@ -355,6 +357,16 @@ impl CameraClient {
         self.ipc
             .camera_get_frame(device_path, format, timeout_ms)
             .await
+    }
+
+    /// Set exposure, gain or auto exposure on the engine-owned camera
+    /// `req.camera_id` and return the values it reads back. Needs
+    /// `camera.control.write`. See [`PluginIpcClient::camera_set_controls`].
+    pub async fn set_controls(
+        &self,
+        req: &CameraControlRequest,
+    ) -> Result<CameraControlResult, ClientError> {
+        self.ipc.camera_set_controls(req).await
     }
 }
 

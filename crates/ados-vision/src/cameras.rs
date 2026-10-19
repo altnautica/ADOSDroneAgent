@@ -8,6 +8,7 @@
 
 use ados_config::cameras::CaptureCamera;
 
+use crate::camera_control::CameraControls;
 use crate::config::VisionConfig;
 use crate::source::{
     AnySource, RtspSettings, RtspSource, SimClock, TapSource, V4l2Settings, V4l2Source,
@@ -68,11 +69,13 @@ pub fn is_rtsp(source: &str) -> bool {
     s.starts_with("rtsp://") || s.starts_with("rtsps://")
 }
 
-/// Builds each attempt's frame source from its spec.
+/// Builds each attempt's frame source from its spec, and registers where the
+/// camera's control requests go.
 #[derive(Clone, Default)]
 pub struct SourceFactory {
     pub triggers: TriggerFeed,
     pub sim: SimClock,
+    pub controls: CameraControls,
 }
 
 impl SourceFactory {
@@ -88,13 +91,16 @@ impl SourceFactory {
         Some(CameraTriggers::new(self.triggers.clone(), stream, joiner))
     }
 
-    /// A fresh source for `spec`.
+    /// A fresh source for `spec`. A V4L2 camera's control requests are routed
+    /// to the new source's capture thread; any other source has no controls.
     pub fn open(&self, spec: &CameraSpec) -> AnySource {
         match spec {
             CameraSpec::Tap { id, socket } => {
+                self.controls.register_other(id);
                 AnySource::Tap(TapSource::new(id.clone(), socket.clone()))
             }
             CameraSpec::Owned(cam) if is_rtsp(&cam.source) => {
+                self.controls.register_other(&cam.id);
                 AnySource::Rtsp(Box::new(RtspSource::new(
                     cam.id.clone(),
                     RtspSettings {
@@ -119,6 +125,7 @@ impl SourceFactory {
                     gain: cam.gain,
                 },
                 self.triggers_for(cam, false),
+                Some(self.controls.register_capture(&cam.id)),
             ))),
         }
     }
@@ -175,5 +182,32 @@ mod tests {
             panic!()
         };
         assert!(factory.triggers_for(free, false).is_none());
+    }
+
+    #[tokio::test]
+    async fn each_opened_source_registers_its_control_route() {
+        use ados_protocol::camera_control::{reason, CameraControlRequest};
+        let factory = SourceFactory::default();
+        let sources: Vec<AnySource> = camera_specs(&config(RIG))
+            .iter()
+            .map(|s| factory.open(s))
+            .collect();
+        let why = |id: &str| {
+            let req = CameraControlRequest {
+                camera_id: id.into(),
+                gain: Some(2.0),
+                ..Default::default()
+            };
+            let controls = factory.controls.clone();
+            async move { controls.set(&req).await.reason }
+        };
+        // The simulated rig camera and the tap have no device controls.
+        assert_eq!(why("cam_fl").await.as_deref(), Some(reason::NOT_V4L2));
+        assert_eq!(why("main").await.as_deref(), Some(reason::NOT_V4L2));
+        assert_eq!(why("other").await.as_deref(), Some(reason::UNKNOWN_CAMERA));
+        // A V4L2 source routes to its capture thread; once the source is gone
+        // there is no open device to apply on.
+        drop(sources);
+        assert_eq!(why("nav").await.as_deref(), Some(reason::NOT_STREAMING));
     }
 }
