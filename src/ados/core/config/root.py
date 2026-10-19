@@ -27,7 +27,7 @@ from .system import (
     UiConfig,
     VisionConfig,
 )
-from .video import VideoConfig
+from .video import CameraLeg, VideoConfig
 
 # Dotted config paths whose stored VALUE is a credential (an API key, a
 # password, a secret-file path). One list feeds two surfaces so they can never
@@ -52,6 +52,10 @@ class ADOSConfig(BaseModel):
     agent: AgentConfig = AgentConfig()
     mavlink: MavlinkConfig = MavlinkConfig()
     video: VideoConfig = VideoConfig()
+    # One entry per physical camera: the video pipeline's stream legs and,
+    # with ``capture: true``, the cameras the vision engine owns. Written by an
+    # operator or a driver plugin (``video.source.set``) through the supervisor.
+    cameras: list[CameraLeg] = Field(default_factory=list)
     network: NetworkConfig = NetworkConfig()
     radio: RadioConfig = RadioConfig()
     server: ServerConfig = ServerConfig()

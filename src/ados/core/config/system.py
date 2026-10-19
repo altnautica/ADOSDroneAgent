@@ -16,19 +16,10 @@ VisionBackend = Literal["auto", "rknn", "hailo", "onnx", "mock"]
 
 
 # The vision sub-models default the fields the native engine requires
-# (`model_id`, `model_path`, a camera's `id`) to empty, so a partly written
-# block never stops the Python services from loading; the engine refuses such
-# an entry itself.
-class VisionCameraEntry(BaseModel):
-    """One explicitly configured camera; an empty list uses HAL discovery."""
-
-    id: str = ""
-    # "tap" reads the video pipeline's frame tap; "capture" opens the device.
-    kind: str = "tap"
-    # For "tap": the frame socket; unset is `<socket_dir>/vision-tap-<id>.sock`.
-    tap_socket: str | None = None
-    # For "capture": the device path; unset is resolved by HAL discovery.
-    device_path: str | None = None
+# (`model_id`, `model_path`) to empty, so a partly written block never stops
+# the Python services from loading; the engine refuses such an entry itself.
+# The cameras the engine owns are the top-level `cameras` entries with
+# `capture: true`.
 
 
 class VisionDetectorConfig(BaseModel):
@@ -69,7 +60,6 @@ class VisionConfig(BaseModel):
     # Overrides `agent.profile` for the engine; unset follows it.
     profile: str | None = None
     socket_dir: str = "/run/ados"
-    cameras: list[VisionCameraEntry] = Field(default_factory=list)
     downscale_width: int = Field(default=640, ge=0, le=U32_MAX)
     downscale_height: int = Field(default=480, ge=0, le=U32_MAX)
     slot_count: int = Field(default=4, ge=0, le=U32_MAX)

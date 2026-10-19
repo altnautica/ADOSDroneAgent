@@ -100,20 +100,27 @@ class CameraMatch(BaseModel):
 
 
 class CameraLeg(BaseModel):
-    """One entry of the optional ``video.cameras`` list — a single video leg the
-    node exposes as its own mediamtx path (and ``:8889/<id>/whep``). Present only
-    when more than one stream is declared (a smart pod, a dual-camera rig); an
-    absent list falls back to the single ``video.camera`` block. The primary leg
-    is always served at the fixed ``main`` path; secondary legs keep their ids.
+    """One entry of the top-level ``cameras`` list — one physical camera. The
+    video pipeline serves each as its own mediamtx path (and
+    ``:8889/<id>/whep``); an absent list falls back to the single
+    ``video.camera`` block. The primary leg is always served at the fixed
+    ``main`` path; secondary legs keep their ids.
 
     ``id`` is the leg's immutable logical identity; ``source`` is its current
     locator; ``match`` re-pins ``source`` → ``id`` across a device rename.
-    ``role`` is the transport plane (primary → the fixed ``main`` path / WFB /
-    cloud); ``purpose`` is the consumer plane a plugin binds to. The management
-    fields (``name`` / ``orientation`` / ``purpose`` / ``enabled`` / ``owner`` /
-    ``fov_deg`` / ``mount_pitch_deg`` / ``calibration`` / ``match``) are metadata
-    surfaced through the camera roster; the encode + radio pipeline reads none of
-    them, so an existing single-``role`` config resolves byte-identically.
+    ``role`` is the rig role (``front_left``, ``front_right``, ``left``,
+    ``right``, ``down``, ``up``, ``back``, ``nav``, ``texture``, ``primary``) or
+    a stream label; ``primary`` (else the first leg) is the transport primary
+    (the fixed ``main`` path / WFB / cloud). ``purpose`` is the consumer plane a
+    plugin binds to. The management fields (``name`` / ``orientation`` /
+    ``purpose`` / ``enabled`` / ``owner`` / ``fov_deg`` / ``mount_pitch_deg`` /
+    ``calibration`` / ``match``) are metadata surfaced through the camera
+    roster; the encode + radio pipeline reads none of them.
+
+    ``capture: true`` hands the camera to the vision engine, the only process
+    that then opens ``source`` (a V4L2 device or an ``rtsp://`` URL); the video
+    pipeline encodes its frames off the frame bus instead. Mirrors the Rust
+    ``CameraLeg`` (video) and ``CaptureCamera`` (vision).
     """
 
     id: str = "main"
@@ -164,6 +171,19 @@ class CameraLeg(BaseModel):
     vflip: bool = False
     encoder: Literal["auto", "omx", "v4l2m2m", "software"] = "auto"
     keyframe_interval: int = Field(default=0, ge=0, le=30)
+    # --- Capture keys (read by the vision engine; `format` also by the frame-
+    # bus encoder input).
+    capture: bool = False
+    format: Literal[
+        "gray8", "gray16", "rgb24", "nv12", "yuv420p", "bayer", "bayer_rggb8", "bayer_rggb16"
+    ] = "rgb24"
+    # Manual exposure in microseconds; unset leaves auto exposure.
+    exposure_us: int | None = Field(default=None, ge=1, le=U32_MAX)
+    # Sensor gain control value; unset leaves the driver's.
+    gain: float | None = None
+    trigger: Literal["none", "hub", "fc"] = "none"
+    # Hub trigger output wired to the camera; unset is the list index.
+    trigger_channel: int | None = Field(default=None, ge=0, le=255)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -227,10 +247,6 @@ class VideoConfig(BaseModel):
     mode: str = "wfb"
     wfb: WfbConfig = WfbConfig()
     camera: CameraConfig = CameraConfig()
-    # Optional multi-stream list. Empty → the single ``camera`` leg (fully
-    # backward compatible). Written by a driver plugin (a smart pod) via the
-    # ``video.source.set`` host service, or set by an operator.
-    cameras: list[CameraLeg] = Field(default_factory=list)
     recording: RecordingConfig = RecordingConfig()
     usb_recovery: UsbRecoveryConfig = UsbRecoveryConfig()
     vision: VisionTapConfig = VisionTapConfig()

@@ -2,14 +2,13 @@
 switcher: the primary leg is always served at the fixed ``main`` path and
 secondary legs keep their ids, mirroring the Rust ``resolve_legs``."""
 
-from types import SimpleNamespace
-
-from ados.core.config.video import CameraLeg, VideoConfig
+from ados.core.config import ADOSConfig
+from ados.core.config.video import CameraLeg
 from ados.setup.service._access_urls import _stream_legs, _video_viewer_url
 
 
-def _cfg(cameras: list[CameraLeg]) -> SimpleNamespace:
-    return SimpleNamespace(video=VideoConfig(cameras=cameras))
+def _cfg(cameras: list[CameraLeg]) -> ADOSConfig:
+    return ADOSConfig(cameras=cameras)
 
 
 def test_backcompat_single_main_leg() -> None:

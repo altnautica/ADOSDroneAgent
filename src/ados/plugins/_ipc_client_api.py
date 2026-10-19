@@ -269,7 +269,7 @@ class _PluginApiMixin(_IpcClientState):
 
     async def video_source_set(self, cameras: list[dict]) -> dict:
         """Declare the video pipeline's stream sources. The host forwards the
-        list to the supervisor, which persists ``video.cameras`` and restarts
+        list to the supervisor, which persists the top-level ``cameras`` list and restarts
         the pipeline. Gated on the ``video.source.set`` capability."""
         return (
             await self._send_request(
