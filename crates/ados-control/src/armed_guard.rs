@@ -246,13 +246,10 @@ fn body_forces(body: Option<&Value>) -> bool {
 /// state the guard reads). The profile comes from the cached config snapshot,
 /// so a guarded request does not parse `config.yaml` on the reactor.
 fn profile_has_vehicle(state: &AppState) -> bool {
-    let cfg = crate::config::PairingConfig::cached(&state.pairing_paths.config);
-    let (profile, _role) = crate::profile::current_profile_and_role_at(
-        &cfg.agent.profile,
-        &state.pairing_paths.profile_conf,
-        &state.pairing_paths.mesh_role,
-    );
-    matches!(profile.as_str(), "drone" | "ground-station")
+    matches!(
+        crate::vehicle_guard::node_profile(state).as_str(),
+        "drone" | "ground-station"
+    )
 }
 
 /// The refusal every guarded action answers while armed.

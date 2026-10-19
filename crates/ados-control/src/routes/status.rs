@@ -140,8 +140,12 @@ const IPC_ONLY_KEYS: [&str; 15] = [
 /// signs its own frames, and whether the FC-write arbiter is active), so they
 /// stay visible while the FC link is down.
 ///
+/// `visor_flight_frames_dropped` is the router's count of client frames it
+/// refused to forward because this node is a visor; it describes the agent's
+/// own command path.
+///
 /// Disjoint from [`IPC_ONLY_KEYS`] by construction; a test pins that.
-const AGENT_DIAGNOSTIC_KEYS: [&str; 23] = [
+const AGENT_DIAGNOSTIC_KEYS: [&str; 24] = [
     "agent_commands_unsigned_rejected_risk",
     "agent_signing",
     "aux_mavlink_tee",
@@ -165,6 +169,7 @@ const AGENT_DIAGNOSTIC_KEYS: [&str; 23] = [
     "swarm_precedence",
     "uplink_blocked_sysid_conflict",
     "video_profile",
+    "visor_flight_frames_dropped",
 ];
 
 /// External binaries the video pipeline may use, checked by presence on `PATH`:

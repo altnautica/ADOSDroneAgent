@@ -16,6 +16,9 @@
 //! `mcp.expose`, and the tool's effect is bounded by the plugin's other granted
 //! capabilities.
 //!
+//! On a visor a tool whose declared `safety_class` is a flight action is
+//! refused for every caller ([`crate::vehicle_guard`]).
+//!
 //! RUST-FIRST: like the plugin-config write, a tool invocation is a control-plane
 //! operation, so it is a native `ados-control` route, not a residual-Python one.
 //!
@@ -81,6 +84,18 @@ pub async fn invoke_plugin_tool(
             StatusCode::BAD_REQUEST,
             "plugin_id and tool must be non-empty",
         );
+    }
+    // A visor's flight controller is a sensor hub: a tool declared as a flight
+    // action is refused there whoever the caller is.
+    if crate::vehicle_guard::node_is_visor(&state)
+        && state
+            .plugins
+            .installed_manifest(plugin_id.clone())
+            .await
+            .is_some_and(|m| crate::vehicle_guard::is_flight_tool(&m, &tool))
+    {
+        tracing::warn!(plugin_id = %plugin_id, tool = %tool, "visor_flight_tool_refused");
+        return crate::vehicle_guard::not_a_vehicle_refusal();
     }
     // The edge stamps the granted scopes only on a request it admitted on an
     // MCP token (any client-sent value is stripped first). Absent, the caller

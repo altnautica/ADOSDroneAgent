@@ -68,7 +68,7 @@ pub(crate) fn frame_total_len(buf: &[u8]) -> Option<usize> {
 
 /// Message id carried in the header of a candidate frame at `buf[0]`, or
 /// `None` when the header is not complete yet.
-fn frame_msg_id(buf: &[u8]) -> Option<u32> {
+pub(super) fn frame_msg_id(buf: &[u8]) -> Option<u32> {
     match buf.first().copied() {
         Some(STX_V2) if buf.len() >= 10 => Some(u32::from_le_bytes([buf[7], buf[8], buf[9], 0])),
         Some(STX_V1) if buf.len() >= 6 => Some(u32::from(buf[5])),
@@ -78,7 +78,7 @@ fn frame_msg_id(buf: &[u8]) -> Option<u32> {
 
 /// Whether the dialect knows `msg_id`, i.e. its CRC_EXTRA is available and the
 /// frame checksum can be verified.
-fn msg_id_known(msg_id: u32) -> bool {
+pub(super) fn msg_id_known(msg_id: u32) -> bool {
     <MavMessage as Message>::default_message_from_id(msg_id).is_some()
 }
 

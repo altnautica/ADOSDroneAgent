@@ -84,6 +84,11 @@ pub(super) async fn build_extras(
     // Cumulative frames decoded off the FC link: the supervisor's proof that
     // the reader is working while the transport is open.
     extras.insert("fc_frames_decoded".into(), json!(fc.frames_decoded()));
+    // Client flight-action frames dropped because this node is a visor.
+    extras.insert(
+        "visor_flight_frames_dropped".into(),
+        json!(fc.visor_flight_frames_dropped()),
+    );
     extras.insert("mavlink_alive".into(), json!(mavlink_alive));
     extras.insert(
         "heartbeat_age_s".into(),

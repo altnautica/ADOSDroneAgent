@@ -41,6 +41,7 @@ pub use send_scheduler::ClientOrigin;
 pub(crate) use send_scheduler::FC_MAX_SINGLE_WRITE;
 pub mod swarm_setpoint;
 pub(crate) mod transport;
+mod visor_gate;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -195,6 +196,11 @@ pub struct FcConnection {
     /// deltas while the transport is open, because the process's own I/O keeps
     /// moving on timers even when the FC reader has wedged.
     fc_frames_decoded: AtomicU64,
+    /// Cumulative client frames dropped because this node is a visor and they
+    /// were flight actions (see [`visor_gate`]).
+    visor_flight_frames_dropped: AtomicU64,
+    /// When the last visor drop was logged, nanoseconds since `epoch` (0 never).
+    visor_drop_logged_at: AtomicU64,
     /// Set by [`Self::open`] when the link it returned was opened at the
     /// fallback baud without any probe evidence (no HEARTBEAT, no MSP). Such a
     /// link is torn down by [`Self::run`] if it proves nothing within
@@ -330,6 +336,8 @@ impl FcConnection {
             fc_identity_latched: AtomicBool::new(false),
             connected: AtomicBool::new(false),
             fc_frames_decoded: AtomicU64::new(0),
+            visor_flight_frames_dropped: AtomicU64::new(0),
+            visor_drop_logged_at: AtomicU64::new(0),
             opened_unproven: AtomicBool::new(false),
             link_proven: AtomicBool::new(false),
             open_failed: AtomicBool::new(false),

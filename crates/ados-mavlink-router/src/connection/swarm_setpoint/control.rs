@@ -152,6 +152,11 @@ pub(super) async fn control_loop(
 /// instead of constructing the payload here: a malformed setpoint must be refused
 /// on this side of the wire, not diagnosed from the vehicle's behaviour.
 pub(super) async fn send_setpoint(fc: &Arc<FcConnection>, target: (u8, u8), setpoint: &Setpoint) {
+    // A visor's flight controller is a sensor hub, never a vehicle.
+    if fc.is_visor() {
+        fc.note_visor_refusals(1);
+        return;
+    }
     let msg = match setpoint_message(target, setpoint) {
         Ok(m) => m,
         Err(e) => {

@@ -38,6 +38,7 @@ pub mod runtime_mode;
 pub mod security_state;
 pub mod serve;
 pub mod state;
+pub mod vehicle_guard;
 mod wfb_pair_state;
 
 pub use daemon::{run_daemon, run_with_paths, DaemonPaths, WATCHDOG_PING_INTERVAL};

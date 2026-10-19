@@ -149,13 +149,18 @@ pub fn describe(include_hid: bool) -> Vec<NativeRoute> {
 pub fn build_router(state: AppState, hid_native: bool) -> Router {
     let (router, table) = build(hid_native);
     crate::routing::install(table);
-    // The armed interlock wraps the native routes and the fallback alike, so it
-    // runs before either.
+    // The armed interlock and the visor interlock wrap the native routes and
+    // the fallback alike, so they run before either. The visor layer is the
+    // outer one: a flight action on a visor is refused whatever the armed state.
     router
         .fallback(non_native_fallback)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::armed_guard::armed_guard,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::vehicle_guard::vehicle_guard,
         ))
         .with_state(state)
 }
