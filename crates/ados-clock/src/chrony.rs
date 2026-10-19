@@ -3,8 +3,8 @@
 //! chrony reads `struct sock_sample` datagrams on the socket it binds for a
 //! `refclock SOCK <path>` line (the installer writes
 //! `refclock SOCK /run/chrony.ados.sock refid PPS ...`). Each datagram says: at
-//! system time `tv` the true time was `tv + offset`. The struct is the
-//! platform's C layout, native endian:
+//! system time `tv` the true time was `tv + offset`. chrony's definition
+//! (`refclock_sock.c`):
 //!
 //! ```c
 //! struct sock_sample {
@@ -17,44 +17,47 @@
 //! };
 //! ```
 //!
-//! 40 bytes with the magic at 36 on a 64-bit host; the `timeval` widths (and
-//! so the size) follow the target's `time_t` / `suseconds_t`.
+//! chrony drops a datagram whose length is not `sizeof(struct sock_sample)`
+//! as *its* build sees it, so the layout to emit is the one chrony was
+//! compiled with, not this binary's libc. Every 64-bit Linux and every 32-bit
+//! distro built with 64-bit `time_t` (glibc `_TIME_BITS=64`: Debian 13 and
+//! Ubuntu 24.04 armhf after the t64 transition, where `struct timeval` becomes
+//! `__time64_t` + `__suseconds64_t`) gives the same 40 bytes, native endian:
+//!
+//! | offset | type | field     |
+//! |--------|------|-----------|
+//! | 0      | i64  | tv_sec    |
+//! | 8      | i64  | tv_usec   |
+//! | 16     | f64  | offset, s |
+//! | 24     | i32  | pulse     |
+//! | 28     | i32  | leap      |
+//! | 32     | i32  | _pad      |
+//! | 36     | i32  | magic     |
+//!
+//! That layout is written explicitly, whatever the target's own `time_t`. A
+//! chrony built with 32-bit `time_t` (pre-t64 armhf, e.g. Debian 12) expects
+//! 32 bytes and rejects these samples; the shipped binaries are aarch64-only,
+//! where the chrony beside them is 64-bit.
 
-use std::mem::{offset_of, size_of};
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
-
-use nix::libc::{c_int, suseconds_t, time_t, timeval};
 
 /// The socket chrony binds for the refclock the installer configures.
 pub const CHRONY_SOCK: &str = "/run/chrony.ados.sock";
 /// `SOCK_MAGIC` from chrony's `refclock_sock.c`.
-pub const SOCK_MAGIC: c_int = 0x534f_434b;
-
-/// chrony's `struct sock_sample`; used only for its layout.
-#[repr(C)]
-#[allow(dead_code)]
-struct SockSample {
-    tv: timeval,
-    offset: f64,
-    pulse: c_int,
-    leap: c_int,
-    pad: c_int,
-    magic: c_int,
-}
-
-/// `sizeof(struct sock_sample)` on this target.
-pub const SAMPLE_LEN: usize = size_of::<SockSample>();
-const TV_SEC_AT: usize = offset_of!(SockSample, tv) + offset_of!(timeval, tv_sec);
-const TV_USEC_AT: usize = offset_of!(SockSample, tv) + offset_of!(timeval, tv_usec);
+pub const SOCK_MAGIC: i32 = 0x534f_434b;
+/// `sizeof(struct sock_sample)` with a 64-bit `struct timeval`.
+pub const SAMPLE_LEN: usize = 40;
+const TV_SEC_AT: usize = 0;
+const TV_USEC_AT: usize = 8;
+const OFFSET_AT: usize = 16;
+const PULSE_AT: usize = 24;
+const LEAP_AT: usize = 28;
+const PAD_AT: usize = 32;
 /// Byte offset of `magic`.
-pub const MAGIC_AT: usize = offset_of!(SockSample, magic);
+pub const MAGIC_AT: usize = 36;
 
-fn put(b: &mut [u8; SAMPLE_LEN], at: usize, bytes: &[u8]) {
-    b[at..at + bytes.len()].copy_from_slice(bytes);
-}
-
-/// Encode one `struct sock_sample` (padding bytes zero).
+/// Encode one `struct sock_sample` (padding zero).
 pub fn encode_sample(
     tv_sec: i64,
     tv_usec: i64,
@@ -63,24 +66,12 @@ pub fn encode_sample(
     leap: i32,
 ) -> [u8; SAMPLE_LEN] {
     let mut b = [0u8; SAMPLE_LEN];
-    put(&mut b, TV_SEC_AT, &(tv_sec as time_t).to_ne_bytes());
-    put(&mut b, TV_USEC_AT, &(tv_usec as suseconds_t).to_ne_bytes());
-    put(
-        &mut b,
-        offset_of!(SockSample, offset),
-        &offset_s.to_ne_bytes(),
-    );
-    put(
-        &mut b,
-        offset_of!(SockSample, pulse),
-        &(pulse as c_int).to_ne_bytes(),
-    );
-    put(
-        &mut b,
-        offset_of!(SockSample, leap),
-        &(leap as c_int).to_ne_bytes(),
-    );
-    put(&mut b, MAGIC_AT, &SOCK_MAGIC.to_ne_bytes());
+    b[TV_SEC_AT..TV_USEC_AT].copy_from_slice(&tv_sec.to_ne_bytes());
+    b[TV_USEC_AT..OFFSET_AT].copy_from_slice(&tv_usec.to_ne_bytes());
+    b[OFFSET_AT..PULSE_AT].copy_from_slice(&offset_s.to_ne_bytes());
+    b[PULSE_AT..LEAP_AT].copy_from_slice(&pulse.to_ne_bytes());
+    b[LEAP_AT..PAD_AT].copy_from_slice(&leap.to_ne_bytes());
+    b[MAGIC_AT..SAMPLE_LEN].copy_from_slice(&SOCK_MAGIC.to_ne_bytes());
     b
 }
 
@@ -161,46 +152,58 @@ mod tests {
         i32::from_ne_bytes(b[at..at + 4].try_into().unwrap())
     }
 
-    /// `(tv_sec, tv_usec)` read back at the target's widths.
     fn tv(b: &[u8]) -> (i64, i64) {
-        fn int_at(b: &[u8], at: usize, len: usize) -> i64 {
-            match len {
-                4 => i32::from_ne_bytes(b[at..at + 4].try_into().unwrap()) as i64,
-                8 => i64::from_ne_bytes(b[at..at + 8].try_into().unwrap()),
-                n => panic!("unexpected field width {n}"),
-            }
-        }
         (
-            int_at(b, TV_SEC_AT, size_of::<time_t>()),
-            int_at(b, TV_USEC_AT, size_of::<suseconds_t>()),
+            i64::from_ne_bytes(b[0..8].try_into().unwrap()),
+            i64::from_ne_bytes(b[8..16].try_into().unwrap()),
         )
     }
 
     fn offset(b: &[u8]) -> f64 {
-        let at = offset_of!(SockSample, offset);
-        f64::from_ne_bytes(b[at..at + 8].try_into().unwrap())
+        f64::from_ne_bytes(b[16..24].try_into().unwrap())
     }
 
+    /// The exact bytes chrony's 64-bit-`time_t` build reads, identical on
+    /// every target (no dependence on this target's libc `timeval`).
     #[test]
-    fn layout_follows_the_platform_timeval() {
-        assert_eq!(SAMPLE_LEN, size_of::<SockSample>());
-        assert_eq!(
-            offset_of!(SockSample, offset),
-            size_of::<timeval>().next_multiple_of(std::mem::align_of::<f64>())
-        );
-        assert_eq!(MAGIC_AT, SAMPLE_LEN - size_of::<c_int>());
-        #[cfg(target_pointer_width = "64")]
-        {
-            assert_eq!(SAMPLE_LEN, 40);
-            assert_eq!(MAGIC_AT, 36);
-        }
+    fn layout_is_chronys_64_bit_timeval_on_every_target() {
         let b = encode_sample(1_760_860_000, 123_456, -0.25, 1, 2);
-        assert_eq!(tv(&b), (1_760_860_000, 123_456));
-        assert_eq!(offset(&b), -0.25);
-        assert_eq!(i32_at(&b, offset_of!(SockSample, pulse)), 1);
-        assert_eq!(i32_at(&b, offset_of!(SockSample, leap)), 2);
-        assert_eq!(i32_at(&b, offset_of!(SockSample, pad)), 0);
-        assert_eq!(i32_at(&b, MAGIC_AT), 0x534f434b);
+        let mut want = Vec::with_capacity(40);
+        want.extend(1_760_860_000i64.to_ne_bytes());
+        want.extend(123_456i64.to_ne_bytes());
+        want.extend((-0.25f64).to_ne_bytes());
+        want.extend(1i32.to_ne_bytes());
+        want.extend(2i32.to_ne_bytes());
+        want.extend(0i32.to_ne_bytes());
+        want.extend(0x534f_434bi32.to_ne_bytes());
+        assert_eq!(b.as_slice(), want.as_slice());
+        assert_eq!(SAMPLE_LEN, 40);
+        assert_eq!(MAGIC_AT, 36);
+        // The C layout chrony builds on a 64-bit-time_t system, mirrored.
+        #[repr(C)]
+        struct Sample64 {
+            tv_sec: i64,
+            tv_usec: i64,
+            offset: f64,
+            pulse: i32,
+            leap: i32,
+            pad: i32,
+            magic: i32,
+        }
+        assert_eq!(std::mem::size_of::<Sample64>(), SAMPLE_LEN);
+        assert_eq!(std::mem::offset_of!(Sample64, magic), MAGIC_AT);
+        let s = Sample64 {
+            tv_sec: 0,
+            tv_usec: 0,
+            offset: 0.0,
+            pulse: 0,
+            leap: 0,
+            pad: 0,
+            magic: 0,
+        };
+        let _ = (
+            s.tv_sec, s.tv_usec, s.offset, s.pulse, s.leap, s.pad, s.magic,
+        );
     }
 
     #[test]
@@ -214,8 +217,8 @@ mod tests {
         assert_eq!(tv(&b), (1_760_000_100, 0));
         // 2 ms plus the 500 ns the microsecond truncation dropped.
         assert!((offset(&b) - 0.002_000_5).abs() < 1e-9, "{}", offset(&b));
-        assert_eq!(i32_at(&b, offset_of!(SockSample, pulse)), 0);
-        assert_eq!(i32_at(&b, offset_of!(SockSample, leap)), 0);
+        assert_eq!(i32_at(&b, PULSE_AT), 0);
+        assert_eq!(i32_at(&b, LEAP_AT), 0);
     }
 
     #[test]

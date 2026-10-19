@@ -196,12 +196,15 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     presence::insert_presence_flags(
         &mut payload,
         &resolved_profile,
-        &state.run_dir,
-        state
-            .pairing_paths
-            .config
-            .parent()
-            .unwrap_or_else(|| Path::new("/etc/ados")),
+        &presence::PresenceDirs {
+            run: &state.run_dir,
+            etc: state
+                .pairing_paths
+                .config
+                .parent()
+                .unwrap_or_else(|| Path::new("/etc/ados")),
+            bin: &state.bin_dir,
+        },
     );
     payload.insert("fc_baud".to_string(), fc_baud);
     payload.insert(

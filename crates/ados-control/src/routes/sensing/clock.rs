@@ -11,10 +11,11 @@ use super::{fresh_map, with_present, SensingPaths, FRESH};
 use crate::state::AppState;
 
 pub async fn get_clock(State(state): State<AppState>) -> Json<Value> {
-    Json(clock_body(
-        &SensingPaths::from_state(&state),
-        SystemTime::now(),
-    ))
+    let paths = SensingPaths::from_state(&state);
+    let body = tokio::task::spawn_blocking(move || clock_body(&paths, SystemTime::now()))
+        .await
+        .unwrap_or_else(|_| with_present(false, empty()));
+    Json(body)
 }
 
 pub(crate) fn clock_body(paths: &SensingPaths, now: SystemTime) -> Value {
