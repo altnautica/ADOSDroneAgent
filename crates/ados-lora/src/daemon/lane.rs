@@ -245,6 +245,7 @@ impl Lane {
             }
         }
         self.transport.send(&tx).await?;
+        self.governor.note_sent();
         Ok(TxOutcome::Sent)
     }
 

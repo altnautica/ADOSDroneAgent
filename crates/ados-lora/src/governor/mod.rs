@@ -349,7 +349,8 @@ impl Governor {
     }
 
     /// Charge an admitted frame to the ledger; call after listen-before-talk
-    /// passed and before the frame is sent.
+    /// passed and before the frame is sent. The frame is counted as sent only
+    /// by [`Governor::note_sent`], since a re-listen may still refuse it.
     pub fn commit(&mut self, grant: &Grant, now: Now) -> io::Result<()> {
         self.ledger.charge(
             now,
@@ -358,13 +359,17 @@ impl Governor {
             grant.airtime_us,
             grant.plan_id,
         )?;
-        self.counters.frames += 1;
         self.blocked = None;
         if !self.channels.is_empty() {
             self.hop_pos = (self.hop_pos + 1) % self.channels.len();
         }
         self.last_grant = Some(grant.clone());
         Ok(())
+    }
+
+    /// Count a frame that reached the radio.
+    pub fn note_sent(&mut self) {
+        self.counters.frames += 1;
     }
 
     /// Record a refusal (the daemon calls this for `lbt_busy`).

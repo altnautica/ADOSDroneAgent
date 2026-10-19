@@ -185,3 +185,43 @@ fn a_previous_boot_spend_ages_out_across_service_restarts() {
     assert_eq!(l.spends()[0].at_ns, 20 * S);
     assert_eq!(l.spent_in(865.0, 867.0, 3_700 * S - 3_600 * S), 0);
 }
+
+#[test]
+fn an_untrusted_boot_spend_is_not_aged_by_an_adopted_trusted_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("airtime.jsonl");
+    // B1, trusted clock: a small spend and a heartbeat at UTC 50 000 s.
+    let (mut l, _) = Ledger::open(&p, "boot-1", now(10, 50_000, true), 3600).unwrap();
+    l.charge(
+        now(10, 50_000, true),
+        866.125,
+        "865.0-867.0",
+        1_000,
+        "IN865",
+    )
+    .unwrap();
+    l.heartbeat(now(70, 50_060, true)).unwrap();
+    drop(l);
+    // B2, no trusted clock: adopts B1's entries, then spends the whole budget
+    // at an unknown wall time.
+    let (mut l, _) = Ledger::open(&p, "boot-2", now(20, 0, false), 3600).unwrap();
+    l.charge(
+        now(30, 0, false),
+        866.125,
+        "865.0-867.0",
+        36_000_000,
+        "IN865",
+    )
+    .unwrap();
+    drop(l);
+    // B3, trusted clock, 3700 s after B1's last trusted moment. B2's spend
+    // could have happened just before this boot, so it must still count.
+    let b3 = now(5, 53_760, true);
+    let (l, _) = Ledger::open(&p, "boot-3", b3, 3600).unwrap();
+    let since = b3.mono_ns - 3600 * S;
+    assert!(l.spent_in(865.0, 867.0, since) >= 36_000_000);
+    // And it stays counted until a full window after this boot placed it.
+    drop(l);
+    let (l, _) = Ledger::open(&p, "boot-3", now(3_000, 56_755, true), 3600).unwrap();
+    assert!(l.spent_in(865.0, 867.0, 3_000 * S - 3600 * S) >= 36_000_000);
+}

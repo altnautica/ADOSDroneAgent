@@ -204,6 +204,13 @@ impl Ledger {
     /// (`true` when any was), so a later reopen in this boot keeps it where it
     /// is rather than placing it at that service start again (which would
     /// keep it in the window for as long as the service restarts).
+    ///
+    /// A re-stamped entry is marked untrusted: its `t_utc_ms` belongs to the
+    /// boot it came from, so it must neither age it by UTC on a later boot nor
+    /// feed this boot's last-alive time. A later boot then places it at this
+    /// boot's own last trusted heartbeat, or at its service start, both no
+    /// earlier than the placement made here (every native entry of this boot
+    /// is written after this open), so the ledger can only over-count.
     fn place(&mut self, entries: Vec<Entry>, now: Now, report: &mut LoadReport) -> bool {
         let mut adopted = false;
         // The latest trusted wall-clock instant each previous boot is known
@@ -231,6 +238,7 @@ impl Ledger {
             if e.boot_id != self.boot_id {
                 e.boot_id = self.boot_id.clone();
                 e.t_mono_ns = at_ns;
+                e.utc_trusted = false;
                 adopted = true;
             }
             if e.kind == EntryKind::Reset {

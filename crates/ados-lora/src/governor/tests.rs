@@ -61,6 +61,7 @@ fn governor(
 fn send(g: &mut Governor, len: usize, ch: Option<f64>, now: Now) -> Result<Grant, Refusal> {
     let grant = g.admit(len, ch, now)?;
     g.commit(&grant, now).unwrap();
+    g.note_sent();
     Ok(grant)
 }
 
@@ -324,4 +325,29 @@ fn japan_through_a_meshtastic_node_is_a_band_mismatch() {
         g.status(41, at(0)).blocked_reason,
         Some("module_band_mismatch")
     );
+}
+
+#[test]
+fn a_frame_refused_after_its_charge_is_not_counted_as_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut g = governor(
+        dir.path(),
+        "b",
+        Some("IN"),
+        ModuleCaps::any(),
+        MODEM_800MS,
+        None,
+        at(0),
+    );
+    // Charged, then the re-listen right before the write finds the channel busy.
+    let grant = g.admit(4, None, at(0)).unwrap();
+    g.commit(&grant, at(0)).unwrap();
+    g.refuse(Refusal::LbtBusy, at(0));
+    let st = g.status(4, at(1));
+    assert_eq!(st.tx["frames"], 0);
+    assert_eq!(st.tx["refused"], 1);
+    // The charge still stands (over-counting, never under-counting).
+    assert_eq!(st.governor["rules"][1]["airtime_ms_window"], 800);
+    send(&mut g, 4, None, at(2)).unwrap();
+    assert_eq!(g.status(4, at(3)).tx["frames"], 1);
 }
