@@ -55,6 +55,15 @@ fn assert_frame_intact(got: &RawFrame, width: u32, height: u32, fmt: FrameFormat
         got.data, expected,
         "frame(fill={fill}): pixel bytes were altered crossing the tap"
     );
+    assert!(
+        got.timing.ts_ns > 0,
+        "frame(fill={fill}): tap header did not carry the host monotonic arrival time"
+    );
+    assert_eq!(
+        got.timing.timebase,
+        ados_protocol::framebus::TIMEBASE_HOST,
+        "frame(fill={fill}): tap frames are host-timebase"
+    );
 }
 
 /// The tap seam carries each frame across intact: several distinct rawvideo

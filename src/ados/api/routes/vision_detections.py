@@ -211,8 +211,9 @@ async def get_latest_detection() -> dict:
     ``X-ADOS-Key`` gate every other REST route sits behind); this is a plain
     GET; it does not use the WebSocket ticket scheme.
 
-    A batch older than ``_LATEST_MAX_AGE_MS`` (by its ``ts_ms`` capture time)
-    is not current: the reply is the empty shape with ``stale: true``. When
+    A batch older than ``_LATEST_MAX_AGE_MS`` (by its ``ts_ms`` capture time,
+    host CLOCK_MONOTONIC milliseconds) is not current: the reply is the empty
+    shape with ``stale: true``. When
     the engine socket cannot be reached or read, the reply carries
     ``available: false`` so "vision is off" never reads as "nothing detected".
     """
@@ -244,7 +245,7 @@ async def get_latest_detection() -> dict:
     ts_ms = batch.get("ts_ms")
     if (
         not isinstance(ts_ms, int)
-        or int(time.time() * 1000) - ts_ms > _LATEST_MAX_AGE_MS
+        or time.monotonic_ns() // 1_000_000 - ts_ms > _LATEST_MAX_AGE_MS
     ):
         return {"detections": [], "stale": True, "available": True}
     return {**batch, "available": True}

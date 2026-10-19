@@ -290,7 +290,11 @@ impl TestRing {
             v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: CAMERA.to_string(),
             frame_id: seq,
-            ts_ms: 1_700_000_000_000 + seq as i64,
+            ts_ns: 1_700_000_000_000 + seq,
+            ts_sensor_ns: None,
+            exposure_ns: None,
+            trigger_seq: None,
+            timebase: ados_protocol::framebus::TIMEBASE_HOST,
             width: 4,
             height: 4,
             format: FrameFormat::Rgb24,
@@ -569,7 +573,7 @@ async fn infer_runs_the_engines_model_on_the_named_frame() {
         .publish_frame(
             &camera,
             3,
-            1_700_000_000_000,
+            ados_vision::ring::FrameTiming::host(1_700_000_000_000),
             4,
             4,
             FrameFormat::Rgb24,
@@ -603,36 +607,5 @@ async fn infer_runs_the_engines_model_on_the_named_frame() {
     h.ipc.close().await;
 }
 
-#[tokio::test]
-async fn a_designated_target_locks_the_engines_tracker() {
-    let (h, engine) = harness(&["vision.track.designate"], RealEngine::start).await;
-    // Only a camera the engine captures has a tracker to lock.
-    engine
-        .engine
-        .publish_frame(
-            CAMERA,
-            1,
-            1_700_000_000_000,
-            4,
-            4,
-            FrameFormat::Rgb24,
-            &[0u8; 48],
-        )
-        .await
-        .expect("publish frame");
-
-    let reply = h
-        .ctx
-        .vision
-        .designate_track(CAMERA, &detection())
-        .await
-        .expect("designate");
-
-    assert_eq!(field(&reply, "designated"), Some(&Value::Boolean(true)));
-    assert_eq!(field(&reply, "camera_id"), Some(&Value::from(CAMERA)));
-    assert!(
-        matches!(field(&reply, "track_id"), Some(Value::Integer(_))),
-        "the tracker assigned the designated box a track id: {reply:?}"
-    );
-    h.ipc.close().await;
-}
+#[path = "vision_engine_e2e/designate.rs"]
+mod designate;

@@ -26,7 +26,7 @@ use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
 use crate::backend::{LoadedModel, VisionBackend};
-use crate::ring::{now_ms, RingWriter};
+use crate::ring::{now_ms, FrameTiming, RingWriter};
 mod models;
 mod tracking;
 
@@ -340,7 +340,7 @@ impl VisionEngine {
         &self,
         camera_id: &str,
         frame_id: u64,
-        ts_ms: i64,
+        timing: FrameTiming,
         width: u32,
         height: u32,
         format: FrameFormat,
@@ -353,7 +353,7 @@ impl VisionEngine {
                 .get_mut(camera_id)
                 .ok_or_else(|| anyhow!("ring vanished for {camera_id}"))?;
             cr.writer
-                .write_frame(camera_id, frame_id, ts_ms, width, height, format, data)
+                .write_frame(camera_id, frame_id, timing, width, height, format, data)
                 .map_err(|e| anyhow!("write frame for {camera_id}: {e}"))?
         };
         // A send error just means no subscribers; that is fine.
@@ -361,12 +361,12 @@ impl VisionEngine {
         Ok(desc)
     }
 
-    /// Read the pixels a descriptor this engine published names, out of the
-    /// camera's ring through the per-slot seqlock. The engine writes the ring,
-    /// so it reads its own region rather than mapping the file. Errors when the
-    /// camera has no ring, the descriptor names a ring other than the camera's
-    /// current one, or the slot has been recycled since.
-    pub async fn read_frame(&self, desc: &FrameDescriptor) -> Result<Vec<u8>> {
+    /// Read the pixels a descriptor this engine published names into `out`, out
+    /// of the camera's ring through the per-slot seqlock. The engine writes the
+    /// ring, so it reads its own region rather than mapping the file. Errors when
+    /// the camera has no ring, the descriptor names a ring other than the
+    /// camera's current one, or the slot has been recycled since.
+    pub async fn read_frame_into(&self, desc: &FrameDescriptor, out: &mut Vec<u8>) -> Result<()> {
         let cams = self.cameras.lock().await;
         let cr = cams
             .get(&desc.camera_id)
@@ -379,8 +379,9 @@ impl VisionEngine {
             ));
         }
         cr.writer
-            .read_frame(desc.slot, desc.seq)
+            .read_frame_into(desc.slot, desc.seq, out)
             .map_err(|e| anyhow!("ring read: {e}"))?
+            .map(|_| ())
             .ok_or_else(|| {
                 anyhow!(
                     "ring slot {} no longer holds seq {} (torn/stale)",
@@ -396,5 +397,7 @@ impl VisionEngine {
     }
 }
 
+#[cfg(test)]
+mod ring_tests;
 #[cfg(test)]
 mod tests;

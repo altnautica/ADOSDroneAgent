@@ -248,6 +248,10 @@ fn fmt_str(f: FrameFormat) -> &'static str {
         FrameFormat::Rgb24 => "rgb24",
         FrameFormat::Nv12 => "nv12",
         FrameFormat::Yuv420p => "yuv420p",
+        FrameFormat::Gray8 => "gray8",
+        FrameFormat::Gray16 => "gray16",
+        FrameFormat::BayerRggb8 => "bayerrggb8",
+        FrameFormat::BayerRggb16 => "bayerrggb16",
     }
 }
 

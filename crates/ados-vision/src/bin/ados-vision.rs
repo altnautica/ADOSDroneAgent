@@ -409,7 +409,7 @@ async fn run_camera(
                                 .publish_frame(
                                     &cam.id,
                                     frame_id,
-                                    now_ms(),
+                                    raw.timing,
                                     raw.width,
                                     raw.height,
                                     raw.format,

@@ -182,7 +182,11 @@ impl FakeVisionEngine {
             v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: self.camera_id.clone(),
             frame_id: seq,
-            ts_ms: 1_700_000_000_000 + seq as i64,
+            ts_ns: 1_700_000_000_000 + seq,
+            ts_sensor_ns: None,
+            exposure_ns: None,
+            trigger_seq: None,
+            timebase: ados_protocol::framebus::TIMEBASE_HOST,
             width: 0, // width/height are descriptive; the resolver keys on byte_len.
             height: 0,
             format: self.layout_format(),
@@ -236,10 +240,18 @@ impl FakeVisionEngine {
     /// Resolve a descriptor against the in-memory ring (no `/dev/shm`),
     /// validating the seqlock exactly as the production resolver does.
     fn resolve(&self, descriptor: FrameDescriptor) -> Option<Frame> {
-        let pixels =
-            framebus::read_slot(&self.region, &self.layout, descriptor.slot, descriptor.seq)
-                .ok()
-                .flatten()?;
+        // The frame owns its pixels (handed to the callback by value), so each
+        // resolve fills a fresh buffer sized to the descriptor.
+        let mut pixels = Vec::with_capacity(descriptor.byte_len as usize);
+        framebus::read_slot_into(
+            &self.region,
+            &self.layout,
+            descriptor.slot,
+            descriptor.seq,
+            &mut pixels,
+        )
+        .ok()
+        .flatten()?;
         Some(Frame { descriptor, pixels })
     }
 

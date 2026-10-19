@@ -249,7 +249,8 @@ async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value>
     let owner = vision_rpc::owner_of(args)?;
     let req = vision_rpc::decode_infer(args)?;
     let desc = &req.frame;
-    let pixels = engine.read_frame(desc).await?;
+    let mut pixels = Vec::with_capacity(desc.byte_len as usize);
+    engine.read_frame_into(desc, &mut pixels).await?;
     let detections = engine
         .infer_for(
             owner,
@@ -265,7 +266,7 @@ async fn handle_infer(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value>
         model_id: req.model_id.clone(),
         camera_id: desc.camera_id.clone(),
         frame_id: desc.frame_id,
-        ts_ms: desc.ts_ms,
+        ts_ms: (desc.ts_ns / 1_000_000) as i64,
         frame_width: desc.width,
         frame_height: desc.height,
         detections,
@@ -592,7 +593,7 @@ mod tests {
         e.publish_frame(
             "uvc-0",
             7,
-            1_700_000_000_000,
+            crate::ring::FrameTiming::host(1_700_000_000_000),
             2,
             2,
             FrameFormat::Rgb24,
@@ -694,7 +695,11 @@ mod tests {
             v: ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 1,
-            ts_ms: 1,
+            ts_ns: 1,
+            ts_sensor_ns: None,
+            exposure_ns: None,
+            trigger_seq: None,
+            timebase: ados_protocol::framebus::TIMEBASE_HOST,
             width: 8,
             height: 8,
             format: FrameFormat::Rgb24,
@@ -784,9 +789,17 @@ mod tests {
     #[tokio::test]
     async fn designate_track_dispatch_locks_a_camera() {
         let e = engine();
-        e.publish_frame("cam-0", 1, 0, 2, 2, FrameFormat::Rgb24, &[0u8; 12])
-            .await
-            .unwrap();
+        e.publish_frame(
+            "cam-0",
+            1,
+            crate::ring::FrameTiming::host(0),
+            2,
+            2,
+            FrameFormat::Rgb24,
+            &[0u8; 12],
+        )
+        .await
+        .unwrap();
         // Mixed numeric encodings for the bbox fields exercise the coercion path.
         let args = Value::Map(vec![
             (Value::from("camera_id"), Value::from("cam-0")),

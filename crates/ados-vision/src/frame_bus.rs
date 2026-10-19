@@ -100,7 +100,11 @@ mod tests {
             v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 7,
-            ts_ms: 1_700_000_000_000,
+            ts_ns: 1_700_000_000_000,
+            ts_sensor_ns: None,
+            exposure_ns: None,
+            trigger_seq: None,
+            timebase: ados_protocol::framebus::TIMEBASE_HOST,
             width: 640,
             height: 480,
             format: FrameFormat::Rgb24,
@@ -150,7 +154,15 @@ mod tests {
         // Publishing a frame into the engine ring emits a descriptor on the bus.
         let pixels = vec![0u8; FrameFormat::Rgb24.frame_bytes(8, 8)];
         let desc = engine
-            .publish_frame("uvc-0", 1, 1_000, 8, 8, FrameFormat::Rgb24, &pixels)
+            .publish_frame(
+                "uvc-0",
+                1,
+                crate::ring::FrameTiming::host(1_000),
+                8,
+                8,
+                FrameFormat::Rgb24,
+                &pixels,
+            )
             .await
             .unwrap();
 

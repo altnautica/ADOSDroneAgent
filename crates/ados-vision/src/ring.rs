@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 
 use ados_protocol::framebus::{
-    read_slot, write_slot, FrameDescriptor, FrameFormat, RingError, RingLayout,
-    FRAMEBUS_DESCRIPTOR_VERSION,
+    read_slot_into, write_slot, FrameDescriptor, FrameFormat, RingError, RingLayout,
+    FRAMEBUS_DESCRIPTOR_VERSION, TIMEBASE_HOST,
 };
 use thiserror::Error;
 
@@ -286,7 +286,7 @@ impl RingWriter {
         &mut self,
         camera_id: &str,
         frame_id: u64,
-        ts_ms: i64,
+        timing: FrameTiming,
         width: u32,
         height: u32,
         format: FrameFormat,
@@ -300,7 +300,11 @@ impl RingWriter {
             v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: camera_id.to_string(),
             frame_id,
-            ts_ms,
+            ts_ns: timing.ts_ns,
+            ts_sensor_ns: timing.ts_sensor_ns,
+            exposure_ns: timing.exposure_ns,
+            trigger_seq: timing.trigger_seq,
+            timebase: timing.timebase,
             width,
             height,
             format,
@@ -311,11 +315,40 @@ impl RingWriter {
         })
     }
 
-    /// Read back the frame a descriptor from this ring names, through the same
-    /// seqlock a consumer reads it with. `Ok(None)` when the slot no longer
-    /// holds `seq`.
-    pub fn read_frame(&self, slot: u32, seq: u64) -> Result<Option<Vec<u8>>, RingError> {
-        read_slot(self.region.as_slice(), &self.layout, slot, seq)
+    /// Read back the frame a descriptor from this ring names into `out`, through
+    /// the same seqlock a consumer reads it with. `Ok(None)` when the slot no
+    /// longer holds `seq`.
+    pub fn read_frame_into(
+        &self,
+        slot: u32,
+        seq: u64,
+        out: &mut Vec<u8>,
+    ) -> Result<Option<usize>, RingError> {
+        read_slot_into(self.region.as_slice(), &self.layout, slot, seq, out)
+    }
+}
+
+/// Capture timing carried onto a frame's descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameTiming {
+    /// Host CLOCK_MONOTONIC ns: exposure midpoint when known, else arrival.
+    pub ts_ns: u64,
+    pub ts_sensor_ns: Option<u64>,
+    pub exposure_ns: Option<u32>,
+    pub trigger_seq: Option<u64>,
+    pub timebase: u8,
+}
+
+impl FrameTiming {
+    /// Host-arrival timing with no source-clock information.
+    pub fn host(ts_ns: u64) -> Self {
+        Self {
+            ts_ns,
+            ts_sensor_ns: None,
+            exposure_ns: None,
+            trigger_seq: None,
+            timebase: TIMEBASE_HOST,
+        }
     }
 }
 
@@ -340,10 +373,17 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Host CLOCK_MONOTONIC in nanoseconds, the clock frame descriptors carry.
+pub fn mono_ns() -> u64 {
+    use nix::time::{clock_gettime, ClockId};
+    clock_gettime(ClockId::CLOCK_MONOTONIC)
+        .map(|t| t.tv_sec() as u64 * 1_000_000_000 + t.tv_nsec() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_protocol::framebus::read_slot;
 
     #[test]
     fn writes_header_and_round_trips_a_frame() {
@@ -353,7 +393,15 @@ mod tests {
 
         let frame: Vec<u8> = (0..layout.slot_bytes as u8).collect();
         let desc = w
-            .write_frame("uvc-0", 1, 123, 8, 8, FrameFormat::Rgb24, &frame)
+            .write_frame(
+                "uvc-0",
+                1,
+                FrameTiming::host(123),
+                8,
+                8,
+                FrameFormat::Rgb24,
+                &frame,
+            )
             .unwrap();
 
         assert_eq!(desc.camera_id, "uvc-0");
@@ -361,10 +409,22 @@ mod tests {
         assert_eq!(desc.seq, 1);
         assert_eq!(desc.slot, 1); // 1 % 4
         assert_eq!(desc.byte_len, layout.slot_bytes);
+        assert_eq!(desc.ts_ns, 123);
+        assert_eq!(desc.timebase, TIMEBASE_HOST);
+        assert_eq!(desc.ts_sensor_ns, None);
 
         // Read it back out of the writer's own region via the contract reader.
-        let got = read_slot(w.region.as_mut_slice(), &layout, desc.slot, desc.seq).unwrap();
-        assert_eq!(got.as_deref(), Some(frame.as_slice()));
+        let mut out = Vec::new();
+        let got = read_slot_into(
+            w.region.as_mut_slice(),
+            &layout,
+            desc.slot,
+            desc.seq,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(got, Some(frame.len()));
+        assert_eq!(out, frame);
     }
 
     #[test]
@@ -374,13 +434,37 @@ mod tests {
         let mut w = RingWriter::open_or_create(&name, layout, DEFAULT_RING_BUDGET_BYTES).unwrap();
 
         let d1 = w
-            .write_frame("c", 1, 0, 4, 4, FrameFormat::Rgb24, &[1; 4])
+            .write_frame(
+                "c",
+                1,
+                FrameTiming::host(0),
+                4,
+                4,
+                FrameFormat::Rgb24,
+                &[1; 4],
+            )
             .unwrap();
         let d2 = w
-            .write_frame("c", 2, 0, 4, 4, FrameFormat::Rgb24, &[2; 4])
+            .write_frame(
+                "c",
+                2,
+                FrameTiming::host(0),
+                4,
+                4,
+                FrameFormat::Rgb24,
+                &[2; 4],
+            )
             .unwrap();
         let d3 = w
-            .write_frame("c", 3, 0, 4, 4, FrameFormat::Rgb24, &[3; 4])
+            .write_frame(
+                "c",
+                3,
+                FrameTiming::host(0),
+                4,
+                4,
+                FrameFormat::Rgb24,
+                &[3; 4],
+            )
             .unwrap();
 
         assert_eq!((d1.seq, d1.slot), (1, 1));
@@ -388,14 +472,10 @@ mod tests {
         assert_eq!((d3.seq, d3.slot), (3, 1)); // recycled slot 1 from d1
 
         // The recycled slot now holds frame 3; the old d1 descriptor is torn.
-        assert_eq!(
-            read_slot(w.region.as_mut_slice(), &layout, 1, d1.seq).unwrap(),
-            None
-        );
-        assert_eq!(
-            read_slot(w.region.as_mut_slice(), &layout, 1, d3.seq).unwrap(),
-            Some(vec![3; 4])
-        );
+        let mut out = Vec::new();
+        assert_eq!(w.read_frame_into(1, d1.seq, &mut out).unwrap(), None);
+        assert_eq!(w.read_frame_into(1, d3.seq, &mut out).unwrap(), Some(4));
+        assert_eq!(out, vec![3; 4]);
     }
 
     #[test]
@@ -404,7 +484,15 @@ mod tests {
         let name = format!("ados-vision-test-{}-big", std::process::id());
         let mut w = RingWriter::open_or_create(&name, layout, DEFAULT_RING_BUDGET_BYTES).unwrap();
         let too_big = vec![0u8; layout.slot_bytes as usize + 1];
-        let err = w.write_frame("c", 1, 0, 2, 2, FrameFormat::Rgb24, &too_big);
+        let err = w.write_frame(
+            "c",
+            1,
+            FrameTiming::host(0),
+            2,
+            2,
+            FrameFormat::Rgb24,
+            &too_big,
+        );
         assert!(matches!(err, Err(RingWriterError::Layout(_))));
     }
 

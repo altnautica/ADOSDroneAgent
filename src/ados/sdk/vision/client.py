@@ -236,7 +236,7 @@ class VisionClient:
             model_id=model_id,
             camera_id=frame.descriptor.camera_id,
             frame_id=frame.descriptor.frame_id,
-            ts_ms=frame.descriptor.ts_ms,
+            ts_ms=frame.descriptor.ts_ns // 1_000_000,
             detections=[detection],
             # Carry the source frame's size so a consumer scales the pixel-space
             # box to the rendered frame instead of guessing.

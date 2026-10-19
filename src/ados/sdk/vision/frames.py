@@ -33,6 +33,14 @@ class FrameFormat(str, enum.Enum):
     """Semi-planar YUV 4:2:0 (Y plane then interleaved UV), 1.5 bytes/pixel."""
     YUV420P = "yuv420p"
     """Planar YUV 4:2:0 (Y, then U, then V), 1.5 bytes per pixel."""
+    GRAY8 = "gray8"
+    """8-bit grayscale, 1 byte per pixel."""
+    GRAY16 = "gray16"
+    """16-bit grayscale, little-endian, 2 bytes per pixel."""
+    BAYER_RGGB8 = "bayerrggb8"
+    """8-bit Bayer mosaic, RGGB pattern, 1 byte per pixel."""
+    BAYER_RGGB16 = "bayerrggb16"
+    """16-bit Bayer mosaic, RGGB pattern, little-endian, 2 bytes per pixel."""
 
     def frame_bytes(self, width: int, height: int) -> int:
         """Exact byte length of one ``width`` x ``height`` frame in this format.
@@ -43,8 +51,23 @@ class FrameFormat(str, enum.Enum):
         px = int(width) * int(height)
         if self is FrameFormat.RGB24:
             return px * 3
+        if self in (FrameFormat.GRAY8, FrameFormat.BAYER_RGGB8):
+            return px
+        if self in (FrameFormat.GRAY16, FrameFormat.BAYER_RGGB16):
+            return px * 2
         # Y plane (px) + chroma (px // 2) = px * 3 // 2.
         return px + px // 2
+
+
+FRAMEBUS_DESCRIPTOR_VERSION = 2
+"""Wire version of a :class:`FrameDescriptor`; any other version is rejected."""
+
+TIMEBASE_HOST = 0
+"""``ts_sensor_ns`` is absent or on the host monotonic clock."""
+TIMEBASE_SENSOR = 1
+"""``ts_sensor_ns`` is on the device/driver clock."""
+TIMEBASE_SIM = 2
+"""``ts_sensor_ns`` is simulation time in ns."""
 
 
 @dataclass(frozen=True)
@@ -61,8 +84,8 @@ class FrameDescriptor:
     """Source camera id. Lets a consumer filter by camera."""
     frame_id: int
     """Monotonic frame counter for this camera, starting at 1."""
-    ts_ms: int
-    """Capture time in milliseconds (the clock the engine timestamps with)."""
+    ts_ns: int
+    """Host CLOCK_MONOTONIC ns: exposure midpoint when known, else arrival."""
     width: int
     height: int
     format: FrameFormat
@@ -76,13 +99,24 @@ class FrameDescriptor:
     dropped."""
     byte_len: int
     """Length of the valid pixel bytes in the slot (``format.frame_bytes``)."""
+    ts_sensor_ns: int | None = None
+    """Source-clock timestamp in ns, interpreted per ``timebase``."""
+    exposure_ns: int | None = None
+    """Exposure duration in ns, when the source reports it."""
+    trigger_seq: int | None = None
+    """Hardware trigger sequence that produced this frame, when known."""
+    timebase: int = TIMEBASE_HOST
+    """Clock domain of ``ts_sensor_ns`` (``TIMEBASE_*``)."""
 
     def to_dict(self) -> dict[str, Any]:
-        """The msgpack-named mapping. ``format`` is the lowercase string."""
-        return {
+        """The msgpack-named mapping. ``format`` is the lowercase string;
+        absent optional fields are omitted."""
+        out: dict[str, Any] = {
+            "v": FRAMEBUS_DESCRIPTOR_VERSION,
             "camera_id": self.camera_id,
             "frame_id": int(self.frame_id),
-            "ts_ms": int(self.ts_ms),
+            "ts_ns": int(self.ts_ns),
+            "timebase": int(self.timebase),
             "width": int(self.width),
             "height": int(self.height),
             "format": FrameFormat(self.format).value,
@@ -91,13 +125,29 @@ class FrameDescriptor:
             "seq": int(self.seq),
             "byte_len": int(self.byte_len),
         }
+        for key in ("ts_sensor_ns", "exposure_ns", "trigger_seq"):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = int(value)
+        return out
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> FrameDescriptor:
+        version = raw.get("v")
+        if version != FRAMEBUS_DESCRIPTOR_VERSION:
+            raise ValueError(
+                f"unsupported frame descriptor version {version!r} "
+                f"(this build speaks {FRAMEBUS_DESCRIPTOR_VERSION})"
+            )
+
+        def opt(key: str) -> int | None:
+            value = raw.get(key)
+            return None if value is None else int(value)
+
         return cls(
             camera_id=str(raw["camera_id"]),
             frame_id=int(raw["frame_id"]),
-            ts_ms=int(raw["ts_ms"]),
+            ts_ns=int(raw["ts_ns"]),
             width=int(raw["width"]),
             height=int(raw["height"]),
             format=FrameFormat(str(raw["format"])),
@@ -105,6 +155,10 @@ class FrameDescriptor:
             slot=int(raw["slot"]),
             seq=int(raw["seq"]),
             byte_len=int(raw["byte_len"]),
+            ts_sensor_ns=opt("ts_sensor_ns"),
+            exposure_ns=opt("exposure_ns"),
+            trigger_seq=opt("trigger_seq"),
+            timebase=int(raw["timebase"]),
         )
 
     def to_msgpack(self) -> bytes:

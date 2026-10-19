@@ -41,7 +41,7 @@ impl VisionEngine {
             model_id: model_id.to_string(),
             camera_id: desc.camera_id.clone(),
             frame_id: desc.frame_id,
-            ts_ms: desc.ts_ms,
+            ts_ms: (desc.ts_ns / 1_000_000) as i64,
             // The vision frame's pixel size the boxes are in, so the overlay
             // scales to it.
             frame_width: desc.width,

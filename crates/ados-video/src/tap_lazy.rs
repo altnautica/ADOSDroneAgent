@@ -224,8 +224,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let (fmt, w, h, len) = decode_tap_header(&header).unwrap();
-        assert_eq!((fmt, w, h, len), (FrameFormat::Rgb24, 2, 2, 12));
+        let hdr = decode_tap_header(&header).unwrap();
+        assert_eq!(
+            (hdr.format, hdr.width, hdr.height, hdr.byte_len),
+            (FrameFormat::Rgb24, 2, 2, 12)
+        );
         engine
     }
 

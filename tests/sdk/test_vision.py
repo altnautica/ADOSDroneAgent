@@ -60,13 +60,17 @@ def test_frame_bytes_matches_format():
     assert FrameFormat.RGB24.frame_bytes(640, 480) == 640 * 480 * 3
     assert FrameFormat.NV12.frame_bytes(640, 480) == 640 * 480 * 3 // 2
     assert FrameFormat.YUV420P.frame_bytes(1280, 720) == 1280 * 720 * 3 // 2
+    assert FrameFormat.GRAY8.frame_bytes(640, 480) == 640 * 480
+    assert FrameFormat.GRAY16.frame_bytes(640, 480) == 640 * 480 * 2
+    assert FrameFormat.BAYER_RGGB8.frame_bytes(641, 481) == 641 * 481
+    assert FrameFormat.BAYER_RGGB16.frame_bytes(640, 480) == 640 * 480 * 2
 
 
 def test_frame_descriptor_msgpack_field_names_match_rust():
     d = FrameDescriptor(
         camera_id="uvc-0",
         frame_id=42,
-        ts_ms=1_700_000_000_000,
+        ts_ns=1_700_000_000_000,
         width=640,
         height=480,
         format=FrameFormat.RGB24,
@@ -76,11 +80,13 @@ def test_frame_descriptor_msgpack_field_names_match_rust():
         byte_len=640 * 480 * 3,
     )
     raw = _unpack(d.to_msgpack())
-    # Exactly the Rust FrameDescriptor field set, no more, no less.
+    # Exactly the Rust FrameDescriptor field set (absent options omitted).
     assert set(raw.keys()) == {
+        "v",
         "camera_id",
         "frame_id",
-        "ts_ms",
+        "ts_ns",
+        "timebase",
         "width",
         "height",
         "format",
@@ -89,12 +95,49 @@ def test_frame_descriptor_msgpack_field_names_match_rust():
         "seq",
         "byte_len",
     }
+    assert raw["v"] == 2
     # format is the lowercase string the Rust serde(rename_all="lowercase") emits.
     assert raw["format"] == "rgb24"
     assert raw["frame_id"] == 42
     assert raw["byte_len"] == 640 * 480 * 3
     # Round-trips byte-identically.
     assert FrameDescriptor.from_msgpack(d.to_msgpack()) == d
+
+
+def test_frame_descriptor_v2_optional_fields_and_formats_round_trip():
+    for fmt in (
+        FrameFormat.GRAY8,
+        FrameFormat.GRAY16,
+        FrameFormat.BAYER_RGGB8,
+        FrameFormat.BAYER_RGGB16,
+    ):
+        d = FrameDescriptor(
+            camera_id="cam0",
+            frame_id=1,
+            ts_ns=5,
+            width=640,
+            height=480,
+            format=fmt,
+            shm_name="ados-vision-cam0",
+            slot=0,
+            seq=1,
+            byte_len=fmt.frame_bytes(640, 480),
+            ts_sensor_ns=123,
+            exposure_ns=4_000_000,
+            trigger_seq=77,
+            timebase=1,
+        )
+        assert FrameDescriptor.from_msgpack(d.to_msgpack()) == d
+
+
+def test_frame_descriptor_v1_is_rejected():
+    v1 = {
+        "v": 1, "camera_id": "uvc-0", "frame_id": 1, "ts_ms": 0, "width": 8,
+        "height": 8, "format": "rgb24", "shm_name": "r", "slot": 0, "seq": 1,
+        "byte_len": 192,
+    }
+    with pytest.raises(ValueError):
+        FrameDescriptor.from_dict(v1)
 
 
 def test_model_metadata_msgpack_field_names_match_rust():
@@ -526,7 +569,7 @@ def test_resolver_follows_a_ring_the_engine_replaced(tmp_path):
 
     def desc(seq: int) -> FrameDescriptor:
         return FrameDescriptor(
-            camera_id="uvc-0", frame_id=seq, ts_ms=seq, width=4, height=4,
+            camera_id="uvc-0", frame_id=seq, ts_ns=seq, width=4, height=4,
             format=FrameFormat.RGB24, shm_name=path.name,
             slot=seq % layout.slot_count, seq=seq, byte_len=layout.slot_bytes,
         )
@@ -609,7 +652,7 @@ async def test_infer_passes_descriptor_and_decodes_detections():
     client = VisionClient(ipc)
 
     descriptor = FrameDescriptor(
-        camera_id="uvc-0", frame_id=1, ts_ms=1, width=4, height=4,
+        camera_id="uvc-0", frame_id=1, ts_ns=1, width=4, height=4,
         format=FrameFormat.RGB24, shm_name="ados-vision-uvc-0",
         slot=1, seq=1, byte_len=48,
     )
@@ -635,7 +678,7 @@ async def test_infer_reply_without_a_batch_is_an_error():
     ipc = _ipc({"vision.model.register"})
     client = VisionClient(ipc)
     descriptor = FrameDescriptor(
-        camera_id="uvc-0", frame_id=1, ts_ms=1, width=2, height=2,
+        camera_id="uvc-0", frame_id=1, ts_ns=1, width=2, height=2,
         format=FrameFormat.RGB24, shm_name="r", slot=0, seq=1, byte_len=12,
     )
     with pytest.raises(PluginError, match="batch"):
@@ -661,7 +704,7 @@ async def test_publish_one_builds_a_batch_from_the_frame():
     ipc = _ipc({"vision.detection.publish"})
     client = VisionClient(ipc)
     descriptor = FrameDescriptor(
-        camera_id="uvc-3", frame_id=12, ts_ms=99, width=2, height=2,
+        camera_id="uvc-3", frame_id=12, ts_ns=99_000_000, width=2, height=2,
         format=FrameFormat.RGB24, shm_name="r", slot=0, seq=12, byte_len=12,
     )
     det = Detection(BoundingBox(1, 1, 2, 2), "crop", 0.7)

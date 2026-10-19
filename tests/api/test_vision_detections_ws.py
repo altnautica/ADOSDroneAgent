@@ -242,7 +242,7 @@ def test_get_latest_returns_most_recent_batch(unpaired_client):
     broadcast and returns it as JSON, matching what the WS route would
     forward."""
     client, sock_path = unpaired_client
-    fresh = {**SAMPLE_BATCH, "ts_ms": int(time.time() * 1000)}
+    fresh = {**SAMPLE_BATCH, "ts_ms": time.monotonic_ns() // 1_000_000}
     engine = _FakeEngineSocket(sock_path, [_frame(fresh)])
     engine.start()
     try:
@@ -259,7 +259,7 @@ def test_get_latest_does_not_serve_a_stale_batch_as_current(unpaired_client):
     """The engine replays its last batch forever; one older than the
     freshness window (a stopped camera) must not reach the overlay."""
     client, sock_path = unpaired_client
-    old = {**SAMPLE_BATCH, "ts_ms": int(time.time() * 1000) - 5_000}
+    old = {**SAMPLE_BATCH, "ts_ms": time.monotonic_ns() // 1_000_000 - 5_000}
     engine = _FakeEngineSocket(sock_path, [_frame(old)])
     engine.start()
     try:

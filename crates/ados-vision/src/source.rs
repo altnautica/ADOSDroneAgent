@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
+use crate::ring::{mono_ns, FrameTiming};
 use ados_protocol::framebus::FrameFormat;
 use ados_protocol::tap::{decode_tap_header, TAP_HEADER_LEN};
 use anyhow::{anyhow, Result};
@@ -126,6 +127,8 @@ pub struct RawFrame {
     pub height: u32,
     pub format: FrameFormat,
     pub data: Vec<u8>,
+    /// Capture timing for the descriptor (host monotonic arrival at minimum).
+    pub timing: FrameTiming,
 }
 
 /// A per-camera frame source. `next_frame` resolves with the next frame, or an
@@ -215,7 +218,7 @@ impl FrameSource for TapSource {
             self.stream = None;
             return Err(e.into());
         }
-        let (format, width, height, byte_len) = match decode_tap_header(&header) {
+        let hdr = match decode_tap_header(&header) {
             Ok(v) => v,
             Err(e) => {
                 self.stream = None;
@@ -223,18 +226,19 @@ impl FrameSource for TapSource {
             }
         };
         let stream = self.stream.as_mut().expect("still connected");
-        let mut data = self.pool.take(byte_len);
-        if byte_len > 0 {
+        let mut data = self.pool.take(hdr.byte_len);
+        if hdr.byte_len > 0 {
             if let Err(e) = stream.read_exact(&mut data).await {
                 self.stream = None;
                 return Err(e.into());
             }
         }
         Ok(RawFrame {
-            width,
-            height,
-            format,
+            width: hdr.width,
+            height: hdr.height,
+            format: hdr.format,
             data,
+            timing: FrameTiming::host(hdr.ts_mono_ns),
         })
     }
 
@@ -288,6 +292,10 @@ impl CaptureSource {
             FrameFormat::Rgb24 => "rgb24",
             FrameFormat::Nv12 => "nv12",
             FrameFormat::Yuv420p => "yuv420p",
+            FrameFormat::Gray8 => "gray",
+            FrameFormat::Gray16 => "gray16le",
+            FrameFormat::BayerRggb8 => "bayer_rggb8",
+            FrameFormat::BayerRggb16 => "bayer_rggb16le",
         }
     }
 
@@ -344,11 +352,13 @@ impl FrameSource for CaptureSource {
             self.child = None;
             return Err(e.into());
         }
+        let arrival_ns = mono_ns();
         Ok(RawFrame {
             width: self.width,
             height: self.height,
             format: self.format,
             data,
+            timing: FrameTiming::host(arrival_ns),
         })
     }
 
@@ -493,6 +503,7 @@ mod tests {
             height: 4,
             format: FrameFormat::Rgb24,
             data: (0..48u8).collect(),
+            timing: FrameTiming::host(987_654_321),
         };
         let frame_clone = frame.clone();
         let writer = tokio::spawn(async move {
@@ -503,6 +514,7 @@ mod tests {
                 frame_clone.width,
                 frame_clone.height,
                 &frame_clone.data,
+                frame_clone.timing.ts_ns,
             )
             .await
             .unwrap();
@@ -518,6 +530,7 @@ mod tests {
         assert_eq!(got.width, 4);
         assert_eq!(got.format, FrameFormat::Rgb24);
         assert_eq!(got.data, frame.data);
+        assert_eq!(got.timing, FrameTiming::host(987_654_321));
         assert_eq!(src.camera_id(), "uvc-0");
         writer.abort();
     }

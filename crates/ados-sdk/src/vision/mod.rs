@@ -243,7 +243,7 @@ impl VisionClient {
             model_id: model_id.to_string(),
             camera_id: frame.descriptor.camera_id.clone(),
             frame_id: frame.descriptor.frame_id,
-            ts_ms: frame.descriptor.ts_ms,
+            ts_ms: (frame.descriptor.ts_ns / 1_000_000) as i64,
             frame_width: frame.descriptor.width,
             frame_height: frame.descriptor.height,
             detections: vec![detection],
@@ -374,11 +374,19 @@ struct MappedRing {
 
 impl MappedRing {
     /// Read the descriptor's slot through the seqlock, recording its sequence
-    /// when the read holds.
+    /// when the read holds. The returned [`Frame`] owns its pixels, so each read
+    /// fills a buffer sized once to the descriptor's byte length.
     fn read(&mut self, descriptor: &FrameDescriptor) -> Option<Vec<u8>> {
-        let pixels = framebus::read_slot(&self.map, &self.layout, descriptor.slot, descriptor.seq)
-            .ok()
-            .flatten()?;
+        let mut pixels = Vec::with_capacity(descriptor.byte_len as usize);
+        framebus::read_slot_into(
+            &self.map,
+            &self.layout,
+            descriptor.slot,
+            descriptor.seq,
+            &mut pixels,
+        )
+        .ok()
+        .flatten()?;
         self.last_seq = self.last_seq.max(descriptor.seq);
         Some(pixels)
     }
@@ -491,7 +499,11 @@ mod tests {
             v: ados_protocol::framebus::FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: seq,
-            ts_ms: 1_700_000_000_000,
+            ts_ns: 1_700_000_000_000,
+            ts_sensor_ns: None,
+            exposure_ns: None,
+            trigger_seq: None,
+            timebase: ados_protocol::framebus::TIMEBASE_HOST,
             width: 4,
             height: 4,
             format: FrameFormat::Rgb24,
@@ -534,15 +546,17 @@ mod tests {
         framebus::write_slot(&mut region, &layout, slot, seq, &pixels).unwrap();
 
         // The resolver maps by name under /dev/shm; mirror the read path here by
-        // exercising read_slot against the same layout the header records.
+        // exercising read_slot_into against the same layout the header records.
         let read_layout = RingLayout::read_header(&region).unwrap();
         assert_eq!(read_layout, layout);
-        let got = framebus::read_slot(&region, &read_layout, slot, seq).unwrap();
-        assert_eq!(got.as_deref(), Some(pixels.as_slice()));
+        let mut out = Vec::new();
+        let got = framebus::read_slot_into(&region, &read_layout, slot, seq, &mut out).unwrap();
+        assert_eq!(got, Some(pixels.len()));
+        assert_eq!(out, pixels);
 
         // A stale descriptor (seq the slot no longer holds) resolves to nothing.
         assert_eq!(
-            framebus::read_slot(&region, &read_layout, slot, seq + 1).unwrap(),
+            framebus::read_slot_into(&region, &read_layout, slot, seq + 1, &mut out).unwrap(),
             None
         );
     }

@@ -54,7 +54,7 @@ DEFAULT_SLOT_COUNT = 8
 
 # The capture timestamp base, matching the Rust harness so cross-language
 # round-trip assertions line up.
-_TS_BASE_MS = 1_700_000_000_000
+_TS_BASE_NS = 1_700_000_000_000
 
 
 class FakeVisionEngine:
@@ -153,7 +153,7 @@ class FakeVisionEngine:
         return FrameDescriptor(
             camera_id=self.camera_id,
             frame_id=seq,
-            ts_ms=_TS_BASE_MS + seq,
+            ts_ns=_TS_BASE_NS + seq,
             # width/height are descriptive; the resolver keys on byte_len.
             width=0,
             height=0,

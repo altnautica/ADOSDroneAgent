@@ -19,7 +19,7 @@
 //! The module is deliberately free of any OS mapping code: it operates on plain
 //! byte slices, so it builds and unit-tests on any host. The caller maps
 //! `/dev/shm/<shm_name>` (for example with `memmap2`) and hands the slice to
-//! [`write_slot`] / [`read_slot`].
+//! [`write_slot`] / [`read_slot_into`].
 //!
 //! Detections travel the other way as small structured payloads on the
 //! `vision.detection` topic and ride the plugin envelope directly; only frames
@@ -91,6 +91,14 @@ pub enum FrameFormat {
     Nv12,
     /// Planar YUV 4:2:0 (Y, then U, then V), 1.5 bytes per pixel.
     Yuv420p,
+    /// 8-bit grayscale, 1 byte per pixel.
+    Gray8,
+    /// 16-bit grayscale, little-endian, 2 bytes per pixel.
+    Gray16,
+    /// 8-bit Bayer mosaic, RGGB pattern, 1 byte per pixel.
+    BayerRggb8,
+    /// 16-bit Bayer mosaic, RGGB pattern, little-endian, 2 bytes per pixel.
+    BayerRggb16,
 }
 
 impl FrameFormat {
@@ -104,6 +112,8 @@ impl FrameFormat {
             FrameFormat::Rgb24 => px * 3,
             // Y plane (px) + chroma (px / 2) = px * 3 / 2.
             FrameFormat::Nv12 | FrameFormat::Yuv420p => px + px / 2,
+            FrameFormat::Gray8 | FrameFormat::BayerRggb8 => px,
+            FrameFormat::Gray16 | FrameFormat::BayerRggb16 => px * 2,
         }
     }
 }
@@ -113,7 +123,14 @@ impl FrameFormat {
 /// descriptor stamped with any other version fails loudly rather than silently
 /// mis-parsing. Mirrors the `framebus.descriptor` entry in the contract
 /// registry (`contracts.toml`).
-pub const FRAMEBUS_DESCRIPTOR_VERSION: u16 = 1;
+pub const FRAMEBUS_DESCRIPTOR_VERSION: u16 = 2;
+
+/// `ts_sensor_ns` is absent or on the host monotonic clock.
+pub const TIMEBASE_HOST: u8 = 0;
+/// `ts_sensor_ns` is on the device/driver clock.
+pub const TIMEBASE_SENSOR: u8 = 1;
+/// `ts_sensor_ns` is simulation time in ns.
+pub const TIMEBASE_SIM: u8 = 2;
 
 /// The small message published on `vision.frame`. It names the ring slot a
 /// consumer should read and carries the `seq` that the per-slot seqlock must
@@ -131,9 +148,19 @@ pub struct FrameDescriptor {
     pub camera_id: String,
     /// Monotonic frame counter for this camera, starting at 1.
     pub frame_id: u64,
-    /// Capture time in milliseconds (the same clock the engine timestamps with;
-    /// VIO consumers align this to flight-controller time downstream).
-    pub ts_ms: i64,
+    /// Host CLOCK_MONOTONIC ns: exposure midpoint when known, else arrival.
+    pub ts_ns: u64,
+    /// Source-clock timestamp in ns, interpreted per `timebase`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts_sensor_ns: Option<u64>,
+    /// Exposure duration in ns, when the source reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure_ns: Option<u32>,
+    /// Hardware trigger sequence that produced this frame, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger_seq: Option<u64>,
+    /// Clock domain of `ts_sensor_ns` (`TIMEBASE_*`).
+    pub timebase: u8,
     pub width: u32,
     pub height: u32,
     pub format: FrameFormat,
@@ -354,16 +381,19 @@ pub fn write_slot(
     Ok(())
 }
 
-/// Read the frame a [`FrameDescriptor`] points at, validating the seqlock.
+/// Read the frame a [`FrameDescriptor`] points at into `out`, validating the
+/// seqlock. `out` is cleared and refilled, reusing its capacity.
 ///
-/// Returns `Ok(None)` if the slot no longer holds `expected_seq` (the writer
-/// recycled it) — the caller drops that frame and waits for the next descriptor.
-pub fn read_slot(
+/// Returns the byte length, or `Ok(None)` if the slot no longer holds
+/// `expected_seq` (the writer recycled it); `out` is unspecified then and the
+/// caller drops that frame and waits for the next descriptor.
+pub fn read_slot_into(
     region: &[u8],
     layout: &RingLayout,
     slot: u32,
     expected_seq: u64,
-) -> Result<Option<Vec<u8>>, RingError> {
+    out: &mut Vec<u8>,
+) -> Result<Option<usize>, RingError> {
     if slot >= layout.slot_count {
         return Err(RingError::SlotOutOfRange {
             slot,
@@ -396,14 +426,15 @@ pub fn read_slot(
     // The copy must not be reordered before the seq_end check above nor after
     // the guard re-reads below; the volatile guard loads plus the fences pin it.
     compiler_fence(Ordering::Acquire);
-    let data = region[data_off..data_off + byte_len].to_vec();
+    out.clear();
+    out.extend_from_slice(&region[data_off..data_off + byte_len]);
     fence(Ordering::Acquire);
     let seq_begin = load_seq_volatile(region, base);
     let seq_end2 = load_seq_volatile(region, trailer_off);
     if seq_begin != expected_seq || seq_end2 != expected_seq {
         return Ok(None);
     }
-    Ok(Some(data))
+    Ok(Some(byte_len))
 }
 
 // ---------------------------------------------------------------------------
@@ -419,51 +450,7 @@ pub fn read_slot(
 /// `/run/ados/vision.sock`. The request args of `REGISTER_MODEL`, `INFER`,
 /// `PUBLISH_DETECTION` and `DESIGNATE_TRACK` are defined in
 /// [`crate::vision_rpc`].
-pub mod methods {
-    /// Subscribe to `vision.frame` descriptors. Gated on `vision.frame.read`.
-    /// The host then delivers descriptors as `vision.deliver` events.
-    pub const SUBSCRIBE_FRAMES: &str = "vision.subscribe_frames";
-    /// Register an inference model. Gated on `vision.model.register`.
-    pub const REGISTER_MODEL: &str = "vision.register_model";
-    /// Run a registered model against one frame on the shared backend, returning
-    /// detections. Gated on `vision.model.register`.
-    pub const INFER: &str = "vision.infer";
-    /// Publish a detection batch on `vision.detection`. Gated on
-    /// `vision.detection.publish`.
-    pub const PUBLISH_DETECTION: &str = "vision.publish_detection";
-
-    /// Subscribe to published `DetectionBatch`es. Gated on
-    /// `vision.detection.subscribe`. The host then delivers each batch as a
-    /// `vision.deliver_detection` event (mirrors `subscribe_frames`).
-    pub const SUBSCRIBE_DETECTIONS: &str = "vision.subscribe_detections";
-
-    /// Event method the host uses to push a detection batch to a subscriber.
-    pub const DELIVER_DETECTION: &str = "vision.deliver_detection";
-
-    /// Designate the engine's single-object follow target: lock the camera's
-    /// tracker onto a specific box (the operator's click-to-follow pick).
-    /// Gated on `vision.track.designate`; the control plane's click-to-follow
-    /// route sends it too.
-    pub const DESIGNATE_TRACK: &str = "vision.designate_track";
-
-    /// List the engine's registered models — a read-back of the model registry
-    /// so the GCS vision hub can show every model loaded on the drone (not just
-    /// the one publishing detections). No args; the reply carries the models as
-    /// a msgpack-encoded `Vec<ModelInfo>` in a binary field.
-    pub const LIST_MODELS: &str = "vision.list_models";
-
-    /// Read the CALLING plugin's own resolved model-delivery status. No args; the
-    /// reply is `{models: [ {state, model_id, runtime, path, reason}, ... ]}` —
-    /// the `model_status` the host resolved from the plugin's declared model
-    /// refs, so the plugin can find where its delivered model was cached. This is
-    /// the model-delivery last mile: unlike `LIST_MODELS` (engine registry) this
-    /// is per-plugin resolution keyed by `model_id`.
-    pub const READ_MODEL: &str = "vision.read_model";
-
-    /// Event method the host uses to push a frame descriptor to a subscriber
-    /// (mirrors `mavlink.deliver`).
-    pub const DELIVER_FRAME: &str = "vision.deliver";
-}
+pub mod methods;
 
 /// What a model produces, so consumers know how to read its output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1187,15 +1174,26 @@ mod tests {
             FrameFormat::Yuv420p.frame_bytes(1280, 720),
             1280 * 720 * 3 / 2
         );
+        assert_eq!(FrameFormat::Gray8.frame_bytes(640, 480), 640 * 480);
+        assert_eq!(FrameFormat::Gray16.frame_bytes(640, 480), 640 * 480 * 2);
+        assert_eq!(FrameFormat::BayerRggb8.frame_bytes(641, 481), 641 * 481);
+        assert_eq!(
+            FrameFormat::BayerRggb16.frame_bytes(640, 480),
+            640 * 480 * 2
+        );
     }
 
     #[test]
     fn descriptor_round_trips_through_msgpack() {
-        let d = FrameDescriptor {
+        let base = FrameDescriptor {
             v: FRAMEBUS_DESCRIPTOR_VERSION,
             camera_id: "uvc-0".into(),
             frame_id: 42,
-            ts_ms: 1_700_000_000_000,
+            ts_ns: 1_700_000_000_000_000_000,
+            ts_sensor_ns: None,
+            exposure_ns: None,
+            trigger_seq: None,
+            timebase: TIMEBASE_HOST,
             width: 640,
             height: 480,
             format: FrameFormat::Rgb24,
@@ -1204,8 +1202,26 @@ mod tests {
             seq: 1234,
             byte_len: (640 * 480 * 3) as u32,
         };
-        let bytes = d.to_msgpack().unwrap();
-        assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), d);
+        let bytes = base.to_msgpack().unwrap();
+        assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), base);
+        for format in [
+            FrameFormat::Gray8,
+            FrameFormat::Gray16,
+            FrameFormat::BayerRggb8,
+            FrameFormat::BayerRggb16,
+        ] {
+            let d = FrameDescriptor {
+                ts_sensor_ns: Some(123_456_789),
+                exposure_ns: Some(4_000_000),
+                trigger_seq: Some(77),
+                timebase: TIMEBASE_SENSOR,
+                format,
+                byte_len: format.frame_bytes(640, 480) as u32,
+                ..base.clone()
+            };
+            let bytes = d.to_msgpack().unwrap();
+            assert_eq!(FrameDescriptor::from_msgpack(&bytes).unwrap(), d);
+        }
     }
 
     #[test]
@@ -1232,7 +1248,11 @@ mod tests {
             v: FRAMEBUS_DESCRIPTOR_VERSION + 1,
             camera_id: "uvc-0".into(),
             frame_id: 1,
-            ts_ms: 0,
+            ts_ns: 0,
+            ts_sensor_ns: None,
+            exposure_ns: None,
+            trigger_seq: None,
+            timebase: TIMEBASE_HOST,
             width: 8,
             height: 8,
             format: FrameFormat::Rgb24,
@@ -1249,11 +1269,11 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_missing_version_fails_decode() {
-        // A payload that predates the version field (no `v` key) must fail to
-        // decode: the field is required, with no serde default.
+    fn descriptor_v1_with_ts_ms_is_rejected() {
+        // A v1 descriptor (millisecond `ts_ms`, no `ts_ns`) must not decode.
         #[derive(Serialize)]
-        struct NoVersionDescriptor {
+        struct V1Descriptor {
+            v: u16,
             camera_id: String,
             frame_id: u64,
             ts_ms: i64,
@@ -1265,7 +1285,8 @@ mod tests {
             seq: u64,
             byte_len: u32,
         }
-        let old = NoVersionDescriptor {
+        let old = V1Descriptor {
+            v: 1,
             camera_id: "uvc-0".into(),
             frame_id: 1,
             ts_ms: 0,
@@ -1280,7 +1301,7 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&old).unwrap();
         assert!(matches!(
             FrameDescriptor::from_msgpack(&bytes),
-            Err(DescriptorError::Decode(_))
+            Err(DescriptorError::Decode(_) | DescriptorError::Version { .. })
         ));
     }
 
@@ -1290,6 +1311,16 @@ mod tests {
         let bytes = rmp_serde::to_vec_named(&FrameFormat::Yuv420p).unwrap();
         let back: String = rmp_serde::from_slice(&bytes).unwrap();
         assert_eq!(back, "yuv420p");
+        for (f, name) in [
+            (FrameFormat::Gray8, "gray8"),
+            (FrameFormat::Gray16, "gray16"),
+            (FrameFormat::BayerRggb8, "bayerrggb8"),
+            (FrameFormat::BayerRggb16, "bayerrggb16"),
+        ] {
+            let bytes = rmp_serde::to_vec_named(&f).unwrap();
+            let back: String = rmp_serde::from_slice(&bytes).unwrap();
+            assert_eq!(back, name);
+        }
     }
 
     #[test]
@@ -1312,8 +1343,30 @@ mod tests {
         let slot = (seq % layout.slot_count as u64) as u32;
         write_slot(&mut region, &layout, slot, seq, &frame).unwrap();
 
-        let got = read_slot(&region, &layout, slot, seq).unwrap();
-        assert_eq!(got.as_deref(), Some(frame.as_slice()));
+        let mut out = Vec::new();
+        let got = read_slot_into(&region, &layout, slot, seq, &mut out).unwrap();
+        assert_eq!(got, Some(frame.len()));
+        assert_eq!(out, frame);
+    }
+
+    #[test]
+    fn read_slot_into_reuses_capacity() {
+        let layout = RingLayout::for_frame(2, 8, 8, FrameFormat::Rgb24);
+        let mut region = vec![0u8; layout.total_len()];
+        layout.write_header(&mut region).unwrap();
+        let mut out = Vec::with_capacity(layout.slot_bytes as usize);
+        out.extend_from_slice(&[0xAA; 5]);
+        let (ptr, cap) = (out.as_ptr(), out.capacity());
+        for seq in 1..=4u64 {
+            let frame = vec![seq as u8; layout.slot_bytes as usize];
+            let slot = (seq % 2) as u32;
+            write_slot(&mut region, &layout, slot, seq, &frame).unwrap();
+            let n = read_slot_into(&region, &layout, slot, seq, &mut out).unwrap();
+            assert_eq!(n, Some(frame.len()));
+            assert_eq!(out, frame);
+            assert_eq!(out.as_ptr(), ptr);
+            assert_eq!(out.capacity(), cap);
+        }
     }
 
     #[test]
@@ -1323,7 +1376,11 @@ mod tests {
         layout.write_header(&mut region).unwrap();
         write_slot(&mut region, &layout, 0, 10, &[1, 2, 3]).unwrap();
         // The consumer asks for a sequence the slot never held.
-        assert_eq!(read_slot(&region, &layout, 0, 11).unwrap(), None);
+        let mut out = Vec::new();
+        assert_eq!(
+            read_slot_into(&region, &layout, 0, 11, &mut out).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -1335,11 +1392,16 @@ mod tests {
         // Writer recycles the single slot for the next frame.
         write_slot(&mut region, &layout, 0, 101, &[8, 8, 8, 8]).unwrap();
         // A consumer still holding the old descriptor sees the new seq and drops.
-        assert_eq!(read_slot(&region, &layout, 0, 100).unwrap(), None);
+        let mut out = Vec::new();
         assert_eq!(
-            read_slot(&region, &layout, 0, 101).unwrap(),
-            Some(vec![8; 4])
+            read_slot_into(&region, &layout, 0, 100, &mut out).unwrap(),
+            None
         );
+        assert_eq!(
+            read_slot_into(&region, &layout, 0, 101, &mut out).unwrap(),
+            Some(4)
+        );
+        assert_eq!(out, vec![8; 4]);
     }
 
     #[test]
@@ -1474,6 +1536,7 @@ mod tests {
         // its whole budget before a starved writer commits its first frame,
         // a test-timing artifact rather than a seqlock failure.
         let mut iters = 0u64;
+        let mut data = Vec::new();
         while reads < 10_000 && iters < 50_000_000 {
             iters += 1;
             let seq = r_latest.load(O::Acquire);
@@ -1485,7 +1548,10 @@ mod tests {
             // SAFETY: read-only view of the same region the writer mutates; the
             // seqlock discards any read torn by a concurrent recycle.
             let region = unsafe { std::slice::from_raw_parts(r_shared.0, r_shared.1) };
-            if let Some(data) = read_slot(region, &layout, slot, seq).unwrap() {
+            if read_slot_into(region, &layout, slot, seq, &mut data)
+                .unwrap()
+                .is_some()
+            {
                 reads += 1;
                 let marker = (seq & 0xFF) as u8;
                 assert!(

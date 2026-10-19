@@ -117,15 +117,12 @@ pub fn frame_format_from_str(pixel_format: &str) -> FrameFormat {
     }
 }
 
-/// Size in bytes of one decoded `rawvideo` frame the reframer reads off ffmpeg's
-/// stdout. rgb24 is 3 bytes/px; nv12 and yuv420p are 4:2:0 planar at 12 bits/px
-/// (= 3/2 bytes/px, exact for even geometry, which is the only valid 4:2:0 case).
-pub fn frame_size_bytes(format: FrameFormat, width: u32, height: u32) -> usize {
-    let px = width as usize * height as usize;
-    match format {
-        FrameFormat::Rgb24 => px * 3,
-        FrameFormat::Nv12 | FrameFormat::Yuv420p => px * 3 / 2,
-    }
+/// Host CLOCK_MONOTONIC in nanoseconds, the clock the tap header carries.
+pub fn mono_ns() -> u64 {
+    use nix::time::{clock_gettime, ClockId};
+    clock_gettime(ClockId::CLOCK_MONOTONIC)
+        .map(|t| t.tv_sec() as u64 * 1_000_000_000 + t.tv_nsec() as u64)
+        .unwrap_or(0)
 }
 
 /// Spawn the decoupled vision tap ffmpeg through [`ManagedProcess`]
@@ -199,7 +196,7 @@ pub async fn serve_tap_session<R>(
 where
     R: AsyncRead + Unpin + Send + 'static,
 {
-    let frame_size = frame_size_bytes(format, width, height);
+    let frame_size = format.frame_bytes(width, height);
     if frame_size == 0 {
         tracing::error!(
             width,
@@ -209,12 +206,13 @@ where
         return TapSessionEnd::SourceEnded;
     }
 
-    let (tx, mut rx) = watch::channel::<Option<Arc<Vec<u8>>>>(None);
+    let (tx, mut rx) = watch::channel::<Option<(u64, Arc<Vec<u8>>)>>(None);
 
     // Reader owns ffmpeg stdout exclusively. Each frame is read into its own
-    // buffer and MOVED into the channel — no per-frame copy. The buffer the
-    // channel just released is reclaimed for the next read whenever the server
-    // has finished with it.
+    // buffer and MOVED into the channel — no per-frame copy — with the host
+    // monotonic arrival time stamped as soon as the read completes. The buffer
+    // the channel just released is reclaimed for the next read whenever the
+    // server has finished with it.
     let reader = tokio::spawn(async move {
         let mut stdout = stdout;
         let mut spare: Option<Vec<u8>> = None;
@@ -224,11 +222,12 @@ where
                 tracing::info!(error = %e, "vision_tap_source_eof");
                 return;
             }
-            let previous = tx.send_replace(Some(Arc::new(buf)));
+            let arrival_ns = mono_ns();
+            let previous = tx.send_replace(Some((arrival_ns, Arc::new(buf))));
             if tx.is_closed() {
                 return; // server gone
             }
-            spare = previous.and_then(|frame| Arc::try_unwrap(frame).ok());
+            spare = previous.and_then(|(_, frame)| Arc::try_unwrap(frame).ok());
         }
     });
 
@@ -265,11 +264,11 @@ where
                 }
                 last_frame_at = tokio::time::Instant::now();
                 let frame = rx.borrow_and_update().clone();
-                let Some(frame) = frame else { continue };
+                let Some((ts_mono_ns, frame)) = frame else { continue };
                 if let Some(e) = engine.as_mut() {
                     let failed = match timeout(
                         ENGINE_WRITE_TIMEOUT,
-                        write_tap_frame(e, format, width, height, &frame),
+                        write_tap_frame(e, format, width, height, &frame, ts_mono_ns),
                     )
                     .await
                     {
@@ -389,19 +388,10 @@ mod tests {
     }
 
     #[test]
-    fn frame_size_matches_pixel_format() {
-        assert_eq!(
-            frame_size_bytes(FrameFormat::Rgb24, 640, 480),
-            640 * 480 * 3
-        );
-        assert_eq!(
-            frame_size_bytes(FrameFormat::Nv12, 640, 480),
-            640 * 480 * 3 / 2
-        );
-        assert_eq!(
-            frame_size_bytes(FrameFormat::Yuv420p, 1280, 720),
-            1280 * 720 * 3 / 2
-        );
+    fn mono_ns_advances() {
+        let a = mono_ns();
+        let b = mono_ns();
+        assert!(a > 0 && b >= a);
     }
 
     #[test]
@@ -431,7 +421,7 @@ mod tests {
 
         let (w, h) = (4u32, 2u32);
         let format = FrameFormat::Rgb24;
-        let frame_size = frame_size_bytes(format, w, h); // 24 bytes
+        let frame_size = format.frame_bytes(w, h); // 24 bytes
 
         // Fake ffmpeg stdout: an in-memory duplex pipe. We write raw frames into
         // `feed`; the reframer reads them off `ffmpeg_stdout` (an AsyncRead).
@@ -453,12 +443,13 @@ mod tests {
 
         let mut header = [0u8; TAP_HEADER_LEN];
         engine.read_exact(&mut header).await.unwrap();
-        let (df, dw, dh, dl) = decode_tap_header(&header).unwrap();
-        assert_eq!(df, format);
-        assert_eq!(dw, w);
-        assert_eq!(dh, h);
-        assert_eq!(dl, frame_size);
-        let mut pixels = vec![0u8; dl];
+        let hdr = decode_tap_header(&header).unwrap();
+        assert_eq!(hdr.format, format);
+        assert_eq!(hdr.width, w);
+        assert_eq!(hdr.height, h);
+        assert_eq!(hdr.byte_len, frame_size);
+        assert!(hdr.ts_mono_ns > 0, "writer stamps host monotonic arrival");
+        let mut pixels = vec![0u8; hdr.byte_len];
         engine.read_exact(&mut pixels).await.unwrap();
         assert_eq!(pixels, frame_a);
 
