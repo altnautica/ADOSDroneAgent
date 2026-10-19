@@ -150,8 +150,8 @@ pub async fn get_video_cameras() -> Json<Value> {
 /// parses `config.yaml` once and writes no config-status sidecar, so a pollable
 /// roster read never races the `ados-video` service's own status stamping.
 fn load_roster() -> Vec<Value> {
-    let path = config_path();
-    let cfg = RosterVideoConfig::load_from(&path);
+    let text = std::fs::read_to_string(config_path()).unwrap_or_default();
+    let cfg = RosterVideoConfig::from_text(&text);
     // The camera roster is a companion-node concept. A ground station carries no
     // onboard camera, so it serves an empty roster rather than a phantom `main`.
     if cfg.is_ground_station() {
@@ -161,22 +161,31 @@ fn load_roster() -> Vec<Value> {
     let declared = declared_legs(&cfg, !discovered.is_empty());
     let live = load_live(&live_streams_path());
     let mut rows = build_roster(&declared, &discovered, &live);
-    attach_entry_keys(&mut rows, &load_entries(&path));
+    attach_entry_keys(&mut rows, &entries_from(&text));
     rows
 }
 
-/// The valid `cameras[]` entries of the config as raw JSON objects keyed by id,
-/// so the roster echoes every key exactly as configured. Empty when the file is
-/// missing or unparseable.
-fn load_entries(path: &Path) -> HashMap<String, Value> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    ados_config::cameras::camera_entries(&text)
+/// The valid `cameras[]` entries of the config text as raw JSON objects keyed
+/// by id, so the roster echoes every key exactly as configured.
+fn entries_from(text: &str) -> HashMap<String, Value> {
+    ados_config::cameras::camera_entries(text)
         .valid
         .into_iter()
         .filter_map(|(_, raw, c)| serde_json::to_value(&raw).ok().map(|v| (c.id, v)))
         .collect()
+}
+
+/// Keys a roster row carries that are runtime state, not `cameras[]` config:
+/// a GET row echoed back as a PUT entry must not persist them.
+const ROSTER_ONLY_KEYS: [&str; 3] = ["state", "live", "device_path"];
+
+/// Drop [`ROSTER_ONLY_KEYS`] from every PUT entry.
+fn strip_roster_only(cameras: &mut [Value]) {
+    for obj in cameras.iter_mut().filter_map(Value::as_object_mut) {
+        for key in ROSTER_ONLY_KEYS {
+            obj.remove(key);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +213,7 @@ pub struct PutCamerasBody {
 /// explicit `null` clears a key), preserves plugin-declared legs, and restarts
 /// the video pipeline. A validation failure is a 400; an unreachable supervisor
 /// a 503; a saved-but-not-restarted result a 502.
-pub async fn put_video_cameras(Json(body): Json<PutCamerasBody>) -> Response {
+pub async fn put_video_cameras(Json(mut body): Json<PutCamerasBody>) -> Response {
     // The camera roster is a companion-node surface; a ground station has no
     // onboard camera to manage, so the write does not apply there.
     if RosterVideoConfig::load_from(&config_path()).is_ground_station() {
@@ -213,6 +222,7 @@ pub async fn put_video_cameras(Json(body): Json<PutCamerasBody>) -> Response {
             "the camera roster is not available on a ground station",
         );
     }
+    strip_roster_only(&mut body.cameras);
     if let Err(msg) = validate_cameras(&body.cameras) {
         return detail(StatusCode::BAD_REQUEST, msg);
     }

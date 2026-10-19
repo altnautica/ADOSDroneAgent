@@ -36,6 +36,13 @@ impl RosterVideoConfig {
     /// Returns the defaults (no profile, no camera, no legs) when the file is
     /// missing or unparseable so the roster read never blocks.
     pub fn load_from(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .map(|text| Self::from_text(&text))
+            .unwrap_or_default()
+    }
+
+    /// [`Self::load_from`] over config text already read.
+    pub fn from_text(text: &str) -> Self {
         #[derive(Debug, Default, Deserialize)]
         struct RawConfig {
             #[serde(default)]
@@ -55,14 +62,11 @@ impl RosterVideoConfig {
             #[serde(default)]
             camera: Option<CameraConfig>,
         }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Self::default();
-        };
-        let raw: RawConfig = ados_config::yaml_or_default(&text, "video");
+        let raw: RawConfig = ados_config::yaml_or_default(text, "video");
         Self {
             profile: raw.video.profile.or(raw.agent.profile),
             camera: raw.video.camera,
-            cameras: super::legs::legs_from(&text),
+            cameras: super::legs::legs_from(text),
         }
     }
 

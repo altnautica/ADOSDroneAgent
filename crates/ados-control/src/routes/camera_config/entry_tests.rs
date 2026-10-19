@@ -1,19 +1,20 @@
 use super::*;
 
-fn config_with(entry: &str) -> tempfile::NamedTempFile {
-    let f = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(f.path(), format!("cameras:\n{entry}")).unwrap();
-    f
-}
+const FULL: &str = "cameras:\n  - id: front\n    source: rtsp://sim/front\n    role: primary\n    capture: true\n    format: gray8\n    exposure_us: 4000\n    gain: 2.5\n    trigger: hub\n    trigger_channel: 1\n    keyframe_interval: 15\n    rotation: 180\n    hflip: true\n    vflip: false\n    encoder: software\n";
 
-const FULL: &str = "  - id: front\n    source: rtsp://sim/front\n    role: primary\n    capture: true\n    format: gray8\n    exposure_us: 4000\n    gain: 2.5\n    trigger: hub\n    trigger_channel: 1\n    keyframe_interval: 15\n    rotation: 180\n    hflip: true\n    vflip: false\n    encoder: software\n";
+fn rows_for(text: &str) -> Vec<Value> {
+    let mut rows = build_roster(
+        &RosterVideoConfig::from_text(text).cameras,
+        &[],
+        &HashMap::new(),
+    );
+    attach_entry_keys(&mut rows, &entries_from(text));
+    rows
+}
 
 #[test]
 fn roster_rows_carry_every_entry_key_raw() {
-    let cfg = config_with(FULL);
-    let legs = RosterVideoConfig::load_from(cfg.path()).cameras;
-    let mut rows = build_roster(&legs, &[], &HashMap::new());
-    attach_entry_keys(&mut rows, &load_entries(cfg.path()));
+    let rows = rows_for(FULL);
     let r = &rows[0];
     assert_eq!(r["capture"], true);
     assert_eq!(r["format"], "gray8");
@@ -31,11 +32,21 @@ fn roster_rows_carry_every_entry_key_raw() {
 }
 
 #[test]
+fn an_echoed_row_drops_its_roster_only_keys() {
+    let mut rows = rows_for(FULL);
+    assert!(rows[0].get("state").is_some());
+    strip_roster_only(&mut rows);
+    for key in ROSTER_ONLY_KEYS {
+        assert!(rows[0].get(key).is_none(), "{key} would persist");
+    }
+    // Config keys survive the strip.
+    assert_eq!(rows[0]["exposure_us"], 4000);
+    assert_eq!(rows[0]["source"], "rtsp://sim/front");
+}
+
+#[test]
 fn absent_entry_keys_are_null() {
-    let cfg = config_with("  - id: front\n    source: /dev/video0\n");
-    let legs = RosterVideoConfig::load_from(cfg.path()).cameras;
-    let mut rows = build_roster(&legs, &[], &HashMap::new());
-    attach_entry_keys(&mut rows, &load_entries(cfg.path()));
+    let rows = rows_for("cameras:\n  - id: front\n    source: /dev/video0\n");
     for key in ENTRY_KEYS {
         assert_eq!(rows[0][key], Value::Null, "{key}");
     }
