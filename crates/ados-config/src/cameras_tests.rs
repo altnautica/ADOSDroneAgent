@@ -179,3 +179,13 @@ fn one_invalid_entry_is_skipped_and_reported_without_taking_down_the_list() {
     // Not a list at all: nothing configured, nothing valid.
     assert!(camera_entries("cameras: 3\n").valid.is_empty());
 }
+
+#[test]
+fn a_keyframe_interval_past_the_ceiling_is_refused() {
+    let e = camera_entries(
+        "cameras:\n  - { id: a, keyframe_interval: 30 }\n  - { id: b, keyframe_interval: 31 }\n",
+    );
+    assert_eq!(e.valid.len(), 1);
+    assert_eq!(e.invalid[0].id, "b");
+    assert!(e.invalid[0].error.contains("keyframe_interval"));
+}

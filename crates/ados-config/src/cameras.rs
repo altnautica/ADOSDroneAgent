@@ -182,7 +182,25 @@ struct VideoPlane {
     hflip: Option<bool>,
     vflip: Option<bool>,
     encoder: Option<EncoderChoice>,
+    /// Keyframe interval in frames, `0..=30` (the encoder's GOP ceiling and
+    /// the Python model's bound).
+    #[serde(default, deserialize_with = "bounded_keyframe_interval")]
     keyframe_interval: Option<u32>,
+}
+
+/// The largest `keyframe_interval` an entry may declare.
+pub const MAX_KEYFRAME_INTERVAL: u32 = 30;
+
+fn bounded_keyframe_interval<'de, D>(d: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u32>::deserialize(d)? {
+        Some(v) if v > MAX_KEYFRAME_INTERVAL => Err(serde::de::Error::custom(format!(
+            "keyframe_interval must be at most {MAX_KEYFRAME_INTERVAL}"
+        ))),
+        v => Ok(v),
+    }
 }
 
 #[derive(Deserialize)]

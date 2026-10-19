@@ -313,11 +313,13 @@ cameras:
     assert_eq!(cam.keyframe_interval, 5);
 }
 
-/// A configured keyframe interval past the GOP ceiling is held at the
-/// ceiling on both the single-camera block and a leg; the ceiling itself and
-/// the 0 default pass unchanged.
+/// A keyframe interval past the GOP ceiling is held at the ceiling on the
+/// single-camera block, but a `cameras[]` entry declaring one is invalid: the
+/// shared per-entry check refuses it for every consumer (as the Python model
+/// does), so it is skipped rather than served with a changed value. The
+/// ceiling itself and the 0 default pass unchanged.
 #[test]
-fn keyframe_interval_is_held_at_the_gop_ceiling() {
+fn keyframe_interval_is_bounded_at_the_gop_ceiling() {
     let yaml = "\
 video:
   camera:
@@ -337,16 +339,18 @@ cameras:
         MAX_KEYFRAME_INTERVAL
     );
     let cfg = AgentVideoConfig::load_from(&path);
-    let by_id = |id: &str| {
-        cfg.cameras
-            .iter()
-            .find(|c| c.id == id)
-            .unwrap()
-            .keyframe_interval
-    };
-    assert_eq!(by_id("eo"), MAX_KEYFRAME_INTERVAL);
-    assert_eq!(by_id("belly"), 30);
+    let ids: Vec<&str> = cfg.cameras.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["belly"]);
+    assert_eq!(cfg.cameras[0].keyframe_interval, 30);
+    let invalid = ados_config::cameras::camera_entries(yaml).invalid;
+    assert_eq!(invalid.len(), 1);
+    assert_eq!(invalid[0].id, "eo");
     assert_eq!(CameraConfig::default().keyframe_interval, 0);
+    // The shared check and the leg parser bound at the same ceiling.
+    assert_eq!(
+        ados_config::cameras::MAX_KEYFRAME_INTERVAL,
+        MAX_KEYFRAME_INTERVAL
+    );
 }
 
 /// A camera the vision engine captures is never opened by the pipeline: its
