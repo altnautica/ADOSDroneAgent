@@ -30,12 +30,15 @@ pub(crate) struct PresenceDirs<'a> {
     pub bin: &'a Path,
 }
 
-/// The four flags for `profile`.
+/// The four flags for `profile`, in either the wire form (`ground-station`,
+/// what `/api/status/full` resolves) or the unit-table form (`ground_station`).
 pub(crate) fn presence_flags(
     profile: &str,
     dirs: &PresenceDirs<'_>,
     now: SystemTime,
 ) -> [(&'static str, bool); 4] {
+    let gate = profile.replace('-', "_");
+    let profile = gate.as_str();
     // The unit execs /bin/true until its best-effort binary lands, so the
     // profile alone does not make a clock.
     let clock = unit_on("ados-clock", profile) && dirs.bin.join("ados-clock").is_file();
@@ -128,6 +131,8 @@ mod tests {
         // A drone has no GNSS service; a ground station no hub or capture.
         assert_eq!(flags("drone", &f), [true, true, false, true]);
         assert_eq!(flags("ground_station", &f), [true, false, true, false]);
+        // The wire spelling the status route resolves gates the same way.
+        assert_eq!(flags("ground-station", &f), [true, false, true, false]);
         // A workstation runs none of these lanes, binary or not.
         assert_eq!(flags("workstation", &f), [false; 4]);
     }
