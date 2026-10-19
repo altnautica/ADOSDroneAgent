@@ -13,8 +13,8 @@ pub struct VideoClient {
 }
 
 impl VideoClient {
-    /// Open a playback session on leg `camera_id` for `offer_sdp`. See
-    /// [`PluginIpcClient::whep_offer`].
+    /// Open a playback session on the configured camera `camera_id` for
+    /// `offer_sdp`. See [`PluginIpcClient::whep_offer`].
     pub async fn whep_offer(
         &self,
         camera_id: &str,

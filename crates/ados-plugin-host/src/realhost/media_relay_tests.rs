@@ -92,13 +92,45 @@ Location: /main/whep/5e1f-aa_9\r\nTransfer-Encoding: chunked\r\n\r\n\
 5\r\nv=0\r\n\r\n6\r\na=x:1\n\r\n0\r\n\r\n";
 const DELETED: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
 
+/// A drone roster: a primary camera with its own id, an enabled secondary and
+/// a disabled one.
+const ROSTER: &str = "\
+agent:
+  profile: drone
+cameras:
+  - { id: eo, source: /dev/video2, role: primary }
+  - { id: cam2, source: rtsp://pod/ir }
+  - { id: belly, source: /dev/video4, enabled: false }
+";
+
+/// A host whose agent config is `config` (written into `dir`), relaying WHEP
+/// to `port`.
+fn host_with_config(dir: &Path, config: &str, port: u16) -> RealHost {
+    std::fs::write(dir.join("config.yaml"), config).unwrap();
+    RealHost::new()
+        .with_media_relay(port, PathBuf::from("/nonexistent/control.sock"))
+        .with_node_info_sources(NodeInfoSources {
+            config_yaml: dir.join("config.yaml"),
+            profile_conf: dir.join("profile.conf"),
+            mesh_role: dir.join("mesh-role"),
+            board_sidecar: dir.join("board.json"),
+            camera_state: dir.join("camera-state.json"),
+        })
+}
+
+fn is_unknown_camera(err: &HostError) -> bool {
+    matches!(err, HostError::Rpc(m) if m.starts_with("unknown_camera:"))
+}
+
 #[tokio::test]
 async fn an_offer_is_relayed_and_its_location_is_the_plugins_alone() {
     let (port, seen) = fake_media_server(vec![ANSWER, DELETED]).await;
-    let host = RealHost::new().with_media_relay(port, PathBuf::from("/nonexistent/control.sock"));
+    let dir = tempfile::tempdir().unwrap();
+    let host = host_with_config(dir.path(), ROSTER, port);
 
+    // The primary camera `eo` is served from the `main` leg.
     let out = host
-        .relay_whep_offer("com.a", &args(&[("camera_id", "main"), ("sdp", "OFFER")]))
+        .relay_whep_offer("com.a", &args(&[("camera_id", "eo"), ("sdp", "OFFER")]))
         .await
         .unwrap();
     let reply = offer_reply(out);
@@ -162,20 +194,50 @@ async fn a_forged_location_is_refused_before_anything_is_sent() {
 }
 
 #[tokio::test]
-async fn bad_offers_and_a_down_media_server_are_errors() {
-    let host = RealHost::new().with_media_relay(dead_port().await, PathBuf::from("/nonexistent"));
-    for camera in ["", "../x", "main/whep", "a b"] {
+async fn only_a_configured_enabled_camera_reaches_the_media_server() {
+    let (port, seen) = fake_media_server(vec![]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let host = host_with_config(dir.path(), ROSTER, port);
+    // `main` is a media path, not a camera; `belly` is disabled; the rest are
+    // not cameras of this node at all.
+    for camera in ["", "../x", "main/whep", "a b", "main", "belly", "missing"] {
         let err = host
             .relay_whep_offer("p", &args(&[("camera_id", camera), ("sdp", "o")]))
             .await
             .unwrap_err();
-        assert!(
-            matches!(&err, HostError::Rpc(m) if m.contains("arguments are invalid")),
-            "{camera}: {err:?}"
-        );
+        assert!(is_unknown_camera(&err), "{camera}: {err:?}");
     }
+    assert!(seen.lock().await.is_empty());
+
+    // A ground station carries no onboard camera, whatever its config lists.
+    let gs = tempfile::tempdir().unwrap();
+    let host = host_with_config(
+        gs.path(),
+        &ROSTER.replace("profile: drone", "profile: ground_station"),
+        port,
+    );
     let err = host
-        .relay_whep_offer("p", &args(&[("camera_id", "main"), ("sdp", "o")]))
+        .relay_whep_offer("p", &args(&[("camera_id", "eo"), ("sdp", "o")]))
+        .await
+        .unwrap_err();
+    assert!(is_unknown_camera(&err), "{err:?}");
+    assert!(seen.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn bad_offers_and_a_down_media_server_are_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = host_with_config(dir.path(), ROSTER, dead_port().await);
+    let err = host
+        .relay_whep_offer("p", &args(&[("camera_id", "eo"), ("sdp", "")]))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, HostError::Rpc(m) if m.contains("arguments are invalid")),
+        "{err:?}"
+    );
+    let err = host
+        .relay_whep_offer("p", &args(&[("camera_id", "eo"), ("sdp", "o")]))
         .await
         .unwrap_err();
     assert!(
@@ -188,7 +250,8 @@ async fn bad_offers_and_a_down_media_server_are_errors() {
 async fn a_refused_offer_is_whep_unavailable() {
     let (port, _) =
         fake_media_server(vec![b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"]).await;
-    let host = RealHost::new().with_media_relay(port, PathBuf::from("/nonexistent"));
+    let dir = tempfile::tempdir().unwrap();
+    let host = host_with_config(dir.path(), ROSTER, port);
     let err = host
         .relay_whep_offer("p", &args(&[("camera_id", "cam2"), ("sdp", "o")]))
         .await

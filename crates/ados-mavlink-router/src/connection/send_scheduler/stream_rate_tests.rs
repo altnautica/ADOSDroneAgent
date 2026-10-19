@@ -133,7 +133,8 @@ async fn unanswered_highres_request_switches_to_raw_imu_at_once() {
     assert!(intervals(&wrx).is_empty());
 
     // Age the request past the timeout: the next tick re-requests at once
-    // with RAW_IMU at 50 Hz in place of HIGHRES_IMU, and stops HIGHRES_IMU.
+    // with RAW_IMU at 50 Hz in place of HIGHRES_IMU, and hands HIGHRES_IMU
+    // back to the FC's default rate.
     let aged = Instant::now() - HIGHRES_TIMEOUT - Duration::from_millis(1);
     conn.sensor_streams().reset_link();
     conn.sensor_streams()
@@ -145,8 +146,12 @@ async fn unanswered_highres_request_switches_to_raw_imu_at_once() {
         "RAW_IMU at 50 Hz: {second:?}"
     );
     assert!(
-        second.contains(&(105, -1.0)),
-        "HIGHRES_IMU stopped: {second:?}"
+        second.contains(&(105, 0.0)),
+        "HIGHRES_IMU back at its default rate: {second:?}"
+    );
+    assert!(
+        !second.iter().any(|e| e.1 < 0.0),
+        "nothing stopped: {second:?}"
     );
     assert!(!second.contains(&(105, 5_000.0)));
     assert_eq!(conn.sensor_streams().imu_state(), ImuStream::RawFallback);
@@ -156,16 +161,16 @@ async fn unanswered_highres_request_switches_to_raw_imu_at_once() {
     );
 
     // The FC starts answering HIGHRES_IMU: back to the HIGHRES request, and
-    // RAW_IMU is stopped.
+    // RAW_IMU returns to its default rate.
     conn.sensor_streams().highres_seen();
     conn.tick_streams().await;
     let third = intervals(&wrx);
     assert!(third.contains(&(105, 5_000.0)), "{third:?}");
-    assert!(third.contains(&(27, -1.0)), "{third:?}");
+    assert!(third.contains(&(27, 0.0)), "{third:?}");
 }
 
 #[tokio::test]
-async fn capture_end_stops_every_capture_only_stream() {
+async fn capture_end_restores_the_default_rate_of_every_capture_only_stream() {
     let (conn, wrx) = link("drone").await;
     conn.sensor_streams().set_capture_active(true);
     conn.tick_streams().await;
@@ -178,14 +183,16 @@ async fn capture_end_stops_every_capture_only_stream() {
     conn.sensor_streams().set_capture_active(false);
     conn.tick_streams().await;
     let after = intervals(&wrx);
-    let stopped: Vec<u32> = after.iter().filter(|e| e.1 == -1.0).map(|e| e.0).collect();
-    assert_eq!(stopped, vec![105, 31, 32, 2, 29], "{after:?}");
+    let restored: Vec<u32> = after.iter().filter(|e| e.1 == 0.0).map(|e| e.0).collect();
+    assert_eq!(restored, vec![105, 31, 32, 2, 29], "{after:?}");
+    // Never a stop: -1 would kill ArduPilot's own SRx default streams.
+    assert!(!after.iter().any(|e| e.1 < 0.0), "{after:?}");
     // GPS_RAW_INT stays, back at its base rate.
     assert!(after.contains(&(24, 500_000.0)), "{after:?}");
     assert!(conn.sensor_streams().sensor_rates_hz().is_empty());
-    // Nothing more to stop on the next refresh.
+    // Nothing more to hand back on the next refresh.
     *conn.last_stream_req.lock().await = None;
     conn.tick_streams().await;
     let next = intervals(&wrx);
-    assert!(!next.is_empty() && !next.iter().any(|e| e.1 == -1.0));
+    assert!(!next.is_empty() && !next.iter().any(|e| e.1 <= 0.0));
 }

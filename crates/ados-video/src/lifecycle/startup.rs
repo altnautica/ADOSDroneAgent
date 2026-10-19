@@ -429,7 +429,18 @@ impl VideoOrchestrator {
         }
         self.last_fingerprint = Some(fingerprint);
         self.last_discovery_at = Some(Instant::now());
-        self.last_cameras =
+        let mut found =
             discover::discover(&self.python_executable, discover::DISCOVERY_TIMEOUT).await;
+        // The probe knows nothing of the roster: honour the primary leg's own
+        // device and never pick one a captured camera's vision engine owns.
+        let owned: Vec<&str> = self
+            .config
+            .cameras
+            .iter()
+            .filter(|c| c.capture && c.enabled)
+            .map(|c| c.source.trim())
+            .collect();
+        found.assign_primary(&self.camera_cfg.source, &owned);
+        self.last_cameras = found;
     }
 }

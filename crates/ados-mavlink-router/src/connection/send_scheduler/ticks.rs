@@ -31,8 +31,10 @@ impl FcConnection {
         // The table follows the profile and the capture marker; within the
         // capture table HIGHRES_IMU gives way to RAW_IMU when the FC never
         // answered it. A change of either re-requests at once, and every
-        // stream the new table no longer asks for is switched off (interval
-        // -1): the FC otherwise keeps streaming it at the old rate.
+        // stream the new table no longer asks for is handed back to the FC's
+        // default rate (interval 0): the FC otherwise keeps streaming it at
+        // the old rate, and a stop (-1) would also kill the default streams
+        // ArduPilot sends from its SRx parameters until the FC reboots.
         let now = Instant::now();
         let rates = stream_rates(&self.cfg.profile, self.sensor_streams.capture_active());
         let capture_table = rates.iter().any(|&(id, _)| id == MSG_HIGHRES_IMU);
@@ -60,7 +62,7 @@ impl FcConnection {
                 .await;
         }
         for msg_id in self.sensor_streams.dropped_by(&table) {
-            self.send_message_interval(msg_id, -1.0).await;
+            self.send_message_interval(msg_id, 0.0).await;
         }
         self.sensor_streams.requested(capture_table, &table, now);
         let target = self.target_system.load(Ordering::Relaxed);
@@ -95,7 +97,7 @@ impl FcConnection {
     }
 
     /// `MAV_CMD_SET_MESSAGE_INTERVAL` for `msg_id`: `interval_us` between
-    /// messages, or -1 to stop the message.
+    /// messages, 0 to restore the FC's default rate, or -1 to stop the message.
     async fn send_message_interval(&self, msg_id: u32, interval_us: f32) {
         let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
             target_system: self.target_system.load(Ordering::Relaxed),

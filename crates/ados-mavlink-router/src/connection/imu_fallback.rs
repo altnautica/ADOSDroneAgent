@@ -148,7 +148,8 @@ impl SensorStreams {
     }
 
     /// Message ids the last request streamed that `table` no longer asks for:
-    /// each must be switched off at the FC, which otherwise keeps sending it.
+    /// each must be handed back to the FC's default rate, or the FC keeps
+    /// sending it at the rate last requested.
     pub fn dropped_by(&self, table: &[(u32, f32)]) -> Vec<u32> {
         self.last().as_deref().map_or_else(Vec::new, |last| {
             last.iter()

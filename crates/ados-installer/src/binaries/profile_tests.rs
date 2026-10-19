@@ -160,6 +160,7 @@ fn visor_fetches_the_capture_set_and_no_radio_lanes() {
         "ados-vision",
         "mediamtx",
         "ados-net",
+        "ados-pic",
         "ados-input",
         "ados-display",
         "ados-display-probe",
@@ -174,7 +175,6 @@ fn visor_fetches_the_capture_set_and_no_radio_lanes() {
     for svc in [
         "ados-radio",
         "ados-groundlink",
-        "ados-pic",
         "ados-swarmbus",
         "ados-crsf",
         "ados-tunnel-config",

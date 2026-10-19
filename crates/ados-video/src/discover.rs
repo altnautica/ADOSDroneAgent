@@ -32,6 +32,8 @@ use tokio::process::Command;
 use crate::camera_state::CameraStateSnapshot;
 use crate::encoder::{CameraInfo, CameraType};
 
+mod assign;
+
 /// Default Python interpreter for the discovery subprocess. Overridable via
 /// `ADOS_PYTHON`, matching the convention the encoder uses for the SEI splice.
 const DEFAULT_PYTHON: &str = "/opt/ados/venv/bin/python3";

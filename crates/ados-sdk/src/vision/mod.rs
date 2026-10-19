@@ -452,7 +452,7 @@ fn map_ring(path: &Path) -> Option<MappedRing> {
     // SAFETY: the region is a POSIX shared-memory object the vision engine
     // owns; mapping it read-only is sound. A concurrent writer recycling slots
     // is the expected case and is detected by the per-slot seqlock in
-    // `read_slot`, which discards any torn read.
+    // `read_slot_into`, which discards any torn read.
     let map = unsafe { memmap2::Mmap::map(&file) }.ok()?;
     let layout = RingLayout::read_header(&map)?;
     Some(MappedRing {

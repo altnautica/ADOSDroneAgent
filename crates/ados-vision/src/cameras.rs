@@ -4,7 +4,8 @@
 //! `cameras[]` list: an `rtsp://` source is a simulated rig camera
 //! ([`RtspSource`]), anything else a local V4L2 device ([`V4l2Source`]). When
 //! the video pipeline's frame tap is on (`video.vision.enabled`), the flight
-//! camera it encodes is read off the tap as camera `main`.
+//! camera it encodes is read off the tap as camera `main`, unless that camera
+//! is itself a captured one (its frames already come from this engine).
 
 use ados_config::cameras::CaptureCamera;
 
@@ -37,8 +38,10 @@ impl CameraSpec {
     }
 }
 
-/// The cameras of `config`: every owned camera, then the tap when it is on and
-/// no owned camera already uses its id.
+/// The cameras of `config`: every owned camera, then the tap when it is on,
+/// the primary camera is not one this engine owns (its tap would carry the
+/// engine's own frames back, so it would be processed twice), and no owned
+/// camera already uses its id.
 pub fn camera_specs(config: &VisionConfig) -> Vec<CameraSpec> {
     let mut specs: Vec<CameraSpec> = config
         .cameras
@@ -47,7 +50,7 @@ pub fn camera_specs(config: &VisionConfig) -> Vec<CameraSpec> {
         .map(CameraSpec::Owned)
         .collect();
     if let Some(socket) = &config.tap_sink {
-        if !specs.iter().any(|s| s.id() == TAP_CAMERA_ID) {
+        if !config.primary_captured && !specs.iter().any(|s| s.id() == TAP_CAMERA_ID) {
             specs.push(CameraSpec::Tap {
                 id: TAP_CAMERA_ID.to_string(),
                 socket: socket.clone(),
@@ -173,6 +176,28 @@ mod tests {
         assert!(needs_triggers(&specs));
         // No tap and no captured camera: nothing to run.
         assert!(camera_specs(&config("agent:\n  profile: drone\n")).is_empty());
+    }
+
+    #[test]
+    fn a_captured_primary_is_not_read_again_off_the_tap() {
+        // The primary `cam_fl` carries its own id; it is owned raw, so the
+        // tap of the stream encoded from it is not run as a second camera.
+        let rig = RIG.replace("  - id: main\n    source: /dev/video0\n", "");
+        let specs = camera_specs(&config(&rig));
+        let ids: Vec<&str> = specs.iter().map(CameraSpec::id).collect();
+        assert_eq!(ids, ["cam_fl", "nav", "free"]);
+        // The same when it is the role-`primary` entry rather than the first.
+        let rig = RIG.replace(
+            "  - id: nav\n    source: /dev/video2\n",
+            "  - id: nav\n    role: primary\n    source: /dev/video2\n",
+        );
+        let ids: Vec<String> = camera_specs(&config(&rig))
+            .iter()
+            .map(|s| s.id().to_string())
+            .collect();
+        assert_eq!(ids, ["cam_fl", "nav", "free"]);
+        // An uncaptured primary keeps the tap.
+        assert!(!config(RIG).primary_captured);
     }
 
     #[test]

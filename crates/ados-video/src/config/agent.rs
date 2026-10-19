@@ -245,7 +245,7 @@ impl AgentVideoConfig {
 
 /// The index of the primary leg in a `cameras` list: the leg whose role is
 /// `"primary"`, else the first. `None` when no legs are declared.
-fn primary_leg_index(cameras: &[CameraLeg]) -> Option<usize> {
+pub(super) fn primary_leg_index(cameras: &[CameraLeg]) -> Option<usize> {
     if cameras.is_empty() {
         return None;
     }

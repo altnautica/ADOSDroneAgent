@@ -5,12 +5,12 @@
 //! a freshly fetched installer when that copy is absent). It stops + disables +
 //! removes every `ados-*` unit, the `.wants` dropins + `multi-user.target.wants`
 //! links, the system dropins (tmpfiles/sysctl/udev/modules-load/NetworkManager/
-//! logind/avahi), the `/usr/local/bin/ados*` symlinks, then `daemon-reload` +
-//! `reset-failed` + `udevadm reload`, and finally the `/opt/ados`, `/var/ados`,
-//! `/var/lib/ados`, `/var/log/ados`, `/run/ados` trees + the MOTD; with
-//! `purge`, also `/etc/ados`. Shares the residue reversion in
-//! [`crate::steps::purge_residue`] (the orphan default route + the SPI-LCD boot
-//! config) so a GS→drone flip leaves a clean box.
+//! logind/avahi/chrony), the GNSS PPS overlay, the `/usr/local/bin/ados*`
+//! symlinks, then `daemon-reload` + `reset-failed` + `udevadm reload`, and
+//! finally the `/opt/ados`, `/var/ados`, `/var/lib/ados`, `/var/log/ados`,
+//! `/run/ados` trees + the MOTD; with `purge`, also `/etc/ados`. Shares the
+//! residue reversion in [`crate::steps::purge_residue`] (the orphan default
+//! route + the SPI-LCD boot config) so a GS→drone flip leaves a clean box.
 
 use std::path::{Path, PathBuf};
 
@@ -255,6 +255,10 @@ pub fn run_uninstall(purge: bool, sink: &ProgressSink) -> anyhow::Result<()> {
     for dropin in dropin_files() {
         let _ = remove_path(Path::new(dropin));
     }
+    // The chrony refclock drop-in (chrony restarted to drop it) and the PPS
+    // overlay's boot-config edits, each reversed by the step that made it.
+    crate::steps::chrony_ados::uninstall();
+    crate::steps::pps_overlay::remove_overlay();
     for link in discover_mac_pin_links(Path::new(ados_macpin::engine::NETWORKD_DIR)) {
         if let Err(e) = remove_path(&link) {
             tracing::warn!(link = %link.display(), error = %e, "removing MAC-pin link failed");

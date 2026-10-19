@@ -28,7 +28,7 @@
 //! Not yet validated on hardware: the generated overlay and both Rockchip
 //! activation paths are untested on a real ROCK 5B+ or ROCK 5C.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use ados_hal_probe::board_sidecar::{load_profiles, resolve_profile};
 use ados_hal_probe::host_facts::probe_host_facts;
@@ -286,39 +286,7 @@ pub fn enable_radxa(
         return Ok(Provisioned::AlreadyEnabled);
     }
 
-    // Keep-first pristine snapshot for the display probe, plus this step's own
-    // pre-edit copy to restore from, so a failed regeneration undoes only this
-    // edit and never rolls back a panel overlay staged earlier.
-    let restore = if extlinux.is_file() {
-        boot_config::snapshot_boot_config(&extlinux).map_err(|e| {
-            format!(
-                "refusing u-boot-update without a snapshot of {}: {e}",
-                extlinux.display()
-            )
-        })?;
-        let bak = PathBuf::from(format!("{}.{OVERLAY_NAME}.bak", extlinux.display()));
-        std::fs::copy(&extlinux, &bak).map_err(|e| format!("snapshot {}: {e}", bak.display()))?;
-        Some(bak)
-    } else {
-        None
-    };
-    let restore_now = |why: &str| -> String {
-        if let Some(bak) = &restore {
-            let _ = std::fs::copy(bak, &extlinux);
-        }
-        format!("{why}; extlinux.conf restored")
-    };
-    if !uboot_update() {
-        return Err(restore_now("u-boot-update failed"));
-    }
-    if restore.is_some() {
-        let size = std::fs::metadata(&extlinux).map(|m| m.len()).unwrap_or(0);
-        if size < EXTLINUX_MIN_BYTES {
-            return Err(restore_now(&format!(
-                "extlinux.conf truncated to {size} bytes"
-            )));
-        }
-    }
+    teardown::regenerate_extlinux(&extlinux, uboot_update)?;
     Ok(Provisioned::Staged)
 }
 
@@ -487,6 +455,9 @@ impl Step for PpsOverlay {
 }
 
 mod gate;
+mod teardown;
+
+pub use teardown::remove_overlay;
 
 #[cfg(test)]
 mod tests;

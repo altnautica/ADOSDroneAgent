@@ -33,11 +33,13 @@ fn args(entries: &[(&str, &str)]) -> Value {
 }
 
 impl PluginIpcClient {
-    /// Open a WebRTC playback (WHEP) session on the published leg `camera_id`
-    /// (`main` for the primary) for a viewer's `offer_sdp`, and return the
-    /// answer. Gated on `video.whep.relay` ([`ClientError::CapabilityDenied`]
-    /// without it). The media server not serving the leg, refusing the offer
-    /// or being down is [`ClientError::Rpc`]`("whep_unavailable: ..")`.
+    /// Open a WebRTC playback (WHEP) session on the configured camera
+    /// `camera_id` (its roster id) for a viewer's `offer_sdp`, and return the
+    /// answer. The host resolves the camera to the media leg publishing it.
+    /// Gated on `video.whep.relay` ([`ClientError::CapabilityDenied`] without
+    /// it). An id that is not a configured, enabled camera is
+    /// [`ClientError::Rpc`]`("unknown_camera: ..")`; the media server refusing
+    /// the offer or being down is [`ClientError::Rpc`]`("whep_unavailable: ..")`.
     pub async fn whep_offer(
         &self,
         camera_id: &str,

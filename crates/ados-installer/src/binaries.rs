@@ -161,7 +161,7 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         asset: "ados-pic-aarch64",
         dest: "/opt/ados/bin/ados-pic",
         gate: Gate::BestEffort,
-        profiles: GROUND,
+        profiles: GS_VISOR,
     },
     PrebuiltBinary {
         service: "ados-input",

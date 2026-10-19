@@ -5,11 +5,14 @@
 //! runs outside it, so it carries the exchange:
 //!
 //! * WHEP goes straight to the media server's loopback WHEP endpoint for the
-//!   requested leg (`127.0.0.1:<webrtc port>/<leg>/whep`), the same upstream
-//!   the agent's own `/whep` front relays to. The session location handed back
-//!   is the front's form (`/whep/<session>?camera=<leg>`), never an address,
-//!   and is remembered as the calling plugin's: a close names one of its own
-//!   locations or is refused.
+//!   leg serving the requested camera (`127.0.0.1:<webrtc port>/<leg>/whep`),
+//!   the same upstream the agent's own `/whep` front relays to. The plugin
+//!   names a camera id; the host resolves it against the node's own camera
+//!   roster, so only a configured, enabled camera's leg is ever reached and
+//!   anything else is refused as `unknown_camera`. The session location handed
+//!   back is the front's form (`/whep/<session>?camera=<leg>`), never an
+//!   address, and is remembered as the calling plugin's: a close names one of
+//!   its own locations or is refused.
 //! * The rig goes to the control plane's `PUT /api/v1/sensors/rig` over its
 //!   Unix socket, the on-box caller path the supervisor's own config writes
 //!   use. No operator credential is involved or exposed; the plugin's
@@ -19,12 +22,15 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
+use std::path::Path;
 
 use ados_protocol::media_relay::{
     is_path_segment, parse_whep_location, whep_location, RigWriteReply, RigWriteRequest,
     WhepCloseRequest, WhepOfferReply, WhepOfferRequest, MAX_RIG_BYTES, MAX_SDP_BYTES,
-    RIG_UNAVAILABLE, RIG_WRITE_METHOD, WHEP_CLOSE_METHOD, WHEP_OFFER_METHOD, WHEP_UNAVAILABLE,
+    RIG_UNAVAILABLE, RIG_WRITE_METHOD, UNKNOWN_CAMERA, WHEP_CLOSE_METHOD, WHEP_OFFER_METHOD,
+    WHEP_UNAVAILABLE,
 };
+use ados_video::config::RosterVideoConfig;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::*;
@@ -255,26 +261,47 @@ fn whep_unavailable(detail: impl std::fmt::Display) -> HostError {
     HostError::Rpc(format!("{WHEP_UNAVAILABLE}: {detail}"))
 }
 
+/// The media leg publishing the configured, enabled camera `camera_id` on
+/// this node, read from the agent config. `None` for anything else, including
+/// a leg id that is not a single media-path segment.
+fn published_leg(config_yaml: &Path, profile_conf: &Path, camera_id: &str) -> Option<String> {
+    if ados_config::node_profile_at(config_yaml, profile_conf) == "ground-station" {
+        return None;
+    }
+    RosterVideoConfig::load_from(config_yaml)
+        .published_leg(camera_id)
+        .filter(|leg| is_path_segment(leg))
+        .map(str::to_string)
+}
+
 impl RealHost {
-    /// `video.whep.offer`: post the offer for one published leg, remember the
-    /// session as `plugin_id`'s, and answer the SDP plus its location.
+    /// `video.whep.offer`: resolve the camera to the leg publishing it, post
+    /// the offer there, remember the session as `plugin_id`'s, and answer the
+    /// SDP plus its location.
     pub(super) async fn relay_whep_offer(
         &self,
         plugin_id: &str,
         args: &Value,
     ) -> Result<HostResult, HostError> {
         let req: WhepOfferRequest = decode(args, WHEP_OFFER_METHOD)?;
-        if !is_path_segment(&req.camera_id) {
-            return Err(HostError::Rpc(format!(
-                "{WHEP_OFFER_METHOD} arguments are invalid: camera_id must match [A-Za-z0-9_-]+"
-            )));
-        }
         if req.sdp.is_empty() || req.sdp.len() > MAX_SDP_BYTES {
             return Err(HostError::Rpc(format!(
                 "{WHEP_OFFER_METHOD} arguments are invalid: sdp must be 1..={MAX_SDP_BYTES} bytes"
             )));
         }
-        let camera = req.camera_id;
+        let sources = self.node_info_sources.clone();
+        let camera_id = req.camera_id.clone();
+        let leg = tokio::task::spawn_blocking(move || {
+            published_leg(&sources.config_yaml, &sources.profile_conf, &camera_id)
+        })
+        .await
+        .map_err(|e| whep_unavailable(format!("camera roster read failed: {e}")))?;
+        let Some(camera) = leg else {
+            return Err(HostError::Rpc(format!(
+                "{UNKNOWN_CAMERA}: {:?} is not a configured, enabled camera",
+                req.camera_id
+            )));
+        };
         let reply = self
             .media_relay
             .whep("POST", &format!("/{camera}/whep"), req.sdp.as_bytes())

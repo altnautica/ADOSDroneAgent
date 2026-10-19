@@ -104,9 +104,10 @@ where
 
     // Native-vs-residual gate for the PIC / gamepad / Bluetooth writes, resolved
     // once at startup (the profile is fixed for the process). Those are served
-    // natively only on a ground station, the only profile that runs the daemons
-    // binding their command sockets (ados-pic's pic.sock, ados-input's
-    // hid-cmd.sock); on any other node they fall through to the residual.
+    // natively only on the profiles whose unit table runs the daemons binding
+    // their command sockets (ados-pic's pic.sock, ados-input's hid-cmd.sock:
+    // ground station and visor); on any other node they fall through to the
+    // residual.
     let profile = {
         let cfg = crate::config::PairingConfig::cached(&paths.config_path);
         crate::profile::current_profile_and_role_at(
@@ -117,7 +118,7 @@ where
         .0
     };
     let is_ground_station = profile == "ground-station";
-    let hid_native = is_ground_station;
+    let hid_native = hid_daemons_run_on(&profile);
 
     // The Wi-Fi client routes talk to the Wi-Fi command socket on every profile.
     // Where the ados-net uplink daemon runs (ground station, visor) it owns the
@@ -317,4 +318,27 @@ where
     let _ = std::fs::remove_file(&paths.control_socket);
     tracing::info!("control API stopped");
     Ok(())
+}
+
+/// Whether `profile` (wire or underscore form) runs the front-panel daemons
+/// (`ados-pic`, `ados-input`) whose command sockets the HID writes reach.
+fn hid_daemons_run_on(profile: &str) -> bool {
+    let profile = profile.replace('-', "_");
+    ["ados-pic", "ados-input"]
+        .iter()
+        .all(|unit| ados_protocol::units::find(unit).is_some_and(|u| u.on_profile(&profile)))
+}
+
+#[cfg(test)]
+mod hid_gate_tests {
+    use super::hid_daemons_run_on;
+
+    #[test]
+    fn hid_writes_are_native_where_the_panel_daemons_run() {
+        assert!(hid_daemons_run_on("ground-station"));
+        assert!(hid_daemons_run_on("ground_station"));
+        assert!(hid_daemons_run_on("visor"));
+        assert!(!hid_daemons_run_on("drone"));
+        assert!(!hid_daemons_run_on("workstation"));
+    }
 }

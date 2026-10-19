@@ -54,6 +54,32 @@ pub fn ensure_conf(root: &Path) -> io::Result<ConfOutcome> {
     Ok(ConfOutcome::Written)
 }
 
+/// Remove the drop-in under `root` (`/` on a real install), the uninstall's
+/// reverse of [`ensure_conf`]. Returns whether a file was removed; a missing
+/// file is already removed.
+pub fn remove_conf(root: &Path) -> io::Result<bool> {
+    match std::fs::remove_file(root.join(CONF_REL)) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// Uninstall: remove the drop-in and, when one was there, restart chrony so
+/// it drops the refclock that pointed at the gone `ados-clock`.
+pub fn uninstall() {
+    match remove_conf(Path::new("/")) {
+        Ok(true) => {
+            let r = exec::run("systemctl", &["try-restart", "chrony.service"]);
+            if !r.success() {
+                tracing::warn!(stderr = %r.stderr.trim(), "chrony restart failed");
+            }
+        }
+        Ok(false) => {}
+        Err(e) => tracing::warn!(error = %e, path = CONF_REL, "chrony drop-in removal failed"),
+    }
+}
+
 /// Whether `profile` runs `ados-clock`.
 fn profile_runs_clock(profile: &str) -> bool {
     matches!(profile, "drone" | "ground_station" | "visor")
@@ -134,6 +160,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         assert_eq!(ensure_conf(root.path()).unwrap(), ConfOutcome::NoChrony);
         assert!(!root.path().join("etc").exists());
+    }
+
+    #[test]
+    fn removal_reverses_the_drop_in_and_is_idempotent() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("etc/chrony")).unwrap();
+        ensure_conf(root.path()).unwrap();
+        assert!(remove_conf(root.path()).unwrap());
+        assert!(!root.path().join(CONF_REL).exists());
+        // chrony's own config directory stays.
+        assert!(root.path().join("etc/chrony").is_dir());
+        assert!(!remove_conf(root.path()).unwrap());
     }
 
     #[test]

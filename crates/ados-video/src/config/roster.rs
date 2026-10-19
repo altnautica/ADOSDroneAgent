@@ -2,9 +2,12 @@
 
 use serde::Deserialize;
 
-use super::agent::primary_camera_from;
+use super::agent::{primary_camera_from, primary_leg_index};
 use super::camera::CameraConfig;
 use super::legs::CameraLeg;
+
+/// The media-server path every node serves its primary camera at.
+pub const PRIMARY_LEG: &str = "main";
 
 /// The roster-relevant slice of the video config, loaded in ONE quiet pass.
 ///
@@ -87,4 +90,35 @@ impl RosterVideoConfig {
     pub fn primary_camera(&self) -> CameraConfig {
         primary_camera_from(&self.cameras, self.camera.clone().unwrap_or_default())
     }
+
+    /// The media-server path (leg id) serving the configured camera
+    /// `camera_id`, resolved the way the video service publishes its legs: the
+    /// primary camera (role `primary`, else the first) is served at
+    /// [`PRIMARY_LEG`], every other camera at its own id. A node with no
+    /// `cameras` list serves its single camera as `main`.
+    ///
+    /// `None` for anything that is not a configured, enabled camera, and on a
+    /// ground station, which carries no onboard camera.
+    pub fn published_leg(&self, camera_id: &str) -> Option<&str> {
+        if self.is_ground_station() {
+            return None;
+        }
+        let Some(primary) = primary_leg_index(&self.cameras) else {
+            return (camera_id == PRIMARY_LEG).then_some(PRIMARY_LEG);
+        };
+        let (index, leg) = self
+            .cameras
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.id == camera_id && c.enabled)?;
+        Some(if index == primary {
+            PRIMARY_LEG
+        } else {
+            leg.id.as_str()
+        })
+    }
 }
+
+#[cfg(test)]
+#[path = "roster_tests.rs"]
+mod tests;

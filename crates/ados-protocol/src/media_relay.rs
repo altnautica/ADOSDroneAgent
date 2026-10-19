@@ -5,9 +5,11 @@
 //! plane's socket. The host can, so it relays on the plugin's behalf:
 //!
 //! * `video.whep.offer` posts a viewer's SDP offer to the media server's WHEP
-//!   endpoint for one published camera leg and returns the answer plus an
-//!   opaque `location` naming the session. The location is the agent's own
-//!   WHEP form (`/whep/<session>?camera=<leg>`), never a host address.
+//!   endpoint for one configured camera and returns the answer plus an opaque
+//!   `location` naming the session. The host resolves the camera id to the
+//!   media leg serving it from the node's own camera roster; the plugin never
+//!   names a media path. The location is the agent's own WHEP form
+//!   (`/whep/<session>?camera=<leg>`), never a host address.
 //! * `video.whep.close` tears down a session, and only one whose location the
 //!   host returned to the same plugin.
 //! * `sensors.rig.write` stores a rig document through the control plane's
@@ -31,8 +33,11 @@ pub const RIG_CAPABILITY: &str = "sensors.rig.write";
 pub const RIG_WRITE_METHOD: &str = "sensors.rig.write";
 
 /// Error prefix when the media server cannot serve the exchange (not running,
-/// the leg is not published, the offer refused, an unknown location).
+/// the offer refused, an unknown location).
 pub const WHEP_UNAVAILABLE: &str = "whep_unavailable";
+/// Error prefix when `video.whep.offer` names anything that is not a
+/// configured, enabled camera of this node.
+pub const UNKNOWN_CAMERA: &str = "unknown_camera";
 /// Error prefix when the control plane's rig route cannot be reached.
 pub const RIG_UNAVAILABLE: &str = "rig_unavailable";
 
@@ -44,7 +49,8 @@ pub const MAX_RIG_BYTES: usize = 256 * 1024;
 /// `video.whep.offer` arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WhepOfferRequest {
-    /// The published leg: `main` for the primary, a roster leg id otherwise.
+    /// A configured, enabled camera's roster id. The host serves it from the
+    /// leg that publishes it (`main` for the primary camera).
     pub camera_id: String,
     /// The viewer's SDP offer.
     pub sdp: String,
