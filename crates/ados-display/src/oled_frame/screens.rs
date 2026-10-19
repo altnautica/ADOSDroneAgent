@@ -1,5 +1,8 @@
-//! The status OLED's rotating screens: `home` (the status frame) and the
-//! ground-station service screens `gnss`, `radios` and `lora`.
+//! The status OLED's rotating screens. A ground station shows `home` (the
+//! status frame) and the service screens `gnss`, `radios` and `lora`; a visor
+//! shows its own `home` (capture, clock and storage instead of the link) and
+//! the sensing screens `cameras`, `sensors` and `storage` (see
+//! [`super::visor`]).
 //!
 //! Rotation order is the configured `ground_station.ui.screens` order ∩
 //! enabled (resolved by [`crate::panel_conf`]), filtered to the screens this
@@ -29,31 +32,78 @@ use crate::pages::gs_ctx::{
 };
 use crate::pages::PageContext;
 
+use super::visor;
+
 /// How long each screen stays up before the next.
 pub const DWELL: Duration = Duration::from_secs(5);
 
 /// Text lines a service screen paints.
 pub const SCREEN_LINES: usize = 5;
 
+/// The node the panel sits on; it decides what `home` paints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OledRole {
+    GroundStation,
+    Visor,
+}
+
+impl OledRole {
+    /// The role for a profile in the underscore spelling the panel tables
+    /// key on. The status OLED runs on ground stations and visors only.
+    pub fn for_profile(profile: &str) -> Self {
+        if profile == "visor" {
+            Self::Visor
+        } else {
+            Self::GroundStation
+        }
+    }
+
+    /// This role's status frame.
+    pub fn home(self) -> OledScreen {
+        match self {
+            Self::GroundStation => OledScreen::Home,
+            Self::Visor => OledScreen::VisorHome,
+        }
+    }
+}
+
 /// A screen the status OLED can paint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OledScreen {
+    /// The ground-station status frame (hostname, IP, link, status).
     Home,
     Gnss,
     Radios,
     Lora,
+    /// The visor status frame (hostname, IP, capture, clock, storage).
+    VisorHome,
+    Cameras,
+    Sensors,
+    Storage,
 }
 
 impl OledScreen {
-    /// The OLED screen for a configured screen id, `None` for an id this
-    /// panel does not paint.
-    pub fn from_id(id: &str) -> Option<Self> {
+    /// The OLED screen for a configured screen id on a `role` panel, `None`
+    /// for an id this panel does not paint.
+    pub fn from_id(id: &str, role: OledRole) -> Option<Self> {
         match id {
-            "home" => Some(Self::Home),
+            "home" => Some(role.home()),
             "gnss" => Some(Self::Gnss),
             "radios" => Some(Self::Radios),
             "lora" => Some(Self::Lora),
+            "cameras" => Some(Self::Cameras),
+            "sensors" => Some(Self::Sensors),
+            "storage" => Some(Self::Storage),
             _ => None,
+        }
+    }
+
+    /// The status frame this screen belongs with, painted when its source
+    /// has gone absent since the rotation was resolved.
+    pub fn home(self) -> Self {
+        match self {
+            Self::Home | Self::Gnss | Self::Radios | Self::Lora => Self::Home,
+            Self::VisorHome | Self::Cameras | Self::Sensors | Self::Storage => Self::VisorHome,
         }
     }
 
@@ -61,27 +111,38 @@ impl OledScreen {
     /// absent or unreachable is skipped.
     fn available(self, ctx: &PageContext) -> bool {
         match self {
-            Self::Home => true,
+            Self::Home | Self::VisorHome => true,
             Self::Gnss => ctx.gnss.is_present(),
             Self::Radios => ctx.radio_adapters.is_present(),
             Self::Lora => ctx.lora.is_present(),
+            Self::Cameras => visor::cameras_lines(&ctx.sensing).is_some(),
+            Self::Sensors => ctx.sensing.sensors.is_present(),
+            Self::Storage => ctx.sensing.storage.is_present(),
         }
     }
 }
 
-/// The screens to rotate through, in configured order.
-pub fn rotation(screens: &[String], ctx: &PageContext, geom: OledGeometry) -> Vec<OledScreen> {
+/// The screens to rotate through on a `role` panel, in configured order.
+pub fn rotation(
+    screens: &[String],
+    ctx: &PageContext,
+    geom: OledGeometry,
+    role: OledRole,
+) -> Vec<OledScreen> {
     if geom.height < 64 {
-        return vec![OledScreen::Home];
+        return vec![role.home()];
     }
     let mut out: Vec<OledScreen> = Vec::new();
-    for s in screens.iter().filter_map(|id| OledScreen::from_id(id)) {
+    for s in screens
+        .iter()
+        .filter_map(|id| OledScreen::from_id(id, role))
+    {
         if s.available(ctx) && !out.contains(&s) {
             out.push(s);
         }
     }
     if out.is_empty() {
-        out.push(OledScreen::Home);
+        out.push(role.home());
     }
     out
 }
@@ -116,17 +177,20 @@ pub fn screen_font() -> LoadedFont {
     LoadedFont::new(FontFace::MonoRegular, 10)
 }
 
-/// The five lines of a service screen; `None` for `home` or an absent
-/// service.
+/// The five lines of a service screen; `None` for a status frame or an
+/// absent service.
 pub fn screen_lines(screen: OledScreen, ctx: &PageContext) -> Option<Vec<String>> {
     match screen {
-        OledScreen::Home => None,
+        OledScreen::Home | OledScreen::VisorHome => None,
         OledScreen::Gnss => ctx.gnss.present().map(gnss_lines),
         OledScreen::Radios => ctx
             .radio_adapters
             .present()
             .map(|r| radios_lines(r, ctx.mesh.peer_count)),
         OledScreen::Lora => ctx.lora.present().map(lora_lines),
+        OledScreen::Cameras => visor::cameras_lines(&ctx.sensing),
+        OledScreen::Sensors => visor::sensors_lines(&ctx.sensing),
+        OledScreen::Storage => visor::storage_lines(&ctx.sensing),
     }
 }
 

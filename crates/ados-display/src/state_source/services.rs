@@ -86,7 +86,7 @@ impl ServiceCache {
 impl StateSource {
     /// The node profile: the fixed one a test or caller set, otherwise
     /// resolved the way the panel page set resolves it.
-    fn service_profile(&self) -> String {
+    pub(super) fn service_profile(&self) -> String {
         match &self.profile {
             Some(p) => p.clone(),
             None => crate::panel_conf::PanelConf::load().profile,

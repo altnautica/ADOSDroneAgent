@@ -84,12 +84,14 @@ fn full_ctx() -> PageContext {
     }
 }
 
+const GS: OledRole = OledRole::GroundStation;
+
 #[test]
 fn rotation_follows_config_order_and_skips_unknown_and_absent() {
     let geom = OledGeometry::W128_H64;
     let screens = ids(&["lora", "link", "home", "plugin:x", "gnss", "radios", "home"]);
     assert_eq!(
-        rotation(&screens, &full_ctx(), geom),
+        rotation(&screens, &full_ctx(), geom, GS),
         vec![
             OledScreen::Lora,
             OledScreen::Home,
@@ -102,7 +104,7 @@ fn rotation_follows_config_order_and_skips_unknown_and_absent() {
     // A failed read is skipped too, never shown as a blank screen.
     ctx.lora = Reading::Unreachable;
     assert_eq!(
-        rotation(&screens, &ctx, geom),
+        rotation(&screens, &ctx, geom, GS),
         vec![OledScreen::Home, OledScreen::Radios]
     );
 }
@@ -111,13 +113,51 @@ fn rotation_follows_config_order_and_skips_unknown_and_absent() {
 fn rotation_falls_back_to_home_and_32px_is_home_only() {
     let ctx = full_ctx();
     assert_eq!(
-        rotation(&ids(&["qr", "system"]), &ctx, OledGeometry::W128_H64),
+        rotation(&ids(&["qr", "system"]), &ctx, OledGeometry::W128_H64, GS),
         vec![OledScreen::Home]
     );
     assert_eq!(
-        rotation(&ids(&["gnss", "lora"]), &ctx, OledGeometry::W128_H32),
+        rotation(&ids(&["gnss", "lora"]), &ctx, OledGeometry::W128_H32, GS),
         vec![OledScreen::Home]
     );
+}
+
+#[test]
+fn a_visor_rotates_its_sensing_screens_and_falls_back_to_its_own_home() {
+    let geom = OledGeometry::W128_H64;
+    let visor = OledRole::for_profile("visor");
+    assert_eq!(visor, OledRole::Visor);
+    assert_eq!(OledRole::for_profile("ground_station"), GS);
+    // The visor defaults: the capture HUD and about are TFT-only.
+    let screens = ids(&ados_protocol::panel_ui::VISOR_SCREENS);
+    let ctx = crate::pages::sensing_ctx::test_util::full_ctx(1000.0);
+    let sensing = [
+        OledScreen::Cameras,
+        OledScreen::Sensors,
+        OledScreen::Storage,
+    ];
+    assert_eq!(rotation(&screens, &ctx, geom, visor), sensing);
+    // Nothing read yet (or a 32 px panel): the visor home, never the
+    // ground-station link frame.
+    let empty = PageContext::default();
+    assert_eq!(
+        rotation(&screens, &empty, geom, visor),
+        vec![OledScreen::VisorHome]
+    );
+    assert_eq!(
+        rotation(&screens, &ctx, OledGeometry::W128_H32, visor),
+        vec![OledScreen::VisorHome]
+    );
+    assert_eq!(
+        rotation(&ids(&["home"]), &ctx, geom, visor),
+        vec![OledScreen::VisorHome]
+    );
+    for s in sensing {
+        assert_eq!(s.home(), OledScreen::VisorHome);
+        assert!(screen_lines(s, &ctx).is_some_and(|l| l.len() <= SCREEN_LINES));
+        assert_eq!(screen_lines(s, &empty), None);
+    }
+    assert_eq!(screen_lines(OledScreen::VisorHome, &ctx), None);
 }
 
 #[test]

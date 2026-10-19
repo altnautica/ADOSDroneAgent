@@ -30,12 +30,15 @@ pub(crate) struct FcView {
     pub autopilot: Option<String>,
 }
 
+/// Whether `unit` runs on `profile` (underscore form).
+pub(crate) fn unit_on(unit: &str, profile: &str) -> bool {
+    ados_protocol::units::find(unit).is_some_and(|u| u.on_profile(profile))
+}
+
 pub async fn get_sensors(State(state): State<AppState>) -> Json<Value> {
     let paths = SensingPaths::from_state(&state);
     let profile = super::profile(&state);
-    let fc_lane =
-        ados_protocol::units::find("ados-mavlink").is_some_and(|u| u.on_profile(&profile));
-    let fc = fc_lane.then(|| {
+    let fc = unit_on("ados-mavlink", &profile).then(|| {
         let snapshot = state.state.snapshot();
         let l = crate::routes::status::fc_liveness_from_snapshot(snapshot.as_ref());
         FcView {
@@ -46,6 +49,7 @@ pub async fn get_sensors(State(state): State<AppState>) -> Json<Value> {
     let body = tokio::task::spawn_blocking(move || {
         sensors_body(
             &paths,
+            &profile,
             SystemTime::now(),
             ados_sensorbus::time::mono_ns(),
             fc,
@@ -73,8 +77,10 @@ pub(crate) fn read_rig(paths: &SensingPaths) -> Option<RigSummary> {
     rig::validate(&doc).ok()
 }
 
+/// The table for a node running `profile` (underscore form).
 pub(crate) fn sensors_body(
     paths: &SensingPaths,
+    profile: &str,
     now: SystemTime,
     now_mono_ns: u64,
     fc: Option<FcView>,
@@ -85,10 +91,12 @@ pub(crate) fn sensors_body(
     let clock = clock_body(paths, now);
     let hub_side =
         read_fresh_at::<Map<String, Value>>(&paths.sidecar("sensorhub.json"), Some(FRESH), now);
+    // The rates the hub was configured with, never the measured ones: the
+    // measured rate is the stream's own `rate_hz`.
     let hub_rates = match &hub_side {
         Reading::Fresh(m) => (
             m.get("imu_odr_hz").and_then(Value::as_f64),
-            m.get("trigger_hz").and_then(Value::as_f64),
+            m.get("trigger_hz_configured").and_then(Value::as_f64),
         ),
         _ => (None, None),
     };
@@ -155,7 +163,9 @@ pub(crate) fn sensors_body(
             "sigma_ns": source_sigma(&clock, origin),
         }));
     }
-    // Rig sensors that are not streaming yet are listed, honestly idle.
+    // Rig sensors that are not streaming yet are listed, honestly idle. GNSS
+    // without a hub comes from `ados-gnss` where that service runs.
+    let gnss_lane = unit_on("ados-gnss", profile);
     if let Some(r) = &rig {
         for rs in &r.sensors {
             if sensors.iter().any(|s| s["id"] == rs.id.as_str()) {
@@ -165,6 +175,7 @@ pub(crate) fn sensors_body(
                 "camera" | "thermal" => "vision",
                 "lidar" => "lidar",
                 _ if hub.is_some() => "hub",
+                "gnss" if gnss_lane => "gnss",
                 _ => "fc",
             };
             sensors.push(json!({

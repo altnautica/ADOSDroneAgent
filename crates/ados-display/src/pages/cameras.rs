@@ -1,16 +1,17 @@
 //! Cameras page: one two-line row per camera sensor.
 //!
 //! Line one: id / role and fps against the expected rate (rate verdict colour).
-//! Line two: exposure, gain and lock state, last frame age and trigger mode.
-//! Values come from `/api/v1/sensors` and the capture state; a missing value
-//! reads `--`.
+//! Line two: exposure, gain and lock state, last frame age and the stream
+//! source (`hub` for a hub-triggered camera). Values come from
+//! `/api/v1/sensors` and the capture state; a missing value reads `--`, and a
+//! camera known only from the capture state shows no source.
 
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;
 use crate::pages::reading::Reading;
 use crate::pages::sensing_ctx::{
-    fmt_num, fmt_str, paint_absent, paint_frame, paint_status, paint_value, rate_color,
-    CaptureCamera, ExposureInfo, SensorInfo, LABEL_X,
+    fmt_num, paint_absent, paint_frame, paint_status, paint_value, rate_color, CaptureCamera,
+    ExposureInfo, SensorInfo, LABEL_X,
 };
 use crate::pages::{blank_panel, Chrome, HitZone, Page, PageContext};
 
@@ -65,14 +66,22 @@ fn paint_camera(
         rate_color(palette, &view),
     );
     let detail = format!(
-        "exp {} us  g {}  {}  age {} ms  trig {}",
+        "exp {} us  g {}  {}  age {} ms{}",
         fmt_num(exp.and_then(|e| e.exposure_us), 0),
         fmt_num(exp.and_then(|e| e.gain), 1),
         lock_label(exp),
         fmt_num(s.age_ms, 0),
-        fmt_str(cap.and_then(|c| c.trigger.as_deref())),
+        source_suffix(s),
     );
     paint_value(c, row + 1, LABEL_X + 14, &detail, palette.text_secondary);
+}
+
+/// `  src <source>` from the sensors row, empty when the row has no source.
+pub(crate) fn source_suffix(s: &SensorInfo) -> String {
+    s.source
+        .as_deref()
+        .filter(|v| !v.is_empty())
+        .map_or_else(String::new, |v| format!("  src {v}"))
 }
 
 impl Page for CamerasPage {
@@ -170,6 +179,16 @@ mod tests {
         e.locked = false;
         assert_eq!(lock_label(Some(&e)), "auto");
         assert_eq!(lock_label(None), "--");
+    }
+
+    #[test]
+    fn the_source_comes_from_the_sensors_row_or_is_left_out() {
+        let hub = SensorInfo {
+            source: Some("hub".into()),
+            ..SensorInfo::default()
+        };
+        assert_eq!(source_suffix(&hub), "  src hub");
+        assert_eq!(source_suffix(&SensorInfo::default()), "");
     }
 
     #[test]

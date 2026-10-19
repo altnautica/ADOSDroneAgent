@@ -10,9 +10,11 @@
 //! - **`PUT /api/v1/lora`**: `{"region": ".." | null}` and/or
 //!   `{"erp_mw", "freq_mhz", "sf"}`. Every value is checked against the plan it
 //!   would run under (`400 E_LORA_OUT_OF_PLAN`), persisted to the `lora:`
-//!   block, and the lane is reloaded through the config side effects. A region
-//!   change is an admin-scope write ([`crate::mcp`]) and is refused while the
-//!   vehicle is armed ([`crate::armed_guard`]).
+//!   block, and the lane is reloaded through the config side effects. The
+//!   reply is the GET body once the lane reports the new values (`504` when it
+//!   has not within a few seconds). A region change is an admin-scope write
+//!   ([`crate::mcp`]) and is refused while the vehicle is armed
+//!   ([`crate::armed_guard`]).
 
 use std::path::Path;
 use std::time::{Duration, SystemTime};
@@ -67,11 +69,8 @@ pub(crate) fn status_body(run_dir: &Path, now: SystemTime) -> Value {
 /// The capability flag: the lane's unit runs on this profile (wire or
 /// underscore form) and the `lora-enabled` marker beside the config is set.
 pub(crate) fn lora_present(config_path: &Path, profile: &str) -> bool {
-    let profile = profile.replace('-', "_");
-    let on_profile =
-        ados_protocol::units::find("ados-lora").is_some_and(|u| u.on_profile(&profile));
     let etc_dir = config_path.parent().unwrap_or(Path::new("."));
-    on_profile && etc_dir.join("lora-enabled").exists()
+    ados_protocol::node_presence::lora_present(profile, etc_dir)
 }
 
 /// The fitted module, from the running lane's `module_band`.
@@ -260,10 +259,12 @@ pub async fn put_lora(State(state): State<AppState>, body: Bytes) -> Response {
         Err(e) => return detail(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
     let caps = module_caps(&state.run_dir, SystemTime::now());
-    let change = match plan_change(&body, &cfg, country(&config_path).as_deref(), caps.as_ref()) {
+    let country = country(&config_path);
+    let change = match plan_change(&body, &cfg, country.as_deref(), caps.as_ref()) {
         Ok(c) => c,
         Err(e) => return out_of_plan(e),
     };
+    let expect = settle::Expect::from_change(&change, country.as_deref());
     let path = config_path.clone();
     let commands = match tokio::task::spawn_blocking(move || persist(&path, change)).await {
         Ok(Ok(c)) => c,
@@ -279,8 +280,17 @@ pub async fn put_lora(State(state): State<AppState>, body: Bytes) -> Response {
             tracing::warn!(command = %cmd.join(" "), "lora side-effect command failed");
         }
     }
-    Json(status_body(&state.run_dir, SystemTime::now())).into_response()
+    // Answer with the lane's own report of the new settings, never the body
+    // read before the reload landed.
+    match settle::settled_body(&state.run_dir, &expect, settle::SETTLE_TIMEOUT).await {
+        Some(body) => Json(body).into_response(),
+        None => detail(
+            StatusCode::GATEWAY_TIMEOUT,
+            "saved; the LoRa lane has not reported the new settings yet",
+        ),
+    }
 }
 
+mod settle;
 #[cfg(test)]
 mod tests;

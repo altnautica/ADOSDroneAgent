@@ -112,7 +112,6 @@ pub struct CaptureCamera {
     pub id: String,
     pub fps: Option<f64>,
     pub dropped: Option<i64>,
-    pub trigger: Option<String>,
 }
 
 /// Capture exposure (`exposure`).
@@ -300,6 +299,7 @@ pub(crate) mod test_util {
                         id: "cam_fl".into(),
                         kind: "camera".into(),
                         role: Some("front_left".into()),
+                        source: Some("vision".into()),
                         rate_hz: Some(20.0),
                         expected_hz: Some(20.0),
                         age_ms: Some(9.0),
@@ -333,7 +333,6 @@ pub(crate) mod test_util {
                     id: "cam_fl".into(),
                     fps: Some(20.0),
                     dropped: Some(3),
-                    trigger: None,
                 }],
                 exposure: Some(ExposureInfo {
                     locked: true,

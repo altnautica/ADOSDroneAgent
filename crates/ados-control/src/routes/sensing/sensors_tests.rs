@@ -33,10 +33,10 @@ fn seed(p: &SensingPaths) {
         p.sidecar("sensorhub.json"),
         r#"{"version":1,"connected":true,"transport":"tcp:192.168.1.50:7610","fw":"ados-sensorhub 0.1.0",
           "board":"matek_h743_slim_v3","proto_ver":1,"uptime_s":321,"crc_errors":0,"dropped":2,
-          "imu_odr_hz":1000.0,"trigger_hz":20.0}"#,
+          "imu_odr_hz":1000.0,"trigger_hz":10.0,"trigger_hz_configured":20.0}"#,
     );
     write(
-        p.sidecar("clock.json"),
+        p.registered("clock"),
         r#"{"version":1,"timebase":"hub_freerun","locked":true,"sigma_ns":420000,"t_ns":1,"utc_ns":null,
           "sources":[{"id":"fc","kind":"fc","locked":true,"offset_ns":0,"skew_ppm":0,"sigma_ns":800000,"last_update_ns":1},
                      {"id":"hub","kind":"hub","locked":true,"offset_ns":0,"skew_ppm":0,"sigma_ns":420000,"last_update_ns":1}]}"#,
@@ -57,7 +57,7 @@ fn the_table_joins_streams_rig_hub_clock_and_fc() {
         connected: true,
         autopilot: Some("ardupilot".into()),
     };
-    let body = sensors_body(&p, SystemTime::now(), 3_000_000, Some(fc));
+    let body = sensors_body(&p, "drone", SystemTime::now(), 3_000_000, Some(fc));
     assert_eq!(body["present"], true);
     assert_eq!(body["rig_id"], "visor-pro-01");
     assert_eq!(body["calib_version"], "2026-10-19a");
@@ -117,7 +117,9 @@ fn the_table_joins_streams_rig_hub_clock_and_fc() {
     assert_eq!(imu["sigma_ns"], 420000);
     assert_eq!(sensors[1]["kind"], "camera");
     assert_eq!(sensors[1]["role"], "front_left");
+    // The configured trigger rate, not the hub's measured 10 Hz.
     assert_eq!(sensors[1]["expected_hz"], 20.0);
+    assert_eq!(sensors[1]["rate_hz"], 20.0);
     assert_eq!(sensors[2]["sigma_ns"], 800000);
     // FC rates come from what the router requested; an unrequested stream
     // has no expectation.
@@ -135,7 +137,7 @@ fn the_table_joins_streams_rig_hub_clock_and_fc() {
 #[test]
 fn nothing_running_is_not_present_with_null_blocks() {
     let dir = tempfile::tempdir().unwrap();
-    let body = sensors_body(&paths(dir.path()), SystemTime::now(), 0, None);
+    let body = sensors_body(&paths(dir.path()), "drone", SystemTime::now(), 0, None);
     assert_eq!(body["present"], false);
     assert_eq!(body["hub"], Value::Null);
     assert_eq!(body["fc"], Value::Null);
@@ -159,7 +161,7 @@ fn a_stale_stream_table_empties_every_block() {
         connected: true,
         autopilot: None,
     };
-    let body = sensors_body(&p, later, 0, Some(fc));
+    let body = sensors_body(&p, "drone", later, 0, Some(fc));
     assert_eq!(body["present"], false);
     for key in ["hub", "fc", "gnss", "rig_id", "calib_version"] {
         assert_eq!(body[key], Value::Null, "{key}");
@@ -178,7 +180,7 @@ fn a_stale_hub_reads_as_configured_but_disconnected() {
         .unwrap();
     hub.set_modified(SystemTime::now() - Duration::from_secs(30))
         .unwrap();
-    let body = sensors_body(&p, SystemTime::now(), 0, None);
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None);
     assert_eq!(body["present"], true);
     assert_eq!(body["hub"]["connected"], false);
     // No live hub rate: hub streams carry no expectation.
@@ -196,9 +198,41 @@ fn each_hub_imu_expects_the_per_imu_odr() {
           {"kind":"imu","src":"imu0","origin":"hub","rate_hz":1000.0,"last_t_ns":1,"last_rx_ns":1,"count":9},
           {"kind":"imu","src":"imu1","origin":"hub","rate_hz":1000.0,"last_t_ns":1,"last_rx_ns":1,"count":9}]}"#,
     );
-    let body = sensors_body(&p, SystemTime::now(), 0, None);
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None);
     assert_eq!(body["sensors"][0]["expected_hz"], 1000.0);
     assert_eq!(body["sensors"][1]["expected_hz"], 1000.0);
+}
+
+#[test]
+fn a_hub_without_a_configured_trigger_rate_gives_no_camera_expectation() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = paths(dir.path());
+    seed(&p);
+    write(
+        p.sidecar("sensorhub.json"),
+        r#"{"version":1,"connected":true,"transport":"auto","imu_odr_hz":1000.0,"trigger_hz":20.0}"#,
+    );
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None);
+    assert_eq!(body["sensors"][1]["id"], "cam0");
+    assert_eq!(body["sensors"][1]["expected_hz"], Value::Null);
+}
+
+#[test]
+fn idle_rig_gnss_without_a_hub_names_the_service_that_owns_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = paths(dir.path());
+    seed(&p);
+    std::fs::remove_file(p.sidecar("sensorhub.json")).unwrap();
+    let source = |profile: &str| {
+        let body = sensors_body(&p, profile, SystemTime::now(), 0, None);
+        let sensors = body["sensors"].as_array().unwrap().clone();
+        let gnss = sensors.iter().find(|s| s["id"] == "gnss0").unwrap();
+        gnss["source"].clone()
+    };
+    // Ground stations and visors run ados-gnss; a drone reads GNSS off the FC.
+    assert_eq!(source("ground_station"), "gnss");
+    assert_eq!(source("visor"), "gnss");
+    assert_eq!(source("drone"), "fc");
 }
 
 #[test]
@@ -216,7 +250,7 @@ fn a_stale_router_sidecar_gives_no_fc_expectation() {
     router
         .set_modified(SystemTime::now() - Duration::from_secs(30))
         .unwrap();
-    let body = sensors_body(&p, SystemTime::now(), 0, None);
+    let body = sensors_body(&p, "drone", SystemTime::now(), 0, None);
     let fc_imu = body["sensors"]
         .as_array()
         .unwrap()

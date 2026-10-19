@@ -18,6 +18,17 @@ fn configured_brightness_reads_the_ui_oled_block() {
 }
 
 #[test]
+fn the_config_watch_reads_the_panel_role() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("config.yaml");
+    std::fs::write(&cfg, "agent:\n  profile: visor\n").unwrap();
+    let mut watch = ConfigWatch::new(cfg);
+    watch.refresh();
+    assert_eq!(watch.role, OledRole::Visor);
+    assert!(watch.screens.iter().any(|s| s == "cameras"));
+}
+
+#[test]
 fn probe_addresses_auto_scan_both_when_unpinned() {
     // Unpinned -> auto-probe the two common OLED addresses in order.
     assert_eq!(resolve_probe_addresses(None), vec![0x3C, 0x3D]);

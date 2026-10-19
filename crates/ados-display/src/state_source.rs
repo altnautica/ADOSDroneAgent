@@ -224,13 +224,18 @@ impl StateSource {
         ctx
     }
 
-    /// The narrow read the small status OLED needs: the ground-station status
-    /// snapshot (the link, pairing, role and network blocks the OLED lines
-    /// show) plus the profile's service routes its service line and rotating
-    /// screens read. No setup or radio-pair call, no log-tail query, no
-    /// host-identity reads, and no trend-buffer advance.
+    /// The narrow read the small status OLED needs: on a ground station the
+    /// ground-station status snapshot (the link, pairing, role and network
+    /// blocks the OLED lines show), which a visor does not serve, plus the
+    /// profile's service routes its status frame and rotating screens read.
+    /// No setup or radio-pair call, no log-tail query, no host-identity
+    /// reads, and no trend-buffer advance.
     pub fn status_only(&mut self) -> PageContext {
-        let status = self.get_json("/api/v1/ground-station/status");
+        let status = if self.service_profile() == "visor" {
+            None
+        } else {
+            self.get_json("/api/v1/ground-station/status")
+        };
         let mut ctx = self.map_sources(status.as_ref(), None, None);
         self.apply_services(&mut ctx);
         ctx

@@ -24,11 +24,12 @@
 //!   full-screen or non-tab route to the first tab), and `Custom` is handed
 //!   back to the caller as a [`Dispatch::Custom`], which resolves it through
 //!   [`PageNavigator::custom_action`].
-//! * The four front-panel buttons resolve their action through the
-//!   [`ados_hid::buttons`] mapping; the navigator maps `back` to a modal pop,
-//!   `cycle_screen` to the next tab, `shutdown_prompt` to the power-off
-//!   confirmation, `passthrough` to nothing (a plugin owns that press), and the
-//!   menu / pairing / network / qr actions to their target routes.
+//! * The front-panel buttons (and the rotary encoder) resolve their action
+//!   through the [`ados_hid::buttons`] mapping; the navigator maps `back` to a
+//!   modal pop, `cycle_screen` / `prev_screen` to the next / previous tab,
+//!   `shutdown_prompt` to the power-off confirmation, `passthrough` to nothing
+//!   (a plugin owns that press), and the menu / pairing / network / qr actions
+//!   to their target routes.
 //!
 //! Persistence
 //! -----------

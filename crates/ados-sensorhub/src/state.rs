@@ -43,17 +43,21 @@ pub struct HubState {
     pub pps_state: Option<u8>,
     /// The per-IMU output data rate this session configured the hub with.
     pub imu_odr_hz: Option<u16>,
+    /// The camera trigger rate this session configured the hub with (0 = off).
+    pub trigger_hz: Option<u16>,
 }
 
 impl HubState {
-    /// A session opened: nothing learnt from an earlier session is current.
-    pub fn begin_session(&mut self, imu_odr_hz: u16) {
+    /// A session opened with the configured IMU and trigger rates: nothing
+    /// learnt from an earlier session is current.
+    pub fn begin_session(&mut self, imu_odr_hz: u16, trigger_hz: u16) {
         self.connected = true;
         self.hello = None;
         self.uptime_s = None;
         self.pps_state = None;
         self.imu_samples = 0;
         self.imu_odr_hz = Some(imu_odr_hz);
+        self.trigger_hz = Some(trigger_hz);
     }
 
     /// The session ended: the link facts stop being live.
@@ -61,6 +65,7 @@ impl HubState {
         self.connected = false;
         self.uptime_s = None;
         self.imu_odr_hz = None;
+        self.trigger_hz = None;
     }
 }
 
@@ -79,7 +84,10 @@ pub struct SidecarBody {
     pub crc_errors: u64,
     pub dropped: u64,
     pub imu_odr_hz: Option<f64>,
+    /// The measured trigger rate between the last two snapshots.
     pub trigger_hz: Option<f64>,
+    /// The trigger rate the session configured the hub with.
+    pub trigger_hz_configured: Option<f64>,
 }
 
 /// Turns successive state snapshots into sidecar bodies, measuring the
@@ -91,8 +99,10 @@ pub struct RateMeter {
 
 impl RateMeter {
     /// The body for `s` taken at host time `now_ns`. `imu_odr_hz` is the
-    /// configured per-IMU rate once IMU samples flow this session; the trigger
-    /// rate is measured. Both are `null` while disconnected.
+    /// configured per-IMU rate once IMU samples flow this session;
+    /// `trigger_hz` is the measured trigger rate and `trigger_hz_configured`
+    /// the rate the hub was told to trigger at. All are `null` while
+    /// disconnected.
     pub fn body(&mut self, s: &HubState, now_ns: u64) -> SidecarBody {
         let prev = self.last.replace((now_ns, s.triggers));
         let trigger_hz = prev.filter(|_| s.connected).and_then(|(t0, trig0)| {
@@ -103,6 +113,7 @@ impl RateMeter {
             .imu_odr_hz
             .filter(|_| s.connected && s.imu_samples > 0)
             .map(f64::from);
+        let trigger_hz_configured = s.trigger_hz.filter(|_| s.connected).map(f64::from);
         let hello = s.hello.as_ref();
         SidecarBody {
             version: SENSORHUB_SIDECAR_VERSION,
@@ -116,6 +127,7 @@ impl RateMeter {
             dropped: s.dropped,
             imu_odr_hz,
             trigger_hz,
+            trigger_hz_configured,
         }
     }
 }
@@ -129,7 +141,7 @@ pub fn write_sidecar(path: &Path, body: &SidecarBody) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    const KEYS: [&str; 11] = [
+    const KEYS: [&str; 12] = [
         "version",
         "connected",
         "transport",
@@ -141,6 +153,7 @@ mod tests {
         "dropped",
         "imu_odr_hz",
         "trigger_hz",
+        "trigger_hz_configured",
     ];
 
     #[test]
@@ -150,7 +163,7 @@ mod tests {
             transport: "tcp:127.0.0.1:7600".into(),
             ..HubState::default()
         };
-        s.begin_session(1000);
+        s.begin_session(1000, 20);
         let first = meter.body(&s, 1_000_000_000);
         // No IMU sample yet: no rate claimed.
         assert_eq!(first.imu_odr_hz, None);
@@ -177,21 +190,37 @@ mod tests {
         let second = meter.body(&s, 3_000_000_000);
         assert_eq!(second.imu_odr_hz, Some(1000.0));
         assert_eq!(second.trigger_hz, Some(20.0));
+        assert_eq!(second.trigger_hz_configured, Some(20.0));
         assert_eq!(second.proto_ver, Some(1));
 
         s.end_session();
         let down = meter.body(&s, 4_000_000_000);
         assert_eq!(
-            (down.imu_odr_hz, down.trigger_hz, down.uptime_s),
+            (down.imu_odr_hz, down.trigger_hz, down.trigger_hz_configured),
             (None, None, None)
         );
+        assert_eq!(down.uptime_s, None);
 
         // A new session forgets the previous hub's identity.
-        s.begin_session(2000);
+        s.begin_session(2000, 30);
         let next = meter.body(&s, 5_000_000_000);
         assert!(next.connected);
         assert_eq!((next.fw, next.board, next.proto_ver), (None, None, None));
         assert_eq!(next.imu_odr_hz, None);
+    }
+
+    #[test]
+    fn an_under_delivering_trigger_keeps_its_configured_rate_apart() {
+        // Configured for 20 Hz, the hub delivers 10 Hz: the measured and the
+        // configured rates disagree, so a reader can give a rate verdict.
+        let mut meter = RateMeter::default();
+        let mut s = HubState::default();
+        s.begin_session(1000, 20);
+        meter.body(&s, 1_000_000_000);
+        s.triggers = 10;
+        let body = meter.body(&s, 2_000_000_000);
+        assert_eq!(body.trigger_hz, Some(10.0));
+        assert_eq!(body.trigger_hz_configured, Some(20.0));
     }
 
     #[test]

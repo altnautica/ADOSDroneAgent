@@ -114,6 +114,7 @@ async fn japan_refuses_lbt_busy_after_three_attempts() {
     assert_eq!(out, TxOutcome::Refused(Refusal::LbtBusy));
     let st = lane.governor.status(23, fixed_now());
     assert_eq!(st.blocked_reason, Some("lbt_busy"));
+    assert!(!st.tx_allowed);
     let lbt = st.governor["rules"]
         .as_array()
         .unwrap()

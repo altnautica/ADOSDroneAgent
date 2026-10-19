@@ -116,7 +116,8 @@
     "path": "/gnss",
     "label": "GNSS",
     "profiles": [
-      "ground_station"
+      "ground_station",
+      "visor"
     ],
     "roles": null
   },

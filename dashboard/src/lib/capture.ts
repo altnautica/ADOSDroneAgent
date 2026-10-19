@@ -9,11 +9,13 @@ export type HealthLevel = "ok" | "warn" | "bad";
 export type HealthId = "blur" | "texture" | "flicker" | "corridor" | "storage" | "clock";
 export const HEALTH_IDS: readonly HealthId[] = ["blur", "texture", "flicker", "corridor", "storage", "clock"];
 
+/** Exposure values are null until the camera has reported them (before the
+ *  first capture). */
 export interface CaptureExposure {
   locked: boolean;
-  exposure_us: number;
-  gain: number;
-  mode: "walking" | "slow" | "short";
+  exposure_us: number | null;
+  gain: number | null;
+  mode: "walking" | "slow" | "short" | null;
   applied?: boolean;
 }
 

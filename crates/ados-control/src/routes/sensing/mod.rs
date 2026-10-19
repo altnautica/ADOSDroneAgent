@@ -48,9 +48,27 @@ impl SensingPaths {
         self.run_dir.join(file)
     }
 
+    /// A registered sidecar or socket (`clock`, `capture-storage`,
+    /// `sensor-bus`) under this run dir, where the path registry places it.
+    pub(crate) fn registered(&self, id: &'static str) -> PathBuf {
+        self.run_dir.join(run_relative(id))
+    }
+
     pub(crate) fn rig(&self) -> PathBuf {
         self.etc_dir.join("rig.json")
     }
+}
+
+/// Where the path registry places a sidecar or socket relative to the run
+/// directory (`clock` → `sensing/clock.json`). An unregistered id is taken as
+/// a file name directly under it, as `ados_protocol::paths::run_path` does.
+pub(crate) fn run_relative(id: &'static str) -> &'static str {
+    use ados_protocol::paths;
+    paths::sidecar(id)
+        .map(|s| s.path)
+        .or_else(|| paths::socket(id).map(|s| s.path))
+        .and_then(|p| p.strip_prefix(paths::RUN_DIR_DEFAULT))
+        .map_or(id, |p| p.trim_start_matches('/'))
 }
 
 /// A sidecar map when it parsed and was rewritten within `window` (`None` =
@@ -77,13 +95,19 @@ pub(crate) fn with_present(present: bool, rest: Map<String, Value>) -> Value {
     Value::Object(out)
 }
 
-/// The resolved agent profile (underscore form).
+/// The resolved agent profile in the underscore form the unit table keys on
+/// (`ground_station`), not the hyphen wire form the resolver returns.
 pub(crate) fn profile(state: &AppState) -> String {
     let configured = crate::config::PairingConfig::cached(&state.pairing_paths.config)
         .agent
         .profile
         .clone();
-    crate::profile::current_profile_and_role(&configured).0
+    unit_profile(&crate::profile::current_profile_and_role(&configured).0)
+}
+
+/// The underscore form of a wire profile (`ground-station` → `ground_station`).
+pub(crate) fn unit_profile(wire: &str) -> String {
+    wire.replace('-', "_")
 }
 
 /// Write `bytes` to `path` atomically (temp file + rename in the same dir).
@@ -111,6 +135,35 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wire_profile_becomes_the_unit_table_form() {
+        assert_eq!(unit_profile("ground-station"), "ground_station");
+        assert_eq!(unit_profile("drone"), "drone");
+        // A ground station runs the FC link, so its sensors table carries `fc`.
+        let gs = unit_profile("ground-station");
+        assert!(sensors::unit_on("ados-mavlink", &gs));
+        assert!(sensors::unit_on("ados-gnss", &gs));
+    }
+
+    #[test]
+    fn registered_paths_follow_the_registry_under_the_run_dir() {
+        assert_eq!(run_relative("clock"), "sensing/clock.json");
+        assert_eq!(run_relative("sensor-bus"), "sensing/sensors.sock");
+        assert_eq!(
+            run_relative("capture-storage"),
+            "capture-storage/capture-storage.json"
+        );
+        assert_eq!(run_relative("gnss"), "gnss.json");
+        let p = SensingPaths {
+            run_dir: PathBuf::from("/tmp/run"),
+            etc_dir: PathBuf::from("/tmp/etc"),
+        };
+        assert_eq!(
+            p.registered("clock"),
+            PathBuf::from("/tmp/run/sensing/clock.json")
+        );
+    }
 
     #[test]
     fn concurrent_atomic_writes_never_share_a_temp_file() {

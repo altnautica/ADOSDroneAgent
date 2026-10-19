@@ -21,7 +21,7 @@ import { toast, toastFromError } from "@/lib/toast";
 import { apiFetch } from "@/shared/api-fetch";
 import { fmtNum } from "@/shared/format";
 
-const MODES: CaptureExposure["mode"][] = ["walking", "slow", "short"];
+const MODES: NonNullable<CaptureExposure["mode"]>[] = ["walking", "slow", "short"];
 
 function StorageCard() {
   const { t } = useTranslation();
@@ -108,7 +108,13 @@ function ExposureCard() {
     }
   }
 
-  const valid = draft != null && draft.exposure_us > 0 && draft.gain > 0;
+  const valid =
+    draft != null &&
+    draft.exposure_us != null &&
+    draft.exposure_us > 0 &&
+    draft.gain != null &&
+    draft.gain > 0 &&
+    draft.mode != null;
 
   return (
     <Card>
@@ -140,8 +146,13 @@ function ExposureCard() {
                   id="exposure-us"
                   className="w-28"
                   inputMode="numeric"
-                  value={String(draft.exposure_us)}
-                  onChange={(e) => setDraft({ ...draft, exposure_us: Number(e.target.value) })}
+                  value={draft.exposure_us == null ? "" : String(draft.exposure_us)}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      exposure_us: e.target.value.trim() === "" ? null : Number(e.target.value),
+                    })
+                  }
                 />
               </div>
               <div className="space-y-1">
@@ -150,8 +161,13 @@ function ExposureCard() {
                   id="exposure-gain"
                   className="w-24"
                   inputMode="decimal"
-                  value={String(draft.gain)}
-                  onChange={(e) => setDraft({ ...draft, gain: Number(e.target.value) })}
+                  value={draft.gain == null ? "" : String(draft.gain)}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      gain: e.target.value.trim() === "" ? null : Number(e.target.value),
+                    })
+                  }
                 />
               </div>
               <div className="space-y-1">
@@ -159,9 +175,12 @@ function ExposureCard() {
                 <select
                   id="exposure-mode"
                   className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-                  value={draft.mode}
-                  onChange={(e) => setDraft({ ...draft, mode: e.target.value as CaptureExposure["mode"] })}
+                  value={draft.mode ?? ""}
+                  onChange={(e) =>
+                    setDraft({ ...draft, mode: (e.target.value || null) as CaptureExposure["mode"] })
+                  }
                 >
+                  {draft.mode == null && <option value="" disabled />}
                   {MODES.map((m) => (
                     <option key={m} value={m}>
                       {t(`settings.capture.modes.${m}`)}

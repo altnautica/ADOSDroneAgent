@@ -73,7 +73,7 @@ pub async fn run_link(p: LinkParams, shutdown: Shutdown, reload: Arc<Notify>) ->
                     }
                     Ok(io) => {
                         tracing::info!(transport = %ep.label(), "sensor hub connected");
-                        lock(&state).begin_session(p.cfg.imu_odr_hz);
+                        lock(&state).begin_session(p.cfg.imu_odr_hz, p.cfg.trigger_hz);
                         let ctx = SessionCtx {
                             cfg: &p.cfg,
                             ext: &p.ext,

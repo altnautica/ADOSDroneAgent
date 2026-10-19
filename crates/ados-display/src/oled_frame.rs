@@ -1,13 +1,16 @@
-//! The I2C status OLED's frame builders: the `home` status frame (hostname,
-//! LAN IP, link and status lines laid out top-down on a 1bpp canvas) and the
-//! rotating ground-station service screens in [`screens`], then packed for
-//! the controller.
+//! The I2C status OLED's frame builders: the `home` status frames (hostname
+//! then body lines laid out top-down on a 1bpp canvas) and the rotating
+//! screens in [`screens`], then packed for the controller.
 //!
-//! Home layout. A 128x64 panel paints the bold hostname then body lines for
-//! the LAN IP, link and status. When a GNSS service or a radio receive plane
-//! reports, a fifth service line (`gnss <fix> <sats> radios <n>`) is added and
-//! the four body lines share the height under the title at an even pitch. A
-//! 128x32 panel keeps the hostname and IP only.
+//! Ground-station home. A 128x64 panel paints the bold hostname then body
+//! lines for the LAN IP, link and status. When a GNSS service or a radio
+//! receive plane reports, a fifth service line (`gnss <fix> <sats> radios <n>`)
+//! is added and the four body lines share the height under the title at an
+//! even pitch. A 128x32 panel keeps the hostname and IP only.
+//!
+//! Visor home. The same layout with the capture state, the clock and the
+//! capture free space in place of the link, status and service lines (see
+//! [`visor`]); a visor has no ground-station link to show.
 //!
 //! PURE (no I2C), so the `ados-oled-i2c` daemon, the unit tests and the
 //! `render_oled` example all paint the exact same frame.
@@ -18,6 +21,7 @@ use crate::pages::gs_ctx::fix_short;
 use crate::pages::PageContext;
 
 pub mod screens;
+pub mod visor;
 use screens::OledScreen;
 
 /// The fonts the status OLED paints with: bold 13 px title, regular 11 px body.
@@ -83,11 +87,50 @@ fn draw_line(canvas: &mut [u8], w: usize, h: usize, font: &LoadedFont, text: &st
     });
 }
 
-/// Paint the status lines onto an unpacked row-major canvas, one byte per
-/// pixel (1 = lit), `geom.width * geom.height` long.
+/// Paint the ground-station status lines onto an unpacked row-major canvas,
+/// one byte per pixel (1 = lit), `geom.width * geom.height` long.
 pub fn render_canvas(
     ctx: &PageContext,
     ip: &str,
+    geom: OledGeometry,
+    title_font: &LoadedFont,
+    body_font: &LoadedFont,
+) -> Vec<u8> {
+    let mut lines = vec![ip.to_string(), link_line(ctx), status_line(ctx)];
+    if let Some(service) = service_line(ctx).filter(|_| geom.height >= 64) {
+        lines.push(service);
+    }
+    let host = if ctx.hostname.is_empty() {
+        "ADOS ground"
+    } else {
+        &ctx.hostname
+    };
+    paint_status_frame(host, &lines, geom, title_font, body_font)
+}
+
+/// Paint the visor status lines (IP, capture, clock, free space), laid out
+/// like [`render_canvas`].
+pub fn render_visor_canvas(
+    ctx: &PageContext,
+    ip: &str,
+    geom: OledGeometry,
+    title_font: &LoadedFont,
+    body_font: &LoadedFont,
+) -> Vec<u8> {
+    let lines = visor::status_lines(&ctx.sensing, ip, geom.height >= 64);
+    let host = if ctx.hostname.is_empty() {
+        "ADOS visor"
+    } else {
+        &ctx.hostname
+    };
+    paint_status_frame(host, &lines, geom, title_font, body_font)
+}
+
+/// The bold `host` title, then `lines` under it as far as the panel has
+/// room: the first line always, the rest only while they start on-panel.
+fn paint_status_frame(
+    host: &str,
+    lines: &[String],
     geom: OledGeometry,
     title_font: &LoadedFont,
     body_font: &LoadedFont,
@@ -98,21 +141,9 @@ pub fn render_canvas(
 
     let title_h = title_font.line_height() as i32;
     let body_h = body_font.line_height() as i32;
-    let mut lines = vec![ip.to_string(), link_line(ctx), status_line(ctx)];
-    if let Some(service) = service_line(ctx).filter(|_| h >= 64) {
-        lines.push(service);
-    }
     // Body pitch: the font's line height, tightened so every line fits.
-    let pitch = body_h.min((h as i32 - title_h) / lines.len() as i32);
-    // Line 1: hostname (bold).
-    let host = if ctx.hostname.is_empty() {
-        "ADOS ground"
-    } else {
-        &ctx.hostname
-    };
+    let pitch = body_h.min((h as i32 - title_h) / lines.len().max(1) as i32);
     draw_line(&mut canvas, w, h, title_font, host, 0, 0);
-    // Then IP, link, status (and the service line), as far as the panel
-    // has room: the IP always, the rest only while they start on-panel.
     let mut y = title_h;
     for (i, line) in lines.iter().enumerate() {
         if i > 0 && (y as usize) >= h {
@@ -136,9 +167,9 @@ pub fn build_frame(
     oled::pack_page_buffer(&canvas, geom).unwrap_or_else(|| vec![0u8; geom.frame_bytes()])
 }
 
-/// Build the packed frame for one rotation `screen`: the status frame for
-/// `home`, else the service screen's lines (falling back to the status frame
-/// when the service has gone absent since the rotation was resolved).
+/// Build the packed frame for one rotation `screen`: the status frame for a
+/// `home`, else the screen's lines (falling back to its status frame when
+/// the source has gone absent since the rotation was resolved).
 pub fn build_screen_frame(
     screen: OledScreen,
     ctx: &PageContext,
@@ -150,6 +181,9 @@ pub fn build_screen_frame(
 ) -> Vec<u8> {
     let canvas = match screens::screen_lines(screen, ctx) {
         Some(lines) => screens::render_lines(&lines, geom, screen_font),
+        None if screen.home() == OledScreen::VisorHome => {
+            render_visor_canvas(ctx, ip, geom, title_font, body_font)
+        }
         None => render_canvas(ctx, ip, geom, title_font, body_font),
     };
     oled::pack_page_buffer(&canvas, geom).unwrap_or_else(|| vec![0u8; geom.frame_bytes()])
@@ -270,5 +304,43 @@ mod tests {
         let with_service = lit_rows(&gs_ctx(3)).unwrap();
         assert!(with_service > plain, "{with_service} vs {plain}");
         assert!(with_service < 64);
+    }
+
+    #[test]
+    fn a_visor_screen_falls_back_to_the_visor_frame_never_the_link_frame() {
+        let geom = OledGeometry::W128_H64;
+        let (title, body) = status_fonts();
+        let face = screens::screen_font();
+        let ctx = ctx_with_host("visor");
+        let pack = |c: Vec<u8>| oled::pack_page_buffer(&c, geom).unwrap();
+        let visor_home = pack(render_visor_canvas(&ctx, "10.0.0.5", geom, &title, &body));
+        let gs_home = pack(render_canvas(&ctx, "10.0.0.5", geom, &title, &body));
+        assert_ne!(visor_home, gs_home);
+        for screen in [
+            OledScreen::VisorHome,
+            OledScreen::Cameras,
+            OledScreen::Sensors,
+            OledScreen::Storage,
+        ] {
+            let frame = build_screen_frame(screen, &ctx, "10.0.0.5", geom, &title, &body, &face);
+            assert_eq!(frame, visor_home, "{screen:?}");
+        }
+    }
+
+    #[test]
+    fn the_visor_frame_paints_the_storage_line_on_a_tall_panel() {
+        let geom = OledGeometry::W128_H64;
+        let (title, body) = status_fonts();
+        let lit_rows = |ctx: &PageContext| {
+            let c = render_visor_canvas(ctx, "10.0.0.5", geom, &title, &body);
+            (0..64)
+                .filter(|y| c[y * 128..(y + 1) * 128].contains(&1))
+                .max()
+        };
+        let plain = lit_rows(&ctx_with_host("visor")).unwrap();
+        let full = crate::pages::sensing_ctx::test_util::full_ctx(1000.0);
+        let with_storage = lit_rows(&full).unwrap();
+        assert!(with_storage > plain, "{with_storage} vs {plain}");
+        assert!(with_storage < 64);
     }
 }

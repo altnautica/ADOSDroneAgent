@@ -90,6 +90,7 @@ impl PageNavigator {
 
     /// Route one front-panel button event through its resolved action name.
     /// `back` pops the modal stack, `cycle_screen` advances to the next tab,
+    /// `prev_screen` steps back to the previous one,
     /// `shutdown_prompt` opens the power-off confirmation (and confirms it when
     /// it is already on top), `passthrough` is left to the plugin that
     /// subscribed to the press, and the menu / pairing / network / qr actions
@@ -123,6 +124,15 @@ impl PageNavigator {
                 let next = self.next_tab_id();
                 if self.go(next) {
                     Dispatch::RouteChanged(next.to_string())
+                } else {
+                    Dispatch::None
+                }
+            }
+            // Carousel-style previous: step back one tab in bar order, wrapping.
+            ados_protocol::panel_ui::PREV_SCREEN => {
+                let prev = self.prev_tab_id();
+                if self.go(prev) {
+                    Dispatch::RouteChanged(prev.to_string())
                 } else {
                     Dispatch::None
                 }
@@ -184,6 +194,17 @@ impl PageNavigator {
         match here {
             Some(i) => self.tabs[(i + 1) % self.tabs.len()],
             None => self.tabs[0],
+        }
+    }
+
+    /// The tab id one step left of the active tab (wraps). When the active
+    /// page is not itself a tab, this starts the backward cycle at the last
+    /// tab.
+    pub(super) fn prev_tab_id(&self) -> &'static str {
+        let len = self.tabs.len();
+        match self.tabs.iter().position(|id| *id == self.active_page_id) {
+            Some(i) => self.tabs[(i + len - 1) % len],
+            None => self.tabs[len - 1],
         }
     }
 

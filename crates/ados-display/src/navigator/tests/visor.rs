@@ -6,7 +6,7 @@ use crate::graphics::palette::DARK;
 use crate::pages::power::SHUTDOWN_PATH;
 use crate::pages::AgentRequest;
 use crate::panel_conf::{resolve_screens, tab_ids};
-use ados_protocol::panel_ui::{PASSTHROUGH, SHUTDOWN_PROMPT};
+use ados_protocol::panel_ui::{PASSTHROUGH, PREV_SCREEN, SHUTDOWN_PROMPT};
 
 const VISOR_TABS: [&str; 5] = ["plugin", "cameras", "sensors", "storage", "details.about"];
 
@@ -40,6 +40,25 @@ fn cycle_screen_walks_the_visor_tabs_and_wraps() {
         );
         assert_eq!(n.current_page_id(), *next);
     }
+}
+
+#[test]
+fn prev_screen_walks_the_visor_tabs_backwards_and_wraps() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut n = visor_nav(dir.path());
+    for prev in VISOR_TABS.iter().rev() {
+        assert_eq!(
+            n.on_button(&button(PREV_SCREEN)),
+            Dispatch::RouteChanged(prev.to_string())
+        );
+        assert_eq!(n.current_page_id(), *prev);
+    }
+    // A non-tab route steps back onto the last tab.
+    assert!(n.go("more"));
+    assert_eq!(
+        n.on_button(&button(PREV_SCREEN)),
+        Dispatch::RouteChanged("details.about".to_string())
+    );
 }
 
 #[test]

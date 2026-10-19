@@ -3,7 +3,7 @@
 use serde_json::{json, Map, Value};
 
 use super::power::dbm_to_mw;
-use super::{rules, Governor, RULE_KEYS};
+use super::{rules, Governor, Refusal, RULE_KEYS};
 use crate::ledger::Now;
 use crate::regions::PowerRef;
 
@@ -133,9 +133,16 @@ impl Governor {
             "refused": self.counters.refused,
             "refused_by_rule": by_rule,
         });
+        // A wait-bound refusal stops blocking once its window frees, even if
+        // no frame has been sent since.
+        let next_ms = self.next_tx_allowed_ms(len, now);
+        let transient = self
+            .blocked
+            .filter(|r| !matches!(r, Refusal::DutyExhausted | Refusal::DwellTime) || next_ms > 0);
+        let blocked_reason = self.static_block.or(transient).map(|r| r.reason());
         GovernorStatus {
-            tx_allowed: self.tx_allowed(),
-            blocked_reason: self.static_block.or(self.blocked).map(|r| r.reason()),
+            tx_allowed: blocked_reason.is_none(),
+            blocked_reason,
             channel,
             governor,
             tx,

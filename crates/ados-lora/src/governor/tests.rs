@@ -90,7 +90,7 @@ fn india_allows_exactly_36_s_per_rolling_hour_then_duty_exhausted() {
     assert_eq!(g.admit(4, None, at(45)), Err(Refusal::DutyExhausted));
     let st = g.status(4, at(45));
     assert_eq!(st.blocked_reason, Some("duty_exhausted"));
-    assert!(st.tx_allowed);
+    assert!(!st.tx_allowed);
     assert_eq!(st.tx["refused_by_rule"]["duty_cycle"], 1);
     let duty = &st.governor["rules"][1];
     assert_eq!(duty["kind"], "duty_cycle");
@@ -99,6 +99,9 @@ fn india_allows_exactly_36_s_per_rolling_hour_then_duty_exhausted() {
     assert_eq!(duty["exhausted"], true);
     // The first frame (t = 0) ages out of the window at t = 3600 s.
     assert_eq!(g.next_tx_allowed_ms(4, at(45)), 3_555_000);
+    let freed = g.status(4, at(3600));
+    assert!(freed.tx_allowed);
+    assert_eq!(freed.blocked_reason, None);
     assert!(g.admit(4, None, at(3600)).is_ok());
 }
 

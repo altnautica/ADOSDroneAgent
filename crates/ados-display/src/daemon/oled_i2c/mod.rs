@@ -1,5 +1,5 @@
 //! ados-oled-i2c: drive a small I2C OLED (SSD1306 / SH1106, 128x64 or 128x32)
-//! with a compact ground-station status page.
+//! with a compact ground-station or visor status page.
 //!
 //! This is the wired consumer of the crate's `oled` driver. It is INDEPENDENT
 //! of the framebuffer / SPI-LCD display arbitration (the legacy `ados-oled`
@@ -12,8 +12,9 @@
 //! and exits cleanly (rc 0) — a board with no OLED never churns.
 //!
 //! Reuse: status comes from [`crate::state_source::StateSource::status_only`]
-//! (the ground-station status every 2 s, plus the profile's GNSS,
-//! radio-adapter and LoRa routes at most every 5 s); the frames are painted
+//! (the ground-station status every 2 s on a ground station, plus the
+//! profile's service routes at most every 5 s: GNSS, radio-adapter and LoRa
+//! on a ground station, the sensing routes on a visor); the frames are painted
 //! by [`crate::oled_frame`] (grayscale glyph coverage thresholded to 1bpp)
 //! and packed + uploaded by [`crate::oled`],
 //! which re-initialises the panel after repeated upload failures (a brownout).
@@ -22,14 +23,16 @@
 //!
 //! Screens: the panel rotates through the renderable entries of the
 //! configured `ground_station.ui.screens` (order ∩ enabled, profile defaults
-//! when unset; see [`crate::panel_conf`]): `home` is the status frame, and
-//! `gnss` / `radios` / `lora` are shown while their service reports present.
+//! when unset; see [`crate::panel_conf`]). On a ground station `home` is the
+//! link status frame and `gnss` / `radios` / `lora` are shown while their
+//! service reports present; on a visor `home` is the capture status frame and
+//! `cameras` / `sensors` / `storage` are shown while their route reports.
 //! Each dwells 5 s; one renderable screen stays up statically. The rules live
 //! in [`crate::oled_frame::screens`]. The frame builders are pure and
 //! unit-tested; only the I2C open/write is Linux-gated.
 
 use crate::oled::{self, Controller, OledGeometry};
-use crate::oled_frame::screens::{rotation, screen_font, Rotator};
+use crate::oled_frame::screens::{rotation, screen_font, OledRole, Rotator};
 use crate::oled_frame::{build_screen_frame, status_fonts};
 #[cfg(not(target_os = "linux"))]
 use crate::pages::PageContext;
@@ -148,11 +151,12 @@ fn configured_brightness(config_yaml: Option<&str>) -> i64 {
 }
 
 /// Re-reads the agent config only when its modification time changes: the
-/// OLED contrast and the resolved screen list.
+/// OLED contrast, the node role and the resolved screen list.
 struct ConfigWatch {
     path: std::path::PathBuf,
     mtime: Option<std::time::SystemTime>,
     brightness: i64,
+    role: OledRole,
     screens: Vec<String>,
     loaded: bool,
 }
@@ -163,6 +167,7 @@ impl ConfigWatch {
             path,
             mtime: None,
             brightness: configured_brightness(None),
+            role: OledRole::GroundStation,
             screens: Vec::new(),
             loaded: false,
         }
@@ -176,8 +181,9 @@ impl ConfigWatch {
         if !self.loaded || mtime != self.mtime {
             let text = std::fs::read_to_string(&self.path).ok();
             self.brightness = configured_brightness(text.as_deref());
-            self.screens =
-                PanelConf::load_from(&self.path, &ados_config::profile_conf_path()).screens;
+            let panel = PanelConf::load_from(&self.path, &ados_config::profile_conf_path());
+            self.role = OledRole::for_profile(&panel.profile);
+            self.screens = panel.screens;
             self.mtime = mtime;
             self.loaded = true;
         }
@@ -259,7 +265,7 @@ fn drive() {
             ctx = src.status_only();
             polled_at = now;
         }
-        let screens = rotation(&config.screens, &ctx, geom);
+        let screens = rotation(&config.screens, &ctx, geom, config.role);
         let screen = rotator.current(&screens, now);
         let packed = build_screen_frame(
             screen,
@@ -297,7 +303,7 @@ fn drive() {
     let mut ip = CachedIp::new();
     let (title_font, body_font) = status_fonts();
     let ctx = PageContext::default();
-    let screens = rotation(&config.screens, &ctx, geom);
+    let screens = rotation(&config.screens, &ctx, geom, config.role);
     let screen = Rotator::default().current(&screens, std::time::Instant::now());
     let frame = build_screen_frame(
         screen,

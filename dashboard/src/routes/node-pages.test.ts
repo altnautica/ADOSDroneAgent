@@ -92,7 +92,7 @@ const elrs = (modules: CrsfModule[]) => loraChips(euStatus(), null, row(), modul
 describe("route table: node pages", () => {
   it("gates the new pages to their profiles", () => {
     const by = Object.fromEntries(ROUTES.map((r) => [r.path, r.profiles]));
-    expect(by["/gnss"]).toEqual(["ground_station"]);
+    expect(by["/gnss"]).toEqual(["ground_station", "visor"]);
     expect(by["/lora"]).toEqual(["drone", "ground_station"]);
     expect(by["/capture"]).toEqual(["visor"]);
     expect(by["/sensors"]).toEqual(["drone", "visor"]);

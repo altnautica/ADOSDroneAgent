@@ -101,12 +101,12 @@ fn clock_info(v: &Value) -> ClockInfo {
 }
 
 fn storage_info(v: &Value) -> StorageInfo {
-    let volumes = v.get("volumes").and_then(Value::as_array);
-    let vol = volumes.and_then(|a| {
-        a.iter()
-            .find(|x| bool_field(x, "is_capture"))
-            .or_else(|| a.first())
-    });
+    // Only the volume the route marks as capture storage; with none marked
+    // there is no capture volume to report.
+    let vol = v
+        .get("volumes")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().find(|x| bool_field(x, "is_capture")));
     let cap = obj(v, "capture");
     StorageInfo {
         capture_root: string_field(v, "capture_root"),
@@ -133,7 +133,6 @@ fn capture_info(v: &Value) -> CaptureInfo {
                         id: string_field(c, "id").unwrap_or_default(),
                         fps: f64_field(c, "fps"),
                         dropped: i64_field(c, "dropped"),
-                        trigger: string_field(c, "trigger"),
                     })
                     .collect()
             })
@@ -280,5 +279,36 @@ mod tests {
             (st.free_bytes, st.write_mbps, st.pending_upload()),
             (None, None, None)
         );
+    }
+
+    #[test]
+    fn no_marked_capture_volume_reports_no_volume_figures() {
+        let st = json!({"present":true,"capture_root":"/c","volumes":[
+           {"mount":"/","device":"mmcblk0","fs":"ext4","total_bytes":32000000000_u64,"free_bytes":1000,"rotational":false,"is_capture":false}],
+         "capture":null,"write_probe":null});
+        let st = sensing_ctx(
+            Reading::Absent,
+            Reading::Absent,
+            Reading::Present(st),
+            Reading::Absent,
+        )
+        .storage
+        .into_present()
+        .expect("storage");
+        assert_eq!((st.free_bytes, st.total_bytes), (None, None));
+    }
+
+    #[test]
+    fn camera_rows_carry_the_sensors_source() {
+        let s = sensing_ctx(
+            Reading::Present(sensors_body()),
+            Reading::Absent,
+            Reading::Absent,
+            Reading::Absent,
+        )
+        .sensors
+        .into_present()
+        .expect("sensors");
+        assert_eq!(s.sensors[1].source.as_deref(), Some("vision"));
     }
 }

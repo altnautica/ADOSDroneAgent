@@ -209,10 +209,6 @@ impl Governor {
         self.static_block
     }
 
-    pub fn tx_allowed(&self) -> bool {
-        self.static_block.is_none()
-    }
-
     /// Charged airtime of a `len`-byte frame.
     pub fn charge_us(&self, len: usize) -> u64 {
         time_on_air_us(&self.setup.modem, len) * self.setup.airtime_factor
