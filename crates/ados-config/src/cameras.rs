@@ -255,26 +255,43 @@ pub fn camera_entries(text: &str) -> CameraEntries {
         }
     };
     for (index, entry) in list.into_iter().enumerate() {
-        let checked = serde_norway::from_value::<CaptureCamera>(entry.clone())
-            .and_then(|c| serde_norway::from_value::<VideoPlane>(entry.clone()).map(|_| c));
-        match checked {
+        match check_entry(&entry) {
             Ok(mut c) => {
                 c.trigger_channel = c.trigger_channel.or_else(|| u8::try_from(index).ok());
                 out.valid.push((index, entry, c));
             }
-            Err(e) => {
+            Err(error) => {
                 let id = entry
                     .get("id")
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .unwrap_or_else(|| format!("cameras[{index}]"));
-                let error = e.to_string();
                 warn_once(format!("cameras[{index}] ({id}) skipped: {error}"));
                 out.invalid.push(InvalidCamera { index, id, error });
             }
         }
     }
     out
+}
+
+/// Check one `cameras[]` entry against every consumer's view of it (the vision
+/// engine's [`CaptureCamera`] and the video pipeline's keys). The entry's
+/// `trigger_channel` is left as written (not resolved from its position).
+pub fn check_entry(entry: &Value) -> Result<CaptureCamera, String> {
+    serde_norway::from_value::<CaptureCamera>(entry.clone())
+        .and_then(|c| serde_norway::from_value::<VideoPlane>(entry.clone()).map(|_| c))
+        .map_err(|e| e.to_string())
+}
+
+/// [`check_entry`] for an entry held as JSON (an HTTP or socket body). JSON
+/// `null` members are treated as absent, the way a cleared key is persisted.
+pub fn check_entry_json(entry: &serde_json::Value) -> Result<CaptureCamera, String> {
+    let mut entry = entry.clone();
+    if let Some(obj) = entry.as_object_mut() {
+        obj.retain(|_, v| !v.is_null());
+    }
+    let yaml = serde_norway::to_value(&entry).map_err(|e| e.to_string())?;
+    check_entry(&yaml)
 }
 
 fn warn_once(msg: String) {

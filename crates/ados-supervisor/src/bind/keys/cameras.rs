@@ -97,12 +97,22 @@ pub(super) fn merge_camera_legs(
             );
         }
     }
+    let incoming = overlay_operator_legs(existing, incoming_stamped, owner);
+    for leg in &incoming {
+        if let Err(e) = ados_config::cameras::check_entry_json(leg) {
+            let id = leg
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            return Err(format!("camera {id:?} is invalid: {e}"));
+        }
+    }
     let mut out: Vec<serde_json::Value> = Vec::new();
     let mut spliced = false;
     for leg in existing {
         if leg_owner(leg) == owner {
             if !spliced {
-                out.extend(incoming_stamped.iter().cloned());
+                out.extend(incoming.iter().cloned());
                 spliced = true;
             }
             // Drop the replaced leg.
@@ -111,9 +121,47 @@ pub(super) fn merge_camera_legs(
         }
     }
     if !spliced {
-        out.extend(incoming_stamped.iter().cloned());
+        out.extend(incoming);
     }
     Ok(out)
+}
+
+/// An operator write is a per-entry patch: each incoming leg is laid over the
+/// operator's existing leg of the same id, so a key the client did not send (or
+/// does not know) survives, and an explicit `null` removes the key. A plugin
+/// write replaces its legs whole. Null members are never persisted.
+fn overlay_operator_legs(
+    existing: &[serde_json::Value],
+    incoming_stamped: &[serde_json::Value],
+    owner: &str,
+) -> Vec<serde_json::Value> {
+    incoming_stamped
+        .iter()
+        .map(|leg| {
+            let Some(patch) = leg.as_object() else {
+                return leg.clone();
+            };
+            let id = patch.get("id").and_then(serde_json::Value::as_str);
+            let base = (owner == OPERATOR_OWNER)
+                .then(|| {
+                    existing.iter().find(|l| {
+                        leg_owner(l) == owner
+                            && l.get("id").and_then(serde_json::Value::as_str) == id
+                    })
+                })
+                .flatten()
+                .and_then(serde_json::Value::as_object);
+            let mut merged = base.cloned().unwrap_or_default();
+            for (k, v) in patch {
+                if v.is_null() {
+                    merged.remove(k);
+                } else {
+                    merged.insert(k.clone(), v.clone());
+                }
+            }
+            serde_json::Value::Object(merged)
+        })
+        .collect()
 }
 
 /// Merge the writer's `cameras` (attributed to `owner`) into the existing
@@ -234,3 +282,6 @@ pub fn persist_video_cameras(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

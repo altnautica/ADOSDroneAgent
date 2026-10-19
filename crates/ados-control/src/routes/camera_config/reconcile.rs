@@ -244,6 +244,45 @@ pub(super) fn build_roster(
     rows
 }
 
+/// The `cameras[]` entry keys every roster row carries verbatim from its config
+/// entry (`null` when the entry does not set the key, or the row has no entry).
+pub(super) const ENTRY_KEYS: [&str; 11] = [
+    "capture",
+    "format",
+    "exposure_us",
+    "gain",
+    "trigger",
+    "trigger_channel",
+    "keyframe_interval",
+    "rotation",
+    "hflip",
+    "vflip",
+    "encoder",
+];
+
+/// Copy [`ENTRY_KEYS`] from each declared leg's raw config entry (keyed by id)
+/// onto its roster row. A discovered-unassigned row, or a leg with no config
+/// entry (the synthesised legacy `main`), gets `null` for every key.
+pub(super) fn attach_entry_keys(rows: &mut [Value], entries: &HashMap<String, Value>) {
+    for row in rows {
+        let entry = if row["state"] == "discovered_unassigned" {
+            None
+        } else {
+            row["id"].as_str().and_then(|id| entries.get(id))
+        };
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+        for key in ENTRY_KEYS {
+            let v = entry
+                .and_then(|e| e.get(key))
+                .cloned()
+                .unwrap_or(Value::Null);
+            obj.insert(key.to_string(), v);
+        }
+    }
+}
+
 /// A stable roster handle for an unassigned discovered device: the device-node
 /// basename (`/dev/video0` → `video0`), or the whole path when it has no `/`.
 pub(super) fn device_handle(device_path: &str) -> String {

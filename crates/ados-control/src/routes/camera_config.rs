@@ -150,7 +150,8 @@ pub async fn get_video_cameras() -> Json<Value> {
 /// parses `config.yaml` once and writes no config-status sidecar, so a pollable
 /// roster read never races the `ados-video` service's own status stamping.
 fn load_roster() -> Vec<Value> {
-    let cfg = RosterVideoConfig::load_from(&config_path());
+    let path = config_path();
+    let cfg = RosterVideoConfig::load_from(&path);
     // The camera roster is a companion-node concept. A ground station carries no
     // onboard camera, so it serves an empty roster rather than a phantom `main`.
     if cfg.is_ground_station() {
@@ -159,7 +160,23 @@ fn load_roster() -> Vec<Value> {
     let discovered = load_discovered(&discovered_path());
     let declared = declared_legs(&cfg, !discovered.is_empty());
     let live = load_live(&live_streams_path());
-    build_roster(&declared, &discovered, &live)
+    let mut rows = build_roster(&declared, &discovered, &live);
+    attach_entry_keys(&mut rows, &load_entries(&path));
+    rows
+}
+
+/// The valid `cameras[]` entries of the config as raw JSON objects keyed by id,
+/// so the roster echoes every key exactly as configured. Empty when the file is
+/// missing or unparseable.
+fn load_entries(path: &Path) -> HashMap<String, Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    ados_config::cameras::camera_entries(&text)
+        .valid
+        .into_iter()
+        .filter_map(|(_, raw, c)| serde_json::to_value(&raw).ok().map(|v| (c.id, v)))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -180,11 +197,13 @@ pub struct PutCamerasBody {
 /// `PUT /api/video/roster` — persist the operator's camera leg list.
 ///
 /// Validates the list (path-safe unique ids, known orientation / purpose values,
-/// no non-primary leg claiming the reserved `main` id), then forwards a
-/// `video.cameras.set` op to the supervisor's video command socket, which merges
-/// the operator legs by owner (preserving plugin-declared legs) and restarts the
-/// video pipeline. A validation failure is a 400; an unreachable supervisor a
-/// 503; a saved-but-not-restarted result a 502.
+/// no non-primary leg claiming the reserved `main` id, and the shared per-entry
+/// `cameras[]` check), then forwards a `video.cameras.set` op to the
+/// supervisor's video command socket. The supervisor merges each operator leg
+/// onto the existing entry of the same id (keys the body omits are kept, an
+/// explicit `null` clears a key), preserves plugin-declared legs, and restarts
+/// the video pipeline. A validation failure is a 400; an unreachable supervisor
+/// a 503; a saved-but-not-restarted result a 502.
 pub async fn put_video_cameras(Json(body): Json<PutCamerasBody>) -> Response {
     // The camera roster is a companion-node surface; a ground station has no
     // onboard camera to manage, so the write does not apply there.
@@ -290,6 +309,9 @@ fn validate_cameras(cameras: &[Value]) -> Result<(), String> {
             Some(_) => {
                 return Err("camera purpose must be an array of purpose strings".to_string());
             }
+        }
+        if let Err(e) = ados_config::cameras::check_entry_json(leg) {
+            return Err(format!("camera {id:?} is invalid: {e}"));
         }
     }
     Ok(())
@@ -462,3 +484,6 @@ fn load_live(path: &Path) -> HashMap<String, Option<bool>> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod entry_tests;
