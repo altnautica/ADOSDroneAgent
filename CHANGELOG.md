@@ -223,6 +223,10 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **SDK `tool.invoke` always answers.** A handler that panics answers
   `tool_handler_panicked`; a result that cannot be framed answers
   `tool_reply_unencodable: ...`.
+- **Plugin file modes.** An archive member or fetched payload installs `0755`
+  when the manifest runs it or its content starts with an ELF or `#!`
+  header (a helper the plugin launches itself, such as a payload under
+  `bin/<arch>-linux/`); every other file installs `0644`.
 
 ### Fixed
 

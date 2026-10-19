@@ -109,12 +109,15 @@ pub fn unpacked_paths(root: &Path) -> BTreeSet<String> {
     out
 }
 
-/// The files a manifest runs, and so the only ones install marks executable:
-/// a rust agent's path entrypoint, every `binaries` path, the first word of a
-/// service command that is a path, and any file named by a `subprocess_spawn`
-/// basename. Derived from the signed manifest because a zip entry's mode bits
-/// sit outside the signed payload hash, so re-zipping a signed archive must not
-/// change what can run.
+/// The files install marks executable (`0755`; everything else is `0644`):
+/// the files a manifest runs (a rust agent's path entrypoint, every `binaries`
+/// path, the first word of a service command that is a path, any file named
+/// by a `subprocess_spawn` basename), plus any file whose content starts with
+/// an executable header ([`has_exec_header`]: ELF magic or `#!`), which covers
+/// helper programs a plugin launches itself. One rule ([`Self::runs`]) for
+/// archive members and fetched payloads alike. Both inputs are inside the
+/// signed content (the manifest, the file bytes); a zip entry's mode bits are
+/// not, so re-zipping a signed archive must not change what can run.
 #[derive(Debug, Default)]
 pub struct Executables {
     paths: BTreeSet<String>,
@@ -154,6 +157,17 @@ impl Executables {
                 .next()
                 .is_some_and(|base| self.basenames.contains(base))
     }
+
+    /// Whether the file at `path` whose content begins with `head` installs
+    /// executable: the manifest runs it, or it carries an executable header.
+    pub fn runs(&self, path: &str, head: &[u8]) -> bool {
+        self.contains(path) || has_exec_header(head)
+    }
+}
+
+/// Whether `head` (a file's first bytes) starts an ELF image or a `#!` script.
+pub fn has_exec_header(head: &[u8]) -> bool {
+    head.starts_with(b"\x7fELF") || head.starts_with(b"#!")
 }
 
 /// Unpack validated archive bytes to `dest`. The caller is responsible for
@@ -219,7 +233,7 @@ pub fn unpack_to(
         }
         std::fs::write(&target, &buf)
             .map_err(|e| ArchiveError(format!("write of {} failed: {e}", target.display())))?;
-        set_entry_mode(&target, executables.contains(&safe))?;
+        set_entry_mode(&target, executables.runs(&safe, &buf))?;
     }
     Ok(())
 }

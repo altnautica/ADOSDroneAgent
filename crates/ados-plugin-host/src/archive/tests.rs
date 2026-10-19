@@ -255,6 +255,47 @@ fn only_files_the_manifest_runs_unpack_executable() {
     assert_eq!(mode("manifest.yaml"), 0o644);
 }
 
+/// A member the manifest does not name unpacks executable only when its
+/// content starts with an ELF or `#!` header, whatever its zip mode bits or
+/// its directory say.
+#[test]
+fn an_unnamed_member_with_an_exec_header_unpacks_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut buf = Vec::new();
+    {
+        let mut w = zip::ZipWriter::new(Cursor::new(&mut buf));
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (name, mode, body) in [
+            (
+                "bin/x86_64-linux/basalt-ados",
+                0o644,
+                &b"\x7fELF\x02\x01"[..],
+            ),
+            ("tools/run.sh", 0o600, &b"#!/bin/sh\n"[..]),
+            ("bin/notes.txt", 0o777, &b"plain"[..]),
+            ("data/tiny", 0o777, &b"\x7f"[..]),
+        ] {
+            w.start_file(name, stored.unix_permissions(mode)).unwrap();
+            w.write_all(body).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    unpack_to(&buf, dir.path(), &Executables::default()).unwrap();
+    let mode = |rel: &str| {
+        std::fs::metadata(dir.path().join(rel))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    assert_eq!(mode("bin/x86_64-linux/basalt-ados"), 0o755);
+    assert_eq!(mode("tools/run.sh"), 0o755);
+    assert_eq!(mode("bin/notes.txt"), 0o644);
+    assert_eq!(mode("data/tiny"), 0o644);
+}
+
 #[test]
 fn an_entry_under_the_attestation_name_is_refused() {
     let zip = build_zip(

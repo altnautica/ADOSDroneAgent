@@ -243,8 +243,9 @@ impl PluginSupervisor {
 }
 
 /// Move each fetched payload from `payload_dir` into the staged tree at its
-/// manifest path. A payload may not overwrite a file the archive ships. A
-/// payload the manifest runs is made executable.
+/// manifest path. A payload may not overwrite a file the archive ships. Its
+/// mode follows the archive members' rule ([`Executables::runs`]): `0755` when
+/// the manifest runs it or it starts with an ELF or `#!` header, else `0644`.
 pub(super) fn place_payloads(
     manifest: &PluginManifest,
     payload_dir: &Path,
@@ -265,8 +266,13 @@ pub(super) fn place_payloads(
             std::fs::create_dir_all(parent)?;
         }
         std::fs::rename(payload_dir.join(path), &dest)?;
+        let mut head = [0u8; 4];
+        let n = {
+            use std::io::Read;
+            std::fs::File::open(&dest)?.read(&mut head)?
+        };
         use std::os::unix::fs::PermissionsExt;
-        let mode = if executables.contains(path) {
+        let mode = if executables.runs(path, &head[..n]) {
             0o755
         } else {
             0o644

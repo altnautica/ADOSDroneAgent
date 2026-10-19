@@ -1667,6 +1667,42 @@ fn payloads_land_only_when_their_pinned_digest_matches() {
         .all(|f| !f.payload));
 }
 
+/// A fetched payload the manifest does not run installs `0755` only when it
+/// starts with an ELF or `#!` header, the same rule as archive members.
+#[test]
+fn payload_modes_follow_the_exec_header_rule() {
+    use std::os::unix::fs::PermissionsExt;
+    let manifest = PluginManifest::from_yaml_text(&payload_manifest(&"a".repeat(64), 4)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (payloads, staging) = (dir.path().join("payloads"), dir.path().join("staging"));
+    let files: [(&str, &[u8]); 4] = [
+        ("bin/aarch64-linux/basalt-ados", b"\x7fELF\x02"),
+        ("libexec/run", b"#!/bin/sh\n"),
+        ("models/net.bin", b"\x00\x01\x02\x03"),
+        ("models/empty", b""),
+    ];
+    let mut fetched = Vec::new();
+    for (path, body) in files {
+        let src = payloads.join(path);
+        std::fs::create_dir_all(src.parent().unwrap()).unwrap();
+        std::fs::write(&src, body).unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o666)).unwrap();
+        fetched.push((path.to_string(), String::new()));
+    }
+    place_payloads(&manifest, &payloads, &staging, &fetched).unwrap();
+    let mode = |rel: &str| {
+        std::fs::metadata(staging.join(rel))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    assert_eq!(mode("bin/aarch64-linux/basalt-ados"), 0o755);
+    assert_eq!(mode("libexec/run"), 0o755);
+    assert_eq!(mode("models/net.bin"), 0o644);
+    assert_eq!(mode("models/empty"), 0o644);
+}
+
 #[test]
 fn services_run_only_on_the_profiles_they_name() {
     let dir = tempfile::tempdir().unwrap();
