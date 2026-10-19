@@ -7,6 +7,7 @@ use std::time::Duration;
 use ados_protocol::paths::run_path;
 use ados_sensorbus::{time::mono_ns, Kind, Origin, Publisher};
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::task::JoinHandle;
 
 use crate::chrony::{ChronySink, CHRONY_SOCK};
 use crate::engine::{write_sidecar, Engine};
@@ -74,16 +75,37 @@ struct Outputs {
     publisher: Publisher,
     clock_json: PathBuf,
     sensors_json: PathBuf,
+    /// The sidecar write in flight on the blocking pool (fsync can stall).
+    writer: Option<JoinHandle<std::io::Result<()>>>,
     /// Whether the last sidecar write failed (logged once per transition).
     write_failing: bool,
 }
 
 impl Outputs {
-    fn publish(&mut self, engine: &Engine, now: u64) {
+    async fn publish(&mut self, engine: &Engine, now: u64) {
         self.publisher
             .proto(Kind::Clock, CLOCK_SRC, &engine.clock.sample(now));
-        let result = write_sidecar(&self.clock_json, &engine.clock.report(now))
-            .and_then(|()| write_sidecar(&self.sensors_json, &engine.streams.report(now)));
+        if let Some(writer) = self.writer.take() {
+            if !writer.is_finished() {
+                // The previous write is still syncing; skip this second.
+                tracing::debug!("clock sidecar write still in flight");
+                self.writer = Some(writer);
+                return;
+            }
+            let result = writer
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+            self.note(result);
+        }
+        let (clock, sensors) = (engine.clock.report(now), engine.streams.report(now));
+        let (clock_json, sensors_json) = (self.clock_json.clone(), self.sensors_json.clone());
+        self.writer = Some(tokio::task::spawn_blocking(move || {
+            write_sidecar(&clock_json, &clock)?;
+            write_sidecar(&sensors_json, &sensors)
+        }));
+    }
+
+    fn note(&mut self, result: std::io::Result<()>) {
         match result {
             Err(e) if !self.write_failing => {
                 tracing::warn!(error = %e, "clock sidecar write failed");
@@ -108,6 +130,7 @@ async fn run_async() -> anyhow::Result<()> {
         publisher: Publisher::spawn(socket.clone(), Origin::Host),
         clock_json: run_path("clock"),
         sensors_json: run_path("sensors"),
+        writer: None,
         write_failing: false,
     };
     let mut sigterm = signal(SignalKind::terminate())?;
@@ -125,7 +148,7 @@ async fn run_async() -> anyhow::Result<()> {
             Some(frame) = tap.recv() => engine.ingest(&frame, mono_ns()),
             _ = tick.tick() => {
                 let now = mono_ns();
-                out.publish(&engine, now);
+                out.publish(&engine, now).await;
                 let timebase = engine.clock.timebase(now);
                 if last_timebase != Some(timebase) {
                     tracing::info!(?timebase, "clock_timebase");

@@ -45,7 +45,8 @@ fn a_noisy_fit_is_not_locked() {
         } else {
             -(8 * MS as i64)
         };
-        assert!(!c.on_sync(&obs(SyncSource::Fc, h, h as i64 + jitter)));
+        let got = c.on_sync(&obs(SyncSource::Fc, h, h as i64 + jitter));
+        assert_eq!(got, SyncOutcome::Accepted, "pair {i}");
     }
     let sigma = c.report(T0 + S).sources[0].sigma_ns;
     assert!(sigma > LOCK_MAX_SIGMA_NS, "sigma {sigma}");
@@ -53,24 +54,72 @@ fn a_noisy_fit_is_not_locked() {
 }
 
 #[test]
-fn a_jump_resets_the_fit() {
+fn one_wild_pair_is_dropped_and_the_lock_holds() {
     let mut c = ClockState::new();
     feed(&mut c, SyncSource::Fc, 10, T0, -37 * MS as i64);
     assert!(c.locked(SyncSource::Fc, T0));
-    // Within 50 ms of the prediction: kept.
+    // 40 ms off the prediction: beyond max(5 sigma, 1 ms), inside the reset
+    // threshold. Dropped, counted, and the fit is untouched.
     let h = T0 + 100 * MS;
-    assert!(!c.on_sync(&obs(
-        SyncSource::Fc,
-        h,
-        h as i64 - 37 * MS as i64 + 40 * MS as i64
-    )));
-    // The source rebooted: its clock restarted near zero.
+    let wild = h as i64 - 37 * MS as i64 + 40 * MS as i64;
+    assert_eq!(
+        c.on_sync(&obs(SyncSource::Fc, h, wild)),
+        SyncOutcome::Outlier
+    );
+    assert_eq!(c.outliers(SyncSource::Fc), 1);
+    assert!(c.locked(SyncSource::Fc, h));
+    let r = c.report(h);
+    assert_eq!(r.sources[0].offset_ns, -37 * MS as i64);
+    assert_eq!(r.sources[0].sigma_ns, 0);
+    assert_eq!(r.sources[0].last_update_ns, T0);
+    // A single pair past the reset threshold is dropped too.
     let h = T0 + 200 * MS;
-    assert!(c.on_sync(&obs(SyncSource::Fc, h, 1_000)));
+    assert_eq!(
+        c.on_sync(&obs(SyncSource::Fc, h, 1_000)),
+        SyncOutcome::Outlier
+    );
+    // A good pair clears the run.
+    let h = T0 + 300 * MS;
+    let good = h as i64 - 37 * MS as i64;
+    assert_eq!(
+        c.on_sync(&obs(SyncSource::Fc, h, good)),
+        SyncOutcome::Accepted
+    );
+    assert!(c.locked(SyncSource::Fc, h));
+}
+
+#[test]
+fn a_source_reboot_resets_the_fit_after_three_pairs() {
+    let mut c = ClockState::new();
+    feed(&mut c, SyncSource::Fc, 10, T0, -37 * MS as i64);
+    // The source rebooted: its clock restarted near zero.
+    for (k, want) in [
+        (1u64, SyncOutcome::Outlier),
+        (2, SyncOutcome::Outlier),
+        (3, SyncOutcome::Reset),
+    ] {
+        let h = T0 + k * 100 * MS;
+        assert_eq!(
+            c.on_sync(&obs(SyncSource::Fc, h, (k * 100 * MS) as i64)),
+            want
+        );
+    }
+    let h = T0 + 300 * MS;
     assert!(!c.locked(SyncSource::Fc, h), "one pair after a reset");
     let r = c.report(h);
-    assert_eq!(r.sources[0].offset_ns, 1_000 - h as i64);
+    assert_eq!(r.sources[0].offset_ns, (300 * MS) as i64 - h as i64);
     assert_eq!(r.sources[0].last_update_ns, h);
+}
+
+#[test]
+fn a_fit_older_than_the_window_starts_over() {
+    let mut c = ClockState::new();
+    feed(&mut c, SyncSource::Hub, 6, T0, 12_000);
+    // Back after two minutes with a different offset: no prediction applies.
+    let h = T0 + 120 * S;
+    let got = c.on_sync(&obs(SyncSource::Hub, h, h as i64 + 900 * MS as i64));
+    assert_eq!(got, SyncOutcome::Accepted);
+    assert_eq!(c.report(h).sources[1].offset_ns, 900 * MS as i64);
 }
 
 #[test]
@@ -115,13 +164,13 @@ fn gnss_gives_utc_and_the_session_time() {
     let r = c.report(now);
     assert_eq!(r.timebase, Timebase::Gnss);
     assert!(r.locked);
-    // The UTC offset is ~1.8e18 ns, so the f64 fit carries ~256 ns of rounding.
-    assert!((0..1_000).contains(&r.sigma_ns), "sigma {}", r.sigma_ns);
+    // The fit is centred on an integer offset, so ~1.8e18 ns keeps ns precision.
+    assert_eq!(r.sigma_ns, 0);
     let want = now as i64 + utc_offset;
-    assert!(r.utc_ns.unwrap().abs_diff(want) < 1_000);
+    assert!(r.utc_ns.unwrap().abs_diff(want) <= 2);
     let s = c.sample(now);
-    assert!((s.t_ns as i64).abs_diff(want) < 1_000);
-    assert!(s.utc_ns.unwrap().abs_diff(want) < 1_000);
+    assert!((s.t_ns as i64).abs_diff(want) <= 2);
+    assert!(s.utc_ns.unwrap().abs_diff(want) <= 2);
 }
 
 #[test]

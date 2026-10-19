@@ -8,7 +8,7 @@ use ados_sensorbus::{BusFrame, Kind, SyncObs, SyncSource};
 use serde::Serialize;
 
 use crate::chrony::{self, ChronySink};
-use crate::clock::ClockState;
+use crate::clock::{ClockState, SyncOutcome};
 use crate::streams::StreamTable;
 
 /// Everything the clock tracks.
@@ -43,8 +43,11 @@ impl Engine {
     }
 
     fn on_sync(&mut self, obs: &SyncObs, rx_ns: u64) {
-        self.clock.on_sync(obs);
-        if obs.source != SyncSource::GnssPps || !self.clock.locked(SyncSource::GnssPps, rx_ns) {
+        let outcome = self.clock.on_sync(obs);
+        if outcome == SyncOutcome::Outlier
+            || obs.source != SyncSource::GnssPps
+            || !self.clock.locked(SyncSource::GnssPps, rx_ns)
+        {
             return;
         }
         let Some(sink) = self.chrony.as_mut() else {

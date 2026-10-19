@@ -17,8 +17,28 @@ pub const LOCK_MAX_AGE_NS: u64 = 3_000_000_000;
 /// The fit residual must be below this for the source to be locked.
 pub const LOCK_MAX_SIGMA_NS: i64 = 5_000_000;
 /// A pair this far from the fit's prediction means the source restarted its
-/// clock; the fit starts over from that pair.
+/// clock; after [`RESET_AFTER`] such pairs in a row the fit starts over.
 pub const RESET_DISAGREE_NS: u64 = 50_000_000;
+/// Consecutive large disagreements that restart a fit. A single wild pair
+/// (a delayed packet, a glitch) is dropped instead.
+pub const RESET_AFTER: u32 = 3;
+/// The smallest disagreement treated as an outlier, whatever the sigma.
+pub const OUTLIER_FLOOR_NS: u64 = 1_000_000;
+/// Outlier gate in sigmas.
+pub const OUTLIER_SIGMAS: u64 = 5;
+/// Pairs older than this no longer predict anything (the fit window).
+const FIT_WINDOW_NS: u64 = 60_000_000_000;
+
+/// What [`ClockState::on_sync`] did with a pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncOutcome {
+    /// Fed to the fit.
+    Accepted,
+    /// Disagreed with the prediction; dropped and counted.
+    Outlier,
+    /// Ended a run of large disagreements: the fit restarted from it.
+    Reset,
+}
 
 /// The timebase a capture session records against (`/api/v1/clock`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -46,8 +66,12 @@ pub fn choose_timebase(sim: bool, gnss: bool, hub: bool) -> Timebase {
 #[derive(Debug, Clone)]
 struct Source {
     fit: ClockFit,
-    /// Host ns of the newest pair, 0 when none arrived yet.
+    /// Host ns of the newest accepted pair, 0 when none arrived yet.
     last_update_ns: u64,
+    /// Consecutive pairs beyond [`RESET_DISAGREE_NS`].
+    large_run: u32,
+    /// Pairs dropped as outliers.
+    outliers: u64,
 }
 
 /// One `sources[]` row of the clock document.
@@ -101,32 +125,69 @@ impl ClockState {
         let fresh = || Source {
             fit: ClockFit::sixty_seconds(),
             last_update_ns: 0,
+            large_run: 0,
+            outliers: 0,
         };
         ClockState {
             sources: [fresh(), fresh(), fresh(), fresh()],
         }
     }
 
-    /// Feed one pair. Returns true when the pair disagreed with the fit by
-    /// more than [`RESET_DISAGREE_NS`] and the fit was restarted from it.
-    pub fn on_sync(&mut self, obs: &SyncObs) -> bool {
+    /// Feed one pair. A pair further from the fit's prediction than
+    /// `max(5 sigma, 1 ms)` is dropped as an outlier; [`RESET_AFTER`]
+    /// consecutive pairs beyond [`RESET_DISAGREE_NS`] mean the source
+    /// restarted its clock, and the fit starts over from the last of them.
+    pub fn on_sync(&mut self, obs: &SyncObs) -> SyncOutcome {
         let src = &mut self.sources[idx(obs.source)];
-        let mut reset = false;
+        // A fit whose newest pair is older than the window predicts nothing.
+        if obs.host_ns.saturating_sub(src.last_update_ns) > FIT_WINDOW_NS {
+            src.fit.reset();
+            src.large_run = 0;
+        }
+        let mut outcome = SyncOutcome::Accepted;
         if let Some(predicted) = src.fit.to_source(obs.host_ns) {
             let miss = predicted.abs_diff(obs.source_ns);
+            let sigma = src.fit.sigma_ns();
+            let gate = (sigma.max(0) as u64 * OUTLIER_SIGMAS).max(OUTLIER_FLOOR_NS);
             if miss > RESET_DISAGREE_NS {
-                tracing::warn!(
-                    source = obs.source.id(),
-                    miss_ns = miss,
-                    "clock_source_reset"
-                );
-                src.fit.reset();
-                reset = true;
+                src.large_run += 1;
+                if src.large_run >= RESET_AFTER {
+                    tracing::warn!(
+                        source = obs.source.id(),
+                        miss_ns = miss,
+                        "clock_source_reset"
+                    );
+                    src.fit.reset();
+                    src.large_run = 0;
+                    outcome = SyncOutcome::Reset;
+                } else {
+                    outcome = SyncOutcome::Outlier;
+                }
+            } else {
+                src.large_run = 0;
+                // Gate only once the residual is measured (three pairs).
+                if sigma >= 0 && miss > gate {
+                    outcome = SyncOutcome::Outlier;
+                }
             }
+        }
+        if outcome == SyncOutcome::Outlier {
+            src.outliers += 1;
+            tracing::debug!(
+                source = obs.source.id(),
+                outliers = src.outliers,
+                "clock_pair_outlier"
+            );
+            return outcome;
         }
         src.fit.push(obs.host_ns, obs.source_ns);
         src.last_update_ns = obs.host_ns;
-        reset
+        outcome
+    }
+
+    /// Pairs from `source` dropped as outliers so far.
+    pub fn outliers(&self, source: SyncSource) -> u64 {
+        self.sources[idx(source)].outliers
     }
 
     /// Whether `source` is locked at host time `now_ns`.
@@ -188,7 +249,7 @@ impl ClockState {
                     id: s.id(),
                     kind: s.kind(),
                     locked: self.locked(s, now_ns),
-                    offset_ns: src.fit.offset_ns(now_ns).map_or(0, |o| o.round() as i64),
+                    offset_ns: src.fit.offset_i64(now_ns).unwrap_or(0),
                     skew_ppm: src.fit.skew_ppm(),
                     sigma_ns: src.fit.sigma_ns(),
                     last_update_ns: src.last_update_ns,
