@@ -29,8 +29,9 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::errors::ManifestError;
 
-/// The node profiles a plugin half may target, in their canonical wire form.
-pub const NODE_PROFILES: &[&str] = &["drone", "ground-station", "workstation", "compute"];
+/// The node profiles a plugin half may target, in their canonical wire form
+/// (the `contracts.toml` `[profiles]` list with the hyphen spelling).
+pub const NODE_PROFILES: &[&str] = &["drone", "ground-station", "workstation", "compute", "visor"];
 
 /// Prefix that marks an entrypoint or a service command's first word as a
 /// reference into the manifest's per-architecture `binaries` table.
@@ -97,3 +98,18 @@ pub use validate::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod profile_tests {
+    use super::{canonical_profile, NODE_PROFILES};
+
+    #[test]
+    fn node_profiles_match_the_canonical_list() {
+        let want: Vec<String> = ados_protocol::contracts::PROFILES
+            .iter()
+            .map(|p| p.replace('_', "-"))
+            .collect();
+        assert_eq!(NODE_PROFILES, want.as_slice());
+        assert_eq!(canonical_profile("visor"), Some("visor"));
+    }
+}

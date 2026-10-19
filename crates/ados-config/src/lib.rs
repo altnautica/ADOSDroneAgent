@@ -20,7 +20,7 @@
 //! config, not just the log.
 //!
 //! [`node_profile`] and [`resolve_profile`] resolve the node profile
-//! (`drone` / `ground-station` / `workstation` / `compute`) from `agent.profile`
+//! (`drone` / `ground-station` / `workstation` / `compute` / `visor`) from `agent.profile`
 //! and `profile.conf`, the one resolution every service shares.
 
 pub mod log_store;

@@ -47,6 +47,16 @@
 # `sidecar_registry_scan` test enforces it.
 
 # ===========================================================================
+# PROFILES — the canonical agent profile list
+# ===========================================================================
+# Emitted as `PROFILES` into contracts.rs, _contracts_generated.py and the
+# Mission Control contracts.generated.ts. Every profile union in Rust, Python
+# and TypeScript derives from or is asserted against this list
+# (tests/test_profile_parity.py). `auto` is a config input, not a profile.
+[profiles]
+values = ["drone", "ground_station", "workstation", "compute", "visor"]
+
+# ===========================================================================
 # CONTRACTS — versioned inter-process wire contracts
 # ===========================================================================
 

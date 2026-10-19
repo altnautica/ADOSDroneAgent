@@ -69,7 +69,9 @@ export function feedCameras(streams: StatusStream[] | undefined, roster: RosterC
 export function FeedScreen() {
   const profile = useProfile();
   const isDrone = profile === "drone";
-  const roster = useRoster(isDrone);
+  // A visor carries its own cameras like a drone, so it lists the same roster.
+  const ownsCameras = isDrone || profile === "visor";
+  const roster = useRoster(ownsCameras);
   const streams = useStatusStore((s) => s.status?.video?.streams);
   const cameras = useMemo(() => feedCameras(streams, roster), [streams, roster]);
   const activeCameraId = useFeedStore((s) => s.activeCameraId);
@@ -83,11 +85,12 @@ export function FeedScreen() {
 
   // A companion node runs a local vision engine; a ground station receives the
   // linked drone's detections over the relay instead. Both feed one overlay.
-  // A drone opens its detection socket only when it reports a working vision
-  // path: with none, the route accepts and closes, and dialling it is pure churn.
+  // A camera node (drone or visor) opens its detection socket only when it
+  // reports a working vision path: with none, the route accepts and closes,
+  // and dialling it is pure churn.
   const perceptionTier = useStatusStore((s) => s.status?.perception_tier ?? null);
-  const droneVision = isDrone && perceptionTier !== null && perceptionTier !== "none";
-  const localVisionCapable = droneVision || profile === "workstation" || profile === "compute";
+  const cameraVision = ownsCameras && perceptionTier !== null && perceptionTier !== "none";
+  const localVisionCapable = cameraVision || profile === "workstation" || profile === "compute";
   const visionCapable = localVisionCapable || profile === "ground_station";
   useVisionDetections(localVisionCapable);
   useGroundDetectionPoll();

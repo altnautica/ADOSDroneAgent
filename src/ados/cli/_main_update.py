@@ -186,7 +186,7 @@ def _run_upgrade(profile: str | None = None, *, force_armed: bool = False) -> No
 @click.option(
     "--profile",
     "profile_override",
-    type=click.Choice(["drone", "ground-station", "workstation", "compute"]),
+    type=click.Choice(["drone", "ground-station", "workstation", "compute", "visor"]),
     default=None,
     help="Override the profile to install. Defaults to whatever this box already is.",
 )

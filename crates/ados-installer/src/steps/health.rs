@@ -21,9 +21,9 @@
 //!      on disk by health time; this closes that gap so a vanished/zero-length
 //!      Hard binary is caught here, not at first supervisor exec. The set is
 //!      read from the same per-profile catalog the fetch step uses, so the
-//!      MAVLink router (the sole C2 path, Hard on a drone and a ground station)
-//!      is required exactly where it is fetched and never on a workstation or
-//!      compute node.
+//!      MAVLink router (the sole C2 path, Hard on a drone, a ground station and
+//!      a visor) is required exactly where it is fetched and never on a
+//!      workstation or compute node.
 //!   6. **NEW** — the native WFB binary the profile's units exec by DEFAULT
 //!      (`ados-radio` on a drone, `ados-groundlink` on a ground station) is
 //!      present + executable. The WFB units run the native service on a clean
@@ -190,7 +190,7 @@ fn is_executable(path: &Path) -> bool {
 /// or not executable) under `/opt/ados/bin` for the profile. The set comes from
 /// the same per-profile catalog the fetch step downloads from, so health never
 /// asserts a binary the profile does not ship (the MAVLink router, the sole C2
-/// path on a drone and a ground station, is Hard there and absent on a
+/// path on a drone, a ground station and a visor, is Hard there and absent on a
 /// workstation or compute node). Pure given a `present` predicate, so a unit
 /// test can exercise the gap-detection without touching the filesystem.
 pub fn missing_hard_binaries<F>(profile: &str, present: F) -> Vec<&'static str>

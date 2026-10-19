@@ -47,7 +47,7 @@ const fn with_short(mut f: FlagSpec, short: &'static str) -> FlagSpec {
 pub const FLAGS: &[FlagSpec] = &[
     valued(
         "--profile",
-        "<drone|ground_station|workstation|compute>",
+        "<drone|ground_station|workstation|compute|visor>",
         "Agent profile to install",
     ),
     valued("--name", "<hostname>", "mDNS hostname to set"),

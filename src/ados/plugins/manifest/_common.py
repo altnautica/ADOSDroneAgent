@@ -22,7 +22,7 @@ SEMVER_PATTERN = re.compile(
     r"(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$"
 )
 
-Profile = Literal["drone", "ground-station", "workstation", "compute"]
+Profile = Literal["drone", "ground-station", "workstation", "compute", "visor"]
 
 PROFILES: tuple[str, ...] = get_args(Profile)
 """Node profiles a plugin can target. Mirrors ``ados_config::node_profile()``."""

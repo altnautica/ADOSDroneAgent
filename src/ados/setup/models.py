@@ -137,11 +137,12 @@ class ProfileSuggestion(BaseModel):
     dashboard can show "auto" vs "needs review" affordances cleanly.
     """
 
-    detected: Literal["drone", "ground_station"] = "drone"
+    detected: Literal["drone", "ground_station", "visor"] = "drone"
     source: Literal["detected", "tiebreaker", "override", "default"] = "detected"
     ground_role_hint: Literal["direct", "relay", "receiver"] = "direct"
     ground_score: int = 0
     air_score: int = 0
+    visor_score: int = 0
     signals: dict[str, bool] = Field(default_factory=dict)
     confirmed: bool = False
     detected_at: str | None = None

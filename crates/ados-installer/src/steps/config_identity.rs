@@ -476,13 +476,11 @@ fn provision_overlays(ctx: &Ctx, source: Option<&Path>) {
     // ── Display ──
     let display_script = source.join("scripts/drivers/install-display-overlay.sh");
     if display_script.is_file() {
-        let display_arg = ctx.args.display.clone().unwrap_or_else(|| {
-            if ctx.profile == "ground_station" {
-                "auto".to_string()
-            } else {
-                "none".to_string()
-            }
-        });
+        let display_arg = ctx
+            .args
+            .display
+            .clone()
+            .unwrap_or_else(|| default_display_arg(&ctx.profile).to_string());
         let script_s = display_script.to_string_lossy();
         tracing::info!(display = %display_arg, "running display overlay installer");
         if !exec::run_ok(&script_s, &["--display", &display_arg]) {
@@ -507,6 +505,18 @@ fn provision_overlays(ctx: &Ctx, source: Option<&Path>) {
         }
     } else {
         tracing::warn!("camera overlay installer not found; skipping camera provisioning");
+    }
+}
+
+/// The `--display` value a profile resolves to when the operator gave none: a
+/// ground station and a visor carry a panel as their local UI, so the panel is
+/// auto-detected; every other profile gets `none`. Shared with the residue
+/// step so the two never disagree.
+pub(crate) fn default_display_arg(profile: &str) -> &'static str {
+    if matches!(profile, "ground_station" | "visor") {
+        "auto"
+    } else {
+        "none"
     }
 }
 
@@ -821,7 +831,7 @@ mod tests {
 
     #[test]
     fn no_dead_mqtt_keys_in_template() {
-        for profile in ["drone", "ground_station"] {
+        for profile in ["drone", "ground_station", "visor"] {
             let cfg = default_config_yaml("abcd1234", "n", profile, "", "local", None, "");
             assert!(!cfg.contains("mqtt_username"), "{profile}");
             assert!(!cfg.contains("mqtt_password"), "{profile}");
@@ -835,6 +845,13 @@ mod tests {
     fn drone_template_has_no_injector_arbitration() {
         let drone = default_config_yaml("abcd1234", "n", "drone", "", "local", None, "");
         assert!(!drone.contains("injector_arbitration"));
+        let visor = default_config_yaml("abcd1234", "n", "visor", "", "local", None, "");
+        assert!(!visor.contains("injector_arbitration"));
+        assert!(visor.contains("profile: \"visor\""));
+        // A panel profile auto-detects its display; everything else gets none.
+        assert_eq!(default_display_arg("visor"), "auto");
+        assert_eq!(default_display_arg("ground_station"), "auto");
+        assert_eq!(default_display_arg("drone"), "none");
         let gs = default_config_yaml("abcd1234", "n", "ground_station", "", "local", None, "");
         let parsed: serde_norway::Value = serde_norway::from_str(&gs).unwrap();
         assert_eq!(

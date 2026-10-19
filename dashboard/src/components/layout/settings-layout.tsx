@@ -126,9 +126,9 @@ const SECTIONS: SectionLink[] = [
     icon: Route,
     blurbKey: "layout.settings.mavlinkBlurb",
     group: "Link & network",
-    // MAVLink routing is the FC-connected drone's surface; a ground station has
-    // no MAVLink router to configure.
-    allow: ["drone"],
+    // MAVLink routing is the FC-connected surface (drone, or a visor's sensor
+    // hub); a ground station has no MAVLink router to configure.
+    allow: ["drone", "visor"],
   },
   // VIDEO & VISION
   {
@@ -137,8 +137,8 @@ const SECTIONS: SectionLink[] = [
     icon: Eye,
     blurbKey: "layout.settings.visionBlurb",
     group: "Video & vision",
-    // The on-board vision engine runs on the drone; a ground station has none.
-    allow: ["drone"],
+    // The on-board vision engine runs on a camera node; a ground station has none.
+    allow: ["drone", "visor"],
   },
   {
     to: "/settings/camera",
@@ -146,8 +146,8 @@ const SECTIONS: SectionLink[] = [
     icon: Monitor,
     blurbKey: "layout.settings.cameraBlurb",
     group: "Video & vision",
-    // Only the drone owns an encode pipeline for its onboard camera.
-    allow: ["drone"],
+    // Only a camera node (drone or visor) owns an encode pipeline.
+    allow: ["drone", "visor"],
   },
   {
     to: "/settings/swarm",
@@ -183,8 +183,8 @@ const SECTIONS: SectionLink[] = [
     icon: BatteryMedium,
     blurbKey: "layout.settings.batteryBlurb",
     group: "System & safety",
-    // Battery telemetry comes from the flight controller the drone carries.
-    allow: ["drone"],
+    // Battery telemetry comes from the flight controller or sensor hub.
+    allow: ["drone", "visor"],
   },
   {
     to: "/settings/self-heal",

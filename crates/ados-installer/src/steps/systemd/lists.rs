@@ -182,9 +182,59 @@ mod tests {
         );
     }
 
+    /// A visor runs the access point, the panel and the buttons, keeps its
+    /// camera pipeline, and tears down every radio, receive and kiosk unit.
+    #[test]
+    fn visor_lists() {
+        assert_eq!(
+            profile_enable_units("visor"),
+            [
+                "ados-oled.service",
+                "ados-oled-i2c.service",
+                "ados-hostapd.service",
+                "ados-dnsmasq-gs.service",
+                "ados-input.service",
+            ]
+        );
+        assert_eq!(
+            sorted(other_profile_units("visor")),
+            sorted(vec![
+                "ados-wfb.service",
+                "ados-vision-hailo.service",
+                "ados-wfb-rx.service",
+                "ados-mesh-pairing.service",
+                "ados-mediamtx-gs.service",
+                "ados-setup-captive.service",
+                "ados-kiosk.service",
+                "ados-pic.service",
+                "ados-uplink-router.service",
+                "ados-batman.service",
+            ])
+        );
+        assert_eq!(
+            start_units("visor"),
+            [
+                "ados-control.service",
+                "ados-plugin-host.service",
+                "ados-oled.service",
+                "ados-hostapd.service",
+                "ados-dnsmasq-gs.service",
+                "ados-input.service",
+            ]
+        );
+        assert_eq!(
+            health_units("visor"),
+            [
+                "ados-supervisor.service",
+                "ados-hostapd.service",
+                "ados-dnsmasq-gs.service",
+            ]
+        );
+    }
+
     #[test]
     fn retired_units_are_never_enabled_started_or_expected() {
-        for profile in ["drone", "ground_station", "workstation", "compute"] {
+        for profile in ["drone", "ground_station", "workstation", "compute", "visor"] {
             for unit in RETIRED_UNITS {
                 assert!(!universal_units().contains(unit), "{unit}");
                 assert!(!profile_enable_units(profile).contains(unit), "{unit}");
@@ -198,7 +248,7 @@ mod tests {
     fn every_started_or_expected_unit_is_enabled() {
         // A unit started or health-checked but not enabled would not come
         // back after a reboot.
-        for profile in ["drone", "ground_station", "workstation", "compute"] {
+        for profile in ["drone", "ground_station", "workstation", "compute", "visor"] {
             let mut enabled = universal_units();
             enabled.extend(profile_enable_units(profile));
             for unit in start_units(profile).iter().chain(&health_units(profile)) {

@@ -33,7 +33,7 @@ class CloudChoiceRequest(BaseModel):
 
 
 class ProfileChoiceRequest(BaseModel):
-    profile: Literal["drone", "ground_station"]
+    profile: Literal["drone", "ground_station", "visor"]
     ground_role: Literal["direct", "relay", "receiver"] | None = Field(default=None)
     auto_restart: bool = Field(
         default=False,

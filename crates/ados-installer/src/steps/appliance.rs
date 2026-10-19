@@ -484,6 +484,8 @@ mod tests {
         assert!(!should_stand_down("drone", false));
         assert!(!should_stand_down("workstation", false));
         assert!(!should_stand_down("compute", false));
+        // A visor has no HDMI kiosk; its panel is the SPI display writer.
+        assert!(!should_stand_down("visor", false));
         // The hyphenated CLI spelling is normalized to the underscored profile
         // before it reaches a step; an un-normalized value must not match.
         assert!(!should_stand_down("ground-station", false));

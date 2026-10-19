@@ -101,8 +101,10 @@ def _setup_steps(
     ``hardware_check`` step renders a per-component readout for the
     chosen profile.
     """
+    # Drone and visor both carry a flight controller / sensor hub over MAVLink.
     is_drone = profile != "ground_station"
     is_ground = profile == "ground_station"
+    has_local_display = profile in ("ground_station", "visor")
     network_complete = bool(network.local_ips) or bool(network.hotspot_enabled)
     # `cloud_paired` comes from the pairing manager (the one owner of the
     # pairing record), not from the cloud-choice posture.
@@ -110,6 +112,7 @@ def _setup_steps(
     profile_confirmed = profile_suggestion.confirmed and profile in (
         "drone",
         "ground_station",
+        "visor",
     )
     hw_state, hw_detail = derive_step_state(hardware_check)
 
@@ -306,12 +309,13 @@ def _setup_steps(
                 href="/ground.html",
             )
         )
+    if has_local_display:
         # Local-display step. Surfaces an SPI LCD attached over the
-        # 40-pin expansion header (Waveshare 3.5" RPi LCD on Cubie A7Z
-        # or Rock 5C ground-station builds). State is derived from the
-        # same hardware-check item that the diagnostic table uses, so
-        # the two surfaces stay in sync. Hidden on drone profile
-        # because no LCD path exists on air-side rigs in this revision.
+        # 40-pin expansion header (ground-station builds and the handheld
+        # visor). State is derived from the same hardware-check item that
+        # the diagnostic table uses, so the two surfaces stay in sync.
+        # Hidden on drone profile because no LCD path exists on air-side
+        # rigs in this revision.
         display_state, display_detail = _resolve_display_step(hardware_check)
         steps.append(
             SetupStep(

@@ -3,7 +3,7 @@
 
 import type { GroundRole, Profile } from "./types";
 
-export type AllowedProfile = "drone" | "ground_station";
+export type AllowedProfile = "drone" | "ground_station" | "workstation" | "compute" | "visor";
 
 /** The wire role (`/api/pairing/info.role`) in the dashboard vocabulary. A
  *  missing or unrecognised role reads `direct`, the ground-station default. */
@@ -16,8 +16,8 @@ export type GateDecision = "pass" | "mismatch";
 
 /** Whether a page restricted to `allow` (and optionally to ground `roles`)
  *  renders on this node. Only `auto` (the agent has not answered yet) passes
- *  through ungated; `unknown` is a known non-flight profile (workstation,
- *  compute) and is a mismatch, since those nodes do not serve the page. */
+ *  through ungated; `unknown` (a profile this dashboard does not know) is a
+ *  mismatch. */
 export function gateDecision(
   profile: Profile,
   role: GroundRole,

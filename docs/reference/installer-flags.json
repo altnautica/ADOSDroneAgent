@@ -5,7 +5,7 @@
       "name": "--profile",
       "short": null,
       "takes_value": true,
-      "value_name": "<drone|ground_station|workstation|compute>"
+      "value_name": "<drone|ground_station|workstation|compute|visor>"
     },
     {
       "help": "mDNS hostname to set",

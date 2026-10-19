@@ -2,11 +2,11 @@
 //! other I2C peripheral) is reachable at `/dev/i2c-1` after the next reboot.
 //!
 //! A fresh Raspberry Pi OS flash ships with I2C OFF (no `dtparam=i2c_arm=on` in
-//! the boot config, no `i2c-dev` module). The ground-station I2C OLED service
-//! gates on `/dev/i2c-1`, so without this step the OLED would silently never
-//! appear on a fresh install (no manual `raspi-config` step).
+//! the boot config, no `i2c-dev` module). The I2C OLED service gates on
+//! `/dev/i2c-1`, so without this step the OLED would silently never appear on
+//! a fresh install (no manual `raspi-config` step).
 //!
-//! What it does (ground-station profile, Pi only):
+//! What it does (ground-station and visor profiles, Pi only):
 //!   * ensures an active `dtparam=i2c_arm=on` line in the Pi boot config
 //!     (uncomment a commented one, else append) — through
 //!     [`crate::steps::boot_config`], whose snapshot is KEEP-FIRST, so this
@@ -111,8 +111,7 @@ impl Step for I2cEnable {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
-        // Scoped to the ground station: the I2C status OLED is a GS peripheral.
-        if ctx.profile != "ground_station" {
+        if !profile_uses_i2c(&ctx.profile) {
             return StepOutcome::Skipped;
         }
         // A fresh `dtparam` needs a reboot before /dev/i2c-1 exists, and
@@ -131,9 +130,24 @@ impl Step for I2cEnable {
     }
 }
 
+/// Whether a profile ships the I2C status OLED (and, on a visor, the I2C power
+/// monitor) and so needs the bus: a ground station and a visor. Pure.
+fn profile_uses_i2c(profile: &str) -> bool {
+    matches!(profile, "ground_station" | "visor")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bus_is_enabled_only_on_panel_profiles() {
+        assert!(profile_uses_i2c("ground_station"));
+        assert!(profile_uses_i2c("visor"));
+        for profile in ["drone", "workstation", "compute"] {
+            assert!(!profile_uses_i2c(profile), "{profile}");
+        }
+    }
 
     #[test]
     fn appends_when_absent() {

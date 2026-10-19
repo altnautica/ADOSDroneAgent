@@ -18,7 +18,7 @@ pub struct InstallResult {
     pub status: String,
     /// Installed agent version, or `unknown`.
     pub version: String,
-    /// `drone` | `ground_station`.
+    /// `drone` | `ground_station` | `workstation` | `compute` | `visor`.
     pub profile: String,
     /// Board id (override sentinel, device-tree model, or `unknown`).
     pub board: String,

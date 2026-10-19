@@ -103,7 +103,7 @@ mod tests {
         // ground station that never starts it cannot pair anything.
         assert!(gs.contains(&"ados-mesh-pairing.service"));
         // The front and plugin host come back on every profile.
-        for profile in ["drone", "ground_station", "workstation", "compute"] {
+        for profile in ["drone", "ground_station", "workstation", "compute", "visor"] {
             let set = crate::steps::systemd::start_units(profile);
             assert!(set.contains(&"ados-control.service"), "{profile}");
             assert!(set.contains(&"ados-plugin-host.service"), "{profile}");

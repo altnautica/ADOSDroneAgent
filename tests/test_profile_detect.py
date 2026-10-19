@@ -19,12 +19,13 @@ import pytest
 from ados.bootstrap import _profile_detect_probes, _profile_detect_uplink, profile_detect
 
 
-def _stub_probes(monkeypatch, **points: tuple[int, int, bool]) -> None:
+def _stub_probes(monkeypatch, **points: tuple) -> None:
     """Replace each named probe with a callable returning the given tuple.
 
     Any probe not listed in ``points`` reports zero contribution.
+    ``probe_sensor_hub`` returns ``(visor_points, detected)``.
     """
-    defaults: dict[str, tuple[int, int, bool]] = {
+    defaults: dict[str, tuple] = {
         "probe_i2c_oled": (0, 0, False),
         "probe_gpio_buttons": (0, 0, False),
         "probe_rtl8812": (0, 0, False),
@@ -32,6 +33,7 @@ def _stub_probes(monkeypatch, **points: tuple[int, int, bool]) -> None:
         "probe_gps_serial": (0, 0, False),
         "probe_fc_heartbeat": (0, 0, False),
         "probe_uplink_type": (0, 0, False),
+        "probe_sensor_hub": (0, False),
     }
     for name, value in points.items():
         defaults[name] = value
@@ -609,7 +611,7 @@ def test_gps_probe_skips_a_port_another_process_holds(tmp_path, monkeypatch) -> 
     fd_dir.mkdir(parents=True)
     (fd_dir / "7").symlink_to(uart_a)
 
-    assert profile_detect.probe_gps_serial() == (0, 3, True)
+    assert profile_detect.probe_gps_serial() == (0, 2, True)
     assert fake_serial.opened == [uart_b]
 
 

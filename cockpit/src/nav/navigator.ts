@@ -10,6 +10,8 @@
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 
+import type { AgentProfile } from "@/shared/use-profile";
+
 /** A screen-raised navigation intent — the web analog of the TFT `HitAction`.
  *  `go-tab` switches the active tab, `open-detail` pushes a detail screen onto
  *  the stack, `back` pops it, and `custom` is a screen-defined key the owning
@@ -55,10 +57,10 @@ export interface ScreenSpec {
    *  false (the default), the screen renders in a framed content region with
    *  solid chrome. */
   fullBleed?: boolean;
-  /** When true, the tab only appears on a ground-station profile (the mesh /
-   *  uplink screens are receive-side concepts a drone does not have). Absent =
-   *  shown on every profile. */
-  groundStationOnly?: boolean;
+  /** The profiles the tab appears on (the mesh / uplink screens are
+   *  receive-side concepts only a ground station has). Absent = shown on every
+   *  profile. */
+  profiles?: AgentProfile[];
   render: (ctx: ScreenContext) => ReactNode;
 }
 

@@ -1,6 +1,6 @@
 //! The install-time injector-arbitration policy for `config.yaml`.
 //!
-//! A drone has a single MAVLink injector, so `mavlink.injector_arbitration:
+//! A drone or a visor has a single MAVLink injector, so `mavlink.injector_arbitration:
 //! true` there is a leftover of an older template and is removed. A ground
 //! station arbitrates between its injectors, so it gains the key when the
 //! config does not set it at all; an explicit value is the operator's and is
@@ -73,7 +73,9 @@ pub fn apply_to_body(body: &str, profile: &str) -> Option<String> {
 
     let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     match profile {
-        "drone" => {
+        // A single-injector node (a drone, or a visor whose only peer is the
+        // GCS) drops a `true` left by an earlier ground-station install.
+        "drone" | "visor" => {
             let i = key_line?;
             if scalar_after_key(lines[i]) != "true" {
                 return None;
@@ -196,6 +198,9 @@ mod tests {
     #[test]
     fn other_profiles_and_flow_style_are_untouched() {
         assert_eq!(apply_to_body(DRONE, "workstation"), None);
+        // A visor is single-injector like a drone: a stale `true` is dropped.
+        let visor = apply_to_body(DRONE, "visor").expect("changed");
+        assert!(!visor.contains("injector_arbitration"));
         assert_eq!(
             apply_to_body("mavlink: {injector_arbitration: true}\n", "drone"),
             None

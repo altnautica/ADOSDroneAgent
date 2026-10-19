@@ -18,7 +18,7 @@ pub use flags::{find_flag, usage, FlagSpec, FLAGS};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Args {
     /// `--profile <v>` — `drone` | `ground_station` | `workstation` | `compute`
-    /// (the ground-station spelling is normalized; others pass through).
+    /// | `visor` (the ground-station spelling is normalized; others pass through).
     pub profile: Option<String>,
     /// `--name <v>` — mDNS hostname to set.
     pub name: Option<String>,
@@ -380,6 +380,13 @@ mod tests {
         assert_eq!(hyphen.profile.as_deref(), Some("ground_station"));
         let under = Args::parse(["--profile", "ground_station"]).unwrap();
         assert_eq!(under.profile.as_deref(), Some("ground_station"));
+    }
+
+    #[test]
+    fn visor_profile_parses() {
+        let a = Args::parse(["--profile", "visor"]).unwrap();
+        assert_eq!(a.profile.as_deref(), Some("visor"));
+        assert_eq!(normalize_profile("visor"), "visor");
     }
 
     #[test]

@@ -21,15 +21,20 @@ pub enum Profile {
     Drone,
     GroundStation,
     Workstation,
+    /// The lean headless engine worker: the workstation's compute rows only.
+    Compute,
+    /// The handheld capture rig.
+    Visor,
 }
 
 impl Profile {
-    /// Map the on-disk profile id to the catalog profile. `compute` (the reserved
-    /// lean headless node) shares the workstation catalog.
+    /// Map the on-disk profile id to the catalog profile.
     pub fn from_id(id: &str) -> Profile {
         match id {
             "ground_station" => Profile::GroundStation,
-            "workstation" | "compute" => Profile::Workstation,
+            "workstation" => Profile::Workstation,
+            "compute" => Profile::Compute,
+            "visor" => Profile::Visor,
             _ => Profile::Drone,
         }
     }
@@ -59,7 +64,7 @@ pub struct HwCategory {
 }
 
 use Availability::{Now, Planned};
-use Profile::{Drone, GroundStation, Workstation};
+use Profile::{Compute, Drone, GroundStation, Visor, Workstation};
 
 /// The full ADOS hardware catalog, profile-tagged. Order is the display order
 /// within a profile: detected-today rows first, roadmap rows after.
@@ -75,15 +80,15 @@ pub const CATALOG: &[HwCategory] = &[
     HwCategory {
         id: "camera",
         label: "Camera",
-        note: "Live video from the aircraft.",
-        profiles: &[Drone],
+        note: "Live video from the aircraft, or the capture cameras of a handheld rig.",
+        profiles: &[Drone, Visor],
         availability: Now,
     },
     HwCategory {
         id: "gps",
         label: "GPS receiver",
         note: "Position and navigation fixes.",
-        profiles: &[Drone],
+        profiles: &[Drone, Visor],
         availability: Now,
     },
     HwCategory {
@@ -113,7 +118,7 @@ pub const CATALOG: &[HwCategory] = &[
         id: "oled",
         label: "Status screen (OLED)",
         note: "A small I2C display for link and status.",
-        profiles: &[GroundStation],
+        profiles: &[GroundStation, Visor],
         availability: Now,
     },
     HwCategory {
@@ -135,14 +140,22 @@ pub const CATALOG: &[HwCategory] = &[
         id: "board",
         label: "This computer",
         note: "The machine that runs the app and the heavy work.",
-        profiles: &[Workstation],
+        profiles: &[Workstation, Compute],
         availability: Now,
     },
     HwCategory {
         id: "gpu",
         label: "Graphics (GPU)",
         note: "Accelerates 3D reconstruction and vision.",
-        profiles: &[Workstation],
+        profiles: &[Workstation, Compute],
+        availability: Now,
+    },
+    // ── visor ───────────────────────────────────────────────────────────────
+    HwCategory {
+        id: "sensor_hub",
+        label: "Sensor hub",
+        note: "The IMU, timing and camera-trigger board of a handheld capture rig.",
+        profiles: &[Visor],
         availability: Now,
     },
     // ── roadmap: sensors (drone) ────────────────────────────────────────────
@@ -171,7 +184,7 @@ pub const CATALOG: &[HwCategory] = &[
         id: "lidar",
         label: "LiDAR",
         note: "Dense distance scanning for mapping and avoidance.",
-        profiles: &[Drone],
+        profiles: &[Drone, Visor],
         availability: Planned,
     },
     HwCategory {
@@ -185,7 +198,7 @@ pub const CATALOG: &[HwCategory] = &[
         id: "rtk",
         label: "RTK GNSS",
         note: "Centimetre-accurate position.",
-        profiles: &[Drone],
+        profiles: &[Drone, Visor],
         availability: Planned,
     },
     // ── roadmap: extra radios (drone + ground station) ──────────────────────
@@ -208,14 +221,14 @@ pub const CATALOG: &[HwCategory] = &[
         id: "spi_lcd",
         label: "SPI LCD",
         note: "A larger attached touchscreen.",
-        profiles: &[GroundStation],
+        profiles: &[GroundStation, Visor],
         availability: Planned,
     },
     HwCategory {
         id: "buttons",
         label: "Physical buttons",
         note: "GPIO buttons for the handheld panel.",
-        profiles: &[GroundStation],
+        profiles: &[GroundStation, Visor],
         availability: Planned,
     },
     // ── roadmap: workstation ground link ────────────────────────────────────
@@ -260,6 +273,7 @@ pub fn detect(cat: &HwCategory, sys: &SysProbe) -> Detection {
         ),
         "camera" => opt(hw::pick_lowest_video(&sys.dev_names).map(|n| format!("/dev/{n}"))),
         "gps" => flag(hw::lsusb_has_gps(&sys.lsusb), "USB GNSS"),
+        "sensor_hub" => flag(hw::lsusb_has_sensor_hub(&sys.lsusb), "USB sensor hub"),
         "modem" => flag(hw::lsusb_has_modem(&sys.lsusb), "USB modem"),
         "radio" => flag(hw::lsusb_has_radio(&sys.lsusb), "USB adapter"),
         "mesh" => {
@@ -307,7 +321,13 @@ mod tests {
 
     #[test]
     fn every_profile_has_a_non_empty_catalog_and_no_fc_off_drone() {
-        for p in [Profile::Drone, Profile::GroundStation, Profile::Workstation] {
+        for p in [
+            Profile::Drone,
+            Profile::GroundStation,
+            Profile::Workstation,
+            Profile::Compute,
+            Profile::Visor,
+        ] {
             let list = catalog_for(p);
             assert!(!list.is_empty(), "empty catalog for {p:?}");
         }
@@ -329,6 +349,14 @@ mod tests {
         for want in ["fc", "radio", "camera", "gps"] {
             assert!(dr.contains(&want), "drone missing {want}");
         }
+        // A visor has cameras and a hub but no flight controller and no radio.
+        let vi: Vec<&str> = catalog_for(Profile::Visor).iter().map(|c| c.id).collect();
+        for want in ["camera", "sensor_hub", "gps", "lidar", "oled"] {
+            assert!(vi.contains(&want), "visor missing {want}");
+        }
+        assert!(!vi.contains(&"fc") && !vi.contains(&"radio"));
+        assert_eq!(Profile::from_id("compute"), Profile::Compute);
+        assert_eq!(Profile::from_id("visor"), Profile::Visor);
     }
 
     #[test]
@@ -366,7 +394,8 @@ mod tests {
     fn detect_classifies_from_the_snapshot() {
         let sys = SysProbe {
             lsusb: "Bus 001 Device 004: ID 0bda:8812 Realtek\n\
-                    Bus 001 Device 006: ID 1546:01a8 U-Blox"
+                    Bus 001 Device 006: ID 1546:01a8 U-Blox\n\
+                    Bus 001 Device 007: ID 1209:ad05 Generic"
                 .into(),
             dev_names: vec!["video0".into(), "ttyACM0".into(), "js0".into()],
             board_model: Some("Radxa Cubie A7Z".into()),
@@ -382,6 +411,7 @@ mod tests {
         assert!(matches!(by_id("camera"), Detection::Found(_)));
         assert!(matches!(by_id("radio"), Detection::Found(_)));
         assert!(matches!(by_id("gps"), Detection::Found(_)));
+        assert!(matches!(by_id("sensor_hub"), Detection::Found(_)));
         assert!(matches!(by_id("oled"), Detection::Found(_)));
         assert!(matches!(by_id("hdmi"), Detection::Found(_)));
         assert!(matches!(by_id("joystick"), Detection::Found(_)));

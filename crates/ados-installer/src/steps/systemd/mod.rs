@@ -181,10 +181,11 @@ impl Step for Systemd {
         for unit in profile_enable_units(&ctx.profile) {
             enable_if_present(unit);
         }
-        if ctx.profile == "ground_station" {
-            // The hardware-access group memberships are GS-only: they belong
-            // to the AP + button/joystick/OLED service set.
-            add_ground_station_group_memberships();
+        if matches!(ctx.profile.as_str(), "ground_station" | "visor") {
+            // The hardware-access group memberships belong to the AP +
+            // button/joystick/OLED service set a ground station and a visor
+            // share; so does the standalone hostapd/dnsmasq conflict.
+            add_panel_group_memberships();
             mask_conflicting_standalone_services();
         }
         // The retired static avahi record, on every profile: an upgraded

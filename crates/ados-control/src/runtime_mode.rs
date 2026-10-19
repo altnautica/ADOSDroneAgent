@@ -33,8 +33,8 @@ pub const RUNTIME_MODE_TTL: Duration = Duration::from_secs(10);
 /// Core services on every profile: native whenever the binary is present.
 const CORE_BINARIES_UNIVERSAL: &[&str] = &["ados-supervisor", "ados-cloud", "ados-mavlink-router"];
 
-/// Drone-only core: the air-side encode pipeline.
-const CORE_BINARIES_DRONE: &[&str] = &["ados-video"];
+/// Camera-node core (drone, visor): the encode pipeline.
+const CORE_BINARIES_CAMERA: &[&str] = &["ados-video"];
 
 /// A service whose branch is chosen by binary presence and, when `flag` is
 /// set, a sentinel file under the etc dir. `flag: None` is native-only (the
@@ -68,7 +68,7 @@ const FLAG_GATED: &[FlagGated] = &[
         name: "plugin-host",
         flag: None,
         binaries: &["ados-plugin-host"],
-        profiles: &["drone", "ground-station"],
+        profiles: &["drone", "ground-station", "visor"],
         opt_out: false,
     },
     FlagGated {
@@ -89,7 +89,7 @@ const FLAG_GATED: &[FlagGated] = &[
         name: "display",
         flag: None,
         binaries: &["ados-display", "ados-display-probe"],
-        profiles: &["drone", "ground-station"],
+        profiles: &["drone", "ground-station", "visor"],
         opt_out: true,
     },
 ];
@@ -97,8 +97,8 @@ const FLAG_GATED: &[FlagGated] = &[
 /// The core binaries the installer fetches for `profile`.
 fn core_binaries_for(profile: &str) -> Vec<&'static str> {
     let mut list = CORE_BINARIES_UNIVERSAL.to_vec();
-    if profile == "drone" {
-        list.extend_from_slice(CORE_BINARIES_DRONE);
+    if matches!(profile, "drone" | "visor") {
+        list.extend_from_slice(CORE_BINARIES_CAMERA);
     }
     list
 }
@@ -123,7 +123,7 @@ fn bin_present(bin_dir: &Path, name: &str) -> bool {
 fn any_native_binary_present(bin_dir: &Path) -> bool {
     CORE_BINARIES_UNIVERSAL
         .iter()
-        .chain(CORE_BINARIES_DRONE)
+        .chain(CORE_BINARIES_CAMERA)
         .any(|b| bin_present(bin_dir, b))
         || FLAG_GATED
             .iter()
@@ -154,7 +154,7 @@ pub fn is_service_native(service: &str, bin_dir: &Path, etc_dir: &Path) -> bool 
         .is_some_and(|svc| verdict(svc, bin_dir, etc_dir))
 }
 
-/// The badge for a node of `profile` (`"drone"` or `"ground-station"`), from
+/// The badge for a node of wire-form `profile` (`"drone"`, `"visor"`, ...), from
 /// the binaries under `bin_dir` and the sentinels under `etc_dir`.
 pub fn compute(profile: &str, bin_dir: &Path, etc_dir: &Path) -> &'static str {
     if !any_native_binary_present(bin_dir) {

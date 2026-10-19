@@ -109,13 +109,16 @@ pub(super) fn autopilot_panel(
         return;
     }
 
-    // A ground station with no flight controller has no autopilot to show.
-    if dash.profile == "ground_station" && !dash.mavlink_connected {
+    // A ground station or a Visor with no flight controller has no autopilot
+    // to show.
+    let no_fc_label = match dash.profile.as_str() {
+        "ground_station" => Some("no autopilot (ground station)"),
+        "visor" => Some("no autopilot (visor)"),
+        _ => None,
+    };
+    if let (Some(label), false) = (no_fc_label, dash.mavlink_connected) {
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "no autopilot (ground station)",
-                dim(),
-            ))),
+            Paragraph::new(Line::from(Span::styled(label, dim()))),
             inner,
         );
         return;

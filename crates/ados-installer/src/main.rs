@@ -485,7 +485,7 @@ fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
 /// which on a fresh install is a race and on a drone is simply the wrong
 /// question.
 fn read_ap_ssid(profile: &str) -> Option<String> {
-    if profile != "ground_station" {
+    if !matches!(profile, "ground_station" | "visor") {
         return None;
     }
     let body = std::fs::read_to_string(env::HOSTAPD_CONF_PATH).ok()?;

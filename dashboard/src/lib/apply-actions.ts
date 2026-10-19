@@ -14,7 +14,7 @@ import type { Profile } from "./types";
 // ---- request shapes ------------------------------------------------
 
 export const profileSectionSchema = z.object({
-  profile: z.enum(["drone", "ground_station"]),
+  profile: z.enum(["drone", "ground_station", "visor"]),
   ground_role: z.enum(["direct", "relay", "receiver"]).optional(),
   auto_restart: z.boolean().optional(),
 });
@@ -115,11 +115,14 @@ export async function putConfigChecked(
   return res;
 }
 
+/** A profile the apply form can submit. */
+export type ApplyProfile = ProfileSection["profile"];
+
 // Narrows a resolved profile to one the apply form can submit.
 export function profileFromStatus(
   profile: Profile | undefined,
-  fallback: "drone" | "ground_station" = "drone",
-): "drone" | "ground_station" {
-  if (!profile || profile === "auto" || profile === "unknown") return fallback;
-  return profile;
+  fallback: ApplyProfile = "drone",
+): ApplyProfile {
+  if (profile === "drone" || profile === "ground_station" || profile === "visor") return profile;
+  return fallback;
 }

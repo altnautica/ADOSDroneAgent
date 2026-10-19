@@ -82,17 +82,21 @@ pub fn optional_packages() -> &'static [&'static str] {
     &["libgstreamer1.0-dev", "libgstrtspserver-1.0-dev"]
 }
 
-/// Core ground-station apt packages (the AP + bluetooth + kiosk-compositor
-/// stack). The Chromium browser the kiosk launches under `cage` is NOT in this
-/// required set: its apt package name varies by distro, so it installs
-/// best-effort by candidate name in the Deps step ([`install_browser`]).
-/// Required for the ground_station profile. `batctl` + `wpasupplicant` back the
-/// self-healing local mesh carrier on dual-RTL ground stations. `wlr-randr`
-/// sets the HDMI output mode inside cage for `ground_station.kiosk.resolution`.
+/// The setup access-point packages, required on every profile that ships the
+/// AP units (ground station and visor).
+pub fn access_point_packages() -> &'static [&'static str] {
+    &["hostapd", "dnsmasq"]
+}
+
+/// Ground-station-only apt packages (bluetooth + kiosk compositor + mesh),
+/// on top of [`access_point_packages`]. The Chromium browser the kiosk launches
+/// under `cage` is NOT in this required set: its apt package name varies by
+/// distro, so it installs best-effort by candidate name in the Deps step
+/// ([`install_browser`]). `batctl` + `wpasupplicant` back the self-healing local
+/// mesh carrier on dual-RTL ground stations. `wlr-randr` sets the HDMI output
+/// mode inside cage for `ground_station.kiosk.resolution`.
 pub fn ground_station_core_packages() -> &'static [&'static str] {
     &[
-        "hostapd",
-        "dnsmasq",
         "bluetooth",
         "bluez",
         "cage",
@@ -111,16 +115,21 @@ pub fn browser_packages() -> &'static [&'static str] {
     &["chromium", "chromium-browser"]
 }
 
-/// Assemble the REQUIRED package set for a profile (pure). The drone profile
-/// gets the cross-profile core; the ground_station profile additionally gets
-/// the AP/kiosk core. Deduped + insertion-stable.
+/// Assemble the REQUIRED package set for a profile (pure). Every profile gets
+/// the cross-profile core; a ground station and a visor add the access-point
+/// set, and a ground station the kiosk/mesh core too. Deduped +
+/// insertion-stable.
 pub fn required_packages(profile: &str) -> Vec<&'static str> {
     let mut pkgs: Vec<&'static str> = core_packages().to_vec();
-    if profile == "ground_station" {
-        for p in ground_station_core_packages() {
-            if !pkgs.contains(p) {
-                pkgs.push(p);
-            }
+    let ap = matches!(profile, "ground_station" | "visor");
+    let gs = profile == "ground_station";
+    let extras = access_point_packages()
+        .iter()
+        .filter(|_| ap)
+        .chain(ground_station_core_packages().iter().filter(|_| gs));
+    for p in extras {
+        if !pkgs.contains(p) {
+            pkgs.push(p);
         }
     }
     pkgs
@@ -531,7 +540,7 @@ mod tests {
         // Release downloads refuse to install unverified, so the verifier must be
         // in the REQUIRED set (a failed install stops the step) on every profile,
         // not left to the bootstrap script that a direct run skips.
-        for profile in ["drone", "ground_station", "compute", "workstation"] {
+        for profile in ["drone", "ground_station", "compute", "workstation", "visor"] {
             assert!(
                 required_packages(profile).contains(&"minisign"),
                 "{profile} must install minisign"
@@ -548,6 +557,16 @@ mod tests {
         assert!(!drone.contains(&"cage"));
         // Core is still present.
         assert!(drone.contains(&"ffmpeg"));
+    }
+
+    #[test]
+    fn visor_adds_only_the_access_point_set() {
+        let visor = required_packages("visor");
+        assert!(visor.contains(&"hostapd"));
+        assert!(visor.contains(&"dnsmasq"));
+        for p in ground_station_core_packages() {
+            assert!(!visor.contains(p), "visor must not install {p}");
+        }
     }
 
     #[test]

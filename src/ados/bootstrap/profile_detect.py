@@ -1,10 +1,17 @@
 """Profile auto-detect for ADOS Drone Agent.
 
-Runs a hardware fingerprint and always returns a usable profile (`drone`
-or `ground_station`). The decision tail is a strict argmax on the live
-probes, with a stable tiebreaker on the last persisted profile and a
-final `drone` default so a fresh-flashed board with no signals still
-boots into a known state.
+Runs a hardware fingerprint and always returns a usable profile (`drone`,
+`ground_station` or `visor`). Each probe scores toward air (drone),
+ground or visor; the decision tail is a strict argmax over the three
+scores, with a stable tiebreaker on the last persisted profile (when it
+is among the tied leaders) and a final `drone` default so a fresh-flashed
+board with no signals still boots into a known state.
+
+Visor signals come from the USB sensor hub probe: the ADOS Sensor Hub
+firmware is a strong visor signal; a stock ArduPilot USB board counts
+toward visor only next to two or more CSI cameras. A GNSS fix counts
+toward air only when no OLED is present, since a handheld visor carries
+both.
 
 This module has no hard runtime dependencies beyond the stdlib. `smbus2`
 and `pyserial` are used when available; otherwise the matching probes
@@ -60,6 +67,11 @@ from ados.bootstrap._profile_detect_uplink import (
     probe_uplink_kinds,
     probe_uplink_type,
 )
+from ados.bootstrap._profile_detect_visor import (
+    probe_csi_cameras,
+    probe_sensor_hub,
+)
+from ados.core._contracts_generated import PROFILES
 from ados.core.paths import ADOS_RUN_DIR, PROFILE_CONF
 
 __all__ = [
@@ -82,12 +94,14 @@ __all__ = [
     "_serial_paths_held_open",
     "board_button_pins",
     "detect_profile",
+    "probe_csi_cameras",
     "probe_fc_heartbeat",
     "probe_gps_serial",
     "probe_gpio_buttons",
     "probe_i2c_oled",
     "probe_mavlink_serial",
     "probe_rtl8812",
+    "probe_sensor_hub",
     "probe_uplink_kinds",
     "probe_uplink_type",
     "read_detect_snapshot",
@@ -100,6 +114,9 @@ __all__ = [
 # The last detection result, written at boot and on an explicit re-detect.
 PROFILE_DETECT_JSON = ADOS_RUN_DIR / "profile-detect.json"
 
+# Profiles the detector can pick, in default-preference order for ties.
+_DETECTABLE = ("drone", "ground_station", "visor")
+
 
 # ---- Decision -------------------------------------------------------------
 
@@ -107,7 +124,7 @@ PROFILE_DETECT_JSON = ADOS_RUN_DIR / "profile-detect.json"
 def _hostname_suggested_profile() -> str | None:
     """Best-effort hostname → profile heuristic for the tiebreaker.
 
-    Returns ``"drone"`` / ``"ground_station"`` when the system hostname
+    Returns ``"drone"`` / ``"ground_station"`` / ``"visor"`` when the system hostname
     matches a well-known prefix, ``None`` otherwise. Mirrors (but is
     independent of) the same helper in ``ados.setup.profile`` — kept
     private here so the bootstrap module never imports the setup tree.
@@ -122,30 +139,33 @@ def _hostname_suggested_profile() -> str | None:
         return "ground_station"
     if name.startswith(("skynode", "drone", "rig-", "uav")):
         return "drone"
+    if name.startswith("visor"):
+        return "visor"
     return None
 
 
 def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     """Run all probes and decide the profile.
 
-    Always returns a usable profile (`drone` or `ground_station`). The
-    decision tail is a strict argmax on the live probes, with a stable
-    tiebreaker on the last persisted profile and a final `drone`
-    default for a fresh-flashed board with no signals. The result
+    Always returns a usable profile (`drone`, `ground_station` or
+    `visor`). The decision tail is a strict argmax on the live probes,
+    with a stable tiebreaker on the last persisted profile and a final
+    `drone` default for a fresh-flashed board with no signals. The result
     includes a `source` field marking which branch of the decision
     produced the profile so the setup status can surface "auto" vs
     "needs review" cleanly.
 
     config_override: explicit value from /etc/ados/config.yaml. If it
-    is "drone" or "ground_station" that value is returned without
-    running any probes.
+    is a detectable profile that value is returned without running any
+    probes.
     """
-    if config_override in ("drone", "ground_station"):
+    if config_override in _DETECTABLE:
         return {
             "profile": config_override,
             "source": "override",
             "ground_score": 0,
             "air_score": 0,
+            "visor_score": 0,
             "signals": {"override": config_override},
             "detected_at": _now_iso(),
         }
@@ -166,13 +186,23 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     }
 
     probes: dict[str, tuple[int, int, bool]] = {}
-    with ThreadPoolExecutor(max_workers=len(probe_callables)) as pool:
+    with ThreadPoolExecutor(max_workers=len(probe_callables) + 1) as pool:
         futures = {name: pool.submit(fn) for name, fn in probe_callables.items()}
+        hub_future = pool.submit(probe_sensor_hub)
         for name, future in futures.items():
             try:
                 probes[name] = future.result()
             except Exception:
                 probes[name] = (0, 0, False)
+        try:
+            visor_score, hub_detected = hub_future.result()
+        except Exception:
+            visor_score, hub_detected = 0, False
+
+    # A GNSS fix next to an OLED is a handheld visor, not evidence of a drone.
+    if probes["oled_i2c"][2]:
+        _g, _a, gps_detected = probes["gps_serial"]
+        probes["gps_serial"] = (0, 0, gps_detected)
 
     ground_score = sum(g for g, _a, _d in probes.values())
     air_score = sum(a for _g, a, _d in probes.values())
@@ -193,19 +223,22 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
     elif hostname_pick == "drone":
         air_score += HOSTNAME_WEIGHT
         hostname_source = "hostname"
+    elif hostname_pick == "visor":
+        visor_score += HOSTNAME_WEIGHT
+        hostname_source = "hostname"
 
-    if air_score > ground_score:
-        profile = "drone"
-        source = hostname_source or "detected"
-    elif ground_score > air_score:
-        profile = "ground_station"
+    scores = {"drone": air_score, "ground_station": ground_score, "visor": visor_score}
+    top = max(scores.values())
+    leaders = [name for name in _DETECTABLE if scores[name] == top]
+    if len(leaders) == 1:
+        profile = leaders[0]
         source = hostname_source or "detected"
     else:
-        # Tied even after hostname weighting (hostname carried no
-        # signal). Fall back to the last-known persisted profile, then
-        # the safe default.
+        # Tied even after hostname weighting. Fall back to the last-known
+        # persisted profile when it is one of the tied leaders, then the
+        # safe default.
         prior = _read_last_known_profile()
-        if prior in ("drone", "ground_station"):
+        if prior in leaders:
             profile = prior
             source = "tiebreaker"
         else:
@@ -213,12 +246,14 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
             source = "default"
 
     signals = {name: detected for name, (_g, _a, detected) in probes.items()}
+    signals["sensor_hub"] = hub_detected
 
     result = {
         "profile": profile,
         "source": source,
         "ground_score": ground_score,
         "air_score": air_score,
+        "visor_score": visor_score,
         "signals": signals,
         "detected_at": _now_iso(),
     }
@@ -229,6 +264,7 @@ def detect_profile(config_override: str | None = None) -> dict[str, Any]:
             source=source,
             ground_score=ground_score,
             air_score=air_score,
+            visor_score=visor_score,
         )
     except Exception:
         pass
@@ -302,7 +338,7 @@ def _read_last_known_profile(path: str = str(PROFILE_CONF)) -> str | None:
     except (OSError, yaml.YAMLError):
         return None
     value = data.get("profile") if isinstance(data, dict) else None
-    if value in ("drone", "ground_station"):
+    if value in _DETECTABLE:
         return value
     return None
 
@@ -323,7 +359,7 @@ def write_profile_conf(
     logged and swallowed because this runs early in boot when logging may
     not be wired yet.
     """
-    if profile not in ("drone", "ground_station"):
+    if profile not in _DETECTABLE:
         return False
     try:
         import yaml  # local import so dry-run without pyyaml fails loudly
@@ -347,10 +383,7 @@ def write_profile_conf(
             if isinstance(loaded, dict):
                 existing = loaded
         current = existing.get("profile")
-        if isinstance(current, str) and current.replace("-", "_") in (
-            "drone",
-            "ground_station",
-        ):
+        if isinstance(current, str) and current.replace("-", "_") in PROFILES:
             return current.replace("-", "_") == profile
         existing["profile"] = profile
         target.parent.mkdir(parents=True, exist_ok=True)

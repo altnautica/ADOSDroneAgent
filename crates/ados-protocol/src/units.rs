@@ -107,13 +107,20 @@ impl UnitSpec {
     }
 }
 
-/// Every agent profile, the expansion of an empty `profiles`.
-pub const ALL_PROFILES: &[&str] = &["drone", "ground_station", "workstation", "compute"];
+/// Every agent profile, the expansion of an empty `profiles`. Generated from
+/// the `[profiles]` table in `contracts.toml`.
+pub const ALL_PROFILES: &[&str] = crate::contracts::PROFILES;
 
 const DRONE: &[&str] = &["drone"];
 const GS: &[&str] = &["ground_station"];
-/// The flight-controller-bearing profiles.
+/// The flight-controller-bearing profiles that run the swarm and RC lanes.
 const FC: &[&str] = &["drone", "ground_station"];
+/// The profiles that talk MAVLink to a flight controller or a stage-A hub.
+const FC_VISOR: &[&str] = &["drone", "ground_station", "visor"];
+/// The camera-owning profiles.
+const DRONE_VISOR: &[&str] = &["drone", "visor"];
+/// The profiles with a local access point, status panel and buttons.
+const GS_VISOR: &[&str] = &["ground_station", "visor"];
 
 /// The all-false row every entry starts from.
 const BASE: UnitSpec = UnitSpec {
@@ -175,7 +182,7 @@ pub const UNITS: &[UnitSpec] = &[
     UnitSpec {
         name: "ados-mavlink.service",
         category: Some(Core),
-        profiles: FC,
+        profiles: FC_VISOR,
         drops_link: true,
         headless_keep: true,
         ..BASE
@@ -211,11 +218,12 @@ pub const UNITS: &[UnitSpec] = &[
         idle_ok: true,
         ..BASE
     },
-    // The air-side encode pipeline; exits 0 and idles off-drone or video-off.
+    // The encode pipeline (air side on a drone, preview legs on a visor); exits
+    // 0 and idles on other profiles or with video off.
     UnitSpec {
         name: "ados-video.service",
         category: Some(Hardware),
-        profiles: DRONE,
+        profiles: DRONE_VISOR,
         drops_link: true,
         headless_keep: true,
         idle_ok: true,
@@ -252,7 +260,7 @@ pub const UNITS: &[UnitSpec] = &[
     UnitSpec {
         name: "ados-vision.service",
         category: Some(Hardware),
-        profiles: DRONE,
+        profiles: DRONE_VISOR,
         ..BASE
     },
     // The native HTTP control surface, the LAN front on every profile. This
@@ -331,19 +339,25 @@ pub const UNITS: &[UnitSpec] = &[
         drops_link: true,
         ..gs_unit("ados-mediamtx-gs.service", Some(Hardware))
     },
-    gs_unit("ados-oled.service", Some(Hardware)),
+    UnitSpec {
+        profiles: GS_VISOR,
+        ..gs_unit("ados-oled.service", Some(Hardware))
+    },
     // The optional I2C status panel self-skips when no panel answers, so the
     // install enables it without kicking it.
     UnitSpec {
+        profiles: GS_VISOR,
         start_on_install: false,
         ..gs_unit("ados-oled-i2c.service", Some(Hardware))
     },
     UnitSpec {
+        profiles: GS_VISOR,
         health_check: true,
         drops_link: true,
         ..gs_unit("ados-hostapd.service", Some(Hardware))
     },
     UnitSpec {
+        profiles: GS_VISOR,
         health_check: true,
         drops_link: true,
         ..gs_unit("ados-dnsmasq-gs.service", Some(Hardware))
@@ -359,6 +373,7 @@ pub const UNITS: &[UnitSpec] = &[
         ..gs_unit("ados-kiosk.service", Some(Hardware))
     },
     UnitSpec {
+        profiles: GS_VISOR,
         drops_link: true,
         ..gs_unit("ados-input.service", Some(Hardware))
     },
@@ -439,62 +454,10 @@ pub fn supervised() -> impl Iterator<Item = &'static UnitSpec> {
     UNITS.iter().filter(|u| u.category.is_some())
 }
 
-const fn str_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
+/// The units installed on `profile`, in table order.
+pub fn units_for_profile(profile: &str) -> impl Iterator<Item = &'static UnitSpec> + '_ {
+    UNITS.iter().filter(move |u| u.on_profile(profile))
 }
 
-const fn role_owns(unit: &UnitSpec, role: Option<&str>) -> bool {
-    let Some(role) = role else {
-        return !unit.roles.is_empty();
-    };
-    let mut i = 0;
-    while i < unit.roles.len() {
-        if str_eq(unit.roles[i], role) {
-            return true;
-        }
-        i += 1;
-    }
-    false
-}
-
-/// How many units `role` owns; `None` counts every role-owned unit.
-pub const fn role_unit_count(role: Option<&str>) -> usize {
-    let mut n = 0;
-    let mut i = 0;
-    while i < UNITS.len() {
-        if role_owns(&UNITS[i], role) {
-            n += 1;
-        }
-        i += 1;
-    }
-    n
-}
-
-/// The unit file names `role` owns, in table order (its start order); `None`
-/// lists every role-owned unit. `N` must be [`role_unit_count`] of the same
-/// argument, so the table and the array cannot disagree.
-pub const fn role_unit_names<const N: usize>(role: Option<&str>) -> [&'static str; N] {
-    assert!(N == role_unit_count(role), "role unit array size mismatch");
-    let mut out = [""; N];
-    let mut n = 0;
-    let mut i = 0;
-    while i < UNITS.len() {
-        if role_owns(&UNITS[i], role) {
-            out[n] = UNITS[i].name;
-            n += 1;
-        }
-        i += 1;
-    }
-    out
-}
+mod roles;
+pub use roles::{role_unit_count, role_unit_names};

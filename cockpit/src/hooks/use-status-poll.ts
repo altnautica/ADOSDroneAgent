@@ -89,7 +89,9 @@ export function statusReader(profile: AgentProfile): (signal: AbortSignal) => Pr
   let fcAt = -Infinity;
 
   return async (signal) => {
-    if (profile === "drone") {
+    // A visor carries its own cameras and sensor hub, so it reports the same
+    // consolidated body a drone does; it has no ground-station composite.
+    if (profile === "drone" || profile === "visor") {
       if (performance.now() - diagAt >= LINK_DIAG_POLL_MS) {
         diagAt = performance.now();
         diag = await getLinkDiagnosis(signal).catch(() => diag);

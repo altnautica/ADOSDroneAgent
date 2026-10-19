@@ -31,7 +31,7 @@ import yaml
 from ados.core.paths import CONFIG_YAML, PROFILE_CONF
 from ados.core.profile import _read_profile_conf_value, current_profile_and_role
 
-_VALID = ("drone", "ground_station")
+_VALID = ("drone", "ground_station", "visor")
 
 
 @click.group("profile", help="Show or override the agent profile.")
@@ -83,7 +83,7 @@ def show(as_json: bool) -> None:
 )
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 def set_profile(value: str, role: str | None, no_restart: bool, as_json: bool) -> None:
-    target = "ground_station" if value in ("ground_station", "ground-station") else "drone"
+    target = value.replace("-", "_")
     role_to_persist = (role or "direct") if target == "ground_station" else None
 
     try:

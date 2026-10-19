@@ -1188,6 +1188,12 @@ mod tests {
                 "This computer",
                 "Long-range radio",
             ),
+            (
+                catalog::Profile::Visor,
+                "visor",
+                "Sensor hub",
+                "Long-range radio",
+            ),
         ] {
             let body = catalog_body(&theme, profile, &sys);
             let screen = Screen {

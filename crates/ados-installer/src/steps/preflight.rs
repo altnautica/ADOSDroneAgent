@@ -53,6 +53,7 @@ pub fn parse_profile_conf(body: &str) -> Option<String> {
             "drone" => "drone",
             "workstation" => "workstation",
             "compute" => "compute",
+            "visor" => "visor",
             // `auto` resolves at runtime; treat it as "no on-disk preference".
             _ => continue,
         };
@@ -204,7 +205,8 @@ fn state_socket_path() -> PathBuf {
         .join("state.sock")
 }
 
-/// Whether a profile carries a vehicle link an upgrade would drop.
+/// Whether a profile carries a vehicle link an upgrade would drop. A visor's
+/// MAVLink peer is a handheld sensor hub, never an aircraft in flight.
 pub fn profile_carries_vehicle(profile: &str) -> bool {
     matches!(profile, "drone" | "ground_station")
 }
@@ -294,9 +296,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_recognizes_workstation_and_compute() {
-        // A re-install of a workstation/compute node must keep its profile from
-        // profile.conf rather than collapsing to drone.
+    fn parse_recognizes_workstation_compute_and_visor() {
+        // A re-install of a workstation/compute/visor node must keep its
+        // profile from profile.conf rather than collapsing to drone.
         assert_eq!(
             parse_profile_conf("profile: workstation\n").as_deref(),
             Some("workstation")
@@ -305,6 +307,11 @@ mod tests {
             parse_profile_conf("profile=compute").as_deref(),
             Some("compute")
         );
+        assert_eq!(
+            parse_profile_conf("profile: visor\n").as_deref(),
+            Some("visor")
+        );
+        assert_eq!(resolve_profile(None, Some("profile=visor")), "visor");
     }
 
     #[test]
@@ -346,6 +353,7 @@ mod tests {
         assert_eq!(armed_refusal(false, false, "drone", &sock), None);
         assert_eq!(armed_refusal(true, false, "workstation", &sock), None);
         assert_eq!(armed_refusal(true, false, "compute", &sock), None);
+        assert_eq!(armed_refusal(true, false, "visor", &sock), None);
     }
 
     #[test]

@@ -266,6 +266,19 @@ pub fn lsusb_has_gps(output: &str) -> bool {
     })
 }
 
+/// The sensor-hub USB ids: the ADOS Sensor Hub firmware CDC (`1209:ad05`)
+/// and stock ArduPilot on a pid.codes board (`1209:5741`, the stage-A hub).
+const SENSOR_HUB_USB_IDS: &[(u16, u16)] = &[(0x1209, 0xAD05), (0x1209, 0x5741)];
+
+/// True when `lsusb` output contains a sensor-hub USB id (pure).
+pub fn lsusb_has_sensor_hub(output: &str) -> bool {
+    output.lines().any(|l| {
+        parse_lsusb_id(l)
+            .map(|(v, p)| SENSOR_HUB_USB_IDS.contains(&(v, p)))
+            .unwrap_or(false)
+    })
+}
+
 /// True when `lsusb` output contains a known LTE-modem vendor id (pure).
 pub fn lsusb_has_modem(output: &str) -> bool {
     output.lines().any(|l| {

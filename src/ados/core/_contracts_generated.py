@@ -514,3 +514,5 @@ SIDECAR_CATALOG: dict[str, dict[str, object]] = {
         "description": "A pending plugin display action fired by a touch zone or button, for the plugin host to deliver.",
     },
 }
+
+PROFILES: tuple[str, ...] = ("drone", "ground_station", "workstation", "compute", "visor")

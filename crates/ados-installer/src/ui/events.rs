@@ -95,7 +95,7 @@ pub struct SummaryData {
     pub status: String,
     /// Installed agent version, or `unknown`.
     pub version: String,
-    /// `drone` | `ground_station`.
+    /// `drone` | `ground_station` | `workstation` | `compute` | `visor`.
     pub profile: String,
     /// Detected board model.
     pub board: String,

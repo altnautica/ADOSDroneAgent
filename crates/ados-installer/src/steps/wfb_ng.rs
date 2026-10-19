@@ -230,10 +230,10 @@ mod tests {
         use crate::checkpoint::Checkpoint;
         use crate::cli::Args;
         use crate::env::EnvInfo;
-        // A console profile with no long-range radio skips the wfb-ng build
-        // before it touches the source tree, so a laptop / GPU box never has to
-        // compile the radio stack it will not use.
-        for profile in ["workstation", "compute"] {
+        // A profile with no long-range radio skips the wfb-ng build before it
+        // touches the source tree, so a laptop / GPU box or a handheld visor
+        // never has to compile the radio stack it will not use.
+        for profile in ["workstation", "compute", "visor"] {
             let args = Args {
                 profile: Some(profile.to_string()),
                 ..Args::default()

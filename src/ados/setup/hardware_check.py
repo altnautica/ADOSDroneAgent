@@ -211,6 +211,22 @@ def _ground_items(role: str) -> Iterable[HardwareCheckItem]:
     yield _check_uplink(runtime=None)
 
 
+def _visor_items(runtime: Any) -> Iterable[HardwareCheckItem]:
+    # Handheld rig: cameras, USB sensor hub, GNSS, local display and buttons.
+    # No WFB radio.
+    yield _check_board()
+    yield _check_fc(runtime)
+    yield _check_camera()
+    yield _check_gps()
+    yield _check_oled()
+    yield _check_display()
+    yield _check_buttons()
+    yield _check_uplink(runtime)
+
+
+_CHECKED_PROFILES = ("drone", "ground_station", "visor")
+
+
 def run_hardware_check_fresh(
     runtime: Any | None,
     *,
@@ -222,11 +238,13 @@ def run_hardware_check_fresh(
     The orchestrator never raises. A failed probe yields an item in the
     ``warning`` or ``unknown`` state with a human-readable hint.
     """
-    profile_norm = profile if profile in ("drone", "ground_station") else "drone"
+    profile_norm = profile if profile in _CHECKED_PROFILES else "drone"
     role_norm = (ground_role or "direct") if profile_norm == "ground_station" else ""
 
     if profile_norm == "drone":
         items = list(_drone_items(runtime))
+    elif profile_norm == "visor":
+        items = list(_visor_items(runtime))
     else:
         items = list(_ground_items(role_norm or "direct"))
 
@@ -256,7 +274,7 @@ def run_hardware_check_cached(
     """
     from ados.setup import hardware_state
 
-    profile_norm = profile if profile in ("drone", "ground_station") else "drone"
+    profile_norm = profile if profile in _CHECKED_PROFILES else "drone"
     role_norm = (ground_role or "direct") if profile_norm == "ground_station" else ""
     ttl = (
         ttl_seconds

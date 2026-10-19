@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from ados.core._contracts_generated import PROFILES
 from ados.core.paths import ADOS_RUN_DIR
 from ados.setup._persist import persist_config
 from ados.setup._regulatory import _is_valid_region_code, apply_regulatory  # noqa: F401
@@ -29,11 +30,14 @@ from ados.setup.models import (
 CONTROL_SOCK = ADOS_RUN_DIR / "control.sock"
 _NATIVE_TIMEOUT_S = 10.0
 
+#: Profiles the wizard can pick (and the detector can suggest).
+WIZARD_PROFILES = ("drone", "ground_station", "visor")
+
 
 def _hostname_suggested_profile() -> str | None:
     """Heuristic mapping from system hostname to expected profile.
 
-    Returns one of ``"drone"`` or ``"ground_station"`` when the hostname
+    Returns one of ``"drone"``, ``"ground_station"`` or ``"visor"`` when the hostname
     matches a well-known prefix the bench uses, or ``None`` when the
     hostname carries no signal. The check is intentionally narrow so
     operators with custom hostnames see no advisory.
@@ -48,6 +52,8 @@ def _hostname_suggested_profile() -> str | None:
         return "ground_station"
     if name.startswith(("skynode", "drone", "rig-", "uav")):
         return "drone"
+    if name.startswith("visor"):
+        return "visor"
     return None
 
 
@@ -90,12 +96,12 @@ def redetect_profile_suggestion(
 
 def _suggestion_from(config: Any, result: dict[str, Any] | None) -> ProfileSuggestion:
     explicit = str(getattr(config.agent, "profile", "") or "")
-    confirmed = explicit in ("drone", "ground_station")
+    confirmed = explicit in PROFILES
     if result is None:
         return ProfileSuggestion(detected="drone", source="default", confirmed=confirmed)
 
     detected = str(result.get("profile") or "drone")
-    if detected not in ("drone", "ground_station"):
+    if detected not in WIZARD_PROFILES:
         detected = "drone"
 
     source = str(result.get("source") or "detected")
@@ -114,6 +120,7 @@ def _suggestion_from(config: Any, result: dict[str, Any] | None) -> ProfileSugge
         ground_role_hint=ground_role,  # type: ignore[arg-type]
         ground_score=int(result.get("ground_score", 0) or 0),
         air_score=int(result.get("air_score", 0) or 0),
+        visor_score=int(result.get("visor_score", 0) or 0),
         signals={
             str(name): bool(detected)
             for name, detected in (result.get("signals") or {}).items()
@@ -200,10 +207,10 @@ def apply_profile(
     The restart is non-blocking, so the route response lands before the
     agent goes down.
     """
-    if profile not in ("drone", "ground_station"):
+    if profile not in WIZARD_PROFILES:
         return SetupActionResult(
             ok=False,
-            message="profile must be 'drone' or 'ground_station'",
+            message="profile must be 'drone', 'ground_station' or 'visor'",
         )
 
     if profile == "ground_station":
@@ -272,10 +279,10 @@ def apply_profile(
             ),
         }
 
-    if profile == "drone":
-        message = "Profile set to drone."
-    else:
+    if profile == "ground_station":
         message = f"Profile set to ground station ({role})."
+    else:
+        message = f"Profile set to {profile}."
 
     if auto_restart and data.get("restart_required"):
         message += dispatch_profile_restart(data)

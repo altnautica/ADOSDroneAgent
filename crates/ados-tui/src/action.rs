@@ -43,12 +43,17 @@ pub const RADIO_PROFILE_UNKNOWN: &str =
     "Restart radio refused: the agent has not reported this node's profile yet, \
      so the radio unit to restart is unknown.";
 
+/// The refusal on a Visor, which carries no long-range radio.
+pub const RADIO_NOT_ON_VISOR: &str = "Restart radio refused: no radio on a Visor.";
+
 /// The radio unit a profile runs: the drone's transmit unit or the ground
-/// station's receive unit. `None` for any other (or an unreported) profile.
+/// station's receive unit. `None` for any other (or an unreported) profile,
+/// and for a Visor, which has no radio.
 pub fn radio_unit(profile: &str) -> Option<&'static str> {
     match profile {
         "drone" => Some("ados-wfb"),
         "ground_station" => Some("ados-wfb-rx"),
+        "visor" => None,
         _ => None,
     }
 }
@@ -63,6 +68,9 @@ impl Action {
         match self.command {
             Command::Run(program, args) => Ok((program, args.to_vec())),
             Command::RestartRadio => {
+                if profile == Some("visor") {
+                    return Err(RADIO_NOT_ON_VISOR);
+                }
                 let unit = profile.and_then(radio_unit).ok_or(RADIO_PROFILE_UNKNOWN)?;
                 Ok(("sudo", vec!["systemctl", "restart", unit]))
             }
@@ -256,5 +264,7 @@ mod tests {
         );
         assert_eq!(restart.argv(None), Err(RADIO_PROFILE_UNKNOWN));
         assert_eq!(restart.argv(Some("?")), Err(RADIO_PROFILE_UNKNOWN));
+        assert_eq!(restart.argv(Some("visor")), Err(RADIO_NOT_ON_VISOR));
+        assert_eq!(radio_unit("visor"), None);
     }
 }

@@ -104,7 +104,7 @@ export function prettyTrail(dotpath: string): string {
 // ── enum options (Pydantic Literal / Enum fields, plus a few known str sets) ──
 
 export const ENUM_OPTIONS: Record<string, string[]> = {
-  "agent.profile": ["auto", "drone", "ground_station", "workstation", "compute"],
+  "agent.profile": ["auto", "drone", "ground_station", "workstation", "compute", "visor"],
   "mavlink.source": ["auto", "serial", "udp", "tcp"],
   "video.camera.rotation": ["0", "90", "180", "270"],
   "video.camera.expected": ["auto", "true", "false"],

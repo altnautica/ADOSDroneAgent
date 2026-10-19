@@ -78,7 +78,8 @@
     "path": "/telemetry",
     "label": "Telemetry",
     "profiles": [
-      "drone"
+      "drone",
+      "visor"
     ],
     "roles": null
   },
@@ -87,7 +88,8 @@
     "path": "/video",
     "label": "Video",
     "profiles": [
-      "drone"
+      "drone",
+      "visor"
     ],
     "roles": null
   },
@@ -131,7 +133,8 @@
     "path": "/settings/battery",
     "label": "Battery",
     "profiles": [
-      "drone"
+      "drone",
+      "visor"
     ],
     "roles": null
   },
@@ -175,7 +178,8 @@
     "path": "/settings/mavlink",
     "label": "MAVLink",
     "profiles": [
-      "drone"
+      "drone",
+      "visor"
     ],
     "roles": null
   },
@@ -191,7 +195,8 @@
     "path": "/settings/vision",
     "label": "Vision",
     "profiles": [
-      "drone"
+      "drone",
+      "visor"
     ],
     "roles": null
   },
@@ -200,7 +205,8 @@
     "path": "/settings/camera",
     "label": "Camera",
     "profiles": [
-      "drone"
+      "drone",
+      "visor"
     ],
     "roles": null
   },

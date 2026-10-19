@@ -108,7 +108,7 @@ pub fn seed_revocation_list(source: Option<&Path>, target: &Path) -> Result<bool
 
 /// Whether a profile installs the World Engine when no flag or wizard answer
 /// says otherwise: on for the workstation-class nodes that run its heavy half,
-/// off for an aircraft or a ground station (an operator opts those in).
+/// off for an aircraft, a ground station or a visor (an operator opts those in).
 pub fn world_engine_default(profile: &str) -> bool {
     matches!(profile, "workstation" | "compute")
 }
@@ -603,6 +603,7 @@ agent:\n  entrypoint: agent/py/x.py\n  target_profiles: [workstation]\n  permiss
         assert!(world_engine_default("compute"));
         assert!(!world_engine_default("drone"));
         assert!(!world_engine_default("ground_station"));
+        assert!(!world_engine_default("visor"));
     }
 
     /// The bundled catalog gains its entry only when the extension is released,

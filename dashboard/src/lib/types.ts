@@ -4,7 +4,14 @@
 // the agent ships nulls + empty objects whenever the underlying
 // service hasn't reported yet.
 
-export type Profile = "drone" | "ground_station" | "auto" | "unknown";
+export type Profile =
+  | "drone"
+  | "ground_station"
+  | "workstation"
+  | "compute"
+  | "visor"
+  | "auto"
+  | "unknown";
 export type GroundRole = "direct" | "relay" | "receiver";
 export type { Severity } from "@/shared/format";
 

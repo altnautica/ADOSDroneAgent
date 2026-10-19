@@ -25,7 +25,8 @@ pub struct Ctx {
     pub failures: FailureAccumulator,
     /// Whether checkpoints are bypassed this run (`--force`).
     pub force: bool,
-    /// Resolved agent profile (`drone` | `ground_station` | `workstation` | `compute`).
+    /// Resolved agent profile (`drone` | `ground_station` | `workstation` |
+    /// `compute` | `visor`).
     pub profile: String,
     /// Whether to build + install the RTL8812EU WFB radio driver. Default on;
     /// `--no-rtl-driver` opts out (a workstation/compute node or a rig with no
@@ -178,12 +179,13 @@ impl Ctx {
     }
 
     /// Whether this install carries the RTL8812EU WFB radio stack: the operator
-    /// kept the radio on AND the profile has a long-range radio at all. A
-    /// workstation / compute console never does, whatever the flag says. The
-    /// wfb-ng step builds the stack on exactly this, and the health gate
-    /// requires it on exactly this, so the two can never disagree.
+    /// kept the radio on AND the profile has a long-range radio at all. Only a
+    /// drone and a ground station do; a workstation / compute console or a visor
+    /// never does, whatever the flag says. The driver and wfb-ng steps build the
+    /// stack on exactly this, and the health gate requires it on exactly this,
+    /// so they can never disagree.
     pub fn has_long_range_radio(&self) -> bool {
-        self.install_rtl8812eu && !matches!(self.profile.as_str(), "workstation" | "compute")
+        self.install_rtl8812eu && matches!(self.profile.as_str(), "drone" | "ground_station")
     }
 }
 
@@ -343,10 +345,12 @@ mod tests {
         assert!(radio_for("ground_station", false));
         // The operator's radio-off choice wins on a radio profile.
         assert!(!radio_for("drone", true));
-        // A workstation-class node has no WFB stack even with the flag left at
-        // its default, so neither wfb-ng nor the health gate expects one there.
+        // A workstation-class node or a visor has no WFB stack even with the
+        // flag left at its default, so neither wfb-ng nor the health gate
+        // expects one there.
         assert!(!radio_for("workstation", false));
         assert!(!radio_for("compute", false));
+        assert!(!radio_for("visor", false));
     }
 
     #[test]

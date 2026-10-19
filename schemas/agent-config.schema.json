@@ -24,7 +24,8 @@
             "drone",
             "ground_station",
             "workstation",
-            "compute"
+            "compute",
+            "visor"
           ],
           "title": "Profile",
           "type": "string"

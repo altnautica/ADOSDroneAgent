@@ -10,7 +10,7 @@ from pydantic import BaseModel
 # boot-time hardware fingerprint in ados.bootstrap.profile_detect. A closed
 # set, so the emitted schema carries the enum and the native config write
 # refuses any other value instead of persisting one the services cannot load.
-AgentProfile = Literal["auto", "drone", "ground_station", "workstation", "compute"]
+AgentProfile = Literal["auto", "drone", "ground_station", "workstation", "compute", "visor"]
 
 
 class AgentConfig(BaseModel):

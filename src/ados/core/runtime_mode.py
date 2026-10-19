@@ -40,21 +40,21 @@ _DEFAULT_ETC_DIR = Path("/etc/ados")
 # check decides the mode for all of them. These are profile-scoped to match
 # the installer's per-profile binary catalog (crates/ados-installer/binaries.rs):
 # counting a binary the installer never fetches for this profile would pin the
-# aggregate at "hybrid" forever (ados-video is drone-only; a ground station that
-# is otherwise fully native would never report "native").
+# aggregate at "hybrid" forever (ados-video is drone|visor only; a ground station
+# that is otherwise fully native would never report "native").
 _CORE_BINARIES_UNIVERSAL: tuple[str, ...] = (
     "ados-supervisor",
     "ados-cloud",
     "ados-mavlink-router",
 )
-# Drone-only core (the air-side encode pipeline; a ground station receives
-# video through ados-mediamtx-gs, never ados-video).
+# Camera-side core (drone and visor run the encode pipeline; a ground station
+# receives video through ados-mediamtx-gs, never ados-video).
 _CORE_BINARIES_DRONE: tuple[str, ...] = ("ados-video",)
 
 
 def _core_binaries_for(profile: str) -> tuple[str, ...]:
     """The core binaries the installer fetches for ``profile``."""
-    if profile == "drone":
+    if profile in ("drone", "visor"):
         return _CORE_BINARIES_UNIVERSAL + _CORE_BINARIES_DRONE
     return _CORE_BINARIES_UNIVERSAL
 
@@ -132,7 +132,7 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         # native binary owns the per-plugin sockets whenever it is present.
         flag=None,
         binaries=("ados-plugin-host",),
-        profiles=("drone", "ground-station"),
+        profiles=("drone", "ground-station", "visor"),
     ),
     "hid": _FlagGated(
         # Native-only: the packaged PIC arbiter + input manager were deleted, so
@@ -160,7 +160,7 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         # to "hybrid".
         flag=None,
         binaries=("ados-display", "ados-display-probe"),
-        profiles=("drone", "ground-station"),
+        profiles=("drone", "ground-station", "visor"),
         opt_out=True,
     ),
 }

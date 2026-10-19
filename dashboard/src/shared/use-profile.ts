@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 
 import { apiFetch } from "./api-fetch";
 
-export type AgentProfile = "drone" | "ground_station" | "workstation" | "compute" | "unknown";
+export type AgentProfile = "drone" | "ground_station" | "workstation" | "compute" | "visor" | "unknown";
 
 export interface PairingInfoLite {
   profile?: string | null;
@@ -40,6 +40,8 @@ export function normalizeProfile(raw: string | null | undefined): AgentProfile {
       return "workstation";
     case "compute":
       return "compute";
+    case "visor":
+      return "visor";
     default:
       return "unknown";
   }

@@ -129,7 +129,8 @@ impl Default for ServerSection {
 /// The resolved agent identity the orchestrator gates on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentConfig {
-    /// Wire-contract profile: `"drone"` or `"ground-station"`.
+    /// Wire-contract profile: `"drone"`, `"ground-station"`, `"workstation"`,
+    /// `"compute"` or `"visor"`.
     pub profile_wire: String,
     /// Active ground-station role at boot (`direct`/`relay`/`receiver`), or
     /// `None` on a drone. This is the snapshot taken at config load. The
@@ -303,6 +304,11 @@ impl AgentConfig {
     /// ground-station role exactly like one that names it literally.
     pub fn is_ground_station(&self) -> bool {
         self.profile_wire == "ground-station"
+    }
+
+    /// True when the resolved profile is the handheld capture rig.
+    pub fn is_visor(&self) -> bool {
+        self.profile_wire == "visor"
     }
 }
 

@@ -11,6 +11,7 @@ import asyncio
 from typing import Any
 
 from ados import __version__
+from ados.core._contracts_generated import PROFILES
 from ados.setup.hardware_check import run_hardware_check_cached
 from ados.setup.models import (
     MavlinkAccess,
@@ -229,7 +230,7 @@ def _assemble_status(  # noqa: C901
     # time. `profile_source` carries the how so the GCS can show an
     # inline "auto-detected" hint without gating any UI.
     setup_state = "configured"
-    explicit_profile = str(config.agent.profile) in ("drone", "ground_station")
+    explicit_profile = str(config.agent.profile) in PROFILES
     profile_source = (
         "user" if explicit_profile else profile_suggestion.source
     )

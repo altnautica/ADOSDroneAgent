@@ -149,7 +149,11 @@ export function PairingRoute() {
   const { profile } = useNodeIdentity();
   const [confirmUnpair, setConfirmUnpair] = useState(false);
   const subject =
-    profile === "ground_station" ? t("pairing.subject.groundStation") : t("pairing.subject.drone");
+    profile === "ground_station"
+      ? t("pairing.subject.groundStation")
+      : profile === "visor"
+        ? t("pairing.subject.visor")
+        : t("pairing.subject.drone");
   const paired = info.data?.paired === true;
 
   return (

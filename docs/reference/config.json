@@ -38,7 +38,8 @@
         "drone",
         "ground_station",
         "workstation",
-        "compute"
+        "compute",
+        "visor"
       ],
       "key": "agent.profile",
       "maximum": null,
@@ -1647,6 +1648,16 @@
       "minimum": null,
       "secret": false,
       "type": "string"
+    },
+    {
+      "default": false,
+      "description": "Enabled",
+      "enum": null,
+      "key": "simulation.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
     },
     {
       "default": 4,

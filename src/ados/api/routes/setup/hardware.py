@@ -7,7 +7,7 @@ import asyncio
 from fastapi import APIRouter
 
 from ados.api.deps import get_agent_app
-from ados.core.profile import _read_profile_conf_value
+from ados.core.profile import _read_profile_conf_value, canonical_profile
 from ados.setup import hardware_state
 from ados.setup.hardware_check import (
     run_hardware_check_cached,
@@ -27,15 +27,7 @@ def _resolve_profile(config) -> tuple[str, str]:
     that hasn't finalized the setup wizard yet.
     """
     raw = str(getattr(getattr(config, "agent", None), "profile", "") or "")
-    profile = raw if raw in ("drone", "ground_station") else ""
-    if not profile:
-        conf_raw = _read_profile_conf_value()
-        if conf_raw == "drone":
-            profile = "drone"
-        elif conf_raw in ("ground_station", "ground-station"):
-            profile = "ground_station"
-    if not profile:
-        profile = "drone"
+    profile = canonical_profile(raw) or _read_profile_conf_value() or "drone"
     role = str(getattr(getattr(config, "ground_station", None), "role", "direct") or "direct")
     return profile, role
 

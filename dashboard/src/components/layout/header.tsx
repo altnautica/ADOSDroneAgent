@@ -18,7 +18,7 @@ import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 
 function profileVariant(profile?: string) {
-  if (profile === "drone") return "info" as const;
+  if (profile === "drone" || profile === "visor") return "info" as const;
   if (profile === "ground_station") return "ok" as const;
   return "default" as const;
 }

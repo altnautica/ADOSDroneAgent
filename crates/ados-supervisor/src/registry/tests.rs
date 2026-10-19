@@ -39,10 +39,11 @@ fn registry_has_expected_shape() {
             "{absent} is torn down on every profile and must not be registered"
         );
     }
-    // The vision engine is a drone-gated Hardware unit and is NOT in the
+    // The vision engine is a camera-node (drone, visor) Hardware unit and is
+    // NOT in the
     // headless keep set (vision/AI is excluded from the lean core).
     let vis = specs.iter().find(|s| s.name == "ados-vision").unwrap();
-    assert_eq!(vis.profile_gate, Some("drone"));
+    assert_eq!(vis.profile_gate, Some("drone|visor"));
     assert_eq!(vis.category, Category::Hardware);
     assert!(!vis.headless_keep);
     // The CRSF RC lane is a Hardware unit on both FC-bearing profiles
@@ -172,7 +173,8 @@ fn the_parked_retry_cadence_is_in_the_fixed_recovery_band() {
 fn mavlink_is_core_on_the_fc_profiles_only() {
     // The MAVLink router is the sole C2 path with no packaged fallback, so
     // it is Core (always started) on the FC-bearing profiles. It is gated to
-    // `drone|ground_station`, NOT the FC-less compute node (which never
+    // `drone|ground_station|visor` (a Visor's stage-A sensor hub is a flight
+    // controller over USB), NOT the FC-less compute node (which never
     // fetches the router binary and would crash-loop on an unconditional
     // start). No role gate.
     let specs = build_specs();
@@ -181,7 +183,7 @@ fn mavlink_is_core_on_the_fc_profiles_only() {
         .find(|s| s.name == "ados-mavlink")
         .expect("ados-mavlink must be in the registry");
     assert_eq!(mav.category, Category::Core);
-    assert_eq!(mav.profile_gate, Some("drone|ground_station"));
+    assert_eq!(mav.profile_gate, Some("drone|ground_station|visor"));
     assert_eq!(mav.role_gate, None);
 }
 
@@ -204,11 +206,10 @@ fn the_swarm_bus_is_core_on_both_fc_profiles_and_kept_headless() {
     // Onboard collision avoidance reads this table, so a lean headless flight
     // node that keeps the router must keep the bus that feeds separation.
     assert!(bus.headless_keep);
+    // A Visor runs the router for its stage-A sensor hub but has no fleet
+    // slot, so the bus stays off it.
     let mav = specs.iter().find(|s| s.name == "ados-mavlink").unwrap();
-    assert_eq!(
-        bus.profile_gate, mav.profile_gate,
-        "same gate as the router"
-    );
+    assert_eq!(mav.profile_gate, Some("drone|ground_station|visor"));
 }
 
 #[test]

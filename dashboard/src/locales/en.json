@@ -119,7 +119,10 @@
       "profileDrone": "Drone",
       "profileGroundStation": "Ground station",
       "profileAuto": "Auto-detecting",
-      "profileOther": "non-flight (workstation or compute)",
+      "profileWorkstation": "Workstation",
+      "profileCompute": "Compute",
+      "profileVisor": "Visor",
+      "profileOther": "unrecognised",
       "roleDirect": "Direct",
       "roleRelay": "Relay",
       "roleReceiver": "Receiver",
@@ -623,6 +626,8 @@
       "droneDescription": "Air-side companion. Routes MAVLink, streams video, talks to the cloud relay.",
       "groundStationLabel": "Ground station",
       "groundStationDescription": "Ground-side receiver. Hosts WFB-rx, displays the video feed, optionally bridges over mesh.",
+      "visorLabel": "Visor",
+      "visorDescription": "Handheld capture rig. Runs the cameras, a USB sensor hub and a local Wi-Fi access point; no long-range radio.",
       "directLabel": "Direct",
       "directDescription": "Single ground node receiving the drone link directly.",
       "relayLabel": "Relay",
@@ -1156,7 +1161,8 @@
   "pairing": {
     "subject": {
       "groundStation": "ground station",
-      "drone": "drone"
+      "drone": "drone",
+      "visor": "visor"
     },
     "page": {
       "title": "Pairing",

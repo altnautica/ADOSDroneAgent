@@ -7,7 +7,7 @@
 //! empty, or absent defers to `profile.conf`; anything unresolved is a drone.
 //!
 //! The result is the hyphenated wire form: `drone`, `ground-station`,
-//! `workstation`, or `compute`.
+//! `workstation`, `compute`, or `visor`.
 //!
 //! A ground station also carries a role (`direct`, `relay` or `receiver`) in the
 //! `/etc/ados/mesh/role` sentinel the role manager writes; [`ground_station_role`]
@@ -66,17 +66,24 @@ pub fn ground_station_role(profile: &str, role_path: &Path) -> Option<String> {
     (profile == "ground-station").then(|| read_mesh_role(role_path))
 }
 
-/// Wire-contract profile string from a raw value. `ground_station` and
-/// `ground-station` become `ground-station`; `workstation` (the operator's
-/// console) and `compute` (a lean engine-only worker) stay as-is;
-/// `drone`/`auto`/empty/unknown collapse to `drone`.
+/// Wire-contract profile string from a raw value. Any profile in the
+/// canonical list (`ados_protocol::contracts::PROFILES`), in either the
+/// underscore or the hyphen spelling, maps to its wire form (`ground_station`
+/// becomes `ground-station`); `auto`/empty/unknown collapse to `drone`.
 pub fn normalize_profile(raw: Option<&str>) -> String {
-    match raw {
-        Some("ground_station") | Some("ground-station") => "ground-station".to_string(),
-        Some("workstation") => "workstation".to_string(),
-        Some("compute") => "compute".to_string(),
-        _ => "drone".to_string(),
+    match raw.and_then(canonical_profile) {
+        Some(p) => p.replace('_', "-"),
+        None => "drone".to_string(),
     }
+}
+
+/// The canonical underscore form of `raw` when it names a known profile.
+fn canonical_profile(raw: &str) -> Option<&'static str> {
+    let underscored = raw.replace('-', "_");
+    ados_protocol::contracts::PROFILES
+        .iter()
+        .copied()
+        .find(|p| *p == underscored)
 }
 
 /// Profile resolution order: explicit `config.agent.profile`, else the
@@ -106,11 +113,8 @@ pub fn read_profile_conf_value(path: &Path) -> Option<String> {
         };
         if let Some(value) = value {
             let v = value.trim().trim_matches(|c| c == '"' || c == '\'');
-            if matches!(
-                v,
-                "drone" | "ground_station" | "ground-station" | "workstation" | "compute"
-            ) {
-                return Some(v.replace('-', "_"));
+            if let Some(p) = canonical_profile(v) {
+                return Some(p.to_string());
             }
         }
     }
@@ -199,6 +203,17 @@ mod tests {
         write(&pc, "profile: compute\n");
         assert_eq!(read_profile_conf_value(&pc).as_deref(), Some("compute"));
         assert_eq!(resolve_profile(Some("auto"), &pc), "compute");
+    }
+
+    #[test]
+    fn visor_profile_resolves_from_config_and_profile_conf() {
+        let dir = tempfile::tempdir().unwrap();
+        let no_conf = dir.path().join("nope.conf");
+        assert_eq!(resolve_profile(Some("visor"), &no_conf), "visor");
+        let pc = dir.path().join("profile.conf");
+        write(&pc, "profile: visor\n");
+        assert_eq!(read_profile_conf_value(&pc).as_deref(), Some("visor"));
+        assert_eq!(resolve_profile(Some("auto"), &pc), "visor");
     }
 
     #[test]

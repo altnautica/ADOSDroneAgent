@@ -57,7 +57,8 @@ pub(super) fn disable_other_profile_units(profile: &str) {
 }
 
 /// Stop + disable + mask the Debian-default dnsmasq/hostapd so they cannot
-/// fight the GS profile for ports 53/67 or wlan0 (`mask_conflicting_standalone_services`).
+/// fight the access-point profiles (ground station, visor) for ports 53/67 or
+/// wlan0 (`mask_conflicting_standalone_services`).
 pub(super) fn mask_conflicting_standalone_services() {
     for action in ["stop", "disable", "mask"] {
         let _ = exec::run("systemctl", &[action, "dnsmasq.service", "hostapd.service"]);

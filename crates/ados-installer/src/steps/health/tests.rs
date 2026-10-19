@@ -45,7 +45,7 @@ fn no_profile_expects_a_retired_or_hardware_gated_unit() {
     // A retired unit is pruned before the gate runs, and the Hailo sidecar
     // is inactive on a board without the accelerator, so expecting either
     // would fail a healthy install.
-    for profile in ["drone", "ground_station", "workstation", "compute"] {
+    for profile in ["drone", "ground_station", "workstation", "compute", "visor"] {
         let units = expected_profile_units(profile);
         for unit in crate::steps::systemd::RETIRED_UNITS {
             assert!(!units.contains(unit), "{profile} expects retired {unit}");
@@ -120,8 +120,9 @@ fn default_radio_binary_is_profile_specific_and_gated() {
         != "/opt/ados/bin/ados-radio")
     .is_none());
 
-    // An unknown profile has no default WFB unit binary to gate on.
+    // A profile with no WFB radio has no default WFB unit binary to gate on.
     assert!(missing_default_radio_binary("workstation", |_| false).is_none());
+    assert!(missing_default_radio_binary("visor", |_| false).is_none());
 }
 
 #[test]
@@ -184,9 +185,9 @@ fn every_profile_is_held_to_exactly_the_hard_binaries_it_fetches() {
     // Health and fetch share one catalog: with everything absent, each
     // profile is flagged for its own Hard binaries and nothing else. A
     // workstation or compute node fetches no MAVLink router, so a missing
-    // one must not fail its install; a drone or ground station runs the
-    // router as its sole C2 path, so a missing one must.
-    for profile in ["drone", "ground_station", "workstation", "compute"] {
+    // one must not fail its install; a drone, ground station or visor runs
+    // the router as its sole FC / sensor-hub path, so a missing one must.
+    for profile in ["drone", "ground_station", "workstation", "compute", "visor"] {
         let missing = missing_hard_binaries(profile, |_| false);
         let fetched_hard: Vec<&str> = binaries::for_profile(profile)
             .into_iter()
@@ -196,7 +197,7 @@ fn every_profile_is_held_to_exactly_the_hard_binaries_it_fetches() {
         assert_eq!(missing, fetched_hard, "{profile}");
         assert!(missing.contains(&"ados-supervisor"), "{profile}");
         let router = missing.contains(&"ados-mavlink-router");
-        let runs_router = matches!(profile, "drone" | "ground_station");
+        let runs_router = matches!(profile, "drone" | "ground_station" | "visor");
         assert_eq!(router, runs_router, "{profile}: router gate");
     }
     // Everything a workstation fetches is present → a healthy install,

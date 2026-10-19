@@ -120,6 +120,7 @@ def test_committed_schema_carries_the_closed_sets_and_native_keys() -> None:
         "ground_station",
         "workstation",
         "compute",
+        "visor",
     ]
     assert defs["VisionConfig"]["properties"]["backend"]["enum"] == [
         "auto",

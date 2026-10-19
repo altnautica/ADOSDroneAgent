@@ -61,12 +61,16 @@ impl Step for Dkms {
         StepKind::Optional
     }
     fn run(&self, ctx: &mut Ctx) -> StepOutcome {
-        // Opt-out: a node with no long-range radio (workstation / compute) or an
-        // explicit operator choice skips the driver build. Returning Skipped keeps
-        // the rtl_regulatory dependency satisfied; a skip marks no checkpoint, so
-        // a later opt-in re-run builds the driver.
-        if !ctx.install_rtl8812eu {
-            tracing::info!("RTL8812EU driver install skipped (--no-rtl-driver)");
+        // Opt-out: a node with no long-range radio (workstation / compute /
+        // visor) or an explicit operator choice skips the driver build. Returning
+        // Skipped keeps the rtl_regulatory dependency satisfied; a skip marks no
+        // checkpoint, so a later opt-in re-run builds the driver.
+        if !ctx.has_long_range_radio() {
+            tracing::info!(
+                profile = %ctx.profile,
+                radio = ctx.install_rtl8812eu,
+                "RTL8812EU driver install skipped (no long-range radio for this device)"
+            );
             return StepOutcome::Skipped;
         }
         // Resolve the driver script under the source tree the clone recorded.
@@ -165,6 +169,19 @@ mod tests {
         };
         let mut ctx = Ctx::from_args(args, EnvInfo::probe(), Checkpoint::new());
         assert!(!ctx.install_rtl8812eu);
+        assert_eq!(Dkms.run(&mut ctx), StepOutcome::Skipped);
+    }
+
+    #[test]
+    fn a_visor_skips_the_driver_build() {
+        // A visor has no WFB radio, so the driver is never built there even
+        // with the radio flag left at its default.
+        let args = Args {
+            profile: Some("visor".to_string()),
+            ..Args::default()
+        };
+        let mut ctx = Ctx::from_args(args, EnvInfo::probe(), Checkpoint::new());
+        assert!(ctx.install_rtl8812eu);
         assert_eq!(Dkms.run(&mut ctx), StepOutcome::Skipped);
     }
 

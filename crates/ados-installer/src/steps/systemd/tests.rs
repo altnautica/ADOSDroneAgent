@@ -25,7 +25,7 @@ fn installer_prunes_retired_units() {
             !universal_units().contains(&unit),
             "{unit} must not be enabled"
         );
-        for profile in ["drone", "ground_station"] {
+        for profile in ados_protocol::contracts::PROFILES {
             assert!(
                 !profile_enable_units(profile).contains(&unit),
                 "{unit} must not be enable-linked on {profile}"

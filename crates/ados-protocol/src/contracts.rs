@@ -98,3 +98,6 @@ pub fn contract_version(id: &str) -> Option<u16> {
 pub fn sidecar_version(id: &str) -> Option<u16> {
     SIDECARS.iter().find(|c| c.id == id).map(|c| c.version)
 }
+
+/// Every agent profile, in canonical order.
+pub const PROFILES: &[&str] = &["drone", "ground_station", "workstation", "compute", "visor"];

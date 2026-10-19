@@ -522,6 +522,10 @@ mod tests {
             parse_profile_conf("device: abc\nprofile: compute\n").as_deref(),
             Some("compute")
         );
+        assert_eq!(
+            parse_profile_conf("profile: visor\n").as_deref(),
+            Some("visor")
+        );
     }
 
     #[test]

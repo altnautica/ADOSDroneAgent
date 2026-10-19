@@ -302,7 +302,9 @@ def probe_gps_serial(timeout: float = 2.0) -> tuple[int, int, bool]:
     config does not assign it to a service, and no other process has it
     open. When that cannot be established the probe samples nothing. A free
     port is opened at 9600 baud; a receiver talking at another baud will not
-    match, which is acceptable for one signal in the profile vote.
+    match, which is acceptable for one signal in the profile vote. A fix
+    earns 2 air points; ``detect_profile`` drops them when an OLED is present
+    (a handheld visor carries a GNSS receiver and a display).
     """
     try:
         import serial  # type: ignore
@@ -344,9 +346,9 @@ def probe_gps_serial(timeout: float = 2.0) -> tuple[int, int, bool]:
         if not buf:
             continue
         if any(buf.find(prefix) >= 0 for prefix in _NMEA_PREFIXES):
-            return 0, 3, True
+            return 0, 2, True
         if buf.find(_UBX_SYNC) >= 0:
-            return 0, 3, True
+            return 0, 2, True
 
     return 0, 0, False
 

@@ -50,6 +50,14 @@ function droneItems(): NavItem[] {
   ];
 }
 
+// A visor has cameras and a sensor hub but no long-range radio to transmit on.
+function visorItems(): NavItem[] {
+  return [
+    { to: "/telemetry", labelKey: "nav.telemetry", icon: Radio },
+    { to: "/video", labelKey: "nav.video", icon: Video },
+  ];
+}
+
 function groundItems(role: GroundRole): NavItem[] {
   const items: NavItem[] = [
     { to: "/receive", labelKey: "nav.receive", icon: Antenna },
@@ -67,6 +75,7 @@ function groundItems(role: GroundRole): NavItem[] {
 function itemsForProfile(profile: Profile, role: GroundRole): NavItem[] {
   if (profile === "drone") return droneItems();
   if (profile === "ground_station") return groundItems(role);
+  if (profile === "visor") return visorItems();
   return [];
 }
 

@@ -1,24 +1,41 @@
 """Profile and role helpers for the wire contract.
 
-The agent stores ``profile`` as ``"drone"`` or ``"ground_station"``
-internally (underscore form, set by ``bootstrap/profile_detect.py`` and
-read from ``/etc/ados/profile.conf``). The GCS-facing wire contract uses
-the hyphenated form ``"ground-station"``. This module is the single
+The agent stores ``profile`` in the underscore form of
+``ados.core._contracts_generated.PROFILES`` internally (set by
+``bootstrap/profile_detect.py`` and read from ``/etc/ados/profile.conf``).
+The GCS-facing wire contract uses the hyphenated form (``"ground-station"``;
+single-word profiles are identical in both forms). This module is the single
 place the two forms are bridged so the heartbeat, the pairing-info
 endpoint, and the mDNS TXT records all emit the same shape.
 """
 
 from __future__ import annotations
 
+from ados.core._contracts_generated import PROFILES
 from ados.core.paths import PROFILE_CONF
 
 
+def canonical_profile(raw: str | None) -> str | None:
+    """Underscore form of ``raw`` when it names a known profile, else ``None``.
+
+    Accepts either spelling (``ground-station`` / ``ground_station``).
+    """
+    if not raw:
+        return None
+    value = raw.strip().replace("-", "_")
+    return value if value in PROFILES else None
+
+
 def normalize_profile(raw: str | None) -> str:
-    """Return the wire-contract profile string."""
-    if raw == "ground_station":
-        return "ground-station"
-    # "drone", "auto", "", None → "drone" for wire purposes.
-    return "drone"
+    """Return the wire-contract (hyphen) profile string.
+
+    Known profiles in either spelling map to their hyphen form; ``"auto"``,
+    empty, ``None`` and unknown values fall back to ``"drone"``.
+    """
+    value = canonical_profile(raw)
+    if value is None:
+        return "drone"
+    return value.replace("_", "-")
 
 
 def _read_profile_conf_value() -> str | None:
@@ -41,12 +58,12 @@ def _read_profile_conf_value() -> str | None:
                 continue
             if stripped.startswith("profile:"):
                 value = stripped.split(":", 1)[1].strip().strip('"\'')
-                if value in ("drone", "ground_station", "ground-station"):
-                    return value.replace("-", "_")
+                if canonical_profile(value):
+                    return canonical_profile(value)
             elif stripped.startswith("profile="):
                 value = stripped.split("=", 1)[1].strip().strip('"\'')
-                if value in ("drone", "ground_station", "ground-station"):
-                    return value.replace("-", "_")
+                if canonical_profile(value):
+                    return canonical_profile(value)
     except OSError:
         return None
     return None

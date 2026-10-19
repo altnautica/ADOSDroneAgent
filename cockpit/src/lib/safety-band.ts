@@ -16,7 +16,7 @@ export type ReachBadge = "DIRECT" | "LAN" | "VIA GROUND";
  *  viewed from another machine is over the LAN. */
 export function reachBadge(profile: AgentProfile | null, hostname: string): ReachBadge | null {
   if (profile === "ground_station") return "VIA GROUND";
-  if (profile !== "drone") return null;
+  if (profile !== "drone" && profile !== "visor") return null;
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" ? "DIRECT" : "LAN";
 }
 

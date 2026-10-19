@@ -78,6 +78,42 @@ fn profile_and_install_rules_hold() {
     }
 }
 
+#[test]
+fn visor_unit_set() {
+    use ados_protocol::units::units_for_profile;
+    let names: Vec<&str> = units_for_profile("visor").map(|u| u.name).collect();
+    for want in [
+        "ados-vision.service",
+        "ados-video.service",
+        "ados-mavlink.service",
+        "ados-hostapd.service",
+        "ados-dnsmasq-gs.service",
+        "ados-oled.service",
+        "ados-oled-i2c.service",
+        "ados-input.service",
+        "ados-control.service",
+    ] {
+        assert!(names.contains(&want), "visor lacks {want}");
+    }
+    for name in &names {
+        assert!(!name.starts_with("ados-wfb"), "visor gets {name}");
+    }
+    for gone in [
+        "ados-crsf.service",
+        "ados-swarmbus.service",
+        "ados-tunnel-config.service",
+        "ados-batman.service",
+        "ados-kiosk.service",
+        "ados-mediamtx-gs.service",
+        "ados-uplink-router.service",
+        "ados-mesh-pairing.service",
+        "ados-setup-captive.service",
+        "ados-pic.service",
+    ] {
+        assert!(!names.contains(&gone), "visor gets {gone}");
+    }
+}
+
 /// The last value of `key=` in a unit file, as systemd keeps the last one.
 fn directive<'a>(body: &'a str, key: &str) -> Option<&'a str> {
     let prefix = format!("{key}=");

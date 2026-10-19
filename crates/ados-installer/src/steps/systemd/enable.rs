@@ -329,7 +329,7 @@ pub(super) fn add_operator_to_ados_group() {
 }
 
 /// Add the `ados` and `pi` service users to the hardware-access groups the
-/// ground-station services need (GROUND-STATION only). Ports the
+/// access-point and panel services need (ground station and visor). Ports the
 /// `usermod -aG ...` bits of `enable_ground_station_units`:
 ///
 /// - `gpio`    — button service drives /dev/gpiochip0 via libgpiod.
@@ -339,7 +339,7 @@ pub(super) fn add_operator_to_ados_group() {
 /// - `i2c`     — userspace OLED + future I2C peripherals.
 ///
 /// Every `usermod -aG` is an idempotent no-op when membership already exists.
-pub(super) fn add_ground_station_group_memberships() {
+pub(super) fn add_panel_group_memberships() {
     for grp in ["gpio", "input", "plugdev", "bluetooth", "i2c"] {
         if !exec::run_ok("getent", &["group", grp]) {
             tracing::warn!(group = grp, "group not present; skipping usermod");

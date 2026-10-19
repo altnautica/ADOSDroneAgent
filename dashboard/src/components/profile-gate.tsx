@@ -17,11 +17,23 @@ interface ProfileGateProps {
   children: React.ReactNode;
 }
 
-function profileLabel(p: AllowedProfile | Profile): string {
-  if (p === "drone") return i18n.t("access.profileGate.profileDrone");
-  if (p === "ground_station") return i18n.t("access.profileGate.profileGroundStation");
-  if (p === "auto") return i18n.t("access.profileGate.profileAuto");
-  return i18n.t("access.profileGate.profileOther");
+function profileLabel(p: Profile): string {
+  switch (p) {
+    case "drone":
+      return i18n.t("access.profileGate.profileDrone");
+    case "ground_station":
+      return i18n.t("access.profileGate.profileGroundStation");
+    case "workstation":
+      return i18n.t("access.profileGate.profileWorkstation");
+    case "compute":
+      return i18n.t("access.profileGate.profileCompute");
+    case "visor":
+      return i18n.t("access.profileGate.profileVisor");
+    case "auto":
+      return i18n.t("access.profileGate.profileAuto");
+    case "unknown":
+      return i18n.t("access.profileGate.profileOther");
+  }
 }
 
 function roleLabel(r: GroundRole): string {

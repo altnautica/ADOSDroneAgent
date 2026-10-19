@@ -12,14 +12,13 @@ import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
 import { toast, toastFromError } from "@/lib/toast";
-import { type ApplyPayload, postApply, profileFromStatus } from "@/lib/apply-actions";
+import { type ApplyPayload, type ApplyProfile, postApply, profileFromStatus } from "@/lib/apply-actions";
 import { withArmedRetry } from "@/lib/armed-retry";
 import type { GroundRole } from "@/lib/types";
 import { apiFetch } from "@/shared/api-fetch";
 import { invalidateProfile } from "@/shared/use-profile";
 
-type ApplyProfile = "drone" | "ground_station";
-
+// Workstation and compute are detected, never chosen here.
 const PROFILE_OPTIONS = [
   {
     value: "drone" as const,
@@ -30,6 +29,11 @@ const PROFILE_OPTIONS = [
     value: "ground_station" as const,
     labelKey: "settings.profile.groundStationLabel",
     descriptionKey: "settings.profile.groundStationDescription",
+  },
+  {
+    value: "visor" as const,
+    labelKey: "settings.profile.visorLabel",
+    descriptionKey: "settings.profile.visorDescription",
   },
 ] as const;
 

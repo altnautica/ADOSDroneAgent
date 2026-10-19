@@ -181,30 +181,26 @@ enum LcdAction {
 
 /// Decide the SPI-LCD residue action from the operator's `--display` choice,
 /// mirroring `config_identity::provision_overlays`' resolution: an explicit
-/// `--display` wins; otherwise a ground station defaults to `auto` (panel
-/// auto-detected) and every other profile to `none`. Pure + unit-tested.
+/// `--display` wins; otherwise a panel profile (ground station, visor)
+/// defaults to `auto` (panel auto-detected) and every other profile to `none`.
+/// Pure + unit-tested.
 ///
 ///   * `none`  -> Revert  (explicit opt-out, or a drone: ensure a clean HDMI /
 ///     GPU boot by stripping any stale SPI-LCD overlay).
-///   * `auto`  -> Defer   (the GS default: the brick-safe shell auto-detector
-///     keeps a bound panel or resolves HDMI/OLED — never force a change here,
-///     so a real SPI-LCD GS is never stripped to a white screen).
-///   * an explicit panel id -> Defer on a ground station (the panel IS its UI
+///   * `auto`  -> Defer   (the panel-profile default: the brick-safe shell
+///     auto-detector keeps a bound panel or resolves HDMI/OLED — never force a
+///     change here, so a real SPI-LCD node is never stripped to a white screen).
+///   * an explicit panel id -> Defer on a panel profile (the panel IS its UI
 ///     and the shell installer is the only thing that may write its overlay),
 ///     Revert on any other profile (a drone must never let the SPI framebuffer
 ///     overlay steal fb0 from the GPU).
 fn lcd_residue_action(ctx: &Ctx) -> LcdAction {
-    let resolved = ctx.args.display.clone().unwrap_or_else(|| {
-        if ctx.profile == "ground_station" {
-            "auto".to_string()
-        } else {
-            "none".to_string()
-        }
-    });
-    match resolved.as_str() {
+    let default = crate::steps::config_identity::default_display_arg(&ctx.profile);
+    let panel_profile = default == "auto";
+    match ctx.args.display.as_deref().unwrap_or(default) {
         "none" => LcdAction::Revert,
         "auto" => LcdAction::Defer,
-        _ if ctx.profile == "ground_station" => LcdAction::Defer,
+        _ if panel_profile => LcdAction::Defer,
         _ => LcdAction::Revert,
     }
 }
@@ -436,6 +432,24 @@ mod tests {
         // Even an explicit panel id on a drone reverts (a drone is not a panel host).
         assert_eq!(
             lcd_residue_action(&ctx_with(Some("waveshare35a"), "drone")),
+            LcdAction::Revert
+        );
+    }
+
+    #[test]
+    fn action_visor_defers_like_a_ground_station() {
+        // A visor's SPI TFT is its local UI: absent or explicit panel choices
+        // defer to the shell auto-detector, an explicit none reverts.
+        assert_eq!(
+            lcd_residue_action(&ctx_with(None, "visor")),
+            LcdAction::Defer
+        );
+        assert_eq!(
+            lcd_residue_action(&ctx_with(Some("waveshare35a"), "visor")),
+            LcdAction::Defer
+        );
+        assert_eq!(
+            lcd_residue_action(&ctx_with(Some("none"), "visor")),
             LcdAction::Revert
         );
     }

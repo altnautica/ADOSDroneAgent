@@ -59,7 +59,7 @@ const SCREENS: ScreenSpec[] = [
     title: "Mesh",
     icon: Network,
     kind: "tab",
-    groundStationOnly: true,
+    profiles: ["ground_station"],
     render: () => <MeshScreen />,
   },
   {
@@ -74,7 +74,7 @@ const SCREENS: ScreenSpec[] = [
     title: "Uplink",
     icon: SlidersHorizontal,
     kind: "tab",
-    groundStationOnly: true,
+    profiles: ["ground_station"],
     render: () => <UplinkScreen />,
   },
   {
@@ -110,14 +110,14 @@ export function allScreens(): ScreenSpec[] {
 }
 
 /** The top-level tab screens, in menu order, filtered for the agent profile.
- *  A drone hides the ground-station-only tabs (Mesh, Uplink). An unknown profile
- *  (before the probe resolves) shows the full ground-station set — the historical
- *  default — and settles once the profile is known. */
+ *  A tab with `profiles` shows only on those profiles (Mesh and Uplink are
+ *  ground-station only). Before the probe resolves, or on a profile the probe
+ *  does not recognise, every tab shows and the menu settles once it is known. */
 export function tabScreens(profile?: AgentProfile | null): ScreenSpec[] {
   return SCREENS.filter((s) => {
     if (s.kind !== "tab") return false;
-    if (s.groundStationOnly && profile === "drone") return false;
-    return true;
+    if (!s.profiles || !profile || profile === "unknown") return true;
+    return s.profiles.includes(profile);
   });
 }
 

@@ -106,7 +106,8 @@
               "drone",
               "ground-station",
               "workstation",
-              "compute"
+              "compute",
+              "visor"
             ],
             "type": "string"
           },
@@ -250,7 +251,8 @@
                   "drone",
                   "ground-station",
                   "workstation",
-                  "compute"
+                  "compute",
+                  "visor"
                 ],
                 "type": "string"
               },
@@ -748,7 +750,8 @@
               "drone",
               "ground-station",
               "workstation",
-              "compute"
+              "compute",
+              "visor"
             ],
             "type": "string"
           },
@@ -799,7 +802,8 @@
                   "drone",
                   "ground-station",
                   "workstation",
-                  "compute"
+                  "compute",
+                  "visor"
                 ],
                 "type": "string"
               },
@@ -1072,7 +1076,8 @@
                   "drone",
                   "ground-station",
                   "workstation",
-                  "compute"
+                  "compute",
+                  "visor"
                 ],
                 "type": "string"
               },
