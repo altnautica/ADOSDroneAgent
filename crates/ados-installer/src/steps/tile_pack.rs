@@ -170,7 +170,7 @@ mod tests {
             "field.pmtiles"
         );
         assert_eq!(
-            pack_file_name("/home/operator/site-a.pmtiles").unwrap(),
+            pack_file_name("/srv/packs/site-a.pmtiles").unwrap(),
             "site-a.pmtiles"
         );
         assert_eq!(pack_file_name("site-b.pmtiles").unwrap(), "site-b.pmtiles");
