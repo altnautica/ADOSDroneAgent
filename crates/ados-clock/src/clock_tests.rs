@@ -11,6 +11,7 @@ fn obs(source: SyncSource, host_ns: u64, source_ns: i64) -> SyncObs {
         host_ns,
         source_ns,
         rtt_ns: 0,
+        sim_time: source == SyncSource::Sim,
     }
 }
 
@@ -191,7 +192,7 @@ fn clock_document_shape() {
     let v = serde_json::to_value(c.report(T0)).unwrap();
     let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     let mut want = vec![
-        "version", "timebase", "locked", "sigma_ns", "t_ns", "utc_ns", "sources",
+        "version", "timebase", "source", "locked", "sigma_ns", "t_ns", "utc_ns", "sources",
     ];
     let mut got = keys.clone();
     got.sort_unstable();
@@ -199,6 +200,7 @@ fn clock_document_shape() {
     assert_eq!(got, want);
     assert_eq!(v["version"], 1);
     assert_eq!(v["timebase"], "hub_freerun");
+    assert_eq!(v["source"], "hub");
     assert!(v["utc_ns"].is_null());
     let sources = v["sources"].as_array().unwrap();
     let ids: Vec<&str> = sources.iter().map(|s| s["id"].as_str().unwrap()).collect();
@@ -224,6 +226,7 @@ fn clock_document_shape() {
             "locked",
             "offset_ns",
             "sigma_ns",
+            "sim_time",
             "skew_ppm"
         ]
     );
@@ -233,136 +236,4 @@ fn clock_document_shape() {
     assert_eq!(sources[0]["sigma_ns"], -1);
     assert_eq!(sources[0]["last_update_ns"], 0);
     assert_eq!(sources[0]["skew_ppm"], 0.0);
-}
-
-/// Deterministic uniform `(0, 1)` draws for the jitter tests.
-struct Lcg(u64);
-
-impl Lcg {
-    fn unit(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6_364_136_223_846_793_005)
-            .wrapping_add(1_442_695_040_888_963_407);
-        ((self.0 >> 11) as f64 + 0.5) / (1u64 << 53) as f64
-    }
-}
-
-/// Simulator time at host time `h` of a run whose clock read 0 at host `h0`
-/// and runs 40 ppm fast.
-fn sim_at(h0: u64, h: u64) -> i64 {
-    ((h as f64 - h0 as f64) * (1.0 + 40e-6)).round() as i64
-}
-
-/// Frames rendered at 20 Hz from host `h0` until `until` by the run of
-/// [`sim_at`]`(h0, _)`, each reaching the host after an exponential latency
-/// (mean 60 ms) and every 25th 200 ms later still; in arrival order.
-fn sim_pairs(rng: &mut Lcg, h0: u64, until: u64) -> Vec<(u64, i64)> {
-    let mut pairs = Vec::new();
-    let (mut emit, mut frame) = (h0, 0u64);
-    while emit < until {
-        let mut latency = -60.0 * MS as f64 * rng.unit().ln();
-        if frame % 25 == 24 {
-            latency += 200.0 * MS as f64;
-        }
-        pairs.push((emit + latency as u64, sim_at(h0, emit)));
-        emit += 50 * MS;
-        frame += 1;
-    }
-    pairs.sort_unstable();
-    pairs
-}
-
-/// Feed `pairs` of the run started at `h0`: the outcomes, the first host time
-/// the sim source was locked, and the worst session-time error while locked.
-/// Once locked it must stay locked.
-fn feed_sim(
-    c: &mut ClockState,
-    pairs: &[(u64, i64)],
-    h0: u64,
-) -> (Vec<SyncOutcome>, Option<u64>, u64) {
-    let (mut outcomes, mut locked_at, mut worst) = (Vec::new(), None, 0);
-    for &(host, sim) in pairs {
-        outcomes.push(c.on_sync(&obs(SyncSource::Sim, host, sim)));
-        if c.locked(SyncSource::Sim, host) {
-            locked_at.get_or_insert(host);
-            let got = c.sample(host).t_ns as i64;
-            worst = worst.max(got.abs_diff(sim_at(h0, host)));
-        } else {
-            assert!(
-                locked_at.is_none(),
-                "lost lock at {host}: {:?}",
-                c.report(host).sources[3]
-            );
-        }
-    }
-    (outcomes, locked_at, worst)
-}
-
-#[test]
-fn arrival_jitter_and_spikes_lock_the_sim_envelope() {
-    for seed in 1..=6 {
-        let mut c = ClockState::new();
-        let pairs = sim_pairs(&mut Lcg(seed), T0, T0 + 90 * S);
-        let (outcomes, locked_at, worst) = feed_sim(&mut c, &pairs, T0);
-        assert!(
-            !outcomes.contains(&SyncOutcome::Reset),
-            "seed {seed}: a late pair reset the fit"
-        );
-        let locked_at = locked_at.unwrap_or_else(|| panic!("seed {seed}: never locked"));
-        assert!(
-            (T0 + 40 * S..T0 + 50 * S).contains(&locked_at),
-            "seed {seed}: locked at {locked_at}"
-        );
-        assert!(worst < MS, "seed {seed}: worst offset error {worst} ns");
-        let now = pairs.last().unwrap().0;
-        let r = c.report(now);
-        assert_eq!(r.timebase, Timebase::Sim);
-        let sim = &r.sources[3];
-        assert!(sim.locked);
-        assert!(
-            (0..LOCK_MAX_SIGMA_NS).contains(&sim.sigma_ns),
-            "seed {seed}: sigma {}",
-            sim.sigma_ns
-        );
-        assert!(
-            (sim.skew_ppm - 40.0).abs() < 20.0,
-            "seed {seed}: skew {}",
-            sim.skew_ppm
-        );
-    }
-}
-
-#[test]
-fn a_simulator_restart_resets_the_sim_envelope() {
-    let mut c = ClockState::new();
-    let mut rng = Lcg(3);
-    let first_run = sim_pairs(&mut rng, T0, T0 + 60 * S);
-    let (outcomes, locked_at, _) = feed_sim(&mut c, &first_run, T0);
-    assert!(!outcomes.contains(&SyncOutcome::Reset));
-    assert!(locked_at.is_some());
-    // A second run a second later: simulator time starts over at zero.
-    let h1 = T0 + 61 * S;
-    let mut second_run = sim_pairs(&mut rng, h1, h1 + 60 * S);
-    let first: Vec<SyncOutcome> = second_run
-        .drain(..3)
-        .map(|(host, sim)| c.on_sync(&obs(SyncSource::Sim, host, sim)))
-        .collect();
-    assert_eq!(
-        first,
-        [
-            SyncOutcome::Outlier,
-            SyncOutcome::Outlier,
-            SyncOutcome::Reset
-        ]
-    );
-    assert!(!c.locked(SyncSource::Sim, second_run[0].0));
-    let (outcomes, locked_at, worst) = feed_sim(&mut c, &second_run, h1);
-    assert!(!outcomes.contains(&SyncOutcome::Reset));
-    let locked_at = locked_at.expect("relocked on the new run");
-    assert!(locked_at >= h1 + 40 * S, "relocked at {locked_at}");
-    assert!(
-        worst < MS,
-        "worst offset error {worst} ns after the restart"
-    );
 }

@@ -1,15 +1,23 @@
 //! Lower-envelope clock fit for pairs stamped on arrival.
 //!
 //! A pair stamped when it reaches the host (the simulator time carried in a
-//! video frame's SEI) includes the transport and decode latency, which only
-//! ever makes `host - source` larger and is jittery. The true relation is the
-//! lower envelope of `host - source`, i.e. the upper envelope of the offset
-//! `source - host`. The fit is the line on or above every pair of the window
-//! that minimises the summed lateness of all of them (the linear program of
-//! one-way delay skew estimation); its optimum is the edge of the upper
-//! convex hull that spans the mean host time. Late pairs never move it.
+//! video frame's SEI) includes the encode, transport and decode latency,
+//! which only ever makes `host - source` larger and is jittery. The lower
+//! envelope of `host - source` (the upper envelope of the offset
+//! `source - host`) is therefore the true relation shifted by the
+//! pipeline's minimum latency, which one-way pairs cannot measure; the
+//! caller adds a known floor or carries its bound in sigma
+//! ([`crate::fit::LatencyFloor`]). The fit is the line on or above every
+//! pair of the window that minimises the summed lateness of all of them (the
+//! linear program of one-way delay skew estimation); its optimum is the edge
+//! of the upper convex hull that spans the mean host time. Late pairs never
+//! move it.
 //!
-//! Sigma is the RMS of the envelope points' residuals: per completed
+//! Only the least-late pair of each [`ENVELOPE_SLOT_NS`] host slot is kept:
+//! a later one in the same slot cannot touch the envelope, and the window
+//! then holds the same span whatever the pair rate (cameras × frame rate).
+//!
+//! Sigma is the RMS of the envelope points' residuals: per whole
 //! [`ENVELOPE_BIN_NS`] host bin, the smallest lateness against the line.
 //!
 //! The latency floor is touched only now and then (with ~100 ms of jitter,
@@ -20,6 +28,8 @@
 
 use std::collections::VecDeque;
 
+/// Host-time slot whose least-late pair stands for every pair in it.
+pub const ENVELOPE_SLOT_NS: u64 = 50_000_000;
 /// Host-time bin each envelope point (for sigma) is the minimum of.
 pub const ENVELOPE_BIN_NS: u64 = 2_000_000_000;
 /// Completed bins sigma needs; fewer and sigma is unmeasured (`-1`).
@@ -34,8 +44,7 @@ pub const ENVELOPE_SLOPE_SPAN_NS: u64 = 2_000_000_000;
 #[derive(Debug, Clone)]
 pub struct EnvelopeFit {
     window_ns: u64,
-    max_points: usize,
-    /// `(host_ns, source - host)`, ascending host time.
+    /// `(host_ns, source - host)`, ascending host time, one per slot.
     pts: VecDeque<(u64, i128)>,
     /// Upper hull scratch, reused across refits.
     hull: Vec<(u64, i128)>,
@@ -58,11 +67,10 @@ impl Line {
 }
 
 impl EnvelopeFit {
-    /// A fit over the last `window_ns` of pairs (at most `max_points`).
-    pub fn new(window_ns: u64, max_points: usize) -> Self {
+    /// A fit over the last `window_ns` of pairs.
+    pub fn new(window_ns: u64) -> Self {
         EnvelopeFit {
             window_ns,
-            max_points: max_points.max(2),
             pts: VecDeque::new(),
             hull: Vec::new(),
             model: None,
@@ -71,7 +79,7 @@ impl EnvelopeFit {
 
     /// The default 60 s window.
     pub fn sixty_seconds() -> Self {
-        Self::new(60_000_000_000, 4096)
+        Self::new(60_000_000_000)
     }
 
     /// Add one pair: the source read `source_ns` no later than host `host_ns`.
@@ -82,10 +90,29 @@ impl EnvelopeFit {
         while at > 0 && self.pts[at - 1].0 > host_ns {
             at -= 1;
         }
+        // A pair already in this slot sits right before or at `at`.
+        let slot = host_ns / ENVELOPE_SLOT_NS;
+        let same = [at.checked_sub(1), Some(at)]
+            .into_iter()
+            .flatten()
+            .find(|&i| {
+                self.pts
+                    .get(i)
+                    .is_some_and(|p| p.0 / ENVELOPE_SLOT_NS == slot)
+            });
+        if let Some(i) = same {
+            if self.pts[i].1 >= y {
+                return;
+            }
+            self.pts.remove(i);
+            if i < at {
+                at -= 1;
+            }
+        }
         self.pts.insert(at, (host_ns, y));
         let newest = self.pts.back().map_or(host_ns, |p| p.0);
         while let Some(&(h, _)) = self.pts.front() {
-            if newest.saturating_sub(h) > self.window_ns || self.pts.len() > self.max_points {
+            if newest.saturating_sub(h) > self.window_ns {
                 self.pts.pop_front();
             } else {
                 break;
@@ -281,11 +308,34 @@ mod tests {
             f.push(h, h as i64);
         }
         let before = f.offset_i64(49 * 100 * MS);
-        // Arrived 200 ms late (source behind), and out of order.
+        // Arrived 200 ms late (source behind), and out of order; the second
+        // shares the 4.90 s pair's slot and is dropped for it.
         f.push(4_950 * MS, (4_750 * MS) as i64);
         f.push(4_920 * MS, (4_720 * MS) as i64);
         assert_eq!(f.offset_i64(49 * 100 * MS), before);
-        assert_eq!(f.len(), 52);
+        assert_eq!(f.len(), 51);
+    }
+
+    #[test]
+    fn each_slot_keeps_its_least_late_pair() {
+        let mut f = EnvelopeFit::sixty_seconds();
+        // Four streams at 30 Hz for 70 s: 120 pairs a second.
+        for k in 0..70 * 30u64 {
+            for cam in 0..4u64 {
+                let h = k * 33_333_333 + cam * 7 * MS;
+                // Latency 0, 3, 6 or 9 ms by stream.
+                f.push(h, h as i64 - (cam * 3 * MS) as i64);
+            }
+        }
+        assert!(f.len() <= (60_000 / 50) as usize + 1, "{} pairs", f.len());
+        assert!(f.span_ns() >= 59_900 * MS, "span {}", f.span_ns());
+        // The latency-0 stream's pairs are the ones kept.
+        assert_eq!(f.offset_i64(69 * 1_000 * MS), Some(0));
+        // A less-late pair replaces the slot's pair.
+        let h = 70_000 * MS + 10 * MS;
+        f.push(h, h as i64 - 20 * MS as i64);
+        f.push(h + 5 * MS, (h + 5 * MS) as i64);
+        assert_eq!(f.pts.back(), Some(&(h + 5 * MS, 0)));
     }
 
     #[test]

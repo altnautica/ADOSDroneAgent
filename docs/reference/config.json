@@ -556,6 +556,16 @@
       "type": "integer"
     },
     {
+      "default": null,
+      "description": "Latency Floor Ns",
+      "enum": null,
+      "key": "clock.sim.latency_floor_ns",
+      "maximum": 1000000000,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer|null"
+    },
+    {
       "default": true,
       "description": "Mdns Enabled",
       "enum": null,

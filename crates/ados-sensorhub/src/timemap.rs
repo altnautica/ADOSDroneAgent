@@ -99,6 +99,7 @@ impl HubClock {
                     host_ns: b.host_ns,
                     source_ns: b.hub_ns as i64,
                     rtt_ns: 0,
+                    sim_time: false,
                 });
                 self.bucket = Some(cand);
             }

@@ -226,6 +226,7 @@ pub fn pps_loop(
             host_ns,
             source_ns: utc_ns,
             rtt_ns: 0,
+            sim_time: false,
         };
         publisher.msgpack(Kind::Sync, id, &obs);
     }

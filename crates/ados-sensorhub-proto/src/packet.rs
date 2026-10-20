@@ -33,7 +33,7 @@ pub const RTCM_MAX_BYTES: usize = 1022;
 pub const CONFIG_LEN: usize = 16;
 pub const HEALTH_LEN: usize = 40;
 
-/// `Hello.board_id` of the simulator.
+/// `Hello.board_id` of the simulator. Its hub clock is the simulator's time.
 pub const BOARD_ID_SIM: u16 = 0xFFFF;
 /// `Hello.board_id` of the Matek H743-SLIM V3.
 pub const BOARD_ID_MATEK_H743_SLIM_V3: u16 = 1;

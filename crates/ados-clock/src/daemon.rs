@@ -16,6 +16,8 @@ use crate::engine::{write_sidecar, Engine};
 pub const TICK: Duration = Duration::from_secs(1);
 /// The stream id of the `clock` frames.
 pub const CLOCK_SRC: &str = "clock";
+/// The agent config when `ADOS_CONFIG` does not name another.
+const DEFAULT_CONFIG: &str = "/etc/ados/config.yaml";
 
 fn init_logging() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -124,8 +126,13 @@ impl Outputs {
 async fn run_async() -> anyhow::Result<()> {
     init_logging();
     let socket = ados_sensorbus::socket_path();
+    let config = std::env::var_os("ADOS_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG));
+    let sim_floor = crate::config::sim_floor(&config);
+    tracing::info!(?sim_floor, "clock_sim_latency_floor");
     let (mut tap, stats) = crate::spawn_bus(&socket)?;
-    let mut engine = Engine::new(Some(ChronySink::new(CHRONY_SOCK)));
+    let mut engine = Engine::new(Some(ChronySink::new(CHRONY_SOCK)), sim_floor);
     let mut out = Outputs {
         publisher: Publisher::spawn(socket.clone(), Origin::Host),
         clock_json: run_path("clock"),

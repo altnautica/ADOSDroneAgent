@@ -274,6 +274,7 @@ mod tests {
             host_ns: 1,
             source_ns: 2,
             rtt_ns: 0,
+            sim_time: false,
         };
         let frames = [
             BusFrame::msgpack(Kind::Sync, "hub", Origin::Host, &obs).unwrap(),

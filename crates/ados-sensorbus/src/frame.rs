@@ -222,13 +222,18 @@ impl SyncSource {
 
 /// One host↔source time pair (`kind: sync`): at host monotonic `host_ns` the
 /// source clock read `source_ns`. `rtt_ns` is the exchange round trip when
-/// the pair comes from a two-way exchange (TIMESYNC), else 0.
+/// the pair comes from a two-way exchange (TIMESYNC), else 0. `sim_time`
+/// says the source runs on the simulator's clock, so `source_ns` is also
+/// simulator time: always for [`SyncSource::Sim`], and for a simulated
+/// sensor hub's [`SyncSource::Hub`] pairs. Absent on the wire means false.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncObs {
     pub source: SyncSource,
     pub host_ns: u64,
     pub source_ns: i64,
     pub rtt_ns: u64,
+    #[serde(default)]
+    pub sim_time: bool,
 }
 
 #[cfg(test)]
@@ -278,6 +283,7 @@ mod tests {
                 host_ns: 1,
                 source_ns: -2,
                 rtt_ns: 0,
+                sim_time: false,
             },
         )
         .unwrap();
@@ -289,5 +295,25 @@ mod tests {
         assert_eq!(k.kind, "sync");
         let obs: SyncObs = f.decode_msgpack().unwrap();
         assert_eq!(obs.source, SyncSource::GnssPps);
+    }
+
+    #[test]
+    fn a_pair_without_sim_time_is_not_on_the_simulator_clock() {
+        #[derive(Serialize)]
+        struct Older {
+            source: SyncSource,
+            host_ns: u64,
+            source_ns: i64,
+            rtt_ns: u64,
+        }
+        let older = Older {
+            source: SyncSource::Hub,
+            host_ns: 1,
+            source_ns: 2,
+            rtt_ns: 0,
+        };
+        let f = BusFrame::msgpack(Kind::Sync, "hub", Origin::Hub, &older).unwrap();
+        let obs: SyncObs = f.decode_msgpack().unwrap();
+        assert!(!obs.sim_time);
     }
 }

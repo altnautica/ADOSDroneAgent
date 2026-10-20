@@ -51,6 +51,7 @@ from ._yaml import StringTimestampLoader
 from .agent import AgentConfig
 from .api import ApiConfig, RestApiConfig
 from .battery import BatteryConfig
+from .clock import ClockConfig, ClockSimConfig
 from .cloud import (
     CloudflareTunnelConfig,
     CloudServerConfig,
@@ -118,6 +119,9 @@ __all__ = [
     "RestApiConfig",
     # battery
     "BatteryConfig",
+    # clock
+    "ClockConfig",
+    "ClockSimConfig",
     # gnss
     "GnssBaseConfig",
     "GnssConfig",

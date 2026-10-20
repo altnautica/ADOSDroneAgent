@@ -27,6 +27,9 @@ pub struct Converter {
     gnss_ports: Vec<u8>,
     /// Set when a `Hello` reports a protocol version this build cannot read.
     pub unsupported_proto: Option<u16>,
+    /// The hub is the simulator's (`BOARD_ID_SIM`): its clock is simulator
+    /// time, and its `sync` pairs say so.
+    sim_clock: bool,
 }
 
 impl Converter {
@@ -40,6 +43,7 @@ impl Converter {
             trigger_next: None,
             gnss_ports: Vec::new(),
             unsupported_proto: None,
+            sim_clock: false,
         }
     }
 
@@ -72,7 +76,8 @@ impl Converter {
                 self.imu_next.clear();
                 self.trigger_next = None;
             }
-            if let Some(sync) = obs.sync {
+            if let Some(mut sync) = obs.sync {
+                sync.sim_time = self.sim_clock;
                 if let Ok(f) = BusFrame::msgpack(Kind::Sync, SYNC_SRC, Origin::Hub, &sync) {
                     emit(f);
                 }
@@ -177,6 +182,7 @@ impl Converter {
         if h.proto_ver != proto::PROTO_VER {
             self.unsupported_proto = Some(h.proto_ver);
         }
+        self.sim_clock = h.board_id == proto::BOARD_ID_SIM;
         st.hello = Some(info);
     }
 

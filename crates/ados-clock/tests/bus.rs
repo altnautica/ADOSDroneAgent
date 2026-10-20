@@ -31,6 +31,7 @@ async fn sync_and_imu_frames_reach_the_clock_and_the_stream_table() {
             host_ns,
             source_ns: host_ns as i64 + 12_000,
             rtt_ns: 0,
+            sim_time: false,
         };
         assert!(hub.msgpack(Kind::Sync, "hub", &obs));
     }
@@ -47,7 +48,7 @@ async fn sync_and_imu_frames_reach_the_clock_and_the_stream_table() {
     };
     assert!(hub.proto(Kind::Imu, "imu0", &batch));
 
-    let mut engine = Engine::new(None);
+    let mut engine = Engine::new(None, ados_clock::fit::LatencyFloor::Unknown);
     for _ in 0..9 {
         let frame = tokio::time::timeout(Duration::from_secs(5), tap.recv())
             .await

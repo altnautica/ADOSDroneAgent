@@ -10,16 +10,31 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - **The simulator clock never locked.** Simulator time from the video SEI is
   paired with the frame's arrival on the host, so every pair carries the
-  decode and transport latency: one-sided, jittery, often over 100 ms. The
-  least-squares fit read that jitter as the clock jumping and restarted
-  every few seconds, so no session got the `sim` timebase. `ados-clock` now
-  fits arrival-stamped sources to the lower envelope of `host - source` (the
-  convex-hull line that minimises the summed lateness of the 60 s window),
-  takes sigma from the per-2 s envelope minima, accepts a pair up to 1 s
-  behind the envelope, drops one ahead of it beyond `max(5 sigma, 1 ms)`, and
-  locks once the pairs span 40 s. Three pairs more than 1 s behind (or 50 ms
-  ahead) still restart the fit, so a simulator restart resets it. The flight
-  controller, sensor hub and GNSS PPS fits are unchanged.
+  encode, transport and decode latency: one-sided, jittery, often over
+  100 ms. The least-squares fit read that jitter as the clock jumping and
+  restarted every few seconds, so no session got the `sim` timebase.
+  - `ados-clock` fits the SEI pairs to the lower envelope of `host - source`
+    (the convex-hull line that minimises the summed lateness of the 60 s
+    window), keeping only the least-late pair per 50 ms so the window spans
+    the same time whatever the camera count and frame rate. It locks once the
+    pairs span 40 s with an envelope residual under 5 ms.
+  - The envelope sits one pipeline floor behind the true relation, which
+    one-way pairs cannot measure. A measured floor goes in the new
+    `clock.sim.latency_floor_ns` and is added to the offset; unset, the
+    published sigma (the source row, `/api/v1/clock`, the bus clock sample and
+    so the session manifest) carries a 30 ms bound for it.
+  - A pair up to 1 s behind the envelope is taken without counting toward a
+    restart. Three pairs more than 1 s behind, or ahead of it beyond
+    `max(5 sigma, 1 ms)`, within 10 s restart the fit: a simulator restart or
+    a lower latency floor relocks instead of biasing the line.
+  - A simulated sensor hub runs on simulator time. `ados-sensorhub` now marks
+    its sync pairs `sim_time` (new optional field on the `sync` bus payload),
+    and the clock takes a locked simulator hub as the exact `sim` source
+    ahead of the SEI envelope: the hub service maps its samples through the
+    same pairs and frames keep their own simulator stamps, so the floor
+    cancels. `clock.json` gains `source` (the row the timebase follows) and
+    a per-row `sim_time`.
+  - The flight controller, flight hub and GNSS PPS fits are unchanged.
 
 ## [0.104.0] - 2026-10-20
 

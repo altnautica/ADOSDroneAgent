@@ -663,6 +663,36 @@
       "title": "CellularConfig",
       "type": "object"
     },
+    "ClockConfig": {
+      "properties": {
+        "sim": {
+          "$ref": "#/$defs/ClockSimConfig"
+        }
+      },
+      "title": "ClockConfig",
+      "type": "object"
+    },
+    "ClockSimConfig": {
+      "description": "Simulator time from the rendered video's SEI.",
+      "properties": {
+        "latency_floor_ns": {
+          "anyOf": [
+            {
+              "maximum": 1000000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latency Floor Ns"
+        }
+      },
+      "title": "ClockSimConfig",
+      "type": "object"
+    },
     "CloudServerConfig": {
       "properties": {
         "mqtt_broker": {
@@ -4021,6 +4051,9 @@
       },
       "title": "Cameras",
       "type": "array"
+    },
+    "clock": {
+      "$ref": "#/$defs/ClockConfig"
     },
     "discovery": {
       "$ref": "#/$defs/DiscoveryConfig",

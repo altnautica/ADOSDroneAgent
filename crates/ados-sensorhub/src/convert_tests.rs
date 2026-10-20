@@ -147,7 +147,8 @@ fn closed_buckets_publish_sync_pairs_and_hello_is_recorded() {
             source: SyncSource::Hub,
             host_ns: 1_000_000_500,
             source_ns: 500,
-            rtt_ns: 0
+            rtt_ns: 0,
+            sim_time: false,
         }
     );
     assert_eq!(
@@ -192,4 +193,55 @@ fn closed_buckets_publish_sync_pairs_and_hello_is_recorded() {
     .is_empty());
     assert!(run(&mut conv, &mut st, health(3_000_000_000), 5_000_000_000).is_empty());
     assert_eq!(st.imu_samples, imu_before);
+}
+
+#[test]
+fn a_simulator_hub_marks_its_pairs_as_simulator_time() {
+    let mut conv = Converter::new(Extrinsics::default(), true);
+    let mut st = HubState::default();
+    let hello = |board_id| {
+        Packet::Hello(proto::Hello {
+            proto_ver: proto::PROTO_VER,
+            fw_major: 0,
+            fw_minor: 1,
+            fw_patch: 0,
+            board_id,
+            caps: proto::caps::IMU0,
+            uid: [0; 12],
+            board_name: [0; 16],
+        })
+    };
+    let samples = [ImuSample::default(); 4];
+    let sync_of = |frames: Vec<BusFrame>| -> SyncObs {
+        let f = frames.iter().find(|f| f.kind == Kind::Sync).unwrap();
+        f.decode_msgpack().unwrap()
+    };
+    run(&mut conv, &mut st, hello(proto::BOARD_ID_SIM), 500_000_000);
+    run(
+        &mut conv,
+        &mut st,
+        batch(&samples, 1_000_000_000, 0),
+        1_000_000_500,
+    );
+    let f = run(
+        &mut conv,
+        &mut st,
+        batch(&samples, 2_000_000_000, 4),
+        2_000_000_500,
+    );
+    assert!(sync_of(f).sim_time);
+    // A flight hub on the same link afterwards: its pairs are its own clock.
+    run(
+        &mut conv,
+        &mut st,
+        hello(proto::BOARD_ID_MATEK_H743_SLIM_V3),
+        2_100_000_000,
+    );
+    let f = run(
+        &mut conv,
+        &mut st,
+        batch(&samples, 3_000_000_000, 8),
+        3_000_000_500,
+    );
+    assert!(!sync_of(f).sim_time);
 }

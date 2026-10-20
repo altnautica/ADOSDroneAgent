@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from .agent import AgentConfig
 from .api import ApiConfig
 from .battery import BatteryConfig
+from .clock import ClockConfig
 from .cloud import RemoteAccessConfig, ServerConfig
 from .gnss import GnssConfig
 from .ground_station import GroundStationConfig
@@ -79,6 +80,7 @@ class ADOSConfig(BaseModel):
     gnss: GnssConfig = Field(default_factory=GnssConfig)
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
     lora: LoraConfig = LoraConfig()
+    clock: ClockConfig = Field(default_factory=ClockConfig)
 
     model_config = {"extra": "ignore"}
 

@@ -9,6 +9,7 @@ use serde::Serialize;
 
 use crate::chrony::{self, ChronySink};
 use crate::clock::{ClockState, SyncOutcome};
+use crate::fit::LatencyFloor;
 use crate::streams::StreamTable;
 
 /// Everything the clock tracks.
@@ -21,9 +22,10 @@ pub struct Engine {
 
 impl Engine {
     /// `chrony`: where to send PPS samples, or `None` to never send.
-    pub fn new(chrony: Option<ChronySink>) -> Self {
+    /// `sim_floor`: the latency floor under the video SEI pairs.
+    pub fn new(chrony: Option<ChronySink>, sim_floor: LatencyFloor) -> Self {
         Engine {
-            clock: ClockState::new(),
+            clock: ClockState::with_sim_floor(sim_floor),
             streams: StreamTable::new(),
             chrony,
         }
@@ -81,6 +83,7 @@ mod tests {
             host_ns,
             source_ns,
             rtt_ns: 0,
+            sim_time: false,
         };
         BusFrame::msgpack(Kind::Sync, source.id(), Origin::Gnss, &obs).unwrap()
     }
@@ -91,7 +94,7 @@ mod tests {
         let path = dir.path().join("chrony.sock");
         let rx = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
         rx.set_nonblocking(true).unwrap();
-        let mut e = Engine::new(Some(ChronySink::new(&path)));
+        let mut e = Engine::new(Some(ChronySink::new(&path)), LatencyFloor::Unknown);
         let utc0 = 1_760_860_000 * S as i64;
         for i in 0..7u64 {
             let h = 50 * S + i * S;
@@ -108,7 +111,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("chrony.sock");
         let _rx = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
-        let mut e = Engine::new(Some(ChronySink::new(&path)));
+        let mut e = Engine::new(Some(ChronySink::new(&path)), LatencyFloor::Unknown);
         for i in 0..10u64 {
             let h = 50 * S + i * S / 10;
             e.ingest(&sync(SyncSource::Hub, h, h as i64), h);
@@ -121,7 +124,7 @@ mod tests {
     fn sidecars_are_written_atomically() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("clock.json");
-        let e = Engine::new(None);
+        let e = Engine::new(None, LatencyFloor::Unknown);
         write_sidecar(&path, &e.clock.report(5)).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(v["timebase"], "host_monotonic");

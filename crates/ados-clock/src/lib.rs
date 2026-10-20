@@ -15,6 +15,7 @@
 pub mod bus;
 pub mod chrony;
 pub mod clock;
+pub mod config;
 pub mod daemon;
 pub mod engine;
 pub mod envelope;

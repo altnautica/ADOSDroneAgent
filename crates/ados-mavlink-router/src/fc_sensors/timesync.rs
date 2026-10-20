@@ -65,6 +65,7 @@ impl TimesyncTracker {
                 host_ns,
                 source_ns,
                 rtt_ns,
+                sim_time: false,
             }),
             None => Reply::Rejected,
         }
