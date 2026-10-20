@@ -27,13 +27,16 @@ pub struct Converter {
     gnss_ports: Vec<u8>,
     /// Set when a `Hello` reports a protocol version this build cannot read.
     pub unsupported_proto: Option<u16>,
-    /// The hub is the simulator's (`BOARD_ID_SIM`): its clock is simulator
-    /// time, and its `sync` pairs say so.
+    /// The hub is the simulator's (`BOARD_ID_SIM`) on a node with
+    /// `simulation.enabled`: its clock is simulator time, and its `sync`
+    /// pairs say so.
     sim_clock: bool,
+    /// `simulation.enabled`.
+    simulation: bool,
 }
 
 impl Converter {
-    pub fn new(ext: Extrinsics, gnss_forward: bool) -> Self {
+    pub fn new(ext: Extrinsics, gnss_forward: bool, simulation: bool) -> Self {
         Self {
             clock: HubClock::new(),
             ext,
@@ -44,6 +47,7 @@ impl Converter {
             gnss_ports: Vec::new(),
             unsupported_proto: None,
             sim_clock: false,
+            simulation,
         }
     }
 
@@ -182,7 +186,11 @@ impl Converter {
         if h.proto_ver != proto::PROTO_VER {
             self.unsupported_proto = Some(h.proto_ver);
         }
-        self.sim_clock = h.board_id == proto::BOARD_ID_SIM;
+        let sim_board = h.board_id == proto::BOARD_ID_SIM;
+        if sim_board && !self.simulation && st.hello.as_ref() != Some(&info) {
+            tracing::warn!("sensor_hub_sim_board_without_simulation");
+        }
+        self.sim_clock = sim_board && self.simulation;
         st.hello = Some(info);
     }
 

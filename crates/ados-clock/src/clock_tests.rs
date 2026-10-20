@@ -192,7 +192,15 @@ fn clock_document_shape() {
     let v = serde_json::to_value(c.report(T0)).unwrap();
     let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
     let mut want = vec![
-        "version", "timebase", "source", "locked", "sigma_ns", "t_ns", "utc_ns", "sources",
+        "version",
+        "timebase",
+        "source",
+        "source_changed",
+        "locked",
+        "sigma_ns",
+        "t_ns",
+        "utc_ns",
+        "sources",
     ];
     let mut got = keys.clone();
     got.sort_unstable();

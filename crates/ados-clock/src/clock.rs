@@ -113,6 +113,21 @@ pub struct SourceReport {
     pub sim_time: bool,
 }
 
+/// The session timebase moved to another source: a session running across it
+/// records a step (`clock_source_changed`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct SourceChange {
+    /// Host monotonic ns the change was seen at.
+    pub host_ns: u64,
+    pub from_timebase: Timebase,
+    pub from: Option<&'static str>,
+    pub to_timebase: Timebase,
+    pub to: Option<&'static str>,
+    /// New minus old session time at `host_ns`, when both sources are on the
+    /// same timebase and the old one still has a line.
+    pub step_ns: Option<i64>,
+}
+
 /// The `/run/ados/sensing/clock.json` document (the `GET /api/v1/clock` body without
 /// `present`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -121,6 +136,8 @@ pub struct ClockReport {
     pub timebase: Timebase,
     /// The `sources[].id` the timebase follows, `None` on host monotonic.
     pub source: Option<&'static str>,
+    /// The newest change of the timebase's source, `None` before any.
+    pub source_changed: Option<SourceChange>,
     pub locked: bool,
     pub sigma_ns: i64,
     pub t_ns: u64,
@@ -132,6 +149,9 @@ pub struct ClockReport {
 #[derive(Debug, Clone)]
 pub struct ClockState {
     sources: [Source; 4],
+    /// The session source as of the last [`ClockState::track`].
+    tracked: (Timebase, Option<SyncSource>),
+    last_change: Option<SourceChange>,
 }
 
 impl Default for ClockState {
@@ -167,6 +187,8 @@ impl ClockState {
         };
         ClockState {
             sources: SyncSource::ALL.map(fresh),
+            tracked: (Timebase::HostMonotonic, None),
+            last_change: None,
         }
     }
 
@@ -315,6 +337,7 @@ impl ClockState {
             version: 1,
             timebase,
             source: source.map(SyncSource::id),
+            source_changed: self.last_change,
             locked,
             sigma_ns,
             t_ns: now_ns,
@@ -333,6 +356,39 @@ impl ClockState {
             locked,
             sigma_ns,
         }
+    }
+
+    /// Note the session source at `now_ns`; when it moved since the last
+    /// call, record and return the change (logged `clock_source_changed`,
+    /// at warn when a source was lost or replaced).
+    pub fn track(&mut self, now_ns: u64) -> Option<SourceChange> {
+        let (timebase, source) = self.session_source(now_ns);
+        let (from_timebase, from) = self.tracked;
+        if (timebase, source) == self.tracked {
+            return None;
+        }
+        let line =
+            |s: Option<SyncSource>| s.and_then(|s| self.sources[idx(s)].fit.to_source(now_ns));
+        let step_ns = match (line(from), line(source)) {
+            (Some(old), Some(new)) if from_timebase == timebase => Some(new.saturating_sub(old)),
+            _ => None,
+        };
+        let change = SourceChange {
+            host_ns: now_ns,
+            from_timebase,
+            from: from.map(SyncSource::id),
+            to_timebase: timebase,
+            to: source.map(SyncSource::id),
+            step_ns,
+        };
+        if from.is_some() {
+            tracing::warn!(?change, "clock_source_changed");
+        } else {
+            tracing::info!(?change, "clock_source_changed");
+        }
+        self.tracked = (timebase, source);
+        self.last_change = Some(change);
+        Some(change)
     }
 }
 

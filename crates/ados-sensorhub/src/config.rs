@@ -70,6 +70,10 @@ pub struct HubConfig {
     /// Bus origins whose `rtcm` frames are forwarded to the hub; never the
     /// hub itself.
     pub rtcm_origins: Vec<Origin>,
+    /// `simulation.enabled`: a hub announcing the simulator board is taken
+    /// to run on simulator time only on a node wired to a simulator
+    /// (`0xFFFF` is also what erased flash reads as).
+    pub simulation: bool,
 }
 
 impl Default for HubConfig {
@@ -96,7 +100,10 @@ impl HubConfig {
             Err(e) => (HubSection::default(), Some(e)),
         };
         ados_config::write_config_status("sensorhub", err.as_deref());
-        Self::from_section(section)
+        Self {
+            simulation: ados_config::simulation::read_gate(path).enabled,
+            ..Self::from_section(section)
+        }
     }
 
     fn from_section(s: HubSection) -> Self {
@@ -115,6 +122,7 @@ impl HubConfig {
                 .into_iter()
                 .filter(|o| *o != Origin::Hub)
                 .collect(),
+            simulation: false,
         }
     }
 
@@ -187,6 +195,7 @@ mod tests {
         assert_eq!(cfg.transport, TransportSpec::Tcp("127.0.0.1:7600".into()));
         assert_eq!(cfg.imu_odr_hz, 2000);
         assert!(cfg.gnss_forward);
+        assert!(!cfg.simulation);
         let pkt = cfg.packet();
         assert_eq!((pkt.trigger_hz, pkt.cam_mask), (0, 0));
         assert_eq!(pkt.trigger_mode, proto::trigger_mode::OFF);
@@ -213,5 +222,13 @@ mod tests {
         assert_eq!(cfg.rtcm_origins, [Origin::Gnss]);
         assert!(!cfg.forwards_rtcm_from(Origin::Host));
         assert!(!cfg.forwards_rtcm_from(Origin::Hub));
+    }
+
+    #[test]
+    fn simulation_enabled_reaches_the_hub_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "simulation:\n  enabled: true\n").unwrap();
+        assert!(HubConfig::load_from(&path).simulation);
     }
 }

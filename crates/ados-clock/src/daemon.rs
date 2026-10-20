@@ -147,7 +147,6 @@ async fn run_async() -> anyhow::Result<()> {
 
     sd_ready();
     tracing::info!(socket = %socket.display(), "clock_ready");
-    let mut last_timebase = None;
     loop {
         tokio::select! {
             _ = sigterm.recv() => { tracing::info!("received SIGTERM"); break; }
@@ -155,12 +154,8 @@ async fn run_async() -> anyhow::Result<()> {
             Some(frame) = tap.recv() => engine.ingest(&frame, mono_ns()),
             _ = tick.tick() => {
                 let now = mono_ns();
+                engine.clock.track(now);
                 out.publish(&engine, now).await;
-                let timebase = engine.clock.timebase(now);
-                if last_timebase != Some(timebase) {
-                    tracing::info!(?timebase, "clock_timebase");
-                    last_timebase = Some(timebase);
-                }
                 sd_watchdog();
             }
         }

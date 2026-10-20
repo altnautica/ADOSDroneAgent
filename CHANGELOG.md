@@ -27,13 +27,20 @@ the project follows [Semantic Versioning](https://semver.org/).
     restart. Three pairs more than 1 s behind, or ahead of it beyond
     `max(5 sigma, 1 ms)`, within 10 s restart the fit: a simulator restart or
     a lower latency floor relocks instead of biasing the line.
-  - A simulated sensor hub runs on simulator time. `ados-sensorhub` now marks
-    its sync pairs `sim_time` (new optional field on the `sync` bus payload),
-    and the clock takes a locked simulator hub as the exact `sim` source
-    ahead of the SEI envelope: the hub service maps its samples through the
-    same pairs and frames keep their own simulator stamps, so the floor
-    cancels. `clock.json` gains `source` (the row the timebase follows) and
-    a per-row `sim_time`.
+  - A simulated sensor hub runs on simulator time. On a node with
+    `simulation.enabled`, `ados-sensorhub` marks a simulator-board hub's sync
+    pairs `sim_time` (new optional field on the `sync` bus payload; the board
+    id alone is not trusted, as it is also what erased flash reads as), and
+    the clock takes a locked simulator hub as the exact `sim` source ahead
+    of the SEI envelope: the hub service maps its samples through the same
+    pairs and frames keep their own simulator stamps, so the floor cancels.
+    `clock.json` gains `source` (the row the timebase follows) and a per-row
+    `sim_time`.
+  - When the timebase's source changes (the simulator hub drops and the
+    envelope takes over, say), the clock logs `clock_source_changed` (warn
+    when a source was lost or replaced) and `clock.json` carries the newest
+    change as `source_changed`, with the session-time step when both sources
+    share the timebase, so a running capture can record it.
   - The flight controller, flight hub and GNSS PPS fits are unchanged.
 
 ## [0.104.0] - 2026-10-20

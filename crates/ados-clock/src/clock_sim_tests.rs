@@ -311,3 +311,45 @@ fn a_flight_hub_stays_free_running() {
     let r = c.report(T0 + 5 * S);
     assert_eq!((r.timebase, r.source), (Timebase::HubFreerun, Some("hub")));
 }
+
+#[test]
+fn losing_the_simulator_hub_falls_back_to_the_envelope_with_a_change_event() {
+    let mut c = ClockState::new();
+    // The hub publishes for 50 s, the video for 70 s.
+    let mut events: Vec<(u64, i64, SyncSource)> = (0..50u64)
+        .map(|i| (T0 + i * S, sim_at(T0, T0 + i * S), SyncSource::Hub))
+        .collect();
+    events.extend(
+        sei_pairs(&mut Lcg(4), T0, T0, T0 + 70 * S, ONE_CAM)
+            .into_iter()
+            .map(|(h, s)| (h, s, SyncSource::Sim)),
+    );
+    events.sort_unstable_by_key(|e| e.0);
+    let mut changes = Vec::new();
+    let mut next_tick = T0;
+    for (host, sim, source) in events {
+        c.on_sync(&sync(source, host, sim, true));
+        if host >= next_tick {
+            changes.extend(c.track(host));
+            next_tick += S;
+        }
+    }
+    let tb = |c: &SourceChange| (c.from_timebase, c.from, c.to_timebase, c.to);
+    assert_eq!(changes.len(), 2, "{changes:?}");
+    assert_eq!(
+        tb(&changes[0]),
+        (Timebase::HostMonotonic, None, Timebase::Sim, Some("hub"))
+    );
+    let drop = changes[1];
+    assert_eq!(
+        tb(&drop),
+        (Timebase::Sim, Some("hub"), Timebase::Sim, Some("sim"))
+    );
+    // The hub's last pair was at T0 + 49 s; it stops counting 3 s later.
+    assert!((T0 + 52 * S..T0 + 54 * S).contains(&drop.host_ns));
+    let step = drop.step_ns.expect("both lines measure the step");
+    assert!(step.unsigned_abs() < MS, "step {step} ns");
+    let r = c.report(T0 + 60 * S);
+    assert_eq!(r.source_changed, Some(drop));
+    assert_eq!(r.source, Some("sim"));
+}

@@ -22,7 +22,7 @@ fn batch(samples: &[ImuSample], t0_ns: u64, seq0: u32) -> Packet<'_> {
 #[test]
 fn imu_samples_are_scaled_rotated_and_stamped_behind_the_arrival() {
     let ext = Extrinsics::from_rig(&crate::rig::tests::rig_with_imu0()).unwrap();
-    let mut conv = Converter::new(ext, true);
+    let mut conv = Converter::new(ext, true, false);
     let mut st = HubState::default();
     let s = ImuSample {
         gyro: [1000, 0, 0],
@@ -68,7 +68,7 @@ fn imu_samples_are_scaled_rotated_and_stamped_behind_the_arrival() {
 
 #[test]
 fn triggers_fan_out_per_camera_bit_and_gaps_count_as_dropped() {
-    let mut conv = Converter::new(Extrinsics::default(), true);
+    let mut conv = Converter::new(Extrinsics::default(), true, false);
     let mut st = HubState::default();
     let trig = |seq| {
         Packet::Trigger(Trigger {
@@ -103,11 +103,11 @@ fn gnss_bytes_forward_only_when_enabled_and_ports_map_to_ids() {
         })
     };
     let mut st = HubState::default();
-    let mut off = Converter::new(Extrinsics::default(), false);
+    let mut off = Converter::new(Extrinsics::default(), false, false);
     assert!(run(&mut off, &mut st, gnss(3, b"$GP"), 10).is_empty());
     assert_eq!(off.rtcm_port(), 3);
 
-    let mut on = Converter::new(Extrinsics::default(), true);
+    let mut on = Converter::new(Extrinsics::default(), true, false);
     let f = run(&mut on, &mut st, gnss(3, b"\xb5\x62"), 10);
     assert_eq!(f[0].src, "gnss0");
     let raw: v1::GnssRaw = f[0].decode_proto().unwrap();
@@ -117,7 +117,7 @@ fn gnss_bytes_forward_only_when_enabled_and_ports_map_to_ids() {
 
 #[test]
 fn closed_buckets_publish_sync_pairs_and_hello_is_recorded() {
-    let mut conv = Converter::new(Extrinsics::default(), true);
+    let mut conv = Converter::new(Extrinsics::default(), true, false);
     let mut st = HubState::default();
     let health = |t_ns| {
         Packet::Health(proto::Health {
@@ -197,7 +197,7 @@ fn closed_buckets_publish_sync_pairs_and_hello_is_recorded() {
 
 #[test]
 fn a_simulator_hub_marks_its_pairs_as_simulator_time() {
-    let mut conv = Converter::new(Extrinsics::default(), true);
+    let mut conv = Converter::new(Extrinsics::default(), true, true);
     let mut st = HubState::default();
     let hello = |board_id| {
         Packet::Hello(proto::Hello {
@@ -244,4 +244,38 @@ fn a_simulator_hub_marks_its_pairs_as_simulator_time() {
         3_000_000_500,
     );
     assert!(!sync_of(f).sim_time);
+}
+
+#[test]
+fn the_simulator_board_id_needs_simulation_enabled() {
+    // 0xFFFF is also erased flash: off a simulator it is a hub's own clock.
+    let mut conv = Converter::new(Extrinsics::default(), true, false);
+    let mut st = HubState::default();
+    let hello = Packet::Hello(proto::Hello {
+        proto_ver: proto::PROTO_VER,
+        fw_major: 0,
+        fw_minor: 1,
+        fw_patch: 0,
+        board_id: proto::BOARD_ID_SIM,
+        caps: proto::caps::IMU0,
+        uid: [0; 12],
+        board_name: [0; 16],
+    });
+    let samples = [ImuSample::default(); 4];
+    run(&mut conv, &mut st, hello, 500_000_000);
+    run(
+        &mut conv,
+        &mut st,
+        batch(&samples, 1_000_000_000, 0),
+        1_000_000_500,
+    );
+    let f = run(
+        &mut conv,
+        &mut st,
+        batch(&samples, 2_000_000_000, 4),
+        2_000_000_500,
+    );
+    let sync = f.iter().find(|f| f.kind == Kind::Sync).unwrap();
+    let obs: SyncObs = sync.decode_msgpack().unwrap();
+    assert!(!obs.sim_time);
 }

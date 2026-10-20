@@ -62,7 +62,7 @@ pub async fn run_session(
     // Corrections queued while the link was down are stale.
     while ctx.rtcm.try_recv().is_ok() {}
 
-    let mut conv = Converter::new(ctx.ext.clone(), ctx.cfg.gnss_forward);
+    let mut conv = Converter::new(ctx.ext.clone(), ctx.cfg.gnss_forward, ctx.cfg.simulation);
     let mut dec = StreamDecoder::new();
     let crc_base = lock(ctx.state).crc_errors;
     let mut buf = vec![0u8; 4096];
