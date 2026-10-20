@@ -6,6 +6,21 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The simulator clock never locked.** Simulator time from the video SEI is
+  paired with the frame's arrival on the host, so every pair carries the
+  decode and transport latency: one-sided, jittery, often over 100 ms. The
+  least-squares fit read that jitter as the clock jumping and restarted
+  every few seconds, so no session got the `sim` timebase. `ados-clock` now
+  fits arrival-stamped sources to the lower envelope of `host - source` (the
+  convex-hull line that minimises the summed lateness of the 60 s window),
+  takes sigma from the per-2 s envelope minima, accepts a pair up to 1 s
+  behind the envelope, drops one ahead of it beyond `max(5 sigma, 1 ms)`, and
+  locks once the pairs span 40 s. Three pairs more than 1 s behind (or 50 ms
+  ahead) still restart the fit, so a simulator restart resets it. The flight
+  controller, sensor hub and GNSS PPS fits are unchanged.
+
 ## [0.104.0] - 2026-10-20
 
 ### Added
