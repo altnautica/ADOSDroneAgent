@@ -226,8 +226,11 @@ the project follows [Semantic Versioning](https://semver.org/).
   when the board declares an encoder. Plugin button subscribers receive the
   encoder events with those labels. The ROCK 5C / 5C Lite profile declares an
   encoder on header pins 36/38/15 (GPIO 130/133/140) and the ROCK 5B+ on
-  header pins 36/38/40 (GPIO 105/106/107). The panel input reader now waits
-  on every line at once, so a press on one button is no longer held until
+  header pins 36/38/40 (GPIO 105/106/107). An encoder line that cannot be
+  requested or read (busy, missing) only drops the encoder; the buttons keep
+  working. The cockpit maps `enc_cw`/`enc_ccw` to next/previous and the
+  switch to activate (long press: back). The panel input reader now waits on
+  every line at once, so a press on one button is no longer held until
   another button sees an edge.
 - **Node lane flags in the cloud heartbeat.** The heartbeat carries `gnss`,
   `lora` and `sim` from the same predicates as `/api/status/full`, so a
@@ -327,12 +330,18 @@ the project follows [Semantic Versioning](https://semver.org/).
   pilot-in-command, each also through the relay proxy, and a plugin tool
   declared `flight`) with `409` `E_NOT_A_VEHICLE`. The MAVLink router drops
   client frames that change mode, upload or steer a mission, carry manual or
-  RC override input, set attitude, position or actuator targets, or carry a
-  movement, arming, motor-test, servo or relay command, counting them in
-  `visor_flight_frames_dropped`; swarm setpoints are held too. Parameter
-  reads and writes, calibration, message and stream requests, time sync,
-  signing and log download are unchanged, and drones and ground stations
-  behave as before.
+  RC override input, set attitude, position or actuator targets, carry raw
+  CAN or CAN FD frames, or carry a movement, arming, motor-test, actuator,
+  CAN-forward, servo or relay command, counting them in
+  `visor_flight_frames_dropped`; the swarm layer holds without sending or
+  counting. Disarming (plain or forced, the command route's `disarm` and
+  `killswitch`) and flight termination stay allowed, so a hub that is somehow
+  armed can always be stopped. A frame an on-box socket writer splits across
+  two writes is reassembled per connection before the check, as the TCP and
+  WebSocket proxies already do; an MSP board gets client bytes untouched.
+  Parameter reads and writes, calibration, message and stream requests, time
+  sync, signing and log download are unchanged, and drones and ground
+  stations behave as before.
 
 ## [0.103.3] - 2026-10-14
 

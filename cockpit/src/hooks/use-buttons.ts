@@ -53,7 +53,15 @@ const BUTTON_BINDINGS: Record<string, NavCommand> = {
   menu: "quick-menu",
   cycle: "cycle-tab",
   cycle_screen: "cycle-tab",
+  // The rotary encoder: a detent steps the focus, the push switch fires it.
+  enc_cw: "next",
+  enc_ccw: "prev",
+  enc_sw: "activate",
 };
+
+/** The encoder push switch's label; its long press goes back (the agent's
+ *  default `ENC_SW_long` is `back`), not to the quick menu. */
+const ENCODER_SWITCH = "enc_sw";
 
 /** Resolve a button event to a command, or null when it is not actionable. A
  *  long-press of the back/menu button opens the quick menu.
@@ -76,6 +84,7 @@ export function eventToCommand(ev: ButtonEvent): NavCommand | null {
   if (!id) return null;
   const base = BUTTON_BINDINGS[id];
   if (base == null) return null;
+  if (ev.kind === "long" && id === ENCODER_SWITCH) return "back";
   if (ev.kind === "long" && (base === "back" || base === "activate")) {
     return "quick-menu";
   }
