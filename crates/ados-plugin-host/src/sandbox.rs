@@ -132,6 +132,9 @@ pub const VISION_FRAME_READ_CAP: &str = "vision.frame.read";
 /// serial port.
 pub const UART_CAP: &str = "hardware.uart";
 
+/// The group owning serial device nodes, joined by a `hardware.uart` grant.
+pub const UART_SUPPLEMENTARY_GROUP: &str = "dialout";
+
 /// The capability that lets a declared service bind its declared TCP ports.
 pub const NETWORK_LISTEN_CAP: &str = "network.listen";
 
@@ -298,6 +301,11 @@ pub fn sandbox_directives(
         }
         if granted.contains(GPU_CAP) {
             lines.push(format!("SupplementaryGroups={GPU_SUPPLEMENTARY_GROUPS}"));
+        }
+        // Serial device nodes are 0660 root:dialout; the device allow-list
+        // alone does not grant the file permission to open them.
+        if granted.contains(UART_CAP) {
+            lines.push(format!("SupplementaryGroups={UART_SUPPLEMENTARY_GROUP}"));
         }
     }
     // The frame rings are 0640 in the readers group: a plugin joins it only
@@ -695,6 +703,13 @@ mod tests {
             configured_fc_serial_port("mavlink:\n  serial_port: ''\n"),
             None
         );
+    }
+
+    #[test]
+    fn uart_grant_adds_dialout() {
+        let dialout = "SupplementaryGroups=dialout".to_string();
+        assert!(sandbox_directives(&caps(&["hardware.uart"]), true, &[]).contains(&dialout));
+        assert!(!sandbox_directives(&caps(&["hardware.i2c"]), true, &[]).contains(&dialout));
     }
 
     #[test]

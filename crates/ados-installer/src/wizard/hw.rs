@@ -282,6 +282,13 @@ pub fn lsusb_has_sensor_hub(output: &str) -> bool {
     })
 }
 
+/// True when `lsusb` output lists the USB id `vendor:product` (pure).
+pub fn lsusb_has_usb_id(output: &str, vendor: u16, product: u16) -> bool {
+    output
+        .lines()
+        .any(|l| parse_lsusb_id(l) == Some((vendor, product)))
+}
+
 /// The address of a Livox LiDAR seen on the LAN, from `ip -4 neigh` output
 /// (pure). Livox Mid-360 units ship on the static address `192.168.1.1XX`
 /// (XX from the serial number) and answer ARP once the host shares that

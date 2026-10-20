@@ -260,6 +260,10 @@ impl FcConnection {
                             if is_sensor_hub(info.vid, info.pid))
                     })
                     .filter(|p| !is_crsf(&p.port_name))
+                    .filter(|p| {
+                        !matches!(&p.port_type, tokio_serial::SerialPortType::UsbPort(info)
+                            if is_rig_lidar_on_visor(&self.cfg.profile, info.vid, info.pid))
+                    })
                     .map(|p| FcCandidate {
                         usb: match &p.port_type {
                             tokio_serial::SerialPortType::UsbPort(info) => {
@@ -292,6 +296,16 @@ pub(super) struct FcCandidate {
 /// STMicroelectronics (the STM32 virtual COM port Betaflight, iNav and many
 /// ArduPilot boards present).
 pub(super) const FC_USB_VENDORS: [u16; 5] = [0x1209, 0x26AC, 0x2DAE, 0x3162, 0x0483];
+
+/// The CP2102 USB-UART bridge a serial LiDAR (RPLIDAR C1) enumerates under.
+pub(super) const RIG_LIDAR_USB_ID: (u16, u16) = (0x10C4, 0xEA60);
+
+/// Whether an enumerated port is the rig's serial LiDAR on a `visor` profile,
+/// where the auto sweep must never open it (the capture service owns it). An
+/// explicitly configured `serial_port` bypasses enumeration and is kept.
+pub(super) fn is_rig_lidar_on_visor(profile: &str, vid: u16, pid: u16) -> bool {
+    profile == "visor" && (vid, pid) == RIG_LIDAR_USB_ID
+}
 
 /// Whether a USB id is the sensor hub. Its vendor (pid.codes) is also the
 /// ArduPilot boards' vendor, so it is matched on the full id.

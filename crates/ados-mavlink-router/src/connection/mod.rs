@@ -482,6 +482,9 @@ mod status;
 mod crsf_exclusion_tests;
 
 #[cfg(test)]
+mod lidar_exclusion_tests;
+
+#[cfg(test)]
 mod command_gate_tests;
 
 #[cfg(test)]

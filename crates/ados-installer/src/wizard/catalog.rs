@@ -152,9 +152,9 @@ pub const CATALOG: &[HwCategory] = &[
     },
     // ── visor ───────────────────────────────────────────────────────────────
     HwCategory {
-        id: "livox",
+        id: "rig_lidar",
         label: "LiDAR",
-        note: "A Livox scanner on the rig's Ethernet port, for depth and mapping.",
+        note: "A 2D or 3D LiDAR on the rig (USB serial or Ethernet), for mapping and pose.",
         profiles: &[Visor],
         availability: Now,
     },
@@ -281,7 +281,13 @@ pub fn detect(cat: &HwCategory, sys: &SysProbe) -> Detection {
         "camera" => opt(hw::pick_lowest_video(&sys.dev_names).map(|n| format!("/dev/{n}"))),
         "gps" => flag(hw::lsusb_has_gps(&sys.lsusb), "USB GNSS"),
         "sensor_hub" => flag(hw::lsusb_has_sensor_hub(&sys.lsusb), "USB sensor hub"),
-        "livox" => opt(hw::livox_in_neigh(&sys.ip_neigh)),
+        "rig_lidar" => {
+            if hw::lsusb_has_usb_id(&sys.lsusb, 0x10c4, 0xea60) {
+                Detection::Found("USB serial LiDAR".into())
+            } else {
+                opt(hw::livox_in_neigh(&sys.ip_neigh))
+            }
+        }
         "modem" => flag(hw::lsusb_has_modem(&sys.lsusb), "USB modem"),
         "radio" => flag(hw::lsusb_has_radio(&sys.lsusb), "USB adapter"),
         "mesh" => {
@@ -359,7 +365,7 @@ mod tests {
         }
         // A visor has cameras and a hub but no flight controller and no radio.
         let vi: Vec<&str> = catalog_for(Profile::Visor).iter().map(|c| c.id).collect();
-        for want in ["camera", "sensor_hub", "gps", "livox", "oled"] {
+        for want in ["camera", "sensor_hub", "gps", "rig_lidar", "oled"] {
             assert!(vi.contains(&want), "visor missing {want}");
         }
         assert!(!vi.contains(&"fc") && !vi.contains(&"radio"));
@@ -423,7 +429,7 @@ mod tests {
         assert!(matches!(by_id("radio"), Detection::Found(_)));
         assert!(matches!(by_id("gps"), Detection::Found(_)));
         assert!(matches!(by_id("sensor_hub"), Detection::Found(_)));
-        assert_eq!(by_id("livox"), Detection::Found("192.168.1.112".into()));
+        assert_eq!(by_id("rig_lidar"), Detection::Found("192.168.1.112".into()));
         assert_eq!(hw::livox_in_neigh("192.168.1.150 dev eth1  FAILED"), None);
         assert!(matches!(by_id("oled"), Detection::Found(_)));
         assert!(matches!(by_id("hdmi"), Detection::Found(_)));
@@ -434,5 +440,25 @@ mod tests {
         assert_eq!(by_id("mesh"), Detection::Missing);
         // No modem in the snapshot.
         assert_eq!(by_id("modem"), Detection::Missing);
+    }
+
+    #[test]
+    fn rig_lidar_prefers_a_usb_serial_lidar_over_the_lan() {
+        let cat = CATALOG.iter().find(|c| c.id == "rig_lidar").unwrap();
+        let sys = SysProbe {
+            lsusb: "Bus 001 Device 005: ID 10c4:ea60 Silicon Labs CP210x".into(),
+            ip_neigh: "192.168.1.112 dev eth1 lladdr aa:bb:cc:00:00:02 REACHABLE".into(),
+            ..SysProbe::default()
+        };
+        assert_eq!(
+            detect(cat, &sys),
+            Detection::Found("USB serial LiDAR".into())
+        );
+        assert_eq!(detect(cat, &SysProbe::default()), Detection::Missing);
+        assert!(!hw::lsusb_has_usb_id(
+            "Bus 001 Device 005: ID 10c4:ea61 X",
+            0x10c4,
+            0xea60
+        ));
     }
 }
