@@ -102,6 +102,16 @@ fn guarded_router(state: AppState, hits: Arc<AtomicUsize>) -> Router {
 /// Send one request to a fresh router for `profile`; the status, the body and
 /// whether a handler ran.
 async fn send(profile: &str, method: &str, uri: &str) -> (StatusCode, Value, usize) {
+    send_with(profile, method, uri, r#"{"cmd":"arm"}"#).await
+}
+
+/// [`send`] with an explicit JSON request body.
+async fn send_with(
+    profile: &str,
+    method: &str,
+    uri: &str,
+    body: &'static str,
+) -> (StatusCode, Value, usize) {
     let (_dir, state) = state_for_profile(profile);
     let hits = Arc::new(AtomicUsize::new(0));
     let router = guarded_router(state, Arc::clone(&hits));
@@ -109,7 +119,7 @@ async fn send(profile: &str, method: &str, uri: &str) -> (StatusCode, Value, usi
         .method(method)
         .uri(uri)
         .header("content-type", "application/json")
-        .body(Body::from(r#"{"command":"arm"}"#))
+        .body(Body::from(body))
         .unwrap();
     let resp = router.oneshot(request).await.unwrap();
     let status = resp.status();
@@ -129,6 +139,35 @@ fn the_flight_predicate_is_the_scope_maps_flight_class() {
     for (method, path) in NON_FLIGHT {
         let method = Method::from_bytes(method.as_bytes()).unwrap();
         assert!(!is_flight_action(&method, path), "{method} {path}");
+    }
+}
+
+#[tokio::test]
+async fn a_visor_passes_disarm_and_kill_but_refuses_every_other_command() {
+    for uri in ["/api/command".to_string(), format!("{RELAY}/api/command")] {
+        for body in [
+            r#"{"cmd":"disarm"}"#,
+            r#"{"cmd":"DISARM"}"#,
+            r#"{"cmd":"killswitch","args":[]}"#,
+            r#"{"cmd":"killSwitch"}"#,
+        ] {
+            let (status, _, hits) = send_with("visor", "POST", &uri, body).await;
+            assert_eq!(status, StatusCode::OK, "{uri} {body}");
+            assert_eq!(hits, 1, "{uri} {body}");
+        }
+        for body in [
+            r#"{"cmd":"arm"}"#,
+            r#"{"cmd":"takeoff","args":[5]}"#,
+            r#"{"cmd":"mode","args":["GUIDED"]}"#,
+            r#"{"cmd":"rtl"}"#,
+            r#"not json"#,
+            r#"{"command":"disarm"}"#,
+        ] {
+            let (status, body_out, hits) = send_with("visor", "POST", &uri, body).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{uri} {body}");
+            assert_eq!(body_out["error"], "E_NOT_A_VEHICLE");
+            assert_eq!(hits, 0, "{uri} {body}");
+        }
     }
 }
 

@@ -90,6 +90,9 @@ pub struct IpcPeer {
     /// the PIC arbiter: it declared itself one, or its kernel credentials put
     /// it on the plugin plane. `None` = an operator/human writer, never gated.
     pub injector: Option<InjectorClaim>,
+    /// This connection's serial, unique within the accepting process, so a
+    /// consumer can keep per-connection state (a partial frame) apart.
+    pub conn: u64,
 }
 
 /// One inbound payload plus the identity of the connection that wrote it.
@@ -153,6 +156,7 @@ fn peer_identity(stream: &UnixStream) -> IpcPeer {
         pid: cred.pid(),
         off_box_source: false,
         injector: plugin.then(|| plugin_plane_claim(cred.uid())),
+        conn: 0,
     }
 }
 
@@ -172,6 +176,9 @@ fn user_uid(name: &str) -> Option<u32> {
 /// Shared by [`IpcBroadcast`] and [`serve_rpc`] so the two accept loops cannot
 /// drift into different recovery policies.
 const ACCEPT_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+
+/// The next accepted connection's [`IpcPeer::conn`].
+static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
 /// Kernel send buffer requested on every accepted broadcast client.
 ///
@@ -372,7 +379,8 @@ impl IpcBroadcast {
         inbound_tx: Option<mpsc::Sender<InboundCommand>>,
     ) {
         pin_send_buffer(&stream);
-        let peer = peer_identity(&stream);
+        let mut peer = peer_identity(&stream);
+        peer.conn = NEXT_CONN.fetch_add(1, Ordering::Relaxed);
         let (mut read_half, mut write_half) = stream.into_split();
         let (tx, mut rx) = mpsc::channel::<Bytes>(queue_depth);
 

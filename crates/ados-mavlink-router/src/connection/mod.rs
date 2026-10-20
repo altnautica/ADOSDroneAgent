@@ -32,6 +32,8 @@
 //! send paths and the three periodic send cadences). This file owns the
 //! [`FcConnection`] state and the connect/read reconnect FSM.
 
+mod client_framer;
+pub(crate) use client_framer::{ClientFramer, ConnFramers};
 mod framing;
 pub mod imu_fallback;
 pub mod injector_gate;

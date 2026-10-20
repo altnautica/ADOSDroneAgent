@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 mod scope;
 
+pub(crate) use scope::relay_proxy_inner_path;
 pub use scope::route_decides_scope;
 pub use scope::route_scope;
 pub use scope::tool_safety_class;

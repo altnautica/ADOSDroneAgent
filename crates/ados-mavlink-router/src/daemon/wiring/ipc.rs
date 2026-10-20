@@ -10,7 +10,7 @@ use ados_protocol::shutdown::Shutdown;
 use tokio::sync::mpsc;
 
 use super::super::Tasks;
-use crate::connection::{ClientOrigin, FcConnection};
+use crate::connection::{ClientOrigin, ConnFramers, FcConnection};
 
 // FC frames -> MAVLink socket clients. The socket contract is 4-byte
 // big-endian length-prefixed in both directions (the inbound reader decodes
@@ -64,6 +64,7 @@ pub(in crate::daemon) fn spawn_command_pumps(
             .enabled()
             .then(|| (fc.routes().register("ipc"), fc.routes().register("cloud")));
         tasks.push(tokio::spawn(async move {
+            let mut framers = ConnFramers::default();
             loop {
                 tokio::select! {
                     cmd = inbound.recv() => match cmd {
@@ -73,13 +74,15 @@ pub(in crate::daemon) fn spawn_command_pumps(
                         // is forwarding bytes that reached the node some other
                         // way, which it now says so the reading is its own
                         // rather than the socket's.
-                        Some(cmd) => {
-                            let origin = ClientOrigin::from_ipc_peer(&cmd.peer);
-                            if let Some((ipc, cloud)) = &route_eps {
-                                let ep = if origin == ClientOrigin::Relayed { cloud } else { ipc };
-                                fc.routes().ingress(ep, &cmd.payload);
+                        Some(InboundCommand { payload, peer }) => {
+                            let origin = ClientOrigin::from_ipc_peer(&peer);
+                            for batch in visor_frames(&fc, &mut framers, peer.conn, payload).await {
+                                if let Some((ipc, cloud)) = &route_eps {
+                                    let ep = if origin == ClientOrigin::Relayed { cloud } else { ipc };
+                                    fc.routes().ingress(ep, &batch);
+                                }
+                                let _ = fc.send_client_bytes(&batch, origin, peer.injector.as_ref()).await;
                             }
-                            let _ = fc.send_client_bytes(&cmd.payload, origin, cmd.peer.injector.as_ref()).await;
                         }
                         None => break,
                     },
@@ -123,12 +126,15 @@ pub(in crate::daemon) fn spawn_command_pumps(
         let fc = fc.clone();
         let cancel = cancel.clone();
         tasks.push(tokio::spawn(async move {
+            let mut framers = ConnFramers::default();
             loop {
                 tokio::select! {
                     cmd = msp_inbound.recv() => match cmd {
-                        Some(cmd) => {
-                            let origin = ClientOrigin::from_ipc_peer(&cmd.peer);
-                            fc.send_client_raw(&cmd.payload, origin, cmd.peer.injector.as_ref()).await
+                        Some(InboundCommand { payload, peer }) => {
+                            let origin = ClientOrigin::from_ipc_peer(&peer);
+                            for batch in visor_frames(&fc, &mut framers, peer.conn, payload).await {
+                                fc.send_client_raw(&batch, origin, peer.injector.as_ref()).await;
+                            }
                         }
                         None => break,
                     },
@@ -136,5 +142,22 @@ pub(in crate::daemon) fn spawn_command_pumps(
                 }
             }
         }));
+    }
+}
+
+/// The writes to pass on for one IPC payload. On a visor with a MAVLink flight
+/// controller the flight-action filter must see whole frames, so a frame a
+/// writer split across two payloads is reassembled per connection first;
+/// everywhere else the payload passes unchanged.
+async fn visor_frames(
+    fc: &FcConnection,
+    framers: &mut ConnFramers,
+    conn: u64,
+    payload: Vec<u8>,
+) -> Vec<Vec<u8>> {
+    if fc.is_visor() && fc.fc_variant().await.is_none() {
+        framers.push(conn, &payload)
+    } else {
+        vec![payload]
     }
 }

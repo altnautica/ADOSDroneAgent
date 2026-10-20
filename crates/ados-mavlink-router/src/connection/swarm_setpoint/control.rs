@@ -130,6 +130,13 @@ pub(super) async fn control_loop(
             status.stand_down();
             continue;
         };
+        // A visor's flight controller is a sensor hub, never a vehicle: the
+        // layer holds every tick, with nothing sent and nothing counted (no
+        // client asked for anything).
+        if fc.is_visor() {
+            status.stand_down();
+            continue;
+        }
         // A human holds PIC on the arbiter: stand down and say so.
         if fc.swarm_refused_by_pic() {
             status.stand_down_for_operator();
@@ -152,9 +159,9 @@ pub(super) async fn control_loop(
 /// instead of constructing the payload here: a malformed setpoint must be refused
 /// on this side of the wire, not diagnosed from the vehicle's behaviour.
 pub(super) async fn send_setpoint(fc: &Arc<FcConnection>, target: (u8, u8), setpoint: &Setpoint) {
-    // A visor's flight controller is a sensor hub, never a vehicle.
+    // A visor's flight controller is a sensor hub, never a vehicle; the loop
+    // already holds there, so this only keeps the send itself honest.
     if fc.is_visor() {
-        fc.note_visor_refusals(1);
         return;
     }
     let msg = match setpoint_message(target, setpoint) {

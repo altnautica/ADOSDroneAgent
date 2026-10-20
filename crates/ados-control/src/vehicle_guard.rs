@@ -12,20 +12,23 @@
 //! alone knows the manifest (see [`is_flight_tool`]).
 //!
 //! On a visor each one answers `409` with
-//! `{"error":"E_NOT_A_VEHICLE","message":"..."}`; there is no override.
-//! Parameter reads and writes, sensor calibration, firmware and info requests,
-//! time sync, signing and logs are not flight actions and pass. Every other
-//! profile passes through unchanged.
+//! `{"error":"E_NOT_A_VEHICLE","message":"..."}`; there is no override. The
+//! one exception is a command-route request that stops the vehicle
+//! (`disarm`, `killswitch`): it passes, so a hub that is somehow armed can
+//! always be disarmed. Parameter reads and writes, sensor calibration,
+//! firmware and info requests, time sync, signing and logs are not flight
+//! actions and pass. Every other profile passes through unchanged.
 //!
 //! Like the armed interlock this is one router layer, so it covers the native
 //! routes and the residual-proxied ones alike and runs before either.
 
+use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use ados_protocol::mcp_token::ScopeClass;
 
@@ -34,9 +37,33 @@ use crate::state::AppState;
 /// The profile whose flight controller is a sensor hub.
 const VISOR_PROFILE: &str = "visor";
 
+/// The command route, bare or as a relay-proxy's inner path.
+const COMMAND_ROUTE: &str = "/api/command";
+
+/// Command-route commands that stop the vehicle (a plain and a forced
+/// disarm); a visor passes them.
+const STOP_COMMANDS: &[&str] = &["disarm", "killswitch"];
+
+/// The largest command-route body the guard reads to find the command.
+const COMMAND_BODY_LIMIT: usize = 64 * 1024;
+
 /// Whether `method` on the decoded `path` is a flight action.
 pub fn is_flight_action(method: &Method, path: &str) -> bool {
     crate::mcp::route_scope(method, path) == Some(ScopeClass::Flight)
+}
+
+/// Whether `path` is the command route, bare or wrapped in the relay-proxy.
+fn is_command_route(path: &str) -> bool {
+    crate::mcp::relay_proxy_inner_path(path).unwrap_or(path) == COMMAND_ROUTE
+}
+
+/// Whether a command-route body names a command that stops the vehicle
+/// (matched as the route matches it, case-insensitively).
+fn is_stop_command(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v.get("cmd")?.as_str().map(str::to_lowercase))
+        .is_some_and(|cmd| STOP_COMMANDS.contains(&cmd.as_str()))
 }
 
 /// Whether a plugin tool's declared safety class in `manifest` makes it a
@@ -85,12 +112,23 @@ pub async fn vehicle_guard(
     let raw_path = request.uri().path();
     let path = crate::auth::decision_path(raw_path).unwrap_or_else(|_| raw_path.to_string());
     // A trailing slash is the one empty segment the decision path keeps.
-    let path = path.strip_suffix('/').unwrap_or(&path);
-    if is_flight_action(request.method(), path) && node_is_visor(&state) {
-        tracing::warn!(method = %request.method(), path = %path, "visor_flight_action_refused");
-        return not_a_vehicle_refusal();
+    let path = path.strip_suffix('/').unwrap_or(&path).to_string();
+    if !is_flight_action(request.method(), &path) || !node_is_visor(&state) {
+        return next.run(request).await;
     }
-    next.run(request).await
+    if is_command_route(&path) {
+        let (parts, body) = request.into_parts();
+        let Ok(bytes) = axum::body::to_bytes(body, COMMAND_BODY_LIMIT).await else {
+            return not_a_vehicle_refusal();
+        };
+        if is_stop_command(&bytes) {
+            return next
+                .run(Request::from_parts(parts, Body::from(bytes)))
+                .await;
+        }
+    }
+    tracing::warn!(path = %path, "visor_flight_action_refused");
+    not_a_vehicle_refusal()
 }
 
 #[cfg(test)]

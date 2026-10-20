@@ -25,7 +25,6 @@ const CMD_NAV_TAKEOFF: u16 = 22;
 const CMD_DO_SET_HOME: u16 = 179;
 const CMD_DO_REPOSITION: u16 = 192;
 const CMD_PREFLIGHT_CALIBRATION: u16 = 241;
-const CMD_COMPONENT_ARM_DISARM: u16 = 400;
 const CMD_SET_MESSAGE_INTERVAL: u16 = 511;
 const CMD_REQUEST_MESSAGE: u16 = 512;
 
@@ -123,8 +122,25 @@ fn the_frame_builders_produce_valid_checksums() {
 
 #[test]
 fn flight_messages_are_flight_actions_whatever_their_payload() {
-    for id in [11, 38, 39, 41, 44, 45, 69, 70, 73, 82, 84, 86, 139] {
+    for id in [
+        11, 38, 39, 41, 44, 45, 69, 70, 73, 82, 84, 86, 139, 386, 387,
+    ] {
         assert!(is_flight_action_frame(id, &[0; 20]), "message {id}");
+    }
+}
+
+#[test]
+fn can_forwarding_and_actuator_commands_are_flight_actions() {
+    // The router's twin of the control plane's CAN passthrough refusal, plus
+    // the PX4 actuator commands.
+    for cmd in [187u16, 310, 32000] {
+        assert!(FLIGHT_COMMANDS.contains(&cmd), "{cmd}");
+        for id in [MSG_COMMAND_LONG, MSG_COMMAND_INT] {
+            assert!(
+                is_flight_action_frame(id, &command_payload(cmd)),
+                "{id} {cmd}"
+            );
+        }
     }
 }
 
@@ -358,4 +374,119 @@ async fn vehicle_profiles_forward_flight_actions_unchanged() {
         assert_eq!(written(&rx), arm, "{profile}");
         assert_eq!(conn.visor_flight_frames_dropped(), 0);
     }
+}
+
+/// A `COMMAND_LONG` / `COMMAND_INT` payload for `command` with `param1` and
+/// `param2`, truncated as a v2 sender would.
+fn command_with(command: u16, param1: f32, param2: f32) -> Vec<u8> {
+    let mut p = command_payload(command);
+    p[0..4].copy_from_slice(&param1.to_le_bytes());
+    p[4..8].copy_from_slice(&param2.to_le_bytes());
+    truncated(p)
+}
+
+#[test]
+fn disarm_and_flight_termination_are_not_flight_actions() {
+    const CMD_DO_FLIGHTTERMINATION: u16 = 185;
+    for msg in [MSG_COMMAND_LONG, MSG_COMMAND_INT] {
+        // Plain and forced (21196) disarm.
+        for force in [0.0, 21196.0] {
+            let disarm = command_with(CMD_COMPONENT_ARM_DISARM, 0.0, force);
+            assert!(
+                !is_flight_action_frame(msg, &disarm),
+                "msg {msg} force {force}"
+            );
+        }
+        let terminate = command_with(CMD_DO_FLIGHTTERMINATION, 1.0, 0.0);
+        assert!(!is_flight_action_frame(msg, &terminate), "msg {msg}");
+        // Arming, forced or not, and a malformed param1 stay refused.
+        for param1 in [1.0, 2.0, f32::NAN] {
+            let arm = command_with(CMD_COMPONENT_ARM_DISARM, param1, 21196.0);
+            assert!(
+                is_flight_action_frame(msg, &arm),
+                "msg {msg} param1 {param1}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_visor_writes_a_client_disarm_to_the_fc() {
+    let (conn, rx) = link("visor").await;
+    let disarm = v2(
+        MSG_COMMAND_LONG,
+        &command_with(CMD_COMPONENT_ARM_DISARM, 0.0, 21196.0),
+        0,
+    );
+    assert!(
+        conn.send_client_bytes(&disarm, ClientOrigin::Trusted, None)
+            .await
+    );
+    assert_eq!(written(&rx), disarm);
+    assert_eq!(conn.visor_flight_frames_dropped(), 0);
+}
+
+#[tokio::test]
+async fn an_msp_board_on_a_visor_gets_client_bytes_untouched() {
+    let (conn, rx) = link("visor").await;
+    *conn.fc_variant.lock().await = Some("betaflight".into());
+    // MSP framing is not MAVLink: the filter must not strip it, even when the
+    // bytes happen to look like a MAVLink arm frame.
+    let msp = b"$M<\x00\x6c\x6c".to_vec();
+    let arm = command_long(CMD_COMPONENT_ARM_DISARM);
+    for bytes in [msp, arm] {
+        conn.send_client_raw(&bytes, ClientOrigin::Trusted, None)
+            .await;
+        assert_eq!(written(&rx), bytes);
+    }
+    assert_eq!(conn.visor_flight_frames_dropped(), 0);
+}
+
+#[tokio::test]
+async fn a_stream_frame_split_across_writes_reaches_a_visor_fc_whole() {
+    let (conn, rx) = link("visor").await;
+    let param_set = v2(PARAM_SET, &[7; 23], 0);
+    let arm = command_long(CMD_COMPONENT_ARM_DISARM);
+    let mut stream = param_set.clone();
+    stream.extend_from_slice(&arm);
+    stream.extend_from_slice(&param_set);
+    // One IPC connection writing the stream in odd-sized pieces, interleaved
+    // with a second connection's split frame.
+    let mut framers = crate::connection::ConnFramers::default();
+    let mut batches = Vec::new();
+    for (i, piece) in stream.chunks(11).enumerate() {
+        batches.extend(framers.push(1, piece));
+        if i == 1 {
+            batches.extend(framers.push(2, &param_set[..9]));
+        }
+    }
+    batches.extend(framers.push(2, &param_set[9..]));
+    for batch in &batches {
+        conn.send_client_bytes(batch, ClientOrigin::Trusted, None)
+            .await;
+    }
+    assert_eq!(
+        written(&rx),
+        [param_set.clone(), param_set.clone(), param_set].concat()
+    );
+    assert_eq!(conn.visor_flight_frames_dropped(), 1);
+}
+
+#[tokio::test]
+async fn a_udp_datagram_of_whole_frames_passes_and_a_cut_one_loses_only_its_tail() {
+    let (conn, rx) = link("visor").await;
+    let param_set = v2(PARAM_SET, &[7; 23], 0);
+    let mut datagram = param_set.clone();
+    datagram.extend_from_slice(&param_set);
+    assert!(
+        conn.send_client_bytes(&datagram, ClientOrigin::Trusted, None)
+            .await
+    );
+    assert_eq!(written(&rx), datagram);
+    // A datagram cut mid-frame is malformed: its whole frame passes, the
+    // fragment does not.
+    let cut = &datagram[..param_set.len() + 7];
+    conn.send_client_bytes(cut, ClientOrigin::Trusted, None)
+        .await;
+    assert_eq!(written(&rx), param_set);
 }

@@ -524,7 +524,7 @@ fn a_forwarding_writer_is_not_read_as_a_local_producer() {
         gid: Some(0),
         pid: Some(1234),
         off_box_source: false,
-        injector: None,
+        ..IpcPeer::default()
     };
     assert_eq!(ClientOrigin::from_ipc_peer(&local), ClientOrigin::Trusted);
 

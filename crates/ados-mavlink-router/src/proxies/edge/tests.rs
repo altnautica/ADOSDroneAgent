@@ -1,49 +1,5 @@
 use super::*;
 
-fn heartbeat() -> Vec<u8> {
-    use ados_protocol::mavlink::ardupilotmega::{
-        MavAutopilot, MavMessage, MavModeFlag, MavState, MavType, HEARTBEAT_DATA,
-    };
-    let msg = MavMessage::HEARTBEAT(HEARTBEAT_DATA {
-        custom_mode: 0,
-        mavtype: MavType::MAV_TYPE_GCS,
-        autopilot: MavAutopilot::MAV_AUTOPILOT_INVALID,
-        base_mode: MavModeFlag::empty(),
-        system_status: MavState::MAV_STATE_ACTIVE,
-        mavlink_version: 3,
-    });
-    ados_protocol::mavlink::serialize_v2(
-        ados_protocol::mavlink::MavHeader {
-            system_id: 255,
-            component_id: 190,
-            sequence: 0,
-        },
-        &msg,
-    )
-    .unwrap()
-}
-
-#[test]
-fn a_frame_split_across_reads_is_forwarded_whole_once() {
-    let frame = heartbeat();
-    let mut framer = ClientFramer::default();
-    assert!(framer.push(&frame[..7]).is_empty(), "half a frame waits");
-    assert_eq!(framer.push(&frame[7..]), vec![frame.clone()]);
-}
-
-#[test]
-fn many_frames_batch_under_the_write_cap() {
-    let frame = heartbeat();
-    let mut burst = Vec::new();
-    for _ in 0..400 {
-        burst.extend_from_slice(&frame);
-    }
-    let batches = ClientFramer::default().push(&burst);
-    assert!(batches.len() > 1);
-    assert!(batches.iter().all(|b| b.len() <= FC_MAX_SINGLE_WRITE));
-    assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), burst.len());
-}
-
 #[tokio::test(start_paused = true)]
 async fn accept_errors_back_off_and_log_once_per_window() {
     let mut errors = AcceptErrors::default();

@@ -41,12 +41,9 @@ use tokio_tungstenite::tungstenite::http::{HeaderValue, StatusCode};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
-use crate::connection::{ClientOrigin, FcConnection};
+use crate::connection::{ClientFramer, ClientOrigin, FcConnection};
 pub use edge::ListenFlag;
-use edge::{
-    bind_until, forward_client_bytes, AcceptErrors, ClientFramer, ListeningGuard, UdpPeers,
-    UdpVerdicts,
-};
+use edge::{bind_until, forward_client_bytes, AcceptErrors, ListeningGuard, UdpPeers, UdpVerdicts};
 
 /// The data-path auth header a paired GCS presents to the direct WebSocket
 /// proxy, matching the HTTP control surface's `X-ADOS-Key`.

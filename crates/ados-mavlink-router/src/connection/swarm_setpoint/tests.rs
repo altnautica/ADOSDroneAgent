@@ -296,3 +296,31 @@ async fn the_unsigned_command_risk_holds_the_layer_off_once() {
     assert!(signing_holds(&fc, &s).await);
     assert!(s.signing_hold_logged.load(Ordering::Relaxed));
 }
+
+#[tokio::test]
+async fn a_visor_sends_no_setpoint_and_counts_no_client_refusal() {
+    use tokio::io::AsyncReadExt;
+    for (profile, sends) in [("visor", false), ("drone", true)] {
+        let cfg = crate::config::MavlinkConfig {
+            profile: profile.into(),
+            ..crate::config::MavlinkConfig::default()
+        };
+        let fc = FcConnection::new(
+            cfg,
+            Arc::new(Mutex::new(VehicleState::default())),
+            Arc::new(Mutex::new(crate::param_cache::ParamCache::new(
+                std::env::temp_dir().join("ados-swarm-visor-test-params.json"),
+            ))),
+        );
+        let (fc_side, mut far) = tokio::io::duplex(4096);
+        fc.connected.store(true, Ordering::Relaxed);
+        *fc.writer.lock().await = Some(Box::pin(fc_side));
+        let sp = Setpoint::velocity(Ned::new(1.0, 0.0, 0.0));
+        send_setpoint(&fc, (1, 1), &sp).await;
+        let mut buf = [0u8; 64];
+        let wait = std::time::Duration::from_millis(50);
+        let read = tokio::time::timeout(wait, far.read(&mut buf)).await;
+        assert_eq!(read.is_ok(), sends, "{profile}");
+        assert_eq!(fc.visor_flight_frames_dropped(), 0, "{profile}");
+    }
+}

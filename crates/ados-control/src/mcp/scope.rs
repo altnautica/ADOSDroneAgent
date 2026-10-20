@@ -132,7 +132,7 @@ pub fn tool_safety_class(
 
 /// The inner path of a ground-station relay-proxy route
 /// (`/api/v1/ground-station/relay-proxy/{peer}/{*inner}`), starting with `/`.
-pub(super) fn relay_proxy_inner_path(path: &str) -> Option<&str> {
+pub(crate) fn relay_proxy_inner_path(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/api/v1/ground-station/relay-proxy/")?;
     let slash = rest.find('/')?;
     (slash > 0 && rest.len() > slash + 1).then(|| &rest[slash..])

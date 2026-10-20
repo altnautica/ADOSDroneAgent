@@ -12,9 +12,7 @@ use std::time::{Duration, Instant};
 use ados_protocol::pairing_posture::Access;
 use ados_protocol::shutdown::Shutdown;
 
-use crate::connection::{
-    extract_frames, ClientOrigin, FcConnection, FC_MAX_SINGLE_WRITE, RECONNECT_INTERVAL,
-};
+use crate::connection::{ClientFramer, ClientOrigin, FcConnection, RECONNECT_INTERVAL};
 
 /// Pause after a failed `accept`. An accept error (EMFILE, ENFILE, ENOBUFS)
 /// leaves the listener ready, so without a pause the loop spins a core.
@@ -28,8 +26,8 @@ const ACCEPT_ERROR_LOG_EVERY: Duration = Duration::from_secs(10);
 pub(super) const AUTH_RECHECK: Duration = Duration::from_secs(2);
 
 /// Largest WebSocket message or frame accepted. The FC path takes at most
-/// [`FC_MAX_SINGLE_WRITE`] per write, so anything far larger is buffered only
-/// to be thrown away.
+/// [`FC_MAX_SINGLE_WRITE`](crate::connection::FC_MAX_SINGLE_WRITE) per write,
+/// so anything far larger is buffered only to be thrown away.
 pub(super) const WS_MAX_MESSAGE: usize = 64 * 1024;
 
 /// A refused UDP peer is logged at most once per this window.
@@ -37,10 +35,6 @@ const UDP_REFUSAL_LOG_EVERY: Duration = Duration::from_secs(60);
 
 /// How often the UDP fan-out evicts quiet peers.
 pub(super) const UDP_EVICT_EVERY: Duration = Duration::from_secs(1);
-
-/// Upper bound on a client's reassembly buffer. A client frame is at most 280
-/// bytes, so this only trips on a stream that is not MAVLink at all.
-const CLIENT_BUF_CAP: usize = 64 * 1024;
 
 /// Whether one proxy edge currently holds its listening socket. Set on bind,
 /// cleared when the proxy task returns.
@@ -126,38 +120,6 @@ impl AcceptErrors {
         }
         tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
         log
-    }
-}
-
-/// Reassembles a client's byte stream into whole MAVLink frames so a frame is
-/// never split across two writes to the flight controller.
-#[derive(Debug, Default)]
-pub(super) struct ClientFramer {
-    buf: Vec<u8>,
-}
-
-impl ClientFramer {
-    /// Feed `data`; returns the complete frames it finished, concatenated into
-    /// batches of at most [`FC_MAX_SINGLE_WRITE`] bytes. A partial trailing
-    /// frame stays buffered for the next call.
-    pub(super) fn push(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
-        self.buf.extend_from_slice(data);
-        let frames = extract_frames(&mut self.buf);
-        if self.buf.len() > CLIENT_BUF_CAP {
-            self.buf.clear();
-        }
-        let mut batches = Vec::new();
-        let mut batch: Vec<u8> = Vec::new();
-        for frame in frames {
-            if !batch.is_empty() && batch.len() + frame.len() > FC_MAX_SINGLE_WRITE {
-                batches.push(std::mem::take(&mut batch));
-            }
-            batch.extend_from_slice(&frame);
-        }
-        if !batch.is_empty() {
-            batches.push(batch);
-        }
-        batches
     }
 }
 

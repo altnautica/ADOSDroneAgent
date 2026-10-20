@@ -122,9 +122,10 @@ impl FcConnection {
         }
         // On a visor the flight controller is a sensor hub: this is the one
         // choke point every client write toward it passes through, so its
-        // flight-action frames are dropped here. Elsewhere the bytes are
+        // flight-action frames are dropped here (an MSP board, which does not
+        // parse MAVLink, gets the bytes untouched). Elsewhere the bytes are
         // unchanged.
-        let admitted = self.visor_admit(data);
+        let admitted = self.visor_admit(data).await;
         if admitted.is_empty() && !data.is_empty() {
             return false;
         }
@@ -209,11 +210,7 @@ impl FcConnection {
         }
         // A visor with a MAVLink flight controller filters this lane like the
         // MAVLink one; an MSP board does not parse MAVLink frames.
-        let admitted = if self.is_visor() && self.fc_variant().await.is_none() {
-            self.visor_admit(data)
-        } else {
-            std::borrow::Cow::Borrowed(data)
-        };
+        let admitted = self.visor_admit(data).await;
         if admitted.is_empty() && !data.is_empty() {
             return;
         }

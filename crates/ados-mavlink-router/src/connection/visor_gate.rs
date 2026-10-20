@@ -10,21 +10,25 @@
 //!
 //! A flight action is a message that moves, arms or steers the vehicle or
 //! drives its outputs: mode changes, mission upload and control, manual and RC
-//! override input, attitude/position/actuator targets, and the `COMMAND_LONG` /
-//! `COMMAND_INT` commands in [`FLIGHT_COMMANDS`]. Servo and relay commands are
-//! refused too: the visor's camera trigger is driven by the flight controller's
-//! own servo and camera parameters, never by a client command. Setting the home
-//! position moves nothing and is allowed, as are parameter reads and writes,
-//! sensor calibration, stream-rate and message requests, time sync, signing and
-//! log download.
+//! override input, attitude/position/actuator targets, arming, and the
+//! `COMMAND_LONG` / `COMMAND_INT` commands in [`FLIGHT_COMMANDS`]. Servo and
+//! relay commands are refused too: the visor's camera trigger is driven by the
+//! flight controller's own servo and camera parameters, never by a client
+//! command. Disarming (forced or not) and flight termination stay allowed, so
+//! a hub that is somehow armed can always be stopped. Setting the home position
+//! moves nothing and is allowed, as are parameter reads and writes, sensor
+//! calibration, stream-rate and message requests, time sync, signing and log
+//! download.
 //!
-//! On a visor the filter forwards nothing it has not classified. Junk between
-//! frames and a trailing partial frame are not forwarded (a partial frame could
-//! otherwise be completed by a later write into a frame nobody inspected), and
-//! a frame whose checksum fails is skipped as the inbound framer skips it. A v2
-//! frame carrying an incompatibility flag other than signing is dropped and
-//! counted: the flight controller abandons such a header and would parse its
-//! payload as fresh frames.
+//! On a visor the filter forwards nothing it has not classified. A stream
+//! client's frame split across two writes is reassembled per connection before
+//! it gets here (the proxies' and the IPC socket's
+//! [`ClientFramer`](super::ClientFramer)); a UDP datagram carries whole frames
+//! by itself. Junk between frames and a trailing partial frame (a malformed
+//! datagram) are not forwarded, and a frame whose checksum fails is skipped as
+//! the inbound framer skips it. A v2 frame carrying an incompatibility flag
+//! other than signing is dropped and counted: the flight controller abandons
+//! such a header and would parse its payload as fresh frames.
 
 use std::borrow::Cow;
 use std::sync::atomic::Ordering;
@@ -53,6 +57,9 @@ const MSG_COMMAND_LONG: u32 = 76;
 /// params) and `COMMAND_INT` (after four float params, `x`, `y` and `z`).
 const COMMAND_OFFSET: usize = 28;
 
+/// `MAV_CMD_COMPONENT_ARM_DISARM`: refused only when it arms.
+const CMD_COMPONENT_ARM_DISARM: u16 = 400;
+
 /// Message ids that are flight actions whatever their content.
 const FLIGHT_MESSAGES: &[u32] = &[
     11,  // SET_MODE
@@ -68,35 +75,39 @@ const FLIGHT_MESSAGES: &[u32] = &[
     84,  // SET_POSITION_TARGET_LOCAL_NED
     86,  // SET_POSITION_TARGET_GLOBAL_INT
     139, // SET_ACTUATOR_CONTROL_TARGET
+    386, // CAN_FRAME (raw CAN to ESCs and servos, as the CAN passthrough route)
+    387, // CANFD_FRAME
 ];
 
 /// `MAV_CMD` values that are flight actions in `COMMAND_LONG` / `COMMAND_INT`.
 pub(crate) const FLIGHT_COMMANDS: &[u16] = &[
-    16,    // NAV_WAYPOINT
-    17,    // NAV_LOITER_UNLIM
-    18,    // NAV_LOITER_TURNS
-    19,    // NAV_LOITER_TIME
-    20,    // NAV_RETURN_TO_LAUNCH
-    21,    // NAV_LAND
-    22,    // NAV_TAKEOFF
-    23,    // NAV_LAND_LOCAL
-    24,    // NAV_TAKEOFF_LOCAL
-    25,    // NAV_FOLLOW
-    31,    // NAV_LOITER_TO_ALT
-    34,    // DO_ORBIT
-    84,    // NAV_VTOL_TAKEOFF
-    85,    // NAV_VTOL_LAND
-    92,    // NAV_GUIDED_ENABLE
-    115,   // CONDITION_YAW
-    176,   // DO_SET_MODE
-    177,   // DO_JUMP
-    178,   // DO_CHANGE_SPEED
-    181,   // DO_SET_RELAY
-    182,   // DO_REPEAT_RELAY
-    183,   // DO_SET_SERVO
-    184,   // DO_REPEAT_SERVO
-    185,   // DO_FLIGHTTERMINATION
+    16,  // NAV_WAYPOINT
+    17,  // NAV_LOITER_UNLIM
+    18,  // NAV_LOITER_TURNS
+    19,  // NAV_LOITER_TIME
+    20,  // NAV_RETURN_TO_LAUNCH
+    21,  // NAV_LAND
+    22,  // NAV_TAKEOFF
+    23,  // NAV_LAND_LOCAL
+    24,  // NAV_TAKEOFF_LOCAL
+    25,  // NAV_FOLLOW
+    31,  // NAV_LOITER_TO_ALT
+    34,  // DO_ORBIT
+    84,  // NAV_VTOL_TAKEOFF
+    85,  // NAV_VTOL_LAND
+    92,  // NAV_GUIDED_ENABLE
+    115, // CONDITION_YAW
+    176, // DO_SET_MODE
+    177, // DO_JUMP
+    178, // DO_CHANGE_SPEED
+    181, // DO_SET_RELAY
+    182, // DO_REPEAT_RELAY
+    183, // DO_SET_SERVO
+    184, // DO_REPEAT_SERVO
+    // DO_FLIGHTTERMINATION (185) is not listed: stopping the outputs must stay
+    // possible on a hub that is somehow armed.
     186,   // DO_CHANGE_ALTITUDE
+    187,   // DO_SET_ACTUATOR
     188,   // DO_RETURN_PATH_START
     189,   // DO_LAND_START
     191,   // DO_GO_AROUND
@@ -110,7 +121,9 @@ pub(crate) const FLIGHT_COMMANDS: &[u16] = &[
     223,   // DO_ENGINE_CONTROL
     224,   // DO_SET_MISSION_CURRENT
     300,   // MISSION_START
-    400,   // COMPONENT_ARM_DISARM
+    310,   // ACTUATOR_TEST
+    400,   // COMPONENT_ARM_DISARM, refused only when it arms (see `arms`)
+    32000, // CAN_FORWARD (starts forwarding CAN bus frames to the client)
     42600, // DO_WINCH
 ];
 
@@ -118,9 +131,22 @@ pub(crate) const FLIGHT_COMMANDS: &[u16] = &[
 /// a flight action.
 pub(crate) fn is_flight_action_frame(msg_id: u32, payload: &[u8]) -> bool {
     match msg_id {
-        MSG_COMMAND_LONG | MSG_COMMAND_INT => FLIGHT_COMMANDS.contains(&command_of(payload)),
+        MSG_COMMAND_LONG | MSG_COMMAND_INT => match command_of(payload) {
+            CMD_COMPONENT_ARM_DISARM => arms(payload),
+            command => FLIGHT_COMMANDS.contains(&command),
+        },
         id => FLIGHT_MESSAGES.contains(&id),
     }
+}
+
+/// Whether a `COMPONENT_ARM_DISARM` payload arms: `param1` (the first float of
+/// both `COMMAND_LONG` and `COMMAND_INT`) is anything but a disarm's zero. A
+/// disarm (including a forced one) stays allowed, so a hub that is somehow
+/// armed can be disarmed.
+fn arms(payload: &[u8]) -> bool {
+    let byte = |i: usize| payload.get(i).copied().unwrap_or(0);
+    let param1 = f32::from_le_bytes([byte(0), byte(1), byte(2), byte(3)]);
+    param1.is_nan() || param1.abs() >= 0.5
 }
 
 /// The `command` field of a `COMMAND_LONG` / `COMMAND_INT` payload. A v2
@@ -207,10 +233,11 @@ impl FcConnection {
     }
 
     /// The bytes of a client write that may reach the flight controller: on a
-    /// visor `data` without its flight-action frames, elsewhere `data`
-    /// unchanged.
-    pub(crate) fn visor_admit<'a>(&self, data: &'a [u8]) -> Cow<'a, [u8]> {
-        if !self.is_visor() {
+    /// visor whose flight controller speaks MAVLink, `data` without its
+    /// flight-action frames; elsewhere (and to an MSP board, which does not
+    /// parse MAVLink frames) `data` unchanged.
+    pub(crate) async fn visor_admit<'a>(&self, data: &'a [u8]) -> Cow<'a, [u8]> {
+        if !self.is_visor() || self.fc_variant().await.is_some() {
             return Cow::Borrowed(data);
         }
         let (kept, refused) = strip_flight_actions(data);
