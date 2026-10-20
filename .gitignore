@@ -59,6 +59,3 @@ target/
 
 # Local omp agent tooling directory (not part of the project)
 .omp/
-
-# uv lock file: the project installs from pyproject pins; the lock is not tracked
-/uv.lock
