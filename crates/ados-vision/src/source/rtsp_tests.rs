@@ -120,6 +120,43 @@ fn bayer_is_refused_for_a_stream() {
     }
 }
 
+/// The decoder emits one frame per picture fed to it, from the first one:
+/// a decoder that drops the pictures it probes would pair every later frame
+/// with an identity that many pictures older. Runs the real `ffmpeg` (the
+/// agent's runtime dependency) on a 60-picture stream it encodes first.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_decoder_emits_every_picture_it_is_fed() {
+    use std::io::{Read, Write};
+    let encoded = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+        .args(["testsrc=size=320x200:rate=20", "-frames:v", "60"])
+        .args(["-c:v", "libx264", "-bf", "0", "-g", "20", "-f", "h264", "-"])
+        .output()
+        .expect("ffmpeg is installed");
+    assert!(encoded.status.success() && !encoded.stdout.is_empty());
+    let settings = RtspSettings {
+        url: "rtsp://unused".into(),
+        width: 320,
+        height: 200,
+        format: FrameFormat::Gray8,
+    };
+    let mut decode = std::process::Command::new("ffmpeg")
+        .args(decoder_args(&settings))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn the decoder");
+    let mut stdin = decode.stdin.take().unwrap();
+    let input = encoded.stdout;
+    let feeder = std::thread::spawn(move || stdin.write_all(&input));
+    let mut raw = Vec::new();
+    decode.stdout.take().unwrap().read_to_end(&mut raw).unwrap();
+    feeder.join().unwrap().unwrap();
+    assert!(decode.wait().unwrap().success());
+    assert_eq!(raw.len(), 60 * 320 * 200, "one gray frame per picture");
+}
+
 fn pending(seq: u64) -> Pending {
     Pending {
         id: Some(WeFrameId { seq, ..ID }),

@@ -192,6 +192,41 @@ pub fn frame_timing(
     t
 }
 
+/// The decoder's arguments: Annex-B H.264 on stdin, raw `settings.format`
+/// frames on stdout, one out per picture in. No `-fflags nobuffer`: with it
+/// ffmpeg discards the packets it reads while probing the stream (the first
+/// tens of pictures), so every decoded frame would pair with an identity that
+/// many pictures older. A 32-byte probe keeps the start-up delay as short.
+pub fn decoder_args(settings: &RtspSettings) -> Vec<String> {
+    let scale = format!("scale={}:{}", settings.width, settings.height);
+    [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-probesize",
+        "32",
+        "-flags",
+        "low_delay",
+        "-f",
+        "h264",
+        "-i",
+        "-",
+        "-an",
+        "-fps_mode",
+        "passthrough",
+        "-vf",
+        &scale,
+        "-pix_fmt",
+        settings.format.ffmpeg_pix_fmt(),
+        "-f",
+        "rawvideo",
+        "-",
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect()
+}
+
 /// What an RTSP capture is opened with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RtspSettings {
@@ -268,23 +303,8 @@ impl RtspSource {
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
-        let scale = format!("scale={}:{}", s.width, s.height);
         let mut decode = Command::new("ffmpeg")
-            .args(["-hide_banner", "-loglevel", "error", "-fflags", "nobuffer"])
-            .args([
-                "-flags",
-                "low_delay",
-                "-f",
-                "h264",
-                "-i",
-                "-",
-                "-an",
-                "-fps_mode",
-                "passthrough",
-                "-vf",
-                &scale,
-            ])
-            .args(["-pix_fmt", s.format.ffmpeg_pix_fmt(), "-f", "rawvideo", "-"])
+            .args(decoder_args(s))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
