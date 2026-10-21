@@ -29,6 +29,7 @@ use crate::worker::{Reply, Request, Worker};
 mod auth;
 mod dispatch;
 mod effects;
+mod palette_cmds;
 mod tab_id;
 mod tabs;
 #[cfg(test)]

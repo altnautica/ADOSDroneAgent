@@ -14,7 +14,7 @@ use crate::api_path::seg;
 use crate::app::{Core, FrameOut, Hit, ShellReq, Tab, TabId};
 use crate::ext::actions;
 use crate::ext::install::{Installer, TAG_PERMS};
-use crate::ext::state::{self, CatalogEntry, Install};
+use crate::ext::state::{self, Install};
 use crate::keymap::{Command, Ctx};
 use crate::overlay::{Overlay, OverlayResult, Ret};
 use crate::poll::{ResourceId, Sub};
@@ -37,23 +37,6 @@ enum Focus {
     Detail,
 }
 
-/// One left-list entry.
-#[derive(Debug, Clone)]
-enum Entry {
-    Installed(Install),
-    Catalog(CatalogEntry),
-}
-
-impl Entry {
-    /// What the selection remembers: the section and the plugin id.
-    fn key(&self) -> (bool, String) {
-        match self {
-            Entry::Installed(i) => (true, i.id.clone()),
-            Entry::Catalog(c) => (false, c.id.clone()),
-        }
-    }
-}
-
 #[derive(Default)]
 pub struct ExtensionsTab {
     sel: usize,
@@ -68,34 +51,10 @@ pub struct ExtensionsTab {
     installer: Installer,
 }
 
-fn entries(core: &Core) -> (Vec<Install>, Vec<CatalogEntry>) {
-    let installs = core
-        .value(&ResourceId::Plugins)
-        .map(state::installs)
-        .unwrap_or_default();
-    let catalog = core
-        .value(&ResourceId::PluginsCatalog)
-        .map(state::catalog)
-        .unwrap_or_default();
-    let catalog = state::not_installed(catalog, &installs);
-    (installs, catalog)
-}
+#[path = "extensions_list.rs"]
+mod list;
 
-/// The display name of an installed plugin: the manifest name, else the
-/// catalog name, else the id.
-fn name_of(core: &Core, id: &str) -> String {
-    core.value(&ResourceId::PluginDetail(id.to_string()))
-        .and_then(|d| crate::app::at(d, "manifest.name"))
-        .and_then(Value::as_str)
-        .filter(|n| !n.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            core.value(&ResourceId::PluginsCatalog)
-                .map(state::catalog)
-                .and_then(|c| c.into_iter().find(|e| e.id == id).map(|e| e.name))
-        })
-        .unwrap_or_else(|| id.to_string())
-}
+use list::{entries, name_of, Entry};
 
 impl ExtensionsTab {
     fn selected(&self, core: &Core) -> Option<Entry> {

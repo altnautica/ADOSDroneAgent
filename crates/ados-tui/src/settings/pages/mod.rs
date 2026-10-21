@@ -22,6 +22,7 @@ pub mod sensors;
 pub mod targets;
 pub mod video_link;
 pub mod wifi;
+mod wifi_actions;
 pub mod wifi_model;
 
 /// Every bespoke page's state.
