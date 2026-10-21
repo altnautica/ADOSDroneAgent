@@ -1,11 +1,12 @@
 //! REST client and shared wire types for the agent HTTP API (Contract D, port
 //! 8080).
 //!
-//! The FastAPI REST layer stays Python; this is the client side used by the
-//! Rust TUI (and any other Rust REST consumer). Auth is the `X-ADOS-Key`
-//! header; the pairing routes are reachable while unpaired. The client is
-//! blocking (`ureq`, HTTP-only) because its callers are simple pollers off the
-//! flight-critical path.
+//! The native front (`ados-control`) serves the API on `:8080`; this is the
+//! client side used by the Rust TUI (and any other Rust REST consumer). Auth is
+//! the `X-ADOS-Key` header, or a dashboard PIN session in
+//! `X-ADOS-Dashboard-Session`; the pairing routes are reachable while unpaired.
+//! The client is blocking (`ureq`, HTTP-only) because its callers are simple
+//! pollers and worker threads off the flight-critical path.
 //!
 //! The client returns raw [`serde_json::Value`] bodies. The [`types`] submodule
 //! adds typed serde structs for the read-projection shapes that the native
@@ -16,6 +17,8 @@
 //! a new field on the producer side round-trips through a consumer that does not
 //! yet know about it.
 
+use std::io::Read;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -30,31 +33,108 @@ pub const DEFAULT_BASE: &str = "http://localhost:8080";
 /// Default per-request timeout, matching the Python CLI's httpx client.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(8);
 
+/// Connect timeout for a long-lived stream (server-sent events). The stream
+/// itself has no read timeout: an idle log stream is not a failure.
+pub const STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Debug, Error)]
 pub enum RestError {
-    #[error("http {0}")]
-    Status(u16),
+    /// A non-2xx answer, with its JSON body when the server sent one.
+    #[error("http {code}{suffix}", suffix = status_detail_suffix(.body.as_ref()))]
+    Status { code: u16, body: Option<Value> },
     #[error("transport error: {0}")]
     Transport(String),
     #[error("response was not valid json: {0}")]
     Json(String),
 }
 
-/// A blocking REST client for the agent HTTP API.
+impl RestError {
+    /// The HTTP status code, when the server answered.
+    pub fn code(&self) -> Option<u16> {
+        match self {
+            RestError::Status { code, .. } => Some(*code),
+            _ => None,
+        }
+    }
+
+    /// The JSON body of a non-2xx answer, when there was one.
+    pub fn body(&self) -> Option<&Value> {
+        match self {
+            RestError::Status { body, .. } => body.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The human detail of a non-2xx answer: the body's `detail` string, else
+    /// `message`, else `error`. Empty when the body carries none of them.
+    pub fn detail(&self) -> String {
+        self.body().map(status_detail).unwrap_or_default()
+    }
+}
+
+/// The human detail of an error body. Flat bodies carry `detail`, `message` or
+/// `error` as a string; nested ones carry an object under `detail` and/or
+/// `error` (`{"detail": {"error": {"code", "message"}}}`). The first string
+/// found among `detail`, `message`, `error`, each looked up directly and then
+/// as `<k>.message` and `<k>.error.message`, wins; empty when there is none.
+pub fn status_detail(body: &Value) -> String {
+    const PATHS: [&[&str]; 9] = [
+        &["detail"],
+        &["message"],
+        &["error"],
+        &["detail", "message"],
+        &["detail", "error", "message"],
+        &["detail", "error"],
+        &["error", "message"],
+        &["detail", "error", "code"],
+        &["error", "code"],
+    ];
+    PATHS
+        .iter()
+        .find_map(|p| p.iter().try_fold(body, |v, k| v.get(*k)).and_then(Value::as_str))
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn status_detail_suffix(body: Option<&Value>) -> String {
+    match body.map(status_detail) {
+        Some(d) if !d.is_empty() => format!(": {d}"),
+        _ => String::new(),
+    }
+}
+
+/// The credentials a [`RestClient`] sends. Shared by every clone of a client,
+/// so setting a key or session on one applies to all of them.
+#[derive(Debug, Clone, Default)]
+pub struct Auth {
+    /// Pairing key, sent as `X-ADOS-Key`.
+    pub api_key: Option<String>,
+    /// Dashboard PIN session, sent as `X-ADOS-Dashboard-Session`.
+    pub session: Option<String>,
+}
+
+/// A blocking REST client for the agent HTTP API. Cheap to clone; clones share
+/// one [`Auth`].
+#[derive(Clone)]
 pub struct RestClient {
     base: String,
-    api_key: Option<String>,
+    auth: Arc<RwLock<Auth>>,
     agent: ureq::Agent,
+    stream_agent: ureq::Agent,
 }
 
 impl RestClient {
     /// Build a client for the given base URL (no trailing slash).
     pub fn new(base: impl Into<String>) -> Self {
         let agent = ureq::AgentBuilder::new().timeout(DEFAULT_TIMEOUT).build();
+        let stream_agent = ureq::AgentBuilder::new()
+            .timeout_connect(STREAM_CONNECT_TIMEOUT)
+            .build();
         Self {
             base: base.into().trim_end_matches('/').to_string(),
-            api_key: None,
+            auth: Arc::default(),
             agent,
+            stream_agent,
         }
     }
 
@@ -64,23 +144,109 @@ impl RestClient {
     }
 
     /// Attach the pairing key sent as `X-ADOS-Key` on every request.
-    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
-        self.api_key = Some(key.into());
+    pub fn with_api_key(self, key: impl Into<String>) -> Self {
+        self.set_api_key(Some(key.into()));
         self
+    }
+
+    /// Set or clear the pairing key on this client and every clone of it.
+    pub fn set_api_key(&self, key: Option<String>) {
+        self.auth
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .api_key = key;
+    }
+
+    /// Set or clear the dashboard PIN session on this client and every clone.
+    pub fn set_session(&self, session: Option<String>) {
+        self.auth
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .session = session;
+    }
+
+    /// The credentials currently attached.
+    pub fn auth(&self) -> Auth {
+        self.auth
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The base URL, e.g. `http://localhost:8080`.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    fn request(&self, agent: &ureq::Agent, method: &str, path: &str) -> ureq::Request {
+        let url = format!("{}{}", self.base, path);
+        let mut req = agent.request(method, &url);
+        let auth = self.auth();
+        if let Some(key) = auth.api_key.as_deref() {
+            req = req.set("X-ADOS-Key", key);
+        }
+        if let Some(session) = auth.session.as_deref() {
+            req = req.set("X-ADOS-Dashboard-Session", session);
+        }
+        req
     }
 
     /// GET `path` (e.g. `/api/status`) and parse the JSON body.
     pub fn get_json(&self, path: &str) -> Result<Value, RestError> {
-        let url = format!("{}{}", self.base, path);
-        let mut req = self.agent.get(&url);
-        if let Some(ref key) = self.api_key {
-            req = req.set("X-ADOS-Key", key);
+        self.send_json("GET", path, None, DEFAULT_TIMEOUT)
+    }
+
+    /// GET `path` with its own request timeout (a slow route such as a Wi-Fi
+    /// scan).
+    pub fn get_json_timeout(&self, path: &str, timeout: Duration) -> Result<Value, RestError> {
+        self.send_json("GET", path, None, timeout)
+    }
+
+    /// Send `method path` with an optional JSON body and parse the JSON reply.
+    /// An empty 2xx body is [`Value::Null`].
+    pub fn send_json(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+        timeout: Duration,
+    ) -> Result<Value, RestError> {
+        let req = self.request(&self.agent, method, path).timeout(timeout);
+        let result = match body {
+            Some(b) => req.send_json(b.clone()),
+            None => req.call(),
+        };
+        match result {
+            Ok(resp) => {
+                let text = resp
+                    .into_string()
+                    .map_err(|e| RestError::Json(e.to_string()))?;
+                if text.trim().is_empty() {
+                    return Ok(Value::Null);
+                }
+                serde_json::from_str(&text).map_err(|e| RestError::Json(e.to_string()))
+            }
+            Err(ureq::Error::Status(code, resp)) => Err(RestError::Status {
+                code,
+                body: resp.into_json::<Value>().ok(),
+            }),
+            Err(ureq::Error::Transport(t)) => Err(RestError::Transport(t.to_string())),
         }
+    }
+
+    /// Open a server-sent-events stream on `path`. Only the connect is
+    /// time-bounded; the returned reader blocks until the server writes or
+    /// closes.
+    pub fn open_stream(&self, path: &str) -> Result<Box<dyn Read + Send>, RestError> {
+        let req = self
+            .request(&self.stream_agent, "GET", path)
+            .set("Accept", "text/event-stream");
         match req.call() {
-            Ok(resp) => resp
-                .into_json::<Value>()
-                .map_err(|e| RestError::Json(e.to_string())),
-            Err(ureq::Error::Status(code, _resp)) => Err(RestError::Status(code)),
+            Ok(resp) => Ok(Box::new(resp.into_reader())),
+            Err(ureq::Error::Status(code, resp)) => Err(RestError::Status {
+                code,
+                body: resp.into_json::<Value>().ok(),
+            }),
             Err(ureq::Error::Transport(t)) => Err(RestError::Transport(t.to_string())),
         }
     }
@@ -115,29 +281,43 @@ pub mod types {
     /// fields survive a round-trip instead of being dropped.
     pub type Extra = Map<String, Value>;
 
-    /// One flight-controller parameter as the parameter-list route reports it.
-    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-    pub struct ParamEntry {
-        /// Parameter name (e.g. `WPNAV_SPEED`).
-        pub name: String,
-        /// Current value. Parameters are carried as floats on the wire; an
-        /// integer parameter is the exact float of that integer.
-        pub value: f64,
-        /// Optional MAVLink parameter type tag (e.g. `INT32`, `REAL32`).
-        #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-        pub ptype: Option<String>,
-        /// Any extra fields the producer attaches per parameter.
-        #[serde(flatten)]
-        pub extra: Extra,
+    /// Progress of the parameter-cache priming sweep.
+    #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+    pub struct ParamProgress {
+        /// Parameters cached so far.
+        #[serde(default)]
+        pub got: u64,
+        /// The FC-advertised total (0 while unknown).
+        #[serde(default)]
+        pub expected: u64,
     }
 
-    /// The flight-controller parameter list.
+    /// The flight-controller parameter list (`GET /api/params`).
     #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
     pub struct ParamsResponse {
-        /// The parameters, in the order the route returns them.
+        /// Parameter name to value. Parameters are carried as floats on the
+        /// wire; an integer parameter is the exact float of that integer.
         #[serde(default)]
-        pub params: Vec<ParamEntry>,
-        /// Any extra envelope fields (counts, completion flags, timestamps).
+        pub params: std::collections::BTreeMap<String, f64>,
+        /// The FC-advertised total when known, else the cached count.
+        #[serde(default)]
+        pub count: u64,
+        /// How many parameters have landed in the cache.
+        #[serde(default)]
+        pub cached: u64,
+        /// Whether the priming sweep is still running.
+        #[serde(default)]
+        pub priming: bool,
+        /// The FC stayed silent past the sweep deadline.
+        #[serde(default)]
+        pub priming_timeout: bool,
+        /// The sweep request itself failed at the link layer.
+        #[serde(default)]
+        pub priming_send_failed: bool,
+        /// Sweep progress, when reported.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub progress: Option<ParamProgress>,
+        /// Any extra envelope fields.
         #[serde(flatten)]
         pub extra: Extra,
     }
@@ -292,9 +472,48 @@ mod tests {
         let base = one_shot_server("401 Unauthorized", r#"{"detail":"missing key"}"#);
         let client = RestClient::new(base).with_api_key("wrong");
         match client.status() {
-            Err(RestError::Status(401)) => {}
+            Err(e @ RestError::Status { code: 401, .. }) => {
+                assert_eq!(e.detail(), "missing key");
+                assert_eq!(e.to_string(), "http 401: missing key");
+            }
             other => panic!("expected 401 status error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn nested_error_bodies_yield_their_message() {
+        let nested = json!({"detail": {"error": {"code": "E_WIFI_STATUS_UNAVAILABLE", "message": "nmcli missing"}}});
+        assert_eq!(status_detail(&nested), "nmcli missing");
+        let coded = json!({"detail": {"error": {"code": "E_RIG_INVALID"}}});
+        assert_eq!(status_detail(&coded), "E_RIG_INVALID");
+        assert_eq!(status_detail(&json!({"detail": {"message": "m"}})), "m");
+        assert_eq!(status_detail(&json!({"other": 1})), "");
+    }
+
+    #[test]
+    fn an_error_body_rides_the_status_error() {
+        let base = one_shot_server(
+            "409 Conflict",
+            r#"{"error":"E_ARMED","message":"vehicle is armed"}"#,
+        );
+        let client = RestClient::new(base);
+        let err = client
+            .send_json("PUT", "/api/config", Some(&json!({"key": "a", "value": 1})), DEFAULT_TIMEOUT)
+            .unwrap_err();
+        assert_eq!(err.code(), Some(409));
+        assert_eq!(err.body().unwrap()["error"], "E_ARMED");
+        // `message` outranks `error` as the human detail.
+        assert_eq!(err.detail(), "vehicle is armed");
+    }
+
+    #[test]
+    fn an_empty_2xx_body_is_null() {
+        let base = one_shot_server("204 No Content", "");
+        let client = RestClient::new(base);
+        let v = client
+            .send_json("DELETE", "/api/v1/network/client", None, DEFAULT_TIMEOUT)
+            .unwrap();
+        assert_eq!(v, Value::Null);
     }
 
     #[test]
@@ -319,39 +538,20 @@ mod tests {
     }
 
     #[test]
-    fn param_entry_round_trips_with_renamed_type_field() {
-        let entry = ParamEntry {
-            name: "WPNAV_SPEED".into(),
-            value: 500.0,
-            ptype: Some("REAL32".into()),
-            extra: Map::new(),
-        };
-        assert_round_trip(&entry);
-        // The `ptype` field serializes as the wire key `type`.
-        let wire = serde_json::to_value(&entry).unwrap();
-        assert_eq!(wire["type"], "REAL32");
-        assert!(wire.get("ptype").is_none());
-    }
-
-    #[test]
-    fn params_response_round_trips() {
-        let resp = ParamsResponse {
-            params: vec![
-                ParamEntry {
-                    name: "ARMING_CHECK".into(),
-                    value: 1.0,
-                    ptype: Some("INT32".into()),
-                    extra: Map::new(),
-                },
-                ParamEntry {
-                    name: "BATT_CAPACITY".into(),
-                    value: 5200.0,
-                    ptype: None,
-                    extra: Map::new(),
-                },
-            ],
-            extra: Map::new(),
-        };
+    fn params_response_reads_the_wire_map() {
+        let raw = json!({
+            "params": {"ARMING_CHECK": 1.0, "BATT_CAPACITY": 5200.0},
+            "count": 700,
+            "cached": 2,
+            "priming": true,
+            "priming_timeout": false,
+            "priming_send_failed": false,
+            "progress": {"got": 2, "expected": 700}
+        });
+        let resp: ParamsResponse = serde_json::from_value(raw).unwrap();
+        assert_eq!(resp.params["BATT_CAPACITY"], 5200.0);
+        assert_eq!(resp.progress, Some(ParamProgress { got: 2, expected: 700 }));
+        assert!(resp.priming);
         assert_round_trip(&resp);
     }
 
