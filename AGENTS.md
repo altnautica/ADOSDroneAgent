@@ -151,6 +151,10 @@ review, except generated files, fixtures, data tables, and vendored code.
   manual follow-up command, fix the installer or agent code.
 - Prefer explicit errors and structured logs that help operators diagnose state
   without exposing environment-specific details.
+- Operator-visible state, settings, and actions have three surfaces: the web
+  dashboard (`dashboard/src/`), the terminal UI (`crates/ados-tui/`), and Mission
+  Control's node settings. A change that adds, renames, or removes one updates
+  every surface that shows it in the same change.
 
 ## Runtime and Deployment Discipline
 
