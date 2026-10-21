@@ -1,13 +1,14 @@
-//! The cockpit's quick actions.
+//! The on-box quick actions.
 //!
 //! Each action is a labelled shell-out to an existing `ados` (or `systemctl`)
-//! command. Running one leaves the alt screen so the command's own output — and
-//! any sudo prompt or its own confirmation — is visible, then the cockpit is
-//! restored. The action set is intentionally small and reuses the CLI verbs
-//! rather than duplicating their logic or opening a write path to the agent.
+//! command. Running one leaves the alt screen so the command's own output, and
+//! any sudo prompt or its own confirmation, is visible, then the UI is
+//! restored. Actions run only from the actions overlay and the palette, and
+//! only against the local agent: on a remote target they would run on the
+//! workstation instead.
 
 /// What an action runs.
-pub enum Command {
+pub enum ShellCommand {
     /// A fixed program and argument list.
     Run(&'static str, &'static [&'static str]),
     /// `systemctl restart` of the radio unit this node's profile actually runs.
@@ -16,17 +17,13 @@ pub enum Command {
 
 /// One quick action.
 pub struct Action {
-    /// A direct dashboard hotkey, if any (also listed in the actions overlay).
-    pub key: Option<char>,
-    /// A short word for the bottom action bar (used only when `key` is set).
-    pub short: &'static str,
-    /// The full label shown in the actions overlay.
+    /// The label shown in the actions overlay and the palette.
     pub label: &'static str,
     /// A one-line description shown beside the label in the overlay.
     pub desc: &'static str,
     /// Ask for a y/N confirmation before running (destructive or long-running).
     pub confirm: bool,
-    pub command: Command,
+    pub command: ShellCommand,
 }
 
 /// Shown instead of running an update while the vehicle reports armed. An update
@@ -65,8 +62,8 @@ impl Action {
         profile: Option<&str>,
     ) -> Result<(&'static str, Vec<&'static str>), &'static str> {
         match self.command {
-            Command::Run(program, args) => Ok((program, args.to_vec())),
-            Command::RestartRadio => {
+            ShellCommand::Run(program, args) => Ok((program, args.to_vec())),
+            ShellCommand::RestartRadio => {
                 if profile == Some("visor") {
                     return Err(RADIO_NOT_ON_VISOR);
                 }
@@ -78,11 +75,11 @@ impl Action {
 
     /// Whether this is the agent update entry.
     pub fn is_update(&self) -> bool {
-        matches!(self.command, Command::Run("ados", args) if args.first() == Some(&"update"))
+        matches!(self.command, ShellCommand::Run("ados", args) if args.first() == Some(&"update"))
     }
 }
 
-/// What the cockpit knows about the vehicle's arm state when an update is asked
+/// What the UI knows about the vehicle's arm state when an update is asked
 /// for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmView {
@@ -110,8 +107,7 @@ impl ArmView {
 pub const ARM_STATE_UNKNOWN: &str = "arm state unknown";
 
 /// The y/N confirmation line for `label`, naming an unknown arm state so the
-/// operator decides knowing the cockpit could not confirm the vehicle is
-/// disarmed.
+/// operator decides knowing the UI could not confirm the vehicle is disarmed.
 pub fn confirm_prompt(label: &str, arm: Option<ArmView>) -> String {
     match arm {
         Some(ArmView::Unknown) => format!("{label} ({ARM_STATE_UNKNOWN}) — proceed? [y/N] "),
@@ -134,77 +130,61 @@ pub fn update_request(arm: ArmView) -> Result<&'static Action, &'static str> {
         .expect("ACTIONS carries the update entry"))
 }
 
-/// The quick actions, in overlay order. The first three carry direct hotkeys.
+/// The quick actions, in overlay order.
 pub const ACTIONS: &[Action] = &[
     Action {
-        key: Some('d'),
-        short: "driver",
         label: "Install RTL driver",
         desc: "Build the RTL8812EU WFB kernel driver if missing",
         confirm: true,
-        command: Command::Run("ados", &["radio", "install-driver"]),
+        command: ShellCommand::Run("ados", &["radio", "install-driver"]),
     },
     Action {
-        key: Some('p'),
-        short: "pair",
-        label: "Pair",
-        desc: "Show Mission Control pairing info",
-        confirm: false,
-        command: Command::Run("ados", &["pair"]),
-    },
-    Action {
-        key: Some('l'),
-        short: "logs",
-        label: "Logs",
-        desc: "Follow the agent logs",
-        confirm: false,
-        command: Command::Run("ados", &["logs", "tail"]),
-    },
-    Action {
-        key: None,
-        short: "",
         label: "Radio status",
         desc: "Show the WFB radio link",
         confirm: false,
-        command: Command::Run("ados", &["radio", "status"]),
+        command: ShellCommand::Run("ados", &["radio", "status"]),
     },
     Action {
-        key: None,
-        short: "",
         label: "Update agent",
         desc: "Update the agent to the latest",
         confirm: true,
-        command: Command::Run("ados", &["update"]),
+        command: ShellCommand::Run("ados", &["update"]),
     },
     Action {
-        key: None,
-        short: "",
         label: "Restart radio",
         desc: "Restart this node's WFB radio service",
         confirm: true,
-        command: Command::RestartRadio,
+        command: ShellCommand::RestartRadio,
     },
     Action {
-        key: None,
-        short: "",
-        label: "Unpair",
-        desc: "Release this agent's pairing",
-        confirm: true,
-        command: Command::Run("ados", &["unpair"]),
-    },
-    Action {
-        key: None,
-        short: "",
         label: "Reboot host",
         desc: "Reboot this device",
         confirm: true,
-        command: Command::Run("sudo", &["systemctl", "reboot"]),
+        command: ShellCommand::Run("sudo", &["systemctl", "reboot"]),
     },
 ];
+
+/// The index of the "Reboot host" action (the System tab's local reboot).
+pub fn reboot_index() -> usize {
+    ACTIONS
+        .iter()
+        .position(|a| a.label == "Reboot host")
+        .expect("ACTIONS carries the reboot entry")
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_overlay_lists_exactly_the_on_box_actions() {
+        let labels: Vec<_> = ACTIONS.iter().map(|a| a.label).collect();
+        assert_eq!(
+            labels,
+            ["Install RTL driver", "Radio status", "Update agent", "Restart radio", "Reboot host"]
+        );
+        assert_eq!(ACTIONS[reboot_index()].label, "Reboot host");
+    }
 
     #[test]
     fn an_update_request_is_confirmed_and_refused_while_armed() {

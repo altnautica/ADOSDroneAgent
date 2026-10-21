@@ -6,6 +6,44 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **The terminal UI is a full operator console.** `ados` (and `ados-tui`) now
+  opens a tabbed console instead of a read-only cockpit: Overview, Vehicle
+  (Ground on a ground station), Link, Video, Params, Extensions, Logs, System
+  and Settings, each shown only on the profiles that have it.
+  - Settings mirrors the web dashboard's pages (identity, network and Wi-Fi,
+    radio, video, cloud and remote access, pairing, security and MCP tokens,
+    region, battery, self-heal, extension parameters) plus a schema-driven
+    browser of every config key. ←/→ applies a toggle or short choice at once;
+    Enter edits; every write goes through the agent's HTTP API.
+  - Params edits flight-controller parameters with the ArduPilot and PX4
+    metadata catalogs: search, groups, staging, `.param` import and export,
+    and a sequential write that is refused unless a fresh reading says the
+    vehicle is disarmed.
+  - `ados-tui --host <host[:port]>` drives an agent on another machine. A
+    paired agent asks for its API key (optionally remembered per target in
+    the user's `tui.json`); an unpaired one asks for the dashboard PIN. On-box
+    quick actions are hidden remotely.
+  - Themes from the brand tokens (amber, brand dark, brand light, NVG),
+    colour-blind mode, Unicode/Nerd Font/ASCII glyph sets, motion that reduces
+    itself over SSH, a command palette (Ctrl-K), toasts with a notification
+    history, and copy to the local clipboard over OSC 52.
+  - No flight commands are sent from the terminal. Lifecycle actions (service
+    restart, reboot, update, extension changes, Wi-Fi joins, profile and region
+    changes, unpair) refuse while the vehicle is armed or its arm state is
+    unknown.
+- The REST client in `ados-protocol` carries the error body of a non-2xx
+  reply, sends a dashboard PIN session when one is set, and opens
+  server-sent-event streams. `ParamsResponse` now matches the `/api/params`
+  wire shape.
+
+### Changed
+
+- The quick actions overlay no longer carries Pair, Logs or Unpair (the
+  Pairing settings page and the Logs tab replace them), and actions no longer
+  have single-key shortcuts on the main screen.
+
 ### Fixed
 
 - **The simulator clock never locked.** Simulator time from the video SEI is

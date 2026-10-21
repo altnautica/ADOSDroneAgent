@@ -25,16 +25,6 @@ fn viewer_url_strips_whep_suffix() {
 }
 
 #[test]
-fn ident_is_device_and_profile() {
-    let dash = Dashboard {
-        device_name: "ados-e996786c".into(),
-        profile: "ground_station".into(),
-        ..Dashboard::default()
-    };
-    assert_eq!(dash.ident(), "ados-e996786c · ground_station");
-}
-
-#[test]
 fn reach_rank_classifies_hosts() {
     assert_eq!(reach_rank("http://ados-abc.local:8080/setup"), 0);
     assert_eq!(reach_rank("http://192.168.1.5:8080/setup"), 1);

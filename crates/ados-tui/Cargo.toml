@@ -14,8 +14,16 @@ path = "src/main.rs"
 [dependencies]
 ados-protocol = { path = "../ados-protocol" }
 ratatui = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
+tachyonfx = { workspace = true }
+tui-input = { workspace = true }
+nucleo-matcher = { workspace = true }
+flate2 = { workspace = true }
+base64 = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
 # Signal disposition around a shelled-out quick action (via nix::libc), so a
 # Ctrl-C used to stop a streaming child exits the child, not this cockpit.
 nix = { workspace = true }

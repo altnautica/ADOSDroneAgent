@@ -1,60 +1,47 @@
-//! Amber-on-charcoal palette for the cockpit.
+//! Colour themes for the terminal UI.
 //!
-//! Mirrors the installer/wizard house style (the hand-rolled
-//! `crates/ados-installer/src/ui/theme.rs`) but expressed as `ratatui` colors:
-//! a single amber accent, muted grey body text, near-white headings, and
-//! semantic success / warning / danger. ratatui emits `Color::Rgb` as 24-bit
-//! truecolor; on a terminal that cannot show it (or with `NO_COLOR`), each
-//! color falls back to its nearest 256-index and then a basic named color, so
-//! the cockpit stays legible everywhere.
+//! The palettes are generated from the brand design tokens
+//! (`palette_generated.rs`): one [`TuiPalette`] per selectable theme, each tone
+//! carrying its 24-bit RGB value and the nearest xterm-256 index. A [`Theme`]
+//! pairs a palette with the colour tier the terminal can render, so every role
+//! falls back RGB → 256-index → a basic named colour → the terminal default.
 //!
-//! The tier is resolved once from the environment and cached. The resolution
-//! and color-picking are split into pure functions so the fallback ladder is
-//! unit-tested without touching the process environment.
+//! The tier is resolved once from the environment. Resolution and colour
+//! picking are pure functions so the fallback ladder is unit-tested without
+//! touching the process environment.
 
-use std::sync::OnceLock;
-
-use ratatui::style::Color;
-
-/// How much color the terminal can render.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Tier {
-    /// 24-bit RGB (`COLORTERM=truecolor`).
-    Truecolor,
-    /// 256-color indexed (`TERM=*-256color`).
-    Ansi256,
-    /// Basic 16-color (named foreground).
-    Basic,
-    /// No color: `NO_COLOR`, or `TERM=dumb`.
-    None,
-}
-
-// --- palette (generated; shared with the installer's amber-on-charcoal theme) -
+use ratatui::style::{Color, Modifier, Style};
 
 #[path = "palette_generated.rs"]
 mod palette_generated;
 
-use palette_generated::{
-    AMBER, AMBER_256, CHARCOAL, CHARCOAL_256, DANGER, DANGER_256, HEADING, HEADING_256, MUTED,
-    MUTED_256, ON_AMBER, ON_AMBER_256, SUCCESS, SUCCESS_256, WARNING, WARNING_256,
-};
+pub use palette_generated::{Tone, TuiPalette};
 
-static TIER: OnceLock<Tier> = OnceLock::new();
+/// How much colour the terminal can render.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// 24-bit RGB (`COLORTERM=truecolor`).
+    Truecolor,
+    /// 256-colour indexed (`TERM=*-256color`).
+    Ansi256,
+    /// Basic 16-colour (named foreground).
+    Basic,
+    /// No colour: `NO_COLOR`, or `TERM=dumb`.
+    None,
+}
 
-/// Resolve the color tier from the environment, once, and cache it.
-fn tier() -> Tier {
-    *TIER.get_or_init(|| {
-        let no_color = std::env::var_os("NO_COLOR").is_some();
-        let term = std::env::var("TERM").unwrap_or_default();
-        let colorterm = std::env::var("COLORTERM").unwrap_or_default();
-        resolve_tier(no_color, &term, &colorterm)
-    })
+/// Resolve the colour tier from the process environment.
+pub fn env_tier() -> Tier {
+    let no_color = std::env::var_os("NO_COLOR").is_some();
+    let term = std::env::var("TERM").unwrap_or_default();
+    let colorterm = std::env::var("COLORTERM").unwrap_or_default();
+    resolve_tier(no_color, &term, &colorterm)
 }
 
 /// Pure tier resolution (tested): `NO_COLOR` / `TERM=dumb` → plain;
 /// `COLORTERM=truecolor|24bit` → truecolor; a `*-256color` `TERM` → 256; else
 /// basic.
-fn resolve_tier(no_color: bool, term: &str, colorterm: &str) -> Tier {
+pub fn resolve_tier(no_color: bool, term: &str, colorterm: &str) -> Tier {
     if no_color || term == "dumb" {
         return Tier::None;
     }
@@ -68,55 +55,165 @@ fn resolve_tier(no_color: bool, term: &str, colorterm: &str) -> Tier {
     }
 }
 
-/// Pure color pick (tested): the RGB value on truecolor, the 256-index on a
-/// 256-color terminal, the basic named color otherwise, and the terminal
-/// default (`Reset`) when there is no color.
-fn color_for(tier: Tier, rgb: (u8, u8, u8), idx: u8, basic: Color) -> Color {
+/// Pure colour pick (tested): the RGB value on truecolor, the 256-index on a
+/// 256-colour terminal, the basic named colour otherwise, and the terminal
+/// default (`Reset`) when there is no colour.
+fn color_for(tier: Tier, tone: Tone, basic: Color) -> Color {
     match tier {
-        Tier::Truecolor => Color::Rgb(rgb.0, rgb.1, rgb.2),
-        Tier::Ansi256 => Color::Indexed(idx),
+        Tier::Truecolor => Color::Rgb(tone.rgb.0, tone.rgb.1, tone.rgb.2),
+        Tier::Ansi256 => Color::Indexed(tone.idx),
         Tier::Basic => basic,
         Tier::None => Color::Reset,
     }
 }
 
-/// The amber accent.
-pub fn accent() -> Color {
-    color_for(tier(), AMBER, AMBER_256, Color::Yellow)
-}
-/// Muted grey for labels, dim text, and inactive dots.
-pub fn muted() -> Color {
-    color_for(tier(), MUTED, MUTED_256, Color::DarkGray)
-}
-/// Near-white for headings and bright values.
-pub fn heading() -> Color {
-    color_for(tier(), HEADING, HEADING_256, Color::White)
-}
-/// Dark text on an amber chip / gauge.
-pub fn on_amber() -> Color {
-    color_for(tier(), ON_AMBER, ON_AMBER_256, Color::Black)
-}
-/// Success green.
-pub fn success() -> Color {
-    color_for(tier(), SUCCESS, SUCCESS_256, Color::Green)
-}
-/// Warning yellow.
-pub fn warning() -> Color {
-    color_for(tier(), WARNING, WARNING_256, Color::Yellow)
-}
-/// Destructive salmon red.
-pub fn danger() -> Color {
-    color_for(tier(), DANGER, DANGER_256, Color::Red)
+/// A selectable theme.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeId {
+    Amber,
+    BrandDark,
+    BrandLight,
+    Nvg,
 }
 
-/// The charcoal screen background, painted once per frame — but only on tiers
-/// that can render a real background (truecolor / 256). On basic and plain
-/// terminals this returns `None` so the terminal keeps its own background.
-pub fn background() -> Option<Color> {
-    match tier() {
-        Tier::Truecolor => Some(Color::Rgb(CHARCOAL.0, CHARCOAL.1, CHARCOAL.2)),
-        Tier::Ansi256 => Some(Color::Indexed(CHARCOAL_256)),
-        _ => None,
+impl ThemeId {
+    /// Every theme, in the order the settings value cycles.
+    pub const ALL: [ThemeId; 4] = [
+        ThemeId::Amber,
+        ThemeId::BrandDark,
+        ThemeId::BrandLight,
+        ThemeId::Nvg,
+    ];
+
+    /// The name stored in the preferences file.
+    pub fn name(self) -> &'static str {
+        match self {
+            ThemeId::Amber => "amber",
+            ThemeId::BrandDark => "brand-dark",
+            ThemeId::BrandLight => "brand-light",
+            ThemeId::Nvg => "nvg",
+        }
+    }
+
+    /// The theme a preferences value names; unknown names are amber.
+    pub fn from_name(name: &str) -> Self {
+        Self::ALL
+            .into_iter()
+            .find(|t| t.name() == name)
+            .unwrap_or(ThemeId::Amber)
+    }
+
+    fn palette(self) -> &'static TuiPalette {
+        match self {
+            ThemeId::Amber => &palette_generated::AMBER,
+            ThemeId::BrandDark => &palette_generated::BRAND_DARK,
+            ThemeId::BrandLight => &palette_generated::BRAND_LIGHT,
+            ThemeId::Nvg => &palette_generated::NVG,
+        }
+    }
+}
+
+/// The colours one screen is drawn with.
+#[derive(Debug, Clone, Copy)]
+pub struct Theme {
+    pub tier: Tier,
+    palette: &'static TuiPalette,
+    pub color_blind: bool,
+}
+
+impl Theme {
+    pub fn new(tier: Tier, id: ThemeId, color_blind: bool) -> Self {
+        Self {
+            tier,
+            palette: id.palette(),
+            color_blind,
+        }
+    }
+
+    /// The screen background, only on tiers that can render one (truecolor and
+    /// 256); basic and plain terminals keep their own background.
+    pub fn canvas(&self) -> Option<Color> {
+        match self.tier {
+            Tier::Truecolor | Tier::Ansi256 => {
+                Some(color_for(self.tier, self.palette.canvas, Color::Reset))
+            }
+            _ => None,
+        }
+    }
+
+    /// The canvas colour effects fade from/to; the terminal default when the
+    /// tier paints no background.
+    pub fn canvas_or_reset(&self) -> Color {
+        self.canvas().unwrap_or(Color::Reset)
+    }
+
+    pub fn border(&self) -> Color {
+        color_for(self.tier, self.palette.border, Color::DarkGray)
+    }
+    /// Primary text: headings and values.
+    pub fn fg(&self) -> Color {
+        color_for(self.tier, self.palette.fg_primary, Color::Reset)
+    }
+    /// Secondary text: labels and dim lines.
+    pub fn muted(&self) -> Color {
+        color_for(self.tier, self.palette.fg_secondary, Color::DarkGray)
+    }
+    pub fn accent(&self) -> Color {
+        color_for(self.tier, self.palette.accent, Color::Yellow)
+    }
+    /// Text drawn on an accent (or status) fill.
+    pub fn on_accent(&self) -> Color {
+        color_for(self.tier, self.palette.on_accent, Color::Black)
+    }
+    /// Success; drawn with the info colour in colour-blind mode.
+    pub fn success(&self) -> Color {
+        if self.color_blind {
+            self.info()
+        } else {
+            color_for(self.tier, self.palette.success, Color::Green)
+        }
+    }
+    pub fn warning(&self) -> Color {
+        color_for(self.tier, self.palette.warning, Color::Yellow)
+    }
+    pub fn error(&self) -> Color {
+        color_for(self.tier, self.palette.error, Color::Red)
+    }
+    pub fn info(&self) -> Color {
+        color_for(self.tier, self.palette.info, Color::Blue)
+    }
+
+    // --- styles -----------------------------------------------------------
+
+    /// Dim label text.
+    pub fn dim(&self) -> Style {
+        Style::default().fg(self.muted())
+    }
+    /// Bright, bold value text.
+    pub fn bright(&self) -> Style {
+        Style::default().fg(self.fg()).add_modifier(Modifier::BOLD)
+    }
+    /// Primary text without bold.
+    pub fn text(&self) -> Style {
+        Style::default().fg(self.fg())
+    }
+    /// Accent text.
+    pub fn accented(&self) -> Style {
+        Style::default().fg(self.accent())
+    }
+    /// Bold accent text.
+    pub fn accent_bold(&self) -> Style {
+        Style::default()
+            .fg(self.accent())
+            .add_modifier(Modifier::BOLD)
+    }
+    /// Text on an accent fill (active tab, chips).
+    pub fn on_accent_fill(&self) -> Style {
+        Style::default().fg(self.on_accent()).bg(self.accent())
+    }
+    /// A chip filled with `color`.
+    pub fn chip(&self, color: Color) -> Style {
+        Style::default().fg(self.on_accent()).bg(color)
     }
 }
 
@@ -139,21 +236,32 @@ mod tests {
 
     #[test]
     fn color_for_falls_back_per_tier() {
+        let amber = palette_generated::AMBER.accent;
         assert_eq!(
-            color_for(Tier::Truecolor, AMBER, 179, Color::Yellow),
+            color_for(Tier::Truecolor, amber, Color::Yellow),
             Color::Rgb(235, 193, 87)
         );
         assert_eq!(
-            color_for(Tier::Ansi256, AMBER, 179, Color::Yellow),
+            color_for(Tier::Ansi256, amber, Color::Yellow),
             Color::Indexed(179)
         );
-        assert_eq!(
-            color_for(Tier::Basic, AMBER, 179, Color::Yellow),
-            Color::Yellow
-        );
-        assert_eq!(
-            color_for(Tier::None, AMBER, 179, Color::Yellow),
-            Color::Reset
-        );
+        assert_eq!(color_for(Tier::Basic, amber, Color::Yellow), Color::Yellow);
+        assert_eq!(color_for(Tier::None, amber, Color::Yellow), Color::Reset);
+    }
+
+    #[test]
+    fn color_blind_success_is_the_info_colour() {
+        let normal = Theme::new(Tier::Truecolor, ThemeId::Amber, false);
+        let cb = Theme::new(Tier::Truecolor, ThemeId::Amber, true);
+        assert_ne!(normal.success(), normal.info());
+        assert_eq!(cb.success(), cb.info());
+    }
+
+    #[test]
+    fn only_rich_tiers_paint_a_background() {
+        assert!(Theme::new(Tier::Ansi256, ThemeId::Nvg, false).canvas().is_some());
+        assert!(Theme::new(Tier::Basic, ThemeId::Nvg, false).canvas().is_none());
+        assert_eq!(ThemeId::from_name("brand-light"), ThemeId::BrandLight);
+        assert_eq!(ThemeId::from_name("nope"), ThemeId::Amber);
     }
 }

@@ -162,6 +162,9 @@ pub struct Dashboard {
     /// The per-profile panel row (see [`Dashboard::merge_profile`]); empty when
     /// the profile has none or no route answered.
     pub profile_row: Vec<RowLine>,
+    /// Hardware-check item counts per state (`ok`, `warning`, `missing`, …),
+    /// from setup `hardware_check.items`; `None` until the check reports.
+    pub hardware_counts: Option<Vec<(String, usize)>>,
 }
 
 /// Map a setup-step state to its display label.
@@ -183,6 +186,9 @@ mod profile_gs;
 #[cfg(test)]
 pub(crate) mod profile_tests;
 mod services;
+pub mod link;
+pub mod ring;
+pub mod vehicle;
 
 /// A reachable host used to project per-host service URLs (mDNS name or LAN IP).
 struct HostRef {
@@ -357,13 +363,6 @@ impl Dashboard {
             "not paired".to_string()
         };
         format!("{pairing} · {}", self.link_mode())
-    }
-
-    /// The device-and-profile identity shown in the header, e.g.
-    /// `ados-e996786c · ground_station`. The word-mark and version are styled
-    /// separately by the renderer.
-    pub fn ident(&self) -> String {
-        format!("{} · {}", self.device_name, self.profile)
     }
 }
 
