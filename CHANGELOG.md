@@ -58,6 +58,13 @@ the project follows [Semantic Versioning](https://semver.org/).
   The agent reports fixed-wing and VTOL airframes as `Fixed Wing` and
   `VTOL …`, which never matched "plane"; those labels now select the plane
   catalog.
+- The terminal UI's Ground control link group names the endpoints by kind
+  (a desktop ground station on TCP 5760, a browser GCS on WebSocket 8765).
+- The terminal UI's help overlay lists "Search everything" once instead of
+  once per terminal encoding of Ctrl-/, and the MCP token row fits 120
+  columns.
+- Dependency updates: rustls 0.23.46, rustls-webpki 0.103.16,
+  webpki-roots and webpki-root-certs 1.0.10.
 
 - **The simulator clock never locked.** Simulator time from the video SEI is
   paired with the frame's arrival on the host, so every pair carries the

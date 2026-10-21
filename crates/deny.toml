@@ -16,4 +16,11 @@ ignore = [
     # no attacker. mavlink-bindgen pins quick-xml ^0.39 in its latest release.
     { id = "RUSTSEC-2026-0194", reason = "build-time parse of the mavlink crate's bundled dialect XML only; never in a shipped binary" },
     { id = "RUSTSEC-2026-0195", reason = "build-time parse of the mavlink crate's bundled dialect XML only; never in a shipped binary" },
+    # zip 2.x: the advisories target ZipArchive::extract and
+    # ZipStreamReader::extract, which nothing in the workspace calls. The
+    # plugin archive reader walks entries with by_index, validates every path
+    # and sets file modes itself. Fixed releases exist only in zip >= 9.
+    { id = "RUSTSEC-2026-0367", reason = "zip extract APIs are never called; the plugin archive reader walks entries with by_index, validates every path and sets file modes itself" },
+    { id = "RUSTSEC-2026-0368", reason = "zip extract APIs are never called; the plugin archive reader walks entries with by_index, validates every path and sets file modes itself" },
+    { id = "RUSTSEC-2026-0369", reason = "zip extract APIs are never called; the plugin archive reader walks entries with by_index, validates every path and sets file modes itself" },
 ]
