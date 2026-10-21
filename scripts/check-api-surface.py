@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fail when a client calls an agent route the agent does not serve.
 
-There are five clients of the agent's HTTP surface — Mission Control, the
-Android GCS, ADOS-MCP, the on-device dashboard SPA and the ``ados`` CLI — and
+There are seven clients of the agent's HTTP surface — Mission Control, the
+Android GCS, ADOS-MCP, the on-device dashboard SPA, the ``ados`` CLI, the
+``ados`` terminal UI and the shared Rust REST client it uses — and
 no build step ever compared any of them against the agent. A route renamed on
 one side therefore landed as a silent 404 in the others, discovered by an
 operator rather than by CI. Two such holes were live when this was written:
@@ -50,6 +51,10 @@ CLIENTS = [
     ("agent dashboard", REPO / "dashboard" / "src", {".ts", ".tsx"}),
     ("agent cockpit", REPO / "cockpit" / "src", {".ts", ".tsx"}),
     ("ados CLI", REPO / "src" / "ados" / "cli", {".py"}),
+    ("ados TUI", REPO / "crates" / "ados-tui" / "src", {".rs"}),
+    # The REST client module only: the rest of the protocol crate is IPC, relay
+    # and codec code whose `/api/...` strings are forwarded paths, not calls.
+    ("Rust REST client", REPO / "crates" / "ados-protocol" / "src" / "rest.rs", {".rs"}),
 ]
 
 # Present only in the full monorepo checkout.
@@ -421,7 +426,7 @@ def main() -> int:
     missing: list[tuple[str, Path]] = []
     in_monorepo = MONOREPO_MARKER.is_file()
     for name, root, exts in CLIENTS:
-        if not root.is_dir():
+        if not root.exists():
             if in_monorepo:
                 missing.append((name, root))
                 print(f"  MISSING {name}: {root} (monorepo checkout, root expected)")
@@ -433,7 +438,9 @@ def main() -> int:
         # path, a base) or a call whose verb the site does not state.
         path_only = 0
         own_routes = own_server_routes(root)
-        for file in sorted(root.rglob("*")):
+        # A client root is a source directory, or a single module file.
+        files = [root] if root.is_file() else sorted(root.rglob("*"))
+        for file in files:
             if not file.is_file() or file.suffix not in exts or is_test_source(file, root):
                 continue
             if any(part in BUILD_DIRS for part in file.relative_to(root).parts[:-1]):
