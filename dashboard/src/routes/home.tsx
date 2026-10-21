@@ -17,13 +17,13 @@ import { WfbRxPanel } from "@/components/panels/wfb-rx-panel";
 import { WfbTxPanel } from "@/components/panels/wfb-tx-panel";
 import { Button } from "@/components/ui/button";
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
+import { useConfig } from "@/hooks/use-config";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
 import { refusalDetail } from "@/lib/refusal";
 import { cn } from "@/lib/utils";
-import { modeFromStatus, regionFromStatus } from "@/lib/region";
-import type { SetupStatus } from "@/lib/types";
+import { modeFromConfig, regionFromConfig } from "@/lib/region";
 
 export function HomeRoute() {
   const status = useStatus({ poll: true });
@@ -100,10 +100,10 @@ function OfflineHome({
 // a region is pinned. Links to the Region settings page.
 function RegionChip() {
   const { t } = useTranslation();
-  const status = useStatus();
-  const reg = status.data?.regulatory as SetupStatus["regulatory"];
-  const mode = modeFromStatus(reg);
-  const region = regionFromStatus(reg);
+  const config = useConfig();
+  const reg = config.data?.network?.regulatory;
+  const mode = modeFromConfig(reg);
+  const region = regionFromConfig(reg);
   const unrestricted = mode !== "region" || !region;
 
   return (

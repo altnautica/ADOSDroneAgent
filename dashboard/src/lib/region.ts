@@ -31,18 +31,18 @@ export function normalizeRegion(raw: string): string | null {
   return /^[A-Z]{2}$/.test(code) ? code : null;
 }
 
-// Resolve the effective mode from a status payload. Absent block or
-// absent mode -> unrestricted (a fresh box).
-export function modeFromStatus(reg: RegulatoryInfo | undefined): RegulatoryMode {
+// Resolve the effective mode from the config's `network.regulatory` block.
+// Absent block or absent mode -> unrestricted (a fresh box).
+export function modeFromConfig(reg: RegulatoryInfo | undefined): RegulatoryMode {
   return reg?.mode === "region" ? "region" : "unrestricted";
 }
 
-// Resolve the pinned region (uppercase ISO) from a status payload, or
-// null when unrestricted / unset.
-export function regionFromStatus(
+// Resolve the pinned region (uppercase ISO) from the config's
+// `network.regulatory` block, or null when unrestricted / unset.
+export function regionFromConfig(
   reg: RegulatoryInfo | undefined,
 ): string | null {
-  if (modeFromStatus(reg) !== "region") return null;
+  if (modeFromConfig(reg) !== "region") return null;
   const code = (reg?.region ?? "").trim().toUpperCase();
   return /^[A-Z]{2}$/.test(code) ? code : null;
 }

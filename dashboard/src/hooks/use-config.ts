@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
+import type { RegulatoryInfo } from "@/lib/types";
 import { apiFetch } from "@/shared/api-fetch";
 
 // Loose shape — the agent returns a Pydantic dump with secrets redacted.
@@ -42,6 +43,7 @@ export interface AgentConfig {
       fail_threshold?: number;
       cooldown_s?: number;
     };
+    regulatory?: RegulatoryInfo;
   };
   video?: {
     usb_recovery?: {

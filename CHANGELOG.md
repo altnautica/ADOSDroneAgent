@@ -46,6 +46,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The web dashboard showed every node as unrestricted.** The region page,
+  the Home region chip and the LoRa region hints read the regulatory posture
+  from the setup status, which never carries it, so a pinned region looked
+  unrestricted and could not be removed. They now read
+  `network.regulatory` from the config.
+- **Applying a self-hosted cloud setting blanked the MQTT broker and reset
+  the port.** The cloud page seeded the form from the cloud choice, which has
+  neither; it now seeds from `server.self_hosted` in the config.
+- **ArduPlane vehicles got the copter parameter catalog in the dashboard.**
+  The agent reports fixed-wing and VTOL airframes as `Fixed Wing` and
+  `VTOL …`, which never matched "plane"; those labels now select the plane
+  catalog.
+
 - **The simulator clock never locked.** Simulator time from the video SEI is
   paired with the frame's arrival on the host, so every pair carries the
   encode, transport and decode latency: one-sided, jittery, often over

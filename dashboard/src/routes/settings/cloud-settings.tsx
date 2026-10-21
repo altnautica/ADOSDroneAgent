@@ -9,8 +9,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
+import { useConfig } from "@/hooks/use-config";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useStatus } from "@/hooks/use-status";
+import { selfHostedSeed } from "@/lib/cloud-seed";
 import { toast, toastFromError } from "@/lib/toast";
 import { cloudSectionSchema, postApply } from "@/lib/apply-actions";
 
@@ -41,6 +43,7 @@ const BROKER_PLACEHOLDER = "mqtt.example.com";
 export function CloudSettings() {
   const { t } = useTranslation();
   const status = useStatus();
+  const config = useConfig();
   const modeOptions = useMemo(
     () =>
       MODE_OPTIONS.map((o) => ({
@@ -52,9 +55,10 @@ export function CloudSettings() {
   );
 
   const initialMode = (status.data?.cloud_choice?.mode as CloudMode) ?? "local";
-  const initialUrl = status.data?.cloud_choice?.backend_url ?? "";
-  const initialBroker = status.data?.cloud_choice?.mqtt_broker ?? "";
-  const initialPort = status.data?.cloud_choice?.mqtt_port ?? 8883;
+  const seed = selfHostedSeed(config.data);
+  const initialUrl = seed.url;
+  const initialBroker = seed.broker;
+  const initialPort = seed.port;
 
   const [mode, setMode] = useState<CloudMode>(initialMode);
   const [url, setUrl] = useState(initialUrl);
@@ -127,6 +131,7 @@ export function CloudSettings() {
       if (res.overall && section?.ok) {
         toast.ok(section.message || t("settingsMore.cloud.saved"));
         setApiKey("");
+        void config.refetch();
       } else {
         toast.err(section?.message ?? t("settingsMore.cloud.applyFailed"));
       }

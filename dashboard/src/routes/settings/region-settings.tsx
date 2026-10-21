@@ -9,13 +9,13 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
+import { useConfig } from "@/hooks/use-config";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
-import { useStatus } from "@/hooks/use-status";
 import {
   COMMON_REGIONS,
-  modeFromStatus,
+  modeFromConfig,
   normalizeRegion,
-  regionFromStatus,
+  regionFromConfig,
   regionLabel,
 } from "@/lib/region";
 import { postRegion } from "@/lib/setup-actions";
@@ -41,11 +41,14 @@ const OTHER = "__other__";
 
 export function RegionSettings() {
   const { t } = useTranslation();
-  const status = useStatus();
+  const config = useConfig();
   const qc = useQueryClient();
 
-  const initialMode = modeFromStatus(status.data?.regulatory);
-  const initialRegion = regionFromStatus(status.data?.regulatory);
+  // The posture lives in config (`network.regulatory`); setup status does not
+  // carry it.
+  const regulatory = config.data?.network?.regulatory;
+  const initialMode = modeFromConfig(regulatory);
+  const initialRegion = regionFromConfig(regulatory);
 
   const [mode, setMode] = useState<RegulatoryMode>("unrestricted");
   const [choice, setChoice] = useState<string>(COMMON_REGIONS[0]!.code);
@@ -93,7 +96,10 @@ export function RegionSettings() {
             ? t("settings.region.restartNote")
             : undefined,
         );
-        await qc.invalidateQueries({ queryKey: ["setup-status"] });
+        await Promise.all([
+          qc.invalidateQueries({ queryKey: ["setup-status"] }),
+          qc.invalidateQueries({ queryKey: ["config"] }),
+        ]);
       } else {
         toast.err(section?.message ?? t("settings.shared.applyFailed"));
       }

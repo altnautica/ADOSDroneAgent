@@ -23,8 +23,8 @@ export type { Severity } from "@/shared/format";
 //     and re-enable the strict regulatory gate + power clamp.
 export type RegulatoryMode = "unrestricted" | "region";
 
-// /api/v1/setup/status -> network.regulatory (additive; absent on
-// older agents -> treat as unrestricted).
+// GET /api/config -> network.regulatory (absent -> treat as unrestricted).
+// Setup status does not carry this block.
 export interface RegulatoryInfo {
   mode?: RegulatoryMode;
   region?: string | null;
@@ -59,7 +59,6 @@ export interface SetupStatus {
   hardware_check?: HardwareCheck;
   remote_access?: RemoteAccess;
   access_urls?: SetupAccessUrl[];
-  regulatory?: RegulatoryInfo;
   // LAN-routable host the agent derived for clients elsewhere on the LAN.
   // Prefers the resolvable system hostname, then the mDNS host, then an IP.
   // Empty when no LAN identity could be derived.
@@ -89,8 +88,6 @@ export interface SetupStep {
 export interface CloudChoice {
   mode?: "cloud" | "self_hosted" | "local";
   backend_url?: string;
-  mqtt_broker?: string;
-  mqtt_port?: number;
 }
 
 export interface NetworkInfo {

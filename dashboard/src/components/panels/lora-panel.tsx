@@ -12,7 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { resourceQueryOptions, useResource } from "@/hooks/use-resource";
 import { useNodeProfile } from "@/hooks/use-node-profile";
 import { useSnapshot } from "@/hooks/use-snapshot";
-import { useStatus } from "@/hooks/use-status";
+import { useConfig } from "@/hooks/use-config";
 import {
   CRSF_STATUS_PATH,
   LORA_BEACONS_PATH,
@@ -32,7 +32,7 @@ import {
   type LoraRule,
   type LoraStatus,
 } from "@/lib/lora";
-import { regionFromStatus } from "@/lib/region";
+import { regionFromConfig } from "@/lib/region";
 import { toast, toastFromError } from "@/lib/toast";
 import { ApiError } from "@/shared/api-fetch";
 
@@ -270,7 +270,7 @@ export function LoraPanel() {
   const lora = useResource<LoraStatus>("lora", LORA_PATH, 2_000);
   const regions = useResource<{ regions: LoraRegionRow[] }>("lora-regions", LORA_REGIONS_PATH);
   const beacons = useResource<{ beacons: LoraBeacon[] }>("lora-beacons", LORA_BEACONS_PATH, 5_000);
-  const status = useStatus();
+  const config = useConfig();
   const snapshot = useSnapshot();
   const profile = useNodeProfile();
   // The RC lane's modules exist only on a ground station; a drone has no route.
@@ -310,7 +310,7 @@ export function LoraPanel() {
             status={lora.data}
             regions={regions.data?.regions ?? []}
             beacons={beacons.data?.beacons ?? []}
-            country={regionFromStatus(status.data?.regulatory)}
+            country={regionFromConfig(config.data?.network?.regulatory)}
             modules={crsf.data?.modules ?? []}
             armed={snapshot.data?.fc?.armed === true}
             nowMs={nowMs}

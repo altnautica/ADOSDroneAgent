@@ -38,8 +38,11 @@ export function resolveFirmwareType(fcFirmware?: string | null, vehicle?: string
     case "betaflight": return "betaflight";
     case "inav": return "inav";
     case "ardupilot": {
+      // Labels are the agent's MAV_TYPE names ("Fixed Wing", "VTOL Quadrotor",
+      // "Ground Rover", "Surface Boat", "Submarine"); ArduPlane flies every
+      // fixed-wing and VTOL frame.
       const v = (vehicle ?? "").toLowerCase();
-      if (v.includes("plane")) return "ardupilot-plane";
+      if (v.includes("plane") || v.includes("fixed wing") || v.startsWith("vtol")) return "ardupilot-plane";
       if (v.includes("rover") || v.includes("boat")) return "ardupilot-rover";
       if (v.includes("sub")) return "ardupilot-sub";
       return "ardupilot-copter"; // default when the vehicle isn't known yet
