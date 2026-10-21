@@ -292,10 +292,16 @@ jobs:
         run: |
           set -uo pipefail
           fail=0
-          # Grow the first baselined file by one line at the top.
-          grown="crates/$(grep -v '^#' crates/.loc-baseline | grep . | head -n1 | cut -d' ' -f2-)"
+          # The clean tree must pass, or the planted failures below prove nothing.
+          if ! python scripts/check-rust-size.py; then
+            echo "SELF-TEST FAILED: the clean tree does not pass"; fail=1
+          fi
+          # Grow the first baselined file past its recorded count, whatever
+          # its current size is.
+          entry="$(grep -v '^#' crates/.loc-baseline | grep . | head -n1)"
+          limit="${entry%% *}"; grown="crates/${entry#* }"
           cp "$grown" "$RUNNER_TEMP/grown.rs"
-          { echo '// planted'; cat "$RUNNER_TEMP/grown.rs"; } > "$grown"
+          { seq 1 "$((limit + 1))" | sed 's#^#// planted #'; cat "$RUNNER_TEMP/grown.rs"; } > "$grown"
           rc=0; python scripts/check-rust-size.py || rc=$?
           cp "$RUNNER_TEMP/grown.rs" "$grown"
           if [ "$rc" -ne 1 ]; then echo "SELF-TEST FAILED: growth of $grown exited $rc, expected 1"; fail=1; fi
@@ -359,12 +365,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Four `#[ignore]`d Rust tests. Adding an ignore used to be a free way to
+      # Five `#[ignore]`d Rust tests. Adding an ignore used to be a free way to
       # make a test stop mattering, so the count is pinned and the set is a
       # reviewed decision: removing an ignore is always fine, adding one
       # requires updating this number and saying why in the same change.
       #
-      # The four, and why each is ignored:
+      # The five, and why each is ignored:
       #   - ados-vision/tests/onnx_coco_infer.rs (two cases): need the COCO
       #     ONNX model sideloaded; deep-tests.yml runs them with --ignored.
       #   - ados-vision/tests/tracker_adversarial.rs
@@ -376,6 +382,9 @@ jobs:
       #     default would make the fixture gate pass by rewriting its own
       #     expectation; its companion `fixture_table_matches_the_file` is NOT
       #     ignored and holds the argv contract in both directions.
+      #   - ados-config capture_storage::root_access_tests::capture_group_member_creates_a_session_and_an_outsider_cannot:
+      #     needs root and a second identity (setpriv); rust.yml runs it under
+      #     sudo after the default test run.
       #
       # This measures source text on purpose. The thing being asserted IS the
       # presence of an attribute, and reading it any other way would require
@@ -383,7 +392,7 @@ jobs:
       - name: Ignored-test count matches the reviewed inventory
         run: |
           set -uo pipefail
-          EXPECTED=4
+          EXPECTED=5
 
           # Attribute position only: a doc comment that mentions the attribute
           # is prose, not an ignored test.

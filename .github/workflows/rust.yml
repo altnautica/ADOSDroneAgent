@@ -175,11 +175,22 @@ jobs:
         # on the exact target the shipped binaries are built for.
         run: cargo clippy --all-targets --target aarch64-unknown-linux-musl --workspace -- -D warnings
 
+      - name: Install ffmpeg (the RTSP decoder tests drive the real CLI)
+        run: sudo apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ffmpeg
+
       - name: Test (default features)
         run: cargo test
 
       - name: Test (all features)
         run: cargo test --all-features
+
+      - name: Root-only tests (run the built binary under sudo)
+        run: |
+          set -euo pipefail
+          bin="$(cargo test -p ados-config --lib --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.name == "ados_config") | .executable' | tail -n1)"
+          test -x "$bin"
+          sudo "$bin" --ignored capture_group_member
 
       - name: Capability catalog + contract registry drift check
         run: cargo run -q -p ados-capabilities-codegen -- --check
