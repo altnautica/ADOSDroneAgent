@@ -7,14 +7,13 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 use serde_json::{json, Map, Value};
 
-use super::kit;
-use super::rowkit::{self, detail_text, text_of};
+use super::kit::{self, detail_text, text_of};
 use crate::app::{at, Core, FrameOut, Hit};
 use crate::keymap::Command;
 use crate::overlay::{OverlayResult, Ret};
 use crate::poll::{ResourceId, Sub};
 use crate::settings::page::{Bespoke, BespokeId};
-use crate::settings::row::{self, EditRow};
+use crate::settings::row;
 use crate::settings::rows_view::{self, info, note, Item, RowsState};
 use crate::settings::schema::Kind;
 use crate::toast::ToastKind;
@@ -88,17 +87,7 @@ impl Page {
             return items;
         };
         for (field, label, help, kind) in specs() {
-            items.push(Item::Row(EditRow {
-                key: field.into(),
-                label: label.into(),
-                help: help.into(),
-                kind,
-                value: current(cfg, field),
-                default: None,
-                secret: false,
-                nullable: false,
-                read_only: false,
-            }));
+            items.push(Item::Row(kit::row(field, label, help, kind, current(cfg, field))));
         }
         items.push(info(core, "Channel", text_of(at(cfg, "radio.channel"))));
         items.push(info(core, "Band", text_of(at(cfg, "radio.band"))));
@@ -135,12 +124,14 @@ impl Bespoke for Page {
             return matches!(cmd, Command::Left | Command::Right | Command::Activate);
         };
         match cmd {
-            Command::Left | Command::Right => {
-                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd == Command::Right) {
+            Command::Activate if row.kind != Kind::Bool => {
+                kit::open_editor(core, ROUTE, &row);
+            }
+            Command::Left | Command::Right | Command::Activate => {
+                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd != Command::Left) {
                     Self::post(core, &row.key, next);
                 }
             }
-            Command::Activate => rowkit::config_edit(core, ROUTE, &row),
             Command::Copy => core.copy(&row::display(&row.kind, row.value.as_ref(), false, true)),
             _ => return false,
         }
@@ -148,11 +139,11 @@ impl Bespoke for Page {
     }
 
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        if ret.tag != rowkit::CONFIG_EDIT {
+        if ret.tag != kit::CONFIG_EDIT {
             return;
         }
         let items = self.items(core);
-        let Some(row) = rowkit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() else {
+        let Some(row) = kit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() else {
             return;
         };
         match row::value_from_result(&row.kind, &result) {
@@ -170,7 +161,7 @@ impl Bespoke for Page {
             .find(|s| s.0 == field)
             .map(|s| s.1)
             .unwrap_or(field);
-        let row = format!("{}{field}", rowkit::prefix(BespokeId::VideoLink.id()));
+        let row = format!("{}{field}", kit::prefix(BespokeId::VideoLink.id()));
         match &reply.result {
             Ok(body) => {
                 let warns = warnings(body);
@@ -198,7 +189,7 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        let prefix = rowkit::prefix(BespokeId::VideoLink.id());
+        let prefix = kit::prefix(BespokeId::VideoLink.id());
         rows_view::render(f, area, core, &items, &mut self.rows, &prefix, true, out);
     }
 
@@ -222,5 +213,20 @@ mod tests {
         assert_eq!(current(&cfg, "auto"), Some(json!(false)));
         assert_eq!(warnings(&json!({"warnings":["set_mcs_failed"]})), vec!["set mcs failed"]);
         assert!(warnings(&json!({"warnings":[]})).is_empty());
+    }
+
+    #[test]
+    fn enter_toggles_auto_and_opens_an_editor_for_numbers() {
+        let mut app = crate::ui::tests::test_app();
+        let core = &mut app.core;
+        kit::put(core, ResourceId::VideoConfig, json!({"radio":{"mcs_index":2},"adaptive":{"adaptive_bitrate_enabled":true}}));
+        let mut page = Page::default();
+        let items = page.items(core);
+        page.rows.focus_key(&items, "auto");
+        assert!(page.on_command(core, Command::Activate));
+        assert!(core.overlays.is_empty(), "a toggle never opens an on/off prompt");
+        page.rows.focus_key(&items, "mcs");
+        assert!(page.on_command(core, Command::Activate));
+        assert_eq!(core.overlays.len(), 1, "a number opens its editor");
     }
 }

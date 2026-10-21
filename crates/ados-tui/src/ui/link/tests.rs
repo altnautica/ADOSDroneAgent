@@ -150,3 +150,22 @@ fn a_counter_that_went_backwards_shows_no_delta() {
     assert!(!text.contains("+18446744"), "{text}");
     assert!(!text.contains("+89988"), "{text}");
 }
+
+#[test]
+fn leaving_the_tab_resets_counter_baselines() {
+    let mut app = app_for("ground_station");
+    let gs = |packets: u64| {
+        json!({"state": "active", "profile": "ground_station",
+               "adapters": [{"iface": "wlan1", "role": "rx", "packets": packets, "lost": 0}]})
+    };
+    land(&mut app, ResourceId::Wfb, gs(1000));
+    land(&mut app, ResourceId::Wfb, gs(1250));
+    assert!(draw(&mut app, 120, 40).contains("+250"));
+
+    app.tabs.link.on_deactivate(&mut app.core);
+    land(&mut app, ResourceId::Wfb, gs(9000));
+    let text = draw(&mut app, 120, 40);
+    assert!(!text.contains("+7750"), "the gap must not read as one interval\n{text}");
+    land(&mut app, ResourceId::Wfb, gs(9100));
+    assert!(draw(&mut app, 120, 40).contains("+100"));
+}

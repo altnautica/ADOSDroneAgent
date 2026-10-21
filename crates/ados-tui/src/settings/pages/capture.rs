@@ -6,15 +6,14 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 use serde_json::{json, Map, Value};
 
-use super::kit;
-use super::rowkit::{self, detail_text, text_of};
+use super::kit::{self, detail_text, text_of};
 use crate::app::{Core, FrameOut, Hit};
 use crate::keymap::Command;
 use crate::model::CAPTURE_STATE_PATH;
 use crate::overlay::{OverlayResult, Ret};
 use crate::poll::{ResourceId, Sub};
 use crate::settings::page::{Bespoke, BespokeId};
-use crate::settings::row::{self, EditRow};
+use crate::settings::row;
 use crate::settings::rows_view::{self, info, note, Item, RowsState};
 use crate::settings::schema::Kind;
 use crate::toast::ToastKind;
@@ -103,17 +102,7 @@ impl Page {
         items.push(info(core, "State", text_of(state.and_then(|s| s.get("state")))));
         for f in FIELDS {
             let (label, help, kind) = spec(f);
-            items.push(Item::Row(EditRow {
-                key: f.into(),
-                label: label.into(),
-                help: help.into(),
-                kind,
-                value: Some(exp.get(f).cloned().unwrap_or(Value::Null)),
-                default: None,
-                secret: false,
-                nullable: false,
-                read_only: false,
-            }));
+            items.push(Item::Row(kit::row(f, label, help, kind, Some(exp.get(f).cloned().unwrap_or(Value::Null)))));
         }
         let locked = exp.get("locked").and_then(Value::as_bool) == Some(true);
         if locked && exp.get("applied").and_then(Value::as_bool) == Some(false) {
@@ -152,17 +141,12 @@ impl Bespoke for Page {
             return matches!(cmd, Command::Left | Command::Right | Command::Activate);
         };
         match cmd {
-            Command::Left | Command::Right => {
-                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd == Command::Right) {
-                    self.set(core, &row.key, next);
-                }
+            Command::Activate if row.kind != Kind::Bool => {
+                kit::open_editor(core, ROUTE, &row);
             }
-            Command::Activate => {
-                if row.kind == Kind::Bool {
-                    let next = !row.value.as_ref().and_then(Value::as_bool).unwrap_or(false);
-                    self.set(core, &row.key, json!(next));
-                } else {
-                    rowkit::config_edit(core, ROUTE, &row);
+            Command::Left | Command::Right | Command::Activate => {
+                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd != Command::Left) {
+                    self.set(core, &row.key, next);
                 }
             }
             Command::Copy => core.copy(&row::display(&row.kind, row.value.as_ref(), false, true)),
@@ -172,11 +156,11 @@ impl Bespoke for Page {
     }
 
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        if ret.tag != rowkit::CONFIG_EDIT {
+        if ret.tag != kit::CONFIG_EDIT {
             return;
         }
         let items = self.items(core);
-        let Some(row) = rowkit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() else {
+        let Some(row) = kit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() else {
             return;
         };
         match row::value_from_result(&row.kind, &result) {
@@ -189,7 +173,7 @@ impl Bespoke for Page {
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
         let Purpose::Page { tag: "exposure", data } = &reply.purpose else { return };
         let field = data.as_str().unwrap_or_default();
-        let row = format!("{}{field}", rowkit::prefix(BespokeId::Capture.id()));
+        let row = format!("{}{field}", kit::prefix(BespokeId::Capture.id()));
         self.draft = None;
         match &reply.result {
             Ok(_) => {
@@ -212,7 +196,7 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        let prefix = rowkit::prefix(BespokeId::Capture.id());
+        let prefix = kit::prefix(BespokeId::Capture.id());
         rows_view::render(f, area, core, &items, &mut self.rows, &prefix, true, out);
     }
 

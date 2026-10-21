@@ -53,7 +53,7 @@ pub(super) fn dedup_drop_loopback(rows: Vec<LinkRow>) -> Vec<LinkRow> {
 }
 
 pub(super) fn is_loopback_host(host: &str) -> bool {
-    host == "localhost" || host == "::1" || host.starts_with("127.")
+    crate::args::is_loopback(host)
 }
 
 pub(super) fn is_ipv4(host: &str) -> bool {

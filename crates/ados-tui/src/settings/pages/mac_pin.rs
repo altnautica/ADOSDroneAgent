@@ -2,14 +2,14 @@
 //! verdicts, `p` pin / `x` unpin on the focused adapter, and the two
 //! `network.mac_pin.*` config switches.
 
+use ados_protocol::rest::RestError;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 use serde_json::{json, Value};
 
-use super::kit;
-use super::rowkit::{self, detail_text};
+use super::kit::{self, detail_text};
 use crate::app::{Core, FrameOut, Hit};
 use crate::keymap::{Command, PageKeys};
 use crate::overlay::{OverlayResult, Ret};
@@ -173,12 +173,12 @@ impl Bespoke for Page {
             }
             Command::Left | Command::Right => {
                 if let Some(row) = self.rows.focused_row(&items).cloned() {
-                    rowkit::config_cycle(core, ROUTE, page, &row, cmd == Command::Right);
+                    kit::config_cycle(core, ROUTE, page, &row, cmd == Command::Right);
                 }
             }
             Command::Activate => {
                 if let Some(row) = self.rows.focused_row(&items).cloned() {
-                    rowkit::config_edit(core, ROUTE, &row);
+                    kit::config_edit(core, ROUTE, page, &row);
                 }
             }
             Command::Copy => {
@@ -192,44 +192,26 @@ impl Bespoke for Page {
     }
 
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        if ret.tag != rowkit::CONFIG_EDIT {
+        if ret.tag != kit::CONFIG_EDIT {
             return;
         }
         let items = self.items(core);
-        if let Some(row) = rowkit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() {
-            rowkit::config_result(core, ROUTE, BespokeId::MacPin.id(), &row, &result);
+        if let Some(row) = kit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() {
+            kit::config_result(core, ROUTE, BespokeId::MacPin.id(), &row, &result);
         }
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
         let items = self.items(core);
-        if rowkit::config_reply(core, &items, &reply) {
+        if kit::config_reply(core, &items, &reply) {
             return;
         }
         let Purpose::Page { tag, data } = &reply.purpose else { return };
         let iface = data.as_str().unwrap_or_default();
-        let row = format!("{}ad:{iface}", rowkit::prefix(BespokeId::MacPin.id()));
-        let (done, failed) = match *tag {
-            "pin" => ("Pinned", "Could not pin the adapter"),
-            "unpin" => ("Unpinned", "Could not unpin the adapter"),
-            _ => return,
-        };
-        match &reply.result {
-            Ok(body) => {
-                let note = body.get("note").and_then(Value::as_str).unwrap_or_default();
-                let text = if note.is_empty() {
-                    format!("{done} {iface}.")
-                } else {
-                    format!("{done} {iface}. {note}")
-                };
-                core.toast(ToastKind::Success, text);
-                core.flash(row, true);
-            }
-            Err(e) => {
-                core.toast(ToastKind::Error, format!("{failed}: {}", detail_text(e)));
-                core.flash(row, false);
-            }
-        }
+        let row = format!("{}ad:{iface}", kit::prefix(BespokeId::MacPin.id()));
+        let Some((ok, text)) = pin_outcome(tag, iface, &reply.result) else { return };
+        core.toast(if ok { ToastKind::Success } else { ToastKind::Error }, text);
+        core.flash(row, ok);
         core.fetch_now(ResourceId::MacAdapters);
     }
 
@@ -240,7 +222,7 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        let prefix = rowkit::prefix(BespokeId::MacPin.id());
+        let prefix = kit::prefix(BespokeId::MacPin.id());
         rows_view::render(f, area, core, &items, &mut self.rows, &prefix, true, out);
     }
 
@@ -251,6 +233,33 @@ impl Bespoke for Page {
         }
         Some(PIN_HINT.into())
     }
+}
+
+/// The toast of a pin (`tag` "pin") or unpin ("unpin") reply: `(ok, text)`.
+/// Both routes answer a body-level failure as a 200 with `status: "error"`
+/// and a `message` (the unpin when the override or `.link` stayed), so the
+/// status field decides, not the HTTP code. `None` for another tag.
+fn pin_outcome(tag: &str, iface: &str, result: &Result<Value, RestError>) -> Option<(bool, String)> {
+    let (done, failed) = match tag {
+        "pin" => ("Pinned", "Could not pin the adapter"),
+        "unpin" => ("Unpinned", "Could not unpin the adapter"),
+        _ => return None,
+    };
+    let str_at = |b: &Value, k: &str| b.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    Some(match result {
+        Ok(body) if body.get("status").and_then(Value::as_str) == Some("error") => {
+            let why = str_at(body, "message")
+                .or_else(|| str_at(body, "persist_error"))
+                .or_else(|| str_at(body, "link_error"))
+                .unwrap_or_else(|| "the agent reported an error".into());
+            (false, format!("{failed} {iface}: {why}"))
+        }
+        Ok(body) => match str_at(body, "note") {
+            Some(note) => (true, format!("{done} {iface}. {note}")),
+            None => (true, format!("{done} {iface}.")),
+        },
+        Err(e) => (false, format!("{failed}: {}", detail_text(e))),
+    })
 }
 
 #[cfg(test)]
@@ -268,5 +277,27 @@ mod tests {
         assert!(list[0].applied_live);
         assert_eq!(list[1].vidpid, None);
         assert_eq!(list[1].deferred.as_deref(), Some("management interface"));
+    }
+
+    #[test]
+    fn pin_replies_classify_on_the_body_status() {
+        let ok = pin_outcome("unpin", "wlan0", &Ok(json!({"status":"ok","iface":"wlan0","note":"re-pinned unless off"})));
+        assert_eq!(ok, Some((true, "Unpinned wlan0. re-pinned unless off".into())));
+        let failed = pin_outcome(
+            "unpin",
+            "wlan0",
+            &Ok(json!({"status":"error","iface":"wlan0","persist_error":"read-only fs","message":"the adapter is still pinned for the next boot"})),
+        );
+        assert_eq!(
+            failed,
+            Some((false, "Could not unpin the adapter wlan0: the adapter is still pinned for the next boot".into()))
+        );
+        let refused = pin_outcome(
+            "pin",
+            "eth9",
+            &Err(RestError::Status { code: 400, body: Some(json!({"detail":{"error":{"code":"E_UNKNOWN_ADAPTER","message":"unknown adapter eth9"}}})) }),
+        );
+        assert_eq!(refused, Some((false, "Could not pin the adapter: unknown adapter eth9".into())));
+        assert_eq!(pin_outcome("other", "wlan0", &Ok(json!({}))), None);
     }
 }

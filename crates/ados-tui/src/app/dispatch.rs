@@ -149,10 +149,7 @@ impl App {
             Command::Help => self.core.open(Overlay::Help),
             Command::Refresh => {
                 self.core.auth.dismissed = false;
-                self.core.poller.refresh();
-                for sub in self.core.subs_sent.clone() {
-                    self.core.fetch_now(sub.id);
-                }
+                self.core.refetch_all();
             }
             Command::Actions => {
                 if self.core.target.remote {
@@ -254,6 +251,17 @@ impl App {
             }
             MouseEventKind::ScrollUp => self.command(Command::Up),
             MouseEventKind::ScrollDown => self.command(Command::Down),
+            MouseEventKind::Moved => {
+                let pos = Position::new(ev.column, ev.row);
+                let hover = self.core.last_hits.iter().find_map(|(r, h)| match h {
+                    Hit::Tab(t) if r.contains(pos) => Some(*t),
+                    _ => None,
+                });
+                if hover == self.core.hover_tab {
+                    return;
+                }
+                self.core.hover_tab = hover;
+            }
             _ => return,
         }
         self.core.dirty = true;
@@ -293,7 +301,7 @@ impl App {
                             slot.code = e.code();
                             slot.error = Some(super::error_text(&e));
                             slot.error_body = e.body().cloned();
-                            self.check_auth(&e);
+                            self.check_auth(&e, true);
                         }
                     }
                     let (tab, core) = self.active();
@@ -320,7 +328,7 @@ impl App {
                         continue;
                     }
                     if let Err(e) = &reply.result {
-                        self.check_auth(e);
+                        self.check_auth(e, false);
                     }
                     if let Purpose::Generic { ok_toast } = &reply.purpose {
                         match &reply.result {
@@ -364,14 +372,21 @@ impl App {
             tab.on_global(&mut self.core);
         }
         if let Some(code) = self.core.view.error_code {
-            self.check_auth(&RestError::Status { code, body: None });
+            super::auth::on_denied(&mut self.core, code, true);
+        }
+        // A remote agent's hotspot passphrase is not this machine's file.
+        if self.core.target.remote {
+            if let Some(d) = self.core.view.dash.as_mut() {
+                d.hotspot_passphrase.clear();
+            }
         }
     }
 
-    /// Open the auth prompt on a 401 (key) or 403 (PIN session).
-    fn check_auth(&mut self, err: &RestError) {
-        if matches!(err.code(), Some(401) | Some(403)) {
-            super::auth::on_denied(&mut self.core, err.code() == Some(403));
+    /// Open the auth prompt when a refusal is about credentials (see
+    /// [`super::auth::on_denied`]). `read` is false for an operator's write.
+    fn check_auth(&mut self, err: &RestError, read: bool) {
+        if let Some(code) = err.code() {
+            super::auth::on_denied(&mut self.core, code, read);
         }
     }
 

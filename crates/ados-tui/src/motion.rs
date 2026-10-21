@@ -79,8 +79,23 @@ impl Fx {
         }
     }
 
+    /// Before adding an effect to an idle manager, restart the frame clock:
+    /// otherwise the first `process` hands the new effect the whole idle gap
+    /// since the previous frame and it finishes before it is ever drawn.
+    fn wake(&mut self) {
+        if !self.mgr.is_running() {
+            self.last = Instant::now();
+        }
+    }
+
     fn add(&mut self, key: &'static str, effect: tachyonfx::Effect) {
+        self.wake();
         self.mgr.add_unique_effect(key, effect);
+    }
+
+    fn push(&mut self, effect: tachyonfx::Effect) {
+        self.wake();
+        self.mgr.add_effect(effect);
     }
 
     /// Tab switch: fade the body in from the canvas.
@@ -112,7 +127,7 @@ impl Fx {
             MotionLevel::Reduced => fx::fade_from_fg(canvas, 150),
             MotionLevel::Off => return,
         };
-        self.mgr.add_effect(e.with_area(area));
+        self.push(e.with_area(area));
     }
 
     /// A toast is leaving `area`.
@@ -122,22 +137,20 @@ impl Fx {
             MotionLevel::Reduced => fx::fade_to_fg(canvas, 150),
             MotionLevel::Off => return,
         };
-        self.mgr.add_effect(e.with_area(area));
+        self.push(e.with_area(area));
     }
 
     /// A value was applied: flash the row from the accent colour.
     pub fn applied(&mut self, area: Rect, accent: Color) {
         if self.level != MotionLevel::Off {
-            self.mgr
-                .add_effect(fx::fade_from_fg(accent, 600).with_area(area));
+            self.push(fx::fade_from_fg(accent, 600).with_area(area));
         }
     }
 
     /// A value failed to apply: flash the row from the error colour.
     pub fn failed(&mut self, area: Rect, error: Color) {
         if self.level != MotionLevel::Off {
-            self.mgr
-                .add_effect(fx::fade_from_fg(error, 800).with_area(area));
+            self.push(fx::fade_from_fg(error, 800).with_area(area));
         }
     }
 

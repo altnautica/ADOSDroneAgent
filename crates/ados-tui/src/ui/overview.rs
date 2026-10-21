@@ -57,7 +57,13 @@ fn verdict(f: &mut Frame, area: Rect, core: &Core) {
     let error = core.view.error.as_deref();
     let stale = core.stale();
     if error.is_some() || stale {
-        let word = if error.is_some() { "UNREACHABLE" } else { "STALE" };
+        let word = if core.view.locked() {
+            "LOCKED"
+        } else if error.is_some() {
+            "UNREACHABLE"
+        } else {
+            "STALE"
+        };
         let why = error.unwrap_or("No answer from the agent.");
         let line1 = Line::from(vec![
             Span::styled(format!("{} ", core.sym.warn), Style::default().fg(t.error())),

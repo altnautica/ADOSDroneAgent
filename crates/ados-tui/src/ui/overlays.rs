@@ -181,6 +181,39 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
                 }
             }
         }
+        Overlay::Input(s) if s.inline && out.focus_value.is_some() => {
+            // Edit in place: the field replaces the value cell of the focused
+            // row; an error or the bounds hint sits on the line below it.
+            let rect = out.focus_value.unwrap_or_default();
+            f.render_widget(Clear, rect);
+            let width = usize::from(rect.width.saturating_sub(1));
+            let scroll = s.input.visual_scroll(width);
+            let text: String = shown(&s.input, s.masked).chars().skip(scroll).collect();
+            let style = t.accent_bold().add_modifier(Modifier::UNDERLINED);
+            f.render_widget(Paragraph::new(Span::styled(text, style)), rect);
+            let cx = rect.x + (s.input.visual_cursor().saturating_sub(scroll)) as u16;
+            out.cursor = Some((cx.min(rect.right().saturating_sub(1)), rect.y));
+            let mut note = match (&s.error, &s.hint) {
+                (Some(e), _) => Some((e.clone(), Style::default().fg(t.error()))),
+                (None, Some(h)) => Some((h.clone(), t.dim())),
+                (None, None) => None,
+            };
+            if s.nullable {
+                let clear = "Backspace on empty clears".to_string();
+                note = Some(match note {
+                    Some((text, style)) => (format!("{text} · {clear}"), style),
+                    None => (clear, t.dim()),
+                });
+            }
+            if let Some((text, style)) = note {
+                if rect.y + 1 < screen.bottom() {
+                    let below = Rect::new(rect.x, rect.y + 1, rect.width, 1);
+                    f.render_widget(Clear, below);
+                    f.render_widget(Paragraph::new(Span::styled(format!("  {text}"), style)), below);
+                }
+            }
+            out.overlay = Some(rect);
+        }
         Overlay::Input(s) => {
             let extra = u16::from(s.error.is_some()) + u16::from(s.hint.is_some());
             let inner = frame_box(f, core, &s.title, 64, 6 + extra, out);

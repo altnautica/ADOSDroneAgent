@@ -22,7 +22,6 @@ pub mod region;
 pub mod display;
 pub mod advanced;
 pub mod kit;
-pub mod rowkit;
 pub mod wifi_model;
 
 /// Every bespoke page's state.

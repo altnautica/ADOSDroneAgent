@@ -141,23 +141,28 @@ pub fn spawn_decode(key: &'static str) -> Receiver<Result<Catalog, String>> {
 }
 
 /// The catalog for an FC: the firmware family from `/api/status` plus the
-/// vehicle type from the dashboard snapshot. ArduPilot splits per vehicle and
-/// defaults to copter while the vehicle is unknown. `None` for an MSP or
-/// unidentified FC.
+/// vehicle type label from the dashboard snapshot (`fc.vehicle`, a
+/// `MAV_TYPE` name such as `Fixed Wing`, `VTOL Quadrotor`, `Ground Rover`,
+/// `Surface Boat`, `Submarine`). ArduPilot splits per vehicle: fixed wing and
+/// every VTOL frame run Plane, rovers and boats run Rover, submarines run Sub,
+/// and everything else (multirotors, helicopters, unknown) defaults to copter.
+/// `None` for an MSP or unidentified FC.
 pub fn catalog_key(fc_firmware: &str, vehicle: Option<&str>) -> Option<&'static str> {
     match fc_firmware.to_ascii_lowercase().as_str() {
         "px4" => Some("px4"),
         "ardupilot" => {
-            let v = vehicle.unwrap_or("").to_ascii_lowercase();
-            Some(if v.contains("plane") {
-                "ardupilot-plane"
-            } else if v.contains("rover") || v.contains("boat") {
-                "ardupilot-rover"
-            } else if v.contains("sub") {
-                "ardupilot-sub"
-            } else {
-                "ardupilot-copter"
-            })
+            let v = vehicle.unwrap_or("").trim().to_ascii_lowercase();
+            Some(
+                if v.contains("fixed wing") || v.contains("plane") || v.starts_with("vtol") {
+                    "ardupilot-plane"
+                } else if v.contains("rover") || v.contains("boat") {
+                    "ardupilot-rover"
+                } else if v.contains("submarine") || v == "sub" {
+                    "ardupilot-sub"
+                } else {
+                    "ardupilot-copter"
+                },
+            )
         }
         _ => None,
     }
@@ -206,7 +211,21 @@ mod tests {
 
     #[test]
     fn catalog_key_follows_firmware_and_vehicle() {
-        assert_eq!(catalog_key("ardupilot", Some("Plane VTOL")), Some("ardupilot-plane"));
+        for plane in [
+            "Fixed Wing",
+            "VTOL Quadrotor",
+            "VTOL Tailsitter",
+            "VTOL Tailsitter Duo",
+            "VTOL Tiltrotor",
+            "VTOL Tiltwing",
+            "VTOL Reserved",
+        ] {
+            assert_eq!(catalog_key("ardupilot", Some(plane)), Some("ardupilot-plane"), "{plane}");
+        }
+        assert_eq!(catalog_key("ardupilot", Some("Ground Rover")), Some("ardupilot-rover"));
+        assert_eq!(catalog_key("ardupilot", Some("Helicopter")), Some("ardupilot-copter"));
+        assert_eq!(catalog_key("ardupilot", Some("Hexarotor")), Some("ardupilot-copter"));
+        assert_eq!(catalog_key("ardupilot", Some("Vehicle 99")), Some("ardupilot-copter"));
         assert_eq!(catalog_key("ardupilot", Some("Surface Boat")), Some("ardupilot-rover"));
         assert_eq!(catalog_key("ardupilot", Some("Submarine")), Some("ardupilot-sub"));
         assert_eq!(catalog_key("ardupilot", Some("Quadrotor")), Some("ardupilot-copter"));

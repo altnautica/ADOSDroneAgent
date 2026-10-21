@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
-use super::{kit, rowkit};
+use super::kit;
 use crate::app::{Core, FrameOut, Hit};
 use crate::keymap::Command;
 use crate::overlay::{OverlayResult, Ret};
@@ -77,12 +77,12 @@ impl Bespoke for Page {
         match cmd {
             Command::Left | Command::Right => {
                 if let Some(row) = row {
-                    rowkit::config_cycle(core, ROUTE, BespokeId::Discovery.id(), &row, cmd == Command::Right);
+                    kit::config_cycle(core, ROUTE, BespokeId::Discovery.id(), &row, cmd == Command::Right);
                 }
             }
             Command::Activate => {
                 if let Some(row) = row {
-                    rowkit::config_edit(core, ROUTE, &row);
+                    kit::config_edit(core, ROUTE, BespokeId::Discovery.id(), &row);
                 }
             }
             Command::Copy => {
@@ -98,18 +98,18 @@ impl Bespoke for Page {
     }
 
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        if ret.tag != rowkit::CONFIG_EDIT {
+        if ret.tag != kit::CONFIG_EDIT {
             return;
         }
         let items = self.items(core);
-        if let Some(row) = rowkit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() {
-            rowkit::config_result(core, ROUTE, BespokeId::Discovery.id(), &row, &result);
+        if let Some(row) = kit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() {
+            kit::config_result(core, ROUTE, BespokeId::Discovery.id(), &row, &result);
         }
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
         let items = self.items(core);
-        rowkit::config_reply(core, &items, &reply);
+        kit::config_reply(core, &items, &reply);
     }
 
     fn on_click(&mut self, core: &mut Core, hit: &Hit) {
@@ -119,7 +119,7 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        let prefix = rowkit::prefix(BespokeId::Discovery.id());
+        let prefix = kit::prefix(BespokeId::Discovery.id());
         rows_view::render(f, area, core, &items, &mut self.rows, &prefix, true, out);
     }
 
@@ -129,5 +129,33 @@ impl Bespoke for Page {
             Some(r) => Some(r.help.clone()),
             None => Some(LINKS_HINT.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::poll::ResourceId;
+    use crate::ui::tests::test_app;
+    use serde_json::json;
+
+    #[test]
+    fn enter_on_the_mdns_toggle_flips_it_without_a_text_prompt() {
+        let mut app = test_app();
+        let core = &mut app.core;
+        kit::put(
+            core,
+            ResourceId::ConfigSchema,
+            json!({"properties": {"discovery": {"properties": {"mdns_enabled": {"type": "boolean", "default": true}}}}}),
+        );
+        kit::put(core, ResourceId::Config, json!({"discovery": {"mdns_enabled": true}}));
+        let mut page = Page::default();
+        let items = page.items(core);
+        page.rows.focus_key(&items, "discovery.mdns_enabled");
+        let row = page.rows.focused_row(&items).cloned().expect("the toggle row");
+        assert!(!row.read_only);
+        assert_eq!(row.kind, crate::settings::schema::Kind::Bool);
+        assert!(page.on_command(core, Command::Activate));
+        assert!(core.overlays.is_empty(), "a toggle never opens an on/off prompt");
     }
 }

@@ -213,6 +213,11 @@ pub fn render(
                 out.hit(rect, Hit::Row(fi));
                 out.row(format!("{row_prefix}{}", row.key), rect);
                 fi += 1;
+                if sel && focused {
+                    // Marker (2) + padded label + gap (2) precede the value.
+                    let offset = (4 + label_w as u16).min(area.width);
+                    out.focus_value = Some(Rect::new(area.x + offset, y, area.width - offset, 1));
+                }
                 let revealed = state.is_revealed(&row.key, core.now);
                 let value = display(&row.kind, row.value.as_ref(), row.secret, revealed);
                 let label = truncate(&row.label, label_w);

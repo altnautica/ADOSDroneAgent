@@ -1,5 +1,6 @@
 //! Settings page: CLOUD & REMOTE › Cloud. The cloud posture (`local`,
-//! `cloud`, `self_hosted`, plus the self-hosted endpoints) is staged on the
+//! `cloud`, `self_hosted`, plus the self-hosted endpoints), read from the
+//! effective config (`server.mode`, `server.self_hosted.*`), is staged on the
 //! page; the Apply row sends `POST /api/v1/setup/apply {cloud: {mode,
 //! self_hosted?}}` after a confirm and shows the per-section result.
 
@@ -51,18 +52,32 @@ struct Current {
     url: String,
     broker: String,
     port: i64,
+    /// The backend the current mode talks to (empty for local).
+    backend: String,
 }
 
 fn current(core: &Core) -> Current {
-    let s = kit::setup(core);
+    let c = core.value(&ResourceId::Config);
+    let text = |path: &str| kit::text(c, path).unwrap_or_default().to_string();
+    let mode = kit::text(c, "server.mode")
+        .filter(|m| MODES.contains(m))
+        .unwrap_or("local")
+        .to_string();
+    let url = text("server.self_hosted.url");
+    let backend = match mode.as_str() {
+        "self_hosted" => url.clone(),
+        "cloud" => text("server.cloud.url"),
+        _ => String::new(),
+    };
     Current {
-        mode: kit::text(s, "cloud_choice.mode").unwrap_or("local").to_string(),
-        url: kit::text(s, "cloud_choice.backend_url").unwrap_or_default().to_string(),
-        broker: kit::text(s, "cloud_choice.mqtt_broker").unwrap_or_default().to_string(),
-        port: s
-            .and_then(|v| crate::app::at(v, "cloud_choice.mqtt_port"))
+        url,
+        broker: text("server.self_hosted.mqtt_broker"),
+        port: c
+            .and_then(|v| crate::app::at(v, "server.self_hosted.mqtt_port"))
             .and_then(Value::as_i64)
             .unwrap_or(DEFAULT_MQTT_PORT),
+        backend,
+        mode,
     }
 }
 
@@ -101,7 +116,7 @@ impl Page {
         let cur = current(core);
         let (mode, url, broker, port) = self.effective(&cur);
         let mut items = vec![Item::Header("Cloud posture".into())];
-        if let Some(note) = kit::resource_note(core, &ResourceId::SetupStatus, "the setup status") {
+        if let Some(note) = kit::resource_note(core, &ResourceId::Config, "the config") {
             items.push(note);
         }
         let mut row = kit::row("mode", "Cloud posture", mode_help(&mode), kit::enum_of(MODES), Some(json!(mode)));
@@ -130,8 +145,8 @@ impl Page {
             r.secret = true;
             items.push(Item::Row(r));
         }
-        if !cur.url.is_empty() {
-            items.push(rows_view::info(core, "Backend URL", cur.url.clone()));
+        if !cur.backend.is_empty() {
+            items.push(rows_view::info(core, "Backend URL", cur.backend.clone()));
         }
         let detail = if self.busy {
             format!("{} Applying…", core.sym.spinner_frame(core.frame as usize))
@@ -198,7 +213,11 @@ impl Page {
 
 impl Bespoke for Page {
     fn subs(&self, _core: &Core) -> Vec<Sub> {
-        vec![kit::setup_sub()]
+        vec![Sub::every_ms(
+            ResourceId::Config,
+            "/api/config",
+            crate::settings::config_rows::CONFIG_EVERY_MS,
+        )]
     }
 
     fn on_command(&mut self, core: &mut Core, cmd: Command) -> bool {
@@ -267,7 +286,7 @@ impl Bespoke for Page {
             }
             core.flash("cloud:mode", ok);
         }
-        core.fetch_now(ResourceId::SetupStatus);
+        core.fetch_now(ResourceId::Config);
     }
 
     fn on_click(&mut self, core: &mut Core, hit: &Hit) {
@@ -290,5 +309,52 @@ impl Bespoke for Page {
 
     fn animating(&self, core: &Core) -> bool {
         self.busy || self.rows.revealing(core.now)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_apply_keeps_the_configured_broker_and_port() {
+        let mut app = crate::ui::tests::test_app();
+        let core = &mut app.core;
+        kit::put(
+            core,
+            ResourceId::Config,
+            json!({"server": {
+                "mode": "self_hosted",
+                "cloud": {"url": "https://cloud.example.com"},
+                "self_hosted": {"url": "https://convex.example.com", "mqtt_broker": "mqtt.example.com", "mqtt_port": 8884, "api_key": "***"}
+            }}),
+        );
+        let cur = current(core);
+        assert_eq!((cur.mode.as_str(), cur.broker.as_str(), cur.port), ("self_hosted", "mqtt.example.com", 8884));
+        assert_eq!(cur.backend, "https://convex.example.com");
+        let mut page = Page::default();
+        page.draft.url = Some("https://convex2.example.com".into());
+        assert!(page.dirty(core));
+        assert_eq!(
+            page.validate(core),
+            Ok(json!({"mode": "self_hosted", "self_hosted": {
+                "url": "https://convex2.example.com", "mqtt_broker": "mqtt.example.com", "mqtt_port": 8884
+            }}))
+        );
+    }
+
+    #[test]
+    fn switching_to_self_hosted_starts_from_the_self_hosted_block() {
+        let mut app = crate::ui::tests::test_app();
+        let core = &mut app.core;
+        kit::put(
+            core,
+            ResourceId::Config,
+            json!({"server": {"mode": "cloud", "cloud": {"url": "https://cloud.example.com"},
+                   "self_hosted": {"url": "", "mqtt_broker": "", "mqtt_port": 8883}}}),
+        );
+        let cur = current(core);
+        assert_eq!(cur.backend, "https://cloud.example.com");
+        assert_eq!(cur.url, "", "the cloud URL is not the self-hosted URL");
     }
 }

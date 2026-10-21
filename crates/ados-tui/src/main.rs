@@ -103,7 +103,9 @@ fn run(terminal: &mut Term, app: &mut App) -> Result<()> {
             let store = app.core.store.clone();
             let latest = app.core.latest.clone();
             let name = target.label();
+            let session_keys = std::mem::take(&mut app.core.session_keys);
             *app = App::new(Core::new(target, key, store, latest));
+            app.core.session_keys = session_keys;
             app.core.toast(toast::ToastKind::Success, format!("Connected to {name}"));
         }
         if app.core.quit {
@@ -149,9 +151,22 @@ fn run(terminal: &mut Term, app: &mut App) -> Result<()> {
     }
 }
 
+/// Whether a shell-out changes the node (and so must wait for a disarmed
+/// reading): every confirming quick action, the update, a plugin install.
+/// "Radio status" only reads.
+fn shell_changes_node(req: ShellReq) -> bool {
+    match req {
+        ShellReq::Action(i) => ACTIONS.get(i).is_some_and(|a| a.confirm),
+        ShellReq::Update | ShellReq::PluginInstall => true,
+    }
+}
+
 /// Run a shell-out the app asked for.
 fn run_shell(terminal: &mut Term, app: &mut App, req: ShellReq) -> Result<()> {
     if app.core.target.remote {
+        return Ok(());
+    }
+    if shell_changes_node(req) && !app.core.guard_disarmed() {
         return Ok(());
     }
     let mouse = app.core.store.prefs.mouse;

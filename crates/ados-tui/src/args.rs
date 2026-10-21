@@ -114,7 +114,7 @@ impl Target {
 /// Whether `host` names this machine.
 pub fn is_loopback(host: &str) -> bool {
     let h = host.trim_start_matches('[').trim_end_matches(']');
-    h.eq_ignore_ascii_case("localhost") || h == "::1" || h.starts_with("127.")
+    h.eq_ignore_ascii_case("localhost") || h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Split `host[:port]` (IPv6 literals in brackets) into host and port.
@@ -238,6 +238,17 @@ mod tests {
         assert_eq!(parse(&argv(&["--help"])), Parsed::Help);
         assert!(matches!(parse(&argv(&["--bogus"])), Parsed::Error(_)));
         assert!(matches!(parse(&argv(&["--host"])), Parsed::Error(_)));
+    }
+
+    #[test]
+    fn only_real_loopback_addresses_are_local() {
+        assert!(is_loopback("localhost"));
+        assert!(is_loopback("127.0.0.1"));
+        assert!(is_loopback("[::1]"));
+        // A hostname that merely starts like a loopback address is remote,
+        // so it never receives the on-box pairing key.
+        assert!(!is_loopback("127.example.com"));
+        assert!(!is_loopback("192.168.1.50"));
     }
 
     #[test]

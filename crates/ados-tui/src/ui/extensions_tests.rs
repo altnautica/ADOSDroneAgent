@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::app::{App, Slot, TabId};
+use crate::app::{App, Slot, Tab, TabId};
 use crate::model::ProfileRoutes;
 use crate::poll::ResourceId;
 use crate::ui::tests::{draw, feed, test_app};
@@ -109,4 +109,31 @@ fn catalog_entry_shows_its_card() {
     let screen = draw(&mut app, 120, 40);
     assert!(screen.contains("com.example.gimbal"), "{screen}");
     assert!(screen.contains("Enter installs"), "{screen}");
+}
+
+#[test]
+fn a_list_refresh_keeps_the_selection_and_detail_scroll() {
+    let mut app = fixture();
+    app.tabs.extensions.on_resource(&mut app.core, &ResourceId::Plugins);
+    app.tabs.extensions.detail_scroll = 4;
+
+    // A periodic refresh that adds an install sorting ahead of the selected one.
+    let installs = json!({"installs": [
+        {"plugin_id": "com.example.aaa", "version": "1.0.0", "status": "running", "permissions": {}},
+        {"plugin_id": ID, "version": "0.2.10", "status": "running", "permissions": {}}
+    ]});
+    put(&mut app, ResourceId::Plugins, installs.clone());
+    app.tabs.extensions.on_resource(&mut app.core, &ResourceId::Plugins);
+    let tab = &app.tabs.extensions;
+    assert_eq!(tab.sel_key.as_ref().map(|(_, id)| id.as_str()), Some(ID));
+    assert_eq!(tab.selected_install(&app.core).map(|i| i.id).as_deref(), Some(ID));
+    assert_eq!(tab.detail_scroll, 4, "a refresh is not a selection change");
+
+    put(&mut app, ResourceId::Plugins, installs);
+    app.tabs.extensions.on_resource(&mut app.core, &ResourceId::PluginsCatalog);
+    assert_eq!(app.tabs.extensions.detail_scroll, 4);
+
+    // Moving to another plugin is a real change.
+    app.command(crate::keymap::Command::Up);
+    assert_eq!(app.tabs.extensions.detail_scroll, 0);
 }

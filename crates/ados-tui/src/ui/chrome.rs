@@ -77,8 +77,11 @@ pub fn header(f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         Span::styled(core.target.label(), t.text()),
         Span::raw("   "),
     ];
-    let offline = core.view.error.is_some() && (core.dash().is_none() || stale);
-    let state_chip = if offline {
+    let locked = core.view.locked();
+    let offline = !locked && core.view.error.is_some() && (core.dash().is_none() || stale);
+    let state_chip = if locked {
+        Some(chip(t, "LOCKED", t.warning()))
+    } else if offline {
         Some(chip(t, "OFFLINE", t.error()))
     } else if stale {
         Some(chip(t, "STALE", t.warning()))
@@ -92,7 +95,10 @@ pub fn header(f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
             right.push(c);
             let rw = width(&right);
             let x = area.x + area.width.saturating_sub(rw) + right_w_before;
-            out.offline_chip = Some(Rect::new(x, area.y, cw, 1));
+            // A lock waits on the operator, not the agent: it does not pulse.
+            if !locked {
+                out.offline_chip = Some(Rect::new(x, area.y, cw, 1));
+            }
         }
         None => right.push(Span::styled(
             core.view.refreshed.clone().unwrap_or_else(|| "--:--:--".into()),
@@ -138,6 +144,8 @@ pub fn tab_bar(f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
     for tab in tabs {
         let style = if tab == core.tab {
             t.on_accent_fill().add_modifier(Modifier::BOLD)
+        } else if core.hover_tab == Some(tab) {
+            t.text()
         } else {
             t.dim()
         };

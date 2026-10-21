@@ -14,7 +14,7 @@ use crate::keymap::{Command, Ctx, PageKeys};
 use crate::overlay::{Overlay, OverlayResult, Ret};
 use crate::poll::{ResourceId, Sub};
 use crate::toast::ToastKind;
-use crate::worker::{Purpose, Request, Route, SCAN_TIMEOUT};
+use crate::worker::{Purpose, Request, Route, RESTART_TIMEOUT, SCAN_TIMEOUT};
 
 mod view;
 
@@ -275,12 +275,15 @@ impl Tab for SystemTab {
         match ret.tag {
             TAG_RESTART => {
                 let Some(name) = ret.data.as_str().map(str::to_string) else { return };
-                core.submit(Request::new(
-                    "POST",
-                    format!("/api/services/{}/restart", seg(&name)),
-                    ROUTE,
-                    Purpose::Page { tag: TAG_RESTART, data: json!(name) },
-                ));
+                core.submit(
+                    Request::new(
+                        "POST",
+                        format!("/api/services/{}/restart", seg(&name)),
+                        ROUTE,
+                        Purpose::Page { tag: TAG_RESTART, data: json!(name) },
+                    )
+                    .timeout(RESTART_TIMEOUT),
+                );
             }
             TAG_SUPERVISOR => core.submit(Request::new(
                 "POST",

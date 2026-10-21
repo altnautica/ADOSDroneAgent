@@ -1,7 +1,8 @@
 //! Settings page: SYSTEM & SAFETY › Region. The RF posture: `unrestricted`
-//! (the default) or a pinned ISO 3166-1 alpha-2 region. Staged on the page,
-//! applied after a confirm via `POST /api/v1/setup/apply {regulatory: {mode,
-//! region?}}`.
+//! (the default) or a pinned ISO 3166-1 alpha-2 region, read from the
+//! effective config (`network.regulatory.mode` / `.region`). Staged on the
+//! page, applied after a confirm via `POST /api/v1/setup/apply {regulatory:
+//! {mode, region?}}`.
 
 use ratatui::layout::Rect;
 use ratatui::Frame;
@@ -66,16 +67,17 @@ pub struct Page {
     busy: bool,
 }
 
-/// The agent's mode and pinned region.
+/// The agent's mode and pinned region, from the effective config the
+/// regulatory apply persists to.
 fn current(core: &Core) -> (String, Option<String>) {
-    let s = kit::setup(core);
-    let mode = if kit::text(s, "regulatory.mode") == Some("region") {
+    let c = core.value(&ResourceId::Config);
+    let mode = if kit::text(c, "network.regulatory.mode") == Some("region") {
         "region"
     } else {
         "unrestricted"
     };
     let region = if mode == "region" {
-        kit::text(s, "regulatory.region").and_then(normalize_region)
+        kit::text(c, "network.regulatory.region").and_then(normalize_region)
     } else {
         None
     };
@@ -101,7 +103,7 @@ impl Page {
         let (cm, cr) = current(core);
         let (m, r) = self.effective(core);
         let mut items = vec![Item::Header("Current".into())];
-        if let Some(note) = kit::resource_note(core, &ResourceId::SetupStatus, "the setup status") {
+        if let Some(note) = kit::resource_note(core, &ResourceId::Config, "the config") {
             items.push(note);
         }
         let now = match (&cm[..], &cr) {
@@ -203,7 +205,11 @@ impl Page {
 
 impl Bespoke for Page {
     fn subs(&self, _core: &Core) -> Vec<Sub> {
-        vec![kit::setup_sub()]
+        vec![Sub::every_ms(
+            ResourceId::Config,
+            "/api/config",
+            crate::settings::config_rows::CONFIG_EVERY_MS,
+        )]
     }
 
     fn on_command(&mut self, core: &mut Core, cmd: Command) -> bool {
@@ -271,7 +277,7 @@ impl Bespoke for Page {
             }
             core.flash("region:mode", ok);
         }
-        core.fetch_now(ResourceId::SetupStatus);
+        core.fetch_now(ResourceId::Config);
     }
 
     fn on_click(&mut self, core: &mut Core, hit: &Hit) {
@@ -309,5 +315,31 @@ mod tests {
         assert_eq!(normalize_region("1A"), None);
         assert_eq!(region_label("IN"), "India (IN)");
         assert_eq!(region_label("FR"), "FR");
+    }
+
+    #[test]
+    fn the_posture_reads_from_config_and_unrestricted_can_be_staged() {
+        let mut app = crate::ui::tests::test_app();
+        let core = &mut app.core;
+        kit::put(
+            core,
+            ResourceId::Config,
+            json!({"network": {"regulatory": {"mode": "region", "region": "US", "ack_operator": "bench"}}}),
+        );
+        // The setup status never carries the posture; it must not matter.
+        kit::put(core, ResourceId::SetupStatus, json!({"regulatory": {}}));
+        let mut page = Page::default();
+        assert_eq!(current(core), ("region".to_string(), Some("US".to_string())));
+        let items = page.items(core);
+        let posture = items.iter().find_map(|i| match i {
+            Item::Row(r) if r.key == "region" => r.value.clone(),
+            _ => None,
+        });
+        assert_eq!(posture, Some(json!("United States (US)")));
+        assert!(!page.dirty(core));
+        page.rows.focus_key(&items, "mode");
+        assert!(page.on_command(core, Command::Right));
+        assert_eq!(page.effective(core).0, "unrestricted");
+        assert!(page.dirty(core), "unrestricted is staged against the pinned US");
     }
 }

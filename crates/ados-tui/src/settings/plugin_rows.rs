@@ -23,6 +23,7 @@ use crate::poll::{ResourceId, Sub};
 use crate::settings::page::Bespoke;
 use crate::settings::row::{cycle, display, edit_overlay, value_from_result, EditRow};
 use crate::settings::rows_view::{self, Item, RowsState};
+use crate::settings::schema::Kind;
 use crate::toast::ToastKind;
 use crate::worker::{Purpose, Reply, Request, Route};
 
@@ -221,6 +222,13 @@ impl Bespoke for PluginConfigPane {
             }
             Command::Activate => {
                 let Some(row) = self.focused_row(core) else { return false };
+                if row.kind == Kind::Bool && !row.read_only {
+                    // A toggle flips in place, like ←/→.
+                    if let Some(v) = cycle(&row.kind, row.value.as_ref(), true) {
+                        self.write(core, &row, v);
+                    }
+                    return true;
+                }
                 match edit_overlay(&row, self.ret(&row.key)) {
                     Some(o) => core.open(o),
                     None => core.toast(ToastKind::Info, format!("{} is read-only here", row.label)),
@@ -298,5 +306,52 @@ impl Bespoke for PluginConfigPane {
 
     fn context_line(&self, core: &Core) -> Option<String> {
         self.focused_row(core).map(|r| r.help).filter(|h| !h.is_empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::Slot;
+
+    const ID: &str = "com.example.follow";
+
+    fn put(core: &mut Core, id: ResourceId, value: Value) {
+        core.res.insert(id, Slot { value: Some(value), error: None, code: None, error_body: None, at: core.now });
+    }
+
+    #[test]
+    fn enter_on_a_bool_parameter_toggles_without_a_prompt() {
+        let mut app = crate::ui::tests::test_app();
+        let core = &mut app.core;
+        put(
+            core,
+            ResourceId::PluginDetail(ID.into()),
+            json!({"manifest": {"id": ID, "gcs": {"contributes": {"parameters": [
+                {"key": "auto_start", "schema": {"type": "boolean", "default": false}, "ui": {"label": "Auto start"}},
+                {"key": "distance_m", "schema": {"type": "number", "minimum": 3, "maximum": 30}, "ui": {"label": "Follow distance"}}
+            ], "settings": []}}}}),
+        );
+        put(core, ResourceId::PluginConfig(ID.into()), json!({"values": {"auto_start": false, "distance_m": 12}}));
+        let mut pane = PluginConfigPane::new(ID.into(), Route::page("plugin"));
+        let items = pane.items(core);
+        let bool_key = pane_key(&items, "Auto start");
+        pane.rows.focus_key(&items, &bool_key);
+        assert!(pane.on_command(core, Command::Activate));
+        assert!(core.overlays.is_empty(), "a toggle never opens an on/off prompt");
+        let num_key = pane_key(&items, "Follow distance");
+        pane.rows.focus_key(&items, &num_key);
+        assert!(pane.on_command(core, Command::Activate));
+        assert_eq!(core.overlays.len(), 1, "a number opens its editor");
+    }
+
+    fn pane_key(items: &[Item], label: &str) -> String {
+        items
+            .iter()
+            .find_map(|i| match i {
+                Item::Row(r) if r.label == label => Some(r.key.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no row labelled {label}"))
     }
 }

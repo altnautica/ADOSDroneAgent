@@ -147,11 +147,12 @@ pub fn parse(kind: &Kind, text: &str) -> Result<Value, String> {
     }
 }
 
-/// The overlay that edits `row` on Enter: a picker for an enum, a text prompt
-/// otherwise (masked for secrets, clearable when nullable). `None` for a
-/// read-only or opaque row.
+/// The overlay that edits `row` on Enter: a picker for an enum, an inline
+/// field on the row otherwise (masked for secrets, clearable when nullable).
+/// `None` for a read-only or opaque row, and for a toggle, which Enter flips
+/// in place like ←/→.
 pub fn edit_overlay(row: &EditRow, ret: Ret) -> Option<Overlay> {
-    if row.read_only || row.kind == Kind::Opaque {
+    if row.read_only || matches!(row.kind, Kind::Opaque | Kind::Bool) {
         return None;
     }
     if let Kind::Enum(values) = &row.kind {
@@ -172,6 +173,7 @@ pub fn edit_overlay(row: &EditRow, ret: Ret) -> Option<Overlay> {
     let mut s = Overlay::input(ret, row.label.clone(), row.help.clone(), &initial);
     s.masked = row.secret;
     s.nullable = row.nullable;
+    s.inline = true;
     s.hint = match &row.kind {
         Kind::Int { min, max } => bounds_hint(min.map(|v| v as f64), max.map(|v| v as f64)),
         Kind::Num { min, max } => bounds_hint(*min, *max),

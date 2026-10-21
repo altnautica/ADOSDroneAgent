@@ -276,6 +276,12 @@ impl Tab for LinkTab {
         subs
     }
 
+    fn on_deactivate(&mut self, _core: &mut Core) {
+        // Polling stops while the tab is hidden; a baseline kept across the gap
+        // would make the first delta after returning cover the whole absence.
+        self.counters = Counters::default();
+    }
+
     fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
         let Some(v) = core
             .slot(id)

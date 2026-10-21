@@ -205,7 +205,13 @@ impl ParamsTab {
     // --- data --------------------------------------------------------------------
 
     fn on_params(&mut self, core: &Core) {
-        let Some(value) = core.value(&ResourceId::Params) else { return };
+        // A failed fetch keeps the previous body in the slot; reloading it would
+        // roll confirmed writes back to the values read before them.
+        let Some(slot) = core.slot(&ResourceId::Params) else { return };
+        if slot.error.is_some() {
+            return;
+        }
+        let Some(value) = slot.value.as_ref() else { return };
         let Ok(resp) = serde_json::from_value::<ParamsResponse>(value.clone()) else { return };
         let progress = resp.progress.unwrap_or_default();
         self.env = Envelope {

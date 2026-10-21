@@ -8,15 +8,13 @@ use ratatui::text::{Line, Span};
 use ratatui::Frame;
 use serde_json::{json, Value};
 
-use super::kit;
-use super::rowkit::{self, detail_text, text_of};
+use super::kit::{self, detail_text, text_of};
 use super::wifi_model::{self as model, JoinConflict, Network, Saved};
 use crate::app::{Core, FrameOut, Hit, ARMED_REFUSAL};
 use crate::keymap::{Command, PageKeys};
 use crate::overlay::{Overlay, OverlayResult, Ret};
 use crate::poll::{ResourceId, Sub};
 use crate::settings::page::{Bespoke, BespokeId};
-use crate::settings::row::EditRow;
 use crate::settings::rows_view::{self, info, note, Item, RowsState};
 use crate::settings::schema::Kind;
 use crate::toast::ToastKind;
@@ -146,19 +144,35 @@ impl Page {
             items.push(note(core, text, false));
         }
         for s in saved {
-            items.push(Item::Row(EditRow {
-                key: format!("saved:{}", s.name),
-                label: s.name.clone(),
-                help: "Autoconnect: rejoin this network automatically when it is in range. ←/→ changes it, x forgets the network.".into(),
-                kind: Kind::Bool,
-                value: Some(json!(s.autoconnect)),
-                default: None,
-                secret: false,
-                nullable: false,
-                read_only: false,
-            }));
+            items.push(Item::Row(kit::row(
+                &format!("saved:{}", s.name),
+                &s.name,
+                "Autoconnect: rejoin this network automatically when it is in range. ←/→ or Enter changes it, x forgets the network.",
+                Kind::Bool,
+                Some(json!(s.autoconnect)),
+            )));
         }
         items
+    }
+
+    /// Flip the focused saved network's autoconnect. False when no saved
+    /// network has focus.
+    fn toggle_autoconnect(&self, core: &mut Core) -> bool {
+        let Some(s) = self.focused_saved(core) else { return false };
+        let enabled = !s.autoconnect;
+        core.submit(
+            Request::new(
+                "PUT",
+                format!("/api/v1/network/client/configured/{}/autoconnect", crate::api_path::seg(&s.name)),
+                ROUTE,
+                Purpose::Page {
+                    tag: "autoconnect",
+                    data: json!({ "name": s.name, "enabled": enabled }),
+                },
+            )
+            .body(json!({ "enabled": enabled })),
+        );
+        true
     }
 
     fn scan(&mut self, core: &mut Core) {
@@ -267,6 +281,10 @@ impl Bespoke for Page {
         match cmd {
             Command::Scan => self.scan(core),
             Command::Activate => {
+                // Enter on a saved network flips autoconnect, like ←/→.
+                if self.toggle_autoconnect(core) {
+                    return true;
+                }
                 let Some(n) = self.focused_network(core) else { return true };
                 if !core.guard_disarmed() {
                     return true;
@@ -317,20 +335,7 @@ impl Bespoke for Page {
                 ));
             }
             Command::Left | Command::Right => {
-                let Some(s) = self.focused_saved(core) else { return true };
-                let enabled = !s.autoconnect;
-                core.submit(
-                    Request::new(
-                        "PUT",
-                        format!("/api/v1/network/client/configured/{}/autoconnect", crate::api_path::seg(&s.name)),
-                        ROUTE,
-                        Purpose::Page {
-                            tag: "autoconnect",
-                            data: json!({ "name": s.name, "enabled": enabled }),
-                        },
-                    )
-                    .body(json!({ "enabled": enabled })),
-                );
+                self.toggle_autoconnect(core);
             }
             Command::Copy => {
                 if let Some(n) = self.focused_network(core) {
@@ -440,7 +445,7 @@ impl Bespoke for Page {
             }
             Purpose::Page { tag: "autoconnect", data } => {
                 let name = data.get("name").and_then(Value::as_str).unwrap_or_default();
-                let row = format!("{}saved:{name}", rowkit::prefix(id()));
+                let row = format!("{}saved:{name}", kit::prefix(id()));
                 match &reply.result {
                     Ok(_) => {
                         let on = data.get("enabled").and_then(Value::as_bool) == Some(true);
@@ -466,7 +471,7 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        rows_view::render(f, area, core, &items, &mut self.rows, &rowkit::prefix(id()), true, out);
+        rows_view::render(f, area, core, &items, &mut self.rows, &kit::prefix(id()), true, out);
     }
 
     fn context_line(&self, core: &Core) -> Option<String> {

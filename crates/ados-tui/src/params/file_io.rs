@@ -62,30 +62,34 @@ pub fn parse_line(line: &str) -> Option<Result<(String, f64), ()>> {
     Some(parsed)
 }
 
-/// Stage every value in `text` that differs from the live one.
+/// Stage every value in `text` that differs from the live one. A leading
+/// UTF-8 byte-order mark (written by some Windows editors) is skipped.
 pub fn import(store: &mut Store, text: &str) -> ImportCounts {
-    let mut counts = ImportCounts::default();
-    for parsed in text.lines().filter_map(parse_line) {
-        let Ok((name, value)) = parsed else {
-            counts.unknown += 1;
-            continue;
-        };
-        let Some(live) = store.value(&name) else {
-            counts.unknown += 1;
-            continue;
-        };
-        if same(live, value) {
-            store.unstage(&name);
-            counts.unchanged += 1;
-            continue;
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    store.batch(|batch| {
+        let mut counts = ImportCounts::default();
+        for parsed in text.lines().filter_map(parse_line) {
+            let Ok((name, value)) = parsed else {
+                counts.unknown += 1;
+                continue;
+            };
+            let Some(live) = batch.value(&name) else {
+                counts.unknown += 1;
+                continue;
+            };
+            if same(live, value) {
+                batch.unstage(&name);
+                counts.unchanged += 1;
+                continue;
+            }
+            match batch.stage(&name, value) {
+                StageOutcome::Staged => counts.staged += 1,
+                StageOutcome::Unchanged => counts.unchanged += 1,
+                StageOutcome::ReadOnly => counts.read_only += 1,
+            }
         }
-        match store.stage(&name, value) {
-            StageOutcome::Staged => counts.staged += 1,
-            StageOutcome::Unchanged => counts.unchanged += 1,
-            StageOutcome::ReadOnly => counts.read_only += 1,
-        }
-    }
-    counts
+        counts
+    })
 }
 
 /// `<device>-<YYYYMMDD-HHMMSS>.param` (UTC) with the device name reduced to
@@ -169,6 +173,16 @@ mod tests {
         assert_eq!((c.staged, c.unchanged, c.unknown), (2, 1, 0));
         assert!(same(other.staged_value("ATC_RAT_RLL_P").unwrap(), 0.135));
         assert_eq!(other.staged_value("WPNAV_SPEED"), Some(500.0));
+    }
+
+    #[test]
+    fn a_bom_prefixed_file_imports_its_first_line() {
+        let mut s = store(&[("A_ONE", 1.0), ("B_TWO", 2.0)]);
+        let c = import(&mut s, "\u{feff}A_ONE,5\r\nB_TWO,7\r\n");
+        assert_eq!((c.staged, c.unchanged, c.unknown), (2, 0, 0));
+        assert_eq!(s.staged_value("A_ONE"), Some(5.0));
+        assert_eq!(s.counts().staged, 2, "the view is rebuilt after the batch");
+        assert_eq!(s.visible().len(), 2);
     }
 
     #[test]

@@ -42,14 +42,14 @@ pub struct Telemetry {
     /// Radians.
     pub roll: Option<f64>,
     pub pitch: Option<f64>,
-    pub yaw: Option<f64>,
-    /// Degrees 0–360; the FC's "unknown" sentinel (655.35) is dropped.
+    /// Degrees 0–360, from the position block: `None` before a position fix
+    /// (the route then reports a 0.0 placeholder) and for the FC's "unknown"
+    /// sentinel (655.35).
     pub heading: Option<f64>,
     pub voltage: Option<f64>,
     pub current: Option<f64>,
     pub remaining: Option<f64>,
     pub temperature: Option<f64>,
-    pub cells: Vec<f64>,
     pub fix_type: Option<i64>,
     pub satellites: Option<i64>,
     /// GPS horizontal dilution (`gps.eph`).
@@ -89,16 +89,11 @@ impl Telemetry {
             relayed,
             roll: f(v, &["attitude", "roll"]),
             pitch: f(v, &["attitude", "pitch"]),
-            yaw: f(v, &["attitude", "yaw"]),
-            heading: f(v, &["position", "heading"]).filter(|h| (0.0..=360.0).contains(h)),
+            heading: pos("heading").filter(|h| (0.0..=360.0).contains(h)),
             voltage: f(v, &["battery", "voltage"]),
             current: f(v, &["battery", "current"]),
             remaining: f(v, &["battery", "remaining"]),
             temperature: f(v, &["battery", "temperature"]),
-            cells: walk(v, &["battery", "cell_voltages"])
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_f64).collect())
-                .unwrap_or_default(),
             fix_type: i(v, &["gps", "fix_type"]),
             satellites: i(v, &["gps", "satellites"]),
             eph: f(v, &["gps", "eph"]),
@@ -120,7 +115,6 @@ pub struct FcIdent {
     pub vehicle: Option<String>,
     pub firmware: Option<String>,
     pub hdop: Option<f64>,
-    pub connected: bool,
 }
 
 impl FcIdent {
@@ -129,7 +123,6 @@ impl FcIdent {
             vehicle: s(v, &["fc", "vehicle"]),
             firmware: s(v, &["fc", "firmware"]),
             hdop: f(v, &["fc", "gps", "hdop"]),
-            connected: walk(v, &["fc", "connected"]).and_then(Value::as_bool) == Some(true),
         }
     }
 }
@@ -296,7 +289,7 @@ mod tests {
         assert!(t.vehicle);
         assert_eq!(t.roll, Some(0.1));
         assert_eq!(t.pitch, None);
-        assert_eq!(t.heading, None, "the 655.35 sentinel is dropped");
+        assert_eq!(t.heading, None, "no heading until GLOBAL_POSITION_INT");
         assert_eq!(t.lat, None, "no position until GLOBAL_POSITION_INT");
         assert_eq!(t.alt_rel, None);
         assert_eq!(t.voltage, None);
@@ -305,6 +298,21 @@ mod tests {
         assert_eq!(t.armed, Some(false));
         assert_eq!(t.eph, None);
         assert_eq!(t.fix_type, Some(3));
+    }
+
+    #[test]
+    fn heading_needs_a_position_fix() {
+        let sample = |age: Value, heading: f64| {
+            Telemetry::from_value(&json!({
+                "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+                "position": {"lat": 0.0, "lon": 0.0, "alt_rel": 0.0, "heading": heading},
+                "position_age_ms": age,
+            }))
+        };
+        assert_eq!(sample(Value::Null, 0.0).heading, None, "0.0 placeholder before a fix");
+        assert_eq!(sample(json!(120), 0.0).heading, Some(0.0));
+        assert_eq!(sample(json!(120), 271.5).heading, Some(271.5));
+        assert_eq!(sample(json!(120), 655.35).heading, None, "unknown sentinel");
     }
 
     #[test]

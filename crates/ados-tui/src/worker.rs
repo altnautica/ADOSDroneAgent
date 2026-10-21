@@ -24,6 +24,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(8);
 pub const SCAN_TIMEOUT: Duration = Duration::from_secs(20);
 /// A plugin download + verify + install.
 pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(180);
+/// A service restart: the agent bounds `systemctl restart` at 30 s and then
+/// confirms the unit for up to 5 s more before it answers.
+pub const RESTART_TIMEOUT: Duration = Duration::from_secs(40);
 
 /// Which screen handles a reply (and an overlay result).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

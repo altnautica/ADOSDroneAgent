@@ -83,10 +83,16 @@ pub fn classify(result: &Result<Value, RestError>) -> Outcome {
                     Outcome::Failed("Enter a new secret value".into())
                 }
                 Some(422) => {
-                    let msg = str_at(&body, &["message"])
-                        .or_else(|| str_at(&body, &["detail", "message"]))
-                        .or_else(|| str_at(&body, &["detail"]))
-                        .map(str::to_string)
+                    // A schema rejection nests its reasons under
+                    // `detail.error.messages`; a cross-field rule is flat.
+                    let reasons: Option<String> = crate::app::at(&body, "detail.error.messages")
+                        .and_then(Value::as_array)
+                        .map(|m| m.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; "))
+                        .filter(|s| !s.is_empty());
+                    let msg = reasons
+                        .or_else(|| str_at(&body, &["message"]).map(str::to_string))
+                        .or_else(|| str_at(&body, &["detail", "message"]).map(str::to_string))
+                        .or_else(|| str_at(&body, &["detail"]).map(str::to_string))
                         .unwrap_or_else(|| crate::app::error_text(e));
                     match str_at(&body, &["field"]) {
                         Some(field) => Outcome::Failed(format!("{msg} ({field})")),
@@ -152,6 +158,13 @@ mod tests {
         assert_eq!(
             classify(&status(422, json!({"error": "E_INVALID", "field": "mavlink.baud_rate", "message": "bad baud"}))),
             Outcome::Failed("bad baud (mavlink.baud_rate)".into())
+        );
+        assert_eq!(
+            classify(&status(
+                422,
+                json!({"detail": {"error": {"code": "E_VALIDATION", "key": "battery.low_cell_mv", "messages": ["must be >= 2500"]}}})
+            )),
+            Outcome::Failed("must be >= 2500".into())
         );
         assert_eq!(
             classify(&status(400, json!({"detail": {"error": {"code": "E_REDACTED_SENTINEL"}}}))),

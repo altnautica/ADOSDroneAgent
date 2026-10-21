@@ -170,11 +170,25 @@ impl PrefsStore {
         let tmp = path.with_extension("json.tmp");
         let body = serde_json::to_string_pretty(&self.prefs)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
-        std::fs::write(&tmp, body)?;
+        // A leftover temp file could carry wider permissions; start fresh and
+        // create it owner-only, so a pairing key is never readable by others,
+        // even between the write and the rename.
+        match std::fs::remove_file(&tmp) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        {
+            use std::io::Write;
+            let mut file = options.open(&tmp)?;
+            file.write_all(body.as_bytes())?;
+            file.sync_all()?;
         }
         std::fs::rename(&tmp, path)
     }
@@ -239,6 +253,21 @@ mod tests {
         assert_eq!(store.prefs.refresh_ms, DEFAULT_REFRESH_MS);
         assert_eq!(store.prefs.theme, "nvg");
         assert!(store.writable);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_saved_file_is_owner_only_even_over_a_leftover_temp() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("mode");
+        let file = dir.join("tui.json");
+        let tmp = file.with_extension("json.tmp");
+        std::fs::write(&tmp, "stale").unwrap();
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let store = PrefsStore::load(Some(file.clone()));
+        store.save().unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

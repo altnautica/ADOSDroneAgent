@@ -1,8 +1,6 @@
 //! Settings page: THIS TERMINAL › Agents. The saved agent targets: connect,
 //! add, edit and delete. The list lives in `tui.json`; no agent call.
 
-use std::collections::HashMap;
-
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
@@ -28,9 +26,6 @@ fn route() -> Route {
 #[derive(Default)]
 pub struct Page {
     rows: RowsState,
-    /// Keys typed for a target but not remembered: used for a connect in this
-    /// session only, never written anywhere.
-    session_keys: HashMap<String, String>,
 }
 
 fn entry_key(i: usize) -> String {
@@ -99,7 +94,7 @@ impl Page {
             let is = core.target.remote && core.target.base == s.base();
             let key = if s.api_key.is_some() {
                 "key stored: yes"
-            } else if self.session_keys.contains_key(&s.name) {
+            } else if core.session_keys.contains_key(&s.name) {
                 "key stored: this session"
             } else {
                 "key stored: no"
@@ -150,7 +145,7 @@ impl Page {
                     core.toast(ToastKind::Info, format!("Already connected to {}", s.name));
                     return;
                 }
-                let key = s.api_key.clone().or_else(|| self.session_keys.get(&s.name).cloned());
+                let key = s.api_key.clone().or_else(|| core.session_keys.get(&s.name).cloned());
                 core.retarget = Some((Target::from_saved(&s), key));
             }
             None => {}
@@ -170,7 +165,8 @@ impl Page {
     }
 
     /// Save the drafted target. `key` is what was typed (`None` = left
-    /// empty); `remember` stores it in `tui.json`.
+    /// empty); `remember` stores it in `tui.json`, otherwise it is kept in
+    /// `core.session_keys` (memory only) for this session.
     fn finish(&mut self, core: &mut Core, data: &Value, key: Option<String>, remember: bool) {
         let name = str_of(data, "name");
         let edit = edit_index(data);
@@ -184,16 +180,16 @@ impl Page {
         };
         if let Some(old) = edit.and_then(|i| core.store.prefs.targets.get(i)) {
             let old_name = old.name.clone();
-            if let Some(k) = self.session_keys.remove(&old_name) {
-                self.session_keys.insert(name.clone(), k);
+            if let Some(k) = core.session_keys.remove(&old_name) {
+                core.session_keys.insert(name.clone(), k);
             }
         }
         match (key, remember) {
             (Some(k), false) => {
-                self.session_keys.insert(name.clone(), k);
+                core.session_keys.insert(name.clone(), k);
             }
             (Some(_), true) => {
-                self.session_keys.remove(&name);
+                core.session_keys.remove(&name);
             }
             (None, _) => {}
         }
@@ -342,7 +338,7 @@ impl Bespoke for Page {
                 let name = str_of(&data, "name");
                 if core.store.prefs.targets.get(i).is_some_and(|t| t.name == name) {
                     core.store.prefs.targets.remove(i);
-                    self.session_keys.remove(&name);
+                    core.session_keys.remove(&name);
                     core.save_prefs();
                     core.toast(ToastKind::Success, format!("{name} deleted"));
                 }
@@ -439,7 +435,12 @@ mod tests {
         let ret = take_ret(core);
         page.on_overlay(core, ret, OverlayResult::Cancelled);
         assert_eq!(core.store.prefs.targets[0].api_key, None);
-        assert_eq!(page.session_keys.get("field").map(String::as_str), Some("k"));
+        assert_eq!(core.session_keys.get("field").map(String::as_str), Some("k"));
+        // The saved entry reports the session key and a connect uses it.
+        let items = page.items(core);
+        page.rows.focus_key(&items, &entry_key(0));
+        page.connect(core);
+        assert_eq!(core.retarget.as_ref().and_then(|(_, k)| k.as_deref()), Some("k"));
     }
 
     #[test]

@@ -78,7 +78,7 @@ pub fn render_cells(frame: &mut Frame, t: &Theme, inner: Rect, cells: Vec<Cell>)
             ),
             Cell::Spark { data, max, color } => {
                 let mut spark = Sparkline::default()
-                    .data(data)
+                    .data(newest(&data, rect.width))
                     .style(Style::default().fg(color));
                 if let Some(m) = max {
                     spark = spark.max(m);
@@ -87,6 +87,13 @@ pub fn render_cells(frame: &mut Frame, t: &Theme, inner: Rect, cells: Vec<Cell>)
             }
         }
     }
+}
+
+/// The newest `width` samples of a series. A sparkline draws from the left
+/// and stops at its width, so a longer history would otherwise show only its
+/// oldest samples.
+pub fn newest<T>(data: &[T], width: u16) -> &[T] {
+    &data[data.len().saturating_sub(usize::from(width))..]
 }
 
 /// A rect `w` × `h` cells, centred in `area` (clamped to it).
@@ -149,6 +156,14 @@ mod tests {
         assert_eq!(scroll_offset(7, 0, 5), 3);
         assert_eq!(scroll_offset(4, 3, 5), 3);
         assert_eq!(scroll_offset(1, 3, 5), 1);
+    }
+
+    #[test]
+    fn a_long_series_keeps_its_newest_samples() {
+        let data: Vec<u64> = (0..150).collect();
+        assert_eq!(newest(&data, 66).first(), Some(&84));
+        assert_eq!(newest(&data, 66).last(), Some(&149));
+        assert_eq!(newest(&data[..10], 66).len(), 10);
     }
 
     #[test]

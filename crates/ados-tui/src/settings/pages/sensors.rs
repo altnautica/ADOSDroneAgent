@@ -2,6 +2,7 @@
 //! and `l` to load a `rig.json` from a path on the machine running this
 //! terminal and store it on the agent.
 
+use std::io::Read;
 use std::path::Path;
 
 use ratatui::layout::Rect;
@@ -10,8 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::Frame;
 use serde_json::{json, Value};
 
-use super::kit;
-use super::rowkit::{self, detail_text, error_code, text_of};
+use super::kit::{self, detail_text, error_code, text_of};
 use crate::app::{Core, FrameOut, Hit};
 use crate::keymap::{Command, PageKeys};
 use crate::overlay::{Overlay, OverlayResult, Ret};
@@ -28,9 +28,28 @@ pub struct Page {
     rows: RowsState,
 }
 
-/// Read and parse a rig file: it must be a JSON object.
+/// The largest rig file this terminal reads.
+pub const RIG_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Read and parse a rig file: a regular file of at most [`RIG_MAX_BYTES`]
+/// holding a JSON object.
 pub fn load_rig(path: &Path) -> Result<Value, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
+    let shown = path.display();
+    let meta = std::fs::metadata(path).map_err(|e| format!("Could not read {shown}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{shown} is not a file. Give the path of the rig JSON file."));
+    }
+    let too_big = || format!("{shown} is larger than 1 MiB; that is not a rig file.");
+    if meta.len() > RIG_MAX_BYTES {
+        return Err(too_big());
+    }
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(RIG_MAX_BYTES + 1).read_to_string(&mut text))
+        .map_err(|e| format!("Could not read {shown}: {e}"))?;
+    if text.len() as u64 > RIG_MAX_BYTES {
+        return Err(too_big());
+    }
     let doc: Value = serde_json::from_str(&text).map_err(|e| format!("Not valid JSON: {e}"))?;
     if !doc.is_object() {
         return Err("The rig file must be a JSON object.".into());
@@ -222,7 +241,7 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        let prefix = rowkit::prefix(BespokeId::Sensors.id());
+        let prefix = kit::prefix(BespokeId::Sensors.id());
         rows_view::render(f, area, core, &items, &mut self.rows, &prefix, true, out);
     }
 
@@ -254,6 +273,24 @@ mod tests {
         let missing = ok.with_file_name("absent.json");
         assert!(load_rig(&missing).unwrap_err().starts_with("Could not read"));
         let _ = std::fs::remove_dir_all(ok.parent().unwrap());
+    }
+
+    #[test]
+    fn rig_load_refuses_a_directory_and_an_oversize_file() {
+        let dir = std::env::temp_dir().join(format!("ados-tui-rig-bounds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = load_rig(&dir).unwrap_err();
+        assert!(err.ends_with("is not a file. Give the path of the rig JSON file."), "{err}");
+        let big = dir.join("big.json");
+        std::fs::write(&big, vec![b' '; RIG_MAX_BYTES as usize + 1]).unwrap();
+        let err = load_rig(&big).unwrap_err();
+        assert!(err.ends_with("is larger than 1 MiB; that is not a rig file."), "{err}");
+        let edge = dir.join("edge.json");
+        let mut body = b"{}".to_vec();
+        body.resize(RIG_MAX_BYTES as usize, b' ');
+        std::fs::write(&edge, body).unwrap();
+        assert!(load_rig(&edge).unwrap().is_object(), "exactly 1 MiB is accepted");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

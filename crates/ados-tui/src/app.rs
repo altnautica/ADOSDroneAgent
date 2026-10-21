@@ -31,6 +31,8 @@ mod dispatch;
 mod effects;
 mod tab_id;
 mod tabs;
+#[cfg(test)]
+mod tests;
 pub use dispatch::at;
 pub use tab_id::{profile_label, TabId};
 pub use tabs::Tabs;
@@ -81,6 +83,9 @@ pub struct FrameOut {
     pub offline_chip: Option<Rect>,
     /// Where to show the text cursor (a focused input).
     pub cursor: Option<(u16, u16)>,
+    /// The value cell of the focused settings row, where an inline edit
+    /// draws its field.
+    pub focus_value: Option<Rect>,
 }
 
 impl FrameOut {
@@ -145,6 +150,12 @@ pub struct Core {
     pub(crate) toasts_in: Vec<u64>,
     pub(crate) toasts_out: Vec<u64>,
     pub auth: auth::AuthCtl,
+    /// Keys entered for a saved target without "remember", by target name.
+    /// Kept in memory only, and carried across a re-target so reconnecting to
+    /// the same target in this session does not ask again.
+    pub session_keys: HashMap<String, String>,
+    /// The tab under the mouse pointer (mouse capture on).
+    pub hover_tab: Option<TabId>,
 }
 
 /// Wall-clock UTC `HH:MM:SS`.
@@ -211,6 +222,8 @@ impl Core {
             toasts_in: Vec::new(),
             toasts_out: Vec::new(),
             auth: auth::AuthCtl::default(),
+            session_keys: HashMap::new(),
+            hover_tab: None,
         };
         if !writable && core.store.path().is_some_and(|p| p.exists()) {
             core.toast(
@@ -245,8 +258,13 @@ impl Core {
         self.res.get(id).and_then(|s| s.value.as_ref())
     }
 
-    /// The newer agent version, when the update check found one.
+    /// The newer agent version, when the update check found one. Local only:
+    /// the check reads this machine's release channel, which says nothing
+    /// about a remote agent's.
     pub fn update_available(&self) -> Option<String> {
+        if self.target.remote {
+            return None;
+        }
         let latest = self.latest.lock().ok().and_then(|g| g.clone())?;
         let installed = &self.dash()?.version;
         crate::update::is_newer(&latest, installed).then_some(latest)
@@ -257,10 +275,20 @@ impl Core {
         self.latest.lock().ok().and_then(|g| g.clone())
     }
 
-    /// `Ok` only when a fresh snapshot reports disarmed.
+    /// `Ok` only when a fresh snapshot says nothing can be flying: a vehicle
+    /// that reports disarmed, or a node with no autopilot (a ground station,
+    /// or a visor with no flight controller link). An unknown arm state on a
+    /// drone is a refusal: a lost FC link can be a vehicle in the air.
     pub fn require_disarmed(&self) -> Result<(), &'static str> {
-        match (self.dash().and_then(|d| d.armed), self.stale()) {
-            (Some(false), false) => Ok(()),
+        let Some(d) = self.dash() else { return Err(ARMED_REFUSAL) };
+        if self.stale() {
+            return Err(ARMED_REFUSAL);
+        }
+        let no_autopilot =
+            d.profile == "ground_station" || (d.profile == "visor" && !d.mavlink_connected);
+        match d.armed {
+            Some(false) => Ok(()),
+            None if no_autopilot => Ok(()),
             _ => Err(ARMED_REFUSAL),
         }
     }
@@ -307,6 +335,14 @@ impl Core {
 
     pub fn fetch_now(&self, id: ResourceId) {
         self.poller.fetch_now(id);
+    }
+
+    /// Re-read everything now: the global poll and every active resource.
+    pub fn refetch_all(&self) {
+        self.poller.refresh();
+        for sub in &self.subs_sent {
+            self.poller.fetch_now(sub.id.clone());
+        }
     }
 
     /// Copy to the clipboard (OSC 52) and say so.

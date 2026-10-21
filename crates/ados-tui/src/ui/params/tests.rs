@@ -113,3 +113,21 @@ fn a_batch_unstages_acked_items_and_reports_the_tally() {
     assert!(texts.iter().any(|t| t == "ATC_RAT_RLL_P: sent, not confirmed"), "{texts:?}");
     assert_eq!(texts.last().map(String::as_str), Some("Wrote 1/2"));
 }
+
+#[test]
+fn a_failed_refetch_does_not_reload_stale_values() {
+    let mut app = params_app();
+    app.tabs.params.store.stage("WPNAV_SPEED", 750.0);
+    app.tabs.params.submit_batch(&mut app.core);
+    let tab = &mut app.tabs.params;
+    tab.batch_item(&mut app.core, "WPNAV_SPEED".into(), 750.0, Ok(json!({"ack": true})));
+    tab.batch_done(&mut app.core);
+    assert_eq!(tab.store.value("WPNAV_SPEED"), Some(750.0));
+
+    // The refetch fails: the slot keeps the pre-write body alongside the error.
+    if let Some(slot) = app.core.res.get_mut(&ResourceId::Params) {
+        slot.error = Some("timed out".into());
+    }
+    app.tabs.params.on_resource(&mut app.core, &ResourceId::Params);
+    assert_eq!(app.tabs.params.store.value("WPNAV_SPEED"), Some(750.0), "confirmed write kept");
+}

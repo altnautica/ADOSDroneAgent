@@ -127,17 +127,7 @@ impl Store {
 
     /// Stage `value`; staging the live value removes the entry.
     pub fn stage(&mut self, name: &str, value: f64) -> StageOutcome {
-        if self.read_only(name) {
-            return StageOutcome::ReadOnly;
-        }
-        let live = self.value(name);
-        let outcome = if live.is_some_and(|l| same(l, value)) {
-            self.staged.remove(name);
-            StageOutcome::Unchanged
-        } else {
-            self.staged.insert(name.to_string(), Staged { value, base: live });
-            StageOutcome::Staged
-        };
+        let outcome = self.stage_quiet(name, value);
         self.rebuild();
         outcome
     }
@@ -146,6 +136,27 @@ impl Store {
         let had = self.staged.remove(name).is_some();
         self.rebuild();
         had
+    }
+
+    /// Run several staging edits, recomputing the view once at the end.
+    pub fn batch<R>(&mut self, edit: impl FnOnce(&mut StagingBatch<'_>) -> R) -> R {
+        let out = edit(&mut StagingBatch { store: self });
+        self.rebuild();
+        out
+    }
+
+    fn stage_quiet(&mut self, name: &str, value: f64) -> StageOutcome {
+        if self.read_only(name) {
+            return StageOutcome::ReadOnly;
+        }
+        let live = self.value(name);
+        if live.is_some_and(|l| same(l, value)) {
+            self.staged.remove(name);
+            StageOutcome::Unchanged
+        } else {
+            self.staged.insert(name.to_string(), Staged { value, base: live });
+            StageOutcome::Staged
+        }
     }
 
     /// Drop every staged edit; returns how many there were.
@@ -300,6 +311,27 @@ impl Store {
         }
         scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
         self.visible = scored.into_iter().map(|(_, n)| n).collect();
+    }
+}
+
+/// Staging edits inside [`Store::batch`]; the view is recomputed once when the
+/// batch ends instead of after every edit.
+pub struct StagingBatch<'a> {
+    store: &'a mut Store,
+}
+
+impl StagingBatch<'_> {
+    pub fn value(&self, name: &str) -> Option<f64> {
+        self.store.value(name)
+    }
+
+    /// Same rules as [`Store::stage`].
+    pub fn stage(&mut self, name: &str, value: f64) -> StageOutcome {
+        self.store.stage_quiet(name, value)
+    }
+
+    pub fn unstage(&mut self, name: &str) -> bool {
+        self.store.staged.remove(name).is_some()
     }
 }
 

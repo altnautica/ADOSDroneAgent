@@ -84,7 +84,9 @@ pub fn render(frame: &mut Frame, app: &mut App) -> FrameOut {
     let tab = tabs.get_mut(core.tab, &profile);
     tab.render(frame, inner, core, &mut out);
 
-    let context = if core.overlays.is_empty() {
+    // The focused row's help stays visible while it is edited in place.
+    let inline_edit = matches!(core.overlays.last(), Some(crate::overlay::Overlay::Input(s)) if s.inline);
+    let context = if core.overlays.is_empty() || inline_edit {
         tab.context_line(core)
     } else {
         None

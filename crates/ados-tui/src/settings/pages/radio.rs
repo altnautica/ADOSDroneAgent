@@ -5,14 +5,13 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 use serde_json::{json, Value};
 
-use super::kit;
-use super::rowkit::{self, detail_text, text_of};
+use super::kit::{self, detail_text, text_of};
 use crate::app::{Core, FrameOut, Hit};
 use crate::keymap::Command;
 use crate::overlay::{OverlayResult, Ret};
 use crate::poll::{ResourceId, Sub};
 use crate::settings::page::{Bespoke, BespokeId};
-use crate::settings::row::{self, EditRow};
+use crate::settings::row;
 use crate::settings::rows_view::{self, info, note, Item, RowsState};
 use crate::settings::schema::Kind;
 use crate::toast::ToastKind;
@@ -28,28 +27,17 @@ pub struct Page {
     rows: RowsState,
 }
 
-/// The TX-power row kind: 0 up to the radio's ceiling.
+/// The agent's TX-power floor: it refuses anything below 1 dBm.
+pub const TX_POWER_FLOOR_DBM: i64 = 1;
+
+/// The TX-power row kind: the agent's floor up to the radio's ceiling.
 pub fn tx_power_kind(max: Option<i64>) -> Kind {
-    Kind::Int { min: Some(0), max }
+    Kind::Int { min: Some(TX_POWER_FLOOR_DBM), max }
 }
 
 /// Parse a typed TX power against the ceiling.
 pub fn parse_tx_power(text: &str, max: Option<i64>) -> Result<i64, String> {
     row::parse(&tx_power_kind(max), text).map(|v| v.as_i64().unwrap_or_default())
-}
-
-fn int_row(key: &str, label: &str, help: &str, kind: Kind, value: Option<&Value>) -> EditRow {
-    EditRow {
-        key: key.into(),
-        label: label.into(),
-        help: help.into(),
-        kind,
-        value: value.cloned(),
-        default: None,
-        secret: false,
-        nullable: false,
-        read_only: false,
-    }
 }
 
 impl Page {
@@ -68,19 +56,19 @@ impl Page {
             });
             return items;
         };
-        items.push(Item::Row(int_row(
+        items.push(Item::Row(kit::row(
             "channel",
             "Channel",
             CHANNEL_HINT,
             Kind::Int { min: Some(1), max: None },
-            w.get("channel"),
+            w.get("channel").cloned(),
         )));
-        items.push(Item::Row(int_row(
+        items.push(Item::Row(kit::row(
             "tx_power",
             "TX power dBm",
             TX_HINT,
             tx_power_kind(Self::tx_max(core)),
-            w.get("tx_power_dbm"),
+            w.get("tx_power_dbm").cloned(),
         )));
         items.push(info(core, "Live channel", text_of(w.get("actual_channel"))));
         let freq = w
@@ -130,7 +118,7 @@ impl Bespoke for Page {
         match cmd {
             Command::Activate => {
                 if let Some(row) = self.rows.focused_row(&items).cloned() {
-                    rowkit::config_edit(core, ROUTE, &row);
+                    kit::open_editor(core, ROUTE, &row);
                 }
             }
             Command::Copy => {
@@ -146,7 +134,7 @@ impl Bespoke for Page {
     }
 
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        if ret.tag != rowkit::CONFIG_EDIT {
+        if ret.tag != kit::CONFIG_EDIT {
             return;
         }
         let key = ret.data.as_str().unwrap_or_default().to_string();
@@ -164,7 +152,7 @@ impl Bespoke for Page {
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
         let Purpose::Page { tag, data } = &reply.purpose else { return };
-        let row = format!("{}{tag}", rowkit::prefix(BespokeId::Radio.id()));
+        let row = format!("{}{tag}", kit::prefix(BespokeId::Radio.id()));
         match (&reply.result, *tag) {
             (Ok(body), "channel") => {
                 let target = body.get("target_channel").cloned().unwrap_or_else(|| data.clone());
@@ -198,7 +186,7 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        let prefix = rowkit::prefix(BespokeId::Radio.id());
+        let prefix = kit::prefix(BespokeId::Radio.id());
         rows_view::render(f, area, core, &items, &mut self.rows, &prefix, true, out);
     }
 
@@ -215,9 +203,9 @@ mod tests {
     #[test]
     fn tx_power_is_bounded_by_the_ceiling() {
         assert_eq!(parse_tx_power("12", Some(15)), Ok(12));
-        assert_eq!(parse_tx_power("0", Some(15)), Ok(0));
+        assert_eq!(parse_tx_power("1", Some(15)), Ok(1));
         assert_eq!(parse_tx_power("16", Some(15)), Err("Maximum is 15".into()));
-        assert_eq!(parse_tx_power("-1", Some(15)), Err("Minimum is 0".into()));
+        assert_eq!(parse_tx_power("0", Some(15)), Err("Minimum is 1".into()), "the agent refuses 0 dBm");
         assert!(parse_tx_power("loud", Some(15)).is_err());
         assert_eq!(parse_tx_power("30", None), Ok(30));
     }

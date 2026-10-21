@@ -6,15 +6,14 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 use serde_json::{json, Value};
 
-use super::kit;
-use super::rowkit::{self, detail_text, text_of};
+use super::kit::{self, detail_text, text_of};
 use crate::app::{Core, FrameOut, Hit};
 use crate::keymap::Command;
 use crate::overlay::{OverlayResult, Ret};
 use crate::poll::{ResourceId, Sub};
 use crate::settings::config_rows;
 use crate::settings::page::{Bespoke, BespokeId};
-use crate::settings::row::{self, EditRow};
+use crate::settings::row;
 use crate::settings::rows_view::{self, info, note, Item, RowsState};
 use crate::settings::schema::Kind;
 use crate::toast::ToastKind;
@@ -35,20 +34,6 @@ pub struct Page {
 
 fn is_gs(core: &Core) -> bool {
     core.profile() == "ground_station"
-}
-
-fn gs_row(key: &str, label: &str, help: &str, kind: Kind, value: Option<Value>) -> EditRow {
-    EditRow {
-        key: key.into(),
-        label: label.into(),
-        help: help.into(),
-        kind,
-        value,
-        default: None,
-        secret: false,
-        nullable: false,
-        read_only: false,
-    }
 }
 
 /// The data cap in GB from the modem view's `cap_mb` (null = no cap).
@@ -98,15 +83,15 @@ impl Page {
         items.push(Item::Header("Cellular uplink".into()));
         match modem {
             Some(m) => {
-                items.push(Item::Row(gs_row("enabled", "Enabled", ENABLED_HINT_GS, Kind::Bool, m.get("enabled").cloned())));
-                items.push(Item::Row(gs_row(
+                items.push(Item::Row(kit::row("enabled", "Enabled", ENABLED_HINT_GS, Kind::Bool, m.get("enabled").cloned())));
+                items.push(Item::Row(kit::row(
                     "apn",
                     "APN",
                     APN_HINT,
                     Kind::Str { pattern: None },
                     Some(m.get("apn").cloned().unwrap_or(Value::Null)),
                 )));
-                items.push(Item::Row(gs_row(
+                items.push(Item::Row(kit::row(
                     "cap_gb",
                     "Data cap (GB)",
                     CAP_HINT,
@@ -189,27 +174,24 @@ impl Bespoke for Page {
         };
         let page = BespokeId::Cellular.id();
         match cmd {
+            Command::Left | Command::Right if is_gs(core) => {
+                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd == Command::Right) {
+                    Self::put_modem(core, &row.key, next);
+                }
+            }
             Command::Left | Command::Right => {
-                let forward = cmd == Command::Right;
-                if is_gs(core) {
-                    if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), forward) {
+                kit::config_cycle(core, ROUTE, page, &row, cmd == Command::Right);
+            }
+            Command::Activate if is_gs(core) => {
+                if row.kind == Kind::Bool {
+                    if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), true) {
                         Self::put_modem(core, &row.key, next);
                     }
                 } else {
-                    rowkit::config_cycle(core, ROUTE, page, &row, forward);
+                    kit::open_editor(core, ROUTE, &row);
                 }
             }
-            Command::Activate => {
-                if is_gs(core) {
-                    if row.kind == Kind::Bool {
-                        Self::put_modem(core, &row.key, json!(!row.value.as_ref().and_then(Value::as_bool).unwrap_or(false)));
-                    } else {
-                        rowkit::config_edit(core, ROUTE, &row);
-                    }
-                } else {
-                    rowkit::config_edit(core, ROUTE, &row);
-                }
-            }
+            Command::Activate => kit::config_edit(core, ROUTE, page, &row),
             Command::Copy => core.copy(&row::display(&row.kind, row.value.as_ref(), false, true)),
             _ => return false,
         }
@@ -217,12 +199,12 @@ impl Bespoke for Page {
     }
 
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        if ret.tag != rowkit::CONFIG_EDIT {
+        if ret.tag != kit::CONFIG_EDIT {
             return;
         }
         let key = ret.data.as_str().unwrap_or_default();
         let items = self.items(core);
-        let Some(row) = rowkit::find_row(&items, key).cloned() else { return };
+        let Some(row) = kit::find_row(&items, key).cloned() else { return };
         if is_gs(core) {
             match row::value_from_result(&row.kind, &result) {
                 Some(Ok(v)) => Self::put_modem(core, &row.key, v),
@@ -230,18 +212,18 @@ impl Bespoke for Page {
                 None => {}
             }
         } else {
-            rowkit::config_result(core, ROUTE, BespokeId::Cellular.id(), &row, &result);
+            kit::config_result(core, ROUTE, BespokeId::Cellular.id(), &row, &result);
         }
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
         let items = self.items(core);
-        if rowkit::config_reply(core, &items, &reply) {
+        if kit::config_reply(core, &items, &reply) {
             return;
         }
         if let Purpose::Page { tag: "modem", data } = &reply.purpose {
             let field = data.get("field").and_then(Value::as_str).unwrap_or_default();
-            let row = format!("{}{field}", rowkit::prefix(BespokeId::Cellular.id()));
+            let row = format!("{}{field}", kit::prefix(BespokeId::Cellular.id()));
             match &reply.result {
                 Ok(_) => {
                     core.toast(ToastKind::Success, saved_text(field, &data["value"]));
@@ -263,7 +245,7 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        let prefix = rowkit::prefix(BespokeId::Cellular.id());
+        let prefix = kit::prefix(BespokeId::Cellular.id());
         rows_view::render(f, area, core, &items, &mut self.rows, &prefix, true, out);
     }
 

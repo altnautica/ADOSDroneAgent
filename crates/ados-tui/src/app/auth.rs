@@ -5,6 +5,8 @@
 //! The shell stays drawn behind the prompt and every tab keeps working; data
 //! panels simply read the failure until a key or PIN is accepted.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{json, Value};
 use tui_input::Input;
 
@@ -29,6 +31,17 @@ pub struct AuthCtl {
     /// The operator closed the prompt: do not reopen it on every poll. A
     /// manual refresh clears this.
     pub dismissed: bool,
+    /// When a key or PIN session was last set. Requests already in flight
+    /// went out without it, so their refusals are not about the new one.
+    changed_at: Option<Instant>,
+}
+
+/// How long after a credential change a refusal is assumed to be from a
+/// request that left before it (one request timeout).
+const IN_FLIGHT: Duration = Duration::from_secs(8);
+
+fn mark_changed(core: &mut Core) {
+    core.auth.changed_at = Some(Instant::now());
 }
 
 fn req(method: &'static str, path: &str, tag: &'static str) -> Request {
@@ -70,13 +83,32 @@ fn open(core: &mut Core, mode: AuthMode, message: Option<String>) {
     }));
 }
 
-/// A read was refused: 401 (`forbidden == false`) or 403.
-pub fn on_denied(core: &mut Core, forbidden: bool) {
+/// A request was refused with `code` (401 or 403). `read` is true for polls
+/// and resource reads, false for a write the operator asked for.
+///
+/// A 401 means the key (or an expired PIN session) is missing. A 403 is a PIN
+/// prompt only for a read on an unpaired agent: the agent also answers 403 for
+/// refusals that have nothing to do with the dashboard PIN (an extension
+/// lifecycle refusal, an MCP scope), and those must not drop a working
+/// session.
+pub fn on_denied(core: &mut Core, code: u16, read: bool) {
     if auth_open(core) || core.auth.busy || core.auth.dismissed {
         return;
     }
+    if core.auth.changed_at.is_some_and(|t| t.elapsed() < IN_FLIGHT) {
+        return;
+    }
+    let unpaired = core.auth.paired == Some(false);
     let has_session = core.client.auth().session.is_some();
-    if forbidden || (has_session && core.auth.paired == Some(false)) {
+    let pin = match code {
+        403 => read && unpaired,
+        401 => unpaired && has_session,
+        _ => return,
+    };
+    if code == 403 && !pin {
+        return;
+    }
+    if pin {
         // A PIN session is needed (or the one held expired).
         if has_session {
             core.client.set_session(None);
@@ -155,7 +187,7 @@ pub fn remember(core: &mut Core, yes: bool) {
         core.save_prefs();
         core.toast(ToastKind::Success, format!("Key saved for {name}"));
     }
-    core.poller.refresh();
+    core.refetch_all();
 }
 
 fn unix_to_hms(secs: f64) -> String {
@@ -180,7 +212,8 @@ pub fn on_reply(core: &mut Core, reply: Reply) {
                         a.offer_remember = true;
                         a.message = None;
                     }
-                    core.poller.refresh();
+                    mark_changed(core);
+                    core.refetch_all();
                     let _ = data;
                 }
                 Err(e) if matches!(e.code(), Some(401) | Some(403)) => {
@@ -216,9 +249,10 @@ pub fn on_reply(core: &mut Core, reply: Reply) {
                 Ok(v) => match v.get("session").and_then(Value::as_str) {
                     Some(session) => {
                         core.client.set_session(Some(session.to_string()));
+                        mark_changed(core);
                         core.overlays.retain(|o| !matches!(o, Overlay::Auth(_)));
                         core.toast(ToastKind::Success, "PIN accepted");
-                        core.poller.refresh();
+                        core.refetch_all();
                     }
                     None => set_message(core, "The agent returned no session"),
                 },

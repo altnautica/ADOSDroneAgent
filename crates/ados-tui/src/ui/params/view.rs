@@ -229,10 +229,9 @@ fn table(tab: &mut ParamsTab, f: &mut Frame, area: Rect, core: &Core, out: &mut 
     let t = &core.theme;
     let body_h = area.height.saturating_sub(1) as usize;
     tab.off = scroll_offset(tab.sel, tab.off, body_h);
-    let visible = tab.store.visible().to_vec();
+    let tab: &ParamsTab = tab;
     let mut rows = Vec::new();
-    for (row, i) in (tab.off..visible.len()).take(body_h).enumerate() {
-        let name = &visible[i];
+    for (row, (i, name)) in tab.store.visible().iter().enumerate().skip(tab.off).take(body_h).enumerate() {
         let meta = tab.store.meta(name);
         let staged = tab.store.staged_value(name);
         let value = staged.or(tab.store.value(name));

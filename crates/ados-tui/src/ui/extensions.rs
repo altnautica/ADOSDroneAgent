@@ -44,9 +44,22 @@ enum Entry {
     Catalog(CatalogEntry),
 }
 
+impl Entry {
+    /// What the selection remembers: the section and the plugin id.
+    fn key(&self) -> (bool, String) {
+        match self {
+            Entry::Installed(i) => (true, i.id.clone()),
+            Entry::Catalog(c) => (false, c.id.clone()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ExtensionsTab {
     sel: usize,
+    /// The selected entry (installed?, plugin id), so a list refresh that
+    /// reorders or grows the list keeps the same plugin selected.
+    sel_key: Option<(bool, String)>,
     list_offset: usize,
     focus: Focus,
     detail_scroll: u16,
@@ -116,11 +129,30 @@ impl ExtensionsTab {
         self.pane.as_ref().is_some_and(|p| p.has_rows(core))
     }
 
+    /// Select index `sel`; the detail scroll resets only when this lands on a
+    /// different plugin than before.
     fn select(&mut self, core: &Core, sel: usize) {
         let n = Self::count(core);
         self.sel = sel.min(n.saturating_sub(1));
-        self.detail_scroll = 0;
+        let key = self.selected(core).map(|e| e.key());
+        if key != self.sel_key {
+            self.detail_scroll = 0;
+            self.sel_key = key;
+        }
         self.sync_pane(core);
+    }
+
+    /// After a list refresh: find the remembered plugin again (an install moves
+    /// it from the catalog to the installed section), else keep the index.
+    fn reselect(&mut self, core: &Core) {
+        let found = self.sel_key.as_ref().and_then(|(_, id)| {
+            let (installs, catalog) = entries(core);
+            installs
+                .iter()
+                .position(|i| i.id == *id)
+                .or_else(|| catalog.iter().position(|c| c.id == *id).map(|p| p + installs.len()))
+        });
+        self.select(core, found.unwrap_or(self.sel));
     }
 
     fn cycle_focus(&mut self, core: &Core, forward: bool) {
@@ -274,8 +306,7 @@ impl Tab for ExtensionsTab {
 
     fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
         if matches!(id, ResourceId::Plugins | ResourceId::PluginsCatalog) {
-            let sel = self.sel;
-            self.select(core, sel);
+            self.reselect(core);
         }
     }
 

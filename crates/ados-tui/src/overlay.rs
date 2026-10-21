@@ -77,6 +77,8 @@ pub struct InputState {
     pub error: Option<String>,
     /// A dim line under the field.
     pub hint: Option<String>,
+    /// Draw the field on the focused settings row instead of in a dialog.
+    pub inline: bool,
     pub ret: Ret,
 }
 
@@ -212,6 +214,7 @@ impl Overlay {
             validate: None,
             error: None,
             hint: None,
+            inline: false,
             ret,
         }
     }

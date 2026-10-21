@@ -125,6 +125,9 @@ pub enum LogMsg {
     Down(String),
 }
 
+/// The comment the agent sends just before closing a stream it cannot serve.
+const STORE_UNAVAILABLE: &str = "logging store unavailable";
+
 /// Server-sent-events framing: `data:` lines accumulate until a blank line
 /// ends the event; `:` comment lines are keep-alives (the last one is kept as
 /// the close reason); other fields are ignored.
@@ -133,6 +136,9 @@ pub struct SseParser {
     data: Vec<String>,
     /// The text of the last comment line seen.
     pub last_comment: Option<String>,
+    /// A complete `data:` event or a keep-alive arrived: the stream is really
+    /// serving. The store-unavailable notice does not count.
+    live: bool,
 }
 
 impl SseParser {
@@ -145,10 +151,14 @@ impl SseParser {
             }
             let payload = self.data.join("\n");
             self.data.clear();
+            self.live = true;
             return Some(payload);
         }
         if let Some(comment) = line.strip_prefix(':') {
             let comment = comment.trim();
+            if comment != STORE_UNAVAILABLE {
+                self.live = true;
+            }
             if !comment.is_empty() {
                 self.last_comment = Some(comment.to_string());
             }
@@ -158,6 +168,11 @@ impl SseParser {
             self.data.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
         }
         None
+    }
+
+    /// Whether the stream has shown it is serving (see [`SseParser::line`]).
+    pub fn live(&self) -> bool {
+        self.live
     }
 }
 
@@ -267,10 +282,11 @@ fn read_stream(client: &RestClient, path: &str, stop: &AtomicBool, tx: &Sender<L
             return;
         }
     };
-    if stop.load(Ordering::Relaxed) || tx.send(LogMsg::Up).is_err() {
-        return;
-    }
+    // Headers alone do not prove the stream works: the agent opens it and
+    // then closes with a store-unavailable comment. `Up` waits for a real
+    // event or keep-alive.
     let mut parser = SseParser::default();
+    let mut up = false;
     for line in BufReader::new(reader).lines() {
         if stop.load(Ordering::Relaxed) {
             return;
@@ -282,7 +298,14 @@ fn read_stream(client: &RestClient, path: &str, stop: &AtomicBool, tx: &Sender<L
                 return;
             }
         };
-        let Some(payload) = parser.line(&line) else { continue };
+        let payload = parser.line(&line);
+        if !up && parser.live() {
+            up = true;
+            if tx.send(LogMsg::Up).is_err() {
+                return;
+            }
+        }
+        let Some(payload) = payload else { continue };
         let entry = serde_json::from_str::<Value>(&payload)
             .ok()
             .and_then(|v| LogEntry::from_value(&v));
@@ -331,6 +354,26 @@ mod tests {
         assert_eq!(p.line(": ping"), None);
         assert_eq!(p.line("\r").as_deref(), Some("{\"seq\":2}"));
         assert_eq!(p.last_comment.as_deref(), Some("ping"));
+    }
+
+    #[test]
+    fn sse_liveness_needs_an_event_or_keep_alive() {
+        let mut closed = SseParser::default();
+        closed.line(": logging store unavailable");
+        closed.line("");
+        assert!(!closed.live(), "the unavailable notice is not a live stream");
+        assert_eq!(closed.last_comment.as_deref(), Some(STORE_UNAVAILABLE));
+
+        let mut ping = SseParser::default();
+        assert!(!ping.live());
+        ping.line(": keep-alive");
+        assert!(ping.live());
+
+        let mut data = SseParser::default();
+        data.line("data: {\"seq\":1}");
+        assert!(!data.live(), "an unfinished event is not yet live");
+        data.line("");
+        assert!(data.live());
     }
 
     #[test]

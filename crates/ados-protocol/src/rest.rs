@@ -213,7 +213,7 @@ impl RestClient {
     ) -> Result<Value, RestError> {
         let req = self.request(&self.agent, method, path).timeout(timeout);
         let result = match body {
-            Some(b) => req.send_json(b.clone()),
+            Some(b) => req.send_json(b),
             None => req.call(),
         };
         match result {

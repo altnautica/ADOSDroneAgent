@@ -299,6 +299,9 @@ fn spawn_resources(client: RestClient, tx: Sender<PollMsg>, ctl: Receiver<ResCtl
     });
 }
 
+/// The status text while the agent refuses this session's credentials.
+pub const LOCKED: &str = "Locked: API key or dashboard PIN required";
+
 /// What the render loop knows about the agent's global status.
 #[derive(Default)]
 pub struct AgentView {
@@ -340,9 +343,19 @@ impl AgentView {
             }
             Err(e) => {
                 self.error_code = e.code();
-                self.error = Some(format!("Agent unreachable: {e}"));
+                // The agent answered: a refusal is a lock, not an outage.
+                self.error = Some(if matches!(e.code(), Some(401) | Some(403)) {
+                    LOCKED.to_string()
+                } else {
+                    format!("Agent unreachable: {e}")
+                });
             }
         }
+    }
+
+    /// Whether the last poll was refused for missing credentials.
+    pub fn locked(&self) -> bool {
+        matches!(self.error_code, Some(401) | Some(403))
     }
 
     /// Whether the shown snapshot is older than `after`.
