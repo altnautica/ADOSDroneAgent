@@ -8,9 +8,17 @@ use serde_json::{Map, Value};
 #[derive(Debug, Clone, PartialEq)]
 pub enum Kind {
     Bool,
-    Int { min: Option<i64>, max: Option<i64> },
-    Num { min: Option<f64>, max: Option<f64> },
-    Str { pattern: Option<String> },
+    Int {
+        min: Option<i64>,
+        max: Option<i64>,
+    },
+    Num {
+        min: Option<f64>,
+        max: Option<f64>,
+    },
+    Str {
+        pattern: Option<String>,
+    },
     Enum(Vec<Value>),
     /// Arrays and objects with no scalar leaves: shown, not edited.
     Opaque,
@@ -62,7 +70,9 @@ fn deref<'a>(root: &'a Value, node: &'a Value) -> &'a Value {
     for _ in 0..16 {
         match cur.get("$ref").and_then(Value::as_str) {
             Some(r) => {
-                let Some(path) = r.strip_prefix("#/") else { return cur };
+                let Some(path) = r.strip_prefix("#/") else {
+                    return cur;
+                };
                 let target = path.split('/').try_fold(root, |acc, k| acc.get(k));
                 match target {
                     Some(t) => cur = t,
@@ -104,7 +114,10 @@ fn kind_of(node: &Value) -> Kind {
             max: node.get("maximum").and_then(Value::as_f64),
         },
         Some("string") => Kind::Str {
-            pattern: node.get("pattern").and_then(Value::as_str).map(str::to_string),
+            pattern: node
+                .get("pattern")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         },
         _ => Kind::Opaque,
     }
@@ -137,7 +150,10 @@ fn walk(root: &Value, props: &Map<String, Value>, prefix: &str, out: &mut Vec<Le
             default: raw.get("default").or_else(|| node.get("default")).cloned(),
             description: text("description"),
             title: text("title"),
-            secret: raw.get("x-secret").or_else(|| node.get("x-secret")).and_then(Value::as_bool)
+            secret: raw
+                .get("x-secret")
+                .or_else(|| node.get("x-secret"))
+                .and_then(Value::as_bool)
                 == Some(true),
             nullable,
             key,
@@ -194,20 +210,43 @@ mod tests {
     #[test]
     fn leaves_carry_kinds_bounds_and_secrets() {
         let leaves = flatten(&fixture());
-        let by = |k: &str| leaves.iter().find(|l| l.key == k).unwrap_or_else(|| panic!("{k} missing: {leaves:?}"));
-        assert_eq!(by("mavlink.source").kind, Kind::Enum(vec![json!("auto"), json!("serial")]));
-        assert_eq!(by("mavlink.baud_rate").kind, Kind::Int { min: None, max: None });
+        let by = |k: &str| {
+            leaves
+                .iter()
+                .find(|l| l.key == k)
+                .unwrap_or_else(|| panic!("{k} missing: {leaves:?}"))
+        };
+        assert_eq!(
+            by("mavlink.source").kind,
+            Kind::Enum(vec![json!("auto"), json!("serial")])
+        );
+        assert_eq!(
+            by("mavlink.baud_rate").kind,
+            Kind::Int {
+                min: None,
+                max: None
+            }
+        );
         assert_eq!(by("mavlink.endpoints").kind, Kind::Opaque);
         assert_eq!(
             by("battery.low_cell_mv").kind,
-            Kind::Int { min: Some(2500), max: Some(4200) }
+            Kind::Int {
+                min: Some(2500),
+                max: Some(4200)
+            }
         );
         // A nullable object recurses into its leaves.
         assert_eq!(by("battery.gauge.enabled").kind, Kind::Bool);
         // A nullable scalar keeps its bounds and is marked clearable.
         let cap = by("battery.capacity_mah");
         assert!(cap.nullable);
-        assert_eq!(cap.kind, Kind::Int { min: Some(1), max: None });
+        assert_eq!(
+            cap.kind,
+            Kind::Int {
+                min: Some(1),
+                max: None
+            }
+        );
         assert_eq!(cap.description.as_deref(), Some("Pack size"));
         assert!(by("api.api_key").secret);
         assert!(!by("mavlink.source").secret);

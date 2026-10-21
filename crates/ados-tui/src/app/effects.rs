@@ -84,7 +84,10 @@ impl App {
     pub fn needs_frame(&self) -> bool {
         self.core.dirty
             || self.core.fx.running()
-            || self.tabs.get(self.core.tab, self.core.profile()).animating(&self.core)
+            || self
+                .tabs
+                .get(self.core.tab, self.core.profile())
+                .animating(&self.core)
             || self
                 .core
                 .toasts

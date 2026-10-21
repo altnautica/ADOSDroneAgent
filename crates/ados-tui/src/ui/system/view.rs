@@ -14,7 +14,13 @@ use crate::poll::ResourceId;
 use crate::ui::widgets::{kv, kv_text, panel, render_cells, scroll_offset, truncate, Cell};
 
 /// Draw the tab; returns the new per-pane scroll offsets.
-pub fn render(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: &mut FrameOut) -> [usize; 3] {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    core: &Core,
+    tab: &SystemTab,
+    out: &mut FrameOut,
+) -> [usize; 3] {
     let hw_len = hw_items(core).len() as u16;
     let rows = Layout::vertical([
         Constraint::Length(8),
@@ -31,7 +37,8 @@ pub fn render(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: &mut
     resources(f, top[0], core, tab);
     temperatures(f, top[1], core);
     agent(f, top[2], core);
-    let mid = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
+    let mid =
+        Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)]).split(rows[1]);
     let mut offsets = tab.offsets;
     offsets[0] = services_table(f, mid[0], core, tab, out);
     offsets[1] = peripherals_table(f, mid[1], core, tab, out);
@@ -49,12 +56,18 @@ fn resources(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let Some(v) = core.value(&ResourceId::System) else {
-        f.render_widget(Paragraph::new(Span::styled(loading(core, &ResourceId::System), t.dim())), inner);
+        f.render_widget(
+            Paragraph::new(Span::styled(loading(core, &ResourceId::System), t.dim())),
+            inner,
+        );
         return;
     };
     let Some(cpu) = num(v, "cpu_percent") else {
         f.render_widget(
-            Paragraph::new(Span::styled("Resource figures unavailable on this node", t.dim())),
+            Paragraph::new(Span::styled(
+                "Resource figures unavailable on this node",
+                t.dim(),
+            )),
             inner,
         );
         return;
@@ -64,27 +77,39 @@ fn resources(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab) {
         p if p >= 75.0 => t.warning(),
         _ => t.accent(),
     };
-    let cores = v.get("cpu_count").and_then(Value::as_u64).map(|n| format!(" · {n} cores")).unwrap_or_default();
+    let cores = v
+        .get("cpu_count")
+        .and_then(Value::as_u64)
+        .map(|n| format!(" · {n} cores"))
+        .unwrap_or_default();
     let mut cells = vec![
-        Cell::Gauge { ratio: cpu / 100.0, label: format!("CPU {cpu:.1}%{cores}"), color: gauge_color(cpu) },
+        Cell::Gauge {
+            ratio: cpu / 100.0,
+            label: format!("CPU {cpu:.1}%{cores}"),
+            color: gauge_color(cpu),
+        },
         Cell::Spark {
             data: tab.cpu.iter().map(|c| c.round().max(0.0) as u64).collect(),
             max: Some(100),
             color: t.accent(),
         },
     ];
-    if let (Some(pct), Some(used), Some(total)) =
-        (num(v, "memory_percent"), num(v, "memory_used_mb"), num(v, "memory_total_mb"))
-    {
+    if let (Some(pct), Some(used), Some(total)) = (
+        num(v, "memory_percent"),
+        num(v, "memory_used_mb"),
+        num(v, "memory_total_mb"),
+    ) {
         cells.push(Cell::Gauge {
             ratio: pct / 100.0,
             label: format!("Memory {used:.0}/{total:.0} MB ({pct:.0}%)"),
             color: gauge_color(pct),
         });
     }
-    if let (Some(pct), Some(used), Some(total)) =
-        (num(v, "disk_percent"), num(v, "disk_used_gb"), num(v, "disk_total_gb"))
-    {
+    if let (Some(pct), Some(used), Some(total)) = (
+        num(v, "disk_percent"),
+        num(v, "disk_used_gb"),
+        num(v, "disk_total_gb"),
+    ) {
         cells.push(Cell::Gauge {
             ratio: pct / 100.0,
             label: format!("Disk {used:.1}/{total:.1} GB ({pct:.0}%)"),
@@ -93,7 +118,12 @@ fn resources(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab) {
     }
     if let (Some(pct), Some(total)) = (num(v, "swap_percent"), num(v, "swap_total_mb")) {
         if total > 0.0 {
-            cells.push(Cell::Line(kv_text(t, "Swap", 6, format!("{pct:.0}% of {total:.0} MB"))));
+            cells.push(Cell::Line(kv_text(
+                t,
+                "Swap",
+                6,
+                format!("{pct:.0}% of {total:.0} MB"),
+            )));
         }
     }
     render_cells(f, t, inner, cells);
@@ -115,10 +145,17 @@ fn temperatures(f: &mut Frame, area: Rect, core: &Core) {
         .value(&ResourceId::System)
         .and_then(|v| v.get("temperatures"))
         .and_then(Value::as_object)
-        .map(|m| m.iter().filter_map(|(k, v)| v.as_f64().map(|c| (k.clone(), c))).collect())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_f64().map(|c| (k.clone(), c)))
+                .collect()
+        })
         .unwrap_or_default();
     if temps.is_empty() {
-        f.render_widget(Paragraph::new(Span::styled("No sensors reported", t.dim())), inner);
+        f.render_widget(
+            Paragraph::new(Span::styled("No sensors reported", t.dim())),
+            inner,
+        );
         return;
     }
     let w = (inner.width as usize).saturating_sub(12).max(4);
@@ -146,7 +183,10 @@ fn agent(f: &mut Frame, area: Rect, core: &Core) {
     let block = panel(t, core.sym, "Agent");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let version = core.dash().map(|d| d.version.clone()).filter(|v| !v.is_empty());
+    let version = core
+        .dash()
+        .map(|d| d.version.clone())
+        .filter(|v| !v.is_empty());
     let latest = core.latest_version();
     let latest_span = match (&latest, core.update_available()) {
         (_, Some(newer)) => Span::styled(format!("{newer} ⬆ update available"), t.accent_bold()),
@@ -166,12 +206,23 @@ fn agent(f: &mut Frame, area: Rect, core: &Core) {
     ];
     let key = |k: &str, what: &str, on: bool| {
         Line::from(vec![
-            Span::styled(format!("{k:<2}"), if on { t.accent_bold() } else { t.dim() }),
+            Span::styled(
+                format!("{k:<2}"),
+                if on { t.accent_bold() } else { t.dim() },
+            ),
             Span::styled(what.to_string(), if on { t.text() } else { t.dim() }),
         ])
     };
     let local = !core.target.remote;
-    lines.push(key("u", if local { "update the agent" } else { "update (local only)" }, local));
+    lines.push(key(
+        "u",
+        if local {
+            "update the agent"
+        } else {
+            "update (local only)"
+        },
+        local,
+    ));
     lines.push(key("S", "restart the supervisor", true));
     lines.push(key("X", "reboot the host", true));
     f.render_widget(Paragraph::new(lines), inner);
@@ -190,10 +241,20 @@ fn list(
 ) -> usize {
     let height = inner.height as usize;
     let offset = sel.map_or(0, |(s, o)| scroll_offset(s, o, height));
-    for (row, (i, line)) in rows.into_iter().enumerate().skip(offset).take(height).enumerate() {
+    for (row, (i, line)) in rows
+        .into_iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .enumerate()
+    {
         let focused = sel.is_some_and(|(s, _)| s == i);
         let mut spans = vec![Span::styled(
-            if focused { format!("{} ", core.sym.row_marker) } else { "  ".to_string() },
+            if focused {
+                format!("{} ", core.sym.row_marker)
+            } else {
+                "  ".to_string()
+            },
             core.theme.accented(),
         )];
         spans.extend(line.spans);
@@ -213,7 +274,13 @@ fn split_header(block_inner: Rect) -> (Rect, Rect) {
     (parts[0], parts[1])
 }
 
-fn services_table(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: &mut FrameOut) -> usize {
+fn services_table(
+    f: &mut Frame,
+    area: Rect,
+    core: &Core,
+    tab: &SystemTab,
+    out: &mut FrameOut,
+) -> usize {
     let t = &core.theme;
     let block = panel(t, core.sym, "Services");
     let inner = block.inner(area);
@@ -221,7 +288,10 @@ fn services_table(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: 
     let body = core.value(&ResourceId::Services);
     let svcs = services(core);
     if svcs.is_empty() {
-        let text = match body.and_then(|b| b.get("systemd_available")).and_then(Value::as_bool) {
+        let text = match body
+            .and_then(|b| b.get("systemd_available"))
+            .and_then(Value::as_bool)
+        {
             Some(false) => "systemd is not reachable on this node".to_string(),
             Some(true) => "No agent services found".to_string(),
             None => loading(core, &ResourceId::Services),
@@ -231,7 +301,13 @@ fn services_table(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: 
     }
     let (head, rest) = split_header(inner);
     f.render_widget(
-        Paragraph::new(Span::styled(format!("  {:<24} {:<12} {:<11} {:>9}", "Service", "Active", "State", "Memory"), t.dim())),
+        Paragraph::new(Span::styled(
+            format!(
+                "  {:<24} {:<12} {:<11} {:>9}",
+                "Service", "Active", "State", "Memory"
+            ),
+            t.dim(),
+        )),
         head,
     );
     let rows: Vec<Line<'static>> = svcs
@@ -241,8 +317,14 @@ fn services_table(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: 
             let (glyph, word, style) = match (v.get("active").and_then(Value::as_bool), state) {
                 (Some(true), _) => (core.sym.ok, "active", Style::default().fg(t.success())),
                 (_, "failed") => (core.sym.err, "failed", Style::default().fg(t.error())),
-                (_, "activating" | "reloading") => (core.sym.warn, state, Style::default().fg(t.warning())),
-                _ => (core.sym.info, if state.is_empty() { "inactive" } else { state }, t.dim()),
+                (_, "activating" | "reloading") => {
+                    (core.sym.warn, state, Style::default().fg(t.warning()))
+                }
+                _ => (
+                    core.sym.info,
+                    if state.is_empty() { "inactive" } else { state },
+                    t.dim(),
+                ),
             };
             let mem = num(v, "memory_mb").map_or_else(|| "—".to_string(), |m| format!("{m:.1} MB"));
             Line::from(vec![
@@ -258,7 +340,13 @@ fn services_table(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: 
     list(f, rest, core, rows, sel, "svc", out)
 }
 
-fn peripherals_table(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: &mut FrameOut) -> usize {
+fn peripherals_table(
+    f: &mut Frame,
+    area: Rect,
+    core: &Core,
+    tab: &SystemTab,
+    out: &mut FrameOut,
+) -> usize {
     let t = &core.theme;
     let block = panel(t, core.sym, "Peripherals");
     let inner = block.inner(area);
@@ -277,21 +365,29 @@ fn peripherals_table(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, ou
     let rows: Vec<Line<'static>> = items
         .iter()
         .map(|p| {
-            let connected = p.get("connected").and_then(Value::as_bool).unwrap_or_else(|| {
-                matches!(s(p, "state"), "connected" | "ready" | "active")
-            });
-            let state = [s(p, "state"), s(p, "status")].into_iter().find(|x| !x.is_empty());
+            let connected = p
+                .get("connected")
+                .and_then(Value::as_bool)
+                .unwrap_or_else(|| matches!(s(p, "state"), "connected" | "ready" | "active"));
+            let state = [s(p, "state"), s(p, "status")]
+                .into_iter()
+                .find(|x| !x.is_empty());
             let (glyph, word, style) = if connected {
                 (core.sym.ok, "connected", Style::default().fg(t.success()))
             } else {
                 match state.unwrap_or("unknown") {
                     w @ ("error" | "failed") => (core.sym.err, w, Style::default().fg(t.error())),
-                    w @ ("missing" | "disconnected") => (core.sym.warn, w, Style::default().fg(t.warning())),
+                    w @ ("missing" | "disconnected") => {
+                        (core.sym.warn, w, Style::default().fg(t.warning()))
+                    }
                     w => (core.sym.info, w, t.dim()),
                 }
             };
             Line::from(vec![
-                Span::styled(format!("{:<name_w$} ", truncate(&peripheral_name(p), name_w)), t.text()),
+                Span::styled(
+                    format!("{:<name_w$} ", truncate(&peripheral_name(p), name_w)),
+                    t.text(),
+                ),
                 Span::styled(format!("{glyph} {:<13} ", truncate(word, 13)), style),
                 Span::styled(truncate(s(p, "transport"), 10), t.dim()),
             ])
@@ -306,8 +402,15 @@ fn hardware(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: &mut F
     let t = &core.theme;
     let mut title = "Hardware check".to_string();
     if tab.rechecking {
-        title.push_str(&format!(" {} re-checking…", core.sym.spinner_frame(core.frame as usize)));
-    } else if let Some(last) = core.value(&ResourceId::HardwareCheck).map(|v| s(v, "last_run")).filter(|l| !l.is_empty()) {
+        title.push_str(&format!(
+            " {} re-checking…",
+            core.sym.spinner_frame(core.frame as usize)
+        ));
+    } else if let Some(last) = core
+        .value(&ResourceId::HardwareCheck)
+        .map(|v| s(v, "last_run"))
+        .filter(|l| !l.is_empty())
+    {
         title.push_str(&format!(" · last run {last}"));
     }
     let block = panel(t, core.sym, &title);
@@ -335,7 +438,11 @@ fn hardware(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: &mut F
                 "checking" => (core.sym.spinner_frame(core.frame as usize), t.dim()),
                 _ => (core.sym.info, t.dim()),
             };
-            let required = if h.get("required").and_then(Value::as_bool) == Some(true) { "" } else { " (optional)" };
+            let required = if h.get("required").and_then(Value::as_bool) == Some(true) {
+                ""
+            } else {
+                " (optional)"
+            };
             let detail = [s(h, "detail"), s(h, "fix_hint")]
                 .into_iter()
                 .filter(|x| !x.is_empty())
@@ -343,7 +450,13 @@ fn hardware(f: &mut Frame, area: Rect, core: &Core, tab: &SystemTab, out: &mut F
                 .join(" · ");
             Line::from(vec![
                 Span::styled(format!("{glyph} {:<8} ", truncate(state, 8)), style),
-                Span::styled(format!("{:<26} ", truncate(&format!("{}{required}", s(h, "label")), 26)), t.text()),
+                Span::styled(
+                    format!(
+                        "{:<26} ",
+                        truncate(&format!("{}{required}", s(h, "label")), 26)
+                    ),
+                    t.text(),
+                ),
                 Span::styled(truncate(&detail, detail_w), t.dim()),
             ])
         })

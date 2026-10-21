@@ -149,7 +149,10 @@ impl SettingsTab {
         let flash = Self::flash_key(&entry.id, &row.key);
         if let PageBody::Prefs(_) = entry.body {
             if !prefs_page::set(&mut core.store.prefs, &row.key, &value) {
-                core.toast(ToastKind::Error, format!("{}: not an accepted value", row.label));
+                core.toast(
+                    ToastKind::Error,
+                    format!("{}: not an accepted value", row.label),
+                );
                 core.flash(flash, false);
                 return;
             }
@@ -160,7 +163,10 @@ impl SettingsTab {
             } else {
                 core.toast(
                     ToastKind::Warn,
-                    format!("{} applied; preferences are not saved this session", row.label),
+                    format!(
+                        "{} applied; preferences are not saved this session",
+                        row.label
+                    ),
                 );
             }
             core.flash(flash, true);
@@ -175,7 +181,10 @@ impl SettingsTab {
         };
         if registry::needs_confirm(&row.key, &value) {
             let shown = display(&row.kind, Some(&value), row.secret, false);
-            let body = vec![format!("Set {label} to {shown}?"), confirm_reason(&row.key).to_string()];
+            let body = vec![
+                format!("Set {label} to {shown}?"),
+                confirm_reason(&row.key).to_string(),
+            ];
             core.open(Overlay::confirm(
                 Ret::new(Route::tab(TabId::Settings), TAG_CONFIRM).with(json!({
                     "page": entry.id, "key": row.key, "label": label, "value": value,
@@ -196,8 +205,12 @@ impl SettingsTab {
 
     /// ←/→ on the focused row.
     pub(super) fn cycle_focused(&mut self, core: &mut Core, entry: &Entry, forward: bool) {
-        let Some(items) = self.items(core, entry) else { return };
-        let Some(row) = self.state(&entry.id).focused_row(&items).cloned() else { return };
+        let Some(items) = self.items(core, entry) else {
+            return;
+        };
+        let Some(row) = self.state(&entry.id).focused_row(&items).cloned() else {
+            return;
+        };
         if let Some(w) = cycle_write(&row, forward) {
             self.apply(core, entry, &row, w.value);
         }
@@ -205,8 +218,12 @@ impl SettingsTab {
 
     /// Enter on the focused row: toggles flip, everything else opens its editor.
     pub(super) fn edit_focused(&mut self, core: &mut Core, entry: &Entry) {
-        let Some(items) = self.items(core, entry) else { return };
-        let Some(row) = self.state(&entry.id).focused_row(&items).cloned() else { return };
+        let Some(items) = self.items(core, entry) else {
+            return;
+        };
+        let Some(row) = self.state(&entry.id).focused_row(&items).cloned() else {
+            return;
+        };
         if row.kind == Kind::Bool && !row.read_only {
             self.cycle_focused(core, entry, true);
             return;
@@ -222,7 +239,13 @@ impl SettingsTab {
 
     /// An overlay a row page opened finished.
     pub(super) fn row_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        let s = |k: &str| ret.data.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let s = |k: &str| {
+            ret.data
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
         let (page, key) = (s("page"), s("key"));
         match ret.tag {
             TAG_CONFIRM if result == OverlayResult::Confirmed => {
@@ -230,8 +253,12 @@ impl SettingsTab {
                 self.write(core, &page, &key, &s("label"), value);
             }
             TAG_EDIT => {
-                let Some(entry) = self.entry(core, &page) else { return };
-                let Some(items) = self.page_items(core, &entry) else { return };
+                let Some(entry) = self.entry(core, &page) else {
+                    return;
+                };
+                let Some(items) = self.page_items(core, &entry) else {
+                    return;
+                };
                 let Some(row) = items.iter().find_map(|i| match i {
                     Item::Row(r) if r.key == key => Some(r.clone()),
                     _ => None,
@@ -265,11 +292,18 @@ impl SettingsTab {
     /// The text `y` copies from the focused row. Secrets copy only while
     /// revealed.
     pub(super) fn copy_focused(&self, core: &mut Core, entry: &Entry) {
-        let Some(items) = self.items(core, entry) else { return };
+        let Some(items) = self.items(core, entry) else {
+            return;
+        };
         let st = self.state(&entry.id);
-        let Some(row) = st.focused_row(&items) else { return };
+        let Some(row) = st.focused_row(&items) else {
+            return;
+        };
         if row.secret && !st.revealing(core.now) {
-            core.toast(ToastKind::Warn, "Press v to reveal the secret before copying it");
+            core.toast(
+                ToastKind::Warn,
+                "Press v to reveal the secret before copying it",
+            );
             return;
         }
         let text = display(&row.kind, row.value.as_ref(), row.secret, true);

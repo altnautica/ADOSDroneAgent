@@ -114,7 +114,12 @@ pub fn rank(query: &str, items: &[PaletteItem]) -> Vec<usize> {
 
 /// Fuzzy-score one haystack against a parsed pattern (shared with the params
 /// search so both rank the same way).
-pub fn score(pattern: &Pattern, matcher: &mut Matcher, haystack: &str, buf: &mut Vec<char>) -> Option<u32> {
+pub fn score(
+    pattern: &Pattern,
+    matcher: &mut Matcher,
+    haystack: &str,
+    buf: &mut Vec<char>,
+) -> Option<u32> {
     pattern.score(Utf32Str::new(haystack, buf), matcher)
 }
 

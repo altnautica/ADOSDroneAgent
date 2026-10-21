@@ -49,18 +49,32 @@ impl Page {
         let mut items = vec![Item::Header("Modem".into())];
         match core.value(&ResourceId::ModemStatus) {
             Some(s) => {
-                let presence = match (s.get("present").and_then(Value::as_bool), s.get("reason").and_then(Value::as_str)) {
+                let presence = match (
+                    s.get("present").and_then(Value::as_bool),
+                    s.get("reason").and_then(Value::as_str),
+                ) {
                     (Some(true), _) => "detected",
-                    (Some(false), Some("modemmanager_not_installed")) => "ModemManager not installed",
+                    (Some(false), Some("modemmanager_not_installed")) => {
+                        "ModemManager not installed"
+                    }
                     (Some(false), _) => "no modem detected",
                     (None, _) => "unknown",
                 };
                 items.push(info(core, "Presence", presence));
             }
-            None => items.push(match core.slot(&ResourceId::ModemStatus).and_then(|s| s.error.clone()) {
-                Some(e) => note(core, format!("Could not read the modem from this node: {e}"), true),
-                None => note(core, "Reading modem…", false),
-            }),
+            None => items.push(
+                match core
+                    .slot(&ResourceId::ModemStatus)
+                    .and_then(|s| s.error.clone())
+                {
+                    Some(e) => note(
+                        core,
+                        format!("Could not read the modem from this node: {e}"),
+                        true,
+                    ),
+                    None => note(core, "Reading modem…", false),
+                },
+            ),
         }
         let modem = core.value(&ResourceId::ModemConfig);
         if let Some(m) = modem {
@@ -73,7 +87,10 @@ impl Page {
             ] {
                 items.push(info(core, label, text_of(m.get(key))));
             }
-            let used = match (m.get("data_used_mb").and_then(Value::as_f64), m.get("cap_mb").and_then(Value::as_f64)) {
+            let used = match (
+                m.get("data_used_mb").and_then(Value::as_f64),
+                m.get("cap_mb").and_then(Value::as_f64),
+            ) {
                 (Some(u), Some(c)) => format!("{u:.0} / {c:.0} MB ({})", text_of(m.get("percent"))),
                 (Some(u), None) => format!("{u:.0} MB"),
                 _ => "—".into(),
@@ -83,7 +100,13 @@ impl Page {
         items.push(Item::Header("Cellular uplink".into()));
         match modem {
             Some(m) => {
-                items.push(Item::Row(kit::row("enabled", "Enabled", ENABLED_HINT_GS, Kind::Bool, m.get("enabled").cloned())));
+                items.push(Item::Row(kit::row(
+                    "enabled",
+                    "Enabled",
+                    ENABLED_HINT_GS,
+                    Kind::Bool,
+                    m.get("enabled").cloned(),
+                )));
                 items.push(Item::Row(kit::row(
                     "apn",
                     "APN",
@@ -95,25 +118,50 @@ impl Page {
                     "cap_gb",
                     "Data cap (GB)",
                     CAP_HINT,
-                    Kind::Num { min: Some(0.0), max: None },
+                    Kind::Num {
+                        min: Some(0.0),
+                        max: None,
+                    },
                     cap_gb(m),
                 )));
             }
-            None => items.push(match core.slot(&ResourceId::ModemConfig).and_then(|s| s.error.clone()) {
-                Some(e) => note(core, format!("Could not read the cellular config from this node: {e}"), true),
-                None => note(core, "Reading config…", false),
-            }),
+            None => items.push(
+                match core
+                    .slot(&ResourceId::ModemConfig)
+                    .and_then(|s| s.error.clone())
+                {
+                    Some(e) => note(
+                        core,
+                        format!("Could not read the cellular config from this node: {e}"),
+                        true,
+                    ),
+                    None => note(core, "Reading config…", false),
+                },
+            ),
         }
         items
     }
 
     fn config_items(&self, core: &Core) -> Vec<Item> {
-        let mut items = vec![Item::Header("Cellular uplink".into()), note(core, NO_MM_NOTE, false)];
+        let mut items = vec![
+            Item::Header("Cellular uplink".into()),
+            note(core, NO_MM_NOTE, false),
+        ];
         if let Some(n) = config_rows::status_note(core) {
             items.push(n);
         }
-        items.push(Item::Row(config_rows::config_row(core, "network.cellular.enabled", "Enabled", ENABLED_HINT)));
-        items.push(Item::Row(config_rows::config_row(core, "network.cellular.apn", "APN", APN_HINT)));
+        items.push(Item::Row(config_rows::config_row(
+            core,
+            "network.cellular.enabled",
+            "Enabled",
+            ENABLED_HINT,
+        )));
+        items.push(Item::Row(config_rows::config_row(
+            core,
+            "network.cellular.apn",
+            "APN",
+            APN_HINT,
+        )));
         items
     }
 
@@ -156,8 +204,16 @@ impl Bespoke for Page {
     fn subs(&self, core: &Core) -> Vec<Sub> {
         if is_gs(core) {
             vec![
-                Sub::every_ms(ResourceId::ModemStatus, "/api/v1/ground-station/modem-status", 5000),
-                Sub::every_ms(ResourceId::ModemConfig, "/api/v1/ground-station/network/modem", 5000),
+                Sub::every_ms(
+                    ResourceId::ModemStatus,
+                    "/api/v1/ground-station/modem-status",
+                    5000,
+                ),
+                Sub::every_ms(
+                    ResourceId::ModemConfig,
+                    "/api/v1/ground-station/network/modem",
+                    5000,
+                ),
             ]
         } else {
             config_rows::subs(core)
@@ -175,7 +231,8 @@ impl Bespoke for Page {
         let page = BespokeId::Cellular.id();
         match cmd {
             Command::Left | Command::Right if is_gs(core) => {
-                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd == Command::Right) {
+                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd == Command::Right)
+                {
                     Self::put_modem(core, &row.key, next);
                 }
             }
@@ -204,7 +261,9 @@ impl Bespoke for Page {
         }
         let key = ret.data.as_str().unwrap_or_default();
         let items = self.items(core);
-        let Some(row) = kit::find_row(&items, key).cloned() else { return };
+        let Some(row) = kit::find_row(&items, key).cloned() else {
+            return;
+        };
         if is_gs(core) {
             match row::value_from_result(&row.kind, &result) {
                 Some(Ok(v)) => Self::put_modem(core, &row.key, v),
@@ -222,7 +281,10 @@ impl Bespoke for Page {
             return;
         }
         if let Purpose::Page { tag: "modem", data } = &reply.purpose {
-            let field = data.get("field").and_then(Value::as_str).unwrap_or_default();
+            let field = data
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let row = format!("{}{field}", kit::prefix(BespokeId::Cellular.id()));
             match &reply.result {
                 Ok(_) => {
@@ -230,7 +292,10 @@ impl Bespoke for Page {
                     core.flash(row, true);
                 }
                 Err(e) => {
-                    core.toast(ToastKind::Error, format!("Could not update the modem: {}", detail_text(e)));
+                    core.toast(
+                        ToastKind::Error,
+                        format!("Could not update the modem: {}", detail_text(e)),
+                    );
                     core.flash(row, false);
                 }
             }

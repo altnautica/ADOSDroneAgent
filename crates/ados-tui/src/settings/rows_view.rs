@@ -182,7 +182,11 @@ pub fn render(
     let height = area.height as usize;
     state.offset = scroll_offset(focus_line, state.offset, height);
 
-    let mut fi = items.iter().take(state.offset).filter(|i| i.focusable()).count();
+    let mut fi = items
+        .iter()
+        .take(state.offset)
+        .filter(|i| i.focusable())
+        .count();
     for (row_i, item) in items.iter().enumerate().skip(state.offset).take(height) {
         let y = area.y + (row_i - state.offset) as u16;
         let rect = Rect::new(area.x, y, area.width, 1);
@@ -239,7 +243,10 @@ pub fn render(
                     ),
                 ];
                 if row.non_default() && !row.read_only {
-                    spans.push(Span::styled(format!(" {}", core.sym.non_default), t.accented()));
+                    spans.push(Span::styled(
+                        format!(" {}", core.sym.non_default),
+                        t.accented(),
+                    ));
                 }
                 if row.read_only {
                     spans.push(Span::styled(format!(" {}", core.sym.read_only), t.dim()));
@@ -276,6 +283,13 @@ pub fn info(core: &Core, label: &str, value: impl Into<String>) -> Item {
 
 /// A one-line status message (warning or error) as a non-focusable line.
 pub fn note(core: &Core, text: impl Into<String>, warn: bool) -> Item {
-    let color = if warn { core.theme.warning() } else { core.theme.muted() };
-    Item::Text(Line::from(Span::styled(format!("  {}", text.into()), Style::default().fg(color))))
+    let color = if warn {
+        core.theme.warning()
+    } else {
+        core.theme.muted()
+    };
+    Item::Text(Line::from(Span::styled(
+        format!("  {}", text.into()),
+        Style::default().fg(color),
+    )))
 }

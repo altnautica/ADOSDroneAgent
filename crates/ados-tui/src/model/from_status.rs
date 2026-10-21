@@ -181,7 +181,10 @@ fn hardware_counts(data: &Value) -> Option<Vec<(String, usize)>> {
         .map(|s| (s.to_string(), 0))
         .collect();
     for item in items {
-        let state = item.get("state").and_then(Value::as_str).unwrap_or("unknown");
+        let state = item
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
         match counts.iter_mut().find(|(s, _)| s == state) {
             Some((_, n)) => *n += 1,
             None => counts.push((state.to_string(), 1)),

@@ -165,7 +165,8 @@ impl SseParser {
             return None;
         }
         if let Some(rest) = line.strip_prefix("data:") {
-            self.data.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+            self.data
+                .push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
         }
         None
     }
@@ -316,7 +317,9 @@ fn read_stream(client: &RestClient, path: &str, stop: &AtomicBool, tx: &Sender<L
         }
     }
     if !stop.load(Ordering::Relaxed) {
-        let why = parser.last_comment.unwrap_or_else(|| "stream closed".to_string());
+        let why = parser
+            .last_comment
+            .unwrap_or_else(|| "stream closed".to_string());
         let _ = tx.send(LogMsg::Down(why));
     }
 }
@@ -361,7 +364,10 @@ mod tests {
         let mut closed = SseParser::default();
         closed.line(": logging store unavailable");
         closed.line("");
-        assert!(!closed.live(), "the unavailable notice is not a live stream");
+        assert!(
+            !closed.live(),
+            "the unavailable notice is not a live stream"
+        );
         assert_eq!(closed.last_comment.as_deref(), Some(STORE_UNAVAILABLE));
 
         let mut ping = SseParser::default();
@@ -394,7 +400,10 @@ mod tests {
         }
         let seqs: Vec<u64> = r.iter().filter_map(|e| e.seq).collect();
         assert_eq!(seqs, vec![2, 3, 4]);
-        assert!(r.push(entry(0, "INFO")), "an evicted seq is no longer a duplicate");
+        assert!(
+            r.push(entry(0, "INFO")),
+            "an evicted seq is no longer a duplicate"
+        );
         assert_eq!(r.len(), 3);
     }
 

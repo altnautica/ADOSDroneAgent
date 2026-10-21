@@ -95,7 +95,11 @@ pub fn on_denied(core: &mut Core, code: u16, read: bool) {
     if auth_open(core) || core.auth.busy || core.auth.dismissed {
         return;
     }
-    if core.auth.changed_at.is_some_and(|t| t.elapsed() < IN_FLIGHT) {
+    if core
+        .auth
+        .changed_at
+        .is_some_and(|t| t.elapsed() < IN_FLIGHT)
+    {
         return;
     }
     let unpaired = core.auth.paired == Some(false);
@@ -149,7 +153,10 @@ pub fn submit(core: &mut Core, text: String) {
                 return;
             }
             core.auth.busy = true;
-            core.submit(req("POST", "/api/dashboard/pin/verify", TAG_PIN_VERIFY).body(json!({ "pin": text })));
+            core.submit(
+                req("POST", "/api/dashboard/pin/verify", TAG_PIN_VERIFY)
+                    .body(json!({ "pin": text })),
+            );
             set_message(core, "Checking…");
         }
         AuthMode::Blocked => {}
@@ -197,7 +204,9 @@ fn unix_to_hms(secs: f64) -> String {
 
 /// A worker reply tagged `auth.*`.
 pub fn on_reply(core: &mut Core, reply: Reply) {
-    let Purpose::Page { tag, data } = reply.purpose else { return };
+    let Purpose::Page { tag, data } = reply.purpose else {
+        return;
+    };
     match tag {
         TAG_PAIRING => {
             if let Ok(v) = &reply.result {
@@ -220,7 +229,10 @@ pub fn on_reply(core: &mut Core, reply: Reply) {
                     core.client.set_api_key(None);
                     set_message(core, "Key rejected");
                 }
-                Err(e) => set_message(core, &format!("Could not check the key: {}", super::error_text(&e))),
+                Err(e) => set_message(
+                    core,
+                    &format!("Could not check the key: {}", super::error_text(&e)),
+                ),
             }
         }
         TAG_PIN_STATUS => {
@@ -233,11 +245,17 @@ pub fn on_reply(core: &mut Core, reply: Reply) {
                     Some("No dashboard PIN is set. Set one on the agent (on-box TUI or web dashboard) first.".into()),
                 );
             } else if v.get("locked").and_then(Value::as_bool) == Some(true) {
-                let until = v.get("locked_until").and_then(Value::as_f64).map(unix_to_hms);
+                let until = v
+                    .get("locked_until")
+                    .and_then(Value::as_f64)
+                    .map(unix_to_hms);
                 open(
                     core,
                     AuthMode::Blocked,
-                    Some(format!("Locked until {}", until.unwrap_or_else(|| "later".into()))),
+                    Some(format!(
+                        "Locked until {}",
+                        until.unwrap_or_else(|| "later".into())
+                    )),
                 );
             } else {
                 open(core, AuthMode::Pin, Some("Dashboard PIN required".into()));
@@ -272,7 +290,9 @@ pub fn on_reply(core: &mut Core, reply: Reply) {
                         ),
                         Some(423) => format!(
                             "Node locked, retry in {} s",
-                            body.get("retry_after_s").and_then(Value::as_u64).unwrap_or(0)
+                            body.get("retry_after_s")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0)
                         ),
                         _ => super::error_text(&e),
                     };

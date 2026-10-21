@@ -53,9 +53,21 @@ impl Page {
         if let Some(note) = kit::resource_note(core, &ResourceId::SetupStatus, "the setup status") {
             items.push(note);
         }
-        items.push(rows_view::info(core, "Provider", kit::text(s, "remote_access.provider").unwrap_or("none")));
-        items.push(rows_view::info(core, "Enabled", yes_no(ra.and_then(|r| r.get("enabled")))));
-        items.push(rows_view::info(core, "Token configured", yes_no(ra.and_then(|r| r.get("configured")))));
+        items.push(rows_view::info(
+            core,
+            "Provider",
+            kit::text(s, "remote_access.provider").unwrap_or("none"),
+        ));
+        items.push(rows_view::info(
+            core,
+            "Enabled",
+            yes_no(ra.and_then(|r| r.get("enabled"))),
+        ));
+        items.push(rows_view::info(
+            core,
+            "Token configured",
+            yes_no(ra.and_then(|r| r.get("configured"))),
+        ));
         let status = kit::text(s, "remote_access.status").unwrap_or("disabled");
         let (glyph, color) = match status {
             "running" => (core.sym.ok, t.success()),
@@ -66,7 +78,10 @@ impl Page {
         items.push(Item::Text(Line::from(vec![
             Span::raw("  "),
             Span::styled(format!("{:<20}  ", "Status"), t.dim()),
-            Span::styled(format!("{glyph} {status}"), ratatui::style::Style::default().fg(color)),
+            Span::styled(
+                format!("{glyph} {status}"),
+                ratatui::style::Style::default().fg(color),
+            ),
         ])));
         if let Some(err) = kit::text(s, "remote_access.error") {
             items.push(rows_view::note(core, err.to_string(), true));
@@ -74,7 +89,12 @@ impl Page {
         let urls: Vec<String> = ra
             .and_then(|r| r.get("public_urls"))
             .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
             .unwrap_or_default();
         if !urls.is_empty() {
             items.push(Item::Header("Public URLs".into()));
@@ -86,7 +106,10 @@ impl Page {
             }
         }
         let detail = if self.busy {
-            format!("{} Installing…", core.sym.spinner_frame(core.frame as usize))
+            format!(
+                "{} Installing…",
+                core.sym.spinner_frame(core.frame as usize)
+            )
         } else {
             "t · a stored token is never shown".into()
         };
@@ -108,7 +131,12 @@ impl Page {
     }
 
     fn url(&self, core: &Core, items: &[Item]) -> Option<String> {
-        let i: usize = self.rows.focused_key(items)?.strip_prefix("url")?.parse().ok()?;
+        let i: usize = self
+            .rows
+            .focused_key(items)?
+            .strip_prefix("url")?
+            .parse()
+            .ok()?;
         kit::setup(core)?
             .get("remote_access")?
             .get("public_urls")?
@@ -172,12 +200,21 @@ impl Bespoke for Page {
         self.busy = false;
         match &reply.result {
             Ok(body) => {
-                let msg = body.get("message").and_then(Value::as_str).filter(|m| !m.is_empty());
+                let msg = body
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|m| !m.is_empty());
                 if body.get("ok").and_then(Value::as_bool) == Some(true) {
-                    core.toast(ToastKind::Success, msg.unwrap_or("Cloudflare tunnel token installed."));
+                    core.toast(
+                        ToastKind::Success,
+                        msg.unwrap_or("Cloudflare tunnel token installed."),
+                    );
                     core.flash("remote_access:token", true);
                 } else {
-                    core.toast(ToastKind::Error, msg.unwrap_or("The token was not accepted."));
+                    core.toast(
+                        ToastKind::Error,
+                        msg.unwrap_or("The token was not accepted."),
+                    );
                     core.flash("remote_access:token", false);
                 }
             }
@@ -196,13 +233,25 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        rows_view::render(f, area, core, &items, &mut self.rows, "remote_access:", true, out);
+        rows_view::render(
+            f,
+            area,
+            core,
+            &items,
+            &mut self.rows,
+            "remote_access:",
+            true,
+            out,
+        );
     }
 
     fn context_line(&self, core: &Core) -> Option<String> {
         let items = self.items(core);
         match self.rows.focused_key(&items)? {
-            "token" => Some("Install a remotely managed Cloudflare Tunnel; a stored token is never shown".into()),
+            "token" => Some(
+                "Install a remotely managed Cloudflare Tunnel; a stored token is never shown"
+                    .into(),
+            ),
             _ => Some("Enter or y copies the URL".into()),
         }
     }

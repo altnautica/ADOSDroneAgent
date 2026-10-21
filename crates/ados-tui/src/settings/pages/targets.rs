@@ -63,7 +63,10 @@ fn validate_port(s: &str) -> Result<(), String> {
 }
 
 fn str_of(data: &Value, k: &str) -> String {
-    data.get(k).and_then(Value::as_str).unwrap_or_default().to_string()
+    data.get(k)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn edit_index(data: &Value) -> Option<usize> {
@@ -86,7 +89,10 @@ impl Page {
             line: Line::from(vec![
                 current(!core.target.remote),
                 Span::styled(format!("{:<20}", "local"), t.text()),
-                Span::styled(format!("{:<28}", format!("localhost:{DEFAULT_PORT}")), t.dim()),
+                Span::styled(
+                    format!("{:<28}", format!("localhost:{DEFAULT_PORT}")),
+                    t.dim(),
+                ),
                 Span::styled("key from the pairing file", t.dim()),
             ]),
         });
@@ -110,7 +116,11 @@ impl Page {
             });
         }
         if core.store.prefs.targets.is_empty() {
-            items.push(rows_view::note(core, "No saved agents. Press n to add one.", false));
+            items.push(rows_view::note(
+                core,
+                "No saved agents. Press n to add one.",
+                false,
+            ));
         }
         if !core.store.writable {
             items.push(rows_view::note(
@@ -138,14 +148,20 @@ impl Page {
                 }
             }
             Some(key) => {
-                let Some(s) = index_of(key).and_then(|i| core.store.prefs.targets.get(i)).cloned() else {
+                let Some(s) = index_of(key)
+                    .and_then(|i| core.store.prefs.targets.get(i))
+                    .cloned()
+                else {
                     return;
                 };
                 if core.target.remote && core.target.base == s.base() {
                     core.toast(ToastKind::Info, format!("Already connected to {}", s.name));
                     return;
                 }
-                let key = s.api_key.clone().or_else(|| core.session_keys.get(&s.name).cloned());
+                let key = s
+                    .api_key
+                    .clone()
+                    .or_else(|| core.session_keys.get(&s.name).cloned());
                 core.retarget = Some((Target::from_saved(&s), key));
             }
             None => {}
@@ -155,7 +171,11 @@ impl Page {
     fn ask_name(core: &mut Core, data: Value, error: Option<String>) {
         let mut s = Overlay::input(
             Ret::new(route(), "name").with(data.clone()),
-            if edit_index(&data).is_some() { "Edit agent" } else { "Add agent" },
+            if edit_index(&data).is_some() {
+                "Edit agent"
+            } else {
+                "Add agent"
+            },
             "Name",
             &str_of(&data, "name"),
         );
@@ -196,7 +216,10 @@ impl Page {
         let target = SavedTarget {
             name: name.clone(),
             host: str_of(data, "host"),
-            port: data.get("port").and_then(Value::as_u64).unwrap_or(u64::from(DEFAULT_PORT)) as u16,
+            port: data
+                .get("port")
+                .and_then(Value::as_u64)
+                .unwrap_or(u64::from(DEFAULT_PORT)) as u16,
             api_key,
         };
         let pos = match edit {
@@ -229,7 +252,10 @@ impl Bespoke for Page {
         match cmd {
             Command::Activate => self.connect(core),
             Command::Add => Self::ask_name(core, json!({ "edit": null }), None),
-            Command::Edit => match self.focused_index(core).and_then(|i| core.store.prefs.targets.get(i).map(|t| (i, t.clone()))) {
+            Command::Edit => match self
+                .focused_index(core)
+                .and_then(|i| core.store.prefs.targets.get(i).map(|t| (i, t.clone())))
+            {
                 Some((i, t)) => Self::ask_name(
                     core,
                     json!({ "edit": i, "name": t.name, "host": t.host, "port": t.port, "has_key": t.api_key.is_some() }),
@@ -237,11 +263,16 @@ impl Bespoke for Page {
                 ),
                 None => core.toast(ToastKind::Info, "Select a saved agent to edit"),
             },
-            Command::Delete => match self.focused_index(core).and_then(|i| core.store.prefs.targets.get(i).map(|t| (i, t.name.clone()))) {
+            Command::Delete => match self
+                .focused_index(core)
+                .and_then(|i| core.store.prefs.targets.get(i).map(|t| (i, t.name.clone())))
+            {
                 Some((i, name)) => core.open(Overlay::confirm(
                     Ret::new(route(), "delete").with(json!({ "index": i, "name": name })),
                     "Delete agent?",
-                    vec![format!("Remove {name} from the saved agents (and any stored key)?")],
+                    vec![format!(
+                        "Remove {name} from the saved agents (and any stored key)?"
+                    )],
                 )),
                 None => core.toast(ToastKind::Info, "Select a saved agent to delete"),
             },
@@ -275,35 +306,63 @@ impl Bespoke for Page {
                     .any(|(j, t)| t.name == name && Some(j) != edit);
                 data["name"] = json!(name);
                 if dup {
-                    Self::ask_name(core, data, Some(format!("An agent named {name} is already saved")));
+                    Self::ask_name(
+                        core,
+                        data,
+                        Some(format!("An agent named {name} is already saved")),
+                    );
                     return;
                 }
-                let mut s = Overlay::input(Ret::new(route(), "host").with(data.clone()), "Agent host", "Host or address", &str_of(&data, "host"));
+                let mut s = Overlay::input(
+                    Ret::new(route(), "host").with(data.clone()),
+                    "Agent host",
+                    "Host or address",
+                    &str_of(&data, "host"),
+                );
                 s.validate = Some(validate_host);
                 s.hint = Some("e.g. 192.168.1.50 or drone.local".into());
                 core.open(Overlay::Input(s));
             }
             ("host", OverlayResult::Text(text)) => {
-                let Ok((host, port)) = split_host_port(&text) else { return };
+                let Ok((host, port)) = split_host_port(&text) else {
+                    return;
+                };
                 data["host"] = json!(host);
-                let typed_port = text
-                    .trim()
-                    .rsplit_once(':')
-                    .is_some_and(|(h, p)| p.parse::<u16>().is_ok() && (!h.contains(':') || h.ends_with(']')));
+                let typed_port = text.trim().rsplit_once(':').is_some_and(|(h, p)| {
+                    p.parse::<u16>().is_ok() && (!h.contains(':') || h.ends_with(']'))
+                });
                 let port = if typed_port {
                     port
                 } else {
-                    data.get("port").and_then(Value::as_u64).map(|p| p as u16).unwrap_or(DEFAULT_PORT)
+                    data.get("port")
+                        .and_then(Value::as_u64)
+                        .map(|p| p as u16)
+                        .unwrap_or(DEFAULT_PORT)
                 };
-                let mut s = Overlay::input(Ret::new(route(), "port").with(data), "Agent port", "Port", &port.to_string());
+                let mut s = Overlay::input(
+                    Ret::new(route(), "port").with(data),
+                    "Agent port",
+                    "Port",
+                    &port.to_string(),
+                );
                 s.validate = Some(validate_port);
                 core.open(Overlay::Input(s));
             }
             ("port", OverlayResult::Text(text)) => {
-                let Ok(port) = text.trim().parse::<u16>() else { return };
+                let Ok(port) = text.trim().parse::<u16>() else {
+                    return;
+                };
                 data["port"] = json!(port);
-                let has_key = data.get("has_key").and_then(Value::as_bool).unwrap_or(false);
-                let mut s = Overlay::input(Ret::new(route(), "key").with(data), "Agent API key", "API key (optional)", "");
+                let has_key = data
+                    .get("has_key")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                let mut s = Overlay::input(
+                    Ret::new(route(), "key").with(data),
+                    "Agent API key",
+                    "API key (optional)",
+                    "",
+                );
                 s.masked = true;
                 s.hint = Some(if has_key {
                     "Leave empty to keep the stored key".into()
@@ -334,9 +393,18 @@ impl Bespoke for Page {
                 self.finish(core, &draft, Some(key), r == OverlayResult::Confirmed);
             }
             ("delete", OverlayResult::Confirmed) => {
-                let i = data.get("index").and_then(Value::as_u64).unwrap_or(u64::MAX) as usize;
+                let i = data
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(u64::MAX) as usize;
                 let name = str_of(&data, "name");
-                if core.store.prefs.targets.get(i).is_some_and(|t| t.name == name) {
+                if core
+                    .store
+                    .prefs
+                    .targets
+                    .get(i)
+                    .is_some_and(|t| t.name == name)
+                {
                     core.store.prefs.targets.remove(i);
                     core.session_keys.remove(&name);
                     core.save_prefs();
@@ -431,16 +499,26 @@ mod tests {
         let core = &mut app.core;
         let mut page = Page::default();
         let data = json!({ "edit": null, "name": "field", "host": "192.168.1.60", "port": 8080 });
-        page.on_overlay(core, Ret::new(route(), "key").with(data), OverlayResult::Text("k".into()));
+        page.on_overlay(
+            core,
+            Ret::new(route(), "key").with(data),
+            OverlayResult::Text("k".into()),
+        );
         let ret = take_ret(core);
         page.on_overlay(core, ret, OverlayResult::Cancelled);
         assert_eq!(core.store.prefs.targets[0].api_key, None);
-        assert_eq!(core.session_keys.get("field").map(String::as_str), Some("k"));
+        assert_eq!(
+            core.session_keys.get("field").map(String::as_str),
+            Some("k")
+        );
         // The saved entry reports the session key and a connect uses it.
         let items = page.items(core);
         page.rows.focus_key(&items, &entry_key(0));
         page.connect(core);
-        assert_eq!(core.retarget.as_ref().and_then(|(_, k)| k.as_deref()), Some("k"));
+        assert_eq!(
+            core.retarget.as_ref().and_then(|(_, k)| k.as_deref()),
+            Some("k")
+        );
     }
 
     #[test]

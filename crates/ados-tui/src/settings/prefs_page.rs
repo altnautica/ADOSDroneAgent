@@ -21,16 +21,45 @@ struct Spec {
 }
 
 const APPEARANCE: &[Spec] = &[
-    Spec { key: "theme", label: "Theme", help: "Theme used for the whole terminal UI" },
-    Spec { key: "color_blind", label: "Color-blind mode", help: "Draw success states in blue instead of green" },
-    Spec { key: "symbols", label: "Symbols", help: "Glyph set: unicode, Nerd Font icons (needs a Nerd Font), or plain ASCII" },
-    Spec { key: "motion", label: "Motion", help: "Animation level; auto is full locally and reduced over SSH" },
+    Spec {
+        key: "theme",
+        label: "Theme",
+        help: "Theme used for the whole terminal UI",
+    },
+    Spec {
+        key: "color_blind",
+        label: "Color-blind mode",
+        help: "Draw success states in blue instead of green",
+    },
+    Spec {
+        key: "symbols",
+        label: "Symbols",
+        help: "Glyph set: unicode, Nerd Font icons (needs a Nerd Font), or plain ASCII",
+    },
+    Spec {
+        key: "motion",
+        label: "Motion",
+        help: "Animation level; auto is full locally and reduced over SSH",
+    },
 ];
 
 const BEHAVIOUR: &[Spec] = &[
-    Spec { key: "refresh_ms", label: "Refresh interval (ms)", help: "How often the agent status is polled" },
-    Spec { key: "mouse", label: "Mouse", help: "Capture the mouse for clicks and scrolling; capture blocks terminal text selection" },
-    Spec { key: "start_tab", label: "Start tab", help: "The tab shown at launch: Overview, or the tab in use when the terminal UI last closed" },
+    Spec {
+        key: "refresh_ms",
+        label: "Refresh interval (ms)",
+        help: "How often the agent status is polled",
+    },
+    Spec {
+        key: "mouse",
+        label: "Mouse",
+        help: "Capture the mouse for clicks and scrolling; capture blocks terminal text selection",
+    },
+    Spec {
+        key: "start_tab",
+        label: "Start tab",
+        help:
+            "The tab shown at launch: Overview, or the tab in use when the terminal UI last closed",
+    },
 ];
 
 fn specs(page: PrefsPage) -> &'static [Spec] {
@@ -44,17 +73,33 @@ fn specs(page: PrefsPage) -> &'static [Spec] {
 fn describe(prefs: &Prefs, key: &str) -> Option<(Kind, Value, Value)> {
     let d = Prefs::default();
     Some(match key {
-        "theme" => (strs(&["amber", "brand-dark", "brand-light", "nvg"]), json!(prefs.theme), json!(d.theme)),
+        "theme" => (
+            strs(&["amber", "brand-dark", "brand-light", "nvg"]),
+            json!(prefs.theme),
+            json!(d.theme),
+        ),
         "color_blind" => (Kind::Bool, json!(prefs.color_blind), json!(d.color_blind)),
-        "symbols" => (strs(&["unicode", "nerd", "ascii"]), json!(prefs.symbols), json!(d.symbols)),
-        "motion" => (strs(&["auto", "full", "reduced", "off"]), json!(prefs.motion), json!(d.motion)),
+        "symbols" => (
+            strs(&["unicode", "nerd", "ascii"]),
+            json!(prefs.symbols),
+            json!(d.symbols),
+        ),
+        "motion" => (
+            strs(&["auto", "full", "reduced", "off"]),
+            json!(prefs.motion),
+            json!(d.motion),
+        ),
         "refresh_ms" => (
             Kind::Enum(REFRESH_CHOICES.iter().map(|v| json!(v)).collect()),
             json!(prefs.refresh_ms),
             json!(DEFAULT_REFRESH_MS),
         ),
         "mouse" => (Kind::Bool, json!(prefs.mouse), json!(d.mouse)),
-        "start_tab" => (strs(&["overview", "last"]), json!(prefs.start_tab), json!(d.start_tab)),
+        "start_tab" => (
+            strs(&["overview", "last"]),
+            json!(prefs.start_tab),
+            json!(d.start_tab),
+        ),
         _ => return None,
     })
 }
@@ -83,7 +128,9 @@ pub fn rows(page: PrefsPage, prefs: &Prefs) -> Vec<EditRow> {
 /// Set preference `key` to `value`. False when the key is unknown or the
 /// value is not one the preference accepts.
 pub fn set(prefs: &mut Prefs, key: &str, value: &Value) -> bool {
-    let Some((kind, _, _)) = describe(prefs, key) else { return false };
+    let Some((kind, _, _)) = describe(prefs, key) else {
+        return false;
+    };
     if let Kind::Enum(values) = &kind {
         if !values.iter().any(|v| super::row::same(v, value)) {
             return false;

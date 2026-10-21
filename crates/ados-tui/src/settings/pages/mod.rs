@@ -2,26 +2,26 @@
 
 use super::page::{Bespoke, BespokeId};
 
-pub mod targets;
-pub mod profile;
-pub mod wifi;
-pub mod hotspot;
-pub mod cellular;
-pub mod mac_pin;
-pub mod discovery;
-pub mod radio;
-pub mod video_link;
-pub mod sensors;
-pub mod capture;
-pub mod cloud;
-pub mod remote_access;
-pub mod pairing;
-pub mod security;
-pub mod mcp;
-pub mod region;
-pub mod display;
 pub mod advanced;
+pub mod capture;
+pub mod cellular;
+pub mod cloud;
+pub mod discovery;
+pub mod display;
+pub mod hotspot;
 pub mod kit;
+pub mod mac_pin;
+pub mod mcp;
+pub mod pairing;
+pub mod profile;
+pub mod radio;
+pub mod region;
+pub mod remote_access;
+pub mod security;
+pub mod sensors;
+pub mod targets;
+pub mod video_link;
+pub mod wifi;
 pub mod wifi_model;
 
 /// Every bespoke page's state.

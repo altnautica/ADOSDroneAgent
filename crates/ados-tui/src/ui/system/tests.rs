@@ -10,7 +10,13 @@ use crate::poll::ResourceId;
 use crate::ui::tests::{draw, feed, test_app};
 
 fn slot(v: Value) -> Slot {
-    Slot { value: Some(v), error: None, code: None, error_body: None, at: Instant::now() }
+    Slot {
+        value: Some(v),
+        error: None,
+        code: None,
+        error_body: None,
+        at: Instant::now(),
+    }
 }
 
 fn fixtures(app: &mut crate::app::App) {
@@ -92,7 +98,11 @@ fn panes_cycle_and_selection_clamps() {
     let mut tab = SystemTab::default();
     assert!(tab.on_command(&mut app.core, Command::Down));
     assert!(tab.on_command(&mut app.core, Command::Down));
-    assert_eq!(tab.sel[Pane::Services as usize], 1, "clamped to the last service");
+    assert_eq!(
+        tab.sel[Pane::Services as usize],
+        1,
+        "clamped to the last service"
+    );
     tab.on_command(&mut app.core, Command::NextPane);
     tab.on_command(&mut app.core, Command::NextPane);
     assert_eq!(tab.pane, Pane::Hardware);

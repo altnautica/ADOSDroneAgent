@@ -31,7 +31,10 @@ fn declared(core: &Core, id: &str) -> Vec<Perm> {
 /// `e` / `d`: confirm, then enable or disable.
 pub fn toggle(core: &mut Core, route: Route, inst: &Install, name: &str, enable: bool) {
     if enable && inst.enabled() {
-        core.toast(ToastKind::Info, format!("{name} is already {}", inst.status));
+        core.toast(
+            ToastKind::Info,
+            format!("{name} is already {}", inst.status),
+        );
         return;
     }
     if !enable && inst.status == "disabled" {
@@ -41,9 +44,16 @@ pub fn toggle(core: &mut Core, route: Route, inst: &Install, name: &str, enable:
     if !core.guard_disarmed() {
         return;
     }
-    let (tag, verb) = if enable { (TAG_ENABLE, "Enable") } else { (TAG_DISABLE, "Disable") };
+    let (tag, verb) = if enable {
+        (TAG_ENABLE, "Enable")
+    } else {
+        (TAG_DISABLE, "Disable")
+    };
     let body = if enable {
-        vec![format!("{name} {} starts with its granted permissions.", inst.version)]
+        vec![format!(
+            "{name} {} starts with its granted permissions.",
+            inst.version
+        )]
     } else {
         vec![format!("{name} stops and stays off until enabled again.")]
     };
@@ -68,7 +78,10 @@ pub fn grant(core: &mut Core, route: Route, inst: &Install, name: &str) {
         .filter(|p| !inst.granted(&p.id))
         .collect();
     if missing.is_empty() {
-        core.toast(ToastKind::Info, format!("{name} has every declared permission"));
+        core.toast(
+            ToastKind::Info,
+            format!("{name} has every declared permission"),
+        );
         return;
     }
     if !core.guard_disarmed() {
@@ -84,24 +97,44 @@ pub fn grant(core: &mut Core, route: Route, inst: &Install, name: &str) {
         }
         core.open(Overlay::confirm(ret, format!("Grant to {name}?"), body));
     } else {
-        let items = missing.iter().map(|p| format!("{}  ({})", p.title(), p.id)).collect();
+        let items = missing
+            .iter()
+            .map(|p| format!("{}  ({})", p.title(), p.id))
+            .collect();
         core.open(Overlay::picker(ret, format!("Grant to {name}"), items, 0));
     }
 }
 
 /// `G`: revoke a granted permission.
 pub fn revoke(core: &mut Core, route: Route, inst: &Install, name: &str) {
-    let granted: Vec<String> = inst.grants.iter().filter(|(_, g)| *g).map(|(id, _)| id.clone()).collect();
+    let granted: Vec<String> = inst
+        .grants
+        .iter()
+        .filter(|(_, g)| *g)
+        .map(|(id, _)| id.clone())
+        .collect();
     if granted.is_empty() {
-        core.toast(ToastKind::Info, format!("{name} holds no granted permission"));
+        core.toast(
+            ToastKind::Info,
+            format!("{name} holds no granted permission"),
+        );
         return;
     }
-    let ret = Ret::new(route, TAG_REVOKE).with(json!({"id": inst.id, "name": name, "perms": granted}));
-    core.open(Overlay::picker(ret, format!("Revoke from {name}"), granted, 0));
+    let ret =
+        Ret::new(route, TAG_REVOKE).with(json!({"id": inst.id, "name": name, "perms": granted}));
+    core.open(Overlay::picker(
+        ret,
+        format!("Revoke from {name}"),
+        granted,
+        0,
+    ));
 }
 
 fn str_at(v: &Value, k: &str) -> String {
-    v.get(k).and_then(Value::as_str).unwrap_or_default().to_string()
+    v.get(k)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
 }
 
 /// A lifecycle dialog answered. `true` when `ret` was one of these.
@@ -122,17 +155,32 @@ pub fn on_overlay(core: &mut Core, route: Route, ret: &Ret, result: &OverlayResu
                 return true;
             }
             let (path, toast) = if ret.tag == TAG_ENABLE {
-                (format!("/api/plugins/{}/enable", seg(&id)), format!("Enabled {name}"))
+                (
+                    format!("/api/plugins/{}/enable", seg(&id)),
+                    format!("Enabled {name}"),
+                )
             } else {
-                (format!("/api/plugins/{}/disable", seg(&id)), format!("Disabled {name}"))
+                (
+                    format!("/api/plugins/{}/disable", seg(&id)),
+                    format!("Disabled {name}"),
+                )
             };
-            core.submit(Request::new("POST", path, route, Purpose::Generic { ok_toast: toast }));
+            core.submit(Request::new(
+                "POST",
+                path,
+                route,
+                Purpose::Generic { ok_toast: toast },
+            ));
         }
         (TAG_REMOVE, OverlayResult::Checked(v)) => {
             if !core.guard_disarmed() {
                 return true;
             }
-            let keep = if v.first().copied().unwrap_or(false) { 1 } else { 0 };
+            let keep = if v.first().copied().unwrap_or(false) {
+                1
+            } else {
+                0
+            };
             core.submit(Request::new(
                 "DELETE",
                 format!("/api/plugins/{}?keep_data={keep}", seg(&id)),
@@ -147,7 +195,9 @@ pub fn on_overlay(core: &mut Core, route: Route, ret: &Ret, result: &OverlayResu
                 OverlayResult::Picked(i) => *i,
                 _ => 0,
             };
-            let Some(perm) = perm_at(idx) else { return true };
+            let Some(perm) = perm_at(idx) else {
+                return true;
+            };
             if !core.guard_disarmed() {
                 return true;
             }
@@ -183,14 +233,21 @@ pub fn on_overlay(core: &mut Core, route: Route, ret: &Ret, result: &OverlayResu
 
 /// A lifecycle request finished: refresh what it changed.
 pub fn on_reply(core: &mut Core, reply: &Reply) {
-    if let Purpose::Page { tag: TAG_REVOKE, data } = &reply.purpose {
+    if let Purpose::Page {
+        tag: TAG_REVOKE,
+        data,
+    } = &reply.purpose
+    {
         let perm = str_at(data, "perm");
         let name = str_at(data, "name");
         match &reply.result {
             Ok(v) => {
                 core.toast(ToastKind::Success, format!("Revoked {perm} from {name}"));
                 if v.get("requires_restart").and_then(Value::as_bool) == Some(true) {
-                    core.toast(ToastKind::Warn, format!("Restart {name} to apply the revocation"));
+                    core.toast(
+                        ToastKind::Warn,
+                        format!("Restart {name} to apply the revocation"),
+                    );
                 }
             }
             Err(e) => core.toast_error(&format!("Revoke {perm}"), e),

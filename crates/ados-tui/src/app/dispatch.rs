@@ -4,7 +4,9 @@
 use std::time::Instant;
 
 use ados_protocol::rest::RestError;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::Position;
 use serde_json::Value;
 
@@ -28,7 +30,9 @@ impl App {
             tabs: Tabs::default(),
         };
         let profile = app.core.profile().to_string();
-        app.tabs.get_mut(app.core.tab, &profile).on_activate(&mut app.core);
+        app.tabs
+            .get_mut(app.core.tab, &profile)
+            .on_activate(&mut app.core);
         super::auth::start(&mut app.core);
         app.sync_subs();
         app
@@ -49,7 +53,10 @@ impl App {
         if let Some(top) = self.core.overlays.last() {
             return top.ctx();
         }
-        let mut stack = self.tabs.get(self.core.tab, self.core.profile()).ctx(&self.core);
+        let mut stack = self
+            .tabs
+            .get(self.core.tab, self.core.profile())
+            .ctx(&self.core);
         if stack.first() != Some(&Ctx::Input) {
             stack.push(Ctx::Global);
         }
@@ -61,7 +68,10 @@ impl App {
         match cmd {
             Command::Actions => !self.core.target.remote,
             Command::Update => !self.core.target.remote && self.core.update_available().is_some(),
-            Command::Search => self.tabs.get(self.core.tab, self.core.profile()).searchable(&self.core),
+            Command::Search => self
+                .tabs
+                .get(self.core.tab, self.core.profile())
+                .searchable(&self.core),
             Command::InstallFile => !self.core.target.remote,
             _ => true,
         }
@@ -69,7 +79,10 @@ impl App {
 
     /// Re-send the active subscriptions when they changed.
     pub fn sync_subs(&mut self) {
-        let subs = self.tabs.get(self.core.tab, self.core.profile()).subs(&self.core);
+        let subs = self
+            .tabs
+            .get(self.core.tab, self.core.profile())
+            .subs(&self.core);
         if subs != self.core.subs_sent {
             self.core.poller.set_active(subs.clone());
             self.core.subs_sent = subs;
@@ -89,7 +102,9 @@ impl App {
         if id == self.core.tab {
             return;
         }
-        self.tabs.get_mut(self.core.tab, &profile).on_deactivate(&mut self.core);
+        self.tabs
+            .get_mut(self.core.tab, &profile)
+            .on_deactivate(&mut self.core);
         self.core.tab = id;
         self.core.store.prefs.last_tab = id.name().to_string();
         self.core.save_prefs();
@@ -101,8 +116,14 @@ impl App {
 
     fn cycle_tab(&mut self, forward: bool) {
         let profile = self.core.profile().to_string();
-        let visible: Vec<TabId> = TabId::ALL.into_iter().filter(|t| t.visible(&profile)).collect();
-        let pos = visible.iter().position(|t| *t == self.core.tab).unwrap_or(0);
+        let visible: Vec<TabId> = TabId::ALL
+            .into_iter()
+            .filter(|t| t.visible(&profile))
+            .collect();
+        let pos = visible
+            .iter()
+            .position(|t| *t == self.core.tab)
+            .unwrap_or(0);
         let next = if forward {
             (pos + 1) % visible.len()
         } else {
@@ -153,7 +174,10 @@ impl App {
             }
             Command::Actions => {
                 if self.core.target.remote {
-                    self.core.toast(ToastKind::Warn, "Quick actions run on the agent host; not available remotely");
+                    self.core.toast(
+                        ToastKind::Warn,
+                        "Quick actions run on the agent host; not available remotely",
+                    );
                 } else {
                     self.core.open(Overlay::Actions(0));
                 }
@@ -182,7 +206,9 @@ impl App {
 
     fn overlay_key(&mut self, key: KeyEvent) {
         let history_len = self.core.toasts.history().len();
-        let Some(top) = self.core.overlays.last_mut() else { return };
+        let Some(top) = self.core.overlays.last_mut() else {
+            return;
+        };
         match overlay::handle_key(top, key, ACTIONS.len(), history_len) {
             Outcome::None => {}
             Outcome::Close => {
@@ -404,20 +430,45 @@ impl App {
         let mut items: Vec<PaletteItem> = Vec::new();
         let profile = self.core.profile().to_string();
         for t in TabId::ALL.into_iter().filter(|t| t.visible(&profile)) {
-            items.push(PaletteItem::new(t.label(&profile), "tab", PaletteAction::Tab(t)));
+            items.push(PaletteItem::new(
+                t.label(&profile),
+                "tab",
+                PaletteAction::Tab(t),
+            ));
         }
         items.extend(self.tabs.settings.palette_items(&self.core));
         items.extend(self.tabs.params.palette_items());
         if !self.core.target.remote {
             for (i, a) in ACTIONS.iter().enumerate() {
-                items.push(PaletteItem::new(a.label, "action", PaletteAction::QuickAction(i)));
+                items.push(PaletteItem::new(
+                    a.label,
+                    "action",
+                    PaletteAction::QuickAction(i),
+                ));
             }
         }
-        items.push(PaletteItem::new("Cycle theme", "command", PaletteAction::Cmd(PaletteCmd::CycleTheme)));
-        items.push(PaletteItem::new("Cycle motion", "command", PaletteAction::Cmd(PaletteCmd::CycleMotion)));
-        items.push(PaletteItem::new("Notifications", "command", PaletteAction::Cmd(PaletteCmd::Notifications)));
-        items.push(PaletteItem::new("Copy agent URLs", "command", PaletteAction::Cmd(PaletteCmd::CopyUrls)));
-        self.core.open(Overlay::Palette(Box::new(PaletteState::new(items, ""))));
+        items.push(PaletteItem::new(
+            "Cycle theme",
+            "command",
+            PaletteAction::Cmd(PaletteCmd::CycleTheme),
+        ));
+        items.push(PaletteItem::new(
+            "Cycle motion",
+            "command",
+            PaletteAction::Cmd(PaletteCmd::CycleMotion),
+        ));
+        items.push(PaletteItem::new(
+            "Notifications",
+            "command",
+            PaletteAction::Cmd(PaletteCmd::Notifications),
+        ));
+        items.push(PaletteItem::new(
+            "Copy agent URLs",
+            "command",
+            PaletteAction::Cmd(PaletteCmd::CopyUrls),
+        ));
+        self.core
+            .open(Overlay::Palette(Box::new(PaletteState::new(items, ""))));
     }
 
     fn run_palette(&mut self, action: PaletteAction) {
@@ -447,7 +498,8 @@ impl App {
                 self.core.store.prefs.theme = next.name().to_string();
                 self.core.apply_prefs();
                 self.core.save_prefs();
-                self.core.toast(ToastKind::Info, format!("Theme: {}", next.name()));
+                self.core
+                    .toast(ToastKind::Info, format!("Theme: {}", next.name()));
             }
             PaletteAction::Cmd(PaletteCmd::CycleMotion) => {
                 const LEVELS: [&str; 4] = ["auto", "full", "reduced", "off"];
@@ -461,7 +513,9 @@ impl App {
                 self.core.save_prefs();
                 self.core.toast(ToastKind::Info, format!("Motion: {next}"));
             }
-            PaletteAction::Cmd(PaletteCmd::Notifications) => self.core.open(Overlay::Notifications(0)),
+            PaletteAction::Cmd(PaletteCmd::Notifications) => {
+                self.core.open(Overlay::Notifications(0))
+            }
             PaletteAction::Cmd(PaletteCmd::CopyUrls) => {
                 let urls: Vec<String> = self
                     .core
@@ -469,7 +523,8 @@ impl App {
                     .map(|d| d.access_urls.iter().map(|u| u.url.clone()).collect())
                     .unwrap_or_default();
                 if urls.is_empty() {
-                    self.core.toast(ToastKind::Warn, "No agent URLs reported yet");
+                    self.core
+                        .toast(ToastKind::Warn, "No agent URLs reported yet");
                 } else {
                     let text = urls.join("\n");
                     self.core.copy(&text);

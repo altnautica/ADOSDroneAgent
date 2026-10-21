@@ -75,7 +75,12 @@ pub fn row(key: &str, label: &str, help: &str, kind: Kind, value: Option<Value>)
 
 /// A string enum kind.
 pub fn enum_of(values: &[&str]) -> Kind {
-    Kind::Enum(values.iter().map(|v| Value::String((*v).to_string())).collect())
+    Kind::Enum(
+        values
+            .iter()
+            .map(|v| Value::String((*v).to_string()))
+            .collect(),
+    )
 }
 
 /// A non-value focusable line (an action such as "Apply").
@@ -99,7 +104,10 @@ pub fn resource_note(core: &Core, id: &ResourceId, what: &str) -> Option<Item> {
         Some(s) if s.value.is_some() => None,
         Some(s) if s.error.is_some() => Some(rows_view::note(
             core,
-            format!("Could not read {what}: {}", s.error.as_deref().unwrap_or("")),
+            format!(
+                "Could not read {what}: {}",
+                s.error.as_deref().unwrap_or("")
+            ),
             true,
         )),
         _ => Some(rows_view::note(core, format!("Reading {what}…"), false)),
@@ -111,7 +119,11 @@ pub fn utc(secs: i64) -> String {
     let days = secs.div_euclid(86_400);
     let rem = secs.rem_euclid(86_400);
     let (y, m, d) = civil(days);
-    format!("{y:04}-{m:02}-{d:02} {:02}:{:02} UTC", rem / 3600, (rem % 3600) / 60)
+    format!(
+        "{y:04}-{m:02}-{d:02} {:02}:{:02} UTC",
+        rem / 3600,
+        (rem % 3600) / 60
+    )
 }
 
 /// `utc` from Unix milliseconds.
@@ -143,7 +155,13 @@ pub fn prefix(page: &str) -> String {
 
 /// ←/→ on a config-key row: cycle a bool or short enum and write it.
 /// Returns true when the row cycles.
-pub fn config_cycle(core: &mut Core, route: Route, page: &str, row: &EditRow, forward: bool) -> bool {
+pub fn config_cycle(
+    core: &mut Core,
+    route: Route,
+    page: &str,
+    row: &EditRow,
+    forward: bool,
+) -> bool {
     if row.read_only {
         return false;
     }
@@ -185,7 +203,13 @@ pub fn config_edit(core: &mut Core, route: Route, page: &str, row: &EditRow) {
 }
 
 /// A [`CONFIG_EDIT`] overlay finished: parse the answer for `row` and write it.
-pub fn config_result(core: &mut Core, route: Route, page: &str, row: &EditRow, result: &OverlayResult) {
+pub fn config_result(
+    core: &mut Core,
+    route: Route,
+    page: &str,
+    row: &EditRow,
+    result: &OverlayResult,
+) {
     match row::value_from_result(&row.kind, result) {
         Some(Ok(value)) => {
             let flash = format!("{}{}", prefix(page), row.key);
@@ -235,7 +259,11 @@ pub fn detail_text(err: &RestError) -> String {
 }
 
 fn body_text(body: &Value) -> Option<String> {
-    let str_of = |v: Option<&Value>| v.and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let str_of = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     match body.get("detail") {
         Some(Value::String(s)) if !s.is_empty() => return Some(s.clone()),
         Some(detail @ Value::Object(_)) => {
@@ -292,7 +320,13 @@ pub fn text_of(v: Option<&Value>) -> String {
 pub fn put(core: &mut Core, id: ResourceId, value: Value) {
     core.res.insert(
         id,
-        crate::app::Slot { value: Some(value), error: None, code: None, error_body: None, at: core.now },
+        crate::app::Slot {
+            value: Some(value),
+            error: None,
+            code: None,
+            error_body: None,
+            at: core.now,
+        },
     );
 }
 
@@ -309,22 +343,37 @@ mod tests {
     }
 
     fn status(code: u16, body: Value) -> RestError {
-        RestError::Status { code, body: Some(body) }
+        RestError::Status {
+            code,
+            body: Some(body),
+        }
     }
 
     #[test]
     fn nested_error_bodies_read_as_operator_text() {
-        let e = status(503, json!({"detail":{"error":{"code":"E_SCAN_UNAVAILABLE","message":"Wi-Fi command socket unavailable"}}}));
+        let e = status(
+            503,
+            json!({"detail":{"error":{"code":"E_SCAN_UNAVAILABLE","message":"Wi-Fi command socket unavailable"}}}),
+        );
         assert_eq!(detail_text(&e), "Wi-Fi command socket unavailable");
         assert_eq!(error_code(&e).as_deref(), Some("E_SCAN_UNAVAILABLE"));
-        let e = status(400, json!({"detail":"Invalid channel 7. Valid channels: [36, 40]"}));
-        assert_eq!(detail_text(&e), "Invalid channel 7. Valid channels: [36, 40]");
+        let e = status(
+            400,
+            json!({"detail":"Invalid channel 7. Valid channels: [36, 40]"}),
+        );
+        assert_eq!(
+            detail_text(&e),
+            "Invalid channel 7. Valid channels: [36, 40]"
+        );
         let e = status(400, json!({"detail":{"error":"above_ceiling","max":15}}));
         assert_eq!(detail_text(&e), "above ceiling (max 15)");
         let e = status(409, json!({"error":"E_ARMED","message":"Vehicle is armed"}));
         assert_eq!(detail_text(&e), ARMED_REFUSAL);
         assert_eq!(error_code(&e).as_deref(), Some("E_ARMED"));
-        let e = status(400, json!({"error":"E_RIG_INVALID","detail":"missing sensors"}));
+        let e = status(
+            400,
+            json!({"error":"E_RIG_INVALID","detail":"missing sensors"}),
+        );
         assert_eq!(detail_text(&e), "missing sensors");
         assert_eq!(error_code(&e).as_deref(), Some("E_RIG_INVALID"));
     }

@@ -41,7 +41,10 @@ pub fn render(frame: &mut Frame, app: &mut App) -> FrameOut {
     let hints = keymap::hints(&stack, |c| app.enabled(c));
     // The key contexts of the screen under any overlay, for the help overlay.
     let under: Vec<keymap::Ctx> = {
-        let mut s = app.tabs.get(app.core.tab, app.core.profile()).ctx(&app.core);
+        let mut s = app
+            .tabs
+            .get(app.core.tab, app.core.profile())
+            .ctx(&app.core);
         s.push(keymap::Ctx::Global);
         s
     };
@@ -85,7 +88,8 @@ pub fn render(frame: &mut Frame, app: &mut App) -> FrameOut {
     tab.render(frame, inner, core, &mut out);
 
     // The focused row's help stays visible while it is edited in place.
-    let inline_edit = matches!(core.overlays.last(), Some(crate::overlay::Overlay::Input(s)) if s.inline);
+    let inline_edit =
+        matches!(core.overlays.last(), Some(crate::overlay::Overlay::Input(s)) if s.inline);
     let context = if core.overlays.is_empty() || inline_edit {
         tab.context_line(core)
     } else {
@@ -96,7 +100,8 @@ pub fn render(frame: &mut Frame, app: &mut App) -> FrameOut {
     chrome::hint_bar(frame, rows[4], core, &hints, extra);
 
     // Toasts sit above the hint bar, bottom-right.
-    let toast_area = ratatui::layout::Rect::new(area.x, rows[2].y, area.width, rows[3].bottom() - rows[2].y);
+    let toast_area =
+        ratatui::layout::Rect::new(area.x, rows[2].y, area.width, rows[3].bottom() - rows[2].y);
     chrome::toasts(frame, toast_area, core, &mut out);
 
     overlays::render(frame, core, &under, &mut out);

@@ -77,7 +77,8 @@ pub fn classify(result: &Result<Value, RestError>) -> Outcome {
                     Outcome::NotPersisted(why.to_string())
                 }
                 Some(400)
-                    if str_at(&body, &["detail", "error", "code"]) == Some("E_REDACTED_SENTINEL")
+                    if str_at(&body, &["detail", "error", "code"])
+                        == Some("E_REDACTED_SENTINEL")
                         || str_at(&body, &["code"]) == Some("E_REDACTED_SENTINEL") =>
                 {
                     Outcome::Failed("Enter a new secret value".into())
@@ -87,7 +88,12 @@ pub fn classify(result: &Result<Value, RestError>) -> Outcome {
                     // `detail.error.messages`; a cross-field rule is flat.
                     let reasons: Option<String> = crate::app::at(&body, "detail.error.messages")
                         .and_then(Value::as_array)
-                        .map(|m| m.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("; "))
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(Value::as_str)
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        })
                         .filter(|s| !s.is_empty());
                     let msg = reasons
                         .or_else(|| str_at(&body, &["message"]).map(str::to_string))
@@ -107,14 +113,18 @@ pub fn classify(result: &Result<Value, RestError>) -> Outcome {
 
 /// Handle a finished config write: toast, flash the row, re-read the config.
 /// Returns the outcome for pages that react further.
-pub fn on_reply(core: &mut Core, label: &str, row: &str, result: &Result<Value, RestError>) -> Outcome {
+pub fn on_reply(
+    core: &mut Core,
+    label: &str,
+    row: &str,
+    result: &Result<Value, RestError>,
+) -> Outcome {
     let outcome = classify(result);
     match &outcome {
         Outcome::Saved => core.toast(ToastKind::Success, format!("{label} saved")),
-        Outcome::NotPersisted(why) => core.toast(
-            ToastKind::Warn,
-            format!("Applied but not persisted: {why}"),
-        ),
+        Outcome::NotPersisted(why) => {
+            core.toast(ToastKind::Warn, format!("Applied but not persisted: {why}"))
+        }
         Outcome::Failed(why) => core.toast(ToastKind::Error, format!("{label}: {why}")),
     }
     core.flash(row, outcome.ok());
@@ -136,7 +146,9 @@ mod tests {
     #[test]
     fn replies_classify_into_what_the_operator_is_told() {
         assert_eq!(
-            classify(&Ok(json!({"status": "ok", "key": "a", "value": 1, "persisted": true}))),
+            classify(&Ok(
+                json!({"status": "ok", "key": "a", "value": 1, "persisted": true})
+            )),
             Outcome::Saved
         );
         assert_eq!(
@@ -144,19 +156,30 @@ mod tests {
             Outcome::Failed("Key not found: a.b".into())
         );
         assert_eq!(
-            classify(&Ok(json!({"status": "ok", "persisted": false, "persist_error": "EROFS"}))),
+            classify(&Ok(
+                json!({"status": "ok", "persisted": false, "persist_error": "EROFS"})
+            )),
             Outcome::NotPersisted("EROFS".into())
         );
         assert_eq!(
-            classify(&status(500, json!({"status": "error", "persisted": false, "persist_error": "disk full"}))),
+            classify(&status(
+                500,
+                json!({"status": "error", "persisted": false, "persist_error": "disk full"})
+            )),
             Outcome::NotPersisted("disk full".into())
         );
         assert_eq!(
-            classify(&status(409, json!({"error": "E_ARMED", "message": "armed"}))),
+            classify(&status(
+                409,
+                json!({"error": "E_ARMED", "message": "armed"})
+            )),
             Outcome::Failed(ARMED_REFUSAL.into())
         );
         assert_eq!(
-            classify(&status(422, json!({"error": "E_INVALID", "field": "mavlink.baud_rate", "message": "bad baud"}))),
+            classify(&status(
+                422,
+                json!({"error": "E_INVALID", "field": "mavlink.baud_rate", "message": "bad baud"})
+            )),
             Outcome::Failed("bad baud (mavlink.baud_rate)".into())
         );
         assert_eq!(
@@ -167,7 +190,10 @@ mod tests {
             Outcome::Failed("must be >= 2500".into())
         );
         assert_eq!(
-            classify(&status(400, json!({"detail": {"error": {"code": "E_REDACTED_SENTINEL"}}}))),
+            classify(&status(
+                400,
+                json!({"detail": {"error": {"code": "E_REDACTED_SENTINEL"}}})
+            )),
             Outcome::Failed("Enter a new secret value".into())
         );
     }

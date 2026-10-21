@@ -29,7 +29,10 @@ fn finite(text: &str) -> Result<(), String> {
 }
 
 fn name_of(ret: &Ret) -> Option<String> {
-    ret.data.get("name").and_then(Value::as_str).map(str::to_string)
+    ret.data
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 impl ParamsTab {
@@ -44,16 +47,26 @@ impl ParamsTab {
             core.toast(ToastKind::Warn, format!("{name} is read-only"));
             return;
         }
-        let Some(cur) = self.current(&name) else { return };
+        let Some(cur) = self.current(&name) else {
+            return;
+        };
         let meta = self.store.meta(&name).cloned().unwrap_or_default();
         let ret = Ret::new(ROUTE, "edit").with(json!({ "name": name }));
         if let Some(values) = meta.enum_values() {
-            let items: Vec<String> = values.iter().map(|(code, label)| format!("{} {label}", plain(*code))).collect();
+            let items: Vec<String> = values
+                .iter()
+                .map(|(code, label)| format!("{} {label}", plain(*code)))
+                .collect();
             let selected = values
                 .iter()
                 .position(|(code, _)| crate::params::same(*code, cur))
                 .unwrap_or(0);
-            core.open(Overlay::picker(ret.with(json!({ "name": name, "kind": "enum" })), name, items, selected));
+            core.open(Overlay::picker(
+                ret.with(json!({ "name": name, "kind": "enum" })),
+                name,
+                items,
+                selected,
+            ));
         } else if let Some(bits) = meta.bits() {
             let raw = cur.max(0.0) as u64;
             let items = bits
@@ -100,10 +113,20 @@ impl ParamsTab {
     fn stage(&mut self, core: &mut Core, name: &str, value: f64) {
         match self.store.stage(name, value) {
             StageOutcome::Staged => {
-                if let Some(r) = self.store.meta(name).filter(|m| m.out_of_range(value)).and_then(|m| m.range) {
+                if let Some(r) = self
+                    .store
+                    .meta(name)
+                    .filter(|m| m.out_of_range(value))
+                    .and_then(|m| m.range)
+                {
                     core.toast(
                         ToastKind::Warn,
-                        format!("{name}: {} is outside {} .. {}; staged anyway", plain(value), plain(r.min), plain(r.max)),
+                        format!(
+                            "{name}: {} is outside {} .. {}; staged anyway",
+                            plain(value),
+                            plain(r.min),
+                            plain(r.max)
+                        ),
                     );
                 }
             }
@@ -136,13 +159,18 @@ impl ParamsTab {
     }
 
     pub(super) fn favourite(&mut self, core: &mut Core) {
-        let (Some(name), Some(key)) = (self.focused(), self.fav_key) else { return };
+        let (Some(name), Some(key)) = (self.focused(), self.fav_key) else {
+            return;
+        };
         let now = self.store.toggle_favourite(&name);
         let favs = self.store.favourites();
         if favs.is_empty() {
             core.store.prefs.favorite_params.remove(key);
         } else {
-            core.store.prefs.favorite_params.insert(key.to_string(), favs);
+            core.store
+                .prefs
+                .favorite_params
+                .insert(key.to_string(), favs);
         }
         core.save_prefs();
         let word = if now { "added to" } else { "removed from" };
@@ -155,14 +183,23 @@ impl ParamsTab {
             core.toast(ToastKind::Warn, "No parameters loaded");
             return;
         }
-        let device = core.dash().map(|d| d.device_name.clone()).unwrap_or_default();
-        let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let device = core
+            .dash()
+            .map(|d| d.device_name.clone())
+            .unwrap_or_default();
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
         let file = file_io::export_name(&device, secs);
         let text = file_io::export_text(&self.store);
         match std::fs::write(&file, text) {
             Ok(()) => core.toast(
                 ToastKind::Success,
-                format!("Exported {} parameters to ./{file}", self.store.live().len()),
+                format!(
+                    "Exported {} parameters to ./{file}",
+                    self.store.live().len()
+                ),
             ),
             Err(e) => core.toast(ToastKind::Error, format!("Export failed: {e}")),
         }
@@ -173,9 +210,20 @@ impl ParamsTab {
             core.toast(ToastKind::Warn, "No parameters loaded");
             return;
         }
-        let mut input = Overlay::input(Ret::new(ROUTE, "import"), "Import parameters", "Path to a .param file", "");
-        let place = if core.target.remote { " (a path on this machine)" } else { "" };
-        input.hint = Some(format!("NAME,VALUE or NAME VALUE per line, # comments{place}"));
+        let mut input = Overlay::input(
+            Ret::new(ROUTE, "import"),
+            "Import parameters",
+            "Path to a .param file",
+            "",
+        );
+        let place = if core.target.remote {
+            " (a path on this machine)"
+        } else {
+            ""
+        };
+        input.hint = Some(format!(
+            "NAME,VALUE or NAME VALUE per line, # comments{place}"
+        ));
         core.open(Overlay::Input(input));
     }
 
@@ -204,7 +252,10 @@ impl ParamsTab {
             core.toast(ToastKind::Error, WRITE_REFUSAL);
             return;
         }
-        let mut body = vec![format!("Write {} parameter(s) to the flight controller?", self.staged_count())];
+        let mut body = vec![format!(
+            "Write {} parameter(s) to the flight controller?",
+            self.staged_count()
+        )];
         for (name, staged) in self.store.staged().iter().take(CONFIRM_ROWS) {
             let meta = self.store.meta(name);
             let old = staged
@@ -223,7 +274,11 @@ impl ParamsTab {
         if self.staged_count() > CONFIRM_ROWS {
             body.push(format!("… and {} more", self.staged_count() - CONFIRM_ROWS));
         }
-        core.open(Overlay::confirm(Ret::new(ROUTE, "write"), "Write parameters", body));
+        core.open(Overlay::confirm(
+            Ret::new(ROUTE, "write"),
+            "Write parameters",
+            body,
+        ));
     }
 
     pub(super) fn submit_batch(&mut self, core: &mut Core) {
@@ -231,7 +286,12 @@ impl ParamsTab {
             core.toast(ToastKind::Error, WRITE_REFUSAL);
             return;
         }
-        let items: Vec<(String, f64)> = self.store.staged().iter().map(|(n, s)| (n.clone(), s.value)).collect();
+        let items: Vec<(String, f64)> = self
+            .store
+            .staged()
+            .iter()
+            .map(|(n, s)| (n.clone(), s.value))
+            .collect();
         if items.is_empty() {
             return;
         }
@@ -242,16 +302,27 @@ impl ParamsTab {
         core.submit(Request::param_batch(ROUTE, items));
     }
 
-    pub(super) fn batch_item(&mut self, core: &mut Core, name: String, value: f64, result: Result<Value, RestError>) {
+    pub(super) fn batch_item(
+        &mut self,
+        core: &mut Core,
+        name: String,
+        value: f64,
+        result: Result<Value, RestError>,
+    ) {
         let row = format!("param:{name}");
         let reboot = self.store.meta(&name).is_some_and(|m| m.reboot_required);
-        let Some(batch) = self.batch.as_mut() else { return };
+        let Some(batch) = self.batch.as_mut() else {
+            return;
+        };
         batch.done += 1;
         match result {
             Ok(body) if body.get("ack").and_then(Value::as_bool) == Some(true) => {
                 batch.acked += 1;
                 batch.reboot |= reboot;
-                let confirmed = body.get("cached_value").and_then(Value::as_f64).unwrap_or(value);
+                let confirmed = body
+                    .get("cached_value")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(value);
                 self.store.unstage(&name);
                 self.store.set_one(&name, confirmed);
                 self.clamp();
@@ -271,7 +342,11 @@ impl ParamsTab {
         if b.reboot {
             text.push_str("; reboot the flight controller to apply");
         }
-        let kind = if b.acked == b.total { ToastKind::Success } else { ToastKind::Warn };
+        let kind = if b.acked == b.total {
+            ToastKind::Success
+        } else {
+            ToastKind::Warn
+        };
         core.toast(kind, text);
         core.fetch_now(crate::poll::ResourceId::Params);
     }

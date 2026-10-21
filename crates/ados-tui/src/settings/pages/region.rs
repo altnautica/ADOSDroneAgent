@@ -112,11 +112,20 @@ impl Page {
         };
         items.push(rows_view::info(core, "Posture", now));
         items.push(Item::Header("Operating region".into()));
-        let mut row = kit::row("mode", "Operating region", MODE_HELP, kit::enum_of(MODES), Some(json!(m)));
+        let mut row = kit::row(
+            "mode",
+            "Operating region",
+            MODE_HELP,
+            kit::enum_of(MODES),
+            Some(json!(m)),
+        );
         row.default = Some(json!(cm));
         items.push(Item::Row(row));
         if m == "region" {
-            let value = r.as_deref().map(region_label).unwrap_or_else(|| "pick a region".into());
+            let value = r
+                .as_deref()
+                .map(region_label)
+                .unwrap_or_else(|| "pick a region".into());
             let mut row = kit::row(
                 "region",
                 "Region",
@@ -148,13 +157,19 @@ impl Page {
         match key {
             "mode" => {
                 let (m, _) = self.effective(core);
-                let next = if m == "region" { "unrestricted" } else { "region" };
+                let next = if m == "region" {
+                    "unrestricted"
+                } else {
+                    "region"
+                };
                 self.staged_mode = Some(next.to_string());
             }
             "region" => {
                 let (_, r) = self.effective(core);
                 let n = COMMON_REGIONS.len();
-                let pos = r.as_deref().and_then(|c| COMMON_REGIONS.iter().position(|(x, _)| *x == c));
+                let pos = r
+                    .as_deref()
+                    .and_then(|c| COMMON_REGIONS.iter().position(|(x, _)| *x == c));
                 let next = match (pos, forward) {
                     (Some(i), true) => (i + 1) % n,
                     (Some(i), false) => (i + n - 1) % n,
@@ -168,13 +183,24 @@ impl Page {
 
     fn pick(&self, core: &mut Core) {
         let (_, r) = self.effective(core);
-        let mut items: Vec<String> = COMMON_REGIONS.iter().map(|(c, _)| region_label(c)).collect();
+        let mut items: Vec<String> = COMMON_REGIONS
+            .iter()
+            .map(|(c, _)| region_label(c))
+            .collect();
         items.push(OTHER.into());
         let sel = match r.as_deref() {
-            Some(c) => COMMON_REGIONS.iter().position(|(x, _)| *x == c).unwrap_or(COMMON_REGIONS.len()),
+            Some(c) => COMMON_REGIONS
+                .iter()
+                .position(|(x, _)| *x == c)
+                .unwrap_or(COMMON_REGIONS.len()),
             None => 0,
         };
-        core.open(Overlay::picker(Ret::new(route(), "pick"), "Region", items, sel));
+        core.open(Overlay::picker(
+            Ret::new(route(), "pick"),
+            "Region",
+            items,
+            sel,
+        ));
     }
 
     fn apply(&mut self, core: &mut Core) {
@@ -194,7 +220,8 @@ impl Page {
             ("region", Some(code)) => format!("The radio will enforce {} channel and power rules.", region_label(code)),
             _ => "The radio will run unrestricted, with no region enforced. You are responsible for legal RF operation in your jurisdiction.".into(),
         };
-        let section = json!({ "mode": m, "region": if m == "region" { json!(r) } else { Value::Null } });
+        let section =
+            json!({ "mode": m, "region": if m == "region" { json!(r) } else { Value::Null } });
         core.open(Overlay::confirm(
             Ret::new(route(), "apply").with(section),
             "Change operating region?",
@@ -235,8 +262,15 @@ impl Bespoke for Page {
                 Some((code, _)) => self.staged_region = Some(code.to_string()),
                 None => {
                     let (_, r) = self.effective(core);
-                    let initial = r.filter(|c| !COMMON_REGIONS.iter().any(|(x, _)| x == c)).unwrap_or_default();
-                    let mut s = Overlay::input(Ret::new(route(), "iso"), "Region", "ISO 3166-1 alpha-2 code", &initial);
+                    let initial = r
+                        .filter(|c| !COMMON_REGIONS.iter().any(|(x, _)| x == c))
+                        .unwrap_or_default();
+                    let mut s = Overlay::input(
+                        Ret::new(route(), "iso"),
+                        "Region",
+                        "ISO 3166-1 alpha-2 code",
+                        &initial,
+                    );
                     s.validate = Some(validate_iso);
                     s.hint = Some("e.g. FR".into());
                     core.open(Overlay::Input(s));
@@ -249,8 +283,15 @@ impl Bespoke for Page {
                 }
                 self.busy = true;
                 core.submit(
-                    Request::new("POST", "/api/v1/setup/apply", route(), Purpose::SetupApply { section: "regulatory" })
-                        .body(json!({ "regulatory": ret.data })),
+                    Request::new(
+                        "POST",
+                        "/api/v1/setup/apply",
+                        route(),
+                        Purpose::SetupApply {
+                            section: "regulatory",
+                        },
+                    )
+                    .body(json!({ "regulatory": ret.data })),
                 );
             }
             _ => {}
@@ -294,7 +335,9 @@ impl Bespoke for Page {
         let items = self.items(core);
         match self.rows.focused_key(&items)? {
             "apply" => Some("Apply the staged posture after a confirm".into()),
-            "region" => Some("←→ cycles common regions · Enter picks, or types another ISO code".into()),
+            "region" => {
+                Some("←→ cycles common regions · Enter picks, or types another ISO code".into())
+            }
             _ => self.rows.focused_row(&items).map(|r| r.help.clone()),
         }
     }
@@ -329,7 +372,10 @@ mod tests {
         // The setup status never carries the posture; it must not matter.
         kit::put(core, ResourceId::SetupStatus, json!({"regulatory": {}}));
         let mut page = Page::default();
-        assert_eq!(current(core), ("region".to_string(), Some("US".to_string())));
+        assert_eq!(
+            current(core),
+            ("region".to_string(), Some("US".to_string()))
+        );
         let items = page.items(core);
         let posture = items.iter().find_map(|i| match i {
             Item::Row(r) if r.key == "region" => r.value.clone(),
@@ -340,6 +386,9 @@ mod tests {
         page.rows.focus_key(&items, "mode");
         assert!(page.on_command(core, Command::Right));
         assert_eq!(page.effective(core).0, "unrestricted");
-        assert!(page.dirty(core), "unrestricted is staged against the pinned US");
+        assert!(
+            page.dirty(core),
+            "unrestricted is staged against the pinned US"
+        );
     }
 }

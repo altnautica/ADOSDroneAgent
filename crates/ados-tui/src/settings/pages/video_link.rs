@@ -28,16 +28,39 @@ fn specs() -> [(&'static str, &'static str, &'static str, Kind); 5] {
             "preset",
             "Preset",
             "A named MCS + FEC trio: conservative favours range, aggressive favours throughput.",
-            Kind::Enum(vec![json!("conservative"), json!("balanced"), json!("aggressive")]),
+            Kind::Enum(vec![
+                json!("conservative"),
+                json!("balanced"),
+                json!("aggressive"),
+            ]),
         ),
-        ("fec_k", "FEC k", "Data packets per FEC block (1-64).", Kind::Int { min: Some(1), max: Some(64) }),
+        (
+            "fec_k",
+            "FEC k",
+            "Data packets per FEC block (1-64).",
+            Kind::Int {
+                min: Some(1),
+                max: Some(64),
+            },
+        ),
         (
             "fec_n",
             "FEC n",
             "Total packets per FEC block, data plus recovery (2-128, above k).",
-            Kind::Int { min: Some(2), max: Some(128) },
+            Kind::Int {
+                min: Some(2),
+                max: Some(128),
+            },
         ),
-        ("mcs", "MCS", "Modulation and coding index (0-7). Lower reaches further.", Kind::Int { min: Some(0), max: Some(7) }),
+        (
+            "mcs",
+            "MCS",
+            "Modulation and coding index (0-7). Lower reaches further.",
+            Kind::Int {
+                min: Some(0),
+                max: Some(7),
+            },
+        ),
         (
             "auto",
             "Auto",
@@ -67,7 +90,12 @@ fn current(cfg: &Value, field: &str) -> Option<Value> {
 pub fn warnings(body: &Value) -> Vec<String> {
     body.get("warnings")
         .and_then(Value::as_array)
-        .map(|w| w.iter().filter_map(Value::as_str).map(|s| s.replace('_', " ")).collect())
+        .map(|w| {
+            w.iter()
+                .filter_map(Value::as_str)
+                .map(|s| s.replace('_', " "))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -80,18 +108,33 @@ impl Page {
     fn items(&self, core: &Core) -> Vec<Item> {
         let mut items = vec![Item::Header("Video link".into())];
         let Some(cfg) = core.value(&ResourceId::VideoConfig) else {
-            items.push(match core.slot(&ResourceId::VideoConfig).and_then(|s| s.error.clone()) {
-                Some(e) => note(core, format!("Could not read the video config: {e}"), true),
-                None => note(core, "Reading video config…", false),
-            });
+            items.push(
+                match core
+                    .slot(&ResourceId::VideoConfig)
+                    .and_then(|s| s.error.clone())
+                {
+                    Some(e) => note(core, format!("Could not read the video config: {e}"), true),
+                    None => note(core, "Reading video config…", false),
+                },
+            );
             return items;
         };
         for (field, label, help, kind) in specs() {
-            items.push(Item::Row(kit::row(field, label, help, kind, current(cfg, field))));
+            items.push(Item::Row(kit::row(
+                field,
+                label,
+                help,
+                kind,
+                current(cfg, field),
+            )));
         }
         items.push(info(core, "Channel", text_of(at(cfg, "radio.channel"))));
         items.push(info(core, "Band", text_of(at(cfg, "radio.band"))));
-        items.push(info(core, "Encoder bitrate", format!("{} kbps", text_of(at(cfg, "encoder.bitrate_kbps")))));
+        items.push(info(
+            core,
+            "Encoder bitrate",
+            format!("{} kbps", text_of(at(cfg, "encoder.bitrate_kbps"))),
+        ));
         items
     }
 
@@ -103,7 +146,10 @@ impl Page {
                 "POST",
                 "/api/video/config",
                 ROUTE,
-                Purpose::Page { tag: "video", data: json!(field) },
+                Purpose::Page {
+                    tag: "video",
+                    data: json!(field),
+                },
             )
             .body(Value::Object(body)),
         );
@@ -112,7 +158,11 @@ impl Page {
 
 impl Bespoke for Page {
     fn subs(&self, _core: &Core) -> Vec<Sub> {
-        vec![Sub::every_ms(ResourceId::VideoConfig, "/api/video/config", 15000)]
+        vec![Sub::every_ms(
+            ResourceId::VideoConfig,
+            "/api/video/config",
+            15000,
+        )]
     }
 
     fn on_command(&mut self, core: &mut Core, cmd: Command) -> bool {
@@ -128,7 +178,8 @@ impl Bespoke for Page {
                 kit::open_editor(core, ROUTE, &row);
             }
             Command::Left | Command::Right | Command::Activate => {
-                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd != Command::Left) {
+                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd != Command::Left)
+                {
                     Self::post(core, &row.key, next);
                 }
             }
@@ -143,7 +194,8 @@ impl Bespoke for Page {
             return;
         }
         let items = self.items(core);
-        let Some(row) = kit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() else {
+        let Some(row) = kit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned()
+        else {
             return;
         };
         match row::value_from_result(&row.kind, &result) {
@@ -154,7 +206,9 @@ impl Bespoke for Page {
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
-        let Purpose::Page { tag: "video", data } = &reply.purpose else { return };
+        let Purpose::Page { tag: "video", data } = &reply.purpose else {
+            return;
+        };
         let field = data.as_str().unwrap_or_default();
         let label = specs()
             .into_iter()
@@ -211,7 +265,10 @@ mod tests {
         assert_eq!(current(&cfg, "auto"), Some(json!(true)));
         let cfg = json!({"adaptive":{"available":true,"adaptive_bitrate_enabled":false}});
         assert_eq!(current(&cfg, "auto"), Some(json!(false)));
-        assert_eq!(warnings(&json!({"warnings":["set_mcs_failed"]})), vec!["set mcs failed"]);
+        assert_eq!(
+            warnings(&json!({"warnings":["set_mcs_failed"]})),
+            vec!["set mcs failed"]
+        );
         assert!(warnings(&json!({"warnings":[]})).is_empty());
     }
 
@@ -219,12 +276,19 @@ mod tests {
     fn enter_toggles_auto_and_opens_an_editor_for_numbers() {
         let mut app = crate::ui::tests::test_app();
         let core = &mut app.core;
-        kit::put(core, ResourceId::VideoConfig, json!({"radio":{"mcs_index":2},"adaptive":{"adaptive_bitrate_enabled":true}}));
+        kit::put(
+            core,
+            ResourceId::VideoConfig,
+            json!({"radio":{"mcs_index":2},"adaptive":{"adaptive_bitrate_enabled":true}}),
+        );
         let mut page = Page::default();
         let items = page.items(core);
         page.rows.focus_key(&items, "auto");
         assert!(page.on_command(core, Command::Activate));
-        assert!(core.overlays.is_empty(), "a toggle never opens an on/off prompt");
+        assert!(
+            core.overlays.is_empty(),
+            "a toggle never opens an on/off prompt"
+        );
         page.rows.focus_key(&items, "mcs");
         assert!(page.on_command(core, Command::Activate));
         assert_eq!(core.overlays.len(), 1, "a number opens its editor");

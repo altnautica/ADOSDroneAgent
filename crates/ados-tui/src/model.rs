@@ -182,12 +182,12 @@ mod from_status;
 mod profile;
 mod reach;
 pub use profile::{present, Level, ProfileRoutes, RouteSet, RowLine, CAPTURE_STATE_PATH};
+pub mod link;
 mod profile_gs;
 #[cfg(test)]
 pub(crate) mod profile_tests;
-mod services;
-pub mod link;
 pub mod ring;
+mod services;
 pub mod vehicle;
 
 /// A reachable host used to project per-host service URLs (mDNS name or LAN IP).

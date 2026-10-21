@@ -63,12 +63,22 @@ impl SettingsTab {
     pub fn palette_items(&self, core: &Core) -> Vec<PaletteItem> {
         let mut out: Vec<PaletteItem> = sidebar::entries(core)
             .into_iter()
-            .map(|e| PaletteItem::new(format!("Settings › {}", e.title), "setting", PaletteAction::SettingsPage(e.id)))
+            .map(|e| {
+                PaletteItem::new(
+                    format!("Settings › {}", e.title),
+                    "setting",
+                    PaletteAction::SettingsPage(e.id),
+                )
+            })
             .collect();
         if let Some(leaves) = config_rows::leaves(core) {
             out.extend(leaves.iter().map(|l| {
                 let label = config_rows::label_of(&l.key, Some(l));
-                PaletteItem::new(format!("{} · {label}", l.key), "config", PaletteAction::ConfigKey(l.key.clone()))
+                PaletteItem::new(
+                    format!("{} · {label}", l.key),
+                    "config",
+                    PaletteAction::ConfigKey(l.key.clone()),
+                )
             }));
         }
         out
@@ -89,8 +99,12 @@ impl SettingsTab {
     }
 
     fn focus_pending(&mut self, core: &Core) {
-        let Some(key) = self.pending_key.clone() else { return };
-        let Some(entry) = self.entry(core, "all_settings") else { return };
+        let Some(key) = self.pending_key.clone() else {
+            return;
+        };
+        let Some(entry) = self.entry(core, "all_settings") else {
+            return;
+        };
         if config_rows::leaves(core).is_none() {
             return;
         }
@@ -146,17 +160,26 @@ impl SettingsTab {
         let cur = self.current(core);
         let pos = entries.iter().position(|e| e.id == cur.id).unwrap_or(0);
         let n = entries.len();
-        let next = if forward { (pos + 1) % n } else { (pos + n - 1) % n };
+        let next = if forward {
+            (pos + 1) % n
+        } else {
+            (pos + n - 1) % n
+        };
         self.select(core, entries[next].id.clone());
     }
 
     /// Keep one config pane per configurable extension.
     fn sync_plugins(&mut self, core: &Core) {
-        let ids: Vec<String> = plugin_rows::configurable(core).into_iter().map(|(id, _)| id).collect();
-        self.plugins.retain(|p| ids.iter().any(|id| id == p.plugin_id()));
+        let ids: Vec<String> = plugin_rows::configurable(core)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        self.plugins
+            .retain(|p| ids.iter().any(|id| id == p.plugin_id()));
         for id in ids {
             if !self.plugins.iter().any(|p| p.plugin_id() == id) {
-                self.plugins.push(PluginConfigPane::new(id, Route::page(PLUGIN_ROUTE)));
+                self.plugins
+                    .push(PluginConfigPane::new(id, Route::page(PLUGIN_ROUTE)));
             }
         }
     }
@@ -170,7 +193,10 @@ impl SettingsTab {
             PageBody::Bespoke(b) => Some(self.pages.get(b)),
             PageBody::Plugin => {
                 let id = entry.plugin_id()?;
-                self.plugins.iter().find(|p| p.plugin_id() == id).map(|p| p as &dyn Bespoke)
+                self.plugins
+                    .iter()
+                    .find(|p| p.plugin_id() == id)
+                    .map(|p| p as &dyn Bespoke)
             }
             _ => None,
         }
@@ -188,7 +214,12 @@ impl SettingsTab {
     }
 
     /// The page a routed reply or overlay belongs to.
-    fn routed_mut(&mut self, core: &Core, page: &str, data: Option<&Value>) -> Option<&mut dyn Bespoke> {
+    fn routed_mut(
+        &mut self,
+        core: &Core,
+        page: &str,
+        data: Option<&Value>,
+    ) -> Option<&mut dyn Bespoke> {
         if page == PLUGIN_ROUTE {
             let named = data
                 .and_then(|d| d.get("plugin"))
@@ -203,7 +234,9 @@ impl SettingsTab {
 
     /// Row-list navigation shared by every row page.
     fn navigate(&mut self, core: &Core, entry: &Entry, cmd: Command) -> bool {
-        let Some(items) = self.items(core, entry) else { return false };
+        let Some(items) = self.items(core, entry) else {
+            return false;
+        };
         let all = entry.body == PageBody::AllSettings;
         let st = self.state_mut(&entry.id);
         match cmd {
@@ -240,12 +273,17 @@ impl Tab for SettingsTab {
         let mut subs = match entry.body {
             PageBody::Config(_) | PageBody::AllSettings => config_rows::subs(core),
             PageBody::Prefs(_) => Vec::new(),
-            PageBody::Bespoke(_) | PageBody::Plugin => {
-                self.bespoke(&entry).map(|p| p.subs(core)).unwrap_or_default()
-            }
+            PageBody::Bespoke(_) | PageBody::Plugin => self
+                .bespoke(&entry)
+                .map(|p| p.subs(core))
+                .unwrap_or_default(),
         };
         // The schema once per session, for the palette's config keys.
-        subs.extend(config_rows::subs(core).into_iter().filter(|s| s.id == ResourceId::ConfigSchema));
+        subs.extend(
+            config_rows::subs(core)
+                .into_iter()
+                .filter(|s| s.id == ResourceId::ConfigSchema),
+        );
         subs.extend(plugin_rows::listing_subs(core));
         let mut seen: Vec<ResourceId> = Vec::with_capacity(subs.len());
         subs.retain(|s| {
@@ -374,7 +412,9 @@ impl Tab for SettingsTab {
             }
             Hit::Item(sidebar::SECTION_HIT, i) => {
                 let entry = self.current(core);
-                let (Some(items), Some(leaves)) = (self.items(core, &entry), config_rows::leaves(core)) else {
+                let (Some(items), Some(leaves)) =
+                    (self.items(core, &entry), config_rows::leaves(core))
+                else {
                     return;
                 };
                 if let Some(section) = all_settings::sections(&leaves).get(*i) {
@@ -396,14 +436,21 @@ impl Tab for SettingsTab {
         let entry = self.current(core);
         match self.bespoke(&entry) {
             Some(p) => p.animating(core),
-            None => self.rows.get(&entry.id).is_some_and(|s| s.revealing(core.now)),
+            None => self
+                .rows
+                .get(&entry.id)
+                .is_some_and(|s| s.revealing(core.now)),
         }
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         self.sync_plugins(core);
         let narrow = f.area().width < 100;
-        let side_w = if narrow { sidebar::NARROW } else { sidebar::WIDE };
+        let side_w = if narrow {
+            sidebar::NARROW
+        } else {
+            sidebar::WIDE
+        };
         let [side, rule, body] = Layout::horizontal([
             Constraint::Length(side_w),
             Constraint::Length(1),
@@ -413,7 +460,15 @@ impl Tab for SettingsTab {
         let entries = sidebar::entries(core);
         let entry = self.current(core);
         let selected = entries.iter().position(|e| e.id == entry.id).unwrap_or(0);
-        sidebar::render(f, side, core, &entries, selected, &mut self.side_offset, out);
+        sidebar::render(
+            f,
+            side,
+            core,
+            &entries,
+            selected,
+            &mut self.side_offset,
+            out,
+        );
         sidebar::rule(f, rule, core);
         let body = Rect {
             x: body.x + 1,
@@ -424,7 +479,9 @@ impl Tab for SettingsTab {
             page.render(f, body, core, out);
             return;
         }
-        let Some(items) = self.items(core, &entry) else { return };
+        let Some(items) = self.items(core, &entry) else {
+            return;
+        };
         let mut rows_area = body;
         if self.filtering || !self.filter.value().is_empty() {
             let line = Rect { height: 1, ..body };
@@ -473,7 +530,8 @@ impl Tab for SettingsTab {
     }
 
     fn status_hint(&self, _core: &Core) -> Option<String> {
-        (!self.filtering && !self.filter.value().is_empty()).then(|| format!("filter: {}", self.filter.value()))
+        (!self.filtering && !self.filter.value().is_empty())
+            .then(|| format!("filter: {}", self.filter.value()))
     }
 
     fn searchable(&self, core: &Core) -> bool {

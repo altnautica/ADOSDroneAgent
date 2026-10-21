@@ -21,7 +21,13 @@ fn level_style(t: &Theme, level: Level) -> Style {
     }
 }
 
-pub(super) fn profile_panel(frame: &mut Frame, area: Rect, core: &Core, dash: &Dashboard, stale: bool) {
+pub(super) fn profile_panel(
+    frame: &mut Frame,
+    area: Rect,
+    core: &Core,
+    dash: &Dashboard,
+    stale: bool,
+) {
     let t = &core.theme;
     let title = match dash.profile.as_str() {
         "visor" => "Visor",
@@ -33,7 +39,10 @@ pub(super) fn profile_panel(frame: &mut Frame, area: Rect, core: &Core, dash: &D
     frame.render_widget(block, area);
     // A snapshot the agent no longer confirms is not shown as live readings.
     if stale {
-        frame.render_widget(Paragraph::new(Span::styled("readings hidden (stale)", t.dim())), inner);
+        frame.render_widget(
+            Paragraph::new(Span::styled("readings hidden (stale)", t.dim())),
+            inner,
+        );
         return;
     }
     frame.render_widget(Paragraph::new(packed_lines(t, dash, inner.width)), inner);

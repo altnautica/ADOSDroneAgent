@@ -28,56 +28,176 @@ pub struct TuiPalette {
 
 /// Theme `terminal-amber`.
 pub const AMBER: TuiPalette = TuiPalette {
-    canvas: Tone { rgb: (31, 31, 31), idx: 234 },
-    border: Tone { rgb: (74, 74, 74), idx: 239 },
-    fg_primary: Tone { rgb: (233, 233, 233), idx: 254 },
-    fg_secondary: Tone { rgb: (138, 138, 138), idx: 245 },
-    accent: Tone { rgb: (235, 193, 87), idx: 179 },
-    on_accent: Tone { rgb: (26, 26, 26), idx: 235 },
-    success: Tone { rgb: (121, 200, 121), idx: 114 },
-    warning: Tone { rgb: (227, 199, 102), idx: 179 },
-    error: Tone { rgb: (224, 108, 90), idx: 209 },
-    info: Tone { rgb: (127, 178, 229), idx: 110 },
+    canvas: Tone {
+        rgb: (31, 31, 31),
+        idx: 234,
+    },
+    border: Tone {
+        rgb: (74, 74, 74),
+        idx: 239,
+    },
+    fg_primary: Tone {
+        rgb: (233, 233, 233),
+        idx: 254,
+    },
+    fg_secondary: Tone {
+        rgb: (138, 138, 138),
+        idx: 245,
+    },
+    accent: Tone {
+        rgb: (235, 193, 87),
+        idx: 179,
+    },
+    on_accent: Tone {
+        rgb: (26, 26, 26),
+        idx: 235,
+    },
+    success: Tone {
+        rgb: (121, 200, 121),
+        idx: 114,
+    },
+    warning: Tone {
+        rgb: (227, 199, 102),
+        idx: 179,
+    },
+    error: Tone {
+        rgb: (224, 108, 90),
+        idx: 209,
+    },
+    info: Tone {
+        rgb: (127, 178, 229),
+        idx: 110,
+    },
 };
 
 /// Theme `brand-dark`.
 pub const BRAND_DARK: TuiPalette = TuiPalette {
-    canvas: Tone { rgb: (0, 0, 0), idx: 16 },
-    border: Tone { rgb: (38, 38, 38), idx: 235 },
-    fg_primary: Tone { rgb: (237, 237, 237), idx: 255 },
-    fg_secondary: Tone { rgb: (180, 180, 180), idx: 249 },
-    accent: Tone { rgb: (58, 130, 255), idx: 69 },
-    on_accent: Tone { rgb: (0, 0, 0), idx: 16 },
-    success: Tone { rgb: (34, 197, 94), idx: 41 },
-    warning: Tone { rgb: (245, 158, 11), idx: 214 },
-    error: Tone { rgb: (239, 68, 68), idx: 203 },
-    info: Tone { rgb: (91, 154, 255), idx: 69 },
+    canvas: Tone {
+        rgb: (0, 0, 0),
+        idx: 16,
+    },
+    border: Tone {
+        rgb: (38, 38, 38),
+        idx: 235,
+    },
+    fg_primary: Tone {
+        rgb: (237, 237, 237),
+        idx: 255,
+    },
+    fg_secondary: Tone {
+        rgb: (180, 180, 180),
+        idx: 249,
+    },
+    accent: Tone {
+        rgb: (58, 130, 255),
+        idx: 69,
+    },
+    on_accent: Tone {
+        rgb: (0, 0, 0),
+        idx: 16,
+    },
+    success: Tone {
+        rgb: (34, 197, 94),
+        idx: 41,
+    },
+    warning: Tone {
+        rgb: (245, 158, 11),
+        idx: 214,
+    },
+    error: Tone {
+        rgb: (239, 68, 68),
+        idx: 203,
+    },
+    info: Tone {
+        rgb: (91, 154, 255),
+        idx: 69,
+    },
 };
 
 /// Theme `brand-light`.
 pub const BRAND_LIGHT: TuiPalette = TuiPalette {
-    canvas: Tone { rgb: (255, 255, 255), idx: 231 },
-    border: Tone { rgb: (229, 229, 229), idx: 254 },
-    fg_primary: Tone { rgb: (23, 23, 23), idx: 233 },
-    fg_secondary: Tone { rgb: (82, 82, 82), idx: 239 },
-    accent: Tone { rgb: (37, 99, 235), idx: 26 },
-    on_accent: Tone { rgb: (255, 255, 255), idx: 231 },
-    success: Tone { rgb: (21, 128, 61), idx: 29 },
-    warning: Tone { rgb: (180, 83, 9), idx: 130 },
-    error: Tone { rgb: (185, 28, 28), idx: 124 },
-    info: Tone { rgb: (37, 99, 235), idx: 26 },
+    canvas: Tone {
+        rgb: (255, 255, 255),
+        idx: 231,
+    },
+    border: Tone {
+        rgb: (229, 229, 229),
+        idx: 254,
+    },
+    fg_primary: Tone {
+        rgb: (23, 23, 23),
+        idx: 233,
+    },
+    fg_secondary: Tone {
+        rgb: (82, 82, 82),
+        idx: 239,
+    },
+    accent: Tone {
+        rgb: (37, 99, 235),
+        idx: 26,
+    },
+    on_accent: Tone {
+        rgb: (255, 255, 255),
+        idx: 231,
+    },
+    success: Tone {
+        rgb: (21, 128, 61),
+        idx: 29,
+    },
+    warning: Tone {
+        rgb: (180, 83, 9),
+        idx: 130,
+    },
+    error: Tone {
+        rgb: (185, 28, 28),
+        idx: 124,
+    },
+    info: Tone {
+        rgb: (37, 99, 235),
+        idx: 26,
+    },
 };
 
 /// Theme `nvg`.
 pub const NVG: TuiPalette = TuiPalette {
-    canvas: Tone { rgb: (0, 0, 0), idx: 16 },
-    border: Tone { rgb: (0, 34, 0), idx: 232 },
-    fg_primary: Tone { rgb: (0, 170, 0), idx: 34 },
-    fg_secondary: Tone { rgb: (0, 160, 0), idx: 34 },
-    accent: Tone { rgb: (0, 255, 0), idx: 46 },
-    on_accent: Tone { rgb: (0, 0, 0), idx: 16 },
-    success: Tone { rgb: (0, 170, 0), idx: 34 },
-    warning: Tone { rgb: (170, 136, 0), idx: 136 },
-    error: Tone { rgb: (255, 51, 51), idx: 203 },
-    info: Tone { rgb: (0, 204, 0), idx: 40 },
+    canvas: Tone {
+        rgb: (0, 0, 0),
+        idx: 16,
+    },
+    border: Tone {
+        rgb: (0, 34, 0),
+        idx: 232,
+    },
+    fg_primary: Tone {
+        rgb: (0, 170, 0),
+        idx: 34,
+    },
+    fg_secondary: Tone {
+        rgb: (0, 160, 0),
+        idx: 34,
+    },
+    accent: Tone {
+        rgb: (0, 255, 0),
+        idx: 46,
+    },
+    on_accent: Tone {
+        rgb: (0, 0, 0),
+        idx: 16,
+    },
+    success: Tone {
+        rgb: (0, 170, 0),
+        idx: 34,
+    },
+    warning: Tone {
+        rgb: (170, 136, 0),
+        idx: 136,
+    },
+    error: Tone {
+        rgb: (255, 51, 51),
+        idx: 203,
+    },
+    info: Tone {
+        rgb: (0, 204, 0),
+        idx: 40,
+    },
 };

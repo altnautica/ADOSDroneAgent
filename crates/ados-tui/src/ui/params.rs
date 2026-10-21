@@ -55,7 +55,9 @@ enum Avail {
 }
 
 fn availability(core: &Core) -> Avail {
-    let Some(d) = core.dash() else { return Avail::Waiting };
+    let Some(d) = core.dash() else {
+        return Avail::Waiting;
+    };
     match d.fc_firmware.as_deref() {
         Some("ardupilot") | Some("px4") => Avail::Ready,
         Some("betaflight") | Some("inav") => Avail::Msp,
@@ -176,7 +178,12 @@ impl ParamsTab {
             Filter::Staged => Some(1),
             Filter::NonDefault => Some(2),
             Filter::Favourites => Some(3),
-            Filter::Group(g) => self.store.groups().iter().position(|(n, _)| n == g).map(|p| p + FIXED),
+            Filter::Group(g) => self
+                .store
+                .groups()
+                .iter()
+                .position(|(n, _)| n == g)
+                .map(|p| p + FIXED),
         };
         match want {
             Some(i) => self.side_sel = i,
@@ -207,12 +214,18 @@ impl ParamsTab {
     fn on_params(&mut self, core: &Core) {
         // A failed fetch keeps the previous body in the slot; reloading it would
         // roll confirmed writes back to the values read before them.
-        let Some(slot) = core.slot(&ResourceId::Params) else { return };
+        let Some(slot) = core.slot(&ResourceId::Params) else {
+            return;
+        };
         if slot.error.is_some() {
             return;
         }
-        let Some(value) = slot.value.as_ref() else { return };
-        let Ok(resp) = serde_json::from_value::<ParamsResponse>(value.clone()) else { return };
+        let Some(value) = slot.value.as_ref() else {
+            return;
+        };
+        let Ok(resp) = serde_json::from_value::<ParamsResponse>(value.clone()) else {
+            return;
+        };
         let progress = resp.progress.unwrap_or_default();
         self.env = Envelope {
             loaded: true,
@@ -357,7 +370,11 @@ impl Tab for ParamsTab {
             Command::DiscardAll => self.discard_all(core),
             Command::Favourite => self.favourite(core),
             Command::StagedView => {
-                let next = if *self.store.filter() == Filter::Staged { 0 } else { 1 };
+                let next = if *self.store.filter() == Filter::Staged {
+                    0
+                } else {
+                    1
+                };
                 self.select_side(next);
             }
             Command::Export => self.export(core),
@@ -385,7 +402,13 @@ impl Tab for ParamsTab {
         }
     }
 
-    fn on_progress(&mut self, core: &mut Core, name: String, value: f64, result: Result<Value, RestError>) {
+    fn on_progress(
+        &mut self,
+        core: &mut Core,
+        name: String,
+        value: f64,
+        result: Result<Value, RestError>,
+    ) {
         self.batch_item(core, name, value, result);
     }
 
@@ -405,7 +428,10 @@ impl Tab for ParamsTab {
 
     fn tick(&mut self, core: &mut Core) {
         self.drain_catalog(core);
-        if self.pending.is_some_and(|t| core.now.saturating_duration_since(t) >= DEBOUNCE) {
+        if self
+            .pending
+            .is_some_and(|t| core.now.saturating_duration_since(t) >= DEBOUNCE)
+        {
             self.apply_search();
             core.dirty = true;
         }

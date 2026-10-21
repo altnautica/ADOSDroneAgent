@@ -122,20 +122,35 @@ impl PluginConfigPane {
     }
 
     /// Draw the rows. `focused` is false while another pane has focus.
-    pub fn draw(&mut self, f: &mut Frame, area: Rect, core: &Core, focused: bool, out: &mut FrameOut) {
+    pub fn draw(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        core: &Core,
+        focused: bool,
+        out: &mut FrameOut,
+    ) {
         let mut items = Vec::new();
         let slot = core.slot(&ResourceId::PluginConfig(self.plugin_id.clone()));
         match slot {
             Some(s) if s.value.is_none() && s.error.is_some() => {
                 let why = s.error.clone().unwrap_or_default();
-                items.push(rows_view::note(core, format!("Config unavailable: {why}"), true));
+                items.push(rows_view::note(
+                    core,
+                    format!("Config unavailable: {why}"),
+                    true,
+                ));
             }
             None => items.push(rows_view::note(core, "Reading config…", false)),
             _ => {}
         }
         let rows = self.items(core);
         if rows.is_empty() {
-            items.push(rows_view::note(core, "This extension declares no config parameters.", false));
+            items.push(rows_view::note(
+                core,
+                "This extension declares no config parameters.",
+                false,
+            ));
         }
         items.extend(rows);
         let prefix = self.prefix();
@@ -147,7 +162,10 @@ impl PluginConfigPane {
 /// list and the detail of every enabled plugin.
 pub fn listing_subs(core: &Core) -> Vec<Sub> {
     let mut subs = vec![Sub::every_ms(ResourceId::Plugins, "/api/plugins", 8_000)];
-    let installs = core.value(&ResourceId::Plugins).map(state::installs).unwrap_or_default();
+    let installs = core
+        .value(&ResourceId::Plugins)
+        .map(state::installs)
+        .unwrap_or_default();
     for i in installs.iter().filter(|i| i.enabled()) {
         subs.push(Sub::every_ms(
             ResourceId::PluginDetail(i.id.clone()),
@@ -160,7 +178,10 @@ pub fn listing_subs(core: &Core) -> Vec<Sub> {
 
 /// Installed, enabled plugins that declare config parameters: `(id, name)`.
 pub fn configurable(core: &Core) -> Vec<(String, String)> {
-    let installs = core.value(&ResourceId::Plugins).map(state::installs).unwrap_or_default();
+    let installs = core
+        .value(&ResourceId::Plugins)
+        .map(state::installs)
+        .unwrap_or_default();
     installs
         .iter()
         .filter(|i| i.enabled())
@@ -210,7 +231,9 @@ impl Bespoke for PluginConfigPane {
             Command::Top => self.rows.jump(&items, isize::MIN / 2),
             Command::Bottom => self.rows.jump(&items, isize::MAX / 2),
             Command::Left | Command::Right => {
-                let Some(row) = self.focused_row(core) else { return false };
+                let Some(row) = self.focused_row(core) else {
+                    return false;
+                };
                 if row.read_only {
                     core.toast(ToastKind::Info, format!("{} is read-only here", row.label));
                     return true;
@@ -221,7 +244,9 @@ impl Bespoke for PluginConfigPane {
                 }
             }
             Command::Activate => {
-                let Some(row) = self.focused_row(core) else { return false };
+                let Some(row) = self.focused_row(core) else {
+                    return false;
+                };
                 if row.kind == Kind::Bool && !row.read_only {
                     // A toggle flips in place, like ←/→.
                     if let Some(v) = cycle(&row.kind, row.value.as_ref(), true) {
@@ -235,7 +260,9 @@ impl Bespoke for PluginConfigPane {
                 }
             }
             Command::Copy => {
-                let Some(row) = self.focused_row(core) else { return false };
+                let Some(row) = self.focused_row(core) else {
+                    return false;
+                };
                 let text = display(&row.kind, row.value.as_ref(), false, true);
                 core.copy(&text);
             }
@@ -248,9 +275,13 @@ impl Bespoke for PluginConfigPane {
         if ret.tag != TAG || !self.owns(&ret.data) {
             return;
         }
-        let Some(key) = ret.data.get("key").and_then(Value::as_str) else { return };
+        let Some(key) = ret.data.get("key").and_then(Value::as_str) else {
+            return;
+        };
         let defs = self.defs(core);
-        let Some(def) = defs.iter().find(|d| d.key == key) else { return };
+        let Some(def) = defs.iter().find(|d| d.key == key) else {
+            return;
+        };
         let row = params::row(def, &self.values(core), self.locale(core));
         match value_from_result(&row.kind, &result) {
             Some(Ok(v)) => self.write(core, &row, v),
@@ -260,12 +291,18 @@ impl Bespoke for PluginConfigPane {
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
-        let Purpose::Page { tag, data } = &reply.purpose else { return };
+        let Purpose::Page { tag, data } = &reply.purpose else {
+            return;
+        };
         if *tag != TAG || !self.owns(data) {
             return;
         }
         let key = data.get("key").and_then(Value::as_str).unwrap_or_default();
-        let label = data.get("label").and_then(Value::as_str).unwrap_or(key).to_string();
+        let label = data
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or(key)
+            .to_string();
         let flash = format!("{}{key}", self.prefix());
         match &reply.result {
             Ok(_) => {
@@ -299,13 +336,23 @@ impl Bespoke for PluginConfigPane {
             Span::styled(name, t.bright()),
             Span::styled(format!("  {}", self.plugin_id), t.dim()),
         ]);
-        f.render_widget(Paragraph::new(head), Rect::new(area.x, area.y, area.width, 1));
-        let body = Rect::new(area.x, area.y + 2.min(area.height), area.width, area.height.saturating_sub(2));
+        f.render_widget(
+            Paragraph::new(head),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+        let body = Rect::new(
+            area.x,
+            area.y + 2.min(area.height),
+            area.width,
+            area.height.saturating_sub(2),
+        );
         self.draw(f, body, core, true, out);
     }
 
     fn context_line(&self, core: &Core) -> Option<String> {
-        self.focused_row(core).map(|r| r.help).filter(|h| !h.is_empty())
+        self.focused_row(core)
+            .map(|r| r.help)
+            .filter(|h| !h.is_empty())
     }
 }
 
@@ -317,7 +364,16 @@ mod tests {
     const ID: &str = "com.example.follow";
 
     fn put(core: &mut Core, id: ResourceId, value: Value) {
-        core.res.insert(id, Slot { value: Some(value), error: None, code: None, error_body: None, at: core.now });
+        core.res.insert(
+            id,
+            Slot {
+                value: Some(value),
+                error: None,
+                code: None,
+                error_body: None,
+                at: core.now,
+            },
+        );
     }
 
     #[test]
@@ -332,13 +388,20 @@ mod tests {
                 {"key": "distance_m", "schema": {"type": "number", "minimum": 3, "maximum": 30}, "ui": {"label": "Follow distance"}}
             ], "settings": []}}}}),
         );
-        put(core, ResourceId::PluginConfig(ID.into()), json!({"values": {"auto_start": false, "distance_m": 12}}));
+        put(
+            core,
+            ResourceId::PluginConfig(ID.into()),
+            json!({"values": {"auto_start": false, "distance_m": 12}}),
+        );
         let mut pane = PluginConfigPane::new(ID.into(), Route::page("plugin"));
         let items = pane.items(core);
         let bool_key = pane_key(&items, "Auto start");
         pane.rows.focus_key(&items, &bool_key);
         assert!(pane.on_command(core, Command::Activate));
-        assert!(core.overlays.is_empty(), "a toggle never opens an on/off prompt");
+        assert!(
+            core.overlays.is_empty(),
+            "a toggle never opens an on/off prompt"
+        );
         let num_key = pane_key(&items, "Follow distance");
         pane.rows.focus_key(&items, &num_key);
         assert!(pane.on_command(core, Command::Activate));

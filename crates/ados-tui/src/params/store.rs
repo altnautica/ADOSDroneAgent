@@ -154,7 +154,8 @@ impl Store {
             self.staged.remove(name);
             StageOutcome::Unchanged
         } else {
-            self.staged.insert(name.to_string(), Staged { value, base: live });
+            self.staged
+                .insert(name.to_string(), Staged { value, base: live });
             StageOutcome::Staged
         }
     }
@@ -189,7 +190,10 @@ impl Store {
 
     /// The live value differs from the catalog default.
     pub fn non_default(&self, name: &str) -> bool {
-        match (self.value(name), self.meta(name).and_then(|m| m.default_value)) {
+        match (
+            self.value(name),
+            self.meta(name).and_then(|m| m.default_value),
+        ) {
             (Some(v), Some(d)) => !same(v, d),
             _ => false,
         }
@@ -241,7 +245,11 @@ impl Store {
     /// Every name known: live values plus staged edits whose parameter left
     /// the live set.
     fn names(&self) -> BTreeSet<String> {
-        self.live.keys().chain(self.staged.keys()).cloned().collect()
+        self.live
+            .keys()
+            .chain(self.staged.keys())
+            .cloned()
+            .collect()
     }
 
     fn haystack(&mut self, name: &str) -> &str {
@@ -350,7 +358,10 @@ mod tests {
         let mut s = store(&[("ATC_RAT_RLL_P", 0.135)]);
         assert_eq!(s.stage("ATC_RAT_RLL_P", 0.2), StageOutcome::Staged);
         assert_eq!(s.staged().len(), 1);
-        assert_eq!(s.stage("ATC_RAT_RLL_P", 0.135_000_005_364_418_03), StageOutcome::Unchanged);
+        assert_eq!(
+            s.stage("ATC_RAT_RLL_P", 0.135_000_005_364_418_03),
+            StageOutcome::Unchanged
+        );
         assert!(s.staged().is_empty());
     }
 
@@ -361,7 +372,11 @@ mod tests {
         assert!(!s.drift("WPNAV_SPEED"));
         s.set_live([("WPNAV_SPEED".to_string(), 600.0)].into_iter().collect());
         assert!(s.drift("WPNAV_SPEED"));
-        assert_eq!(s.staged_value("WPNAV_SPEED"), Some(750.0), "staged edits survive a refresh");
+        assert_eq!(
+            s.staged_value("WPNAV_SPEED"),
+            Some(750.0),
+            "staged edits survive a refresh"
+        );
     }
 
     #[test]
@@ -373,8 +388,15 @@ mod tests {
 
     #[test]
     fn filters_and_search_narrow_the_list() {
-        let mut s = store(&[("BATT_LOW_VOLT", 10.5), ("BATT_CAPACITY", 3300.0), ("GPS_TYPE", 1.0)]);
-        assert_eq!(s.groups(), &[("BATT".to_string(), 2), ("GPS".to_string(), 1)]);
+        let mut s = store(&[
+            ("BATT_LOW_VOLT", 10.5),
+            ("BATT_CAPACITY", 3300.0),
+            ("GPS_TYPE", 1.0),
+        ]);
+        assert_eq!(
+            s.groups(),
+            &[("BATT".to_string(), 2), ("GPS".to_string(), 1)]
+        );
         s.set_filter(Filter::Group("GPS".into()));
         assert_eq!(s.visible(), &["GPS_TYPE".to_string()]);
         s.set_filter(Filter::All);

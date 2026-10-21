@@ -112,7 +112,11 @@ mod tests {
         let shown: Vec<_> = toasts.visible(t0).iter().map(|t| t.text.clone()).collect();
         assert_eq!(shown, ["t2", "t3", "boom"]);
         let later = t0 + Duration::from_secs(5);
-        let shown: Vec<_> = toasts.visible(later).iter().map(|t| t.text.clone()).collect();
+        let shown: Vec<_> = toasts
+            .visible(later)
+            .iter()
+            .map(|t| t.text.clone())
+            .collect();
         assert_eq!(shown, ["boom"]);
         assert_eq!(toasts.history().len(), 5);
     }

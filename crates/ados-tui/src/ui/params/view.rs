@@ -15,22 +15,40 @@ use crate::ui::widgets::{scroll_offset, truncate};
 /// Detail pane height: a rule plus five rows.
 const DETAIL_H: u16 = 6;
 
-pub(super) fn render(tab: &mut ParamsTab, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
+pub(super) fn render(
+    tab: &mut ParamsTab,
+    f: &mut Frame,
+    area: Rect,
+    core: &Core,
+    out: &mut FrameOut,
+) {
     let t = &core.theme;
     let message = match availability(core) {
         Avail::Ready => None,
-        Avail::Msp => Some("MSP flight controller: parameters are edited in Mission Control's Configure tab"),
+        Avail::Msp => {
+            Some("MSP flight controller: parameters are edited in Mission Control's Configure tab")
+        }
         Avail::Waiting => Some("Waiting for the flight controller…"),
     };
     if let Some(msg) = message {
         let y = area.y + area.height / 2;
-        let rect = Rect::new(area.x, y.min(area.bottom().saturating_sub(1)), area.width, 1);
+        let rect = Rect::new(
+            area.x,
+            y.min(area.bottom().saturating_sub(1)),
+            area.width,
+            1,
+        );
         f.render_widget(Paragraph::new(msg).style(t.dim()).centered(), rect);
         return;
     }
 
     let side_w = if area.width < 100 { 16 } else { 22 };
-    let cols = Layout::horizontal([Constraint::Length(side_w), Constraint::Length(1), Constraint::Min(0)]).split(area);
+    let cols = Layout::horizontal([
+        Constraint::Length(side_w),
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ])
+    .split(area);
     sidebar(tab, f, cols[0], core, out);
     let rule = Block::default()
         .borders(Borders::LEFT)
@@ -57,9 +75,16 @@ pub(super) fn render(tab: &mut ParamsTab, f: &mut Frame, area: Rect, core: &Core
                 *rect,
             ),
             Status::Search(prefix) => {
-                let value = tab.search.as_ref().map(|i| i.value().to_string()).unwrap_or_default();
+                let value = tab
+                    .search
+                    .as_ref()
+                    .map(|i| i.value().to_string())
+                    .unwrap_or_default();
                 let cursor = tab.search.as_ref().map(|i| i.visual_cursor()).unwrap_or(0);
-                let line = Line::from(vec![Span::styled(prefix.clone(), t.accent_bold()), Span::styled(value, t.bright())]);
+                let line = Line::from(vec![
+                    Span::styled(prefix.clone(), t.accent_bold()),
+                    Span::styled(value, t.bright()),
+                ]);
                 f.render_widget(Paragraph::new(line), *rect);
                 let x = rect.x + (prefix.chars().count() + cursor) as u16;
                 out.cursor = Some((x.min(rect.right().saturating_sub(1)), rect.y));
@@ -82,13 +107,22 @@ fn status_lines(tab: &ParamsTab, core: &Core) -> Vec<Status> {
     if tab.search.is_some() {
         lines.push(Status::Search("/ ".into()));
     } else {
-        let mut spans = vec![Span::styled(format!("{} shown", tab.store.visible().len()), t.dim())];
+        let mut spans = vec![Span::styled(
+            format!("{} shown", tab.store.visible().len()),
+            t.dim(),
+        )];
         if !tab.store.query().is_empty() {
-            spans.push(Span::styled(format!(" · search \"{}\"", tab.store.query()), t.accented()));
+            spans.push(Span::styled(
+                format!(" · search \"{}\"", tab.store.query()),
+                t.accented(),
+            ));
         }
         match (tab.store.catalog(), &tab.loading) {
             (_, Some(_)) => spans.push(Span::styled(
-                format!(" · {} loading metadata", core.sym.spinner_frame(core.frame as usize)),
+                format!(
+                    " · {} loading metadata",
+                    core.sym.spinner_frame(core.frame as usize)
+                ),
                 t.dim(),
             )),
             (Some(c), None) => spans.push(Span::styled(
@@ -104,13 +138,24 @@ fn status_lines(tab: &ParamsTab, core: &Core) -> Vec<Status> {
     }
     if let Some(slot) = core.slot(&crate::poll::ResourceId::Params) {
         if let Some(err) = &slot.error {
-            lines.push(Status::Text(warn_line(core, format!("Parameter read failed: {err}"), true)));
+            lines.push(Status::Text(warn_line(
+                core,
+                format!("Parameter read failed: {err}"),
+                true,
+            )));
         }
     }
     let env = tab.env;
     if env.priming {
-        let ratio = if env.expected > 0 { env.got as f64 / env.expected as f64 } else { 0.0 };
-        lines.push(Status::Gauge(ratio, format!("Reading parameters {}/{}", env.got, env.expected)));
+        let ratio = if env.expected > 0 {
+            env.got as f64 / env.expected as f64
+        } else {
+            0.0
+        };
+        lines.push(Status::Gauge(
+            ratio,
+            format!("Reading parameters {}/{}", env.got, env.expected),
+        ));
     }
     if env.timeout {
         lines.push(Status::Text(warn_line(
@@ -127,11 +172,17 @@ fn status_lines(tab: &ParamsTab, core: &Core) -> Vec<Status> {
         )));
     }
     if env.loaded && !env.priming && tab.store.live().is_empty() {
-        lines.push(Status::Text(Line::from(Span::styled("No parameters cached yet.", t.dim()))));
+        lines.push(Status::Text(Line::from(Span::styled(
+            "No parameters cached yet.",
+            t.dim(),
+        ))));
     }
     if !env.loaded && core.slot(&crate::poll::ResourceId::Params).is_none() {
         lines.push(Status::Text(Line::from(Span::styled(
-            format!("{} Loading parameters…", core.sym.spinner_frame(core.frame as usize)),
+            format!(
+                "{} Loading parameters…",
+                core.sym.spinner_frame(core.frame as usize)
+            ),
             t.dim(),
         ))));
     }
@@ -144,7 +195,10 @@ fn warn_line(core: &Core, text: String, error: bool) -> Line<'static> {
     } else {
         (core.sym.warn, core.theme.warning())
     };
-    Line::from(Span::styled(format!("{glyph} {text}"), Style::default().fg(color)))
+    Line::from(Span::styled(
+        format!("{glyph} {text}"),
+        Style::default().fg(color),
+    ))
 }
 
 fn sidebar(tab: &mut ParamsTab, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
@@ -204,10 +258,16 @@ fn markers(tab: &ParamsTab, core: &Core, name: &str, meta: Option<&ParamMeta>) -
     if let Some(v) = tab.store.staged_value(name) {
         spans.push(Span::styled(s.staged, Style::default().fg(t.accent())));
         if tab.store.drift(name) {
-            spans.push(Span::styled(tab.drift_glyph(core), Style::default().fg(t.warning())));
+            spans.push(Span::styled(
+                tab.drift_glyph(core),
+                Style::default().fg(t.warning()),
+            ));
         }
         if meta.is_some_and(|m| m.out_of_range(v)) {
-            spans.push(Span::styled(tab.out_of_range_glyph(core), Style::default().fg(t.warning())));
+            spans.push(Span::styled(
+                tab.out_of_range_glyph(core),
+                Style::default().fg(t.warning()),
+            ));
         }
     }
     if tab.store.non_default(name) {
@@ -231,12 +291,26 @@ fn table(tab: &mut ParamsTab, f: &mut Frame, area: Rect, core: &Core, out: &mut 
     tab.off = scroll_offset(tab.sel, tab.off, body_h);
     let tab: &ParamsTab = tab;
     let mut rows = Vec::new();
-    for (row, (i, name)) in tab.store.visible().iter().enumerate().skip(tab.off).take(body_h).enumerate() {
+    for (row, (i, name)) in tab
+        .store
+        .visible()
+        .iter()
+        .enumerate()
+        .skip(tab.off)
+        .take(body_h)
+        .enumerate()
+    {
         let meta = tab.store.meta(name);
         let staged = tab.store.staged_value(name);
         let value = staged.or(tab.store.value(name));
-        let value_text = value.map(|v| format_labeled(v, meta)).unwrap_or_else(|| "—".into());
-        let value_style = if staged.is_some() { t.accent_bold() } else { t.bright() };
+        let value_text = value
+            .map(|v| format_labeled(v, meta))
+            .unwrap_or_else(|| "—".into());
+        let value_style = if staged.is_some() {
+            t.accent_bold()
+        } else {
+            t.bright()
+        };
         let selected = i == tab.sel;
         let style = match (selected, tab.focus == Focus::Table) {
             (true, true) => t.on_accent_fill(),
@@ -244,13 +318,22 @@ fn table(tab: &mut ParamsTab, f: &mut Frame, area: Rect, core: &Core, out: &mut 
             _ => Style::default(),
         };
         let desc = meta
-            .map(|m| if m.description.is_empty() { m.human_name.clone() } else { m.description.clone() })
+            .map(|m| {
+                if m.description.is_empty() {
+                    m.human_name.clone()
+                } else {
+                    m.description.clone()
+                }
+            })
             .unwrap_or_default();
         let cells = vec![
             Cell::from(markers(tab, core, name, meta)),
             Cell::from(Span::styled(name.clone(), t.text())),
             Cell::from(Span::styled(value_text, value_style)),
-            Cell::from(Span::styled(meta.and_then(|m| m.units.clone()).unwrap_or_default(), t.dim())),
+            Cell::from(Span::styled(
+                meta.and_then(|m| m.units.clone()).unwrap_or_default(),
+                t.dim(),
+            )),
             Cell::from(Span::styled(range_text(meta), t.dim())),
             Cell::from(Span::styled(desc, t.dim())),
         ];
@@ -259,7 +342,8 @@ fn table(tab: &mut ParamsTab, f: &mut Frame, area: Rect, core: &Core, out: &mut 
         out.row(format!("param:{name}"), rect);
         out.hit(rect, Hit::Row(i));
     }
-    let header = Row::new(["", "Name", "Value", "Units", "Range/Options", "Description"]).style(t.dim().add_modifier(Modifier::UNDERLINED));
+    let header = Row::new(["", "Name", "Value", "Units", "Range/Options", "Description"])
+        .style(t.dim().add_modifier(Modifier::UNDERLINED));
     let widths = [
         Constraint::Length(6),
         Constraint::Length(17),
@@ -268,7 +352,10 @@ fn table(tab: &mut ParamsTab, f: &mut Frame, area: Rect, core: &Core, out: &mut 
         Constraint::Length(15),
         Constraint::Fill(1),
     ];
-    f.render_widget(Table::new(rows, widths).header(header).column_spacing(1), area);
+    f.render_widget(
+        Table::new(rows, widths).header(header).column_spacing(1),
+        area,
+    );
 }
 
 fn detail(tab: &ParamsTab, f: &mut Frame, area: Rect, core: &Core) {
@@ -279,7 +366,9 @@ fn detail(tab: &ParamsTab, f: &mut Frame, area: Rect, core: &Core) {
         .border_style(Style::default().fg(t.border()));
     let inner = rule.inner(area);
     f.render_widget(rule, area);
-    let Some(name) = tab.store.visible().get(tab.sel).cloned() else { return };
+    let Some(name) = tab.store.visible().get(tab.sel).cloned() else {
+        return;
+    };
     let rows = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(2),
@@ -290,14 +379,23 @@ fn detail(tab: &ParamsTab, f: &mut Frame, area: Rect, core: &Core) {
     let meta = tab.store.meta(&name);
 
     let mut head = vec![Span::styled(name.clone(), t.accent_bold())];
-    if let Some(h) = meta.map(|m| m.human_name.as_str()).filter(|h| !h.is_empty()) {
+    if let Some(h) = meta
+        .map(|m| m.human_name.as_str())
+        .filter(|h| !h.is_empty())
+    {
         head.push(Span::styled(format!("  {h}"), t.bright()));
     }
     if meta.is_some_and(|m| m.reboot_required) {
-        head.push(Span::styled(format!("  {} reboot required", core.sym.reboot), Style::default().fg(t.warning())));
+        head.push(Span::styled(
+            format!("  {} reboot required", core.sym.reboot),
+            Style::default().fg(t.warning()),
+        ));
     }
     if tab.store.read_only(&name) {
-        head.push(Span::styled(format!("  {} read-only", core.sym.read_only), t.dim()));
+        head.push(Span::styled(
+            format!("  {} read-only", core.sym.read_only),
+            t.dim(),
+        ));
     }
     f.render_widget(Paragraph::new(Line::from(head)), rows[0]);
 
@@ -306,7 +404,12 @@ fn detail(tab: &ParamsTab, f: &mut Frame, area: Rect, core: &Core) {
         (None, Some(_)) => "Loading metadata…".into(),
         (None, None) => "No metadata for this parameter.".into(),
     };
-    f.render_widget(Paragraph::new(desc).style(t.text()).wrap(Wrap { trim: true }), rows[1]);
+    f.render_widget(
+        Paragraph::new(desc)
+            .style(t.text())
+            .wrap(Wrap { trim: true }),
+        rows[1],
+    );
 
     let mut facts: Vec<String> = Vec::new();
     if let Some(m) = meta {
@@ -326,9 +429,16 @@ fn detail(tab: &ParamsTab, f: &mut Frame, area: Rect, core: &Core) {
     let live = tab.store.value(&name);
     match (live, tab.store.staged_value(&name)) {
         (Some(l), Some(s)) => {
-            let mut text = format!("live {} → staged {}", format_labeled(l, meta), format_labeled(s, meta));
+            let mut text = format!(
+                "live {} → staged {}",
+                format_labeled(l, meta),
+                format_labeled(s, meta)
+            );
             if tab.store.drift(&name) {
-                text.push_str(&format!(" {} changed on the FC since staging", tab.drift_glyph(core)));
+                text.push_str(&format!(
+                    " {} changed on the FC since staging",
+                    tab.drift_glyph(core)
+                ));
             }
             if meta.is_some_and(|m| m.out_of_range(s)) {
                 text.push_str(&format!(" {} out of range", tab.out_of_range_glyph(core)));
@@ -349,7 +459,11 @@ fn detail(tab: &ParamsTab, f: &mut Frame, area: Rect, core: &Core) {
             .iter()
             .map(|(code, label)| {
                 let on = cur.is_some_and(|c| same(c, *code));
-                format!("{}{} {label}", if on { core.sym.page_marker } else { "" }, plain(*code))
+                format!(
+                    "{}{} {label}",
+                    if on { core.sym.page_marker } else { "" },
+                    plain(*code)
+                )
             })
             .collect::<Vec<_>>()
             .join(" · "),
@@ -359,7 +473,11 @@ fn detail(tab: &ParamsTab, f: &mut Frame, area: Rect, core: &Core) {
                 .unwrap_or_default()
                 .iter()
                 .map(|(bit, label)| {
-                    let mark = if raw & (1u64 << bit) != 0 { "[x]" } else { "[ ]" };
+                    let mark = if raw & (1u64 << bit) != 0 {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
                     format!("{mark} {bit} {label}")
                 })
                 .collect::<Vec<_>>()
@@ -368,5 +486,8 @@ fn detail(tab: &ParamsTab, f: &mut Frame, area: Rect, core: &Core) {
         _ => String::new(),
     };
     let width = rows[3].width as usize;
-    f.render_widget(Paragraph::new(truncate(&listing, width)).style(t.dim()), rows[3]);
+    f.render_widget(
+        Paragraph::new(truncate(&listing, width)).style(t.dim()),
+        rows[3],
+    );
 }

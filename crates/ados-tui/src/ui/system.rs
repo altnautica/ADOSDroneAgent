@@ -113,7 +113,11 @@ impl SystemTab {
     fn cycle_pane(&mut self, forward: bool) {
         let i = self.pane.idx();
         let n = Pane::ALL.len();
-        self.pane = Pane::ALL[if forward { (i + 1) % n } else { (i + n - 1) % n }];
+        self.pane = Pane::ALL[if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        }];
     }
 
     /// The selected service's name.
@@ -164,9 +168,10 @@ impl SystemTab {
             core.open(Overlay::confirm(
                 Ret::new(ROUTE, TAG_REBOOT),
                 "Reboot the agent host?",
-                vec![
-                    format!("{} reboots; this session reconnects when it is back.", core.target.host),
-                ],
+                vec![format!(
+                    "{} reboots; this session reconnects when it is back.",
+                    core.target.host
+                )],
             ));
         } else {
             // The shell action asks its own y/N on the plain terminal.
@@ -176,7 +181,10 @@ impl SystemTab {
 
     fn update(&self, core: &mut Core) {
         if core.target.remote {
-            core.toast(ToastKind::Warn, "Update runs on the agent host; not available remotely");
+            core.toast(
+                ToastKind::Warn,
+                "Update runs on the agent host; not available remotely",
+            );
             return;
         }
         if core.guard_disarmed() {
@@ -194,7 +202,10 @@ impl SystemTab {
                 "POST",
                 "/api/v1/setup/hardware-check/refresh",
                 ROUTE,
-                Purpose::Page { tag: TAG_RECHECK, data: Value::Null },
+                Purpose::Page {
+                    tag: TAG_RECHECK,
+                    data: Value::Null,
+                },
             )
             .timeout(SCAN_TIMEOUT),
         );
@@ -211,13 +222,21 @@ impl Tab for SystemTab {
             Sub::every_ms(ResourceId::System, "/api/system", 5000),
             Sub::every_ms(ResourceId::Services, "/api/services", 5000),
             Sub::every_ms(ResourceId::Peripherals, "/api/v1/peripherals", 10_000),
-            Sub::every_ms(ResourceId::HardwareCheck, "/api/v1/setup/hardware-check", 10_000),
+            Sub::every_ms(
+                ResourceId::HardwareCheck,
+                "/api/v1/setup/hardware-check",
+                10_000,
+            ),
         ]
     }
 
     fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
         if *id == ResourceId::System {
-            if let Some(cpu) = core.value(id).and_then(|v| v.get("cpu_percent")).and_then(Value::as_f64) {
+            if let Some(cpu) = core
+                .value(id)
+                .and_then(|v| v.get("cpu_percent"))
+                .and_then(Value::as_f64)
+            {
                 self.cpu.push_back(cpu);
                 while self.cpu.len() > CPU_SAMPLES {
                     self.cpu.pop_front();
@@ -256,7 +275,10 @@ impl Tab for SystemTab {
                     core.open(Overlay::confirm(
                         Ret::new(ROUTE, TAG_SUPERVISOR),
                         "Restart the agent supervisor?",
-                        vec!["Every agent service restarts; video, radio and MAVLink drop briefly.".into()],
+                        vec![
+                            "Every agent service restarts; video, radio and MAVLink drop briefly."
+                                .into(),
+                        ],
                     ));
                 }
             }
@@ -274,13 +296,18 @@ impl Tab for SystemTab {
         }
         match ret.tag {
             TAG_RESTART => {
-                let Some(name) = ret.data.as_str().map(str::to_string) else { return };
+                let Some(name) = ret.data.as_str().map(str::to_string) else {
+                    return;
+                };
                 core.submit(
                     Request::new(
                         "POST",
                         format!("/api/services/{}/restart", seg(&name)),
                         ROUTE,
-                        Purpose::Page { tag: TAG_RESTART, data: json!(name) },
+                        Purpose::Page {
+                            tag: TAG_RESTART,
+                            data: json!(name),
+                        },
                     )
                     .timeout(RESTART_TIMEOUT),
                 );
@@ -289,27 +316,37 @@ impl Tab for SystemTab {
                 "POST",
                 "/api/v1/system/restart-supervisor",
                 ROUTE,
-                Purpose::Page { tag: TAG_SUPERVISOR, data: Value::Null },
+                Purpose::Page {
+                    tag: TAG_SUPERVISOR,
+                    data: Value::Null,
+                },
             )),
             TAG_REBOOT => core.submit(Request::new(
                 "POST",
                 "/api/v1/setup/reboot",
                 ROUTE,
-                Purpose::Generic { ok_toast: "Reboot requested".into() },
+                Purpose::Generic {
+                    ok_toast: "Reboot requested".into(),
+                },
             )),
             _ => {}
         }
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: crate::worker::Reply) {
-        let Purpose::Page { tag, data } = &reply.purpose else { return };
+        let Purpose::Page { tag, data } = &reply.purpose else {
+            return;
+        };
         match (*tag, &reply.result) {
             (TAG_RESTART, Ok(body)) => {
                 let name = data.as_str().unwrap_or("service");
                 if body.get("status").and_then(Value::as_str) == Some("ok") {
                     core.toast(ToastKind::Success, format!("{name} restarted"));
                 } else {
-                    let msg = body.get("message").and_then(Value::as_str).unwrap_or("restart failed");
+                    let msg = body
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .unwrap_or("restart failed");
                     core.toast(ToastKind::Error, format!("{name}: {msg}"));
                 }
                 core.fetch_now(ResourceId::Services);
@@ -317,16 +354,28 @@ impl Tab for SystemTab {
             (TAG_SUPERVISOR, Ok(body)) => {
                 let msg = body.get("message").and_then(Value::as_str);
                 if body.get("ok").and_then(Value::as_bool) == Some(true) {
-                    core.toast(ToastKind::Success, msg.unwrap_or("Supervisor restart scheduled").to_string());
+                    core.toast(
+                        ToastKind::Success,
+                        msg.unwrap_or("Supervisor restart scheduled").to_string(),
+                    );
                 } else {
-                    core.toast(ToastKind::Error, msg.unwrap_or("Supervisor restart failed").to_string());
+                    core.toast(
+                        ToastKind::Error,
+                        msg.unwrap_or("Supervisor restart failed").to_string(),
+                    );
                 }
             }
             (TAG_RECHECK, Ok(body)) => {
                 self.rechecking = false;
                 core.res.insert(
                     ResourceId::HardwareCheck,
-                    Slot { value: Some(body.clone()), error: None, code: None, error_body: None, at: Instant::now() },
+                    Slot {
+                        value: Some(body.clone()),
+                        error: None,
+                        code: None,
+                        error_body: None,
+                        at: Instant::now(),
+                    },
                 );
                 core.toast(ToastKind::Success, "Hardware check refreshed");
             }
@@ -380,7 +429,11 @@ impl Tab for SystemTab {
             }),
             Pane::Hardware => hw_items(core).get(i).and_then(|h| {
                 let hint = s(h, "fix_hint");
-                let text = if hint.is_empty() { s(h, "detail") } else { hint };
+                let text = if hint.is_empty() {
+                    s(h, "detail")
+                } else {
+                    hint
+                };
                 (!text.is_empty()).then(|| text.to_string())
             }),
         }

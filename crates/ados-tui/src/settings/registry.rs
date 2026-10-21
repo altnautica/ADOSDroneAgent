@@ -88,7 +88,12 @@ pub struct Row {
     pub choices: &'static [i64],
 }
 
-const fn row(section: &'static str, key: &'static str, label: &'static str, help: &'static str) -> Row {
+const fn row(
+    section: &'static str,
+    key: &'static str,
+    label: &'static str,
+    help: &'static str,
+) -> Row {
     Row {
         section,
         key,
@@ -99,7 +104,12 @@ const fn row(section: &'static str, key: &'static str, label: &'static str, help
     }
 }
 
-const fn confirmed(section: &'static str, key: &'static str, label: &'static str, help: &'static str) -> Row {
+const fn confirmed(
+    section: &'static str,
+    key: &'static str,
+    label: &'static str,
+    help: &'static str,
+) -> Row {
     Row {
         section,
         key,
@@ -130,7 +140,13 @@ const DRONE: &[&str] = &["drone"];
 const VISOR: &[&str] = &["visor"];
 const GS: &[&str] = &["ground_station"];
 
-const fn page(id: &'static str, group: Group, title: &'static str, profiles: &'static [&'static str], body: PageBody) -> Page {
+const fn page(
+    id: &'static str,
+    group: Group,
+    title: &'static str,
+    profiles: &'static [&'static str],
+    body: PageBody,
+) -> Page {
     Page {
         id,
         group,
@@ -140,7 +156,13 @@ const fn page(id: &'static str, group: Group, title: &'static str, profiles: &'s
     }
 }
 
-const fn bespoke(b: BespokeId, id: &'static str, group: Group, title: &'static str, profiles: &'static [&'static str]) -> Page {
+const fn bespoke(
+    b: BespokeId,
+    id: &'static str,
+    group: Group,
+    title: &'static str,
+    profiles: &'static [&'static str],
+) -> Page {
     page(id, group, title, profiles, PageBody::Bespoke(b))
 }
 
@@ -181,10 +203,30 @@ const VISION_ROWS: &[Row] = &[
 ];
 
 const SWARM_ROWS: &[Row] = &[
-    row("", "swarm.enabled", "Swarm participation", "Persist this node's intent to join a swarm. No runtime consumer acts on it yet."),
-    row("", "swarm.role", "Role", "The node's intended swarm role (e.g. auto)."),
-    row("", "swarm.default_formation", "Default formation", "The formation preset the node starts with."),
-    row("", "swarm.default_spacing", "Default spacing (metres)", "The default inter-node spacing a formation should target."),
+    row(
+        "",
+        "swarm.enabled",
+        "Swarm participation",
+        "Persist this node's intent to join a swarm. No runtime consumer acts on it yet.",
+    ),
+    row(
+        "",
+        "swarm.role",
+        "Role",
+        "The node's intended swarm role (e.g. auto).",
+    ),
+    row(
+        "",
+        "swarm.default_formation",
+        "Default formation",
+        "The formation preset the node starts with.",
+    ),
+    row(
+        "",
+        "swarm.default_spacing",
+        "Default spacing (metres)",
+        "The default inter-node spacing a formation should target.",
+    ),
 ];
 
 const MONITORING: &str = "Monitoring";
@@ -217,42 +259,180 @@ use Group as G;
 /// Every static page, in sidebar order.
 pub const PAGES: &[Page] = &[
     // THIS TERMINAL
-    page("appearance", G::ThisTerminal, "Appearance", ALL, PageBody::Prefs(PrefsPage::Appearance)),
-    page("behaviour", G::ThisTerminal, "Behaviour", ALL, PageBody::Prefs(PrefsPage::Behaviour)),
+    page(
+        "appearance",
+        G::ThisTerminal,
+        "Appearance",
+        ALL,
+        PageBody::Prefs(PrefsPage::Appearance),
+    ),
+    page(
+        "behaviour",
+        G::ThisTerminal,
+        "Behaviour",
+        ALL,
+        PageBody::Prefs(PrefsPage::Behaviour),
+    ),
     bespoke(BespokeId::Targets, "agents", G::ThisTerminal, "Agents", ALL),
     // IDENTITY
     bespoke(BespokeId::Profile, "profile", G::Identity, "Profile", ALL),
-    page("device", G::Identity, "Device", ALL, PageBody::Config(DEVICE_ROWS)),
+    page(
+        "device",
+        G::Identity,
+        "Device",
+        ALL,
+        PageBody::Config(DEVICE_ROWS),
+    ),
     // LINK & NETWORK
     bespoke(BespokeId::Wifi, "wifi", G::LinkNetwork, "Wi-Fi", ALL),
-    bespoke(BespokeId::Hotspot, "hotspot", G::LinkNetwork, "Hotspot", ALL),
-    bespoke(BespokeId::Cellular, "cellular", G::LinkNetwork, "Cellular", ALL),
-    bespoke(BespokeId::MacPin, "mac_pin", G::LinkNetwork, "MAC pinning", ALL),
-    bespoke(BespokeId::Discovery, "discovery", G::LinkNetwork, "Discovery", ALL),
-    page("mavlink", G::LinkNetwork, "MAVLink", DRONE_VISOR, PageBody::Config(MAVLINK_ROWS)),
+    bespoke(
+        BespokeId::Hotspot,
+        "hotspot",
+        G::LinkNetwork,
+        "Hotspot",
+        ALL,
+    ),
+    bespoke(
+        BespokeId::Cellular,
+        "cellular",
+        G::LinkNetwork,
+        "Cellular",
+        ALL,
+    ),
+    bespoke(
+        BespokeId::MacPin,
+        "mac_pin",
+        G::LinkNetwork,
+        "MAC pinning",
+        ALL,
+    ),
+    bespoke(
+        BespokeId::Discovery,
+        "discovery",
+        G::LinkNetwork,
+        "Discovery",
+        ALL,
+    ),
+    page(
+        "mavlink",
+        G::LinkNetwork,
+        "MAVLink",
+        DRONE_VISOR,
+        PageBody::Config(MAVLINK_ROWS),
+    ),
     bespoke(BespokeId::Radio, "radio", G::LinkNetwork, "Radio", DRONE_GS),
     // VIDEO & VISION
-    page("camera", G::VideoVision, "Camera", DRONE_VISOR, PageBody::Config(CAMERA_ROWS)),
-    bespoke(BespokeId::VideoLink, "video_link", G::VideoVision, "Video link", DRONE),
-    page("vision", G::VideoVision, "Vision", DRONE_VISOR, PageBody::Config(VISION_ROWS)),
-    bespoke(BespokeId::Sensors, "sensors", G::VideoVision, "Sensors", DRONE_VISOR),
-    bespoke(BespokeId::Capture, "capture", G::VideoVision, "Capture", VISOR),
-    page("swarm", G::VideoVision, "Swarm", DRONE, PageBody::Config(SWARM_ROWS)),
+    page(
+        "camera",
+        G::VideoVision,
+        "Camera",
+        DRONE_VISOR,
+        PageBody::Config(CAMERA_ROWS),
+    ),
+    bespoke(
+        BespokeId::VideoLink,
+        "video_link",
+        G::VideoVision,
+        "Video link",
+        DRONE,
+    ),
+    page(
+        "vision",
+        G::VideoVision,
+        "Vision",
+        DRONE_VISOR,
+        PageBody::Config(VISION_ROWS),
+    ),
+    bespoke(
+        BespokeId::Sensors,
+        "sensors",
+        G::VideoVision,
+        "Sensors",
+        DRONE_VISOR,
+    ),
+    bespoke(
+        BespokeId::Capture,
+        "capture",
+        G::VideoVision,
+        "Capture",
+        VISOR,
+    ),
+    page(
+        "swarm",
+        G::VideoVision,
+        "Swarm",
+        DRONE,
+        PageBody::Config(SWARM_ROWS),
+    ),
     // CLOUD & REMOTE
     bespoke(BespokeId::Cloud, "cloud", G::CloudRemote, "Cloud", ALL),
-    bespoke(BespokeId::RemoteAccess, "remote_access", G::CloudRemote, "Remote access", ALL),
+    bespoke(
+        BespokeId::RemoteAccess,
+        "remote_access",
+        G::CloudRemote,
+        "Remote access",
+        ALL,
+    ),
     // ACCESS & SECURITY
-    bespoke(BespokeId::Pairing, "pairing", G::AccessSecurity, "Pairing", ALL),
-    bespoke(BespokeId::Security, "security", G::AccessSecurity, "Security", ALL),
+    bespoke(
+        BespokeId::Pairing,
+        "pairing",
+        G::AccessSecurity,
+        "Pairing",
+        ALL,
+    ),
+    bespoke(
+        BespokeId::Security,
+        "security",
+        G::AccessSecurity,
+        "Security",
+        ALL,
+    ),
     bespoke(BespokeId::Mcp, "mcp", G::AccessSecurity, "MCP", ALL),
     // SYSTEM & SAFETY
-    bespoke(BespokeId::Region, "region", G::SystemSafety, "Region", DRONE_GS),
-    page("battery", G::SystemSafety, "Battery", DRONE_VISOR, PageBody::Config(BATTERY_ROWS)),
-    page("self_heal", G::SystemSafety, "Self-heal", ALL, PageBody::Config(SELF_HEAL_ROWS)),
-    bespoke(BespokeId::Display, "display", G::SystemSafety, "Display", GS),
-    bespoke(BespokeId::Advanced, "advanced", G::SystemSafety, "Advanced", ALL),
+    bespoke(
+        BespokeId::Region,
+        "region",
+        G::SystemSafety,
+        "Region",
+        DRONE_GS,
+    ),
+    page(
+        "battery",
+        G::SystemSafety,
+        "Battery",
+        DRONE_VISOR,
+        PageBody::Config(BATTERY_ROWS),
+    ),
+    page(
+        "self_heal",
+        G::SystemSafety,
+        "Self-heal",
+        ALL,
+        PageBody::Config(SELF_HEAL_ROWS),
+    ),
+    bespoke(
+        BespokeId::Display,
+        "display",
+        G::SystemSafety,
+        "Display",
+        GS,
+    ),
+    bespoke(
+        BespokeId::Advanced,
+        "advanced",
+        G::SystemSafety,
+        "Advanced",
+        ALL,
+    ),
     // ALL SETTINGS
-    page("all_settings", G::AllSettings, "All settings", ALL, PageBody::AllSettings),
+    page(
+        "all_settings",
+        G::AllSettings,
+        "All settings",
+        ALL,
+        PageBody::AllSettings,
+    ),
 ];
 
 /// The page id prefix of a plugin page (`plugin:<plugin id>`).
@@ -341,7 +521,10 @@ mod tests {
         assert!(needs_confirm("mavlink.system_id", &json!(2)));
         assert!(!needs_confirm("mavlink.component_id", &json!(191)));
         assert!(needs_confirm("mavlink.ws_proxy_enforce_auth", &json!(true)));
-        assert!(!needs_confirm("mavlink.ws_proxy_enforce_auth", &json!(false)));
+        assert!(!needs_confirm(
+            "mavlink.ws_proxy_enforce_auth",
+            &json!(false)
+        ));
         assert!(!needs_confirm("discovery.mdns_enabled", &json!(false)));
     }
 }

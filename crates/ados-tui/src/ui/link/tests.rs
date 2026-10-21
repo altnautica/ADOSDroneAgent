@@ -165,7 +165,10 @@ fn leaving_the_tab_resets_counter_baselines() {
     app.tabs.link.on_deactivate(&mut app.core);
     land(&mut app, ResourceId::Wfb, gs(9000));
     let text = draw(&mut app, 120, 40);
-    assert!(!text.contains("+7750"), "the gap must not read as one interval\n{text}");
+    assert!(
+        !text.contains("+7750"),
+        "the gap must not read as one interval\n{text}"
+    );
     land(&mut app, ResourceId::Wfb, gs(9100));
     assert!(draw(&mut app, 120, 40).contains("+100"));
 }

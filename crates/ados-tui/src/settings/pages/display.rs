@@ -27,12 +27,15 @@ fn items(core: &Core) -> Vec<Item> {
         "Installing an overlay edits the boot config and needs a reboot; run it from the installer with --upgrade --display <id>.",
         false,
     ));
-    if let Some(note) = kit::resource_note(core, &ResourceId::DisplayOptions, "the display options") {
+    if let Some(note) = kit::resource_note(core, &ResourceId::DisplayOptions, "the display options")
+    {
         items.push(note);
         return items;
     }
     let opts = core.value(&ResourceId::DisplayOptions);
-    let current = kit::text(opts, "current.display_id").unwrap_or("none").to_string();
+    let current = kit::text(opts, "current.display_id")
+        .unwrap_or("none")
+        .to_string();
     items.push(rows_view::info(core, "Active", current.clone()));
     let board = kit::text(opts, "board_id").unwrap_or("unknown");
     let supported = opts
@@ -42,20 +45,39 @@ fn items(core: &Core) -> Vec<Item> {
         .unwrap_or_default();
     items.push(Item::Header(format!("Supported on this board ({board})")));
     if supported.is_empty() {
-        items.push(rows_view::note(core, "No display overlays declared in this board's HAL profile.", false));
+        items.push(rows_view::note(
+            core,
+            "No display overlays declared in this board's HAL profile.",
+            false,
+        ));
     }
     for d in &supported {
         let id = d.get("id").and_then(Value::as_str).unwrap_or_default();
-        let mut detail = d.get("label").and_then(Value::as_str).unwrap_or_default().to_string();
-        if let Some(res) = d.get("resolution").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        let mut detail = d
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(res) = d
+            .get("resolution")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             detail.push_str(&format!(" · {res}"));
         }
-        if let Some(chip) = d.get("touch_chip").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        if let Some(chip) = d
+            .get("touch_chip")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
             detail.push_str(&format!(" · touch {chip}"));
         }
         let mut spans = vec![Span::styled(format!("{id:<20}"), t.text())];
         if id == current {
-            spans.push(Span::styled(format!("{} active  ", core.sym.ok), t.chip(t.success())));
+            spans.push(Span::styled(
+                format!("{} active  ", core.sym.ok),
+                t.chip(t.success()),
+            ));
         }
         spans.push(Span::styled(detail, t.dim()));
         items.push(Item::Entry {
@@ -68,7 +90,11 @@ fn items(core: &Core) -> Vec<Item> {
 
 impl Bespoke for Page {
     fn subs(&self, _core: &Core) -> Vec<Sub> {
-        vec![Sub::every_ms(ResourceId::DisplayOptions, "/api/v1/setup/display/options", 60_000)]
+        vec![Sub::every_ms(
+            ResourceId::DisplayOptions,
+            "/api/v1/setup/display/options",
+            60_000,
+        )]
     }
 
     fn on_command(&mut self, core: &mut Core, cmd: Command) -> bool {

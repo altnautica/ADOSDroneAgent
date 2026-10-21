@@ -22,7 +22,12 @@ pub type Term = Terminal<CrosstermBackend<Stdout>>;
 /// Restore the terminal out of raw mode and the alternate screen.
 pub fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(std::io::stdout(), DisableMouseCapture, LeaveAlternateScreen, Show);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        Show
+    );
 }
 
 /// Restore the terminal from a panic hook before the default hook runs, so a
@@ -72,7 +77,11 @@ fn pause_then_restore(terminal: &mut Term, mouse: bool) -> Result<()> {
 
 /// Show why a request was refused on the plain terminal, in the same frame an
 /// action's own output would appear in, so the refusal is not a silent no-op.
-fn show_refusal(terminal: &mut Terminal<CrosstermBackend<Stdout>>, why: &str, mouse: bool) -> Result<()> {
+fn show_refusal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    why: &str,
+    mouse: bool,
+) -> Result<()> {
     restore_terminal();
     println!("\n{why}");
     pause_then_restore(terminal, mouse)

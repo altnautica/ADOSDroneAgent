@@ -70,7 +70,11 @@ fn fixture() -> App {
             }
         }),
     );
-    put(&mut app, ResourceId::PluginConfig(ID.into()), json!({"plugin_id": ID, "values": {"distance_m": 12}}));
+    put(
+        &mut app,
+        ResourceId::PluginConfig(ID.into()),
+        json!({"plugin_id": ID, "values": {"distance_m": 12}}),
+    );
     put(
         &mut app,
         ResourceId::PluginReadiness(ID.into()),
@@ -114,7 +118,9 @@ fn catalog_entry_shows_its_card() {
 #[test]
 fn a_list_refresh_keeps_the_selection_and_detail_scroll() {
     let mut app = fixture();
-    app.tabs.extensions.on_resource(&mut app.core, &ResourceId::Plugins);
+    app.tabs
+        .extensions
+        .on_resource(&mut app.core, &ResourceId::Plugins);
     app.tabs.extensions.detail_scroll = 4;
 
     // A periodic refresh that adds an install sorting ahead of the selected one.
@@ -123,14 +129,21 @@ fn a_list_refresh_keeps_the_selection_and_detail_scroll() {
         {"plugin_id": ID, "version": "0.2.10", "status": "running", "permissions": {}}
     ]});
     put(&mut app, ResourceId::Plugins, installs.clone());
-    app.tabs.extensions.on_resource(&mut app.core, &ResourceId::Plugins);
+    app.tabs
+        .extensions
+        .on_resource(&mut app.core, &ResourceId::Plugins);
     let tab = &app.tabs.extensions;
     assert_eq!(tab.sel_key.as_ref().map(|(_, id)| id.as_str()), Some(ID));
-    assert_eq!(tab.selected_install(&app.core).map(|i| i.id).as_deref(), Some(ID));
+    assert_eq!(
+        tab.selected_install(&app.core).map(|i| i.id).as_deref(),
+        Some(ID)
+    );
     assert_eq!(tab.detail_scroll, 4, "a refresh is not a selection change");
 
     put(&mut app, ResourceId::Plugins, installs);
-    app.tabs.extensions.on_resource(&mut app.core, &ResourceId::PluginsCatalog);
+    app.tabs
+        .extensions
+        .on_resource(&mut app.core, &ResourceId::PluginsCatalog);
     assert_eq!(app.tabs.extensions.detail_scroll, 4);
 
     // Moving to another plugin is a real change.

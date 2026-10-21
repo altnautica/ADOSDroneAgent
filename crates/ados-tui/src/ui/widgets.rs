@@ -22,7 +22,10 @@ pub fn panel<'a>(t: &Theme, sym: &Symbols, title: &str) -> Block<'a> {
 
 /// A `label   value` row: dim label padded to `width`, then the value.
 pub fn kv(t: &Theme, label: &str, width: usize, value: Span<'static>) -> Line<'static> {
-    Line::from(vec![Span::styled(format!("{label:<width$} "), t.dim()), value])
+    Line::from(vec![
+        Span::styled(format!("{label:<width$} "), t.dim()),
+        value,
+    ])
 }
 
 /// A `label value` row where the value is plain bright text.

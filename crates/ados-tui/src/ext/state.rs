@@ -66,7 +66,12 @@ pub fn installs(body: &Value) -> Vec<Install> {
                 .and_then(Value::as_object)
                 .map(|m| {
                     m.iter()
-                        .map(|(k, g)| (k.clone(), g.get("granted").and_then(Value::as_bool).unwrap_or(false)))
+                        .map(|(k, g)| {
+                            (
+                                k.clone(),
+                                g.get("granted").and_then(Value::as_bool).unwrap_or(false),
+                            )
+                        })
                         .collect()
                 })
                 .unwrap_or_default();
@@ -77,7 +82,10 @@ pub fn installs(body: &Value) -> Vec<Install> {
                 status: str_of(i, "status").unwrap_or_else(|| "installed".into()),
                 signer: str_of(i, "signer_id"),
                 failure_reason: str_of(i, "failure_reason"),
-                revocation_pending: i.get("revocation_pending").and_then(Value::as_bool).unwrap_or(false),
+                revocation_pending: i
+                    .get("revocation_pending")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
                 grants,
             })
         })
@@ -201,7 +209,12 @@ pub fn requested(perms: &[Perm], checked: &[bool]) -> Vec<String> {
 }
 
 /// The `POST /api/plugins/install_from_url` body.
-pub fn install_body(url: &str, sha256: Option<&str>, requested: Vec<String>, from_catalog: bool) -> Value {
+pub fn install_body(
+    url: &str,
+    sha256: Option<&str>,
+    requested: Vec<String>,
+    from_catalog: bool,
+) -> Value {
     let mut body = json!({
         "url": url,
         "requested_permissions": requested,
@@ -308,7 +321,10 @@ mod tests {
         // The operator unchecks camera.read; a required one stays requested
         // even if the result claims it unchecked.
         let req = requested(&p, &[false, true, false]);
-        assert_eq!(req, vec!["mavlink.read".to_string(), "vision.read".to_string()]);
+        assert_eq!(
+            req,
+            vec!["mavlink.read".to_string(), "vision.read".to_string()]
+        );
         let body = install_body("https://example.com/c.adosplug", Some("cc"), req, true);
         assert_eq!(
             body,
@@ -329,7 +345,10 @@ mod tests {
         let p = perms(&json!({"permissions": [
             {"id": "a", "required": true}, {"id": "b", "required": true}, {"id": "c", "required": false}
         ]}));
-        assert_eq!(missing_required(&p, &json!({"granted": ["a"]})), vec!["b".to_string()]);
+        assert_eq!(
+            missing_required(&p, &json!({"granted": ["a"]})),
+            vec!["b".to_string()]
+        );
     }
 
     #[test]

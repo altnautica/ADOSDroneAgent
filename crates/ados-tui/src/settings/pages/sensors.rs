@@ -37,7 +37,9 @@ pub fn load_rig(path: &Path) -> Result<Value, String> {
     let shown = path.display();
     let meta = std::fs::metadata(path).map_err(|e| format!("Could not read {shown}: {e}"))?;
     if !meta.is_file() {
-        return Err(format!("{shown} is not a file. Give the path of the rig JSON file."));
+        return Err(format!(
+            "{shown} is not a file. Give the path of the rig JSON file."
+        ));
     }
     let too_big = || format!("{shown} is larger than 1 MiB; that is not a rig file.");
     if meta.len() > RIG_MAX_BYTES {
@@ -70,10 +72,15 @@ impl Page {
     fn hub_items(core: &Core, items: &mut Vec<Item>) {
         items.push(Item::Header("Sensor hub".into()));
         let Some(s) = core.value(&ResourceId::SensorsStatus) else {
-            items.push(match core.slot(&ResourceId::SensorsStatus).and_then(|s| s.error.clone()) {
-                Some(e) => note(core, format!("Could not read sensors: {e}"), true),
-                None => note(core, "Reading sensors…", false),
-            });
+            items.push(
+                match core
+                    .slot(&ResourceId::SensorsStatus)
+                    .and_then(|s| s.error.clone())
+                {
+                    Some(e) => note(core, format!("Could not read sensors: {e}"), true),
+                    None => note(core, "Reading sensors…", false),
+                },
+            );
             return;
         };
         match s.get("hub").filter(|h| h.is_object()) {
@@ -90,13 +97,20 @@ impl Page {
                 items.push(info(
                     core,
                     "Errors",
-                    format!("crc {}, dropped {}", text_of(h.get("crc_errors")), text_of(h.get("dropped"))),
+                    format!(
+                        "crc {}, dropped {}",
+                        text_of(h.get("crc_errors")),
+                        text_of(h.get("dropped"))
+                    ),
                 ));
             }
             None => items.push(info(core, "Status", "not configured")),
         }
         items.push(Item::Header("Rig file".into()));
-        let rig = match (s.get("rig_id").and_then(Value::as_str), s.get("calib_version").and_then(Value::as_str)) {
+        let rig = match (
+            s.get("rig_id").and_then(Value::as_str),
+            s.get("calib_version").and_then(Value::as_str),
+        ) {
             (Some(r), Some(c)) => format!("rig {r}, calibration {c}"),
             (Some(r), None) => format!("rig {r}"),
             _ => "—".into(),
@@ -108,10 +122,15 @@ impl Page {
         let t = &core.theme;
         items.push(Item::Header("Clock sources".into()));
         let Some(c) = core.value(&ResourceId::ClockStatus) else {
-            items.push(match core.slot(&ResourceId::ClockStatus).and_then(|s| s.error.clone()) {
-                Some(e) => note(core, format!("Could not read the clock: {e}"), true),
-                None => note(core, "Reading clock…", false),
-            });
+            items.push(
+                match core
+                    .slot(&ResourceId::ClockStatus)
+                    .and_then(|s| s.error.clone())
+                {
+                    Some(e) => note(core, format!("Could not read the clock: {e}"), true),
+                    None => note(core, "Reading clock…", false),
+                },
+            );
             return;
         };
         let lock = |v: Option<&Value>| match v.and_then(Value::as_bool) {
@@ -120,13 +139,24 @@ impl Page {
         };
         items.push(info(core, "Timebase", text_of(c.get("timebase"))));
         items.push(info(core, "Lock", lock(c.get("locked"))));
-        items.push(info(core, "σ", sigma(c.get("sigma_ns").and_then(Value::as_f64))));
-        let sources = c.get("sources").and_then(Value::as_array).cloned().unwrap_or_default();
+        items.push(info(
+            core,
+            "σ",
+            sigma(c.get("sigma_ns").and_then(Value::as_f64)),
+        ));
+        let sources = c
+            .get("sources")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         if sources.is_empty() {
             return;
         }
         items.push(Item::Text(Line::from(Span::styled(
-            format!("  {:<12} {:<10} {:<12} {:>12} {:>10} {:>10}", "Source", "Kind", "Lock", "Offset", "Skew", "σ"),
+            format!(
+                "  {:<12} {:<10} {:<12} {:>12} {:>10} {:>10}",
+                "Source", "Kind", "Lock", "Offset", "Skew", "σ"
+            ),
             t.dim(),
         ))));
         for s in sources {
@@ -148,7 +178,13 @@ impl Page {
                     format!("{:<12} ", lock(s.get("locked"))),
                     Style::default().fg(if locked { t.success() } else { t.warning() }),
                 ),
-                Span::styled(format!("{offset:>12} {skew:>10} {:>10}", sigma(s.get("sigma_ns").and_then(Value::as_f64))), t.text()),
+                Span::styled(
+                    format!(
+                        "{offset:>12} {skew:>10} {:>10}",
+                        sigma(s.get("sigma_ns").and_then(Value::as_f64))
+                    ),
+                    t.text(),
+                ),
             ])));
         }
     }
@@ -188,7 +224,12 @@ impl Bespoke for Page {
         }
         match cmd {
             Command::LoadRig => {
-                let mut input = Overlay::input(Ret::new(ROUTE, "rig_path"), "Load rig file", "Path to rig.json", "");
+                let mut input = Overlay::input(
+                    Ret::new(ROUTE, "rig_path"),
+                    "Load rig file",
+                    "Path to rig.json",
+                    "",
+                );
                 input.hint = Some(Self::hint(core));
                 core.open(Overlay::Input(input));
             }
@@ -199,7 +240,9 @@ impl Bespoke for Page {
     }
 
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        let ("rig_path", OverlayResult::Text(path)) = (ret.tag, result) else { return };
+        let ("rig_path", OverlayResult::Text(path)) = (ret.tag, result) else {
+            return;
+        };
         let path = path.trim().to_string();
         match load_rig(Path::new(&path)) {
             Ok(doc) => core.submit(
@@ -207,7 +250,10 @@ impl Bespoke for Page {
                     "PUT",
                     "/api/v1/sensors/rig",
                     ROUTE,
-                    Purpose::Page { tag: "rig", data: json!(path) },
+                    Purpose::Page {
+                        tag: "rig",
+                        data: json!(path),
+                    },
                 )
                 .body(doc),
             ),
@@ -216,17 +262,25 @@ impl Bespoke for Page {
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
-        let Purpose::Page { tag: "rig", .. } = &reply.purpose else { return };
+        let Purpose::Page { tag: "rig", .. } = &reply.purpose else {
+            return;
+        };
         match &reply.result {
             Ok(body) => {
                 let rig = text_of(body.get("rig_id"));
                 let calib = text_of(body.get("calib_version"));
-                core.toast(ToastKind::Success, format!("Rig {rig} saved (calibration {calib})."));
+                core.toast(
+                    ToastKind::Success,
+                    format!("Rig {rig} saved (calibration {calib})."),
+                );
             }
             Err(e) if error_code(e).as_deref() == Some("E_RIG_INVALID") => {
                 core.open(Overlay::result(
                     "Rig file rejected",
-                    vec![(ToastKind::Error, format!("Rejected (E_RIG_INVALID): {}", detail_text(e)))],
+                    vec![(
+                        ToastKind::Error,
+                        format!("Rejected (E_RIG_INVALID): {}", detail_text(e)),
+                    )],
                 ));
             }
             Err(e) => core.toast(ToastKind::Error, format!("Rig upload: {}", detail_text(e))),
@@ -269,9 +323,14 @@ mod tests {
         let bad = temp("bad.json", "rig_id = visor");
         assert!(load_rig(&bad).unwrap_err().starts_with("Not valid JSON"));
         let arr = temp("arr.json", "[1,2]");
-        assert_eq!(load_rig(&arr).unwrap_err(), "The rig file must be a JSON object.");
+        assert_eq!(
+            load_rig(&arr).unwrap_err(),
+            "The rig file must be a JSON object."
+        );
         let missing = ok.with_file_name("absent.json");
-        assert!(load_rig(&missing).unwrap_err().starts_with("Could not read"));
+        assert!(load_rig(&missing)
+            .unwrap_err()
+            .starts_with("Could not read"));
         let _ = std::fs::remove_dir_all(ok.parent().unwrap());
     }
 
@@ -280,16 +339,25 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ados-tui-rig-bounds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let err = load_rig(&dir).unwrap_err();
-        assert!(err.ends_with("is not a file. Give the path of the rig JSON file."), "{err}");
+        assert!(
+            err.ends_with("is not a file. Give the path of the rig JSON file."),
+            "{err}"
+        );
         let big = dir.join("big.json");
         std::fs::write(&big, vec![b' '; RIG_MAX_BYTES as usize + 1]).unwrap();
         let err = load_rig(&big).unwrap_err();
-        assert!(err.ends_with("is larger than 1 MiB; that is not a rig file."), "{err}");
+        assert!(
+            err.ends_with("is larger than 1 MiB; that is not a rig file."),
+            "{err}"
+        );
         let edge = dir.join("edge.json");
         let mut body = b"{}".to_vec();
         body.resize(RIG_MAX_BYTES as usize, b' ');
         std::fs::write(&edge, body).unwrap();
-        assert!(load_rig(&edge).unwrap().is_object(), "exactly 1 MiB is accepted");
+        assert!(
+            load_rig(&edge).unwrap().is_object(),
+            "exactly 1 MiB is accepted"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

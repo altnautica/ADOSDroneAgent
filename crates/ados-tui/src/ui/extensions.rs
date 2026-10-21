@@ -12,9 +12,9 @@ use serde_json::Value;
 
 use crate::api_path::seg;
 use crate::app::{Core, FrameOut, Hit, ShellReq, Tab, TabId};
+use crate::ext::actions;
 use crate::ext::install::{Installer, TAG_PERMS};
 use crate::ext::state::{self, CatalogEntry, Install};
-use crate::ext::actions;
 use crate::keymap::{Command, Ctx};
 use crate::overlay::{Overlay, OverlayResult, Ret};
 use crate::poll::{ResourceId, Sub};
@@ -69,8 +69,14 @@ pub struct ExtensionsTab {
 }
 
 fn entries(core: &Core) -> (Vec<Install>, Vec<CatalogEntry>) {
-    let installs = core.value(&ResourceId::Plugins).map(state::installs).unwrap_or_default();
-    let catalog = core.value(&ResourceId::PluginsCatalog).map(state::catalog).unwrap_or_default();
+    let installs = core
+        .value(&ResourceId::Plugins)
+        .map(state::installs)
+        .unwrap_or_default();
+    let catalog = core
+        .value(&ResourceId::PluginsCatalog)
+        .map(state::catalog)
+        .unwrap_or_default();
     let catalog = state::not_installed(catalog, &installs);
     (installs, catalog)
 }
@@ -147,10 +153,12 @@ impl ExtensionsTab {
     fn reselect(&mut self, core: &Core) {
         let found = self.sel_key.as_ref().and_then(|(_, id)| {
             let (installs, catalog) = entries(core);
-            installs
-                .iter()
-                .position(|i| i.id == *id)
-                .or_else(|| catalog.iter().position(|c| c.id == *id).map(|p| p + installs.len()))
+            installs.iter().position(|i| i.id == *id).or_else(|| {
+                catalog
+                    .iter()
+                    .position(|c| c.id == *id)
+                    .map(|p| p + installs.len())
+            })
         });
         self.select(core, found.unwrap_or(self.sel));
     }
@@ -165,7 +173,11 @@ impl ExtensionsTab {
         }
         let pos = order.iter().position(|f| *f == self.focus).unwrap_or(0);
         let n = order.len();
-        self.focus = order[if forward { (pos + 1) % n } else { (pos + n - 1) % n }];
+        self.focus = order[if forward {
+            (pos + 1) % n
+        } else {
+            (pos + n - 1) % n
+        }];
     }
 
     fn nav(&mut self, core: &mut Core, cmd: Command) {
@@ -214,7 +226,11 @@ impl ExtensionsTab {
                     .start(core, ROUTE, c.download_url, Some(c.sha256), true, c.name);
             }
             (_, Some(Entry::Installed(_))) => {
-                self.focus = if self.has_config(core) { Focus::Config } else { Focus::Detail };
+                self.focus = if self.has_config(core) {
+                    Focus::Config
+                } else {
+                    Focus::Detail
+                };
             }
             (_, None) => {}
         }
@@ -247,7 +263,12 @@ impl ExtensionsTab {
         if !core.guard_disarmed() {
             return;
         }
-        let mut s = Overlay::input(Ret::new(ROUTE, TAG_FILE), "Install from file", "Path to a .adosplug file", "");
+        let mut s = Overlay::input(
+            Ret::new(ROUTE, TAG_FILE),
+            "Install from file",
+            "Path to a .adosplug file",
+            "",
+        );
         s.validate = Some(|t: &str| {
             if t.trim().ends_with(".adosplug") {
                 Ok(())
@@ -255,7 +276,8 @@ impl ExtensionsTab {
                 Err("Enter the path of a .adosplug file".into())
             }
         });
-        s.hint = Some("Runs `ados plugin install <path>`, which asks for permissions itself".into());
+        s.hint =
+            Some("Runs `ados plugin install <path>`, which asks for permissions itself".into());
         core.open(Overlay::Input(s));
     }
 
@@ -313,9 +335,12 @@ impl Tab for ExtensionsTab {
     fn on_command(&mut self, core: &mut Core, cmd: Command) -> bool {
         self.sync_pane(core);
         match cmd {
-            Command::Up | Command::Down | Command::PageUp | Command::PageDown | Command::Top | Command::Bottom => {
-                self.nav(core, cmd)
-            }
+            Command::Up
+            | Command::Down
+            | Command::PageUp
+            | Command::PageDown
+            | Command::Top
+            | Command::Bottom => self.nav(core, cmd),
             Command::Left | Command::Right if self.focus == Focus::Config => {
                 if let Some(p) = self.pane.as_mut() {
                     p.on_command(core, cmd);
@@ -324,11 +349,18 @@ impl Tab for ExtensionsTab {
             Command::NextPane => self.cycle_focus(core, true),
             Command::PrevPane => self.cycle_focus(core, false),
             Command::Activate => self.activate(core),
-            Command::Enable | Command::Disable | Command::Remove | Command::Grant | Command::RevokePerm => {
-                self.lifecycle(core, cmd)
-            }
+            Command::Enable
+            | Command::Disable
+            | Command::Remove
+            | Command::Grant
+            | Command::RevokePerm => self.lifecycle(core, cmd),
             Command::InstallUrl => {
-                let mut s = Overlay::input(Ret::new(ROUTE, TAG_URL), "Install from URL", "Archive URL (.adosplug)", "");
+                let mut s = Overlay::input(
+                    Ret::new(ROUTE, TAG_URL),
+                    "Install from URL",
+                    "Archive URL (.adosplug)",
+                    "",
+                );
                 s.validate = Some(state::validate_url);
                 s.hint = Some("The agent only downloads from its allowlisted hosts".into());
                 core.open(Overlay::Input(s));
@@ -344,7 +376,12 @@ impl Tab for ExtensionsTab {
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
         match ret.tag {
             plugin_rows::TAG => {
-                let id = ret.data.get("plugin").and_then(Value::as_str).unwrap_or_default().to_string();
+                let id = ret
+                    .data
+                    .get("plugin")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 match self.pane.as_mut().filter(|p| p.plugin_id() == id) {
                     Some(p) => p.on_overlay(core, ret, result),
                     None => PluginConfigPane::new(id, ROUTE).on_overlay(core, ret, result),
@@ -354,17 +391,26 @@ impl Tab for ExtensionsTab {
             TAG_URL => {
                 if let OverlayResult::Text(url) = result {
                     let ret = Ret::new(ROUTE, TAG_SHA).with(serde_json::json!({"url": url.trim()}));
-                    let mut s = Overlay::input(ret, "Install from URL", "Archive sha256 (optional)", "");
+                    let mut s =
+                        Overlay::input(ret, "Install from URL", "Archive sha256 (optional)", "");
                     s.validate = Some(state::validate_sha);
-                    s.hint = Some("Empty: the install is pinned to the archive the preview verified".into());
+                    s.hint = Some(
+                        "Empty: the install is pinned to the archive the preview verified".into(),
+                    );
                     core.open(Overlay::Input(s));
                 }
             }
             TAG_SHA => {
                 if let OverlayResult::Text(sha) = result {
-                    let url = ret.data.get("url").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let url = ret
+                        .data
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
                     let name = url.rsplit('/').next().unwrap_or(&url).to_string();
-                    self.installer.start(core, ROUTE, url, Some(sha), false, name);
+                    self.installer
+                        .start(core, ROUTE, url, Some(sha), false, name);
                 }
             }
             TAG_FILE => {
@@ -385,8 +431,15 @@ impl Tab for ExtensionsTab {
         match &reply.purpose {
             Purpose::PluginParse => self.installer.on_parse(core, ROUTE, &reply.result),
             Purpose::PluginInstall => self.installer.on_install(core, ROUTE, &reply.result),
-            Purpose::Page { tag: plugin_rows::TAG, data } => {
-                let id = data.get("plugin").and_then(Value::as_str).unwrap_or_default().to_string();
+            Purpose::Page {
+                tag: plugin_rows::TAG,
+                data,
+            } => {
+                let id = data
+                    .get("plugin")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 match self.pane.as_mut().filter(|p| p.plugin_id() == id) {
                     Some(p) => p.on_reply(core, reply),
                     None => PluginConfigPane::new(id, ROUTE).on_reply(core, reply),
@@ -443,8 +496,13 @@ impl Tab for ExtensionsTab {
 
     fn context_line(&self, core: &Core) -> Option<String> {
         match (self.focus, self.selected(core)) {
-            (Focus::Config, _) => self.pane.as_ref().and_then(|p| Bespoke::context_line(p, core)),
-            (Focus::Detail, _) => Some("Detail: ↑↓ scroll · Tab next pane · Esc back to the list".into()),
+            (Focus::Config, _) => self
+                .pane
+                .as_ref()
+                .and_then(|p| Bespoke::context_line(p, core)),
+            (Focus::Detail, _) => {
+                Some("Detail: ↑↓ scroll · Tab next pane · Esc back to the list".into())
+            }
             (_, Some(Entry::Catalog(c))) => Some(c.description).filter(|d| !d.is_empty()),
             (_, Some(Entry::Installed(i))) => i.failure_reason.or_else(|| {
                 self.has_config(core)

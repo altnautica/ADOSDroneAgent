@@ -35,7 +35,11 @@ fn level_filter_hides_lower_levels() {
     assert_eq!(shown, vec!["w", "e"]);
     tab.level = 1;
     tab.filter = "E".into();
-    assert_eq!(tab.visible().len(), 1, "the text filter is case-insensitive");
+    assert_eq!(
+        tab.visible().len(),
+        1,
+        "the text filter is case-insensitive"
+    );
 }
 
 #[test]
@@ -66,12 +70,29 @@ fn poll_fallback_folds_entries_oldest_first_without_duplicates() {
     });
     app.core.res.insert(
         ResourceId::LogsPoll,
-        Slot { value: Some(body), error: None, code: None, error_body: None, at: Instant::now() },
+        Slot {
+            value: Some(body),
+            error: None,
+            code: None,
+            error_body: None,
+            at: Instant::now(),
+        },
     );
-    app.tabs.logs.on_resource(&mut app.core, &ResourceId::LogsPoll);
-    let msgs: Vec<&str> = app.tabs.logs.ring.iter().map(|e| e.message.as_str()).collect();
+    app.tabs
+        .logs
+        .on_resource(&mut app.core, &ResourceId::LogsPoll);
+    let msgs: Vec<&str> = app
+        .tabs
+        .logs
+        .ring
+        .iter()
+        .map(|e| e.message.as_str())
+        .collect();
     assert_eq!(msgs, vec!["old", "middle", "newest"]);
-    assert_eq!(app.tabs.logs.warning.as_deref(), Some("logging store unavailable"));
+    assert_eq!(
+        app.tabs.logs.warning.as_deref(),
+        Some("logging store unavailable")
+    );
 }
 
 #[test]

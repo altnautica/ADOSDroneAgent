@@ -23,7 +23,8 @@ use crate::worker::{Purpose, Reply, Request, Route};
 const LEVELS: &[&str] = &["debug", "info", "warning", "error", "critical"];
 const AUTO: &str = "auto-detect";
 
-const LEVEL_HELP: &str = "Verbosity for the structured logger. Saved on selection; applies on the next service restart.";
+const LEVEL_HELP: &str =
+    "Verbosity for the structured logger. Saved on selection; applies on the next service restart.";
 const BOARD_HELP: &str = "Force the HAL detector to use a specific board profile slug. Leave blank for auto-detect. Wrong values can disable peripherals.";
 
 fn route() -> Route {
@@ -35,7 +36,10 @@ pub fn validate_board_override(s: &str) -> Result<(), String> {
     if s.chars().count() > 64 {
         return Err("At most 64 characters.".into());
     }
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err("Letters, digits, dash and underscore only.".into());
     }
     Ok(())
@@ -57,9 +61,11 @@ fn config_str<'a>(core: &'a Core, path: &str) -> Option<&'a str> {
 
 impl Page {
     fn level(&self, core: &Core) -> String {
-        self.pending_level
-            .clone()
-            .unwrap_or_else(|| config_str(core, "logging.level").unwrap_or("info").to_ascii_lowercase())
+        self.pending_level.clone().unwrap_or_else(|| {
+            config_str(core, "logging.level")
+                .unwrap_or("info")
+                .to_ascii_lowercase()
+        })
     }
 
     fn items(&self, core: &Core) -> Vec<Item> {
@@ -67,7 +73,13 @@ impl Page {
         if let Some(note) = kit::resource_note(core, &ResourceId::Config, "the config") {
             items.push(note);
         }
-        let mut row = kit::row("log_level", "Log level", LEVEL_HELP, kit::enum_of(LEVELS), Some(json!(self.level(core))));
+        let mut row = kit::row(
+            "log_level",
+            "Log level",
+            LEVEL_HELP,
+            kit::enum_of(LEVELS),
+            Some(json!(self.level(core))),
+        );
         row.default = Some(json!("info"));
         items.push(Item::Row(row));
         items.push(Item::Header("Board".into()));
@@ -111,8 +123,15 @@ impl Page {
     }
 
     fn edit_board(&self, core: &mut Core) {
-        let current = config_str(core, "agent.board_override").unwrap_or_default().to_string();
-        let mut s = Overlay::input(Ret::new(route(), "board"), "Board override", "Slug (empty = auto-detect)", &current);
+        let current = config_str(core, "agent.board_override")
+            .unwrap_or_default()
+            .to_string();
+        let mut s = Overlay::input(
+            Ret::new(route(), "board"),
+            "Board override",
+            "Slug (empty = auto-detect)",
+            &current,
+        );
         s.validate = Some(validate_board_override);
         s.hint = Some("Letters, digits, dash and underscore, at most 64".into());
         core.open(Overlay::Input(s));
@@ -139,14 +158,24 @@ impl Bespoke for Page {
                 if self.pending_level.is_some() {
                     return true;
                 }
-                if let Some(Value::String(next)) = cycle(&r.kind, r.value.as_ref(), cmd == Command::Right) {
+                if let Some(Value::String(next)) =
+                    cycle(&r.kind, r.value.as_ref(), cmd == Command::Right)
+                {
                     self.send_level(core, next);
                 }
             }
             (Command::Activate, Some(r)) if r.key == "log_level" => {
-                let sel = LEVELS.iter().position(|l| *l == self.level(core)).unwrap_or(1);
+                let sel = LEVELS
+                    .iter()
+                    .position(|l| *l == self.level(core))
+                    .unwrap_or(1);
                 let items = LEVELS.iter().map(|l| l.to_string()).collect();
-                core.open(Overlay::picker(Ret::new(route(), "level"), "Log level", items, sel));
+                core.open(Overlay::picker(
+                    Ret::new(route(), "level"),
+                    "Log level",
+                    items,
+                    sel,
+                ));
             }
             (Command::Activate, Some(r)) if r.key == "board_override" => self.edit_board(core),
             (Command::Left | Command::Right | Command::Activate, _) => {}
@@ -170,7 +199,11 @@ impl Bespoke for Page {
                     core.toast(ToastKind::Error, e);
                     return;
                 }
-                let shown = if slug.is_empty() { AUTO.to_string() } else { slug.clone() };
+                let shown = if slug.is_empty() {
+                    AUTO.to_string()
+                } else {
+                    slug.clone()
+                };
                 core.open(Overlay::confirm(
                     Ret::new(route(), "board_apply").with(json!(slug)),
                     "Override the detected board?",
@@ -200,7 +233,9 @@ impl Bespoke for Page {
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
-        let Purpose::Page { tag, data } = &reply.purpose else { return };
+        let Purpose::Page { tag, data } = &reply.purpose else {
+            return;
+        };
         match *tag {
             "log_level" => {
                 self.pending_level = None;
@@ -219,7 +254,10 @@ impl Bespoke for Page {
             "board_override" => {
                 self.busy = false;
                 if let Some(body) = apply_result::show(core, "Board override", &reply.result) {
-                    core.flash("advanced:board_override", apply_result::succeeded(body, "advanced"));
+                    core.flash(
+                        "advanced:board_override",
+                        apply_result::succeeded(body, "advanced"),
+                    );
                 }
             }
             _ => return,
@@ -234,7 +272,16 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        rows_view::render(f, area, core, &items, &mut self.rows, "advanced:", true, out);
+        rows_view::render(
+            f,
+            area,
+            core,
+            &items,
+            &mut self.rows,
+            "advanced:",
+            true,
+            out,
+        );
     }
 
     fn context_line(&self, core: &Core) -> Option<String> {

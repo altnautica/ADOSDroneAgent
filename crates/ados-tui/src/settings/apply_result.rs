@@ -15,7 +15,10 @@ use crate::toast::ToastKind;
 /// The dialog lines for an apply reply: the overall outcome, then each
 /// section's `ok`/`message`, then each rolled-back section.
 pub fn lines(body: &Value) -> Vec<(ToastKind, String)> {
-    let overall = body.get("overall").and_then(Value::as_bool).unwrap_or(false);
+    let overall = body
+        .get("overall")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let mut out = vec![if overall {
         (ToastKind::Success, "Applied".to_string())
     } else {
@@ -29,7 +32,11 @@ pub fn lines(body: &Value) -> Vec<(ToastKind, String)> {
                 .and_then(Value::as_str)
                 .filter(|m| !m.is_empty())
                 .unwrap_or(if ok { "ok" } else { "failed" });
-            let kind = if ok { ToastKind::Success } else { ToastKind::Error };
+            let kind = if ok {
+                ToastKind::Success
+            } else {
+                ToastKind::Error
+            };
             out.push((kind, format!("{name}: {message}")));
         }
     }
@@ -57,7 +64,11 @@ pub fn succeeded(body: &Value, name: &str) -> bool {
 
 /// Show a finished apply: the result dialog for an answer, an error toast
 /// for a failed request. Returns the body when the agent answered.
-pub fn show<'a>(core: &mut Core, title: &str, result: &'a Result<Value, RestError>) -> Option<&'a Value> {
+pub fn show<'a>(
+    core: &mut Core,
+    title: &str,
+    result: &'a Result<Value, RestError>,
+) -> Option<&'a Value> {
     match result {
         Ok(body) => {
             core.open(Overlay::result(title, lines(body)));
@@ -88,10 +99,19 @@ mod tests {
         });
         let got = lines(&body);
         assert_eq!(got[0], (ToastKind::Error, "Not applied".to_string()));
-        assert!(got.contains(&(ToastKind::Success, "profile: Profile set to drone".to_string())));
-        assert!(got.contains(&(ToastKind::Error, "regulatory: Unknown region XX".to_string())));
+        assert!(got.contains(&(
+            ToastKind::Success,
+            "profile: Profile set to drone".to_string()
+        )));
+        assert!(got.contains(&(
+            ToastKind::Error,
+            "regulatory: Unknown region XX".to_string()
+        )));
         assert!(got.contains(&(ToastKind::Success, "cloud: ok".to_string())));
-        assert_eq!(got.last(), Some(&(ToastKind::Warn, "profile: rolled back".to_string())));
+        assert_eq!(
+            got.last(),
+            Some(&(ToastKind::Warn, "profile: rolled back".to_string()))
+        );
         assert_eq!(got.len(), 5);
         assert!(!succeeded(&body, "profile"));
     }

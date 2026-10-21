@@ -309,7 +309,11 @@ mod tests {
                 "position_age_ms": age,
             }))
         };
-        assert_eq!(sample(Value::Null, 0.0).heading, None, "0.0 placeholder before a fix");
+        assert_eq!(
+            sample(Value::Null, 0.0).heading,
+            None,
+            "0.0 placeholder before a fix"
+        );
         assert_eq!(sample(json!(120), 0.0).heading, Some(0.0));
         assert_eq!(sample(json!(120), 271.5).heading, Some(271.5));
         assert_eq!(sample(json!(120), 655.35).heading, None, "unknown sentinel");

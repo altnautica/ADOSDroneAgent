@@ -165,7 +165,12 @@ pub fn now_hms() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0)
         % 86_400;
-    format!("{:02}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
 }
 
 impl Core {
@@ -280,7 +285,9 @@ impl Core {
     /// or a visor with no flight controller link). An unknown arm state on a
     /// drone is a refusal: a lost FC link can be a vehicle in the air.
     pub fn require_disarmed(&self) -> Result<(), &'static str> {
-        let Some(d) = self.dash() else { return Err(ARMED_REFUSAL) };
+        let Some(d) = self.dash() else {
+            return Err(ARMED_REFUSAL);
+        };
         if self.stale() {
             return Err(ARMED_REFUSAL);
         }
@@ -368,8 +375,10 @@ impl Core {
         let p = &self.store.prefs;
         self.theme = Theme::new(self.tier, ThemeId::from_name(&p.theme), p.color_blind);
         self.sym = symbols::by_name(&p.symbols);
-        self.fx.set_level(motion::resolve(&p.motion, self.ssh, self.tier));
-        self.poller.set_interval(Duration::from_millis(p.refresh_ms));
+        self.fx
+            .set_level(motion::resolve(&p.motion, self.ssh, self.tier));
+        self.poller
+            .set_interval(Duration::from_millis(p.refresh_ms));
         self.mouse_changed = true;
         self.dirty = true;
     }
@@ -418,7 +427,14 @@ pub trait Tab {
     /// A worker request this tab submitted finished.
     fn on_reply(&mut self, _core: &mut Core, _reply: Reply) {}
     /// One item of a parameter batch finished.
-    fn on_progress(&mut self, _core: &mut Core, _name: String, _value: f64, _result: Result<Value, RestError>) {}
+    fn on_progress(
+        &mut self,
+        _core: &mut Core,
+        _name: String,
+        _value: f64,
+        _result: Result<Value, RestError>,
+    ) {
+    }
     /// A mouse click on a hit this tab recorded.
     fn on_click(&mut self, _core: &mut Core, _hit: &Hit) {}
     /// Called every loop iteration while active (drain own channels).

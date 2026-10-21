@@ -1,8 +1,8 @@
 //! `.param` files: `NAME,VALUE` lines (also `NAME VALUE`), `#` comments.
 
 use super::metadata::plain;
-use super::store::{StageOutcome, Store};
 use super::same;
+use super::store::{StageOutcome, Store};
 
 /// What an import did.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -97,9 +97,19 @@ pub fn import(store: &mut Store, text: &str) -> ImportCounts {
 pub fn export_name(device: &str, unix_secs: u64) -> String {
     let safe: String = device
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
-    let device = if safe.trim_matches('_').is_empty() { "ados".to_string() } else { safe };
+    let device = if safe.trim_matches('_').is_empty() {
+        "ados".to_string()
+    } else {
+        safe
+    };
     format!("{device}-{}.param", stamp(unix_secs))
 }
 
@@ -160,15 +170,30 @@ mod tests {
 
     #[test]
     fn export_then_import_round_trips() {
-        let source = store(&[("ATC_RAT_RLL_P", 0.135_000_005_364_418_03), ("WPNAV_SPEED", 500.0), ("BATT_LOW_VOLT", 10.5)]);
+        let source = store(&[
+            ("ATC_RAT_RLL_P", 0.135_000_005_364_418_03),
+            ("WPNAV_SPEED", 500.0),
+            ("BATT_LOW_VOLT", 10.5),
+        ]);
         let text = export_text(&source);
-        assert_eq!(text, "ATC_RAT_RLL_P,0.135\nBATT_LOW_VOLT,10.5\nWPNAV_SPEED,500\n");
+        assert_eq!(
+            text,
+            "ATC_RAT_RLL_P,0.135\nBATT_LOW_VOLT,10.5\nWPNAV_SPEED,500\n"
+        );
 
-        let mut same_fc = store(&[("ATC_RAT_RLL_P", 0.135_000_005_364_418_03), ("WPNAV_SPEED", 500.0), ("BATT_LOW_VOLT", 10.5)]);
+        let mut same_fc = store(&[
+            ("ATC_RAT_RLL_P", 0.135_000_005_364_418_03),
+            ("WPNAV_SPEED", 500.0),
+            ("BATT_LOW_VOLT", 10.5),
+        ]);
         let c = import(&mut same_fc, &text);
         assert_eq!((c.staged, c.unchanged, c.unknown), (0, 3, 0));
 
-        let mut other = store(&[("ATC_RAT_RLL_P", 0.2), ("WPNAV_SPEED", 400.0), ("BATT_LOW_VOLT", 10.5)]);
+        let mut other = store(&[
+            ("ATC_RAT_RLL_P", 0.2),
+            ("WPNAV_SPEED", 400.0),
+            ("BATT_LOW_VOLT", 10.5),
+        ]);
         let c = import(&mut other, &text);
         assert_eq!((c.staged, c.unchanged, c.unknown), (2, 1, 0));
         assert!(same(other.staged_value("ATC_RAT_RLL_P").unwrap(), 0.135));
@@ -187,7 +212,10 @@ mod tests {
 
     #[test]
     fn export_names_are_timestamped_and_safe() {
-        assert_eq!(export_name("bench drone", 0), "bench_drone-19700101-000000.param");
+        assert_eq!(
+            export_name("bench drone", 0),
+            "bench_drone-19700101-000000.param"
+        );
         assert_eq!(stamp(951_782_400 + 3_723), "20000229-010203");
         assert_eq!(export_name("", 1_792_454_400), "ados-20261020-000000.param");
     }

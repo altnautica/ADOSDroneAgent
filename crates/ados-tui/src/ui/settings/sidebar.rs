@@ -60,7 +60,11 @@ pub fn entries(core: &Core) -> Vec<Entry> {
 fn plugin_entry((id, name): &(String, String)) -> Entry {
     Entry {
         id: format!("{PLUGIN_PREFIX}{id}"),
-        title: if name.is_empty() { id.clone() } else { name.clone() },
+        title: if name.is_empty() {
+            id.clone()
+        } else {
+            name.clone()
+        },
         group: Group::Extensions,
         body: PageBody::Plugin,
     }
@@ -164,7 +168,11 @@ pub fn sections(
     selected: usize,
     out: &mut FrameOut,
 ) -> Rect {
-    let w = if f.area().width < 100 { SECTIONS_NARROW } else { SECTIONS_WIDE };
+    let w = if f.area().width < 100 {
+        SECTIONS_NARROW
+    } else {
+        SECTIONS_WIDE
+    };
     let [list, rule_area, rows] = ratatui::layout::Layout::horizontal([
         ratatui::layout::Constraint::Length(w),
         ratatui::layout::Constraint::Length(1),

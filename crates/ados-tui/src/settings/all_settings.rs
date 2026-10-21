@@ -9,7 +9,8 @@ use super::schema::{Kind, Leaf};
 use crate::app::Core;
 
 /// The context line of a list or object value.
-pub const OPAQUE_HELP: &str = "List value: edit config.yaml (the config API sets one scalar key per call)";
+pub const OPAQUE_HELP: &str =
+    "List value: edit config.yaml (the config API sets one scalar key per call)";
 
 /// The top-level sections, in schema order.
 pub fn sections(leaves: &[Leaf]) -> Vec<&str> {
@@ -90,7 +91,10 @@ fn section_starts(items: &[Item]) -> Vec<(String, usize)> {
 
 /// Focus the first row of `section`.
 pub fn focus_section(items: &[Item], state: &mut RowsState, section: &str) {
-    if let Some((_, i)) = section_starts(items).into_iter().find(|(s, _)| s == section) {
+    if let Some((_, i)) = section_starts(items)
+        .into_iter()
+        .find(|(s, _)| s == section)
+    {
         state.select(items, i);
     }
 }
@@ -135,11 +139,20 @@ mod tests {
         let now = std::time::Instant::now();
         for (id, v) in [
             (ResourceId::ConfigSchema, schema()),
-            (ResourceId::Config, json!({"agent": {"name": "bench"}, "cameras": [{"id": "a"}], "mavlink": {"baud_rate": 115200, "system_id": 1}})),
+            (
+                ResourceId::Config,
+                json!({"agent": {"name": "bench"}, "cameras": [{"id": "a"}], "mavlink": {"baud_rate": 115200, "system_id": 1}}),
+            ),
         ] {
             app.core.res.insert(
                 id,
-                crate::app::Slot { value: Some(v), error: None, code: None, error_body: None, at: now },
+                crate::app::Slot {
+                    value: Some(v),
+                    error: None,
+                    code: None,
+                    error_body: None,
+                    at: now,
+                },
             );
         }
         app
@@ -169,7 +182,12 @@ mod tests {
         assert_eq!(baud.label, "baud_rate");
         assert_eq!(baud.value, Some(json!(115200)));
         assert!(baud.non_default());
-        assert!(baud.help.starts_with("mavlink.baud_rate: Serial line speed"), "{}", baud.help);
+        assert!(
+            baud.help
+                .starts_with("mavlink.baud_rate: Serial line speed"),
+            "{}",
+            baud.help
+        );
         let cams = items
             .iter()
             .find_map(|i| match i {

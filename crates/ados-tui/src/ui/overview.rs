@@ -29,7 +29,11 @@ impl Tab for OverviewTab {
         match core.dash() {
             Some(d) => super::panels::body(f, rows[1], core, d),
             None => {
-                let msg = core.view.error.clone().unwrap_or_else(|| "Connecting to the agent…".into());
+                let msg = core
+                    .view
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Connecting to the agent…".into());
                 f.render_widget(
                     Paragraph::new(msg)
                         .style(Style::default().fg(core.theme.warning()))
@@ -51,7 +55,10 @@ impl Tab for OverviewTab {
 fn verdict(f: &mut Frame, area: Rect, core: &Core) {
     let t = &core.theme;
     let Some(d) = core.dash() else {
-        f.render_widget(Paragraph::new(Line::from(Span::styled("· · ·", t.dim()))), area);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled("· · ·", t.dim()))),
+            area,
+        );
         return;
     };
     let error = core.view.error.as_deref();
@@ -66,8 +73,14 @@ fn verdict(f: &mut Frame, area: Rect, core: &Core) {
         };
         let why = error.unwrap_or("No answer from the agent.");
         let line1 = Line::from(vec![
-            Span::styled(format!("{} ", core.sym.warn), Style::default().fg(t.error())),
-            Span::styled(word, Style::default().fg(t.error()).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                format!("{} ", core.sym.warn),
+                Style::default().fg(t.error()),
+            ),
+            Span::styled(
+                word,
+                Style::default().fg(t.error()).add_modifier(Modifier::BOLD),
+            ),
         ]);
         let line2 = Line::from(Span::styled(
             format!("{why} · showing the last snapshot"),

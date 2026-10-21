@@ -85,7 +85,11 @@ impl Page {
         );
         enabled.read_only = false;
         let mut items = vec![Item::Header("Setup hotspot".into())];
-        items.extend(kit::resource_note(core, &ResourceId::SetupStatus, "the setup status"));
+        items.extend(kit::resource_note(
+            core,
+            &ResourceId::SetupStatus,
+            "the setup status",
+        ));
         items.push(Item::Row(enabled));
         items.push(Item::Row(row(
             "ssid",
@@ -133,15 +137,22 @@ impl Bespoke for Page {
         }
         let focused = self.rows.focused_key(&items).map(str::to_string);
         match (cmd, focused.as_deref()) {
-            (Command::Left | Command::Right | Command::Activate, Some("enabled")) => Self::ask_toggle(core),
+            (Command::Left | Command::Right | Command::Activate, Some("enabled")) => {
+                Self::ask_toggle(core)
+            }
             (Command::Reveal, _) => {
                 self.rows.reveal(&items, core.now);
             }
             (Command::Copy, Some("passphrase")) if core.target.remote => {
-                core.toast(crate::toast::ToastKind::Info, "The hotspot passphrase is shown on the agent only");
+                core.toast(
+                    crate::toast::ToastKind::Info,
+                    "The hotspot passphrase is shown on the agent only",
+                );
             }
             (Command::Copy, Some(key)) => {
-                if let Some(Value::String(s)) = kit::find_row(&items, key).and_then(|r| r.value.clone()) {
+                if let Some(Value::String(s)) =
+                    kit::find_row(&items, key).and_then(|r| r.value.clone())
+                {
                     core.copy(&s);
                 }
             }
@@ -170,7 +181,10 @@ impl Bespoke for Page {
         if let Purpose::SetupApply { .. } = reply.purpose {
             let ok = matches!(&reply.result, Ok(b) if apply_result::succeeded(b, "network"));
             apply_result::show(core, "Hotspot", &reply.result);
-            core.flash(format!("{}enabled", kit::prefix(BespokeId::Hotspot.id())), ok);
+            core.flash(
+                format!("{}enabled", kit::prefix(BespokeId::Hotspot.id())),
+                ok,
+            );
             core.fetch_now(ResourceId::SetupStatus);
             core.poller.refresh();
         }
@@ -211,7 +225,9 @@ mod tests {
     use crate::ui::tests::test_app;
 
     fn passphrase(page: &Page, core: &Core) -> EditRow {
-        kit::find_row(&page.items(core), "passphrase").cloned().expect("the passphrase row")
+        kit::find_row(&page.items(core), "passphrase")
+            .cloned()
+            .expect("the passphrase row")
     }
 
     #[test]

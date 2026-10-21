@@ -36,9 +36,27 @@ pub struct Page {
 
 fn spec(field: &str) -> (&'static str, &'static str, Kind) {
     match field {
-        "locked" => ("Lock exposure", "Hold exposure and gain fixed while capturing.", Kind::Bool),
-        "exposure_us" => ("Exposure (µs)", "Manual exposure time in microseconds.", Kind::Int { min: Some(1), max: None }),
-        "gain" => ("Gain", "Sensor gain as a multiplier (1 = the driver default).", Kind::Num { min: Some(0.01), max: None }),
+        "locked" => (
+            "Lock exposure",
+            "Hold exposure and gain fixed while capturing.",
+            Kind::Bool,
+        ),
+        "exposure_us" => (
+            "Exposure (µs)",
+            "Manual exposure time in microseconds.",
+            Kind::Int {
+                min: Some(1),
+                max: None,
+            },
+        ),
+        "gain" => (
+            "Gain",
+            "Sensor gain as a multiplier (1 = the driver default).",
+            Kind::Num {
+                min: Some(0.01),
+                max: None,
+            },
+        ),
         _ => (
             "Mode",
             "Motion profile the exposure is tuned for: walking, slow or short.",
@@ -49,8 +67,12 @@ fn spec(field: &str) -> (&'static str, &'static str, Kind) {
 
 /// Whether an exposure body is complete enough to send.
 pub fn complete(e: &Map<String, Value>) -> bool {
-    e.get("exposure_us").and_then(Value::as_f64).is_some_and(|v| v > 0.0)
-        && e.get("gain").and_then(Value::as_f64).is_some_and(|v| v > 0.0)
+    e.get("exposure_us")
+        .and_then(Value::as_f64)
+        .is_some_and(|v| v > 0.0)
+        && e.get("gain")
+            .and_then(Value::as_f64)
+            .is_some_and(|v| v > 0.0)
         && e.get("mode").is_some_and(Value::is_string)
 }
 
@@ -58,7 +80,11 @@ pub fn complete(e: &Map<String, Value>) -> bool {
 pub fn exposure_body(e: &Map<String, Value>) -> Value {
     let mut out = Map::new();
     for f in FIELDS {
-        let v = e.get(f).cloned().unwrap_or(if f == "locked" { json!(false) } else { Value::Null });
+        let v = e.get(f).cloned().unwrap_or(if f == "locked" {
+            json!(false)
+        } else {
+            Value::Null
+        });
         out.insert(f.into(), v);
     }
     Value::Object(out)
@@ -92,17 +118,32 @@ impl Page {
             return items;
         }
         let Some(exp) = self.exposure(core) else {
-            items.push(match core.slot(&ResourceId::CaptureState).and_then(|s| s.error.clone()) {
-                Some(e) => note(core, format!("Could not read the capture state: {e}"), true),
-                None => note(core, "Loading…", false),
-            });
+            items.push(
+                match core
+                    .slot(&ResourceId::CaptureState)
+                    .and_then(|s| s.error.clone())
+                {
+                    Some(e) => note(core, format!("Could not read the capture state: {e}"), true),
+                    None => note(core, "Loading…", false),
+                },
+            );
             return items;
         };
         let state = core.value(&ResourceId::CaptureState);
-        items.push(info(core, "State", text_of(state.and_then(|s| s.get("state")))));
+        items.push(info(
+            core,
+            "State",
+            text_of(state.and_then(|s| s.get("state"))),
+        ));
         for f in FIELDS {
             let (label, help, kind) = spec(f);
-            items.push(Item::Row(kit::row(f, label, help, kind, Some(exp.get(f).cloned().unwrap_or(Value::Null)))));
+            items.push(Item::Row(kit::row(
+                f,
+                label,
+                help,
+                kind,
+                Some(exp.get(f).cloned().unwrap_or(Value::Null)),
+            )));
         }
         let locked = exp.get("locked").and_then(Value::as_bool) == Some(true);
         if locked && exp.get("applied").and_then(Value::as_bool) == Some(false) {
@@ -116,12 +157,24 @@ impl Page {
 
     /// Stage `field = value`, sending the whole exposure once it is complete.
     fn set(&mut self, core: &mut Core, field: &str, value: Value) {
-        self.draft.get_or_insert_with(Map::new).insert(field.into(), value);
-        let Some(exp) = self.exposure(core) else { return };
+        self.draft
+            .get_or_insert_with(Map::new)
+            .insert(field.into(), value);
+        let Some(exp) = self.exposure(core) else {
+            return;
+        };
         if complete(&exp) {
             core.submit(
-                Request::new("PUT", EXPOSURE_PATH, ROUTE, Purpose::Page { tag: "exposure", data: json!(field) })
-                    .body(exposure_body(&exp)),
+                Request::new(
+                    "PUT",
+                    EXPOSURE_PATH,
+                    ROUTE,
+                    Purpose::Page {
+                        tag: "exposure",
+                        data: json!(field),
+                    },
+                )
+                .body(exposure_body(&exp)),
             );
         }
     }
@@ -129,7 +182,11 @@ impl Page {
 
 impl Bespoke for Page {
     fn subs(&self, _core: &Core) -> Vec<Sub> {
-        vec![Sub::every_ms(ResourceId::CaptureState, CAPTURE_STATE_PATH, 3000)]
+        vec![Sub::every_ms(
+            ResourceId::CaptureState,
+            CAPTURE_STATE_PATH,
+            3000,
+        )]
     }
 
     fn on_command(&mut self, core: &mut Core, cmd: Command) -> bool {
@@ -145,7 +202,8 @@ impl Bespoke for Page {
                 kit::open_editor(core, ROUTE, &row);
             }
             Command::Left | Command::Right | Command::Activate => {
-                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd != Command::Left) {
+                if let Some(next) = row::cycle(&row.kind, row.value.as_ref(), cmd != Command::Left)
+                {
                     self.set(core, &row.key, next);
                 }
             }
@@ -160,7 +218,8 @@ impl Bespoke for Page {
             return;
         }
         let items = self.items(core);
-        let Some(row) = kit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned() else {
+        let Some(row) = kit::find_row(&items, ret.data.as_str().unwrap_or_default()).cloned()
+        else {
             return;
         };
         match row::value_from_result(&row.kind, &result) {
@@ -171,7 +230,13 @@ impl Bespoke for Page {
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
-        let Purpose::Page { tag: "exposure", data } = &reply.purpose else { return };
+        let Purpose::Page {
+            tag: "exposure",
+            data,
+        } = &reply.purpose
+        else {
+            return;
+        };
         let field = data.as_str().unwrap_or_default();
         let row = format!("{}{field}", kit::prefix(BespokeId::Capture.id()));
         self.draft = None;
@@ -212,7 +277,10 @@ mod tests {
 
     #[test]
     fn exposure_needs_every_field_before_it_is_sent() {
-        let mut e: Map<String, Value> = serde_json::from_value(json!({"locked":true,"exposure_us":null,"gain":null,"mode":null,"applied":false})).unwrap();
+        let mut e: Map<String, Value> = serde_json::from_value(
+            json!({"locked":true,"exposure_us":null,"gain":null,"mode":null,"applied":false}),
+        )
+        .unwrap();
         assert!(!complete(&e));
         e.insert("exposure_us".into(), json!(4000));
         e.insert("gain".into(), json!(2.0));

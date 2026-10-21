@@ -192,7 +192,12 @@ impl Overlay {
     }
 
     /// Build a confirmation the operator confirms by typing `word`.
-    pub fn typed_confirm(ret: Ret, title: impl Into<String>, body: Vec<String>, word: &'static str) -> Self {
+    pub fn typed_confirm(
+        ret: Ret,
+        title: impl Into<String>,
+        body: Vec<String>,
+        word: &'static str,
+    ) -> Self {
         Overlay::Confirm(ConfirmState {
             title: title.into(),
             body,
@@ -204,7 +209,12 @@ impl Overlay {
     }
 
     /// Build a text prompt.
-    pub fn input(ret: Ret, title: impl Into<String>, prompt: impl Into<String>, initial: &str) -> InputState {
+    pub fn input(
+        ret: Ret,
+        title: impl Into<String>,
+        prompt: impl Into<String>,
+        initial: &str,
+    ) -> InputState {
         InputState {
             title: title.into(),
             prompt: prompt.into(),
@@ -289,7 +299,12 @@ fn step(sel: usize, len: usize, down: bool) -> usize {
 }
 
 /// Handle a key on the top overlay. `actions_len` is the quick-action count.
-pub fn handle_key(overlay: &mut Overlay, key: KeyEvent, actions_len: usize, history_len: usize) -> Outcome {
+pub fn handle_key(
+    overlay: &mut Overlay,
+    key: KeyEvent,
+    actions_len: usize,
+    history_len: usize,
+) -> Outcome {
     let cmd = keymap::resolve(&overlay.ctx(), &key);
     match overlay {
         Overlay::UpdateSplash => {

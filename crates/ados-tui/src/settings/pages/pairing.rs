@@ -43,7 +43,10 @@ fn info(core: &Core) -> Option<&Value> {
 }
 
 fn paired(core: &Core) -> bool {
-    info(core).and_then(|v| v.get("paired")).and_then(Value::as_bool) == Some(true)
+    info(core)
+        .and_then(|v| v.get("paired"))
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 fn code(core: &Core) -> Option<String> {
@@ -52,7 +55,10 @@ fn code(core: &Core) -> Option<String> {
 
 /// The code spaced out so it reads at a glance: `A B C 1 2 3`.
 fn spaced(code: &str) -> String {
-    code.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ")
+    code.chars()
+        .map(|c| c.to_string())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl Page {
@@ -60,7 +66,8 @@ impl Page {
         let t = &core.theme;
         let v = info(core);
         let mut items = vec![Item::Header("Pairing".into())];
-        if let Some(note) = kit::resource_note(core, &ResourceId::PairingInfo, "the pairing state") {
+        if let Some(note) = kit::resource_note(core, &ResourceId::PairingInfo, "the pairing state")
+        {
             items.push(note);
         }
         let is_paired = paired(core);
@@ -80,7 +87,11 @@ impl Page {
                 Span::styled(format!("{:<20}  ", "Pairing code"), t.dim()),
                 Span::styled(spaced(&c), t.accent_bold().add_modifier(Modifier::BOLD)),
             ])));
-            items.push(rows_view::note(core, "Type this code into Mission Control to claim this agent.", false));
+            items.push(rows_view::note(
+                core,
+                "Type this code into Mission Control to claim this agent.",
+                false,
+            ));
             items.push(Item::Text(Line::from("")));
         }
         if let Some(owner) = kit::text(v, "owner_id") {
@@ -97,22 +108,41 @@ impl Page {
         }
         items.push(Item::Header("Actions".into()));
         if self.busy {
-            items.push(rows_view::note(core, format!("{} Working…", core.sym.spinner_frame(core.frame as usize)), false));
+            items.push(rows_view::note(
+                core,
+                format!("{} Working…", core.sym.spinner_frame(core.frame as usize)),
+                false,
+            ));
         }
         if !is_paired {
-            items.push(kit::action(core, "accept", "Accept a code", "c · a code Mission Control issued"));
+            items.push(kit::action(
+                core,
+                "accept",
+                "Accept a code",
+                "c · a code Mission Control issued",
+            ));
         }
         if code(core).is_some() {
             items.push(kit::action(core, "copy", "Copy the pairing code", "y"));
         }
         if is_paired {
-            items.push(kit::action(core, "unpair", "Unpair this agent", "U · type unpair to confirm"));
+            items.push(kit::action(
+                core,
+                "unpair",
+                "Unpair this agent",
+                "U · type unpair to confirm",
+            ));
         }
         items
     }
 
     fn accept(core: &mut Core) {
-        let mut s = Overlay::input(Ret::new(route(), "accept"), "Accept a pairing code", "Code from Mission Control", "");
+        let mut s = Overlay::input(
+            Ret::new(route(), "accept"),
+            "Accept a pairing code",
+            "Code from Mission Control",
+            "",
+        );
         s.validate = Some(validate_code);
         core.open(Overlay::Input(s));
     }
@@ -147,7 +177,11 @@ impl Page {
 
 impl Bespoke for Page {
     fn subs(&self, _core: &Core) -> Vec<Sub> {
-        vec![Sub::every_ms(ResourceId::PairingInfo, "/api/pairing/info", 5000)]
+        vec![Sub::every_ms(
+            ResourceId::PairingInfo,
+            "/api/pairing/info",
+            5000,
+        )]
     }
 
     fn keys(&self) -> Option<PageKeys> {
@@ -179,8 +213,16 @@ impl Bespoke for Page {
             ("accept", OverlayResult::Text(code)) => {
                 self.busy = true;
                 core.submit(
-                    Request::new("POST", "/api/pairing/accept", route(), Purpose::Page { tag: "accept", data: Value::Null })
-                        .body(json!({ "code": code.trim() })),
+                    Request::new(
+                        "POST",
+                        "/api/pairing/accept",
+                        route(),
+                        Purpose::Page {
+                            tag: "accept",
+                            data: Value::Null,
+                        },
+                    )
+                    .body(json!({ "code": code.trim() })),
                 );
             }
             ("unpair", OverlayResult::Confirmed) => {
@@ -192,7 +234,10 @@ impl Bespoke for Page {
                     "POST",
                     "/api/pairing/unpair",
                     route(),
-                    Purpose::Page { tag: "unpair", data: Value::Null },
+                    Purpose::Page {
+                        tag: "unpair",
+                        data: Value::Null,
+                    },
                 ));
             }
             _ => {}
@@ -200,16 +245,29 @@ impl Bespoke for Page {
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
-        let Purpose::Page { tag, .. } = reply.purpose else { return };
+        let Purpose::Page { tag, .. } = reply.purpose else {
+            return;
+        };
         self.busy = false;
         match (tag, &reply.result) {
             ("accept", Ok(body)) => {
-                let message = body.get("message").and_then(Value::as_str).filter(|m| !m.is_empty());
+                let message = body
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|m| !m.is_empty());
                 if body.get("ok").and_then(Value::as_bool) == Some(true) {
                     core.toast(ToastKind::Success, message.unwrap_or("Paired"));
                 } else {
-                    let error = body.get("error").and_then(Value::as_str).unwrap_or("failed");
-                    core.toast(ToastKind::Error, message.map(str::to_string).unwrap_or_else(|| format!("Pairing failed: {error}")));
+                    let error = body
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("failed");
+                    core.toast(
+                        ToastKind::Error,
+                        message
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("Pairing failed: {error}")),
+                    );
                 }
             }
             ("accept", Err(e)) => core.toast_error("Pairing failed", e),

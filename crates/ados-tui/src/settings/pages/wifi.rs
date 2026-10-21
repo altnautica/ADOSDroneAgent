@@ -71,7 +71,10 @@ impl Page {
         let mut items = vec![Item::Header("Status".into())];
         let slot = core.slot(&ResourceId::WifiStatus);
         match slot {
-            Some(s) if s.value.is_none() && model::status_unavailable(s.code, s.error_body.as_ref()) => {
+            Some(s)
+                if s.value.is_none()
+                    && model::status_unavailable(s.code, s.error_body.as_ref()) =>
+            {
                 items.push(note(core, "Wi-Fi control unavailable on this node", true));
             }
             Some(s) if s.value.is_some() => {
@@ -87,7 +90,12 @@ impl Page {
                 let signal = v
                     .get("signal")
                     .and_then(Value::as_f64)
-                    .map(|s| format!("{} {s:.0} %", core.sym.signal_bars(s.clamp(0.0, 100.0) as u8)))
+                    .map(|s| {
+                        format!(
+                            "{} {s:.0} %",
+                            core.sym.signal_bars(s.clamp(0.0, 100.0) as u8)
+                        )
+                    })
                     .unwrap_or_else(|| "—".into());
                 items.push(info(core, "Signal", signal));
                 items.push(info(core, "IP", text_of(v.get("ip"))));
@@ -115,7 +123,12 @@ impl Page {
                 items.push(note(core, "No networks found", false))
             }
             Some(nets) => {
-                let w = nets.iter().map(|n| n.ssid.chars().count()).max().unwrap_or(0).min(32);
+                let w = nets
+                    .iter()
+                    .map(|n| n.ssid.chars().count())
+                    .max()
+                    .unwrap_or(0)
+                    .min(32);
                 for n in nets {
                     let [bars, ssid, lock, sec, used] = model::network_cells(core.sym, n);
                     let line = Line::from(vec![
@@ -158,12 +171,17 @@ impl Page {
     /// Flip the focused saved network's autoconnect. False when no saved
     /// network has focus.
     fn toggle_autoconnect(&self, core: &mut Core) -> bool {
-        let Some(s) = self.focused_saved(core) else { return false };
+        let Some(s) = self.focused_saved(core) else {
+            return false;
+        };
         let enabled = !s.autoconnect;
         core.submit(
             Request::new(
                 "PUT",
-                format!("/api/v1/network/client/configured/{}/autoconnect", crate::api_path::seg(&s.name)),
+                format!(
+                    "/api/v1/network/client/configured/{}/autoconnect",
+                    crate::api_path::seg(&s.name)
+                ),
                 ROUTE,
                 Purpose::Page {
                     tag: "autoconnect",
@@ -181,8 +199,13 @@ impl Page {
         }
         self.scanning = true;
         core.submit(
-            Request::new("GET", "/api/v1/network/client/scan", ROUTE, Purpose::WifiScan)
-                .timeout(worker::SCAN_TIMEOUT),
+            Request::new(
+                "GET",
+                "/api/v1/network/client/scan",
+                ROUTE,
+                Purpose::WifiScan,
+            )
+            .timeout(worker::SCAN_TIMEOUT),
         );
     }
 
@@ -192,7 +215,11 @@ impl Page {
             body.push("This session may disconnect if the agent changes networks.".into());
         }
         self.pending = Some(Pending { ssid, passphrase });
-        core.open(Overlay::confirm(Ret::new(ROUTE, "join"), "Join network", body));
+        core.open(Overlay::confirm(
+            Ret::new(ROUTE, "join"),
+            "Join network",
+            body,
+        ));
     }
 
     fn send_join(&self, core: &mut Core, forced: bool) {
@@ -211,7 +238,13 @@ impl Page {
         );
     }
 
-    fn join_reply(&mut self, core: &mut Core, ssid: &str, forced: bool, result: &Result<Value, ados_protocol::rest::RestError>) {
+    fn join_reply(
+        &mut self,
+        core: &mut Core,
+        ssid: &str,
+        forced: bool,
+        result: &Result<Value, ados_protocol::rest::RestError>,
+    ) {
         match result {
             Ok(body) => {
                 self.pending = None;
@@ -250,13 +283,25 @@ impl Page {
 
     fn focused_network(&self, core: &Core) -> Option<Network> {
         let items = self.items(core);
-        let key = self.rows.focused_key(&items)?.strip_prefix("net:")?.to_string();
-        self.networks.as_ref()?.iter().find(|n| n.ssid == key).cloned()
+        let key = self
+            .rows
+            .focused_key(&items)?
+            .strip_prefix("net:")?
+            .to_string();
+        self.networks
+            .as_ref()?
+            .iter()
+            .find(|n| n.ssid == key)
+            .cloned()
     }
 
     fn focused_saved(&self, core: &Core) -> Option<Saved> {
         let items = self.items(core);
-        let name = self.rows.focused_key(&items)?.strip_prefix("saved:")?.to_string();
+        let name = self
+            .rows
+            .focused_key(&items)?
+            .strip_prefix("saved:")?
+            .to_string();
         Self::saved(core).into_iter().find(|s| s.name == name)
     }
 }
@@ -264,8 +309,16 @@ impl Page {
 impl Bespoke for Page {
     fn subs(&self, _core: &Core) -> Vec<Sub> {
         vec![
-            Sub::every_ms(ResourceId::WifiStatus, "/api/v1/network/client/status", 5000),
-            Sub::every_ms(ResourceId::WifiConfigured, "/api/v1/network/client/configured", 15000),
+            Sub::every_ms(
+                ResourceId::WifiStatus,
+                "/api/v1/network/client/status",
+                5000,
+            ),
+            Sub::every_ms(
+                ResourceId::WifiConfigured,
+                "/api/v1/network/client/configured",
+                15000,
+            ),
         ]
     }
 
@@ -285,7 +338,9 @@ impl Bespoke for Page {
                 if self.toggle_autoconnect(core) {
                     return true;
                 }
-                let Some(n) = self.focused_network(core) else { return true };
+                let Some(n) = self.focused_network(core) else {
+                    return true;
+                };
                 if !core.guard_disarmed() {
                     return true;
                 }
@@ -307,7 +362,12 @@ impl Bespoke for Page {
                 if !core.guard_disarmed() {
                     return true;
                 }
-                let mut input = Overlay::input(Ret::new(ROUTE, "hidden_ssid"), "Hidden network", "Network name (SSID)", "");
+                let mut input = Overlay::input(
+                    Ret::new(ROUTE, "hidden_ssid"),
+                    "Hidden network",
+                    "Network name (SSID)",
+                    "",
+                );
                 input.validate = Some(need_ssid);
                 core.open(Overlay::Input(input));
             }
@@ -321,17 +381,26 @@ impl Bespoke for Page {
                     .and_then(Value::as_str)
                     .map(|s| format!("Disconnect from {s}?"))
                     .unwrap_or_else(|| "Disconnect the Wi-Fi client link?".into());
-                core.open(Overlay::confirm(Ret::new(ROUTE, "leave"), "Disconnect", vec![ssid]));
+                core.open(Overlay::confirm(
+                    Ret::new(ROUTE, "leave"),
+                    "Disconnect",
+                    vec![ssid],
+                ));
             }
             Command::Forget => {
-                let Some(s) = self.focused_saved(core) else { return true };
+                let Some(s) = self.focused_saved(core) else {
+                    return true;
+                };
                 if !core.guard_disarmed() {
                     return true;
                 }
                 core.open(Overlay::confirm(
                     Ret::new(ROUTE, "forget").with(json!(s.name)),
                     "Forget network",
-                    vec![format!("Forget {}? Its saved passphrase is deleted.", s.name)],
+                    vec![format!(
+                        "Forget {}? Its saved passphrase is deleted.",
+                        s.name
+                    )],
                 ));
             }
             Command::Left | Command::Right => {
@@ -350,9 +419,17 @@ impl Bespoke for Page {
     }
 
     fn on_overlay(&mut self, core: &mut Core, ret: Ret, result: OverlayResult) {
-        let ssid_of = |ret: &Ret| ret.data.get("ssid").and_then(Value::as_str).unwrap_or_default().to_string();
+        let ssid_of = |ret: &Ret| {
+            ret.data
+                .get("ssid")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
         match (ret.tag, result) {
-            ("pass", OverlayResult::Text(pass)) => self.confirm_join(core, ssid_of(&ret), Some(pass)),
+            ("pass", OverlayResult::Text(pass)) => {
+                self.confirm_join(core, ssid_of(&ret), Some(pass))
+            }
             ("hidden_ssid", OverlayResult::Text(ssid)) => {
                 let ssid = ssid.trim().to_string();
                 let mut input = Overlay::input(
@@ -390,7 +467,10 @@ impl Bespoke for Page {
                         "DELETE",
                         "/api/v1/network/client",
                         ROUTE,
-                        Purpose::Page { tag: "leave", data: Value::Null },
+                        Purpose::Page {
+                            tag: "leave",
+                            data: Value::Null,
+                        },
                     ));
                 }
             }
@@ -399,9 +479,15 @@ impl Bespoke for Page {
                 if core.guard_disarmed() {
                     core.submit(Request::new(
                         "DELETE",
-                        format!("/api/v1/network/client/configured/{}", crate::api_path::seg(&name)),
+                        format!(
+                            "/api/v1/network/client/configured/{}",
+                            crate::api_path::seg(&name)
+                        ),
                         ROUTE,
-                        Purpose::Page { tag: "forget", data: json!(name) },
+                        Purpose::Page {
+                            tag: "forget",
+                            data: json!(name),
+                        },
                     ));
                 }
             }
@@ -415,7 +501,9 @@ impl Bespoke for Page {
                 self.scanning = false;
                 match &reply.result {
                     Ok(body) => self.networks = Some(model::parse_scan(body)),
-                    Err(e) => core.toast(ToastKind::Error, format!("Scan failed: {}", detail_text(e))),
+                    Err(e) => {
+                        core.toast(ToastKind::Error, format!("Scan failed: {}", detail_text(e)))
+                    }
                 }
             }
             Purpose::WifiJoin { ssid, forced } => {
@@ -431,19 +519,30 @@ impl Bespoke for Page {
                         };
                         core.toast(ToastKind::Success, msg);
                     }
-                    Err(e) => core.toast(ToastKind::Error, format!("Disconnect: {}", detail_text(e))),
+                    Err(e) => {
+                        core.toast(ToastKind::Error, format!("Disconnect: {}", detail_text(e)))
+                    }
                 }
                 core.fetch_now(ResourceId::WifiStatus);
             }
-            Purpose::Page { tag: "forget", data } => {
+            Purpose::Page {
+                tag: "forget",
+                data,
+            } => {
                 let name = data.as_str().unwrap_or_default();
                 match &reply.result {
                     Ok(_) => core.toast(ToastKind::Success, format!("Forgot {name}")),
-                    Err(e) => core.toast(ToastKind::Error, format!("Forget {name}: {}", detail_text(e))),
+                    Err(e) => core.toast(
+                        ToastKind::Error,
+                        format!("Forget {name}: {}", detail_text(e)),
+                    ),
                 }
                 core.fetch_now(ResourceId::WifiConfigured);
             }
-            Purpose::Page { tag: "autoconnect", data } => {
+            Purpose::Page {
+                tag: "autoconnect",
+                data,
+            } => {
                 let name = data.get("name").and_then(Value::as_str).unwrap_or_default();
                 let row = format!("{}saved:{name}", kit::prefix(id()));
                 match &reply.result {
@@ -471,13 +570,29 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        rows_view::render(f, area, core, &items, &mut self.rows, &kit::prefix(id()), true, out);
+        rows_view::render(
+            f,
+            area,
+            core,
+            &items,
+            &mut self.rows,
+            &kit::prefix(id()),
+            true,
+            out,
+        );
     }
 
     fn context_line(&self, core: &Core) -> Option<String> {
         if let Some(n) = self.focused_network(core) {
-            let sec = if n.secured() { n.security.as_str() } else { "open" };
-            return Some(format!("{} · signal {} % · {sec} · Enter joins", n.ssid, n.signal));
+            let sec = if n.secured() {
+                n.security.as_str()
+            } else {
+                "open"
+            };
+            return Some(format!(
+                "{} · signal {} % · {sec} · Enter joins",
+                n.ssid, n.signal
+            ));
         }
         let items = self.items(core);
         if let Some(r) = self.rows.focused_row(&items) {

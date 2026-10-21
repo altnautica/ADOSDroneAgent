@@ -32,7 +32,13 @@ impl ParamsTab {
         let Some(key) = wanted_key(core) else { return };
         if self.fav_key != Some(key) {
             self.fav_key = Some(key);
-            let favs = core.store.prefs.favorite_params.get(key).cloned().unwrap_or_default();
+            let favs = core
+                .store
+                .prefs
+                .favorite_params
+                .get(key)
+                .cloned()
+                .unwrap_or_default();
             self.store.set_favourites(favs);
         }
         if self.store.catalog().map(|c| c.key) == Some(key) {
@@ -51,7 +57,9 @@ impl ParamsTab {
 
     /// Pick up a finished background decode.
     pub(super) fn drain_catalog(&mut self, core: &mut Core) {
-        let Some((key, rx)) = &self.loading else { return };
+        let Some((key, rx)) = &self.loading else {
+            return;
+        };
         let key = *key;
         match rx.try_recv() {
             Err(TryRecvError::Empty) => {}
@@ -66,7 +74,10 @@ impl ParamsTab {
                     }
                     Err(e) => {
                         self.failed.push(key);
-                        core.toast(ToastKind::Warn, format!("Parameter metadata unavailable: {e}"));
+                        core.toast(
+                            ToastKind::Warn,
+                            format!("Parameter metadata unavailable: {e}"),
+                        );
                     }
                 }
             }

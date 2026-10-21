@@ -40,11 +40,19 @@ impl Page {
             MDNS_HINT,
         )));
         items.push(Item::Header("Advertised links".into()));
-        let urls = core.dash().map(|d| d.access_urls.as_slice()).unwrap_or_default();
+        let urls = core
+            .dash()
+            .map(|d| d.access_urls.as_slice())
+            .unwrap_or_default();
         if urls.is_empty() {
             items.push(note(core, "No reach URLs reported yet", false));
         }
-        let w = urls.iter().map(|u| u.label.chars().count()).max().unwrap_or(0).min(24);
+        let w = urls
+            .iter()
+            .map(|u| u.label.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(24);
         for (i, u) in urls.iter().enumerate() {
             items.push(Item::Entry {
                 key: format!("url:{i}"),
@@ -58,7 +66,12 @@ impl Page {
     }
 
     fn focused_url(&self, core: &Core, items: &[Item]) -> Option<String> {
-        let i: usize = self.rows.focused_key(items)?.strip_prefix("url:")?.parse().ok()?;
+        let i: usize = self
+            .rows
+            .focused_key(items)?
+            .strip_prefix("url:")?
+            .parse()
+            .ok()?;
         core.dash()?.access_urls.get(i).map(|u| u.url.clone())
     }
 }
@@ -77,7 +90,13 @@ impl Bespoke for Page {
         match cmd {
             Command::Left | Command::Right => {
                 if let Some(row) = row {
-                    kit::config_cycle(core, ROUTE, BespokeId::Discovery.id(), &row, cmd == Command::Right);
+                    kit::config_cycle(
+                        core,
+                        ROUTE,
+                        BespokeId::Discovery.id(),
+                        &row,
+                        cmd == Command::Right,
+                    );
                 }
             }
             Command::Activate => {
@@ -148,14 +167,25 @@ mod tests {
             ResourceId::ConfigSchema,
             json!({"properties": {"discovery": {"properties": {"mdns_enabled": {"type": "boolean", "default": true}}}}}),
         );
-        kit::put(core, ResourceId::Config, json!({"discovery": {"mdns_enabled": true}}));
+        kit::put(
+            core,
+            ResourceId::Config,
+            json!({"discovery": {"mdns_enabled": true}}),
+        );
         let mut page = Page::default();
         let items = page.items(core);
         page.rows.focus_key(&items, "discovery.mdns_enabled");
-        let row = page.rows.focused_row(&items).cloned().expect("the toggle row");
+        let row = page
+            .rows
+            .focused_row(&items)
+            .cloned()
+            .expect("the toggle row");
         assert!(!row.read_only);
         assert_eq!(row.kind, crate::settings::schema::Kind::Bool);
         assert!(page.on_command(core, Command::Activate));
-        assert!(core.overlays.is_empty(), "a toggle never opens an on/off prompt");
+        assert!(
+            core.overlays.is_empty(),
+            "a toggle never opens an on/off prompt"
+        );
     }
 }

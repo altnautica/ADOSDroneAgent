@@ -46,7 +46,9 @@ pub(super) fn body(frame: &mut Frame, area: Rect, core: &Core, dash: &Dashboard)
         Constraint::Min(4),
     ];
     if !dash.profile_row.is_empty() {
-        let rows = super::profile_row::packed_lines(&core.theme, dash, cols[1].width.saturating_sub(2)).len();
+        let rows =
+            super::profile_row::packed_lines(&core.theme, dash, cols[1].width.saturating_sub(2))
+                .len();
         constraints.push(Constraint::Length(rows as u16 + 2));
     }
     let cockpit = Layout::vertical(constraints).split(cols[1]);
@@ -149,7 +151,10 @@ pub(super) fn autopilot_panel(
         _ => None,
     };
     if let (Some(label), false) = (no_fc_label, dash.mavlink_connected) {
-        frame.render_widget(Paragraph::new(Line::from(Span::styled(label, t.dim()))), inner);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(label, t.dim()))),
+            inner,
+        );
         return;
     }
 
@@ -371,7 +376,10 @@ pub(super) fn services_panel(frame: &mut Frame, area: Rect, core: &Core, dash: &
             ]));
             // A dim sub-line explaining a step that still needs attention.
             if step.state != "complete" && !step.detail.is_empty() {
-                lines.push(Line::from(Span::styled(format!("    {}", step.detail), t.dim())));
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", step.detail),
+                    t.dim(),
+                )));
             }
         }
         // The "next action" summary, unless it just repeats a step's detail
@@ -404,7 +412,10 @@ fn hardware_summary(core: &Core) -> Option<Vec<Span<'static>>> {
             "fail" | "error" | "missing" => t.error(),
             _ => t.muted(),
         };
-        spans.push(Span::styled(format!("{n} {state}  "), Style::default().fg(color)));
+        spans.push(Span::styled(
+            format!("{n} {state}  "),
+            Style::default().fg(color),
+        ));
     }
     Some(spans)
 }

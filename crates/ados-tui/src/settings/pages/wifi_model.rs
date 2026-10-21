@@ -71,9 +71,21 @@ pub fn network_cells(sym: &Symbols, n: &Network) -> [String; 5] {
     [
         sym.signal_bars(n.signal),
         n.ssid.clone(),
-        if n.secured() { lock_glyph(sym).to_string() } else { String::new() },
-        if n.secured() { n.security.clone() } else { "open".to_string() },
-        if n.in_use { sym.ok.to_string() } else { String::new() },
+        if n.secured() {
+            lock_glyph(sym).to_string()
+        } else {
+            String::new()
+        },
+        if n.secured() {
+            n.security.clone()
+        } else {
+            "open".to_string()
+        },
+        if n.in_use {
+            sym.ok.to_string()
+        } else {
+            String::new()
+        },
     ]
 }
 
@@ -93,7 +105,10 @@ pub fn parse_saved(body: &Value) -> Vec<Saved> {
                 .filter_map(|r| {
                     Some(Saved {
                         name: r.get("name").and_then(Value::as_str)?.to_string(),
-                        autoconnect: r.get("autoconnect").and_then(Value::as_bool).unwrap_or(false),
+                        autoconnect: r
+                            .get("autoconnect")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                     })
                 })
                 .collect()
@@ -129,7 +144,11 @@ pub fn join_conflict(err: &RestError) -> Option<JoinConflict> {
     if err.code() != Some(409) {
         return None;
     }
-    let armed = err.body().and_then(|b| b.get("error")).and_then(Value::as_str) == Some("E_ARMED");
+    let armed = err
+        .body()
+        .and_then(|b| b.get("error"))
+        .and_then(Value::as_str)
+        == Some("E_ARMED");
     Some(if armed {
         JoinConflict::Armed
     } else {
@@ -186,15 +205,27 @@ mod tests {
             {"name":"Bench","type":"802-11-wireless","device":"wlan0","autoconnect":true},
             {"name":"Old","type":"802-11-wireless","device":null,"autoconnect":false}
         ]}));
-        assert_eq!(saved, vec![
-            Saved { name: "Bench".into(), autoconnect: true },
-            Saved { name: "Old".into(), autoconnect: false },
-        ]);
+        assert_eq!(
+            saved,
+            vec![
+                Saved {
+                    name: "Bench".into(),
+                    autoconnect: true
+                },
+                Saved {
+                    name: "Old".into(),
+                    autoconnect: false
+                },
+            ]
+        );
     }
 
     #[test]
     fn join_bodies() {
-        assert_eq!(join_body("Bench", Some("secret12"), false), json!({"ssid":"Bench","passphrase":"secret12"}));
+        assert_eq!(
+            join_body("Bench", Some("secret12"), false),
+            json!({"ssid":"Bench","passphrase":"secret12"})
+        );
         assert_eq!(join_body("Cafe", None, false), json!({"ssid":"Cafe"}));
         assert_eq!(join_body("Cafe", Some(""), false), json!({"ssid":"Cafe"}));
         assert_eq!(
@@ -207,7 +238,9 @@ mod tests {
     fn conflicts_split_armed_from_hotspot_busy() {
         let busy = RestError::Status {
             code: 409,
-            body: Some(json!({"detail":{"error":{"code":"E_WLAN0_BUSY_AP_ACTIVE","message":"AP active"}},"needs_force":true})),
+            body: Some(
+                json!({"detail":{"error":{"code":"E_WLAN0_BUSY_AP_ACTIVE","message":"AP active"}},"needs_force":true}),
+            ),
         };
         assert_eq!(join_conflict(&busy), Some(JoinConflict::HotspotBusy));
         let armed = RestError::Status {
@@ -215,7 +248,10 @@ mod tests {
             body: Some(json!({"error":"E_ARMED","message":"Vehicle is armed","override":"force"})),
         };
         assert_eq!(join_conflict(&armed), Some(JoinConflict::Armed));
-        let other = RestError::Status { code: 500, body: None };
+        let other = RestError::Status {
+            code: 500,
+            body: None,
+        };
         assert_eq!(join_conflict(&other), None);
     }
 

@@ -22,7 +22,10 @@ mod tests {
     #[test]
     fn reserved_bytes_are_encoded() {
         assert_eq!(seg("Home WiFi/5G?"), "Home%20WiFi%2F5G%3F");
-        assert_eq!(seg("com.altnautica.world-engine"), "com.altnautica.world-engine");
+        assert_eq!(
+            seg("com.altnautica.world-engine"),
+            "com.altnautica.world-engine"
+        );
         assert_eq!(seg("café"), "caf%C3%A9");
     }
 }

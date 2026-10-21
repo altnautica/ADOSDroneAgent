@@ -48,7 +48,10 @@ pub fn schema_kind(schema: &Value) -> Kind {
             max: num("maximum"),
         },
         Some("string") => Kind::Str {
-            pattern: schema.get("pattern").and_then(Value::as_str).map(str::to_string),
+            pattern: schema
+                .get("pattern")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         },
         _ => Kind::Opaque,
     }
@@ -58,13 +61,22 @@ fn parse_one(raw: &Value, section: Option<&str>) -> Option<ParamDef> {
     let key = raw.get("key").and_then(Value::as_str)?.to_string();
     let schema = raw.get("schema").filter(|s| s.is_object())?;
     let ui = raw.get("ui");
-    let ui_str = |k: &str| ui.and_then(|u| u.get(k)).and_then(Value::as_str).map(str::to_string);
+    let ui_str = |k: &str| {
+        ui.and_then(|u| u.get(k))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
     let visible_if = ui.and_then(|u| u.get("visible_if")).and_then(|v| {
         let k = v.get("key").and_then(Value::as_str)?;
-        let eq = v.get("equals").filter(|e| e.is_string() || e.is_number() || e.is_boolean())?;
+        let eq = v
+            .get("equals")
+            .filter(|e| e.is_string() || e.is_number() || e.is_boolean())?;
         Some((k.to_string(), eq.clone()))
     });
-    let binding = raw.get("binding").and_then(Value::as_str).unwrap_or("plugin.config");
+    let binding = raw
+        .get("binding")
+        .and_then(Value::as_str)
+        .unwrap_or("plugin.config");
     let widget = ui_str("widget");
     let kind = schema_kind(schema);
     let writable = binding == "plugin.config"
@@ -136,10 +148,14 @@ pub fn localize(locale: Option<&Map<String, Value>>, text: &str) -> String {
 /// Whether `def` shows, given the other parameters' current values. The
 /// comparison is type-strict: the number `1` never equals the string `"1"`.
 pub fn visible(def: &ParamDef, all: &[ParamDef], values: &Map<String, Value>) -> bool {
-    let Some((key, equals)) = &def.visible_if else { return true };
-    let current = values
-        .get(key)
-        .or_else(|| all.iter().find(|d| &d.key == key).and_then(|d| d.default.as_ref()));
+    let Some((key, equals)) = &def.visible_if else {
+        return true;
+    };
+    let current = values.get(key).or_else(|| {
+        all.iter()
+            .find(|d| &d.key == key)
+            .and_then(|d| d.default.as_ref())
+    });
     match current {
         Some(v) if v.is_number() && equals.is_number() => same(v, equals),
         Some(v) => v == equals,
@@ -150,7 +166,11 @@ pub fn visible(def: &ParamDef, all: &[ParamDef], values: &Map<String, Value>) ->
 /// The settings rows: visible parameters grouped under headers (the section
 /// title and the `ui.group`, in first-appearance order), ordered by
 /// `ui.order` inside a group.
-pub fn items(defs: &[ParamDef], values: &Map<String, Value>, locale: Option<&Map<String, Value>>) -> Vec<Item> {
+pub fn items(
+    defs: &[ParamDef],
+    values: &Map<String, Value>,
+    locale: Option<&Map<String, Value>>,
+) -> Vec<Item> {
     let heading = |d: &ParamDef| -> Option<String> {
         let sec = d.section.as_deref().map(|s| localize(locale, s));
         let grp = d.group.as_deref().map(|g| localize(locale, g));
@@ -169,7 +189,11 @@ pub fn items(defs: &[ParamDef], values: &Map<String, Value>, locale: Option<&Map
     }
     let mut out = Vec::new();
     for (h, mut list) in groups {
-        list.sort_by(|a, b| a.order.unwrap_or(f64::MAX).total_cmp(&b.order.unwrap_or(f64::MAX)));
+        list.sort_by(|a, b| {
+            a.order
+                .unwrap_or(f64::MAX)
+                .total_cmp(&b.order.unwrap_or(f64::MAX))
+        });
         if let Some(h) = h {
             out.push(Item::Header(h));
         }
@@ -181,13 +205,21 @@ pub fn items(defs: &[ParamDef], values: &Map<String, Value>, locale: Option<&Map
 }
 
 /// The editable row of one parameter.
-pub fn row(def: &ParamDef, values: &Map<String, Value>, locale: Option<&Map<String, Value>>) -> EditRow {
+pub fn row(
+    def: &ParamDef,
+    values: &Map<String, Value>,
+    locale: Option<&Map<String, Value>>,
+) -> EditRow {
     let label = def
         .label
         .as_deref()
         .map(|l| localize(locale, l))
         .unwrap_or_else(|| title_case(&def.key));
-    let mut help = def.help.as_deref().map(|h| localize(locale, h)).unwrap_or_default();
+    let mut help = def
+        .help
+        .as_deref()
+        .map(|h| localize(locale, h))
+        .unwrap_or_default();
     let live = values.get(&def.key).cloned();
     if live.is_none() && def.default.is_some() {
         if !help.is_empty() {
@@ -254,9 +286,21 @@ mod tests {
         let d = defs(&detail());
         assert_eq!(d.len(), 5);
         assert_eq!(d[0].kind, Kind::Enum(vec![json!("auto"), json!("manual")]));
-        assert_eq!(d[1].kind, Kind::Num { min: Some(0.5), max: Some(4.0) });
+        assert_eq!(
+            d[1].kind,
+            Kind::Num {
+                min: Some(0.5),
+                max: Some(4.0)
+            }
+        );
         assert!(!d[2].writable, "a detector-bound model picker is read-only");
-        assert_eq!(d[3].kind, Kind::Int { min: Some(3), max: Some(30) });
+        assert_eq!(
+            d[3].kind,
+            Kind::Int {
+                min: Some(3),
+                max: Some(30)
+            }
+        );
         assert_eq!(d[3].default, Some(json!(8)));
         assert_eq!(d[3].section.as_deref(), Some("Follow"));
         assert_eq!(d[4].kind, Kind::Bool);
@@ -266,8 +310,14 @@ mod tests {
     fn visible_if_hides_and_shows() {
         let d = defs(&detail());
         let auto = Map::new();
-        let keys: Vec<String> = rows(&items(&d, &auto, None)).iter().map(|r| r.key.clone()).collect();
-        assert!(!keys.contains(&"gain".to_string()), "default mode auto hides gain");
+        let keys: Vec<String> = rows(&items(&d, &auto, None))
+            .iter()
+            .map(|r| r.key.clone())
+            .collect();
+        assert!(
+            !keys.contains(&"gain".to_string()),
+            "default mode auto hides gain"
+        );
         let mut manual = Map::new();
         manual.insert("mode".into(), json!("manual"));
         let shown = items(&d, &manual, None);
@@ -292,7 +342,9 @@ mod tests {
         locale.insert("p.mode".into(), json!("Track mode"));
         let it = items(&d, &values, Some(&locale));
         assert!(matches!(&it[0], Item::Header(h) if h == "Tracking"));
-        assert!(it.iter().any(|i| matches!(i, Item::Header(h) if h == "Follow")));
+        assert!(it
+            .iter()
+            .any(|i| matches!(i, Item::Header(h) if h == "Follow")));
         let r = rows(&it);
         let mode = r.iter().find(|r| r.key == "mode").unwrap();
         assert_eq!(mode.label, "Track mode");

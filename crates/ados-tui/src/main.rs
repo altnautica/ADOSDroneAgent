@@ -106,7 +106,8 @@ fn run(terminal: &mut Term, app: &mut App) -> Result<()> {
             let session_keys = std::mem::take(&mut app.core.session_keys);
             *app = App::new(Core::new(target, key, store, latest));
             app.core.session_keys = session_keys;
-            app.core.toast(toast::ToastKind::Success, format!("Connected to {name}"));
+            app.core
+                .toast(toast::ToastKind::Success, format!("Connected to {name}"));
         }
         if app.core.quit {
             return Ok(());
@@ -174,7 +175,9 @@ fn run_shell(terminal: &mut Term, app: &mut App, req: ShellReq) -> Result<()> {
     let profile = app.core.dash().map(|d| d.profile.clone());
     match req {
         ShellReq::Action(i) => {
-            let Some(action) = ACTIONS.get(i) else { return Ok(()) };
+            let Some(action) = ACTIONS.get(i) else {
+                return Ok(());
+            };
             if action.is_update() {
                 shell::request_update(terminal, arm, mouse)?;
             } else {

@@ -47,7 +47,12 @@ pub fn parse(argv: &[String]) -> Parsed {
             Some((n, v)) if n.starts_with("--") => (n, Some(v.to_string())),
             _ => (flag.as_str(), None),
         };
-        let mut value = |n: &str| inline.clone().or_else(|| it.next().cloned()).ok_or(format!("{n} needs a value"));
+        let mut value = |n: &str| {
+            inline
+                .clone()
+                .or_else(|| it.next().cloned())
+                .ok_or(format!("{n} needs a value"))
+        };
         match name {
             "--help" | "-h" => return Parsed::Help,
             "--version" | "-V" => return Parsed::Version,
@@ -114,7 +119,9 @@ impl Target {
 /// Whether `host` names this machine.
 pub fn is_loopback(host: &str) -> bool {
     let h = host.trim_start_matches('[').trim_end_matches(']');
-    h.eq_ignore_ascii_case("localhost") || h.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    h.eq_ignore_ascii_case("localhost")
+        || h.parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Split `host[:port]` (IPv6 literals in brackets) into host and port.
@@ -253,10 +260,22 @@ mod tests {
 
     #[test]
     fn host_port_splits() {
-        assert_eq!(split_host_port("drone.local").unwrap(), ("drone.local".into(), 8080));
-        assert_eq!(split_host_port("10.0.0.2:9000").unwrap(), ("10.0.0.2".into(), 9000));
-        assert_eq!(split_host_port("[fe80::1]:81").unwrap(), ("fe80::1".into(), 81));
-        assert_eq!(split_host_port("fe80::1").unwrap(), ("fe80::1".into(), 8080));
+        assert_eq!(
+            split_host_port("drone.local").unwrap(),
+            ("drone.local".into(), 8080)
+        );
+        assert_eq!(
+            split_host_port("10.0.0.2:9000").unwrap(),
+            ("10.0.0.2".into(), 9000)
+        );
+        assert_eq!(
+            split_host_port("[fe80::1]:81").unwrap(),
+            ("fe80::1".into(), 81)
+        );
+        assert_eq!(
+            split_host_port("fe80::1").unwrap(),
+            ("fe80::1".into(), 8080)
+        );
         assert!(split_host_port("x:notaport").is_err());
     }
 
@@ -278,13 +297,19 @@ mod tests {
             key: Some("flagkey".into()),
             ..Default::default()
         };
-        assert_eq!(resolve(&flag, &env, &saved).unwrap().1.as_deref(), Some("flagkey"));
+        assert_eq!(
+            resolve(&flag, &env, &saved).unwrap().1.as_deref(),
+            Some("flagkey")
+        );
 
         let no_flag = Args {
             target: Some("bench".into()),
             ..Default::default()
         };
-        assert_eq!(resolve(&no_flag, &env, &saved).unwrap().1.as_deref(), Some("envkey"));
+        assert_eq!(
+            resolve(&no_flag, &env, &saved).unwrap().1.as_deref(),
+            Some("envkey")
+        );
 
         let no_env = Env {
             ados_key: None,

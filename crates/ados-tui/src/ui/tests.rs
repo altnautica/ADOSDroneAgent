@@ -33,7 +33,9 @@ pub(crate) fn feed(app: &mut App, setup: Value, routes: ProfileRoutes, age: Dura
         status_full: Some(json!({"services": [{"state": "active"}]})),
         profile: routes,
     };
-    app.core.view.apply(result, Instant::now() - age, "12:00:00".into());
+    app.core
+        .view
+        .apply(result, Instant::now() - age, "12:00:00".into());
     app.core.now = Instant::now();
 }
 
@@ -107,7 +109,10 @@ fn overview_renders_links_fc_steps_and_hardware() {
     assert!(text.contains("http://ados-x.local:8080  ●"), "{text}");
     assert!(text.contains("Conventional MAVLink"), "{text}");
     assert!(text.contains("command.altnautica.com"), "{text}");
-    assert!(text.contains("No flight controller detected on USB/serial"), "{text}");
+    assert!(
+        text.contains("No flight controller detected on USB/serial"),
+        "{text}"
+    );
     assert!(text.contains("Connect the FC and re-check."), "{text}");
     assert!(text.contains("hardware 1 ok  1 missing"), "{text}");
 }
@@ -140,7 +145,10 @@ fn a_failed_poll_takes_the_verdict_line_over_the_last_snapshot() {
     app.core.view.error = Some("Agent unreachable: connection refused".into());
     let text = draw(&mut app, 120, 50);
     assert!(text.contains("UNREACHABLE"), "{text}");
-    assert!(text.contains("Agent unreachable: connection refused"), "{text}");
+    assert!(
+        text.contains("Agent unreachable: connection refused"),
+        "{text}"
+    );
     assert!(!text.contains("HEALTHY"), "{text}");
 }
 
@@ -149,10 +157,18 @@ fn a_stale_snapshot_hides_its_flight_readings() {
     let mut app = test_app();
     feed(&mut app, live_drone(), ProfileRoutes::default(), fresh());
     let live = draw(&mut app, 120, 50);
-    assert!(live.contains("DISARMED") && live.contains("battery 82%"), "{live}");
+    assert!(
+        live.contains("DISARMED") && live.contains("battery 82%"),
+        "{live}"
+    );
 
     let mut old = test_app();
-    feed(&mut old, live_drone(), ProfileRoutes::default(), Duration::from_secs(30));
+    feed(
+        &mut old,
+        live_drone(),
+        ProfileRoutes::default(),
+        Duration::from_secs(30),
+    );
     let text = draw(&mut old, 120, 50);
     assert!(text.contains("STALE"), "{text}");
     assert!(!text.contains("HEALTHY"), "{text}");
@@ -187,7 +203,10 @@ fn ground_station_renders_radios_gnss_and_lora() {
     feed(&mut app, profile_status("ground_station"), routes, fresh());
     let text = draw(&mut app, 140, 50);
     assert!(text.contains("Ground station"), "{text}");
-    assert!(text.contains("wlan1   rxtx   -48 dBm  loss 0.1 %"), "{text}");
+    assert!(
+        text.contains("wlan1   rxtx   -48 dBm  loss 0.1 %"),
+        "{text}"
+    );
     assert!(text.contains("GNSS 3d 14 sats base survey"), "{text}");
 }
 
@@ -195,7 +214,12 @@ fn ground_station_renders_radios_gnss_and_lora() {
 fn a_stale_snapshot_hides_the_profile_row() {
     let mut app = test_app();
     let routes = crate::model::profile_tests::gs_routes();
-    feed(&mut app, profile_status("ground_station"), routes, Duration::from_secs(30));
+    feed(
+        &mut app,
+        profile_status("ground_station"),
+        routes,
+        Duration::from_secs(30),
+    );
     let text = draw(&mut app, 140, 50);
     assert!(!text.contains("LoRa IN865"), "{text}");
     assert!(text.contains("readings hidden (stale)"), "{text}");
@@ -209,17 +233,40 @@ fn tab_row(text: &str) -> String {
 #[test]
 fn the_tab_bar_lists_only_the_tabs_the_profile_shows() {
     let mut drone = test_app();
-    feed(&mut drone, profile_status("drone"), ProfileRoutes::default(), fresh());
+    feed(
+        &mut drone,
+        profile_status("drone"),
+        ProfileRoutes::default(),
+        fresh(),
+    );
     let row = tab_row(&draw(&mut drone, 120, 40));
-    for label in ["Overview", "Vehicle", "Link", "Video", "Params", "Extensions", "Logs", "System", "Settings"] {
+    for label in [
+        "Overview",
+        "Vehicle",
+        "Link",
+        "Video",
+        "Params",
+        "Extensions",
+        "Logs",
+        "System",
+        "Settings",
+    ] {
         assert!(row.contains(label), "{label} missing: {row}");
     }
 
     let mut gs = test_app();
-    feed(&mut gs, profile_status("ground_station"), ProfileRoutes::default(), fresh());
+    feed(
+        &mut gs,
+        profile_status("ground_station"),
+        ProfileRoutes::default(),
+        fresh(),
+    );
     let row = tab_row(&draw(&mut gs, 120, 40));
     assert!(row.contains("Ground") && row.contains("Link"), "{row}");
-    assert!(!row.contains("Vehicle") && !row.contains("Video") && !row.contains("Params"), "{row}");
+    assert!(
+        !row.contains("Vehicle") && !row.contains("Video") && !row.contains("Params"),
+        "{row}"
+    );
 
     // Narrow terminals show the short labels.
     let row = tab_row(&draw(&mut drone, 80, 24));
@@ -229,7 +276,12 @@ fn the_tab_bar_lists_only_the_tabs_the_profile_shows() {
 #[test]
 fn a_hidden_tab_refuses_its_digit() {
     let mut gs = test_app();
-    feed(&mut gs, profile_status("ground_station"), ProfileRoutes::default(), fresh());
+    feed(
+        &mut gs,
+        profile_status("ground_station"),
+        ProfileRoutes::default(),
+        fresh(),
+    );
     gs.activate_tab(TabId::Params);
     assert_eq!(gs.core.tab, TabId::Overview);
     let text = draw(&mut gs, 120, 40);
@@ -241,6 +293,9 @@ fn a_terminal_below_80_by_24_shows_the_size_notice() {
     let mut app = test_app();
     feed(&mut app, sample(), ProfileRoutes::default(), fresh());
     let text = draw(&mut app, 79, 23);
-    assert!(text.contains("Terminal too small: need 80×24, have 79×23"), "{text}");
+    assert!(
+        text.contains("Terminal too small: need 80×24, have 79×23"),
+        "{text}"
+    );
     assert!(!draw(&mut app, 80, 24).contains("Terminal too small"));
 }

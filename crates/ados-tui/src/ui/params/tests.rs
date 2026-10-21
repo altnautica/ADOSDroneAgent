@@ -45,7 +45,9 @@ fn params_app() -> App {
         },
     );
     app.activate_tab(TabId::Params);
-    app.tabs.params.on_resource(&mut app.core, &ResourceId::Params);
+    app.tabs
+        .params
+        .on_resource(&mut app.core, &ResourceId::Params);
     app
 }
 
@@ -103,14 +105,33 @@ fn a_batch_unstages_acked_items_and_reports_the_tally() {
     app.tabs.params.submit_batch(&mut app.core);
 
     let tab = &mut app.tabs.params;
-    tab.batch_item(&mut app.core, "WPNAV_SPEED".into(), 750.0, Ok(json!({"ack": true, "cached_value": 750.0})));
-    tab.batch_item(&mut app.core, "ATC_RAT_RLL_P".into(), 0.2, Ok(json!({"ack": false})));
+    tab.batch_item(
+        &mut app.core,
+        "WPNAV_SPEED".into(),
+        750.0,
+        Ok(json!({"ack": true, "cached_value": 750.0})),
+    );
+    tab.batch_item(
+        &mut app.core,
+        "ATC_RAT_RLL_P".into(),
+        0.2,
+        Ok(json!({"ack": false})),
+    );
     tab.batch_done(&mut app.core);
     assert_eq!(tab.store.staged_value("WPNAV_SPEED"), None);
     assert_eq!(tab.store.value("WPNAV_SPEED"), Some(750.0));
-    assert_eq!(tab.store.staged_value("ATC_RAT_RLL_P"), Some(0.2), "unconfirmed stays staged");
+    assert_eq!(
+        tab.store.staged_value("ATC_RAT_RLL_P"),
+        Some(0.2),
+        "unconfirmed stays staged"
+    );
     let texts: Vec<String> = app.core.toasts.history().map(|t| t.text.clone()).collect();
-    assert!(texts.iter().any(|t| t == "ATC_RAT_RLL_P: sent, not confirmed"), "{texts:?}");
+    assert!(
+        texts
+            .iter()
+            .any(|t| t == "ATC_RAT_RLL_P: sent, not confirmed"),
+        "{texts:?}"
+    );
     assert_eq!(texts.last().map(String::as_str), Some("Wrote 1/2"));
 }
 
@@ -120,7 +141,12 @@ fn a_failed_refetch_does_not_reload_stale_values() {
     app.tabs.params.store.stage("WPNAV_SPEED", 750.0);
     app.tabs.params.submit_batch(&mut app.core);
     let tab = &mut app.tabs.params;
-    tab.batch_item(&mut app.core, "WPNAV_SPEED".into(), 750.0, Ok(json!({"ack": true})));
+    tab.batch_item(
+        &mut app.core,
+        "WPNAV_SPEED".into(),
+        750.0,
+        Ok(json!({"ack": true})),
+    );
     tab.batch_done(&mut app.core);
     assert_eq!(tab.store.value("WPNAV_SPEED"), Some(750.0));
 
@@ -128,6 +154,12 @@ fn a_failed_refetch_does_not_reload_stale_values() {
     if let Some(slot) = app.core.res.get_mut(&ResourceId::Params) {
         slot.error = Some("timed out".into());
     }
-    app.tabs.params.on_resource(&mut app.core, &ResourceId::Params);
-    assert_eq!(app.tabs.params.store.value("WPNAV_SPEED"), Some(750.0), "confirmed write kept");
+    app.tabs
+        .params
+        .on_resource(&mut app.core, &ResourceId::Params);
+    assert_eq!(
+        app.tabs.params.store.value("WPNAV_SPEED"),
+        Some(750.0),
+        "confirmed write kept"
+    );
 }

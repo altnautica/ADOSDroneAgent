@@ -32,7 +32,10 @@ pub const TX_POWER_FLOOR_DBM: i64 = 1;
 
 /// The TX-power row kind: the agent's floor up to the radio's ceiling.
 pub fn tx_power_kind(max: Option<i64>) -> Kind {
-    Kind::Int { min: Some(TX_POWER_FLOOR_DBM), max }
+    Kind::Int {
+        min: Some(TX_POWER_FLOOR_DBM),
+        max,
+    }
 }
 
 /// Parse a typed TX power against the ceiling.
@@ -50,17 +53,22 @@ impl Page {
     fn items(&self, core: &Core) -> Vec<Item> {
         let mut items = vec![Item::Header("Radio".into())];
         let Some(w) = core.value(&ResourceId::Wfb) else {
-            items.push(match core.slot(&ResourceId::Wfb).and_then(|s| s.error.clone()) {
-                Some(e) => note(core, format!("Could not read the radio: {e}"), true),
-                None => note(core, "Reading radio…", false),
-            });
+            items.push(
+                match core.slot(&ResourceId::Wfb).and_then(|s| s.error.clone()) {
+                    Some(e) => note(core, format!("Could not read the radio: {e}"), true),
+                    None => note(core, "Reading radio…", false),
+                },
+            );
             return items;
         };
         items.push(Item::Row(kit::row(
             "channel",
             "Channel",
             CHANNEL_HINT,
-            Kind::Int { min: Some(1), max: None },
+            Kind::Int {
+                min: Some(1),
+                max: None,
+            },
             w.get("channel").cloned(),
         )));
         items.push(Item::Row(kit::row(
@@ -77,8 +85,16 @@ impl Page {
             .map(|f| format!("{f:.0} MHz"))
             .unwrap_or_else(|| "—".into());
         items.push(info(core, "Frequency", freq));
-        items.push(info(core, "TX power ceiling", format!("{} dBm", text_of(w.get("tx_power_max_dbm")))));
-        items.push(info(core, "Regulatory domain", text_of(w.get("regulatory_domain"))));
+        items.push(info(
+            core,
+            "TX power ceiling",
+            format!("{} dBm", text_of(w.get("tx_power_max_dbm"))),
+        ));
+        items.push(info(
+            core,
+            "Regulatory domain",
+            text_of(w.get("regulatory_domain")),
+        ));
         items.push(info(core, "State", text_of(w.get("state"))));
         items
     }
@@ -89,7 +105,10 @@ impl Page {
                 "POST",
                 "/api/wfb/channel",
                 ROUTE,
-                Purpose::Page { tag: "channel", data: json!(value) },
+                Purpose::Page {
+                    tag: "channel",
+                    data: json!(value),
+                },
             )
             .body(json!({ "channel": value }))
         } else {
@@ -97,7 +116,10 @@ impl Page {
                 "PUT",
                 "/api/wfb/tx-power",
                 ROUTE,
-                Purpose::Page { tag: "tx_power", data: json!(value) },
+                Purpose::Page {
+                    tag: "tx_power",
+                    data: json!(value),
+                },
             )
             .body(json!({ "tx_power_dbm": value }))
         };
@@ -138,11 +160,20 @@ impl Bespoke for Page {
             return;
         }
         let key = ret.data.as_str().unwrap_or_default().to_string();
-        let OverlayResult::Text(text) = result else { return };
+        let OverlayResult::Text(text) = result else {
+            return;
+        };
         let parsed = if key == "tx_power" {
             parse_tx_power(&text, Self::tx_max(core))
         } else {
-            row::parse(&Kind::Int { min: Some(1), max: None }, &text).map(|v| v.as_i64().unwrap_or_default())
+            row::parse(
+                &Kind::Int {
+                    min: Some(1),
+                    max: None,
+                },
+                &text,
+            )
+            .map(|v| v.as_i64().unwrap_or_default())
         };
         match parsed {
             Ok(v) => Self::write(core, &key, v),
@@ -151,26 +182,44 @@ impl Bespoke for Page {
     }
 
     fn on_reply(&mut self, core: &mut Core, reply: Reply) {
-        let Purpose::Page { tag, data } = &reply.purpose else { return };
+        let Purpose::Page { tag, data } = &reply.purpose else {
+            return;
+        };
         let row = format!("{}{tag}", kit::prefix(BespokeId::Radio.id()));
         match (&reply.result, *tag) {
             (Ok(body), "channel") => {
-                let target = body.get("target_channel").cloned().unwrap_or_else(|| data.clone());
-                core.toast(ToastKind::Success, format!("Channel hop to {target} initiated"));
+                let target = body
+                    .get("target_channel")
+                    .cloned()
+                    .unwrap_or_else(|| data.clone());
+                core.toast(
+                    ToastKind::Success,
+                    format!("Channel hop to {target} initiated"),
+                );
                 core.flash(row, true);
             }
             (Ok(body), "tx_power") => {
-                let eff = body.get("effective_dbm").cloned().unwrap_or_else(|| data.clone());
+                let eff = body
+                    .get("effective_dbm")
+                    .cloned()
+                    .unwrap_or_else(|| data.clone());
                 if body.get("persisted").and_then(Value::as_bool) == Some(false) {
                     let why = text_of(body.get("persist_error"));
-                    core.toast(ToastKind::Warn, format!("TX power {eff} dBm applied but not persisted: {why}"));
+                    core.toast(
+                        ToastKind::Warn,
+                        format!("TX power {eff} dBm applied but not persisted: {why}"),
+                    );
                 } else {
                     core.toast(ToastKind::Success, format!("TX power {eff} dBm saved"));
                 }
                 core.flash(row, true);
             }
             (Err(e), "channel" | "tx_power") => {
-                let label = if *tag == "channel" { "Channel" } else { "TX power" };
+                let label = if *tag == "channel" {
+                    "Channel"
+                } else {
+                    "TX power"
+                };
                 core.toast(ToastKind::Error, format!("{label}: {}", detail_text(e)));
                 core.flash(row, false);
             }
@@ -205,7 +254,11 @@ mod tests {
         assert_eq!(parse_tx_power("12", Some(15)), Ok(12));
         assert_eq!(parse_tx_power("1", Some(15)), Ok(1));
         assert_eq!(parse_tx_power("16", Some(15)), Err("Maximum is 15".into()));
-        assert_eq!(parse_tx_power("0", Some(15)), Err("Minimum is 1".into()), "the agent refuses 0 dBm");
+        assert_eq!(
+            parse_tx_power("0", Some(15)),
+            Err("Minimum is 1".into()),
+            "the agent refuses 0 dBm"
+        );
         assert!(parse_tx_power("loud", Some(15)).is_err());
         assert_eq!(parse_tx_power("30", None), Ok(30));
     }

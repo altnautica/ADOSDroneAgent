@@ -124,7 +124,14 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
         Overlay::Palette(p) => {
             let h = (p.ranked.len() as u16 + 4).clamp(6, 18);
             let inner = frame_box(f, core, "Command palette", 72, h, out);
-            field(f, core, Rect::new(inner.x, inner.y, inner.width, 1), &p.input, false, out);
+            field(
+                f,
+                core,
+                Rect::new(inner.x, inner.y, inner.width, 1),
+                &p.input,
+                false,
+                out,
+            );
             let mut lines = vec![Line::from("")];
             for (row, idx) in p.ranked.iter().enumerate() {
                 let item = &p.items[*idx];
@@ -132,7 +139,8 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
                 let sel = row == p.selected;
                 let style = if sel { t.accent_bold() } else { t.text() };
                 let marker = if sel { core.sym.row_marker } else { " " };
-                let pad = (inner.width as usize).saturating_sub(label.chars().count() + item.kind.len() + 3);
+                let pad = (inner.width as usize)
+                    .saturating_sub(label.chars().count() + item.kind.len() + 3);
                 lines.push(Line::from(vec![
                     Span::styled(format!("{marker} "), t.accented()),
                     Span::styled(label, style),
@@ -143,12 +151,21 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
             if p.ranked.is_empty() {
                 lines.push(hint(core, "  no match"));
             }
-            let rest = Rect::new(inner.x, inner.y + 1, inner.width, inner.height.saturating_sub(1));
+            let rest = Rect::new(
+                inner.x,
+                inner.y + 1,
+                inner.width,
+                inner.height.saturating_sub(1),
+            );
             f.render_widget(Paragraph::new(lines), rest);
         }
         Overlay::Confirm(c) => {
             let w = 72.min(screen.width);
-            let body_h: u16 = c.body.iter().map(|l| wrapped_rows(l, w.saturating_sub(2))).sum();
+            let body_h: u16 = c
+                .body
+                .iter()
+                .map(|l| wrapped_rows(l, w.saturating_sub(2)))
+                .sum();
             let inner = frame_box(f, core, &c.title, w, (body_h + 6).min(screen.height), out);
             let mut lines: Vec<Line> = c
                 .body
@@ -160,13 +177,23 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
                 Some(word) => {
                     lines.push(Line::from(vec![
                         Span::styled("Type ", t.dim()),
-                        Span::styled(word, Style::default().fg(t.error()).add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            word,
+                            Style::default().fg(t.error()).add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(" and press Enter to confirm · Esc cancel", t.dim()),
                     ]));
                     let y = inner.y + lines.len() as u16;
                     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
                     if y < inner.bottom() {
-                        field(f, core, Rect::new(inner.x, y, inner.width, 1), &c.input, false, out);
+                        field(
+                            f,
+                            core,
+                            Rect::new(inner.x, y, inner.width, 1),
+                            &c.input,
+                            false,
+                            out,
+                        );
                     }
                 }
                 None => {
@@ -209,7 +236,10 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
                 if rect.y + 1 < screen.bottom() {
                     let below = Rect::new(rect.x, rect.y + 1, rect.width, 1);
                     f.render_widget(Clear, below);
-                    f.render_widget(Paragraph::new(Span::styled(format!("  {text}"), style)), below);
+                    f.render_widget(
+                        Paragraph::new(Span::styled(format!("  {text}"), style)),
+                        below,
+                    );
                 }
             }
             out.overlay = Some(rect);
@@ -221,7 +251,10 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
             lines.push(Line::from(""));
             lines.push(Line::from(""));
             if let Some(e) = &s.error {
-                lines.push(Line::from(Span::styled(e.clone(), Style::default().fg(t.error()))));
+                lines.push(Line::from(Span::styled(
+                    e.clone(),
+                    Style::default().fg(t.error()),
+                )));
             }
             if let Some(h) = &s.hint {
                 lines.push(hint(core, h));
@@ -232,12 +265,24 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
             }
             lines.push(hint(core, &tail));
             f.render_widget(Paragraph::new(lines), inner);
-            field(f, core, Rect::new(inner.x, inner.y + 1, inner.width, 1), &s.input, s.masked, out);
+            field(
+                f,
+                core,
+                Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                &s.input,
+                s.masked,
+                out,
+            );
         }
         Overlay::Picker(p) => {
             let h = (p.items.len() as u16 + 3).clamp(5, 20);
             let inner = frame_box(f, core, &p.title, 56, h, out);
-            let mut lines = list_lines(core, &p.items, p.selected, inner.height.saturating_sub(1) as usize);
+            let mut lines = list_lines(
+                core,
+                &p.items,
+                p.selected,
+                inner.height.saturating_sub(1) as usize,
+            );
             lines.push(hint(core, "↑↓ move · Enter select · Esc cancel"));
             f.render_widget(Paragraph::new(lines), inner);
         }
@@ -260,10 +305,25 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
                         (true, false) => "☑",
                         (false, false) => "☐",
                     };
-                    let style = if i == c.selected { t.accent_bold() } else { t.text() };
-                    let lock = if item.locked { format!("  {} required", core.sym.read_only) } else { String::new() };
+                    let style = if i == c.selected {
+                        t.accent_bold()
+                    } else {
+                        t.text()
+                    };
+                    let lock = if item.locked {
+                        format!("  {} required", core.sym.read_only)
+                    } else {
+                        String::new()
+                    };
                     Line::from(vec![
-                        Span::styled(if i == c.selected { format!("{} ", core.sym.row_marker) } else { "  ".into() }, t.accented()),
+                        Span::styled(
+                            if i == c.selected {
+                                format!("{} ", core.sym.row_marker)
+                            } else {
+                                "  ".into()
+                            },
+                            t.accented(),
+                        ),
                         Span::styled(format!("{mark} "), style),
                         Span::styled(item.label.clone(), style),
                         Span::styled(lock, t.dim()),
@@ -297,10 +357,21 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
                 })
                 .collect();
             let copy = if r.copy.is_some() { " · y copy" } else { "" };
-            let body = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
-            f.render_widget(Paragraph::new(std::mem::take(&mut lines)).wrap(Wrap { trim: false }), body);
+            let body = Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            );
+            f.render_widget(
+                Paragraph::new(std::mem::take(&mut lines)).wrap(Wrap { trim: false }),
+                body,
+            );
             let foot = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
-            f.render_widget(Paragraph::new(hint(core, &format!("↑↓ scroll{copy} · Esc close"))), foot);
+            f.render_widget(
+                Paragraph::new(hint(core, &format!("↑↓ scroll{copy} · Esc close"))),
+                foot,
+            );
         }
         Overlay::Secret(s) => {
             let w = 76.min(screen.width);
@@ -308,7 +379,10 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
             let h = 5 + wrapped_rows(&s.note, inner_w) + wrapped_rows(&s.secret, inner_w);
             let inner = frame_box(f, core, &s.title, w, h, out);
             let lines = vec![
-                Line::from(Span::styled(s.note.clone(), Style::default().fg(t.warning()))),
+                Line::from(Span::styled(
+                    s.note.clone(),
+                    Style::default().fg(t.warning()),
+                )),
                 Line::from(""),
                 Line::from(Span::styled(s.secret.clone(), t.accent_bold())),
                 Line::from(""),
@@ -374,7 +448,10 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
             if a.offer_remember {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    format!("Key accepted. Remember it for {}? (y/n)", core.target.label()),
+                    format!(
+                        "Key accepted. Remember it for {}? (y/n)",
+                        core.target.label()
+                    ),
                     Style::default().fg(t.success()),
                 )));
                 f.render_widget(Paragraph::new(lines), inner);
@@ -394,7 +471,14 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
             lines.push(hint(core, "Enter submit · Esc close (data stays locked)"));
             f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
             if a.mode != AuthMode::Blocked {
-                field(f, core, Rect::new(inner.x, inner.y + 2, inner.width, 1), &a.input, true, out);
+                field(
+                    f,
+                    core,
+                    Rect::new(inner.x, inner.y + 2, inner.width, 1),
+                    &a.input,
+                    true,
+                    out,
+                );
             }
         }
         Overlay::Notifications(back) => {
@@ -416,7 +500,12 @@ fn render_one(f: &mut Frame, core: &Core, overlay: &Overlay, under: &[Ctx], out:
             if lines.is_empty() {
                 lines.push(hint(core, "No notifications yet"));
             }
-            let body = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
+            let body = Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            );
             f.render_widget(Paragraph::new(lines), body);
             let foot = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
             f.render_widget(Paragraph::new(hint(core, "↑↓ scroll · Esc close")), foot);

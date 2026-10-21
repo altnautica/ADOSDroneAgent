@@ -119,20 +119,47 @@ impl Page {
         if let Some(note) = kit::resource_note(core, &ResourceId::Config, "the config") {
             items.push(note);
         }
-        let mut row = kit::row("mode", "Cloud posture", mode_help(&mode), kit::enum_of(MODES), Some(json!(mode)));
+        let mut row = kit::row(
+            "mode",
+            "Cloud posture",
+            mode_help(&mode),
+            kit::enum_of(MODES),
+            Some(json!(mode)),
+        );
         row.default = Some(json!(cur.mode));
         items.push(Item::Row(row));
         if mode == "self_hosted" {
             items.push(Item::Header("Self-hosted endpoints".into()));
             let str_kind = || Kind::Str { pattern: None };
-            let mut r = kit::row("url", "Convex URL", "The backend URL, e.g. https://convex.example.com", str_kind(), Some(json!(url)));
+            let mut r = kit::row(
+                "url",
+                "Convex URL",
+                "The backend URL, e.g. https://convex.example.com",
+                str_kind(),
+                Some(json!(url)),
+            );
             r.default = Some(json!(cur.url));
             items.push(Item::Row(r));
-            let mut r = kit::row("broker", "MQTT broker", "The MQTT broker host, e.g. mqtt.example.com", str_kind(), Some(json!(broker)));
+            let mut r = kit::row(
+                "broker",
+                "MQTT broker",
+                "The MQTT broker host, e.g. mqtt.example.com",
+                str_kind(),
+                Some(json!(broker)),
+            );
             r.default = Some(json!(cur.broker));
             items.push(Item::Row(r));
-            let port_kind = Kind::Int { min: Some(1), max: Some(65535) };
-            let mut r = kit::row("port", "Port", "The MQTT broker port", port_kind, Some(json!(port)));
+            let port_kind = Kind::Int {
+                min: Some(1),
+                max: Some(65535),
+            };
+            let mut r = kit::row(
+                "port",
+                "Port",
+                "The MQTT broker port",
+                port_kind,
+                Some(json!(port)),
+            );
             r.default = Some(json!(cur.port));
             items.push(Item::Row(r));
             let mut r = kit::row(
@@ -202,7 +229,9 @@ impl Page {
                     Ret::new(route(), "apply").with(section),
                     "Switch cloud posture?",
                     vec![
-                        format!("The cloud relay client will reconnect using the new posture ({mode})."),
+                        format!(
+                            "The cloud relay client will reconnect using the new posture ({mode})."
+                        ),
                         "Existing MQTT and HTTP sessions drop. Pairing is preserved.".into(),
                     ],
                 ));
@@ -236,7 +265,9 @@ impl Bespoke for Page {
             Command::Activate => match (self.rows.focused_key(&items), focused) {
                 (Some("apply"), _) => self.apply(core),
                 (_, Some(row)) => {
-                    if let Some(o) = edit_overlay(&row, Ret::new(route(), "edit").with(json!(row.key))) {
+                    if let Some(o) =
+                        edit_overlay(&row, Ret::new(route(), "edit").with(json!(row.key)))
+                    {
                         core.open(o);
                     }
                 }
@@ -266,8 +297,13 @@ impl Bespoke for Page {
             "apply" if result == OverlayResult::Confirmed => {
                 self.busy = true;
                 core.submit(
-                    Request::new("POST", "/api/v1/setup/apply", route(), Purpose::SetupApply { section: "cloud" })
-                        .body(json!({ "cloud": ret.data })),
+                    Request::new(
+                        "POST",
+                        "/api/v1/setup/apply",
+                        route(),
+                        Purpose::SetupApply { section: "cloud" },
+                    )
+                    .body(json!({ "cloud": ret.data })),
                 );
             }
             _ => {}
@@ -330,7 +366,10 @@ mod tests {
             }}),
         );
         let cur = current(core);
-        assert_eq!((cur.mode.as_str(), cur.broker.as_str(), cur.port), ("self_hosted", "mqtt.example.com", 8884));
+        assert_eq!(
+            (cur.mode.as_str(), cur.broker.as_str(), cur.port),
+            ("self_hosted", "mqtt.example.com", 8884)
+        );
         assert_eq!(cur.backend, "https://convex.example.com");
         let mut page = Page::default();
         page.draft.url = Some("https://convex2.example.com".into());

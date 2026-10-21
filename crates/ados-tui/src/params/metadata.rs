@@ -24,10 +24,19 @@ pub const CATALOG_KEYS: [&str; 5] = [
 /// The gzip bytes of one catalog.
 fn bytes(key: &str) -> Option<&'static [u8]> {
     Some(match key {
-        "ardupilot-copter" => &include_bytes!("../../../../dashboard/public/param-metadata/ardupilot-copter.json.gz")[..],
-        "ardupilot-plane" => &include_bytes!("../../../../dashboard/public/param-metadata/ardupilot-plane.json.gz")[..],
-        "ardupilot-rover" => &include_bytes!("../../../../dashboard/public/param-metadata/ardupilot-rover.json.gz")[..],
-        "ardupilot-sub" => &include_bytes!("../../../../dashboard/public/param-metadata/ardupilot-sub.json.gz")[..],
+        "ardupilot-copter" => {
+            &include_bytes!("../../../../dashboard/public/param-metadata/ardupilot-copter.json.gz")
+                [..]
+        }
+        "ardupilot-plane" => {
+            &include_bytes!("../../../../dashboard/public/param-metadata/ardupilot-plane.json.gz")[..]
+        }
+        "ardupilot-rover" => {
+            &include_bytes!("../../../../dashboard/public/param-metadata/ardupilot-rover.json.gz")[..]
+        }
+        "ardupilot-sub" => {
+            &include_bytes!("../../../../dashboard/public/param-metadata/ardupilot-sub.json.gz")[..]
+        }
         "px4" => &include_bytes!("../../../../dashboard/public/param-metadata/px4.json.gz")[..],
         _ => return None,
     })
@@ -123,11 +132,16 @@ pub fn decode(key: &str) -> Result<Catalog, String> {
         .find(|k| *k == key)
         .ok_or_else(|| format!("no embedded catalog {key}"))?;
     let gz = bytes(key).ok_or_else(|| format!("no embedded catalog {key}"))?;
-    let snap: Snapshot = serde_json::from_reader(GzDecoder::new(gz)).map_err(|e| format!("{key}: {e}"))?;
+    let snap: Snapshot =
+        serde_json::from_reader(GzDecoder::new(gz)).map_err(|e| format!("{key}: {e}"))?;
     Ok(Catalog {
         key,
         provenance: snap.provenance,
-        params: snap.params.into_iter().map(|p| (p.name.clone(), p)).collect(),
+        params: snap
+            .params
+            .into_iter()
+            .map(|p| (p.name.clone(), p))
+            .collect(),
     })
 }
 
@@ -220,15 +234,40 @@ mod tests {
             "VTOL Tiltwing",
             "VTOL Reserved",
         ] {
-            assert_eq!(catalog_key("ardupilot", Some(plane)), Some("ardupilot-plane"), "{plane}");
+            assert_eq!(
+                catalog_key("ardupilot", Some(plane)),
+                Some("ardupilot-plane"),
+                "{plane}"
+            );
         }
-        assert_eq!(catalog_key("ardupilot", Some("Ground Rover")), Some("ardupilot-rover"));
-        assert_eq!(catalog_key("ardupilot", Some("Helicopter")), Some("ardupilot-copter"));
-        assert_eq!(catalog_key("ardupilot", Some("Hexarotor")), Some("ardupilot-copter"));
-        assert_eq!(catalog_key("ardupilot", Some("Vehicle 99")), Some("ardupilot-copter"));
-        assert_eq!(catalog_key("ardupilot", Some("Surface Boat")), Some("ardupilot-rover"));
-        assert_eq!(catalog_key("ardupilot", Some("Submarine")), Some("ardupilot-sub"));
-        assert_eq!(catalog_key("ardupilot", Some("Quadrotor")), Some("ardupilot-copter"));
+        assert_eq!(
+            catalog_key("ardupilot", Some("Ground Rover")),
+            Some("ardupilot-rover")
+        );
+        assert_eq!(
+            catalog_key("ardupilot", Some("Helicopter")),
+            Some("ardupilot-copter")
+        );
+        assert_eq!(
+            catalog_key("ardupilot", Some("Hexarotor")),
+            Some("ardupilot-copter")
+        );
+        assert_eq!(
+            catalog_key("ardupilot", Some("Vehicle 99")),
+            Some("ardupilot-copter")
+        );
+        assert_eq!(
+            catalog_key("ardupilot", Some("Surface Boat")),
+            Some("ardupilot-rover")
+        );
+        assert_eq!(
+            catalog_key("ardupilot", Some("Submarine")),
+            Some("ardupilot-sub")
+        );
+        assert_eq!(
+            catalog_key("ardupilot", Some("Quadrotor")),
+            Some("ardupilot-copter")
+        );
         assert_eq!(catalog_key("ardupilot", None), Some("ardupilot-copter"));
         assert_eq!(catalog_key("px4", Some("Quadrotor")), Some("px4"));
         assert_eq!(catalog_key("px4", None), Some("px4"));

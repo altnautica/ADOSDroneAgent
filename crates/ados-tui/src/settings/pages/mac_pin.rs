@@ -54,7 +54,10 @@ fn adapters(body: &Value) -> Vec<Adapter> {
                         vidpid: s(a, "vidpid"),
                         state: s(a, "state").unwrap_or_else(|| "unknown".into()),
                         pinned_mac: s(a, "pinnedMac"),
-                        applied_live: a.get("appliedLive").and_then(Value::as_bool).unwrap_or(false),
+                        applied_live: a
+                            .get("appliedLive")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
                         deferred: s(a, "deferredReason"),
                     })
                 })
@@ -81,9 +84,18 @@ impl Page {
                     };
                     let mut spans = vec![
                         Span::styled(format!("{:<8} ", a.name), t.text()),
-                        Span::styled(format!("{:<10} ", a.vidpid.clone().unwrap_or_else(|| "—".into())), t.dim()),
+                        Span::styled(
+                            format!("{:<10} ", a.vidpid.clone().unwrap_or_else(|| "—".into())),
+                            t.dim(),
+                        ),
                         Span::styled(format!("{:<9} ", a.state), Style::default().fg(state_color)),
-                        Span::styled(format!("{:<18} ", a.pinned_mac.clone().unwrap_or_else(|| "—".into())), t.text()),
+                        Span::styled(
+                            format!(
+                                "{:<18} ",
+                                a.pinned_mac.clone().unwrap_or_else(|| "—".into())
+                            ),
+                            t.text(),
+                        ),
                         Span::styled(if a.applied_live { "live" } else { "next boot" }, t.dim()),
                     ];
                     if let Some(why) = &a.deferred {
@@ -98,10 +110,19 @@ impl Page {
                     });
                 }
             }
-            None => items.push(match core.slot(&ResourceId::MacAdapters).and_then(|s| s.error.clone()) {
-                Some(e) => note(core, format!("Could not read adapter stability from this node: {e}"), true),
-                None => note(core, "Reading adapters…", false),
-            }),
+            None => items.push(
+                match core
+                    .slot(&ResourceId::MacAdapters)
+                    .and_then(|s| s.error.clone())
+                {
+                    Some(e) => note(
+                        core,
+                        format!("Could not read adapter stability from this node: {e}"),
+                        true,
+                    ),
+                    None => note(core, "Reading adapters…", false),
+                },
+            ),
         }
         items.push(Item::Header("Pinning".into()));
         if let Some(n) = config_rows::status_note(core) {
@@ -132,7 +153,11 @@ impl Page {
 
 impl Bespoke for Page {
     fn subs(&self, core: &Core) -> Vec<Sub> {
-        let mut subs = vec![Sub::every_ms(ResourceId::MacAdapters, "/api/v1/network/mac/adapters", 10000)];
+        let mut subs = vec![Sub::every_ms(
+            ResourceId::MacAdapters,
+            "/api/v1/network/mac/adapters",
+            10000,
+        )];
         subs.extend(config_rows::subs(core));
         subs
     }
@@ -158,7 +183,10 @@ impl Bespoke for Page {
                         "POST",
                         "/api/v1/network/mac/pin",
                         ROUTE,
-                        Purpose::Page { tag: "pin", data: json!(iface) },
+                        Purpose::Page {
+                            tag: "pin",
+                            data: json!(iface),
+                        },
                     )
                     .body(json!({ "iface": iface }))
                 } else {
@@ -166,7 +194,10 @@ impl Bespoke for Page {
                         "DELETE",
                         format!("/api/v1/network/mac/{}", crate::api_path::seg(&iface)),
                         ROUTE,
-                        Purpose::Page { tag: "unpin", data: json!(iface) },
+                        Purpose::Page {
+                            tag: "unpin",
+                            data: json!(iface),
+                        },
                     )
                 };
                 core.submit(req);
@@ -206,11 +237,22 @@ impl Bespoke for Page {
         if kit::config_reply(core, &items, &reply) {
             return;
         }
-        let Purpose::Page { tag, data } = &reply.purpose else { return };
+        let Purpose::Page { tag, data } = &reply.purpose else {
+            return;
+        };
         let iface = data.as_str().unwrap_or_default();
         let row = format!("{}ad:{iface}", kit::prefix(BespokeId::MacPin.id()));
-        let Some((ok, text)) = pin_outcome(tag, iface, &reply.result) else { return };
-        core.toast(if ok { ToastKind::Success } else { ToastKind::Error }, text);
+        let Some((ok, text)) = pin_outcome(tag, iface, &reply.result) else {
+            return;
+        };
+        core.toast(
+            if ok {
+                ToastKind::Success
+            } else {
+                ToastKind::Error
+            },
+            text,
+        );
         core.flash(row, ok);
         core.fetch_now(ResourceId::MacAdapters);
     }
@@ -239,13 +281,22 @@ impl Bespoke for Page {
 /// Both routes answer a body-level failure as a 200 with `status: "error"`
 /// and a `message` (the unpin when the override or `.link` stayed), so the
 /// status field decides, not the HTTP code. `None` for another tag.
-fn pin_outcome(tag: &str, iface: &str, result: &Result<Value, RestError>) -> Option<(bool, String)> {
+fn pin_outcome(
+    tag: &str,
+    iface: &str,
+    result: &Result<Value, RestError>,
+) -> Option<(bool, String)> {
     let (done, failed) = match tag {
         "pin" => ("Pinned", "Could not pin the adapter"),
         "unpin" => ("Unpinned", "Could not unpin the adapter"),
         _ => return None,
     };
-    let str_at = |b: &Value, k: &str| b.get(k).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string);
+    let str_at = |b: &Value, k: &str| {
+        b.get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
     Some(match result {
         Ok(body) if body.get("status").and_then(Value::as_str) == Some("error") => {
             let why = str_at(body, "message")
@@ -281,23 +332,47 @@ mod tests {
 
     #[test]
     fn pin_replies_classify_on_the_body_status() {
-        let ok = pin_outcome("unpin", "wlan0", &Ok(json!({"status":"ok","iface":"wlan0","note":"re-pinned unless off"})));
-        assert_eq!(ok, Some((true, "Unpinned wlan0. re-pinned unless off".into())));
+        let ok = pin_outcome(
+            "unpin",
+            "wlan0",
+            &Ok(json!({"status":"ok","iface":"wlan0","note":"re-pinned unless off"})),
+        );
+        assert_eq!(
+            ok,
+            Some((true, "Unpinned wlan0. re-pinned unless off".into()))
+        );
         let failed = pin_outcome(
             "unpin",
             "wlan0",
-            &Ok(json!({"status":"error","iface":"wlan0","persist_error":"read-only fs","message":"the adapter is still pinned for the next boot"})),
+            &Ok(
+                json!({"status":"error","iface":"wlan0","persist_error":"read-only fs","message":"the adapter is still pinned for the next boot"}),
+            ),
         );
         assert_eq!(
             failed,
-            Some((false, "Could not unpin the adapter wlan0: the adapter is still pinned for the next boot".into()))
+            Some((
+                false,
+                "Could not unpin the adapter wlan0: the adapter is still pinned for the next boot"
+                    .into()
+            ))
         );
         let refused = pin_outcome(
             "pin",
             "eth9",
-            &Err(RestError::Status { code: 400, body: Some(json!({"detail":{"error":{"code":"E_UNKNOWN_ADAPTER","message":"unknown adapter eth9"}}})) }),
+            &Err(RestError::Status {
+                code: 400,
+                body: Some(
+                    json!({"detail":{"error":{"code":"E_UNKNOWN_ADAPTER","message":"unknown adapter eth9"}}}),
+                ),
+            }),
         );
-        assert_eq!(refused, Some((false, "Could not pin the adapter: unknown adapter eth9".into())));
+        assert_eq!(
+            refused,
+            Some((
+                false,
+                "Could not pin the adapter: unknown adapter eth9".into()
+            ))
+        );
         assert_eq!(pin_outcome("other", "wlan0", &Ok(json!({}))), None);
     }
 }

@@ -143,7 +143,9 @@ pub fn parse(kind: &Kind, text: &str) -> Result<Value, String> {
             .cloned()
             .ok_or_else(|| "Pick one of the listed values".into()),
         Kind::Str { .. } => Ok(json!(text)),
-        Kind::Opaque => Err("List value: edit config.yaml (the config API sets one scalar key per call)".into()),
+        Kind::Opaque => {
+            Err("List value: edit config.yaml (the config API sets one scalar key per call)".into())
+        }
     }
 }
 
@@ -156,7 +158,10 @@ pub fn edit_overlay(row: &EditRow, ret: Ret) -> Option<Overlay> {
         return None;
     }
     if let Kind::Enum(values) = &row.kind {
-        let items: Vec<String> = values.iter().map(|v| display(&row.kind, Some(v), false, true)).collect();
+        let items: Vec<String> = values
+            .iter()
+            .map(|v| display(&row.kind, Some(v), false, true))
+            .collect();
         let sel = row
             .value
             .as_ref()
@@ -194,7 +199,10 @@ fn bounds_hint(min: Option<f64>, max: Option<f64>) -> Option<String> {
 
 /// The value an overlay result stands for, for a row of `kind`: a picker
 /// index maps back into the enum, text parses, `Null` clears.
-pub fn value_from_result(kind: &Kind, result: &crate::overlay::OverlayResult) -> Option<Result<Value, String>> {
+pub fn value_from_result(
+    kind: &Kind,
+    result: &crate::overlay::OverlayResult,
+) -> Option<Result<Value, String>> {
     use crate::overlay::OverlayResult as R;
     match (kind, result) {
         (Kind::Enum(values), R::Picked(i)) => values.get(*i).cloned().map(Ok),
@@ -213,27 +221,63 @@ mod tests {
         let k = Kind::Enum(vec![json!(0), json!(90), json!(180), json!(270)]);
         assert_eq!(cycle(&k, Some(&json!(270)), true), Some(json!(0)));
         assert_eq!(cycle(&k, Some(&json!(0)), false), Some(json!(270)));
-        assert_eq!(cycle(&Kind::Bool, Some(&json!(true)), true), Some(json!(false)));
+        assert_eq!(
+            cycle(&Kind::Bool, Some(&json!(true)), true),
+            Some(json!(false))
+        );
         let long = Kind::Enum((0..9).map(|i| json!(i)).collect());
         assert_eq!(cycle(&long, Some(&json!(1)), true), None);
     }
 
     #[test]
     fn parse_enforces_bounds_and_finiteness() {
-        let k = Kind::Int { min: Some(2500), max: Some(4200) };
+        let k = Kind::Int {
+            min: Some(2500),
+            max: Some(4200),
+        };
         assert_eq!(parse(&k, "3300"), Ok(json!(3300)));
         assert!(parse(&k, "5000").is_err());
         assert!(parse(&k, "3.5").is_err());
-        let n = Kind::Num { min: None, max: None };
+        let n = Kind::Num {
+            min: None,
+            max: None,
+        };
         assert!(parse(&n, "NaN").is_err());
         assert_eq!(parse(&n, "0.25"), Ok(json!(0.25)));
     }
 
     #[test]
     fn secrets_never_display_their_value_unless_revealed() {
-        assert_eq!(display(&Kind::Str { pattern: None }, Some(&json!("***")), true, false), "set");
-        assert_eq!(display(&Kind::Str { pattern: None }, Some(&json!("")), true, false), "not set");
-        assert_eq!(display(&Kind::Str { pattern: None }, Some(&json!("hunter2")), true, false), MASK);
-        assert_eq!(display(&Kind::Str { pattern: None }, Some(&json!("hunter2")), true, true), "hunter2");
+        assert_eq!(
+            display(
+                &Kind::Str { pattern: None },
+                Some(&json!("***")),
+                true,
+                false
+            ),
+            "set"
+        );
+        assert_eq!(
+            display(&Kind::Str { pattern: None }, Some(&json!("")), true, false),
+            "not set"
+        );
+        assert_eq!(
+            display(
+                &Kind::Str { pattern: None },
+                Some(&json!("hunter2")),
+                true,
+                false
+            ),
+            MASK
+        );
+        assert_eq!(
+            display(
+                &Kind::Str { pattern: None },
+                Some(&json!("hunter2")),
+                true,
+                true
+            ),
+            "hunter2"
+        );
     }
 }

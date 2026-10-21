@@ -24,9 +24,17 @@ pub const SCHEMA_RETRY_MS: u64 = 10_000;
 /// Resources a page showing config rows needs: the effective config, and the
 /// schema until it has loaded once this session.
 pub fn subs(core: &Core) -> Vec<Sub> {
-    let mut out = vec![Sub::every_ms(ResourceId::Config, "/api/config", CONFIG_EVERY_MS)];
+    let mut out = vec![Sub::every_ms(
+        ResourceId::Config,
+        "/api/config",
+        CONFIG_EVERY_MS,
+    )];
     if core.value(&ResourceId::ConfigSchema).is_none() {
-        out.push(Sub::every_ms(ResourceId::ConfigSchema, "/api/config/schema", SCHEMA_RETRY_MS));
+        out.push(Sub::every_ms(
+            ResourceId::ConfigSchema,
+            "/api/config/schema",
+            SCHEMA_RETRY_MS,
+        ));
     }
     out
 }
@@ -80,8 +88,14 @@ pub fn help_of(key: &str, leaf: Option<&Leaf>) -> String {
 fn guessed_kind(value: Option<&Value>) -> Kind {
     match value {
         Some(Value::Bool(_)) => Kind::Bool,
-        Some(Value::Number(n)) if n.is_i64() || n.is_u64() => Kind::Int { min: None, max: None },
-        Some(Value::Number(_)) => Kind::Num { min: None, max: None },
+        Some(Value::Number(n)) if n.is_i64() || n.is_u64() => Kind::Int {
+            min: None,
+            max: None,
+        },
+        Some(Value::Number(_)) => Kind::Num {
+            min: None,
+            max: None,
+        },
         Some(Value::String(_)) => Kind::Str { pattern: None },
         _ => Kind::Opaque,
     }
@@ -125,7 +139,10 @@ pub fn config_row(core: &Core, key: &str, label: &str, help: &str) -> EditRow {
     match leaf {
         Some(leaf) => leaf_row(core, leaf, label, help),
         None => {
-            let value = core.value(&ResourceId::Config).and_then(|c| get(c, key)).cloned();
+            let value = core
+                .value(&ResourceId::Config)
+                .and_then(|c| get(c, key))
+                .cloned();
             EditRow {
                 key: key.to_string(),
                 label,

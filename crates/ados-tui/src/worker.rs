@@ -52,21 +52,34 @@ impl Route {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Purpose {
     /// `PUT /api/config` of one key; `row` names the row to flash.
-    ConfigSet { key: String, row: String },
+    ConfigSet {
+        key: String,
+        row: String,
+    },
     /// `POST /api/v1/setup/apply` of one section.
-    SetupApply { section: &'static str },
+    SetupApply {
+        section: &'static str,
+    },
     /// Sequential parameter writes, one `Progress` message per item.
     ParamBatch(Vec<(String, f64)>),
     WifiScan,
-    WifiJoin { ssid: String, forced: bool },
+    WifiJoin {
+        ssid: String,
+        forced: bool,
+    },
     McpMint,
     PluginParse,
     PluginInstall,
     /// A plain action: success toasts `ok_toast`, failure toasts the error.
-    Generic { ok_toast: String },
+    Generic {
+        ok_toast: String,
+    },
     /// Anything else a screen tracks itself: `tag` names it, `data` carries
     /// whatever the screen needs back.
-    Page { tag: &'static str, data: Value },
+    Page {
+        tag: &'static str,
+        data: Value,
+    },
 }
 
 /// One request.
@@ -87,7 +100,12 @@ impl Request {
         Self::new("POST", String::new(), route, Purpose::ParamBatch(items))
     }
 
-    pub fn new(method: &'static str, path: impl Into<String>, route: Route, purpose: Purpose) -> Self {
+    pub fn new(
+        method: &'static str,
+        path: impl Into<String>,
+        route: Route,
+        purpose: Purpose,
+    ) -> Self {
         Self {
             method,
             path: path.into(),

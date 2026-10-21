@@ -23,7 +23,8 @@ use crate::worker::{Purpose, Reply, Request, Route};
 const PROFILES: &[&str] = &["drone", "ground_station", "visor"];
 const ROLES: &[&str] = &["direct", "relay", "receiver"];
 
-const PROFILE_HELP: &str = "Drone: air-side companion. Ground station: ground-side receiver. Visor: handheld capture rig.";
+const PROFILE_HELP: &str =
+    "Drone: air-side companion. Ground station: ground-side receiver. Visor: handheld capture rig.";
 const ROLE_HELP: &str = "Direct: single ground node. Relay: forwards a drone link to another ground node. Receiver: aggregates streams from relay nodes.";
 
 fn route() -> Route {
@@ -41,7 +42,9 @@ pub struct Page {
 /// The applied profile and role from the setup status.
 fn current(core: &Core) -> (String, String) {
     let s = kit::setup(core);
-    let profile = kit::text(s, "profile").unwrap_or_else(|| core.profile()).to_string();
+    let profile = kit::text(s, "profile")
+        .unwrap_or_else(|| core.profile())
+        .to_string();
     let role = kit::text(s, "ground_role").unwrap_or("direct").to_string();
     (profile, role)
 }
@@ -78,22 +81,58 @@ impl Page {
         if let Some(note) = kit::resource_note(core, &ResourceId::SetupStatus, "the setup status") {
             items.push(note);
         }
-        let role_text = if cur_p == "ground_station" { format!(" / role {cur_r}") } else { String::new() };
-        items.push(rows_view::info(core, "Current", format!("{}{role_text}", profile_label(&cur_p))));
-        items.push(rows_view::info(core, "Source", kit::text(s, "profile_source").unwrap_or("unknown")));
+        let role_text = if cur_p == "ground_station" {
+            format!(" / role {cur_r}")
+        } else {
+            String::new()
+        };
+        items.push(rows_view::info(
+            core,
+            "Current",
+            format!("{}{role_text}", profile_label(&cur_p)),
+        ));
+        items.push(rows_view::info(
+            core,
+            "Source",
+            kit::text(s, "profile_source").unwrap_or("unknown"),
+        ));
         if let Some(d) = kit::text(s, "profile_suggestion.detected") {
             let hint = kit::text(s, "profile_suggestion.ground_role_hint").unwrap_or("direct");
-            let role = if d == "ground_station" { format!(" / role {hint}") } else { String::new() };
-            items.push(rows_view::info(core, "Hardware suggests", format!("{}{role}", profile_label(d))));
+            let role = if d == "ground_station" {
+                format!(" / role {hint}")
+            } else {
+                String::new()
+            };
+            items.push(rows_view::info(
+                core,
+                "Hardware suggests",
+                format!("{}{role}", profile_label(d)),
+            ));
         }
 
         items.push(Item::Header("Profile".into()));
-        let mut row = kit::row("profile", "Profile", PROFILE_HELP, kit::enum_of(PROFILES), Some(json!(p)));
+        let mut row = kit::row(
+            "profile",
+            "Profile",
+            PROFILE_HELP,
+            kit::enum_of(PROFILES),
+            Some(json!(p)),
+        );
         row.default = Some(json!(cur_p));
         items.push(Item::Row(row));
         if p == "ground_station" {
-            let mut row = kit::row("ground_role", "Ground station role", ROLE_HELP, kit::enum_of(ROLES), Some(json!(r)));
-            row.default = Some(json!(if cur_p == "ground_station" { cur_r } else { String::new() }));
+            let mut row = kit::row(
+                "ground_role",
+                "Ground station role",
+                ROLE_HELP,
+                kit::enum_of(ROLES),
+                Some(json!(r)),
+            );
+            row.default = Some(json!(if cur_p == "ground_station" {
+                cur_r
+            } else {
+                String::new()
+            }));
             items.push(Item::Row(row));
         }
         let detail = if self.busy {
@@ -110,8 +149,12 @@ impl Page {
 
     fn stage(&mut self, core: &Core, forward: bool) {
         let items = self.items(core);
-        let Some(row) = self.rows.focused_row(&items) else { return };
-        let Some(next) = cycle(&row.kind, row.value.as_ref(), forward) else { return };
+        let Some(row) = self.rows.focused_row(&items) else {
+            return;
+        };
+        let Some(next) = cycle(&row.kind, row.value.as_ref(), forward) else {
+            return;
+        };
         let next = next.as_str().unwrap_or_default().to_string();
         let (cur_p, cur_r) = current(core);
         match row.key.as_str() {
@@ -198,8 +241,13 @@ impl Bespoke for Page {
         }
         self.busy = true;
         core.submit(
-            Request::new("POST", "/api/v1/setup/apply", route(), Purpose::SetupApply { section: "profile" })
-                .body(json!({ "profile": section })),
+            Request::new(
+                "POST",
+                "/api/v1/setup/apply",
+                route(),
+                Purpose::SetupApply { section: "profile" },
+            )
+            .body(json!({ "profile": section })),
         );
     }
 
@@ -236,7 +284,10 @@ impl Bespoke for Page {
     fn context_line(&self, core: &Core) -> Option<String> {
         let items = self.items(core);
         match self.rows.focused_key(&items)? {
-            "apply" => Some("Apply the staged profile; ados-supervisor restarts so the new services come up".into()),
+            "apply" => Some(
+                "Apply the staged profile; ados-supervisor restarts so the new services come up"
+                    .into(),
+            ),
             "redetect" => Some("Re-run the hardware probes and refresh the suggestion".into()),
             _ => self.rows.focused_row(&items).map(|r| r.help.clone()),
         }

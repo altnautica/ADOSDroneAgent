@@ -209,7 +209,12 @@ impl Poller {
     }
 }
 
-fn spawn_global(client: RestClient, mut interval: Duration, tx: Sender<PollMsg>, ctl: Receiver<GlobalCtl>) {
+fn spawn_global(
+    client: RestClient,
+    mut interval: Duration,
+    tx: Sender<PollMsg>,
+    ctl: Receiver<GlobalCtl>,
+) {
     thread::spawn(move || loop {
         let setup = client.setup_status();
         let fc_status = client.status().ok();
@@ -251,7 +256,9 @@ fn spawn_resources(client: RestClient, tx: Sender<PollMsg>, ctl: Receiver<ResCtl
             let now = Instant::now();
             // Read everything due, in subscription order.
             for sub in &subs {
-                let Some(Some(at)) = due.get(&sub.id) else { continue };
+                let Some(Some(at)) = due.get(&sub.id) else {
+                    continue;
+                };
                 if *at > now {
                     continue;
                 }

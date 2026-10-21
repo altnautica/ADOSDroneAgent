@@ -259,8 +259,12 @@ mod tests {
 
     #[test]
     fn only_rich_tiers_paint_a_background() {
-        assert!(Theme::new(Tier::Ansi256, ThemeId::Nvg, false).canvas().is_some());
-        assert!(Theme::new(Tier::Basic, ThemeId::Nvg, false).canvas().is_none());
+        assert!(Theme::new(Tier::Ansi256, ThemeId::Nvg, false)
+            .canvas()
+            .is_some());
+        assert!(Theme::new(Tier::Basic, ThemeId::Nvg, false)
+            .canvas()
+            .is_none());
         assert_eq!(ThemeId::from_name("brand-light"), ThemeId::BrandLight);
         assert_eq!(ThemeId::from_name("nope"), ThemeId::Amber);
     }

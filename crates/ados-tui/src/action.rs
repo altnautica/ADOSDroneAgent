@@ -181,7 +181,13 @@ mod tests {
         let labels: Vec<_> = ACTIONS.iter().map(|a| a.label).collect();
         assert_eq!(
             labels,
-            ["Install RTL driver", "Radio status", "Update agent", "Restart radio", "Reboot host"]
+            [
+                "Install RTL driver",
+                "Radio status",
+                "Update agent",
+                "Restart radio",
+                "Reboot host"
+            ]
         );
         assert_eq!(ACTIONS[reboot_index()].label, "Reboot host");
     }

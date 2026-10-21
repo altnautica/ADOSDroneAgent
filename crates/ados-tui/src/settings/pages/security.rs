@@ -77,7 +77,11 @@ impl Page {
         items.push(Item::Header("Agent API key".into()));
         let config = core.value(&ResourceId::Config);
         let key = config.and_then(|c| crate::app::at(c, "security.api.api_key"));
-        let state = if config.is_some() { api_key_state(key) } else { "unknown" };
+        let state = if config.is_some() {
+            api_key_state(key)
+        } else {
+            "unknown"
+        };
         items.push(rows_view::info(core, "API key", state));
         items.push(rows_view::note(
             core,
@@ -91,7 +95,11 @@ impl Page {
         } else {
             let pin = core.value(&ResourceId::PinStatus);
             let flag = |k: &str| pin.and_then(|p| p.get(k)).and_then(Value::as_bool) == Some(true);
-            items.push(rows_view::info(core, "PIN", if flag("pin_set") { "set" } else { "not set" }));
+            items.push(rows_view::info(
+                core,
+                "PIN",
+                if flag("pin_set") { "set" } else { "not set" },
+            ));
             if flag("locked") {
                 let until = pin
                     .and_then(|p| p.get("locked_until"))
@@ -111,7 +119,9 @@ impl Page {
 
     fn toggle(&mut self, core: &mut Core) {
         let items = self.items(core);
-        let Some(row) = self.rows.focused_row(&items).cloned() else { return };
+        let Some(row) = self.rows.focused_row(&items).cloned() else {
+            return;
+        };
         if row.read_only || row.kind != Kind::Bool {
             return;
         }
@@ -134,7 +144,11 @@ impl Page {
 impl Bespoke for Page {
     fn subs(&self, core: &Core) -> Vec<Sub> {
         let mut subs = config_rows::subs(core);
-        subs.push(Sub::every_ms(ResourceId::PinStatus, "/api/dashboard/pin/status", 10_000));
+        subs.push(Sub::every_ms(
+            ResourceId::PinStatus,
+            "/api/dashboard/pin/status",
+            10_000,
+        ));
         subs
     }
 
@@ -175,7 +189,16 @@ impl Bespoke for Page {
 
     fn render(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
         let items = self.items(core);
-        rows_view::render(f, area, core, &items, &mut self.rows, "security:", true, out);
+        rows_view::render(
+            f,
+            area,
+            core,
+            &items,
+            &mut self.rows,
+            "security:",
+            true,
+            out,
+        );
     }
 
     fn context_line(&self, core: &Core) -> Option<String> {

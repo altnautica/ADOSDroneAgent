@@ -160,7 +160,9 @@ impl LogsTab {
 
     fn step(&mut self, delta: isize) {
         let visible = self.visible();
-        let Some(cur) = self.selected_index(&visible) else { return };
+        let Some(cur) = self.selected_index(&visible) else {
+            return;
+        };
         let next = cur.saturating_add_signed(delta).min(visible.len() - 1);
         self.sel = if next + 1 == visible.len() && self.sel.is_none() {
             None
@@ -205,7 +207,13 @@ impl LogsTab {
     fn open_detail(&self, core: &mut Core) {
         let Some(e) = self.selected() else { return };
         let mut lines = vec![
-            (ToastKind::Info, format!("Time    {}", e.timestamp.clone().unwrap_or_else(|| "unknown".into()))),
+            (
+                ToastKind::Info,
+                format!(
+                    "Time    {}",
+                    e.timestamp.clone().unwrap_or_else(|| "unknown".into())
+                ),
+            ),
             (ToastKind::Info, format!("Level   {}", e.level_word())),
             (ToastKind::Info, format!("Logger  {}", e.logger)),
         ];
@@ -234,7 +242,11 @@ impl Tab for LogsTab {
     fn subs(&self, _core: &Core) -> Vec<Sub> {
         let mut subs = vec![Sub::once(ResourceId::Services, "/api/services")];
         if self.mode == Mode::Polling {
-            subs.push(Sub::every_ms(ResourceId::LogsPoll, self.poll_path(), POLL_MS));
+            subs.push(Sub::every_ms(
+                ResourceId::LogsPoll,
+                self.poll_path(),
+                POLL_MS,
+            ));
         }
         subs
     }
@@ -306,7 +318,12 @@ impl Tab for LogsTab {
             }
             Command::Search => {
                 let ret = Ret::new(Route::tab(TabId::Logs), TAG_FILTER);
-                let mut input = Overlay::input(ret, "Filter logs", "Text in logger or message", &self.filter);
+                let mut input = Overlay::input(
+                    ret,
+                    "Filter logs",
+                    "Text in logger or message",
+                    &self.filter,
+                );
                 input.hint = Some("Empty clears the filter".into());
                 core.open(Overlay::Input(input));
             }
@@ -350,7 +367,11 @@ impl Tab for LogsTab {
     }
 
     fn tick(&mut self, core: &mut Core) {
-        let msgs = self.stream.as_ref().map(LogStream::drain).unwrap_or_default();
+        let msgs = self
+            .stream
+            .as_ref()
+            .map(LogStream::drain)
+            .unwrap_or_default();
         for msg in msgs {
             self.handle(core, msg);
         }
@@ -373,7 +394,8 @@ impl Tab for LogsTab {
 
     fn context_line(&self, _core: &Core) -> Option<String> {
         self.sel?;
-        self.selected().map(|e| format!("{}: {}", e.logger, e.message))
+        self.selected()
+            .map(|e| format!("{}: {}", e.logger, e.message))
     }
 
     fn status_hint(&self, _core: &Core) -> Option<String> {

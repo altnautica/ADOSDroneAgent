@@ -60,7 +60,15 @@ impl Installer {
     }
 
     /// Start with the preview. Armed-guarded; one install at a time.
-    pub fn start(&mut self, core: &mut Core, route: Route, url: String, sha: Option<String>, from_catalog: bool, name: String) {
+    pub fn start(
+        &mut self,
+        core: &mut Core,
+        route: Route,
+        url: String,
+        sha: Option<String>,
+        from_catalog: bool,
+        name: String,
+    ) {
         if self.busy() {
             core.toast(ToastKind::Warn, "An install is already in progress");
             return;
@@ -68,11 +76,18 @@ impl Installer {
         if !core.guard_disarmed() {
             return;
         }
-        let sha = sha.map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty());
+        let sha = sha
+            .map(|s| s.trim().to_ascii_lowercase())
+            .filter(|s| !s.is_empty());
         core.submit(
-            Request::new("POST", "/api/plugins/parse_from_url", route, Purpose::PluginParse)
-                .body(state::parse_body(&url, sha.as_deref()))
-                .timeout(INSTALL_TIMEOUT),
+            Request::new(
+                "POST",
+                "/api/plugins/parse_from_url",
+                route,
+                Purpose::PluginParse,
+            )
+            .body(state::parse_body(&url, sha.as_deref()))
+            .timeout(INSTALL_TIMEOUT),
         );
         self.flow = Some(Flow {
             url,
@@ -86,7 +101,9 @@ impl Installer {
 
     /// The preview arrived: show the permission checklist.
     pub fn on_parse(&mut self, core: &mut Core, route: Route, result: &Result<Value, RestError>) {
-        let Some(flow) = self.flow.as_mut() else { return };
+        let Some(flow) = self.flow.as_mut() else {
+            return;
+        };
         let summary = match result {
             Ok(v) => v,
             Err(e) => {
@@ -98,14 +115,26 @@ impl Installer {
         flow.perms = state::perms(summary);
         // Pin the install to the archive the preview verified.
         if flow.sha.is_none() {
-            flow.sha = summary.get("archive_sha256").and_then(Value::as_str).map(str::to_string);
+            flow.sha = summary
+                .get("archive_sha256")
+                .and_then(Value::as_str)
+                .map(str::to_string);
         }
-        let str_at = |k: &str| summary.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+        let str_at = |k: &str| {
+            summary
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
         let name = str_at("name");
         if !name.is_empty() {
             flow.name = name;
         }
-        let signer = match (summary.get("signed").and_then(Value::as_bool), str_at("signer_id")) {
+        let signer = match (
+            summary.get("signed").and_then(Value::as_bool),
+            str_at("signer_id"),
+        ) {
             (Some(true), s) if !s.is_empty() => format!("signed by {s}"),
             (Some(true), _) => "signed".to_string(),
             _ => "unsigned".to_string(),
@@ -126,7 +155,9 @@ impl Installer {
 
     /// The checklist closed: install with the approved set, or stop.
     pub fn on_perms(&mut self, core: &mut Core, route: Route, result: OverlayResult) {
-        let Some(flow) = self.flow.as_mut() else { return };
+        let Some(flow) = self.flow.as_mut() else {
+            return;
+        };
         let OverlayResult::Checked(checked) = result else {
             self.flow = None;
             return;
@@ -136,11 +167,17 @@ impl Installer {
             return;
         }
         let requested = state::requested(&flow.perms, &checked);
-        let body = state::install_body(&flow.url, flow.sha.as_deref(), requested, flow.from_catalog);
+        let body =
+            state::install_body(&flow.url, flow.sha.as_deref(), requested, flow.from_catalog);
         core.submit(
-            Request::new("POST", "/api/plugins/install_from_url", route, Purpose::PluginInstall)
-                .body(body)
-                .timeout(INSTALL_TIMEOUT),
+            Request::new(
+                "POST",
+                "/api/plugins/install_from_url",
+                route,
+                Purpose::PluginInstall,
+            )
+            .body(body)
+            .timeout(INSTALL_TIMEOUT),
         );
         flow.stage = Stage::Installing;
     }
@@ -150,15 +187,26 @@ impl Installer {
         let Some(flow) = self.flow.take() else { return };
         match result {
             Ok(v) => {
-                let id = v.get("plugin_id").and_then(Value::as_str).unwrap_or_default().to_string();
+                let id = v
+                    .get("plugin_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 let version = v.get("version").and_then(Value::as_str).unwrap_or_default();
                 let missing = state::missing_required(&flow.perms, v);
                 if missing.is_empty() {
-                    core.toast(ToastKind::Success, format!("Installed {} {version}", flow.name));
+                    core.toast(
+                        ToastKind::Success,
+                        format!("Installed {} {version}", flow.name),
+                    );
                 } else {
                     core.toast(
                         ToastKind::Warn,
-                        format!("Installed {}, but {} was not granted; disabling it", flow.name, missing.join(", ")),
+                        format!(
+                            "Installed {}, but {} was not granted; disabling it",
+                            flow.name,
+                            missing.join(", ")
+                        ),
                     );
                     if !id.is_empty() {
                         core.submit(Request::new(

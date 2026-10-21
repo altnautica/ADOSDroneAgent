@@ -100,7 +100,9 @@ fn sidebar_groups_render_in_order() {
     ];
     let mut last = 0;
     for g in groups {
-        let at = side.find(g).unwrap_or_else(|| panic!("{g} missing:\n{side}"));
+        let at = side
+            .find(g)
+            .unwrap_or_else(|| panic!("{g} missing:\n{side}"));
         assert!(at >= last, "{g} out of order:\n{side}");
         last = at;
     }
@@ -111,7 +113,17 @@ fn sidebar_groups_render_in_order() {
 fn a_drone_and_a_ground_station_gate_their_pages() {
     let mut drone = profile_app("drone");
     let side = sidebar_text(&draw(&mut drone, 120, 40));
-    for page in ["MAVLink", "Radio", "Camera", "Video link", "Vision", "Sensors", "Swarm", "Region", "Battery"] {
+    for page in [
+        "MAVLink",
+        "Radio",
+        "Camera",
+        "Video link",
+        "Vision",
+        "Sensors",
+        "Swarm",
+        "Region",
+        "Battery",
+    ] {
         assert!(side.contains(page), "drone lacks {page}:\n{side}");
     }
     for page in ["Capture", "Display"] {
@@ -123,7 +135,16 @@ fn a_drone_and_a_ground_station_gate_their_pages() {
     for page in ["Radio", "Region", "Display", "Wi-Fi", "All settings"] {
         assert!(side.contains(page), "ground station lacks {page}:\n{side}");
     }
-    for page in ["MAVLink", "Camera", "Video link", "Vision", "Sensors", "Swarm", "Battery", "Capture"] {
+    for page in [
+        "MAVLink",
+        "Camera",
+        "Video link",
+        "Vision",
+        "Sensors",
+        "Swarm",
+        "Battery",
+        "Capture",
+    ] {
         assert!(!side.contains(page), "ground station shows {page}:\n{side}");
     }
 }
@@ -153,18 +174,30 @@ fn bool_row(value: bool) -> EditRow {
 #[test]
 fn left_right_on_a_bool_row_writes_the_toggled_bool() {
     let w = cycle_write(&bool_row(true), true).unwrap();
-    assert_eq!((w.key.as_str(), &w.value), ("discovery.mdns_enabled", &json!(false)));
+    assert_eq!(
+        (w.key.as_str(), &w.value),
+        ("discovery.mdns_enabled", &json!(false))
+    );
     let w = cycle_write(&bool_row(false), false).unwrap();
-    assert_eq!((w.key.as_str(), &w.value), ("discovery.mdns_enabled", &json!(true)));
+    assert_eq!(
+        (w.key.as_str(), &w.value),
+        ("discovery.mdns_enabled", &json!(true))
+    );
 
     let mut ro = bool_row(true);
     ro.read_only = true;
     assert!(cycle_write(&ro, true).is_none());
 
     let mut num = bool_row(true);
-    num.kind = Kind::Int { min: None, max: None };
+    num.kind = Kind::Int {
+        min: None,
+        max: None,
+    };
     num.value = Some(json!(3));
-    assert!(cycle_write(&num, true).is_none(), "numbers edit with Enter, not ←/→");
+    assert!(
+        cycle_write(&num, true).is_none(),
+        "numbers edit with Enter, not ←/→"
+    );
 
     let mut e = bool_row(true);
     e.kind = Kind::Enum(vec![json!("a"), json!("b"), json!("c")]);
@@ -200,7 +233,10 @@ fn prefs_pages_apply_live_and_persist() {
     app.command(Command::Down);
     app.command(Command::Right);
     assert_eq!(app.core.store.prefs.motion, "full");
-    assert_eq!(app.core.fx.level, crate::motion::resolve("full", app.core.ssh, app.core.tier));
+    assert_eq!(
+        app.core.fx.level,
+        crate::motion::resolve("full", app.core.ssh, app.core.tier)
+    );
 
     let saved = PrefsStore::load(Some(path));
     assert_eq!(saved.prefs.theme, "brand-dark");
@@ -214,9 +250,15 @@ fn behaviour_rows_render_with_their_values() {
     let mut app = profile_app("drone");
     app.tabs.settings.goto_page(&mut app.core, "behaviour");
     let frame = draw(&mut app, 120, 40);
-    assert!(frame.contains("Refresh interval (ms)") && frame.contains("2000"), "{frame}");
+    assert!(
+        frame.contains("Refresh interval (ms)") && frame.contains("2000"),
+        "{frame}"
+    );
     assert!(frame.contains("Mouse") && frame.contains("off"), "{frame}");
-    assert!(frame.contains("Start tab") && frame.contains("overview"), "{frame}");
+    assert!(
+        frame.contains("Start tab") && frame.contains("overview"),
+        "{frame}"
+    );
 }
 
 #[test]
@@ -227,7 +269,11 @@ fn a_confirm_row_asks_before_writing() {
     app.command(Command::Right);
     match app.core.overlays.last() {
         Some(Overlay::Confirm(c)) => {
-            assert!(c.title.contains("Flight-controller transport"), "{}", c.title);
+            assert!(
+                c.title.contains("Flight-controller transport"),
+                "{}",
+                c.title
+            );
             assert!(c.body[0].contains("serial"), "{:?}", c.body);
         }
         other => panic!("expected a confirm, got {other:?}"),
@@ -241,9 +287,15 @@ fn config_pages_show_schema_rows_with_curated_labels() {
     app.tabs.settings.goto_page(&mut app.core, "mavlink");
     let frame = draw(&mut app, 120, 40);
     assert!(frame.contains("Flight-controller transport"), "{frame}");
-    assert!(frame.contains("Baud rate") && frame.contains("115200"), "{frame}");
+    assert!(
+        frame.contains("Baud rate") && frame.contains("115200"),
+        "{frame}"
+    );
     assert!(frame.contains("Agent identity"), "{frame}");
-    assert!(frame.contains("How the agent reaches the flight controller"), "{frame}");
+    assert!(
+        frame.contains("How the agent reaches the flight controller"),
+        "{frame}"
+    );
 }
 
 #[test]
@@ -267,11 +319,17 @@ fn the_filter_keeps_matching_rows_and_their_headers() {
 fn right_on_a_bool_config_row_submits_without_confirming() {
     let mut app = profile_app("drone");
     with_config(&mut app);
-    app.tabs.settings.goto_key(&mut app.core, "discovery.mdns_enabled");
+    app.tabs
+        .settings
+        .goto_key(&mut app.core, "discovery.mdns_enabled");
     app.command(Command::Right);
     assert!(app.core.overlays.is_empty(), "mDNS needs no confirmation");
     assert_eq!(
-        app.tabs.settings.pending.get("all_settings/discovery.mdns_enabled").map(String::as_str),
+        app.tabs
+            .settings
+            .pending
+            .get("all_settings/discovery.mdns_enabled")
+            .map(String::as_str),
         Some("Mdns enabled"),
         "the write is in flight under its flash key"
     );
@@ -296,7 +354,9 @@ fn a_configurable_extension_gets_a_page_under_extensions() {
     let side = sidebar_text(&draw(&mut app, 120, 40));
     let ext = side.find("EXTENSIONS").unwrap_or_else(|| panic!("{side}"));
     let tracker = side.find("Tracker").unwrap_or_else(|| panic!("{side}"));
-    let all = side.find("ALL SETTINGS").unwrap_or_else(|| panic!("{side}"));
+    let all = side
+        .find("ALL SETTINGS")
+        .unwrap_or_else(|| panic!("{side}"));
     assert!(ext < tracker && tracker < all, "{side}");
 }
 
@@ -304,16 +364,26 @@ fn a_configurable_extension_gets_a_page_under_extensions() {
 fn all_settings_lists_sections_and_jumps_to_a_key() {
     let mut app = profile_app("drone");
     with_config(&mut app);
-    app.tabs.settings.goto_key(&mut app.core, "mavlink.baud_rate");
+    app.tabs
+        .settings
+        .goto_key(&mut app.core, "mavlink.baud_rate");
     let frame = draw(&mut app, 120, 40);
     for s in ["agent", "cameras", "discovery", "mavlink"] {
         assert!(frame.contains(s), "{s} missing:\n{frame}");
     }
-    assert!(frame.contains("baud_rate") && frame.contains("115200"), "{frame}");
+    assert!(
+        frame.contains("baud_rate") && frame.contains("115200"),
+        "{frame}"
+    );
     assert!(frame.contains("[{\"id\":\"front\"}]"), "{frame}");
-    assert!(frame.contains("mavlink.baud_rate: Serial line speed"), "{frame}");
+    assert!(
+        frame.contains("mavlink.baud_rate: Serial line speed"),
+        "{frame}"
+    );
 
     let items = app.tabs.settings.palette_items(&app.core);
-    assert!(items.iter().any(|i| i.label.starts_with("mavlink.baud_rate")));
+    assert!(items
+        .iter()
+        .any(|i| i.label.starts_with("mavlink.baud_rate")));
     assert!(items.iter().any(|i| i.label == "Settings › All settings"));
 }

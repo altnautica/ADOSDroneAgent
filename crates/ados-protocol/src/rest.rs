@@ -91,7 +91,11 @@ pub fn status_detail(body: &Value) -> String {
     ];
     PATHS
         .iter()
-        .find_map(|p| p.iter().try_fold(body, |v, k| v.get(*k)).and_then(Value::as_str))
+        .find_map(|p| {
+            p.iter()
+                .try_fold(body, |v, k| v.get(*k))
+                .and_then(Value::as_str)
+        })
         .unwrap_or_default()
         .to_string()
 }
@@ -498,7 +502,12 @@ mod tests {
         );
         let client = RestClient::new(base);
         let err = client
-            .send_json("PUT", "/api/config", Some(&json!({"key": "a", "value": 1})), DEFAULT_TIMEOUT)
+            .send_json(
+                "PUT",
+                "/api/config",
+                Some(&json!({"key": "a", "value": 1})),
+                DEFAULT_TIMEOUT,
+            )
             .unwrap_err();
         assert_eq!(err.code(), Some(409));
         assert_eq!(err.body().unwrap()["error"], "E_ARMED");
@@ -550,7 +559,13 @@ mod tests {
         });
         let resp: ParamsResponse = serde_json::from_value(raw).unwrap();
         assert_eq!(resp.params["BATT_CAPACITY"], 5200.0);
-        assert_eq!(resp.progress, Some(ParamProgress { got: 2, expected: 700 }));
+        assert_eq!(
+            resp.progress,
+            Some(ParamProgress {
+                got: 2,
+                expected: 700
+            })
+        );
         assert!(resp.priming);
         assert_round_trip(&resp);
     }

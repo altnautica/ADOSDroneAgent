@@ -27,7 +27,10 @@ pub fn wrap(text: &str, width: usize) -> Vec<String> {
     if chars.is_empty() {
         return vec![String::new()];
     }
-    chars.chunks(width.max(1)).map(|c| c.iter().collect()).collect()
+    chars
+        .chunks(width.max(1))
+        .map(|c| c.iter().collect())
+        .collect()
 }
 
 fn level_style(core: &Core, e: &LogEntry) -> Style {
@@ -35,7 +38,9 @@ fn level_style(core: &Core, e: &LogEntry) -> Style {
     match e.rank() {
         0 | 1 => t.dim(),
         2 => t.text(),
-        3 => Style::default().fg(t.warning()).add_modifier(Modifier::BOLD),
+        3 => Style::default()
+            .fg(t.warning())
+            .add_modifier(Modifier::BOLD),
         _ => Style::default().fg(t.error()).add_modifier(Modifier::BOLD),
     }
 }
@@ -47,7 +52,10 @@ fn status_line(core: &Core, tab: &LogsTab, shown: usize) -> Line<'static> {
         Span::styled("Level ≥ ", t.dim()),
         Span::styled(LEVELS[tab.level], t.accent_bold()),
         Span::styled("  Service ", t.dim()),
-        Span::styled(tab.service.clone().unwrap_or_else(|| "all".into()), t.bright()),
+        Span::styled(
+            tab.service.clone().unwrap_or_else(|| "all".into()),
+            t.bright(),
+        ),
     ];
     if !tab.filter.is_empty() {
         spans.push(Span::styled("  Filter ", t.dim()));
@@ -78,7 +86,12 @@ fn status_line(core: &Core, tab: &LogsTab, shown: usize) -> Line<'static> {
         t.dim(),
     ));
     if tab.paused_at.is_some() {
-        spans.push(Span::styled("  PAUSED", Style::default().fg(t.warning()).add_modifier(Modifier::BOLD)));
+        spans.push(Span::styled(
+            "  PAUSED",
+            Style::default()
+                .fg(t.warning())
+                .add_modifier(Modifier::BOLD),
+        ));
     }
     Line::from(spans)
 }
@@ -103,7 +116,10 @@ pub fn render(f: &mut Frame, area: Rect, core: &Core, tab: &LogsTab, out: &mut F
             f,
             area,
             y,
-            Line::from(Span::styled(format!("{} {w}", core.sym.warn), Style::default().fg(t.warning()))),
+            Line::from(Span::styled(
+                format!("{} {w}", core.sym.warn),
+                Style::default().fg(t.warning()),
+            )),
         );
         y += 1;
     }
@@ -128,7 +144,12 @@ pub fn render(f: &mut Frame, area: Rect, core: &Core, tab: &LogsTab, out: &mut F
         } else {
             "No lines match the level or filter."
         };
-        put(f, area, y, Line::from(Span::styled(format!("  {text}"), t.dim())));
+        put(
+            f,
+            area,
+            y,
+            Line::from(Span::styled(format!("  {text}"), t.dim())),
+        );
         return 0;
     }
     let height = list.height as usize;
@@ -138,7 +159,13 @@ pub fn render(f: &mut Frame, area: Rect, core: &Core, tab: &LogsTab, out: &mut F
     } else {
         scroll_offset(sel, tab.offset, height)
     };
-    for (row, (i, e)) in visible.iter().enumerate().skip(offset).take(height).enumerate() {
+    for (row, (i, e)) in visible
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(height)
+        .enumerate()
+    {
         let focused = tab.sel.is_some() && i == sel;
         let marker = if focused { core.sym.row_marker } else { " " };
         let msg_style = if focused { t.accented() } else { t.text() };
@@ -146,8 +173,14 @@ pub fn render(f: &mut Frame, area: Rect, core: &Core, tab: &LogsTab, out: &mut F
         let l = Line::from(vec![
             Span::styled(format!("{marker} "), t.accented()),
             Span::styled(format!("{:<TIME_W$} ", e.time()), t.dim()),
-            Span::styled(format!("{:<LEVEL_W$} ", e.level_word()), level_style(core, e)),
-            Span::styled(format!("{:<LOGGER_W$} ", truncate(&e.logger, LOGGER_W)), t.dim()),
+            Span::styled(
+                format!("{:<LEVEL_W$} ", e.level_word()),
+                level_style(core, e),
+            ),
+            Span::styled(
+                format!("{:<LOGGER_W$} ", truncate(&e.logger, LOGGER_W)),
+                t.dim(),
+            ),
             Span::styled(truncate(&e.message, msg_w), msg_style),
         ]);
         f.render_widget(Paragraph::new(l), rect);

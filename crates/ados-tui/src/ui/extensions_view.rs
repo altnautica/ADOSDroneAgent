@@ -20,14 +20,22 @@ enum ListLine {
 }
 
 impl ExtensionsTab {
-    pub(super) fn render_list(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
+    pub(super) fn render_list(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        core: &Core,
+        out: &mut FrameOut,
+    ) {
         let t = &core.theme;
         let (installs, catalog) = entries(core);
         let w = area.width as usize;
         let mut lines = vec![ListLine::Header(format!("INSTALLED ({})", installs.len()))];
         match core.slot(&ResourceId::Plugins) {
             Some(s) if s.value.is_none() => {
-                lines.push(ListLine::Note(s.error.clone().unwrap_or_else(|| "Reading…".into())));
+                lines.push(ListLine::Note(
+                    s.error.clone().unwrap_or_else(|| "Reading…".into()),
+                ));
             }
             None => lines.push(ListLine::Note("Reading…".into())),
             _ if installs.is_empty() => lines.push(ListLine::Note("none".into())),
@@ -39,7 +47,10 @@ impl ExtensionsTab {
             let name_w = w.saturating_sub(4 + version.chars().count());
             let line = Line::from(vec![
                 Span::styled(format!("{glyph} "), Style::default().fg(color)),
-                Span::styled(format!("{:<name_w$}", truncate(&name_of(core, &inst.id), name_w)), t.text()),
+                Span::styled(
+                    format!("{:<name_w$}", truncate(&name_of(core, &inst.id), name_w)),
+                    t.text(),
+                ),
                 Span::styled(version, t.dim()),
             ]);
             lines.push(ListLine::Entry(i, line));
@@ -48,7 +59,9 @@ impl ExtensionsTab {
         lines.push(ListLine::Header(format!("CATALOG ({})", catalog.len())));
         match core.slot(&ResourceId::PluginsCatalog) {
             Some(s) if s.value.is_none() => {
-                lines.push(ListLine::Note(s.error.clone().unwrap_or_else(|| "Reading…".into())));
+                lines.push(ListLine::Note(
+                    s.error.clone().unwrap_or_else(|| "Reading…".into()),
+                ));
             }
             None => lines.push(ListLine::Note("Reading…".into())),
             _ if catalog.is_empty() => lines.push(ListLine::Note("everything is installed".into())),
@@ -60,7 +73,10 @@ impl ExtensionsTab {
             let line = Line::from(vec![
                 Span::styled(format!("{:<name_w$}", truncate(&c.name, name_w)), t.text()),
                 Span::styled(format!(" {}", c.version), t.dim()),
-                Span::styled(format!(" {}", c.risk), Style::default().fg(detail::risk_color(t, &c.risk))),
+                Span::styled(
+                    format!(" {}", c.risk),
+                    Style::default().fg(detail::risk_color(t, &c.risk)),
+                ),
             ]);
             lines.push(ListLine::Entry(installs.len() + j, line));
         }
@@ -71,10 +87,17 @@ impl ExtensionsTab {
             .unwrap_or(0);
         self.list_offset = scroll_offset(focus_line, self.list_offset, area.height as usize);
         let focused = self.focus == super::Focus::List;
-        for (row, line) in lines.into_iter().skip(self.list_offset).take(area.height as usize).enumerate() {
+        for (row, line) in lines
+            .into_iter()
+            .skip(self.list_offset)
+            .take(area.height as usize)
+            .enumerate()
+        {
             let rect = Rect::new(area.x, area.y + row as u16, area.width, 1);
             let drawn = match line {
-                ListLine::Header(h) => Line::from(Span::styled(h, t.dim().add_modifier(Modifier::BOLD))),
+                ListLine::Header(h) => {
+                    Line::from(Span::styled(h, t.dim().add_modifier(Modifier::BOLD)))
+                }
                 ListLine::Note(n) => Line::from(Span::styled(format!("  {n}"), t.dim())),
                 ListLine::Entry(i, line) => {
                     out.hit(rect, Hit::Sidebar(i));
@@ -103,16 +126,33 @@ impl ExtensionsTab {
         }
     }
 
-    pub(super) fn render_detail(&mut self, f: &mut Frame, area: Rect, core: &Core, out: &mut FrameOut) {
+    pub(super) fn render_detail(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        core: &Core,
+        out: &mut FrameOut,
+    ) {
         let t = &core.theme;
         let mut area = area;
         if let Some(status) = self.installer.status() {
             let line = Line::from(vec![
-                Span::styled(format!("{} ", core.sym.spinner_frame(core.frame as usize)), t.accented()),
+                Span::styled(
+                    format!("{} ", core.sym.spinner_frame(core.frame as usize)),
+                    t.accented(),
+                ),
                 Span::styled(status, t.text()),
             ]);
-            f.render_widget(Paragraph::new(line), Rect::new(area.x, area.y, area.width, 1));
-            area = Rect::new(area.x, area.y + 2.min(area.height), area.width, area.height.saturating_sub(2));
+            f.render_widget(
+                Paragraph::new(line),
+                Rect::new(area.x, area.y, area.width, 1),
+            );
+            area = Rect::new(
+                area.x,
+                area.y + 2.min(area.height),
+                area.width,
+                area.height.saturating_sub(2),
+            );
         }
         let lines = match self.selected(core) {
             Some(Entry::Installed(inst)) => detail::installed(core, &inst),
@@ -124,7 +164,9 @@ impl ExtensionsTab {
         };
         // The config rows take the lower part when the plugin declares any.
         let config_rows = match (&self.pane, self.selected(core)) {
-            (Some(p), Some(Entry::Installed(_))) if p.has_rows(core) => p.items(core).len() as u16 + 1,
+            (Some(p), Some(Entry::Installed(_))) if p.has_rows(core) => {
+                p.items(core).len() as u16 + 1
+            }
             _ => 0,
         };
         let (doc, cfg) = if config_rows > 0 && area.height > 8 {
@@ -140,12 +182,21 @@ impl ExtensionsTab {
         self.detail_len = lines.len() as u16;
         self.detail_scroll = self.detail_scroll.min(self.detail_len.saturating_sub(1));
         f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((self.detail_scroll, 0)),
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((self.detail_scroll, 0)),
             doc,
         );
         if let (Some(cfg), Some(pane)) = (cfg, self.pane.as_mut()) {
-            let style = if self.focus == Focus::Config { t.accent_bold() } else { t.text() };
-            let head = Line::from(Span::styled("Config", style.add_modifier(Modifier::UNDERLINED)));
+            let style = if self.focus == Focus::Config {
+                t.accent_bold()
+            } else {
+                t.text()
+            };
+            let head = Line::from(Span::styled(
+                "Config",
+                style.add_modifier(Modifier::UNDERLINED),
+            ));
             f.render_widget(Paragraph::new(head), Rect::new(cfg.x, cfg.y, cfg.width, 1));
             let rows = Rect::new(cfg.x, cfg.y + 1, cfg.width, cfg.height.saturating_sub(1));
             pane.draw(f, rows, core, self.focus == Focus::Config, out);

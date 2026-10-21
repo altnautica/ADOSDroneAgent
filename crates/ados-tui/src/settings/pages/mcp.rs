@@ -30,7 +30,13 @@ const ACCEPT_LABEL: &str = "Accept MCP tokens";
 const SCOPES: &[&str] = &["read", "safe_write", "admin"];
 const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 /// TTL choices: label and days.
-const TTLS: &[(&str, i64)] = &[("1 day", 1), ("7 days", 7), ("30 days", 30), ("90 days", 90), ("365 days", 365)];
+const TTLS: &[(&str, i64)] = &[
+    ("1 day", 1),
+    ("7 days", 7),
+    ("30 days", 30),
+    ("90 days", 90),
+    ("365 days", 365),
+];
 const DEFAULT_TTL: usize = 2;
 /// Stands in for the operator's local ADOS-MCP clone.
 pub const CLONE_PATH: &str = "<path-to>/ADOS-MCP";
@@ -48,7 +54,14 @@ pub fn connect_recipe(host: &str, api_key: &str) -> String {
 
 /// The recipe as displayed: the key masked, or the placeholder when unknown.
 pub fn masked_recipe(host: &str, api_key: Option<&str>) -> String {
-    connect_recipe(host, if api_key.is_some() { MASK } else { KEY_PLACEHOLDER })
+    connect_recipe(
+        host,
+        if api_key.is_some() {
+            MASK
+        } else {
+            KEY_PLACEHOLDER
+        },
+    )
 }
 
 /// The agent's reachable address for the recipe: the setup mDNS host, else
@@ -62,7 +75,13 @@ fn connect_host(core: &Core) -> String {
     let port = s
         .and_then(|v| crate::app::at(v, "network.api_port"))
         .and_then(Value::as_u64)
-        .or_else(|| core.target.base.rsplit(':').next().and_then(|p| p.parse().ok()))
+        .or_else(|| {
+            core.target
+                .base
+                .rsplit(':')
+                .next()
+                .and_then(|p| p.parse().ok())
+        })
         .unwrap_or(8080);
     format!("http://{}:{port}", host_for_url(&host))
 }
@@ -130,7 +149,11 @@ impl Page {
         items.push(Item::Header("Tokens".into()));
         let list = tokens(core);
         if list.is_empty() && status(core).is_some() {
-            items.push(rows_view::note(core, "No tokens. Press n to mint one.", false));
+            items.push(rows_view::note(
+                core,
+                "No tokens. Press n to mint one.",
+                false,
+            ));
         }
         for tok in &list {
             let state = token_state(tok);
@@ -142,16 +165,36 @@ impl Page {
             let scopes = tok
                 .get("scopes")
                 .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(","))
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
                 .unwrap_or_default();
-            let created = tok.get("created_at").and_then(Value::as_f64).map(|s| kit::utc(s as i64)).unwrap_or_default();
-            let expires = tok.get("expires_at").and_then(Value::as_i64).map(kit::utc_ms).unwrap_or_default();
+            let created = tok
+                .get("created_at")
+                .and_then(Value::as_f64)
+                .map(|s| kit::utc(s as i64))
+                .unwrap_or_default();
+            let expires = tok
+                .get("expires_at")
+                .and_then(Value::as_i64)
+                .map(kit::utc_ms)
+                .unwrap_or_default();
             let label = str_of(tok, "label");
-            let label = if label.is_empty() { "(no label)" } else { label };
+            let label = if label.is_empty() {
+                "(no label)"
+            } else {
+                label
+            };
             items.push(Item::Entry {
                 key: str_of(tok, "token_id").to_string(),
                 line: Line::from(vec![
-                    Span::styled(format!("{glyph} {state:<8} "), ratatui::style::Style::default().fg(color)),
+                    Span::styled(
+                        format!("{glyph} {state:<8} "),
+                        ratatui::style::Style::default().fg(color),
+                    ),
                     Span::styled(format!("{label:<18} "), t.text()),
                     Span::styled(format!("{scopes:<22} "), t.dim()),
                     Span::styled(format!("{created}  →  {expires}"), t.dim()),
@@ -159,17 +202,32 @@ impl Page {
             });
         }
         if self.busy {
-            items.push(rows_view::note(core, format!("{} Working…", core.sym.spinner_frame(core.frame as usize)), false));
+            items.push(rows_view::note(
+                core,
+                format!("{} Working…", core.sym.spinner_frame(core.frame as usize)),
+                false,
+            ));
         }
 
         items.push(Item::Header("Connect".into()));
         let key = core.client.auth().api_key;
         let recipe = masked_recipe(&connect_host(core), key.as_deref());
         if let Some((head, tail)) = recipe.split_once(" -- ") {
-            items.push(Item::Text(Line::from(Span::styled(format!("  {head} \\"), t.text()))));
-            items.push(Item::Text(Line::from(Span::styled(format!("    -- {tail}"), t.text()))));
+            items.push(Item::Text(Line::from(Span::styled(
+                format!("  {head} \\"),
+                t.text(),
+            ))));
+            items.push(Item::Text(Line::from(Span::styled(
+                format!("    -- {tail}"),
+                t.text(),
+            ))));
         }
-        items.push(kit::action(core, "copy", "Copy the command", "y · with the real key"));
+        items.push(kit::action(
+            core,
+            "copy",
+            "Copy the command",
+            "y · with the real key",
+        ));
         if key.is_none() {
             items.push(rows_view::note(
                 core,
@@ -177,21 +235,36 @@ impl Page {
                 true,
             ));
         }
-        items.push(rows_view::note(core, format!("{CLONE_PATH} is your local clone of ADOS-MCP, built once."), false));
+        items.push(rows_view::note(
+            core,
+            format!("{CLONE_PATH} is your local clone of ADOS-MCP, built once."),
+            false,
+        ));
         items
     }
 
     fn focused_token(&self, core: &Core) -> Option<Value> {
         let items = self.items(core);
         let id = self.rows.focused_key(&items)?;
-        tokens(core).into_iter().find(|t| str_of(t, "token_id") == id)
+        tokens(core)
+            .into_iter()
+            .find(|t| str_of(t, "token_id") == id)
     }
 
     fn toggle_accept(&self, core: &mut Core) {
-        let Some(cur) = status(core).and_then(|s| s.get("accept_enabled")).and_then(Value::as_bool) else {
+        let Some(cur) = status(core)
+            .and_then(|s| s.get("accept_enabled"))
+            .and_then(Value::as_bool)
+        else {
             return;
         };
-        config_write::submit(core, route(), ACCEPT_KEY, json!(!cur), &format!("mcp:{ACCEPT_KEY}"));
+        config_write::submit(
+            core,
+            route(),
+            ACCEPT_KEY,
+            json!(!cur),
+            &format!("mcp:{ACCEPT_KEY}"),
+        );
     }
 
     fn copy_recipe(core: &mut Core) {
@@ -200,7 +273,10 @@ impl Page {
             Some(k) => core.copy(&connect_recipe(&host, &k)),
             None => {
                 core.copy(&connect_recipe(&host, KEY_PLACEHOLDER));
-                core.toast(ToastKind::Warn, format!("No pairing key known: replace {KEY_PLACEHOLDER} in the command"));
+                core.toast(
+                    ToastKind::Warn,
+                    format!("No pairing key known: replace {KEY_PLACEHOLDER} in the command"),
+                );
             }
         }
     }
@@ -224,7 +300,9 @@ impl Page {
                 })
                 .collect(),
             selected: 0,
-            footer: Some("Flight, destructive and secret-read tokens are minted from Mission Control".into()),
+            footer: Some(
+                "Flight, destructive and secret-read tokens are minted from Mission Control".into(),
+            ),
             ret: Ret::new(route(), "scopes").with(json!({ "label": label })),
         }));
     }
@@ -249,7 +327,15 @@ impl Page {
     fn submit_revoke(&mut self, core: &mut Core, body: Value, ok: &str) {
         self.busy = true;
         core.submit(
-            Request::new("POST", "/api/mcp/revoke", route(), Purpose::Generic { ok_toast: ok.into() }).body(body),
+            Request::new(
+                "POST",
+                "/api/mcp/revoke",
+                route(),
+                Purpose::Generic {
+                    ok_toast: ok.into(),
+                },
+            )
+            .body(body),
         );
     }
 }
@@ -273,7 +359,9 @@ impl Bespoke for Page {
         }
         let focused = self.rows.focused_key(&items).map(str::to_string);
         match cmd {
-            Command::Left | Command::Right if focused.as_deref() == Some(ACCEPT_KEY) => self.toggle_accept(core),
+            Command::Left | Command::Right if focused.as_deref() == Some(ACCEPT_KEY) => {
+                self.toggle_accept(core)
+            }
             Command::Activate => match focused.as_deref() {
                 Some(ACCEPT_KEY) => self.toggle_accept(core),
                 Some("copy") => Self::copy_recipe(core),
@@ -301,7 +389,12 @@ impl Bespoke for Page {
         match (ret.tag, result) {
             ("label", OverlayResult::Text(label)) => Self::scopes(core, label.trim()),
             ("scopes", OverlayResult::Checked(picked)) => {
-                let scopes: Vec<&str> = SCOPES.iter().zip(picked).filter(|(_, on)| *on).map(|(s, _)| *s).collect();
+                let scopes: Vec<&str> = SCOPES
+                    .iter()
+                    .zip(picked)
+                    .filter(|(_, on)| *on)
+                    .map(|(s, _)| *s)
+                    .collect();
                 let label = str_of(&ret.data, "label").to_string();
                 if scopes.is_empty() {
                     core.toast(ToastKind::Error, "Pick at least one scope");
@@ -321,7 +414,9 @@ impl Bespoke for Page {
                 let mut body = ret.data.clone();
                 body["ttl_ms"] = json!(days * DAY_MS);
                 self.busy = true;
-                core.submit(Request::new("POST", "/api/mcp/tokens", route(), Purpose::McpMint).body(body));
+                core.submit(
+                    Request::new("POST", "/api/mcp/tokens", route(), Purpose::McpMint).body(body),
+                );
             }
             ("revoke", OverlayResult::Confirmed) => {
                 let id = ret.data.as_str().unwrap_or_default().to_string();
@@ -344,7 +439,10 @@ impl Bespoke for Page {
                 match &reply.result {
                     Ok(body) => match body.get("token").and_then(Value::as_str) {
                         Some(token) => {
-                            let expires = body.get("expires_at").and_then(Value::as_i64).map(kit::utc_ms);
+                            let expires = body
+                                .get("expires_at")
+                                .and_then(Value::as_i64)
+                                .map(kit::utc_ms);
                             let note = match expires {
                                 Some(e) => format!("Copy it now: it is not stored and will not be shown again. Expires {e}."),
                                 None => "Copy it now: it is not stored and will not be shown again.".into(),
@@ -355,9 +453,13 @@ impl Bespoke for Page {
                                 note,
                             }));
                         }
-                        None => core.toast(ToastKind::Error, "Mint failed: the agent returned no token"),
+                        None => {
+                            core.toast(ToastKind::Error, "Mint failed: the agent returned no token")
+                        }
                     },
-                    Err(e) if e.code() == Some(409) => core.toast(ToastKind::Error, "Pair this agent first"),
+                    Err(e) if e.code() == Some(409) => {
+                        core.toast(ToastKind::Error, "Pair this agent first")
+                    }
                     Err(e) => core.toast_error("Mint failed", e),
                 }
             }
@@ -404,7 +506,10 @@ mod tests {
         );
         let shown = masked_recipe(host, Some("k3y"));
         assert!(!shown.contains("k3y"), "{shown}");
-        assert!(shown.contains(&format!("ADOS_MCP_AGENT_KEY={MASK} ")), "{shown}");
+        assert!(
+            shown.contains(&format!("ADOS_MCP_AGENT_KEY={MASK} ")),
+            "{shown}"
+        );
         assert!(masked_recipe(host, None).contains("ADOS_MCP_AGENT_KEY=<pairing-key> "));
     }
 
@@ -445,7 +550,10 @@ mod tests {
                  "expires_at": 1_702_592_000_000_i64, "revoked": false, "expired": false}
             ]})),
         );
-        app.core.res.insert(ResourceId::SetupStatus, slot(json!({"network": {"mdns_host": "bench.local", "api_port": 8080}})));
+        app.core.res.insert(
+            ResourceId::SetupStatus,
+            slot(json!({"network": {"mdns_host": "bench.local", "api_port": 8080}})),
+        );
         let mut page = Page::default();
         let mut term = Terminal::new(TestBackend::new(140, 30)).unwrap();
         term.draw(|f| {
@@ -455,20 +563,40 @@ mod tests {
         .unwrap();
         let buf = term.backend().buffer().clone();
         let text: String = (0..buf.area.height)
-            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect::<String>() + "\n")
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+                    + "\n"
+            })
             .collect();
         assert!(text.contains("Accept MCP tokens"), "{text}");
         assert!(text.contains("laptop"), "{text}");
         assert!(text.contains("active"), "{text}");
-        assert!(text.contains(&format!("ADOS_MCP_AGENT_KEY={MASK}")), "{text}");
-        assert!(text.contains("--target agent http://bench.local:8080"), "{text}");
+        assert!(
+            text.contains(&format!("ADOS_MCP_AGENT_KEY={MASK}")),
+            "{text}"
+        );
+        assert!(
+            text.contains("--target agent http://bench.local:8080"),
+            "{text}"
+        );
         assert!(!text.contains("real-key-123"), "{text}");
     }
 
     #[test]
     fn token_state_reads_revoked_before_expired() {
-        assert_eq!(token_state(&json!({"revoked": true, "expired": true})), "revoked");
-        assert_eq!(token_state(&json!({"revoked": false, "expired": true})), "expired");
-        assert_eq!(token_state(&json!({"revoked": false, "expired": false})), "active");
+        assert_eq!(
+            token_state(&json!({"revoked": true, "expired": true})),
+            "revoked"
+        );
+        assert_eq!(
+            token_state(&json!({"revoked": false, "expired": true})),
+            "expired"
+        );
+        assert_eq!(
+            token_state(&json!({"revoked": false, "expired": false})),
+            "active"
+        );
     }
 }
