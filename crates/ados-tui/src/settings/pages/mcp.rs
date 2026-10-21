@@ -196,8 +196,8 @@ impl Page {
                         ratatui::style::Style::default().fg(color),
                     ),
                     Span::styled(format!("{label:<18} "), t.text()),
-                    Span::styled(format!("{scopes:<22} "), t.dim()),
-                    Span::styled(format!("{created}  →  {expires}"), t.dim()),
+                    Span::styled(format!("{scopes:<16} "), t.dim()),
+                    Span::styled(format!("{created} → {expires}"), t.dim()),
                 ]),
             });
         }

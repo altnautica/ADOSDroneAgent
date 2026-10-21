@@ -21,6 +21,8 @@ mod poll;
 mod prefs;
 mod settings;
 mod shell;
+#[cfg(test)]
+mod showcase;
 mod stream;
 mod symbols;
 mod theme;

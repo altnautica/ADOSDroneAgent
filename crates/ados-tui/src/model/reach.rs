@@ -75,7 +75,7 @@ impl Dashboard {
         gc.extend(self.rows_for(&["mavlink"])); // e.g. the tunnel MAVLink WS
         out.push(LinkGroup {
             title: "Ground control",
-            desc: "Conventional MAVLink over TCP / WebSocket for a third-party GCS — tcp://…:5760 (QGC / Mission Planner desktop), ws://…:8765/ (browser GCS).",
+            desc: "Conventional MAVLink over TCP / WebSocket for a third-party GCS: tcp://…:5760 for a desktop ground station, ws://…:8765/ for a browser GCS.",
             rows: dedup_drop_loopback(gc),
         });
 
