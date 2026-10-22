@@ -25,7 +25,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ados_hid::affine::{self, SaveParams};
+use ados_hmi::affine::{self, SaveParams};
 
 use crate::pages::TwoTapConfirm;
 use crate::touch_input::{LCD_H, LCD_W};

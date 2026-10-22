@@ -5,7 +5,7 @@
 //! Waveshare 3.5" SPI LCD), drains its ABS_X / ABS_Y / BTN_TOUCH stream, maps
 //! each contact point from the panel's raw ADC range into landscape LCD pixels
 //! for the display rotation, and feeds the points through the host-portable
-//! [`ados_hid::touch::StrokeFsm`]. Completed strokes are classified into a
+//! [`ados_hmi::touch::StrokeFsm`]. Completed strokes are classified into a
 //! [`TouchGesture`] and handed to the render loop over an mpsc channel, where
 //! the navigator turns them into tab switches and modal pushes/pops.
 //!
@@ -21,13 +21,13 @@
 //!     persisted to [`ados_hid::sidecar::TOUCH_CALIB_PATH`] and fit against the
 //!     panel's real raw ADC counts, or
 //!   * when no calibration file is present, the rotation-aware baseline from
-//!     [`ados_hid::affine::identity_for`], which maps the canonical 12-bit raw
+//!     [`ados_hmi::affine::identity_for`], which maps the canonical 12-bit raw
 //!     range to the LCD bounds for the configured rotation.
 //!
 //! Only the node discovery + the async event drain are target-gated to Linux
 //! (they touch evdev). The coordinate transform and the raw-range normalizer are
 //! pure and unit-tested for every rotation, mirroring the `#[cfg(...)]` split the
-//! sibling `ados_hid::touch` / `ados_hid::input` modules use.
+//! `ados_hmi::touch` / `ados_hid::input` modules use.
 
 // `TouchGesture` is only named in the Linux-gated reader signature; importing it
 // at module scope would be an unused import on non-Linux hosts where the reader
@@ -36,7 +36,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use ados_hid::affine::{self, Affine};
+use ados_hmi::affine::{self, Affine};
 
 /// Landscape LCD width in pixels — the on-screen frame the navigator routes in.
 pub const LCD_W: i32 = crate::pages::PANEL_W as i32;
@@ -177,7 +177,7 @@ pub fn load_transform(
 /// UI and calibration without a second reader.
 #[derive(Debug, Clone)]
 pub struct TouchEvent {
-    pub gesture: ados_hid::touch::TouchGesture,
+    pub gesture: ados_hmi::touch::TouchGesture,
     /// The raw, pre-transform `(x, y)` ADC sample at pen-up.
     pub raw: (i32, i32),
 }
@@ -344,7 +344,7 @@ async fn drain_touch_device(
 ) -> crate::touch_supervisor::SessionEnd {
     use std::time::Instant;
 
-    use ados_hid::touch::StrokeFsm;
+    use ados_hmi::touch::StrokeFsm;
     use evdev::{AbsoluteAxisType, InputEventKind, Key};
 
     use crate::touch_supervisor::SessionEnd;

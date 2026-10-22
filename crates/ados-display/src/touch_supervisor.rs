@@ -81,7 +81,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use ados_hid::touch::{GestureKind, TouchGesture};
+    use ados_hmi::touch::{GestureKind, TouchGesture};
     use tokio::sync::mpsc;
 
     use super::*;

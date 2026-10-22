@@ -1,23 +1,14 @@
-// Unused in this crate today: the touch/LCD path is owned by the display layer.
-// Kept as the host-portable gesture FSM for that layer to wire when its touch
-// path lands; do not delete here.
-//
-//! Touch input: raw evdev samples -> rotated/calibrated -> classified gesture.
+//! Touch gestures: calibrated samples in, classified gestures out.
 //!
-//! Originally ported from the Python touch bridge, which has since been deleted.
 //! Covers the per-stroke state machine (`open_stroke` / `record_move` /
 //! `close_stroke`), the move filter, and the tap / long_press / swipe / drag
-//! classifier. The chunk-1 [`crate::affine`]
-//! transform maps each raw `(x, y)` ADC sample to LCD pixels before the FSM
-//! sees it.
+//! classifier. Map each raw `(x, y)` sample to display pixels with
+//! [`crate::affine::Affine::apply`] before feeding the FSM.
 //!
-//! The FSM + classifier ([`StrokeFsm`]) are PURE and host-portable: they take
-//! transformed `(x_lcd, y_lcd, ts_ms)` samples, so the move-delta filter, the
-//! displacement/duration thresholds, and the direction-of-larger-component rule
-//! are all unit-testable with synthetic strokes. Only the evdev node-open +
-//! read loop is target-gated to Linux.
-
-use crate::affine::Affine;
+//! [`StrokeFsm`] is pure and host-portable: it takes transformed
+//! `(x_lcd, y_lcd, ts_ms)` samples, so the move-delta filter, the
+//! displacement/duration thresholds and the direction-of-larger-component rule
+//! are all unit-testable with synthetic strokes.
 
 /// Move filter: only record a sample when it differs from the previous accepted
 /// one by at least this many pixels on either axis (stops a held-stationary pen
@@ -48,13 +39,18 @@ pub const MAX_STROKE_SAMPLES: usize = 512;
 /// The classified kind of a completed stroke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GestureKind {
+    /// Short, nearly stationary contact.
     Tap,
+    /// Long, nearly stationary contact.
     LongPress,
+    /// Fast directional stroke.
     Swipe,
+    /// Slow directional stroke.
     Drag,
 }
 
 impl GestureKind {
+    /// The lowercase wire string.
     pub fn as_str(self) -> &'static str {
         match self {
             GestureKind::Tap => "tap",
@@ -69,13 +65,18 @@ impl GestureKind {
 /// drags; `None` for tap/long_press.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
+    /// Toward the top edge.
     Up,
+    /// Toward the bottom edge.
     Down,
+    /// Toward the left edge.
     Left,
+    /// Toward the right edge.
     Right,
 }
 
 impl Direction {
+    /// The lowercase wire string.
     pub fn as_str(self) -> &'static str {
         match self {
             Direction::Up => "up",
@@ -89,23 +90,36 @@ impl Direction {
 /// A single accepted move sample in LCD pixel space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TouchMove {
+    /// x in display pixels.
     pub x_lcd: i32,
+    /// y in display pixels.
     pub y_lcd: i32,
+    /// Unix milliseconds of the event.
     pub timestamp_ms: i64,
 }
 
 /// A completed pen-down -> pen-up sequence, classified into a kind.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TouchGesture {
+    /// What happened.
     pub kind: GestureKind,
+    /// Stroke start x in pixels.
     pub start_x: i32,
+    /// Stroke start y in pixels.
     pub start_y: i32,
+    /// Stroke end x in pixels.
     pub end_x: i32,
+    /// Stroke end y in pixels.
     pub end_y: i32,
+    /// Pen-down time in milliseconds.
     pub start_t_ms: i64,
+    /// Pen-up time in milliseconds.
     pub end_t_ms: i64,
+    /// Stroke duration in milliseconds.
     pub duration_ms: i64,
+    /// Direction of the larger displacement, for swipes and drags.
     pub direction: Option<Direction>,
+    /// Mean speed over the stroke in pixels per second.
     pub velocity_px_per_s: f64,
     /// The stroke's accepted moves: the first one plus up to
     /// [`MAX_STROKE_SAMPLES`] - 1 of the most recent.
@@ -137,6 +151,7 @@ pub struct StrokeFsm {
 }
 
 impl StrokeFsm {
+    /// A stroke machine with no stroke open.
     pub fn new() -> Self {
         Self::default()
     }
@@ -147,8 +162,7 @@ impl StrokeFsm {
     }
 
     /// Begin a stroke at `now_ms`. Coordinate seeding is deferred to the first
-    /// accepted move (only then is there a sample), matching the Python
-    /// `_open_stroke`.
+    /// accepted move (only then is there a sample).
     pub fn open_stroke(&mut self, now_ms: i64) {
         self.down_at_ms = now_ms;
         self.samples.clear();
@@ -269,80 +283,10 @@ pub fn direction_for(dx: i32, dy: i32) -> Direction {
     }
 }
 
-/// The initial transform for a stroke source: a persisted calibration if one exists,
-/// else the rotation-aware identity.
-pub fn initial_affine(calib_path: &std::path::Path, rotation: i32, lcd_size: (i32, i32)) -> Affine {
-    // load_for, not load: a calibration captured on a different panel geometry or
-    // rotation must be rejected so this falls back to the identity (and the
-    // wizard re-prompts) rather than mis-mapping every touch.
-    crate::affine::load_for(calib_path, lcd_size, rotation)
-        .unwrap_or_else(|| crate::affine::identity_for(rotation, lcd_size))
-}
-
-/// Run the touch evdev read loop on Linux: discover the node, then drain raw
-/// ABS_X/ABS_Y + BTN_TOUCH + SYN events, applying `affine` to each sample and
-/// feeding the [`StrokeFsm`]. Invokes `on_step` for each emitted move/gesture.
-/// The node-open + read is the only hardware-coupled part; the FSM stays pure.
-#[cfg(target_os = "linux")]
-pub fn run_event_loop<F>(
-    device_path: &str,
-    affine: &Affine,
-    fsm: &mut StrokeFsm,
-    mut on_step: F,
-) -> std::io::Result<()>
-where
-    F: FnMut(StrokeStep),
-{
-    use std::time::Instant;
-
-    use evdev::{Device, InputEventKind, Key};
-
-    let mut dev = Device::open(device_path)?;
-    let base = Instant::now();
-
-    // Raw ABS coordinates accumulate between SYN_REPORT markers.
-    let mut pending_x: Option<i32> = None;
-    let mut pending_y: Option<i32> = None;
-
-    loop {
-        for ev in dev.fetch_events()? {
-            let now_ms = base.elapsed().as_millis() as i64;
-            match ev.kind() {
-                InputEventKind::Key(Key::BTN_TOUCH) => {
-                    if ev.value() == 1 && !fsm.pen_down() {
-                        fsm.open_stroke(now_ms);
-                    } else if ev.value() == 0 && fsm.pen_down() {
-                        if let Some(g) = fsm.close_stroke(now_ms) {
-                            on_step(StrokeStep::Gesture(g));
-                        }
-                        pending_x = None;
-                        pending_y = None;
-                    }
-                }
-                InputEventKind::AbsAxis(axis) => {
-                    if axis == evdev::AbsoluteAxisType::ABS_X {
-                        pending_x = Some(ev.value());
-                    } else if axis == evdev::AbsoluteAxisType::ABS_Y {
-                        pending_y = Some(ev.value());
-                    }
-                }
-                InputEventKind::Synchronization(_) if fsm.pen_down() => {
-                    if let (Some(x), Some(y)) = (pending_x, pending_y) {
-                        let (x_lcd, y_lcd) = affine.apply(x, y);
-                        if let Some(m) = fsm.record_move(x_lcd, y_lcd, now_ms) {
-                            on_step(StrokeStep::Move(m));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::affine::Affine;
 
     /// Drive a stroke through the FSM with `(x_lcd, y_lcd, ts_ms)` samples
     /// (already transformed) and return the closing gesture plus the count of

@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 
 pub use ados_hid::buttons::board_button_pins;
 use ados_hid::buttons::{
-    board_pins_or_default, default_button_mapping, merge_mapping, ButtonEvent, PressKind,
-    BUTTON_PINS,
+    board_pins_or_default, default_button_mapping, merge_mapping, BUTTON_PINS,
 };
+use ados_hmi::press::{ButtonEvent, PressKind};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;

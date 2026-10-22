@@ -44,7 +44,7 @@ pub(super) async fn run_page_ui(
     use crate::state_source::StateSource;
     use crate::touch_input::{TouchTransformHandle, TOUCH_CALIB_PATH};
     use crate::widgets::draw_ack_line;
-    use ados_hid::touch::GestureKind;
+    use ados_hmi::touch::GestureKind;
 
     // State poll cadence — matches the Python service's POLL_PERIOD_SECONDS.
     const STATE_POLL_PERIOD: Duration = Duration::from_secs(5);
