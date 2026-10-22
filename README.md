@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://altnautica.com">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/brand/ados-lockup-dark.svg">
-      <img src=".github/assets/brand/ados-lockup-light.svg" alt="ADOS" width="220">
+      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/brand/altnautica-wordmark-dark.svg">
+      <img src=".github/assets/brand/altnautica-wordmark-light.svg" alt="Altnautica" width="240">
     </picture>
   </a>
 </p>
@@ -32,7 +32,9 @@ https://github.com/user-attachments/assets/09f265f4-b692-468a-a170-2be2d8525ae7
     </picture>
 </p>
 
-ADOS Drone Agent is the onboard software for a software-defined drone. It runs on the companion computer next to your flight controller, reads MAVLink off the FC and routes it to any ground station, streams HD video over radio or the internet, and lets you fly and manage the aircraft from a browser. The flight-critical paths are native Rust. AI, vision, and plugins run in Python.
+ADOS Drone Agent turns the companion computer next to your flight controller into the drone's onboard brain. It reads MAVLink off the FC and routes it to every ground station at once, streams HD video over a long-range radio link or the internet, runs onboard vision when you turn it on, and hosts the extensions that add sensors, behaviors and navigation. The same software runs on the ground as the ADOS Ground Agent, the receiving end of the radio link.
+
+It is the onboard half of ADOS, an open-source platform for software-defined drones, and it is built to be extended: through signed extensions, a Rust plugin SDK and published Rust crates. The flight-critical paths are native Rust. AI, vision inference and Python plugins run in Python.
 
 ## Quick Start
 
@@ -68,6 +70,8 @@ Also runs on macOS for local development (the installer points you to `cargo` th
 
 ## Features
 
+### The agent's own dashboard
+
 <table>
   <tr>
     <td width="50%">
@@ -95,37 +99,70 @@ Also runs on macOS for local development (the installer points you to `cargo` th
     </td>
     <td width="50%">
       <picture>
-        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/drone-plugins-catalog-dark.webp">
-        <img src=".github/assets/screens/drone-plugins-catalog-light.webp" alt="Plugin catalog" width="100%">
-      </picture><br>
-      <sub>Install signed plugins from the catalog. <a href="https://docs.altnautica.com/drone-agent/dashboard-extensions">Docs</a></sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <picture>
         <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/ground-home-dark.webp">
         <img src=".github/assets/screens/ground-home-light.webp" alt="Ground node home" width="100%">
       </picture><br>
-      <sub>The same agent running as a ground node. <a href="https://docs.altnautica.com/ground-agent/dashboard-overview">Docs</a></sub>
+      <sub>The same agent in its ground-station profile. <a href="https://docs.altnautica.com/ground-agent/dashboard-overview">Docs</a></sub>
+    </td>
+  </tr>
+</table>
+
+### The same agent in Mission Control
+
+<table>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/gcs-node-overview-dark.webp">
+        <img src=".github/assets/screens/gcs-node-overview-light.webp" alt="Node overview in Mission Control" width="100%">
+      </picture><br>
+      <sub>Node overview: resources, services, live logs and parameters. <a href="https://docs.altnautica.com/mission-control/nodes-fleet-view">Docs</a></sub>
     </td>
     <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/gcs-fleet-nodes-dark.webp">
+        <img src=".github/assets/screens/gcs-fleet-nodes-light.webp" alt="Fleet nodes in Mission Control" width="100%">
+      </picture><br>
+      <sub>Every paired agent in the fleet. <a href="https://docs.altnautica.com/mission-control/nodes-fleet-view">Docs</a></sub>
+    </td>
+  </tr>
+</table>
+
+### Extensions
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/drone-plugins-catalog-dark.webp">
+    <img src=".github/assets/screens/drone-plugins-catalog-light.webp" alt="Plugin catalog" width="100%">
+  </picture><br>
+  <sub>Install signed plugins from the catalog. <a href="https://docs.altnautica.com/drone-agent/dashboard-extensions">Docs</a></sub>
+</p>
+
+### On the ground and in the air
+
+<table>
+  <tr>
+    <td width="33%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/ground-node-dark.webp">
+        <img src=".github/assets/scenes/ground-node-light.webp" alt="Ground node" width="100%">
+      </picture><br>
+      <sub>A ground node running the Ground Agent profile. <a href="https://docs.altnautica.com/ground-agent/dashboard-overview">Docs</a></sub>
+    </td>
+    <td width="33%">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/video-link-dark.webp">
         <img src=".github/assets/scenes/video-link-light.webp" alt="Video link" width="100%">
       </picture><br>
       <sub>Long-range WFB-ng video and telemetry link. <a href="https://docs.altnautica.com/drone-agent/wfb-ng">Docs</a></sub>
     </td>
-  </tr>
-  <tr>
-    <td width="50%">
+    <td width="33%">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/mesh-dark.webp">
         <img src=".github/assets/scenes/mesh-light.webp" alt="Ground mesh" width="100%">
       </picture><br>
       <sub>Two or three ground nodes form a receive mesh. <a href="https://docs.altnautica.com/ground-agent/mesh-overview">Docs</a></sub>
     </td>
-    <td width="50%"></td>
   </tr>
 </table>
 
@@ -140,6 +177,40 @@ Also runs on macOS for local development (the installer points you to `cargo` th
 - **Run the same agent on the ground.** A ground-station profile (no flight controller, an OLED and buttons, a WFB-ng adapter) turns a small board into the receiving end of the radio link.
 - **Build distributed receive.** Two or three ground nodes form a self-healing mesh so you keep the link in obstructed areas.
 - **Extend it without forking it.** Install signed plugins that add drivers, behaviors, AI models, and ground-station hardware support.
+
+## Set up from Mission Control
+
+Pair the agent with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) and the drone opens there as one node: the flight controller and the companion computer side by side. From that one panel you set up the FC and edit every parameter (the agent carries the MAVLink, also through a ground station's radio relay), and you configure the agent itself: services and their health, peripherals, battery, the radio link, Wi-Fi, cellular and MAVLink routing and signing, cameras and perception, swarm, cloud relay, security, and the extensions installed on the drone. Extensions add their own pages to the same panel.
+
+## Smart and autonomous features
+
+- **Onboard vision.** The vision engine shares each camera through a frame bus, runs detection through pluggable inference backends (including NPU sidecars on boards that have one) and tracks a subject you designate. Off by default; turn it on per drone.
+- **Follow-Me** (extension). Click a subject in the live video and the agent keeps a fixed standoff from it with guided setpoints. A lock-state safety gate stops commanding the moment the track goes uncertain, and it never re-locks onto a different subject on its own.
+- **Vision Navigation** (extension). GPS-denied navigation from downward optical flow: a Rust estimator pairs frames with IMU samples and sends flow messages that the flight controller fuses into its own estimator.
+- **World Engine (beta, extension).** The drone captures keyframes tagged with a pose from the flight controller, stereo visual-inertial odometry, LiDAR odometry or planar LiDAR SLAM, and streams them to a paired compute node over the LAN or the cloud, with pose and status also carried over the radio link through a ground station. The node reconstructs a Gaussian splat, point cloud, mesh and occupancy grid that you view in Mission Control.
+- **Perception offload.** The agent decides whether perception runs onboard, on a compute node or split between them, so a board without an NPU can still use detection. A freshness gate marks stale or link-lost results so a control loop holds instead of acting on them.
+- **Swarm.** Agents share a small beacon at 2 Hz, and an onboard swarm layer turns it into separation, flocking and formation setpoints at 10 Hz. Each drone broadcasts which layer is in control (hard separation, operator, formation, flocking or hold). Off by default and still early.
+- **AI clients.** [ADOS MCP](https://github.com/altnautica/ADOS-MCP) lets an AI client read, administer and, when you allow it, fly the drone through the agent, under scopes and a safety gate.
+
+These features are under active development and grow with every release; build on them through extensions and the SDK.
+
+## What you can build on it
+
+ADOS is a base, not a finished product for one job. These are directions it is built toward, with the pieces that exist for them today:
+
+- **Smart agriculture.** RTK corrections injected into the flight controller from a base station, survey missions from Mission Control, onboard detection, and payload drivers (sprayers, droppers) through the plugin SDK.
+- **Indoor operations.** Optical-flow navigation with Vision Navigation, and visual-inertial or LiDAR SLAM poses with indoor world models from World Engine (beta).
+- **Logistics in GPS-denied warehouses.** The same positioning sources, a warehouse reconstruction preset in World Engine, and perception offload to a nearby compute node.
+
+None of these is a turnkey product yet. The parts are open, so you can take them the rest of the way.
+
+## Build on it
+
+The agent is meant to be extended, not forked. An extension's agent half runs as a supervised Python or Rust process with the permissions it declared, and its Mission Control half adds panels on the ground. Start from [ADOS Extensions](https://github.com/altnautica/ADOSExtensions) and the [developer docs](https://docs.altnautica.com/developers/overview). Rust plugins use the [`ados-sdk`](https://docs.rs/ados-sdk) crate, Python driver plugins import `ados.sdk`, and the reusable libraries are published as [Rust crates](#rust-crates) you can use in your own projects. Pull requests are welcome; see [Contributing](#contributing).
+
+## Where it fits
+
+The Drone Agent is the onboard part of the ADOS ecosystem, and with its ground-station profile it is also the Ground Agent on the far end of the radio link. [Mission Control](https://github.com/altnautica/ADOSMissionControl) and [Android GCS](https://github.com/altnautica/ADOSAndroidGCS) reach it over the LAN or the cloud relay, [Extensions](https://github.com/altnautica/ADOSExtensions) run on it, and [ADOS MCP](https://github.com/altnautica/ADOS-MCP) gives AI clients scoped access to it.
 
 ---
 
@@ -393,7 +464,8 @@ ADOS is local-first. The primary path between Mission Control and the agent is y
 | Plugin system (Python and Rust plugins) | Working |
 | Ground-station distributed receive and local mesh | Working |
 | Lean headless profile (Rust core only) | In progress |
-| Swarm formation flight | Planned |
+| Onboard swarm layer (beacon, separation, flocking, formations) | Early, off by default |
+| World Engine extension (world models, perception offload) | Beta |
 
 ---
 
