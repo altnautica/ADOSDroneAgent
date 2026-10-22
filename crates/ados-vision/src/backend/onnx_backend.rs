@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::yolo;
+use ados_tracker::yolo;
 
 /// Default detection thresholds, matching the Python sidecar's defaults.
 const ONNX_CONF_THRESHOLD: f32 = 0.25;
@@ -122,7 +122,7 @@ impl LoadedModel for OnnxModel {
         }
         // The re-id ONNX expects ImageNet-normalized input (applied here, the
         // same way the detector path divides by 255 outside the model).
-        let chw = crate::reid::preprocess_osnet_nchw(crop, w, h)
+        let chw = ados_tracker::reid::preprocess_osnet_nchw(crop, w, h)
             .ok_or_else(|| anyhow!("onnx embed preprocess failed (crop too small)"))?;
         let input = ort::value::Tensor::from_array(([1usize, 3, ih as usize, iw as usize], chw))?;
         let mut session = self

@@ -7,7 +7,7 @@
 //! re-designation) once the appearance margin clears the ambiguity guard.
 
 use ados_protocol::framebus::{BoundingBox, Detection, LockState};
-use ados_vision::tracker::{
+use ados_tracker::tracker::{
     Appearance, Candidate, SingleObjectTracker, TrackerConfig, APPEARANCE_DIM,
 };
 
@@ -83,7 +83,7 @@ fn fixed_admissible_distractor_must_not_silently_capture_held_id() {
         let pred_x = f as f32 * 8.0;
         let target = Candidate::with_appearance(
             det(pred_x, 100.0 + k as f32 * 7.0, 40.0, 40.0, 0.90, "object"),
-            target_app(), // appearance 1.0 to the template — the BETTER match
+            target_app(), // appearance 1.0 to the template, the BETTER match
         );
         let distractor = Candidate::with_appearance(
             det(pred_x, 100.0, 40.0, 40.0, 0.99, "object"),
@@ -112,7 +112,7 @@ fn fixed_admissible_distractor_must_not_silently_capture_held_id() {
         "RESIDUAL SILENT SWAP: the held id {held} cleanly reported Locked on a strictly-less-\
          similar (sim 0.70 vs target 1.0) prediction-riding distractor while the true target was \
          present and separated, at frames {silent:?}. Appearance gating did NOT hold the lock on \
-         the better appearance match — the combined score let motion+confidence outvote a clear \
+         the better appearance match, the combined score let motion+confidence outvote a clear \
          appearance preference for the target."
     );
 }

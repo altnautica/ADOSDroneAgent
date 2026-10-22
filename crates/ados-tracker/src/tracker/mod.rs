@@ -6,7 +6,7 @@
 //! module turns that noisy per-frame stream into a single stable identity.
 //!
 //! It takes the per-frame detections (the canonical
-//! [`ados_protocol::framebus::Detection`] — never a parallel type), predicts
+//! [`ados_protocol::framebus::Detection`], never a parallel type), predicts
 //! where the locked object should be next with a constant-velocity motion
 //! model, associates the single best detection by a COMBINED score (appearance
 //! similarity first, then motion-gate fit, then detector confidence), and
@@ -29,8 +29,8 @@
 //! (raw embeddings would bloat every detection message). It travels through the
 //! tracker's own [`Candidate`] type as a side input. A real deployment extracts
 //! the descriptor from the candidate bbox's pixels via an [`AppearanceModel`]
-//! (a colour/gradient histogram now, a learned re-id / siamese embedding at
-//! Gate-B — the trait makes that swap source-compatible). The synthetic test
+//! (a colour/gradient histogram by default; a learned re-id / siamese embedding
+//! plugs in through the same trait with no tracker change). The synthetic test
 //! harness supplies a descriptor per detection directly, so association can be
 //! exercised without pixels: a target and a distractor get *different*
 //! descriptors, exactly as two real objects would.
@@ -42,7 +42,7 @@
 //! detector-confidence only break a tie among candidates whose appearance is
 //! within an ambiguity margin of the best. A louder or better-positioned
 //! distractor can therefore never demote a candidate that is strictly more
-//! appearance-similar than it — the cue that owns identity (appearance) is not
+//! appearance-similar than it, the cue that owns identity (appearance) is not
 //! out-voted by the cues that only describe where a box sits and how confident
 //! the detector was about its class.
 //!
@@ -61,7 +61,7 @@
 //! unsolvable from vision alone (there is no signal to separate them), and it is
 //! handled out of band by the operator-re-designation backstop, not by a guess.
 //!
-//! The core is pure and deterministic — it owns no camera, socket, or clock. It
+//! The core is pure and deterministic, it owns no camera, socket, or clock. It
 //! advances on whatever per-frame candidate list it is handed, so the same input
 //! always yields the same id assignment.
 
@@ -127,14 +127,14 @@ struct Track {
     /// True while the current coast is an APPEARANCE-AMBIGUITY hold (two
     /// indistinguishable candidates) rather than a genuine miss. An ambiguity
     /// hold that is then resolved by a single lone admissible candidate (the
-    /// competitor left frame) re-locks immediately — the ambiguity was resolved
+    /// competitor left frame) re-locks immediately, the ambiguity was resolved
     /// by the competitor's disappearance, so no extra re-confirm frame is owed.
     /// Only a miss-coast (the laundering threat) takes the re-confirm window.
     coast_ambiguous: bool,
     /// True only when this track originates from an explicit operator
     /// [`SingleObjectTracker::designate`] call. An automatically seeded track
     /// (the most-confident auto-pick) is `false`: it is still tracked for
-    /// continuity — it keeps its id and predicted box — but a consumer publish
+    /// continuity, it keeps its id and predicted box, but a consumer publish
     /// path must NOT present it as locked. Only a target the operator actually
     /// designated carries a lock state to consumers, so a follow behavior can
     /// never engage a subject nobody chose. This mirrors the offload publish
@@ -149,7 +149,7 @@ impl SingleObjectTracker {
         Self::with_appearance_model(cfg, Box::new(HistogramAppearance))
     }
 
-    /// A tracker with a chosen appearance backend. At Gate-B a learned re-id /
+    /// A tracker with a chosen appearance backend. A learned re-id /
     /// siamese embedding implementing [`AppearanceModel`] plugs in here with no
     /// other change.
     pub fn with_appearance_model(cfg: TrackerConfig, appearance: Box<dyn AppearanceModel>) -> Self {
@@ -194,7 +194,7 @@ impl SingleObjectTracker {
 
     /// Operator designation: drop any current lock and seed a fresh track onto a
     /// specific detection (the box the operator clicked), instead of the
-    /// most-confident one — the operator's pick overrides the confidence floor.
+    /// most-confident one, the operator's pick overrides the confidence floor.
     /// Returns the new track id. The next [`update`] associates from this seed.
     /// Used by the click-to-follow path so the operator picks the target rather
     /// than the tracker's auto-lock.
@@ -222,8 +222,8 @@ impl SingleObjectTracker {
     }
 
     /// Advance one frame on a list of [`Candidate`]s carrying appearance
-    /// descriptors. This is the real path: the engine extracts a descriptor per
-    /// candidate from the frame pixels (Gate-B) or the synthetic harness
+    /// descriptors. This is the real path: the caller extracts a descriptor per
+    /// candidate from the frame pixels, or a synthetic harness
     /// supplies one. Association is appearance-first (the most appearance-similar
     /// admissible candidate wins; motion + confidence only break an
     /// appearance tie), the appearance gate rejects shadowing distractors, and

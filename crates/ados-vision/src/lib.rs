@@ -22,8 +22,6 @@
 //!   the sensor-bus trigger records joined to captured frames.
 //! - [`backend`] — the inference backends: a mock, an opt-in ONNX Runtime one,
 //!   and an IPC client to the accelerator sidecar.
-//! - [`yolo`] — YOLO detection-head decoding (the Rust twin of the sidecar's
-//!   decoder) used by the ONNX backend to turn a raw output tensor into boxes.
 //! - [`engine`] — the per-camera rings + sources, the model registry, the
 //!   accelerator lease arbiter, and the detection publisher.
 //! - [`visionsock`] — the `/run/ados/vision.sock` request/response server.
@@ -33,10 +31,6 @@
 //! - [`frame_bus`] — the `/run/ados/vision-frames.sock` broadcast that
 //!   re-publishes every frame descriptor as length-prefixed msgpack so an on-box
 //!   service (the world-model capture service) can subscribe and read the ring.
-//! - [`tracker`] — a single-object visual tracker that turns the noisy per-frame
-//!   detection stream into one stable identity by filling `track_id` on the
-//!   canonical detection type (the lock primitive follow-me / framing /
-//!   target-lock consumers read).
 //! - [`config`] — the `vision:` block of the agent config.
 //! - [`camera_control`] — routes a camera's exposure and gain requests to the
 //!   capture thread that owns its device.
@@ -52,12 +46,9 @@ pub mod detection_bus;
 pub mod engine;
 pub mod frame_bus;
 pub mod perception_scheduler;
-pub mod reid;
 pub mod ring;
 pub mod sei;
 pub mod source;
-pub mod tracker;
 pub mod trigger;
 pub mod visionsock;
 pub mod work_status;
-pub mod yolo;

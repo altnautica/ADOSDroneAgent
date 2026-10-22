@@ -20,9 +20,9 @@ use std::sync::{Arc, Mutex};
 use ados_protocol::framebus::{
     BoundingBox, Detection, DetectionHead, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
 };
+use ados_tracker::tracker::TrackerConfig;
 use ados_vision::backend::{LoadedModel, VisionBackend};
 use ados_vision::engine::VisionEngine;
-use ados_vision::tracker::TrackerConfig;
 
 const W: u32 = 320;
 const H: u32 = 240;

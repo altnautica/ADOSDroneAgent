@@ -37,10 +37,10 @@ impl Appearance {
 /// [`Appearance`]; `similarity` scores two descriptors in `0..=1` (1 = identical
 /// appearance, 0 = unrelated). The tracker depends only on this trait, so the
 /// model-free [`HistogramAppearance`] shipped here can be swapped for a learned
-/// re-id / siamese embedding at Gate-B with no tracker change: the new model
+/// re-id / siamese embedding with no tracker change: the new model
 /// just produces longer descriptors and a learned similarity.
 ///
-/// The default `extract` returns `None` (no pixels available — the pure /
+/// The default `extract` returns `None` (no pixels available, the pure /
 /// synthetic path), so a tracker can run appearance-aware on descriptors handed
 /// to it directly (the harness) while a deployment plugs in a real extractor.
 pub trait AppearanceModel: Send + Sync {
@@ -59,7 +59,7 @@ pub trait AppearanceModel: Send + Sync {
 /// descriptor vectors.
 ///
 /// It does NOT extract from pixels (a real deployment swaps in a re-id model for
-/// that at Gate-B); it scores descriptors the caller already holds. Cosine
+/// that); it scores descriptors the caller already holds. Cosine
 /// similarity is scale-invariant and maps cleanly onto `0..=1` after clamping,
 /// so a colour/gradient histogram now and a learned embedding later both work
 /// through the same `similarity`. Two equal vectors score 1.0; orthogonal ones
@@ -96,11 +96,11 @@ pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// One candidate detection for a frame, optionally carrying its appearance
 /// descriptor.
 ///
-/// The motion-only [`SingleObjectTracker::update`] path wraps each wire
+/// The motion-only [`SingleObjectTracker::update`](super::SingleObjectTracker::update) path wraps each wire
 /// [`Detection`] with `appearance: None`; the appearance-aware
-/// [`SingleObjectTracker::update_with_appearance`] path carries a descriptor per
+/// [`SingleObjectTracker::update_with_appearance`](super::SingleObjectTracker::update_with_appearance) path carries a descriptor per
 /// candidate (extracted from pixels in a real deployment, supplied directly by
-/// the synthetic harness). The descriptor never reaches the wire — only the
+/// the synthetic harness). The descriptor never reaches the wire, only the
 /// resulting lock-state / association confidence does.
 #[derive(Debug, Clone)]
 pub struct Candidate {

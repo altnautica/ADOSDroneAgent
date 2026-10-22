@@ -7,7 +7,7 @@ use super::TrackerConfig;
 
 /// A constant-velocity Kalman filter over a bounding box.
 ///
-/// State is `[cx, cy, w, h, vx, vy, vw, vh]` — the box center, size, and their
+/// State is `[cx, cy, w, h, vx, vy, vw, vh]`, the box center, size, and their
 /// per-frame velocities. Each of the four box components is an independent
 /// 1-D constant-velocity sub-filter (position + velocity), which keeps the math
 /// small, allocation-free, and exact without a matrix library while giving the

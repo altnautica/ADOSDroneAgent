@@ -788,6 +788,9 @@ dependencies = [
 [[package]]
 name = "ados-tracker"
 version = "0.106.1"
+dependencies = [
+ "ados-protocol",
+]
 
 [[package]]
 name = "ados-tui"

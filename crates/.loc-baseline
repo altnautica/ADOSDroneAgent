@@ -95,9 +95,9 @@
 597 ados-swarm-control/src/controller/mod.rs
 786 ados-swarm-control/src/controller/tests.rs
 578 ados-swarmbus/src/service.rs
+701 ados-tracker/src/tracker/tests.rs
+729 ados-tracker/tests/tracker_adversarial.rs
 2314 ados-video/src/encoder/tests.rs
 590 ados-video/src/mediamtx/tests.rs
 1194 ados-video/src/orchestrator/tests.rs
 571 ados-vision/src/engine/tests.rs
-701 ados-vision/src/tracker/tests.rs
-729 ados-vision/tests/tracker_adversarial.rs
