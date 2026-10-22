@@ -8,7 +8,7 @@
 </p>
 <h1 align="center">ADOS Drone Agent</h1>
 <p align="center"><em>Open-source onboard agent for software-defined drones. Long-range data link. HD video. Full remote control.</em></p>
-<p align="center">![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg) ![Rust + Python](https://img.shields.io/badge/Core-Rust%20%2B%20Python-blue.svg) ![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange.svg) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2.svg)](https://discord.gg/uxbvuD4d5q)</p>
+<p align="center"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg"> <img alt="Rust + Python" src="https://img.shields.io/badge/Core-Rust%20%2B%20Python-blue.svg"> <img alt="Status: Alpha" src="https://img.shields.io/badge/Status-Alpha-orange.svg"> <a href="https://discord.gg/uxbvuD4d5q"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2.svg"></a></p>
 <p align="center">
   <strong><a href="https://github.com/altnautica/ADOSMissionControl">Mission Control</a></strong> |
   <strong><a href="https://github.com/altnautica/ADOSDroneAgent">Drone Agent</a></strong> |
@@ -23,9 +23,7 @@
 
 <p align="center"><a href="#quick-start">Install</a> · <a href="https://docs.altnautica.com/drone-agent/overview">Docs</a> · <a href="https://github.com/altnautica/ADOSDroneAgent/issues">Issues</a></p>
 
-<p align="center">
-  <a href="https://altnautica.com"><img src=".github/assets/film-poster.webp" alt="ADOS in 30 seconds" width="100%"></a>
-</p>
+https://github.com/user-attachments/assets/09f265f4-b692-468a-a170-2be2d8525ae7
 
 <p align="center">
   <picture>
