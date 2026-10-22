@@ -1,0 +1,179 @@
+# BeagleBoard.org BeagleY-AI — TI AM67A (J722S), arm64
+#
+# Pi-form-factor SBC: J722S (AM67A) quad Cortex-A53 + 2x C7x DSP/MMA,
+# 4 GB LPDDR4, microSD boot (no eMMC), 1x Gigabit Ethernet, M.2 E-key
+# (optional Wi-Fi/BT — NOT populated by default), 2x 4-lane CSI, 40-pin
+# Pi-compatible header. Detection is by /proc/device-tree compatible
+# first-token ("beagle,am67a-beagley-ai") + model substring
+# ("BeagleBoard.org BeagleY-AI").
+#
+# The AM67A "4 TOPS" comes from the 2x C7x DSP + MMA, reachable ONLY via
+# TI TIDL — it is NOT an ONNX/RKNN NPU ADOS can drive, so local_inference
+# is none and this board is a Tier-B vision-offload candidate (like a Pi 4B).
+#
+# Kernel: the current image (Debian 13.5 / Trixie, 2026-05-19) runs the
+# 6.1.x-ti-arm64 line (uname -r = 6.1.83-ti-arm64-r74 as of this writing;
+# the -rNN suffix advances). Headers: apt install linux-headers-$(uname -r)
+# from repos.rcn-ee.com. Bus device-node numbers below are best-effort
+# defaults for the runtime probe/fallback — verify on a rig.
+#
+# Sources:
+#   https://www.beagleboard.org/distros/beagley-ai-debian-13-5-2026-05-19-xfce-v6-1-x-ti
+#   https://github.com/torvalds/linux/blob/master/arch/arm64/boot/dts/ti/k3-am67a-beagley-ai.dts
+#   https://www.cnx-software.com/2024/03/28/beagley-ai-sbc-features-ti-am67a-vision-processor-with-4-tops-ai-accelerators/
+
+name: "BeagleBoard.org BeagleY-AI"
+vendor: "BeagleBoard.org"
+soc: "TI AM67A (J722S)"
+arch: "aarch64"
+model_patterns:
+  - "BeagleBoard.org BeagleY-AI"
+  - "beagle,am67a-beagley-ai"   # DT compatible first-token
+  - "ti,j722s"                  # SoC compatible token
+  - "BeagleY-AI"
+  - "AM67A"
+  - "J722S"
+default_tier: 3
+
+# 40-pin Pi-compatible header (GPIO via an on-board expander MCU). Modest
+# set at the common Pi signal positions; the header exposes I2C/SPI/UART.
+gpio_pins:
+  - 3    # I2C1 SDA
+  - 5    # I2C1 SCL
+  - 8    # header UART TXD
+  - 10   # header UART RXD
+  - 19   # SPI MOSI
+  - 21   # SPI MISO
+  - 23   # SPI SCLK
+  - 24   # SPI CE0
+uart_paths:
+  - /dev/ttyS2    # debug/console UART (main_uart0), certain
+  - /dev/ttyS4    # 40-pin header UART (pins 8/10) — node enumerated at runtime, verify on rig
+hw_video_codecs:
+  - h264_enc      # AM67A WAVE codec IP; needs the TI codec stack — probe, fall back to software
+  - h265_enc
+  - h264_dec
+  - h265_dec
+
+board:
+  id: beagley-ai
+  manufacturer: BeagleBoard.org
+  status: experimental
+
+compute:
+  cores: 4
+  core_type: "Cortex-A53 x4"
+  max_freq_mhz: 1400
+  gpu: "Imagination AXE-1-16M"   # small integrated GPU (approx — not used by ADOS)
+  # 2x C7x DSP + MMA (~4 TOPS) is TI-TIDL-only, NOT an ONNX/RKNN NPU.
+  npu_tops: 0
+  local_inference: none
+  hw_encoder: ["h264", "h265"]   # SoC capability; runtime probes actual V4L2 M2M availability
+  hw_decoder: ["h264", "h265"]
+  ram_mb: 4096
+  ram_type: LPDDR4
+
+storage:
+  emmc: false
+  emmc_gb: 0
+  sd_card: true
+  nand: false
+  # (Also carries an M.2 M-key slot for NVMe — not modeled here.)
+
+buses:
+  uart:
+    - id: uart-console
+      path: /dev/ttyS2
+      baud: 115200
+      fc_capable: false
+    - id: uart-header
+      path: /dev/ttyS4
+      baud: 921600
+      fc_capable: true
+      notes: "40-pin header pins 8/10; node enumerated at runtime, router probes/falls back"
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+  i2c:
+    - id: i2c-header
+      path: /dev/i2c-1
+      speed_hz: 400000
+      notes: "40-pin header I2C1 (pins 3/5); verify node on rig"
+  spi:
+    - id: spi-header
+      path: /dev/spidev0.0
+      notes: "40-pin header SPI (pins 19/21/23/24)"
+
+network:
+  wifi: false        # no onboard Wi-Fi; optional via M.2 E-key card
+  ethernet: true     # onboard Gigabit Ethernet — management link
+  bluetooth: false   # arrives with the optional M.2 Wi-Fi/BT card
+
+video:
+  csi_ports: 2
+  csi_connector: "22-pin 0.5mm (Raspberry Pi CAM/DISP compatible), 4-lane"
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 60
+  encoder_api: vendor
+  # CSI-2 needs the TI vendor ISP/overlays (immature on the community 6.1
+  # image); lead the nav camera with USB UVC. Single USB host can carry a
+  # UVC nav camera alongside the WFB-ng dongle.
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 1
+    recommended_role: nav-usb
+
+# Cameras this board can drive. The universal provisioner ensures the
+# camera-userspace packages at install time and the camera service binds
+# at runtime. USB UVC leads (no device-tree overlay required).
+cameras:
+  supported:
+    - id: usb-nav
+      type: usb
+      bus: usb
+      orientation: forward
+      overlay_required: false
+      vendor_isp: false
+
+# Radios this board carries. Drives install-time driver provisioning via the
+# universal provisioner. Onboard management goes over Ethernet, so the RTL
+# dongle is dedicated to WFB injection.
+radios:
+  supported:
+    - id: wfb-rtl8812eu
+      role: wfb-injection
+      chipset: RTL8812EU
+      driver: rtl8812eu
+      install: dkms
+      modules_required: [8812eu]
+      mesh_capable: true
+
+# Flight-controller link hints, priority-ordered. USB-ACM leads (certain,
+# board-agnostic); the header UART is a runtime-probed fallback.
+flight_controller:
+  interfaces:
+    - id: fc-usb
+      type: usb-acm
+      baud_candidates: [921600, 115200, 57600]
+      priority: 1
+    - id: fc-uart-header
+      type: uart
+      path: /dev/ttyS4
+      baud: 921600
+      priority: 2
+
+# Universal provisioning manifest walked by the install-time provisioner:
+# ensure packages, install declared drivers. camera-userspace fires so the
+# UVC nav camera works; the wfb driver install fires so injection comes up.
+provisioning:
+  packages:
+    - {id: camera-userspace, when: camera, apt: [gstreamer1.0-tools, v4l-utils]}
+  drivers:
+    - {radio: wfb-rtl8812eu}
+
+power:
+  typical_watts: 3.0
+  max_watts: 10.0
+  voltage: 5.0
+  input: "USB-C 5V/3A"

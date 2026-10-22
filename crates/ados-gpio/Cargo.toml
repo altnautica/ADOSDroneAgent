@@ -1,12 +1,20 @@
 [package]
 name = "ados-gpio"
-publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
-description = "Generic GPIO output substrate: drive a status buzzer or LED on a host GPIO line, plus a software-PWM beep pattern. The agent's first hardware-output service, behind a command socket the plugin host forwards to."
+homepage.workspace = true
+documentation = "https://docs.rs/ados-gpio"
+readme = "README.md"
+description = "Drive a buzzer or LED on a Linux GPIO character-device line and compute bounded software-PWM beep schedules, as used by the ADOS Drone Agent."
+keywords = ["gpio", "buzzer", "led", "pwm", "linux"]
+categories = ["hardware-support", "embedded", "os::linux-apis", "aerospace::drones"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [lib]
 name = "ados_gpio"

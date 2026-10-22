@@ -1,0 +1,394 @@
+# Radxa ROCK 5C Lite (RK3582) — Pro tier (NPU intact, no GPU)
+#
+# Binned RK3588S2 with GPU (Mali-G610) and 2x Cortex-A76 fused off.
+# NPU and VPU survive binning intact: 6 TOPS @ INT4 / ~5 TOPS @ INT8.
+# RK3588 model zoo binaries (YOLOv8n, MiDaS, RetinaFace) run unmodified
+# via standard RKNPU2 / rknn-toolkit2 stack.
+#
+# Video encode always uses the VPU (rkmpp) -> WFB-ng path, independent of the
+# GPU. On the full Rock 5C the Mali-G610 IS present and accelerates the HDMI
+# kiosk UI (cage + Chromium via scoped libmali); the software renderer (pixman /
+# --disable-gpu) is the fallback when no accelerated GPU userspace is
+# provisioned. GPU presence is determined per-unit at runtime (/dev/mali0), not
+# assumed from this profile — see the installer's GPU provisioning step.
+#
+# Note: the RK3582 does NOT have the NPU fused off, despite a common claim
+# that it does. References:
+#   - https://dl.radxa.com/rock5/5c/docs/hw/v1100/radxa_rock5c_product_brief.pdf
+#   - https://www.cnx-software.com/2024/05/18/radxa-rock-5c-lite-sbc-rockchip-rk3588s2-rk3582-soc-wifi-6-raspberry-pi-pcie-ffc-connector/
+#   - https://www.hackster.io/news/radxa-launches-the-rock-5c-5c-lite-single-board-computers-and-adopts-raspberry-pi-s-pcie-pinout-d327c57ed04c
+#   - https://forum.radxa.com/t/announcing-the-rock-5c-power-performance-and-versatility-for-just-30/20429
+#
+# Prebuilt RTL8812EU driver: on Armbian (the vendor rk35xx BSP kernel,
+# e.g. 6.1.115-vendor-rk35xx) the `armbian-rk35xx` CI flavor
+# (linux-headers-vendor-rk35xx) publishes a verified prebuilt module the
+# installer loads by matching the running kernel's exact `uname -r`, so a
+# fresh flash skips the multi-minute on-device DKMS compile. Other images
+# (the Radxa BSP rsdk kernel) fall through to the DKMS build.
+
+name: "Radxa ROCK 5C Lite (RK3582)"
+vendor: "Radxa"
+soc: "RK3582"
+arch: "aarch64"
+model_patterns:
+  # /proc/device-tree/model on Rock 5C Lite hardware reports
+  # "Radxa ROCK 5C " (no "Lite" suffix). Radxa uses the same DT for
+  # both Rock 5C and Rock 5C Lite variants. Without the no-suffix
+  # pattern, detect.py's substring match falls back to generic-arm64.
+  - "Radxa ROCK 5C Lite"
+  - "Radxa Rock 5C Lite"
+  - "Radxa ROCK 5C"
+  - "Radxa Rock 5C"
+  - "rock-5c-lite"
+  - "rock-5c"
+  - "rk3582"
+default_tier: 4
+
+# The SAME device tree serves both SoC bins, so a pattern match cannot tell
+# them apart and nothing else could: a full ROCK 5C (RK3588S2, 4x A76 + 4x A55)
+# published this profile's `soc: RK3582` and a name ending in "Lite" into
+# /run/ados/board.json, /api/status and Mission Control. The core count is the
+# discriminator — the Lite is the binned part with 2 of the 4 A76 cores fused
+# off (6 online cores vs 8) — and it overrides only the two identity fields
+# that actually differ. Everything else (NPU, VPU, UARTs, header pinout,
+# displays) is shared: it is the same PCB, and GPU presence is runtime-probed
+# (/dev/mali0), never assumed from this file.
+variants:
+  - id: rock-5c
+    when:
+      cpu_cores: 8
+    name: "Radxa ROCK 5C (RK3588S2)"
+    soc: "RK3588S2"
+
+gpio_pins:
+  - 3   # SDA
+  - 5   # SCL
+  - 8   # UART TX
+  - 10  # UART RX
+  - 12  # PWM
+uart_paths:
+  - /dev/ttyS0
+  - /dev/ttyS1
+hw_video_codecs:
+  - h264_enc
+  - h264_dec
+  - h265_enc
+  - h265_dec
+  - av1_dec
+  - vp9_dec
+
+board:
+  id: rock-5c-lite
+  manufacturer: Radxa
+  status: supported
+
+compute:
+  cores: 6
+  core_type: "Cortex-A76 x2 + Cortex-A55 x4"
+  max_freq_mhz: 2400
+  # Mali-G610 is PRESENT on the full Rock 5C (RK3588S2) — the common board this
+  # profile serves — and binned on the Lite (RK3582). This annotation is
+  # human-readable only (the parser ignores it); the AUTHORITATIVE, per-unit GPU
+  # determination is the runtime probe (`/dev/mali0` + the SoC family), which the
+  # installer's GPU provisioning step uses to enable the HDMI kiosk's GPU
+  # renderer (scoped libmali) and otherwise falls back to the software renderer.
+  gpu: "Mali-G610 MP4"   # full Rock 5C; binned on the Lite. Runtime-probed.
+  npu_tops: 6.0          # 6 TOPS @ INT4, ~5 TOPS @ INT8 (intact, NOT fused off)
+  hw_encoder: ["h264", "h265"]
+  hw_decoder: ["h264", "h265", "vp9", "av1"]
+  ram_mb: 16384          # 16 GB LPDDR4x reference unit
+  ram_type: LPDDR4X
+
+storage:
+  emmc: true
+  emmc_gb: 0             # Socket present, not always populated. Set per-unit.
+  sd_card: true
+  nand: false
+
+buses:
+  uart:
+    - id: uart0
+      path: /dev/ttyS0
+      baud: 921600
+      fc_capable: true
+    - id: uart1
+      path: /dev/ttyS1
+      baud: 115200
+      fc_capable: false
+  usb:
+    - id: usb0
+      path: "/dev/bus/usb/001/*"
+      type: usb2
+    - id: usb1
+      path: "/dev/bus/usb/002/*"
+      type: usb3
+    - id: usb2
+      path: "/dev/bus/usb/003/*"
+      type: usb2
+    - id: usb3
+      path: "/dev/bus/usb/004/*"
+      type: usb3
+  i2c:
+    - id: i2c0
+      path: /dev/i2c-0
+      speed_hz: 400000
+    - id: i2c1
+      path: /dev/i2c-1
+      speed_hz: 400000
+  spi:
+    - id: spi0
+      path: /dev/spidev0.0
+  pcie:
+    - id: pcie0
+      type: pcie3.0
+      lanes: 1
+
+network:
+  wifi: true             # WiFi 6 onboard
+  ethernet: true         # Gigabit
+  bluetooth: true        # BT 5.4
+
+video:
+  csi_ports: 1           # Only 1x MIPI CSI 31-pin Radxa-proprietary broken out
+  csi_connector: "31-pin 0.3mm Radxa FPC (Hirose FH35C-31S-0.3SHW(50)), 4-lane"
+  max_encode_resolution: "3840x2160"
+  max_encode_fps: 60
+  encoder_api: rkmpp     # video encode uses the VPU (rkmpp); the GPU, when present, drives the kiosk UI
+  # Single CSI consumed by the primary forward camera. Downward nav
+  # camera (optical-flow or VIO mono) lands on one of the four USB ports.
+  #
+  # The optional ``cameras`` block below maps each physical port to a
+  # mount orientation. The vision-nav wizard reads this to default the
+  # camera-orientation picker; without it the wizard falls back to
+  # ``auto`` and asks the operator to confirm. ``forward`` suits
+  # indoor / corridor / inspection flight; ``downward`` suits
+  # over-ground flight (agriculture, survey, SAR, pipeline patrol).
+  nav_cameras:
+    csi_count: 1
+    usb_uvc_count: 4
+    recommended_role: nav-usb
+  cameras:
+    - name: front
+      bus: csi
+      orientation: forward
+      notes: "Primary forward FPV / Vision Engine camera. MIPI CSI is the cleanest path on the dev rig once a supported sensor lands; current dev-rig builds use USB UVC instead."
+    - name: down
+      bus: usb
+      orientation: downward
+      notes: "AprilTag landing and survey capture today; the optical-flow estimator and downward VIO both bind here when the operator picks them in the wizard."
+
+# Sensor bindings shared by both bins (same PCB, same device tree, so no
+# separate ROCK 5C profile: one would claim the same fingerprint, and the
+# `variants` block above already names the full RK3588S2 part).
+#
+# Sources:
+#   [hwif]     Radxa Docs, ROCK 5C Hardware interface description, "40 PIN GPIO
+#              Header" (pinout with the Linux GPIO number column) and "MIPI CSI":
+#              https://docs.radxa.com/en/rock5/rock5c/hardware-design/hardware-interface
+#   [dts]      Radxa vendor kernel linux-6.1-stan-rkr4.1, rk3588s.dtsi aliases
+#              (i2cN = &i2cN, serialN = &uartN: controller N is /dev/i2c-N and
+#              /dev/ttySN): https://github.com/radxa/kernel/tree/linux-6.1-stan-rkr4.1
+#   [overlays] https://github.com/radxa-pkg/radxa-overlays,
+#              arch/arm64/boot/dts/rockchip/overlays/ (metadata names the boards
+#              and header pins of each overlay)
+# GPIO numbers are bank * 32 + group * 8 + index ([hwif] "GPIO number"); the
+# line is offset (number % 32) on /dev/gpiochip<number / 32>.
+
+# The single 4-lane CSI connector on csi2_dphy0, bound to the Radxa Camera 4K
+# (Sony IMX415) by overlay rock-5a-radxa-camera-4k, whose metadata lists
+# `compatible = "radxa,rock-5a", "radxa,rock-5c"` and `exclusive = "csi2_dphy0"`
+# [overlays]. Radxa images ship it as `<name>.dtbo.disabled` under /boot/dtbo.
+# Capture nodes and modes are not declared until measured on a unit.
+cameras:
+  supported:
+    - id: csi-cam0
+      type: csi
+      sensor: "Sony IMX415"
+      bus: csi2_dphy0
+      orientation: forward
+      overlay_required: true
+      overlay_source: bsp-disabled
+      overlay_ref: "rock-5a-radxa-camera-4k"
+
+# GNSS on the SBC: UART8_M0, TX pin 32 (GPIO4_B0), RX pin 40 (GPIO4_B1) [hwif],
+# enabled by overlay rk3588-uart8-m0 ("On Radxa ROCK 5C this is TX pin 32 and
+# RX pin 40") [overlays]; /dev/ttyS8 [dts]. It avoids the SPI4-M2 panel pins
+# and the display GPIOs above. PPS lands on header pin 16, GPIO1_A5, Linux GPIO
+# 37 [hwif], free of every binding in this file. No Radxa overlay provides a
+# pps-gpio node; /dev/ppsN appears only once a pps-gpio overlay names this line.
+# Baud and receiver model are per-receiver and left to the service's detection.
+gnss:
+  transport: serial
+  device: /dev/ttyS8
+  pps_gpio: 37
+
+# No battery gauge is declared here: its shunt resistor and full-scale current
+# belong to the rig's power wiring, not to the board, so the gauge is bound per
+# rig in the agent config (`battery.gauge`, shunt_ohm and max_current_a
+# required). The free header bus for an INA226 is I2C8_M2: SDA pin 3
+# (GPIO1_D7), SCL pin 5 (GPIO1_D6) [hwif], enabled by overlay rk3588-i2c8-m2
+# ("On Radxa ROCK 5C this is SDA pin 3 and SCL pin 5") [overlays]; /dev/i2c-8
+# [dts]. 0x40 is the A1=A0=GND address (TI INA226 datasheet, "Serial Bus
+# Address": https://www.ti.com/lit/ds/symlink/ina226.pdf).
+
+# Panel buttons, by Linux GPIO number ([hwif] "GPIO number" column): the reader
+# opens /dev/gpiochip<n / 32> line n % 32. Header pins 29/31/33/35, each a plain
+# GPIO with no function bound in this file, with ground on pins 30/34/39.
+# Wire each button from its pin to ground (active-low, pulled up).
+#   up     pin 29  GPIO1_B2  42
+#   down   pin 31  GPIO1_B1  41
+#   select pin 33  GPIO1_B4  44
+#   back   pin 35  GPIO4_A0  128
+buttons: {up: 42, down: 41, select: 44, back: 128}
+
+# Rotary encoder (KY-040 class), by Linux GPIO number ([hwif] "GPIO number"
+# column), the same numbering as `buttons`. Header pins 36/38/15, each a plain
+# GPIO with no function bound in this file. Power the module's `+` from 3.3 V
+# (pin 1 or 17, never 5 V: [hwif] puts the header GPIO maximum at 3.63 V) and
+# its GND to pin 14 or 39; CLK and DT are pulled up on the module, SW switches
+# to ground. One detent is four quadrature transitions.
+#   a  (CLK) pin 36  GPIO4_A2  130   /dev/gpiochip4 line 2
+#   b  (DT)  pin 38  GPIO4_A5  133   /dev/gpiochip4 line 5
+#   sw (SW)  pin 15  GPIO4_B4  140   /dev/gpiochip4 line 12
+encoder: {a: 130, b: 133, sw: 140}
+
+# Lines bound to something other than a panel input; the loader rejects a button
+# or encoder line on any of them (the GNSS PPS line is added from
+# `gnss.pps_gpio`). [hwif]
+reserved_gpio:
+  - {gpio: 13, header_pin: 8, use: "debug console UART2_M0 TX (GPIO0_B5)"}
+  - {gpio: 14, header_pin: 10, use: "debug console UART2_M0 RX (GPIO0_B6)"}
+  - {gpio: 63, header_pin: 3, use: "I2C8_M2 SDA (GPIO1_D7)"}
+  - {gpio: 62, header_pin: 5, use: "I2C8_M2 SCL (GPIO1_D6)"}
+  - {gpio: 136, header_pin: 32, use: "GNSS UART8_M0 TX (GPIO4_B0)"}
+  - {gpio: 137, header_pin: 40, use: "GNSS UART8_M0 RX (GPIO4_B1)"}
+  - {gpio: 33, header_pin: 19, use: "SPI4_M2 MOSI, panel (GPIO1_A1)"}
+  - {gpio: 32, header_pin: 21, use: "SPI4_M2 MISO, panel (GPIO1_A0)"}
+  - {gpio: 34, header_pin: 23, use: "SPI4_M2 CLK, panel (GPIO1_A2)"}
+  - {gpio: 35, header_pin: 24, use: "SPI4_M2 CS0, panel (GPIO1_A3)"}
+  - {gpio: 36, header_pin: 26, use: "SPI4_M2 CS1, panel touch (GPIO1_A4)"}
+  - {gpio: 40, header_pin: 18, use: "panel DC (GPIO1_B0)"}
+  - {gpio: 45, header_pin: 22, use: "panel reset (GPIO1_B5)"}
+  - {gpio: 139, header_pin: 11, use: "panel touch PENIRQ (GPIO4_B3)"}
+
+power:
+  typical_watts: 4.0
+  max_watts: 8.5
+  voltage: 5.0
+  input: "USB-C 5V/3A"
+
+# Full VIO target. NPU intact at 6 TOPS, 16 GB RAM, Cortex-A76 pair drives
+# the front-end at 30 fps comfortably. Rangefinder choices: a free UART
+# header or either I2C bus.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyS1, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-0, speed_hz: 400000}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}
+
+# 40-pin header signal positions are Pi-pinout-compatible at the SPI4-M2
+# pad mux (GPIO1_A0..A4 → physical pins 21/19/23/24/26), so a Waveshare
+# 3.5" RPi LCD HAT plugs in directly. The BSP ships a compiled overlay
+# at /boot/dtbo/rk3588-spi4-m2-cs0-waveshare35.dtbo whose metadata
+# declares ``radxa,rock-5c`` compatible — the LCD-overlay installer
+# activates that DTBO when present, and falls back to compiling a
+# vendored copy of the source when the BSP overlay set is absent
+# (third-party Rockchip images such as Armbian / Ubuntu-Rockchip / DietPi).
+displays:
+  supported:
+    - id: waveshare35a
+      type: spi-lcd
+      controller: ILI9486
+      touch_chip: ADS7846
+      bus: spi4
+      resolution: 480x320
+      overlay_source: upstream
+      overlay_ref: rk3588-spi4-m2-cs0-waveshare35
+      gpio:
+        dc:
+          pin: GPIO1_B0
+          pinctrl: default
+          header_pin: 18
+          direction: out
+        reset:
+          pin: GPIO1_B5
+          pinctrl: default
+          header_pin: 22
+          direction: out
+        irq:
+          pin: GPIO4_B3
+          pinctrl: default
+          header_pin: 11
+          direction: in
+        cs_touch:
+          pin: GPIO1_A4
+          pinctrl: default
+          header_pin: 26
+          direction: out
+      default_rotation: 90
+      modules_required:
+        - fbtft
+        - fb_ili9486
+        - ads7846
+
+    # HDMI display carrying a standalone XPT2046 (ADS7846-compatible) SPI
+    # resistive touch layer — video over HDMI, touch over SPI. The installer
+    # compiles the touch-ONLY overlay (an ads7846 node, no framebuffer panel)
+    # and writes a LIBINPUT_CALIBRATION_MATRIX udev rule so cage/chromium
+    # consumes the touch as a standard libinput touchscreen mapped onto the
+    # 800x480 output. This is an ALTERNATIVE wiring to waveshare35a above (a
+    # rig has one or the other, never both), so the touch reuses the same,
+    # proven SPI4-M2 header positions and the GPIO4_B3 PENIRQ line — only CS1
+    # is populated (CS0 stays free) and the ILI9486 panel is stripped.
+    #
+    # TO-VERIFY on hardware (a Rock 5C with an HDMI touch panel): the exact
+    # panel's SPI wiring (bus/CS), the PENIRQ header pin, and the raw ADC edge
+    # bounds. The bounds/orientation below are a best-guess baseline for a
+    # common 800x480 XPT2046 panel; a mis-aligned panel is refit by the
+    # on-screen calibration wizard, which regenerates the udev matrix.
+    - id: hdmi_touch_xpt2046
+      type: hdmi-touch
+      controller: HDMI
+      touch_chip: ADS7846
+      bus: spi4
+      resolution: 800x480
+      overlay_source: upstream-vendored
+      overlay_ref: rk3588-spi4-m2-cs1-xpt2046-touch
+      modules_required:
+        - ads7846
+      touch:
+        controller: XPT2046
+        bus: spi4
+        cs: 1
+        irq:
+          pin: GPIO4_B3     # PENIRQ, header pin 11 (proven on this carrier)
+          pinctrl: default
+          header_pin: 11
+          direction: in
+        # Raw 12-bit ADC bounds at the panel edges (best-guess baseline).
+        x_min: 200
+        x_max: 3900
+        y_min: 200
+        y_max: 3900
+        # Orientation of the resistive layer vs the landscape HDMI output.
+        swap_xy: false
+        invert_x: false
+        invert_y: false
+        modules_required:
+          - ads7846
+
+profiles:
+  tier: pro
+  max_features:
+    - mavlink_proxy
+    - mqtt_gateway
+    - video_pipeline
+    - rest_api
+    - vision_engine     # NPU is intact, vision behaviors run real-time
+    - wfb_ng
+    - cloud_relay
+  video_capable: true
+  recommended_resolution: "1920x1080"
+  memory_budget_mb: 4096    # Plenty of RAM headroom on 16GB
+  notes: "ADOS Dev Rig primary companion. NPU intact at 6 TOPS INT4 (RK3588 model zoo compatible). Video uses the VPU + WFB-ng, independent of the GPU; the Mali-G610 (present on the full Rock 5C, binned on the Lite) accelerates the HDMI kiosk UI when provisioned, else the kiosk renders in software. GPU presence is runtime-probed (/dev/mali0), not assumed. Heatsink mandatory (throttles 80C). Same physical PCB as full Rock 5C (1x MIPI CSI broken out, dual MIPI CSI not feasible)."

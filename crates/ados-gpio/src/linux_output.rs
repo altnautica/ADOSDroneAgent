@@ -29,8 +29,7 @@ struct DrivenLine {
 /// Owns the set of output lines the service is driving, opening each chip lazily
 /// on first use and caching the line handle so repeated writes reuse it.
 ///
-/// Safe-by-default: nothing is driven until [`set`](Self::set) (or
-/// [`pulse`](Self::pulse)) is called, and a line is requested with an initial
+/// Safe-by-default: nothing is driven until [`set`](Self::set) is called, and a line is requested with an initial
 /// LOW value so claiming it never energizes the attached device.
 #[derive(Default)]
 pub struct GpioOutput {

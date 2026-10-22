@@ -23,7 +23,7 @@ ados-clock-fit = { workspace = true }
 ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
 # The sysfs tty walk shared with the board probe (`transport: auto`).
-ados-hal-probe = { path = "../ados-hal-probe" }
+ados-hal-probe = { workspace = true }
 ados-sensorbus = { path = "../ados-sensorbus" }
 ados-sensorhub-proto = { workspace = true }
 serde = { workspace = true }

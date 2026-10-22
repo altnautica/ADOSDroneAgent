@@ -1,24 +1,4 @@
-//! Probe-first hardware-capability detection.
-//!
-//! The agent must not trust hardware *declarations*. A board YAML can be wrong,
-//! `ffmpeg -encoders` advertises wrapper codecs that are backed by no real
-//! device, and a vendor binary can list a feature it cannot deliver. This crate
-//! derives capabilities by *probing the real silicon*: it reads the sysfs node,
-//! the device-tree compatible string, issues the V4L2 ioctl, or runs a bounded
-//! trial-init, and records the [`Evidence`](ados_protocol::hwcaps::Evidence)
-//! that produced each answer.
-//!
-//! The result shapes live in [`ados_protocol::hwcaps`] so any service can read
-//! them; this crate owns the I/O. The dangerous part — trial-initializing a
-//! real device that might hang the kernel ioctl into a D-state that no signal
-//! can reap — is isolated in [`runner`], which spawns the trial in its own
-//! process group and SIGKILLs the whole group on timeout so the agent always
-//! survives.
-//!
-//! ## Phases
-//! Destructive / stateful probes (encoder trial-init) only run when the
-//! [`ProbePhase`] permits it (`Setup` / `BootPreArm`, never armed `Runtime`).
-//! Read-only probes (CPU, SoC, USB, serial) run in any phase.
+#![doc = include_str!("../README.md")]
 
 pub mod bindings;
 pub mod board_sidecar;

@@ -26,7 +26,7 @@ ados-hid = { path = "../ados-hid" }
 # corrections in toward the FC.
 ados-sensorbus = { path = "../ados-sensorbus" }
 # The sensor hub's USB id, so FC discovery never claims the hub's port.
-ados-hal-probe = { path = "../ados-hal-probe" }
+ados-hal-probe = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_norway = { workspace = true }
