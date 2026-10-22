@@ -4,7 +4,7 @@
 //! Checks run in a fixed order and the first refusal wins: region resolved ->
 //! module band -> `max_power` -> `dwell_time` -> `duty_cycle` -> `lbt`. The
 //! first five are decided here against the plan and the ledger; listen-before-
-//! talk needs the radio, so the daemon runs it on the granted channel and
+//! talk needs the radio, so the caller runs it on the granted channel and
 //! reports the outcome ([`Governor::commit`] or [`Governor::refuse`]). A
 //! commit charges the ledger (fsync'd) before the frame is sent.
 
@@ -27,11 +27,17 @@ pub use status::GovernorStatus;
 /// Why a frame was not transmitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
+    /// No region is configured or resolvable.
     RegionUnset,
+    /// The fitted radio cannot meet the plan.
     ModuleBandMismatch,
+    /// The requested power exceeds the plan limit.
     PowerOverLimit,
+    /// The channel dwell-time limit is reached.
     DwellTime,
+    /// The duty-cycle budget is used up.
     DutyExhausted,
+    /// Listen-before-talk found the channel busy.
     LbtBusy,
 }
 
@@ -74,8 +80,11 @@ pub const RULE_KEYS: [&str; 6] = [
 /// What the governor is set up with.
 #[derive(Debug, Clone)]
 pub struct Setup {
+    /// The resolved region plan, if any.
     pub resolved: Option<Resolved>,
+    /// What the fitted radio can tune.
     pub caps: ModuleCaps,
+    /// The LoRa modem settings.
     pub modem: Modem,
     /// Multiplier on time on air charged to the ledger.
     pub airtime_factor: u64,
@@ -83,6 +92,7 @@ pub struct Setup {
     pub freq_mhz: Option<f64>,
     /// Requested ERP, else the plan clamp.
     pub erp_mw: Option<f64>,
+    /// The antenna path used for power conversions.
     pub antenna: Antenna,
     /// Seeds the hop permutation.
     pub node_id: u16,
@@ -91,11 +101,15 @@ pub struct Setup {
 /// An admitted frame's channel, power and charge.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Grant {
+    /// Granted channel centre, MHz.
     pub channel_mhz: f64,
+    /// Granted conducted power, dBm.
     pub power_dbm: i8,
     /// Charged airtime (time on air x the transport factor), microseconds.
     pub airtime_us: u64,
+    /// Label of the plan sub-band the channel falls in.
     pub sub_band: String,
+    /// Identifier of the plan the grant was made under.
     pub plan_id: &'static str,
 }
 
@@ -106,6 +120,7 @@ struct Counters {
     by_rule: BTreeMap<&'static str, u64>,
 }
 
+/// The per-region transmit governor.
 pub struct Governor {
     setup: Setup,
     ledger: Ledger,
@@ -138,6 +153,7 @@ fn hop_permutation(n: usize, seed: u16) -> Vec<usize> {
 }
 
 impl Governor {
+    /// Build a governor from its setup and an opened ledger.
     pub fn new(setup: Setup, ledger: Ledger) -> Self {
         let (channels, static_block) = match setup.resolved {
             None => (Vec::new(), Some(Refusal::RegionUnset)),
@@ -191,14 +207,17 @@ impl Governor {
         }
     }
 
+    /// The active plan, if a region resolved.
     pub fn plan(&self) -> Option<&'static Plan> {
         self.setup.resolved.map(|r| r.plan)
     }
 
+    /// The setup the governor was built with.
     pub fn setup(&self) -> &Setup {
         &self.setup
     }
 
+    /// Mutable access to the airtime ledger.
     pub fn ledger_mut(&mut self) -> &mut Ledger {
         &mut self.ledger
     }
@@ -214,10 +233,12 @@ impl Governor {
         time_on_air_us(&self.setup.modem, len) * self.setup.airtime_factor
     }
 
+    /// Record the channel utilisation reported by the radio, percent.
     pub fn set_reported_air_util(&mut self, pct: Option<f64>) {
         self.reported_air_util_pct = pct;
     }
 
+    /// Record a link report from a peer for adaptive power control.
     pub fn note_peer_report(&mut self, peer: u16, snr_db: f32, now: Now) {
         self.apc.note_report(peer, snr_db, now.mono_ns);
     }
@@ -368,7 +389,7 @@ impl Governor {
         self.counters.frames += 1;
     }
 
-    /// Record a refusal (the daemon calls this for `lbt_busy`).
+    /// Record a refusal (the caller reports `lbt_busy` here).
     pub fn refuse(&mut self, refusal: Refusal, now: Now) {
         self.counters.refused += 1;
         *self.counters.by_rule.entry(refusal.rule()).or_default() += 1;

@@ -17,9 +17,9 @@ use serde::Deserialize;
 use tokio::net::UdpSocket;
 
 use super::{RxEvent, Transport, TransportKind, TxFrame};
-use crate::airtime::Modem;
-use crate::band::ModuleCaps;
 use crate::config::LoraConfig;
+use ados_lora_governor::airtime::Modem;
+use ados_lora_governor::band::ModuleCaps;
 
 /// The ambient level reported when the peer injected none.
 pub const QUIET_FLOOR_DBM: i16 = -120;

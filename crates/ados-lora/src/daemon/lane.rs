@@ -9,15 +9,15 @@ use tokio::time::Instant;
 
 use serde_json::{json, Value};
 
-use crate::band::ModuleCaps;
 use crate::frame::{Beacon, Frame, Kind, Status};
-use crate::governor::{lbt, Governor, Refusal};
-use crate::ledger::Now;
-use crate::regions::LbtRule;
 use crate::transport::e22::E22;
 use crate::transport::loopback::Loopback;
 use crate::transport::meshtastic::Meshtastic;
 use crate::transport::{RxEvent, Transport, TransportKind, TxFrame};
+use ados_lora_governor::band::ModuleCaps;
+use ados_lora_governor::governor::{lbt, Governor, Refusal};
+use ados_lora_governor::ledger::Now;
+use ados_lora_governor::regions::LbtRule;
 
 /// The configured transport.
 pub enum AnyTransport {
@@ -43,7 +43,7 @@ impl Transport for AnyTransport {
     fn caps(&self) -> &ModuleCaps {
         each!(self, t => t.caps())
     }
-    fn modem(&self) -> crate::airtime::Modem {
+    fn modem(&self) -> ados_lora_governor::airtime::Modem {
         each!(self, t => t.modem())
     }
     fn airtime_factor(&self) -> u64 {

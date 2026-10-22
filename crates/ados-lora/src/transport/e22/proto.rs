@@ -14,9 +14,9 @@
 
 use std::collections::VecDeque;
 
-use crate::band::{ModuleCaps, Tuning};
 use crate::frame::{Frame, FrameError};
 use crate::transport::RxEvent;
+use ados_lora_governor::band::{ModuleCaps, Tuning};
 
 pub const CMD_WRITE_SAVE: u8 = 0xC0;
 pub const CMD_READ: u8 = 0xC1;

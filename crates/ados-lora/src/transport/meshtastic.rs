@@ -21,11 +21,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
-use crate::airtime::Modem;
-use crate::band::ModuleCaps;
 use crate::config::LoraConfig;
 use crate::frame::{Beacon, Frame, Kind};
 use crate::transport::{RxEvent, Transport, TransportKind, TxFrame};
+use ados_lora_governor::airtime::Modem;
+use ados_lora_governor::band::ModuleCaps;
 use msg::{port, FromRadio, LoraSettings, OutPacket, Position};
 
 /// The node's serial console rate.

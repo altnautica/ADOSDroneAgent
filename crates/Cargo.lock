@@ -470,6 +470,12 @@ dependencies = [
 [[package]]
 name = "ados-lora-governor"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
 
 [[package]]
 name = "ados-macpin"

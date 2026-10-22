@@ -2,12 +2,12 @@ use super::lane::{AnyTransport, Lane, TxOutcome};
 use super::*;
 use crate::config::LoraConfig;
 use crate::frame::Beacon;
-use crate::governor::power::Antenna;
-use crate::governor::{Governor, Refusal, Setup};
-use crate::ledger::Ledger;
-use crate::regions::{by_code, RegionSource, Resolved};
 use crate::transport::loopback::Loopback;
 use crate::transport::Transport;
+use ados_lora_governor::governor::power::Antenna;
+use ados_lora_governor::governor::{Governor, Refusal, Setup};
+use ados_lora_governor::ledger::Ledger;
+use ados_lora_governor::regions::{by_code, RegionSource, Resolved};
 use tokio::net::UdpSocket;
 
 fn fixed_now() -> Now {

@@ -14,15 +14,21 @@ use crate::regions::Plan;
 pub enum Tuning {
     /// Fixed channels at `start_mhz + n * step_mhz`, `n` in `0..count`.
     Grid {
+        /// First channel centre, MHz.
         start_mhz: f64,
+        /// Channel spacing, MHz.
         step_mhz: f64,
+        /// Number of channels.
         count: u32,
     },
     /// Any centre in `lo_mhz..=hi_mhz`. `hops` is whether the transport can
     /// change channel per frame (a Meshtastic node sits on one preset slot).
     Continuous {
+        /// Lowest tunable frequency, MHz.
         lo_mhz: f64,
+        /// Highest tunable frequency, MHz.
         hi_mhz: f64,
+        /// Whether the transport can change channel per frame.
         hops: bool,
     },
 }
@@ -33,6 +39,7 @@ pub struct ModuleCaps {
     /// The band label reported as `module_band` (`850-930`, `410-493`,
     /// `863-928`, `any`).
     pub band: String,
+    /// How the radio tunes.
     pub tuning: Tuning,
     /// Conducted output steps the module can be set to, in dBm, descending.
     pub power_steps_dbm: Vec<i8>,
@@ -104,8 +111,8 @@ impl ModuleCaps {
         }
     }
 
-    /// The caps for a `module_band` label (the loopback transport's
-    /// `lora.loopback.module_band`).
+    /// The caps for a `module_band` label (`850-930`, `410-493`, `863-928`,
+    /// `any`).
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
             "850-930" => Some(Self::e22_900()),

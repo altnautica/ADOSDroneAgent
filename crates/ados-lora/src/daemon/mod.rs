@@ -19,10 +19,10 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use crate::frame::{Frame, Kind, Status};
-use crate::governor::max_window_s;
-use crate::ledger::Now;
 use crate::paths;
 use crate::status::{lane_body, LaneState};
+use ados_lora_governor::governor::max_window_s;
+use ados_lora_governor::ledger::Now;
 use lane::{remember, TxOutcome};
 use setup::Built;
 
@@ -233,7 +233,7 @@ async fn recv_bridge(
 
 fn write_sidecars(
     state: &LaneState,
-    gov: &crate::governor::GovernorStatus,
+    gov: &ados_lora_governor::governor::GovernorStatus,
     beacons: &VecDeque<Value>,
 ) {
     let body = lane_body(state, gov);

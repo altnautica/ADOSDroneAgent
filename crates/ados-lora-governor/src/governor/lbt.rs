@@ -1,5 +1,5 @@
 //! `lbt` (listen before talk): the decision over a listen interval's RSSI
-//! samples. The daemon samples the radio on the granted channel for at least
+//! samples. The caller samples the radio on the granted channel for at least
 //! `listen_us`, transmits within `gap_max_us` of the last sample when every
 //! sample is at or below the threshold, and otherwise backs off a random
 //! multiple (1..=8) of the listen interval and retries, up to
