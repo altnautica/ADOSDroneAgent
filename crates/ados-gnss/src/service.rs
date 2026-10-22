@@ -15,14 +15,14 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
-use crate::base::{Base, BaseMode, BaseState, Capability};
 use crate::config::{GnssConfig, ReceiverCfg, Source};
-use crate::receiver::ReceiverState;
 use crate::status::{
     BaseOut, GnssStatus, Heading, ReceiverView, RtcmCounter, GNSS_SIDECAR_VERSION,
 };
-use crate::stream::Frame;
-use crate::{nmea, ubx, valset};
+use ados_gnss_stream::base::{Base, BaseMode, BaseState, Capability};
+use ados_gnss_stream::receiver::ReceiverState;
+use ados_gnss_stream::stream::Frame;
+use ados_gnss_stream::{nmea, ubx, valset};
 
 pub type Shared = Arc<Mutex<Service>>;
 

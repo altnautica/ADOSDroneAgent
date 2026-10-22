@@ -21,3 +21,8 @@ targets = ["x86_64-unknown-linux-gnu"]
 fixtures = []
 
 [dependencies]
+serde = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

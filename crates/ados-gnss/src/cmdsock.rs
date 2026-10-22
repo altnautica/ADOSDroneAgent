@@ -14,9 +14,9 @@ use ados_sensorbus::time::mono_ns;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-use crate::base::{BaseMode, Llh};
 use crate::service::{Shared, E_BAD_REQUEST};
 use crate::status::linked_peer_count;
+use ados_gnss_stream::base::{BaseMode, Llh};
 
 /// Largest request line accepted.
 const MAX_LINE: u64 = 4096;

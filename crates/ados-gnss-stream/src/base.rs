@@ -13,17 +13,27 @@ use crate::valset::{self, RxPort};
 /// or the fixed-mode VALSET acknowledged).
 pub const CONFIRM_TIMEOUT_NS: u64 = 10_000_000_000;
 
+/// Failure reason recorded when the receiver cannot act as a base.
 pub const E_UNSUPPORTED: &str = "E_GNSS_UNSUPPORTED";
 
 /// A requested base mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BaseMode {
+    /// Not a base.
     Off,
-    Survey { min_dur_s: u32, accuracy_m: f64 },
+    /// Survey-in until both the minimum duration and the accuracy are met.
+    Survey {
+        /// Minimum survey duration, seconds.
+        min_dur_s: u32,
+        /// Target mean position accuracy, metres.
+        accuracy_m: f64,
+    },
+    /// A known base position.
     Fixed(Llh),
 }
 
 impl BaseMode {
+    /// `off`, `survey` or `fixed`.
     pub fn as_str(&self) -> &'static str {
         match self {
             BaseMode::Off => "off",
@@ -36,17 +46,25 @@ impl BaseMode {
 /// Geodetic position, WGS84.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Llh {
+    /// Latitude, degrees.
     pub lat_deg: f64,
+    /// Longitude, degrees.
     pub lon_deg: f64,
+    /// Height above the ellipsoid, metres.
     pub h_ellipsoid_m: f64,
 }
 
+/// Base machine state, serialized in snake case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BaseState {
+    /// Not a base.
     Off,
+    /// Survey-in running.
     Surveying,
+    /// Base position fixed (surveyed or configured).
     Fixed,
+    /// The receiver rejected or did not confirm the command.
     Failed,
 }
 
@@ -57,6 +75,7 @@ pub struct Capability {
     pub writable: bool,
     /// Model string, when known (config or MON-VER).
     pub model: Option<String>,
+    /// Receiver port the host is attached to.
     pub port: RxPort,
 }
 
@@ -107,9 +126,11 @@ impl Base {
         }
     }
 
+    /// The requested mode.
     pub fn mode(&self) -> BaseMode {
         self.mode
     }
+    /// The machine state.
     pub fn state(&self) -> BaseState {
         self.state
     }
@@ -117,6 +138,7 @@ impl Base {
     pub fn reason(&self) -> Option<&str> {
         self.reason.as_deref()
     }
+    /// The survey defaults `(min_dur_s, target_accuracy_m)`.
     pub fn defaults(&self) -> (u32, f64) {
         (self.min_dur_s, self.target_accuracy_m)
     }
@@ -274,14 +296,22 @@ impl Base {
     }
 }
 
+/// A serializable snapshot of the base machine.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BaseView {
+    /// Mode name, as [`BaseMode::as_str`].
     pub mode: &'static str,
+    /// Machine state.
     pub state: BaseState,
+    /// Survey-in elapsed time, seconds.
     pub elapsed_s: u32,
+    /// Survey-in minimum duration, seconds.
     pub min_dur_s: u32,
+    /// Current survey-in accuracy, metres.
     pub accuracy_m: Option<f64>,
+    /// Target survey-in accuracy, metres.
     pub target_accuracy_m: f64,
+    /// The base position, once fixed.
     pub fixed: Option<Llh>,
 }
 

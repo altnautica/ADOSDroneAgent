@@ -1,21 +1,36 @@
-//! UBX message decode for the messages this service consumes. Offsets follow
-//! the u-blox F9 interface description; every decoder checks the payload
-//! length first and returns `None` for a short or foreign payload.
+//! UBX message decode for the navigation, timing, acknowledgement and version
+//! messages a host typically consumes. Offsets follow the u-blox F9 interface
+//! description; every decoder checks the payload length first and returns
+//! `None` for a short or foreign payload.
 
+/// UBX class NAV (navigation results).
 pub const CLS_NAV: u8 = 0x01;
+/// UBX class ACK (acknowledgements).
 pub const CLS_ACK: u8 = 0x05;
+/// UBX class CFG (configuration).
 pub const CLS_CFG: u8 = 0x06;
+/// UBX class MON (monitoring).
 pub const CLS_MON: u8 = 0x0A;
+/// UBX class TIM (timing).
 pub const CLS_TIM: u8 = 0x0D;
 
+/// Message id of NAV-DOP.
 pub const NAV_DOP: u8 = 0x04;
+/// Message id of NAV-PVT.
 pub const NAV_PVT: u8 = 0x07;
+/// Message id of NAV-SVIN.
 pub const NAV_SVIN: u8 = 0x3B;
+/// Message id of NAV-RELPOSNED.
 pub const NAV_RELPOSNED: u8 = 0x3C;
+/// Message id of ACK-NAK.
 pub const ACK_NAK: u8 = 0x00;
+/// Message id of ACK-ACK.
 pub const ACK_ACK: u8 = 0x01;
+/// Message id of CFG-VALSET.
 pub const CFG_VALSET: u8 = 0x8A;
+/// Message id of MON-VER.
 pub const MON_VER: u8 = 0x04;
+/// Message id of TIM-TP.
 pub const TIM_TP: u8 = 0x01;
 
 /// Seconds between the Unix epoch and the GPS epoch (1980-01-06).
@@ -36,20 +51,29 @@ fn i32_at(p: &[u8], o: usize) -> i32 {
 /// UBX-NAV-PVT.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NavPvt {
+    /// GNSS fix type (0 none, 1 dead reckoning, 2 2D, 3 3D, 4 combined, 5 time only).
     pub fix_type: u8,
+    /// The fix is within the receiver's accuracy masks.
     pub gnss_fix_ok: bool,
+    /// Differential corrections were applied.
     pub diff_soln: bool,
     /// 0 none, 1 float, 2 fixed.
     pub carr_soln: u8,
+    /// Satellites used in the solution.
     pub num_sv: u8,
+    /// Latitude, degrees.
     pub lat_deg: f64,
+    /// Longitude, degrees.
     pub lon_deg: f64,
+    /// Height above the ellipsoid, metres.
     pub h_ellipsoid_m: f64,
+    /// Height above mean sea level, metres.
     pub h_msl_m: f64,
     /// UTC of the solution epoch, when date and time are valid and resolved.
     pub utc_ns: Option<i64>,
 }
 
+/// Decode a NAV-PVT payload.
 pub fn nav_pvt(p: &[u8]) -> Option<NavPvt> {
     if p.len() < 92 {
         return None;
@@ -96,14 +120,19 @@ pub fn nav_dop_hdop(p: &[u8]) -> Option<f64> {
 /// UBX-NAV-SVIN.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NavSvin {
+    /// Survey-in duration so far, seconds.
     pub dur_s: u32,
     /// Mean position, ECEF metres.
     pub mean_ecef_m: [f64; 3],
+    /// Mean position accuracy, metres.
     pub mean_acc_m: f64,
+    /// The survey-in met its limits and the position is valid.
     pub valid: bool,
+    /// A survey-in is in progress.
     pub active: bool,
 }
 
+/// Decode a NAV-SVIN payload.
 pub fn nav_svin(p: &[u8]) -> Option<NavSvin> {
     if p.len() < 40 {
         return None;
@@ -121,15 +150,23 @@ pub fn nav_svin(p: &[u8]) -> Option<NavSvin> {
 /// UBX-NAV-RELPOSNED (version 1, F9).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RelPosNed {
+    /// Heading of the relative position vector, degrees.
     pub heading_deg: f64,
+    /// Heading accuracy, degrees.
     pub acc_heading_deg: f64,
+    /// Length of the relative position vector, metres.
     pub length_m: f64,
+    /// The fix is within the receiver's accuracy masks.
     pub gnss_fix_ok: bool,
+    /// The relative position components are valid.
     pub rel_pos_valid: bool,
+    /// The receiver runs in moving-base mode.
     pub is_moving: bool,
+    /// The heading is valid.
     pub heading_valid: bool,
 }
 
+/// Decode a NAV-RELPOSNED (version 1) payload.
 pub fn nav_relposned(p: &[u8]) -> Option<RelPosNed> {
     if p.len() < 64 || p[0] != 0x01 {
         return None;
