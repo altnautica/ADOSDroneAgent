@@ -2,7 +2,7 @@
 //!
 //! NPU-less boards are first-class: a board with no accelerator runs an
 //! autonomous mission by offloading the heavy perception to a paired compute
-//! node, not as a degraded mode. The agent picks the tier from three inputs —
+//! node, not as a degraded mode. The agent picks the tier from three inputs ,
 //! the HAL accelerator capability, whether a compute node is paired on an
 //! acceptable bearer, and whether the board can carry a light local path.
 
@@ -24,15 +24,14 @@ pub enum PerceptionTier {
 /// The inputs the agent reads to pick a perception tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TierInputs {
-    /// The board has an NPU / GPU (`infer-capabilities`).
+    /// The board has an NPU / GPU.
     pub has_accelerator: bool,
     /// The board has no NPU but a CPU strong enough to run the detector locally
-    /// via the in-process ONNX backend (declared by the board profile, e.g. a
-    /// Cortex-A76-class SoC). A distinct signal from `has_accelerator`: it is a
-    /// full local compute path, so it resolves to `Local` the same way an
-    /// accelerator does — an NPU-less-but-CPU-strong board runs detection
-    /// on-board rather than offloading. Only true when the board genuinely
-    /// declares it, so it never fabricates a local path.
+    /// (for example a Cortex-A76-class SoC). A distinct signal from
+    /// `has_accelerator`: it is a full local compute path, so it resolves to
+    /// `Local` the same way an accelerator does, and the board runs detection
+    /// on-board rather than offloading. Set it only when the board really has
+    /// that path, so the picker never invents one.
     pub local_inference_capable: bool,
     /// The required models fit + run on the local accelerator.
     pub models_fit_locally: bool,
@@ -46,15 +45,13 @@ pub struct TierInputs {
 }
 
 impl TierInputs {
-    /// The tier inputs a drone-profile status surface builds each read: the local
-    /// accelerator picture (an NPU, or a CPU strong enough for the ONNX detector)
-    /// plus the offload-link signal (a paired, reachable workstation).
-    /// `models_fit_locally` is held `true` for an accelerator board (an NPU board
-    /// is assumed to fit its recommended detector — there is no model-fit probe
-    /// yet, so this is a documented assumption, not a fabricated signal) and
-    /// `can_run_light_local` `false` (no split light-detector + fast-VIO path runs
-    /// today). Both status call sites (`/api/status`, the cloud heartbeat) use
-    /// this so they feed `pick_tier` identically and cannot drift.
+    /// The tier inputs for a drone: the local compute picture (an NPU, or a CPU
+    /// strong enough for the detector) plus the offload-link signal (a paired,
+    /// reachable compute node). `models_fit_locally` is held `true` for an
+    /// accelerator board (assumed to fit its recommended detector, as there is
+    /// no model-fit probe) and `can_run_light_local` `false` (no split
+    /// light-detector plus fast-VIO path). Build every status view through this
+    /// so they all feed [`pick_tier`] identically.
     pub fn for_drone(
         has_accelerator: bool,
         local_inference_capable: bool,
@@ -73,7 +70,7 @@ impl TierInputs {
 }
 
 /// Pick the perception tier, or `None` when no heavy perception is available
-/// (an NPU-less board with no usable compute node — it flies on bare odometry,
+/// (an NPU-less board with no usable compute node, it flies on bare odometry,
 /// with no detection / tracking / map-based autonomy).
 ///
 /// - A local compute path that fits the models ⇒ **Local** (the default): an

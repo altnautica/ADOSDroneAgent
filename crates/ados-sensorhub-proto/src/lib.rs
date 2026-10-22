@@ -1,15 +1,6 @@
-//! Sensor hub wire protocol v1.
-//!
-//! ```text
-//! wire  := COBS(raw) 0x00
-//! raw   := type:u8  len:u16le  payload[len]  crc:u16le
-//! crc   := CRC-16/CCITT-FALSE over type, len and payload
-//! ```
-//!
-//! `no_std`, no allocation: callers own every buffer. [`encode_frame`]
-//! produces one delimited wire frame, [`decode_frame`] parses one COBS block
-//! (delimiter stripped) and [`Deframer`] splits a byte stream on `0x00`.
+#![doc = include_str!("../README.md")]
 #![no_std]
+#![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
 pub mod cobs;
@@ -41,7 +32,10 @@ pub enum Error {
     /// CRC mismatch.
     Crc,
     /// The payload size does not fit the packet type.
-    PayloadSize { ty: u8 },
+    PayloadSize {
+        /// The packet type byte.
+        ty: u8,
+    },
     /// `ImuBatch.n` outside 1..=64.
     ImuCount,
 }
@@ -138,6 +132,8 @@ pub enum Push<'a> {
 }
 
 impl<const N: usize> Deframer<N> {
+    /// An empty deframer with an `N`-byte block buffer. Size `N` to the
+    /// largest COBS block you expect: [`MAX_FRAME`] holds any valid frame.
     pub const fn new() -> Self {
         Self {
             buf: [0; N],
@@ -146,6 +142,12 @@ impl<const N: usize> Deframer<N> {
         }
     }
 
+    /// Feed one byte from the stream. On a `0x00` delimiter this returns the
+    /// buffered block as [`Push::Block`], or [`Push::Overflow`] if the block
+    /// outgrew the buffer; an empty block (two delimiters in a row) returns
+    /// [`Push::Pending`]. Every other byte is buffered and returns
+    /// [`Push::Pending`]. The returned block borrows the deframer until the
+    /// next push.
     pub fn push(&mut self, b: u8) -> Push<'_> {
         if b == 0 {
             let (len, overflow) = (self.len, self.overflow);

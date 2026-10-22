@@ -3,7 +3,7 @@
 //! A behaviour opens a session in one of three modes and streams frames to the
 //! compute node; the node streams detections and/or drift-corrected poses back.
 //! The session does not move frames itself (the transport is injected by the
-//! consumer) — it owns the SAFETY: it tracks each return stream's freshness and
+//! consumer), it owns the SAFETY: it tracks each return stream's freshness and
 //! runs the lock-state gate so a behaviour commands only on fresh, locked
 //! results and stops the moment any required stream goes stale or the link
 //! drops. The fast control loop and the guided-setpoint math stay on the drone;
@@ -23,7 +23,7 @@ pub enum OffloadMode {
     /// Drift-corrected poses + occupancy. Consumers: navigation, avoidance,
     /// the live world model.
     SlamOnly,
-    /// Both, from one frame stream — an NPU-less drone on a full autonomous
+    /// Both, from one frame stream, an NPU-less drone on a full autonomous
     /// mission. Any required stream going stale trips the lock.
     Full,
 }
@@ -63,13 +63,14 @@ impl OffloadSession {
         }
     }
 
+    /// The mode the session was opened in.
     pub fn mode(&self) -> OffloadMode {
         self.mode
     }
 
     /// A detection/target result arrived from the node. `now_ms` is the local
     /// monotonic time of arrival (the same clock [`tick`](Self::tick) reads), not
-    /// the result's own timestamp — see [`FreshnessGate`].
+    /// the result's own timestamp, see [`FreshnessGate`].
     pub fn on_detection(&mut self, now_ms: i64) {
         self.target_gate.record(now_ms);
     }
@@ -86,7 +87,7 @@ impl OffloadSession {
         self.pose_gate.set_link(up);
     }
 
-    /// Acquire (or re-acquire) the lock — an operator designate / click-to-track.
+    /// Acquire (or re-acquire) the lock, an operator designate / click-to-track.
     /// The only way out of a lost lock.
     pub fn designate(&mut self) {
         self.lock.lock();
@@ -97,6 +98,7 @@ impl OffloadSession {
         self.lock.unlock();
     }
 
+    /// The current lock state.
     pub fn lock_state(&self) -> LockState {
         self.lock.state()
     }
@@ -214,7 +216,7 @@ mod tests {
         assert!(s.tick(1100).commanding);
         s.set_link(false);
         assert_eq!(s.tick(1150).lock, LockState::Lost);
-        // Link recovers, fresh detections resume — but the lock stays Lost.
+        // Link recovers, fresh detections resume, but the lock stays Lost.
         s.set_link(true);
         s.on_detection(1200);
         let status = s.tick(1250);
@@ -226,7 +228,7 @@ mod tests {
     #[test]
     fn a_full_session_holds_while_only_one_stream_is_fresh() {
         // Full needs BOTH streams; with only the target fresh it stays acquiring
-        // (locked, holding) and never commands — it does not trip to Lost (it has
+        // (locked, holding) and never commands, it does not trip to Lost (it has
         // not yet tracked) and it does not command on half the data.
         let mut s = OffloadSession::new(OffloadMode::Full, 500, 500);
         s.designate();
