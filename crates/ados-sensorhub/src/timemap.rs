@@ -7,7 +7,7 @@
 //! when the bucket closes that pair feeds a [`ClockFit`] and is published as a
 //! `sync` observation, so `ados-clock` fits the same relation.
 
-use ados_sensorbus::fit::ClockFit;
+use ados_clock_fit::fit::ClockFit;
 use ados_sensorbus::{SyncObs, SyncSource};
 
 /// Envelope bucket length on the host clock.

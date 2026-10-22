@@ -59,6 +59,10 @@ dependencies = [
 [[package]]
 name = "ados-clock-fit"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tracing",
+]
 
 [[package]]
 name = "ados-cloud"

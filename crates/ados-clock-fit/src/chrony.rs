@@ -1,8 +1,8 @@
 //! GNSS PPS samples for chrony's `SOCK` refclock driver.
 //!
 //! chrony reads `struct sock_sample` datagrams on the socket it binds for a
-//! `refclock SOCK <path>` line (the installer writes
-//! `refclock SOCK /run/chrony.ados.sock refid PPS ...`). Each datagram says: at
+//! `refclock SOCK <path>` line (for example
+//! `refclock SOCK /run/chrony.sock refid PPS`). Each datagram says: at
 //! system time `tv` the true time was `tv + offset`. chrony's definition
 //! (`refclock_sock.c`):
 //!
@@ -36,14 +36,12 @@
 //!
 //! That layout is written explicitly, whatever the target's own `time_t`. A
 //! chrony built with 32-bit `time_t` (pre-t64 armhf, e.g. Debian 12) expects
-//! 32 bytes and rejects these samples; the shipped binaries are aarch64-only,
-//! where the chrony beside them is 64-bit.
+//! 32 bytes and rejects these samples; pair this sink with a chrony built
+//! for 64-bit `time_t`.
 
 use std::os::unix::net::UnixDatagram;
 use std::path::{Path, PathBuf};
 
-/// The socket chrony binds for the refclock the installer configures.
-pub const CHRONY_SOCK: &str = "/run/chrony.ados.sock";
 /// `SOCK_MAGIC` from chrony's `refclock_sock.c`.
 pub const SOCK_MAGIC: i32 = 0x534f_434b;
 /// `sizeof(struct sock_sample)` with a 64-bit `struct timeval`.
@@ -99,6 +97,8 @@ pub struct ChronySink {
 }
 
 impl ChronySink {
+    /// A sink for the chrony socket at `path`. Nothing is opened until the
+    /// first [`send`](Self::send).
     pub fn new(path: impl Into<PathBuf>) -> Self {
         ChronySink {
             path: path.into(),
@@ -107,6 +107,7 @@ impl ChronySink {
         }
     }
 
+    /// The chrony socket path samples are sent to.
     pub fn path(&self) -> &Path {
         &self.path
     }

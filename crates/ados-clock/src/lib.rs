@@ -13,12 +13,10 @@
 //! PPS source is also handed to chrony through its `SOCK` refclock.
 
 pub mod bus;
-pub mod chrony;
 pub mod clock;
 pub mod config;
 pub mod daemon;
 pub mod engine;
-pub mod envelope;
 pub mod fit;
 pub mod streams;
 

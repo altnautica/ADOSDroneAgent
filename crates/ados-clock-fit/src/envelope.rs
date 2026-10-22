@@ -6,8 +6,8 @@
 //! envelope of `host - source` (the upper envelope of the offset
 //! `source - host`) is therefore the true relation shifted by the
 //! pipeline's minimum latency, which one-way pairs cannot measure; the
-//! caller adds a known floor or carries its bound in sigma
-//! ([`crate::fit::LatencyFloor`]). The fit is the line on or above every
+//! caller adds a known floor or carries its bound in sigma. The fit is the
+//! line on or above every
 //! pair of the window that minimises the summed lateness of all of them (the
 //! linear program of one-way delay skew estimation); its optimum is the edge
 //! of the upper convex hull that spans the mean host time. Late pairs never
@@ -41,6 +41,8 @@ pub const ENVELOPE_LOCK_SPAN_NS: u64 = 40_000_000_000;
 /// the least-late pair until then.
 pub const ENVELOPE_SLOPE_SPAN_NS: u64 = 2_000_000_000;
 
+/// Lower-envelope fit of `offset(host) = source - host` for pairs stamped on
+/// arrival, over the pairs of the last window.
 #[derive(Debug, Clone)]
 pub struct EnvelopeFit {
     window_ns: u64,
@@ -127,10 +129,12 @@ impl EnvelopeFit {
         self.model = None;
     }
 
+    /// Pairs currently kept (at most one per host slot).
     pub fn len(&self) -> usize {
         self.pts.len()
     }
 
+    /// Whether no pairs are kept.
     pub fn is_empty(&self) -> bool {
         self.pts.is_empty()
     }

@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use ados_clock_fit::chrony::ChronySink;
 use ados_protocol::paths::run_path;
 use ados_sensorbus::{time::mono_ns, Kind, Origin, Publisher};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::task::JoinHandle;
 
-use crate::chrony::{ChronySink, CHRONY_SOCK};
 use crate::engine::{write_sidecar, Engine};
 
 /// Cadence of the `clock` frame, the sidecars and the watchdog ping.
@@ -18,6 +18,8 @@ pub const TICK: Duration = Duration::from_secs(1);
 pub const CLOCK_SRC: &str = "clock";
 /// The agent config when `ADOS_CONFIG` does not name another.
 const DEFAULT_CONFIG: &str = "/etc/ados/config.yaml";
+/// The socket chrony binds for the refclock the installer configures.
+const CHRONY_SOCK: &str = "/run/chrony.ados.sock";
 
 fn init_logging() {
     use ados_protocol::logd::layer::LogdLayer;

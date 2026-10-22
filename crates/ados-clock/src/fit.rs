@@ -1,11 +1,11 @@
 //! The per-source fit, chosen by how the source's pairs are stamped, and the
 //! verdict on a pair against its prediction.
 
-use ados_sensorbus::fit::ClockFit;
+use ados_clock_fit::envelope::{EnvelopeFit, ENVELOPE_LOCK_SPAN_NS};
+use ados_clock_fit::fit::ClockFit;
 use ados_sensorbus::SyncSource;
 
 use crate::clock::{ENVELOPE_LATE_MAX_NS, OUTLIER_FLOOR_NS, OUTLIER_SIGMAS, RESET_DISAGREE_NS};
-use crate::envelope::{EnvelopeFit, ENVELOPE_LOCK_SPAN_NS};
 
 /// The latency floor assumed when none is configured: encode, RTSP and
 /// decode of a rendered frame take at least this long at most. Its whole

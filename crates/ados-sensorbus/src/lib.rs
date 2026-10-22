@@ -25,12 +25,11 @@
 //!
 //! Every `t_ns` a producer puts on the bus is on the host monotonic clock
 //! (`CLOCK_MONOTONIC`, ns); producers convert their source time with their
-//! own [`fit::ClockFit`]. The `clock` frames carry the mapping from host
+//! own `ClockFit` (crate `ados-clock-fit`). The `clock` frames carry the mapping from host
 //! monotonic to the session timebase, so a recorder converts once.
 
 pub mod broker;
 pub mod client;
-pub mod fit;
 pub mod frame;
 pub mod rig;
 pub mod rtcm;

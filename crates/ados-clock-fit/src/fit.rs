@@ -66,10 +66,12 @@ impl ClockFit {
         self.model = None;
     }
 
+    /// Pairs currently in the window.
     pub fn len(&self) -> usize {
         self.pts.len()
     }
 
+    /// Whether the window holds no pairs.
     pub fn is_empty(&self) -> bool {
         self.pts.is_empty()
     }
@@ -222,6 +224,7 @@ impl TimesyncEstimator {
         self.fit.reset();
     }
 
+    /// The underlying fit of the accepted exchanges.
     pub fn fit(&self) -> &ClockFit {
         &self.fit
     }
