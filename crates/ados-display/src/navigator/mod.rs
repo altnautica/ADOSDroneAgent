@@ -44,8 +44,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use ados_hid::buttons::ButtonEvent;
-use ados_hid::touch::{GestureKind, TouchGesture};
+use ados_hmi::press::ButtonEvent;
+use ados_hmi::touch::{GestureKind, TouchGesture};
 
 use crate::graphics::palette::Palette;
 use crate::graphics::primitives::Canvas;

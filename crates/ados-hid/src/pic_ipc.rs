@@ -1,6 +1,6 @@
 //! PIC IPC seam — the single-owner socket for the arbiter state.
 //!
-//! The `ados-pic` daemon is the SOLE owner of the [`crate::pic::PicArbiter`]
+//! The `ados-pic` daemon is the SOLE owner of the [`ados_hmi::pic::PicArbiter`]
 //! state. Every other process that needs PIC (the FastAPI `/pic/*` routes, the
 //! HDMI kiosk, the input-hotplug hooks) reaches it over a Unix-domain socket at
 //! [`PIC_SOCK`] rather than each instantiating its own arbiter — that
@@ -51,8 +51,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
-use crate::eventbus::{ButtonEventBus, PicEventKind};
-use crate::pic::{
+use ados_hmi::eventbus::{ButtonEventBus, PicEventKind};
+use ados_hmi::pic::{
     ClaimOutcome, DisconnectOutcome, HeartbeatOutcome, PicArbiter, PicState, ReleaseOutcome,
     WATCHDOG_INTERVAL_SECONDS,
 };
@@ -702,7 +702,7 @@ mod tests {
         }
 
         // The daemon's button reader publishes a press onto the bus.
-        buttons.publish(crate::eventbus::ButtonBusEvent {
+        buttons.publish(ados_hmi::eventbus::ButtonBusEvent {
             button: 5,
             label: "B1".into(),
             kind: "short",

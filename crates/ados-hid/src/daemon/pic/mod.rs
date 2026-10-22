@@ -20,10 +20,10 @@ use tokio::sync::Mutex;
 
 use crate::buttons::{self, default_button_mapping};
 use crate::buttons_ipc::{self, BUTTONS_SOCK};
-use crate::eventbus::ButtonEventBus;
 use crate::paths::pic_state_json;
-use crate::pic::PicArbiter;
 use crate::pic_ipc::{self, PIC_SOCK};
+use ados_hmi::eventbus::ButtonEventBus;
+use ados_hmi::pic::PicArbiter;
 
 fn init_logging() {
     use ados_protocol::logd::layer::LogdLayer;
@@ -128,7 +128,7 @@ async fn serve() -> Result<()> {
         // and a SIGHUP remap reaches both. It stays inert unless the operator
         // sets ADOS_BUTTONS_ALLOW_INJECT=1 (the op checks the env itself).
         let sidecar = Path::new(buttons::BOARD_SIDECAR);
-        let mut classifier = crate::buttons::PressClassifier::with_pins(
+        let mut classifier = ados_hmi::press::PressClassifier::with_pins(
             mapping.clone(),
             buttons::board_pins_or_default(sidecar),
         );
@@ -240,10 +240,10 @@ fn spawn_button_reader(
     button_bus: ButtonEventBus,
 ) {
     use crate::buttons::{
-        button_lines, encoder_lines, ButtonEvent, ButtonsSkip, EncoderSkip, PressClassifier,
-        BOARD_SIDECAR, BUTTON_PINS,
+        button_lines, encoder_lines, ButtonsSkip, EncoderSkip, BOARD_SIDECAR, BUTTON_PINS,
     };
-    use crate::eventbus::ButtonBusEvent;
+    use ados_hmi::eventbus::ButtonBusEvent;
+    use ados_hmi::press::{ButtonEvent, PressClassifier};
 
     tokio::task::spawn_blocking(move || {
         let started = std::time::Instant::now();

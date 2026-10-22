@@ -1,15 +1,12 @@
 //! In-process fanout for PIC state transitions.
 //!
-//! Mirrors the Button / PIC / Input event buses on the Python side: every
-//! subscriber gets its own bounded receiver, and a slow consumer is lagged
-//! (drops the oldest events) rather than allowed to stall the publisher. Built
-//! on `tokio::sync::broadcast`, matching the `ados-plugin-host` `EventBus`
-//! shape.
+//! Every subscriber gets its own bounded receiver, and a slow consumer is
+//! lagged (drops the oldest events) rather than allowed to stall the
+//! publisher. Built on `tokio::sync::broadcast`.
 
 use tokio::sync::broadcast;
 
-/// Per-subscriber bus depth. Matches the Python `PicEventBus` `queue_maxsize`
-/// default (64): a subscriber that falls more than this many events behind is
+/// Per-subscriber bus depth. A subscriber that falls more than this many events behind is
 /// lagged rather than blocking the publisher.
 pub const PIC_EVENT_QUEUE_DEPTH: usize = 64;
 
@@ -25,7 +22,7 @@ pub enum PicEventKind {
 }
 
 impl PicEventKind {
-    /// The wire string used on the IPC/REST surface.
+    /// The wire string used on the wire.
     pub fn as_str(self) -> &'static str {
         match self {
             PicEventKind::Claimed => "claimed",
@@ -40,12 +37,16 @@ impl PicEventKind {
 /// `client_id` is the new holder on `Claimed`, and the client that just lost
 /// PIC on `Released` / `Disconnected`. `claim_counter` is the monotonic counter
 /// so clients can detect races when they observe the bus out of order relative
-/// to REST replies. `timestamp_ms` is unix milliseconds at the transition.
+/// to request replies. `timestamp_ms` is unix milliseconds at the transition.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PicEvent {
+    /// What happened.
     pub kind: PicEventKind,
+    /// The client the transition concerns.
     pub client_id: Option<String>,
+    /// The monotonic claim counter after this call.
     pub claim_counter: u64,
+    /// Unix milliseconds of the event.
     pub timestamp_ms: i64,
 }
 
@@ -76,7 +77,7 @@ impl PicEventBus {
 
     /// Publish an event. Returns the number of live receivers it reached. A
     /// send with no receivers returns 0 rather than erroring (drop-on-empty),
-    /// matching the Python `publish` no-op when there are no subscribers.
+    /// so publishing with no subscribers is a no-op.
     pub fn publish(&self, event: PicEvent) -> usize {
         self.tx.send(event).unwrap_or(0)
     }
@@ -93,14 +94,12 @@ impl Default for PicEventBus {
     }
 }
 
-/// Per-subscriber depth for the button bus. Matches the Python button bus
-/// `queue_maxsize` default (64).
+/// Per-subscriber depth for the button bus.
 pub const BUTTON_EVENT_QUEUE_DEPTH: usize = 64;
 
 /// A classified front-panel button press, in the shape the display/OLED
-/// consumer reads off the wire. Field names + types match the Python
-/// `ButtonEvent` (`button`, `kind`, `timestamp_ms`, `action`) so a Python
-/// consumer parses it with `json.loads` and a Rust consumer with serde.
+/// consumer reads off the wire. The fields (`button`, `kind`, `timestamp_ms`,
+/// `action`) serialize to a flat JSON object any consumer can parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ButtonBusEvent {
     /// The board GPIO number of the button.
@@ -117,9 +116,8 @@ pub struct ButtonBusEvent {
     pub timestamp_ms: u64,
 }
 
-/// Fanout bus for [`ButtonBusEvent`]. The `ados-pic` daemon's button reader is
-/// the publisher; the display/OLED layer subscribes over the control socket
-/// (`subscribe_buttons`). Same drop-on-lag broadcast contract as
+/// Fanout bus for [`ButtonBusEvent`]. A button reader publishes; display or
+/// network layers subscribe. Same drop-on-lag broadcast contract as
 /// [`PicEventBus`].
 #[derive(Debug, Clone)]
 pub struct ButtonEventBus {
@@ -216,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn kind_wire_strings_match_python() {
+    fn kind_wire_strings_are_stable() {
         assert_eq!(PicEventKind::Claimed.as_str(), "claimed");
         assert_eq!(PicEventKind::Released.as_str(), "released");
         assert_eq!(PicEventKind::Disconnected.as_str(), "disconnected");

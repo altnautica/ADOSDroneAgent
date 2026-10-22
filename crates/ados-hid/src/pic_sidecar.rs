@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 
-use crate::pic::{PicState, PicStateSnapshot};
+use ados_hmi::pic::{PicState, PicStateSnapshot};
 
 /// The schema version this build reads and writes for the PIC-state sidecar. Sits
 /// alongside the arbiter fields as an additive `version` key. Must match the
@@ -71,7 +71,7 @@ pub fn read_snapshot(path: &Path) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pic::PicArbiter;
+    use ados_hmi::pic::PicArbiter;
 
     #[test]
     fn unclaimed_snapshot_is_the_get_state_default() {

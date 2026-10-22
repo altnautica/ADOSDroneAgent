@@ -15,8 +15,8 @@
 //! claimed(A) --on_pic_disconnected(A)-> unclaimed
 //! ```
 //!
-//! Covers the five claim cases with their exact outcome shapes (the REST layer maps `needs_confirm` /
-//! `status` to HTTP 409 / 403 / 410), the confirm-token TTL, the heartbeat
+//! Covers the five claim cases with their exact outcome shapes (an HTTP layer can map `needs_confirm`
+//! / `status` to 409 / 403 / 410), the confirm-token TTL, the heartbeat
 //! session watchdog auto-release, gamepad auto-claim, and the monotonic claim
 //! counter. Time comes from an injectable [`Clock`] so the TTL and watchdog are
 //! unit-testable without sleeping.
@@ -34,9 +34,9 @@ pub const CONFIRM_TTL_SECONDS: f64 = 2.0;
 /// without calling release.
 pub const HEARTBEAT_TIMEOUT_SECONDS: f64 = 30.0;
 
-/// Cadence at which the session watchdog checks the last heartbeat age and
-/// refreshes the PIC state sidecar. A tenth of the sidecar staleness window,
-/// so a reader never sees an idle-but-healthy arbiter as unavailable.
+/// Cadence at which the session watchdog checks the last heartbeat age. Short
+/// enough that a state mirror refreshed on each tick never looks stale while
+/// the arbiter is idle but healthy.
 pub const WATCHDOG_INTERVAL_SECONDS: f64 = 2.0;
 
 /// A monotonic, injectable time source.
@@ -47,7 +47,9 @@ pub const WATCHDOG_INTERVAL_SECONDS: f64 = 2.0;
 /// [`SystemClock`]; tests use a manually advanced clock so token expiry and the
 /// watchdog can be exercised without real time passing.
 pub trait Clock: Send + Sync {
+    /// Monotonic seconds.
     fn monotonic(&self) -> f64;
+    /// Unix wall-clock milliseconds.
     fn wall_ms(&self) -> i64;
 }
 
@@ -78,11 +80,14 @@ impl Clock for SystemClock {
 /// The current PIC state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PicState {
+    /// Nobody holds PIC.
     Unclaimed,
+    /// A client holds PIC.
     Claimed,
 }
 
 impl PicState {
+    /// The lowercase wire string.
     pub fn as_str(self) -> &'static str {
         match self {
             PicState::Unclaimed => "unclaimed",
@@ -92,40 +97,54 @@ impl PicState {
 }
 
 /// The outcome of a [`PicArbiter::claim`] call. Variants carry exactly the
-/// fields the REST layer serializes; `status` is the HTTP code the rejection
+/// fields an HTTP layer serializes; `status` is the HTTP code the rejection
 /// variants map to.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClaimOutcome {
     /// Fresh claim from `unclaimed`.
     Fresh {
+        /// The client now holding PIC.
         claimed_by: String,
+        /// The monotonic claim counter after this call.
         claim_counter: u64,
     },
     /// Same client re-claimed; nothing changed.
     Idempotent {
+        /// The client now holding PIC.
         claimed_by: String,
+        /// The monotonic claim counter after this call.
         claim_counter: u64,
     },
     /// Force takeover (logged at WARN); always wins.
     Forced {
+        /// The client now holding PIC.
         claimed_by: String,
+        /// The monotonic claim counter after this call.
         claim_counter: u64,
+        /// The client that held PIC before, if any.
         previous_pic: Option<String>,
     },
     /// Confirm-token matched and was unexpired; transfer completed.
     Transferred {
+        /// The client now holding PIC.
         claimed_by: String,
+        /// The monotonic claim counter after this call.
         claim_counter: u64,
+        /// The client control was transferred from.
         transferred_from: Option<String>,
     },
     /// A confirm token was supplied but missing or expired. -> HTTP 409.
     InvalidConfirmToken {
+        /// The client currently holding PIC, if any.
         current_pic: Option<String>,
+        /// The HTTP status this rejection maps to.
         status: u16,
     },
     /// Already claimed, no token, no force. -> HTTP 409.
     AlreadyClaimed {
+        /// The client currently holding PIC, if any.
         current_pic: Option<String>,
+        /// The HTTP status this rejection maps to.
         status: u16,
     },
 }
@@ -143,7 +162,6 @@ impl ClaimOutcome {
     }
 
     /// Whether the GCS should surface the "Take control" confirm prompt
-    /// (`needs_confirm` on the Python side).
     pub fn needs_confirm(&self) -> bool {
         matches!(
             self,
@@ -151,7 +169,7 @@ impl ClaimOutcome {
         )
     }
 
-    /// The HTTP status the REST layer returns (200 on success, 409 on the
+    /// The HTTP status an HTTP layer returns (200 on success, 409 on the
     /// confirm-needed rejections).
     pub fn http_status(&self) -> u16 {
         match self {
@@ -165,12 +183,16 @@ impl ClaimOutcome {
 /// Outcome of [`PicArbiter::release`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReleaseOutcome {
+    /// The caller released PIC.
     Released {
+        /// The client that held PIC before, if any.
         previous_pic: Option<String>,
     },
     /// Caller does not currently hold PIC. -> HTTP 403.
     NotCurrentPic {
+        /// The client currently holding PIC, if any.
         current_pic: Option<String>,
+        /// The HTTP status this rejection maps to.
         status: u16,
     },
 }
@@ -178,14 +200,20 @@ pub enum ReleaseOutcome {
 /// Outcome of [`PicArbiter::heartbeat`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum HeartbeatOutcome {
+    /// The heartbeat was accepted.
     Ok {
+        /// The client now holding PIC.
         claimed_by: Option<String>,
+        /// The monotonic claim counter after this call.
         claim_counter: u64,
+        /// Monotonic seconds of the accepted heartbeat.
         last_heartbeat_ts: f64,
     },
     /// No active claim from this client. -> HTTP 410.
     NoActiveClaim {
+        /// The client currently holding PIC, if any.
         current_pic: Option<String>,
+        /// The HTTP status this rejection maps to.
         status: u16,
     },
 }
@@ -197,7 +225,9 @@ pub enum DisconnectOutcome {
     Disconnected,
     /// Another client holds PIC; nothing changed. -> HTTP 409.
     NotHolder {
+        /// The client currently holding PIC, if any.
         current_pic: Option<String>,
+        /// The HTTP status this rejection maps to.
         status: u16,
     },
 }
@@ -205,10 +235,15 @@ pub enum DisconnectOutcome {
 /// A point-in-time snapshot of the arbiter state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PicStateSnapshot {
+    /// Claimed or unclaimed.
     pub state: PicState,
+    /// The client now holding PIC.
     pub claimed_by: Option<String>,
+    /// Monotonic seconds when the current claim started.
     pub claimed_since: Option<f64>,
+    /// The monotonic claim counter after this call.
     pub claim_counter: u64,
+    /// The gamepad bound to the current PIC, if any.
     pub primary_gamepad_id: Option<String>,
 }
 
@@ -218,9 +253,8 @@ struct ConfirmToken {
     expires_at: f64,
 }
 
-/// The PIC arbiter. Single-threaded by contract: the owning daemon serializes
-/// calls (the Python version takes `self._lock` around every mutation; here the
-/// caller holds the arbiter behind its own `Mutex`). Time is injected via
+/// The PIC arbiter. Single-threaded by contract: the owner serializes
+/// calls (hold the arbiter behind a `Mutex`). Time is injected via
 /// [`Clock`].
 pub struct PicArbiter {
     state: PicState,
@@ -457,7 +491,7 @@ impl PicArbiter {
 
     /// One watchdog tick: if PIC is held and the last heartbeat is older than
     /// [`HEARTBEAT_TIMEOUT_SECONDS`], auto-release and return the released
-    /// client. The owning daemon calls this every
+    /// client. The owner calls this every
     /// [`WATCHDOG_INTERVAL_SECONDS`]; pulling the cadence out makes the timeout
     /// testable without sleeping.
     pub fn watchdog_tick(&mut self) -> Option<String> {
@@ -480,7 +514,7 @@ impl PicArbiter {
 
     /// Auto-claim PIC for `client_id_hint` if nobody holds it. Called on a
     /// gamepad hotplug-connect event so the single-operator bench rig has a
-    /// working control loop with no REST round-trip. Records the gamepad as the
+    /// working control loop with no request round-trip. Records the gamepad as the
     /// primary bound to this PIC. No-op if PIC is already held.
     pub fn on_gamepad_connected(&mut self, device_id: &str, client_id_hint: &str) {
         if self.state == PicState::Unclaimed {
@@ -538,8 +572,7 @@ impl Default for PicArbiter {
     }
 }
 
-/// 16 random bytes rendered as 32 lowercase hex chars, matching Python
-/// `secrets.token_hex(16)`.
+/// 16 random bytes rendered as 32 lowercase hex chars, as a confirm token.
 fn random_hex_16() -> String {
     let mut buf = [0u8; 16];
     // getrandom only fails on a platform without an entropy source, which the

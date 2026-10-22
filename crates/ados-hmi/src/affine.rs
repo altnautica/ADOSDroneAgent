@@ -6,11 +6,10 @@
 //! into a single 2x3 affine matrix that maps raw `(x_raw, y_raw)` to LCD
 //! `(x_px, y_px)`.
 //!
-//! Ports `src/ados/services/ui/touch/transform.py`: the matrix dataclass and
-//! its `apply` rounding, the four rotation matrices, the normal-equations
-//! least-squares fit (the 3x3 assembled once and solved twice), the 3x3
-//! Gaussian-elimination solver with partial pivot + singular guard, the RMS
-//! residual, and the atomic `touch.calib` persistence with the 9-key blob.
+//! Covers the matrix and its `apply` rounding, the four rotation matrices, the
+//! normal-equations least-squares fit (the 3x3 assembled once and solved
+//! twice), the 3x3 Gaussian-elimination solver with partial pivot and singular
+//! guard, the RMS residual, and atomic JSON persistence of the 9-key blob.
 
 use std::path::Path;
 
@@ -20,9 +19,10 @@ use serde::{Deserialize, Serialize};
 /// transform. The driver emits values clipped to this range, so the math does
 /// not have to defend against out-of-range inputs.
 pub const RAW_MIN: i32 = 0;
+/// Largest raw ADC value.
 pub const RAW_MAX: i32 = 4095;
 
-/// Persistence schema version. Bumped only when the on-disk shape changes —
+/// Persistence schema version. Bumped only when the on-disk shape changes ,
 /// readers fall back to the identity transform on a version mismatch rather
 /// than blindly trusting an unknown layout.
 pub const CALIB_FILE_VERSION: i64 = 1;
@@ -64,17 +64,23 @@ impl std::error::Error for FitError {}
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Affine {
+    /// x coefficient of the x row.
     pub a: f64,
+    /// y coefficient of the x row.
     pub b: f64,
+    /// Offset of the x row.
     pub c: f64,
+    /// x coefficient of the y row.
     pub d: f64,
+    /// y coefficient of the y row.
     pub e: f64,
+    /// Offset of the y row.
     pub f: f64,
 }
 
 impl Affine {
     /// Map a raw sample to LCD pixel coordinates, rounding to the nearest
-    /// integer (Python `int(round(x))` — round-half-to-even).
+    /// integer (round-half-to-even).
     pub fn apply(&self, x_raw: i32, y_raw: i32) -> (i32, i32) {
         let xr = x_raw as f64;
         let yr = y_raw as f64;
@@ -104,9 +110,9 @@ impl Affine {
     }
 }
 
-/// Python `int(round(x))` uses banker's rounding (round-half-to-even). Rust's
-/// `f64::round` is round-half-away-from-zero, so match Python explicitly to
-/// keep pixel coordinates byte-identical across the two implementations.
+/// Banker's rounding (round-half-to-even). Rust's `f64::round` is
+/// round-half-away-from-zero; half-to-even keeps pixel coordinates identical
+/// to implementations that use the IEEE default rounding mode.
 fn round_half_even(x: f64) -> f64 {
     let floor = x.floor();
     let diff = x - floor;
@@ -280,7 +286,7 @@ fn solve3(m: &[[f64; 3]; 3], rhs: [f64; 3]) -> Result<[f64; 3], FitError> {
     ];
     let n = 3usize;
     for i in 0..n {
-        // Partial pivot — pick the row with max |a[k][i]| on or below the
+        // Partial pivot, pick the row with max |a[k][i]| on or below the
         // diagonal.
         let mut pivot = i;
         let mut max_abs = a[i][i].abs();
@@ -317,7 +323,7 @@ fn solve3(m: &[[f64; 3]; 3], rhs: [f64; 3]) -> Result<[f64; 3], FitError> {
 }
 
 /// The on-disk calibration blob. Deserialized leniently when reading; the
-/// writer always emits the full set, matching the Python `save` dict.
+/// writer always emits the full set, so every field is always present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CalibBlob {
     version: i64,
@@ -342,10 +348,15 @@ struct CalibBlob {
 /// Parameters captured alongside the matrix when persisting a calibration.
 #[derive(Debug, Clone)]
 pub struct SaveParams {
+    /// Panel rotation in degrees.
     pub rotation: i32,
+    /// RMS residual of the fit in pixels.
     pub rms: f64,
+    /// Name of the touch device the calibration belongs to.
     pub device: String,
+    /// Raw ADC range `(min, max)` of the device.
     pub raw_range: (i32, i32),
+    /// Panel size `(width, height)` in pixels.
     pub lcd_size: (i32, i32),
 }
 
@@ -387,7 +398,7 @@ fn blob_affine(blob: &CalibBlob) -> Option<Affine> {
 /// Returns `None` when the file is missing, malformed, marked
 /// `calibrated=false` (a skip marker), or the version field does not match this
 /// build. The caller falls back to [`identity_for`] in any of those cases.
-/// Prefer [`load_for`] on the render path — a calibration is only valid for the
+/// Prefer [`load_for`] on the render path, a calibration is only valid for the
 /// panel + rotation it was captured on.
 pub fn load(path: &Path) -> Option<Affine> {
     blob_affine(&read_valid_blob(path)?)
@@ -399,12 +410,12 @@ pub fn load(path: &Path) -> Option<Affine> {
 /// A calibration matrix is fit against one panel's raw ADC range mapped to one
 /// LCD size at one rotation. Swap the panel (a different `lcd_size`) or change
 /// the display rotation and the stored matrix mis-maps every touch by tens of
-/// pixels — silently, because [`load`] never looked. This gate rejects a
+/// pixels, silently, because [`load`] never looked. This gate rejects a
 /// calibration whose saved `lcd_size` or `rotation_applied_at_save` does not
 /// match what the reader is running now, so the caller falls back to the
 /// rotation-aware identity and the wizard re-prompts rather than the operator
 /// fighting a mis-aligned screen. A blob that predates geometry tagging (no
-/// `lcd_size`) is also rejected — its geometry cannot be proven.
+/// `lcd_size`) is also rejected, its geometry cannot be proven.
 pub fn load_for(path: &Path, expected_lcd: (i32, i32), expected_rotation: i32) -> Option<Affine> {
     let blob = read_valid_blob(path)?;
     if blob.lcd_size != Some([expected_lcd.0, expected_lcd.1]) {
@@ -441,7 +452,7 @@ pub fn save(affine: &Affine, path: &Path, params: &SaveParams) -> std::io::Resul
 /// Persist a marker that says the operator chose to skip calibration.
 ///
 /// The reader treats this the same as "no calibration file" and uses the
-/// identity transform — but the marker stops the wizard from auto-launching
+/// identity transform, but the marker stops the wizard from auto-launching
 /// every boot.
 pub fn save_skip_marker(path: &Path) -> std::io::Result<()> {
     let blob = CalibBlob {
@@ -473,7 +484,7 @@ fn atomic_write_json(path: &Path, blob: &CalibBlob) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Compact separators, mirroring Python `json.dump(..., separators=(",",":"))`.
+    // Compact separators.
     let body = serde_json::to_vec(blob).map_err(std::io::Error::other)?;
 
     // tmp sibling in the same directory so the rename is atomic on the same
@@ -579,7 +590,7 @@ mod tests {
         let m45 = identity_for(45, (480, 320));
         let m0 = identity_for(0, (480, 320));
         assert_eq!(m45, m0);
-        // Negative rotations normalize via rem_euclid (Python `% 360`).
+        // Negative rotations normalize via rem_euclid (`% 360` semantics).
         let m_neg = identity_for(-90, (480, 320));
         assert_eq!(m_neg, identity_for(270, (480, 320)));
     }
@@ -607,7 +618,7 @@ mod tests {
         let (fit, rms) = compute_from_samples(&samples, &targets).unwrap();
         // Coefficients land within the integer-rounding noise of the truth
         // (the targets were rounded to whole pixels before fitting, so an exact
-        // recovery is not possible — the slope coefficients pick up that
+        // recovery is not possible, the slope coefficients pick up that
         // perturbation, larger for the small-magnitude axes).
         assert!((fit.a - truth.a).abs() < 1e-3, "a={}", fit.a);
         assert!((fit.e - truth.e).abs() < 1e-3, "e={}", fit.e);
@@ -715,7 +726,7 @@ mod tests {
     /// `load_for` accepts a calibration only for the panel geometry + rotation it
     /// was captured on. A swapped panel (different `lcd_size`) or a changed
     /// rotation must fall back to the identity (None) rather than mis-map every
-    /// touch — the defect `load` had (it never looked at the stored geometry).
+    /// touch, the defect `load` had (it never looked at the stored geometry).
     #[test]
     fn load_for_rejects_a_mismatched_panel_or_rotation() {
         let dir = tempfile::tempdir().unwrap();

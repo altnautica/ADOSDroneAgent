@@ -537,7 +537,7 @@ mod tests {
 
     #[test]
     fn hybrid_unclaimed_injection_survives_30s_without_ops() {
-        use ados_hid::pic::{PicArbiter, WATCHDOG_INTERVAL_SECONDS};
+        use ados_hmi::pic::{PicArbiter, WATCHDOG_INTERVAL_SECONDS};
         use std::time::SystemTime;
 
         // An idle arbiter whose daemon refreshes the sidecar on every watchdog

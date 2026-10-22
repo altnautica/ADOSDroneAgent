@@ -16,7 +16,7 @@
 //! rejected and the partial detent is discarded.
 //!
 //! The push switch is an ordinary active-low button: it runs through the shared
-//! [`super::PressClassifier`] (debounce, short/long/cancel) under [`ENC_SW`].
+//! [`crate::press::PressClassifier`] (debounce, short/long/cancel) under [`ENC_SW`].
 //! A detent is delivered as a `short` press of [`ENC_CW`] or [`ENC_CCW`], so
 //! every consumer of the button stream reads it without a new event kind.
 

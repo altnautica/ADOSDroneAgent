@@ -1,7 +1,7 @@
 //! On-disk sidecars under `/etc/ados`: the touch calibration file and the
 //! ground-station input selection.
 //!
-//! `touch.calib` is owned by [`crate::affine`] (the matrix blob lives with the
+//! `touch.calib` is owned by `ados_hmi::affine` (the matrix blob lives with the
 //! math); this module re-exports its canonical path and provides the
 //! `ground-station-input.json` `{primary}` persistence. Both writes are atomic
 //! (unique temp sibling + fsync + rename), so a power loss mid-save never

@@ -1,9 +1,9 @@
 //! Button-event IPC seam — a dedicated fanout socket for front-panel presses.
 //!
 //! The `ados-pic` daemon owns the GPIO button reader: it classifies each press
-//! as short / long / cancel through the shared [`crate::buttons::PressClassifier`]
+//! as short / long / cancel through the shared [`ados_hmi::press::PressClassifier`]
 //! (the single source of truth for those semantics and for the config action
-//! mapping) and publishes a [`crate::eventbus::ButtonBusEvent`] to the in-process
+//! mapping) and publishes a [`ados_hmi::eventbus::ButtonBusEvent`] to the in-process
 //! [`ButtonEventBus`]. This seam binds a dedicated Unix socket at [`BUTTONS_SOCK`]
 //! and streams those events as newline-JSON to every subscriber — the seam the
 //! HDMI cockpit relay reads through so a browser can be driven by the ground
@@ -33,8 +33,8 @@ use tokio::net::UnixStream;
 
 use std::sync::{Arc, Mutex};
 
-use crate::buttons::{Edge, PressClassifier};
-use crate::eventbus::{ButtonBusEvent, ButtonEventBus};
+use ados_hmi::eventbus::{ButtonBusEvent, ButtonEventBus};
+use ados_hmi::press::{Edge, PressClassifier};
 
 /// Button-event fanout socket path (sibling to pic.sock / mavlink.sock).
 pub const BUTTONS_SOCK: &str = "/run/ados/buttons.sock";
@@ -279,7 +279,7 @@ async fn stream_button_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eventbus::ButtonBusEvent;
+    use ados_hmi::eventbus::ButtonBusEvent;
     use serde_json::Value;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -304,9 +304,9 @@ mod tests {
         // mapping key is "<label>_<kind>".
         let mut m = HashMap::new();
         m.insert("B1_short".to_string(), "commit".to_string());
-        Arc::new(Mutex::new(PressClassifier::with_mapping(Arc::new(
-            RwLock::new(m),
-        ))))
+        Arc::new(Mutex::new(crate::buttons::classifier_with_mapping(
+            Arc::new(RwLock::new(m)),
+        )))
     }
 
     #[test]
@@ -545,9 +545,9 @@ mod tests {
         // What the reader publishes for a CW detent, a CCW detent and a switch
         // press: ordinary short presses, so every subscriber parses them.
         let published = [
-            (130, crate::buttons::ENC_CW, "cycle_screen"),
-            (130, crate::buttons::ENC_CCW, "prev_screen"),
-            (140, crate::buttons::ENC_SW, "confirm"),
+            (130, ados_hmi::encoder::ENC_CW, "cycle_screen"),
+            (130, ados_hmi::encoder::ENC_CCW, "prev_screen"),
+            (140, ados_hmi::encoder::ENC_SW, "confirm"),
         ];
         for (button, label, action) in published {
             buttons.publish(ButtonBusEvent {

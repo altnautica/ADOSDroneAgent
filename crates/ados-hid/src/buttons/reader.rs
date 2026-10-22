@@ -12,9 +12,10 @@ use std::time::Instant;
 use anyhow::Context;
 use gpio_cdev::{Chip, EventRequestFlags, EventType, LineRequestFlags};
 
-use super::{
-    ButtonEvent, ButtonLine, Channel, Edge, EncoderLines, PressClassifier, QuadratureDecoder,
-};
+use ados_hmi::encoder::{Channel, QuadratureDecoder};
+use ados_hmi::press::{ButtonEvent, Edge, PressClassifier};
+
+use super::{ButtonLine, EncoderLines};
 
 /// What a requested line feeds.
 #[derive(Debug, Clone, Copy)]

@@ -34,8 +34,8 @@
 604 ados-groundlink/src/receiver.rs
 534 ados-groundlink/src/wfb_rx/stats.rs
 761 ados-hal-probe/src/board_sidecar.rs
-510 ados-hid/src/affine.rs
-559 ados-hid/src/pic.rs
+521 ados-hmi/src/affine.rs
+592 ados-hmi/src/pic.rs
 1376 ados-installer/src/macos.rs
 697 ados-installer/src/main.rs
 645 ados-installer/src/steps/config_identity.rs

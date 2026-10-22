@@ -1,8 +1,8 @@
 use super::*;
 use crate::daemon::display::all_pages;
 use crate::pages::{GS_TAB_IDS, PANEL_W};
-use ados_hid::buttons::PressKind;
-use ados_hid::touch::{TouchGesture, TouchMove};
+use ados_hmi::press::PressKind;
+use ados_hmi::touch::{TouchGesture, TouchMove};
 
 fn nav(dir: &std::path::Path) -> PageNavigator {
     PageNavigator::with_state_path(
