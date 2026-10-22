@@ -54,6 +54,7 @@ fn read_config() -> ReconcileConfig {
         enabled: mp.enabled.unwrap_or(true),
         apply_live_allowed: mp.apply_live_allowed.unwrap_or(false),
         overrides: mp.overrides.unwrap_or_default(),
+        layout: ados_config::mac_pin::ados_pin_layout(),
     }
 }
 

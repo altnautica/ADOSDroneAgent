@@ -302,7 +302,7 @@ fn native_payload(base: &HeartbeatBase) -> HeartbeatPayload {
         // and no transport ever produced it.
         mac_stability: ados_macpin::engine::adapters_camel_from(std::path::Path::new(
             &std::env::var("ADOS_MAC_PINS_STATE")
-                .unwrap_or_else(|_| ados_macpin::engine::STATE_PATH.to_string()),
+                .unwrap_or_else(|_| ados_config::mac_pin::MAC_PINS_STATE.to_string()),
         )),
         // No radio view in the native base ⇒ no injection verdict: the key is
         // omitted (never a fabricated false) until the radio enrichment folds

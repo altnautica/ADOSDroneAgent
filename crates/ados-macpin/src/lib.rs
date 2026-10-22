@@ -1,40 +1,18 @@
-//! Stable-MAC pinning for network adapters that have no efuse MAC and so
-//! randomize their hardware address on every driver load.
-//!
-//! Some USB WiFi chipsets ship without a MAC burned into efuse, so their driver
-//! generates a fresh random MAC each time it loads. On a DHCP network that means
-//! a new lease — and a new IP — every boot, which makes the box hard to find and
-//! breaks long-running operations when the address moves mid-flight. The fix is
-//! to pin a stable, locally-administered MAC the adapter keeps across boots, via
-//! a high-priority `systemd-networkd` `.link` drop-in that sets the address on
-//! the next boot without ever touching the live interface.
-//!
-//! This crate is the shared engine for that feature, used by the install-time
-//! provisioning step and the always-on supervisor reconciler:
-//!   * the quirk table of chipsets known to lack an efuse MAC ([`is_quirk_randomizer`]),
-//!   * the allowlist of chipsets known to carry a stable efuse MAC ([`is_known_stable_efuse`]),
-//!   * the deterministic per-board MAC derivation ([`derive_pinned_mac`]),
-//!   * the on-disk state-file contract ([`MacPinsState`]) the heartbeat reads,
-//!   * and (in [`engine`]) the sysfs enumeration + `.link` provisioning.
-//!
-//! Detection deliberately does NOT trust two signals that look authoritative but
-//! lie in practice (both proven on an AICSemi AIC8800D80): the kernel's
-//! `addr_assign_type` reads `0` (permanent) while the adapter actually
-//! randomizes, and the random MAC uses a real-looking vendor OUI with the
-//! locally-administered bit clear. So randomization is identified by chipset
-//! VID:PID (quirk table) or by observing the MAC change across boots for a stable
-//! device identity, never by `addr_assign_type` or the LAA bit.
+#![doc = include_str!("../README.md")]
+#![warn(missing_docs)]
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod atomic;
 pub mod engine;
 
-/// A USB device identity. Defined locally (rather than pulled from a heavier
-/// crate) to keep this engine lean enough for the bootstrap installer.
+/// A USB device identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UsbId {
+    /// USB vendor id.
     pub vid: u16,
+    /// USB product id.
     pub pid: u16,
 }
 
@@ -42,6 +20,7 @@ pub struct UsbId {
 /// product matches every product from that vendor (a vendor-family match).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MacQuirk {
+    /// USB vendor id.
     pub vid: u16,
     /// `Some(pid)` matches one product; `None` matches the whole vendor family.
     pub pid: Option<u16>,
@@ -51,8 +30,8 @@ pub struct MacQuirk {
 
 /// Chipsets that have no efuse MAC and randomize their address each driver load.
 ///
-/// Keep this list small and evidence-driven — a false entry would pin an adapter
-/// that does not need it. Grow it only as boards are validated.
+/// Keep this list small and evidence-driven: a false entry would pin an adapter
+/// that does not need it.
 ///
 /// AICSemi (vid 0xa69c) USB WiFi (the AIC8800 family) is the founding case:
 /// proven on an AIC8800D80 (`a69c:8d81`) that re-randomizes its MAC every boot
@@ -68,8 +47,7 @@ pub const MAC_QUIRKS: &[MacQuirk] = &[MacQuirk {
 /// before the cross-boot learner has confirmed them, so a known-good radio's
 /// hardware address is never overwritten.
 ///
-/// The RTL88xx family (Realtek, vid 0x0bda) is the radio adapter the platform
-/// uses for the WFB link; it has a real efuse MAC.
+/// The Realtek RTL88xx USB WiFi family (vid 0x0bda) carries a real efuse MAC.
 pub const KNOWN_STABLE_EFUSE: &[MacQuirk] = &[MacQuirk {
     vid: 0x0bda,
     pid: None,
@@ -107,7 +85,7 @@ impl MacAddr {
     }
 
     /// True when the locally-administered bit (second-LSB of the first octet) is
-    /// set — a self-assigned address that cannot collide with a vendor OUI.
+    /// set: a self-assigned address that cannot collide with a vendor OUI.
     pub fn is_locally_administered(&self) -> bool {
         self.0[0] & 0x02 != 0
     }
@@ -165,7 +143,7 @@ impl<'de> Deserialize<'de> for MacAddr {
 /// adapter is present the caller passes the adapter's USB topology path so each
 /// gets a distinct address.
 ///
-/// Returns `None` when `machine_id` is empty — the caller must skip pinning
+/// Returns `None` when `machine_id` is empty: the caller must skip pinning
 /// rather than invent a non-deterministic value (which would collide across
 /// cloned images).
 pub fn derive_pinned_mac(machine_id: &str, salt: &str) -> Option<MacAddr> {
@@ -186,12 +164,11 @@ pub fn derive_pinned_mac(machine_id: &str, salt: &str) -> Option<MacAddr> {
     ]))
 }
 
-/// The verdict for one network adapter, written to the state file and surfaced
-/// on the heartbeat / CLI / setup webapp.
+/// The verdict for one network adapter, as written to the state file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdapterState {
-    /// A stable efuse MAC — left untouched.
+    /// A stable efuse MAC, left untouched.
     Stable,
     /// A randomizer we have pinned; the value lands on the next boot.
     Pinned,
@@ -226,11 +203,15 @@ pub struct AdapterVerdict {
     pub vidpid: String,
     /// Stable USB topology path (e.g. `5-1.3`), port-stable across reboots.
     pub usb_path: String,
+    /// The verdict.
     pub state: AdapterState,
+    /// How the verdict was reached, when it is not `Stable`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<AdapterSource>,
+    /// The pinned (or proposed) MAC.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pinned_mac: Option<MacAddr>,
+    /// The MAC the interface carried when it was enumerated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_seen_mac: Option<MacAddr>,
     /// True when the pin was also applied to the live interface (opt-in).
@@ -244,31 +225,39 @@ pub struct AdapterVerdict {
     pub deferred_reason: Option<String>,
 }
 
-/// The cross-boot learner's per-device memory (Layer 2). Keyed by the stable
-/// device identity so a churning MAC + churning kernel name still resolves to
-/// the same record.
+/// The cross-boot learner's per-device memory. Keyed by the stable device
+/// identity so a churning MAC + churning kernel name still resolves to the
+/// same record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LearnerRecord {
+    /// `vvvv:pppp` USB id.
     pub vidpid: String,
+    /// Stable USB topology path.
     pub usb_path: String,
+    /// The MAC seen on the latest boot.
     pub last_mac: MacAddr,
+    /// UNIX seconds of the first sighting.
     pub first_seen: u64,
+    /// Boots on which the device was observed.
     pub boot_count: u32,
+    /// Boots on which its MAC differed from the previous one.
     pub mac_change_count: u32,
 }
 
-/// On-disk schema version for `/etc/ados/mac-pins.state`.
+/// On-disk schema version of [`MacPinsState`].
 pub const MAC_PINS_STATE_VERSION: u32 = 1;
 
-/// The `/etc/ados/mac-pins.state` document. The installer step + supervisor
-/// reconciler write it; the Python heartbeat enricher reads it (so the JSON
-/// shape is a cross-language contract — extend additively only).
+/// The state-file document: per-adapter verdicts plus the learner memory. The
+/// JSON shape may be read by other programs, so extend it additively only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MacPinsState {
+    /// Schema version ([`MAC_PINS_STATE_VERSION`]).
     pub version: u32,
+    /// Verdicts from the latest reconcile.
     #[serde(default)]
     pub adapters: Vec<AdapterVerdict>,
     #[serde(default)]
+    /// Learner memory, one record per device ever seen.
     pub learner: Vec<LearnerRecord>,
     /// UNIX seconds the state was last written.
     #[serde(default)]

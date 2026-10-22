@@ -462,7 +462,7 @@ version = "0.1.0"
 name = "ados-macpin"
 version = "0.1.0"
 dependencies = [
- "ados-protocol",
+ "getrandom 0.4.2",
  "hex",
  "serde",
  "serde_json",
