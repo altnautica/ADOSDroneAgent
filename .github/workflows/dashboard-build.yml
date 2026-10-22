@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # dashboard/src/shared/ is a committed copy of web-shared/src/; a change
       # to one without re-syncing the other ships divergent code.
