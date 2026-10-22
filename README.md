@@ -514,4 +514,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR guidelines, and [AG
 
 ## License
 
-[GPL-3.0-or-later](LICENSE). Free to use, modify, and distribute. Derivative works must also be GPL-3.0-or-later. Library crates under `crates/` listed in [crates/README.md](crates/README.md) are MIT OR Apache-2.0.
+[GPL-3.0-or-later](LICENSE). Copyright 2026 Altnautica. Free to use, modify, and distribute; modified versions you distribute must also be GPL-3.0-or-later. Library crates under `crates/` listed in [crates/README.md](crates/README.md) are MIT OR Apache-2.0.
