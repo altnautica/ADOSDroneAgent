@@ -1,0 +1,97 @@
+name: Crates
+
+# The library crates published to crates.io (every crates/ member without
+# `publish = false`; index in crates/README.md).
+#
+#   check    on pull requests and pushes to main that touch the crates or these
+#            scripts: metadata, dependency rule, packaging, rustdoc, doctests
+#            and the bump check (scripts/check-crates.sh)
+#   publish  on a release tag (v*) or a manual run: publishes every
+#            name@version crates.io does not have yet and tags it
+#            crates/<name>-v<version> (scripts/publish-crates.sh). Auth is
+#            crates.io Trusted Publishing: the job exchanges its GitHub OIDC
+#            token for a short-lived publish token, so no registry secret is
+#            stored in this repository.
+#
+# release.yml runs on the same v* tag in parallel; neither waits for the other.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "scripts/check-crates.sh"
+      - "scripts/publish-crates.sh"
+      - ".github/workflows/crates.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "scripts/check-crates.sh"
+      - "scripts/publish-crates.sh"
+      - ".github/workflows/crates.yml"
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: crates-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The bump check diffs each crate against its crates/<name>-v<version> tag.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: x64-crates-${{ hashFiles('crates/Cargo.lock') }}
+          restore-keys: x64-crates-
+
+      - name: Check the published crates
+        run: bash scripts/check-crates.sh
+
+  publish:
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Tag and package versions agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: bash scripts/check-version-sync.sh "${GITHUB_REF_NAME}"
+
+      - name: Authenticate to crates.io (Trusted Publishing)
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish missing crate versions
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: bash scripts/publish-crates.sh

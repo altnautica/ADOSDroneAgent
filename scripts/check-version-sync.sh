@@ -51,31 +51,34 @@ if [ "$cargo_version" != "$py_version" ]; then
     fail=1
 fi
 
-# The lockstep crates (ados-protocol, ados-tracker) are pinned in
-# [workspace.dependencies] with `version = "=X.Y.Z"`, and that pin is what a
-# published ados-sdk / ados-tracker records as its ados-protocol requirement.
-# A pin that drifts from the workspace version publishes a crate that asks for
-# a wire version nobody ships.
-for name in ados-protocol ados-tracker; do
-    pin=$(awk -v n="$name" '
-        /^\[/ { in_deps = ($0 == "[workspace.dependencies]") ; next }
-        in_deps && $0 ~ "^" n "[[:space:]]*=" {
-            if (match($0, /version[[:space:]]*=[[:space:]]*"=[^"]*"/)) {
-                v = substr($0, RSTART, RLENGTH)
-                sub(/^version[[:space:]]*=[[:space:]]*"=/, "", v)
-                sub(/"$/, "", v)
-                print v
-            } else {
-                print "<missing>"
-            }
-            exit
-        }
-    ' "$CARGO_FILE")
+# The lockstep published crates (ados-protocol and the crates that depend on
+# it) are pinned in [workspace.dependencies] with an exact `version = "=X.Y.Z"`,
+# and that pin is the requirement a published dependent records. A pin that
+# drifts from the workspace version publishes a crate that asks for a wire
+# version nobody ships. Every exact pin in that table is checked; ados-protocol
+# must be among them, so an emptied table cannot pass vacuously.
+pins=$(awk '
+    /^\[/ { in_deps = ($0 == "[workspace.dependencies]") ; next }
+    in_deps && match($0, /version[[:space:]]*=[[:space:]]*"=[^"]*"/) {
+        v = substr($0, RSTART, RLENGTH)
+        sub(/^version[[:space:]]*=[[:space:]]*"=/, "", v)
+        sub(/"$/, "", v)
+        name = $0
+        sub(/[[:space:]]*=.*/, "", name)
+        print name, v
+    }
+' "$CARGO_FILE")
+if ! printf '%s\n' "$pins" | grep -q '^ados-protocol '; then
+    echo "FAIL: ${CARGO_FILE} [workspace.dependencies] has no exact ados-protocol pin (version = \"=${cargo_version}\")." >&2
+    fail=1
+fi
+while read -r name pin; do
+    [ -n "$name" ] || continue
     if [ "$pin" != "$cargo_version" ]; then
         echo "FAIL: ${CARGO_FILE} [workspace.dependencies] ${name} pins =${pin}, workspace version is ${cargo_version}. Set them in the same commit." >&2
         fail=1
     fi
-done
+done <<<"$pins"
 
 if [ "$#" -ge 1 ]; then
     expected="${1#v}"

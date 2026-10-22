@@ -77,7 +77,8 @@ you touched and do not treat the full run as a gate.
 
 ## Architecture Map
 
-Rust, under `crates/`, 32 workspace members. The flight-critical path:
+Rust, under `crates/`, 42 workspace members; 17 of them are published
+library crates (see "Published crates" below). The flight-critical path:
 
 - Service supervision: `crates/ados-supervisor/`
 - MAVLink routing: `crates/ados-mavlink-router/`
@@ -90,25 +91,34 @@ Rust, under `crates/`, 32 workspace members. The flight-critical path:
 - Ground-station link and mesh: `crates/ados-groundlink/`
 - Installer: `crates/ados-installer/`
 - Plugin host: `crates/ados-plugin-host/`
-- Vision engine: `crates/ados-vision/`
+- Vision engine: `crates/ados-vision-engine/`; the tracker, YOLO decoding
+  and re-identification are `crates/ados-vision/`
 - Perception offload tier decision: `crates/ados-offload/`. The World Engine
   (world model, compute node, offload sessions) is the
   `com.altnautica.world-engine` extension, not core.
-- Swarm: `crates/ados-swarm-laws/` (published control laws), `crates/ados-swarmbus/`; the onboard control loop lives in `crates/ados-mavlink-router/src/connection/swarm_setpoint/`
-- Peripherals: `crates/ados-crsf/`, `crates/ados-display/`,
-  `crates/ados-hid/`, `crates/ados-gpio/`, `crates/ados-hal-probe/`
+- Swarm: `crates/ados-swarm/` (published control laws), `crates/ados-swarmbus/`; the onboard control loop lives in `crates/ados-mavlink-router/src/connection/swarm_setpoint/`
+- Peripherals: `crates/ados-crsf/` (codec in `crates/ados-crsf-codec/`),
+  `crates/ados-display/` (OLED and framebuffer output in
+  `crates/ados-display-driver/`), `crates/ados-hid/` (touch, buttons and
+  encoder state machines in `crates/ados-hmi/`), `crates/ados-gpio/`,
+  `crates/ados-hal-probe/`
 - Shared: `crates/ados-protocol/` (wire contracts and their version
   registry, `contracts.toml`), `crates/ados-config/`, `crates/ados-sdk/`,
-  `crates/ados-capabilities-codegen/`, `crates/ados-config-tunnel/`,
-  `crates/ados-tui/`
-- Sensor hub wire protocol: `crates/ados-sensorhub-proto/` (`no_std`, MIT
-  licensed, unlike the rest of the workspace, because the hub firmware and
-  the simulator link it; keep it dependency-free)
+  `crates/ados-capabilities-codegen/`, `crates/ados-config-tunnel/`
+  (chunking in `crates/ados-mavlink-tunnel/`), `crates/ados-tui/`
+- LoRa: `crates/ados-lora-service/` (the lane service), `crates/ados-lora/`
+  (band plans and the transmit governor)
+- Sensor hub wire protocol: `crates/ados-sensorhub/` (`no_std`, MIT only,
+  because the hub firmware and the simulator link it; keep it
+  dependency-free)
 - Sensor bus and time: `crates/ados-sensorbus/` (the `sensors.sock` frame
-  codec, broker, clients and clock-fit math, with the vendored MIT capture
-  contract `.proto`/schema files), `crates/ados-clock/` (brokers the bus,
-  owns the host timebase), `crates/ados-sensorhub/` (sensor hub host side),
-  `crates/ados-gnss/` (GNSS receivers, PPS, RTK base)
+  codec, broker, clients, with the vendored MIT capture contract
+  `.proto`/schema files), `crates/ados-clock-service/` (brokers the bus,
+  owns the host timebase), `crates/ados-clock/` (clock-fit math and the
+  chrony sink), `crates/ados-sensorhub-service/` (sensor hub host side),
+  `crates/ados-gnss/` (GNSS receivers, PPS, RTK base), `crates/ados-positioning/`
+  (UBX/NMEA/RTCM3 stream split, VALSET, survey-in), `crates/ados-rtcm/`
+  (RTCM3 framing and `GPS_RTCM_DATA` fragmentation)
 
 Python, under `src/ados/`:
 
@@ -197,6 +207,36 @@ contains before committing.
   Commercial, pricing, or roadmap commentary does not belong in the codebase.
 - **Comments, log strings, commit messages, and PR titles are public too.** Keep
   them bland, factual, and technical.
+
+## Published crates
+
+Every member of `crates/` whose manifest does not say `publish = false` is
+published on crates.io. The list, with one line per crate, is
+`crates/README.md`.
+
+- **Licences.** Published crates are `MIT OR Apache-2.0`, each with its own
+  `LICENSE-MIT` and `LICENSE-APACHE`; `ados-sensorhub` is MIT only. Everything
+  else in this repository is GPL-3.0-or-later.
+- **Versions.** `ados-protocol`, `ados-sdk`, `ados-vision`, `ados-gpio` and
+  `ados-hal-probe` carry the workspace version and are pinned `=X.Y.Z` in
+  `[workspace.dependencies]`; `scripts/check-version-sync.sh` keeps the pins
+  equal to it. The other crates carry their own semver. Any change to a file
+  a published crate packages needs a version bump in the same change.
+- **Dependencies.** A published crate never depends on an unpublished
+  `ados-*` crate, and consumers reach published crates through their
+  `[workspace.dependencies]` entry (`{ workspace = true }`).
+- **Packaging.** No `include_str!`/`include_bytes!` outside the crate
+  directory; `cargo package` only ships what is inside it. `ados-hal-probe`
+  bundles a copy of `src/ados/hal/boards/*.yaml` in `boards/`, and a test
+  fails when the copy drifts.
+- **Docs.** A crate's `README.md` is both its crates.io page and its docs.rs
+  front page (`#![doc = include_str!("../README.md")]`), so its example is a
+  doctest. The crate and repository tables between `ados-family` markers are
+  generated; do not edit them by hand.
+- **Gate.** `bash scripts/check-crates.sh` (Linux) checks metadata, the
+  dependency rule, packaging, rustdoc, doctests and the version bump.
+  `.github/workflows/crates.yml` runs it on pull requests and publishes any
+  `name@version` crates.io does not have on a `v*` tag.
 
 ## Verification
 
