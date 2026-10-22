@@ -3,7 +3,7 @@ resolver = "2"
 members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision-engine", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-offload", "ados-swarmbus", "ados-sensorhub-service", "ados-sensorbus", "ados-gnss", "ados-clock-service", "ados-sensorhub", "ados-lora-service", "ados-vision", "ados-lora", "ados-crsf-codec", "ados-positioning", "ados-rtcm", "ados-clock", "ados-swarm", "ados-mavlink-tunnel", "ados-display-driver", "ados-hmi"]
 
 [workspace.package]
-version = "0.106.1"
+version = "0.106.2"
 edition = "2021"
 # Minimum supported Rust. `slice::as_chunks` / `as_chunks_mut`, which the
 # protocol decode, the display blitter and the vision crop use to state a
@@ -30,10 +30,10 @@ homepage = "https://altnautica.com"
 # Published crates (crates.io). Every in-tree consumer reaches them through these
 # entries so the path and the registry version stay together. The lockstep
 # pins must equal the workspace version (scripts/check-version-sync.sh).
-ados-protocol = { path = "ados-protocol", version = "=0.106.1" }
-ados-vision = { path = "ados-vision", version = "=0.106.1" }
-ados-gpio = { path = "ados-gpio", version = "=0.106.1" }
-ados-hal-probe = { path = "ados-hal-probe", version = "=0.106.1" }
+ados-protocol = { path = "ados-protocol", version = "=0.106.2" }
+ados-vision = { path = "ados-vision", version = "=0.106.2" }
+ados-gpio = { path = "ados-gpio", version = "=0.106.2" }
+ados-hal-probe = { path = "ados-hal-probe", version = "=0.106.2" }
 ados-sensorhub = { path = "ados-sensorhub", version = "0.1.0" }
 ados-offload = { path = "ados-offload", version = "0.1.0" }
 ados-macpin = { path = "ados-macpin", version = "0.1.0" }
