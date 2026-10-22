@@ -267,7 +267,7 @@ fn imu_samples_batch_per_ten_ms_with_running_seq() {
 /// A CRC-valid RTCM3 frame of `total_len` bytes.
 fn rtcm3(total_len: usize) -> Vec<u8> {
     let payload: Vec<u8> = (0..total_len - 6).map(|i| i as u8).collect();
-    ados_sensorbus::rtcm::encode_rtcm3(&payload)
+    ados_rtcm::encode_rtcm3(&payload)
 }
 
 #[test]
