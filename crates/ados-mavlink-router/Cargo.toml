@@ -1,5 +1,6 @@
 [package]
 name = "ados-mavlink-router"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +9,10 @@ repository.workspace = true
 description = "Owns the flight-controller serial link, fans MAVLink frames to the IPC socket, and produces the vehicle-state snapshot on the state socket."
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }
+ados-rtcm = { workspace = true }
+ados-clock-fit = { workspace = true }
+ados-swarm-laws = { workspace = true }
+ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
 # Onboard swarm autonomy. The control laws live there and stay pure; this
 # crate supplies the FC link they command through and the swarm-socket feed.

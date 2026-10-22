@@ -1,5 +1,6 @@
 [package]
 name = "ados-sensorhub"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,14 +17,15 @@ name = "ados-sensorhub"
 path = "src/main.rs"
 
 [dependencies]
+ados-clock-fit = { workspace = true }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
 # The sysfs tty walk shared with the board probe (`transport: auto`).
 ados-hal-probe = { path = "../ados-hal-probe" }
 ados-sensorbus = { path = "../ados-sensorbus" }
-ados-sensorhub-proto = { path = "../ados-sensorhub-proto" }
+ados-sensorhub-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

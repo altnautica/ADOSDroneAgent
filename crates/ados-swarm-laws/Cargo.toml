@@ -1,0 +1,19 @@
+[package]
+name = "ados-swarm-laws"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ados-swarm-laws"
+readme = "README.md"
+description = "Swarm control laws for multirotors: separation, braking-aware barriers, alpha-lattice flocking, formations, CBBA task allocation and a deterministic point-mass simulator."
+keywords = ["swarm", "flocking", "cbba", "formation", "uav"]
+categories = ["science::robotics", "aerospace::unmanned-aerial-vehicles", "algorithms", "simulation"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]

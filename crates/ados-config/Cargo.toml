@@ -1,5 +1,6 @@
 [package]
 name = "ados-config"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,12 +9,13 @@ repository.workspace = true
 description = "Loud-fail config loading for the agent services: parse a YAML config slice (or a JSON sidecar) and log the exact parser error on failure instead of silently defaulting, optionally handing the error back so a service can surface it on its status."
 
 [dependencies]
+ados-macpin = { workspace = true }
 serde = { workspace = true }
 serde_norway = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { workspace = true }
 
 # statvfs for the capture-storage volume listing; off Linux the space reader
 # reports nothing and the pure core still builds and tests.

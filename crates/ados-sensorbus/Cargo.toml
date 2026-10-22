@@ -1,5 +1,6 @@
 [package]
 name = "ados-sensorbus"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +13,7 @@ name = "ados_sensorbus"
 path = "src/lib.rs"
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { workspace = true }
 prost = "0.14"
 serde = { workspace = true }
 serde_json = { workspace = true }

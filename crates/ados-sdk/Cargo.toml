@@ -3,9 +3,21 @@ name = "ados-sdk"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
-description = "Plugin author SDK for the ADOS Drone Agent: an async IPC client, the plugin-facing context facade, the hardware driver traits, and the lifecycle runner. A Rust plugin built on this SDK speaks the same length-prefixed msgpack wire and capability-token handshake as the Python plugin host."
+homepage.workspace = true
+documentation = "https://docs.rs/ados-sdk"
+readme = "README.md"
+description = "Build Rust plugins for the ADOS Drone Agent: async IPC client, plugin context, hardware driver traits and lifecycle runner."
+keywords = ["ados", "drone", "uav", "plugin", "sdk"]
+categories = ["aerospace::drones", "aerospace::unmanned-aerial-vehicles", "asynchronous"]
+# The integration tests stand up the unpublished plugin host and vision engine,
+# so they stay in the repository and out of the published package.
+exclude = ["tests/"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
 # The wire (frame + envelope + capability token) lives in ados-protocol and is
@@ -15,7 +27,7 @@ description = "Plugin author SDK for the ADOS Drone Agent: an async IPC client, 
 # The `mavlink` feature is enabled so the vision pose helper can build a
 # VISION_POSITION_ESTIMATE / ODOMETRY frame from the shared ardupilotmega
 # codec rather than hand-assembling bytes in every VIO plugin.
-ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
+ados-protocol = { workspace = true, features = ["mavlink"] }
 tokio = { workspace = true }
 rmpv = { workspace = true }
 # msgpack codec for the vision payloads the SDK serializes (model metadata,

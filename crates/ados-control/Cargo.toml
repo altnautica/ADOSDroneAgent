@@ -1,5 +1,6 @@
 [package]
 name = "ados-control"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -18,16 +19,19 @@ name = "ados-control"
 path = "src/main.rs"
 
 [dependencies]
+ados-lora-governor = { workspace = true }
+ados-rtcm = { workspace = true }
+ados-swarm-laws = { workspace = true }
 # Shared wire contracts: the versioned IPC frames the status/command chunks
 # decode, reused so the native surface speaks the exact same seams the Python API
 # does. The `mavlink` feature pulls in the ardupilotmega codec the command route
 # builds its COMMAND_LONG frames with (the same codec the router serializes the
 # FC send path with), so a frame this surface writes to the MAVLink socket is
 # byte-identical to one the router would have written.
-ados-protocol = { path = "../ados-protocol", features = ["mavlink"] }
+ados-protocol = { workspace = true, features = ["mavlink"] }
 # The canonical perception-tier decision (pick_tier) so the status surfaces
 # report the same tier the drone runs on, not a second implementation.
-ados-offload = { path = "../ados-offload" }
+ados-offload = { workspace = true }
 ados-config = { path = "../ados-config" }
 # The sensor bus: rig validation against the capture contract, RTCM
 # fragment counting and the one-shot publish the RTCM route injects with.
@@ -46,7 +50,7 @@ ados-hid = { path = "../ados-hid" }
 # so a pin the native surface writes resolves to the exact same .link + state the
 # supervisor reconciler and the Python route produced. Linux-target legs inside
 # the crate are cfg-gated, so a non-Linux dev build keeps the safe fallbacks.
-ados-macpin = { path = "../ados-macpin" }
+ados-macpin = { workspace = true }
 # The ground-station video recorder lifecycle, reused by the recording write
 # routes so the front holds one long-lived recorder (the ffmpeg child must
 # outlive a single request: start and stop are separate HTTP calls). The crate
@@ -162,7 +166,7 @@ socket2 = { version = "0.5", features = ["all"] }
 sysinfo = { workspace = true }
 # The always-on `_ados._tcp` advert. The GCS Add-a-Node card browses this
 # service, so the process that answers `/api/pairing/*` is the one that must
-# publish it — a record pointing at a front that is not running is worse than
+# publish it â€” a record pointing at a front that is not running is worse than
 # no record. Same version the groundlink advert uses, so one mDNS
 # implementation ships on the box.
 mdns-sd = "0.13"

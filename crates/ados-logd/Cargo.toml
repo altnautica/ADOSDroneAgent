@@ -1,5 +1,6 @@
 [package]
 name = "ados-logd"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -28,7 +29,7 @@ ados-config = { path = "../ados-config" }
 mimalloc = "0.1"
 # Shared wire contracts: the versioned ingest frames, the read-API envelope,
 # and the secret-field redaction applied at ingest.
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { workspace = true }
 # Embedded single-writer SQLite. Only this daemon opens the store read-write.
 rusqlite = { workspace = true }
 serde = { workspace = true }

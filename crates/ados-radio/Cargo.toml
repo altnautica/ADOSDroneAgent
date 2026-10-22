@@ -1,5 +1,6 @@
 [package]
 name = "ados-radio"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,7 +25,7 @@ bench-adapters = []
 [dependencies]
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
 # The adaptive ladder publishes its rung's bitrate to the video encoder as a
 # ceiling, so a degrading link emits FEWER on-air bytes rather than more. Only

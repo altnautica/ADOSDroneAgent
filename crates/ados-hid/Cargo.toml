@@ -1,5 +1,6 @@
 [package]
 name = "ados-hid"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,9 +21,10 @@ name = "ados-input"
 path = "src/bin/ados-input.rs"
 
 [dependencies]
+ados-hmi = { workspace = true }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 # The shared node-profile resolution, so the button defaults follow the profile.
 ados-config = { path = "../ados-config" }
 serde = { workspace = true }

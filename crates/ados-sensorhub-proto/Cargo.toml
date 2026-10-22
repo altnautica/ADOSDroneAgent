@@ -1,14 +1,23 @@
 [package]
 name = "ados-sensorhub-proto"
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-# MIT, unlike the rest of the workspace: the sensor-hub firmware and the
-# simulator link this crate, so it stays permissively licensed and
-# dependency-free.
+# MIT only, unlike the MIT OR Apache-2.0 crates: the sensor-hub firmware and
+# the simulator link this crate, so it keeps the licence it shipped under and
+# stays dependency-free.
 license = "MIT"
 repository.workspace = true
-description = "Sensor hub wire protocol v1: COBS framing, CRC-16/CCITT-FALSE and the packet structs shared by the hub firmware, the agent and the simulator. no_std, no allocation."
+homepage.workspace = true
+documentation = "https://docs.rs/ados-sensorhub-proto"
+readme = "README.md"
+description = "Sensor hub wire protocol: COBS framing, CRC-16/CCITT-FALSE and fixed-layout IMU, barometer, magnetometer, trigger, PPS and GNSS packets. no_std, no allocation."
+keywords = ["cobs", "crc", "imu", "sensor", "no-std"]
+categories = ["embedded", "no-std", "no-std::no-alloc", "encoding", "aerospace::protocols"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [lib]
 name = "ados_sensorhub_proto"

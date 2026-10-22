@@ -1,5 +1,6 @@
 [package]
 name = "ados-tui"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,7 +13,7 @@ name = "ados-tui"
 path = "src/main.rs"
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

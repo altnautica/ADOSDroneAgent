@@ -1,5 +1,6 @@
 [package]
 name = "ados-lora"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,9 +25,10 @@ default = ["daemon"]
 daemon = ["dep:tokio", "dep:tokio-serial", "dep:tracing-subscriber", "dep:ados-config", "dep:nix", "dep:ados-gpio"]
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-lora-governor = { workspace = true }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 # CRC-16/CCITT-FALSE for the frame trailer.
-ados-sensorhub-proto = { path = "../ados-sensorhub-proto" }
+ados-sensorhub-proto = { workspace = true }
 ados-config = { path = "../ados-config", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,5 +1,6 @@
 [package]
 name = "ados-hal-probe"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +17,7 @@ name = "ados-camera-probe"
 path = "src/bin/ados-camera-probe.rs"
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The board-profile YAMLs are embedded and parsed here so a zero-Python node can

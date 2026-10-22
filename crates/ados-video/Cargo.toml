@@ -1,5 +1,6 @@
 [package]
 name = "ados-video"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +17,7 @@ name = "ados-video"
 path = "src/main.rs"
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
 ados-hal-probe = { path = "../ados-hal-probe" }
 serde = { workspace = true }

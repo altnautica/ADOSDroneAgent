@@ -1,5 +1,6 @@
 [package]
 name = "ados-installer"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +17,7 @@ path = "src/main.rs"
 # (`logging.store.enabled`), so its decision to enable the store unit and the
 # daemon's decision to run cannot disagree.
 ados-config = { path = "../ados-config" }
-ados-macpin = { path = "../ados-macpin" }
+ados-macpin = { workspace = true }
 # The board-profile reader (the YAMLs are embedded there, and it is the sidecar
 # writer). Used to validate `--display <id>` against the ids the detected
 # board actually declares, so a typo is refused before the install starts
@@ -30,7 +31,7 @@ ados-hal-probe = { path = "../ados-hal-probe" }
 # (`unit_to_label`) the macOS workstation install writes into
 # `~/Library/LaunchAgents`, shared with the supervisor's runtime
 # `LaunchdManager` that then manages those jobs.
-ados-protocol = { path = "../ados-protocol" }
+ados-protocol = { workspace = true }
 # The plugin lifecycle controller. The World Engine extension step installs
 # the first-party extension through the same `PluginSupervisor` (signature
 # verify, compatibility gates, unit render) and the same allowlisted,

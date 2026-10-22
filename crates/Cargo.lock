@@ -38,6 +38,7 @@ dependencies = [
 name = "ados-clock"
 version = "0.106.1"
 dependencies = [
+ "ados-clock-fit",
  "ados-config",
  "ados-protocol",
  "ados-sensorbus",
@@ -54,6 +55,10 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "ados-clock-fit"
+version = "0.1.0"
 
 [[package]]
 name = "ados-cloud"
@@ -92,6 +97,7 @@ dependencies = [
 name = "ados-config"
 version = "0.106.1"
 dependencies = [
+ "ados-macpin",
  "ados-protocol",
  "nix 0.29.0",
  "parking_lot",
@@ -107,6 +113,7 @@ name = "ados-config-tunnel"
 version = "0.106.1"
 dependencies = [
  "ados-config",
+ "ados-mavlink-tunnel",
  "ados-protocol",
  "async-trait",
  "serde",
@@ -128,6 +135,7 @@ dependencies = [
  "ados-groundlink",
  "ados-hid",
  "ados-lora",
+ "ados-lora-governor",
  "ados-macpin",
  "ados-mavlink-router",
  "ados-net",
@@ -135,8 +143,10 @@ dependencies = [
  "ados-plugin-host",
  "ados-protocol",
  "ados-radio",
+ "ados-rtcm",
  "ados-sensorbus",
  "ados-supervisor",
+ "ados-swarm-laws",
  "ados-swarmbus",
  "ados-video",
  "anyhow",
@@ -185,7 +195,9 @@ name = "ados-crsf"
 version = "0.106.1"
 dependencies = [
  "ados-config",
+ "ados-crsf-codec",
  "ados-hid",
+ "ados-hmi",
  "ados-protocol",
  "evdev",
  "serde",
@@ -199,12 +211,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-crsf-codec"
+version = "0.1.0"
+
+[[package]]
 name = "ados-display"
 version = "0.106.1"
 dependencies = [
  "ab_glyph",
  "ados-config",
+ "ados-display-driver",
  "ados-hid",
+ "ados-hmi",
  "ados-protocol",
  "anyhow",
  "embedded-graphics",
@@ -228,10 +246,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-display-driver"
+version = "0.1.0"
+
+[[package]]
 name = "ados-gnss"
 version = "0.106.1"
 dependencies = [
  "ados-config",
+ "ados-gnss-stream",
  "ados-protocol",
  "ados-sensorbus",
  "nix 0.29.0",
@@ -246,6 +269,10 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "ados-gnss-stream"
+version = "0.1.0"
 
 [[package]]
 name = "ados-gpio"
@@ -318,6 +345,7 @@ name = "ados-hid"
 version = "0.106.1"
 dependencies = [
  "ados-config",
+ "ados-hmi",
  "ados-protocol",
  "anyhow",
  "evdev",
@@ -336,6 +364,10 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "ados-hmi"
+version = "0.1.0"
 
 [[package]]
 name = "ados-installer"
@@ -408,6 +440,7 @@ version = "0.106.1"
 dependencies = [
  "ados-config",
  "ados-gpio",
+ "ados-lora-governor",
  "ados-protocol",
  "ados-sensorhub-proto",
  "nix 0.29.0",
@@ -422,8 +455,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-lora-governor"
+version = "0.1.0"
+
+[[package]]
 name = "ados-macpin"
-version = "0.106.1"
+version = "0.1.0"
 dependencies = [
  "ados-protocol",
  "hex",
@@ -439,12 +476,15 @@ dependencies = [
 name = "ados-mavlink-router"
 version = "0.106.1"
 dependencies = [
+ "ados-clock-fit",
  "ados-config",
  "ados-hal-probe",
  "ados-hid",
  "ados-protocol",
+ "ados-rtcm",
  "ados-sensorbus",
  "ados-swarm-control",
+ "ados-swarm-laws",
  "ados-swarmbus",
  "anyhow",
  "bytes",
@@ -462,6 +502,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "ados-mavlink-tunnel"
+version = "0.1.0"
 
 [[package]]
 name = "ados-net"
@@ -489,7 +533,7 @@ dependencies = [
 
 [[package]]
 name = "ados-offload"
-version = "0.106.1"
+version = "0.1.0"
 dependencies = [
  "serde",
 ]
@@ -584,6 +628,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-rtcm"
+version = "0.1.0"
+
+[[package]]
 name = "ados-sdk"
 version = "0.106.1"
 dependencies = [
@@ -633,6 +681,7 @@ dependencies = [
 name = "ados-sensorhub"
 version = "0.106.1"
 dependencies = [
+ "ados-clock-fit",
  "ados-config",
  "ados-hal-probe",
  "ados-protocol",
@@ -650,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorhub-proto"
-version = "0.106.1"
+version = "0.1.0"
 dependencies = [
  "proptest",
  "serde",
@@ -696,11 +745,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-swarm-laws"
+version = "0.1.0"
+
+[[package]]
 name = "ados-swarmbus"
 version = "0.106.1"
 dependencies = [
  "ados-protocol",
  "ados-radio",
+ "ados-swarm-laws",
  "anyhow",
  "chacha20poly1305",
  "getrandom 0.4.2",
@@ -717,6 +771,10 @@ dependencies = [
  "tracing-journald",
  "tracing-subscriber",
 ]
+
+[[package]]
+name = "ados-tracker"
+version = "0.106.1"
 
 [[package]]
 name = "ados-tui"
@@ -764,6 +822,7 @@ dependencies = [
  "ados-config",
  "ados-protocol",
  "ados-sensorbus",
+ "ados-tracker",
  "anyhow",
  "memmap2",
  "nix 0.29.0",

@@ -3,9 +3,18 @@ name = "ados-protocol"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
-description = "Canonical implementation of the ADOS Drone Agent IPC wire contracts: length-prefixed framing, plugin RPC envelope and capability tokens, and the vehicle-state codec."
+homepage.workspace = true
+documentation = "https://docs.rs/ados-protocol"
+readme = "README.md"
+description = "Wire contracts for the ADOS Drone Agent: length-prefixed IPC framing, plugin RPC envelope and capability tokens, the vision frame bus, MSP and MAVLink helpers."
+keywords = ["ados", "drone", "uav", "mavlink", "ipc"]
+categories = ["aerospace::drones", "aerospace::protocols", "encoding", "network-programming"]
+
+[package.metadata.docs.rs]
+features = ["mavlink"]
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
 serde = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "ados-hmi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ados-hmi"
+readme = "README.md"
+description = "Input state machines for hardware front panels: touchscreen affine calibration and gestures, button press classification, quadrature encoder decoding and a pilot-in-command arbiter."
+keywords = ["touchscreen", "gesture", "encoder", "button", "hmi"]
+categories = ["hardware-support", "embedded"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]

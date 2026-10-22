@@ -1,5 +1,6 @@
 [package]
 name = "ados-clock"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,10 +17,11 @@ name = "ados-clock"
 path = "src/main.rs"
 
 [dependencies]
+ados-clock-fit = { workspace = true }
 ados-config = { path = "../ados-config" }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-sensorbus = { path = "../ados-sensorbus" }
 anyhow = { workspace = true }
 # Timestamp-only views of the bus payloads (the full messages are not decoded).

@@ -1,5 +1,6 @@
 [package]
 name = "ados-cloud"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,16 +17,16 @@ path = "src/bin/ados-cloud.rs"
 # Wire primitives + the frozen plugin-supervisor contract the command
 # dispatcher will drive (path deps; the supervisor consumer wiring lands with
 # the command-dispatcher task).
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer", "tls"] }
+ados-protocol = { workspace = true, features = ["tracing-layer", "tls"] }
 # The canonical perception-tier decision (pick_tier) so the cloud beacon reports
 # the same tier the drone runs on, not a second implementation.
-ados-offload = { path = "../ados-offload" }
+ados-offload = { workspace = true }
 ados-config = { path = "../ados-config" }
 ados-plugin-host = { path = "../ados-plugin-host" }
 # The per-adapter stable-MAC verdicts the heartbeat's `macStability` block
 # carries. The projection lives in the crate that owns the state file so the
 # LAN status body and this heartbeat ship one shape, not two.
-ados-macpin = { path = "../ados-macpin" }
+ados-macpin = { workspace = true }
 # The camera-state sidecar reader lives beside its writer in ados-video.
 ados-video = { path = "../ados-video" }
 serde = { workspace = true }

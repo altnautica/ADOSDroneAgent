@@ -1,5 +1,6 @@
 [package]
 name = "ados-crsf"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,9 +17,11 @@ name = "ados-crsf"
 path = "src/main.rs"
 
 [dependencies]
+ados-crsf-codec = { workspace = true }
+ados-hmi = { workspace = true }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
 ados-hid = { path = "../ados-hid" }
 serde = { workspace = true }
@@ -34,7 +37,7 @@ tokio-serial = "5.4"
 [target.'cfg(target_os = "linux")'.dependencies]
 # Pure-Rust Linux input for the gamepad channel source (same crate/version the
 # input daemons use). The tokio feature drives the async event stream; only
-# the node-open + read loop is target-gated — the axis/switch → channel maths
+# the node-open + read loop is target-gated â€” the axis/switch â†’ channel maths
 # stays host-portable.
 evdev = { version = "0.12", features = ["tokio"] }
 

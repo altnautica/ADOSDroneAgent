@@ -1,5 +1,6 @@
 [package]
 name = "ados-vision"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,7 +22,7 @@ path = "src/bin/ados-vision.rs"
 default = []
 # Opt-in ONNX Runtime backend. Loads the runtime dynamically (dlopen at start)
 # rather than static-linking a downloaded build, so the compiled binary carries
-# no link-time dependency on the runtime's glibc/libstdc++ — the shared library
+# no link-time dependency on the runtime's glibc/libstdc++ â€” the shared library
 # is fetched separately (a glibc-2.17 manylinux build that runs on every target)
 # and its path handed in via ORT_DYLIB_PATH. Never on by default; heavy runtime.
 onnx = ["dep:ort", "ort/load-dynamic"]
@@ -36,7 +37,8 @@ coreml = ["onnx", "ort/coreml"]
 reid = []
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }
+ados-tracker = { workspace = true }
+ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
 # Trigger records in, simulator time pairs out, on the sensor bus.
 ados-sensorbus = { path = "../ados-sensorbus" }

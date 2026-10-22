@@ -51,6 +51,32 @@ if [ "$cargo_version" != "$py_version" ]; then
     fail=1
 fi
 
+# The lockstep crates (ados-protocol, ados-tracker) are pinned in
+# [workspace.dependencies] with `version = "=X.Y.Z"`, and that pin is what a
+# published ados-sdk / ados-tracker records as its ados-protocol requirement.
+# A pin that drifts from the workspace version publishes a crate that asks for
+# a wire version nobody ships.
+for name in ados-protocol ados-tracker; do
+    pin=$(awk -v n="$name" '
+        /^\[/ { in_deps = ($0 == "[workspace.dependencies]") ; next }
+        in_deps && $0 ~ "^" n "[[:space:]]*=" {
+            if (match($0, /version[[:space:]]*=[[:space:]]*"=[^"]*"/)) {
+                v = substr($0, RSTART, RLENGTH)
+                sub(/^version[[:space:]]*=[[:space:]]*"=/, "", v)
+                sub(/"$/, "", v)
+                print v
+            } else {
+                print "<missing>"
+            }
+            exit
+        }
+    ' "$CARGO_FILE")
+    if [ "$pin" != "$cargo_version" ]; then
+        echo "FAIL: ${CARGO_FILE} [workspace.dependencies] ${name} pins =${pin}, workspace version is ${cargo_version}. Set them in the same commit." >&2
+        fail=1
+    fi
+done
+
 if [ "$#" -ge 1 ]; then
     expected="${1#v}"
     if [ "$py_version" != "$expected" ] || [ "$cargo_version" != "$expected" ]; then

@@ -1,5 +1,6 @@
 [package]
 name = "ados-swarmbus"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,15 +17,16 @@ name = "ados-swarmbus"
 path = "src/bin/ados-swarmbus.rs"
 
 [dependencies]
+ados-swarm-laws = { workspace = true }
 # `tracing-layer` pulls in the LogdLayer so the daemon's logs reach the durable
 # ados-logd Black Box store, not just journald. `ipc` + `state` carry
 # the swarm.sock broadcast server and the state.sock reader the own-beacon body
 # is filled from.
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 # The single source of truth for fleet addressing: FLEET_MAX_SLOTS, SLOT_GROUND,
 # the fleet-identity validator, and the WfbConfig defaults this service reads the
 # same three fields out of. Depended on for CONSTANTS, never for its config
-# loader — `WfbConfig::load_from` publishes the *radio* service's config-status
+# loader â€” `WfbConfig::load_from` publishes the *radio* service's config-status
 # sidecar, and a second writer would clobber it.
 ados-radio = { path = "../ados-radio" }
 serde = { workspace = true }
@@ -40,7 +42,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 # ChaCha20-Poly1305 AEAD over the beacon payload, keyed by the fleet's shared
-# secret. Pure-Rust (RustCrypto), no `ring` — the same primitive and crate
+# secret. Pure-Rust (RustCrypto), no `ring` â€” the same primitive and crate
 # version the mesh invite bundle uses.
 chacha20poly1305 = "0.11"
 # SHA-256 for the domain-separated fleet-key derivation off /etc/drone.key,

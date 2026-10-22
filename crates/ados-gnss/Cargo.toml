@@ -1,5 +1,6 @@
 [package]
 name = "ados-gnss"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,7 +17,8 @@ name = "ados-gnss"
 path = "src/main.rs"
 
 [dependencies]
-ados-protocol = { path = "../ados-protocol", features = ["tracing-layer"] }
+ados-gnss-stream = { workspace = true }
+ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
 ados-sensorbus = { path = "../ados-sensorbus" }
 serde = { workspace = true }
@@ -35,4 +37,5 @@ sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
 
 [dev-dependencies]
+ados-gnss-stream = { workspace = true, features = ["fixtures"] }
 tempfile = "3"

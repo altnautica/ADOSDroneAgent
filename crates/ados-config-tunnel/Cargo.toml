@@ -1,5 +1,6 @@
 [package]
 name = "ados-config-tunnel"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,9 +17,10 @@ name = "ados-tunnel-config"
 path = "src/main.rs"
 
 [dependencies]
+ados-mavlink-tunnel = { workspace = true }
 # The wire layer (TUNNEL codec + the L3 chunk framing/reassembler) and the
 # producer-side log-shipping layer.
-ados-protocol = { path = "../ados-protocol", features = ["mavlink", "tracing-layer"] }
+ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
 serde = { workspace = true }
 serde_json = { workspace = true }
