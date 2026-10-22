@@ -8,7 +8,7 @@
 </p>
 <h1 align="center">ADOS Drone Agent</h1>
 <p align="center"><em>Open-source onboard agent for software-defined drones. Long-range data link. HD video. Full remote control.</em></p>
-<p align="center"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg"> <img alt="Rust + Python" src="https://img.shields.io/badge/Core-Rust%20%2B%20Python-blue.svg"> <img alt="Status: Alpha" src="https://img.shields.io/badge/Status-Alpha-orange.svg"> <a href="https://discord.gg/uxbvuD4d5q"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2.svg"></a></p>
+<p align="center"><img alt="License: GPL-3.0-or-later" src="https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg"> <img alt="Rust + Python" src="https://img.shields.io/badge/Core-Rust%20%2B%20Python-blue.svg"> <a href="https://discord.gg/uxbvuD4d5q"><img alt="Discord" src="https://img.shields.io/badge/Discord-Join-5865F2.svg"></a></p>
 <p align="center">
   <strong><a href="https://github.com/altnautica/ADOSMissionControl">Mission Control</a></strong> |
   <strong><a href="https://github.com/altnautica/ADOSDroneAgent">Drone Agent</a></strong> |
@@ -184,12 +184,12 @@ Pair the agent with [ADOS Mission Control](https://github.com/altnautica/ADOSMis
 
 ## Smart and autonomous features
 
-- **Onboard vision.** The vision engine shares each camera through a frame bus, runs detection through pluggable inference backends (including NPU sidecars on boards that have one) and tracks a subject you designate. Off by default; turn it on per drone.
+- **Onboard vision.** The vision engine shares each camera through a frame bus, runs detection through pluggable inference backends (including NPU sidecars on boards that have one) and tracks a subject you designate.
 - **Follow-Me** (extension). Click a subject in the live video and the agent keeps a fixed standoff from it with guided setpoints. A lock-state safety gate stops commanding the moment the track goes uncertain, and it never re-locks onto a different subject on its own.
 - **Vision Navigation** (extension). GPS-denied navigation from downward optical flow: a Rust estimator pairs frames with IMU samples and sends flow messages that the flight controller fuses into its own estimator.
 - **World Engine (beta, extension).** The drone captures keyframes tagged with a pose from the flight controller, stereo visual-inertial odometry, LiDAR odometry or planar LiDAR SLAM, and streams them to a paired compute node over the LAN or the cloud, with pose and status also carried over the radio link through a ground station. The node reconstructs a Gaussian splat, point cloud, mesh and occupancy grid that you view in Mission Control.
 - **Perception offload.** The agent decides whether perception runs onboard, on a compute node or split between them, so a board without an NPU can still use detection. A freshness gate marks stale or link-lost results so a control loop holds instead of acting on them.
-- **Swarm.** Agents share a small beacon at 2 Hz, and an onboard swarm layer turns it into separation, flocking and formation setpoints at 10 Hz. Each drone broadcasts which layer is in control (hard separation, operator, formation, flocking or hold). Off by default and still early.
+- **Swarm.** Agents share a small beacon at 2 Hz, and an onboard swarm layer turns it into separation, flocking and formation setpoints at 10 Hz. Each drone broadcasts which layer is in control (hard separation, operator, formation, flocking or hold).
 - **AI clients.** [ADOS MCP](https://github.com/altnautica/ADOS-MCP) lets an AI client read, administer and, when you allow it, fly the drone through the agent, under scopes and a safety gate.
 
 These features are under active development and grow with every release; build on them through extensions and the SDK.
@@ -202,7 +202,7 @@ ADOS is a base, not a finished product for one job. These are directions it is b
 - **Indoor operations.** Optical-flow navigation with Vision Navigation, and visual-inertial or LiDAR SLAM poses with indoor world models from World Engine (beta).
 - **Logistics in GPS-denied warehouses.** The same positioning sources, a warehouse reconstruction preset in World Engine, and perception offload to a nearby compute node.
 
-None of these is a turnkey product yet. The parts are open, so you can take them the rest of the way.
+The parts are open, so you can take them where you need them.
 
 ## Build on it
 
@@ -463,8 +463,7 @@ ADOS is local-first. The primary path between Mission Control and the agent is y
 | On-device vision host (frame bus, detectors) | Working |
 | Plugin system (Python and Rust plugins) | Working |
 | Ground-station distributed receive and local mesh | Working |
-| Lean headless profile (Rust core only) | In progress |
-| Onboard swarm layer (beacon, separation, flocking, formations) | Early, off by default |
+| Onboard swarm layer (beacon, separation, flocking, formations) | Working |
 | World Engine extension (world models, perception offload) | Beta |
 
 ---
