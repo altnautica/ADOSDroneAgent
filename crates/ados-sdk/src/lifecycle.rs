@@ -120,7 +120,7 @@ pub struct RunnerArgs {
 }
 
 impl RunnerArgs {
-    /// Parse from a raw argv (excluding argv[0]) and an env lookup. The env
+    /// Parse from a raw argv (excluding `argv[0]`) and an env lookup. The env
     /// lookup is injected so the parse is unit-testable without touching the
     /// process environment.
     ///

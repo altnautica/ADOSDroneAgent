@@ -2,7 +2,7 @@
 //!
 //! The host creates a per-plugin directory under the agent run dir, binds it
 //! into the plugin's unit, and names the socket path in
-//! [`HTTP_SOCKET_ENV`]. The control plane forwards
+//! [`ENV_PLUGIN_HTTP_SOCKET`]. The control plane forwards
 //! `/api/plugins/{id}/x/{*rest}` to that socket as `/<rest>` (query kept,
 //! WebSocket upgrades included), so every request arriving on it has already
 //! been authenticated as the operator. The plugin serves plain HTTP/1.1 on the
@@ -12,11 +12,8 @@ use std::io;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+use ados_protocol::plugin::ENV_PLUGIN_HTTP_SOCKET;
 use tokio::net::UnixListener;
-
-/// The env var the host sets on an `agent.http` plugin's unit, carrying the
-/// socket path the plugin must serve HTTP on.
-pub const HTTP_SOCKET_ENV: &str = "ADOS_PLUGIN_HTTP_SOCKET";
 
 /// Mode of the bound socket: the plugin's own user and the agent group may
 /// connect, which is how the control plane reaches it.
@@ -34,7 +31,7 @@ pub fn socket_path_with<F>(env: F) -> Option<PathBuf>
 where
     F: Fn(&str) -> Option<String>,
 {
-    env(HTTP_SOCKET_ENV)
+    env(ENV_PLUGIN_HTTP_SOCKET)
         .filter(|v| !v.trim().is_empty())
         .map(PathBuf::from)
 }
@@ -70,7 +67,7 @@ mod tests {
 
     #[test]
     fn socket_path_reads_the_env_and_treats_blank_as_unset() {
-        let set = |k: &str| (k == HTTP_SOCKET_ENV).then(|| "/run/x/http.sock".to_string());
+        let set = |k: &str| (k == ENV_PLUGIN_HTTP_SOCKET).then(|| "/run/x/http.sock".to_string());
         assert_eq!(
             socket_path_with(set),
             Some(PathBuf::from("/run/x/http.sock"))
@@ -113,15 +110,5 @@ mod tests {
         let err = bind(&path).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(std::fs::read(&path).unwrap(), b"not a socket");
-    }
-
-    /// The SDK and the host name the same env var; a rename on either side
-    /// would leave every HTTP plugin without its socket.
-    #[test]
-    fn env_name_matches_the_host() {
-        assert_eq!(
-            HTTP_SOCKET_ENV,
-            ados_plugin_host::systemd::ENV_PLUGIN_HTTP_SOCKET
-        );
     }
 }

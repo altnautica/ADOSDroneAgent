@@ -24,7 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::plugin::{
     CapabilityToken, Envelope, TokenIssuer, PROTOCOL_VERSION, TELEMETRY_STATE_MAX_HZ,
-    TELEMETRY_STATE_TOPIC,
+    TELEMETRY_STATE_TOPIC, TOKEN_REFRESH_METHOD,
 };
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -83,16 +83,6 @@ fn owned_by_this_process(meta: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     meta.uid() == nix::unistd::geteuid().as_raw()
 }
-
-/// The event method the host pushes a rotated capability token on.
-///
-/// Part of the plugin wire contract: the Python `ipc_client` and the Rust SDK
-/// client both listen for it and replace the token they present on subsequent
-/// requests, so a rotation never costs the plugin a failed call. Args are
-/// `{token, expires_at, granted_caps}` — the grant list rides along so a
-/// plugin can log (or degrade on) a capability it just lost instead of
-/// discovering it through a `capability_denied`.
-pub const TOKEN_REFRESH_METHOD: &str = "token.refresh";
 
 /// How long an accept loop waits after a failed `accept()` before trying again.
 /// Fixed, with no cap on attempts, so a socket recovers on its own once the

@@ -4,12 +4,12 @@
 //! author exercises a frame-consuming plugin without a real plugin host, vision
 //! engine, shared memory, or socket. [`FakeVisionEngine`] emits synthetic
 //! frames (from an in-memory list or a directory of raw frame files) into the
-//! same [`FrameCallback`](crate::vision::FrameCallback) a plugin registers with
+//! same [`FrameCallback`] a plugin registers with
 //! `ctx.vision.subscribe_frames`, and captures the [`DetectionBatch`]es the
 //! plugin would publish so a test can assert against them.
 //!
 //! The fake builds a real frame ring through the
-//! [`framebus`](ados_protocol::framebus) contract and resolves each synthetic
+//! [`framebus`] contract and resolves each synthetic
 //! frame the same way the production client does (per-slot seqlock, latest-wins,
 //! torn/stale reads dropped), so a plugin's frame-handling path is exercised
 //! end to end, only the host and the OS shared-memory are faked.

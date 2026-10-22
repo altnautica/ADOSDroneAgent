@@ -40,7 +40,7 @@
 /// `hostname(1)`. This function is reached from async route handlers
 /// (`ados-control`'s `/api/pairing/*`), and spawning a process inline on the
 /// reactor parks a worker for the life of the command, so that fallback is
-/// probed at most once per [`HOSTNAME_PROBE_TTL`] rather than per request. No
+/// probed at most once per `HOSTNAME_PROBE_TTL` rather than per request. No
 /// SBC ever reaches that leg at all.
 pub fn system_hostname() -> Option<String> {
     if let Ok(raw) = std::fs::read_to_string("/proc/sys/kernel/hostname") {

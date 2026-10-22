@@ -67,7 +67,7 @@ impl PluginIpcClient {
     }
 
     /// Read this plugin's resolved model-delivery status. Sends
-    /// [`framebus::methods::READ_MODEL`] (gated on `vision.model.read`); the host
+    /// [`framebus::methods::READ_MODEL`](ados_protocol::framebus::methods::READ_MODEL) (gated on `vision.model.read`); the host
     /// returns `{models: [ {state, model_id, runtime, path, reason}, ... ]}` off
     /// this plugin's install record. No args.
     pub async fn vision_read_model(&self) -> Result<Value, ClientError> {

@@ -684,7 +684,7 @@ impl OperatorListener {
 
 /// The connecting peer's uid and group set, as the kernel reports them. An
 /// error means the platform would not answer, which the caller treats as a
-/// refusal (see [`peer_hung_up_before_accept`] for the one exception).
+/// refusal (see `peer_hung_up_before_accept` for the one exception).
 fn peer_credentials(stream: &UnixStream) -> io::Result<(u32, Vec<u32>)> {
     let cred = stream.peer_cred()?;
     #[allow(unused_mut)]
@@ -700,7 +700,7 @@ fn peer_credentials(stream: &UnixStream) -> io::Result<(u32, Vec<u32>)> {
 /// plugin-plane peers (the log ingest sink), this tells the two apart so what a
 /// plugin writes is recorded as the plugin's. Unreadable credentials read as
 /// not-operator, which can only narrow trust, except for the development-host
-/// case [`peer_hung_up_before_accept`] documents.
+/// case `peer_hung_up_before_accept` documents.
 pub fn is_operator_peer(stream: &UnixStream) -> bool {
     match peer_credentials(stream) {
         Ok((uid, gids)) => operator_peer_allowed(

@@ -560,7 +560,7 @@ fn install_secret(path: &std::path::Path, offered: &str) -> std::io::Result<Acce
 /// The decision and the write are joined here so no caller can reach the write
 /// without going through the rule -- the whole scheme rests on first-write-wins,
 /// and a handler that stored first and asked afterwards would defeat it. The
-/// write itself is atomic and exclusive (see [`install_secret`]), and offers
+/// write itself is atomic and exclusive (see `install_secret`), and offers
 /// are serialised, so concurrent offers yield exactly one `Accept`. Blocking
 /// file IO: an async caller runs it in `spawn_blocking`.
 pub fn apply_offered_secret(

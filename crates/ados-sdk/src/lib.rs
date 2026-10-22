@@ -1,33 +1,4 @@
-//! Plugin author SDK for the ADOS Drone Agent.
-//!
-//! A Rust plugin links this crate to talk to the agent's plugin host over the
-//! same wire the Python SDK uses: length-prefixed msgpack [`Envelope`] frames
-//! over a per-plugin Unix domain socket, gated by a pipe-delimited HMAC
-//! capability token. The wire itself lives in `ados-protocol` and is reused
-//! unchanged, so a Rust plugin and the Rust (or Python) host interoperate
-//! byte-for-byte.
-//!
-//! The surface mirrors the Python `ados.sdk` package:
-//!
-//! - [`PluginIpcClient`] — the async client: connect to the socket, run the
-//!   `hello` handshake, send requests keyed by a `r<n>` request id, drain the
-//!   reader loop, and dispatch event / MAVLink pushes to topic-matched
-//!   callbacks. Ports `ados.plugins.ipc_client`.
-//! - [`PluginContext`] — the plugin-facing facade with `events`, `mavlink`,
-//!   `telemetry`, `peripheral_manager`, `camera`, `config`, `process`,
-//!   `cloud`, and `lifecycle` sub-clients. Ports `ados.plugins.ipc.context`.
-//! - [`drivers`] — the hardware driver traits (`CameraDriver`, `GimbalDriver`,
-//!   `LidarDriver`, `GpsDriver`, `EscDriver`, `PayloadActuatorDriver`) and
-//!   their candidate / capability / sample types. Ports `ados.sdk.drivers`.
-//! - [`Plugin`] + [`run_plugin`] — the lifecycle hook trait and the runner
-//!   entry that reads `--socket` / `--token` / `--agent-id` off argv and env,
-//!   connects, and drives `on_install` .. `on_disable`. Ports
-//!   `ados.plugins.runner` for the `runtime: rust` case.
-//! - [`http`] — the operator-facing HTTP socket of an `agent.http` plugin: the
-//!   host-provided path and a listener bind helper.
-//!
-//! The agent capability catalog is re-exported from `ados-protocol` as
-//! [`capabilities`]; the SDK does not maintain its own copy.
+#![doc = include_str!("../README.md")]
 
 pub mod client;
 pub mod context;

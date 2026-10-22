@@ -1,7 +1,7 @@
 //! A reusable, non-blocking emitter that ships discrete [`EventFrame`] records
 //! from any Rust service to the logging daemon's ingest socket.
 //!
-//! The log-shipping [`crate::logd::layer`] carries `tracing` *log* events; this
+//! The log-shipping `layer` module (feature `tracing-layer`) carries `tracing` *log* events; this
 //! emitter carries the structured *events* a service wants to record as
 //! first-class, queryable rows (a regulatory-gate verdict, a bind-session
 //! lifecycle transition, a received-side link-proof state change). Until this
@@ -9,7 +9,7 @@
 //! emit a typed event with an open detail map. This closes that gap with the
 //! same transport discipline as the log layer:
 //!
-//! - [`EventEmitter::emit`] redacts any secret-bearing detail field, frames an
+//! - [`EventEmitter::emit`](crate::logd::emitter::EventEmitter::emit) redacts any secret-bearing detail field, frames an
 //!   [`EventFrame`], and hands it to a bounded channel with a non-blocking send.
 //!   A full channel drops the event and counts it — the producer never blocks.
 //! - A single background task drains the channel, batches frames, and writes
@@ -73,7 +73,7 @@ const SHIPPER_BUFFER_MAX_FRAMES: usize = 1024;
 /// failures every producer waited five seconds before noticing the store had
 /// come up, and shipped nothing in the meantime. Fixed instead, from
 /// [`crate::retry`], which is also where the byte-identical second copy of this
-/// ladder in [`crate::logd::layer`] now gets its pace.
+/// ladder in the `layer` module now gets its pace.
 const RECONNECT_PACE: crate::retry::RetryPace = crate::retry::LOCAL_SOCKET;
 
 /// Counters surfaced for diagnostics: events enqueued for shipping and events
