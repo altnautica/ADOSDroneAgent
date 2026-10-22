@@ -9,7 +9,7 @@
 //!
 //! ## Why not reuse an existing envelope
 //!
-//! [`crate::tunnel_config`] chunks a body across 128-byte MAVLink TUNNEL frames
+//! The `ados-mavlink-tunnel` crate chunks a body across 128-byte MAVLink TUNNEL frames
 //! and is sized for that budget. The aux lane is not so constrained: a decoded
 //! aux datagram carries a normal payload, so it needs a channel tag and a
 //! length, not a chunking protocol. The plugin msgpack envelope is far heavier

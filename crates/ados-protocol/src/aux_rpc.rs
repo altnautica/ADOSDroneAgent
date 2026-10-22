@@ -11,7 +11,7 @@
 //!
 //! ## Why not reuse an existing envelope
 //!
-//! The MAVLink TUNNEL extension (`crate::tunnel_config`) chunks a single body
+//! The MAVLink TUNNEL extension (the `ados-mavlink-tunnel` crate) chunks a single body
 //! across 128-byte frames, sized for the radio's control plane. The aux lane
 //! carries a normal UDP-sized datagram, so a request and a response each span
 //! as few frames as their bytes need. The plugin msgpack envelope is heavier

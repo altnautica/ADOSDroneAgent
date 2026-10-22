@@ -110,7 +110,6 @@ pub mod shutdown;
 pub mod sidecar;
 pub mod state;
 pub mod tap;
-pub mod tunnel_config;
 pub mod units;
 pub mod vision_rpc;
 pub mod vision_status;

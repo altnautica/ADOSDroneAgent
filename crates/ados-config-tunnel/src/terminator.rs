@@ -24,22 +24,22 @@ use std::sync::Arc;
 use tokio::sync::{watch, Notify};
 use tokio::time::Instant;
 
-use ados_protocol::mavlink::{build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader};
+use ados_mavlink_tunnel::{CompletedMessage, PushOutcome, Reassembler};
+use ados_protocol::mavlink::{
+    build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader, CONFIG_TUNNEL_PAYLOAD_TYPE,
+};
 use ados_protocol::nonce_cache::NonceCache;
 use ados_protocol::pairing_posture::relay_config_key_forbidden;
 use ados_protocol::relay_ticket::{
     load_secret_at, new_replay_cache, refusal_body, tunnel_binding_body, RelayTicketError,
     RelayTicketIssuer, RequestBinding, TUNNEL_BINDING_METHOD, TUNNEL_BINDING_PATH,
 };
-use ados_protocol::tunnel_config::{
-    chunk_message, CompletedMessage, PushOutcome, Reassembler, CONFIG_TUNNEL_PAYLOAD_TYPE,
-};
 
 use crate::config_client::{ConfigClient, ConfigResponse, Unreachable};
 use crate::message::{error_body, parse_request, ConfigOp, MAX_CONFIG_RESPONSE_BYTES};
 use crate::stats::Counters;
 use crate::transport::TunnelTransport;
-use crate::{MAX_BODY_BYTES, MAX_CHUNKS, REASSEMBLY_TIMEOUT, SWEEP_INTERVAL};
+use crate::{FRAMING, MAX_BODY_BYTES, MAX_CHUNKS, REASSEMBLY_TIMEOUT, SWEEP_INTERVAL};
 
 /// The config keys a tunnel write may touch, by dot-path prefix.
 pub const WRITABLE_KEY_PREFIXES: &[&str] = &["radio.", "video."];
@@ -256,7 +256,7 @@ pub async fn run_terminator(
     mut shutdown: watch::Receiver<bool>,
     reload: Arc<Notify>,
 ) -> bool {
-    let mut re = Reassembler::new(MAX_CHUNKS, MAX_BODY_BYTES);
+    let mut re = Reassembler::new(FRAMING, MAX_CHUNKS, MAX_BODY_BYTES);
     let mut seq: u8 = 0;
     let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
     sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -318,7 +318,7 @@ async fn handle_and_reply(
         client.as_ref(),
     )
     .await;
-    let frames = match chunk_message(
+    let frames = match FRAMING.chunk_message(
         request.request_id,
         true,
         handled.is_error,
@@ -331,7 +331,9 @@ async fn handle_and_reply(
             // fall back to a tiny honest error so the caller is not left hanging.
             tracing::warn!(error = %e, "config tunnel response too large to chunk");
             let small = error_body("E_RESPONSE_TOO_LARGE", "response exceeded the chunk budget");
-            chunk_message(request.request_id, true, true, &small, MAX_CHUNKS).unwrap_or_default()
+            FRAMING
+                .chunk_message(request.request_id, true, true, &small, MAX_CHUNKS)
+                .unwrap_or_default()
         }
     };
     for payload in frames {
