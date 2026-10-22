@@ -19,7 +19,8 @@ use serde_json::{json, Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-use ados_sensorbus::{rtcm, BusFrame, Kind, Origin};
+use ados_rtcm as rtcm;
+use ados_sensorbus::{BusFrame, Kind, Origin};
 
 use super::{fresh_map, with_present, SensingPaths, FRESH};
 use crate::config_store::{section_path, update_config};

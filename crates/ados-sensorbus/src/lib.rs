@@ -32,7 +32,6 @@ pub mod broker;
 pub mod client;
 pub mod frame;
 pub mod rig;
-pub mod rtcm;
 pub mod time;
 
 /// The capture contract `ados.capture.v1` messages, generated from the

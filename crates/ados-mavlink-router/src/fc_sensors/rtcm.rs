@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use ados_protocol::mavlink::ardupilotmega::GPS_RTCM_DATA_DATA;
 use ados_protocol::shutdown::Shutdown;
-use ados_sensorbus::rtcm::{Fragmenter, Rtcm3Splitter};
+use ados_rtcm::{Fragmenter, Rtcm3Splitter};
 use ados_sensorbus::{Kind, Subscriber};
 
 use crate::connection::FcConnection;
