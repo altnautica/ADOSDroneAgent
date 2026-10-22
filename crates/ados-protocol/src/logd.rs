@@ -34,7 +34,7 @@ use crate::frame;
 pub mod layer;
 
 /// The reusable event emitter that ships discrete [`EventFrame`] records from a
-/// service to the ingest socket. Unlike the log [`layer`], events are a
+/// service to the ingest socket. Unlike the log `layer`, events are a
 /// first-class capture path, so this module is always available (not gated on
 /// `tracing-layer`).
 pub mod emitter;

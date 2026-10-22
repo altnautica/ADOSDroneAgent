@@ -282,7 +282,7 @@ impl PluginIpcClient {
     /// Subscribe to application datagrams received on the open auxiliary stream.
     ///
     /// The host forwards each received `(channel, payload)` as a
-    /// `radio.aux_stream.deliver` event to every registered [`aux`-callback]
+    /// `radio.aux_stream.deliver` event to every registered `aux` callback
     /// (the plugin's codec routes by channel). Register a callback first with
     /// [`Self::register_aux_callback`] so no early frame is missed. Gated on
     /// `radio.aux_stream`. Mirrors the button subscribe shape.

@@ -8,7 +8,7 @@
 //! delivers each descriptor to a subscriber as a `vision.deliver` event. This
 //! client resolves a descriptor to pixels by memory-mapping the named
 //! `/dev/shm` ring read-only and reading the descriptor's slot through the
-//! per-slot seqlock the [`framebus`](ados_protocol::framebus) contract defines,
+//! per-slot seqlock the `framebus` contract defines,
 //! dropping any torn or stale read (latest-wins).
 //!
 //! Detections and model metadata are small structured payloads, so they ride
@@ -135,7 +135,7 @@ impl VisionClient {
     /// client resolves each to pixels and invokes `callback` with the [`Frame`].
     ///
     /// Registers a frame callback on the client's `vision.deliver` path (keyed
-    /// on `camera_id`), then sends the [`methods::SUBSCRIBE_FRAMES`] RPC (gated
+    /// on `camera_id`), then sends the [`methods::SUBSCRIBE_FRAMES`](ados_protocol::framebus::methods::SUBSCRIBE_FRAMES) RPC (gated
     /// on `vision.frame.read`) so the engine starts or widens the stream. A
     /// `camera_id` of `None` receives every camera's frames; a `Some(id)` filter
     /// is applied at the engine and, as a backstop, in the resolver. The
@@ -179,7 +179,7 @@ impl VisionClient {
     }
 
     /// Register an inference model with the engine. Sends
-    /// [`methods::REGISTER_MODEL`] (gated on `vision.model.register`) in the
+    /// [`methods::REGISTER_MODEL`](ados_protocol::framebus::methods::REGISTER_MODEL) (gated on `vision.model.register`) in the
     /// [`vision_rpc`] shape the engine decodes. The engine files it as
     /// `<plugin_id>/<id>` (the reply's `model_id`), so it never replaces the
     /// node's own models or another plugin's; a plugin holds at most eight. An
@@ -192,7 +192,7 @@ impl VisionClient {
     /// Read this plugin's resolved model-delivery status: one
     /// [`ModelResolution`] per declared model, keyed by `model_id`. This is the
     /// model-delivery last mile — a plugin loads its detector from the resolved
-    /// `path`. Sends [`methods::READ_MODEL`] (gated on `vision.model.read`); an
+    /// `path`. Sends [`methods::READ_MODEL`](ados_protocol::framebus::methods::READ_MODEL) (gated on `vision.model.read`); an
     /// unresolved plugin returns an empty list rather than erroring, so a caller
     /// can poll until its model resolves.
     pub async fn resolved_model(&self) -> Result<Vec<ModelResolution>, ClientError> {
@@ -201,7 +201,7 @@ impl VisionClient {
     }
 
     /// Run a registered model against one frame on the shared backend and
-    /// return its detections. Sends [`methods::INFER`] (gated on
+    /// return its detections. Sends [`methods::INFER`](ados_protocol::framebus::methods::INFER) (gated on
     /// `vision.model.register`); the engine arbitrates access to the
     /// accelerator. `model_id` names this plugin's own model or one of the
     /// node's configured models. The frame is passed by descriptor (the engine
@@ -219,7 +219,7 @@ impl VisionClient {
     }
 
     /// Publish a detection batch on `vision.detection`. Sends
-    /// [`methods::PUBLISH_DETECTION`] (gated on `vision.detection.publish`) in
+    /// [`methods::PUBLISH_DETECTION`](ados_protocol::framebus::methods::PUBLISH_DETECTION) (gated on `vision.detection.publish`) in
     /// the [`vision_rpc`] shape the engine decodes. Subscribers see its
     /// `model_id` as
     /// `<plugin_id>/<model_id>`, and `lock_state` / `track_id` are cleared

@@ -1,6 +1,6 @@
 //! Egress client for the auxiliary application stream.
 //!
-//! [`aux_mux`](crate::aux_mux) says what an aux datagram *means*; this module is
+//! [`aux_mux`] says what an aux datagram *means*; this module is
 //! how a producer gets one onto the air. Both halves live here because a channel
 //! tag is useless without a carrier, and every producer that ever sends on the
 //! lane (MAVLink, status, identity) needs the identical two steps:

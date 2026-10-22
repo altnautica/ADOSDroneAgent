@@ -36,6 +36,19 @@ pub const TELEMETRY_STATE_TOPIC: &str = "telemetry.state";
 /// receives the newest state.
 pub const TELEMETRY_STATE_MAX_HZ: u32 = 10;
 
+/// The event method the host pushes a rotated capability token on.
+///
+/// The plugin side listens for it and replaces the token it presents on
+/// subsequent requests, so a rotation never costs the plugin a failed call.
+/// Args are `{token, expires_at, granted_caps}`; the grant list rides along so
+/// a plugin can log (or degrade on) a capability it just lost instead of
+/// discovering it through a `capability_denied`.
+pub const TOKEN_REFRESH_METHOD: &str = "token.refresh";
+
+/// The env var the host sets on an `agent.http` plugin's process, carrying the
+/// Unix socket path the plugin must serve HTTP on.
+pub const ENV_PLUGIN_HTTP_SOCKET: &str = "ADOS_PLUGIN_HTTP_SOCKET";
+
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Error)]

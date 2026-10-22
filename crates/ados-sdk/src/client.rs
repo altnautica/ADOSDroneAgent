@@ -24,7 +24,9 @@ use std::time::Duration;
 
 use ados_protocol::frame::{decode_len, FrameError, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::node_info::NodeInfo;
-use ados_protocol::plugin::{CapabilityToken, Envelope, PROTOCOL_VERSION, TELEMETRY_STATE_TOPIC};
+use ados_protocol::plugin::{
+    CapabilityToken, Envelope, PROTOCOL_VERSION, TELEMETRY_STATE_TOPIC, TOKEN_REFRESH_METHOD,
+};
 use ados_protocol::vision_rpc;
 use rmpv::Value;
 use thiserror::Error;
@@ -62,12 +64,6 @@ pub struct OffloadAdvertisement {
     /// The detector model id the offload session runs.
     pub model_id: Option<String>,
 }
-
-/// The host's token-rotation push. Wire contract, pinned here because the
-/// plugin side must adopt the token the host re-minted or it cannot reconnect
-/// after the rotation; the host half is `ados_plugin_host::TOKEN_REFRESH_METHOD`
-/// and the Python client's is `_TOKEN_REFRESH_METHOD`.
-const TOKEN_REFRESH_METHOD: &str = "token.refresh";
 
 /// A callback invoked for each delivered event or MAVLink frame. The argument
 /// is the delivered envelope's `args` map (topic + payload for events; the

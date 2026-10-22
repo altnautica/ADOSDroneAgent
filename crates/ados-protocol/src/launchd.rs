@@ -44,7 +44,7 @@ pub struct PlistLogPaths<'a> {
 
 /// Render a launchd property list for a managed service.
 ///
-/// Emits `ProgramArguments` (the `program` as argv[0] followed by `args`),
+/// Emits `ProgramArguments` (the `program` as `argv[0]` followed by `args`),
 /// `EnvironmentVariables` (when any are given), `StandardOutPath` /
 /// `StandardErrorPath` (when a log path is given), `RunAtLoad` true, and — when
 /// `keep_alive` — a `KeepAlive` dict requesting a restart only on a crash

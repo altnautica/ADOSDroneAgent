@@ -194,7 +194,7 @@ fn v2_body_len(header: [u8; frame::HEADER_SIZE]) -> io::Result<usize> {
 
 /// Decode a complete frame body of the given wire kind. A malformed body is
 /// [`StateFrame::Skip`]; a well-formed v2 body with a foreign version is
-/// [`StateFrame::VersionMismatch`]. Sharing this with [`v2_body_len`] keeps the
+/// [`StateFrame::VersionMismatch`]. Sharing this with `v2_body_len` keeps the
 /// framing + decode logic identical across the async and blocking readers; only
 /// the byte pump differs between them.
 fn decode_state_body(is_v2: bool, body: &[u8]) -> StateFrame {
@@ -313,8 +313,8 @@ where
 
 /// Blocking sibling of [`read_state_value`] for the sync heartbeat-enrichment
 /// path, which reads one snapshot under a socket read timeout rather than on a
-/// tokio task. Shares the exact framing + decode core ([`v2_body_len`] +
-/// [`decode_state_body`]); only the byte pump differs.
+/// tokio task. Shares the exact framing + decode core (`v2_body_len` +
+/// `decode_state_body`); only the byte pump differs.
 pub fn read_state_value_blocking<R>(reader: &mut R) -> io::Result<Option<Value>>
 where
     R: io::Read,

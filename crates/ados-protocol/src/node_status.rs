@@ -11,7 +11,7 @@
 //!
 //! The cloud heartbeat already assembles exactly these facts, but its payload is
 //! a hundred-plus camelCase fields sized for an HTTP POST. One aux frame carries
-//! [`AUX_MAX_PAYLOAD`](crate::aux_mux::AUX_MAX_PAYLOAD) = 1200 bytes, and the
+//! [`AUX_MAX_PAYLOAD`] = 1200 bytes, and the
 //! lane is shared with MAVLink at telemetry rates. So this is a deliberately
 //! separate, deliberately small projection: the fields a ground operator acts
 //! on, and nothing else.
@@ -456,7 +456,7 @@ impl NodeStatus {
         self
     }
 
-    /// Encode to msgpack, shedding fields down [`TRIM_LADDER`] until the frame
+    /// Encode to msgpack, shedding fields down `TRIM_LADDER` until the frame
     /// fits one aux payload.
     ///
     /// Returns the bytes and how many ladder steps were applied, so a producer

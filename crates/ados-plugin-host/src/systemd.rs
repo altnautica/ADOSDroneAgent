@@ -33,6 +33,8 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use ados_protocol::plugin::ENV_PLUGIN_HTTP_SOCKET;
+
 use crate::backend::UnitSpec;
 use crate::errors::SupervisorError;
 use crate::manifest::{bin_reference, host_arch_os, AgentIsolation, AgentRuntime, PluginManifest};
@@ -85,8 +87,6 @@ pub const ENV_PLUGIN_SOCKET: &str = "ADOS_PLUGIN_SOCKET";
 /// `workstation`, `compute`), so a plugin that behaves per profile needs no
 /// read of the agent's config files.
 pub const ENV_NODE_PROFILE: &str = "ADOS_NODE_PROFILE";
-/// The env var carrying where an `agent.http` plugin serves its HTTP socket.
-pub const ENV_PLUGIN_HTTP_SOCKET: &str = "ADOS_PLUGIN_HTTP_SOCKET";
 /// The run-dir subdirectory holding each `agent.http` plugin's socket dir.
 pub const PLUGIN_HTTP_SUBDIR: &str = "plugin-http";
 /// The HTTP socket file inside a plugin's HTTP dir.

@@ -95,7 +95,7 @@ fn sticks_to_channels(roll: f32, pitch: f32, yaw: f32, throttle: f32) -> [u16; 4
 /// `ctx.msp` — read and write raw MSP to a Betaflight / iNav / KISS FC through
 /// the host's MSP byte plane. The sibling of [`MavlinkClient`] for an FC that
 /// speaks MSP; the codec that builds/parses the bytes is
-/// [`ados_protocol::msp`](ados_protocol::msp).
+/// [`ados_protocol::msp`].
 #[derive(Clone)]
 pub struct MspClient {
     ipc: Arc<PluginIpcClient>,
