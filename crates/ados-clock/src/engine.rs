@@ -4,10 +4,10 @@
 
 use std::path::Path;
 
+use ados_clock_fit::chrony::{self, ChronySink};
 use ados_sensorbus::{BusFrame, Kind, SyncObs, SyncSource};
 use serde::Serialize;
 
-use crate::chrony::{self, ChronySink};
 use crate::clock::{ClockState, SyncOutcome};
 use crate::fit::LatencyFloor;
 use crate::streams::StreamTable;
