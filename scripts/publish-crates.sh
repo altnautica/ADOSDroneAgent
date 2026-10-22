@@ -67,7 +67,7 @@ while read -r name version; do
         echo "missing:   $name $version"
         missing+=("$name@$version")
     fi
-done < <(jq -r '.packages[] | select(.publish == null) | "\(.name) \(.version)"' <<<"$meta" | sort)
+done < <(jq -r '.packages[] | select(.publish == null) | "\(.name) \(.version)"' <<<"$meta" | tr -d '\r' | sort)
 
 if [ "${#missing[@]}" -eq 0 ]; then
     echo "nothing to publish"

@@ -41,6 +41,10 @@ for tool in cargo jq git comm; do
     command -v "$tool" >/dev/null 2>&1 || { echo "ERROR: check-crates.sh needs $tool on PATH" >&2; exit 2; }
 done
 
+# jq.exe on Windows ends every line with CRLF; a trailing CR in a crate name
+# makes every tag lookup miss and the bump check pass without checking.
+jq() { command jq "$@" | tr -d '\r'; }
+
 cd "$(dirname "$0")/../crates"
 
 meta="$(cargo metadata --no-deps --format-version 1)"
@@ -85,7 +89,7 @@ check_metadata() {
             echo "  $c: missing or invalid: $problems"
             bad=1
         fi
-        dir="$(jq -r --arg n "$c" '.packages[] | select(.name == $n) | .manifest_path' <<<"$meta")"
+        dir="$(jq -r --arg n "$c" '.packages[] | select(.name == $n) | .manifest_path' <<<"$meta" | tr '\\' '/')"
         dir="$(dirname "$dir")"
         [ -f "$dir/README.md" ] || { echo "  $c: no README.md"; bad=1; }
         lic="$(jq -r --arg n "$c" '.packages[] | select(.name == $n) | .license' <<<"$meta")"
@@ -125,7 +129,13 @@ check_bump() {
         git rev-parse -q --verify "refs/tags/$tag" >/dev/null || continue
         changed="$(git diff --name-only "$tag" HEAD -- "$c" | sed "s|^crates/$c/||" | sort -u)"
         [ -n "$changed" ] || continue
-        packaged="$(cargo package --list --allow-dirty -p "$c" 2>/dev/null | sort -u)"
+        # An empty list would make every change look unpackaged, so a failed
+        # `cargo package --list` is a failure, never a pass.
+        if ! packaged="$(cargo package --list --allow-dirty -p "$c" | tr -d '\r' | tr '\\' '/' | sort -u; exit "${PIPESTATUS[0]}")"; then
+            echo "FAIL: $c: cargo package --list failed"
+            bad=1
+            continue
+        fi
         hit="$(comm -12 <(printf '%s\n' "$changed") <(printf '%s\n' "$packaged"))"
         if [ -n "$hit" ]; then
             echo "FAIL: $c changed since $ver was published; bump its version"
