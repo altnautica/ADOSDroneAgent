@@ -3,10 +3,9 @@
 //! Remote perception is near-real-time, not real-time (200-500 ms on a direct
 //! LAN, more on a relay). The one invariant the whole offload path is built
 //! around: **a result past its freshness budget, or a dropped link, is treated
-//! as absent — never held forward, never extrapolated.** A behaviour that has a
+//! as absent, never held forward, never extrapolated.** A behaviour that has a
 //! lock loses it (stop and hold) and **never auto-re-acquires**; only an explicit
-//! re-designation re-locks. This is the link-aware tightening of the shipped
-//! Follow-Me lock-state gate, applied to any consumer of offloaded results.
+//! re-designation re-locks.
 
 use serde::{Deserialize, Serialize};
 
@@ -15,11 +14,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum GateState {
-    /// A result arrived within the budget and the link is up — usable.
+    /// A result arrived within the budget and the link is up: usable.
     Fresh,
-    /// A result arrived but it is older than the budget — not usable (stop).
+    /// A result arrived but it is older than the budget: not usable (stop).
     Stale,
-    /// No result yet, or the link is down — not usable (stop).
+    /// No result yet, or the link is down: not usable (stop).
     Lost,
 }
 
@@ -38,10 +37,10 @@ impl GateState {
 /// the drone and the compute node are not clock-synced, so a node whose clock is
 /// skewed ahead, whose detector then hangs (the socket staying up, so no link
 /// drop fires), would keep a frozen stream reading fresh forever if age were
-/// measured from the remote timestamp — the aircraft would follow a frozen
+/// measured from the remote timestamp; the aircraft would follow a frozen
 /// target. Measuring "time since a result last arrived, on the drone's own
-/// monotonic clock" catches exactly that stall (the Rule-37 / advancing-is-not-
-/// proof-of-work class). The `now_ms` passed to [`record`](Self::record) and
+/// monotonic clock" catches exactly that stall. The `now_ms` passed to
+/// [`record`](Self::record) and
 /// [`state`](Self::state) MUST come from the same local monotonic clock; the
 /// remote result timestamp is for telemetry, never for this gate.
 #[derive(Debug, Clone)]
@@ -65,7 +64,7 @@ impl FreshnessGate {
     }
 
     /// Record that a result arrived. `now_ms` is the **local monotonic time of
-    /// arrival** (NOT the result's own timestamp) — see the type docs.
+    /// arrival** (NOT the result's own timestamp), see the type docs.
     pub fn record(&mut self, now_ms: i64) {
         self.last_arrival_ms = Some(now_ms);
     }
@@ -100,7 +99,7 @@ impl FreshnessGate {
 /// designate, or an auto-lock). While `Locked` it is *acquiring* until the
 /// stream first becomes usable; once it has had a usable reading, the stream
 /// going stale or the link dropping drops it to `Lost`. The only way out of
-/// `Lost` is an explicit re-lock — there is no auto-re-acquire. A lock that has
+/// `Lost` is an explicit re-lock, there is no auto-re-acquire. A lock that has
 /// never yet had a usable reading does NOT drop to `Lost` (there is nothing to
 /// lose); it stays `Locked`, holding, until a result arrives or it is released.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,10 +133,12 @@ impl Default for LockGate {
 }
 
 impl LockGate {
+    /// An unlocked gate.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// The current lock state.
     pub fn state(&self) -> LockState {
         self.state
     }
@@ -149,7 +150,7 @@ impl LockGate {
         self.state == LockState::Locked
     }
 
-    /// Explicitly acquire (or re-acquire) the lock — an operator designate. This
+    /// Explicitly acquire (or re-acquire) the lock, an operator designate. This
     /// is the ONLY transition out of `Lost`.
     pub fn lock(&mut self) {
         self.state = LockState::Locked;
@@ -166,7 +167,7 @@ impl LockGate {
     /// usable (fresh + link up). A `Locked` gate that HAS been usable and then
     /// is not drops to `Lost`; a `Locked` gate still acquiring (never usable yet)
     /// stays `Locked`. A `Lost` gate stays `Lost` even when the stream becomes
-    /// usable again — it never auto-re-acquires.
+    /// usable again, it never auto-re-acquires.
     pub fn update(&mut self, stream_usable: bool) {
         if self.state != LockState::Locked {
             return;
@@ -213,7 +214,7 @@ mod tests {
     #[test]
     fn a_frozen_stream_goes_stale_on_local_elapsed_not_the_result_timestamp() {
         // The safety regression: anchored on local arrival, a stream that stops
-        // arriving goes Stale once the LOCAL clock passes the budget — a remote
+        // arriving goes Stale once the LOCAL clock passes the budget, a remote
         // clock skew or a frozen-but-socket-up node can no longer mask staleness.
         let mut g = FreshnessGate::new(500);
         g.record(1000); // arrived at local time 1000
@@ -257,7 +258,7 @@ mod tests {
     #[test]
     fn a_lock_still_acquiring_stays_locked_not_lost() {
         // Designated but the stream has not produced a usable reading yet: this
-        // is acquiring, not lost — the behaviour holds, it has nothing to lose.
+        // is acquiring, not lost, the behaviour holds, it has nothing to lose.
         let mut g = LockGate::new();
         g.lock();
         g.update(false);
