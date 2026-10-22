@@ -26,7 +26,7 @@
 //!
 //! ## Bearer boundary
 //!
-//! The wire framing ([`ados_protocol::tunnel_config`] + the TUNNEL codec) and
+//! The wire framing ([`FRAMING`] over [`ados_mavlink_tunnel`] + the TUNNEL codec) and
 //! the bearer transport ([`transport`]) are built here. The bearer is the
 //! auxiliary application lane — the drone's `-p2` downlink and the ground
 //! station's `-p3` uplink — on its own channel of the shared aux multiplex, and
@@ -53,6 +53,15 @@ pub mod sidecar;
 pub mod stats;
 pub mod terminator;
 pub mod transport;
+
+/// The chunk framing of the config channel: every chunk opens with
+/// [`ados_protocol::mavlink::CONFIG_TUNNEL_MAGIC`].
+pub const FRAMING: ados_mavlink_tunnel::Framing = ados_mavlink_tunnel::Framing {
+    magic: ados_protocol::mavlink::CONFIG_TUNNEL_MAGIC,
+};
+
+const _: () =
+    assert!(ados_mavlink_tunnel::TUNNEL_PAYLOAD_CAP == ados_protocol::mavlink::TUNNEL_MAX_PAYLOAD);
 
 /// Largest number of TUNNEL frames one config message may span. Bounds both
 /// the chunker and the reassembler; above [`message::MAX_CONFIG_RESPONSE_BYTES`]

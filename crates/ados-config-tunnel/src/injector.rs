@@ -16,15 +16,14 @@ use std::time::Duration;
 use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::Instant;
 
-use ados_protocol::mavlink::{build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader};
-use ados_protocol::tunnel_config::{
-    chunk_message, CompletedMessage, PushOutcome, Reassembler, TunnelConfigError,
-    CONFIG_TUNNEL_PAYLOAD_TYPE,
+use ados_mavlink_tunnel::{CompletedMessage, PushOutcome, Reassembler, TunnelError};
+use ados_protocol::mavlink::{
+    build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader, CONFIG_TUNNEL_PAYLOAD_TYPE,
 };
 
 use crate::stats::Counters;
 use crate::transport::TunnelTransport;
-use crate::{MAX_BODY_BYTES, MAX_CHUNKS, REASSEMBLY_TIMEOUT, SWEEP_INTERVAL};
+use crate::{FRAMING, MAX_BODY_BYTES, MAX_CHUNKS, REASSEMBLY_TIMEOUT, SWEEP_INTERVAL};
 
 /// The drone's reassembled reply to one submitted request.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,7 +39,7 @@ pub struct InjectorResponse {
 pub enum InjectorError {
     /// The request body could not be chunked (it exceeded the chunk budget).
     #[error("request could not be chunked: {0}")]
-    Chunk(#[from] TunnelConfigError),
+    Chunk(#[from] TunnelError),
     /// No response arrived within the deadline. Honest: over a lossy low-rate
     /// bearer a request or its reply can be dropped; the caller sees a timeout,
     /// never a fabricated success.
@@ -96,7 +95,7 @@ impl Injector {
         timeout: Duration,
     ) -> Result<InjectorResponse, InjectorError> {
         let request_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let frames = chunk_message(request_id, false, false, op_body, MAX_CHUNKS)?;
+        let frames = FRAMING.chunk_message(request_id, false, false, op_body, MAX_CHUNKS)?;
 
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(request_id, tx);
@@ -139,7 +138,7 @@ impl Injector {
     }
 
     async fn recv_loop(self: Arc<Self>, mut shutdown: watch::Receiver<bool>) {
-        let mut re = Reassembler::new(MAX_CHUNKS, MAX_BODY_BYTES);
+        let mut re = Reassembler::new(FRAMING, MAX_CHUNKS, MAX_BODY_BYTES);
         let mut sweep = tokio::time::interval(SWEEP_INTERVAL);
         sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
