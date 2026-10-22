@@ -16,7 +16,7 @@ use super::*;
 #[cfg(target_os = "linux")]
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_page_ui(
-    mut writer: crate::fb_writer::FbWriter,
+    mut writer: ados_display_driver::fb_writer::FbWriter,
     bpp: u32,
     rotation: i32,
     conf_blob: &std::collections::BTreeMap<String, String>,

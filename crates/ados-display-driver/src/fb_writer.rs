@@ -1,28 +1,26 @@
 //! Off-thread framebuffer writer.
 //!
-//! Ports the decoupled SPI writer from `renderers/framebuffer.py` (the
-//! `present` / `_writer_loop` / `cleanup` block). This is the load-bearing
-//! fidelity surface: the synchronous mmap write must never run on a runtime
-//! worker, because a blocking SPI write on the render loop's critical path was
-//! the root cascade behind the LCD-freeze -> video-stall regression. The model
-//! preserved here, exactly:
+//! A blocking framebuffer write (an SPI panel behind fbtft can take tens of
+//! milliseconds per frame) must never run on an async runtime worker or on the
+//! render loop's critical path. [`FbWriter`] moves it onto a dedicated thread
+//! with this model:
 //!
 //! * Single-slot latest-wins holder (`Mutex<Option<Frame>>`): a new frame
 //!   stashed while the previous one is still pending OVERWRITES it and bumps the
 //!   drop counter.
-//! * A DEDICATED OS thread (`std::thread`, NOT a tokio task) owns the blocking
-//!   pack + write off any runtime worker.
+//! * A DEDICATED OS thread (`std::thread`, NOT an async task) owns the blocking
+//!   write, off any runtime worker.
 //! * Duplicate-skip on a hash of the RAW input bytes (not the packed buffer):
-//!   an identical frame skips the pack + write entirely. The last-written hash
-//!   is updated ONLY after a successful write.
-//! * stats(): writes / drops / skipped_duplicates / last_write_ms.
-//! * cleanup ordering: signal stop, wake the writer, JOIN it (1 s) BEFORE the
+//!   an identical frame skips the write entirely. The last-written hash is
+//!   updated ONLY after a successful write.
+//! * [`FbWriter::stats`]: writes, drops, skipped duplicates, last write time.
+//! * Cleanup ordering: signal stop, wake the writer, JOIN it (1 s) BEFORE the
 //!   sink is dropped, and drain a frame stashed right before stop so it still
 //!   lands.
 //!
-//! The real `/dev/fbN` mmap is the [`MmapSink`] (Linux-gated). The threading
-//! model is generic over a [`FrameSink`], so the latest-wins / dup-skip / stats
-//! / cleanup behavior is unit-tested against a Vec-backed fake sink.
+//! The real `/dev/fbN` mmap is the `MmapSink` (Linux only). The threading
+//! model is generic over a [`FrameSink`], so the latest-wins, dup-skip, stats
+//! and cleanup behavior is unit-tested against a Vec-backed fake sink.
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
@@ -31,20 +29,20 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-/// Join timeout when tearing down the writer thread (matches the Python 1 s).
+/// Join timeout when tearing down the writer thread.
 pub const WRITER_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// One frame's worth of already-packed bytes plus the hash of its raw input.
 ///
-/// The caller packs the input (RGB565/RGB888/xRGB) before stashing — the hash
-/// is over the RAW pre-pack bytes so a duplicate skips even the pack. (In the
-/// Python version the pack happens on the writer thread; here packing is the
-/// caller's job via [`crate::pack`], but the dup-skip still keys on raw input.)
+/// The caller packs the input (RGB565/RGB888/xRGB) before stashing, for
+/// example with [`crate::pack::pack_for_bpp`]. The hash is over the RAW
+/// pre-pack bytes, so a caller can ask [`FbWriter::is_last`] and skip even the
+/// pack for a duplicate.
 #[derive(Debug, Clone)]
 pub struct Frame {
     /// Bytes to write to the sink (already packed to the panel's bit depth).
     pub packed: Vec<u8>,
-    /// Hash of the raw, pre-pack input bytes — the dup-skip key.
+    /// Hash of the raw, pre-pack input bytes: the dup-skip key.
     pub input_hash: u64,
 }
 
@@ -62,15 +60,10 @@ impl Frame {
     }
 }
 
-/// A PNG snapshot of a rendered canvas, encoded on the writer thread so the
-/// compression never runs on the render loop.
-#[derive(Debug, Clone)]
-pub struct SnapshotJob {
-    pub path: std::path::PathBuf,
-    pub rgb888: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-}
+/// Deferred work the writer thread runs after its pending frame, such as
+/// encoding a PNG snapshot of the canvas, so slow side work never runs on the
+/// render loop. The closure owns everything it needs.
+pub type SnapshotJob = Box<dyn FnOnce() + Send>;
 
 /// Hash raw input bytes for the duplicate-skip comparison.
 pub fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -82,12 +75,12 @@ pub fn hash_bytes(bytes: &[u8]) -> u64 {
 /// Inclusive `(first, last)` byte offsets that differ between two equal-length
 /// frames, or `None` when they are byte-identical.
 ///
-/// The framebuffer sink writes only this span into the mmap and flushes only
-/// this span, so the fbtft deferred-IO marks only the touched pages dirty and
-/// pushes only the changed scanline band over SPI. A localized UI change (a
-/// ticking number, a tab highlight) becomes a few-row push instead of the whole
-/// 480x320 panel; a full repaint (page switch) widens the span back to the whole
-/// frame, the same cost as before — never a regression.
+/// `MmapSink` writes only this span into the mmap and flushes only this span,
+/// so fbtft deferred IO marks only the touched pages dirty and pushes only the
+/// changed scanline band over SPI. A localized UI change (a ticking number, a
+/// tab highlight) becomes a few-row push instead of the whole panel; a full
+/// repaint widens the span back to the whole frame, the same cost as a full
+/// write.
 pub fn changed_span(prev: &[u8], next: &[u8]) -> Option<(usize, usize)> {
     debug_assert_eq!(prev.len(), next.len(), "changed_span needs equal lengths");
     let len = prev.len().min(next.len());
@@ -105,34 +98,29 @@ pub fn changed_span(prev: &[u8], next: &[u8]) -> Option<(usize, usize)> {
     Some((first, last))
 }
 
-/// Where packed frames go. The real implementation mmaps `/dev/fbN`; the test
-/// fake captures the bytes in a Vec.
+/// Where packed frames go. `MmapSink` maps `/dev/fbN`; [`VirtualSink`] writes
+/// a file; tests use an in-memory fake.
 pub trait FrameSink: Send {
     /// Write `buf` to the device. `buf.len()` is the full frame size; an error
     /// stops the writer (a disconnected SPI bus or a closed mapping).
     fn write_frame(&mut self, buf: &[u8]) -> std::io::Result<()>;
 }
 
-/// A portable [`FrameSink`] that writes each packed frame to a file, overwriting
-/// so the file always holds the CURRENT panel contents. Selected by the
-/// `ADOS_DISPLAY_VIRTUAL_FB` env var, it makes the display render path runnable
-/// and inspectable off real hardware — in a VM, in CI, or on a dev box with no
-/// framebuffer — where `MmapSink` (Linux `/dev/fbN`) is unavailable. The bytes
-/// are exactly what the real sink would blit, so a reader decodes them with the
-/// panel's geometry + bpp.
+/// A portable [`FrameSink`] that writes each packed frame to a file, replacing
+/// it so the file always holds the CURRENT panel contents. It makes a render
+/// path runnable and inspectable off real hardware (in a VM, in CI, or on a dev
+/// box with no framebuffer) where `MmapSink` is unavailable. The bytes are
+/// exactly what the real sink would blit, so a reader decodes them with the
+/// panel's geometry and bit depth.
 pub struct VirtualSink {
     path: std::path::PathBuf,
 }
 
 impl VirtualSink {
+    /// A sink that writes every frame to `path`. Nothing is touched until the
+    /// first write.
     pub fn open(path: impl Into<std::path::PathBuf>) -> Self {
         Self { path: path.into() }
-    }
-
-    /// The sink from `ADOS_DISPLAY_VIRTUAL_FB`, or `None` when unset (the real
-    /// framebuffer path is used instead).
-    pub fn from_env() -> Option<Self> {
-        std::env::var_os("ADOS_DISPLAY_VIRTUAL_FB").map(Self::open)
     }
 }
 
@@ -140,11 +128,10 @@ impl FrameSink for VirtualSink {
     fn write_frame(&mut self, buf: &[u8]) -> std::io::Result<()> {
         // Atomic replace: write a sibling temp file, then rename it over the
         // target. A concurrent reader then sees either the previous complete
-        // frame or the new one, NEVER a torn mix. `std::fs::write` truncates the
-        // target and then writes, so a reader can catch it part-filled — the
-        // comment here used to claim atomicity the plain write does not provide.
-        // The temp sibling shares the target's directory, so the rename stays on
-        // one filesystem (a cross-fs rename is not atomic).
+        // frame or the new one, NEVER a torn mix (`std::fs::write` truncates
+        // and then writes, so a reader could catch it part-filled). The temp
+        // sibling shares the target's directory, so the rename stays on one
+        // filesystem (a cross-filesystem rename is not atomic).
         let mut tmp = self.path.clone().into_os_string();
         tmp.push(".tmp");
         let tmp = std::path::PathBuf::from(tmp);
@@ -153,12 +140,17 @@ impl FrameSink for VirtualSink {
     }
 }
 
-/// Observability snapshot, mirroring `FrameBufferRenderer.stats()`.
+/// Observability snapshot returned by [`FbWriter::stats`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WriterStats {
+    /// Frames written to the sink successfully.
     pub writes: u64,
+    /// Pending frames overwritten by a newer one before the writer took them.
     pub drops: u64,
+    /// Frames skipped because their raw input matched the last write.
     pub skipped_duplicates: u64,
+    /// Duration of the last successful write in milliseconds (two decimals),
+    /// or `None` before the first write.
     pub last_write_ms: Option<f64>,
 }
 
@@ -179,15 +171,16 @@ struct Shared {
 struct PendingState {
     frame: Option<Frame>,
     last_written_hash: Option<u64>,
-    /// Single-slot latest-wins snapshot request, independent of the frame slot.
+    /// Single-slot latest-wins side job, independent of the frame slot.
     snapshot: Option<SnapshotJob>,
 }
 
 const NO_LAST_WRITE: u64 = u64::MAX;
 
-/// The off-thread framebuffer writer handle. `present` stashes a frame (returns
-/// immediately); the dedicated thread packs-already-done + writes. Drop or
-/// [`FbWriter::cleanup`] tears the thread down before the sink is released.
+/// The off-thread framebuffer writer handle. [`FbWriter::present`] stashes an
+/// already-packed frame and returns immediately; the dedicated thread writes
+/// it. Drop or [`FbWriter::cleanup`] tears the thread down before the sink is
+/// released.
 pub struct FbWriter {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
@@ -213,7 +206,7 @@ impl FbWriter {
         let thread = {
             let shared = shared.clone();
             std::thread::Builder::new()
-                .name("ados-fb-writer".to_string())
+                .name("fb-writer".to_string())
                 .spawn(move || writer_loop(shared, sink))
                 .expect("spawn fb writer thread")
         };
@@ -225,7 +218,7 @@ impl FbWriter {
 
     /// Stash a frame for the writer and return immediately. If a frame is still
     /// pending (the writer has not picked it up yet) it is OVERWRITTEN and the
-    /// drop counter is bumped — latest-wins.
+    /// drop counter is bumped (latest wins).
     pub fn present(&self, frame: Frame) {
         {
             let mut p = self.shared.pending.lock().unwrap();
@@ -246,8 +239,9 @@ impl FbWriter {
             || p.last_written_hash == Some(input_hash)
     }
 
-    /// Queue a PNG snapshot for the writer thread to encode. A request not yet
-    /// picked up is replaced (latest wins). Returns immediately.
+    /// Queue a side job (for example a PNG snapshot encode) for the writer
+    /// thread to run after its pending frame. A job not yet picked up is
+    /// replaced (latest wins). Returns immediately.
     pub fn request_snapshot(&self, job: SnapshotJob) {
         self.shared.pending.lock().unwrap().snapshot = Some(job);
         self.shared.cv.notify_one();
@@ -277,7 +271,7 @@ impl FbWriter {
         self.shared.cv.notify_all();
         if let Some(thread) = self.thread.take() {
             // Join with a soft timeout: poll is_finished so a wedged write
-            // cannot block teardown forever, matching the Python join(1.0).
+            // cannot block teardown forever.
             let deadline = Instant::now() + WRITER_JOIN_TIMEOUT;
             while !thread.is_finished() && Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(5));
@@ -297,10 +291,10 @@ impl Drop for FbWriter {
     }
 }
 
-/// The dedicated-thread loop. Waits for a frame or a snapshot request (waking
+/// The dedicated-thread loop. Waits for a frame or a side job (waking
 /// periodically so cleanup breaks it out), drains latest-wins, skips duplicate
-/// frames by raw-input hash, writes — updating the last-written hash only after
-/// a successful write — and encodes any pending snapshot PNG.
+/// frames by raw-input hash, writes (updating the last-written hash only after
+/// a successful write), then runs any pending side job.
 fn writer_loop<S: FrameSink>(shared: Arc<Shared>, mut sink: S) {
     loop {
         let stop = shared.stop.load(Ordering::SeqCst);
@@ -345,7 +339,7 @@ fn writer_loop<S: FrameSink>(shared: Arc<Shared>, mut sink: S) {
                     Err(e) => {
                         // A failed write (an SPI hiccup, a driver rebind) must not
                         // freeze the panel on its last image for the life of the
-                        // service: log it and keep serving. The last-written hash is
+                        // process: log it and keep serving. The last-written hash is
                         // left alone, so the next frame is written even if its input
                         // matches the one that just failed.
                         tracing::warn!(error = %e, "framebuffer write failed");
@@ -355,11 +349,7 @@ fn writer_loop<S: FrameSink>(shared: Arc<Shared>, mut sink: S) {
         }
 
         if let Some(job) = snapshot {
-            if let Err(e) =
-                crate::sidecar::write_snapshot_png(&job.path, &job.rgb888, job.width, job.height)
-            {
-                tracing::debug!(error = %e, "lcd-snapshot write failed");
-            }
+            job();
         }
 
         if shared.stop.load(Ordering::SeqCst) {
@@ -380,8 +370,8 @@ fn round2(v: f64) -> f64 {
 
 /// Real `/dev/fbN` mmap sink. Each write copies only the bytes that changed
 /// since the last frame into the mapping and flushes only that span, so the
-/// fbtft driver pushes just the changed scanline band over SPI. Linux-only (the
-/// mmap + flush use the unix mapping API). Construct via [`MmapSink::open`].
+/// fbtft driver pushes just the changed scanline band over SPI. Linux only.
+/// Construct via [`MmapSink::open`].
 #[cfg(target_os = "linux")]
 pub struct MmapSink {
     _file: std::fs::File,
@@ -434,7 +424,7 @@ impl FrameSink for MmapSink {
         }
         // Push only the changed span. fbtft's deferred-IO faults the touched
         // pages dirty and sends just that scanline band, so an unchanged frame
-        // costs nothing and a localized change costs a few rows, not 480x320.
+        // costs nothing and a localized change costs a few rows, not the panel.
         match changed_span(&self.last, src) {
             None => Ok(()),
             Some((first, last)) => {
@@ -472,10 +462,10 @@ mod tests {
     }
 
     /// A reader hammering the file while the sink writes alternating-size frames
-    /// must only ever see a COMPLETE frame — one of the two full lengths, never a
-    /// partial. With the plain truncate-then-write this races and a reader can
+    /// must only ever see a COMPLETE frame: one of the two full lengths, never a
+    /// partial. With a plain truncate-then-write this races and a reader can
     /// catch a short file; the temp-file + rename makes every observed state a
-    /// whole frame. (Proven-to-bite: revert to `std::fs::write` and this fails.)
+    /// whole frame. (Revert to `std::fs::write` and this fails.)
     #[test]
     fn concurrent_reader_never_sees_a_torn_frame() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -535,16 +525,6 @@ mod tests {
             small_seen.load(Ordering::Relaxed) && large_seen.load(Ordering::Relaxed),
             "the reader observed both complete frames"
         );
-    }
-
-    #[test]
-    fn virtual_sink_from_env_is_none_when_unset() {
-        // Absent env -> no virtual sink (the real framebuffer path is used).
-        // (Set-case is covered by the explicit `open` round-trip above; reading
-        // the process env in a test is racy, so it is asserted only for absence
-        // under a name that is not set.)
-        std::env::remove_var("ADOS_DISPLAY_VIRTUAL_FB");
-        assert!(VirtualSink::from_env().is_none());
     }
 
     /// A Vec-backed fake sink that records every write. Optionally fails after a
@@ -613,7 +593,7 @@ mod tests {
         let writes = sink.write_count.clone();
         let mut w = FbWriter::spawn(sink);
         // Two frames with identical RAW input but the second can carry any
-        // packed bytes — dup-skip keys on the raw-input hash.
+        // packed bytes: dup-skip keys on the raw-input hash.
         w.present(Frame::new(vec![1, 2, 3, 4], b"same-input"));
         wait_until(|| writes.load(Ordering::SeqCst) == 1);
         w.present(Frame::new(vec![9, 9, 9, 9], b"same-input"));
@@ -669,8 +649,8 @@ mod tests {
 
     #[test]
     fn drain_pending_frame_on_stop_still_writes() {
-        // A frame stashed right before cleanup must still land (Python tests
-        // rely on this drain-on-stop behavior).
+        // A frame stashed right before cleanup must still land (drain on
+        // stop).
         let sink = FakeSink::new();
         let recorded = sink.writes.clone();
         let mut w = FbWriter::spawn(sink);
@@ -699,6 +679,19 @@ mod tests {
         w.cleanup();
         assert_eq!(w.stats().writes, 2, "the writer must keep serving");
         assert_eq!(recorded.lock().unwrap().last(), Some(&vec![2]));
+    }
+
+    #[test]
+    fn snapshot_job_runs_on_the_writer_thread() {
+        let w = FbWriter::spawn(FakeSink::new());
+        let ran_on = Arc::new(Mutex::new(None::<String>));
+        let slot = ran_on.clone();
+        w.request_snapshot(Box::new(move || {
+            let name = std::thread::current().name().map(str::to_string);
+            *slot.lock().unwrap() = name;
+        }));
+        wait_until(|| ran_on.lock().unwrap().is_some());
+        assert_eq!(ran_on.lock().unwrap().as_deref(), Some("fb-writer"));
     }
 
     #[test]
@@ -741,7 +734,7 @@ mod tests {
         let prev = vec![0u8; 64];
         let mut next = prev.clone();
         // A localized change at bytes 20..=23 (a small UI update) reports a
-        // tight span, not the whole buffer — only those rows reach the panel.
+        // tight span, not the whole buffer: only those rows reach the panel.
         next[20] = 1;
         next[21] = 2;
         next[23] = 4;

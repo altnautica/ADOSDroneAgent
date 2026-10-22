@@ -14,7 +14,7 @@ use ados_protocol::sidecar::write_atomic;
 
 use serde::{Deserialize, Serialize};
 
-use crate::fb_writer::WriterStats;
+use ados_display_driver::fb_writer::WriterStats;
 
 /// Canonical sidecar paths (`core/paths.py`).
 pub const LCD_STATE_PATH: &str = "/run/ados/lcd-state.json";

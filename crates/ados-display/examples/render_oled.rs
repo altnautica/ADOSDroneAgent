@@ -13,9 +13,9 @@
 
 use std::path::PathBuf;
 
-use ados_display::oled::OledGeometry;
 use ados_display::oled_frame::{render_canvas, status_fonts};
 use ados_display::pages::PageContext;
+use ados_display_driver::oled::OledGeometry;
 
 /// Integer upscale per panel pixel.
 const SCALE: u32 = 4;

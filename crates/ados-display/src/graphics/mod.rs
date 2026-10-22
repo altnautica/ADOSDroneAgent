@@ -4,8 +4,8 @@
 //! color palette, the TrueType font rasterizer, the small draw primitives
 //! (rect/line/text), and the composite widgets (sparkline, bar meter, status
 //! dot, QR). Everything paints onto an in-memory RGB888 canvas that the
-//! existing [`crate::pack`] packers convert to the panel's bit depth and the
-//! [`crate::fb_writer`] thread blits to `/dev/fbN`.
+//! [`ados_display_driver::pack`] packers convert to the panel's bit depth and
+//! the [`ados_display_driver::fb_writer`] thread blits to `/dev/fbN`.
 //!
 //! The submodules:
 //!

@@ -7,7 +7,7 @@
 //! the value changes (and again after a re-init, which restores the power-on
 //! default).
 
-use crate::oled::{init, render_frame, write_cmd, Controller, I2cBus, OledGeometry};
+use ados_display_driver::oled::{init, render_frame, write_cmd, Controller, I2cBus, OledGeometry};
 
 /// The SSD1306/SH1106 "set contrast" command and its one-byte argument.
 pub fn contrast_command(value: u8) -> [u8; 2] {
@@ -85,7 +85,7 @@ impl OledLink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::oled::{init_commands, CTRL_CMD, CTRL_DATA};
+    use ados_display_driver::oled::{init_commands, CTRL_CMD, CTRL_DATA};
 
     /// Records writes; data writes fail while `failing` is set.
     #[derive(Default)]

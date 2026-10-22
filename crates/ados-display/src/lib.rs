@@ -1,15 +1,9 @@
 //! Display layer for the ground-station SPI LCD and OLED.
 //!
 //! * [`conf`] — `/etc/ados/display.conf` parsing + `read_rotation`.
-//! * [`fb_geometry`] — `/sys/class/graphics` geometry + driver-name discovery
-//!   and the SPI-LCD framebuffer match (skips the primary HDMI/DRM surface).
-//! * [`pack`] — RGB565 / RGB888 / xRGB32 pixel packers.
 //! * [`probe`] — the boot-time apply-verify-auto-revert presence probe.
-//! * [`fb_writer`] — the off-thread framebuffer writer: single-slot latest-wins,
-//!   dedicated OS thread, duplicate-skip on raw-input hash, stats, and a
-//!   join-before-release teardown. The load-bearing fidelity surface.
-//! * [`oled`] — SSD1306 / SH1106 monochrome OLED over raw `/dev/i2c-N` ioctls
-//!   (no external driver-crate stack); the page packing is pure.
+//! * The framebuffer geometry discovery, pixel packers, off-thread framebuffer
+//!   writer and SSD1306 / SH1106 OLED transport live in [`ados_display_driver`].
 //! * [`oled_frame`] — the status OLED's pure frame builder (hostname, IP,
 //!   link, role lines), shared by the daemon and the `render_oled` example.
 //! * [`sidecar`] — `/run/ados` LCD sidecars (lcd-state read, page-request
@@ -42,16 +36,12 @@ pub mod button_source;
 pub mod calibration;
 pub mod conf;
 pub mod daemon;
-pub mod fb_geometry;
-pub mod fb_writer;
 pub mod graphics;
 pub mod host_identity;
 pub mod log_tail;
 pub mod navigator;
-pub mod oled;
 pub mod oled_frame;
 pub mod oled_link;
-pub mod pack;
 pub mod pages;
 pub mod panel_action;
 pub mod panel_conf;

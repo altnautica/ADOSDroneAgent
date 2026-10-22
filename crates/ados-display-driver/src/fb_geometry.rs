@@ -1,9 +1,9 @@
-//! Framebuffer geometry + driver-name discovery from `/sys/class/graphics`.
+//! Framebuffer geometry and driver-name discovery from `/sys/class/graphics`.
 //!
-//! Ports `_read_fb_geometry`, `_read_fb_name`, and the SPI-LCD driver-name set
-//! (`hardware_check.py::_SPI_LCD_DRIVER_NAMES`) plus the probe's candidate-match
-//! rule from `renderers/framebuffer.py`. All of it is sysfs reads, so it is
-//! tested against a temp `/sys/class/graphics` tree.
+//! Finds the framebuffer an SPI LCD (fbtft) is bound to, reads its resolution
+//! and bit depth, and skips the primary HDMI/DRM framebuffer. Every function
+//! takes the sysfs root as a parameter, so all of it is plain file reads that
+//! work against a temp tree in tests and on any host.
 
 use std::path::{Path, PathBuf};
 
@@ -11,10 +11,9 @@ use std::path::{Path, PathBuf};
 pub const SYS_GRAPHICS_DIR: &str = "/sys/class/graphics";
 
 /// Kernel driver names exported under `/sys/class/graphics/fbN/name` when a
-/// supported SPI LCD is bound. The acceptance set used when display.conf
-/// carries no explicit expected name, so the probe never binds the primary
-/// HDMI/DRM framebuffer by accident. Exact 9-name set from
-/// `hardware_check.py::_SPI_LCD_DRIVER_NAMES`.
+/// supported fbtft SPI LCD is bound. This is the acceptance set when no
+/// explicit expected name is configured, so a probe never binds the primary
+/// HDMI/DRM framebuffer by accident.
 pub const SPI_LCD_DRIVER_NAMES: [&str; 9] = [
     "fb_ili9486",
     "fb_ili9341",
@@ -35,8 +34,11 @@ pub fn is_spi_lcd_driver(name: &str) -> bool {
 /// Resolved framebuffer geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FbGeometry {
+    /// Visible width in pixels.
     pub xres: u32,
+    /// Visible height in pixels.
     pub yres: u32,
+    /// Bit depth per pixel (16, 24 or 32 for the packers in [`crate::pack`]).
     pub bits_per_pixel: u32,
 }
 
@@ -101,12 +103,11 @@ pub fn read_fb_name(sys_root: &Path, fb_name: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Whether a candidate framebuffer's driver name is acceptable for the SPI-LCD
-/// UI. Mirrors the `_resolve_fb_path` probe rule (api/routes/display.py), which
-/// still owns the `/api/v1/display` surface: when an `expected` name is
-/// configured, accept only a framebuffer whose driver name contains it;
-/// otherwise accept only a known SPI-LCD fbtft driver so the primary HDMI/DRM
-/// fb is never grabbed.
+/// Whether a candidate framebuffer's driver name is acceptable for an SPI-LCD
+/// UI. When an `expected` name is configured, accept only a framebuffer whose
+/// driver name contains it; otherwise accept only a known SPI-LCD fbtft driver
+/// ([`SPI_LCD_DRIVER_NAMES`]) so the primary HDMI/DRM framebuffer is never
+/// grabbed.
 pub fn driver_name_acceptable(driver_name: &str, expected: &str) -> bool {
     let expected = expected.trim();
     if !expected.is_empty() {
@@ -116,7 +117,8 @@ pub fn driver_name_acceptable(driver_name: &str, expected: &str) -> bool {
     }
 }
 
-/// Whether the bit depth is one this renderer can pack (16/24/32).
+/// Whether the bit depth is one [`crate::pack::pack_for_bpp`] can pack
+/// (16/24/32).
 pub fn bpp_supported(bpp: u32) -> bool {
     matches!(bpp, 16 | 24 | 32)
 }
@@ -145,17 +147,20 @@ fn is_fb_entry(name: &str) -> bool {
 /// A framebuffer that matched the probe rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FbMatch {
+    /// The sysfs entry name, for example `fb1`.
     pub fb_name: String,
+    /// The device node, `/dev/<fb_name>`.
     pub dev_path: PathBuf,
+    /// The driver name read from sysfs.
     pub driver_name: String,
+    /// Resolution and bit depth.
     pub geometry: FbGeometry,
 }
 
 /// Walk `sys_root` and return the first framebuffer whose driver name passes
-/// [`driver_name_acceptable`] and whose bpp is supported. `expected` is the
-/// configured `framebuffer_name_expected` (empty for the SPI-LCD-set fallback).
-/// This is the pure core of the renderer probe (the dev-node open lives in the
-/// daemon).
+/// [`driver_name_acceptable`] and whose bpp is supported. `expected` is a
+/// configured driver-name substring (empty for the [`SPI_LCD_DRIVER_NAMES`]
+/// fallback). Opening the device node is left to the caller.
 pub fn match_framebuffer(sys_root: &Path, expected: &str) -> Option<FbMatch> {
     for fb_name in list_framebuffers(sys_root) {
         let Ok(geometry) = read_fb_geometry(sys_root, &fb_name) else {

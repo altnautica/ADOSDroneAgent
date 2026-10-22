@@ -16,7 +16,7 @@
 //! profile's service routes at most every 5 s: GNSS, radio-adapter and LoRa
 //! on a ground station, the sensing routes on a visor); the frames are painted
 //! by [`crate::oled_frame`] (grayscale glyph coverage thresholded to 1bpp)
-//! and packed + uploaded by [`crate::oled`],
+//! and packed + uploaded by [`ados_display_driver::oled`],
 //! which re-initialises the panel after repeated upload failures (a brownout).
 //! The configured `ground_station.ui.oled.brightness` is applied as the
 //! controller contrast whenever it changes.
@@ -31,12 +31,12 @@
 //! in [`crate::oled_frame::screens`]. The frame builders are pure and
 //! unit-tested; only the I2C open/write is Linux-gated.
 
-use crate::oled::{self, Controller, OledGeometry};
 use crate::oled_frame::screens::{rotation, screen_font, OledRole, Rotator};
 use crate::oled_frame::{build_screen_frame, status_fonts};
 #[cfg(not(target_os = "linux"))]
 use crate::pages::PageContext;
 use crate::panel_conf::PanelConf;
+use ados_display_driver::oled::{self, Controller, OledGeometry};
 
 /// Read a `u8` env var with a fallback (for ops overrides; the defaults match a
 /// standard Raspberry Pi header OLED).

@@ -18,7 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::fb_geometry::is_spi_lcd_driver;
+use ados_display_driver::fb_geometry::is_spi_lcd_driver;
 
 /// How long to wait for the SPI LCD framebuffer console to bind. fbtft binds
 /// late in kernel boot; poll past the slowest observed board before judging the
@@ -45,7 +45,7 @@ pub struct ProbePaths {
 impl Default for ProbePaths {
     fn default() -> Self {
         Self {
-            sys_graphics_dir: PathBuf::from(crate::fb_geometry::SYS_GRAPHICS_DIR),
+            sys_graphics_dir: PathBuf::from(ados_display_driver::fb_geometry::SYS_GRAPHICS_DIR),
             sys_input_dir: PathBuf::from("/sys/class/input"),
             display_conf: PathBuf::from(crate::conf::DISPLAY_CONF_PATH),
             display_enabled: PathBuf::from("/etc/ados/display.enabled"),

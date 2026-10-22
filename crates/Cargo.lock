@@ -228,8 +228,6 @@ dependencies = [
  "embedded-graphics",
  "evdev",
  "image",
- "memmap2",
- "nix 0.29.0",
  "png 0.17.16",
  "qrcode",
  "sd-notify",
@@ -248,6 +246,12 @@ dependencies = [
 [[package]]
 name = "ados-display-driver"
 version = "0.1.0"
+dependencies = [
+ "libc",
+ "memmap2",
+ "tempfile",
+ "tracing",
+]
 
 [[package]]
 name = "ados-gnss"
