@@ -3,9 +3,8 @@
 //! The bank is the value container both channel sources fill: writes validate
 //! against the usable endpoint range (172..=1811) at this boundary, so an
 //! out-of-range value is rejected before it ever reaches the wire; the codec
-//! below stays faithful to any 11-bit value. Which bank feeds the transmitter
-//! (and when nothing is transmitted at all) is the sibling `sources` module's
-//! job — this module owns only values + validation.
+//! below stays faithful to any 11-bit value. Choosing which bank feeds the transmitter
+//! is the caller's job; this module owns only values and validation.
 
 use crate::channels::{CHANNEL_COUNT, CHANNEL_MAX, CHANNEL_MID, CHANNEL_MIN};
 
@@ -55,7 +54,7 @@ impl ChannelBank {
     }
 
     /// Replace all 16 channels. Rejects the whole set if any value is out of
-    /// range — a partial apply would transmit a mixed frame nobody asked for.
+    /// range, a partial apply would transmit a mixed frame nobody asked for.
     pub fn set_all(&mut self, values: [u16; CHANNEL_COUNT]) -> Result<(), BankError> {
         for &v in &values {
             Self::check(v)?;

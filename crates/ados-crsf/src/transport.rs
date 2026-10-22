@@ -19,10 +19,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
-use crate::channels::build_rc_frame;
-use crate::frame::{Parser, TYPE_LINK_STATISTICS};
 use crate::sources::SourceMerge;
-use crate::telemetry::LinkStatistics;
+use ados_crsf_codec::channels::build_rc_frame;
+use ados_crsf_codec::frame::{Parser, TYPE_LINK_STATISTICS};
+use ados_crsf_codec::telemetry::LinkStatistics;
 
 /// The CRSF UART line rate: 420 kbaud, 8 data bits, no parity, 1 stop bit
 /// (the serial defaults for this builder).
@@ -237,10 +237,10 @@ pub async fn run_rx<R: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::{unpack_channels, CHANNEL_COUNT, PACKED_SIZE};
-    use crate::frame::{build_frame, ADDR_FLIGHT_CONTROLLER};
     use crate::sources::{ChannelSourceMode, MAX_INJECT_TTL};
-    use crate::telemetry::{build_telemetry_frame, Telemetry};
+    use ados_crsf_codec::channels::{unpack_channels, CHANNEL_COUNT, PACKED_SIZE};
+    use ados_crsf_codec::frame::{build_frame, ADDR_FLIGHT_CONTROLLER};
+    use ados_crsf_codec::telemetry::{build_telemetry_frame, Telemetry};
 
     fn inject_merge() -> Arc<Mutex<SourceMerge>> {
         Arc::new(Mutex::new(SourceMerge::new(ChannelSourceMode::Inject)))
@@ -282,15 +282,15 @@ mod tests {
 
         let oob = Arc::new(OobQueue::default());
         // A parameter frame queued out-of-band rides between RC frames.
-        let param = crate::params::ParameterWrite {
-            dest: crate::frame::ADDR_TRANSMITTER_MODULE,
-            origin: crate::frame::ADDR_HANDSET,
+        let param = ados_crsf_codec::params::ParameterWrite {
+            dest: ados_crsf_codec::frame::ADDR_TRANSMITTER_MODULE,
+            origin: ados_crsf_codec::frame::ADDR_HANDSET,
             field_index: 3,
             data: vec![2],
         };
         oob.push(
             param
-                .to_frame(crate::frame::ADDR_TRANSMITTER_MODULE)
+                .to_frame(ados_crsf_codec::frame::ADDR_TRANSMITTER_MODULE)
                 .unwrap(),
         )
         .unwrap();
@@ -329,16 +329,17 @@ mod tests {
         let mut saw_param = false;
         for frame in &frames {
             match frame.frame_type {
-                crate::frame::TYPE_PARAMETER_WRITE => {
+                ados_crsf_codec::frame::TYPE_PARAMETER_WRITE => {
                     // The queued out-of-band parameter frame came through the
                     // same cadence, intact.
-                    let decoded = crate::params::ParameterWrite::decode(&frame.payload).unwrap();
+                    let decoded =
+                        ados_crsf_codec::params::ParameterWrite::decode(&frame.payload).unwrap();
                     assert_eq!(decoded.field_index, 3);
                     assert_eq!(decoded.data, vec![2]);
                     saw_param = true;
                 }
                 t => {
-                    assert_eq!(t, crate::frame::TYPE_RC_CHANNELS_PACKED);
+                    assert_eq!(t, ados_crsf_codec::frame::TYPE_RC_CHANNELS_PACKED);
                     let payload: [u8; PACKED_SIZE] = frame.payload.clone().try_into().unwrap();
                     assert_eq!(unpack_channels(&payload), injected);
                 }

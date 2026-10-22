@@ -1,20 +1,20 @@
-//! Input scaling: evdev-style axis and switch values → CRSF channel values.
+//! Input scaling: signed 16-bit axis and switch values → CRSF channel values.
 //!
 //! Pure functions, host-testable with zero hardware. The device read loop that
 //! produces the raw values lives elsewhere; this module owns only the maths.
 
 use crate::channels::{CHANNEL_MAX, CHANNEL_MID, CHANNEL_MIN};
 
-/// Full-scale evdev axis minimum (`ABS_X`-style signed 16-bit).
+/// Full-scale signed 16-bit axis minimum.
 pub const AXIS_MIN: i32 = -32768;
-/// Full-scale evdev axis maximum.
+/// Full-scale signed 16-bit axis maximum.
 pub const AXIS_MAX: i32 = 32767;
 
 /// Scale a signed full-range axis value onto the CRSF channel range.
 ///
 /// `AXIS_MIN` maps to 172 (full low), `AXIS_MAX` maps to 1811 (full high),
 /// and 0 maps to the 992 center (the positive half-range is one count
-/// shorter, so the two halves scale independently around the exact center —
+/// shorter, so the two halves scale independently around the exact center,
 /// a centered stick must read exactly 992, not 991 or 993). Out-of-range
 /// input clamps to the endpoints.
 pub fn axis_to_channel(raw: i32) -> u16 {
@@ -49,6 +49,7 @@ pub fn switch_to_channel(pos: u8, positions: u8) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     #[test]
     fn axis_endpoints_hit_the_channel_endpoints() {

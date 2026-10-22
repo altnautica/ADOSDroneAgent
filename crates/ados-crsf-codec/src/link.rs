@@ -1,20 +1,18 @@
-//! The lane state machine: a pure derivation from observed inputs to the
-//! sidecar's `state` and `rf_unverified` fields.
+//! Link state derivation: a pure function from observed inputs to a link
+//! state and an `rf_unverified` verdict.
 //!
-//! Liveness discipline: bytes accepted by the serial driver prove only that
-//! the driver took them — never that the RC module radiated, and never that
-//! the far receiver heard anything. The only received-side proof this lane
-//! has is the inbound link-statistics telemetry (frame type 0x14) and its
-//! uplink link-quality figure, so the verdict keys on that: transmitting
-//! without fresh link statistics — or with fresh statistics whose uplink LQ
-//! reads ZERO (the module is talking to us but hears no receiver) — is
-//! `rf_unverified`, not "up". Before the proof window has even had a chance
-//! to fill, the honest answer is "no verdict yet" (`ready`,
-//! `rf_unverified: null`) — never a fabricated false. Only a state with a
-//! real received-side proof ([`LaneState::flyable`]) may ever be reported
-//! usable for flight.
+//! Bytes accepted by the serial driver prove only that the driver took them,
+//! never that the RC module radiated, and never that the far receiver heard
+//! anything. The only received-side proof is the inbound link-statistics
+//! telemetry (frame type 0x14) and its uplink link-quality figure, so the
+//! verdict keys on that: transmitting without fresh link statistics, or with
+//! fresh statistics whose uplink LQ reads zero (the module answers but hears
+//! no receiver), is `rf_unverified`, not "up". Before the proof window has
+//! had a chance to fill, the answer is "no verdict yet" (`Ready`, verdict
+//! `None`). Only a state with a real received-side proof
+//! ([`LaneState::flyable`]) may be reported usable for flight.
 
-use std::time::Duration;
+use core::time::Duration;
 
 /// How fresh the last link-statistics frame must be to count as a
 /// received-side proof of the link.
@@ -27,19 +25,17 @@ pub const RF_PROOF_GRACE: Duration = Duration::from_secs(5);
 /// Uplink link-quality percentage below which a proven link reads `degraded`.
 pub const LQ_DEGRADED_BELOW: u8 = 50;
 
-/// The lane state, exactly the sidecar vocabulary.
+/// The link state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneState {
     /// The lane is opted out (or this node's profile does not run it).
     Disabled,
     /// Enabled but no usable serial device is open.
     Unconfigured,
-    /// Standing by with no liveness verdict. In `crsf_rc` mode: the device is
-    /// open but unproven (not transmitting, or still inside the proof grace
-    /// window). In `mavlink` mode: the lane itself — the module's port
-    /// belongs to the MAVLink router and this service transmits no RC, so
-    /// `ready` is the honest "alive, holding off" standby (written directly
-    /// by the mode gate, not derived).
+    /// Standing by with no liveness verdict: the device is open but unproven
+    /// (not transmitting, or still inside the proof grace window). Also the
+    /// natural standby when the port is in use by something else and no RC
+    /// is transmitted.
     Ready,
     /// Fresh link statistics with healthy uplink quality.
     LinkOk,
@@ -50,6 +46,7 @@ pub enum LaneState {
 }
 
 impl LaneState {
+    /// Stable snake_case name of the state.
     pub fn as_str(self) -> &'static str {
         match self {
             LaneState::Disabled => "disabled",
@@ -61,7 +58,7 @@ impl LaneState {
         }
     }
 
-    /// The sidecar's `rf_unverified` field for this state: `Some(false)` when
+    /// The `rf_unverified` verdict for this state: `Some(false)` when
     /// a received-side proof exists, `Some(true)` when transmission is
     /// provably unheard, `None` when there is no verdict to report.
     pub fn rf_unverified_flag(self) -> Option<bool> {
@@ -74,7 +71,7 @@ impl LaneState {
 
     /// Whether the lane may be reported usable for flight: true ONLY when a
     /// received-side proof exists (a fresh link-statistics frame with a
-    /// non-zero uplink LQ). `rf_unverified` — and every no-verdict state — is
+    /// non-zero uplink LQ). `rf_unverified`, and every no-verdict state, is
     /// never flyable: a lane that cannot prove a receiver hears it must not
     /// be offered as a control path.
     pub fn flyable(self) -> bool {
@@ -105,7 +102,7 @@ pub fn derive_state(i: &LinkInputs) -> LaneState {
     if !i.device_open {
         return LaneState::Unconfigured;
     }
-    // A fresh link-statistics frame proves the serial telemetry hop — but
+    // A fresh link-statistics frame proves the serial telemetry hop, but
     // only a NON-ZERO uplink LQ proves a receiver hears the transmission.
     if let Some(age) = i.stats_age {
         if age <= STATS_FRESH_WINDOW {
@@ -113,7 +110,7 @@ pub fn derive_state(i: &LinkInputs) -> LaneState {
                 Some(lq) if lq >= LQ_DEGRADED_BELOW => LaneState::LinkOk,
                 Some(lq) if lq > 0 => LaneState::Degraded,
                 // Zero (or defensively-missing) uplink LQ: the module reports
-                // that nobody hears it — the same no-received-proof ladder as
+                // that nobody hears it, the same no-received-proof ladder as
                 // missing statistics, never "degraded".
                 _ => no_proof_state(i.tx_running_for),
             };
@@ -232,7 +229,7 @@ mod tests {
     #[test]
     fn stale_stats_fall_back_to_the_no_proof_ladder() {
         // Stats went stale while transmitting: the proof has lapsed, so the
-        // lane is back to unverified — a dead link must not keep reading ok.
+        // lane is back to unverified, a dead link must not keep reading ok.
         let i = LinkInputs {
             enabled: true,
             device_open: true,
@@ -247,7 +244,7 @@ mod tests {
     fn tx_advancing_with_zero_uplink_lq_is_rf_unverified() {
         // The module answers on serial (fresh statistics) but reports that no
         // receiver hears it: transmission past the grace window is provably
-        // unheard — never "degraded", never flyable.
+        // unheard, never "degraded", never flyable.
         let i = LinkInputs {
             enabled: true,
             device_open: true,
@@ -270,7 +267,7 @@ mod tests {
     fn zero_lq_inside_the_grace_window_is_still_no_verdict() {
         // At bring-up the module reports LQ 0 while the RF link acquires; the
         // grace window applies to the zero-LQ path exactly as to missing
-        // statistics — "no verdict yet", not a premature rf_unverified.
+        // statistics, "no verdict yet", not a premature rf_unverified.
         let i = LinkInputs {
             enabled: true,
             device_open: true,

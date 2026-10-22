@@ -34,8 +34,8 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::channels::{CHANNEL_COUNT, CHANNEL_MID};
-use crate::scale::{axis_to_channel, switch_to_channel};
+use ados_crsf_codec::channels::{CHANNEL_COUNT, CHANNEL_MID};
+use ados_crsf_codec::scale::{axis_to_channel, switch_to_channel};
 
 /// One absolute-axis mapping: an evdev ABS code onto a channel index.
 #[derive(Debug, Clone, Copy)]
@@ -154,7 +154,7 @@ pub struct HidChannels {
 impl Default for HidChannels {
     fn default() -> Self {
         Self {
-            values: crate::bank::ChannelBank::default().values(),
+            values: ados_crsf_codec::bank::ChannelBank::default().values(),
         }
     }
 }
@@ -560,7 +560,7 @@ async fn stream_device(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::{CHANNEL_MAX, CHANNEL_MIN};
+    use ados_crsf_codec::channels::{CHANNEL_MAX, CHANNEL_MIN};
 
     // ── scaling ─────────────────────────────────────────────────────────────
 

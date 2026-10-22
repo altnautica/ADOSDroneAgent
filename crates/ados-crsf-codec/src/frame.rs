@@ -4,14 +4,15 @@
 //! Every CRSF frame is `[sync] [len] [type] [payload…] [crc8]` where `len`
 //! counts the bytes AFTER it (type + payload + crc, so 2..=62) and the CRC-8
 //! (DVB-S2 polynomial `0xD5`, init 0, no reflection, no xor-out) covers the
-//! type and payload bytes only — the sync and length bytes are excluded.
+//! type and payload bytes only, the sync and length bytes are excluded.
 //!
 //! Sync-byte decision, recorded: the leading byte is a CRSF device address,
-//! not a fixed magic. Three addresses appear on a real shared bus — `0xC8`
+//! not a fixed magic. Three addresses appear on a real shared bus, `0xC8`
 //! (flight controller), `0xEE` (transmitter module), and `0xEA` (radio
-//! handset) — so the parser accepts any of the three and rejects everything
-//! else. Frames this service transmits toward the RC module carry `0xC8`.
+//! handset), so the parser accepts any of the three and rejects everything
+//! else. Frames sent toward the RC module carry `0xC8`.
 
+use alloc::vec::Vec;
 /// CRSF device address: flight controller. Also the sync byte on frames the
 /// handset/controller side sends to the TX module.
 pub const ADDR_FLIGHT_CONTROLLER: u8 = 0xC8;
@@ -70,8 +71,11 @@ pub fn crc8_dvb_s2(data: &[u8]) -> u8 {
 /// sibling `telemetry` / `channels` / `params` modules.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawFrame {
+    /// Leading address (sync) byte.
     pub sync: u8,
+    /// Frame type byte.
     pub frame_type: u8,
+    /// Payload bytes between the type and the CRC.
     pub payload: Vec<u8>,
 }
 
@@ -85,19 +89,27 @@ pub enum FrameError {
     /// Fewer bytes than the length byte promises.
     Truncated,
     /// The trailing CRC does not match the computed one.
-    CrcMismatch { expected: u8, got: u8 },
+    CrcMismatch {
+        /// CRC computed over type and payload.
+        expected: u8,
+        /// CRC found on the wire.
+        got: u8,
+    },
     /// A known frame type carried a payload of the wrong size.
     PayloadSizeMismatch {
+        /// The frame type.
         frame_type: u8,
+        /// Payload size the type requires.
         expected: usize,
+        /// Payload size received.
         got: usize,
     },
     /// A payload longer than the wire format can carry was offered for build.
     PayloadTooLarge(usize),
 }
 
-impl std::fmt::Display for FrameError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for FrameError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             FrameError::BadSync(b) => write!(f, "bad sync byte 0x{b:02X}"),
             FrameError::BadLength(l) => write!(f, "bad length byte {l}"),
@@ -121,7 +133,7 @@ impl std::fmt::Display for FrameError {
     }
 }
 
-impl std::error::Error for FrameError {}
+impl core::error::Error for FrameError {}
 
 /// Whether `b` is one of the three device addresses accepted as a sync byte.
 pub fn is_sync_byte(b: u8) -> bool {
@@ -217,7 +229,7 @@ pub fn parse_frame(buf: &[u8]) -> Result<(RawFrame, usize), FrameError> {
 /// or wedge the stream. The internal buffer is inherently bounded: the push
 /// loop drains every parseable or rejectable prefix and only stops on a
 /// truncated frame candidate, which by the length rule needs fewer than
-/// [`MAX_FRAME_BYTES`] bytes — so the buffer never holds a full frame's worth
+/// [`MAX_FRAME_BYTES`] bytes, so the buffer never holds a full frame's worth
 /// of bytes across calls.
 #[derive(Debug, Default)]
 pub struct Parser {
@@ -232,6 +244,7 @@ pub struct Parser {
 }
 
 impl Parser {
+    /// A parser with an empty buffer and zeroed counters.
     pub fn new() -> Self {
         Self::default()
     }

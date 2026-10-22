@@ -11,8 +11,8 @@ use std::sync::atomic::AtomicBool;
 use super::*;
 use crate::cmdsock::{ModuleTarget, ModuleTargets};
 use crate::modules::{fresh_link, ModuleConfig, ModuleRole, ModuleStatus};
-use crate::telemetry::LinkStatistics;
 use crate::transport::OobQueue;
+use ados_crsf_codec::telemetry::LinkStatistics;
 
 /// One autonomy module's live state, shared between its runner and the
 /// heartbeat / command socket.

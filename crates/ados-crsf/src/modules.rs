@@ -27,10 +27,10 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::link::STATS_FRESH_WINDOW;
 use crate::sidecar::rssi_dbm_from_wire;
-use crate::telemetry::LinkStatistics;
 use crate::transport::TelemetryState;
+use ados_crsf_codec::link::STATS_FRESH_WINDOW;
+use ados_crsf_codec::telemetry::LinkStatistics;
 
 /// The id the legacy single-port config resolves to.
 pub const LEGACY_MODULE_ID: &str = "m0";

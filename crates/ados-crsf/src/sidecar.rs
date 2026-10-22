@@ -25,10 +25,10 @@
 
 use serde_json::{json, Value};
 
-use crate::link::LaneState;
 use crate::modules::ModuleStatus;
 use crate::paths::{run_path, write_sidecar, CRSF_STATS_SIDECAR_VERSION};
-use crate::telemetry::LinkStatistics;
+use ados_crsf_codec::link::LaneState;
+use ados_crsf_codec::telemetry::LinkStatistics;
 
 /// Fold a wire RSSI byte into physical dBm. The field is a signed dBm where
 /// some modules transmit the magnitude instead (an RSSI of −51 dBm sent as

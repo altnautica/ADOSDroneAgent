@@ -338,7 +338,7 @@ pub(super) async fn run_service_pass(
             // Only a FRESH link-statistics frame is reported: a stale reading
             // re-surfacing as current would be a lying surface.
             let fresh_link = match stats_age {
-                Some(age) if age <= crate::link::STATS_FRESH_WINDOW => link_copy,
+                Some(age) if age <= ados_crsf_codec::link::STATS_FRESH_WINDOW => link_copy,
                 _ => None,
             };
             let source = merge.lock().await.current(now).map(|(_, s)| s.as_str());

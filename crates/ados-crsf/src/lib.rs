@@ -13,31 +13,23 @@
 //! device and stands by at `ready` (see the binary's module doc for the full
 //! split).
 //!
-//! Module map: `frame` (framing + CRC + stream parser), `channels` (the
-//! 16×11-bit RC payload), `scale` (input → channel maths), `telemetry` /
-//! `params` (typed payload codecs), `bank` (a validated channel-value set),
-//! `sources` (the HID/injection authority merge + TTL), `hid` (the primary-
-//! gamepad reader), `link` (the lane state machine), `transport` (serial +
-//! TX/RX tasks), `cmdsock` (the command socket), `sidecar` (the state file),
-//! `modules` (the configured RC module set and its per-module status), `reg`
-//! (the regulatory posture + bring-up event), `config` + `paths` (wiring).
+//! The frame, channel, telemetry, parameter, scaling, bank and link-state
+//! codecs live in the `ados-crsf-codec` crate. Module map here: `sources`
+//! (the HID/injection authority merge + TTL), `hid` (the primary-gamepad
+//! reader), `transport` (serial + TX/RX tasks), `cmdsock` (the command
+//! socket), `sidecar` (the state file), `modules` (the configured RC module
+//! set and its per-module status), `reg` (the regulatory posture + bring-up
+//! event), `config` + `paths` (wiring).
 
-pub mod bank;
-pub mod channels;
 pub mod cmdsock;
 pub mod config;
 pub mod daemon;
-pub mod frame;
 pub mod hid;
 pub mod injector;
-pub mod link;
 pub mod modules;
-pub mod params;
 pub mod paths;
 pub mod reg;
-pub mod scale;
 pub mod sidecar;
 pub mod sources;
-pub mod telemetry;
 pub mod transport;
 pub mod watchdog;

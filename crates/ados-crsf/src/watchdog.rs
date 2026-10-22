@@ -95,8 +95,8 @@ pub async fn tx_liveness_watchdog(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::{CHANNEL_COUNT, CHANNEL_MID};
     use crate::sources::{ChannelSourceMode, MAX_INJECT_TTL};
+    use ados_crsf_codec::channels::{CHANNEL_COUNT, CHANNEL_MID};
 
     fn counters() -> Arc<WireCounters> {
         Arc::new(WireCounters::default())

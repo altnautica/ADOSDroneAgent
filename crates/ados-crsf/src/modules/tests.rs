@@ -7,11 +7,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use super::*;
-use crate::frame::ADDR_FLIGHT_CONTROLLER;
-use crate::link::LaneState;
 use crate::sidecar::{build_stats_value, StatsInputs};
-use crate::telemetry::{build_telemetry_frame, Telemetry};
 use crate::transport::{run_rx, WireCounters};
+use ados_crsf_codec::frame::ADDR_FLIGHT_CONTROLLER;
+use ados_crsf_codec::link::LaneState;
+use ados_crsf_codec::telemetry::{build_telemetry_frame, Telemetry};
 
 fn stats(rssi: (i8, i8), lq: u8, snr: i8, rf_mode: u8, tx_power: u8) -> LinkStatistics {
     LinkStatistics {

@@ -13,8 +13,10 @@ use crate::frame::{
     build_frame, FrameError, RawFrame, TYPE_ATTITUDE, TYPE_BATTERY, TYPE_FLIGHT_MODE, TYPE_GPS,
     TYPE_LINK_STATISTICS,
 };
+use alloc::string::String;
+use alloc::vec::Vec;
 
-/// Link statistics (type 0x14, 10-byte payload) — the received-side proof the
+/// Link statistics (type 0x14, 10-byte payload), the received-side proof the
 /// lane's liveness verdict keys on. All fields are one byte wide.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkStatistics {
@@ -44,8 +46,10 @@ pub struct LinkStatistics {
 }
 
 impl LinkStatistics {
+    /// Fixed payload size in bytes.
     pub const PAYLOAD_SIZE: usize = 10;
 
+    /// Decode a payload, rejecting a wrong size.
     pub fn decode(payload: &[u8]) -> Result<Self, FrameError> {
         if payload.len() != Self::PAYLOAD_SIZE {
             return Err(FrameError::PayloadSizeMismatch {
@@ -68,6 +72,7 @@ impl LinkStatistics {
         })
     }
 
+    /// Encode the payload bytes.
     pub fn encode_payload(&self) -> [u8; Self::PAYLOAD_SIZE] {
         [
             self.uplink_rssi_ant1 as u8,
@@ -94,7 +99,7 @@ impl LinkStatistics {
 
     /// The uplink TX power in milliwatts, mapping the wire `uplink_tx_power`
     /// power-level INDEX through the CRSF link-statistics power table. Returns
-    /// `None` for an index outside the defined table — an honest "unknown",
+    /// `None` for an index outside the defined table, an honest "unknown",
     /// never a fabricated figure. The table (index → mW): 0→0, 1→10, 2→25,
     /// 3→100, 4→500, 5→1000, 6→2000, 7→250, 8→50.
     pub fn uplink_tx_power_mw(&self) -> Option<u16> {
@@ -131,8 +136,10 @@ pub struct Gps {
 }
 
 impl Gps {
+    /// Fixed payload size in bytes.
     pub const PAYLOAD_SIZE: usize = 15;
 
+    /// Decode a payload, rejecting a wrong size.
     pub fn decode(payload: &[u8]) -> Result<Self, FrameError> {
         if payload.len() != Self::PAYLOAD_SIZE {
             return Err(FrameError::PayloadSizeMismatch {
@@ -151,6 +158,7 @@ impl Gps {
         })
     }
 
+    /// Encode the payload bytes.
     pub fn encode_payload(&self) -> [u8; Self::PAYLOAD_SIZE] {
         let mut out = [0u8; Self::PAYLOAD_SIZE];
         out[0..4].copy_from_slice(&self.lat_1e7.to_be_bytes());
@@ -177,8 +185,10 @@ pub struct Battery {
 }
 
 impl Battery {
+    /// Fixed payload size in bytes.
     pub const PAYLOAD_SIZE: usize = 8;
 
+    /// Decode a payload, rejecting a wrong size.
     pub fn decode(payload: &[u8]) -> Result<Self, FrameError> {
         if payload.len() != Self::PAYLOAD_SIZE {
             return Err(FrameError::PayloadSizeMismatch {
@@ -195,6 +205,7 @@ impl Battery {
         })
     }
 
+    /// Encode the payload bytes.
     pub fn encode_payload(&self) -> [u8; Self::PAYLOAD_SIZE] {
         let cap = self.capacity_used.to_be_bytes();
         [
@@ -214,14 +225,19 @@ impl Battery {
 /// angle scale is bench-verified before a consumer renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Attitude {
+    /// Pitch, raw wire units.
     pub pitch: i16,
+    /// Roll, raw wire units.
     pub roll: i16,
+    /// Yaw, raw wire units.
     pub yaw: i16,
 }
 
 impl Attitude {
+    /// Fixed payload size in bytes.
     pub const PAYLOAD_SIZE: usize = 6;
 
+    /// Decode a payload, rejecting a wrong size.
     pub fn decode(payload: &[u8]) -> Result<Self, FrameError> {
         if payload.len() != Self::PAYLOAD_SIZE {
             return Err(FrameError::PayloadSizeMismatch {
@@ -237,6 +253,7 @@ impl Attitude {
         })
     }
 
+    /// Encode the payload bytes.
     pub fn encode_payload(&self) -> [u8; Self::PAYLOAD_SIZE] {
         let mut out = [0u8; Self::PAYLOAD_SIZE];
         out[0..2].copy_from_slice(&self.pitch.to_be_bytes());
@@ -253,7 +270,7 @@ pub struct FlightMode(pub String);
 impl FlightMode {
     /// Decode a null-terminated string payload. Bytes after the first NUL are
     /// ignored; a payload with no NUL is taken whole. Non-UTF-8 bytes are
-    /// replaced, never fatal — a garbled mode string must not kill the parser.
+    /// replaced, never fatal, a garbled mode string must not kill the parser.
     pub fn decode(payload: &[u8]) -> Self {
         let end = payload
             .iter()
@@ -274,10 +291,15 @@ impl FlightMode {
 /// types pass through untyped so pass-through consumers still see them.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Telemetry {
+    /// Link statistics (0x14).
     LinkStatistics(LinkStatistics),
+    /// GPS (0x02).
     Gps(Gps),
+    /// Battery (0x08).
     Battery(Battery),
+    /// Attitude (0x1E).
     Attitude(Attitude),
+    /// Flight mode (0x21).
     FlightMode(FlightMode),
 }
 
@@ -527,7 +549,7 @@ mod tests {
         // A hand-built CRSF attitude payload (type 0x1E, 6 bytes: pitch, roll,
         // yaw as big-endian signed i16), decoded independently of the encoder.
         // The struct carries raw wire integers (the angle scale is bench-verified
-        // before a consumer renders it), so this proves the byte→i16 layout —
+        // before a consumer renders it), so this proves the byte→i16 layout,
         // in particular the two's-complement decode of the negative axes.
         let payload = [
             0xF3, 0xBB, // pitch = −3141

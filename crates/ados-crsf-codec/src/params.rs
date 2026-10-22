@@ -4,7 +4,7 @@
 //! These are extended frames: the payload leads with a destination and an
 //! origin device address, then the type-specific fields. The RC module's
 //! parameter system (packet rate, TX power, telemetry ratio, binding phrase)
-//! is driven through these three types. The lane is a transparent carrier —
+//! is driven through these three types. The lane is a transparent carrier,
 //! it frames and unframes the parameter data without interpreting field
 //! values; the consumer (a configuration UI) owns the semantics.
 //!
@@ -16,20 +16,27 @@ use crate::frame::{
     build_frame, FrameError, TYPE_PARAMETER_READ, TYPE_PARAMETER_SETTINGS_ENTRY,
     TYPE_PARAMETER_WRITE,
 };
+use alloc::vec::Vec;
 
 /// A parameter read request (type 0x2E): ask `dest` for chunk `chunk_index`
 /// of parameter `field_index`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParameterRead {
+    /// Destination device address.
     pub dest: u8,
+    /// Origin device address.
     pub origin: u8,
+    /// Parameter index.
     pub field_index: u8,
+    /// Chunk index within the parameter.
     pub chunk_index: u8,
 }
 
 impl ParameterRead {
+    /// Fixed payload size in bytes.
     pub const PAYLOAD_SIZE: usize = 4;
 
+    /// Decode a payload, rejecting a wrong size.
     pub fn decode(payload: &[u8]) -> Result<Self, FrameError> {
         if payload.len() != Self::PAYLOAD_SIZE {
             return Err(FrameError::PayloadSizeMismatch {
@@ -46,10 +53,12 @@ impl ParameterRead {
         })
     }
 
+    /// Encode the payload bytes.
     pub fn encode_payload(&self) -> [u8; Self::PAYLOAD_SIZE] {
         [self.dest, self.origin, self.field_index, self.chunk_index]
     }
 
+    /// Build a complete frame with the given sync byte.
     pub fn to_frame(&self, sync: u8) -> Result<Vec<u8>, FrameError> {
         build_frame(sync, TYPE_PARAMETER_READ, &self.encode_payload())
     }
@@ -59,9 +68,13 @@ impl ParameterRead {
 /// `dest` to the raw `data` bytes (the value encoding is parameter-specific).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterWrite {
+    /// Destination device address.
     pub dest: u8,
+    /// Origin device address.
     pub origin: u8,
+    /// Parameter index.
     pub field_index: u8,
+    /// Raw value bytes.
     pub data: Vec<u8>,
 }
 
@@ -69,6 +82,7 @@ impl ParameterWrite {
     /// Header bytes before the value data: dest + origin + field index.
     pub const HEADER_SIZE: usize = 3;
 
+    /// Decode a payload, rejecting one shorter than the header.
     pub fn decode(payload: &[u8]) -> Result<Self, FrameError> {
         if payload.len() < Self::HEADER_SIZE {
             return Err(FrameError::PayloadSizeMismatch {
@@ -85,6 +99,7 @@ impl ParameterWrite {
         })
     }
 
+    /// Encode the payload bytes.
     pub fn encode_payload(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::HEADER_SIZE + self.data.len());
         out.push(self.dest);
@@ -94,6 +109,7 @@ impl ParameterWrite {
         out
     }
 
+    /// Build a complete frame with the given sync byte.
     pub fn to_frame(&self, sync: u8) -> Result<Vec<u8>, FrameError> {
         build_frame(sync, TYPE_PARAMETER_WRITE, &self.encode_payload())
     }
@@ -104,10 +120,15 @@ impl ParameterWrite {
 /// come after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterSettingsEntry {
+    /// Destination device address.
     pub dest: u8,
+    /// Origin device address.
     pub origin: u8,
+    /// Parameter index.
     pub field_index: u8,
+    /// Chunks still to come after this one.
     pub chunks_remaining: u8,
+    /// This chunk's bytes.
     pub chunk: Vec<u8>,
 }
 
@@ -116,6 +137,7 @@ impl ParameterSettingsEntry {
     /// chunks remaining.
     pub const HEADER_SIZE: usize = 4;
 
+    /// Decode a payload, rejecting one shorter than the header.
     pub fn decode(payload: &[u8]) -> Result<Self, FrameError> {
         if payload.len() < Self::HEADER_SIZE {
             return Err(FrameError::PayloadSizeMismatch {
@@ -133,6 +155,7 @@ impl ParameterSettingsEntry {
         })
     }
 
+    /// Encode the payload bytes.
     pub fn encode_payload(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(Self::HEADER_SIZE + self.chunk.len());
         out.push(self.dest);
@@ -143,6 +166,7 @@ impl ParameterSettingsEntry {
         out
     }
 
+    /// Build a complete frame with the given sync byte.
     pub fn to_frame(&self, sync: u8) -> Result<Vec<u8>, FrameError> {
         build_frame(sync, TYPE_PARAMETER_SETTINGS_ENTRY, &self.encode_payload())
     }

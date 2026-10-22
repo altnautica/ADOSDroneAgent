@@ -319,8 +319,11 @@ async fn param_write_queues_a_valid_wire_frame() {
     assert_eq!(resp["queued"], true);
     let frames = st.oob.drain();
     assert_eq!(frames.len(), 1);
-    let (frame, _) = crate::frame::parse_frame(&frames[0]).unwrap();
-    assert_eq!(frame.frame_type, crate::frame::TYPE_PARAMETER_WRITE);
+    let (frame, _) = ados_crsf_codec::frame::parse_frame(&frames[0]).unwrap();
+    assert_eq!(
+        frame.frame_type,
+        ados_crsf_codec::frame::TYPE_PARAMETER_WRITE
+    );
     let decoded = ParameterWrite::decode(&frame.payload).unwrap();
     assert_eq!(decoded.dest, ADDR_TRANSMITTER_MODULE);
     assert_eq!(decoded.origin, ADDR_HANDSET);

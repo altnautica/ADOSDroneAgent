@@ -67,13 +67,13 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::bank::BankError;
-use crate::channels::{CHANNEL_COUNT, CHANNEL_MAX, CHANNEL_MIN};
-use crate::frame::{ADDR_HANDSET, ADDR_TRANSMITTER_MODULE, MAX_PAYLOAD};
 use crate::injector::InjectorAuth;
-use crate::params::ParameterWrite;
 use crate::sources::{clamp_ttl, SourceMerge, DEFAULT_INJECT_TTL};
 use crate::transport::OobQueue;
+use ados_crsf_codec::bank::BankError;
+use ados_crsf_codec::channels::{CHANNEL_COUNT, CHANNEL_MAX, CHANNEL_MIN};
+use ados_crsf_codec::frame::{ADDR_HANDSET, ADDR_TRANSMITTER_MODULE, MAX_PAYLOAD};
+use ados_crsf_codec::params::ParameterWrite;
 
 /// Largest parameter value payload a single write frame can carry: the wire
 /// payload ceiling minus the dest/origin/field-index header.

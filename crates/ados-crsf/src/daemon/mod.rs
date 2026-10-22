@@ -44,10 +44,10 @@ use tokio::sync::{watch, Mutex, Notify};
 
 use crate::cmdsock::{self, CmdState};
 use crate::config::{profile_is_drone, CrsfLaneConfig, LaneMode};
-use crate::link::{derive_state, LaneState, LinkInputs};
 use crate::sidecar::{build_stats_value, write_stats_sidecar, StatsInputs};
 use crate::sources::{ChannelSourceMode, SourceMerge};
 use crate::transport::{open_serial, run_rx, run_tx, TelemetryState, WireCounters, CRSF_BAUD};
+use ados_crsf_codec::link::{derive_state, LaneState, LinkInputs};
 
 const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 const PROFILE_CONF: &str = "/etc/ados/profile.conf";

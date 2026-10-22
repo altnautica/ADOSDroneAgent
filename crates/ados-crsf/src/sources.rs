@@ -39,8 +39,8 @@
 
 use std::time::{Duration, Instant};
 
-use crate::bank::{BankError, ChannelBank};
-use crate::channels::CHANNEL_COUNT;
+use ados_crsf_codec::bank::{BankError, ChannelBank};
+use ados_crsf_codec::channels::CHANNEL_COUNT;
 
 // The PIC-verdict authority half lives in `ados-hid::pic_view` (ground-profile,
 // so the same verdict propagates over every bearer). Re-exported here so this
@@ -270,7 +270,7 @@ impl SourceMerge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::channels::{CHANNEL_MAX, CHANNEL_MID, CHANNEL_MIN};
+    use ados_crsf_codec::channels::{CHANNEL_MAX, CHANNEL_MID, CHANNEL_MIN};
 
     fn t0() -> Instant {
         Instant::now()

@@ -3,11 +3,12 @@
 //!
 //! Channel value convention: `172` = full low, `992` = center, `1811` = full
 //! high. The 11 bits could carry 0..2047 but the usable endpoint range is
-//! 172..=1811 (1640 steps); values this service transmits are clamped to that
+//! 172..=1811 (1640 steps); values a transmitter sends are clamped to that
 //! range at the injection boundary, never here (the codec is faithful to the
 //! wire and round-trips any 11-bit value).
 
 use crate::frame::{build_frame, FrameError, ADDR_FLIGHT_CONTROLLER, TYPE_RC_CHANNELS_PACKED};
+use alloc::vec::Vec;
 
 /// Number of RC channels in the packed frame.
 pub const CHANNEL_COUNT: usize = 16;
@@ -46,7 +47,7 @@ pub fn pack_channels(channels: &[u16; CHANNEL_COUNT]) -> [u8; PACKED_SIZE] {
 /// Unpack the 22-byte payload back into 16 channel values.
 ///
 /// Deliberately implemented by per-bit indexing (channel `ch` bit `b` is
-/// payload bit `ch * 11 + b`), NOT by reversing the packer's accumulator —
+/// payload bit `ch * 11 + b`), NOT by reversing the packer's accumulator,
 /// two independent readings of the bit-layout rule, so the round-trip tests
 /// genuinely cross-check the packer instead of mirroring it.
 pub fn unpack_channels(payload: &[u8; PACKED_SIZE]) -> [u16; CHANNEL_COUNT] {
