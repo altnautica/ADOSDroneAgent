@@ -4,15 +4,13 @@
 //! returns is L2-normalized so the tracker's cosine similarity is a clean dot
 //! product, the standard re-id distance.
 //!
-//! Why the crop lives here (the engine), not in a backend: both the in-process
-//! ONNX path and the Python RKNN sidecar consume the SAME model-input-sized
-//! rgb24 crop, so cropping + resizing once in the engine keeps the two paths
-//! byte-identical at the crop boundary. The ONNX path then applies the ImageNet
-//! normalization in code (the detector path divides by 255 the same way — the
-//! norm is applied outside the model, not folded into it); the RKNN path feeds
-//! the raw uint8 crop and the converted `.rknn` folds the same normalization via
-//! its `rknn.config(mean, std)`. The two must agree numerically — the SITL
-//! distractor-survival check is the parity gate.
+//! The crop is separate from any inference backend so that every backend that
+//! consumes the same model-input-sized rgb24 crop sees byte-identical input at
+//! the crop boundary. [`preprocess_osnet_nchw`] then applies the ImageNet
+//! normalization in code (outside the model, not folded into it) for runtimes
+//! that take float tensors; a runtime that folds the same normalization into a
+//! converted model can take the raw uint8 crop instead. Both paths must agree
+//! numerically.
 
 use ados_protocol::framebus::BoundingBox;
 
@@ -91,9 +89,9 @@ pub fn crop_resize_rgb24(
 }
 
 /// Normalize a packed rgb24 crop (`w` x `h`) into the OSNet input tensor: NCHW
-/// f32 with `(pixel - mean) / std` per channel (ImageNet stats). This is the
-/// in-process ONNX path; the RKNN path sends the raw uint8 crop and lets the
-/// converted model fold the same normalization.
+/// f32 with `(pixel - mean) / std` per channel (ImageNet stats). Use this for
+/// float-tensor runtimes; a model that folds the same normalization in takes the
+/// raw uint8 crop instead.
 pub fn preprocess_osnet_nchw(crop: &[u8], w: u32, h: u32) -> Option<Vec<f32>> {
     let plane = w as usize * h as usize;
     if crop.len() < plane * 3 {

@@ -145,9 +145,9 @@ impl VisionEngine {
         let crops: Vec<Option<Vec<u8>>> = detections
             .iter()
             .map(|d| {
-                d.bbox
-                    .as_ref()
-                    .and_then(|b| crate::reid::crop_resize_rgb24(frame, width, height, b, iw, ih))
+                d.bbox.as_ref().and_then(|b| {
+                    ados_tracker::reid::crop_resize_rgb24(frame, width, height, b, iw, ih)
+                })
             })
             .collect();
 
@@ -173,7 +173,7 @@ impl VisionEngine {
                     let crop = crop?;
                     match loaded.embed(&crop, iw, ih, FrameFormat::Rgb24) {
                         Ok(Some(mut emb)) if !emb.is_empty() => {
-                            crate::reid::l2_normalize(&mut emb);
+                            ados_tracker::reid::l2_normalize(&mut emb);
                             Some(Appearance::from_features(emb))
                         }
                         _ => None,
@@ -228,7 +228,7 @@ impl VisionEngine {
 /// tracker's predicted box (coast/ambiguous frame, no measured input).
 fn merge_tracked(
     mut detections: Vec<Detection>,
-    update: crate::tracker::TrackUpdate,
+    update: ados_tracker::tracker::TrackUpdate,
 ) -> Vec<Detection> {
     let Some(mut locked) = update.detection else {
         // Idle or tentative-not-yet-confirmed: nothing to stamp.

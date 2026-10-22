@@ -1,13 +1,12 @@
-//! YOLO detection-head decoding for the Rust (ONNX) backend.
+//! YOLO detection-head decoding.
 //!
-//! This is the Rust twin of the Python sidecar's `decode_yolo_detections`: it
-//! turns a model's raw output tensor into [`Detection`]s in source-frame pixels,
+//! Turns a model's raw output tensor into [`Detection`]s in source-frame pixels,
 //! selecting the layout by [`DetectionHead`].
 //!
-//! * [`DetectionHead::Yolo8`] — the transposed `[1, 4+nc, anchors]` head: four
+//! * [`DetectionHead::Yolo8`], the transposed `[1, 4+nc, anchors]` head: four
 //!   box rows (cx, cy, w, h) then one score row per class, no objectness. This
 //!   is the ultralytics YOLOv8/v11 export.
-//! * [`DetectionHead::Yolo5`] — the legacy `[1, anchors, 5+nc]` head: per anchor
+//! * [`DetectionHead::Yolo5`], the legacy `[1, anchors, 5+nc]` head: per anchor
 //!   `[cx, cy, w, h, objectness, class_scores...]` (YOLOv5/v7).
 //!
 //! The decoder is orientation robust: the raw output is a flat row-major buffer
@@ -122,8 +121,8 @@ pub fn decode(data: &[f32], rows: usize, cols: usize, p: &DecodeParams) -> Vec<D
 /// when a dimension is zero or the frame buffer is too small.
 ///
 /// The simple stretch resize (not a letterbox) is deliberate: it matches the
-/// `frame / input` box scale-back in [`decode`] and the Python sidecar's own
-/// scaling, so the Rust ONNX path and the sidecar path stay box-consistent. A
+/// `frame / input` box scale-back in [`decode`], so preprocessing and decoding
+/// stay box-consistent. A
 /// letterbox would have to land in both decoders at once.
 pub fn preprocess_rgb24_nchw(
     frame: &[u8],

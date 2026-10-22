@@ -17,3 +17,4 @@ all-features = true
 targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
+ados-protocol = { workspace = true }

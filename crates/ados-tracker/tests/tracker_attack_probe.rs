@@ -5,7 +5,7 @@
 //! association HOLDS the lock on the true target across the whole danger band, or
 //! whether some calibration of the distractor's similarity lets its combined
 //! score (boosted by a perfect motion fit + higher detector confidence) capture
-//! the lock with NO Uncertain / no confidence drop / no lock-state change — a
+//! the lock with NO Uncertain / no confidence drop / no lock-state change, a
 //! silent swap.
 //!
 //! Unlike the shipped suite (which uses a trivially-dissimilar tag-1 distractor),
@@ -13,7 +13,7 @@
 //! threshold behaviour of `decide` is exercised.
 
 use ados_protocol::framebus::{BoundingBox, Detection, LockState};
-use ados_vision::tracker::{
+use ados_tracker::tracker::{
     Appearance, Candidate, SingleObjectTracker, TrackState, TrackerConfig, APPEARANCE_DIM,
 };
 
@@ -122,7 +122,7 @@ fn run_crossing(sim: f32) -> (Vec<FrameRecord>, u64) {
             target_app(),
         );
         // The distractor rides the prediction exactly (perfect motion fit) and is
-        // LOUDER (higher confidence) — the worst case for outranking the target.
+        // LOUDER (higher confidence), the worst case for outranking the target.
         let distractor = Candidate::with_appearance(
             det(pred_x, 100.0, 40.0, 40.0, 0.99, "object"),
             distractor_app(sim),
@@ -183,7 +183,7 @@ fn following_distractor(r: &FrameRecord) -> bool {
 // ===========================================================================
 
 /// A TRUE silent in-lock swap requires the ORIGINAL locked id to be dragged onto
-/// the distractor with no honesty signal — NOT an honest drop+re-acquire onto a
+/// the distractor with no honesty signal, NOT an honest drop+re-acquire onto a
 /// fresh id after a None gap. This walks the per-frame records keeping the id the
 /// lock held before the crossing (`locked_id`) and only flags a frame where:
 ///   * the box follows the distractor while clearly separated,
@@ -212,7 +212,7 @@ fn true_inlock_swap_frames(records: &[FrameRecord], locked_id: u64) -> Vec<usize
 /// NO calibration drags the ORIGINAL held id silently onto the distractor. This
 /// is the core attack: somewhere in `(min_appearance, 1 - ambiguous_margin)` is
 /// the window where the distractor is admissible AND clearly the best by combined
-/// score AND not close enough to the target to trigger the ambiguity hold —
+/// score AND not close enough to the target to trigger the ambiguity hold ,
 /// exactly where a naive associator picks it silently while still claiming the
 /// locked id.
 #[test]
@@ -240,7 +240,7 @@ fn danger_band_sweep_never_silent_swaps() {
 /// follows the distractor must EITHER carry a fresh id reached through a None gap
 /// (honest re-acquire) OR be flagged Uncertain / not-measured / redesignation.
 /// A clean measured Locked on the distractor under the ORIGINAL id is the only
-/// thing forbidden — and is exactly what `true_inlock_swap_frames` catches; this
+/// thing forbidden, and is exactly what `true_inlock_swap_frames` catches; this
 /// asserts there is no OTHER dishonest follow hiding under id-bookkeeping.
 #[test]
 fn every_distractor_follow_is_honest_or_a_fresh_reacquire() {
@@ -277,7 +277,7 @@ fn every_distractor_follow_is_honest_or_a_fresh_reacquire() {
 }
 
 /// The single most dangerous calibration, isolated and fully instrumented: a
-/// distractor whose similarity sits in the danger window — above the 0.5 gate,
+/// distractor whose similarity sits in the danger window, above the 0.5 gate,
 /// comfortably below the target's ~1.0, and outside the 0.08 ambiguity margin.
 /// The target has veered far off. If the appearance gating is sound the lock is
 /// HELD on the target (or honestly held Uncertain), never silently dragged onto
@@ -286,7 +286,7 @@ fn every_distractor_follow_is_honest_or_a_fresh_reacquire() {
 fn worst_case_admissible_distractor_holds_or_uncertain_never_silent() {
     // 0.6: above min_appearance (0.5), well below target (~1.0), and the
     // best-minus-second margin (~0.4) hugely exceeds ambiguous_margin (0.08), so
-    // the ambiguity guard will NOT fire — this is precisely the window where a
+    // the ambiguity guard will NOT fire, this is precisely the window where a
     // naive best-combined-score pick would silently capture the distractor.
     let sim = 0.6f32;
     let (records, locked_id) = run_crossing(sim);
@@ -318,7 +318,7 @@ fn worst_case_admissible_distractor_holds_or_uncertain_never_silent() {
     // Stronger: the reported box must never follow the distractor at all once the
     // two are separated. The appearance gate (0.6 < ... ) should reject the
     // distractor as the best appearance match relative to the target, so the lock
-    // either tracks the (veering) target or honestly coasts — but it must not end
+    // either tracks the (veering) target or honestly coasts, but it must not end
     // up on the distractor.
     assert!(
         followed.is_empty(),
@@ -397,7 +397,7 @@ fn admissible_distractor_provokes_an_honest_response_not_a_clean_lie() {
 /// Confirm the scenario is non-vacuous: the distractor really does ride the
 /// prediction (so a motion-only tracker WOULD capture it). We assert that with no
 /// appearance cue (motion-only path) the same geometry DOES drag the box onto the
-/// distractor — proving the appearance path is what saves it, not a lucky
+/// distractor, proving the appearance path is what saves it, not a lucky
 /// geometry that never tempted the tracker in the first place.
 #[test]
 fn scenario_is_non_vacuous_motion_only_would_capture() {

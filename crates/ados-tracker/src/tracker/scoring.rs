@@ -50,7 +50,7 @@ impl SingleObjectTracker {
             // across the gate. IoU sharpens it when the boxes overlap.
             let motion = motion_fit(geo_iou, dist, gate);
             // Appearance similarity to the template (1.0 when we have no
-            // template or no descriptor — appearance is simply not a cue then,
+            // template or no descriptor, appearance is simply not a cue then,
             // it neither helps nor vetoes).
             let (appearance, has_app) = match (&track.template, &cand.appearance) {
                 (Some(t), Some(a)) => (self.appearance.similarity(t, a), true),
@@ -79,7 +79,7 @@ impl SingleObjectTracker {
         }
         // Order by combined score for determinism / debuggability. The decision
         // is appearance-first (see `decide`), so this ordering is NOT the
-        // association key on the appearance path — it only ranks the motion-only
+        // association key on the appearance path, it only ranks the motion-only
         // fallback, where the combined score IS the decision.
         out.sort_by(|a, b| total_cmp(b.score, a.score));
         out
@@ -100,10 +100,10 @@ impl SingleObjectTracker {
     ///    [`TrackerConfig::ambiguous_margin`] of that best appearance. A candidate
     ///    that is strictly more appearance-similar (beyond the margin) can never
     ///    be demoted below a less-similar one by a louder confidence or a better
-    ///    motion fit — the cue that owns identity is not out-voted by the cues
+    ///    motion fit, the cue that owns identity is not out-voted by the cues
     ///    that only say where the box sits.
     /// 3. If a second admissible candidate's appearance is within the margin of
-    ///    the best, the two are appearance-indistinguishable — the tracker refuses
+    ///    the best, the two are appearance-indistinguishable, the tracker refuses
     ///    to pick and goes [`Decision::Ambiguous`] (hold + re-designate), exactly
     ///    as the co-visible identical case does.
     ///
@@ -122,7 +122,7 @@ impl SingleObjectTracker {
         if !appearance_live {
             // Motion-only path: combined score already ranked them; take the best.
             // (No appearance template/descriptor means appearance neither helps
-            // nor vetoes — the motion gate carries the decision.)
+            // nor vetoes, the motion gate carries the decision.)
             let best = scored
                 .iter()
                 .enumerate()
@@ -163,7 +163,7 @@ impl SingleObjectTracker {
             .collect();
 
         // Contention → Uncertain: if two (or more) admissible candidates are in
-        // the appearance-tie group, they are indistinguishable by appearance —
+        // the appearance-tie group, they are indistinguishable by appearance ,
         // refuse to silently pick. This fires for the near-target chameleon (its
         // similarity sits within the margin of the target's), not only for
         // cosine-identical pairs.
@@ -175,7 +175,7 @@ impl SingleObjectTracker {
 
         // A single, unambiguous appearance winner. (When the tie group has one
         // member there is no appearance tie to break, so motion/confidence play no
-        // ranking role — they only ever tie-break WITHIN the group, which here is
+        // ranking role, they only ever tie-break WITHIN the group, which here is
         // a single candidate.) Blend is safe: the winner is the clear appearance
         // match with no near-competitor, so the EMA cannot be dragged onto a
         // prediction-riding distractor.
@@ -272,7 +272,7 @@ pub(super) fn motion_fit(geo_iou: f32, dist: f32, gate: f32) -> f32 {
 /// coast budget exhausted, before any re-acquire) reports `Lost`. `assoc` is the
 /// association confidence computed for this frame. A downstream consumer never
 /// has to guess whether a box was actually seen-and-resolved this frame or only
-/// predicted — a silent identity swap cannot hide because the uncertainty is on
+/// predicted, a silent identity swap cannot hide because the uncertainty is on
 /// the wire.
 pub(super) fn reported(track: &Track, bbox: BoundingBox, lock: LockState, assoc: f32) -> Detection {
     Detection {

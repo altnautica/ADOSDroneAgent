@@ -52,7 +52,7 @@ impl SingleObjectTracker {
                 track.coast_ambiguous = false;
                 // Re-association coming OUT of a miss-induced coast must pass
                 // through a transitional re-confirm frame (reported Uncertain)
-                // before it is trusted as Confirmed again — a handover laundered
+                // before it is trusted as Confirmed again, a handover laundered
                 // during an occlusion surfaces doubt for at least one frame
                 // instead of snapping straight Coasting→Confirmed.
                 let entering_reconfirm = was_miss_coast && !track.reconfirming;
@@ -135,7 +135,7 @@ impl SingleObjectTracker {
                 track.hits = 0;
                 match track.state {
                     // A tentative track that misses before confirming is dropped
-                    // immediately — it never earned an id, so nothing to hold.
+                    // immediately, it never earned an id, so nothing to hold.
                     TrackState::Tentative => {
                         self.needs_redesignation = false;
                         TrackUpdate {
@@ -160,7 +160,7 @@ impl SingleObjectTracker {
     /// Coast (or, on the budget edge, drop) a confirmed/coasting track that did
     /// not get a clean association this frame. `ambiguous` distinguishes a
     /// genuine miss (occlusion) from an appearance-ambiguity hold (two
-    /// identical-looking candidates) — the latter raises re-designation.
+    /// identical-looking candidates), the latter raises re-designation.
     pub(super) fn hold_or_drop(
         &mut self,
         mut track: Track,
@@ -170,13 +170,13 @@ impl SingleObjectTracker {
     ) -> TrackUpdate {
         if track.misses > self.cfg.max_coast_frames {
             // Real loss: drop the lock. A future detection re-acquires under a
-            // fresh id. Clear the ambiguity latch — there is no lock to confirm.
+            // fresh id. Clear the ambiguity latch, there is no lock to confirm.
             self.needs_redesignation = false;
             // Emit one final Lost event on the wire for the track that just
             // dropped: the predicted box carries the OLD id flagged
             // `LockState::Lost` so a downstream consumer sees the loss explicitly
             // (this is where the wire enum's `Lost` is produced). The live held id
-            // (`TrackUpdate::track_id`) is cleared — the lock is gone — so a
+            // (`TrackUpdate::track_id`) is cleared, the lock is gone, so a
             // drop+re-acquire still travels through a None-id gap and never reads
             // as an in-lock swap.
             let lost = reported(&track, predicted, LockState::Lost, 0.0);

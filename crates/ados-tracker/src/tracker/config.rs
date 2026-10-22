@@ -13,7 +13,7 @@ pub struct TrackerConfig {
     /// diagonal. A fast/weaving target can move enough that its boxes barely
     /// overlap frame-to-frame; an in-diagonal center still associates. This is
     /// the *base* multiplier; the live gate widens with the filter's position
-    /// uncertainty (see [`max_gate_dist`]).
+    /// uncertainty (see `max_gate_dist`).
     pub max_center_dist_diag: f32,
     /// How strongly the filter's own position uncertainty widens the gate.
     /// During a coast the position covariance grows, so the gate should grow
@@ -60,8 +60,8 @@ pub struct TrackerConfig {
     pub template_lr: f32,
     /// Weights for the combined association score: (appearance, motion, detector
     /// confidence). Used only as the TIE-BREAK among candidates whose appearance
-    /// similarity is within [`Self::ambiguous_margin`] of the best — appearance
-    /// alone owns the primary ranking (see [`SingleObjectTracker::decide`]), so a
+    /// similarity is within [`Self::ambiguous_margin`] of the best, appearance
+    /// alone owns the primary ranking (see `SingleObjectTracker::decide`), so a
     /// louder/closer distractor cannot out-rank a strictly-more-similar candidate
     /// through this score. Normalized internally, so only the ratio matters.
     pub score_weights: ScoreWeights,
@@ -148,7 +148,7 @@ pub struct TrackUpdate {
     /// the ambiguity surfaces.
     pub needs_redesignation: bool,
     /// True only when the reported track was seeded by an explicit operator
-    /// [`SingleObjectTracker::designate`] call. A consumer publish path gates the
+    /// [`SingleObjectTracker::designate`](super::SingleObjectTracker::designate) call. A consumer publish path gates the
     /// wire `lock_state` on this: an auto-seeded track (`false`) is tracked and
     /// carries an id, but is never presented as locked, mirroring the offload
     /// publish path. `false` on a frame with nothing to report.

@@ -7,14 +7,14 @@
 //! a fixed distinct appearance: the identical-phase associations once blended the
 //! distractor into the template (EMA, lr=0.1) and poisoned it, after which the
 //! distractor beat the genuine target against the tracker's OWN drifted template.
-//! That route is now closed — association is appearance-first (the louder
+//! That route is now closed, association is appearance-first (the louder
 //! prediction-riding distractor can never demote the strictly-more-similar true
 //! target) and the EMA blend is suppressed under contention (so the foothold
 //! associations cannot walk the template onto the distractor). Both the control
 //! and the foothold sweep must show no clean capture.
 
 use ados_protocol::framebus::{BoundingBox, Detection, LockState};
-use ados_vision::tracker::{
+use ados_tracker::tracker::{
     Appearance, Candidate, SingleObjectTracker, TrackerConfig, APPEARANCE_DIM,
 };
 
@@ -129,7 +129,7 @@ fn zero_foothold_fixed_distractor_does_not_capture() {
 }
 
 /// A brief identical foothold THEN a fixed distinct appearance must NOT capture
-/// the held id — the EMA template-poison route is closed. No length of identical
+/// the held id, the EMA template-poison route is closed. No length of identical
 /// foothold (0..=10 frames) may let the subsequently-distinct (sim 0.70)
 /// distractor cleanly capture the held id while the true target is present and
 /// separated.

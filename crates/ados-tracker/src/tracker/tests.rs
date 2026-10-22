@@ -33,8 +33,8 @@ fn obj(x: f32, y: f32) -> Detection {
 /// A synthetic appearance descriptor distinct per `tag`. Two detections with
 /// the same tag look alike; different tags look different (orthogonal-ish
 /// one-hot-ish vectors). This stands in for a real re-id embedding so
-/// association can be exercised without pixels — a real extractor builds the
-/// descriptor from the bbox pixels at Gate-B.
+/// association can be exercised without pixels, a real extractor builds the
+/// descriptor from the bbox pixels.
 fn appearance_for(tag: usize) -> Appearance {
     let mut v = vec![0.0f32; APPEARANCE_DIM];
     // Put most of the energy in one slot keyed by tag, with a small shared
@@ -322,7 +322,7 @@ fn scenario_c2_long_occlusion_reacquires_new_id() {
 
 /// (a) DIFFERENT-appearance shadowing distractor riding the prediction while
 /// the target maneuvers off it. The lock must be HELD on the target, the
-/// distractor NOT captured, zero swaps — because the appearance gate rejects
+/// distractor NOT captured, zero swaps, because the appearance gate rejects
 /// the differently-coloured distractor even though it is dead-center in the
 /// motion gate. This is the scenario that FAILED motion-only.
 #[test]
@@ -407,7 +407,7 @@ fn scenario_adversarial_shadowing_distractor_held_on_target() {
 }
 
 /// (b) IDENTICAL-appearance distractor in the same gate: the tracker MUST go
-/// Uncertain and flag re-designation — it must NOT silently swap. This is the
+/// Uncertain and flag re-designation, it must NOT silently swap. This is the
 /// honest, never-silent backstop for the information-theoretically
 /// unsolvable case. We assert the lock-state is Uncertain and that
 /// re-designation is requested at the ambiguous frame; we do NOT claim the
@@ -431,7 +431,7 @@ fn scenario_identical_distractor_goes_uncertain_and_flags_redesignation() {
     );
 
     // An IDENTICAL-looking (tag 0) distractor lands in the gate, right beside
-    // the predicted target position — two indistinguishable candidates.
+    // the predicted target position, two indistinguishable candidates.
     let pred_x = 4.0 * 8.0;
     let target = cand(det(pred_x, 100.0, 40.0, 40.0, 0.90, "object"), 0);
     let identical = cand(det(pred_x + 8.0, 100.0, 40.0, 40.0, 0.91, "object"), 0);

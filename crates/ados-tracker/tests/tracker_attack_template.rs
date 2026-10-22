@@ -9,7 +9,7 @@
 //! template cannot be silently walked off the true target.
 
 use ados_protocol::framebus::{BoundingBox, Detection, LockState};
-use ados_vision::tracker::{
+use ados_tracker::tracker::{
     Appearance, Candidate, SingleObjectTracker, TrackerConfig, APPEARANCE_DIM,
 };
 
@@ -72,7 +72,7 @@ fn center_err(report: &Detection, truth: &Detection) -> f32 {
 ///
 /// The honesty contract: across the poisoning frames the distractor may be
 /// associated (it is the only thing in the gate and it is admissible), but the
-/// template must not drift so far that the genuine target is then locked out —
+/// template must not drift so far that the genuine target is then locked out ,
 /// AND no frame may silently report Locked-measured on the distractor while the
 /// true target is simultaneously present and separated (there is no such frame
 /// here because the target is occluded, so the real check is the re-lock after).
@@ -105,7 +105,7 @@ fn sole_distractor_cannot_poison_template_enough_to_lock_out_target() {
     }
 
     // The genuine target re-appears (its true appearance, sim 1.0), on its own
-    // continued path. It must still be recognisable — the template must not have
+    // continued path. It must still be recognisable, the template must not have
     // been walked onto the distractor.
     let mut relocked_on_target = false;
     for k in 0..6usize {
@@ -129,7 +129,7 @@ fn sole_distractor_cannot_poison_template_enough_to_lock_out_target() {
          not poison the template enough to lock the genuine target out"
     );
     // The id is either the held original (template held through the coast) or a
-    // fresh re-acquire after an honest drop — never a swap onto the distractor's
+    // fresh re-acquire after an honest drop, never a swap onto the distractor's
     // identity while the target was present. Both are acceptable; what matters is
     // the target is tracked, asserted above. Sanity: a live id exists.
     assert!(
@@ -240,7 +240,7 @@ fn one_admissible_association_cannot_cross_the_gate_in_one_step() {
         app_at_sim(0.55),
     )]);
     // Next frame: the genuine target alone, on path. It MUST still be admissible
-    // (associated, Locked) — proving one bad EMA step did not lock it out.
+    // (associated, Locked), proving one bad EMA step did not lock it out.
     let u = t.update_with_appearance(&[Candidate::with_appearance(
         det(5.0 * 8.0, 100.0, 40.0, 40.0, 0.90, "object"),
         target_app(),

@@ -11,11 +11,11 @@
 //! descriptors (as two real objects would), and two identical-looking objects
 //! get the SAME descriptor (the information-theoretically unsolvable case the
 //! tracker must refuse to resolve silently). A real deployment extracts the
-//! descriptor from the bbox pixels (Gate-B); here we supply it directly so
+//! descriptor from the bbox pixels; here we supply it directly so
 //! association is exercised without pixels.
 
 use ados_protocol::framebus::{BoundingBox, Detection, LockState};
-use ados_vision::tracker::{
+use ados_tracker::tracker::{
     Appearance, Candidate, SingleObjectTracker, TrackState, TrackerConfig, APPEARANCE_DIM,
 };
 
@@ -78,7 +78,7 @@ fn id_changes(ids: &[Option<u64>]) -> usize {
 }
 
 /// True if the id stream ever changes from id A directly to id B with NO None
-/// frame in between — a silent in-lock swap.
+/// frame in between, a silent in-lock swap.
 fn has_inlock_swap(ids: &[Option<u64>]) -> bool {
     let mut prev: Option<u64> = None;
     for id in ids {
@@ -302,7 +302,7 @@ fn one_in_three_drops_fast_target_holds_id() {
 }
 
 // ===========================================================================
-// (b2) Sparse-but-consistent sighting (2-in-3 drops) — identity-SAFE, but a
+// (b2) Sparse-but-consistent sighting (2-in-3 drops), identity-SAFE, but a
 // documented robustness limit of the confirm phase.
 // ===========================================================================
 
@@ -341,11 +341,11 @@ fn sparse_two_in_three_sighting_never_mis_identifies() {
 /// so it never reports a stable id. This is by design, not a silent-swap bug: the
 /// spurious-blob guard drops a still-Tentative track on its very first miss
 /// (`single_spurious_blob_never_claims_an_id` depends on exactly that), and
-/// confirmation needs `confirm_hits` CONSECUTIVE associated frames — which a
+/// confirmation needs `confirm_hits` CONSECUTIVE associated frames, which a
 /// 2-in-3-drops pattern can never accumulate. The behaviour is identity-SAFE
 /// (`sparse_two_in_three_sighting_never_mis_identifies` proves no false / mis-id),
 /// it is only a robustness limit: a detector this sparse simply will not hold a
-/// lock. The remedies live outside the never-silent core — a denser detector, or
+/// lock. The remedies live outside the never-silent core, a denser detector, or
 /// a deployment that sets `confirm_hits = 1` (accepting that a one-frame blob can
 /// then claim an id). We do NOT relax the Tentative-drop guard to make this pass,
 /// because that guard is the spurious-blob defence; this test stands as the honest
@@ -371,13 +371,13 @@ fn sparse_two_in_three_sighting_does_not_confirm_a_lock() {
     assert!(
         ids.iter().all(Option::is_none),
         "documented: a 2-in-3-drops sparse sighting never confirms a lock, so no id \
-         is reported. If this fails, the confirm-phase lifecycle changed — revisit \
+         is reported. If this fails, the confirm-phase lifecycle changed, revisit \
          whether the spurious-blob guard is still intact: {ids:?}"
     );
 }
 
 // ===========================================================================
-// (c) Bbox jitter at the association-gate boundary — the FIXED churn case.
+// (c) Bbox jitter at the association-gate boundary, the FIXED churn case.
 // ===========================================================================
 
 /// A single continuously-visible object under large oscillating jitter (about
@@ -419,7 +419,7 @@ fn boundary_jitter_holds_one_id_no_churn() {
 
 /// The dangerous version of (c): jitter at the gate boundary while a DIFFERENT-
 /// looking distractor hovers just outside the gate. A jitter excursion must not
-/// let the distractor slip in and capture the lock — appearance vetoes it.
+/// let the distractor slip in and capture the lock, appearance vetoes it.
 #[test]
 fn boundary_jitter_with_lurking_distractor_no_capture() {
     let cfg = TrackerConfig::default();
@@ -450,7 +450,7 @@ fn boundary_jitter_with_lurking_distractor_no_capture() {
 }
 
 // ===========================================================================
-// The shadowing distractor — the headline B0 fix.
+// The shadowing distractor, the headline fix.
 // ===========================================================================
 
 /// A DIFFERENT-appearance distractor sits exactly on the target's prediction and
@@ -531,7 +531,7 @@ fn shadowing_distractor_does_not_capture_with_appearance() {
 
 /// The IDENTICAL-appearance case: a same-looking distractor in the same gate is
 /// impossible to disambiguate from vision. The tracker must go Uncertain and
-/// request re-designation — NEVER a silent swap. This is the honest backstop,
+/// request re-designation, NEVER a silent swap. This is the honest backstop,
 /// not a magic resolution.
 #[test]
 fn identical_distractor_goes_uncertain_never_silent() {

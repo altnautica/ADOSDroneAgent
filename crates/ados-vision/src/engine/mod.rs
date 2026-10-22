@@ -31,7 +31,7 @@ use crate::ring::{FrameTiming, RingWriter};
 mod models;
 mod tracking;
 
-use crate::tracker::{Appearance, Candidate, SingleObjectTracker, TrackerConfig};
+use ados_tracker::tracker::{Appearance, Candidate, SingleObjectTracker, TrackerConfig};
 
 /// Broadcast depth for frame descriptors and detections. Slow subscribers lag
 /// and skip rather than back up the publisher (latest-wins, like the rings).

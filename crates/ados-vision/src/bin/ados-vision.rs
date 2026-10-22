@@ -93,7 +93,7 @@ async fn main() {
         backend,
         sizing,
         config.tracker_enabled,
-        ados_vision::tracker::TrackerConfig::default(),
+        ados_tracker::tracker::TrackerConfig::default(),
         config.reid_enabled,
         reid_model_id,
     );
