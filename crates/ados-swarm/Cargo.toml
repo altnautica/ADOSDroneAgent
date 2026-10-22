@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-swarm"
 readme = "README.md"
 description = "Swarm control laws for multirotors: separation, braking-aware barriers, alpha-lattice flocking, formations, CBBA task allocation and a deterministic point-mass simulator."
 keywords = ["swarm", "flocking", "cbba", "formation", "uav"]
-categories = ["science::robotics", "aerospace::unmanned-aerial-vehicles", "algorithms", "simulation"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "science::robotics"]
 
 [package.metadata.docs.rs]
 all-features = true

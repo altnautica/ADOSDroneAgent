@@ -13,7 +13,7 @@ documentation = "https://docs.rs/ados-sensorhub"
 readme = "README.md"
 description = "Sensor hub wire protocol: COBS framing, CRC-16/CCITT-FALSE and fixed-layout IMU, barometer, magnetometer, trigger, PPS and GNSS packets. no_std, no allocation."
 keywords = ["cobs", "crc", "imu", "sensor", "no-std"]
-categories = ["embedded", "no-std", "no-std::no-alloc", "encoding", "aerospace::protocols"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "no-std"]
 
 [package.metadata.docs.rs]
 all-features = true

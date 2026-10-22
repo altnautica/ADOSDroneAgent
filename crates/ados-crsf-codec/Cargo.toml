@@ -1,6 +1,6 @@
 [package]
 name = "ados-crsf-codec"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-crsf-codec"
 readme = "README.md"
 description = "no_std CRSF (Crossfire / ExpressLRS) codec: frames, packed RC channels, telemetry and parameter frames, axis scaling and link liveness."
 keywords = ["crsf", "expresslrs", "elrs", "rc", "no-std"]
-categories = ["embedded", "no-std", "encoding", "aerospace::drones", "aerospace::protocols"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "embedded"]
 
 [package.metadata.docs.rs]
 all-features = true

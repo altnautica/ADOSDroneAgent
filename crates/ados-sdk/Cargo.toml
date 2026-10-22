@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-sdk"
 readme = "README.md"
 description = "Build Rust plugins for the ADOS Drone Agent: async IPC client, plugin context, hardware driver traits and lifecycle runner."
 keywords = ["ados", "drone", "uav", "plugin", "sdk"]
-categories = ["aerospace::drones", "aerospace::unmanned-aerial-vehicles", "asynchronous"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "asynchronous"]
 # The integration tests stand up the unpublished plugin host and vision engine,
 # so they stay in the repository and out of the published package.
 exclude = ["tests/"]

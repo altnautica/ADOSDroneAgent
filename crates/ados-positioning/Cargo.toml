@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-positioning"
 readme = "README.md"
 description = "Split a mixed UBX, NMEA and RTCM3 byte stream with resync, build u-blox VALSET commands and run an RTK base survey-in state machine."
 keywords = ["gnss", "ubx", "rtcm", "rtk", "nmea"]
-categories = ["parser-implementations", "embedded", "hardware-support", "aerospace::drones"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "parser-implementations"]
 
 [package.metadata.docs.rs]
 all-features = true

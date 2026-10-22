@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-rtcm"
 readme = "README.md"
 description = "RTCM3 framing, CRC-24Q and MAVLink GPS_RTCM_DATA fragmentation for injecting RTK corrections into a flight controller."
 keywords = ["rtcm", "rtk", "gnss", "mavlink", "crc24q"]
-categories = ["encoding", "parser-implementations", "aerospace::drones"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "parser-implementations"]
 
 [package.metadata.docs.rs]
 all-features = true

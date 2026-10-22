@@ -1,6 +1,6 @@
 [package]
 name = "ados-clock"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-clock"
 readme = "README.md"
 description = "Map remote clocks onto a host monotonic timebase: windowed least-squares and lower-envelope fits, NTP-style TIMESYNC estimation and a chrony SOCK refclock sink."
 keywords = ["clock", "time-sync", "chrony", "timesync", "sensor-fusion"]
-categories = ["date-and-time", "science::robotics", "embedded"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "date-and-time"]
 
 [package.metadata.docs.rs]
 all-features = true

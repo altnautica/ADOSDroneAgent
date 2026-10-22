@@ -1,6 +1,6 @@
 [package]
 name = "ados-macpin"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-macpin"
 readme = "README.md"
 description = "Stable MAC addresses for Linux network adapters that randomize theirs every boot: chipset quirk table, deterministic per-machine derivation and systemd-networkd .link files."
 keywords = ["mac-address", "networkd", "wifi", "linux", "systemd"]
-categories = ["os::linux-apis", "network-programming", "hardware-support"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "os::linux-apis"]
 
 [package.metadata.docs.rs]
 all-features = true

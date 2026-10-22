@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-hal-probe"
 readme = "README.md"
 description = "Probe-first hardware capability detection for Linux single-board computers: CPU, SoC, USB, serial, V4L2 encoders and board profiles, read from the real silicon by the ADOS Drone Agent."
 keywords = ["hardware", "probe", "sbc", "v4l2", "drone"]
-categories = ["hardware-support", "os::linux-apis", "aerospace::drones"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "hardware-support"]
 
 [package.metadata.docs.rs]
 all-features = true

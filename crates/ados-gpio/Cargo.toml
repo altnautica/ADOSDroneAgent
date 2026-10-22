@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-gpio"
 readme = "README.md"
 description = "Drive a buzzer or LED on a Linux GPIO character-device line and compute bounded software-PWM beep schedules, as used by the ADOS Drone Agent."
 keywords = ["gpio", "buzzer", "led", "pwm", "linux"]
-categories = ["hardware-support", "embedded", "os::linux-apis", "aerospace::drones"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "hardware-support"]
 
 [package.metadata.docs.rs]
 all-features = true

@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-protocol"
 readme = "README.md"
 description = "Wire contracts for the ADOS Drone Agent: length-prefixed IPC framing, plugin RPC envelope and capability tokens, the vision frame bus, MSP and MAVLink helpers."
 keywords = ["ados", "drone", "uav", "mavlink", "ipc"]
-categories = ["aerospace::drones", "aerospace::protocols", "encoding", "network-programming"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "network-programming"]
 
 [package.metadata.docs.rs]
 features = ["mavlink"]

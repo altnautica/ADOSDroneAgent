@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-offload"
 readme = "README.md"
 description = "Decide where drone perception runs (onboard, offloaded or hybrid) and gate stale or link-lost results so the vehicle holds instead of extrapolating."
 keywords = ["drone", "offload", "perception", "slam", "safety"]
-categories = ["aerospace::drones", "science::robotics"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "science::robotics"]
 
 [package.metadata.docs.rs]
 all-features = true

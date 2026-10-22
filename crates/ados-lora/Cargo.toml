@@ -1,6 +1,6 @@
 [package]
 name = "ados-lora"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-lora"
 readme = "README.md"
 description = "LoRa transmit governor with cited regional band plans: time-on-air, duty cycle, dwell time, listen-before-talk, power limits and a persisted airtime ledger."
 keywords = ["lora", "regulatory", "airtime", "duty-cycle", "radio"]
-categories = ["embedded", "hardware-support", "aerospace::drones"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "embedded"]
 
 [package.metadata.docs.rs]
 all-features = true

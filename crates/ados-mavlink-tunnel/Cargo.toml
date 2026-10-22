@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-mavlink-tunnel"
 readme = "README.md"
 description = "Chunk and reassemble large messages over MAVLink TUNNEL frames with a 12-byte header and bounded reassembly."
 keywords = ["mavlink", "tunnel", "chunking", "drone", "uav"]
-categories = ["aerospace::protocols", "encoding", "network-programming"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "encoding"]
 
 [package.metadata.docs.rs]
 all-features = true

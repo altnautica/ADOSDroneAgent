@@ -1,6 +1,6 @@
 [package]
 name = "ados-hmi"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-hmi"
 readme = "README.md"
 description = "Input state machines for hardware front panels: touchscreen affine calibration and gestures, button press classification, quadrature encoder decoding and a pilot-in-command arbiter."
 keywords = ["touchscreen", "gesture", "encoder", "button", "hmi"]
-categories = ["hardware-support", "embedded"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "hardware-support"]
 
 [package.metadata.docs.rs]
 all-features = true

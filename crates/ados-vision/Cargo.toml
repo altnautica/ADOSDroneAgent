@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-vision"
 readme = "README.md"
 description = "Single-object visual tracker for drones: Kalman motion model with appearance re-identification, YOLOv8 head decoding and OSNet embedding helpers."
 keywords = ["tracking", "yolo", "reid", "kalman", "drone"]
-categories = ["computer-vision", "science::robotics", "aerospace::drones"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "computer-vision"]
 
 [package.metadata.docs.rs]
 all-features = true

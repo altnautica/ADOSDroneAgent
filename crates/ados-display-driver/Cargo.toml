@@ -1,6 +1,6 @@
 [package]
 name = "ados-display-driver"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/ados-display-driver"
 readme = "README.md"
 description = "Linux output for small displays: SSD1306/SH1106 OLED over I2C, RGB565/RGB888/xRGB pixel packers and an off-thread latest-wins framebuffer writer."
 keywords = ["ssd1306", "sh1106", "framebuffer", "oled", "rgb565"]
-categories = ["hardware-support", "embedded", "os::linux-apis"]
+categories = ["aerospace", "aerospace::protocols", "aerospace::unmanned-aerial-vehicles", "aerospace::drones", "hardware-support"]
 
 [package.metadata.docs.rs]
 all-features = true

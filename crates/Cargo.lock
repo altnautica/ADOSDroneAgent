@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "ados-clock"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "tempfile",
  "tracing",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "ados-crsf-codec"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "ados-display"
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "ados-display-driver"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "memmap2",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hmi"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "getrandom 0.4.2",
  "hex",
@@ -449,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "ados-lora"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "ados-macpin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "getrandom 0.4.2",
  "hex",
