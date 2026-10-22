@@ -17,8 +17,9 @@
 #   scripts/publish-crates.sh --dry-run   # cargo publish --dry-run, no tags
 #   scripts/publish-crates.sh --no-tags   # publish, print the git tag commands
 #
-# Auth: CARGO_REGISTRY_TOKEN (Trusted Publishing in CI, a short-lived token for
-# a crate's first release).
+# Auth: CARGO_REGISTRY_TOKEN (Trusted Publishing in CI; a maintainer's API
+# token for a crate's first release, which must exist before a trusted
+# publisher can be configured for it).
 set -euo pipefail
 
 dry_run=0
