@@ -11,10 +11,11 @@
 
 use serde_json::Value;
 
-use crate::beacon::{
-    SwarmBeacon, STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO,
+use crate::beacon::SwarmBeacon;
+use ados_swarm_laws::status::{
+    STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO,
 };
-use crate::ModePrecedence;
+use ados_swarm_laws::ModePrecedence;
 
 /// The lowest `GPS_RAW_INT.fix_type` that counts as a usable fix
 /// (`GPS_FIX_TYPE_3D_FIX`).
@@ -25,26 +26,6 @@ use crate::ModePrecedence;
 /// position is broadcast anyway, flagged — every consumer can then decide, rather
 /// than the position simply vanishing from the fleet view.
 pub const MIN_USABLE_FIX_TYPE: i64 = 3;
-
-/// How stale this drone's OWN state snapshot may be before it stops being
-/// broadcast as this node's position.
-///
-/// Tighter than [`crate::NEIGHBOR_STALE`] on purpose. A neighbour going quiet
-/// empties the picture, which every consumer already refuses to fly on. Our own
-/// state going quiet does something worse: it stays plausible. The onboard
-/// control loop reads it as the frame every neighbour is measured in, and every
-/// OTHER drone in the fleet dead-reckons the beacon we send FORWARD from the
-/// position and velocity in it — so a frozen fix does not go quiet across the
-/// fleet, it keeps moving, confidently, in a direction the aircraft is no longer
-/// going. At the 2 Hz beacon rate a three-second window is six beacons of
-/// invented motion, so this is one second.
-///
-/// The control path reaches this same constant through
-/// `ados_swarm_control::OWN_STATE_STALE`, which re-exports it. It is defined
-/// here because this crate is the one both halves depend on, and because
-/// restating it would let the two windows drift apart silently: the transmitted
-/// beacon and the loop that flies against it must agree on when a fix is dead.
-pub const OWN_STATE_STALE: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Read a nested `f64` out of the state snapshot, e.g. `("position", "lat")`.
 fn nested_f64(state: &Value, group: &str, field: &str) -> Option<f64> {
@@ -200,8 +181,8 @@ pub fn beacon_from_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::beacon::STATUS_PRECEDENCE_MASK;
-    use crate::ModePrecedence;
+    use ados_swarm_laws::status::STATUS_PRECEDENCE_MASK;
+    use ados_swarm_laws::ModePrecedence;
     use serde_json::json;
 
     /// A beacon from a snapshot whose position fix is fresh.

@@ -12,20 +12,20 @@
 //!
 //! Olfati-Saber's α-lattice comes from a SINGLE action function whose zero
 //! crossing is the desired lattice constant. Splitting it into an independent
-//! cohesion gain and an independent repulsion gain — which is what a
-//! `cohesion = 0.4` / `separation_gain = 1.5` pair is — destroys that property:
+//! cohesion gain and an independent repulsion gain - which is what a
+//! `cohesion = 0.4` / `separation_gain = 1.5` pair is - destroys that property:
 //! solving `0.4·d = 1.5·(1/d − 1/8)` puts the equilibrium spacing at 1.65 m,
 //! well inside the 4 m safety floor. Restricting cohesion to neighbours beyond
 //! the separation radius (Reynolds' original formulation, where the three rules
 //! act on their own neighbourhoods) restores it: cohesion pulls only from
 //! outside the lattice constant, repulsion pushes only from inside, and the
 //! equilibrium lands exactly ON [`crate::separation::SEPARATION_RADIUS_M`]. Both
-//! gains stay at the plan's values.
+//! gains stay at their default values.
 //!
 //! # Why the virtual leader saturates
 //!
 //! A proportional pull `FLOCK_TARGET · (target − p)` differs between two drones
-//! by `FLOCK_TARGET · d` along the line joining them — 6.4 m/s of compression on
+//! by `FLOCK_TARGET · d` along the line joining them - 6.4 m/s of compression on
 //! an 8 m lattice against a repulsive term of 0 at that range. The lattice
 //! collapses along-track before it ever reaches the target. Saturating the term
 //! makes it a UNIFORM field while the flock is far from the target: every drone
@@ -51,16 +51,22 @@ pub const FLOCK_ALIGNMENT: f64 = 0.6;
 /// Virtual-leader gain, 1/s.
 pub const FLOCK_TARGET: f64 = 0.8;
 
-/// The flocking gains, as configured. Defaults are the plan's constants; the
-/// `swarm.flock.*` config block overrides them (integer percentages there, real
-/// gains here — the conversion happens once, in [`crate::config`]).
+/// The flocking gains, as configured. Defaults are the module constants; a
+/// [`crate::config::FlockConfig`] overrides them (integer percentages there, real
+/// gains here - the conversion happens once, in [`crate::config`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FlockTuning {
+    /// Neighbourhood radius, metres.
     pub radius_m: f64,
+    /// Neighbours weighted.
     pub neighbors: usize,
+    /// Cohesion gain.
     pub cohesion: f64,
+    /// Alignment gain.
     pub alignment: f64,
+    /// Virtual-leader gain.
     pub target: f64,
+    /// The separation tuning the repulsive term uses.
     pub separation: SeparationTuning,
 }
 
@@ -78,6 +84,7 @@ impl Default for FlockTuning {
 }
 
 impl FlockTuning {
+    /// Clamp every field into a safe range.
     pub fn sanitised(mut self) -> Self {
         self.separation = self.separation.sanitised();
         if !self.radius_m.is_finite() || self.radius_m <= self.separation.radius_m {
@@ -99,15 +106,20 @@ impl FlockTuning {
 /// so the diagnostics can show WHICH term is driving.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct FlockTerms {
+    /// Cohesion term, metres/second.
     pub cohesion: Ned,
+    /// Alignment term, metres/second.
     pub alignment: Ned,
+    /// Separation term, metres/second.
     pub separation: Ned,
+    /// Virtual-leader term, metres/second.
     pub target: Ned,
     /// How many neighbours were inside the flocking radius.
     pub neighbors_used: usize,
 }
 
 impl FlockTerms {
+    /// The summed velocity intent.
     pub fn sum(&self) -> Ned {
         self.cohesion + self.alignment + self.separation + self.target
     }
@@ -158,7 +170,7 @@ pub fn terms(
 
     if far_count > 0 {
         // `pos` is already relative to this drone, so the neighbour centroid IS
-        // the error vector — no subtraction of own position needed.
+        // the error vector - no subtraction of own position needed.
         let centroid = far_sum.scale(1.0 / far_count as f64);
         out.cohesion = centroid.scale(t.cohesion);
     }
@@ -260,7 +272,7 @@ mod tests {
     fn the_virtual_leader_is_a_uniform_field_beyond_the_saturation_radius() {
         let t = FlockTuning::default();
         // Two drones 8 m apart on the line to a target 500 m away get target
-        // terms that differ by essentially nothing — that is what stops the
+        // terms that differ by essentially nothing - that is what stops the
         // lattice compressing along-track.
         let lead = terms(Ned::ZERO, Some(Ned::new(500.0, 0.0, 0.0)), &[], &t, CRUISE).target;
         let trail = terms(Ned::ZERO, Some(Ned::new(508.0, 0.0, 0.0)), &[], &t, CRUISE).target;
@@ -271,7 +283,7 @@ mod tests {
             "differential compression {:?}",
             lead - trail
         );
-        // An UNSATURATED proportional pull would differ by 0.8 * 8 = 6.4 m/s —
+        // An UNSATURATED proportional pull would differ by 0.8 * 8 = 6.4 m/s  -
         // the failure mode this test exists to pin.
         let raw_lead = Ned::new(500.0, 0.0, 0.0).scale(FLOCK_TARGET);
         let raw_trail = Ned::new(508.0, 0.0, 0.0).scale(FLOCK_TARGET);

@@ -1,5 +1,5 @@
 use super::*;
-use ados_swarm_control::geo::Ned;
+use ados_swarm_laws::geo::Ned;
 
 #[test]
 fn a_setpoint_is_addressed_to_the_latched_autopilot_not_system_one() {
@@ -51,7 +51,7 @@ fn the_status_block_publishes_the_controller_counters() {
     s.publish(
         ModePrecedence::Flocking,
         true,
-        ados_swarm_control::SwarmControlCounters {
+        ados_swarm_laws::SwarmControlCounters {
             setpoints_emitted: 7,
             ticks_suppressed: 3,
             hard_engagements: 2,
@@ -148,9 +148,9 @@ fn own_fresh() -> OwnState {
 
 /// Slot 2, `north_m` metres north of `own_fresh`, at the same altitude.
 fn neighbour_north(north_m: f64) -> NeighborFix {
-    use ados_swarm_control::neighbor::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED};
-    let (lat, lon, alt) = ados_swarm_control::GeoOrigin::new(HOME.0, HOME.1, HOME.2)
-        .to_geo(Ned::new(north_m, 0.0, 0.0));
+    use ados_swarm_laws::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED};
+    let (lat, lon, alt) =
+        ados_swarm_laws::GeoOrigin::new(HOME.0, HOME.1, HOME.2).to_geo(Ned::new(north_m, 0.0, 0.0));
     NeighborFix {
         slot: 2,
         lat_deg: lat,
@@ -237,14 +237,14 @@ fn a_ground_station_slot_disqualifies_the_layer() {
     let cfg = dir.path().join("config.yaml");
     // Enabled, but no drone slot: slot 0 is the ground station.
     std::fs::write(&cfg, "swarm:\n  enabled: true\n").unwrap();
-    assert!(!eligible(&SwarmControlConfig::load_from(&cfg)));
+    assert!(!eligible(&load_swarm_config(&cfg)));
     // With a slot assigned it is eligible.
     std::fs::write(
         &cfg,
         "swarm:\n  enabled: true\nvideo:\n  wfb:\n    fleet_slot: 4\n",
     )
     .unwrap();
-    assert!(eligible(&SwarmControlConfig::load_from(&cfg)));
+    assert!(eligible(&load_swarm_config(&cfg)));
 }
 
 #[test]
@@ -323,4 +323,76 @@ async fn a_visor_sends_no_setpoint_and_counts_no_client_refusal() {
         assert_eq!(read.is_ok(), sends, "{profile}");
         assert_eq!(fc.visor_flight_frames_dropped(), 0, "{profile}");
     }
+}
+
+fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, body).unwrap();
+    p
+}
+
+#[test]
+fn a_missing_file_or_block_is_the_default_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        load_swarm_config(&dir.path().join("absent.yaml")),
+        SwarmControlConfig::default()
+    );
+    let p = write(
+        dir.path(),
+        "other.yaml",
+        "video:\n  wfb:\n    channel: 149\n",
+    );
+    assert_eq!(load_swarm_config(&p), SwarmControlConfig::default());
+}
+
+#[test]
+fn the_block_is_read_verbatim() {
+    use ados_swarm_laws::{FormationName, SwarmMode};
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "swarm.yaml",
+        "swarm:\n  enabled: true\n  mode: formation\n  default_formation: wedge\n  default_spacing: 15\n  flock:\n    cohesion: 25\n    alignment: 90\n    separation_gain: 200\n    radius_m: 45\n    neighbors: 3\n  separation:\n    radius_m: 12\n    hard_m: 5\n  tasks:\n    enabled: true\n",
+    );
+    let c = load_swarm_config(&p);
+    assert!(c.enabled);
+    assert_eq!(c.swarm_mode(), SwarmMode::Formation);
+    assert_eq!(c.formation_name(), FormationName::Wedge);
+    assert_eq!(c.spacing_m(), 15.0);
+    assert!(c.tasks.enabled);
+    let f = c.flock_tuning();
+    assert!((f.cohesion - 0.25).abs() < 1e-12);
+    assert!((f.alignment - 0.90).abs() < 1e-12);
+    assert!((f.separation.gain - 2.0).abs() < 1e-12);
+    assert_eq!(f.radius_m, 45.0);
+    assert_eq!(f.neighbors, 3);
+    assert_eq!(f.separation.radius_m, 12.0);
+    assert_eq!(f.separation.hard_m, 5.0);
+}
+
+#[test]
+fn a_partial_block_keeps_the_other_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "partial.yaml",
+        "swarm:\n  flock:\n    cohesion: 5\n",
+    );
+    let c = load_swarm_config(&p);
+    assert_eq!(c.flock.cohesion, 5);
+    assert_eq!(c.flock.alignment, 60, "untouched sibling keeps its default");
+    assert_eq!(c.separation.hard_m, 4);
+    assert_eq!(c.mode, "hold");
+}
+
+#[test]
+fn a_malformed_block_degrades_to_defaults_rather_than_panicking() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = write(
+        dir.path(),
+        "bad.yaml",
+        "swarm:\n  flock:\n    cohesion: not-a-number\n",
+    );
+    assert_eq!(load_swarm_config(&p), SwarmControlConfig::default());
 }

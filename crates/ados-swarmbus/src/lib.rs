@@ -17,8 +17,8 @@
 //!
 //! Module map, roughly in wire order:
 //!
-//! - [`beacon`] — the 20-byte message and its status bits.
-//! - [`precedence`] — the mode-precedence level packed into three of those bits.
+//! - [`beacon`] — the 20-byte message. Its status bits and the mode-precedence
+//!   level packed into three of them come from `ados_swarm_laws::status`.
 //! - [`frame`] — the radiotap + 802.11 envelope, and the kernel filter that picks
 //!   it out of the video stream sharing the adapter.
 //! - [`crypto`] — the fleet-keyed ChaCha20-Poly1305 seal.
@@ -75,29 +75,22 @@ pub mod fleet_join;
 pub mod frame;
 pub mod ingest;
 pub mod neighbors;
-pub mod precedence;
 pub mod publish;
 pub mod radio;
 pub mod schedule;
 pub mod service;
 pub mod vehicle;
 
-pub use beacon::{
-    SwarmBeacon, BEACON_WIRE_LEN, STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED,
-    STATUS_HERO, STATUS_PRECEDENCE_MASK,
-};
+pub use beacon::{SwarmBeacon, BEACON_WIRE_LEN};
 pub use bus::SwarmBus;
 pub use config::{SwarmBusConfig, CONFIG_YAML};
 pub use crypto::{derive_fleet_key, FleetKeyWatch, SwarmCipher};
 pub use frame::SwarmFrameKind;
 pub use ingest::{ingest_frame, Ingest, IngestReject};
-pub use neighbors::{
-    Neighbor, NeighborTable, Recorded, SwarmCounters, MAX_NEIGHBORS, NEIGHBOR_STALE,
-};
-pub use precedence::ModePrecedence;
+pub use neighbors::{Neighbor, NeighborTable, Recorded, SwarmCounters, MAX_NEIGHBORS};
 pub use schedule::{BEACON_HZ, BEACON_JITTER_MS, BEACON_PERIOD};
 pub use service::run;
-pub use vehicle::{beacon_from_state, MIN_USABLE_FIX_TYPE, OWN_STATE_STALE};
+pub use vehicle::{beacon_from_state, MIN_USABLE_FIX_TYPE};
 
 /// The airtime figure derived in the module documentation above, as a fraction of
 /// one 20 MHz channel at the full fleet size.

@@ -1,8 +1,8 @@
 //! Mode arbitration, the 10 Hz loop, and the failsafe gates.
 //!
 //! The only stateful object in the crate. It holds what a safety layer genuinely
-//! needs latched — the hard-override dwell and its climb datum, the staleness
-//! deadline, the operator directive's expiry — converts geodetic fixes into the
+//! needs latched - the hard-override dwell and its climb datum, the staleness
+//! deadline, the operator directive's expiry - converts geodetic fixes into the
 //! local frame the laws work in, and arbitrates.
 //!
 //! # Precedence, highest first
@@ -13,7 +13,7 @@
 //! 2. OPERATOR direct command.
 //! 3. FORMATION keeping.
 //! 4. FLOCKING.
-//! 5. HOLD — nothing is driving.
+//! 5. HOLD - nothing is driving.
 //!
 //! # Failsafes
 //!
@@ -24,8 +24,8 @@
 //! table has been non-empty inside [`crate::NEIGHBOR_STALE`]. A layer with no
 //! fresh neighbour data has no basis to fly and hands the vehicle back to the FC.
 //!
-//! Operator authority is untouched by that gate: a GCS command reaches the FC
-//! through the router's client-passthrough path, not through here. The `Operator`
+//! Operator authority is untouched by that gate: a ground-station command
+//! reaches the FC through its own path, not through here. The `Operator`
 //! precedence level is for a SWARM-level directive (a fleet reposition) being
 //! arbitrated against the autonomy layers.
 
@@ -78,12 +78,16 @@ pub const COMMAND_DEADBAND_MPS: f64 = 0.05;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SwarmMode {
     #[default]
+    /// No behaviour layer is driving.
     Hold,
+    /// Flocking drives the vehicle.
     Flocking,
+    /// A named formation drives the vehicle.
     Formation,
 }
 
 impl SwarmMode {
+    /// The stable wire string for this mode.
     pub const fn as_wire(self) -> &'static str {
         match self {
             Self::Hold => "hold",
@@ -92,7 +96,7 @@ impl SwarmMode {
         }
     }
 
-    /// Parse `swarm.mode`. Anything unrecognised is `hold` — an unknown mode must
+    /// Parse `swarm.mode`. Anything unrecognised is `hold` - an unknown mode must
     /// never fly.
     pub fn from_wire(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
@@ -108,25 +112,35 @@ impl SwarmMode {
 pub enum OperatorDirective {
     /// Reposition to a geodetic point.
     Goto {
+        /// Target latitude, degrees.
         lat_deg: f64,
+        /// Target longitude, degrees.
         lon_deg: f64,
+        /// Target altitude, metres.
         alt_m: f64,
     },
     /// Stop where you are.
     Hold,
 }
 
-/// This drone's own state, as the router already holds it.
+/// This drone's own state, as the host already holds it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OwnState {
+    /// This drone's fleet slot.
     pub slot: u8,
+    /// Latitude, degrees.
     pub lat_deg: f64,
+    /// Longitude, degrees.
     pub lon_deg: f64,
-    /// Altitude relative to home, metres — the frame every setpoint uses.
+    /// Altitude relative to home, metres - the frame every setpoint uses.
     pub alt_rel_m: f64,
+    /// Velocity north, metres/second.
     pub vn: f64,
+    /// Velocity east, metres/second.
     pub ve: f64,
+    /// Velocity down, metres/second.
     pub vd: f64,
+    /// Whether the flight controller reports armed.
     pub armed: bool,
     /// Whether the FC reports GUIDED. No setpoint is emitted otherwise.
     pub guided: bool,
@@ -161,14 +175,21 @@ impl Default for OwnState {
 /// `now` by the caller.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NeighborFix {
+    /// The neighbour's fleet slot.
     pub slot: u8,
+    /// Latitude, degrees.
     pub lat_deg: f64,
+    /// Longitude, degrees.
     pub lon_deg: f64,
+    /// Altitude, metres.
     pub alt_m: f64,
+    /// Velocity north, metres/second.
     pub vn: f64,
+    /// Velocity east, metres/second.
     pub ve: f64,
     /// Down-positive, MAVLink convention: a climbing neighbour is negative.
     pub vd: f64,
+    /// The beacon status byte verbatim (see [`crate::status`]).
     pub status: u8,
     /// This drone's bus sender id compared with the neighbour's
     /// (`own.cmp(&neighbour)`), `Equal` when either is unknown. Breaks the hard
@@ -203,19 +224,24 @@ pub enum Suppression {
 /// One tick's result.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ControlOutcome {
+    /// The command to send this tick, if any.
     pub setpoint: Option<Setpoint>,
     /// The level ACTUALLY driving, which is what rides beacon status bits 5..7.
     pub precedence: ModePrecedence,
     /// Whether beacon status bit 2 should be raised on the next beacon.
     pub emergency: bool,
+    /// Why nothing was sent, when `setpoint` is `None`.
     pub suppressed: Option<Suppression>,
 }
 
 /// Cheap counters for the status snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SwarmControlCounters {
+    /// Setpoints emitted since start.
     pub setpoints_emitted: u64,
+    /// Ticks on which output was suppressed.
     pub ticks_suppressed: u64,
+    /// Times the hard-separation override engaged.
     pub hard_engagements: u64,
 }
 
@@ -287,10 +313,12 @@ impl SwarmController {
         );
     }
 
+    /// Change the commanded behaviour mode.
     pub fn set_mode(&mut self, mode: SwarmMode) {
         self.mode = mode;
     }
 
+    /// The commanded behaviour mode.
     pub fn mode(&self) -> SwarmMode {
         self.mode
     }
@@ -306,6 +334,7 @@ impl SwarmController {
         self.formation = Formation::built_in(name, slots, spacing_m, anchor);
     }
 
+    /// The formation table in use.
     pub fn formation(&self) -> &Formation {
         &self.formation
     }
@@ -328,6 +357,7 @@ impl SwarmController {
         self.operator = Some((directive, now));
     }
 
+    /// Drop any operator directive immediately.
     pub fn clear_operator_directive(&mut self) {
         self.operator = None;
     }
@@ -343,13 +373,14 @@ impl SwarmController {
     }
 
     /// While the hard override is engaged: the slot that triggered it and the
-    /// altitude it is climbing to. Diagnostic only — the arbitration never reads
-    /// it back — but it is what turns "emergency" on the operator screen into
+    /// altitude it is climbing to. Diagnostic only - the arbitration never reads
+    /// it back - but it is what turns "emergency" on the operator screen into
     /// "emergency, because of slot 7".
     pub fn hard_latch(&self) -> Option<(u8, f64)> {
         self.hard.map(|l| (l.offender, l.target_alt_m))
     }
 
+    /// A snapshot of the running counters.
     pub fn counters(&self) -> SwarmControlCounters {
         self.counters
     }
@@ -360,7 +391,7 @@ impl SwarmController {
         //
         // The origin below is anchored on our own fix, and every neighbour is
         // converted into it, so a frozen own position does not empty the picture
-        // the way a silent fleet does — it produces a confident, wrong one. The
+        // the way a silent fleet does - it produces a confident, wrong one. The
         // dangerous case is a PARTIAL stall: position stops while heartbeats
         // continue, so armed and guided stay true, lat/lon freeze, and setpoints
         // keep flowing at the full tick rate computed against where the aircraft
@@ -445,7 +476,7 @@ impl SwarmController {
             self.precedence = ModePrecedence::HardSeparation;
             self.counters.setpoints_emitted += 1;
             // The behaviour layer's horizontal SOLUTION is abandoned, but the
-            // repulsive term is not part of that solution — it is the safety
+            // repulsive term is not part of that solution - it is the safety
             // layer's own, and dropping it would leave two pinned vehicles with
             // nothing but residual velocity between them. Horizontal only, so it
             // cannot fight the deterministic climb.
@@ -533,8 +564,8 @@ impl SwarmController {
     /// Engage, hold or release the hard override.
     ///
     /// Two triggers. A GEOMETRIC breach of the hard radius is the literal one. A
-    /// PINNED closure — the barrier leaving no usable closing allowance at all
-    /// while the behaviour layer still wants to close — is the same condition seen
+    /// PINNED closure - the barrier leaving no usable closing allowance at all
+    /// while the behaviour layer still wants to close - is the same condition seen
     /// one step earlier: the horizontal solution has been taken away, which is
     /// precisely when the deterministic vertical rule is the only thing left that
     /// can break the deadlock.

@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
-use ados_swarm_control::ModePrecedence;
+use ados_swarm_laws::ModePrecedence;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
@@ -272,12 +272,15 @@ pub(super) async fn build_extras(
         None => (ModePrecedence::Hold.as_wire(), false),
     };
     extras.insert(
-        ados_swarm_control::EXTRA_PRECEDENCE.into(),
+        crate::connection::swarm_setpoint::payload::EXTRA_PRECEDENCE.into(),
         json!(precedence),
     );
     // A real JSON bool, not 0/1: the beacon builder reads a non-bool as false, and
     // for a safety flag that is the wrong direction to fail in.
-    extras.insert(ados_swarm_control::EXTRA_EMERGENCY.into(), json!(emergency));
+    extras.insert(
+        crate::connection::swarm_setpoint::payload::EXTRA_EMERGENCY.into(),
+        json!(emergency),
+    );
     // Operator frames the ground station held because two linked aircraft
     // share the system id they were addressed to. Ground station only.
     if let Some(u) = uplink {

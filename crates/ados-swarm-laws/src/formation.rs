@@ -5,9 +5,8 @@
 //! from the registered slot set rather than stored, so any fleet size from 1 to
 //! 24 is valid and re-pairing a drone never leaves a hole in a table.
 //!
-//! The five names are a CLOSED set — they are the exact enum the Mission Control
-//! settings page offers as a `<Select>`, so a sixth name here would be a value
-//! the operator can never choose and a config value the UI cannot render.
+//! The five names are a CLOSED set, so an operator interface can offer them as
+//! a fixed list and every value it can send is one this crate understands.
 
 use std::collections::BTreeMap;
 
@@ -25,7 +24,7 @@ pub const DEFAULT_SPACING_M: f64 = 10.0;
 ///
 /// Four is generous: a member four formation-widths from us is still forming
 /// up, and pulling the anchor toward it is the whole point of the law. What the
-/// gate is for is the fix that is not a MEASUREMENT at all — see
+/// gate is for is the fix that is not a MEASUREMENT at all - see
 /// [`anchor_position`].
 pub const ANCHOR_RANGE_SLACK: f64 = 4.0;
 
@@ -34,7 +33,7 @@ pub const ANCHOR_RANGE_SLACK: f64 = 4.0;
 /// A tight formation has a small diameter, so the slack alone would gate a
 /// legitimately out-of-station member out of the anchor and stall the fleet
 /// short of its shape. This floor keeps the gate wide enough to be invisible to
-/// every real geometry — it is six times the flocking radius — while still
+/// every real geometry - it is six times the flocking radius - while still
 /// four orders of magnitude below the distance a bogus fix lands at.
 pub const ANCHOR_RANGE_MIN_M: f64 = 200.0;
 
@@ -55,6 +54,7 @@ pub enum FormationName {
 }
 
 impl FormationName {
+    /// Every formation, in a fixed order.
     pub const ALL: [Self; 5] = [
         Self::Line,
         Self::Column,
@@ -63,6 +63,7 @@ impl FormationName {
         Self::Circle,
     ];
 
+    /// The stable wire string for this formation.
     pub const fn as_wire(self) -> &'static str {
         match self {
             Self::Line => "line",
@@ -73,7 +74,7 @@ impl FormationName {
         }
     }
 
-    /// Parse the config value. An unrecognised name falls back to `line` — the
+    /// Parse the config value. An unrecognised name falls back to `line` - the
     /// same default the config model carries, so a hand-edited typo flies the
     /// documented default instead of refusing to form up at all.
     pub fn from_wire(s: &str) -> Self {
@@ -102,8 +103,11 @@ pub enum FormationAnchor {
 /// north / east / down.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Formation {
+    /// Formation name.
     pub name: String,
+    /// What the offsets are relative to.
     pub anchor: FormationAnchor,
+    /// Per-slot offsets, metres NED.
     pub offsets: BTreeMap<u8, [f32; 3]>,
 }
 
@@ -231,7 +235,7 @@ fn grid_columns(n: usize) -> usize {
 /// `Centroid` averages this drone and every fleet member whose fix is inside
 /// `radius_m` ([`Formation::anchor_range_m`]). `Slot(s)` resolves to the origin
 /// when `s` is this drone, else to that neighbour's position, and to `None`
-/// when the designated slot is not being heard OR its fix is outside the gate —
+/// when the designated slot is not being heard OR its fix is outside the gate  -
 /// a formation with a missing anchor must decline, not fall back to some other
 /// reference and fly the fleet somewhere nobody commanded.
 ///
@@ -241,12 +245,12 @@ fn grid_columns(n: usize) -> usize {
 /// terms, the repulsive term and the closing-rate barrier all build a
 /// [`crate::neighbor::NearestSet`] first, so an implausible fix falls out of
 /// each of them on range. Ungated, one member beaconing the no-fix placeholder
-/// position — a real geodetic point thousands of kilometres from any operating
-/// site — moves the anchor by `distance / (N + 1)` metres, which saturates
+/// position - a real geodetic point thousands of kilometres from any operating
+/// site - moves the anchor by `distance / (N + 1)` metres, which saturates
 /// [`crate::setpoint::MAX_COMMAND_SPEED_MPS`] for every drone in the fleet at
 /// once. The closing-rate barrier cannot catch it either: it caps closure on
 /// in-range neighbours and passes a command aimed at empty space straight
-/// through. So the transport-side skip in [`crate::swarmbus::fixes_from_payload`]
+/// through. So the transport-side skip in the host adapter that parses neighbour fixes
 /// is the first line and this gate is the backstop for any other producer.
 pub fn anchor_position(
     anchor: FormationAnchor,
@@ -323,7 +327,7 @@ mod tests {
                 let s = slots(n);
                 let f = Formation::built_in(name, &s, SPACING, FormationAnchor::Centroid);
                 assert_eq!(f.name, name.as_wire());
-                // Covers exactly the registered slot set — no hole, no extra.
+                // Covers exactly the registered slot set - no hole, no extra.
                 assert_eq!(f.offsets.len(), n, "{name:?} n={n}");
                 for slot in &s {
                     let st = f
@@ -445,7 +449,7 @@ mod tests {
 
     #[test]
     fn a_sparse_slot_set_is_honoured_verbatim() {
-        // Slots 3, 11 and 19 — what a fleet looks like after two drones are
+        // Slots 3, 11 and 19 - what a fleet looks like after two drones are
         // released. A generator keyed on slot number rather than rank would put
         // station 19 nineteen spacings out.
         let f = Formation::built_in(

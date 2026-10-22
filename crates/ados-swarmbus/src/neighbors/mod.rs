@@ -27,14 +27,7 @@ pub use counters::SwarmCounters;
 use replay::SenderVerdict;
 pub use replay::{SenderMarks, REPLAY_STATE_PATH};
 
-/// How long a neighbour survives without a beacon: six missed transmissions at
-/// [`crate::BEACON_HZ`].
-///
-/// Six rather than two because the evidence says outages of about a second are
-/// normal in real formation flight, and dropping a neighbour that is still there
-/// is worse than carrying a slightly old one — the separation layer would stop
-/// avoiding an aircraft that has not gone anywhere.
-pub const NEIGHBOR_STALE: Duration = Duration::from_secs(3);
+use ados_swarm_laws::NEIGHBOR_STALE;
 
 /// Hard cap on table size. A legal fleet cannot reach it
 /// ([`ados_radio::config::FLEET_MAX_SLOTS`] is 24); it bounds the table against a garbage or hostile
@@ -326,7 +319,7 @@ impl NeighborTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::beacon::STATUS_GPS_OK;
+    use ados_swarm_laws::status::STATUS_GPS_OK;
 
     /// Bengaluru, so the longitude scaling is exercised at a real non-zero
     /// latitude rather than on the equator where `cos(lat)` is 1 and a missing

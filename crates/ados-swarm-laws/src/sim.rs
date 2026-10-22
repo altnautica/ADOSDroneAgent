@@ -20,11 +20,11 @@ use std::time::Instant;
 use crate::config::SwarmControlConfig;
 use crate::controller::{NeighborFix, OwnState, SwarmController, CONTROL_PERIOD};
 use crate::geo::{GeoOrigin, Ned};
-use crate::neighbor::{STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED};
 use crate::precedence::ModePrecedence;
 use crate::separation::min_pairwise_distance;
+use crate::status::{STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED};
 
-/// Simulation step, seconds — the control period, so one step is one tick.
+/// Simulation step, seconds - the control period, so one step is one tick.
 pub const SIM_DT: f64 = 0.1;
 
 /// First-order velocity-tracking time constant, seconds. A plausible small
@@ -50,14 +50,20 @@ struct SimBeacon {
 
 /// One simulated aircraft.
 pub struct SimDrone {
+    /// Fleet slot.
     pub slot: u8,
+    /// Position, metres NED from the world origin.
     pub pos: Ned,
+    /// Velocity, metres/second NED.
     pub vel: Ned,
+    /// Whether the drone is armed.
     pub armed: bool,
+    /// Whether the drone accepts offboard setpoints.
     pub guided: bool,
-    /// Killing this stops the drone both transmitting and receiving beacons — the
+    /// Killing this stops the drone both transmitting and receiving beacons - the
     /// beacon-loss scenario.
     pub bus_alive: bool,
+    /// This drone's controller.
     pub controller: SwarmController,
     /// Altitude at spawn, so a scenario can assert a climb.
     pub spawn_alt_m: f64,
@@ -67,6 +73,7 @@ pub struct SimDrone {
 }
 
 impl SimDrone {
+    /// A drone at `pos`, armed and guided, in a fleet of `slots`.
     pub fn new(slot: u8, pos: Ned, cfg: &SwarmControlConfig, slots: &[u8]) -> Self {
         Self {
             slot,
@@ -81,6 +88,7 @@ impl SimDrone {
         }
     }
 
+    /// Start the drone with velocity `vel`.
     pub fn with_velocity(mut self, vel: Ned) -> Self {
         self.vel = vel;
         self
@@ -91,6 +99,7 @@ impl SimDrone {
         -self.pos.d
     }
 
+    /// Altitude gained since spawn, metres.
     pub fn climbed_m(&self) -> f64 {
         self.alt_m() - self.spawn_alt_m
     }
@@ -99,17 +108,22 @@ impl SimDrone {
 /// One sampled instant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimSample {
+    /// Simulated time, seconds.
     pub t_s: f64,
     /// Smallest pairwise 3-D separation across the whole fleet, metres.
     pub min_pairwise_m: Option<f64>,
+    /// Each drone's position.
     pub positions: Vec<(u8, Ned)>,
+    /// Each drone's active precedence level.
     pub precedence: Vec<(u8, ModePrecedence)>,
     /// Whether each drone emitted a setpoint on this tick.
     pub emitted: Vec<(u8, bool)>,
+    /// How many neighbours each drone saw.
     pub neighbors_seen: Vec<(u8, usize)>,
 }
 
 impl SimSample {
+    /// Active precedence of `slot`, if present.
     pub fn precedence_of(&self, slot: u8) -> Option<ModePrecedence> {
         self.precedence
             .iter()
@@ -117,6 +131,7 @@ impl SimSample {
             .map(|(_, p)| *p)
     }
 
+    /// Whether `slot` emitted a setpoint this tick.
     pub fn emitted_by(&self, slot: u8) -> bool {
         self.emitted
             .iter()
@@ -124,6 +139,7 @@ impl SimSample {
             .is_some_and(|(_, e)| *e)
     }
 
+    /// Neighbours `slot` saw this tick.
     pub fn neighbors_of(&self, slot: u8) -> usize {
         self.neighbors_seen
             .iter()
@@ -135,13 +151,16 @@ impl SimSample {
 /// The whole run.
 #[derive(Debug, Clone)]
 pub struct SimReport {
+    /// Control ticks run.
     pub ticks: usize,
     /// The worst separation seen at ANY sampled instant, metres.
     pub min_pairwise_m: f64,
+    /// One sample per tick.
     pub samples: Vec<SimSample>,
 }
 
 impl SimReport {
+    /// The final sample.
     pub fn last(&self) -> &SimSample {
         self.samples.last().expect("a run has at least one sample")
     }
@@ -150,7 +169,9 @@ impl SimReport {
 /// The simulated world. Broadcast medium, lossless, so the only reason a drone
 /// misses a beacon is that the sender stopped sending.
 pub struct SimWorld {
+    /// Projection origin.
     pub origin: GeoOrigin,
+    /// The simulated drones.
     pub drones: Vec<SimDrone>,
     beacons: BTreeMap<u8, SimBeacon>,
     t0: Instant,
@@ -158,6 +179,7 @@ pub struct SimWorld {
 }
 
 impl SimWorld {
+    /// A world with the given drones.
     pub fn new(origin: GeoOrigin, drones: Vec<SimDrone>) -> Self {
         Self {
             origin,
@@ -168,14 +190,17 @@ impl SimWorld {
         }
     }
 
+    /// The drone in `slot`.
     pub fn drone(&self, slot: u8) -> Option<&SimDrone> {
         self.drones.iter().find(|d| d.slot == slot)
     }
 
+    /// The drone in `slot`, mutably.
     pub fn drone_mut(&mut self, slot: u8) -> Option<&mut SimDrone> {
         self.drones.iter_mut().find(|d| d.slot == slot)
     }
 
+    /// Simulated time, seconds.
     pub fn t_s(&self) -> f64 {
         self.tick as f64 * SIM_DT
     }
@@ -315,7 +340,7 @@ impl SimWorld {
     }
 
     /// Every heard neighbour, dead-reckoned forward to now, with anything older
-    /// than the staleness window dropped — exactly what `NeighborTable` serves.
+    /// than the staleness window dropped - exactly what `NeighborTable` serves.
     fn fixes_for(&self, slot: u8) -> Vec<NeighborFix> {
         let stale_ticks = (crate::NEIGHBOR_STALE.as_secs_f64() / SIM_DT).round() as usize;
         self.beacons
@@ -336,7 +361,7 @@ impl SimWorld {
                 let lon = crate::geo::e7_to_deg(b.lon_e7);
                 let alt = b.alt_dm as f64 / 10.0;
                 // Dead reckon in the local frame, then hand back geodetic, which
-                // is the same order `swarmbus::fixes_from_payload` uses.
+                // is the same order a typical host adapter uses.
                 let o = GeoOrigin::new(lat, lon, alt);
                 let (plat, plon, palt) = o.to_geo(Ned::new(vn * dt, ve * dt, vd * dt));
                 Some(NeighborFix {
@@ -361,10 +386,12 @@ impl SimWorld {
 pub struct Rng(u64);
 
 impl Rng {
+    /// A generator seeded with `seed`.
     pub fn new(seed: u64) -> Self {
         Self(seed | 1)
     }
 
+    /// The next pseudo-random value.
     pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x >> 12;
@@ -434,7 +461,7 @@ mod tests {
         );
 
         // One tick later, with no fresh beacon, the fix must have been dead
-        // reckoned FORWARD by one period at the reported velocity — that is the
+        // reckoned FORWARD by one period at the reported velocity - that is the
         // whole reason a 2 Hz beacon can drive a 10 Hz loop.
         w.tick += 1;
         let later = w.fixes_for(1);

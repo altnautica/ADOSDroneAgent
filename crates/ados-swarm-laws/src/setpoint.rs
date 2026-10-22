@@ -3,7 +3,7 @@
 //! MAVLink message 86, sent only while the FC reports GUIDED.
 //! This module owns the field set and the `type_mask` semantics as pure data so
 //! the encoding is unit-testable without a flight controller, a serial port or a
-//! MAVLink dialect in scope; the router turns a [`Setpoint`] into the wire
+//! MAVLink dialect in scope; the host turns a [`Setpoint`] into the wire
 //! message.
 
 use crate::geo::{deg_to_e7, GeoOrigin, Ned};
@@ -13,8 +13,8 @@ use crate::geo::{deg_to_e7, GeoOrigin, Ned};
 /// Every control law is a proportional term over an error that can be hundreds
 /// of metres, so each saturates here. Chosen as a conservative small-multirotor
 /// cruise: high enough that a 500 m repositioning is a minute rather than ten,
-/// low enough that the closing-rate barrier — whose allowance is 4 m/s at the
-/// soft separation radius — remains the binding constraint near other aircraft.
+/// low enough that the closing-rate barrier - whose allowance is 4 m/s at the
+/// soft separation radius - remains the binding constraint near other aircraft.
 pub const MAX_COMMAND_SPEED_MPS: f64 = 10.0;
 
 /// `MAV_FRAME_GLOBAL_RELATIVE_ALT_INT`. Relative altitude, matching the
@@ -53,15 +53,19 @@ pub enum SetpointKind {
 /// One `SET_POSITION_TARGET_GLOBAL_INT` payload, frame-independent.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Setpoint {
+    /// What the setpoint commands.
     pub kind: SetpointKind,
     /// Degrees × 1e7, MAVLink fixed point.
     pub lat_e7: i32,
+    /// Longitude, degrees times 1e7.
     pub lon_e7: i32,
     /// Metres, relative to home (see [`MAV_FRAME_GLOBAL_RELATIVE_ALT_INT`]).
     pub alt_m: f32,
     /// Metres/second NED. `vd` is DOWN-positive: a climb is negative.
     pub vn: f32,
+    /// Velocity east, metres/second.
     pub ve: f32,
+    /// Velocity down, metres/second.
     pub vd: f32,
 }
 

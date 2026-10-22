@@ -8,11 +8,11 @@
 //! # Why one round is enough here
 //!
 //! The literature bounds convergence at `N_min · D` iterations, where `D` is the
-//! diameter of the interaction graph — a mesh of point-to-point links needs
+//! diameter of the interaction graph - a mesh of point-to-point links needs
 //! `D` hops for one agent's bid to reach the far side. A shared broadcast medium
 //! has `D = 1`: every drone hears every drone's bid directly, so the diameter
 //! factor vanishes and the bound collapses to `N_min`. When the greedy bundles
-//! are already conflict-free, that is literally ONE round — one build, one
+//! are already conflict-free, that is literally ONE round - one build, one
 //! broadcast, done, which [`converge_broadcast`] measures rather than assumes.
 //!
 //! # Rate
@@ -32,7 +32,7 @@ use crate::geo::Ned;
 
 /// Per-second reward discount. The score is `Σ λ^{t_j} r_j` over the path's
 /// arrival times, which is what gives CBBA its diminishing-marginal-gain
-/// property — the property the convergence proof rests on. A plain
+/// property - the property the convergence proof rests on. A plain
 /// `reward − distance` score does NOT satisfy it and can livelock.
 pub const CBBA_DISCOUNT: f64 = 0.95;
 
@@ -46,13 +46,16 @@ pub const CBBA_BUNDLE_CAPACITY: usize = 5;
 /// A task to be allocated: a waypoint or survey cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CbbaTask {
+    /// Stable task identifier.
     pub id: String,
     /// Position in the fleet's shared local NED frame.
     pub pos: Ned,
+    /// Reward for completing the task, before the time discount.
     pub reward: f32,
 }
 
 impl CbbaTask {
+    /// A task at `pos` worth `reward`.
     pub fn new(id: impl Into<String>, pos: Ned, reward: f32) -> Self {
         Self {
             id: id.into(),
@@ -62,23 +65,29 @@ impl CbbaTask {
     }
 }
 
-/// What this drone is currently assigned — the read-only pair the settings page
+/// What this drone is currently assigned - the read-only pair the settings page
 /// surfaces (`swarm.tasks.assigned_task_id`, `swarm.tasks.bundle_position`).
 /// Never the bid internals: the operator wants the assignment, not the auction.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskAssignment {
+    /// The task this agent won, if any.
     pub task_id: Option<String>,
+    /// Position of that task in this agent's bundle.
     pub bundle_position: Option<usize>,
 }
 
 /// One drone's auction state.
 #[derive(Debug, Clone)]
 pub struct CbbaAgent {
+    /// This agent's fleet slot.
     pub slot: u8,
     /// Where this drone starts its path, in the shared local frame.
     pub pos: Ned,
+    /// Cruise speed used to turn path length into time, metres/second.
     pub speed: f64,
+    /// Maximum tasks in one bundle.
     pub capacity: usize,
+    /// Per-second time discount applied to rewards (0..1).
     pub discount: f64,
     bundle: Vec<usize>,
     path: Vec<usize>,
@@ -87,6 +96,7 @@ pub struct CbbaAgent {
 }
 
 impl CbbaAgent {
+    /// An agent at `pos`, sized for `n_tasks` tasks and `n_agents` agents.
     pub fn new(slot: u8, pos: Ned, n_tasks: usize, n_agents: usize) -> Self {
         Self {
             slot,
@@ -101,11 +111,13 @@ impl CbbaAgent {
         }
     }
 
+    /// Set the bundle capacity.
     pub fn with_capacity(mut self, capacity: usize) -> Self {
         self.capacity = capacity.max(1);
         self
     }
 
+    /// This agent's current bid vector, as broadcast to peers.
     pub fn vector(&self) -> &BidVector {
         &self.vector
     }
@@ -115,7 +127,7 @@ impl CbbaAgent {
         &self.path
     }
 
-    /// Tasks in the order they were added — the order releases walk.
+    /// Tasks in the order they were added - the order releases walk.
     pub fn bundle(&self) -> &[usize] {
         &self.bundle
     }
@@ -131,7 +143,7 @@ impl CbbaAgent {
         }
     }
 
-    /// Phase 1: greedily grow the bundle while a task's marginal score beats the
+    /// Bundle-building step: greedily grow the bundle while a task's marginal score beats the
     /// standing winning bid. Returns whether anything was added.
     pub fn build_bundle(&mut self, tasks: &[CbbaTask]) -> bool {
         let mut changed = false;
@@ -156,7 +168,7 @@ impl CbbaAgent {
                 }
                 let Some((at, marginal)) = here else { continue };
                 // Compare at WIRE precision. The score is computed in f64 but the
-                // bid vector carries f32, and `f32(x) < x` for most x — so an f64
+                // bid vector carries f32, and `f32(x) < x` for most x - so an f64
                 // comparison against a widened f32 makes a drone find its OWN
                 // losing bid beatable, re-bid the identical value, get outbid
                 // again, and oscillate until the round bound. Rounding first makes
@@ -178,7 +190,7 @@ impl CbbaAgent {
         changed
     }
 
-    /// Phase 2: integrate a peer's bid vector. Returns whether the ASSIGNMENT
+    /// Consensus step: integrate a peer's bid vector. Returns whether the ASSIGNMENT
     /// changed; the information timestamps are merged either way but do not count,
     /// since a monotonic clock would otherwise make the auction never settle.
     pub fn receive(&mut self, sender: u8, theirs: &BidVector, roster: &[u8], now: u16) -> bool {

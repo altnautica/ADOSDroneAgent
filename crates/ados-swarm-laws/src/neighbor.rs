@@ -1,27 +1,20 @@
 //! The control laws' view of a neighbour, and the allocation-free nearest-set
 //! search every law shares.
 //!
-//! [`NeighborState`] is deliberately NOT `ados_swarmbus::Neighbor`: it is that
-//! type projected into the local NED frame and stripped of transport concerns
-//! (receive time, RSSI, the wire's fixed-point scaling). Keeping the laws on
-//! this type is what makes every one of them a pure function testable on a
-//! laptop with no radio, no socket and no clock.
+//! [`NeighborState`] is a peer projected into the local NED frame and stripped
+//! of transport concerns (receive time, RSSI, any fixed-point wire scaling).
+//! Keeping the laws on this type is what makes every one of them a pure
+//! function testable on a laptop with no radio, no socket and no clock.
 
 use crate::geo::Ned;
 
-// The beacon `status` condition bits, re-exported from the transport that defines
-// them. Restating the bit positions here would be a second copy of a wire format
-// this crate does not own — and the first time the two disagreed, a drone would
-// read a neighbour's `armed` flag as its `guided` one.
-pub use ados_swarmbus::beacon::{
-    STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO,
-};
+use crate::status::{STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO};
 
 /// A neighbour as the control laws see it: a slot, a position and velocity in
 /// the local NED frame, and the raw beacon status byte.
 ///
 /// `pos` is dead-reckoned forward from the last beacon by the caller
-/// ([`crate::swarmbus::fixes_from_payload`]), which is why a 2 Hz beacon feeds a
+/// (the host adapter that feeds the controller), which is why a 2 Hz beacon feeds a
 /// 10 Hz control loop without the loop ever seeing a staircase.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NeighborState {
@@ -42,6 +35,7 @@ pub struct NeighborState {
 }
 
 impl NeighborState {
+    /// A neighbour from its slot, local position, velocity and status byte.
     pub const fn new(slot: u8, pos: Ned, vel: Ned, status: u8) -> Self {
         Self {
             slot,
@@ -58,22 +52,27 @@ impl NeighborState {
         self
     }
 
+    /// The neighbour reports armed.
     pub const fn armed(&self) -> bool {
         self.status & STATUS_ARMED != 0
     }
 
+    /// The neighbour accepts offboard setpoints.
     pub const fn guided(&self) -> bool {
         self.status & STATUS_GUIDED != 0
     }
 
+    /// The neighbour's separation layer has taken over.
     pub const fn emergency(&self) -> bool {
         self.status & STATUS_EMERGENCY != 0
     }
 
+    /// The neighbour's GPS fix is usable.
     pub const fn gps_ok(&self) -> bool {
         self.status & STATUS_GPS_OK != 0
     }
 
+    /// The neighbour is the operator-selected hero.
     pub const fn hero(&self) -> bool {
         self.status & STATUS_HERO != 0
     }
@@ -90,7 +89,7 @@ impl NeighborState {
     /// the value it returns and [`crate::formation::anchor_position`] gates the
     /// centroid anchor on whether it returns at all. A second copy of the
     /// predicate is how a law ends up weighting a fix another law already
-    /// rejected — and the centroid anchor is the law where that costs the most,
+    /// rejected - and the centroid anchor is the law where that costs the most,
     /// because it is the only one that averages over the WHOLE fleet with no
     /// range bound of its own.
     ///
@@ -112,8 +111,8 @@ impl NeighborState {
 
 /// Upper bound on the neighbour count any single law weights.
 ///
-/// Both `k` values the plan sets are 7 (`SEPARATION_NEIGHBORS`,
-/// `FLOCK_NEIGHBORS`), and Dronisos flew N=10 outdoor flocking weighting just
+/// Both default `k` values are 7 (`SEPARATION_NEIGHBORS`,
+/// `FLOCK_NEIGHBORS`), and published outdoor flocking flights weight as few as
 /// two, so 16 is already double the generous setting. The cap exists so
 /// [`NearestSet`] is a fixed-size stack value and the 10 Hz control loop never
 /// allocates: a heap allocation per tick per law, times 24 drones, is pure
@@ -153,7 +152,7 @@ impl NearestSet {
     /// a `Vec`.
     ///
     /// Ties break on the lower slot number, so two neighbours at exactly equal
-    /// range produce the same set on every drone — a swarm where two aircraft
+    /// range produce the same set on every drone - a swarm where two aircraft
     /// disagree about who their neighbours are is a swarm with no lattice.
     pub fn build(neighbors: &[NeighborState], radius: f64, k: usize) -> Self {
         let mut out = Self::default();
@@ -167,7 +166,7 @@ impl NearestSet {
             };
             let len = out.len as usize;
             // Rank against the entries already held. A candidate is better than an
-            // entry when it is nearer, or exactly as near with a lower slot — the
+            // entry when it is nearer, or exactly as near with a lower slot - the
             // tie-break has to be part of the RANKING, not a separate check, or a
             // full set rejects an equidistant lower slot that belongs in it.
             let mut at = len;
@@ -202,10 +201,12 @@ impl NearestSet {
         out
     }
 
+    /// Number of neighbours selected.
     pub fn len(&self) -> usize {
         self.len as usize
     }
 
+    /// Whether no neighbour was selected.
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

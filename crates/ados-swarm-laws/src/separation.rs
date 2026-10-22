@@ -41,17 +41,21 @@ pub const HARD_CLIMB_RATE_MPS: f64 = 1.0;
 /// The deconfliction rule is `slot * HARD_CLIMB_STEP_M`: strictly increasing in
 /// slot, so two converging drones separate vertically by a rule both compute
 /// identically from data both already have. No negotiation, no round trip, and
-/// no dependence on which drone noticed first — which is exactly why it is safe
+/// no dependence on which drone noticed first - which is exactly why it is safe
 /// to run on a lossy broadcast medium.
 pub const HARD_CLIMB_STEP_M: f64 = 0.5;
 
-/// The separation gains, as configured. Defaults are the plan's constants; the
-/// `swarm.separation.*` config block overrides the two radii.
+/// The separation gains, as configured. Defaults are the module constants; a
+/// [`crate::config::SeparationConfig`] overrides the two radii.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SeparationTuning {
+    /// Soft separation radius, metres.
     pub radius_m: f64,
+    /// Hard separation floor, metres.
     pub hard_m: f64,
+    /// Repulsive gain.
     pub gain: f64,
+    /// Neighbours weighted.
     pub neighbors: usize,
 }
 
@@ -94,14 +98,16 @@ impl SeparationTuning {
     }
 }
 
-/// The nearest neighbour inside [`SeparationTuning::hard_m`] — the reason the
+/// The nearest neighbour inside [`SeparationTuning::hard_m`] - the reason the
 /// hard override is engaged.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HardBreach {
+    /// Slot of the breaching neighbour.
     pub slot: u8,
+    /// Distance to it, metres.
     pub distance_m: f64,
     /// The offender's altitude offset from this drone, metres UP-positive. Needed
-    /// because the climb datum has to be shared; see [`climb_datum_m`].
+    /// because the climb datum has to be shared between the pair.
     pub relative_alt_m: f64,
     /// This drone's bus sender id compared with the offender's; see
     /// [`NeighborState::sender_order`]. Only consulted when the slots tie.
@@ -185,8 +191,8 @@ pub fn climbs(own_slot: u8, offender_slot: u8, sender_order: Ordering) -> bool {
 /// Pinning the climber to the HOLDER's altitude fixes it: the holder is not
 /// moving vertically, so `offender_alt + 0.5·Δslot` is the same number on every
 /// tick and every re-engagement. The climb happens once and then holds. Both
-/// vehicles still compute it from data both already have — the beacon carries the
-/// neighbour's slot and altitude — so it is still a deterministic rule needing no
+/// vehicles still compute it from data both already have - the beacon carries the
+/// neighbour's slot and altitude - so it is still a deterministic rule needing no
 /// negotiation, which is the property that makes it safe on a lossy broadcast.
 pub fn climb_offset_m(own_slot: u8, offender_slot: u8, sender_order: Ordering) -> f64 {
     if !climbs(own_slot, offender_slot, sender_order) {
@@ -207,7 +213,7 @@ pub fn climb_offset_m(own_slot: u8, offender_slot: u8, sender_order: Ordering) -
 ///   aircraft it is avoiding is worse than one that holds. Measured: without this
 ///   guard a packed cluster of eight loses a third of its separation floor to
 ///   climb-throughs.
-/// * Otherwise — level with, or above, the offender — climb to
+/// * Otherwise - level with, or above, the offender - climb to
 ///   [`climb_offset_m`] above the OFFENDER's altitude. Measured from the holder,
 ///   never from the climber's own rising altitude, so the number is the same on
 ///   every tick and every re-engagement.
@@ -231,7 +237,7 @@ pub fn hard_climb_target_m(
 /// climb at [`HARD_CLIMB_RATE_MPS`] until `alt_m` reaches `target_alt_m`.
 ///
 /// Down-positive, so a climb is negative. Once the offset is reached the command
-/// is a pure zero — the vehicle holds, it does not drift on up.
+/// is a pure zero - the vehicle holds, it does not drift on up.
 pub fn hard_override(alt_m: f64, target_alt_m: f64) -> Ned {
     if alt_m >= target_alt_m {
         return Ned::ZERO;

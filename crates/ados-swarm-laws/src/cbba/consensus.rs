@@ -1,4 +1,4 @@
-//! CBBA phase 2 — the conflict-resolution decision table.
+//! CBBA phase 2 - the conflict-resolution decision table.
 //!
 //! A direct transcription of Table 1 in Choi, Brunet & How, *Consensus-Based
 //! Decentralized Auctions for Robust Task Allocation* (IEEE T-RO 2009). The table
@@ -63,7 +63,7 @@ pub fn decide(
             // spawned at the same point score every task identically, and with
             // `yk > yi` alone neither side ever yields, so the auction settles
             // conflicted. CBBA requires bids to be unique or a deterministic
-            // tie-break; the lower slot wins, which is antisymmetric — of the two
+            // tie-break; the lower slot wins, which is antisymmetric - of the two
             // drones evaluating the same tie, exactly one concedes.
             if yk > yi || (yk == yi && sender < receiver) {
                 Update
@@ -169,7 +169,7 @@ pub fn apply(action: TableAction, j: usize, theirs: &BidVector, mine: &mut BidVe
 /// Merge information timestamps after integrating a message.
 ///
 /// The sender was heard DIRECTLY, so its entry becomes `now`. Everything else the
-/// sender knows is second-hand, so it is merged by recency — which is precisely
+/// sender knows is second-hand, so it is merged by recency - which is precisely
 /// the mechanism the timestamp rows of the table arbitrate on.
 pub fn merge_stamps(
     mine: &mut BidVector,
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn sender_confirms_what_i_already_believed_about_it() {
-        // I thought the sender held it; the sender agrees. Take its figure —
+        // I thought the sender held it; the sender agrees. Take its figure  -
         // it is first-hand and mine was a rumour.
         assert_eq!(row(3.0, Some(THEM), 9.0, Some(THEM)), Update);
     }
@@ -314,7 +314,7 @@ mod tests {
         mine.s[2] = 1;
         assert_eq!(decide(0, THEM, ME, &theirs, &mine, &ROSTER), Update);
 
-        // Two different third parties — the rows that exist purely to break
+        // Two different third parties - the rows that exist purely to break
         // contradictory rumours.
         let (mut theirs, mut mine) = vecs(9.0, Some(OTHER), 5.0, Some(FOURTH));
         assert_eq!(decide(0, THEM, ME, &theirs, &mine, &ROSTER), Leave);

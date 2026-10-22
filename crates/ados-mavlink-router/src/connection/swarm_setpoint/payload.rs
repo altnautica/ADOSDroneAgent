@@ -1,9 +1,10 @@
 //! The seam between the transport and the control laws.
 //!
 //! `ados-swarmbus` owns the radio, the beacon wire format and the neighbour
-//! table; this crate owns the control laws. Everything that crosses between them
-//! crosses here, in one place, so the laws stay pure functions over
-//! [`crate::NeighborState`] and can be tested with no socket and no clock.
+//! table; `ados-swarm-laws` owns the control laws. Everything that crosses
+//! between them crosses here, in one place, so the laws stay pure functions over
+//! [`ados_swarm_laws::NeighborState`] and can be tested with no socket and no
+//! clock.
 //!
 //! # Which direction each half travels
 //!
@@ -12,12 +13,12 @@
 //! link. So the two halves are different processes and the seam is two IPC
 //! payloads, not a function call:
 //!
-//! * INBOUND — the neighbour table, read off `/run/ados/swarm.sock`. That payload
+//! * INBOUND â€” the neighbour table, read off `/run/ados/swarm.sock`. That payload
 //!   is a published contract (`ados_swarmbus::publish::neighbors_payload`), which
 //!   is why [`fixes_from_payload`] pins every key name it reads in its tests: a
 //!   rename upstream must fail here loudly rather than quietly leave the autonomy
 //!   layer flying on an empty neighbour table.
-//! * OUTBOUND — the active precedence and the emergency condition, published in
+//! * OUTBOUND â€” the active precedence and the emergency condition, published in
 //!   the router's own state snapshot as [`EXTRA_PRECEDENCE`] and
 //!   [`EXTRA_EMERGENCY`], which `ados_swarmbus::vehicle::beacon_from_state` folds
 //!   into the beacon exactly as it already does for the hero bit.
@@ -39,10 +40,10 @@
 //! formation on them would hand the aircraft to whoever is in radio range. An
 //! absent flag reads the same as false.
 
-use ados_swarmbus::NEIGHBOR_STALE;
+use ados_swarm_laws::NEIGHBOR_STALE;
 use serde_json::Value;
 
-use crate::controller::NeighborFix;
+use ados_swarm_laws::NeighborFix;
 
 /// State-snapshot key carrying this node's active precedence level, as
 /// `ModePrecedence::as_wire`. Absent reads as `hold`.
@@ -59,7 +60,7 @@ pub const EXTRA_EMERGENCY: &str = "swarm_emergency";
 /// entry's published `age_ms`, and it is what turns a 2 Hz feed into a 10 Hz one:
 /// the socket delivers five times slower than the control loop runs, so without
 /// it every fifth tick would carry a genuine prediction and the other four would
-/// replay the same frozen frame — a staircase, at exactly the scale that matters
+/// replay the same frozen frame â€” a staircase, at exactly the scale that matters
 /// to a 4 m separation floor.
 ///
 /// Writes into `out` rather than returning a `Vec`: this runs at 10 Hz on an SBC
@@ -70,7 +71,7 @@ pub const EXTRA_EMERGENCY: &str = "swarm_emergency";
 /// flight controller holds.
 ///
 /// An entry missing any field it needs is SKIPPED rather than defaulted, and so
-/// is an entry whose position is PRESENT but is not a measurement — see
+/// is an entry whose position is PRESENT but is not a measurement â€” see
 /// [`is_measured_fix`]. A neighbour with no position is not a neighbour at the
 /// origin: that would put a phantom aircraft at the equator and drag the whole
 /// flock toward it.
@@ -117,9 +118,9 @@ pub fn fixes_from_payload(
         let vd = n.get("vz_ms").and_then(Value::as_f64).unwrap_or(0.0);
         // Dead reckon at constant velocity.
         let dt = age_ms as f64 / 1000.0;
-        let origin = crate::geo::GeoOrigin::new(lat_deg, lon_deg, alt_m);
+        let origin = ados_swarm_laws::geo::GeoOrigin::new(lat_deg, lon_deg, alt_m);
         let (lat_deg, lon_deg, alt_m) =
-            origin.to_geo(crate::geo::Ned::new(vn * dt, ve * dt, vd * dt));
+            origin.to_geo(ados_swarm_laws::geo::Ned::new(vn * dt, ve * dt, vd * dt));
         out.push(NeighborFix {
             slot: slot.min(u8::MAX as u64) as u8,
             lat_deg,
@@ -154,8 +155,8 @@ fn sender_id(v: Option<&Value>) -> Option<u64> {
 /// A fleet member with no usable GPS still beacons: the vehicle half fills
 /// lat/lon/alt with zeros and leaves the `gps_ok` bit clear rather than
 /// withholding the row. Absence is already skipped above; a PRESENT zero is the
-/// dangerous half, because (0, 0, 0) is a real geodetic point — thousands of
-/// kilometres from any operating site — and the one law with no range bound of
+/// dangerous half, because (0, 0, 0) is a real geodetic point â€” thousands of
+/// kilometres from any operating site â€” and the one law with no range bound of
 /// its own, `formation::anchor_position(Centroid)`, averages it straight into
 /// the fleet anchor. One member sitting on the ground without a lock would
 /// otherwise move every armed drone's anchor by `distance / (N + 1)` metres and
@@ -165,7 +166,7 @@ fn sender_id(v: Option<&Value>) -> Option<u64> {
 /// telling us its position is not a measurement, whatever numbers it carried.
 /// The rest catch a producer that raises the bit anyway.
 fn is_measured_fix(lat_deg: f64, lon_deg: f64, alt_m: f64, status: u8) -> bool {
-    if status & crate::neighbor::STATUS_GPS_OK == 0 {
+    if status & ados_swarm_laws::STATUS_GPS_OK == 0 {
         return false;
     }
     if !lat_deg.is_finite() || !lon_deg.is_finite() || !alt_m.is_finite() {
@@ -185,7 +186,7 @@ fn is_measured_fix(lat_deg: f64, lon_deg: f64, alt_m: f64, status: u8) -> bool {
 ///
 /// The payload publishes the flags decoded rather than raw, so the byte is
 /// reassembled here. Bits 5..7 come back through `ModePrecedence`, which is what
-/// makes a neighbour's ACTIVE level — not its commanded mode — available to this
+/// makes a neighbour's ACTIVE level â€” not its commanded mode â€” available to this
 /// drone's own arbitration and to the operator screen.
 fn status_byte(n: &Value) -> u8 {
     let flag = |key: &str, bit: u8| {
@@ -195,13 +196,13 @@ fn status_byte(n: &Value) -> u8 {
             0
         }
     };
-    let mut status = flag("armed", crate::neighbor::STATUS_ARMED)
-        | flag("guided", crate::neighbor::STATUS_GUIDED)
-        | flag("emergency", crate::neighbor::STATUS_EMERGENCY)
-        | flag("gps_ok", crate::neighbor::STATUS_GPS_OK)
-        | flag("hero", crate::neighbor::STATUS_HERO);
+    let mut status = flag("armed", ados_swarm_laws::STATUS_ARMED)
+        | flag("guided", ados_swarm_laws::STATUS_GUIDED)
+        | flag("emergency", ados_swarm_laws::STATUS_EMERGENCY)
+        | flag("gps_ok", ados_swarm_laws::STATUS_GPS_OK)
+        | flag("hero", ados_swarm_laws::STATUS_HERO);
     if let Some(level) = n.get("mode_precedence").and_then(Value::as_str) {
-        status |= crate::ModePrecedence::from_wire(level).as_status_bits();
+        status |= ados_swarm_laws::ModePrecedence::from_wire(level).as_status_bits();
     }
     status
 }
@@ -211,8 +212,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::neighbor::{STATUS_ARMED, STATUS_EMERGENCY, STATUS_GUIDED};
-    use crate::ModePrecedence;
+    use ados_swarm_laws::ModePrecedence;
+    use ados_swarm_laws::{STATUS_ARMED, STATUS_EMERGENCY, STATUS_GUIDED};
     use serde_json::json;
 
     /// A payload in exactly the shape `ados_swarmbus::publish::neighbors_payload`
@@ -274,7 +275,8 @@ mod tests {
     /// carry opposite orders, so the pair resolves to exactly one climber.
     #[test]
     fn a_same_slot_pair_reads_opposite_sender_orders_off_the_published_payload() {
-        use ados_swarmbus::beacon::{SwarmBeacon, STATUS_GPS_OK};
+        use ados_swarm_laws::STATUS_GPS_OK;
+        use ados_swarmbus::beacon::SwarmBeacon;
         use ados_swarmbus::crypto::SenderNonce;
         use ados_swarmbus::neighbors::NeighborTable;
         use ados_swarmbus::publish::neighbors_payload;
@@ -333,7 +335,8 @@ mod tests {
         assert!(out.is_empty(), "an absent flag is not a bound key");
 
         // The real producer on a cold-start bus publishes false.
-        use ados_swarmbus::beacon::{SwarmBeacon, STATUS_GPS_OK};
+        use ados_swarm_laws::STATUS_GPS_OK;
+        use ados_swarmbus::beacon::SwarmBeacon;
         use ados_swarmbus::neighbors::NeighborTable;
         use ados_swarmbus::publish::neighbors_payload;
         let now = std::time::Instant::now();
@@ -376,7 +379,8 @@ mod tests {
             Duration::from_millis(300),
             &mut mid_interval,
         );
-        let advanced = (mid_interval[0].lat_deg - at_publish[0].lat_deg) * crate::geo::DEG_TO_M;
+        let advanced =
+            (mid_interval[0].lat_deg - at_publish[0].lat_deg) * ados_swarm_laws::geo::DEG_TO_M;
         assert!((advanced - 3.0).abs() < 0.01, "advanced {advanced} m");
         // And it counts toward staleness too, so a socket that stopped delivering
         // ages out on the local clock rather than on a frozen `age_ms`.
@@ -392,7 +396,7 @@ mod tests {
         let mut aged = Vec::new();
         fixes_from_payload(&payload(400, 10.0), Duration::ZERO, &mut aged);
         // 0.4 s at 10 m/s north is 4 m of latitude.
-        let advanced = (aged[0].lat_deg - fresh[0].lat_deg) * crate::geo::DEG_TO_M;
+        let advanced = (aged[0].lat_deg - fresh[0].lat_deg) * ados_swarm_laws::geo::DEG_TO_M;
         assert!((advanced - 4.0).abs() < 0.01, "advanced {advanced} m");
         // The reported velocity is passed through unchanged; only the position is
         // predicted.
@@ -479,7 +483,7 @@ mod tests {
         fixes_from_payload(&p, Duration::ZERO, &mut out);
         assert!(out.is_empty(), "no lock means no usable position");
 
-        // Absent reads the same as false — the payload publishes the bit
+        // Absent reads the same as false â€” the payload publishes the bit
         // decoded, so a producer that dropped it is not asserting a fix.
         let mut p = payload(0, 0.0);
         p["neighbors"][0]

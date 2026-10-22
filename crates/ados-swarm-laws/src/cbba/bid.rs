@@ -14,7 +14,7 @@
 //!
 //! The three blocks are CBBA's `y`, `z` and `s` vectors. The agent block is
 //! ordered by the sorted roster of registered slots, which every drone derives
-//! from the same fleet registry — so the encoding needs no explicit roster on the
+//! from the same fleet registry - so the encoding needs no explicit roster on the
 //! wire.
 //!
 //! Bids are EVENT-DRIVEN ONLY: emitted on a task-set change or a reallocation,
@@ -39,6 +39,7 @@ pub struct BidVector {
 }
 
 impl BidVector {
+    /// An empty vector sized for `n_tasks` tasks and `n_agents` agents.
     pub fn new(n_tasks: usize, n_agents: usize) -> Self {
         Self {
             y: vec![0.0; n_tasks],
@@ -47,6 +48,7 @@ impl BidVector {
         }
     }
 
+    /// Encoded length in bytes of a vector of this shape.
     pub fn wire_len(n_tasks: usize, n_agents: usize) -> usize {
         n_tasks * BID_BYTES_PER_TASK + n_agents * BID_BYTES_PER_AGENT
     }
@@ -65,9 +67,9 @@ impl BidVector {
     }
 
     /// Decode a peer's bid. `None` when the length does not match the roster the
-    /// receiver holds — a mismatched task or agent count means the sender is
+    /// receiver holds - a mismatched task or agent count means the sender is
     /// auctioning a different problem, and silently truncating would splice two
-    /// auctions together — or when any bid is NaN, infinite or negative. A NaN
+    /// auctions together - or when any bid is NaN, infinite or negative. A NaN
     /// can never be outbid (every comparison against it is false) and an
     /// infinity outbids everything, so either would lock a task forever.
     pub fn decode(bytes: &[u8], n_tasks: usize, n_agents: usize) -> Option<Self> {

@@ -2,9 +2,9 @@ use std::cmp::Ordering;
 use std::time::Duration;
 
 use super::*;
-use crate::neighbor::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED};
 use crate::separation::{climb_offset_m, SEPARATION_HARD_M};
 use crate::setpoint::SetpointKind;
+use crate::status::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED};
 
 const HOME: (f64, f64) = (12.9716, 77.5946);
 const ALT: f64 = 30.0;
@@ -150,7 +150,7 @@ fn a_zero_position_beacon_leaves_the_formation_command_unchanged() {
     // What a fleet member on the ground without a 3-D lock actually beacons:
     // lat/lon/alt all zero, `gps_ok` clear. (0, 0, 0) is a real geodetic point
     // thousands of kilometres from any site, and the centroid anchor is the one
-    // law that averages every neighbour with no range bound — so ungated, this
+    // law that averages every neighbour with no range bound - so ungated, this
     // single row moved the anchor by roughly half that distance and commanded
     // every armed drone in the fleet at full rate toward it. The barrier cannot
     // catch that: it caps closure on in-range neighbours and passes a command
@@ -278,7 +278,7 @@ fn a_disarmed_vehicle_gets_nothing() {
     assert!(out.setpoint.is_none());
     assert_eq!(out.suppressed, Some(Suppression::NotArmed));
     // The separation layer is documented as running "whenever armed", so a
-    // disarmed drone must not even flag an emergency at 2 m — it is sitting on
+    // disarmed drone must not even flag an emergency at 2 m - it is sitting on
     // the ground next to another drone.
     assert!(!out.emergency);
     assert!(c.hard_latch().is_none());
@@ -416,7 +416,7 @@ fn the_hard_override_climbs_and_keeps_only_the_repulsive_push() {
     );
     let horizontal = (s.vn as f64).hypot(s.ve as f64);
     // Bounded by the repulsive law itself, not by a behaviour layer: at 1.41 m the
-    // plan's `1.5 * (1/d - 1/8)` is under 0.9 m/s.
+    // default `1.5 * (1/d - 1/8)` is under 0.9 m/s.
     assert!(
         horizontal < 1.0,
         "this is the safety push, not a manoeuvre: {horizontal}"
@@ -530,7 +530,7 @@ fn a_trim_does_not_escalate_but_a_pin_does() {
     };
 
     // Standing still 6 m short of a neighbour, commanded straight at it. The
-    // barrier trims the 10 m/s down to the 2 m/s the margin affords — ordinary
+    // barrier trims the 10 m/s down to the 2 m/s the margin affords - ordinary
     // traffic, and escalating here would freeze every drone in a dense lattice.
     let mut c = controller("hold", &[1, 2]);
     c.set_operator_directive(goto_north, t);

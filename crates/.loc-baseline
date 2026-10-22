@@ -92,8 +92,8 @@
 583 ados-supervisor/src/janitor/tests.rs
 1010 ados-supervisor/src/lifecycle/tests.rs
 642 ados-supervisor/src/pair_proof/tests.rs
-597 ados-swarm-control/src/controller/mod.rs
-786 ados-swarm-control/src/controller/tests.rs
+597 ados-swarm-laws/src/controller/mod.rs
+786 ados-swarm-laws/src/controller/tests.rs
 578 ados-swarmbus/src/service.rs
 701 ados-tracker/src/tracker/tests.rs
 729 ados-tracker/tests/tracker_adversarial.rs
