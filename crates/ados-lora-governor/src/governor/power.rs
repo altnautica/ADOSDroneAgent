@@ -13,10 +13,12 @@ use crate::regions::{PowerRef, PowerRule};
 /// ERP and EIRP differ by the gain of a half-wave dipole.
 pub const DIPOLE_DBI: f64 = 2.15;
 
+/// Convert milliwatts to dBm.
 pub fn mw_to_dbm(mw: f64) -> f64 {
     10.0 * mw.log10()
 }
 
+/// Convert dBm to milliwatts.
 pub fn dbm_to_mw(dbm: f64) -> f64 {
     10f64.powf(dbm / 10.0)
 }
@@ -24,7 +26,9 @@ pub fn dbm_to_mw(dbm: f64) -> f64 {
 /// The antenna path the conversions use.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Antenna {
+    /// Antenna gain, dBi.
     pub gain_dbi: f64,
+    /// Cable and connector loss, dB.
     pub cable_loss_db: f64,
 }
 
@@ -83,12 +87,14 @@ pub fn pick_step(steps_desc: &[i8], cap_dbm: f64, steps_down: usize) -> Option<i
 /// hears us with margin, step back up when any peer is marginal or silent.
 #[derive(Debug, Default, Clone)]
 pub struct Apc {
+    /// Power steps currently taken down from the plan maximum.
     pub steps_down: usize,
     /// Peer node -> (SNR of our last beacon it reported, when).
     peers: HashMap<u16, (f32, i64)>,
 }
 
 impl Apc {
+    /// Record a peer SNR report taken at `at_ns` (monotonic ns).
     pub fn note_report(&mut self, peer: u16, snr_db: f32, at_ns: i64) {
         self.peers.insert(peer, (snr_db, at_ns));
     }

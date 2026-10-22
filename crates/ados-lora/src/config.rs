@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::airtime::Modem;
+use ados_lora_governor::airtime::Modem;
 
 /// `lora.e22`: the Ebyte UART module.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

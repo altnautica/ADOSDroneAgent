@@ -1,5 +1,5 @@
 //! Country (ISO 3166-1 alpha-2) to plan-row mapping for the
-//! `network.regulatory.region` fallback.
+//! country-code fallback.
 
 /// EU member states and Iceland (EEA) follow the EU plan, which Commission
 /// Implementing Decision (EU) 2019/1345 binds them to. Liechtenstein follows

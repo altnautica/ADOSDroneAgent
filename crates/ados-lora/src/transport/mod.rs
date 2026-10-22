@@ -11,8 +11,8 @@ pub mod meshtastic;
 
 use std::io;
 
-use crate::airtime::Modem;
-use crate::band::ModuleCaps;
+use ados_lora_governor::airtime::Modem;
+use ados_lora_governor::band::ModuleCaps;
 
 /// `lora.transport`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

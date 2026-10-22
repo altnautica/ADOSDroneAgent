@@ -5,9 +5,9 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::band::{self, ModuleCaps};
-use crate::governor::{GovernorStatus, RULE_KEYS};
-use crate::regions::{self, elrs_domains, Plan, Resolved};
+use ados_lora_governor::band::{self, ModuleCaps};
+use ados_lora_governor::governor::{GovernorStatus, RULE_KEYS};
+use ados_lora_governor::regions::{self, elrs_domains, Plan, Resolved};
 
 /// The `region` object of the lane body.
 pub fn region_object(resolved: Option<Resolved>) -> Value {

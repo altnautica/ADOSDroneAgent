@@ -3,11 +3,11 @@
 //! One row per supported region. A row that ships with rules transmits under
 //! them; a row whose limits could not all be cited from the regulator text
 //! ships with its bands only (`rules: []`) and is receive-only. Every enforced
-//! number in [`table`] carries the regulator document it comes from in the
+//! number in the compiled table carries the regulator document it comes from in the
 //! row's `citation`.
 //!
-//! Resolution order: `lora.region` when set, else the agent's country setting
-//! `network.regulatory.region` mapped through [`country_plan`], else none
+//! Resolution order: an explicit region code when set, else a country code
+//! mapped through [`country_plan`], else none
 //! (transmit blocked with `region_unset`, receive still on).
 mod country;
 mod elrs;
@@ -23,15 +23,20 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PowerRef {
+    /// Effective radiated power (dipole reference).
     Erp,
+    /// Effective isotropic radiated power.
     Eirp,
+    /// Conducted power at the radio output.
     Conducted,
 }
 
 /// A `max_power` rule.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct PowerRule {
+    /// Power limit, milliwatts.
     pub limit_mw: f64,
+    /// What the limit is measured against.
     pub reference: PowerRef,
     /// Power spectral density cap in dBm per 3 kHz, in the same reference.
     pub psd_dbm_per_3khz: Option<f64>,
@@ -42,7 +47,9 @@ pub struct PowerRule {
 /// A `duty_cycle` rule: `limit_pct` of airtime over a rolling `window_s`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct DutyRule {
+    /// Maximum duty, percent of the window.
     pub limit_pct: f64,
+    /// Rolling window length, seconds.
     pub window_s: u32,
 }
 
@@ -59,6 +66,7 @@ pub struct DwellRule {
     /// Occupancy limit of one channel over `per_s` seconds; `None` when the
     /// plan only bounds a single transmission.
     pub limit_ms: Option<u32>,
+    /// Window the occupancy limit applies over, seconds.
     pub per_s: Option<u32>,
     /// Longest single transmission.
     pub single_tx_max_ms: u32,
@@ -69,23 +77,31 @@ pub struct DwellRule {
 /// A `lbt` (listen before talk) rule.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct LbtRule {
+    /// Busy threshold, dBm.
     pub threshold_dbm: i16,
+    /// Minimum listen time, microseconds.
     pub listen_us: u32,
+    /// Maximum gap between listen and transmit, microseconds.
     pub gap_max_us: u32,
 }
 
 /// A channel grid: centres at `start_mhz + n * step_mhz`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Grid {
+    /// First channel centre, MHz.
     pub start_mhz: f64,
+    /// Channel spacing, MHz.
     pub step_mhz: f64,
 }
 
 /// One sub-band of a plan with the limits that apply inside it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SubBand {
+    /// Lower band edge, MHz.
     pub lo_mhz: f64,
+    /// Upper band edge, MHz.
     pub hi_mhz: f64,
+    /// Duty-cycle rule for this sub-band, if any.
     pub duty: Option<DutyRule>,
     /// `None` only on research rows, which never transmit.
     pub power: Option<PowerRule>,
@@ -120,14 +136,19 @@ fn fmt_mhz(v: f64) -> String {
 pub struct Plan {
     /// The region code (`IN`, `EU`, `EU433`, ...).
     pub code: &'static str,
+    /// Human-readable region name.
     pub name: &'static str,
+    /// Band-plan identifier.
     pub plan_id: &'static str,
     /// The span the plan's sub-bands cover, for display.
     pub band_mhz: (f64, f64),
     /// The regulator documents every enforced number comes from.
     pub citation: &'static str,
+    /// The sub-bands the plan allows.
     pub sub_bands: &'static [SubBand],
+    /// Dwell-time rule, if any.
     pub dwell: Option<DwellRule>,
+    /// Listen-before-talk rule, if any.
     pub lbt: Option<LbtRule>,
     /// The plan's mandatory channel grid (JP, KR).
     pub grid: Option<Grid>,
@@ -150,8 +171,11 @@ pub struct Plan {
 
 /// The rule kinds the governor enforces.
 pub const RULE_DUTY: &str = "duty_cycle";
+/// Rule key for the dwell-time limit.
 pub const RULE_DWELL: &str = "dwell_time";
+/// Rule key for listen-before-talk.
 pub const RULE_LBT: &str = "lbt";
+/// Rule key for the power limit.
 pub const RULE_POWER: &str = "max_power";
 
 impl Plan {
@@ -213,13 +237,16 @@ pub fn by_code(code: &str) -> Option<&'static Plan> {
 /// Where the active region came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RegionSource {
+    /// Set explicitly as a region code.
     #[serde(rename = "lora.region")]
     LoraRegion,
+    /// Mapped from a country code.
     #[serde(rename = "network.regulatory.region")]
     NetworkRegulatory,
 }
 
 impl RegionSource {
+    /// Stable string form of the source.
     pub fn as_str(self) -> &'static str {
         match self {
             RegionSource::LoraRegion => "lora.region",
@@ -231,7 +258,9 @@ impl RegionSource {
 /// A resolved region: the row and where it came from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Resolved {
+    /// The resolved plan.
     pub plan: &'static Plan,
+    /// Where the region came from.
     pub source: RegionSource,
 }
 
@@ -240,7 +269,7 @@ pub fn lookup(code: &str) -> Option<&'static Plan> {
     by_code(code).or_else(|| country_plan(code).and_then(by_code))
 }
 
-/// Resolve the active region from `lora.region` and the agent's country
+/// Resolve the active region from an explicit region code and a country
 /// setting. `None` when neither names a known row.
 pub fn resolve(lora_region: Option<&str>, country: Option<&str>) -> Option<Resolved> {
     fn pick(v: Option<&str>) -> Option<&str> {

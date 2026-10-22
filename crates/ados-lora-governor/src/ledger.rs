@@ -37,10 +37,13 @@ pub struct Now {
     pub utc_trusted: bool,
 }
 
+/// The kind of a ledger line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryKind {
+    /// An admitted transmission.
     Tx,
+    /// A liveness heartbeat.
     Seen,
     /// The ledger was found corrupt: every duty rule is exhausted for
     /// `window_s` from this entry's time. Persisted, so a reload or restart
@@ -51,19 +54,29 @@ pub enum EntryKind {
 /// One ledger line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Entry {
+    /// What this line records.
     pub kind: EntryKind,
+    /// Boot the line was written in.
     pub boot_id: String,
+    /// Monotonic time of the line, ns.
     pub t_mono_ns: i64,
+    /// Wall-clock time of the line, ms since the Unix epoch.
     pub t_utc_ms: i64,
+    /// Whether the wall clock was trusted when written.
     pub utc_trusted: bool,
+    /// Sub-band label of a transmission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sub_band: Option<String>,
+    /// Channel centre of a transmission, MHz.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_mhz: Option<f64>,
+    /// Charged airtime, microseconds.
     #[serde(default)]
     pub airtime_us: u64,
+    /// Plan identifier of a transmission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_id: Option<String>,
+    /// Duty window length, seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_s: Option<u32>,
 }
@@ -91,7 +104,9 @@ pub struct Spend {
     /// Effective time, ns on this boot's monotonic clock (may be negative for
     /// a spend before this boot).
     pub at_ns: i64,
+    /// Channel centre, MHz.
     pub channel_mhz: f64,
+    /// Charged airtime, microseconds.
     pub airtime_us: u64,
     entry: Entry,
 }
@@ -99,12 +114,15 @@ pub struct Spend {
 /// What loading found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LoadReport {
+    /// Number of entries loaded.
     pub entries: usize,
+    /// Whether a torn last line was dropped.
     pub torn_tail: bool,
     /// The file was corrupt and moved aside; duty starts exhausted.
     pub reset: bool,
 }
 
+/// The persisted airtime ledger.
 pub struct Ledger {
     path: PathBuf,
     file: Option<File>,
@@ -374,12 +392,19 @@ impl Ledger {
 }
 
 /// fsync the directory holding `path`, so a rename or create in it survives a
-/// power loss.
+/// power loss. Windows cannot open a directory as a file and commits the
+/// rename with the file metadata, so this is a no-op there.
+#[cfg(unix)]
 fn sync_dir(path: &Path) -> io::Result<()> {
     match path.parent().filter(|d| !d.as_os_str().is_empty()) {
         Some(dir) => File::open(dir)?.sync_all(),
         None => Ok(()),
     }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

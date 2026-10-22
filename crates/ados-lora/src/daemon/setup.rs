@@ -8,17 +8,17 @@ use serde_json::Value;
 
 use super::lane::{AnyTransport, Lane};
 use super::{beacon_interval_s, now_at, utc_trusted};
-use crate::band::{self, ModuleCaps};
 use crate::config::LoraConfig;
-use crate::governor::power::{conducted_cap_dbm, pick_step, Antenna};
-use crate::governor::{max_window_s, Governor, Setup};
-use crate::ledger::Ledger;
-use crate::regions::{self, Plan, Resolved};
 use crate::status::{LaneState, MeshtasticState};
 use crate::transport::e22::E22;
 use crate::transport::loopback::Loopback;
 use crate::transport::meshtastic::Meshtastic;
 use crate::transport::{Transport, TransportKind};
+use ados_lora_governor::band::{self, ModuleCaps};
+use ados_lora_governor::governor::power::{conducted_cap_dbm, pick_step, Antenna};
+use ados_lora_governor::governor::{max_window_s, Governor, Setup};
+use ados_lora_governor::ledger::Ledger;
+use ados_lora_governor::regions::{self, Plan, Resolved};
 
 /// A built lane, ready to run.
 pub struct Built {
@@ -96,7 +96,7 @@ fn lane(
     resolved: Option<Resolved>,
     freq_mhz: Option<f64>,
     ledger_path: &Path,
-    now: crate::ledger::Now,
+    now: ados_lora_governor::ledger::Now,
 ) -> io::Result<Lane> {
     let window = max_window_s(resolved.map(|r| r.plan));
     let (ledger, report) = Ledger::open(ledger_path, &boot_id(), now, window)?;
@@ -284,7 +284,7 @@ pub async fn build(config_path: &Path) -> io::Result<Option<Built>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::regions::by_code;
+    use ados_lora_governor::regions::by_code;
 
     #[test]
     fn meshtastic_slots_are_accounted_inside_the_plan() {

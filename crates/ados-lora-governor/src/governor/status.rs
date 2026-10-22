@@ -10,10 +10,15 @@ use crate::regions::PowerRef;
 /// The `channel`, `governor`, `tx` blocks and the TX verdict.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GovernorStatus {
+    /// Whether transmit is currently allowed.
     pub tx_allowed: bool,
+    /// Why transmit is blocked, when it is.
     pub blocked_reason: Option<&'static str>,
+    /// Channel details as JSON.
     pub channel: Value,
+    /// Governor counters and rule state as JSON.
     pub governor: Value,
+    /// Transmit details as JSON.
     pub tx: Value,
 }
 

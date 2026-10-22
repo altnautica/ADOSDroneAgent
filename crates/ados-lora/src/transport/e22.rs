@@ -31,10 +31,10 @@ use tokio_serial::{SerialPortBuilderExt, SerialStream};
 
 pub use pins::{GpioModePins, Mode, ModePins};
 
-use crate::airtime::Modem;
-use crate::band::ModuleCaps;
 use crate::config::LoraConfig;
 use crate::transport::{RxEvent, Transport, TransportKind, TxFrame};
+use ados_lora_governor::airtime::Modem;
+use ados_lora_governor::band::ModuleCaps;
 use proto::{RxBuf, Scan};
 
 /// Configuration mode only accepts 9600 8N1 (manual section 7.1).

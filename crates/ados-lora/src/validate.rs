@@ -1,10 +1,10 @@
 //! Validation of a `PUT /api/v1/lora` change against the plan it would run
 //! under. A value outside the plan answers `E_LORA_OUT_OF_PLAN`.
 
-use crate::airtime::{time_on_air_us, Modem};
-use crate::band::{self, ModuleCaps};
-use crate::governor::power::{conducted_cap_dbm, dbm_to_mw, Antenna};
-use crate::regions::Plan;
+use ados_lora_governor::airtime::{time_on_air_us, Modem};
+use ados_lora_governor::band::{self, ModuleCaps};
+use ados_lora_governor::governor::power::{conducted_cap_dbm, dbm_to_mw, Antenna};
+use ados_lora_governor::regions::Plan;
 
 /// The beacon frame size the dwell check is held to at `PUT` time: the
 /// longest beacon.
@@ -110,7 +110,7 @@ pub fn check(plan: &Plan, caps: Option<&ModuleCaps>, p: &Proposed) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::regions::by_code;
+    use ados_lora_governor::regions::by_code;
 
     fn proposed(freq: Option<f64>, erp: Option<f64>) -> Proposed {
         Proposed {
