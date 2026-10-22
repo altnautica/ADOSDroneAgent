@@ -1,58 +1,40 @@
-# ADOS Drone Agent
-
-**Open-source onboard agent for software-defined drones. Long-range data link. HD video. Full remote control.**
-
-![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-green.svg) ![Rust + Python](https://img.shields.io/badge/Core-Rust%20%2B%20Python-blue.svg) ![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange.svg) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2.svg)](https://discord.gg/uxbvuD4d5q)
-
-ADOS Drone Agent is the onboard software for a software-defined drone. It runs on the companion computer next to your flight controller, reads MAVLink off the FC and routes it to any ground station, streams HD video over radio or the internet, and lets you fly and manage the aircraft from a browser. The flight-critical paths are native Rust. AI, vision, and plugins run in Python.
-
-> **Part of the ADOS ecosystem.** Pairs with [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) (the browser ground station) for mission planning, 3D simulation, AI PID tuning, and gamepad flight control. The agent runs on the drone; Mission Control runs in your browser. Extend either side with [ADOS Extensions](https://github.com/altnautica/ADOSExtensions), the first-party plugin repo.
-
 <p align="center">
-  <strong><a href="https://github.com/altnautica/ADOSMissionControl">ADOS Mission Control</a></strong> |
-  <strong><a href="https://github.com/altnautica/ADOSExtensions">ADOS Extensions</a></strong> |
+  <a href="https://altnautica.com">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/brand/ados-lockup-dark.svg">
+      <img src=".github/assets/brand/ados-lockup-light.svg" alt="ADOS" width="220">
+    </picture>
+  </a>
+</p>
+<h1 align="center">ADOS Drone Agent</h1>
+<p align="center"><em>Open-source onboard agent for software-defined drones. Long-range data link. HD video. Full remote control.</em></p>
+<p align="center">![License: GPL-3.0-or-later](https://img.shields.io/badge/License-GPL--3.0--or--later-green.svg) ![Rust + Python](https://img.shields.io/badge/Core-Rust%20%2B%20Python-blue.svg) ![Status: Alpha](https://img.shields.io/badge/Status-Alpha-orange.svg) [![Discord](https://img.shields.io/badge/Discord-Join-5865F2.svg)](https://discord.gg/uxbvuD4d5q)</p>
+<p align="center">
+  <strong><a href="https://github.com/altnautica/ADOSMissionControl">Mission Control</a></strong> |
+  <strong><a href="https://github.com/altnautica/ADOSDroneAgent">Drone Agent</a></strong> |
+  <strong><a href="https://github.com/altnautica/ADOSAndroidGCS">Android GCS</a></strong> |
+  <strong><a href="https://github.com/altnautica/ADOSExtensions">Extensions</a></strong> |
+  <strong><a href="https://github.com/altnautica/ADOS-MCP">MCP</a></strong> |
+  <strong><a href="https://github.com/altnautica/ADOSDroneAgent/tree/main/crates#published-crates">Rust crates</a></strong> |
   <strong><a href="https://docs.altnautica.com">Docs</a></strong> |
   <strong><a href="https://altnautica.com">Website</a></strong> |
-  <strong><a href="https://discord.gg/uxbvuD4d5q">Discord</a></strong> |
-  <strong><a href="mailto:team@altnautica.com">Email</a></strong> |
-  <strong><a href="https://github.com/altnautica/ADOSDroneAgent/issues">Issues</a></strong>
+  <strong><a href="https://discord.gg/uxbvuD4d5q">Discord</a></strong>
 </p>
 
----
+<p align="center"><a href="#quick-start">Install</a> · <a href="https://docs.altnautica.com/drone-agent/overview">Docs</a> · <a href="https://github.com/altnautica/ADOSDroneAgent/issues">Issues</a></p>
 
-<table>
-  <tr>
-    <td width="50%">
-      <img src="docs/screenshots/overview.png" alt="ADOS Drone Agent overview showing services, system resources, and logs" height="220" width="100%"><br>
-      <sub>Overview, showing running services, system resources, and live logs in Mission Control</sub>
-    </td>
-    <td width="50%">
-      <img src="docs/screenshots/fleet-network.png" alt="Fleet network enrollment, MQTT gateway, mesh radio peers" height="220" width="100%"><br>
-      <sub>Fleet network enrollment, MQTT gateway status, and mesh radio peers</sub>
-    </td>
-  </tr>
-  <tr>
-    <td width="50%">
-      <img src="docs/screenshots/peripherals.png" alt="Connected peripherals with live sensor readings" height="220" width="100%"><br>
-      <sub>Connected peripherals with live sensor readings; drivers extend through the plugin system</sub>
-    </td>
-    <td width="50%"></td>
-  </tr>
-</table>
+<p align="center">
+  <a href="https://altnautica.com"><img src=".github/assets/film-poster.webp" alt="ADOS in 30 seconds" width="100%"></a>
+</p>
 
----
+<p align="center">
+  <picture>
+      <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/drone-brain-dark.webp">
+      <img src=".github/assets/scenes/drone-brain-light.webp" alt="ADOS Drone Agent on a companion computer" width="100%">
+    </picture>
+</p>
 
-## What it lets you do
-
-- **Turn a companion computer into a connected drone with one command.** A single installer flashes nothing, builds nothing on the device, and leaves a paired, video-streaming, telemetry-flowing aircraft.
-- **Pair over your own network, no cloud account.** The agent auto-pairs with Mission Control over the LAN. Cloud relay is there when you want to reach the drone from anywhere, and off by default.
-- **Fly the FC from a browser.** Arm, change modes, fly guided, and upload missions. The agent routes MAVLink to WebSocket, TCP, and UDP at the same time, so several ground stations can connect at once.
-- **Watch HD video over radio or the internet.** The video pipeline drives RTSP, WebRTC (WHEP), and a long-range WFB-ng radio link, and plays back in the browser.
-- **Reach the drone from anywhere.** Optional cloud relay carries telemetry and commands over the internet with no port forwarding.
-- **Sign your MAVLink.** Transparent pass-through for MAVLink v2 signing, with one-shot flight-controller enrollment. Key material stays in the ground station, never on the agent.
-- **Run the same agent on the ground.** A ground-station profile (no flight controller, an OLED and buttons, a WFB-ng adapter) turns a small board into the receiving end of the radio link.
-- **Build distributed receive.** Two or three ground nodes form a self-healing mesh so you keep the link in obstructed areas.
-- **Extend it without forking it.** Install signed plugins that add drivers, behaviors, AI models, and ground-station hardware support.
+ADOS Drone Agent is the onboard software for a software-defined drone. It runs on the companion computer next to your flight controller, reads MAVLink off the FC and routes it to any ground station, streams HD video over radio or the internet, and lets you fly and manage the aircraft from a browser. The flight-critical paths are native Rust. AI, vision, and plugins run in Python.
 
 ## Quick Start
 
@@ -86,6 +68,123 @@ Also runs on macOS for local development (the installer points you to `cargo` th
 
 ---
 
+## Features
+
+<table>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/drone-home-dark.webp">
+        <img src=".github/assets/screens/drone-home-light.webp" alt="Agent home" width="100%">
+      </picture><br>
+      <sub>Home: services, link state and system resources. <a href="https://docs.altnautica.com/drone-agent/dashboard-home">Docs</a></sub>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/drone-telemetry-dark.webp">
+        <img src=".github/assets/screens/drone-telemetry-light.webp" alt="Telemetry" width="100%">
+      </picture><br>
+      <sub>Live flight controller telemetry. <a href="https://docs.altnautica.com/drone-agent/dashboard-telemetry">Docs</a></sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/drone-video-dark.webp">
+        <img src=".github/assets/screens/drone-video-light.webp" alt="Video" width="100%">
+      </picture><br>
+      <sub>HD video pipeline status and preview. <a href="https://docs.altnautica.com/drone-agent/dashboard-video">Docs</a></sub>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/drone-plugins-catalog-dark.webp">
+        <img src=".github/assets/screens/drone-plugins-catalog-light.webp" alt="Plugin catalog" width="100%">
+      </picture><br>
+      <sub>Install signed plugins from the catalog. <a href="https://docs.altnautica.com/drone-agent/dashboard-extensions">Docs</a></sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/ground-home-dark.webp">
+        <img src=".github/assets/screens/ground-home-light.webp" alt="Ground node home" width="100%">
+      </picture><br>
+      <sub>The same agent running as a ground node. <a href="https://docs.altnautica.com/ground-agent/dashboard-overview">Docs</a></sub>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/video-link-dark.webp">
+        <img src=".github/assets/scenes/video-link-light.webp" alt="Video link" width="100%">
+      </picture><br>
+      <sub>Long-range WFB-ng video and telemetry link. <a href="https://docs.altnautica.com/drone-agent/wfb-ng">Docs</a></sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/mesh-dark.webp">
+        <img src=".github/assets/scenes/mesh-light.webp" alt="Ground mesh" width="100%">
+      </picture><br>
+      <sub>Two or three ground nodes form a receive mesh. <a href="https://docs.altnautica.com/ground-agent/mesh-overview">Docs</a></sub>
+    </td>
+    <td width="50%"></td>
+  </tr>
+</table>
+
+## What it lets you do
+
+- **Turn a companion computer into a connected drone with one command.** A single installer flashes nothing, builds nothing on the device, and leaves a paired, video-streaming, telemetry-flowing aircraft.
+- **Pair over your own network, no cloud account.** The agent auto-pairs with Mission Control over the LAN. Cloud relay is there when you want to reach the drone from anywhere, and off by default.
+- **Fly the FC from a browser.** Arm, change modes, fly guided, and upload missions. The agent routes MAVLink to WebSocket, TCP, and UDP at the same time, so several ground stations can connect at once.
+- **Watch HD video over radio or the internet.** The video pipeline drives RTSP, WebRTC (WHEP), and a long-range WFB-ng radio link, and plays back in the browser.
+- **Reach the drone from anywhere.** Optional cloud relay carries telemetry and commands over the internet with no port forwarding.
+- **Sign your MAVLink.** Transparent pass-through for MAVLink v2 signing, with one-shot flight-controller enrollment. Key material stays in the ground station, never on the agent.
+- **Run the same agent on the ground.** A ground-station profile (no flight controller, an OLED and buttons, a WFB-ng adapter) turns a small board into the receiving end of the radio link.
+- **Build distributed receive.** Two or three ground nodes form a self-healing mesh so you keep the link in obstructed areas.
+- **Extend it without forking it.** Install signed plugins that add drivers, behaviors, AI models, and ground-station hardware support.
+
+---
+
+## How ADOS fits together
+
+```mermaid
+flowchart LR
+  subgraph air["On the drone"]
+    FC["Flight controller<br/>ArduPilot · PX4 · Betaflight · iNav"]
+    DA["ADOS Drone Agent"]
+  end
+  subgraph ground["On the ground"]
+    GA["ADOS Ground Agent"]
+    MC["ADOS Mission Control<br/>browser · desktop"]
+    AG["ADOS Android GCS"]
+    MCP["ADOS MCP<br/>AI clients"]
+  end
+  EXT["ADOS Extensions"]
+  FC <-- MAVLink --> DA
+  DA <-- "long-range radio link" --> GA
+  MC <-- "LAN or cloud relay" --> DA
+  MC <-- LAN --> GA
+  AG <-- "LAN or cloud" --> DA
+  MCP <-- "LAN or cloud" --> DA
+  EXT -. "agent plugins" .-> DA
+  EXT -. "GCS panels" .-> MC
+```
+
+ADOS Ground Agent is the Drone Agent running its ground-station profile.
+
+<!-- ados-family:repos -->
+| Repo | Runs on | What it does | Link |
+|---|---|---|---|
+| ADOS Mission Control | Browser, desktop (Electron) | Ground control station: FC setup, mission planning, flight, 3D simulation, fleet | [ADOSMissionControl](https://github.com/altnautica/ADOSMissionControl) |
+| ADOS Drone Agent | Companion computer on the drone, or a ground node | Onboard agent: MAVLink routing, HD video, long-range radio link, plugins, remote control | [ADOSDroneAgent](https://github.com/altnautica/ADOSDroneAgent) |
+| ADOS Android GCS | Android phones and tablets | Native ground control app for agents on the LAN, direct flight controllers and the cloud | [ADOSAndroidGCS](https://github.com/altnautica/ADOSAndroidGCS) |
+| ADOS Extensions | Drone Agent and Mission Control | First-party signed plugins, each with an agent half and a GCS half | [ADOSExtensions](https://github.com/altnautica/ADOSExtensions) |
+| ADOS MCP | Your machine | Model Context Protocol server that lets AI clients operate ADOS drones under scopes and a safety gate | [ADOS-MCP](https://github.com/altnautica/ADOS-MCP) |
+| Documentation | docs.altnautica.com | Public docs for every ADOS product | [Documentation](https://github.com/altnautica/Documentation) |
+<!-- /ados-family:repos -->
+
+---
+
 ## Why Rust
 
 The flight-critical paths are native Rust: the process supervisor that drives systemd, the MAVLink router, the video pipeline, the WFB-ng radio control, the on-device vision host, and the HTTP control surface on `:8080`. That choice buys three things you can feel:
@@ -94,51 +193,90 @@ The flight-critical paths are native Rust: the process supervisor that drives sy
 - **A small memory and CPU footprint.** The native services idle in tens of megabytes, which leaves headroom for video encode and vision on modest boards.
 - **A path to a zero-Python headless profile.** On the smallest boards the agent can run the Rust core alone (MAVLink, camera, radio, control), which drops the Python interpreter and most of the memory floor with it.
 
-Python stays where it earns its place: AI and vision inference, the plugin runtime, hardware bring-up, and the setup webapp. A few mature C programs are supervised rather than rewritten (the RTL8812EU driver, `wfb_tx` and `wfb_rx`, `ffmpeg`, and `mediamtx`). systemd remains the process manager; the Rust supervisor orchestrates the units, it does not replace systemd.
+Python stays where it earns its place: AI and vision inference, the Python plugin runner, hardware bring-up, and the setup webapp. A few mature C programs are supervised rather than rewritten (the RTL8812EU driver, `wfb_tx` and `wfb_rx`, `ffmpeg`, and `mediamtx`). systemd remains the process manager; the Rust supervisor orchestrates the units, it does not replace systemd.
 
 ---
 
 ## Architecture at a glance
 
-`ados-control`, a native Rust HTTP front, owns port `:8080`. It serves the control, telemetry, pairing, parameter, fleet, and ground-station routes natively, and reverse-proxies a small Python feature service on an internal socket for the parts that stay in Python: AI and vision inference, the plugin runtime, the setup webapp, and WHEP video.
+The agent sits between the flight controller and every ground client; the diagram in [How ADOS fits together](#how-ados-fits-together) shows where it lives in the system. On the device itself:
 
-```
-              ┌────────────────────────────────────┐
-   CLI  ────▶ │  HTTP control surface  ·  :8080     │ ◀──── Mission Control / HTTP clients
-              │  ados-control (native Rust front)   │
-              └───────────────┬────────────────────┘
-                              │ proxies the Python feature
-                              │ service on an internal socket
-   ┌──────────────────────────┴────────────────────────────────┐
-   │              Rust core services (systemd units)             │
-   │   supervisor · MAVLink router · video · cloud relay ·       │
-   │   WFB-ng radio · vision · ground-station receive / uplink   │
-   └────┬───────────────────┬────────────────────┬──────────────┘
-        ▼                   ▼                     ▼
-  flight controller   RTL8812EU + wfb (C)    camera / NPU
-  (serial / USB)      ffmpeg · mediamtx       (Python + C)
-
-  Python feature service: AI + vision inference · plugin runtime ·
-                          setup webapp · WHEP video
-```
+- **`ados-control`**, a native Rust HTTP front, owns port `:8080`. It serves the control, telemetry, pairing, parameter, fleet, plugin, video and ground-station routes natively, and reverse-proxies a small Python feature service on an internal socket for AI and vision inference, the setup webapp and peripherals.
+- **Rust core services** (systemd units): supervisor, MAVLink router, video, cloud relay, WFB-ng radio, vision host, plugin host, and ground-station receive and uplink.
+- **Supervised C programs**: the RTL8812EU driver, `wfb_tx` and `wfb_rx`, `ffmpeg` and `mediamtx`.
+- **Python feature service**: AI and vision inference, the Python plugin runner, HAL bootstrap and the setup webapp.
 
 On a device the agent installs as a set of systemd services plus a Python virtualenv, both placed by the prebuilt Rust installer. Routes read FC status, telemetry, video, radio, and parameter state through named accessors, so the control surface stays independent of service internals.
 
 ---
 
-## Hardware Support
+## Supported hardware
 
-The agent auto-detects the board on boot and scales features to available resources. Profiles for 21 boards ship in `src/ados/hal/boards/`, and any ARM64 or x86_64 Linux board with a serial port and systemd should work through the `generic-arm64` profile.
+The agent auto-detects the board on boot and scales features to the resources it finds. 22 board profiles ship in [`src/ados/hal/boards/`](src/ados/hal/boards/); any ARM64 or x86_64 Linux board with a serial port and systemd should work through a generic profile.
 
-| Class | Example boards | Capabilities |
-|-------|----------------|--------------|
-| Entry | Raspberry Pi 3, Radxa CM3 (RK3566) | MAVLink proxy, cloud relay, telemetry |
-| Standard | Raspberry Pi 4 / 5, CM4, Orange Pi 5 | + HD video pipeline, WFB-ng radio |
-| Accelerated | CM5, Rock 5C Lite, Cubie A7Z, RK3576 / RK3588S2, Jetson Nano / Orin Nano | + on-device vision, NPU-backed inference, plugin sandbox |
+| Board | SoC | Profile file |
+|---|---|---|
+| BeagleBoard.org BeagleY-AI | TI AM67A (J722S) | `beagley-ai.yaml` |
+| Raspberry Pi Compute Module 3 | BCM2837 | `cm3.yaml` |
+| Raspberry Pi CM4 | BCM2711 | `cm4.yaml` |
+| Raspberry Pi CM5 | BCM2712 | `cm5.yaml` |
+| Radxa Cubie A7S | Allwinner A733 | `cubie-a7s.yaml` |
+| Radxa Cubie A7Z | Allwinner A733 | `cubie-a7z.yaml` |
+| generic-arm64 | Any | `generic-arm64.yaml` |
+| generic-x86_64 | Any | `generic-x86_64.yaml` |
+| NVIDIA Jetson Nano | Tegra X1 | `jetson-nano.yaml` |
+| NVIDIA Jetson Orin Nano | Tegra Orin | `jetson-orin-nano.yaml` |
+| Orange Pi 5 | RK3588S | `orange-pi-5.yaml` |
+| D-Robotics RDK X3 | Horizon Sunrise X3 | `rdk-x3.yaml` |
+| Radxa CM3 (RK3566) | RK3566 | `rk3566.yaml` |
+| Rockchip RK3576 (Reference) | RK3576 | `rk3576.yaml` |
+| Radxa CM4 (RK3588S2) | RK3588S2 | `rk3588s2.yaml` |
+| Radxa ROCK 5B+ (RK3588) | RK3588 | `rock-5b-plus.yaml` |
+| Radxa ROCK 5C Lite (RK3582) | RK3582 | `rock-5c-lite.yaml` |
+| Raspberry Pi 3 | BCM2837 | `rpi3.yaml` |
+| Raspberry Pi 4B | BCM2711 | `rpi4b.yaml` |
+| Raspberry Pi 5 | BCM2712 | `rpi5.yaml` |
+| Rockchip RV1126B | RV1126B | `rv1126b.yaml` |
+| Raspberry Pi Zero 2 W | BCM2710A1 | `zero2w.yaml` |
 
 The same codebase also runs the ground-station profile (no flight controller, an OLED or SPI LCD with buttons, and a WFB-ng adapter); a hardware fingerprint at boot picks the profile.
 
 **Mesh role hardware.** A single ground node (`direct` role) needs one RTL8812EU USB WiFi adapter for WFB-ng. Relay and receiver nodes add a second USB WiFi dongle that carries the batman-adv mesh traffic between nodes. Any adapter with a Linux driver that supports 802.11s or IBSS mode works for the mesh carrier.
+
+---
+
+## Rust crates
+
+The reusable libraries under `crates/` are published on crates.io under `MIT OR Apache-2.0` (`ados-sensorhub` is MIT). The full index, with versioning rules, is [crates/README.md](crates/README.md).
+
+<!-- ados-family:crates -->
+**Platform (versioned with the ADOS Drone Agent)**
+
+| Crate | What it does | Docs |
+|---|---|---|
+| [`ados-protocol`](https://crates.io/crates/ados-protocol) | Wire contracts of the ADOS Drone Agent: IPC framing, plugin RPC envelope, capability tokens and the vision frame bus. | [docs.rs](https://docs.rs/ados-protocol) |
+| [`ados-sdk`](https://crates.io/crates/ados-sdk) | Write Rust plugins for the ADOS Drone Agent: IPC client, plugin context, driver traits and lifecycle runner. | [docs.rs](https://docs.rs/ados-sdk) |
+| [`ados-vision`](https://crates.io/crates/ados-vision) | Single-object visual tracker: Kalman motion model, appearance re-identification and YOLOv8 head decoding. | [docs.rs](https://docs.rs/ados-vision) |
+| [`ados-gpio`](https://crates.io/crates/ados-gpio) | Drive status buzzers and LEDs on Linux GPIO lines, with bounded software-PWM beep patterns. | [docs.rs](https://docs.rs/ados-gpio) |
+| [`ados-hal-probe`](https://crates.io/crates/ados-hal-probe) | Find out what a board's hardware can really do by probing it, plus bundled board profiles. | [docs.rs](https://docs.rs/ados-hal-probe) |
+
+**Standalone**
+
+| Crate | What it does | Docs |
+|---|---|---|
+| [`ados-sensorhub`](https://crates.io/crates/ados-sensorhub) | Sensor hub wire protocol: COBS framing, CRC-16 and fixed-layout IMU, baro, mag and GNSS packets. no_std. | [docs.rs](https://docs.rs/ados-sensorhub) |
+| [`ados-offload`](https://crates.io/crates/ados-offload) | Choose where perception runs (onboard, offloaded or hybrid) and hold the vehicle when results go stale. | [docs.rs](https://docs.rs/ados-offload) |
+| [`ados-macpin`](https://crates.io/crates/ados-macpin) | Stable MAC addresses for Linux network adapters that randomize theirs every boot. | [docs.rs](https://docs.rs/ados-macpin) |
+| [`ados-lora`](https://crates.io/crates/ados-lora) | LoRa transmit governor with cited regional band plans, duty cycle, dwell time and airtime accounting. | [docs.rs](https://docs.rs/ados-lora) |
+| [`ados-crsf-codec`](https://crates.io/crates/ados-crsf-codec) | no_std CRSF / ExpressLRS codec for RC channels, telemetry and parameter frames. | [docs.rs](https://docs.rs/ados-crsf-codec) |
+| [`ados-positioning`](https://crates.io/crates/ados-positioning) | Split mixed UBX, NMEA and RTCM3 GNSS streams, configure u-blox receivers and run an RTK base survey-in. | [docs.rs](https://docs.rs/ados-positioning) |
+| [`ados-rtcm`](https://crates.io/crates/ados-rtcm) | RTCM3 framing, CRC-24Q and MAVLink GPS_RTCM_DATA fragmentation for RTK corrections. | [docs.rs](https://docs.rs/ados-rtcm) |
+| [`ados-clock`](https://crates.io/crates/ados-clock) | Map remote clocks onto the host clock: least-squares and envelope fits, TIMESYNC and a chrony sink. | [docs.rs](https://docs.rs/ados-clock) |
+| [`ados-swarm`](https://crates.io/crates/ados-swarm) | Swarm control laws: separation, flocking, formations, CBBA task allocation and a point-mass simulator. | [docs.rs](https://docs.rs/ados-swarm) |
+| [`ados-mavlink-tunnel`](https://crates.io/crates/ados-mavlink-tunnel) | Send large messages over MAVLink TUNNEL frames with chunking and bounded reassembly. | [docs.rs](https://docs.rs/ados-mavlink-tunnel) |
+| [`ados-display-driver`](https://crates.io/crates/ados-display-driver) | Small-display output on Linux: SSD1306/SH1106 OLED over I2C, pixel packers and a framebuffer writer. | [docs.rs](https://docs.rs/ados-display-driver) |
+| [`ados-hmi`](https://crates.io/crates/ados-hmi) | Front-panel input: touchscreen calibration and gestures, button presses and rotary encoders. | [docs.rs](https://docs.rs/ados-hmi) |
+<!-- /ados-family:crates -->
 
 ---
 
@@ -162,7 +300,7 @@ Grouped subcommands cover the deeper surfaces: `ados plugin` (install and manage
 
 ## REST API
 
-Served by the native Rust front (`ados-control`) on `:8080`. The control and telemetry routes are native; AI/vision, plugin, setup, and WHEP routes are proxied to the Python feature service. Full reference at [docs.altnautica.com](https://docs.altnautica.com).
+Served by the native Rust front (`ados-control`) on `:8080`. Control, telemetry, plugin and WHEP video routes are native; AI/vision, setup, and peripheral routes are proxied to the Python feature service. Full reference at [docs.altnautica.com](https://docs.altnautica.com).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -289,16 +427,6 @@ See [AGENTS.md](AGENTS.md) for architecture notes and [CONTRIBUTING.md](CONTRIBU
 
 ---
 
-## Hardware Partners
-
-Building and testing ADOS Drone Agent on real companion computers and flight hardware. Want to get involved? [Email us](mailto:team@altnautica.com).
-
-<!-- Format: | [![Company](logo-url)](website) -->
-
-*Interested in sponsoring or sending test hardware? See our [partnership info](mailto:team@altnautica.com).*
-
----
-
 ## Community
 
 - **[Discord](https://discord.gg/uxbvuD4d5q)** - Ask questions, share builds
@@ -309,13 +437,12 @@ Building and testing ADOS Drone Agent on real companion computers and flight har
 
 ---
 
-## Related
+## Contributing
 
-- [ADOS Mission Control](https://github.com/altnautica/ADOSMissionControl) - browser ground station (the control side of this pair)
-- [ADOS Extensions](https://github.com/altnautica/ADOSExtensions) - first-party plugins for the agent and the GCS
+See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and PR guidelines, and [AGENTS.md](AGENTS.md) for architecture notes.
 
 ---
 
 ## License
 
-[GPL-3.0-only](LICENSE). Free to use, modify, and distribute. Derivative works must also be GPL-3.0.
+[GPL-3.0-or-later](LICENSE). Free to use, modify, and distribute. Derivative works must also be GPL-3.0-or-later. Library crates under `crates/` listed in [crates/README.md](crates/README.md) are MIT OR Apache-2.0.
