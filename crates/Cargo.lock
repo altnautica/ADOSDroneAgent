@@ -483,7 +483,6 @@ dependencies = [
  "ados-protocol",
  "ados-rtcm",
  "ados-sensorbus",
- "ados-swarm-control",
  "ados-swarm-laws",
  "ados-swarmbus",
  "anyhow",
@@ -733,20 +732,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "ados-swarm-control"
-version = "0.106.1"
-dependencies = [
- "ados-config",
- "ados-swarmbus",
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
-]
-
-[[package]]
 name = "ados-swarm-laws"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "ados-swarmbus"

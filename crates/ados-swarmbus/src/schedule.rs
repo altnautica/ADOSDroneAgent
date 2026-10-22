@@ -8,7 +8,7 @@
 //! about a second. ADS-B settled on 2 Hz for traffic moving at 250 m/s. Two drones
 //! closing at 8 m/s cover 4 m between beacons, which is why the control loop runs
 //! at 10 Hz against neighbour positions it dead-reckons itself from the published
-//! table (`ados-swarm-control`'s `swarmbus` module) rather than at the beacon rate.
+//! table (the router's `swarm_setpoint::payload` module) rather than at the beacon rate.
 //!
 //! ## Why the jitter
 //!

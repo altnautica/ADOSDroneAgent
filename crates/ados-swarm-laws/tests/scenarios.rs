@@ -5,24 +5,24 @@
 //! directly, with no autopilot required: same 10 Hz cadence, same 2 Hz beacons
 //! with wire quantisation and dead reckoning, first-order velocity plant.
 //!
-//! What that buys and what it does not: it falsifies a control-law bug — every
-//! one of these caught a real one during development — and it says nothing about
+//! What that buys and what it does not: it falsifies a control-law bug - every
+//! one of these caught a real one during development - and it says nothing about
 //! the autopilot's attitude loop, its EKF, or its failsafes. It is NOT the SITL
 //! gate and does not substitute for it.
 //!
-//! `cargo run -p ados-swarm-control --example swarm_scenarios` prints the same
+//! `cargo run -p ados-swarm-laws --example swarm_scenarios` prints the same
 //! runs with their measured numbers.
 
-use ados_swarm_control::scenarios;
-use ados_swarm_control::separation::SEPARATION_HARD_M;
-use ados_swarm_control::NEIGHBOR_STALE;
+use ados_swarm_laws::scenarios;
+use ados_swarm_laws::separation::SEPARATION_HARD_M;
+use ados_swarm_laws::NEIGHBOR_STALE;
 
 #[test]
 fn scenario_1_two_drones_on_a_collision_course_stay_apart_and_the_lower_slot_climbs() {
     let s = scenarios::separation_collision_course();
     assert!(
         (s.closing_speed_mps - 4.0).abs() < 1e-9 && (s.start_separation_m - 20.0).abs() < 1e-9,
-        "the scenario must be the plan's: {s:?}"
+        "the scenario must be the documented one: {s:?}"
     );
     assert!(
         s.min_separation_m > SEPARATION_HARD_M,

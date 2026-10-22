@@ -52,7 +52,7 @@ pub struct SwarmCounters {
     /// node's own slot is recorded (separation must see it) and counted; a second
     /// sender on another peer's live slot is counted and not recorded.
     pub beacons_slot_conflict: u64,
-    /// Neighbours dropped after [`super::NEIGHBOR_STALE`].
+    /// Neighbours dropped after [`ados_swarm_laws::NEIGHBOR_STALE`].
     pub beacons_stale_dropped: u64,
 }
 

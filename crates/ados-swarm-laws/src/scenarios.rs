@@ -39,7 +39,7 @@ fn cfg(mode: &str) -> SwarmControlConfig {
 /// Rejection sampled on purpose. An unconstrained "random start within 100 m"
 /// routinely places two of eight drones three metres apart, and a run that BEGINS
 /// inside the safety floor measures the initial condition rather than the
-/// controller — no velocity command can un-violate a violation that was there at
+/// controller - no velocity command can un-violate a violation that was there at
 /// t = 0. Real fleets launch from separated pads, which is what this models.
 /// Falls back to an evenly spaced ring if the box is too tight to sample, so the
 /// helper can never loop forever or return an illegal set.
@@ -78,24 +78,28 @@ fn scatter(
 /// Scenario 1 result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SeparationScenario {
+    /// Control ticks run.
     pub ticks: usize,
     /// Worst separation over the whole run, metres.
     pub min_separation_m: f64,
     /// Metres climbed by the lower-slot drone.
     pub climb_slot_1_m: f64,
+    /// Climb of slot 2, metres.
     pub climb_slot_2_m: f64,
     /// Whether the hard override ever took the vehicle.
     pub hard_engaged: bool,
     /// Ticks in which at least one drone read `hard-separation`.
     pub hard_ticks: usize,
+    /// Initial separation, metres.
     pub start_separation_m: f64,
+    /// Closing speed between the pair, metres/second.
     pub closing_speed_mps: f64,
 }
 
 /// Two drones on a collision course 20 m apart, closing at 4 m/s.
 ///
 /// The closure is sustained by re-issuing an operator directive 2 m ahead of each
-/// drone along the line to the other every tick — a fixed distant waypoint would
+/// drone along the line to the other every tick - a fixed distant waypoint would
 /// saturate at the speed ceiling and a fixed near one would be reached and stop,
 /// and neither is a 4 m/s collision course.
 pub fn separation_collision_course() -> SeparationScenario {
@@ -162,16 +166,21 @@ pub fn separation_collision_course() -> SeparationScenario {
 /// Scenario 2 result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlockingScenario {
+    /// Control ticks run.
     pub ticks: usize,
+    /// Number of drones.
     pub fleet: usize,
     /// Worst separation over the whole run, metres.
     pub min_pairwise_m: f64,
     /// Worst final distance to the target, metres.
     pub max_target_error_m: f64,
+    /// Mean distance from the target at the end, metres.
     pub mean_target_error_m: f64,
     /// How many drones ended within 30 m of the target.
     pub arrived: usize,
+    /// Distance to the target at the start, metres.
     pub target_range_m: f64,
+    /// Initial spread of the fleet, metres.
     pub start_spread_m: f64,
     /// Closest pair at t = 0, so the run's floor can be read against a legal
     /// starting geometry rather than a random violation.
@@ -231,11 +240,15 @@ pub fn flocking_to_target() -> FlockingScenario {
 /// Scenario 3 result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FormationScenario {
+    /// Control ticks run.
     pub ticks: usize,
+    /// Number of drones.
     pub fleet: usize,
+    /// Formation spacing, metres.
     pub spacing_m: f64,
     /// Worst steady-state station error, metres.
     pub max_offset_error_m: f64,
+    /// Mean station-keeping error at the end, metres.
     pub mean_offset_error_m: f64,
     /// Worst separation over the whole run, metres.
     pub min_pairwise_m: f64,
@@ -309,7 +322,9 @@ pub fn formation_wedge() -> FormationScenario {
 /// Scenario 4 result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeaconLossScenario {
+    /// Control ticks run.
     pub ticks: usize,
+    /// Tick at which the bus was cut.
     pub kill_at_tick: usize,
     /// Neighbours the surviving drones could still see, once the window elapsed.
     pub survivor_neighbours_after: usize,
@@ -396,7 +411,7 @@ pub fn beacon_loss() -> BeaconLossScenario {
     }
 }
 
-/// Smallest pairwise distance among a set of drone positions — re-exported for a
+/// Smallest pairwise distance among a set of drone positions - re-exported for a
 /// harness that wants to sample it itself.
 pub fn min_separation(positions: &[Ned]) -> Option<f64> {
     min_pairwise_distance(positions)

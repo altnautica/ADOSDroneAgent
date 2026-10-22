@@ -21,7 +21,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ados_control::{run_with_paths, DaemonPaths};
-use ados_swarmbus::beacon::{SwarmBeacon, STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO};
+use ados_swarm_laws::{ModePrecedence, STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO};
+use ados_swarmbus::beacon::SwarmBeacon;
 use ados_swarmbus::crypto::{derive_fleet_key, SwarmCipher};
 use ados_swarmbus::frame::{build_frame, SwarmFrameKind};
 use ados_swarmbus::ingest::{ingest_frame, Ingest};
@@ -29,7 +30,6 @@ use ados_swarmbus::neighbors::NeighborTable;
 use ados_swarmbus::publish::{
     encode_line, neighbors_payload, sender_id_hex, COUNTER_KEYS, NEIGHBOR_KEYS,
 };
-use ados_swarmbus::ModePrecedence;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener, UnixStream};

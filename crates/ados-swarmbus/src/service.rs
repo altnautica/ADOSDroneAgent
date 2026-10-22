@@ -34,7 +34,8 @@ use crate::neighbors::{NeighborTable, SenderMarks};
 use crate::publish::{encode_line, neighbors_payload};
 use crate::radio::{Transport, LOOPBACK_IFACE};
 use crate::schedule::{beacon_delay, random_word, BEACON_PERIOD};
-use crate::vehicle::{beacon_from_state, OWN_STATE_STALE};
+use crate::vehicle::beacon_from_state;
+use ados_swarm_laws::OWN_STATE_STALE;
 
 use state_reader::spawn_state_reader;
 
@@ -714,7 +715,7 @@ mod tests {
     /// hard separation as a disarmed one on `hold`.
     #[test]
     fn a_frozen_fix_under_a_live_producer_withholds_only_the_position() {
-        use crate::ModePrecedence;
+        use ados_swarm_laws::ModePrecedence;
 
         let flying = serde_json::json!({
             "armed": true,

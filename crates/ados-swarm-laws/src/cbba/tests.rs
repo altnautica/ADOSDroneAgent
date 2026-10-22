@@ -24,7 +24,7 @@ fn agents_on_tasks(tasks: &[CbbaTask], n_agents: usize, capacity: usize) -> Vec<
 fn converges_in_one_round_when_greedy_bids_are_conflict_free() {
     // Four drones each sitting on their own task: every drone's best pick is
     // distinct, so ONE build plus ONE broadcast is the whole auction. This is the
-    // diameter-1 property — no bid needs a second hop to reach anybody.
+    // diameter-1 property - no bid needs a second hop to reach anybody.
     let tasks = line_tasks(4);
     let mut agents = agents_on_tasks(&tasks, 4, 1);
     let r = converge_broadcast(&mut agents, &tasks, &roster(4));
@@ -168,7 +168,7 @@ fn losing_a_task_releases_it_and_everything_added_after_it() {
     );
     assert!(a.path().is_empty());
     // Bids priced against the vanished path are voided, but the LOST task keeps
-    // the winner's figure — that is the peer's news, not ours to erase.
+    // the winner's figure - that is the peer's news, not ours to erase.
     assert_eq!(a.vector().z[last_added], None);
     assert_eq!(a.vector().y[last_added], 0.0);
     assert_eq!(a.vector().z[first_added], Some(2));
@@ -233,7 +233,7 @@ fn conflicts_and_consensus_detect_a_genuine_split() {
     let tasks = line_tasks(2);
     let mut a = CbbaAgent::new(1, tasks[0].pos, 2, 2).with_capacity(1);
     let mut b = CbbaAgent::new(2, tasks[0].pos, 2, 2).with_capacity(1);
-    // Phase 1 only, no exchange: both grabbed task 0.
+    // Bundle building only, no exchange: both grabbed task 0.
     a.build_bundle(&tasks);
     b.build_bundle(&tasks);
     assert_eq!(conflicts(&[a.clone(), b.clone()]), vec![0]);
@@ -271,7 +271,7 @@ fn the_score_is_time_discounted_so_a_closer_task_is_worth_more() {
     // Diminishing marginal gain: inserting a task into a path that already has
     // one is worth less than that task was worth alone, which is the property
     // CBBA's convergence proof rests on. The two tasks must NOT be collinear with
-    // the start — on a straight line the detour is free and the marginal gain
+    // the start - on a straight line the detour is free and the marginal gain
     // equals the standalone value exactly, so a strict inequality there would be
     // testing floating-point noise rather than the property.
     let both = vec![

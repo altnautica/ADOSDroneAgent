@@ -16,7 +16,7 @@
 //!   comes back.
 //! - **A new prefix while the slot's entry is still live**: a second sender on the
 //!   slot. A restart that fast is not possible (the entry only goes stale after
-//!   [`super::NEIGHBOR_STALE`] of silence), so this is two nodes provisioned with one
+//!   [`ados_swarm_laws::NEIGHBOR_STALE`] of silence), so this is two nodes provisioned with one
 //!   slot, and the first one heard keeps it.
 //!
 //! The marks outlive the process. A receiver that forgot them on restart would

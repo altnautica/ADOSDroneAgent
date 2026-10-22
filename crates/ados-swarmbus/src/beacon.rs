@@ -17,14 +17,20 @@
 //!   dead-reckoning epoch and the staleness signal in one, and it deliberately
 //!   does NOT carry wall-clock: two drones with unsynchronised clocks must still
 //!   agree on which of two beacons is newer, and a 65.5 s wrap is far longer than
-//!   [`crate::NEIGHBOR_STALE`].
+//!   [`ados_swarm_laws::NEIGHBOR_STALE`].
 //! - **`status`** packs five independent conditions plus the active mode
 //!   precedence into one byte. Each bit is a separate condition, never blended:
 //!   an armed drone with a bad GPS fix and an armed drone in emergency are
 //!   different situations and the operator surface renders them as different
 //!   glyphs.
 
-use crate::ModePrecedence;
+// The status bit layout is defined once, in the control-law crate, so the bits a
+// beacon encodes and the bits a control law reads cannot drift apart.
+use ados_swarm_laws::status::{
+    STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO,
+    STATUS_PRECEDENCE_MASK,
+};
+use ados_swarm_laws::ModePrecedence;
 
 /// The beacon's exact on-air length. `size_of::<SwarmBeacon>()` is **24** —
 /// `repr(C)` pads `slot`/`seq_ms` to a 4-byte boundary and tail-pads `status` —
@@ -33,36 +39,6 @@ use crate::ModePrecedence;
 /// transmuted. `repr(C)` is kept only to pin field order to the wire order, so
 /// the two can be read side by side. A test asserts the 20.
 pub const BEACON_WIRE_LEN: usize = 20;
-
-/// `status` bit 0: the flight controller reports the vehicle armed.
-pub const STATUS_ARMED: u8 = 1 << 0;
-/// `status` bit 1: the vehicle is in a mode that accepts offboard setpoints
-/// (GUIDED). The onboard autonomy layer only commands an FC that reports this.
-pub const STATUS_GUIDED: u8 = 1 << 1;
-/// `status` bit 2: the separation layer has taken over (a neighbour inside the
-/// hard-separation radius). Raised on the next beacon after the override fires.
-pub const STATUS_EMERGENCY: u8 = 1 << 2;
-/// `status` bit 3: the GPS fix is usable (3D or better). A beacon with this bit
-/// clear carries a position no other drone may separate against.
-pub const STATUS_GPS_OK: u8 = 1 << 3;
-/// `status` bit 4: this drone is the operator-selected hero and is streaming full
-/// video. Exclusive fleet-wide. The UI renders THIS bit as the truth about hero
-/// state rather than its own optimistic local guess, so a demotion that failed
-/// over the air is visible instead of assumed.
-pub const STATUS_HERO: u8 = 1 << 4;
-
-/// `status` bits 5-7: the sender's currently-active mode-precedence level, as
-/// [`ModePrecedence`]. Three bits hold all five levels with room to spare, so the
-/// per-neighbour precedence truth the operator surface needs costs zero extra
-/// bytes and zero extra airtime.
-///
-/// [`ModePrecedence::Hold`] is discriminant 0, so a node with no autonomy layer
-/// running radiates `000` here and every reader decodes `hold` — the honest
-/// answer for a drone that is not being flown by the swarm layer.
-pub const STATUS_PRECEDENCE_MASK: u8 = 0b1110_0000;
-
-/// How far to shift a [`ModePrecedence`] discriminant into `status`.
-pub const STATUS_PRECEDENCE_SHIFT: u32 = 5;
 
 /// One node's cooperative-awareness broadcast. Little-endian on the wire; see
 /// [`BEACON_WIRE_LEN`] for why the struct is never transmuted.
@@ -215,6 +191,7 @@ impl SwarmBeacon {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ados_swarm_laws::status::STATUS_PRECEDENCE_SHIFT;
 
     /// A beacon with every field distinct, so a swapped or overlapping offset in
     /// `encode`/`decode` cannot round-trip. Deliberately uses negative values in

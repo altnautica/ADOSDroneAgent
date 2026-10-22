@@ -24,7 +24,7 @@ pub const EARTH_RADIUS_M: f64 = 6_378_100.0;
 /// is `LOCATION_SCALING_FACTOR * 1e7`.
 pub const DEG_TO_M: f64 = EARTH_RADIUS_M * PI / 180.0;
 
-/// Degrees per metre of latitude — the inverse of [`DEG_TO_M`].
+/// Degrees per metre of latitude - the inverse of [`DEG_TO_M`].
 pub const M_TO_DEG: f64 = 1.0 / DEG_TO_M;
 
 /// A displacement or velocity in the local NED frame. Metres, or metres per
@@ -35,18 +35,23 @@ pub const M_TO_DEG: f64 = 1.0 / DEG_TO_M;
 /// `SET_POSITION_TARGET_GLOBAL_INT.vz`. A climb is therefore NEGATIVE `d`.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Ned {
+    /// North, metres.
     pub n: f64,
+    /// East, metres.
     pub e: f64,
+    /// Down, metres.
     pub d: f64,
 }
 
 impl Ned {
+    /// The zero vector.
     pub const ZERO: Ned = Ned {
         n: 0.0,
         e: 0.0,
         d: 0.0,
     };
 
+    /// A vector from its components.
     pub const fn new(n: f64, e: f64, d: f64) -> Self {
         Self { n, e, d }
     }
@@ -62,6 +67,7 @@ impl Ned {
         }
     }
 
+    /// This vector scaled by `k`.
     pub fn scale(self, k: f64) -> Self {
         Self::new(self.n * k, self.e * k, self.d * k)
     }
@@ -72,6 +78,7 @@ impl Ned {
         self.n * self.n + self.e * self.e + self.d * self.d
     }
 
+    /// Euclidean length.
     pub fn norm(self) -> f64 {
         self.norm_sq().sqrt()
     }
@@ -107,6 +114,7 @@ impl Ned {
         }
     }
 
+    /// Whether every component is finite.
     pub fn is_finite(self) -> bool {
         self.n.is_finite() && self.e.is_finite() && self.d.is_finite()
     }
@@ -136,13 +144,17 @@ impl std::ops::Sub for Ned {
 /// this is a struct and not a pair of free functions.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GeoOrigin {
+    /// Origin latitude, degrees.
     pub lat_deg: f64,
+    /// Origin longitude, degrees.
     pub lon_deg: f64,
+    /// Origin altitude, metres.
     pub alt_m: f64,
     cos_lat: f64,
 }
 
 impl GeoOrigin {
+    /// An origin at the given geodetic position.
     pub fn new(lat_deg: f64, lon_deg: f64, alt_m: f64) -> Self {
         Self {
             lat_deg,

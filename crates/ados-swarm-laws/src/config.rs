@@ -1,11 +1,15 @@
-//! The `swarm:` config slice, and the one place integer percentages become real
-//! gains.
+//! The swarm configuration block, and the one place integer percentages become
+//! real gains.
 //!
-//! The Mission Control config primitives have no float field, so every gain is
+//! Many configuration front ends have no float field, so every gain is
 //! persisted as an INTEGER PERCENTAGE: `cohesion = 40` is 0.40,
 //! `separation_gain = 150` is 1.50. That conversion happens exactly here, at the
 //! boundary. A control law that divided by 100 itself would be one refactor away
 //! from doing it twice.
+//!
+//! Every struct here derives `serde::Deserialize`, so a host can read the block
+//! from YAML, TOML or JSON. Field names (`flock.cohesion`, `separation.hard_m`,
+//! ...) are examples of one layout, not a required file format.
 
 use serde::Deserialize;
 
@@ -63,18 +67,23 @@ fn metres(value: i64, fallback: f64) -> f64 {
     }
 }
 
-/// `swarm.flock.*` — gains as integer percentages, radii as integer metres.
+/// `swarm.flock.*` - gains as integer percentages, radii as integer metres.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct FlockConfig {
     #[serde(default = "default_cohesion_pct")]
+    /// Cohesion gain, integer percent.
     pub cohesion: i64,
     #[serde(default = "default_alignment_pct")]
+    /// Alignment gain, integer percent.
     pub alignment: i64,
     #[serde(default = "default_separation_gain_pct")]
+    /// Separation gain, integer percent.
     pub separation_gain: i64,
     #[serde(default = "default_flock_radius_m")]
+    /// Flocking neighbourhood radius, metres.
     pub radius_m: i64,
     #[serde(default = "default_flock_neighbors")]
+    /// Neighbours weighted by the flocking law.
     pub neighbors: i64,
 }
 
@@ -90,12 +99,14 @@ impl Default for FlockConfig {
     }
 }
 
-/// `swarm.separation.*` — the safety layer's two radii.
+/// `swarm.separation.*` - the safety layer's two radii.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SeparationConfig {
     #[serde(default = "default_separation_radius_m")]
+    /// Soft separation radius, metres.
     pub radius_m: i64,
     #[serde(default = "default_separation_hard_m")]
+    /// Hard separation floor, metres.
     pub hard_m: i64,
 }
 
@@ -108,25 +119,30 @@ impl Default for SeparationConfig {
     }
 }
 
-/// `swarm.tasks.*`. `assigned_task_id` and `bundle_position` are AGENT-WRITTEN
-/// status mirrors — this runtime fills them, the settings page renders them
-/// read-only. Null until an auction has run.
+/// Task allocation settings. `assigned_task_id` and `bundle_position` are
+/// status mirrors written by the runtime, not operator inputs. `None` until an
+/// auction has run.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub struct TasksConfig {
     #[serde(default)]
+    /// Whether task allocation runs.
     pub enabled: bool,
     #[serde(default)]
+    /// The task this node currently holds, if any.
     pub assigned_task_id: Option<String>,
     #[serde(default)]
+    /// Its position in this node's bundle, if any.
     pub bundle_position: Option<i64>,
 }
 
-/// The `swarm:` block of `/etc/ados/config.yaml`.
+/// The swarm control configuration block.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SwarmControlConfig {
     #[serde(default)]
+    /// Master switch: nothing is commanded while false.
     pub enabled: bool,
     #[serde(default = "default_role")]
+    /// Node role hint (`auto` by default).
     pub role: String,
     /// The operator-commandable behaviour mode. `hard-separation` and `operator`
     /// are NOT values here: they are precedence levels the arbitration derives,
@@ -134,24 +150,27 @@ pub struct SwarmControlConfig {
     #[serde(default = "default_mode")]
     pub mode: String,
     #[serde(default = "default_formation")]
+    /// Formation used when the mode is `formation` (wire name).
     pub default_formation: String,
     #[serde(default = "default_spacing")]
+    /// Formation spacing, metres.
     pub default_spacing: i64,
     #[serde(default)]
+    /// Flocking gains.
     pub flock: FlockConfig,
     #[serde(default)]
+    /// Separation radii.
     pub separation: SeparationConfig,
     #[serde(default)]
+    /// Task allocation settings.
     pub tasks: TasksConfig,
-    /// This node's fleet slot, read from `video.wfb.fleet_slot` — NOT from the
-    /// `swarm:` block, and not settable there.
+    /// This node's fleet slot.
     ///
-    /// Radio addressing owns it (`ados_radio::config::WfbConfig`) because it is
-    /// what keys the node's transmitters, and the ground station's fleet registry
-    /// assigns it at pair time. The control layer needs it for two things it
-    /// cannot do without: the slot-indexed deconfliction climb and this drone's
-    /// station in a formation table. Carried here so the field is read once at the
-    /// crate boundary rather than plumbed through every law.
+    /// Never deserialized from the swarm block: radio addressing usually owns
+    /// the slot, so the host fills it in after loading. The control layer needs
+    /// it for the slot-indexed deconfliction climb and for this drone's station
+    /// in a formation table, so it is carried here and read once at the crate
+    /// boundary rather than plumbed through every law.
     #[serde(skip)]
     pub fleet_slot: u8,
 }
@@ -173,42 +192,9 @@ impl Default for SwarmControlConfig {
 }
 
 impl SwarmControlConfig {
-    /// Load the `swarm:` block plus this node's `video.wfb.fleet_slot`.
-    ///
-    /// A malformed block surfaces on the Health view through the config-status
-    /// sidecar rather than silently defaulting the autonomy layer off — a
-    /// genuinely-disabled swarm and a mis-parsed one must not look identical.
-    pub fn load_from(path: &std::path::Path) -> Self {
-        #[derive(Debug, Default, Deserialize)]
-        struct RawConfig {
-            #[serde(default)]
-            swarm: SwarmControlConfig,
-            #[serde(default)]
-            video: VideoSection,
-        }
-        #[derive(Debug, Default, Deserialize)]
-        struct VideoSection {
-            #[serde(default)]
-            wfb: WfbSection,
-        }
-        #[derive(Debug, Default, Deserialize)]
-        struct WfbSection {
-            #[serde(default)]
-            fleet_slot: u8,
-        }
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return Self::default();
-        };
-        let (raw, err) = ados_config::yaml_reporting::<RawConfig>(&text, "swarm-control");
-        ados_config::write_config_status("swarm-control", err.as_deref());
-        let mut cfg = raw.swarm;
-        cfg.fleet_slot = raw.video.wfb.fleet_slot;
-        cfg
-    }
-
     /// The slot set this node knows about: itself plus every slot it can hear.
     ///
-    /// A drone has no fleet registry — that lives on the ground station — so its
+    /// A drone has no fleet registry - that lives on the ground station - so its
     /// formation table is generated from the fleet it can actually SEE. That is
     /// the right answer for a decentralized layer: a drone cannot hold station
     /// relative to an aircraft it is not hearing, and a table sized for a fleet
@@ -250,14 +236,17 @@ impl SwarmControlConfig {
         .sanitised()
     }
 
+    /// The configured formation, falling back to `line` for an unknown name.
     pub fn formation_name(&self) -> FormationName {
         FormationName::from_wire(&self.default_formation)
     }
 
+    /// The configured mode, falling back to `hold` for an unknown name.
     pub fn swarm_mode(&self) -> SwarmMode {
         SwarmMode::from_wire(&self.mode)
     }
 
+    /// Formation spacing in metres, sanitised.
     pub fn spacing_m(&self) -> f64 {
         metres(self.default_spacing, DEFAULT_SPACING_M)
     }
@@ -267,14 +256,8 @@ impl SwarmControlConfig {
 mod tests {
     use super::*;
 
-    fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
-        let p = dir.join(name);
-        std::fs::write(&p, body).unwrap();
-        p
-    }
-
     #[test]
-    fn defaults_match_the_python_config_model() {
+    fn defaults_are_the_documented_values() {
         let c = SwarmControlConfig::default();
         assert!(!c.enabled);
         assert_eq!(c.role, "auto");
@@ -306,75 +289,6 @@ mod tests {
         assert_eq!(s.radius_m, crate::separation::SEPARATION_RADIUS_M);
         assert_eq!(s.hard_m, crate::separation::SEPARATION_HARD_M);
         assert_eq!(c.spacing_m(), DEFAULT_SPACING_M);
-    }
-
-    #[test]
-    fn a_missing_file_or_block_is_the_default_not_an_error() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(
-            SwarmControlConfig::load_from(&dir.path().join("absent.yaml")),
-            SwarmControlConfig::default()
-        );
-        let p = write(
-            dir.path(),
-            "other.yaml",
-            "video:\n  wfb:\n    channel: 149\n",
-        );
-        assert_eq!(
-            SwarmControlConfig::load_from(&p),
-            SwarmControlConfig::default()
-        );
-    }
-
-    #[test]
-    fn the_block_is_read_verbatim() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = write(
-            dir.path(),
-            "swarm.yaml",
-            "swarm:\n  enabled: true\n  mode: formation\n  default_formation: wedge\n  default_spacing: 15\n  flock:\n    cohesion: 25\n    alignment: 90\n    separation_gain: 200\n    radius_m: 45\n    neighbors: 3\n  separation:\n    radius_m: 12\n    hard_m: 5\n  tasks:\n    enabled: true\n",
-        );
-        let c = SwarmControlConfig::load_from(&p);
-        assert!(c.enabled);
-        assert_eq!(c.swarm_mode(), SwarmMode::Formation);
-        assert_eq!(c.formation_name(), FormationName::Wedge);
-        assert_eq!(c.spacing_m(), 15.0);
-        assert!(c.tasks.enabled);
-        let f = c.flock_tuning();
-        assert!((f.cohesion - 0.25).abs() < 1e-12);
-        assert!((f.alignment - 0.90).abs() < 1e-12);
-        assert!((f.separation.gain - 2.0).abs() < 1e-12);
-        assert_eq!(f.radius_m, 45.0);
-        assert_eq!(f.neighbors, 3);
-        assert_eq!(f.separation.radius_m, 12.0);
-        assert_eq!(f.separation.hard_m, 5.0);
-    }
-
-    #[test]
-    fn a_partial_block_keeps_the_other_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = write(
-            dir.path(),
-            "partial.yaml",
-            "swarm:\n  flock:\n    cohesion: 5\n",
-        );
-        let c = SwarmControlConfig::load_from(&p);
-        assert_eq!(c.flock.cohesion, 5);
-        assert_eq!(c.flock.alignment, 60, "untouched sibling keeps its default");
-        assert_eq!(c.separation.hard_m, 4);
-        assert_eq!(c.mode, "hold");
-    }
-
-    #[test]
-    fn a_malformed_block_degrades_to_defaults_rather_than_panicking() {
-        let dir = tempfile::tempdir().unwrap();
-        let p = write(
-            dir.path(),
-            "bad.yaml",
-            "swarm:\n  flock:\n    cohesion: not-a-number\n",
-        );
-        let c = SwarmControlConfig::load_from(&p);
-        assert_eq!(c, SwarmControlConfig::default());
     }
 
     #[test]

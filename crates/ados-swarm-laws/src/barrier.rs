@@ -2,19 +2,19 @@
 //!
 //! # Why a barrier and not just a stronger repulsive gain
 //!
-//! The plan fixes the repulsive force at `1.5·(1/d − 1/8)` m/s, which peaks at
-//! 0.19 m/s as a neighbour reaches the 4 m floor. Any goal-seeking term — an
-//! operator command, a virtual leader, a formation error — is metres per second
+//! The default repulsive law is at `1.5·(1/d − 1/8)` m/s, which peaks at
+//! 0.19 m/s as a neighbour reaches the 4 m floor. Any goal-seeking term - an
+//! operator command, a virtual leader, a formation error - is metres per second
 //! of intent, so a summed potential field CANNOT hold a 4 m floor: it is
 //! outvoted by two orders of magnitude, and the vehicle sails through the floor
 //! before the hard override even notices.
 //!
-//! The plan's own answer is that the separation layer is "applied LAST" and
-//! "OVERRIDES flocking and formation". An override is not a summand. This module
+//! The separation layer is applied LAST and OVERRIDES flocking and formation.
+//! An override is not a summand. This module
 //! implements it as a constraint: after every behaviour layer has had its say,
 //! the component of the commanded velocity that closes on a neighbour is capped
 //! at what the geometry can afford. Everything perpendicular to that neighbour
-//! passes through untouched, so the vehicle still manoeuvres — it just cannot
+//! passes through untouched, so the vehicle still manoeuvres - it just cannot
 //! manoeuvre INTO anything.
 //!
 //! # The guarantee, and why braking distance is in it
@@ -24,7 +24,7 @@
 //! control period. A real multirotor does not: its velocity loop has a time
 //! constant of a few hundred milliseconds, so a vehicle told to stop keeps
 //! closing for roughly `v·τ` more metres. Cap the command alone and a drone
-//! arriving at the speed ceiling coasts several metres past the floor — which is
+//! arriving at the speed ceiling coasts several metres past the floor - which is
 //! exactly what it does, measured, before this term is added.
 //!
 //! So the allowance is computed on the BRAKING-ADJUSTED margin
@@ -42,8 +42,8 @@
 //!
 //! [`BarrierOutcome`] separates two things the arbitration must not conflate. A
 //! command being TRIMMED is ordinary: it happens constantly in a dense lattice
-//! and the behaviour layer stays in charge. A vehicle being PINNED — allowance at
-//! zero while it still wants to close — is the deadlock that only the hard
+//! and the behaviour layer stays in charge. A vehicle being PINNED - allowance at
+//! zero while it still wants to close - is the deadlock that only the hard
 //! override's deterministic vertical rule can break. Escalating on every trim
 //! freezes a whole flock; escalating on none of them lets a pair sit nose to nose
 //! forever.
@@ -56,7 +56,7 @@ use crate::setpoint::MAX_COMMAND_SPEED_MPS;
 /// Barrier gain, 1/s: allowed closing rate per metre of braking-adjusted margin.
 pub const BARRIER_GAIN_HZ: f64 = 1.0;
 
-/// Plant lag budget, seconds — how long a vehicle keeps its present velocity
+/// Plant lag budget, seconds - how long a vehicle keeps its present velocity
 /// after the command changes. One control period of dead time plus a
 /// conservative small-multirotor velocity-loop time constant. Deliberately
 /// generous: over-estimating the lag costs a little conservatism, under-estimating
@@ -74,7 +74,7 @@ pub const HARD_PIN_MPS: f64 = 0.25;
 /// the nearest neighbour's cap can reintroduce closure toward another, which is
 /// precisely what happens in a packed flock and is measurably what breaches the
 /// floor there. Sweeping the constraint set a few times is Gauss-Seidel on the
-/// feasible set — it converges quickly for a satisfiable geometry and the loop
+/// feasible set - it converges quickly for a satisfiable geometry and the loop
 /// exits early when a pass changes nothing.
 pub const BARRIER_PASSES: usize = 4;
 
@@ -114,7 +114,7 @@ pub struct BarrierOutcome {
 /// makes its two invariants hold: opening motion and motion perpendicular to a
 /// neighbour pass through untouched, and a command is only ever trimmed, never
 /// reversed. Pushing a vehicle backwards is the repulsive term's job
-/// ([`crate::separation::repulsion`]) — folding it in here would give the same
+/// ([`crate::separation::repulsion`]) - folding it in here would give the same
 /// physical effect two owners and two gains.
 pub fn allowed_closing_rate(d: f64, closing_speed: f64, hard_m: f64, gain: f64) -> f64 {
     if !d.is_finite() || !closing_speed.is_finite() {

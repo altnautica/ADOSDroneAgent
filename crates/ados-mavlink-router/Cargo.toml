@@ -14,9 +14,6 @@ ados-clock-fit = { workspace = true }
 ados-swarm-laws = { workspace = true }
 ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
-# Onboard swarm autonomy. The control laws live there and stay pure; this
-# crate supplies the FC link they command through and the swarm-socket feed.
-ados-swarm-control = { path = "../ados-swarm-control" }
 # For the beacon `status` bit layout the autonomy status block encodes into.
 ados-swarmbus = { path = "../ados-swarmbus" }
 # The PIC-verdict authority half the injector gate consults (ground-profile,

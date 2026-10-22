@@ -94,7 +94,7 @@ Rust, under `crates/`, 32 workspace members. The flight-critical path:
 - Perception offload tier decision: `crates/ados-offload/`. The World Engine
   (world model, compute node, offload sessions) is the
   `com.altnautica.world-engine` extension, not core.
-- Swarm: `crates/ados-swarm-control/`, `crates/ados-swarmbus/`
+- Swarm: `crates/ados-swarm-laws/` (published control laws), `crates/ados-swarmbus/`; the onboard control loop lives in `crates/ados-mavlink-router/src/connection/swarm_setpoint/`
 - Peripherals: `crates/ados-crsf/`, `crates/ados-display/`,
   `crates/ados-hid/`, `crates/ados-gpio/`, `crates/ados-hal-probe/`
 - Shared: `crates/ados-protocol/` (wire contracts and their version

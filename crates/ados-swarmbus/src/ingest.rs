@@ -527,7 +527,7 @@ mod tests {
         ));
         assert_eq!(table.get(6).unwrap().beacon, b);
 
-        assert_eq!(table.prune(t0 + crate::NEIGHBOR_STALE), 1);
+        assert_eq!(table.prune(t0 + ados_swarm_laws::NEIGHBOR_STALE), 1);
         assert!(table.get(6).is_none());
         assert_eq!(table.counters().beacons_stale_dropped, 1);
     }

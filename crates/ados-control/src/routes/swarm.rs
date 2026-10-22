@@ -41,7 +41,7 @@ use crate::state::AppState;
 
 /// How old the held table may be and still be served: the bus's own bound for a
 /// neighbour it has stopped hearing.
-pub const TABLE_STALE_AFTER: Duration = ados_swarmbus::NEIGHBOR_STALE;
+pub const TABLE_STALE_AFTER: Duration = ados_swarm_laws::NEIGHBOR_STALE;
 
 /// What the front knows about the bus's table right now.
 enum Table {
@@ -78,7 +78,7 @@ pub async fn get_neighbors(State(state): State<AppState>) -> Json<Value> {
 fn aged_payload(value: &Value, table_age: Duration) -> Value {
     let mut body = normalise_payload(Some(value));
     let elapsed = table_age.as_millis() as u64;
-    let stale_ms = ados_swarmbus::NEIGHBOR_STALE.as_millis() as u64;
+    let stale_ms = ados_swarm_laws::NEIGHBOR_STALE.as_millis() as u64;
     if let Some(rows) = body.get_mut("neighbors").and_then(Value::as_array_mut) {
         rows.retain_mut(|row| {
             let Some(published) = row.get("age_ms").and_then(Value::as_u64) else {
@@ -286,7 +286,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
         let mut table = published();
-        let stale_ms = ados_swarmbus::NEIGHBOR_STALE.as_millis() as u64;
+        let stale_ms = ados_swarm_laws::NEIGHBOR_STALE.as_millis() as u64;
         let mut old_row = table["neighbors"][0].clone();
         old_row["slot"] = json!(7);
         old_row["age_ms"] = json!(stale_ms - 100);
