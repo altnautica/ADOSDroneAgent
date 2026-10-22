@@ -107,7 +107,28 @@ Also runs on macOS for local development (the installer points you to `cargo` th
   </tr>
 </table>
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/drone-params-dark.webp">
+    <img src=".github/assets/screens/drone-params-light.webp" alt="Parameter editor" width="100%">
+  </picture><br>
+  <sub>Search, edit and save flight controller parameters. Writes are blocked while the vehicle is armed.</sub>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/screens/drone-video-link-dark.webp">
+    <img src=".github/assets/screens/drone-video-link-light.webp" alt="Video link settings" width="100%">
+  </picture><br>
+  <sub>Video link: encoder, radio state and link tuning (preset, error correction, rate). <a href="https://docs.altnautica.com/drone-agent/dashboard-video">Docs</a></sub>
+</p>
+
 ### The same agent in Mission Control
+
+<p align="center">
+  <img src=".github/assets/loops/gcs-fleet.gif" alt="The fleet view in Mission Control" width="100%"><br>
+  <sub>The fleet view: every node, how it is reached (LAN, cloud relay or radio relay) and its live state. <a href="https://docs.altnautica.com/mission-control/nodes-fleet-view">Docs</a></sub>
+</p>
 
 <table>
   <tr>
@@ -166,6 +187,89 @@ Also runs on macOS for local development (the installer points you to `cargo` th
   </tr>
 </table>
 
+## Terminal console
+
+Run `ados` on the device, or `ados-tui --host <host>` from another machine, and you get a full console for the agent in the terminal. Nine tabs cover the vehicle, the radio and LoRa link, video, flight controller parameters (stage, write, import and export), extensions with their permissions, live logs, services and peripherals, and every setting from Wi-Fi to MCP tokens. A command palette (`Ctrl+K`) jumps to any page or setting, and the console ships with four colour themes.
+
+<p align="center">
+  <img src=".github/assets/loops/tui-tour.gif" alt="A tour of the ADOS terminal console" width="100%">
+</p>
+
+<table>
+  <tr>
+    <td width="50%">
+      <img src=".github/assets/tui/vehicle.webp" alt="Vehicle tab" width="100%"><br>
+      <sub>Vehicle: attitude, GPS, trends and per-cell battery.</sub>
+    </td>
+    <td width="50%">
+      <img src=".github/assets/tui/link.webp" alt="Link tab" width="100%"><br>
+      <sub>Link: radio state, signal, loss and bitrate, plus the LoRa lane and its beacons.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src=".github/assets/tui/params.webp" alt="Params tab" width="100%"><br>
+      <sub>Params: browse by group, stage edits against metadata, then write.</sub>
+    </td>
+    <td width="50%">
+      <img src=".github/assets/tui/extensions.webp" alt="Extensions tab" width="100%"><br>
+      <sub>Extensions: install, enable, grant permissions and edit config.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src=".github/assets/tui/logs.webp" alt="Logs tab" width="100%"><br>
+      <sub>Logs: live, filtered by level and service.</sub>
+    </td>
+    <td width="50%">
+      <img src=".github/assets/tui/system.webp" alt="System tab" width="100%"><br>
+      <sub>System: services, peripherals, hardware check and agent update.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src=".github/assets/tui/palette.webp" alt="Command palette" width="100%"><br>
+      <sub>The command palette jumps straight to a page or setting.</sub>
+    </td>
+    <td width="50%">
+      <img src=".github/assets/tui/ground.webp" alt="Ground tab" width="100%"><br>
+      <sub>Ground profile: GNSS and RTK base survey, gamepads, Bluetooth and the display.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <img src=".github/assets/tui/theme-light.webp" alt="Light theme" width="100%"><br>
+      <sub>The light theme.</sub>
+    </td>
+    <td width="50%">
+      <img src=".github/assets/tui/theme-nvg.webp" alt="Night-vision theme" width="100%"><br>
+      <sub>The night-vision theme.</sub>
+    </td>
+  </tr>
+</table>
+
+## Ground station front panel
+
+In its ground-station profile the agent drives a small front-panel screen and buttons, so you can check and set up a ground node in the field without a laptop. The pages cover the drone, the ground stations attached to the node, the radio link, the network and the system, with a full dashboard on larger panels and mesh pages for neighbours, picking the node's role and joining a mesh.
+
+<table>
+  <tr>
+    <td width="33%"><img src=".github/assets/display/drone.webp" alt="Drone page" width="100%"><br><sub>The drone: mode, battery, satellites.</sub></td>
+    <td width="33%"><img src=".github/assets/display/gcs.webp" alt="Ground stations page" width="100%"><br><sub>Ground stations attached to the node.</sub></td>
+    <td width="33%"><img src=".github/assets/display/link.webp" alt="Link page" width="100%"><br><sub>Radio link: signal, rate, error correction.</sub></td>
+  </tr>
+  <tr>
+    <td width="33%"><img src=".github/assets/display/net.webp" alt="Network page" width="100%"><br><sub>Network: access point and uplink.</sub></td>
+    <td width="33%"><img src=".github/assets/display/system.webp" alt="System page" width="100%"><br><sub>System: CPU, memory, uptime.</sub></td>
+    <td width="33%"><img src=".github/assets/display/dashboard.webp" alt="Dashboard page" width="100%"><br><sub>The full dashboard on a larger panel.</sub></td>
+  </tr>
+  <tr>
+    <td width="33%"><img src=".github/assets/display/neighbors.webp" alt="Mesh neighbours page" width="100%"><br><sub>Mesh neighbours and link quality.</sub></td>
+    <td width="33%"><img src=".github/assets/display/role-picker.webp" alt="Role picker" width="100%"><br><sub>Role picker: direct, relay or receiver.</sub></td>
+    <td width="33%"><img src=".github/assets/display/join-scan.webp" alt="Join mesh scan" width="100%"><br><sub>Join scan: find a mesh and join it.</sub></td>
+  </tr>
+</table>
+
 ## What it lets you do
 
 - **Turn a companion computer into a connected drone with one command.** A single installer flashes nothing, builds nothing on the device, and leaves a paired, video-streaming, telemetry-flowing aircraft.
@@ -194,6 +298,41 @@ Pair the agent with [ADOS Mission Control](https://github.com/altnautica/ADOSMis
 
 These features are under active development and grow with every release; build on them through extensions and the SDK.
 
+<table>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/vision-dark.webp">
+        <img src=".github/assets/scenes/vision-light.webp" alt="Onboard detection" width="100%">
+      </picture><br>
+      <sub>Onboard vision: detection and tracking on the drone.</sub>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/swarm-dark.webp">
+        <img src=".github/assets/scenes/swarm-light.webp" alt="Swarm" width="100%">
+      </picture><br>
+      <sub>Swarm: separation, flocking and formations from a shared beacon.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/atlas-dark.webp">
+        <img src=".github/assets/scenes/atlas-light.webp" alt="World model" width="100%">
+      </picture><br>
+      <sub>World Engine (beta): a 3D world model built from posed keyframes.</sub>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/workstation-dark.webp">
+        <img src=".github/assets/scenes/workstation-light.webp" alt="Compute node" width="100%">
+      </picture><br>
+      <sub>A compute node reconstructs world models and serves perception offload.</sub>
+    </td>
+  </tr>
+</table>
+
 ## What you can build on it
 
 ADOS is a base, not a finished product for one job. These are directions it is built toward, with the pieces that exist for them today:
@@ -203,6 +342,14 @@ ADOS is a base, not a finished product for one job. These are directions it is b
 - **Logistics in GPS-denied warehouses.** The same positioning sources, a warehouse reconstruction preset in World Engine, and perception offload to a nearby compute node.
 
 The parts are open, so you can take them where you need them.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/survey-dark.webp">
+    <img src=".github/assets/scenes/survey-light.webp" alt="A survey pattern over a field" width="100%">
+  </picture><br>
+  <sub>A survey pattern over a field, the starting point for agricultural work.</sub>
+</p>
 
 ## Build on it
 
@@ -283,6 +430,14 @@ On a device the agent installs as a set of systemd services plus a Python virtua
 
 The agent auto-detects the board on boot and scales features to the resources it finds. 22 board profiles ship in [`src/ados/hal/boards/`](src/ados/hal/boards/); any ARM64 or x86_64 Linux board with a serial port and systemd should work through a generic profile.
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/board-stack-dark.webp">
+    <img src=".github/assets/scenes/board-stack-light.webp" alt="A companion computer stack" width="100%">
+  </picture><br>
+  <sub>The companion computer: the agent's home on the drone.</sub>
+</p>
+
 | Board | SoC | Profile file |
 |---|---|---|
 | BeagleBoard.org BeagleY-AI | TI AM67A (J722S) | `beagley-ai.yaml` |
@@ -355,7 +510,7 @@ The public everyday CLI is intentionally small. Run `ados --help` for the curren
 
 | Command | Description |
 |---------|-------------|
-| `ados` | Open the read-only terminal status page, or plain status when not attached to a TTY |
+| `ados` | Open the terminal console, or plain status when not attached to a TTY |
 | `ados status` | Print setup, MAVLink, video, network, remote-access, and service status |
 | `ados status --json` | Print the full setup facade payload for scripts |
 | `ados update` | Update the agent to the latest version (re-runs the installer upgrade) |
@@ -410,6 +565,27 @@ ADOS is local-first. The primary path between Mission Control and the agent is y
 **Local pairing (default).** Mission Control reaches the agent over the LAN by hostname or IP. The apiKey is stored in the browser, with no cloud round-trip. An agent with cloud relay disabled is in its normal, correct state.
 
 **Long-range radio link.** The drone-to-ground data link is WFB-ng on 5.8 GHz, with forward error correction, for video and telemetry without any internet. It auto-binds to the ground station on first boot.
+
+**LoRa beacon lane.** A low-duty LoRa lane carries position beacons, short status reports and text, never video or control. Every frame passes a regional governor (band plan, duty cycle, dwell time and power) before it reaches the radio.
+
+<table>
+  <tr>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/lora-dark.webp">
+        <img src=".github/assets/scenes/lora-light.webp" alt="LoRa beacons" width="100%">
+      </picture><br>
+      <sub>LoRa beacons between the drone and ground nodes.</sub>
+    </td>
+    <td width="50%">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset=".github/assets/scenes/relay-dark.webp">
+        <img src=".github/assets/scenes/relay-light.webp" alt="Relayed link" width="100%">
+      </picture><br>
+      <sub>The drone's link relayed through a ground node to the operator.</sub>
+    </td>
+  </tr>
+</table>
 
 **Cloud relay (optional).** For remote access across networks, the agent connects to Mission Control over a relay:
 
