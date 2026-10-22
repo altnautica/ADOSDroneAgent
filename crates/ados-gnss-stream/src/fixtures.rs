@@ -34,13 +34,21 @@ fn put_i32(p: &mut [u8], o: usize, v: i32) {
 /// NAV-PVT fields a test sets.
 #[derive(Debug, Clone, Copy)]
 pub struct Pvt {
+    /// `fixType`.
     pub fix_type: u8,
+    /// `flags` byte (bit 0 `gnssFixOK`, bit 1 `diffSoln`, bits 6..7 `carrSoln`).
     pub flags: u8,
+    /// Satellites used.
     pub num_sv: u8,
+    /// Latitude, 1e-7 degrees.
     pub lat_e7: i32,
+    /// Longitude, 1e-7 degrees.
     pub lon_e7: i32,
+    /// Height above the ellipsoid, millimetres.
     pub height_mm: i32,
+    /// Height above mean sea level, millimetres.
     pub hmsl_mm: i32,
+    /// Position DOP, 0.01 units.
     pub pdop_centi: u16,
     /// `(year, month, day, hour, min, sec, nano)`; `None` leaves time invalid.
     pub utc: Option<(u16, u8, u8, u8, u8, u8, i32)>,
@@ -62,6 +70,7 @@ impl Default for Pvt {
     }
 }
 
+/// A NAV-PVT frame carrying `v`.
 pub fn nav_pvt(v: Pvt) -> Vec<u8> {
     let mut p = vec![0u8; 92];
     if let Some((y, mo, d, h, mi, s, nano)) = v.utc {
@@ -85,6 +94,7 @@ pub fn nav_pvt(v: Pvt) -> Vec<u8> {
     ubx_frame(ubx::CLS_NAV, ubx::NAV_PVT, &p)
 }
 
+/// A NAV-DOP frame with the horizontal DOP in 0.01 units.
 pub fn nav_dop(hdop_centi: u16) -> Vec<u8> {
     let mut p = vec![0u8; 18];
     put_u16(&mut p, 12, hdop_centi);
@@ -121,6 +131,7 @@ pub fn nav_relposned(heading_e5: i32, acc_e5: u32, length_cm: i32, flags: u32) -
     ubx_frame(ubx::CLS_NAV, ubx::NAV_RELPOSNED, &p)
 }
 
+/// A TIM-TP frame.
 pub fn tim_tp(tow_ms: u32, sub_ms: u32, week: u16, flags: u8) -> Vec<u8> {
     let mut p = vec![0u8; 16];
     put_u32(&mut p, 0, tow_ms);
@@ -130,6 +141,7 @@ pub fn tim_tp(tow_ms: u32, sub_ms: u32, week: u16, flags: u8) -> Vec<u8> {
     ubx_frame(ubx::CLS_TIM, ubx::TIM_TP, &p)
 }
 
+/// A MON-VER frame with hardware version `hw` and extension strings.
 pub fn mon_ver(hw: &str, extensions: &[&str]) -> Vec<u8> {
     let mut p = vec![0u8; 40 + 30 * extensions.len()];
     p[..9].copy_from_slice(b"EXT CORE ");
@@ -141,6 +153,7 @@ pub fn mon_ver(hw: &str, extensions: &[&str]) -> Vec<u8> {
     ubx_frame(ubx::CLS_MON, ubx::MON_VER, &p)
 }
 
+/// An ACK-ACK (`ok`) or ACK-NAK frame for `(class, id)`.
 pub fn ack(ok: bool, class: u8, id: u8) -> Vec<u8> {
     let msg = if ok { ubx::ACK_ACK } else { ubx::ACK_NAK };
     ubx_frame(ubx::CLS_ACK, msg, &[class, id])

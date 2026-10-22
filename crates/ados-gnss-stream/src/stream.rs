@@ -16,7 +16,14 @@ const BUF_MAX: usize = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
     /// UBX message: class, id, payload.
-    Ubx { class: u8, id: u8, payload: Vec<u8> },
+    Ubx {
+        /// Message class.
+        class: u8,
+        /// Message id.
+        id: u8,
+        /// Payload without header or checksum.
+        payload: Vec<u8>,
+    },
     /// NMEA sentence without the trailing CR LF (`$GNGGA,...*hh`).
     Nmea(String),
     /// RTCM3 frame, header to CRC inclusive.
@@ -62,6 +69,7 @@ pub struct Splitter {
 }
 
 impl Splitter {
+    /// An empty splitter.
     pub fn new() -> Self {
         Self::default()
     }

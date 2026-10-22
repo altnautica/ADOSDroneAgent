@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::base::{BaseMode, Llh};
-use crate::valset::RxPort;
+use ados_gnss_stream::base::{BaseMode, Llh};
+use ados_gnss_stream::valset::RxPort;
 
 /// Baud for a serial source that names none (the u-blox UART default).
 pub const DEFAULT_BAUD: u32 = 38_400;
@@ -247,10 +247,8 @@ mod tests {
 
     #[test]
     fn udp_sources_match_the_shared_vectors() {
-        let doc: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/gnss-udp-sources.json"
-        ))
-        .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/gnss-udp-sources.json")).unwrap();
         for (key, want) in [("valid", true), ("invalid", false)] {
             for s in doc[key].as_array().unwrap() {
                 let s = s.as_str().unwrap();

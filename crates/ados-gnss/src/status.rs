@@ -6,9 +6,9 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::base::BaseView;
-use crate::receiver::{Fix, Rtk};
-use crate::ubx::RelPosNed;
+use ados_gnss_stream::base::BaseView;
+use ados_gnss_stream::receiver::{Fix, Rtk};
+use ados_gnss_stream::ubx::RelPosNed;
 
 /// Schema version of `gnss.json`; mirrors the `gnss` sidecar row.
 pub const GNSS_SIDECAR_VERSION: u16 = 1;

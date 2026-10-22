@@ -5,27 +5,39 @@ use crate::receiver::Fix;
 /// A decoded GGA sentence.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Gga {
+    /// Fix quality from the GGA quality field.
     pub fix: Fix,
+    /// Satellites used.
     pub sats: u8,
+    /// Horizontal dilution of precision.
     pub hdop: Option<f64>,
+    /// Latitude, degrees.
     pub lat_deg: Option<f64>,
+    /// Longitude, degrees.
     pub lon_deg: Option<f64>,
+    /// Altitude above mean sea level, metres.
     pub h_msl_m: Option<f64>,
+    /// Height above the ellipsoid (MSL plus geoid separation), metres.
     pub h_ellipsoid_m: Option<f64>,
 }
 
 /// A decoded RMC sentence.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rmc {
+    /// Fix from the RMC status and mode fields.
     pub fix: Fix,
+    /// Latitude, degrees.
     pub lat_deg: Option<f64>,
+    /// Longitude, degrees.
     pub lon_deg: Option<f64>,
 }
 
-/// A decoded sentence this service uses.
+/// A sentence type this crate decodes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Sentence {
+    /// GGA: fix data.
     Gga(Gga),
+    /// RMC: recommended minimum data.
     Rmc(Rmc),
 }
 

@@ -8,21 +8,10 @@
 //! RTCM3 output is published as `rtcm` frames for the router to inject toward
 //! the paired drones; PPS pulses are published as `sync` pairs.
 
-pub mod base;
 pub mod cmdsock;
 pub mod config;
 pub mod daemon;
-pub mod nmea;
 pub mod pps;
-pub mod receiver;
 pub mod service;
 pub mod sources;
 pub mod status;
-pub mod stream;
-pub mod ubx;
-pub mod valset;
-
-#[cfg(test)]
-mod decode_tests;
-#[cfg(test)]
-pub(crate) mod fixtures;

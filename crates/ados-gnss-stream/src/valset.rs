@@ -7,15 +7,25 @@
 use crate::stream::ubx_frame;
 use crate::ubx::{CFG_VALSET, CLS_CFG};
 
+/// CFG-TMODE-MODE: 0 disabled, 1 survey-in, 2 fixed.
 pub const TMODE_MODE: u32 = 0x2003_0001;
+/// CFG-TMODE-POS_TYPE: 0 ECEF, 1 LLH.
 pub const TMODE_POS_TYPE: u32 = 0x2003_0002;
+/// CFG-TMODE-LAT: fixed latitude, 1e-7 degrees.
 pub const TMODE_LAT: u32 = 0x4003_0009;
+/// CFG-TMODE-LON: fixed longitude, 1e-7 degrees.
 pub const TMODE_LON: u32 = 0x4003_000A;
+/// CFG-TMODE-HEIGHT: fixed ellipsoid height, centimetres.
 pub const TMODE_HEIGHT: u32 = 0x4003_000B;
+/// CFG-TMODE-LAT_HP: high-precision latitude, 1e-9 degrees.
 pub const TMODE_LAT_HP: u32 = 0x2003_000C;
+/// CFG-TMODE-LON_HP: high-precision longitude, 1e-9 degrees.
 pub const TMODE_LON_HP: u32 = 0x2003_000D;
+/// CFG-TMODE-HEIGHT_HP: high-precision height, 0.1 mm.
 pub const TMODE_HEIGHT_HP: u32 = 0x2003_000E;
+/// CFG-TMODE-SVIN_MIN_DUR: survey-in minimum duration, seconds.
 pub const TMODE_SVIN_MIN_DUR: u32 = 0x4003_0010;
+/// CFG-TMODE-SVIN_ACC_LIMIT: survey-in accuracy limit, 0.1 mm.
 pub const TMODE_SVIN_ACC_LIMIT: u32 = 0x4003_0011;
 
 /// `CFG-VALSET` layer bit for RAM (applied now, lost on power cycle).
@@ -25,12 +35,15 @@ pub const LAYER_RAM: u8 = 0x01;
 /// CFG-MSGOUT keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RxPort {
+    /// UART1.
     #[default]
     Uart1,
+    /// USB.
     Usb,
 }
 
 impl RxPort {
+    /// Parse `uart1` or `usb`.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "uart1" => Some(Self::Uart1),
@@ -50,12 +63,15 @@ const RTCM_MSGOUT: [(u16, u32, u32); 6] = [
     (1124, 0x2091_036E, 0x2091_0370),
     (1230, 0x2091_0304, 0x2091_0306),
 ];
-/// CFG-MSGOUT-UBX_* key ids `(uart1, usb)` for the navigation messages this
-/// service reads.
+/// CFG-MSGOUT-UBX_NAV_PVT key ids `(uart1, usb)`.
 pub const NAV_PVT_MSGOUT: (u32, u32) = (0x2091_0007, 0x2091_0009);
+/// CFG-MSGOUT-UBX_NAV_DOP key ids `(uart1, usb)`.
 pub const NAV_DOP_MSGOUT: (u32, u32) = (0x2091_0039, 0x2091_003B);
+/// CFG-MSGOUT-UBX_NAV_SVIN key ids `(uart1, usb)`.
 pub const NAV_SVIN_MSGOUT: (u32, u32) = (0x2091_0089, 0x2091_008B);
+/// CFG-MSGOUT-UBX_NAV_RELPOSNED key ids `(uart1, usb)`.
 pub const NAV_RELPOSNED_MSGOUT: (u32, u32) = (0x2091_008E, 0x2091_0090);
+/// CFG-MSGOUT-UBX_TIM_TP key ids `(uart1, usb)`.
 pub const TIM_TP_MSGOUT: (u32, u32) = (0x2091_017E, 0x2091_0180);
 
 fn port_key(keys: (u32, u32), port: RxPort) -> u32 {
@@ -102,7 +118,7 @@ fn msgout_items(port: RxPort) -> Vec<Item> {
     v
 }
 
-/// Enable, once per solution, the UBX messages this service decodes on
+/// Enable, once per solution, the UBX messages this crate decodes on
 /// `port`: NAV-PVT and NAV-DOP always; TIM-TP and NAV-SVIN on the base
 /// receiver; NAV-RELPOSNED on a heading rover. A factory-default receiver
 /// emits only NMEA, so this runs every time the port opens.
