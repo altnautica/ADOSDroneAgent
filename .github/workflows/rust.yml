@@ -17,6 +17,7 @@ on:
       # them must rebuild, retest and republish the prebuilt binaries, and
       # release.yml's RUST_PATHS must list the same set.
       - "src/ados/hal/boards/**"
+      - "crates/ados-hal-probe/boards/**"
       - "src/ados/data/plugin-catalog.json"
       - "src/ados/plugins/builtin/**/manifest.yaml"
       - "schemas/agent-config.schema.json"
@@ -36,6 +37,7 @@ on:
       - "data/systemd/**"
       # Compiled into the binaries through include_str! (see the push filter).
       - "src/ados/hal/boards/**"
+      - "crates/ados-hal-probe/boards/**"
       - "src/ados/data/plugin-catalog.json"
       - "src/ados/plugins/builtin/**/manifest.yaml"
       - "schemas/agent-config.schema.json"

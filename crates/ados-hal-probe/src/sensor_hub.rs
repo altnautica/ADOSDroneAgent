@@ -211,7 +211,13 @@ mod tests {
     /// the same marker this module writes at boot.
     #[test]
     fn the_udev_rule_mirrors_the_hub_presence_marker() {
-        let rule = include_str!("../../../data/udev/99-ados-sensorhub.rules");
+        // The rule ships with the agent, outside this crate; a packaged crate
+        // has no copy to check.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../data/udev/99-ados-sensorhub.rules");
+        let Ok(rule) = std::fs::read_to_string(&path) else {
+            return;
+        };
         let active: Vec<&str> = rule
             .lines()
             .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())

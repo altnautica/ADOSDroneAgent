@@ -1,0 +1,49 @@
+name: "Raspberry Pi CM5"
+vendor: "Raspberry Pi"
+soc: "BCM2712"
+arch: "aarch64"
+model_patterns:
+  - "Raspberry Pi Compute Module 5"
+  - "Raspberry Pi CM5"
+default_tier: 4
+gpio_pins:
+  - 2   # SDA1
+  - 3   # SCL1
+  - 14  # UART TX
+  - 15  # UART RX
+  - 18  # PWM0
+uart_paths:
+  - /dev/ttyAMA0
+  - /dev/ttyS0
+hw_video_codecs:
+  - h264_dec
+  - h265_enc
+  - h265_dec
+
+# No NPU on the CM5, but the Cortex-A76 quad at 2.4 GHz runs a small detector on
+# the CPU via the in-process ONNX backend. This makes the installer fetch the
+# onnx-enabled vision build and the perception tier read "local" (detection runs
+# on-board, no compute-node offload needed).
+compute:
+  local_inference: onnx
+
+# CM5 carrier boards typically expose 2 MIPI CSI lanes plus multiple USB
+# host ports. Spare CSI lane available for a downward navigation camera
+# alongside the primary forward-facing camera.
+video:
+  csi_ports: 2
+  max_encode_resolution: "1920x1080"
+  max_encode_fps: 60
+  encoder_api: v4l2
+  nav_cameras:
+    csi_count: 2
+    usb_uvc_count: 4
+    recommended_role: nav-csi
+
+# VIO runs on the Cortex-A76 cores at 8 GB SKUs. Optical flow + VIO both
+# supported. Rangefinder lands on the primary UART or a free I2C bus.
+navigation:
+  vio_capable: true
+  rangefinder_ports:
+    - {type: uart, path: /dev/ttyAMA0, baud_max: 115200}
+    - {type: i2c, path: /dev/i2c-1, speed_hz: 400000}

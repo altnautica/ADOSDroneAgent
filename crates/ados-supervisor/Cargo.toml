@@ -17,7 +17,7 @@ ados-macpin = { workspace = true }
 # The board fingerprint sidecar writer: the supervisor publishes
 # /run/ados/board.json once at startup so a zero-Python node reports its real
 # board and NPU instead of `unknown` / npu_tops 0.
-ados-hal-probe = { path = "../ados-hal-probe" }
+ados-hal-probe = { workspace = true }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
 ados-protocol = { workspace = true, features = ["tracing-layer"] }

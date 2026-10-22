@@ -1,22 +1,4 @@
-//! Generic GPIO-output substrate: drive a status buzzer or LED on a host GPIO
-//! line, and compute a software-PWM beep schedule.
-//!
-//! This is the agent's first hardware-OUTPUT crate (the front-panel button
-//! reader in `ados-hid` is the GPIO-INPUT precedent). It is split the same way:
-//!
-//! * The hardware-coupled half ([`GpioOutput`]) opens a `/dev/gpiochip*` line in
-//!   OUTPUT mode and drives it high/low. It is `#[cfg(target_os = "linux")]` over
-//!   `gpio-cdev` (the same pure-Rust character-device backend the button reader
-//!   uses, no libgpiod C dependency), so the rest of the crate still builds and
-//!   tests on a non-Linux dev host.
-//! * The host-portable half ([`BeepPattern`] + [`beep_schedule`] + [`Command`])
-//!   is pure timing math and command parsing, fully unit-tested without any
-//!   hardware. A software-PWM beep is a list of toggle instants the service can
-//!   apply to a [`GpioOutput`]; computing it is pure.
-//!
-//! Safe-by-default: a fresh service drives NO line until it receives an explicit
-//! command, and every beep pattern is bounded ([`BeepPattern::clamp`]) so a
-//! command can never hold a line high indefinitely or schedule an unbounded run.
+#![doc = include_str!("../README.md")]
 
 use serde::{Deserialize, Serialize};
 

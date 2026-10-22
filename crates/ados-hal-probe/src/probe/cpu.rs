@@ -20,7 +20,7 @@ const CPUINFO_PATH: &str = "/proc/cpuinfo";
 /// big cores, or vice versa), so grouping consecutive runs reconstructs the
 /// clusters without sorting.
 ///
-/// Returns [`Probed::Absent`] with [`AbsenceReason::NodeMissing`] when
+/// Returns [`Probed::Absent`] with [`AbsenceReason::NodeMissing`](ados_protocol::hwcaps::AbsenceReason::NodeMissing) when
 /// `/proc/cpuinfo` cannot be read or carries no implementer/part fields (a
 /// non-ARM kernel exposes neither). On a non-Linux host the file does not exist
 /// at all, so the probe is left [`Probed::NotProbed`].

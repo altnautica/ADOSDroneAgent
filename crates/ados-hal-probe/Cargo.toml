@@ -1,12 +1,20 @@
 [package]
 name = "ados-hal-probe"
-publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
-description = "Probe-first hardware-capability detection: derives capabilities by reading real silicon (sysfs, device-tree, ioctl, sandboxed trial-init) rather than trusting declarations."
+homepage.workspace = true
+documentation = "https://docs.rs/ados-hal-probe"
+readme = "README.md"
+description = "Probe-first hardware capability detection for Linux single-board computers: CPU, SoC, USB, serial, V4L2 encoders and board profiles, read from the real silicon by the ADOS Drone Agent."
+keywords = ["hardware", "probe", "sbc", "v4l2", "drone"]
+categories = ["hardware-support", "os::linux-apis", "aerospace::drones"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 # The boot-time camera apply-verify-auto-revert oneshot. A binary rather than a
 # library call because it has to run BEFORE the supervisor, from a

@@ -17,7 +17,7 @@ const USB_DEVICES_DIR: &str = "/sys/bus/usb/devices";
 /// [`Probed::Present`] (an empty `Vec`): the sysfs tree existed and we read it,
 /// so "no USB devices" is a genuine answer, not "we could not look". The
 /// directory being unreadable (no USB sysfs on this host) is [`Probed::Absent`]
-/// with [`AbsenceReason::NodeMissing`].
+/// with [`AbsenceReason::NodeMissing`](ados_protocol::hwcaps::AbsenceReason::NodeMissing).
 #[cfg(target_os = "linux")]
 pub fn probe_usb_ids() -> Probed<Vec<UsbId>> {
     use ados_protocol::hwcaps::{AbsenceReason, Evidence};

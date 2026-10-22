@@ -254,85 +254,37 @@ fn default_tier_field() -> i64 {
 /// is asserted to cover every file in the directory, so adding a board without
 /// registering it here fails a test instead of silently detecting as unknown.
 pub const BOARD_PROFILE_YAML: &[(&str, &str)] = &[
-    (
-        "beagley-ai",
-        include_str!("../../../src/ados/hal/boards/beagley-ai.yaml"),
-    ),
-    ("cm3", include_str!("../../../src/ados/hal/boards/cm3.yaml")),
-    ("cm4", include_str!("../../../src/ados/hal/boards/cm4.yaml")),
-    ("cm5", include_str!("../../../src/ados/hal/boards/cm5.yaml")),
-    (
-        "cubie-a7s",
-        include_str!("../../../src/ados/hal/boards/cubie-a7s.yaml"),
-    ),
-    (
-        "cubie-a7z",
-        include_str!("../../../src/ados/hal/boards/cubie-a7z.yaml"),
-    ),
+    ("beagley-ai", include_str!("../boards/beagley-ai.yaml")),
+    ("cm3", include_str!("../boards/cm3.yaml")),
+    ("cm4", include_str!("../boards/cm4.yaml")),
+    ("cm5", include_str!("../boards/cm5.yaml")),
+    ("cubie-a7s", include_str!("../boards/cubie-a7s.yaml")),
+    ("cubie-a7z", include_str!("../boards/cubie-a7z.yaml")),
     (
         "generic-arm64",
-        include_str!("../../../src/ados/hal/boards/generic-arm64.yaml"),
+        include_str!("../boards/generic-arm64.yaml"),
     ),
     (
         "generic-x86_64",
-        include_str!("../../../src/ados/hal/boards/generic-x86_64.yaml"),
+        include_str!("../boards/generic-x86_64.yaml"),
     ),
-    (
-        "jetson-nano",
-        include_str!("../../../src/ados/hal/boards/jetson-nano.yaml"),
-    ),
+    ("jetson-nano", include_str!("../boards/jetson-nano.yaml")),
     (
         "jetson-orin-nano",
-        include_str!("../../../src/ados/hal/boards/jetson-orin-nano.yaml"),
+        include_str!("../boards/jetson-orin-nano.yaml"),
     ),
-    (
-        "orange-pi-5",
-        include_str!("../../../src/ados/hal/boards/orange-pi-5.yaml"),
-    ),
-    (
-        "rdk-x3",
-        include_str!("../../../src/ados/hal/boards/rdk-x3.yaml"),
-    ),
-    (
-        "rk3566",
-        include_str!("../../../src/ados/hal/boards/rk3566.yaml"),
-    ),
-    (
-        "rk3576",
-        include_str!("../../../src/ados/hal/boards/rk3576.yaml"),
-    ),
-    (
-        "rk3588s2",
-        include_str!("../../../src/ados/hal/boards/rk3588s2.yaml"),
-    ),
-    (
-        "rock-5b-plus",
-        include_str!("../../../src/ados/hal/boards/rock-5b-plus.yaml"),
-    ),
-    (
-        "rock-5c-lite",
-        include_str!("../../../src/ados/hal/boards/rock-5c-lite.yaml"),
-    ),
-    (
-        "rpi3",
-        include_str!("../../../src/ados/hal/boards/rpi3.yaml"),
-    ),
-    (
-        "rpi4b",
-        include_str!("../../../src/ados/hal/boards/rpi4b.yaml"),
-    ),
-    (
-        "rpi5",
-        include_str!("../../../src/ados/hal/boards/rpi5.yaml"),
-    ),
-    (
-        "rv1126b",
-        include_str!("../../../src/ados/hal/boards/rv1126b.yaml"),
-    ),
-    (
-        "zero2w",
-        include_str!("../../../src/ados/hal/boards/zero2w.yaml"),
-    ),
+    ("orange-pi-5", include_str!("../boards/orange-pi-5.yaml")),
+    ("rdk-x3", include_str!("../boards/rdk-x3.yaml")),
+    ("rk3566", include_str!("../boards/rk3566.yaml")),
+    ("rk3576", include_str!("../boards/rk3576.yaml")),
+    ("rk3588s2", include_str!("../boards/rk3588s2.yaml")),
+    ("rock-5b-plus", include_str!("../boards/rock-5b-plus.yaml")),
+    ("rock-5c-lite", include_str!("../boards/rock-5c-lite.yaml")),
+    ("rpi3", include_str!("../boards/rpi3.yaml")),
+    ("rpi4b", include_str!("../boards/rpi4b.yaml")),
+    ("rpi5", include_str!("../boards/rpi5.yaml")),
+    ("rv1126b", include_str!("../boards/rv1126b.yaml")),
+    ("zero2w", include_str!("../boards/zero2w.yaml")),
 ];
 
 /// Parse every embedded profile, in filename order — the same order the Python
@@ -782,22 +734,29 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_board_profile_yaml_is_registered_and_parses() {
-        // The drift guard: a board added to the directory but not to the
-        // embedded table would detect as unknown on a Rust-only node, which is
-        // exactly the defect this writer exists to fix.
-        let dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../src/ados/hal/boards");
-        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
-            .expect("the board profile directory must exist")
+    fn yaml_files(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<(String, Vec<u8>)> = std::fs::read_dir(dir)
+            .expect("board profile directory must be readable")
             .flatten()
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
-                name.strip_suffix(".yaml").map(str::to_string)
+                name.ends_with(".yaml")
+                    .then(|| (name, std::fs::read(e.path()).expect("readable profile")))
             })
             .collect();
-        on_disk.sort();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn every_board_profile_yaml_is_registered_and_parses() {
+        // A board added to the bundled directory but not to the embedded table
+        // would silently detect as unknown.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("boards");
+        let on_disk: Vec<String> = yaml_files(&dir)
+            .into_iter()
+            .map(|(name, _)| name.trim_end_matches(".yaml").to_string())
+            .collect();
         let mut embedded: Vec<String> = BOARD_PROFILE_YAML
             .iter()
             .map(|(stem, _)| stem.to_string())
@@ -805,7 +764,7 @@ mod tests {
         embedded.sort();
         assert_eq!(
             embedded, on_disk,
-            "the embedded board table and src/ados/hal/boards/ have drifted"
+            "the embedded board table and boards/ have drifted"
         );
 
         // And every one of them parses into the fingerprint's view of a profile.
@@ -814,6 +773,33 @@ mod tests {
             BOARD_PROFILE_YAML.len(),
             "a board profile failed to parse"
         );
+    }
+
+    #[test]
+    fn bundled_boards_match_the_canonical_hal_profiles() {
+        // In the source repository the HAL profiles under src/ados/hal/boards
+        // are canonical; the crate bundles a copy so it packages on its own.
+        // A packaged crate has no canonical directory, so there is nothing to
+        // compare against.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let canonical = root.join("../../src/ados/hal/boards");
+        if !canonical.is_dir() {
+            return;
+        }
+        let bundled = yaml_files(&root.join("boards"));
+        let canonical = yaml_files(&canonical);
+        let names = |v: &[(String, Vec<u8>)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            names(&bundled),
+            names(&canonical),
+            "crates/ados-hal-probe/boards/ and src/ados/hal/boards/ list different files"
+        );
+        for ((name, a), (_, b)) in bundled.iter().zip(&canonical) {
+            assert!(
+                a == b,
+                "boards/{name} differs from src/ados/hal/boards/{name}; copy it over"
+            );
+        }
     }
 
     #[test]

@@ -45,7 +45,7 @@ nix = { workspace = true, features = ["time"], optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 # The E22 M0/M1 mode lines, driven through the GPIO output service's
 # character-device line driver.
-ados-gpio = { path = "../ados-gpio", optional = true }
+ados-gpio = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"

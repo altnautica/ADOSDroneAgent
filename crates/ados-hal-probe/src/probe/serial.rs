@@ -14,8 +14,8 @@
 //! pinned CRSF/ELRS device (`radio.crsf.device`) so the RC module's port
 //! scores 0, mirroring the exclusion the router's live path already enforces.
 //!
-//! The scoring and the sysfs walk are split: [`score_fc`] is a pure function
-//! tested on any host, and [`enumerate_from_root`] takes the `/sys/class/tty`
+//! The scoring and the sysfs walk are split: `score_fc` is a pure function
+//! tested on any host, and `enumerate_from_root` takes the `/sys/class/tty`
 //! root as a parameter so a fake layout can be parsed in a test.
 
 use std::path::Path;

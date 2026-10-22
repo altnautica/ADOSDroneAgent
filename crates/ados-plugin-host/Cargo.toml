@@ -38,7 +38,7 @@ ados-config = { path = "../ados-config" }
 # publishes: the HAL board sidecar's, and the video pipeline's camera-state
 # sidecar and primary-stream config resolution. Reading them here rather than
 # re-parsing the files keeps the answer identical to what the agent acts on.
-ados-hal-probe = { path = "../ados-hal-probe" }
+ados-hal-probe = { workspace = true }
 ados-video = { path = "../ados-video" }
 tokio = { workspace = true }
 serde = { workspace = true }

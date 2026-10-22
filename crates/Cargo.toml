@@ -32,6 +32,8 @@ homepage = "https://altnautica.com"
 # pins must equal the workspace version (scripts/check-version-sync.sh).
 ados-protocol = { path = "ados-protocol", version = "=0.106.1" }
 ados-tracker = { path = "ados-tracker", version = "=0.106.1" }
+ados-gpio = { path = "ados-gpio", version = "=0.106.1" }
+ados-hal-probe = { path = "ados-hal-probe", version = "=0.106.1" }
 ados-sensorhub-proto = { path = "ados-sensorhub-proto", version = "0.1.0" }
 ados-offload = { path = "ados-offload", version = "0.1.0" }
 ados-macpin = { path = "ados-macpin", version = "0.1.0" }
