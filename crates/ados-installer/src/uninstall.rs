@@ -148,6 +148,7 @@ fn discover_wants_dirs() -> Vec<PathBuf> {
 /// The MAC-pin `.link` drop-ins under `dir`. Without removing them the box
 /// keeps the pinned MACs on its next boot after the agent is gone.
 fn discover_mac_pin_links(dir: &Path) -> Vec<PathBuf> {
+    let layout = ados_config::mac_pin::ados_pin_layout();
     let mut links: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -156,7 +157,7 @@ fn discover_mac_pin_links(dir: &Path) -> Vec<PathBuf> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(ados_macpin::engine::is_pin_link_file)
+                .is_some_and(|n| ados_macpin::engine::is_pin_link_file(&layout, n))
         })
         .collect();
     links.sort();
@@ -259,7 +260,8 @@ pub fn run_uninstall(purge: bool, sink: &ProgressSink) -> anyhow::Result<()> {
     // overlay's boot-config edits, each reversed by the step that made it.
     crate::steps::chrony_ados::uninstall();
     crate::steps::pps_overlay::remove_overlay();
-    for link in discover_mac_pin_links(Path::new(ados_macpin::engine::NETWORKD_DIR)) {
+    let networkd_dir = ados_config::mac_pin::ados_pin_layout().networkd_dir;
+    for link in discover_mac_pin_links(&networkd_dir) {
         if let Err(e) = remove_path(&link) {
             tracing::warn!(link = %link.display(), error = %e, "removing MAC-pin link failed");
         }

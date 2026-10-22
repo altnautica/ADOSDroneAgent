@@ -17,17 +17,16 @@ all-features = true
 targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
-# The shared atomic writer (`ados_protocol::sidecar::write_atomic`) the state
-# file and the .link files go through.
-ados-protocol = { workspace = true }
+# Temp-file names for the atomic state and .link writes.
+getrandom = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
-# The two entry points an axum handler reaches (`apply_live`, `remove_pin_link`)
-# spawn `ip` / `udevadm`; they run bounded under tokio::process so a wedged
-# netlink or udev settle cannot block the control-plane reactor.
+# The two async entry points (`apply_live`, `remove_pin_link`) spawn `ip` /
+# `udevadm` bounded under tokio::process, so a wedged netlink call or udev
+# settle cannot block the caller's reactor.
 tokio = { workspace = true }
 
 [dev-dependencies]

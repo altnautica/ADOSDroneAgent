@@ -71,7 +71,8 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use ados_macpin::engine::{NETWORKD_DIR, STATE_PATH};
+use ados_config::mac_pin::{ados_pin_layout, MAC_PINS_STATE};
+use ados_macpin::engine::PinLayout;
 
 use crate::config_store::{section_path, update_config};
 use crate::state::AppState;
@@ -92,13 +93,25 @@ use pin::*;
 /// supervisor reconciler write and the heartbeat reads. Overridable via
 /// `ADOS_MAC_PINS_STATE` for tests.
 fn state_file_path() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_MAC_PINS_STATE").unwrap_or_else(|_| STATE_PATH.to_string()))
+    PathBuf::from(
+        std::env::var("ADOS_MAC_PINS_STATE").unwrap_or_else(|_| MAC_PINS_STATE.to_string()),
+    )
 }
 
 /// The `systemd-networkd` drop-in directory the pin `.link` lives in
 /// (`/etc/systemd/network`). Overridable via `ADOS_NETWORKD_DIR` for tests.
 fn networkd_dir() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_NETWORKD_DIR").unwrap_or_else(|_| NETWORKD_DIR.to_string()))
+    std::env::var_os("ADOS_NETWORKD_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| ados_pin_layout().networkd_dir)
+}
+
+/// The agent's pin layout with its drop-in directory replaced by `dir`.
+fn layout_in(dir: &Path) -> PinLayout {
+    PinLayout {
+        networkd_dir: dir.to_path_buf(),
+        ..ados_pin_layout()
+    }
 }
 
 /// Build a FastAPI-shaped error-object response: `(status, {"detail": {"error":
@@ -315,14 +328,14 @@ async fn apply_live(_iface: &str, _mac: &str) -> Result<(), String> {
 /// the flag and the error are still exercised by tests.
 #[cfg(target_os = "linux")]
 async fn remove_link_file(dir: &Path, key: &str) -> Result<bool, String> {
-    ados_macpin::engine::remove_pin_link(dir, key)
+    ados_macpin::engine::remove_pin_link(&layout_in(dir), key)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[cfg(not(target_os = "linux"))]
 async fn remove_link_file(dir: &Path, key: &str) -> Result<bool, String> {
-    let path = dir.join(ados_macpin::engine::link_file_name(key));
+    let path = link_path(dir, key);
     if path.exists() {
         std::fs::remove_file(&path)
             .map(|()| true)
@@ -330,6 +343,12 @@ async fn remove_link_file(dir: &Path, key: &str) -> Result<bool, String> {
     } else {
         Ok(false)
     }
+}
+
+/// The pin `.link` path for adapter `key` under `dir`.
+#[cfg(any(not(target_os = "linux"), test))]
+fn link_path(dir: &Path, key: &str) -> PathBuf {
+    dir.join(ados_macpin::engine::link_file_name(&layout_in(dir), key))
 }
 
 /// The adapter key for `iface` from the state file, or the `400

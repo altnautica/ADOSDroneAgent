@@ -26,6 +26,7 @@
 pub mod cameras;
 pub mod capture_storage;
 pub mod log_store;
+pub mod mac_pin;
 mod profile;
 pub mod schema;
 pub mod side_effects;

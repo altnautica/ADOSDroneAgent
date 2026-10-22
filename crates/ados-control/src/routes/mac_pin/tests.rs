@@ -427,7 +427,7 @@ async fn delete_removes_a_present_override_and_link_and_reports_both_true() {
     )
     .unwrap();
     // Seed a .link file at the engine's canonical name so the remove reports true.
-    let link = netd.join(ados_macpin::engine::link_file_name(WLAN0_KEY));
+    let link = link_path(&netd, WLAN0_KEY);
     std::fs::write(
         &link,
         "[Match]\nPath=platform-xhci-usb-0:1.0:1.0\n[Link]\nMACAddress=02:c6:75:83:1a:3e\n",
@@ -476,7 +476,7 @@ async fn delete_reports_a_link_that_exists_but_cannot_be_removed() {
     let state = dir.path().join("mac-pins.state");
     seed_state(&state, &[("wlan0", None)]);
     let netd = dir.path().join("networkd");
-    let link = netd.join(ados_macpin::engine::link_file_name(WLAN0_KEY));
+    let link = link_path(&netd, WLAN0_KEY);
     std::fs::create_dir_all(&link).unwrap();
     std::fs::write(&cfg, "agent:\n  name: my-drone\n").unwrap();
 

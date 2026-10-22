@@ -27,7 +27,7 @@
 //! `mac-pins.state` the sibling MAC-pin write route reads for its
 //! learner-candidate fallback) and map each entry to camelCase — it never
 //! enumerates live adapters, runs a command, or mutates anything. The state-file
-//! seam is `ados-macpin`'s `STATE_PATH`, overridable via `ADOS_MAC_PINS_STATE` for
+//! seam is `ados_config::mac_pin::MAC_PINS_STATE`, overridable via `ADOS_MAC_PINS_STATE` for
 //! tests, exactly as `mac_pin.rs` resolves it.
 //!
 //! ## The camelCase projection
@@ -52,14 +52,17 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Value};
 
-use ados_macpin::engine::{read_state, state_json_to_camel, STATE_PATH};
+use ados_config::mac_pin::MAC_PINS_STATE;
+use ados_macpin::engine::{read_state, state_json_to_camel};
 
 /// The on-disk state file with the per-adapter verdicts (`/etc/ados/mac-pins.state`),
 /// the same file the installer step + supervisor reconciler write and the heartbeat
 /// reads. Overridable via `ADOS_MAC_PINS_STATE` for tests, resolved identically to
 /// the sibling MAC-pin write route so both read one source of truth.
 pub(crate) fn state_file_path() -> PathBuf {
-    PathBuf::from(std::env::var("ADOS_MAC_PINS_STATE").unwrap_or_else(|_| STATE_PATH.to_string()))
+    PathBuf::from(
+        std::env::var("ADOS_MAC_PINS_STATE").unwrap_or_else(|_| MAC_PINS_STATE.to_string()),
+    )
 }
 
 /// `GET /api/v1/network/mac/adapters` → the per-adapter stable-MAC verdicts.

@@ -50,7 +50,9 @@ pub fn read_config_from(text: &str) -> ReconcileConfig {
     }
     let enabled_default = ReconcileConfig {
         enabled: true,
-        ..Default::default()
+        apply_live_allowed: false,
+        overrides: HashMap::new(),
+        layout: ados_config::mac_pin::ados_pin_layout(),
     };
     match serde_norway::from_str::<Raw>(text) {
         Ok(raw) => match raw.network.mac_pin {
@@ -58,6 +60,7 @@ pub fn read_config_from(text: &str) -> ReconcileConfig {
                 enabled: mp.enabled,
                 apply_live_allowed: mp.apply_live_allowed,
                 overrides: mp.overrides,
+                layout: ados_config::mac_pin::ados_pin_layout(),
             },
             None => enabled_default,
         },
@@ -66,13 +69,9 @@ pub fn read_config_from(text: &str) -> ReconcileConfig {
 }
 
 fn read_config() -> ReconcileConfig {
-    match std::fs::read_to_string(CONFIG_YAML) {
-        Ok(t) => read_config_from(&t),
-        Err(_) => ReconcileConfig {
-            enabled: true,
-            ..Default::default()
-        },
-    }
+    std::fs::read_to_string(CONFIG_YAML)
+        .map(|t| read_config_from(&t))
+        .unwrap_or_else(|_| read_config_from(""))
 }
 
 /// Run the reconciler until `shutdown` flips. Re-reads config each tick so a

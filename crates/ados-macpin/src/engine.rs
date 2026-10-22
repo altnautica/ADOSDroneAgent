@@ -1,41 +1,61 @@
-//! The MAC-pin engine: sysfs enumeration, the per-adapter decision, and the
+//! The pinning engine: sysfs enumeration, the per-adapter decision, and the
 //! `systemd-networkd` `.link` provisioning. The pure parts (`render_link_file`,
 //! `parse_match_block`, `match_block_is_specific`, `parse_udev_id_path`,
 //! `classify_adapter`) are unit-tested without I/O; the sysfs / `udevadm` /
 //! subprocess parts are Linux-gated.
 //!
 //! The provisioning path only ever writes a `.link` file (effective on the next
-//! boot) — it never changes a live interface's address, so it cannot drop the
-//! operator's management link. Re-tagging the live interface is a separate,
-//! caller-gated action ([`apply_live`]).
+//! boot). It never changes a live interface's address, so it cannot drop a
+//! management link. Re-tagging the live interface is a separate, caller-gated
+//! action ([`apply_live`]).
 //!
-//! Two entry points are reached from an axum handler and are therefore `async`
-//! with bounded, `kill_on_drop` subprocesses ([`apply_live`],
-//! [`remove_pin_link`]); the synchronous `reconcile` path belongs to the
-//! installer step and the supervisor, which run off the reactor.
+//! Two entry points are meant for async request handlers and are therefore
+//! `async` with bounded, `kill_on_drop` subprocesses ([`apply_live`],
+//! [`remove_pin_link`]); the synchronous [`reconcile`] path is meant for a
+//! provisioning step or a background service running off the async reactor.
+//!
+//! Every on-disk location (state file, drop-in directory, file-name prefix and
+//! the owner named in the generated file header) comes from a [`PinLayout`].
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use ados_protocol::sidecar::write_atomic;
-
+use crate::atomic::write_atomic;
 use crate::{
     derive_pinned_mac, is_known_stable_efuse, is_quirk_randomizer, AdapterSource, LearnerRecord,
     MacAddr, MacPinsState, UsbId,
 };
 
-/// Directory `systemd-networkd` reads `.link` drop-ins from.
+/// The directory `systemd-networkd` reads `.link` drop-ins from on a stock
+/// systemd host; a sensible [`PinLayout::networkd_dir`].
 pub const NETWORKD_DIR: &str = "/etc/systemd/network";
-/// Where the per-adapter verdicts + learner memory are persisted.
-pub const STATE_PATH: &str = "/etc/ados/mac-pins.state";
 /// Machine-id sources, in preference order.
 pub const MACHINE_ID_PATHS: [&str; 2] = ["/etc/machine-id", "/var/lib/dbus/machine-id"];
 /// The learner flags a randomizer after the MAC has changed on this many boots.
 pub const LEARN_THRESHOLD: u32 = 2;
 
+/// Where the engine keeps its files and how it names them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinLayout {
+    /// The JSON state file holding the per-adapter verdicts and learner memory.
+    pub state_path: PathBuf,
+    /// The `systemd-networkd` drop-in directory the `.link` files go in
+    /// (usually [`NETWORKD_DIR`]).
+    pub networkd_dir: PathBuf,
+    /// The file-name prefix every pin `.link` carries, e.g. `10-myapp-mac-`.
+    /// A low number sorts before stock `.link` files so the pin wins; the
+    /// prefix also tells the engine's own files apart from everything else in
+    /// the directory.
+    pub link_prefix: String,
+    /// Who manages the files, named in the generated header
+    /// (`# Managed by the {owner_label}`).
+    pub owner_label: String,
+}
+
 /// A network adapter discovered under `/sys/class/net`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetAdapter {
+    /// Kernel interface name (e.g. `wlan0`).
     pub name: String,
     /// `None` for non-USB adapters (platform NICs, virtual interfaces).
     pub usb_id: Option<UsbId>,
@@ -46,40 +66,48 @@ pub struct NetAdapter {
     pub mac: Option<MacAddr>,
 }
 
-/// Runtime knobs from `network.mac_pin` config.
-#[derive(Debug, Clone, Default)]
+/// Runtime knobs for one reconcile pass.
+#[derive(Debug, Clone)]
 pub struct ReconcileConfig {
+    /// Master switch: when false, randomizers are reported but never pinned.
     pub enabled: bool,
+    /// Whether the caller allows re-tagging a live interface.
     pub apply_live_allowed: bool,
     /// Operator overrides -> explicit MAC, keyed by a stable identity: the
     /// adapter key `vvvv:pppp@<usb_path>` (one adapter in one port), or a bare
     /// `vvvv:pppp` (every adapter of that model). Interface names are not
     /// identities and are not honoured.
     pub overrides: HashMap<String, String>,
+    /// File locations and naming.
+    pub layout: PinLayout,
 }
 
 /// The decision for one adapter (pure, no I/O).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    /// Stable efuse MAC — leave it alone.
+    /// Stable efuse MAC: leave it alone.
     Stable,
     /// Pinning disabled by config.
     Disabled,
     /// A randomizer we cannot pin right now.
     Deferred(String),
     /// Write a `.link` pinning `mac`.
-    Pin { mac: MacAddr, source: AdapterSource },
+    Pin {
+        /// The address to pin.
+        mac: MacAddr,
+        /// How the verdict was reached.
+        source: AdapterSource,
+    },
     /// The learner suspects randomization; surface for the operator to confirm.
-    Candidate { proposed: Option<MacAddr> },
+    Candidate {
+        /// The MAC that would be pinned, when a machine-id is available.
+        proposed: Option<MacAddr>,
+    },
     /// Still gathering cross-boot evidence; no verdict yet.
     Observe,
 }
 
 // ── Pure helpers ────────────────────────────────────────────────────────────
-
-/// The file-name prefix every MAC-pin `.link` drop-in carries. The `10-` sorts
-/// before the stock board files (`50-...`) so the pin wins.
-pub const LINK_FILE_PREFIX: &str = "10-ados-mac-";
 
 /// The stable identity of a USB adapter: its model plus the port it sits in.
 /// Survives a kernel rename and enumeration-order changes; two adapters of
@@ -88,9 +116,10 @@ pub fn adapter_key(vidpid: &str, usb_path: &str) -> String {
     format!("{vidpid}@{usb_path}")
 }
 
-/// The `.link` filename for an adapter key (see [`adapter_key`]). Characters
-/// outside `[A-Za-z0-9.@-]` become `-`, so the name is always a plain file.
-pub fn link_file_name(key: &str) -> String {
+/// The `.link` filename for an adapter key (see [`adapter_key`]): the
+/// layout's prefix plus the key. Characters outside `[A-Za-z0-9.@-]` become
+/// `-`, so the name is always a plain file.
+pub fn link_file_name(layout: &PinLayout, key: &str) -> String {
     let safe: String = key
         .chars()
         .map(|c| {
@@ -101,7 +130,7 @@ pub fn link_file_name(key: &str) -> String {
             }
         })
         .collect();
-    format!("{LINK_FILE_PREFIX}{safe}.link")
+    format!("{}{safe}.link", layout.link_prefix)
 }
 
 /// The adapter key the state file records for the adapter currently named
@@ -119,30 +148,31 @@ pub fn adapter_key_for_iface(state_path: &Path, iface: &str) -> Option<String> {
     })
 }
 
-/// The pin `.link` files to remove (pure). `existing` are the pin file names
-/// in the drop-in directory, `present` the file names for every adapter on
-/// the box now, `pinned` those this pass pinned. A file for a present adapter
-/// that is no longer pinned is stale, and so is any file not named by an
-/// adapter key (a legacy interface-name file pins whichever adapter holds
-/// that name). A keyed file for an adapter that is merely unplugged is kept,
-/// so it still applies when the adapter comes back.
+/// The pin `.link` files to remove (pure). `existing` are the file names in
+/// the drop-in directory, `present` the file names for every adapter on the
+/// box now, `pinned` those this pass pinned. A file for a present adapter that
+/// is no longer pinned is stale, and so is any pin file not named by an
+/// adapter key (a legacy interface-name file pins whichever adapter holds that
+/// name). A keyed file for an adapter that is merely unplugged is kept, so it
+/// still applies when the adapter comes back.
 pub fn stale_pin_links(
+    layout: &PinLayout,
     existing: &[String],
     present: &std::collections::HashSet<String>,
     pinned: &std::collections::HashSet<String>,
 ) -> Vec<String> {
     existing
         .iter()
-        .filter(|name| is_pin_link_file(name) && !pinned.contains(*name))
+        .filter(|name| is_pin_link_file(layout, name) && !pinned.contains(*name))
         .filter(|name| present.contains(*name) || !name.contains('@'))
         .cloned()
         .collect()
 }
 
-/// Whether `name` is a MAC-pin `.link` file this engine writes (so an
-/// uninstall can sweep them without touching a board's own `.link` files).
-pub fn is_pin_link_file(name: &str) -> bool {
-    name.starts_with(LINK_FILE_PREFIX) && name.ends_with(".link")
+/// Whether `name` is a pin `.link` file this engine writes under `layout`
+/// (so an uninstall can sweep them without touching any other `.link` file).
+pub fn is_pin_link_file(layout: &PinLayout, name: &str) -> bool {
+    name.starts_with(&layout.link_prefix) && name.ends_with(".link")
 }
 
 /// Render the full `.link` body (pure). `match_block` is the body of the
@@ -153,11 +183,11 @@ pub fn is_pin_link_file(name: &str) -> bool {
 /// keeps working; an explicit `MACAddress=` sets the address unconditionally
 /// (unlike `MACAddressPolicy=persistent`, which never fires on an adapter whose
 /// `addr_assign_type` reads permanent while it actually randomizes).
-pub fn render_link_file(match_block: &str, mac: &MacAddr) -> String {
+pub fn render_link_file(layout: &PinLayout, match_block: &str, mac: &MacAddr) -> String {
     format!(
         "# Pin a stable MAC on an onboard adapter with no efuse MAC (it would\n\
 # otherwise randomize each boot and churn the DHCP lease). Managed by the\n\
-# ADOS agent; remove this file to revert. NamePolicy=kernel keeps the kernel\n\
+# {}; remove this file to revert. NamePolicy=kernel keeps the kernel\n\
 # interface name so the wpa_supplicant binding survives. The [Match] block\n\
 # names exactly one adapter: MACAddress= below is unconditional, so a glob\n\
 # here would give every interface on this box the same address.\n\
@@ -167,6 +197,7 @@ pub fn render_link_file(match_block: &str, mac: &MacAddr) -> String {
 [Link]\n\
 NamePolicy=kernel\n\
 MACAddress={}\n",
+        layout.owner_label,
         match_block.trim_end(),
         mac
     )
@@ -180,10 +211,10 @@ const IDENTITY_MATCH_KEYS: [&str; 4] =
 /// True when a `[Match]` block names one specific adapter (pure).
 ///
 /// The pin used to COPY the `[Match]` of whichever stock `.link` won for the
-/// interface — and on a stock systemd that is `99-default.link`, whose match is
+/// interface, and on a stock systemd that is `99-default.link`, whose match is
 /// `OriginalName=*`. Pairing that wildcard with our unconditional
 /// `MACAddress=` handed the pinned address to every interface on the box: the
-/// management NIC, the second WFB radio, everything. So a pin is now refused
+/// management NIC, a second radio, everything. So a pin is now refused
 /// unless the match carries a glob-free identity key.
 pub fn match_block_is_specific(match_block: &str) -> bool {
     match_block.lines().any(|raw| {
@@ -332,123 +363,14 @@ pub fn load_state_from(path: &Path) -> MacPinsState {
         .unwrap_or_default()
 }
 
-/// Atomically write the state file (`ados_protocol::sidecar::write_atomic`).
+/// Atomically write the state file (temp file plus rename).
 pub fn save_state_to(path: &Path, state: &MacPinsState) -> std::io::Result<()> {
     let body = serde_json::to_vec_pretty(state).map_err(std::io::Error::other)?;
     write_atomic(path, &body, 0o644)
 }
 
-/// Convenience wrappers using [`STATE_PATH`].
-pub fn load_state() -> MacPinsState {
-    load_state_from(Path::new(STATE_PATH))
-}
-pub fn save_state(state: &MacPinsState) -> std::io::Result<()> {
-    save_state_to(Path::new(STATE_PATH), state)
-}
-
-// ---------------------------------------------------------------------------
-// The GCS-facing projection of the per-adapter verdicts.
-// ---------------------------------------------------------------------------
-//
-// One copy, here, because the state file is this crate's. It feeds BOTH
-// transports: the LAN `GET /api/v1/network/mac/adapters` route, the LAN
-// `/api/status/full` body, and the cloud heartbeat's `macStability` block. Every
-// one of the GCS's readers of that block sat empty because no transport produced
-// it, and the fix would have been three projections without this.
-//
-// The keys are ALREADY camelCase here (`usbPath`, `appliedLive`, `pinnedMac`), so
-// a consumer must not put this block through a snake→camel remap.
-
-/// Read + parse the state file into a JSON document, or `None` when the file is
-/// absent or malformed.
-pub fn read_state(state_path: &Path) -> Option<serde_json::Value> {
-    let text = std::fs::read_to_string(state_path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// Project one state-file adapter object to the camelCase shape the GCS reads.
-pub fn adapter_to_camel(a: &serde_json::Map<String, serde_json::Value>) -> serde_json::Value {
-    use serde_json::Value;
-    let mut out = serde_json::Map::new();
-    // Always present (carried through verbatim — an absent source key renders
-    // JSON null).
-    for key in ["name", "vidpid"] {
-        out.insert(key.to_string(), a.get(key).cloned().unwrap_or(Value::Null));
-    }
-    out.insert(
-        "usbPath".to_string(),
-        a.get("usb_path").cloned().unwrap_or(Value::Null),
-    );
-    out.insert(
-        "state".to_string(),
-        a.get("state").cloned().unwrap_or(Value::Null),
-    );
-    // `applied_live` coerced to a bool with a false default.
-    let applied_live = a.get("applied_live").map(value_is_truthy).unwrap_or(false);
-    out.insert("appliedLive".to_string(), Value::Bool(applied_live));
-
-    // Present only when the source value is non-null.
-    for (src, dst) in [
-        ("source", "source"),
-        ("pinned_mac", "pinnedMac"),
-        ("last_seen_mac", "lastSeenMac"),
-        ("link_file", "linkFile"),
-        ("deferred_reason", "deferredReason"),
-    ] {
-        if let Some(v) = a.get(src) {
-            if !v.is_null() {
-                out.insert(dst.to_string(), v.clone());
-            }
-        }
-    }
-    Value::Object(out)
-}
-
-/// Truthiness for the `applied_live` coercion: a JSON bool is itself; `null` is
-/// false; a number is false iff zero; a string/array/object is false iff empty.
-fn value_is_truthy(v: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    match v {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(true),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(a) => !a.is_empty(),
-        Value::Object(o) => !o.is_empty(),
-    }
-}
-
-/// The projected adapter list from a parsed state document, or an empty list when
-/// the document is absent / malformed / carries no `adapters` array.
-pub fn state_json_to_camel(raw: Option<&serde_json::Value>) -> Vec<serde_json::Value> {
-    raw.and_then(|d| d.get("adapters"))
-        .and_then(serde_json::Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(serde_json::Value::as_object)
-                .map(adapter_to_camel)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// The `macStability` block for a status body / heartbeat: `{adapters: [...]}`,
-/// or `None` when the state file is absent, malformed, or lists no adapter.
-///
-/// `None` rather than an empty list on purpose: the GCS clamp hides the card
-/// unless `adapters` is an array, and a node that has never pinned a MAC has no
-/// verdict to report — an empty card would claim it looked and found nothing.
-///
-/// No staleness gate: `/etc/ados/mac-pins.state` is persistent operator state, not
-/// a tmpfs liveness sidecar, so an old reading is still the current verdict.
-pub fn adapters_camel_from(state_path: &Path) -> Option<serde_json::Value> {
-    let raw = read_state(state_path);
-    let adapters = state_json_to_camel(raw.as_ref());
-    if adapters.is_empty() {
-        return None;
-    }
-    Some(serde_json::json!({ "adapters": adapters }))
-}
+mod projection;
+pub use projection::{adapter_to_camel, adapters_camel_from, read_state, state_json_to_camel};
 
 /// Read the machine-id from the first available source.
 pub fn read_machine_id() -> Option<String> {
@@ -470,12 +392,11 @@ pub fn read_machine_id() -> Option<String> {
 /// It MUST NOT `trigger` the `net` subsystem: `udevadm trigger` re-runs
 /// `net_setup_link` on the LIVE interface, which re-applies the pinned
 /// `MACAddress=` to the running `wlan0`, drops the association, and forces a new
-/// DHCP lease — churning the operator's management link mid-run. That is the
-/// exact hazard the installer's `install_power_hardening` avoids by scoping its
-/// own trigger to `--subsystem-match=usb`. The pin is meant to take effect on
-/// the next boot (per the module contract above), so no live trigger is ever
-/// needed here. Kept at module scope (not inside the Linux-gated `mod linux`) so
-/// the invariant is unit-testable on every platform.
+/// DHCP lease, churning the operator's management link mid-run. The pin is
+/// meant to take effect on the next boot (per the module contract above), so no
+/// live trigger is ever needed here. Kept at module scope (not inside the
+/// Linux-gated `mod linux`) so the invariant is unit-testable on every
+/// platform.
 // Consumed by `mod linux::reload_udev` (Linux-only) and the invariant test; on a
 // non-Linux, non-test build neither is compiled, so allow the unused const there.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -608,15 +529,16 @@ mod linux {
         udev_id_path(iface).map(|p| format!("Path={p}"))
     }
 
-    /// Write the pin `.link` for the adapter `key`. Idempotent: a no-op when
-    /// the file already has identical content. Reloads udev so a later boot
-    /// applies it; never touches the live interface. Returns the file path.
+    /// Write the pin `.link` for the adapter `key` into
+    /// `layout.networkd_dir`. Idempotent: a no-op when the file already has
+    /// identical content. Reloads udev so a later boot applies it; never
+    /// touches the live interface. Returns the file path.
     ///
     /// Refused when `match_block` is not specific to one adapter: the file
     /// carries an unconditional `MACAddress=`, so a glob match would give every
     /// interface on the box the same address.
     pub fn write_pin_link(
-        dir: &Path,
+        layout: &PinLayout,
         key: &str,
         match_block: &str,
         mac: &MacAddr,
@@ -626,8 +548,8 @@ mod linux {
                 "refusing to pin {key}: [Match] block {match_block:?} does not name one adapter"
             )));
         }
-        let path = dir.join(link_file_name(key));
-        let body = render_link_file(match_block, mac);
+        let path = layout.networkd_dir.join(link_file_name(layout, key));
+        let body = render_link_file(layout, match_block, mac);
         let unchanged = std::fs::read_to_string(&path)
             .map(|cur| cur == body)
             .unwrap_or(false);
@@ -638,15 +560,14 @@ mod linux {
         Ok(path)
     }
 
-    /// Remove the pin `.link` for the adapter `key`. Returns whether a file
-    /// was removed.
+    /// Remove the pin `.link` for the adapter `key` from
+    /// `layout.networkd_dir`. Returns whether a file was removed.
     ///
-    /// Async because its only caller is the `DELETE /api/v1/network/mac/{iface}`
-    /// handler: the udev reload is a subprocess whose settle would otherwise
-    /// block the reactor and stall every other in-flight request on a
-    /// single-core SBC.
-    pub async fn remove_pin_link(dir: &Path, key: &str) -> std::io::Result<bool> {
-        let path = dir.join(link_file_name(key));
+    /// Async for request handlers: the udev reload is a subprocess whose
+    /// settle would otherwise block the reactor and stall every other
+    /// in-flight request on a single-core board.
+    pub async fn remove_pin_link(layout: &PinLayout, key: &str) -> std::io::Result<bool> {
+        let path = layout.networkd_dir.join(link_file_name(layout, key));
         if path.exists() {
             std::fs::remove_file(&path)?;
             reload_udev_async().await;
@@ -659,10 +580,11 @@ mod linux {
     /// Remove the stale pin `.link` files (see [`stale_pin_links`]). Returns
     /// how many were removed.
     fn sweep_pin_links(
-        dir: &Path,
+        layout: &PinLayout,
         present: &std::collections::HashSet<String>,
         pinned: &std::collections::HashSet<String>,
     ) -> usize {
+        let dir = layout.networkd_dir.as_path();
         let existing: Vec<String> = std::fs::read_dir(dir)
             .into_iter()
             .flatten()
@@ -670,7 +592,7 @@ mod linux {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         let mut removed = 0;
-        for name in stale_pin_links(&existing, present, pinned) {
+        for name in stale_pin_links(layout, &existing, present, pinned) {
             match std::fs::remove_file(dir.join(&name)) {
                 Ok(()) => {
                     removed += 1;
@@ -690,9 +612,9 @@ mod linux {
     /// Re-tag the LIVE interface now (drops any connection over it). Opt-in; the
     /// caller is responsible for the safety gate (never the management iface).
     ///
-    /// Async + bounded: it is called from an axum handler, and a blocking
+    /// Async + bounded: it is meant for a request handler, and a blocking
     /// `ip link set` on the reactor stalls every other request for the duration
-    /// of the link down/up. Each invocation is capped by [`IP_CMD_TIMEOUT`] with
+    /// of the link down/up. Each invocation is capped at 10 s with
     /// `kill_on_drop`, so a wedged netlink call cannot park the handler forever.
     pub async fn apply_live(iface: &str, mac: &MacAddr) -> std::io::Result<()> {
         let mac = mac.to_string();
@@ -721,12 +643,11 @@ mod linux {
 
     /// Reload the udev rules database so a later device event (a hot-plug, or
     /// the next boot) picks up the new/removed `.link` file. Runs only the
-    /// invocations in [`super::UDEV_RELOAD_ARGV`] — which deliberately excludes
+    /// invocations in [`super::UDEV_RELOAD_ARGV`], which deliberately excludes
     /// any `udevadm trigger` of the `net` subsystem (see that const's docs).
     ///
-    /// Blocking form, for the SYNCHRONOUS pin path only: the installer step and
-    /// the supervisor reconciler drive `reconcile` off the reactor. The async
-    /// route path uses [`reload_udev_async`].
+    /// Blocking form, for the synchronous [`reconcile`] path only, which runs
+    /// off the reactor. The async path uses [`reload_udev_async`].
     fn reload_udev() {
         for argv in UDEV_RELOAD_ARGV {
             let _ = Command::new("udevadm").args(*argv).status();
@@ -750,10 +671,13 @@ mod linux {
 
     /// The full reconcile: enumerate -> fold the learner -> classify -> write
     /// `.link`s for armed quirk/override randomizers -> persist + return state.
-    /// `with_learner` enables Layer-2 cross-boot detection (the supervisor runs
-    /// it; the install step does not, to keep first-boot deterministic).
+    /// `with_learner` enables cross-boot detection of unknown randomizers (a
+    /// background service runs it; a one-shot provisioning step may leave it
+    /// off to keep the first boot deterministic). Files live under
+    /// `config.layout`.
     pub fn reconcile(config: &ReconcileConfig, with_learner: bool) -> MacPinsState {
-        let mut state = load_state();
+        let layout = &config.layout;
+        let mut state = load_state_from(&layout.state_path);
         let adapters = enumerate_net_adapters();
         let machine_id = read_machine_id();
         let link_mechanism = link_mechanism_available();
@@ -769,10 +693,10 @@ mod linux {
             };
             let vidpid = format!("{:04x}:{:04x}", usb_id.vid, usb_id.pid);
             let key = adapter_key(&vidpid, &a.usb_path);
-            present.insert(link_file_name(&key));
+            present.insert(link_file_name(layout, &key));
             // Always salt the derived MAC by the adapter's stable USB path, so a
-            // lone randomizer can never derive the same machine-id-only MAC that
-            // collides with another radio's (the 2026-08 A7S dup-MAC bug).
+            // lone randomizer can never derive the same machine-id-only MAC as
+            // another radio on the same box.
             let salt = a.usb_path.as_str();
 
             // Fold this boot into the learner memory for unknown adapters (not
@@ -804,21 +728,27 @@ mod linux {
                 learner_rec.as_ref(),
                 with_learner,
             );
-            let verdict = realize(decision, a, &vidpid, &key);
+            let verdict = realize(layout, decision, a, &vidpid, &key);
             if verdict.state == AdapterState::Pinned {
-                pinned.insert(link_file_name(&key));
+                pinned.insert(link_file_name(layout, &key));
             }
             verdicts.push(verdict);
         }
-        sweep_pin_links(Path::new(NETWORKD_DIR), &present, &pinned);
+        sweep_pin_links(layout, &present, &pinned);
         state.adapters = verdicts;
         state.updated_at = now;
-        let _ = save_state(&state);
+        let _ = save_state_to(&layout.state_path, &state);
         state
     }
 
     /// Turn a [`Decision`] into a verdict, writing the `.link` for a `Pin`.
-    fn realize(decision: Decision, a: &NetAdapter, vidpid: &str, key: &str) -> AdapterVerdict {
+    fn realize(
+        layout: &PinLayout,
+        decision: Decision,
+        a: &NetAdapter,
+        vidpid: &str,
+        key: &str,
+    ) -> AdapterVerdict {
         let mut v = AdapterVerdict {
             name: a.name.clone(),
             vidpid: vidpid.to_string(),
@@ -851,7 +781,7 @@ mod linux {
                     tracing::warn!(iface = %a.name, "MAC pin deferred: no stable device path");
                     return v;
                 };
-                match write_pin_link(Path::new(NETWORKD_DIR), key, &match_block, &mac) {
+                match write_pin_link(layout, key, &match_block, &mac) {
                     Ok(path) => {
                         v.state = AdapterState::Pinned;
                         v.source = Some(source);
@@ -881,14 +811,17 @@ pub use linux::{
 };
 
 // Non-Linux stubs so the crate builds + unit-tests on a dev host.
+/// Non-Linux stub: no sysfs, so no adapters.
 #[cfg(not(target_os = "linux"))]
 pub fn enumerate_net_adapters() -> Vec<NetAdapter> {
     Vec::new()
 }
+/// Non-Linux stub: always `false`.
 #[cfg(not(target_os = "linux"))]
 pub fn link_mechanism_available() -> bool {
     false
 }
+/// Non-Linux stub: does nothing and returns an empty state.
 #[cfg(not(target_os = "linux"))]
 pub fn reconcile(_config: &ReconcileConfig, _with_learner: bool) -> MacPinsState {
     MacPinsState::default()
@@ -929,22 +862,33 @@ pub fn fold_learner(
 mod tests {
     use super::*;
 
+    fn layout() -> PinLayout {
+        PinLayout {
+            state_path: PathBuf::from("/tmp/test-mac-pins.state"),
+            networkd_dir: PathBuf::from(NETWORKD_DIR),
+            link_prefix: "10-test-mac-".into(),
+            owner_label: "test suite".into(),
+        }
+    }
+
     fn cfg(enabled: bool) -> ReconcileConfig {
         ReconcileConfig {
             enabled,
             apply_live_allowed: false,
             overrides: HashMap::new(),
+            layout: layout(),
         }
     }
 
     #[test]
     fn link_filename_sorts_before_stock_and_names_the_adapter() {
-        let name = link_file_name(&adapter_key("a69c:8d81", "5-1.3"));
+        let l = layout();
+        let name = link_file_name(&l, &adapter_key("a69c:8d81", "5-1.3"));
         // Assembled from the key so the expected name does not read as an email
         // address to the repository's leak scanner.
-        assert_eq!(name, format!("10-ados-mac-{}.link", "a69c-8d81@5-1.3"));
-        assert!(is_pin_link_file(&name));
-        assert!(name.as_str() < "50-radxa-aic8800.link");
+        assert_eq!(name, format!("10-test-mac-{}.link", "a69c-8d81@5-1.3"));
+        assert!(is_pin_link_file(&l, &name));
+        assert!(name.as_str() < "50-board-wifi.link");
     }
 
     #[test]
@@ -978,31 +922,33 @@ mod tests {
         let set = |names: &[&str]| -> std::collections::HashSet<String> {
             names.iter().map(|s| s.to_string()).collect()
         };
-        let kept = link_file_name(&adapter_key("a69c:8d81", "5-1.3"));
-        let unpinned = link_file_name(&adapter_key("a69c:8d81", "5-1.4"));
-        let unplugged = link_file_name(&adapter_key("a69c:8d81", "3-1"));
+        let l = layout();
+        let kept = link_file_name(&l, &adapter_key("a69c:8d81", "5-1.3"));
+        let unpinned = link_file_name(&l, &adapter_key("a69c:8d81", "5-1.4"));
+        let unplugged = link_file_name(&l, &adapter_key("a69c:8d81", "3-1"));
         let existing = vec![
             kept.clone(),
             unpinned.clone(),
             unplugged.clone(),
-            "10-ados-mac-wlan0.link".to_string(),
-            "50-radxa-aic8800.link".to_string(),
+            "10-test-mac-wlan0.link".to_string(),
+            "50-board-wifi.link".to_string(),
         ];
         let mut stale = stale_pin_links(
+            &l,
             &existing,
             &set(&[kept.as_str(), unpinned.as_str()]),
             &set(&[kept.as_str()]),
         );
         stale.sort();
-        assert_eq!(stale, vec![unpinned, "10-ados-mac-wlan0.link".to_string()]);
+        assert_eq!(stale, vec![unpinned, "10-test-mac-wlan0.link".to_string()]);
     }
 
     #[test]
     fn reload_udev_never_triggers_the_live_net_link() {
         // The pin/unpin path may reload the udev rules DB, but must NEVER
-        // `udevadm trigger` the net subsystem — that re-applies the pinned MAC
-        // to the LIVE interface and drops the operator's management link (the
-        // install-churn root cause). Reloading the rules DB is the only allowed
+        // `udevadm trigger` the net subsystem: that re-applies the pinned MAC
+        // to the LIVE interface and drops the operator's management link.
+        // Reloading the rules DB is the only allowed
         // action; the `.link` takes effect on the next boot / hot-plug event.
         for argv in UDEV_RELOAD_ARGV {
             assert!(
@@ -1024,7 +970,8 @@ mod tests {
     #[test]
     fn render_carries_match_namepolicy_and_mac() {
         let mac = MacAddr::parse("02:c6:75:83:1a:3e").unwrap();
-        let body = render_link_file("Path=platform-xhci-hcd.0-usb-0:1.3:1.0", &mac);
+        let body = render_link_file(&layout(), "Path=platform-xhci-hcd.0-usb-0:1.3:1.0", &mac);
+        assert!(body.contains("Managed by the\n# test suite; remove"));
         assert!(body.contains("[Match]\nPath=platform-xhci-hcd.0-usb-0:1.3:1.0"));
         assert!(body.contains("NamePolicy=kernel"));
         assert!(body.contains("MACAddress=02:c6:75:83:1a:3e"));
@@ -1040,7 +987,7 @@ mod tests {
         );
         // A round trip: render then re-parse yields the same match.
         let mac = MacAddr::parse("02:00:00:00:00:01").unwrap();
-        let rendered = render_link_file("OriginalName=wlan0", &mac);
+        let rendered = render_link_file(&layout(), "OriginalName=wlan0", &mac);
         assert_eq!(
             parse_match_block(&rendered).as_deref(),
             Some("OriginalName=wlan0")
