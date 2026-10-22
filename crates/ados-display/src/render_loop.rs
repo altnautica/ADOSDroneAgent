@@ -3,10 +3,10 @@
 //! On each tick it reads the latest agent state, asks the [`crate::navigator`]
 //! for the active page, has the page composer in [`crate::pages`] paint a
 //! full-panel [`crate::graphics::primitives::Canvas`], packs it for the panel's
-//! bit depth via [`crate::pack`], and hands the frame to the off-thread
-//! [`crate::fb_writer`] (latest-wins, duplicate-skip). This replaces the prior
-//! page-render service while reusing the byte-level write path this crate
-//! already owns.
+//! bit depth via [`ados_display_driver::pack`], and hands the frame to the
+//! off-thread [`ados_display_driver::fb_writer`] (latest-wins,
+//! duplicate-skip). This replaces the prior page-render service while reusing
+//! the byte-level write path.
 //!
 //! This module carries the pure frame-packing seam the loop is built on. The
 //! tick loop itself is wired in the integration stage that follows; keeping the
@@ -16,9 +16,9 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::fb_writer::{hash_bytes, FbWriter, Frame, SnapshotJob};
 use crate::graphics::primitives::Canvas;
-use crate::pack::pack_for_bpp;
+use ados_display_driver::fb_writer::{hash_bytes, FbWriter, Frame};
+use ados_display_driver::pack::pack_for_bpp;
 
 /// Render-loop tick granularity. The render period derives from the active
 /// page's refresh rate; this is the resolution the loop wakes at to decide
@@ -28,9 +28,9 @@ pub const TICK_GRANULARITY: Duration = Duration::from_millis(100);
 /// Pack a finished page canvas into the panel's framebuffer bytes for `bpp`.
 ///
 /// Reads the canvas as tightly-packed RGB888 and dispatches to the matching
-/// [`crate::pack`] packer (16 bpp -> RGB565 LE, 24 bpp -> RGB888 passthrough,
-/// 32 bpp -> xRGB32). Returns `None` for an unsupported depth so the caller can
-/// drop the frame, matching the renderer's bpp gate.
+/// [`ados_display_driver::pack`] packer (16 bpp -> RGB565 LE, 24 bpp -> RGB888
+/// passthrough, 32 bpp -> xRGB32). Returns `None` for an unsupported depth so
+/// the caller can drop the frame, matching the renderer's bpp gate.
 pub fn pack_frame(canvas: &Canvas, bpp: u32) -> Option<Vec<u8>> {
     pack_for_bpp(canvas.as_rgb888(), bpp)
 }
@@ -222,12 +222,15 @@ impl FramePresenter {
         }
         if let Some(path) = snapshot_to {
             if self.last_snapshot_hash != Some(hash) {
-                writer.request_snapshot(SnapshotJob {
-                    path,
-                    rgb888: raw.to_vec(),
-                    width: canvas.width(),
-                    height: canvas.height(),
-                });
+                let rgb888 = raw.to_vec();
+                let (width, height) = (canvas.width(), canvas.height());
+                writer.request_snapshot(Box::new(move || {
+                    if let Err(e) =
+                        crate::sidecar::write_snapshot_png(&path, &rgb888, width, height)
+                    {
+                        tracing::debug!(error = %e, "lcd-snapshot write failed");
+                    }
+                }));
                 self.last_snapshot_hash = Some(hash);
                 self.snapshots += 1;
             }
@@ -307,7 +310,7 @@ mod tests {
 
     struct CountingSink(std::sync::Arc<std::sync::atomic::AtomicUsize>);
 
-    impl crate::fb_writer::FrameSink for CountingSink {
+    impl ados_display_driver::fb_writer::FrameSink for CountingSink {
         fn write_frame(&mut self, _buf: &[u8]) -> std::io::Result<()> {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(())

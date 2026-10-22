@@ -4,7 +4,8 @@
 //! row-major, top-left origin) that the pages paint into. It implements
 //! `embedded_graphics`' `DrawTarget` so the shipped shape primitives (rect,
 //! line, circle) draw onto it directly, and exposes [`Canvas::as_rgb888`] so
-//! [`crate::pack`] can convert the finished frame to the panel's bit depth.
+//! [`ados_display_driver::pack`] can convert the finished frame to the panel's
+//! bit depth.
 //!
 //! The text path rasterizes a [`super::fonts::LoadedFont`] glyph-by-glyph and
 //! alpha-blends each covered pixel over the existing canvas content, so
@@ -51,7 +52,7 @@ impl Canvas {
     }
 
     /// The finished frame as tightly-packed RGB888 bytes, ready for
-    /// [`crate::pack::pack_for_bpp`].
+    /// [`ados_display_driver::pack::pack_for_bpp`].
     pub fn as_rgb888(&self) -> &[u8] {
         &self.buf
     }

@@ -16,9 +16,9 @@
 //! `render_oled` example all paint the exact same frame.
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
-use crate::oled::{self, OledGeometry};
 use crate::pages::gs_ctx::fix_short;
 use crate::pages::PageContext;
+use ados_display_driver::oled::{self, OledGeometry};
 
 pub mod screens;
 pub mod visor;

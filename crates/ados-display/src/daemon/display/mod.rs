@@ -101,8 +101,8 @@ async fn run_linux(
     rotation: i32,
     conf_blob: &std::collections::BTreeMap<String, String>,
 ) -> Result<()> {
-    use crate::fb_geometry::{self, FbMatch};
-    use crate::fb_writer::{FbWriter, MmapSink};
+    use ados_display_driver::fb_geometry::{self, FbMatch};
+    use ados_display_driver::fb_writer::{FbWriter, MmapSink};
 
     let sys_root = Path::new(fb_geometry::SYS_GRAPHICS_DIR);
     let Some(FbMatch {
@@ -132,7 +132,7 @@ async fn run_linux(
     // precedence when ADOS_DISPLAY_VIRTUAL_FB is set; otherwise the real
     // /dev/fbN mmap. FbWriter::spawn is generic over the sink, so both yield the
     // same writer.
-    let writer = match crate::fb_writer::VirtualSink::from_env() {
+    let writer = match virtual_sink_from_env() {
         Some(vs) => {
             tracing::info!("ados-display: virtual framebuffer sink (ADOS_DISPLAY_VIRTUAL_FB)");
             FbWriter::spawn(vs)
@@ -160,6 +160,14 @@ async fn run_linux(
         geometry.yres,
     )
     .await
+}
+
+/// The file-backed sink from `ADOS_DISPLAY_VIRTUAL_FB`, or `None` when unset
+/// (the real framebuffer path is used instead).
+#[cfg(any(target_os = "linux", test))]
+fn virtual_sink_from_env() -> Option<ados_display_driver::fb_writer::VirtualSink> {
+    std::env::var_os("ADOS_DISPLAY_VIRTUAL_FB")
+        .map(ados_display_driver::fb_writer::VirtualSink::open)
 }
 
 #[cfg(target_os = "linux")]
@@ -221,4 +229,16 @@ pub(crate) fn all_pages(
         Box::new(PowerPage::new(buttons)),
     ];
     pages
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn virtual_sink_from_env_is_none_when_unset() {
+        // Absent env -> no virtual sink (the real framebuffer path is used).
+        // Reading the process env in a test is racy, so only absence is
+        // asserted, under a name no other test sets.
+        std::env::remove_var("ADOS_DISPLAY_VIRTUAL_FB");
+        assert!(super::virtual_sink_from_env().is_none());
+    }
 }

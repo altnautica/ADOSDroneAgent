@@ -1,18 +1,16 @@
 //! SSD1306 / SH1106 monochrome OLED over I2C.
 //!
-//! Drives the 128x64 (or 128x32) mono OLED the ground-station OLED service
-//! paints. The controller init is a short command sequence and the frame upload
-//! is a page-by-page column write, so this talks the I2C character device
-//! (`/dev/i2c-N`) directly via `nix` ioctls rather than dragging the
-//! `ssd1306` / `sh1106` / `linux-embedded-hal` / `i2cdev` crate stack in.
-//! Reasons: it keeps the aarch64-musl gate trivially pure-Rust (one transport,
-//! `nix` only — already a workspace dep), and the init is ~6 bytes plus a
-//! page-write loop. The two controllers differ only in a column offset (SH1106
-//! is a 132-column part windowed to 128, so it starts at column 2).
+//! Drives a 128x64 (or 128x32) mono OLED. The controller init is a short
+//! command sequence and the frame upload is a page-by-page column write, so
+//! this talks to the Linux I2C character device (`/dev/i2c-N`) directly with
+//! one ioctl instead of pulling in an embedded-hal driver stack. The two
+//! controllers differ only in a column offset (SH1106 is a 132-column part
+//! windowed to 128, so it starts at column 2).
 //!
-//! The frame packing (`pack_page_buffer`: a 1-bit-per-pixel canvas -> the
-//! controller's page/column byte layout) is PURE and unit-tested; only the I2C
-//! device open + ioctl write is Linux-gated.
+//! The frame packing ([`pack_page_buffer`]: a 1-bit-per-pixel canvas to the
+//! controller's page/column byte layout) and the upload plan are pure and
+//! portable; only `I2cDev` (the device open + ioctl) is Linux-only. Any other
+//! transport plugs in through the [`I2cBus`] trait.
 
 /// I2C control byte that precedes a command stream (Co=0, D/C#=0).
 pub const CTRL_CMD: u8 = 0x00;
@@ -26,7 +24,9 @@ pub const DEFAULT_I2C_ADDR: u16 = 0x3C;
 /// 2-column display offset because it is a 132-column die windowed to 128.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Controller {
+    /// Solomon SSD1306: 128 columns, no column offset.
     Ssd1306,
+    /// Sino Wealth SH1106: a 132-column die windowed to 128, column offset 2.
     Sh1106,
 }
 
@@ -44,15 +44,19 @@ impl Controller {
 /// 8-pixel-tall horizontal bands, so `pages = height / 8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OledGeometry {
+    /// Panel width in pixels (128 for both supported controllers).
     pub width: u8,
+    /// Panel height in pixels: 64 or 32. Must be a multiple of 8.
     pub height: u8,
 }
 
 impl OledGeometry {
+    /// The common 128x64 panel (8 pages).
     pub const W128_H64: OledGeometry = OledGeometry {
         width: 128,
         height: 64,
     };
+    /// The 128x32 strip panel (4 pages).
     pub const W128_H32: OledGeometry = OledGeometry {
         width: 128,
         height: 32,
@@ -102,7 +106,7 @@ pub fn init_commands(geom: OledGeometry) -> Vec<u8> {
 ///
 /// `canvas` is row-major, one byte per pixel, where any non-zero value is "on".
 /// The output is `width * pages` bytes: for each page (8-pixel band) and each
-/// column, one byte whose bit `b` is the pixel at `(col, page*8 + b)` — the
+/// column, one byte whose bit `b` is the pixel at `(col, page*8 + b)`: the
 /// standard SSD1306/SH1106 vertical-byte layout. Returns `None` when the canvas
 /// length does not match `width * height`.
 pub fn pack_page_buffer(canvas: &[u8], geom: OledGeometry) -> Option<Vec<u8>> {
@@ -134,6 +138,11 @@ pub fn pack_page_buffer(canvas: &[u8], geom: OledGeometry) -> Option<Vec<u8>> {
 /// page's `width` data bytes. The transport writes each command vec with the
 /// [`CTRL_CMD`] prefix and each data vec with the [`CTRL_DATA`] prefix. Pulled
 /// out so the upload sequence is testable without an I2C device.
+///
+/// # Panics
+///
+/// Panics when `packed` is shorter than `geom.frame_bytes()`; pass the output
+/// of [`pack_page_buffer`] for the same geometry.
 pub fn page_upload_plan(
     packed: &[u8],
     geom: OledGeometry,
@@ -156,17 +165,17 @@ pub fn page_upload_plan(
     plan
 }
 
-/// I2C transport for the OLED. The real implementation opens `/dev/i2c-N` and
-/// issues the slave-address ioctl + writes; the test fake records the bytes.
+/// I2C transport for the OLED. `I2cDev` opens `/dev/i2c-N` and issues the
+/// slave-address ioctl plus writes; a test fake can record the bytes instead.
 pub trait I2cBus {
     /// Write `bytes` to the bound slave (the caller prepends the control byte).
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()>;
 }
 
-/// Send the init sequence then upload `packed` over `bus`. The control-byte
-/// framing (CMD vs DATA) is applied here; the per-page plan comes from
-/// [`page_upload_plan`]. Transport-agnostic, so it is exercised in tests with a
-/// fake bus.
+/// Upload `packed` over `bus`, page by page (call [`init`] once first). The
+/// control-byte framing (CMD vs DATA) is applied here; the per-page plan comes
+/// from [`page_upload_plan`]. Transport-agnostic, so it is exercised in tests
+/// with a fake bus.
 pub fn render_frame<B: I2cBus>(
     bus: &mut B,
     packed: &[u8],
@@ -210,8 +219,7 @@ const I2C_SLAVE: u32 = 0x0703;
 
 /// Raw `/dev/i2c-N` transport (Linux only). Binds the slave address once with
 /// the `I2C_SLAVE` ioctl, then each write is a plain `write(2)` of the
-/// control-prefixed buffer. Uses `nix::libc::ioctl` directly so no extra cargo
-/// feature is needed; stays pure-Rust.
+/// control-prefixed buffer.
 #[cfg(target_os = "linux")]
 pub struct I2cDev {
     file: std::fs::File,
@@ -230,8 +238,7 @@ impl I2cDev {
             .open(&path)?;
         // SAFETY: I2C_SLAVE takes the address as the integer ioctl arg (not a
         // pointer); the fd is a freshly-opened i2c char device we own.
-        let rc =
-            unsafe { nix::libc::ioctl(file.as_raw_fd(), I2C_SLAVE as _, addr as nix::libc::c_int) };
+        let rc = unsafe { libc::ioctl(file.as_raw_fd(), I2C_SLAVE as _, addr as libc::c_int) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error());
         }

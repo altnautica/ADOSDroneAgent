@@ -1,18 +1,15 @@
-//! Pixel packers: RGB888 source -> the panel's bit depth.
+//! Pixel packers: RGB888 source to the panel's bit depth.
 //!
-//! Ports the bpp branches of `_compose_and_pack` / `_pack_rgb565` in
-//! `renderers/framebuffer.py`:
+//! * 16 bpp: RGB565 little-endian.
+//! * 24 bpp: RGB888 passthrough (the canvas bytes as-is).
+//! * 32 bpp: xRGB32 laid out B, G, R, 0 per pixel (the fbtft xRGB order).
 //!
-//! * 16 bpp -> RGB565 little-endian.
-//! * 24 bpp -> RGB888 passthrough (the canvas bytes as-is).
-//! * 32 bpp -> xRGB32 laid out B, G, R, 0 per pixel (the fbtft xRGB order).
-//!
-//! Input is a tightly-packed RGB888 byte slice (3 bytes per pixel), matching
-//! PIL's `image.convert("RGB").tobytes()`. Pure math, fully testable.
+//! Input is a tightly-packed RGB888 byte slice (3 bytes per pixel, row-major).
+//! Pure functions; each allocates only its output buffer.
 
-/// Pack RGB888 source bytes to RGB565 little-endian (2 bytes per pixel). The
-/// channel masks match the Python `((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b
-/// >> 3)`, written little-endian.
+/// Pack RGB888 source bytes to RGB565 little-endian (2 bytes per pixel): the
+/// 16-bit value `((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)`, low byte
+/// first.
 pub fn pack_rgb565(rgb: &[u8]) -> Vec<u8> {
     let px = rgb.len() / 3;
     let mut out = vec![0u8; px * 2];
@@ -32,7 +29,7 @@ pub fn pack_rgb888(rgb: &[u8]) -> Vec<u8> {
     rgb.to_vec()
 }
 
-/// Pack RGB888 source to 32-bit xRGB laid out B, G, R, 0 per pixel — the order
+/// Pack RGB888 source to 32-bit xRGB laid out B, G, R, 0 per pixel: the order
 /// the fbtft 32 bpp branch writes (`out[..0]=B, out[..1]=G, out[..2]=R,
 /// out[..3]=0`).
 pub fn pack_xrgb32(rgb: &[u8]) -> Vec<u8> {
@@ -51,8 +48,7 @@ pub fn pack_xrgb32(rgb: &[u8]) -> Vec<u8> {
 }
 
 /// Pack RGB888 source to the buffer for `bpp` (16/24/32). Returns `None` for an
-/// unsupported depth so the caller can drop the frame, matching the renderer's
-/// bpp gate.
+/// unsupported depth so the caller can drop the frame.
 pub fn pack_for_bpp(rgb: &[u8], bpp: u32) -> Option<Vec<u8>> {
     match bpp {
         16 => Some(pack_rgb565(rgb)),

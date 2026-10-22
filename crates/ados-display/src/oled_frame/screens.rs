@@ -26,11 +26,11 @@
 use std::time::{Duration, Instant};
 
 use crate::graphics::fonts::{FontFace, LoadedFont};
-use crate::oled::OledGeometry;
 use crate::pages::gs_ctx::{
     best_rssi, fix_label, loss_pct, pct_short, AdapterRole, GnssCtx, LoraCtx, RadioAdaptersCtx,
 };
 use crate::pages::PageContext;
+use ados_display_driver::oled::OledGeometry;
 
 use super::visor;
 
