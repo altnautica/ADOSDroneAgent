@@ -10,14 +10,15 @@ use ratatui::Frame;
 use serde_json::{json, Value};
 
 use super::kit;
+use super::mcp_recipe::{
+    connect_recipe, masked_recipe, recipe_host, Runtime, CLONE_PATH, KEY_PLACEHOLDER,
+};
 use crate::app::{Core, FrameOut, Hit};
 use crate::keymap::{Command, PageKeys};
 use crate::overlay::{CheckItem, ChecklistState, Overlay, OverlayResult, Ret, SecretState};
 use crate::poll::{ResourceId, Sub};
-use crate::prefs::host_for_url;
 use crate::settings::config_write;
 use crate::settings::page::{Bespoke, BespokeId};
-use crate::settings::row::MASK;
 use crate::settings::rows_view::{self, Item, RowsState};
 use crate::settings::schema::Kind;
 use crate::toast::ToastKind;
@@ -38,52 +39,9 @@ const TTLS: &[(&str, i64)] = &[
     ("365 days", 365),
 ];
 const DEFAULT_TTL: usize = 2;
-/// Stands in for the operator's local ADOS-MCP clone.
-pub const CLONE_PATH: &str = "<path-to>/ADOS-MCP";
-/// Stands in for the key when this session has none.
-pub const KEY_PLACEHOLDER: &str = "<pairing-key>";
 
 fn route() -> Route {
     Route::page(BespokeId::Mcp.id())
-}
-
-/// The LAN-direct `claude mcp add` command for this agent.
-pub fn connect_recipe(host: &str, api_key: &str) -> String {
-    format!("claude mcp add ados -e ADOS_MCP_AGENT_KEY={api_key} -- node {CLONE_PATH}/dist/index.js --target agent {host}")
-}
-
-/// The recipe as displayed: the key masked, or the placeholder when unknown.
-pub fn masked_recipe(host: &str, api_key: Option<&str>) -> String {
-    connect_recipe(
-        host,
-        if api_key.is_some() {
-            MASK
-        } else {
-            KEY_PLACEHOLDER
-        },
-    )
-}
-
-/// The agent's reachable address for the recipe: the setup mDNS host, else
-/// the LAN host, else the host this session targets, on the API port.
-fn connect_host(core: &Core) -> String {
-    let s = kit::setup(core);
-    let host = kit::text(s, "network.mdns_host")
-        .or_else(|| kit::text(s, "lan_host"))
-        .map(str::to_string)
-        .unwrap_or_else(|| core.target.host.clone());
-    let port = s
-        .and_then(|v| crate::app::at(v, "network.api_port"))
-        .and_then(Value::as_u64)
-        .or_else(|| {
-            core.target
-                .base
-                .rsplit(':')
-                .next()
-                .and_then(|p| p.parse().ok())
-        })
-        .unwrap_or(8080);
-    format!("http://{}:{port}", host_for_url(&host))
 }
 
 fn validate_label(s: &str) -> Result<(), String> {
@@ -211,30 +169,60 @@ impl Page {
 
         items.push(Item::Header("Connect".into()));
         let key = core.client.auth().api_key;
-        let recipe = masked_recipe(&connect_host(core), key.as_deref());
-        if let Some((head, tail)) = recipe.split_once(" -- ") {
-            items.push(Item::Text(Line::from(Span::styled(
-                format!("  {head} \\"),
-                t.text(),
-            ))));
-            items.push(Item::Text(Line::from(Span::styled(
-                format!("    -- {tail}"),
-                t.text(),
-            ))));
+        let line = |s: String| Item::Text(Line::from(Span::styled(s, t.text())));
+        let label = |s: &str| Item::Text(Line::from(Span::styled(format!("  {s}"), t.dim())));
+
+        items.push(label("Docker"));
+        let docker = masked_recipe(
+            Runtime::Docker,
+            &recipe_host(core, Runtime::Docker),
+            key.as_deref(),
+        );
+        if let Some((head, tail)) = docker.split_once(" -- ") {
+            items.push(line(format!("  {head} \\")));
+            match tail.split_once(" --target ") {
+                Some((run, target)) => {
+                    items.push(line(format!("    -- {run} \\")));
+                    items.push(line(format!("    --target {target}")));
+                }
+                None => items.push(line(format!("    -- {tail}"))),
+            }
         }
         items.push(kit::action(
             core,
             "copy",
-            "Copy the command",
+            "Copy the Docker command",
             "y · with the real key",
+        ));
+
+        items.push(label("From source"));
+        let source = masked_recipe(
+            Runtime::Source,
+            &recipe_host(core, Runtime::Source),
+            key.as_deref(),
+        );
+        if let Some((head, tail)) = source.split_once(" -- ") {
+            items.push(line(format!("  {head} \\")));
+            items.push(line(format!("    -- {tail}")));
+        }
+        items.push(kit::action(
+            core,
+            "copy_source",
+            "Copy the from-source command",
+            "with the real key",
         ));
         if key.is_none() {
             items.push(rows_view::note(
                 core,
-                format!("No pairing key is known for this session: the command keeps the {KEY_PLACEHOLDER} placeholder."),
+                format!("No pairing key is known for this session: the commands keep the {KEY_PLACEHOLDER} placeholder."),
                 true,
             ));
         }
+        items.push(rows_view::note(
+            core,
+            "The Docker command mounts ~/.ados/mcp for the audit trail and needs Docker on your machine.",
+            false,
+        ));
         items.push(rows_view::note(
             core,
             format!("{CLONE_PATH} is your local clone of ADOS-MCP, built once."),
@@ -267,12 +255,12 @@ impl Page {
         );
     }
 
-    fn copy_recipe(core: &mut Core) {
-        let host = connect_host(core);
+    fn copy_recipe(core: &mut Core, rt: Runtime) {
+        let host = recipe_host(core, rt);
         match core.client.auth().api_key {
-            Some(k) => core.copy(&connect_recipe(&host, &k)),
+            Some(k) => core.copy(&connect_recipe(rt, &host, &k)),
             None => {
-                core.copy(&connect_recipe(&host, KEY_PLACEHOLDER));
+                core.copy(&connect_recipe(rt, &host, KEY_PLACEHOLDER));
                 core.toast(
                     ToastKind::Warn,
                     format!("No pairing key known: replace {KEY_PLACEHOLDER} in the command"),
@@ -364,7 +352,8 @@ impl Bespoke for Page {
             }
             Command::Activate => match focused.as_deref() {
                 Some(ACCEPT_KEY) => self.toggle_accept(core),
-                Some("copy") => Self::copy_recipe(core),
+                Some("copy") => Self::copy_recipe(core, Runtime::Docker),
+                Some("copy_source") => Self::copy_recipe(core, Runtime::Source),
                 _ => {}
             },
             Command::Left | Command::Right => {}
@@ -379,7 +368,7 @@ impl Bespoke for Page {
                 ],
                 "revoke",
             )),
-            Command::Copy => Self::copy_recipe(core),
+            Command::Copy => Self::copy_recipe(core, Runtime::Docker),
             _ => return false,
         }
         true
@@ -483,7 +472,12 @@ impl Bespoke for Page {
         let items = self.items(core);
         match self.rows.focused_key(&items)? {
             ACCEPT_KEY => self.rows.focused_row(&items).map(|r| r.help.clone()),
-            "copy" => Some("Copies the claude mcp add command with this session's real key".into()),
+            "copy" => {
+                Some("Copies the Docker claude mcp add command with this session's real key".into())
+            }
+            "copy_source" => Some(
+                "Copies the from-source claude mcp add command with this session's real key".into(),
+            ),
             _ => Some("x revokes this token · X revokes every token".into()),
         }
     }
@@ -496,38 +490,7 @@ impl Bespoke for Page {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_connect_recipe_matches_mission_control() {
-        let host = "http://drone.local:8080";
-        assert_eq!(
-            connect_recipe(host, "k3y"),
-            "claude mcp add ados -e ADOS_MCP_AGENT_KEY=k3y -- node <path-to>/ADOS-MCP/dist/index.js --target agent http://drone.local:8080"
-        );
-        let shown = masked_recipe(host, Some("k3y"));
-        assert!(!shown.contains("k3y"), "{shown}");
-        assert!(
-            shown.contains(&format!("ADOS_MCP_AGENT_KEY={MASK} ")),
-            "{shown}"
-        );
-        assert!(masked_recipe(host, None).contains("ADOS_MCP_AGENT_KEY=<pairing-key> "));
-    }
-
-    #[test]
-    fn the_connect_host_prefers_the_mdns_name() {
-        let mut app = crate::ui::tests::test_app();
-        app.core.res.insert(
-            ResourceId::SetupStatus,
-            crate::app::Slot {
-                value: Some(json!({"network": {"mdns_host": "bench.local", "api_port": 8080}, "lan_host": "192.168.1.50"})),
-                error: None,
-                code: None,
-                error_body: None,
-                at: std::time::Instant::now(),
-            },
-        );
-        assert_eq!(connect_host(&app.core), "http://bench.local:8080");
-    }
+    use crate::settings::row::MASK;
 
     #[test]
     fn the_page_shows_tokens_and_a_masked_recipe() {

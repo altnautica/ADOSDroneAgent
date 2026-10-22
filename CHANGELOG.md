@@ -37,6 +37,10 @@ the project follows [Semantic Versioning](https://semver.org/).
   reply, sends a dashboard PIN session when one is set, and opens
   server-sent-event streams. `ParamsResponse` now matches the `/api/params`
   wire shape.
+- The terminal UI's MCP page offers a Docker command (`y` copies it) that runs
+  the published `ghcr.io/altnautica/ados-mcp` image, alongside the
+  from-source command. The Docker command targets the agent's LAN address,
+  since `.local` names may not resolve inside a container.
 
 ### Changed
 

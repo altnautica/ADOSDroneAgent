@@ -12,6 +12,7 @@ pub mod hotspot;
 pub mod kit;
 pub mod mac_pin;
 pub mod mcp;
+mod mcp_recipe;
 pub mod pairing;
 pub mod profile;
 pub mod radio;
