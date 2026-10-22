@@ -348,7 +348,7 @@ version = 1
 path = "/run/ados/lora.json"
 max_age_ms = 10000
 writer = "ados-lora"
-rust_const = "ados_lora::paths::LORA_JSON"
+rust_const = "ados_lora_service::paths::LORA_JSON"
 description = "LoRa lane state: transport, module band, resolved region and plan, channel and power, the governor's per-rule state (duty, dwell, listen-before-talk, power), TX/RX counters and the Meshtastic bridge."
 
 [[sidecar]]
@@ -357,7 +357,7 @@ version = 1
 path = "/run/ados/lora-beacons.json"
 max_age_ms = 10000
 writer = "ados-lora"
-rust_const = "ados_lora::paths::LORA_BEACONS_JSON"
+rust_const = "ados_lora_service::paths::LORA_BEACONS_JSON"
 description = "Beacons heard on the LoRa lane, newest first, capped at 100."
 
 [[sidecar]]

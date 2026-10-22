@@ -35,7 +35,6 @@ use crate::publish::{encode_line, neighbors_payload};
 use crate::radio::{Transport, LOOPBACK_IFACE};
 use crate::schedule::{beacon_delay, random_word, BEACON_PERIOD};
 use crate::vehicle::beacon_from_state;
-use ados_swarm_laws::OWN_STATE_STALE;
 
 use state_reader::spawn_state_reader;
 
@@ -100,7 +99,7 @@ fn fix_age(snapshot: &StateSnapshot) -> Option<std::time::Duration> {
 /// enough to stand for it at all. Pure, so both gates are testable without a
 /// socket or a radio.
 ///
-/// Two independent ages clear [`OWN_STATE_STALE`], because they fail
+/// Two independent ages clear [`ados_swarm::OWN_STATE_STALE`], because they fail
 /// independently and mean different things:
 ///
 /// - **Arrival age** (`now - received`) catches the MAVLink router dying. Then
@@ -114,12 +113,12 @@ fn fix_age(snapshot: &StateSnapshot) -> Option<std::time::Duration> {
 ///   precedence readings in the same snapshot are still live and still go out.
 fn beacon_body(snapshot: Option<&StateSnapshot>, now: Instant) -> Option<(&Value, bool)> {
     let snapshot = snapshot?;
-    if now.saturating_duration_since(snapshot.received) >= OWN_STATE_STALE {
+    if now.saturating_duration_since(snapshot.received) >= ados_swarm::OWN_STATE_STALE {
         return None;
     }
     // Fail closed on an unstated age: a producer that cannot say how old its fix
     // is has not earned the fleet's trust in that fix.
-    let fix_trusted = fix_age(snapshot).is_some_and(|age| age < OWN_STATE_STALE);
+    let fix_trusted = fix_age(snapshot).is_some_and(|age| age < ados_swarm::OWN_STATE_STALE);
     Some((&snapshot.value, fix_trusted))
 }
 
@@ -580,6 +579,7 @@ async fn publish_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ados_swarm::OWN_STATE_STALE;
 
     /// A run of injection failures ends the transmitter; a single success in the
     /// run clears it, so an occasional full queue never tears the radio down.
@@ -715,7 +715,7 @@ mod tests {
     /// hard separation as a disarmed one on `hold`.
     #[test]
     fn a_frozen_fix_under_a_live_producer_withholds_only_the_position() {
-        use ados_swarm_laws::ModePrecedence;
+        use ados_swarm::ModePrecedence;
 
         let flying = serde_json::json!({
             "armed": true,

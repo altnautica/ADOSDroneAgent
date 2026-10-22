@@ -1,9 +1,9 @@
 use serde_json::{json, Value};
 
 use super::*;
-use ados_gnss_stream::base::Llh;
-use ados_gnss_stream::fixtures::{self, Pvt};
-use ados_gnss_stream::stream::Splitter;
+use ados_positioning::base::Llh;
+use ados_positioning::fixtures::{self, Pvt};
+use ados_positioning::stream::Splitter;
 
 const S: u64 = 1_000_000_000;
 

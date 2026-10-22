@@ -258,8 +258,8 @@ pub const SLOT_KEYS: [&str; 2] = ["slot", "device_id"];
 mod tests {
     use super::*;
     use crate::beacon::SwarmBeacon;
-    use ados_swarm_laws::ModePrecedence;
-    use ados_swarm_laws::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO};
+    use ados_swarm::ModePrecedence;
+    use ados_swarm::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO};
     use serde_json::Map;
     use std::time::Duration;
 

@@ -55,9 +55,9 @@ pub mod terminator;
 pub mod transport;
 
 /// The chunk framing of the config channel: every chunk opens with
-/// [`ados_protocol::mavlink::CONFIG_TUNNEL_MAGIC`].
+/// [`ados_protocol::config_tunnel::CONFIG_TUNNEL_MAGIC`].
 pub const FRAMING: ados_mavlink_tunnel::Framing = ados_mavlink_tunnel::Framing {
-    magic: ados_protocol::mavlink::CONFIG_TUNNEL_MAGIC,
+    magic: ados_protocol::config_tunnel::CONFIG_TUNNEL_MAGIC,
 };
 
 const _: () =

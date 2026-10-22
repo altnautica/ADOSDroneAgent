@@ -36,9 +36,17 @@ dependencies = [
 
 [[package]]
 name = "ados-clock"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "ados-clock-service"
 version = "0.106.1"
 dependencies = [
- "ados-clock-fit",
+ "ados-clock",
  "ados-config",
  "ados-protocol",
  "ados-sensorbus",
@@ -54,14 +62,6 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ados-clock-fit"
-version = "0.1.0"
-dependencies = [
- "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -139,7 +139,7 @@ dependencies = [
  "ados-groundlink",
  "ados-hid",
  "ados-lora",
- "ados-lora-governor",
+ "ados-lora-service",
  "ados-macpin",
  "ados-mavlink-router",
  "ados-net",
@@ -150,7 +150,7 @@ dependencies = [
  "ados-rtcm",
  "ados-sensorbus",
  "ados-supervisor",
- "ados-swarm-laws",
+ "ados-swarm",
  "ados-swarmbus",
  "ados-video",
  "anyhow",
@@ -262,7 +262,7 @@ name = "ados-gnss"
 version = "0.106.1"
 dependencies = [
  "ados-config",
- "ados-gnss-stream",
+ "ados-positioning",
  "ados-protocol",
  "ados-sensorbus",
  "nix 0.29.0",
@@ -276,15 +276,6 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ados-gnss-stream"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tracing",
 ]
 
 [[package]]
@@ -381,6 +372,15 @@ dependencies = [
 [[package]]
 name = "ados-hmi"
 version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.2",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "ados-installer"
@@ -449,13 +449,23 @@ dependencies = [
 
 [[package]]
 name = "ados-lora"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "ados-lora-service"
 version = "0.106.1"
 dependencies = [
  "ados-config",
  "ados-gpio",
- "ados-lora-governor",
+ "ados-lora",
  "ados-protocol",
- "ados-sensorhub-proto",
+ "ados-sensorhub",
  "nix 0.29.0",
  "serde",
  "serde_json",
@@ -465,16 +475,6 @@ dependencies = [
  "tokio-serial",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ados-lora-governor"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "tempfile",
- "tracing",
 ]
 
 [[package]]
@@ -495,14 +495,14 @@ dependencies = [
 name = "ados-mavlink-router"
 version = "0.106.1"
 dependencies = [
- "ados-clock-fit",
+ "ados-clock",
  "ados-config",
  "ados-hal-probe",
  "ados-hid",
  "ados-protocol",
  "ados-rtcm",
  "ados-sensorbus",
- "ados-swarm-laws",
+ "ados-swarm",
  "ados-swarmbus",
  "anyhow",
  "bytes",
@@ -594,6 +594,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-positioning"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "ados-protocol"
 version = "0.106.1"
 dependencies = [
@@ -655,7 +664,7 @@ version = "0.106.1"
 dependencies = [
  "ados-plugin-host",
  "ados-protocol",
- "ados-vision",
+ "ados-vision-engine",
  "anyhow",
  "async-trait",
  "futures-core",
@@ -697,14 +706,22 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorhub"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+]
+
+[[package]]
+name = "ados-sensorhub-service"
 version = "0.106.1"
 dependencies = [
- "ados-clock-fit",
+ "ados-clock",
  "ados-config",
  "ados-hal-probe",
  "ados-protocol",
  "ados-sensorbus",
- "ados-sensorhub-proto",
+ "ados-sensorhub",
  "proptest",
  "serde",
  "serde_json",
@@ -713,14 +730,6 @@ dependencies = [
  "tokio-serial",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ados-sensorhub-proto"
-version = "0.1.0"
-dependencies = [
- "proptest",
- "serde",
 ]
 
 [[package]]
@@ -751,7 +760,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ados-swarm-laws"
+name = "ados-swarm"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -763,7 +772,7 @@ version = "0.106.1"
 dependencies = [
  "ados-protocol",
  "ados-radio",
- "ados-swarm-laws",
+ "ados-swarm",
  "anyhow",
  "chacha20poly1305",
  "getrandom 0.4.2",
@@ -779,13 +788,6 @@ dependencies = [
  "tracing",
  "tracing-journald",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ados-tracker"
-version = "0.106.1"
-dependencies = [
- "ados-protocol",
 ]
 
 [[package]]
@@ -812,7 +814,7 @@ dependencies = [
  "ados-config",
  "ados-hal-probe",
  "ados-protocol",
- "ados-vision",
+ "ados-vision-engine",
  "anyhow",
  "memmap2",
  "nix 0.29.0",
@@ -831,10 +833,17 @@ dependencies = [
 name = "ados-vision"
 version = "0.106.1"
 dependencies = [
+ "ados-protocol",
+]
+
+[[package]]
+name = "ados-vision-engine"
+version = "0.106.1"
+dependencies = [
  "ados-config",
  "ados-protocol",
  "ados-sensorbus",
- "ados-tracker",
+ "ados-vision",
  "anyhow",
  "memmap2",
  "nix 0.29.0",

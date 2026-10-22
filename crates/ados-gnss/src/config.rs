@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use ados_gnss_stream::base::{BaseMode, Llh};
-use ados_gnss_stream::valset::RxPort;
+use ados_positioning::base::{BaseMode, Llh};
+use ados_positioning::valset::RxPort;
 
 /// Baud for a serial source that names none (the u-blox UART default).
 pub const DEFAULT_BAUD: u32 = 38_400;

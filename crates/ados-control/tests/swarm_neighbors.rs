@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use ados_control::{run_with_paths, DaemonPaths};
-use ados_swarm_laws::{ModePrecedence, STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO};
+use ados_swarm::{ModePrecedence, STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO};
 use ados_swarmbus::beacon::SwarmBeacon;
 use ados_swarmbus::crypto::{derive_fleet_key, SwarmCipher};
 use ados_swarmbus::frame::{build_frame, SwarmFrameKind};

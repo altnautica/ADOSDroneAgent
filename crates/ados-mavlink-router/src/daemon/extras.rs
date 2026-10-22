@@ -3,7 +3,7 @@
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
-use ados_swarm_laws::ModePrecedence;
+use ados_swarm::ModePrecedence;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 

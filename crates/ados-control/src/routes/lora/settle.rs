@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use ados_lora_governor::regions;
+use ados_lora::regions;
 use serde_json::Value;
 
 use super::status_body;

@@ -1,7 +1,7 @@
 //! The 10 Hz onboard-autonomy loop: swarm neighbour table in,
 //! `SET_POSITION_TARGET_GLOBAL_INT` out.
 //!
-//! Every control law lives in `ados-swarm-laws` as a pure function; this file
+//! Every control law lives in `ados-swarm` as a pure function; this file
 //! is the plumbing that connects it to the two things it cannot own — the swarm
 //! bus and the flight controller.
 //!
@@ -75,7 +75,7 @@ use std::time::{Duration, Instant, SystemTime};
 use ados_protocol::ipc::{connect_with_retry, read_newline_line};
 use ados_protocol::mavlink::{GuidedSetpoint, SetpointKind as WireSetpointKind};
 use ados_protocol::shutdown::Shutdown;
-use ados_swarm_laws::{
+use ados_swarm::{
     ControlOutcome, ModePrecedence, NeighborFix, OwnState, Setpoint, SwarmControlConfig,
     SwarmController, CONTROL_PERIOD,
 };
@@ -116,7 +116,7 @@ impl SwarmSetpointStatus {
     /// The `mode_precedence` wire string for the snapshot.
     pub fn precedence_wire(&self) -> &'static str {
         ModePrecedence::from_status_bits(
-            self.precedence.load(Ordering::Relaxed) << ados_swarm_laws::STATUS_PRECEDENCE_SHIFT,
+            self.precedence.load(Ordering::Relaxed) << ados_swarm::STATUS_PRECEDENCE_SHIFT,
         )
         .as_wire()
     }
@@ -138,12 +138,7 @@ impl SwarmSetpointStatus {
         self.hard_engagements.load(Ordering::Relaxed)
     }
 
-    fn publish(
-        &self,
-        level: ModePrecedence,
-        emergency: bool,
-        c: ados_swarm_laws::SwarmControlCounters,
-    ) {
+    fn publish(&self, level: ModePrecedence, emergency: bool, c: ados_swarm::SwarmControlCounters) {
         self.precedence.store(level as u8, Ordering::Relaxed);
         self.emergency.store(emergency, Ordering::Relaxed);
         self.setpoints_emitted

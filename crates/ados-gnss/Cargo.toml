@@ -17,7 +17,7 @@ name = "ados-gnss"
 path = "src/main.rs"
 
 [dependencies]
-ados-gnss-stream = { workspace = true }
+ados-positioning = { workspace = true }
 ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
 ados-sensorbus = { path = "../ados-sensorbus" }
@@ -37,5 +37,5 @@ sd-notify = { workspace = true }
 tracing-journald = { workspace = true }
 
 [dev-dependencies]
-ados-gnss-stream = { workspace = true, features = ["fixtures"] }
+ados-positioning = { workspace = true, features = ["fixtures"] }
 tempfile = "3"

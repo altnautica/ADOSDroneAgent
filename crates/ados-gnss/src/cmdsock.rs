@@ -16,7 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 use crate::service::{Shared, E_BAD_REQUEST};
 use crate::status::linked_peer_count;
-use ados_gnss_stream::base::{BaseMode, Llh};
+use ados_positioning::base::{BaseMode, Llh};
 
 /// Largest request line accepted.
 const MAX_LINE: u64 = 4096;

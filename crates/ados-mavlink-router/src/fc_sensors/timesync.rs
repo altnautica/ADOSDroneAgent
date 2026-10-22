@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use ados_clock_fit::fit::TimesyncEstimator;
+use ados_clock::fit::TimesyncEstimator;
 use ados_sensorbus::{SyncObs, SyncSource};
 
 /// Outstanding requests remembered for matching (the cadence is 1 Hz, so this

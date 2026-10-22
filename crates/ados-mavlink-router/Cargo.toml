@@ -10,8 +10,8 @@ description = "Owns the flight-controller serial link, fans MAVLink frames to th
 
 [dependencies]
 ados-rtcm = { workspace = true }
-ados-clock-fit = { workspace = true }
-ados-swarm-laws = { workspace = true }
+ados-clock = { workspace = true }
+ados-swarm = { workspace = true }
 ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
 ados-config = { path = "../ados-config" }
 # For the beacon `status` bit layout the autonomy status block encodes into.

@@ -19,9 +19,9 @@ name = "ados-control"
 path = "src/main.rs"
 
 [dependencies]
-ados-lora-governor = { workspace = true }
+ados-lora = { workspace = true }
 ados-rtcm = { workspace = true }
-ados-swarm-laws = { workspace = true }
+ados-swarm = { workspace = true }
 # Shared wire contracts: the versioned IPC frames the status/command chunks
 # decode, reused so the native surface speaks the exact same seams the Python API
 # does. The `mavlink` feature pulls in the ardupilotmega codec the command route
@@ -63,7 +63,7 @@ ados-video = { path = "../ados-video" }
 ados-groundlink = { path = "../ados-groundlink" }
 # The LoRa region table, plan validation and status shapes the lora routes
 # serve; the library only, without the lane daemon.
-ados-lora = { path = "../ados-lora", default-features = false }
+ados-lora-service = { path = "../ados-lora-service", default-features = false }
 # The ground-station role table (`role::role_units` / `ALL_ROLE_UNITS`) the role
 # read reports, and the control-socket name the role write forwards `set_role`
 # to: the supervisor executes role transitions, so both halves read its

@@ -11,7 +11,7 @@ async fn a_designated_target_locks_the_engines_tracker() {
         .publish_frame(
             CAMERA,
             1,
-            ados_vision::ring::FrameTiming::host(1_700_000_000_000),
+            ados_vision_engine::ring::FrameTiming::host(1_700_000_000_000),
             4,
             4,
             FrameFormat::Rgb24,

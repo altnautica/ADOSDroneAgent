@@ -4,7 +4,7 @@
 //! on the tap wire format, so decoded frames never cross the socket and the
 //! vision engine (and everything downstream of it) sees nothing — with no error
 //! anywhere. This test wires the REAL producer half (`ados_video::tap`) to the
-//! REAL consumer half (`ados_vision::source::TapSource`) over a Unix socket and
+//! REAL consumer half (`ados_vision_engine::source::TapSource`) over a Unix socket and
 //! asserts that every frame's geometry, format, and exact pixel bytes survive
 //! the round trip. If any hop breaks, the assertions fail loudly.
 //!
@@ -24,7 +24,7 @@ use std::time::Duration;
 
 use ados_protocol::framebus::FrameFormat;
 use ados_video::tap::{bind_vision_tap, run_vision_tap_server};
-use ados_vision::source::{FrameSource, RawFrame, TapSource};
+use ados_vision_engine::source::{FrameSource, RawFrame, TapSource};
 use tokio::io::{AsyncWriteExt, DuplexStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;

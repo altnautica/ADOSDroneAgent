@@ -25,9 +25,8 @@ use tokio::sync::{watch, Notify};
 use tokio::time::Instant;
 
 use ados_mavlink_tunnel::{CompletedMessage, PushOutcome, Reassembler};
-use ados_protocol::mavlink::{
-    build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader, CONFIG_TUNNEL_PAYLOAD_TYPE,
-};
+use ados_protocol::config_tunnel::CONFIG_TUNNEL_PAYLOAD_TYPE;
+use ados_protocol::mavlink::{build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader};
 use ados_protocol::nonce_cache::NonceCache;
 use ados_protocol::pairing_posture::relay_config_key_forbidden;
 use ados_protocol::relay_ticket::{

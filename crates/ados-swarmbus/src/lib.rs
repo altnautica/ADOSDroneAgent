@@ -18,7 +18,7 @@
 //! Module map, roughly in wire order:
 //!
 //! - [`beacon`] — the 20-byte message. Its status bits and the mode-precedence
-//!   level packed into three of them come from `ados_swarm_laws::status`.
+//!   level packed into three of them come from `ados_swarm::status`.
 //! - [`frame`] — the radiotap + 802.11 envelope, and the kernel filter that picks
 //!   it out of the video stream sharing the adapter.
 //! - [`crypto`] — the fleet-keyed ChaCha20-Poly1305 seal.

@@ -33,7 +33,7 @@
 893 ados-groundlink/src/presence.rs
 604 ados-groundlink/src/receiver.rs
 534 ados-groundlink/src/wfb_rx/stats.rs
-761 ados-hal-probe/src/board_sidecar.rs
+713 ados-hal-probe/src/board_sidecar.rs
 521 ados-hmi/src/affine.rs
 592 ados-hmi/src/pic.rs
 1376 ados-installer/src/macos.rs
@@ -50,7 +50,7 @@
 717 ados-logd/src/query/tests.rs
 832 ados-logd/src/retention/tests.rs
 597 ados-logd/src/writer/tests.rs
-927 ados-macpin/src/engine.rs
+860 ados-macpin/src/engine.rs
 693 ados-mavlink-router/src/aux_rpc_handler/tests.rs
 808 ados-mavlink-router/src/aux_uplink_consumer/tests.rs
 633 ados-mavlink-router/src/connection/send_scheduler/tests.rs
@@ -92,12 +92,11 @@
 583 ados-supervisor/src/janitor/tests.rs
 1010 ados-supervisor/src/lifecycle/tests.rs
 642 ados-supervisor/src/pair_proof/tests.rs
-597 ados-swarm-laws/src/controller/mod.rs
-786 ados-swarm-laws/src/controller/tests.rs
+786 ados-swarm/src/controller/tests.rs
 578 ados-swarmbus/src/service.rs
-701 ados-tracker/src/tracker/tests.rs
-729 ados-tracker/tests/tracker_adversarial.rs
 2314 ados-video/src/encoder/tests.rs
 590 ados-video/src/mediamtx/tests.rs
 1194 ados-video/src/orchestrator/tests.rs
-571 ados-vision/src/engine/tests.rs
+571 ados-vision-engine/src/engine/tests.rs
+701 ados-vision/src/tracker/tests.rs
+729 ados-vision/tests/tracker_adversarial.rs

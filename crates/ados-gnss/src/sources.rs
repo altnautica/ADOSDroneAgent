@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::config::Source;
 use crate::service::Shared;
-use ados_gnss_stream::stream::Splitter;
+use ados_positioning::stream::Splitter;
 
 const RETRY: Duration = Duration::from_secs(5);
 const WRITE_QUEUE: usize = 32;

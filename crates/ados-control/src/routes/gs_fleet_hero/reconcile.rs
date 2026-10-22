@@ -46,7 +46,7 @@ use crate::routes::gs_fleet_slot::registered_slots;
 /// running now. The swarm bus drops a neighbour it has not heard for this long,
 /// and a table that has not been republished for this long means the bus
 /// itself has stopped, leaving every row frozen at its last age.
-pub const OBSERVATION_MAX_AGE: Duration = ados_swarm_laws::NEIGHBOR_STALE;
+pub const OBSERVATION_MAX_AGE: Duration = ados_swarm::NEIGHBOR_STALE;
 
 /// What one reconcile tick should do, given the fleet and what is outstanding.
 #[derive(Debug, Clone, PartialEq, Eq)]

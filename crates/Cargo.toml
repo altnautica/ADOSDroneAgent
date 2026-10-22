@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-offload", "ados-swarmbus", "ados-sensorhub-proto", "ados-sensorbus", "ados-gnss", "ados-clock", "ados-sensorhub", "ados-lora", "ados-tracker", "ados-lora-governor", "ados-crsf-codec", "ados-gnss-stream", "ados-rtcm", "ados-clock-fit", "ados-swarm-laws", "ados-mavlink-tunnel", "ados-display-driver", "ados-hmi"]
+members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision-engine", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-offload", "ados-swarmbus", "ados-sensorhub-service", "ados-sensorbus", "ados-gnss", "ados-clock-service", "ados-sensorhub", "ados-lora-service", "ados-vision", "ados-lora", "ados-crsf-codec", "ados-positioning", "ados-rtcm", "ados-clock", "ados-swarm", "ados-mavlink-tunnel", "ados-display-driver", "ados-hmi"]
 
 [workspace.package]
 version = "0.106.1"
@@ -31,18 +31,18 @@ homepage = "https://altnautica.com"
 # entries so the path and the registry version stay together. The lockstep
 # pins must equal the workspace version (scripts/check-version-sync.sh).
 ados-protocol = { path = "ados-protocol", version = "=0.106.1" }
-ados-tracker = { path = "ados-tracker", version = "=0.106.1" }
+ados-vision = { path = "ados-vision", version = "=0.106.1" }
 ados-gpio = { path = "ados-gpio", version = "=0.106.1" }
 ados-hal-probe = { path = "ados-hal-probe", version = "=0.106.1" }
-ados-sensorhub-proto = { path = "ados-sensorhub-proto", version = "0.1.0" }
+ados-sensorhub = { path = "ados-sensorhub", version = "0.1.0" }
 ados-offload = { path = "ados-offload", version = "0.1.0" }
 ados-macpin = { path = "ados-macpin", version = "0.1.0" }
-ados-lora-governor = { path = "ados-lora-governor", version = "0.1.0" }
+ados-lora = { path = "ados-lora", version = "0.1.0" }
 ados-crsf-codec = { path = "ados-crsf-codec", version = "0.1.0" }
-ados-gnss-stream = { path = "ados-gnss-stream", version = "0.1.0" }
+ados-positioning = { path = "ados-positioning", version = "0.1.0" }
 ados-rtcm = { path = "ados-rtcm", version = "0.1.0" }
-ados-clock-fit = { path = "ados-clock-fit", version = "0.1.0" }
-ados-swarm-laws = { path = "ados-swarm-laws", version = "0.1.0" }
+ados-clock = { path = "ados-clock", version = "0.1.0" }
+ados-swarm = { path = "ados-swarm", version = "0.1.0" }
 ados-mavlink-tunnel = { path = "ados-mavlink-tunnel", version = "0.1.0" }
 ados-display-driver = { path = "ados-display-driver", version = "0.1.0" }
 ados-hmi = { path = "ados-hmi", version = "0.1.0" }

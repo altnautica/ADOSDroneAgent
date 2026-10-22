@@ -1,70 +1,20 @@
 [package]
 name = "ados-vision"
-publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
-description = "Vision engine host: owns the per-camera shared-memory frame rings, the model registry, the accelerator lease arbiter, and the vision.sock plugin bridge."
+homepage.workspace = true
+documentation = "https://docs.rs/ados-vision"
+readme = "README.md"
+description = "Single-object visual tracker for drones: Kalman motion model with appearance re-identification, YOLOv8 head decoding and OSNet embedding helpers."
+keywords = ["tracking", "yolo", "reid", "kalman", "drone"]
+categories = ["computer-vision", "science::robotics", "aerospace::drones"]
 
-[lib]
-name = "ados_vision"
-path = "src/lib.rs"
-
-[[bin]]
-name = "ados-vision"
-path = "src/bin/ados-vision.rs"
-
-[features]
-# The default build carries no native inference runtime so it compiles fast
-# everywhere; the MockBackend and the RKNN sidecar IPC client cover the baseline.
-default = []
-# Opt-in ONNX Runtime backend. Loads the runtime dynamically (dlopen at start)
-# rather than static-linking a downloaded build, so the compiled binary carries
-# no link-time dependency on the runtime's glibc/libstdc++ â€” the shared library
-# is fetched separately (a glibc-2.17 manylinux build that runs on every target)
-# and its path handed in via ORT_DYLIB_PATH. Never on by default; heavy runtime.
-onnx = ["dep:ort", "ort/load-dynamic"]
-# Register the CoreML execution provider so ONNX inference runs on the Apple GPU
-# (macOS workstation, "leverage the GPU"). Implies `onnx`; a no-op on non-macOS
-# builds (the backend registers it only under target_os = "macos"). Off by
-# default so a Linux/CI build never pulls the CoreML runtime.
-coreml = ["onnx", "ort/coreml"]
-# Opt-in appearance (re-id) model support for the tracker: builds the
-# sidecar-backed appearance extractor. Compiled out by default so the motion-only
-# tracker carries no extra weight; mirrors `onnx` in being a non-default feature.
-reid = []
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
-ados-tracker = { workspace = true }
-ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
-ados-config = { path = "../ados-config" }
-# Trigger records in, simulator time pairs out, on the sensor bus.
-ados-sensorbus = { path = "../ados-sensorbus" }
-tokio = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-serde_norway = { workspace = true }
-rmp-serde = { workspace = true }
-rmpv = { workspace = true }
-anyhow = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-memmap2 = { workspace = true }
-# ONNX Runtime, gated behind the `onnx` feature. The `load-dynamic` feature
-# (enabled by the `onnx` feature) dlopens the shared library at start from
-# ORT_DYLIB_PATH, so the compiled binary never link-depends on the runtime's
-# glibc/libstdc++. Default features are kept for the pregenerated bindings; the
-# build-time download is never linked (load-dynamic) and the shipped runtime is
-# a separate glibc-2.17 manylinux build the installer places on the box.
-ort = { version = "2.0.0-rc.13", optional = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-sd-notify = { workspace = true }
-tracing-journald = { workspace = true }
-nix = { workspace = true }
-
-[dev-dependencies]
-tempfile = "3"
+ados-protocol = { workspace = true }

@@ -26,8 +26,8 @@ use ados_protocol::framebus::{
 use ados_protocol::plugin::{Envelope, TokenIssuer, PROTOCOL_VERSION};
 use ados_protocol::shutdown::Shutdown;
 use ados_sdk::{Frame, PluginContext, PluginIpcClient};
-use ados_vision::backend::{LoadedModel, VisionBackend};
-use ados_vision::engine::VisionEngine;
+use ados_vision_engine::backend::{LoadedModel, VisionBackend};
+use ados_vision_engine::engine::VisionEngine;
 use parking_lot::Mutex;
 use rmpv::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -136,7 +136,7 @@ impl RealEngine {
         let path = sock.to_str().expect("utf-8 socket path").to_string();
         let (e, c) = (engine.clone(), cancel.clone());
         tokio::spawn(async move {
-            ados_vision::visionsock::serve(e, &path, c)
+            ados_vision_engine::visionsock::serve(e, &path, c)
                 .await
                 .expect("serve vision.sock");
         });
@@ -573,7 +573,7 @@ async fn infer_runs_the_engines_model_on_the_named_frame() {
         .publish_frame(
             &camera,
             3,
-            ados_vision::ring::FrameTiming::host(1_700_000_000_000),
+            ados_vision_engine::ring::FrameTiming::host(1_700_000_000_000),
             4,
             4,
             FrameFormat::Rgb24,

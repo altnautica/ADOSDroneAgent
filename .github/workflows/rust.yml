@@ -345,7 +345,7 @@ jobs:
       # has its own job below. Built on its own so its feature set is exactly
       # the crate's defaults, reusing the dependencies the step above compiled.
       - name: Build the default vision binary (static musl)
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-vision --bin ados-vision
+        run: cargo zigbuild --release --target aarch64-unknown-linux-musl -p ados-vision-engine --bin ados-vision
 
       # Self-hosting the upstream relay means an install never depends on a
       # third-party release staying available.
@@ -422,7 +422,7 @@ jobs:
           key: gnu-onnx-release
 
       - name: Build ados-vision with the onnx backend (dynamic load)
-        run: cargo build --release --features onnx -p ados-vision
+        run: cargo build --release --features onnx -p ados-vision-engine
 
       - name: Fetch the ONNX Runtime shared library (official aarch64 build)
         run: |

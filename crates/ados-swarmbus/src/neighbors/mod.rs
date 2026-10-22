@@ -27,7 +27,7 @@ pub use counters::SwarmCounters;
 use replay::SenderVerdict;
 pub use replay::{SenderMarks, REPLAY_STATE_PATH};
 
-use ados_swarm_laws::NEIGHBOR_STALE;
+use ados_swarm::NEIGHBOR_STALE;
 
 /// Hard cap on table size. A legal fleet cannot reach it
 /// ([`ados_radio::config::FLEET_MAX_SLOTS`] is 24); it bounds the table against a garbage or hostile
@@ -319,7 +319,7 @@ impl NeighborTable {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_swarm_laws::status::STATUS_GPS_OK;
+    use ados_swarm::status::STATUS_GPS_OK;
 
     /// Bengaluru, so the longitude scaling is exercised at a real non-zero
     /// latitude rather than on the equator where `cos(lat)` is 1 and a missing

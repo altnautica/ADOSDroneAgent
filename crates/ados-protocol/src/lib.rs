@@ -12,6 +12,8 @@ pub mod camera_control;
 pub mod capabilities;
 pub mod cloud_link;
 pub mod cloud_publish;
+#[cfg(feature = "mavlink")]
+pub mod config_tunnel;
 pub mod config_tunnel_ingest;
 pub mod contracts;
 #[cfg(feature = "tls")]

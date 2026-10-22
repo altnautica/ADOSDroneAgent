@@ -1,175 +1,137 @@
-//! The per-source fit, chosen by how the source's pairs are stamped, and the
-//! verdict on a pair against its prediction.
+//! Clock relation math: a windowed linear fit of a source clock against the
+//! host monotonic clock (offset + skew, sigma = residual RMS), and the
+//! NTP-style TIMESYNC estimator built on it.
 
-use ados_clock_fit::envelope::{EnvelopeFit, ENVELOPE_LOCK_SPAN_NS};
-use ados_clock_fit::fit::ClockFit;
-use ados_sensorbus::SyncSource;
+use std::collections::VecDeque;
 
-use crate::clock::{ENVELOPE_LATE_MAX_NS, OUTLIER_FLOOR_NS, OUTLIER_SIGMAS, RESET_DISAGREE_NS};
-
-/// The latency floor assumed when none is configured: encode, RTSP and
-/// decode of a rendered frame take at least this long at most. Its whole
-/// width goes into the published sigma, never into the offset.
-pub const UNKNOWN_FLOOR_BOUND_NS: u64 = 30_000_000;
-
-/// The pipeline's minimum latency under an arrival-stamped source, which
-/// one-way pairs cannot measure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LatencyFloor {
-    /// Measured and configured (`clock.sim.latency_floor_ns`): added to the
-    /// envelope's offset; its own error is the measurement's.
-    Known(u64),
-    /// Not measured: the offset is the envelope's, and the published sigma
-    /// carries [`UNKNOWN_FLOOR_BOUND_NS`].
-    Unknown,
-}
-
-/// How a pair relates to its source's prediction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Miss {
-    /// Feed it to the fit; it ends any run of large misses.
-    Fine,
-    /// Feed it to the fit; it says nothing about a restart (an arrival-stamped
-    /// pair behind its envelope: latency, not a clock change).
-    Late,
-    /// Drop it; it ends any run of large misses.
-    Outlier,
-    /// Drop it. [`crate::clock::RESET_AFTER`] of these within
-    /// [`crate::clock::RESET_RUN_WINDOW_NS`] mean the source clock changed.
-    Large,
-}
-
+/// Least-squares fit of `offset(host) = source - host` as a line in host
+/// time, over the pairs of the last `window_ns`.
 #[derive(Debug, Clone)]
-pub enum Fit {
-    /// Pairs with symmetric error: two-way TIMESYNC midpoints, kernel PPS
-    /// stamps, the hub's already-enveloped pairs. Least squares.
-    Linear(ClockFit),
-    /// Pairs stamped on arrival (the simulator SEI): a one-sided, jittery
-    /// latency above a floor. Lower envelope.
-    Envelope {
-        fit: EnvelopeFit,
-        floor: LatencyFloor,
-    },
+pub struct ClockFit {
+    window_ns: u64,
+    max_points: usize,
+    pts: VecDeque<(u64, i64)>,
+    model: Option<Model>,
 }
 
-impl Fit {
-    /// `floor` applies to the arrival-stamped source only.
-    pub fn for_source(source: SyncSource, floor: LatencyFloor) -> Self {
-        match source {
-            SyncSource::Sim => Fit::Envelope {
-                fit: EnvelopeFit::sixty_seconds(),
-                floor,
-            },
-            SyncSource::Fc | SyncSource::Hub | SyncSource::GnssPps => {
-                Fit::Linear(ClockFit::sixty_seconds())
-            }
+#[derive(Debug, Clone, Copy)]
+struct Model {
+    /// Reference host time the line is centred on.
+    x0: u64,
+    /// Integer reference offset (the window's mean `source - host`), ns. The
+    /// float terms are relative to it, so a UTC-scale offset (~1.8e18 ns)
+    /// keeps nanosecond precision.
+    y0: i128,
+    /// Offset at `x0` relative to `y0`, ns.
+    c: f64,
+    /// Slope: ns of offset per ns of host time (skew).
+    s: f64,
+    /// Residual RMS, ns.
+    rms: f64,
+}
+
+impl ClockFit {
+    /// A fit over the last `window_ns` of pairs (at most `max_points`).
+    pub fn new(window_ns: u64, max_points: usize) -> Self {
+        ClockFit {
+            window_ns,
+            max_points: max_points.max(2),
+            pts: VecDeque::new(),
+            model: None,
         }
     }
 
-    /// Judge the pair `(host_ns, source_ns)` against the fit's own line (no
-    /// floor): the verdict and how far the pair reads behind the line
-    /// (negative: ahead of it). `None` while the fit has no line.
-    ///
-    /// A linear fit gates `|behind|` at `max(5 sigma, 1 ms)` and calls
-    /// anything beyond [`RESET_DISAGREE_NS`] large. An envelope takes any
-    /// lateness up to [`ENVELOPE_LATE_MAX_NS`] as [`Miss::Late`]. A pair ahead
-    /// of the envelope cannot happen while the relation holds: once sigma is
-    /// measured, one ahead by more than the gate is large (a run of them is a
-    /// clock step or a lower latency floor, and restarts the fit). Before
-    /// that the envelope is still finding the floor, and a pair up to
-    /// [`ENVELOPE_LATE_MAX_NS`] ahead is taken.
-    pub fn judge(&self, host_ns: u64, source_ns: i64) -> Option<(Miss, i64)> {
-        let predicted = match self {
-            Fit::Linear(f) => f.to_source(host_ns),
-            Fit::Envelope { fit, .. } => fit.to_source(host_ns),
-        }?;
-        let behind = predicted.saturating_sub(source_ns);
-        let sigma = self.fit_sigma_ns();
-        let gate = (sigma.max(0) as u64 * OUTLIER_SIGMAS).max(OUTLIER_FLOOR_NS);
-        let miss = behind.unsigned_abs();
-        let verdict = match self {
-            Fit::Linear(_) if miss > RESET_DISAGREE_NS => Miss::Large,
-            Fit::Linear(_) if sigma >= 0 && miss > gate => Miss::Outlier,
-            Fit::Linear(_) => Miss::Fine,
-            Fit::Envelope { .. } if miss > ENVELOPE_LATE_MAX_NS => Miss::Large,
-            Fit::Envelope { .. } if behind >= 0 || sigma < 0 || miss <= gate => Miss::Late,
-            Fit::Envelope { .. } => Miss::Large,
-        };
-        Some((verdict, behind))
+    /// The default 60 s window.
+    pub fn sixty_seconds() -> Self {
+        Self::new(60_000_000_000, 4096)
     }
 
-    /// Whether the pairs span enough host time to lock: always for a linear
-    /// fit, [`ENVELOPE_LOCK_SPAN_NS`] for an envelope.
-    pub fn baseline_ok(&self) -> bool {
-        match self {
-            Fit::Linear(_) => true,
-            Fit::Envelope { fit, .. } => fit.span_ns() >= ENVELOPE_LOCK_SPAN_NS,
-        }
-    }
-
+    /// Add one pair: at host monotonic `host_ns` the source read `source_ns`.
     pub fn push(&mut self, host_ns: u64, source_ns: i64) {
-        match self {
-            Fit::Linear(f) => f.push(host_ns, source_ns),
-            Fit::Envelope { fit, .. } => fit.push(host_ns, source_ns),
+        self.pts.push_back((host_ns, source_ns));
+        let newest = host_ns;
+        while let Some(&(h, _)) = self.pts.front() {
+            if newest.saturating_sub(h) > self.window_ns || self.pts.len() > self.max_points {
+                self.pts.pop_front();
+            } else {
+                break;
+            }
         }
+        self.refit();
     }
 
+    /// Drop every pair (source reset, e.g. a flight-controller reboot).
     pub fn reset(&mut self) {
-        match self {
-            Fit::Linear(f) => f.reset(),
-            Fit::Envelope { fit, .. } => fit.reset(),
-        }
+        self.pts.clear();
+        self.model = None;
     }
 
+    /// Pairs currently in the window.
     pub fn len(&self) -> usize {
-        match self {
-            Fit::Linear(f) => f.len(),
-            Fit::Envelope { fit, .. } => fit.len(),
-        }
+        self.pts.len()
     }
 
+    /// Whether the window holds no pairs.
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.pts.is_empty()
     }
 
-    /// The fit's own residual, ns (`-1` unmeasured): what lock and the
-    /// outlier gate judge the fit by.
-    pub fn fit_sigma_ns(&self) -> i64 {
-        match self {
-            Fit::Linear(f) => f.sigma_ns(),
-            Fit::Envelope { fit, .. } => fit.sigma_ns(),
+    /// Host time of the newest pair.
+    pub fn last_host_ns(&self) -> Option<u64> {
+        self.pts.back().map(|p| p.0)
+    }
+
+    fn refit(&mut self) {
+        let n = self.pts.len();
+        if n == 0 {
+            self.model = None;
+            return;
         }
+        let x0 = self.pts.back().unwrap().0;
+        let sum: i128 = self.pts.iter().map(|&(h, s)| s as i128 - h as i128).sum();
+        let y0 = sum / n as i128;
+        let pts = || {
+            self.pts
+                .iter()
+                .map(move |&(h, s)| (h as f64 - x0 as f64, (s as i128 - h as i128 - y0) as f64))
+        };
+        let nf = n as f64;
+        let (sx, sy) = pts().fold((0.0, 0.0), |(a, b), (x, y)| (a + x, b + y));
+        let (mx, my) = (sx / nf, sy / nf);
+        let (sxx, sxy) = pts().fold((0.0, 0.0), |(a, b), (x, y)| {
+            (a + (x - mx) * (x - mx), b + (x - mx) * (y - my))
+        });
+        let s = if n >= 2 && sxx > 0.0 { sxy / sxx } else { 0.0 };
+        let c = my - s * mx;
+        let rss = pts().fold(0.0, |a, (x, y)| {
+            let r = y - (c + s * x);
+            a + r * r
+        });
+        let rms = if n > 2 {
+            (rss / (nf - 2.0)).sqrt()
+        } else {
+            0.0
+        };
+        self.model = Some(Model { x0, y0, c, s, rms });
     }
 
-    /// The published one-sigma error of the offset, ns (`-1` unmeasured):
-    /// the fit residual, and for an envelope with no measured floor the
-    /// floor bound with it.
-    pub fn sigma_ns(&self) -> i64 {
-        let sigma = self.fit_sigma_ns();
-        match self {
-            Fit::Envelope {
-                floor: LatencyFloor::Unknown,
-                ..
-            } if sigma >= 0 => {
-                let (s, b) = (sigma as f64, UNKNOWN_FLOOR_BOUND_NS as f64);
-                (s * s + b * b).sqrt().round() as i64
-            }
-            _ => sigma,
-        }
+    /// Offset relative to the model's integer reference at `host_ns`.
+    fn rel_offset(m: &Model, host_ns: u64) -> f64 {
+        m.c + m.s * (host_ns as f64 - m.x0 as f64)
     }
 
-    /// Offset `source - host` at host time `host_ns`, the known floor added.
+    /// Offset `source - host` at host time `host_ns`, ns. A float, so a
+    /// UTC-scale offset is only good to ~256 ns here; [`Self::offset_i64`]
+    /// and [`Self::to_source`] are exact.
+    pub fn offset_ns(&self, host_ns: u64) -> Option<f64> {
+        let m = self.model?;
+        Some(m.y0 as f64 + Self::rel_offset(&m, host_ns))
+    }
+
+    /// Offset `source - host` at host time `host_ns`, rounded to whole ns.
     pub fn offset_i64(&self, host_ns: u64) -> Option<i64> {
-        match self {
-            Fit::Linear(f) => f.offset_i64(host_ns),
-            Fit::Envelope { fit, floor } => {
-                let add = match floor {
-                    LatencyFloor::Known(f) => *f as i64,
-                    LatencyFloor::Unknown => 0,
-                };
-                fit.offset_i64(host_ns).map(|o| o.saturating_add(add))
-            }
-        }
+        let m = self.model?;
+        Some((m.y0 + Self::rel_offset(&m, host_ns).round() as i128) as i64)
     }
 
     /// Source time at host time `host_ns`.
@@ -178,10 +140,203 @@ impl Fit {
             .map(|o| (host_ns as i128 + o as i128) as i64)
     }
 
+    /// Host time at source time `source_ns` (inverse of [`Self::to_source`]).
+    pub fn to_host(&self, source_ns: i64) -> Option<u64> {
+        let m = self.model?;
+        // source = host + y0 + c + s (host - x0); with u = host - x0:
+        // u = (source - y0 - x0 - c) / (1 + s)
+        let d = (source_ns as i128 - m.y0 - m.x0 as i128) as f64;
+        let u = (d - m.c) / (1.0 + m.s);
+        let host = m.x0 as i128 + u.round() as i128;
+        u64::try_from(host).ok()
+    }
+
+    /// Skew of the source against the host, parts per million.
     pub fn skew_ppm(&self) -> f64 {
-        match self {
-            Fit::Linear(f) => f.skew_ppm(),
-            Fit::Envelope { fit, .. } => fit.skew_ppm(),
+        self.model.map_or(0.0, |m| m.s * 1e6)
+    }
+
+    /// One-sigma residual, ns; `-1` with fewer than three pairs (unmeasured).
+    pub fn sigma_ns(&self) -> i64 {
+        match self.model {
+            Some(m) if self.pts.len() >= 3 => m.rms.round() as i64,
+            _ => -1,
         }
+    }
+}
+
+/// Default number of recent round trips the min-RTT gate looks back over.
+pub const RTT_WINDOW: usize = 32;
+
+/// Two-way time exchange estimator (MAVLink TIMESYNC). Each completed
+/// exchange gives `host_tx`, the source's reply time `source_ns`, and
+/// `host_rx`; the source time is taken to correspond to the midpoint. Only
+/// exchanges whose round trip is within a margin of the minimum over the last
+/// [`RTT_WINDOW`] feed the fit, which rejects queueing-delayed replies whose
+/// asymmetry would bias the offset.
+#[derive(Debug, Clone)]
+pub struct TimesyncEstimator {
+    rtts: VecDeque<u64>,
+    fit: ClockFit,
+}
+
+/// Accepted round trips may exceed the window minimum by this much.
+const RTT_MARGIN_NS: u64 = 20_000;
+
+impl Default for TimesyncEstimator {
+    fn default() -> Self {
+        TimesyncEstimator {
+            rtts: VecDeque::with_capacity(RTT_WINDOW),
+            fit: ClockFit::sixty_seconds(),
+        }
+    }
+}
+
+impl TimesyncEstimator {
+    /// Feed one completed exchange. Returns the accepted `(host_mid_ns,
+    /// source_ns, rtt_ns)` pair, or `None` when the min-RTT gate rejected it.
+    pub fn on_exchange(
+        &mut self,
+        host_tx_ns: u64,
+        source_ns: i64,
+        host_rx_ns: u64,
+    ) -> Option<(u64, i64, u64)> {
+        if host_rx_ns < host_tx_ns {
+            return None;
+        }
+        let rtt = host_rx_ns - host_tx_ns;
+        if self.rtts.len() == RTT_WINDOW {
+            self.rtts.pop_front();
+        }
+        self.rtts.push_back(rtt);
+        let min = *self.rtts.iter().min().unwrap();
+        if rtt > min + RTT_MARGIN_NS.max(min / 10) {
+            return None;
+        }
+        let mid = host_tx_ns + rtt / 2;
+        self.fit.push(mid, source_ns);
+        Some((mid, source_ns, rtt))
+    }
+
+    /// Forget every exchange (source rebooted: its clock jumped).
+    pub fn reset(&mut self) {
+        self.rtts.clear();
+        self.fit.reset();
+    }
+
+    /// The underlying fit of the accepted exchanges.
+    pub fn fit(&self) -> &ClockFit {
+        &self.fit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// xorshift64*, deterministic test noise.
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        /// Exponential-ish delay with the given mean, ns.
+        fn delay(&mut self, mean: f64) -> u64 {
+            let u = (self.next() >> 11) as f64 / (1u64 << 53) as f64;
+            (-(1.0 - u).ln() * mean) as u64
+        }
+    }
+
+    #[test]
+    fn fit_recovers_exact_line() {
+        let mut f = ClockFit::sixty_seconds();
+        for i in 0..100u64 {
+            let h = 1_000_000_000_000 + i * 100_000_000;
+            let s = h as i64 + 5_000_000 + (h as f64 * 10e-6) as i64;
+            f.push(h, s);
+        }
+        let h = 1_000_000_000_000 + 99 * 100_000_000;
+        let want = 5_000_000.0 + h as f64 * 10e-6;
+        assert!((f.offset_ns(h).unwrap() - want).abs() < 2.0);
+        assert!((f.skew_ppm() - 10.0).abs() < 1e-3);
+        assert!(f.sigma_ns() <= 1);
+        let src = f.to_source(h).unwrap();
+        assert!((f.to_host(src).unwrap() as i64 - h as i64).abs() <= 1);
+    }
+
+    /// A UTC-scale source (offset ~1.76e18 ns) keeps nanosecond precision:
+    /// exact data recovers the offset to the ns and a zero sigma.
+    #[test]
+    fn utc_scale_offset_keeps_nanosecond_precision() {
+        let utc_offset: i64 = 1_760_860_000_123_456_789;
+        let mut f = ClockFit::sixty_seconds();
+        for i in 0..20u64 {
+            let h = 400_000_000_000 + i * 1_000_000_000;
+            f.push(h, h as i64 + utc_offset);
+        }
+        let h = 400_000_000_000 + 19 * 1_000_000_000 + 250_000_000;
+        let want = h as i64 + utc_offset;
+        let got = f.to_source(h).unwrap();
+        assert!(got.abs_diff(want) <= 2, "error {} ns", got - want);
+        assert!(f.offset_i64(h).unwrap().abs_diff(utc_offset) <= 2);
+        assert_eq!(f.sigma_ns(), 0);
+        assert!(f.to_host(want).unwrap().abs_diff(h) <= 2);
+    }
+
+    #[test]
+    fn fit_window_drops_old_pairs_and_sigma_reports_noise() {
+        let mut f = ClockFit::new(10_000_000_000, 4096);
+        assert_eq!(f.sigma_ns(), -1);
+        // A first regime that must age out of the 10 s window.
+        for i in 0..50u64 {
+            f.push(i * 100_000_000, (i * 100_000_000) as i64 + 1_000_000);
+        }
+        let mut rng = Rng(7);
+        for i in 0..200u64 {
+            let h = 20_000_000_000 + i * 50_000_000;
+            let noise = (rng.next() % 2001) as i64 - 1000;
+            f.push(h, h as i64 - 3_000_000 + noise);
+        }
+        assert!(f.len() <= 201);
+        let o = f.offset_ns(f.last_host_ns().unwrap()).unwrap();
+        assert!((o + 3_000_000.0).abs() < 300.0, "offset {o}");
+        let sigma = f.sigma_ns();
+        assert!((400..=800).contains(&sigma), "sigma {sigma}");
+    }
+
+    /// TIMESYNC: 37.2 ms offset + 40 ppm skew, asymmetric random link delays,
+    /// recovered within 2 µs.
+    #[test]
+    fn timesync_recovers_offset_and_skew_within_two_microseconds() {
+        let offset = 37_200_000.0;
+        let skew = 40e-6;
+        let fc = |host: u64| (host as f64 * (1.0 + skew) + offset) as i64;
+        let mut est = TimesyncEstimator::default();
+        let mut rng = Rng(0x5eed);
+        let mut host = 5_000_000_000u64;
+        let mut accepted = 0;
+        for _ in 0..600 {
+            // 10 Hz exchanges over 60 s, each way 300 µs base + jitter.
+            host += 100_000_000;
+            let up = 300_000 + rng.delay(20_000.0);
+            let down = 300_000 + rng.delay(20_000.0);
+            let source = fc(host + up);
+            if est.on_exchange(host, source, host + up + down).is_some() {
+                accepted += 1;
+            }
+        }
+        assert!(accepted > 50, "accepted {accepted}");
+        let t = host;
+        let want = fc(t) as f64 - t as f64;
+        let got = est.fit().offset_ns(t).unwrap();
+        assert!(
+            (got - want).abs() < 2_000.0,
+            "offset error {} ns",
+            got - want
+        );
+        assert!((est.fit().skew_ppm() - 40.0).abs() < 0.05);
     }
 }

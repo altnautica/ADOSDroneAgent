@@ -1,42 +1,23 @@
 [package]
 name = "ados-clock"
-publish = false
-version.workspace = true
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
-description = "Host clock service: brokers the sensor bus (/run/ados/sensing/sensors.sock), fits every time source against the host monotonic clock, picks the session timebase, publishes clock samples, writes the clock and sensor-stream sidecars, and feeds a GNSS PPS lock to chrony."
+homepage.workspace = true
+documentation = "https://docs.rs/ados-clock"
+readme = "README.md"
+description = "Map remote clocks onto a host monotonic timebase: windowed least-squares and lower-envelope fits, NTP-style TIMESYNC estimation and a chrony SOCK refclock sink."
+keywords = ["clock", "time-sync", "chrony", "timesync", "sensor-fusion"]
+categories = ["date-and-time", "science::robotics", "embedded"]
 
-[lib]
-name = "ados_clock"
-path = "src/lib.rs"
-
-[[bin]]
-name = "ados-clock"
-path = "src/main.rs"
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
-ados-clock-fit = { workspace = true }
-ados-config = { path = "../ados-config" }
-# The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
-# the logging daemon's ingest socket alongside journald; never on the hot path.
-ados-protocol = { workspace = true, features = ["tracing-layer"] }
-ados-sensorbus = { path = "../ados-sensorbus" }
-anyhow = { workspace = true }
-# Timestamp-only views of the bus payloads (the full messages are not decoded).
-prost = "0.14"
-rmp-serde = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-nix = { workspace = true }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-tracing-journald = { workspace = true }
-sd-notify = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

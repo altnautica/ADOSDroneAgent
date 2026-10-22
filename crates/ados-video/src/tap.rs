@@ -14,7 +14,7 @@
 //! orchestrator restarts it on its own ladder and the encode + radio path is
 //! untouched.
 //!
-//! The engine is the client ([`ados_vision`]'s `TapSource` does
+//! The engine is the client ([`ados_vision_engine`]'s `TapSource` does
 //! `UnixStream::connect`), so this side binds and serves. The framing is
 //! defined once in [`ados_protocol::tap`] and both halves build against it —
 //! the same frozen-wire-contract discipline the mavlink, state, and plugin

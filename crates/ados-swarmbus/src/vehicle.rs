@@ -12,10 +12,10 @@
 use serde_json::Value;
 
 use crate::beacon::SwarmBeacon;
-use ados_swarm_laws::status::{
+use ados_swarm::status::{
     STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO,
 };
-use ados_swarm_laws::ModePrecedence;
+use ados_swarm::ModePrecedence;
 
 /// The lowest `GPS_RAW_INT.fix_type` that counts as a usable fix
 /// (`GPS_FIX_TYPE_3D_FIX`).
@@ -181,8 +181,8 @@ pub fn beacon_from_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_swarm_laws::status::STATUS_PRECEDENCE_MASK;
-    use ados_swarm_laws::ModePrecedence;
+    use ados_swarm::status::STATUS_PRECEDENCE_MASK;
+    use ados_swarm::ModePrecedence;
     use serde_json::json;
 
     /// A beacon from a snapshot whose position fix is fresh.

@@ -117,7 +117,7 @@ jobs:
         run: |
           set -uo pipefail
           # --ignored runs ONLY the ignored tests.
-          cargo test --features onnx -p ados-vision -- --ignored --nocapture
+          cargo test --features onnx -p ados-vision-engine -- --ignored --nocapture
 
       - name: Record the outcome
         if: always()

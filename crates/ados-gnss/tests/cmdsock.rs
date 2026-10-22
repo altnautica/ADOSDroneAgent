@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use ados_gnss::config::{GnssConfig, ReceiverCfg, Source};
 use ados_gnss::service::{Service, Shared};
-use ados_gnss_stream::base::BaseMode;
-use ados_gnss_stream::valset::RxPort;
+use ados_positioning::base::BaseMode;
+use ados_positioning::valset::RxPort;
 use ados_protocol::shutdown::Shutdown;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

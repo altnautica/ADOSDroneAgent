@@ -19,10 +19,10 @@ use crate::config::{GnssConfig, ReceiverCfg, Source};
 use crate::status::{
     BaseOut, GnssStatus, Heading, ReceiverView, RtcmCounter, GNSS_SIDECAR_VERSION,
 };
-use ados_gnss_stream::base::{Base, BaseMode, BaseState, Capability};
-use ados_gnss_stream::receiver::ReceiverState;
-use ados_gnss_stream::stream::Frame;
-use ados_gnss_stream::{nmea, ubx, valset};
+use ados_positioning::base::{Base, BaseMode, BaseState, Capability};
+use ados_positioning::receiver::ReceiverState;
+use ados_positioning::stream::Frame;
+use ados_positioning::{nmea, ubx, valset};
 
 pub type Shared = Arc<Mutex<Service>>;
 

@@ -1,5 +1,5 @@
 use super::*;
-use ados_swarm_laws::geo::Ned;
+use ados_swarm::geo::Ned;
 
 #[test]
 fn a_setpoint_is_addressed_to_the_latched_autopilot_not_system_one() {
@@ -51,7 +51,7 @@ fn the_status_block_publishes_the_controller_counters() {
     s.publish(
         ModePrecedence::Flocking,
         true,
-        ados_swarm_laws::SwarmControlCounters {
+        ados_swarm::SwarmControlCounters {
             setpoints_emitted: 7,
             ticks_suppressed: 3,
             hard_engagements: 2,
@@ -148,9 +148,9 @@ fn own_fresh() -> OwnState {
 
 /// Slot 2, `north_m` metres north of `own_fresh`, at the same altitude.
 fn neighbour_north(north_m: f64) -> NeighborFix {
-    use ados_swarm_laws::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED};
+    use ados_swarm::{STATUS_ARMED, STATUS_GPS_OK, STATUS_GUIDED};
     let (lat, lon, alt) =
-        ados_swarm_laws::GeoOrigin::new(HOME.0, HOME.1, HOME.2).to_geo(Ned::new(north_m, 0.0, 0.0));
+        ados_swarm::GeoOrigin::new(HOME.0, HOME.1, HOME.2).to_geo(Ned::new(north_m, 0.0, 0.0));
     NeighborFix {
         slot: 2,
         lat_deg: lat,
@@ -348,7 +348,7 @@ fn a_missing_file_or_block_is_the_default_not_an_error() {
 
 #[test]
 fn the_block_is_read_verbatim() {
-    use ados_swarm_laws::{FormationName, SwarmMode};
+    use ados_swarm::{FormationName, SwarmMode};
     let dir = tempfile::tempdir().unwrap();
     let p = write(
         dir.path(),

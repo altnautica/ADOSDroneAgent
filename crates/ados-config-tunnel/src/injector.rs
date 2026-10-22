@@ -17,9 +17,8 @@ use tokio::sync::{oneshot, watch, Mutex};
 use tokio::time::Instant;
 
 use ados_mavlink_tunnel::{CompletedMessage, PushOutcome, Reassembler, TunnelError};
-use ados_protocol::mavlink::{
-    build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader, CONFIG_TUNNEL_PAYLOAD_TYPE,
-};
+use ados_protocol::config_tunnel::CONFIG_TUNNEL_PAYLOAD_TYPE;
+use ados_protocol::mavlink::{build_tunnel_v2, tunnel_payload, tunnel_payload_type, MavHeader};
 
 use crate::stats::Counters;
 use crate::transport::TunnelTransport;

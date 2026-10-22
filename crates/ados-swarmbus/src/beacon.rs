@@ -17,7 +17,7 @@
 //!   dead-reckoning epoch and the staleness signal in one, and it deliberately
 //!   does NOT carry wall-clock: two drones with unsynchronised clocks must still
 //!   agree on which of two beacons is newer, and a 65.5 s wrap is far longer than
-//!   [`ados_swarm_laws::NEIGHBOR_STALE`].
+//!   [`ados_swarm::NEIGHBOR_STALE`].
 //! - **`status`** packs five independent conditions plus the active mode
 //!   precedence into one byte. Each bit is a separate condition, never blended:
 //!   an armed drone with a bad GPS fix and an armed drone in emergency are
@@ -26,11 +26,11 @@
 
 // The status bit layout is defined once, in the control-law crate, so the bits a
 // beacon encodes and the bits a control law reads cannot drift apart.
-use ados_swarm_laws::status::{
+use ados_swarm::status::{
     STATUS_ARMED, STATUS_EMERGENCY, STATUS_GPS_OK, STATUS_GUIDED, STATUS_HERO,
     STATUS_PRECEDENCE_MASK,
 };
-use ados_swarm_laws::ModePrecedence;
+use ados_swarm::ModePrecedence;
 
 /// The beacon's exact on-air length. `size_of::<SwarmBeacon>()` is **24** —
 /// `repr(C)` pads `slot`/`seq_ms` to a 4-byte boundary and tail-pads `status` —
@@ -191,7 +191,7 @@ impl SwarmBeacon {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_swarm_laws::status::STATUS_PRECEDENCE_SHIFT;
+    use ados_swarm::status::STATUS_PRECEDENCE_SHIFT;
 
     /// A beacon with every field distinct, so a swapped or overlapping offset in
     /// `encode`/`decode` cannot round-trip. Deliberately uses negative values in

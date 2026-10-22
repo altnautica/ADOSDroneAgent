@@ -65,5 +65,5 @@ futures-util = "0.3"
 parking_lot = { workspace = true }
 # The vision wire tests serve the real engine's `vision.sock` in-process, so
 # what the SDK builds is decoded by the engine's own handlers, not a copy.
-ados-vision = { path = "../ados-vision" }
+ados-vision-engine = { path = "../ados-vision-engine" }
 anyhow = { workspace = true }
