@@ -28,6 +28,8 @@
 //!   coordinate transform is pure; only the node drain is Linux-gated.
 //! * [`touch_supervisor`] — the never-give-up discover/drain loop around it.
 //! * [`state_poller`] — the off-loop agent-state poller the render loop reads.
+//! * [`kiosk`] — the HDMI kiosk: a full-screen browser on the cockpit, under
+//!   cage or inside a running desktop session (`ados-kiosk`).
 //!
 //! mDNS and the FastAPI display routes stay in Python; the byte-level write path
 //! and the page render both live here.
@@ -38,6 +40,7 @@ pub mod conf;
 pub mod daemon;
 pub mod graphics;
 pub mod host_identity;
+pub mod kiosk;
 pub mod log_tail;
 pub mod navigator;
 pub mod oled_frame;

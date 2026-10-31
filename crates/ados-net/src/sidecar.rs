@@ -4,14 +4,12 @@
 //! sibling, then `rename` over the destination so a reader never sees a
 //! half-written file. Two flavors:
 //!
-//! * [`write_atomic`] — write + rename, no fsync. Matches the Python
-//!   `save_priority` (`tmp.write_text(...)` then `os.replace`), which does not
-//!   fsync. Used for the priority list and the active-uplink flag.
+//! * [`write_atomic`] — write + rename, no fsync. Used for the priority list
+//!   and the active-uplink flag.
 //! * [`write_atomic_fsync`] — write + `sync_all` + rename. For callers that
 //!   want the bytes durable before the rename (later chunks may opt in).
 //!
-//! The tmp-suffix policy mirrors Python's `Path.with_suffix(".json.tmp")`,
-//! which replaces the final `.json` component, so
+//! The tmp sibling replaces the final `.json` component with `.json.tmp`,
 //! `ground-station-uplink.json` → `ground-station-uplink.json.tmp`.
 
 use std::io::Write;

@@ -2,7 +2,7 @@
 //!
 //! * `lcd-state.json` (`active_page_id`) — read to restore the page on restart.
 //! * `lcd-page-request.json` (`page`) — a remote page-switch request; read then
-//!   unlinked so the same request can't reapply (mirrors the Python watcher).
+//!   unlinked so the same request can't reapply.
 //! * `lcd-fb-stats.json` — the fb-writer stats snapshot, written atomically at
 //!   1 Hz so the diagnostics surface sees the SPI throughput. Every writer here
 //!   goes through `ados_protocol::sidecar::write_atomic` (unique temp sibling,

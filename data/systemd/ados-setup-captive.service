@@ -14,11 +14,11 @@ StartLimitIntervalSec=0
 Slice=ados.slice
 Type=simple
 User=root
-ExecStart=/opt/ados/venv/bin/python -m ados.services.setup_webapp.captive_dns
+ExecStart=/opt/ados/bin/ados-captive
 Restart=always
 # 0 is the "nothing to serve" exit: setup is complete, ados-dnsmasq-gs owns
-# DNS, or port 53 is already taken. Restarting it started Python every
-# RestartSec= until setup completed. A crash still restarts.
+# DNS, or port 53 is already taken. Restarting it would re-run the portal
+# every RestartSec= until setup completed. A crash still restarts.
 RestartPreventExitStatus=0
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml

@@ -24,6 +24,10 @@ path = "src/bin/ados-display-probe.rs"
 name = "ados-oled-i2c"
 path = "src/bin/ados-oled-i2c.rs"
 
+[[bin]]
+name = "ados-kiosk"
+path = "src/bin/ados-kiosk.rs"
+
 [dependencies]
 ados-display-driver = { workspace = true }
 ados-hmi = { workspace = true }
@@ -33,6 +37,9 @@ ados-hid = { path = "../ados-hid" }
 # The node profile resolver (config `agent.profile`, then `profile.conf`) the
 # panel page set keys on.
 ados-config = { path = "../ados-config" }
+# Process-group children (the kiosk compositor / browser) and bounded command
+# runs (loginctl, systemctl, wlr-randr, pkill, ps).
+ados-proc = { path = "../ados-proc" }
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
 ados-protocol = { workspace = true, features = ["tracing-layer"] }
@@ -64,6 +71,9 @@ sd-notify = { workspace = true }
 # `EventStream` the touch reader drains in the daemon's select! loop. Only the
 # node-open + read path is Linux-gated; the coordinate transform stays pure.
 evdev = { version = "0.12", features = ["tokio"] }
+# The passwd lookup that resolves a desktop session user's home and primary
+# group before the kiosk window is dropped to that user.
+nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

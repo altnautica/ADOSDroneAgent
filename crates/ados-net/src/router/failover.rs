@@ -4,7 +4,7 @@
 //! The router FSM owns the loop and the live state. This module owns the pure
 //! logic: the configured priority list (load/save), the hysteresis thresholds,
 //! the routing-table replace command, and the selection helpers that pick the
-//! next viable uplink. Ports `uplink/failover.py`.
+//! next viable uplink.
 
 use std::path::Path;
 use std::time::Duration;

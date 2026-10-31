@@ -9,7 +9,7 @@
 //! kernel default route happens to be at probe time. Binding needs
 //! `CAP_NET_RAW`; on `EPERM` (or any non-Linux host where the option does not
 //! exist) we fall back to a plain connect on the current default route, which
-//! still validates reachability. Ports `uplink/health.py`.
+//! still validates reachability.
 
 use std::net::ToSocketAddrs;
 use std::time::Duration;

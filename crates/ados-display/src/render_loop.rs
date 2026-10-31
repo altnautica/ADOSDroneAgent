@@ -1,17 +1,16 @@
-//! The page render loop that drives the LCD off the device state.
+//! The frame path between the page composers and the LCD framebuffer.
 //!
-//! On each tick it reads the latest agent state, asks the [`crate::navigator`]
-//! for the active page, has the page composer in [`crate::pages`] paint a
-//! full-panel [`crate::graphics::primitives::Canvas`], packs it for the panel's
-//! bit depth via [`ados_display_driver::pack`], and hands the frame to the
-//! off-thread [`ados_display_driver::fb_writer`] (latest-wins,
-//! duplicate-skip). This replaces the prior page-render service while reusing
-//! the byte-level write path.
+//! The display daemon's page UI ticks at [`TICK_GRANULARITY`], asks the
+//! [`crate::navigator`] for the active page, and has the page composer in
+//! [`crate::pages`] paint a full-panel [`crate::graphics::primitives::Canvas`].
+//! [`FramePresenter`] then hashes that canvas, skips it when the off-thread
+//! [`ados_display_driver::fb_writer`] already holds the same frame, and
+//! otherwise fits it to the panel resolution and packs it for the panel's bit
+//! depth via [`ados_display_driver::pack`] before handing it to the writer
+//! (latest-wins, duplicate-skip).
 //!
-//! This module carries the pure frame-packing seam the loop is built on. The
-//! tick loop itself is wired in the integration stage that follows; keeping the
-//! seam here lets the page composers and the panel write path develop and test
-//! independently.
+//! A panel whose resolution matches the canvas is packed straight from the
+//! canvas bytes; any other size is scaled and letterboxed first.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -35,15 +34,15 @@ pub fn pack_frame(canvas: &Canvas, bpp: u32) -> Option<Vec<u8>> {
     pack_for_bpp(canvas.as_rgb888(), bpp)
 }
 
-/// How the native canvas was placed onto a differently-sized panel: the uniform
+/// How the native canvas is placed onto a differently-sized panel: the uniform
 /// scale factor and the top-left offset of the scaled image within the panel.
 ///
-/// This is RENDER-side placement geometry — [`scale_letterbox`] uses it to blit
-/// the scaled canvas, and it is returned so the placement can be asserted in
-/// tests. It is NOT how touch is mapped: the touch layer maps raw ADC counts to
-/// LCD pixels through the [`crate::touch_input`] affine calibration, fit against
-/// the panel's real geometry independently of this letterbox, so there is no
-/// panel-to-canvas inverse of this transform anywhere on the touch path.
+/// This is RENDER-side placement geometry: [`scale_letterbox`] uses it to blit
+/// the scaled canvas. It is NOT how touch is mapped: the touch layer maps raw
+/// ADC counts to LCD pixels through the [`crate::touch_input`] affine
+/// calibration, fit against the panel's real geometry independently of this
+/// letterbox, so there is no panel-to-canvas inverse of this transform anywhere
+/// on the touch path.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LetterboxTransform {
     pub scale: f32,
@@ -87,37 +86,27 @@ impl LetterboxTransform {
 
 /// Scale the native `src_w`x`src_h` RGB888 canvas to fit a `xres`x`yres` panel,
 /// preserving aspect ratio, centered, with black letterbox bars — so the panel
-/// size no longer has to match the authoring size. Bilinear sampling.
+/// size no longer has to match the authoring size. Bilinear sampling, placed by
+/// [`LetterboxTransform::fit`].
 ///
-/// Returns the packed-target RGB888 buffer (`xres*yres*3` bytes, ready for
-/// [`pack_for_bpp`]) and the [`LetterboxTransform`] that placed it. When the
-/// panel already matches the canvas exactly, this is a cheap identity copy so
-/// the common case pays nothing.
-pub fn scale_letterbox(
-    src: &[u8],
-    src_w: u32,
-    src_h: u32,
-    xres: u32,
-    yres: u32,
-) -> (Vec<u8>, LetterboxTransform) {
+/// Returns the RGB888 buffer (`xres*yres*3` bytes, ready for [`pack_for_bpp`]).
+/// When the panel already matches the canvas exactly the result is a copy of
+/// `src`.
+pub fn scale_letterbox(src: &[u8], src_w: u32, src_h: u32, xres: u32, yres: u32) -> Vec<u8> {
     if xres == src_w && yres == src_h {
-        return (src.to_vec(), LetterboxTransform::identity(src_w, src_h));
+        return src.to_vec();
     }
     if src_w == 0 || src_h == 0 || xres == 0 || yres == 0 {
-        return (
-            vec![0u8; (xres as usize) * (yres as usize) * 3],
-            LetterboxTransform::identity(src_w, src_h),
-        );
+        return vec![0u8; (xres as usize) * (yres as usize) * 3];
     }
 
-    let xf = LetterboxTransform::fit(src_w, src_h, xres, yres);
     let LetterboxTransform {
         scale,
         offset_x,
         offset_y,
         scaled_w,
         scaled_h,
-    } = xf;
+    } = LetterboxTransform::fit(src_w, src_h, xres, yres);
 
     let mut out = vec![0u8; (xres as usize) * (yres as usize) * 3]; // black bars
     let sw = src_w as i32;
@@ -150,29 +139,27 @@ pub fn scale_letterbox(
             out[di..di + 3].copy_from_slice(&rgb);
         }
     }
-    (out, xf)
+    out
 }
 
-/// Pack the native canvas, scaled+letterboxed to a `xres`x`yres` panel, for
-/// `bpp`. The scale-to-fit entry point the render loop uses instead of packing
-/// the raw canvas: on an exactly-matching panel it is `pack_frame`, on any other
-/// size it fits the canvas and fills the surplus with black. Returns the packed
-/// bytes (length `xres*yres*bpp/8`) plus the transform for the touch layer, or
-/// `None` on an unsupported depth.
-pub fn pack_frame_fitted(
-    canvas: &Canvas,
-    bpp: u32,
-    xres: u32,
-    yres: u32,
-) -> Option<(Vec<u8>, LetterboxTransform)> {
-    let (rgb, xf) = scale_letterbox(
+/// Pack the native canvas for a `xres`x`yres` panel at `bpp`. The entry point
+/// the render loop uses: on an exactly-matching panel it is [`pack_frame`]
+/// (packed straight from the canvas bytes, no intermediate copy); on any other
+/// size it scales and letterboxes the canvas first, filling the surplus with
+/// black. Returns the packed bytes (length `xres*yres*bpp/8`), or `None` on an
+/// unsupported depth.
+pub fn pack_frame_fitted(canvas: &Canvas, bpp: u32, xres: u32, yres: u32) -> Option<Vec<u8>> {
+    if xres == canvas.width() && yres == canvas.height() {
+        return pack_frame(canvas, bpp);
+    }
+    let rgb = scale_letterbox(
         canvas.as_rgb888(),
         canvas.width(),
         canvas.height(),
         xres,
         yres,
     );
-    pack_for_bpp(&rgb, bpp).map(|packed| (packed, xf))
+    pack_for_bpp(&rgb, bpp)
 }
 
 /// Presents finished canvases through the off-thread writer without redoing
@@ -211,7 +198,7 @@ impl FramePresenter {
         let hash = hash_bytes(raw);
         if !writer.is_last(hash) {
             match pack_frame_fitted(canvas, self.bpp, self.xres, self.yres) {
-                Some((packed, _xf)) => {
+                Some(packed) => {
                     self.packs += 1;
                     writer.present(Frame::with_hash(packed, hash));
                 }
@@ -269,11 +256,13 @@ mod tests {
     }
 
     #[test]
-    fn scale_letterbox_identity_is_a_cheap_copy() {
+    fn scale_letterbox_identity_is_a_copy() {
         let src = vec![7u8; 4 * 3 * 3]; // 4x3 RGB
-        let (out, xf) = scale_letterbox(&src, 4, 3, 4, 3);
-        assert_eq!(out, src);
-        assert_eq!(xf, LetterboxTransform::identity(4, 3));
+        assert_eq!(scale_letterbox(&src, 4, 3, 4, 3), src);
+        assert_eq!(
+            LetterboxTransform::fit(4, 3, 4, 3),
+            LetterboxTransform::identity(4, 3)
+        );
     }
 
     #[test]
@@ -281,7 +270,8 @@ mod tests {
         // A 2x2 white canvas onto a 6x4 panel: scale = min(3, 2) = 2, so the
         // image is 4x4 centered -> x-bars of 1px each side, no y-bars.
         let src = vec![255u8; 2 * 2 * 3];
-        let (out, xf) = scale_letterbox(&src, 2, 2, 6, 4);
+        let out = scale_letterbox(&src, 2, 2, 6, 4);
+        let xf = LetterboxTransform::fit(2, 2, 6, 4);
         assert_eq!(out.len(), 6 * 4 * 3);
         assert_eq!(xf.scale, 2.0);
         assert_eq!((xf.scaled_w, xf.scaled_h), (4, 4));
@@ -297,15 +287,16 @@ mod tests {
     }
 
     #[test]
-    fn letterbox_transform_fit_matches_scale_letterbox() {
-        // fit() is the pure-geometry twin of scale_letterbox's placement.
-        let src = [255u8; 2 * 2 * 3];
-        let (_out, xf) = scale_letterbox(&src, 2, 2, 6, 4);
-        assert_eq!(xf, LetterboxTransform::fit(2, 2, 6, 4));
+    fn pack_frame_fitted_matches_pack_frame_on_a_matching_panel() {
+        let canvas = blank_panel(&DARK);
+        let (w, h) = (canvas.width(), canvas.height());
         assert_eq!(
-            LetterboxTransform::fit(480, 320, 480, 320),
-            LetterboxTransform::identity(480, 320)
+            pack_frame_fitted(&canvas, 16, w, h),
+            pack_frame(&canvas, 16)
         );
+        // A larger panel is letterboxed to its own size.
+        let packed = pack_frame_fitted(&canvas, 16, w * 2, h * 2).unwrap();
+        assert_eq!(packed.len(), (w * 2 * h * 2 * 2) as usize);
     }
 
     struct CountingSink(std::sync::Arc<std::sync::atomic::AtomicUsize>);

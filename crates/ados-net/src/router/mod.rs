@@ -6,7 +6,7 @@
 //! (`usb0` when a laptop shares its connection over the USB gadget). This
 //! orchestrator picks exactly one as the default route based on a configured
 //! priority list, and fails over automatically when the active uplink stops
-//! reaching the cloud relay. Ports `uplink/router.py`.
+//! reaching the cloud relay.
 //!
 //! The hardware managers (wifi-client / ethernet / hostapd / modem), the
 //! firewall, the USB-gadget surface, and the data-cap tracker land in later

@@ -1,10 +1,9 @@
 //! Uplink event types and fanout bus.
 //!
 //! [`UplinkEvent`] is the canonical record for routing, health, and data-cap
-//! state changes. [`UplinkEventBus`] mirrors the Python `UplinkEventBus`:
-//! bounded fanout, drop-on-lag. The Python side keeps bounded per-subscriber
-//! queues with drop-on-full; `tokio::sync::broadcast` is the idiomatic
-//! equivalent — a bounded ring per channel where a slow receiver loses the
+//! state changes. [`UplinkEventBus`] is a bounded fanout with drop-on-lag:
+//! `tokio::sync::broadcast` keeps
+//! a bounded ring per channel where a slow receiver loses the
 //! oldest events (a `Lagged` skip) rather than blocking the publisher.
 
 use serde::Serialize;

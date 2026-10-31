@@ -1,8 +1,8 @@
 //! Contract-E filesystem path constants used by the uplink matrix.
 //!
-//! Mirrors the subset of `core/paths.py` the uplink router reads and writes.
-//! Other crates (mesh) read `UPLINK_ACTIVE_FLAG` by literal path, so the
-//! constants here must stay byte-identical to the Python side.
+//! The subset of runtime/config paths the uplink router reads and writes.
+//! Other crates (mesh) read `UPLINK_ACTIVE_FLAG` by literal path, so these
+//! constants must not change.
 
 use std::path::Path;
 

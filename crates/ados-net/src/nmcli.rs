@@ -34,7 +34,6 @@ pub fn parse_terse_line(line: &str) -> Vec<String> {
 
 /// Parse multi-line terse output into rows, skipping blank lines and keeping
 /// only rows with at least `fields` columns (each truncated to `fields`).
-/// Mirrors the Python `_parse_nmcli_terse(text, fields)`.
 pub fn parse_terse(text: &str, fields: usize) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     for line in text.lines() {

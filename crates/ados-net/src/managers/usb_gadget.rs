@@ -4,10 +4,9 @@
 //! Linux, Android 11+) gets a USB-Ethernet link and a DHCP lease for
 //! 192.168.7.2. The gadget lives under `/sys/kernel/config/usb_gadget/ados_gs`
 //! and binds to the first `/sys/class/udc`; after bind, usb0 gets
-//! 192.168.7.1/24 and a single-host `dnsmasq` serves the tethered host. Ports
-//! `usb_gadget.py`.
+//! 192.168.7.1/24 and a single-host `dnsmasq` serves the tethered host.
 //!
-//! The dnsmasq fork goes through [`ManagedProcess`] (setsid + killpg)
+//! The dnsmasq fork goes through [`GroupChild`] (setsid + killpg)
 //! so a teardown can never orphan a dnsmasq holding a bound socket on usb0.
 //! Posture: requires root + configfs; off-Linux or unprivileged, the configfs
 //! writes fail cleanly and `setup` returns false without panicking.
@@ -18,7 +17,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tracing::{error, info, warn};
 
-use crate::process::ManagedProcess;
+use ados_proc::{GroupChild, Spec, StderrMode, StdoutMode};
 
 const GADGET_NAME: &str = "ados_gs";
 const USB_INTERFACE: &str = "usb0";
@@ -64,7 +63,7 @@ pub struct UsbGadgetManager {
     net_dir: PathBuf,
     dnsmasq_conf_path: PathBuf,
     dnsmasq_pid_path: PathBuf,
-    dnsmasq: Option<ManagedProcess>,
+    dnsmasq: Option<GroupChild>,
     bound: bool,
     /// True once `setup` brought usb0 up: the tethered host is owed a DHCP
     /// server from here on, so `supervise` keeps dnsmasq running.
@@ -262,7 +261,14 @@ impl UsbGadgetManager {
             return false;
         }
         let conf_arg = format!("--conf-file={}", self.dnsmasq_conf_path.to_string_lossy());
-        match ManagedProcess::spawn("dnsmasq", &["--keep-in-foreground", &conf_arg]) {
+        let args = ["--keep-in-foreground".to_string(), conf_arg];
+        let spec = Spec {
+            program: "dnsmasq",
+            args: &args,
+            stdout: StdoutMode::Null,
+            stderr: StderrMode::Null,
+        };
+        match GroupChild::spawn("dnsmasq", spec) {
             Ok(proc) => {
                 info!(pid = ?proc.pid(), conf = %self.dnsmasq_conf_path.display(), "usb_gadget_dnsmasq_started");
                 self.dnsmasq = Some(proc);
@@ -384,7 +390,7 @@ fn dnsmasq_needs_restart(serving: bool, running: bool) -> bool {
 }
 
 /// Write `value` to a configfs attribute with NO trailing newline (configfs
-/// rejects a trailing newline on some attributes). Mirrors the Python `_write`.
+/// rejects a trailing newline on some attributes).
 fn write_no_newline(path: &Path, value: &str) -> std::io::Result<()> {
     std::fs::write(path, value)
 }

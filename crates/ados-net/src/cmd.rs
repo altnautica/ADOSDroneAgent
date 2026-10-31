@@ -1,6 +1,6 @@
 //! Async command runner for the uplink managers.
 //!
-//! Mirrors the Python `_run(cmd, timeout) -> (rc, stdout, stderr)` tuple shape:
+//! Every command resolves to an `(rc, stdout, stderr)` [`CmdOut`]:
 //! a timeout yields rc 124 (the `timeout(1)` convention), a spawn error yields
 //! rc 1. Execution is abstracted behind [`CmdRunner`] so the ethernet and
 //! wifi-client managers are unit-testable against a scripted fake instead of a

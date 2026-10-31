@@ -42,7 +42,7 @@ impl ModemManager {
 
     /// Bring up the cellular data session. D-Bus first; on failure the manager
     /// advances its failure counter and (past threshold) flips to the AT
-    /// fallback. In fallback D-Bus is retried every [`DBUS_RETRY_INTERVAL`], so
+    /// fallback. In fallback D-Bus is retried every `DBUS_RETRY_INTERVAL`, so
     /// a transient D-Bus outage does not pin the modem to AT for good. Returns
     /// a status dict. `apn = "auto"` resolves via the supplied IMSI ("auto"
     /// with no IMSI falls back to `internet`).

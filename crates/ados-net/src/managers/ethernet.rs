@@ -4,8 +4,8 @@
 //! the wired iface up on cable-plug. This manager reads
 //! `/sys/class/net/<iface>/carrier` for liveness, resolves the default gateway
 //! via `ip route`, and offers nmcli static/DHCP configuration. It implements
-//! the [`UplinkManager`] trait so the router can probe it. Ports
-//! `ethernet_manager.py`. Bench-runnable: carrier reads return "down" when the
+//! the [`UplinkManager`] trait so the router can probe it. Bench-runnable:
+//! carrier reads return "down" when the
 //! iface is absent, no NIC required.
 
 use std::path::PathBuf;
@@ -309,7 +309,7 @@ impl EthernetManager {
                 .await;
             if out.ok() {
                 for line in out.stdout.lines() {
-                    // Mirror Python `line.partition(":")`: split on the FIRST ':'.
+                    // Split on the FIRST ':' only; values may contain ':'.
                     let Some((key, val)) = line.split_once(':') else {
                         continue;
                     };

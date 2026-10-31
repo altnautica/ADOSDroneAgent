@@ -164,6 +164,18 @@ _FLAG_GATED: dict[str, _FlagGated] = {
         profiles=("drone", "ground-station", "visor"),
         opt_out=True,
     ),
+    # The first-boot captive portal and the HDMI kiosk: native-only, ground
+    # station only (the installer fetches both for that profile alone).
+    "captive": _FlagGated(
+        flag=None,
+        binaries=("ados-captive",),
+        profiles=("ground-station",),
+    ),
+    "kiosk": _FlagGated(
+        flag=None,
+        binaries=("ados-kiosk",),
+        profiles=("ground-station",),
+    ),
 }
 
 

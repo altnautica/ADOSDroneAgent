@@ -20,9 +20,9 @@ use serde::{Deserialize, Serialize};
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 
 /// The `ground_station:` section. Only `share_uplink` is typed; every other
-/// field is tolerated. The default mirrors the Python
-/// `GroundStationConfig.share_uplink = False`, so an absent section reads as
-/// off.
+/// field is tolerated. The default must agree with `share_uplink: bool = False`
+/// on `GroundStationConfig` in `src/ados/core/config/ground_station.py`, so an
+/// absent section reads as off.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct GroundStationSection {
     #[serde(default)]

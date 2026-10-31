@@ -129,10 +129,10 @@ def test_gs_needs_groundlink_and_hid(roots: tuple[Path, Path]) -> None:
         == "hybrid"
     )
 
-    # Now make groundlink + hid native too → GS reaches native. groundlink
-    # is native-only (native once its binary is present, no marker); hid is
-    # still opt-in and needs its marker.
-    for b in ("ados-groundlink", "ados-pic", "ados-input"):
+    # Now make groundlink + hid + the portal and kiosk native too → GS reaches
+    # native. groundlink, captive and kiosk are native-only (native once their
+    # binary is present, no marker); hid is still opt-in and needs its marker.
+    for b in ("ados-groundlink", "ados-pic", "ados-input", "ados-captive", "ados-kiosk"):
         _make_bin(bin_dir, b)
     _touch_flag(etc_dir, "hid-rust-enabled")
     assert (

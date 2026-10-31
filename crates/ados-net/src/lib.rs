@@ -5,6 +5,7 @@
 //! tracker, and the share-uplink firewall / throttle. The modem speaks D-Bus
 //! (ModemManager1) and delegates its AT fallback to the Python service.
 
+pub mod captive;
 pub mod cmd;
 pub mod cmdsock;
 pub mod config;
@@ -16,7 +17,6 @@ pub mod iw_scan;
 pub mod managers;
 pub mod nmcli;
 pub mod paths;
-pub mod process;
 pub mod router;
 pub mod sidecar;
 pub mod throttle;
@@ -31,7 +31,6 @@ pub use managers::{
     apn_for_imsi, build_ssid, EthernetManager, HostapdManager, ModemConfig, ModemManager,
     UsbGadgetManager, WifiClientManager,
 };
-pub use process::ManagedProcess;
 pub use router::active_flag::{ActiveFlagWriter, ActiveUplinkFlag};
 pub use router::events::{DataCapState, UplinkEvent, UplinkEventBus, UplinkEventKind};
 pub use router::failover;

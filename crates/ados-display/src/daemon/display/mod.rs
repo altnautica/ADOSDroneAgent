@@ -4,7 +4,8 @@
 //! framebuffer, opens the mmap sink, and runs the off-thread writer.
 //!
 //! The full-resolution page UI in [`crate::pages`] renders in-process: a
-//! [`StateSource`] reads the live agent state, the [`PageNavigator`] resolves
+//! [`crate::state_source::StateSource`] reads the live agent state, the
+//! [`crate::navigator::PageNavigator`] resolves
 //! the active page, the page composer paints a 480x320 canvas, the frame is
 //! packed and presented through the writer. It also writes a PNG of each
 //! rendered frame to `lcd-snapshot.png` so the REST snapshot endpoint can serve

@@ -34,7 +34,7 @@ User=root
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 Environment=XDG_RUNTIME_DIR=/run/user/0
 EnvironmentFile=-/etc/ados/env
-ExecStart=/opt/ados/venv/bin/python -m ados.services.kiosk.kiosk_service
+ExecStart=/opt/ados/bin/ados-kiosk
 Restart=always
 # Exit 0 means this node has nothing for the unit to run (display.type lcd/none
 # or ground_station.kiosk.enabled false); it must not respawn every RestartSec. Any

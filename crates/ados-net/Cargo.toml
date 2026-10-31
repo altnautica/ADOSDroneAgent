@@ -16,11 +16,19 @@ description = "Ground-station uplink matrix: priority failover, cloud-reachabili
 name = "ados-net"
 path = "src/main.rs"
 
+# The first-boot captive portal (DNS + HTTP redirect to the setup webapp). A
+# separate binary because it stands itself down once setup completes, while
+# the uplink daemon runs for the life of the node.
+[[bin]]
+name = "ados-captive"
+path = "src/bin/ados-captive.rs"
+
 [dependencies]
 # The producer-side log-shipping layer (feature-gated in ados-protocol) feeds
 # the logging daemon's ingest socket alongside journald; never on the hot path.
 ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
+ados-proc = { path = "../ados-proc" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # YAML config reader (/etc/ados/config.yaml) for the share_uplink reconcile.

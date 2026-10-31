@@ -1,11 +1,9 @@
 //! The active-uplink sentinel (`/run/ados/uplink-active`) — the headline fix.
 //!
-//! The mesh gateway-election path reads this file by `.is_file()` to decide
-//! whether a node can advertise itself as a cloud gateway (`mesh_manager`'s
-//! `has_uplink = UPLINK_ACTIVE_FLAG.is_file()`). In the all-Python agent
-//! *nothing wrote it*, so `has_uplink` was always `False` and a perfectly good
-//! ground node never offered its uplink to the mesh. This module is the missing
-//! writer.
+//! The mesh gateway-election path reads this file by presence to decide
+//! whether a node can advertise itself as a cloud gateway (the `ados-batman`
+//! bring-up, `ados-groundlink --mesh-bringup`, treats an existing file as a live
+//! uplink). This module is its writer.
 //!
 //! Contract:
 //!

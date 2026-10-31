@@ -1,6 +1,6 @@
 //! Boot-time display presence probe with apply-verify-auto-revert.
 //!
-//! Ports `display_probe.py`. Fires once per boot (a systemd oneshot) only while
+//! Fires once per boot (a systemd oneshot) only while
 //! a display overlay is on probation: an SPI-LCD overlay was written to the boot
 //! config before the panel could be confirmed present.
 //!

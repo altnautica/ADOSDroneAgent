@@ -4,7 +4,6 @@
 //! the ObjectManager, enable the first one, and bring up a data session with
 //! `Modem.Simple.Connect({apn})`. On three consecutive D-Bus failures the
 //! manager flips to AT-fallback mode and recovers on the next D-Bus success.
-//! Ports `modem_manager.py`.
 //!
 //! AT/serial path: when D-Bus is unavailable the manager drives the modem's AT
 //! control port directly (see [`crate::managers::modem_at`]): open
