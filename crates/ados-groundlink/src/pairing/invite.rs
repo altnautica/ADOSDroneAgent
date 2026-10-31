@@ -1,22 +1,21 @@
 //! The mesh invite bundle: what a relay receives on approval.
 //!
-//! Fields map 1:1 into `/etc/ados/mesh/` paths on the relay side. Ports
-//! `pairing_manager.InviteBundle`: `pack()` is `json.dumps(sort_keys=True)` with
-//! the binary key material hex-encoded, `unpack()` is the inverse.
+//! Fields map 1:1 into `/etc/ados/mesh/` paths on the relay side. `pack()` is
+//! JSON with sorted keys and the binary key material hex-encoded; `unpack()` is
+//! the inverse.
 //!
-//! `sort_keys` is load-bearing for interop, so `pack()` builds a `BTreeMap`
-//! (keys are emitted in deterministic alphabetical order, matching Python). The
-//! plaintext is carried inside the ChaCha20Poly1305 AEAD, so the exact
-//! inter-key whitespace is NOT authenticated and Python's `json.loads` parses
-//! the compact form identically; the field set, types, and hex encoding are the
-//! contract.
+//! Sorted keys are load-bearing for interop, so `pack()` builds a `BTreeMap`.
+//! The plaintext is carried inside the ChaCha20Poly1305 AEAD, so the exact
+//! inter-key whitespace is NOT authenticated and any JSON parser reads the
+//! compact and the spaced form identically; the field set, types, and hex
+//! encoding are the contract.
 
 use std::collections::BTreeMap;
 
 use serde_json::Value;
 
 /// What a relay receives on approval. `mesh_psk` and `wfb_rx_key` are raw bytes;
-/// they are hex-encoded in the packed JSON (matching Python `.hex()`).
+/// they are hex-encoded in the packed JSON.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InviteBundle {
     pub mesh_id: String,
@@ -31,7 +30,7 @@ pub struct InviteBundle {
 
 impl InviteBundle {
     /// Serialize to the packed JSON bytes (sorted keys, hex-encoded binaries).
-    /// Mirrors `InviteBundle.pack`: `json.dumps(payload, sort_keys=True)`.
+    /// `{"drone_channel", "expires_at_ms", ...}` with sorted keys.
     pub fn pack(&self) -> Vec<u8> {
         // BTreeMap → deterministic alphabetical key order, matching sort_keys.
         let mut map: BTreeMap<&str, Value> = BTreeMap::new();
@@ -49,8 +48,7 @@ impl InviteBundle {
         serde_json::to_vec(&map).expect("BTreeMap<&str, Value> always serializes")
     }
 
-    /// Parse the packed JSON bytes back into a bundle. Mirrors
-    /// `InviteBundle.unpack`: `json.loads` + `bytes.fromhex`.
+    /// Parse the packed JSON bytes back into a bundle (hex fields decoded).
     pub fn unpack(blob: &[u8]) -> Result<InviteBundle, String> {
         let data: Value = serde_json::from_slice(blob).map_err(|e| e.to_string())?;
         let mesh_id = str_field(&data, "mesh_id")?;
@@ -81,8 +79,8 @@ fn str_field(v: &Value, key: &str) -> Result<String, String> {
         .ok_or_else(|| format!("missing/invalid string field {key}"))
 }
 
-/// Parse an integer field, tolerating a numeric JSON value (Python writes ints
-/// for the *_ms / channel / port fields).
+/// Parse an integer field, tolerating a float-typed JSON number for the
+/// *_ms / channel / port fields.
 fn int_field(v: &Value, key: &str) -> Result<i64, String> {
     v.get(key)
         .and_then(Value::as_i64)
@@ -135,11 +133,11 @@ mod tests {
     }
 
     #[test]
-    fn unpack_parses_a_python_style_spaced_bundle() {
-        // Python `json.dumps(..., sort_keys=True)` uses `", "` / `": "` spacing.
-        // The relay must parse that verbatim (the AEAD plaintext carries the
-        // exact bytes Python produced). This is the interop direction.
-        let python_json = concat!(
+    fn unpack_parses_a_spaced_bundle() {
+        // Bundles sealed by nodes already in the field use `", "` / `": "`
+        // spacing; the relay must parse that verbatim (the AEAD plaintext
+        // carries the exact bytes the sealing node produced).
+        let spaced_json = concat!(
             "{",
             "\"drone_channel\": 149, ",
             "\"expires_at_ms\": 1700000120000, ",
@@ -156,7 +154,7 @@ mod tests {
             "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd\"",
             "}"
         );
-        let b = InviteBundle::unpack(python_json.as_bytes()).expect("parses python json");
+        let b = InviteBundle::unpack(spaced_json.as_bytes()).expect("parses spaced json");
         assert_eq!(b, sample());
     }
 }

@@ -1,6 +1,6 @@
 //! Mesh identity: the deployment `mesh-id` + shared PSK sentinels.
 //!
-//! Ports `_ensure_mesh_identity` from `mesh_manager.py`. A receiver node
+//! A receiver node
 //! generates both on first boot and writes them under `/etc/ados/mesh/`
 //! (`mesh-id` as 0644 text, `psk.key` as 0600 raw bytes). A relay picks the
 //! values up from a pairing invite bundle. If the files are missing on a relay,
@@ -75,8 +75,8 @@ pub fn ensure_mesh_identity(
 ///
 /// `configured_id` is the operator's `ground_station.mesh.mesh_id` (empty when
 /// unset). `psk_path` is `ground_station.mesh.shared_key_path`. `device_id`
-/// seeds the receiver's first-boot id derivation. Mirrors
-/// `_ensure_mesh_identity`. The mesh-id precedence is: configured id wins, else
+/// seeds the receiver's first-boot id derivation. The mesh-id precedence is:
+/// configured id wins, else
 /// an existing `mesh-id` file, else a receiver derives
 /// `ados-<sha256(device_id)[:10]>` and writes it 0644, else (a relay with
 /// nothing on disk) returns `Missing`. The PSK is an existing `psk.key`
@@ -114,14 +114,14 @@ pub fn ensure_mesh_identity_at(
     } else {
         return Err(MeshIdentityError::Missing(
             "mesh_id missing. A relay must be paired with a receiver before \
-             mesh_manager can start."
+             the mesh bring-up can start."
                 .to_string(),
         ));
     };
 
     let psk = if psk_path.is_file() {
         let raw = std::fs::read(psk_path)?;
-        // Python `.strip()`s the bytes; mirror by trimming ASCII whitespace.
+        // Edge ASCII whitespace is not part of the key.
         let trimmed = trim_ascii_whitespace(&raw);
         if trimmed.len() < 16 {
             return Err(MeshIdentityError::PskTooShort(trimmed.len()));
@@ -137,8 +137,8 @@ pub fn ensure_mesh_identity_at(
         psk
     } else {
         return Err(MeshIdentityError::Missing(format!(
-            "mesh PSK missing at {}. A relay must be paired before mesh_manager \
-             can start.",
+            "mesh PSK missing at {}. A relay must be paired before the mesh \
+             bring-up can start.",
             psk_path.display()
         )));
     };

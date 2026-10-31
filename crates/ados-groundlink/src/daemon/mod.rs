@@ -26,6 +26,7 @@ mod direct;
 mod generation;
 mod ground_video;
 mod receive;
+mod services;
 
 use ados_protocol::shutdown::Shutdown;
 use std::process::ExitCode;
@@ -190,9 +191,14 @@ async fn run_ground_video() -> Result<()> {
     Ok(())
 }
 
-/// Run the ground-station data-plane (or the ground media server) to completion.
+/// Run the ground-station data-plane, the ground media server, the mesh
+/// pairing service or the mesh bring-up to completion.
 #[tokio::main]
 pub async fn run() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(mode) = services::service_mode(&args) {
+        return services::run(mode).await;
+    }
     match run_service().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

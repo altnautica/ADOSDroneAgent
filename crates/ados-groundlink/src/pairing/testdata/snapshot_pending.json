@@ -1,0 +1,14 @@
+{
+  "approvals": {},
+  "closes_at_ms": "<ms>",
+  "code": "<code>",
+  "open": true,
+  "opened_at_ms": "<ms>",
+  "pending": [
+    {
+      "device_id": "relay-synthetic-01",
+      "received_at_ms": "<ms>",
+      "remote_ip": "127.0.0.1"
+    }
+  ]
+}

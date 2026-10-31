@@ -1,40 +1,38 @@
 //! batman-adv control: `batctl` output parsers + command wrapper.
 //!
-//! Ports `_parse_neighbors` / `_parse_gateways` and the `batctl gw_sel` call.
+//! Neighbour and gateway parsers plus the command wrapper.
 //! The parsers are pure (column split with TQ tolerance across batman-adv
 //! versions); the command wrapper shells out to `batctl`/`ip`/`iw`.
 //!
-//! The Python module runs `batctl` through `asyncio.to_thread` so a wedged
-//! kernel module cannot stall the event loop. The Rust equivalent uses tokio's
-//! async `Command` with a per-call timeout, which offloads the wait to the
-//! reactor without a blocking thread; a timeout returns a non-zero rc rather
-//! than hanging the poll loop.
+//! Every call goes through `ados_proc::run::run` with a per-call timeout and
+//! a null stdin, and the child is killed if the timeout fires, so a wedged
+//! kernel module cannot stall the poll loop; a timeout returns a non-zero rc.
 
 use std::time::Duration;
+
+use ados_proc::run::RunOutcome;
 
 use super::state::{MeshGateway, MeshNeighbor};
 
 /// Run a command with a hard timeout. Returns `(rc, stdout, stderr)`; a timeout
 /// or spawn failure yields a non-zero rc so the caller degrades gracefully.
 pub async fn run(cmd: &str, args: &[&str], timeout: Duration) -> (i32, String, String) {
-    let fut = tokio::process::Command::new(cmd).args(args).output();
-    match tokio::time::timeout(timeout, fut).await {
-        Ok(Ok(out)) => {
-            let rc = out.status.code().unwrap_or(-1);
-            (
-                rc,
-                String::from_utf8_lossy(&out.stdout).into_owned(),
-                String::from_utf8_lossy(&out.stderr).into_owned(),
-            )
+    match ados_proc::run::run(cmd, args, &[], timeout).await {
+        RunOutcome::Exited {
+            code,
+            stdout,
+            stderr,
+        } => (code.unwrap_or(-1), stdout, stderr),
+        RunOutcome::SpawnFailed(_) | RunOutcome::WaitFailed(_) => {
+            (127, String::new(), "not found".to_string())
         }
-        Ok(Err(_)) => (127, String::new(), "not found".to_string()),
-        Err(_) => (124, String::new(), "timeout".to_string()),
+        RunOutcome::TimedOut => (124, String::new(), "timeout".to_string()),
     }
 }
 
 /// Parse `batctl n -H` output. Columns: `IF  Neighbor-MAC  last-seen  [TQ]`.
 /// `last-seen` is a `"0.550s"` form; the result's `last_seen_ms` is the absolute
-/// age subtracted from `now_ms` (matching the Python `now_ms - last_seen_ms`).
+/// age subtracted from `now_ms`.
 pub fn parse_neighbors(text: &str, now_ms: i64) -> Vec<MeshNeighbor> {
     let mut out = Vec::new();
     for line in text.lines() {

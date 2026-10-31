@@ -12,6 +12,20 @@ fn ground_video_flag_selects_media_server() {
 }
 
 #[test]
+fn service_flags_select_pairing_and_mesh_bringup() {
+    use super::services::{service_mode, ServiceMode};
+    assert_eq!(
+        service_mode(&args(&["--pairing"])),
+        Some(ServiceMode::Pairing)
+    );
+    assert_eq!(
+        service_mode(&args(&["--mesh-bringup"])),
+        Some(ServiceMode::MeshBringup)
+    );
+    assert_eq!(service_mode(&args(&["--role", "relay"])), None);
+}
+
+#[test]
 fn a_slot_registered_after_start_still_gets_a_consumer() {
     use std::collections::BTreeSet;
 

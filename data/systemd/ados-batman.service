@@ -4,7 +4,7 @@ After=systemd-networkd.service
 PartOf=ados-supervisor.service
 # Runs only for the `relay` and `receiver` roles. The supervisor writes
 # /etc/ados/mesh/role on every transition and at boot; on a direct node the
-# module exits 0 (never restarted), keeping the unit inactive.
+# bring-up exits 0 (never restarted), keeping the unit inactive.
 ConditionPathExists=/etc/ados/mesh/role
 AssertPathExists=/etc/ados/mesh/role
 StartLimitIntervalSec=0
@@ -15,7 +15,7 @@ StartLimitIntervalSec=0
 Slice=ados.slice
 Type=simple
 User=root
-ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.mesh_manager
+ExecStart=/opt/ados/bin/ados-groundlink --mesh-bringup
 Restart=always
 # Exit 0 means this node has nothing for the unit to run (feature off, role
 # not applicable, display absent); it must not respawn every RestartSec. Any

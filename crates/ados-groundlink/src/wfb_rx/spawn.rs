@@ -3,7 +3,7 @@
 //! receivers. Every receiver listens on all receiving adapters; the two
 //! transmitters run on the transmit adapter.
 
-use crate::process_spawn::{GsWfbProcess, Stdout};
+use ados_proc::{GroupChild, Spec, StderrMode, StdoutMode};
 
 use super::args::{
     aux_rx_port, control_rx_port, data_rx_args, gs_aux_rx_args, gs_aux_tx_args, gs_rx_control_args,
@@ -20,11 +20,11 @@ use super::WfbRxManager;
 pub struct PrimaryChain {
     /// The fleet slot this chain is anchored on (the lowest registered slot).
     pub slot: u8,
-    pub video: GsWfbProcess,
-    pub aux: GsWfbProcess,
-    pub control: GsWfbProcess,
-    pub tx_control: GsWfbProcess,
-    pub aux_tx: GsWfbProcess,
+    pub video: GroupChild,
+    pub aux: GroupChild,
+    pub control: GroupChild,
+    pub tx_control: GroupChild,
+    pub aux_tx: GroupChild,
 }
 
 /// The receive trio for one non-primary fleet slot. Additive to the primary
@@ -43,9 +43,32 @@ pub struct SlotReceivers {
     pub slot: u8,
     /// The video receiver (p0), or `None` when this slot is not the hero and its
     /// video port is therefore unwatched. Dropping a set receiver killpg's it.
-    pub video: Option<GsWfbProcess>,
-    pub aux: GsWfbProcess,
-    pub control: GsWfbProcess,
+    pub video: Option<GroupChild>,
+    pub aux: GroupChild,
+    pub control: GroupChild,
+}
+
+/// Spawn one wfb child as its own process group; `log` receives its stderr
+/// (emptied at spawn), otherwise stderr is discarded.
+pub(crate) fn spawn_wfb(
+    program: &str,
+    args: &[String],
+    stdout: StdoutMode,
+    log: Option<&str>,
+) -> std::io::Result<GroupChild> {
+    let stderr = match log {
+        Some(path) => StderrMode::AppendLog(path.into()),
+        None => StderrMode::Null,
+    };
+    GroupChild::spawn(
+        program,
+        Spec {
+            program,
+            args,
+            stdout,
+            stderr,
+        },
+    )
 }
 
 impl SlotReceivers {
@@ -82,20 +105,18 @@ impl WfbRxManager {
         let tx = self.interface.as_str();
 
         // Data RX: stdout piped for the stats reader, in its own process group.
-        let video = GsWfbProcess::spawn(
+        let video = spawn_wfb(
             "wfb_rx",
             &data_rx_args(rx, &rx_key, video_rx_port(primary_slot), drone),
-            Stdout::Piped,
+            StdoutMode::Piped,
             None,
-        )
-        .await?;
-        let control = GsWfbProcess::spawn(
+        )?;
+        let control = spawn_wfb(
             "wfb_rx",
             &gs_rx_control_args(rx, &rx_key, control_rx_port(primary_slot), drone),
-            Stdout::Null,
+            StdoutMode::Null,
             Some("/run/ados/wfb-gs-rx-control.log"),
-        )
-        .await?;
+        )?;
         // Aux application lane. The drone half has always been complete
         // (`wfb_tx -p 2` behind the radio-aux socket) but this receiver was
         // written, unit-tested, and then never spawned, so nothing on the
@@ -104,13 +125,12 @@ impl WfbRxManager {
         // consumer's enable flag: a linked ground station must be able to
         // receive whatever the drone chooses to send, and an idle wfb_rx with
         // no inbound frames costs essentially nothing.
-        let aux = GsWfbProcess::spawn(
+        let aux = spawn_wfb(
             "wfb_rx",
             &gs_aux_rx_args(rx, &rx_key, aux_rx_port(primary_slot), drone),
-            Stdout::Null,
+            StdoutMode::Null,
             Some("/run/ados/wfb-gs-aux-rx.log"),
-        )
-        .await?;
+        )?;
         // stdout PIPED, not discarded: the per-second `PKT` stats line is the
         // only per-transmitter proof that bytes offered to this `wfb_tx`
         // actually reached the radio. Nothing read it before, so a silently
@@ -118,13 +138,12 @@ impl WfbRxManager {
         // uplink (below) while every surface still read `active`. See
         // [`ados_radio::tx_liveness`]. The caller MUST drain it — an unread 64 KiB
         // pipe blocks the transmitter in `fprintf(stdout)`.
-        let tx_control = GsWfbProcess::spawn(
+        let tx_control = spawn_wfb(
             "wfb_tx",
             &gs_tx_control_args(tx, &rx_key, self.config.mcs_index, ground),
-            Stdout::Piped,
+            StdoutMode::Piped,
             Some("/run/ados/wfb-gs-tx-control.log"),
-        )
-        .await?;
+        )?;
         // Aux UPLINK. The counterpart to the receiver above, and the half that
         // made the lane one-directional: the drone has always listened on
         // radio_id 3, but nothing on the ground ever transmitted there, so a
@@ -132,7 +151,7 @@ impl WfbRxManager {
         // Spawned unconditionally for the same reason as the receiver — a
         // linked ground station must be able to answer the drone it can hear,
         // and an idle wfb_tx with no ingress traffic costs essentially nothing.
-        let aux_tx = GsWfbProcess::spawn(
+        let aux_tx = spawn_wfb(
             "wfb_tx",
             &gs_aux_tx_args(
                 tx,
@@ -141,10 +160,9 @@ impl WfbRxManager {
                 ground,
                 self.config.aux_tx_port,
             ),
-            Stdout::Piped,
+            StdoutMode::Piped,
             Some("/run/ados/wfb-gs-aux-tx.log"),
-        )
-        .await?;
+        )?;
         Ok(PrimaryChain {
             slot: primary_slot,
             video,
@@ -184,32 +202,27 @@ impl WfbRxManager {
         let rx_key = rx_key_path();
         let drone = ados_radio::config::link_id(self.config.fleet_id, slot);
         let video = if with_video {
-            Some(
-                GsWfbProcess::spawn(
-                    "wfb_rx",
-                    &data_rx_args(rx, &rx_key, video_rx_port(slot), drone),
-                    Stdout::Null,
-                    Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
-                )
-                .await?,
-            )
+            Some(spawn_wfb(
+                "wfb_rx",
+                &data_rx_args(rx, &rx_key, video_rx_port(slot), drone),
+                StdoutMode::Null,
+                Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
+            )?)
         } else {
             None
         };
-        let aux = GsWfbProcess::spawn(
+        let aux = spawn_wfb(
             "wfb_rx",
             &gs_aux_rx_args(rx, &rx_key, aux_rx_port(slot), drone),
-            Stdout::Null,
+            StdoutMode::Null,
             Some(&format!("/run/ados/wfb-gs-aux-rx-{slot}.log")),
-        )
-        .await?;
-        let control = GsWfbProcess::spawn(
+        )?;
+        let control = spawn_wfb(
             "wfb_rx",
             &gs_rx_control_args(rx, &rx_key, control_rx_port(slot), drone),
-            Stdout::Null,
+            StdoutMode::Null,
             Some(&format!("/run/ados/wfb-gs-rx-control-{slot}.log")),
-        )
-        .await?;
+        )?;
         Ok(SlotReceivers {
             slot,
             video,
@@ -220,18 +233,17 @@ impl WfbRxManager {
 
     /// Bring the video receiver (p0) up for a slot, the bring-back half of the
     /// unwatched-video-slots split. Called when the slot becomes the hero, off the
-    /// 1 s hero poll. The process is created anew because `GsWfbProcess` is not
+    /// 1 s hero poll. The process is created anew because `GroupChild` is not
     /// `Clone` (it owns a process group); the previous one, if any, was dropped
     /// (killpg'd) when it was unpromoted.
-    pub async fn spawn_slot_video(&self, slot: u8) -> std::io::Result<GsWfbProcess> {
+    pub async fn spawn_slot_video(&self, slot: u8) -> std::io::Result<GroupChild> {
         let rx_key = rx_key_path();
         let drone = ados_radio::config::link_id(self.config.fleet_id, slot);
-        GsWfbProcess::spawn(
+        spawn_wfb(
             "wfb_rx",
             &data_rx_args(&self.rx_ifaces, &rx_key, video_rx_port(slot), drone),
-            Stdout::Null,
+            StdoutMode::Null,
             Some(&format!("/run/ados/wfb-gs-video-rx-{slot}.log")),
         )
-        .await
     }
 }

@@ -3,7 +3,8 @@
 //! Polls batman-adv neighbours/gateways and publishes the `mesh-state.json`
 //! snapshot. Bringing the mesh up (secure 802.11s/IBSS join, `bat0` bind) and
 //! supervising it, including the batman gateway mode, is owned by the
-//! `ados-batman` unit (`mesh_manager.py`); this module only observes the result.
+//! `ados-batman` bring-up (`ados-groundlink --mesh-bringup`, [`super::bringup`]);
+//! this module only observes the result.
 //! Subprocess calls go through `batctl::run` (tokio async `Command` +
 //! per-call timeout) so a wedged kernel module cannot stall the poll loop.
 //!
@@ -77,7 +78,7 @@ fn active_hard_if(text: &str) -> Option<String> {
 /// re-serving the previous answer with a fresh `last_poll_ms`: a neighbour list
 /// from a module that has since unloaded is not a current reading. `up` needs
 /// both the carrier interface up and a neighbour query that answered, and a
-/// mesh that is up but has heard no neighbour for [`PARTITION_POLLS`] polls is
+/// mesh that is up but has heard no neighbour for `PARTITION_POLLS` polls is
 /// reported as partitioned.
 pub fn apply_poll(snap: &mut MeshSnapshot, poll: MeshPoll) {
     match poll.neighbors.as_deref() {

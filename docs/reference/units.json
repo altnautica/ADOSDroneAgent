@@ -361,7 +361,7 @@
       "condition_paths": [
         "/etc/ados/profile.conf"
       ],
-      "description": "ADOS mesh pairing daemon (UDP 5801 sidecar for pairing_manager)",
+      "description": "ADOS mesh pairing service (accept window, UDP 5801 join listener, relay join)",
       "drops_link": false,
       "install": "profile",
       "memory_max": "48M",

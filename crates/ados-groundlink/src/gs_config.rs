@@ -22,6 +22,18 @@ fn default_true() -> bool {
 fn default_bat_iface() -> String {
     "bat0".to_string()
 }
+fn default_carrier() -> String {
+    "802.11s".to_string()
+}
+fn default_shared_key_path() -> String {
+    crate::paths::MESH_PSK_PATH.to_string()
+}
+fn default_mesh_channel() -> u8 {
+    1
+}
+fn default_cloud_uplink() -> String {
+    "auto".to_string()
+}
 
 /// Relay-role config (`ground_station.wfb_relay`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -63,9 +75,24 @@ impl Default for WfbReceiverConfig {
     }
 }
 
-/// Mesh fabric config (`ground_station.mesh`) — the subset the loops read.
+/// Mesh fabric config (`ground_station.mesh`).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MeshConfig {
+    /// Operator pin for the mesh carrier adapter; wins over every resolver.
+    #[serde(default)]
+    pub interface_override: Option<String>,
+    /// The L2 carrier: `802.11s` (preferred) or `ibss`.
+    #[serde(default = "default_carrier")]
+    pub carrier: String,
+    /// Operator-pinned deployment mesh id; empty/absent uses the id file.
+    #[serde(default)]
+    pub mesh_id: Option<String>,
+    /// Where the deployment mesh PSK lives (0600 raw bytes).
+    #[serde(default = "default_shared_key_path")]
+    pub shared_key_path: String,
+    /// 2.4 GHz carrier channel, 1-13.
+    #[serde(default = "default_mesh_channel")]
+    pub channel: u8,
     /// The batman-adv carrier interface (default `bat0`).
     #[serde(default = "default_bat_iface")]
     pub bat_iface: String,
@@ -74,20 +101,40 @@ pub struct MeshConfig {
 impl Default for MeshConfig {
     fn default() -> Self {
         Self {
+            interface_override: None,
+            carrier: default_carrier(),
+            mesh_id: None,
+            shared_key_path: default_shared_key_path(),
+            channel: default_mesh_channel(),
             bat_iface: default_bat_iface(),
         }
     }
 }
 
-/// The `ground_station:` config subset the relay/receiver loops consume.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+/// The `ground_station:` config subset the ground-station services consume.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GroundStationConfig {
+    /// Whether this node advertises a batman-adv gateway: `auto`, `force_on`
+    /// or `force_off`.
+    #[serde(default = "default_cloud_uplink")]
+    pub cloud_uplink: String,
     #[serde(default)]
     pub wfb_relay: WfbRelayConfig,
     #[serde(default)]
     pub wfb_receiver: WfbReceiverConfig,
     #[serde(default)]
     pub mesh: MeshConfig,
+}
+
+impl Default for GroundStationConfig {
+    fn default() -> Self {
+        Self {
+            cloud_uplink: default_cloud_uplink(),
+            wfb_relay: WfbRelayConfig::default(),
+            wfb_receiver: WfbReceiverConfig::default(),
+            mesh: MeshConfig::default(),
+        }
+    }
 }
 
 /// JSON pointer of the `ground_station` slice in the agent config.

@@ -377,7 +377,7 @@ mod tests {
     // ---- fakes -------------------------------------------------------------
 
     /// Clock that returns a fixed "now". Silence is forced by patching the
-    /// silence threshold to 0.0 (mirrors the Python tests), so the clock just
+    /// silence threshold to 0.0, so the clock just
     /// needs to be monotone and stable.
     struct FakeClock {
         now: Mutex<f64>,
@@ -398,9 +398,8 @@ mod tests {
     /// Receive process fake. The seed-guard `is_running` check at the top of
     /// `run()` plus the first `while`-condition check must both see "alive"; the
     /// loop then runs exactly ONE body iteration and the next `while`-condition
-    /// check sees "dead", ending the loop. This mirrors the Python one-shot
-    /// latch (`_peer_present` flips `_running` off after the first call) without
-    /// coupling the latch to a branch that some scenarios never reach.
+    /// check sees "dead", ending the loop. This acts as a one-shot latch
+    /// without coupling the latch to a branch that some scenarios never reach.
     struct FakeRx {
         terminated: AtomicU32,
         live_checks: AtomicU32,

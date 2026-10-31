@@ -14,8 +14,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::acquire::{ChannelSetter, ValidPacketCounter};
-use crate::process_spawn::GsWfbProcess;
 use crate::watchdog::{Clock, RxProcess};
+use ados_proc::GroupChild;
 
 /// The cumulative valid-decode packet counter the stats reader updates and the
 /// watchdog/acquirer read. Implements both the watchdog's and the acquirer's
@@ -231,16 +231,16 @@ impl Clock for SystemClock {
     }
 }
 
-/// Wraps a live `WfbProcess` so the watchdog can poll liveness + terminate it.
+/// Wraps a live wfb child so the watchdog can poll liveness + terminate it.
 /// The data-RX child is shared (the stats reader takes its stdout; the watchdog
 /// holds this handle to assert liveness and request a restart).
 pub struct DataRxHandle {
-    proc: Mutex<Option<GsWfbProcess>>,
+    proc: Mutex<Option<GroupChild>>,
     terminated: AtomicU32,
 }
 
 impl DataRxHandle {
-    pub fn new(proc: GsWfbProcess) -> Arc<Self> {
+    pub fn new(proc: GroupChild) -> Arc<Self> {
         Arc::new(Self {
             proc: Mutex::new(Some(proc)),
             terminated: AtomicU32::new(0),

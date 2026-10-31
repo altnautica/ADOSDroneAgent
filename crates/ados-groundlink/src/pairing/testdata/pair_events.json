@@ -1,0 +1,32 @@
+[
+  {
+    "bus": "pair",
+    "kind": "accept_window_opened",
+    "payload": {
+      "duration_s": 30
+    },
+    "timestamp_ms": "<ms>"
+  },
+  {
+    "bus": "pair",
+    "kind": "join_request_received",
+    "payload": {
+      "device_id": "relay-synthetic-01"
+    },
+    "timestamp_ms": "<ms>"
+  },
+  {
+    "bus": "pair",
+    "kind": "join_approved",
+    "payload": {
+      "device_id": "relay-synthetic-01"
+    },
+    "timestamp_ms": "<ms>"
+  },
+  {
+    "bus": "pair",
+    "kind": "accept_window_closed",
+    "payload": {},
+    "timestamp_ms": "<ms>"
+  }
+]

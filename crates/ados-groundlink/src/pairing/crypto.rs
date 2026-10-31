@@ -1,12 +1,11 @@
 //! Mesh-invite crypto: X25519 ECDH + a custom 2-step HMAC-SHA256 session-key
 //! derivation + ChaCha20Poly1305 AEAD.
 //!
-//! Wire-compatible with the agent's Python `invite_crypto` module. The
-//! session-key derivation is NOT RFC 5869 HKDF: it is a bespoke 2-step
+//! The session-key derivation is NOT RFC 5869 HKDF: it is a bespoke 2-step
 //! HMAC-SHA256 construction (`HMAC(salt=0x00*32, shared) -> prk;
 //! HMAC(prk, context || 0x01)`), built here from `hmac` + `sha2`. The `hkdf`
 //! crate is deliberately NOT used because RFC 5869 differs in the info/counter
-//! framing and would not interoperate with a Python-produced bundle.
+//! framing and would not open invites sealed by nodes already in the field.
 //!
 //! The context binds the accept window's six-digit code:
 //! `b"ados-mesh-invite" ‖ 0x00 ‖ code`. ECDH alone does not tell the relay who
@@ -28,7 +27,7 @@ use super::invite::InviteBundle;
 type HmacSha256 = Hmac<Sha256>;
 
 /// The fixed prefix of the session-key context. Load-bearing for interop:
-/// changing it makes a Python-produced bundle undecryptable.
+/// changing it makes every invite sealed by another node undecryptable.
 pub const INVITE_CONTEXT: &[u8] = b"ados-mesh-invite";
 
 /// Length of the accept window's code, in decimal digits.
@@ -85,8 +84,7 @@ pub struct KeyPair {
     pub public: [u8; 32],
 }
 
-/// Generate an X25519 keypair. The public half is the raw 32-byte encoding
-/// (matching Python's `public_bytes(Encoding.Raw, PublicFormat.Raw)`).
+/// Generate an X25519 keypair. The public half is the raw 32-byte encoding.
 pub fn generate_keypair() -> KeyPair {
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).expect("OS RNG for X25519 keygen");
@@ -97,8 +95,7 @@ pub fn generate_keypair() -> KeyPair {
 
 /// Derive the 32-byte ChaCha20Poly1305 session key from the ECDH shared secret.
 ///
-/// This is the CUSTOM 2-step construction, NOT RFC 5869, identical to the
-/// Python `invite_crypto.session_key`:
+/// This is the CUSTOM 2-step construction, NOT RFC 5869:
 ///
 /// 1. `prk = HMAC-SHA256(key = 0x00 * 32, msg = shared)`
 /// 2. `okm = HMAC-SHA256(key = prk, msg = context || 0x01)`
@@ -121,8 +118,7 @@ pub fn session_key(shared: &[u8], context: &[u8]) -> [u8; 32] {
 /// Encrypt an invite bundle for `relay_pubkey` using `receiver_secret`, under
 /// the accept window's `code`.
 ///
-/// Returns the wire blob `receiver_pub ‖ nonce ‖ ct‖tag`. AEAD AD is empty
-/// (matching Python's `associated_data=None`).
+/// Returns the wire blob `receiver_pub ‖ nonce ‖ ct‖tag`. AEAD AD is empty.
 pub fn encrypt_invite(
     bundle: &InviteBundle,
     receiver_secret: &StaticSecret,
@@ -289,11 +285,10 @@ mod tests {
         }
     }
 
-    /// The same vector the Python invite crypto test pins: both sides must
-    /// derive this key for this shared secret and code, or an invite sealed by
-    /// one never opens on the other.
+    /// A pinned vector: every node must derive this key for this shared secret
+    /// and code, or an invite sealed by one never opens on another.
     #[test]
-    fn the_code_bound_session_key_matches_the_python_vector() {
+    fn the_code_bound_session_key_matches_the_pinned_vector() {
         let context = invite_context("123456").unwrap();
         assert_eq!(context, b"ados-mesh-invite\x00123456");
         assert_eq!(

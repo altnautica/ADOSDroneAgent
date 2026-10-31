@@ -5,8 +5,7 @@
 //! revoked relay's join request is dropped) and, when the pairing manager could
 //! resolve it at revoke time, the relay's mesh MAC: the receiver reads the list
 //! every churn poll and never presents a listed MAC as a relay. `save` writes
-//! atomically (tmp + rename) with the list sorted, matching
-//! `json.dumps(sorted(revoked))`.
+//! atomically (tmp + rename) with the list sorted.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -14,8 +13,8 @@ use std::path::Path;
 use crate::paths::MESH_REVOCATIONS_JSON;
 
 /// Read the current revocation set (device-ids and relay MACs) from disk. A
-/// missing/unreadable/malformed file is an empty set (matching the Python
-/// `_read_revocations_from_disk` tolerance). Reads from the canonical path.
+/// missing/unreadable/malformed file is an empty set. Reads from the canonical
+/// path.
 pub fn load() -> BTreeSet<String> {
     load_from(Path::new(MESH_REVOCATIONS_JSON))
 }

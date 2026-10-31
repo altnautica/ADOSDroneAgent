@@ -33,11 +33,10 @@
 //!   - **aux TX** `wfb_tx -p 3 -i <link> -u 5602 …` carries the uplink half of
 //!     the aux pair.
 //!
-//! Process-group isolation (`setsid`/`killpg`) follows the same discipline as
-//! `ados_radio::process::WfbProcess` so the orphan-child bug class is
-//! structurally impossible here too; the GS-specific spawn lives in
-//! `process_spawn::GsWfbProcess` because the drone crate exposes no generic
-//! spawn entry point and the GS arg sets differ. The run loop wires the stats
+//! Every child runs as an `ados_proc::GroupChild` (its own process group,
+//! killed as a group on teardown or drop), so the orphan-child bug class is
+//! structurally impossible here; the GS-specific arg sets live in `args`.
+//! The run loop wires the stats
 //! stream into the valid-packet watchdog (its counter/presence/acquirer seams)
 //! and the acquirer, writes the ground `wfb-stats.json` sidecar, and runs the
 //! stdout-silence zombie watchdog.
@@ -89,6 +88,7 @@ pub use loops::{stats_reader_loop, zombie_watchdog};
 pub use seams::{
     DataRxHandle, GroupChannelSetter, IwChannelSetter, RadioGroup, SharedValidCounter, SystemClock,
 };
+pub(crate) use spawn::spawn_wfb;
 pub use spawn::{PrimaryChain, SlotReceivers};
 pub use stats::{
     build_gs_stats, write_blocked_unpaired_sidecar, write_no_adapter_sidecar,

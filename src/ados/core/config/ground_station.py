@@ -114,7 +114,8 @@ class MeshConfig(BaseModel):
     drivers without 802.11s). `mesh_id` and `shared_key_path` gate the
     deployment so two adjacent sites on the same channel stay isolated.
     `shared_key_path` defaults to a device-derived key written on first
-    boot by mesh_manager (0o600, never logged).
+    boot by the ``ados-batman`` bring-up (``ados-groundlink --mesh-bringup``),
+    0o600, never logged.
     """
 
     interface_override: str | None = None
@@ -140,8 +141,8 @@ class GroundStationConfig(BaseModel):
     # the combined FEC-repaired stream for the mediamtx pipeline.
     role: Literal["direct", "relay", "receiver"] = "direct"
     # Whether this node should advertise its uplink as a batman-adv
-    # gateway. `auto` lets the mesh_manager decide based on actual
-    # uplink health.
+    # gateway. `auto` lets the ``ados-batman`` bring-up
+    # (``ados-groundlink --mesh-bringup``) decide based on actual uplink health.
     cloud_uplink: Literal["auto", "force_on", "force_off"] = "auto"
     wfb_relay: WfbRelayConfig = WfbRelayConfig()
     wfb_receiver: WfbReceiverConfig = WfbReceiverConfig()

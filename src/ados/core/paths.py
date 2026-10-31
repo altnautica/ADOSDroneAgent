@@ -111,7 +111,6 @@ CONFIG_LOCK = ADOS_RUN_DIR / "config.yaml.lock"
 
 # IPC sockets
 STATE_SOCK = ADOS_RUN_DIR / "state.sock"
-PAIRING_SOCK = ADOS_RUN_DIR / "pairing.sock"
 # The supervisor's Unix control socket (role changes, bind sessions). The
 # supervisor binds it; Python callers forward one JSON request per connection.
 SUPERVISOR_SOCK = ADOS_RUN_DIR / "supervisor.sock"
@@ -147,15 +146,6 @@ LOGD_PUSH_RESULT_PATH = ADOS_RUN_DIR / "logd-push-result.json"
 # on-box reader (the native control surface) can serve the full board block
 # without an in-process HAL-detect port of its own.
 BOARD_JSON = ADOS_RUN_DIR / "board.json"
-# Cross-process field-pairing event journal. The in-process pairing bus lives in
-# the API process; the native control surface that serves the mesh event stream
-# is a separate process and cannot reach that bus, so the pairing manager mirrors
-# each pair event here as one newline-delimited JSON object. The native handler
-# tails this file alongside the mesh-event journal. Same envelope shape as the
-# mesh journal (`{"bus","kind","timestamp_ms","payload"}`), append-only,
-# best-effort; bounded by the tmpfs wipe on reboot.
-PAIR_EVENTS_JSONL = ADOS_RUN_DIR / "pair-events.jsonl"
-
 # Live wfb-ng radio stats snapshot (rssi, snr, packets, fec, bitrate).
 # Written ~once per second by whichever wfb manager owns the radio:
 # WfbManager on the drone profile, WfbRxManager on the GS profile.
@@ -164,10 +154,6 @@ PAIR_EVENTS_JSONL = ADOS_RUN_DIR / "pair-events.jsonl"
 # wfb subprocess and the api subprocess don't share memory and the
 # wfb stats need to surface to multiple consumers per box.
 WFB_STATS_JSON = ADOS_RUN_DIR / "wfb-stats.json"
-
-# Sentinel files
-UPLINK_ACTIVE_FLAG = ADOS_RUN_DIR / "uplink-active"
-
 
 # Live LCD shell state — current page id and modal stack identifiers,
 # persisted across service restarts so the operator returns to the
@@ -245,16 +231,11 @@ PLUGIN_SOCKET_NAME = "host.sock"
 
 # Mesh
 MESH_DIR = ADOS_ETC_DIR / "mesh"
-MESH_ID_PATH = MESH_DIR / "id"
 MESH_PSK_PATH = MESH_DIR / "psk.key"
 MESH_ROLE_PATH = MESH_DIR / "role"
-MESH_GATEWAY_JSON = MESH_DIR / "gateway.json"
-MESH_RECEIVER_JSON = MESH_DIR / "receiver.json"
-MESH_REVOCATIONS_JSON = MESH_DIR / "revocations.json"
 
 # WFB-ng key material
 WFB_KEY_DIR = ADOS_ETC_DIR / "wfb"
-WFB_RX_KEY_PATH = WFB_KEY_DIR / "rx.key"
 # The shared radio keys the bind writes where wfb-ng itself reads them. The
 # swarm bus and the presence beacon derive the fleet and beacon keys from the
 # drone key, so a factory reset must remove both.

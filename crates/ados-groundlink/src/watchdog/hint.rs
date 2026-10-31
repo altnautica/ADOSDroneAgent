@@ -36,7 +36,7 @@ fn persist_hint(path: &std::path::Path, channel: u8) -> std::io::Result<()> {
     let tmp = path.with_extension("tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
-        // Single integer + trailing newline (mirrors the Python `f"{int}\n"`).
+        // Single integer + trailing newline.
         writeln!(f, "{channel}")?;
         f.sync_all()?;
     }

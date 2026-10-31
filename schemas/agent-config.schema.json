@@ -1991,7 +1991,7 @@
       "type": "object"
     },
     "MeshConfig": {
-      "description": "batman-adv local mesh transport settings.\n\n`carrier` is the L2 technology on the second USB WiFi dongle:\n802.11s (native mesh, preferred) or IBSS (ad-hoc, fallback for\ndrivers without 802.11s). `mesh_id` and `shared_key_path` gate the\ndeployment so two adjacent sites on the same channel stay isolated.\n`shared_key_path` defaults to a device-derived key written on first\nboot by mesh_manager (0o600, never logged).",
+      "description": "batman-adv local mesh transport settings.\n\n`carrier` is the L2 technology on the second USB WiFi dongle:\n802.11s (native mesh, preferred) or IBSS (ad-hoc, fallback for\ndrivers without 802.11s). `mesh_id` and `shared_key_path` gate the\ndeployment so two adjacent sites on the same channel stay isolated.\n`shared_key_path` defaults to a device-derived key written on first\nboot by the ``ados-batman`` bring-up (``ados-groundlink --mesh-bringup``),\n0o600, never logged.",
       "properties": {
         "bat_iface": {
           "default": "bat0",

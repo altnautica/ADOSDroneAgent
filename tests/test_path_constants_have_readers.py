@@ -32,8 +32,10 @@ SEARCH_SUFFIXES = {".py", ".sh", ".service", ".rules", ".conf", ".yaml", ".yml",
 
 #: A scan that finds fewer constants than this is broken, not proof of a clean
 #: registry. Lower it deliberately (with a reason) if the module genuinely
-#: shrinks that far; never to make a failure go away.
-MIN_CONSTANTS = 60
+#: shrinks that far; never to make a failure go away. 60 -> 55: the mesh
+#: pairing and bring-up services moved to Rust, and eight path constants only
+#: they read were deleted.
+MIN_CONSTANTS = 55
 
 
 def _constant_lines() -> dict[str, int]:

@@ -170,15 +170,14 @@ pub async fn stats_reader_loop(
     fanout: crate::fanout::FanoutCounters,
     aux: crate::aux_consumer::AuxCounters,
 ) {
-    use tokio::io::AsyncBufReadExt;
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut lines = ados_proc::lines::BoundedLines::new(stdout);
     let mut mon = LinkQualityMonitor::new();
     // Last successfully-read live channel; seeded to the operating channel so a
     // momentary `iw info` failure keeps reporting the last-known live value.
     let mut last_live_channel = channel;
     let mut channel_poll = ChannelPoll::new();
     let mut gate = PublishGate::new();
-    while let Ok(Some(line)) = lines.next_line().await {
+    while let Some(line) = lines.next_line().await {
         let now_mono = clock.monotonic();
         *last_stdout_at.lock().await = now_mono;
         let line = line.trim();

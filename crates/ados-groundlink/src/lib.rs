@@ -36,7 +36,6 @@ pub mod pair_state;
 pub mod pairing;
 pub mod paths;
 pub mod presence;
-pub mod process_spawn;
 pub mod receiver;
 pub mod relay;
 pub mod watchdog;

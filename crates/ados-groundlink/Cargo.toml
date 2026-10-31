@@ -28,6 +28,7 @@ ados-radio = { path = "../ados-radio" }
 ados-supervisor = { path = "../ados-supervisor" }
 ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
+ados-proc = { path = "../ados-proc" }
 # The installed-plugin inventory (id + contract version) the aux node-identity
 # consumer compares a peer against, so a version mismatch across an
 # upgrade-mixed pair is surfaced instead of silently misreading the plugin wire.

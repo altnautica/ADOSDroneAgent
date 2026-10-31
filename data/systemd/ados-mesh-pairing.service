@@ -1,5 +1,5 @@
 [Unit]
-Description=ADOS mesh pairing daemon (UDP 5801 sidecar for pairing_manager)
+Description=ADOS mesh pairing service (accept window, UDP 5801 join listener, relay join)
 After=ados-batman.service
 Wants=ados-batman.service
 PartOf=ados-supervisor.service
@@ -17,15 +17,14 @@ StartLimitIntervalSec=0
 Slice=ados.slice
 Type=simple
 User=root
-ExecStart=/opt/ados/venv/bin/python -m ados.services.ground_station.pairing_daemon
+ExecStart=/opt/ados/bin/ados-groundlink --pairing
 Restart=always
 RestartSec=3
 Environment=ADOS_CONFIG=/etc/ados/config.yaml
 EnvironmentFile=-/etc/ados/env
 
 # Needs raw socket capability to bind UDP 5801 on bat0 and the ability
-# to use SO_BINDTODEVICE. Matches the capability set we grant the
-# in-process pairing code today.
+# to use SO_BINDTODEVICE.
 AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=no
 ProtectSystem=strict

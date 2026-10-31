@@ -111,9 +111,13 @@ After factory reset, the node has to be re-paired from scratch. The receiver gen
 
 ## Source references
 
-- `ADOSDroneAgent/src/ados/services/ground_station/pairing_manager.py`. receiver-side state machine, UDP 5801 listener, approval flow
-- `ADOSDroneAgent/src/ados/services/ground_station/pairing_client.py`. relay-side invite request and bundle unpacking
-- `ADOSDroneAgent/src/ados/services/ground_station/mesh_manager.py`. consumes the bundle fields to bring up batman-adv
+All of it runs in `ados-groundlink`: the `ados-mesh-pairing` unit is `ados-groundlink --pairing` and the `ados-batman` unit is `ados-groundlink --mesh-bringup`.
+
+- `ADOSDroneAgent/crates/ados-groundlink/src/pairing/manager.rs`. receiver-side accept window, UDP 5801 listener, approval flow
+- `ADOSDroneAgent/crates/ados-groundlink/src/pairing/server.rs`. the `/run/ados/pairing.sock` RPC the REST routes forward to
+- `ADOSDroneAgent/crates/ados-groundlink/src/pairing/client.rs`. relay-side join request and bundle unpacking
+- `ADOSDroneAgent/crates/ados-groundlink/src/pairing/rekey.rs` and `relay_rekey.rs`. revocation re-key and its relay side
+- `ADOSDroneAgent/crates/ados-groundlink/src/mesh/bringup.rs`. consumes the bundle fields to bring up batman-adv
 
 ## Related docs
 

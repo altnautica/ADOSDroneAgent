@@ -1,9 +1,7 @@
 //! Mesh snapshot types + the `mesh-state.json` writer.
 //!
-//! Ports the `MeshSnapshot`/`MeshNeighbor`/`MeshGateway` dataclasses and
-//! `_write_state_json` from `mesh_manager.py`. The JSON shape is byte-identical
-//! to the Python writer (same key names + nesting) so the REST layer and OLED
-//! that read the file cross-process see the same surface. Atomic tmp + rename.
+//! The `mesh-state.json` shape (key names + nesting) is the cross-process
+//! contract the REST layer and on-box UI read. Atomic tmp + rename.
 
 use serde::Serialize;
 
@@ -60,7 +58,7 @@ pub struct MeshSnapshot {
 
 impl MeshSnapshot {
     /// A fresh snapshot for `role` with the configured interfaces, before
-    /// bringup (matching the Python constructor defaults).
+    /// bringup.
     pub fn new(role: &str, bat_iface: &str, carrier: &str) -> Self {
         Self {
             version: MESH_STATE_SIDECAR_VERSION,
@@ -121,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_json_shape_matches_python_keys() {
+    fn snapshot_json_shape_matches_the_reader_contract() {
         let mut snap = MeshSnapshot::new("receiver", "bat0", "802.11s");
         snap.mesh_iface = "wlan1".into();
         snap.mesh_id = "ados-abc".into();

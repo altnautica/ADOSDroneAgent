@@ -21,8 +21,7 @@ use std::net::IpAddr;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 /// An active `_ados-receiver._tcp` advertisement. Dropping it unregisters the
-/// record and shuts the mDNS daemon down (mirrors the Python
-/// `zc.unregister_service(info); zc.close()` teardown).
+/// record and shuts the mDNS daemon down.
 pub struct ReceiverAdvert {
     #[cfg(target_os = "linux")]
     daemon: ServiceDaemon,
@@ -216,6 +215,19 @@ fn iface_ipv4(iface: &str) -> Option<Ipv4Addr> {
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
     parse_iface_ipv4(&text)
+}
+
+/// The first IPv4 address bound to `iface`, read through `ip -4 addr show dev`
+/// with a 2 s bound. `None` when the interface is absent or has no address.
+pub async fn iface_ipv4_bounded(iface: &str) -> Option<Ipv4Addr> {
+    let outcome = ados_proc::run::run(
+        "ip",
+        &["-4", "addr", "show", "dev", iface],
+        &[],
+        Duration::from_secs(2),
+    )
+    .await;
+    parse_iface_ipv4(outcome.stdout())
 }
 
 /// Pull the `inet <a.b.c.d>/prefix` address out of `ip -4 addr show` output.

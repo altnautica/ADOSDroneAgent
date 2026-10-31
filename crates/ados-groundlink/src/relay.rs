@@ -26,19 +26,16 @@ use tokio::sync::Mutex;
 
 use crate::gs_config::GroundStationConfig;
 use crate::mesh_events;
-use crate::process_spawn::{GsWfbProcess, Stdout};
+use ados_proc::{GroupChild, StdoutMode};
 
 /// Receiver-loss grace window: how long the relay tolerates the receiver
-/// dropping off mDNS before it marks the link down. Mirrors the Python
-/// `_RECEIVER_LOST_GRACE_S = 15.0`.
+/// dropping off mDNS before it marks the link down.
 const RECEIVER_LOST_GRACE_MS: i64 = 15_000;
-/// Poll cadence for re-resolving the receiver and republishing state. Mirrors
-/// the Python `_POLL_INTERVAL_S = 2.0`.
+/// Poll cadence for re-resolving the receiver and republishing state.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// mDNS resolve timeout per poll.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(3);
-/// Forwarder graceful-shutdown grace before SIGKILL. Mirrors the Python
-/// `wait_for(proc.wait(), timeout=3.0)` between terminate and kill.
+/// Forwarder graceful-shutdown grace between SIGTERM and SIGKILL.
 const FORWARDER_GRACE: Duration = Duration::from_secs(3);
 /// Fixed retry for drone-facing adapter detection while none is usable. No cap:
 /// an adapter plugged in after boot is picked up within one interval.
@@ -173,15 +170,15 @@ pub async fn spawn_forwarder(
     receiver_ip: &str,
     receiver_port: u16,
     link_id: u32,
-) -> std::io::Result<GsWfbProcess> {
+) -> std::io::Result<GroupChild> {
     let rx_key = Path::new(ados_radio::paths::WFB_RX_KEY);
     let args = forward_args(drone_ifaces, receiver_ip, receiver_port, rx_key, link_id);
-    GsWfbProcess::spawn("wfb_rx", &args, Stdout::Null, Some(FORWARDER_LOG)).await
+    crate::wfb_rx::spawn_wfb("wfb_rx", &args, StdoutMode::Null, Some(FORWARDER_LOG))
 }
 
 /// True when the receiver should be treated as lost: a previously-seen
 /// receiver has gone silent past the grace window while the link was up.
-/// Mirrors the Python `stale_ms > _RECEIVER_LOST_GRACE_S * 1000 and state.up`.
+/// A receiver never seen (`last_seen_ms == 0`) is not stale.
 fn receiver_is_stale(last_seen_ms: i64, was_up: bool, now_ms: i64) -> bool {
     last_seen_ms > 0 && was_up && (now_ms - last_seen_ms) > RECEIVER_LOST_GRACE_MS
 }
@@ -253,7 +250,7 @@ pub async fn run(
         tracing::warn!("wfb_relay_keys_missing");
     }
 
-    let mut forwarder: Option<GsWfbProcess> = None;
+    let mut forwarder: Option<GroupChild> = None;
     // The receiver the forwarder feeds and the drone link it forwards. A change
     // in either (a new receiver, or the operator picking a different hero)
     // replaces the forwarder.
@@ -290,7 +287,7 @@ pub async fn run(
                 // Receiver or drone changed (or the forwarder died): tear down
                 // the old forwarder, spawn fresh.
                 if let Some(mut old) = forwarder.take() {
-                    old.terminate_then_kill(FORWARDER_GRACE).await;
+                    old.terminate(FORWARDER_GRACE).await;
                 }
                 {
                     let mut s = state.lock().await;
@@ -317,7 +314,7 @@ pub async fn run(
         } else if link.is_none() {
             // No drone to forward: nothing this relay forwards is real.
             if let Some(mut old) = forwarder.take() {
-                old.terminate_then_kill(FORWARDER_GRACE).await;
+                old.terminate(FORWARDER_GRACE).await;
             }
             current_target = None;
             if resolved.is_some() {
@@ -339,7 +336,7 @@ pub async fn run(
                     json!({ "last_receiver": last_ip, "stale_ms": stale }),
                 );
                 if let Some(mut old) = forwarder.take() {
-                    old.terminate_then_kill(FORWARDER_GRACE).await;
+                    old.terminate(FORWARDER_GRACE).await;
                 }
                 current_target = None;
                 tracing::warn!(stale_ms = stale, "wfb_relay_receiver_unreachable");
@@ -358,7 +355,7 @@ pub async fn run(
 
     // Clean shutdown: terminate the forwarder and persist the down state.
     if let Some(mut proc) = forwarder.take() {
-        proc.terminate_then_kill(FORWARDER_GRACE).await;
+        proc.terminate(FORWARDER_GRACE).await;
     }
     {
         let mut s = state.lock().await;

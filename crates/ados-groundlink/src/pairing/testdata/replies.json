@@ -1,0 +1,302 @@
+[
+  {
+    "name": "snapshot_closed",
+    "reply": {
+      "ok": true,
+      "result": {
+        "open": false
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "snapshot"
+    }
+  },
+  {
+    "name": "is_window_open_closed",
+    "reply": {
+      "ok": true,
+      "result": {
+        "open": false
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "is_window_open"
+    }
+  },
+  {
+    "name": "close_window_none_open",
+    "reply": {
+      "ok": true,
+      "result": {
+        "closed": false
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "close_window"
+    }
+  },
+  {
+    "name": "approve_missing_device_id",
+    "reply": {
+      "error": "device_id required",
+      "ok": false
+    },
+    "request": {
+      "args": {},
+      "op": "approve"
+    }
+  },
+  {
+    "name": "approve_mesh_not_initialized",
+    "reply": {
+      "error": "mesh not initialized",
+      "ok": false
+    },
+    "request": {
+      "args": {
+        "device_id": "relay-synthetic-01"
+      },
+      "op": "approve"
+    }
+  },
+  {
+    "name": "open_window",
+    "reply": {
+      "ok": true,
+      "result": {
+        "closes_at_ms": "<ms>",
+        "code": "<code>",
+        "opened_at_ms": "<ms>"
+      }
+    },
+    "request": {
+      "args": {
+        "duration_s": 30
+      },
+      "op": "open_window"
+    }
+  },
+  {
+    "name": "is_window_open_open",
+    "reply": {
+      "ok": true,
+      "result": {
+        "open": true
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "is_window_open"
+    }
+  },
+  {
+    "name": "snapshot_open",
+    "reply": {
+      "ok": true,
+      "result": {
+        "approvals": {},
+        "closes_at_ms": "<ms>",
+        "code": "<code>",
+        "open": true,
+        "opened_at_ms": "<ms>",
+        "pending": []
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "snapshot"
+    }
+  },
+  {
+    "name": "approve_not_pending",
+    "reply": {
+      "error": "pair request not found or window closed",
+      "ok": false
+    },
+    "request": {
+      "args": {
+        "device_id": "relay-synthetic-09"
+      },
+      "op": "approve"
+    }
+  },
+  {
+    "name": "snapshot_pending",
+    "reply": {
+      "ok": true,
+      "result": {
+        "approvals": {},
+        "closes_at_ms": "<ms>",
+        "code": "<code>",
+        "open": true,
+        "opened_at_ms": "<ms>",
+        "pending": [
+          {
+            "device_id": "relay-synthetic-01",
+            "received_at_ms": "<ms>",
+            "remote_ip": "127.0.0.1"
+          }
+        ]
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "snapshot"
+    }
+  },
+  {
+    "name": "approve_ok",
+    "reply": {
+      "ok": true,
+      "result": {
+        "approved": true,
+        "expires_at_ms": "<ms>",
+        "invite_blob_hex": "<hex>",
+        "issued_at_ms": "<ms>"
+      }
+    },
+    "request": {
+      "args": {
+        "device_id": "relay-synthetic-01"
+      },
+      "op": "approve"
+    }
+  },
+  {
+    "name": "snapshot_approved",
+    "reply": {
+      "ok": true,
+      "result": {
+        "approvals": {
+          "relay-synthetic-01": "<ms>"
+        },
+        "closes_at_ms": "<ms>",
+        "code": "<code>",
+        "open": true,
+        "opened_at_ms": "<ms>",
+        "pending": [
+          {
+            "device_id": "relay-synthetic-01",
+            "received_at_ms": "<ms>",
+            "remote_ip": "127.0.0.1"
+          }
+        ]
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "snapshot"
+    }
+  },
+  {
+    "name": "revoke_missing_device_id",
+    "reply": {
+      "error": "device_id required",
+      "ok": false
+    },
+    "request": {
+      "args": {},
+      "op": "revoke"
+    }
+  },
+  {
+    "name": "revoke_new",
+    "reply": {
+      "ok": true,
+      "result": {
+        "revoked": true
+      }
+    },
+    "request": {
+      "args": {
+        "device_id": "relay-synthetic-02"
+      },
+      "op": "revoke"
+    }
+  },
+  {
+    "name": "revoke_again",
+    "reply": {
+      "ok": true,
+      "result": {
+        "revoked": false
+      }
+    },
+    "request": {
+      "args": {
+        "device_id": "relay-synthetic-02"
+      },
+      "op": "revoke"
+    }
+  },
+  {
+    "name": "close_window_open",
+    "reply": {
+      "ok": true,
+      "result": {
+        "closed": true
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "close_window"
+    }
+  },
+  {
+    "name": "snapshot_after_close",
+    "reply": {
+      "ok": true,
+      "result": {
+        "open": false
+      }
+    },
+    "request": {
+      "args": {},
+      "op": "snapshot"
+    }
+  },
+  {
+    "name": "unknown_op",
+    "reply": {
+      "error": "unknown op: bogus",
+      "ok": false
+    },
+    "request": {
+      "args": {},
+      "op": "bogus"
+    }
+  },
+  {
+    "name": "join_bad_code",
+    "reply": {
+      "error": "the join code is six digits",
+      "error_code": "E_BAD_CODE",
+      "ok": false
+    },
+    "request": {
+      "args": {
+        "code": "12ab"
+      },
+      "op": "join"
+    }
+  },
+  {
+    "name": "malformed_json",
+    "raw": "not json",
+    "reply": {
+      "error": "malformed request: Expecting value: line 1 column 1 (char 0)",
+      "ok": false
+    }
+  },
+  {
+    "name": "malformed_args",
+    "raw": "{\"op\":\"snapshot\",\"args\":[1]}",
+    "reply": {
+      "error": "malformed request: args must be object",
+      "ok": false
+    }
+  }
+]

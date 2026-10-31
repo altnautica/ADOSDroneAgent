@@ -6,8 +6,7 @@ use super::generation::{reconcile_fleet, spawn_link_telemetry};
 use super::*;
 
 /// The receive manager's main loop: spawn a generation, run it to completion,
-/// restart with bounded backoff. Mirrors the Python `WfbRxManager.run` structure
-/// (sans the Python-owned adapter-detect/pairing gate).
+/// restart with bounded backoff.
 pub(super) async fn receive_loop(
     config: &WfbConfig,
     presence_cache: GsPresenceCache,
