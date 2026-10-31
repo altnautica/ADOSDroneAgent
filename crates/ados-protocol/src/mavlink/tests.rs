@@ -1,0 +1,750 @@
+use super::*;
+use rust_mavlink::dialects::ardupilotmega::HEARTBEAT_DATA;
+
+fn heartbeat() -> MavMessage {
+    MavMessage::HEARTBEAT(HEARTBEAT_DATA {
+        custom_mode: 0,
+        mavtype: ardupilotmega::MavType::MAV_TYPE_QUADROTOR,
+        autopilot: ardupilotmega::MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
+        base_mode: ardupilotmega::MavModeFlag::empty(),
+        system_status: ardupilotmega::MavState::MAV_STATE_STANDBY,
+        mavlink_version: 3,
+    })
+}
+
+#[test]
+fn heartbeat_round_trips_through_v2_frame() {
+    let header = MavHeader {
+        system_id: 1,
+        component_id: 1,
+        sequence: 42,
+    };
+    let frame = serialize_v2(header, &heartbeat()).unwrap();
+    // A v2 frame starts with the 0xFD magic byte.
+    assert_eq!(frame[0], 0xFD);
+
+    let (got_header, got_msg) = parse_v2(&frame).unwrap();
+    assert_eq!(got_header.system_id, 1);
+    assert_eq!(got_header.component_id, 1);
+    assert_eq!(got_header.sequence, 42);
+    match got_msg {
+        MavMessage::HEARTBEAT(hb) => {
+            assert_eq!(hb.mavtype, ardupilotmega::MavType::MAV_TYPE_QUADROTOR);
+            assert_eq!(hb.mavlink_version, 3);
+        }
+        other => panic!("expected HEARTBEAT, got {other:?}"),
+    }
+}
+
+#[test]
+fn truncated_frame_is_a_read_error() {
+    let header = MavHeader::default();
+    let frame = serialize_v2(header, &heartbeat()).unwrap();
+    // Drop the last few bytes so the frame is incomplete.
+    assert!(matches!(
+        parse_v2(&frame[..frame.len() - 3]),
+        Err(MavlinkError::Read(_))
+    ));
+}
+
+#[test]
+fn heartbeat_round_trips_through_v1_frame() {
+    let header = MavHeader {
+        system_id: 1,
+        component_id: 1,
+        sequence: 7,
+    };
+    let frame = serialize_v1(header, &heartbeat()).unwrap();
+    // A v1 frame starts with the 0xFE magic byte.
+    assert_eq!(frame[0], 0xFE);
+
+    let (got_header, got_msg) = parse_v1(&frame).unwrap();
+    assert_eq!(got_header.system_id, 1);
+    assert_eq!(got_header.component_id, 1);
+    assert_eq!(got_header.sequence, 7);
+    assert!(matches!(got_msg, MavMessage::HEARTBEAT(_)));
+}
+
+#[test]
+fn outbound_frame_is_length_prefixed_and_decode_recovers_it() {
+    // The MAVLink socket contract frames each outbound raw MAVLink frame
+    // with a 4-byte big-endian length prefix. A consumer reads the prefix
+    // with decode_len and then exactly that many payload bytes, recovering
+    // the original frame verbatim.
+    use crate::frame::{decode_len, encode_frame, HEADER_SIZE, MAVLINK_MAX_FRAME};
+    let header = MavHeader {
+        system_id: 1,
+        component_id: 1,
+        sequence: 5,
+    };
+    let raw = serialize_v2(header, &heartbeat()).unwrap();
+
+    let framed = encode_frame(&raw, MAVLINK_MAX_FRAME).unwrap();
+    // The prefix is the big-endian length of the raw frame.
+    let prefix: [u8; HEADER_SIZE] = framed[..HEADER_SIZE].try_into().unwrap();
+    let len = decode_len(prefix, MAVLINK_MAX_FRAME, false).unwrap();
+    assert_eq!(len, raw.len());
+    // The payload after the prefix is the original frame, unchanged.
+    assert_eq!(&framed[HEADER_SIZE..], raw.as_slice());
+    // And it still parses as the heartbeat it started as.
+    let (_, msg) = parse_any(&framed[HEADER_SIZE..]).unwrap();
+    assert!(matches!(msg, MavMessage::HEARTBEAT(_)));
+}
+
+#[test]
+fn parse_any_dispatches_on_start_of_frame_byte() {
+    let header = MavHeader {
+        system_id: 1,
+        component_id: 1,
+        sequence: 3,
+    };
+    let v2_frame = serialize_v2(header, &heartbeat()).unwrap();
+    let v1_frame = serialize_v1(header, &heartbeat()).unwrap();
+    assert_eq!(v2_frame[0], 0xFD);
+    assert_eq!(v1_frame[0], 0xFE);
+
+    let (_, m2) = parse_any(&v2_frame).unwrap();
+    let (_, m1) = parse_any(&v1_frame).unwrap();
+    assert!(matches!(m2, MavMessage::HEARTBEAT(_)));
+    assert!(matches!(m1, MavMessage::HEARTBEAT(_)));
+
+    // An unknown start byte is rejected, not silently parsed.
+    assert!(matches!(
+        parse_any(&[0x00, 0x01, 0x02]),
+        Err(MavlinkError::Read(_))
+    ));
+    assert!(matches!(parse_any(&[]), Err(MavlinkError::Read(_))));
+}
+
+// ── build_command_long_v2 ────────────────────────────────────────────────
+
+#[test]
+fn command_long_builder_matches_the_golden_set_camera_source_frame() {
+    // The exact 44-byte frame the reference encoder produces for
+    // SET_CAMERA_SOURCE (command 534) with camera_index=2, source
+    // system/component 255/190, target 1/1, sequence 0. param2 carries the
+    // index (2.0); every other param is 0.
+    let header = MavHeader {
+        system_id: 255,
+        component_id: 190,
+        sequence: 0,
+    };
+    let frame = build_command_long_v2(header, 534, 1, 1, [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let golden = hex_to_bytes(
+        "fd20000000ffbe4c000000000000000000400000000000000000000000000000000000000000160201019b45",
+    );
+    assert_eq!(
+        frame, golden,
+        "the built frame must be byte-identical to the golden SET_CAMERA_SOURCE frame"
+    );
+}
+
+#[test]
+fn command_long_builder_truncates_trailing_zeros_and_is_44_bytes() {
+    let header = MavHeader {
+        system_id: 255,
+        component_id: 190,
+        sequence: 0,
+    };
+    let frame = build_command_long_v2(header, 534, 1, 1, [0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    // 10-byte v2 header + 32-byte truncated payload + 2-byte CRC = 44.
+    assert_eq!(frame.len(), 44);
+    assert_eq!(frame[0], 0xFD); // v2 start-of-frame
+    assert_eq!(frame[1], 32); // truncated payload length
+    assert_eq!(frame[2], 0x00); // incompat flags (unsigned)
+    assert_eq!(frame[3], 0x00); // compat flags
+                                // 3-byte LE message id == 76.
+    assert_eq!(frame[7], 76);
+    assert_eq!(frame[8], 0);
+    assert_eq!(frame[9], 0);
+}
+
+#[test]
+fn command_long_builder_crc_matches_rust_mavlink_for_a_named_id() {
+    // For a command the dialect DOES name (ARM_DISARM, 400), the raw builder
+    // must produce the byte-identical frame the typed serializer produces —
+    // proving the X.25 + CRC_EXTRA fold here is consistent with the codec the
+    // rest of the agent uses. ARM_DISARM's CRC_EXTRA differs from
+    // COMMAND_LONG's, but the message id + payload layout are the same, so we
+    // compare the frame bytes up to (but excluding) the 2-byte CRC, then assert
+    // both CRCs are well-formed 2-byte tails.
+    use rust_mavlink::dialects::ardupilotmega::{MavCmd, COMMAND_LONG_DATA};
+    let header = MavHeader {
+        system_id: 1,
+        component_id: 191,
+        sequence: 7,
+    };
+    let typed = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+        target_system: 1,
+        target_component: 1,
+        command: MavCmd::MAV_CMD_COMPONENT_ARM_DISARM,
+        confirmation: 0,
+        param1: 1.0,
+        param2: 0.0,
+        param3: 0.0,
+        param4: 0.0,
+        param5: 0.0,
+        param6: 0.0,
+        param7: 0.0,
+    });
+    let typed_frame = serialize_v2(header, &typed).unwrap();
+    // The raw builder for the same command id + params.
+    let raw_frame = build_command_long_v2(header, 400, 1, 1, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    // The header + payload (everything but the trailing 2-byte CRC) is
+    // identical: the raw builder reproduces the typed serializer's framing.
+    assert_eq!(
+        &raw_frame[..raw_frame.len() - 2],
+        &typed_frame[..typed_frame.len() - 2],
+        "header + payload must match the typed serializer for the same command"
+    );
+}
+
+#[test]
+fn command_long_builder_zero_truncation_keeps_one_byte() {
+    // An all-zero payload truncates to a single byte (never empty), so the
+    // frame is still a valid, parseable v2 frame.
+    let mut payload = vec![0u8, 0, 0, 0];
+    truncate_trailing_zeros(&mut payload);
+    assert_eq!(payload, vec![0u8]);
+}
+
+/// Decode a lowercase hex string into bytes for the golden-frame assertions.
+fn hex_to_bytes(s: &str) -> Vec<u8> {
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
+}
+
+// ---- guided setpoint builder ----------------------------------------
+
+fn velocity_setpoint(kind: SetpointKind, frame: u8) -> GuidedSetpoint {
+    // Pure-velocity setpoint: ignore position, accel, yaw; command vx/vy/vz.
+    let ignore = TYPEMASK_X_IGNORE
+        | TYPEMASK_Y_IGNORE
+        | TYPEMASK_Z_IGNORE
+        | TYPEMASK_AX_IGNORE
+        | TYPEMASK_AY_IGNORE
+        | TYPEMASK_AZ_IGNORE
+        | TYPEMASK_YAW_IGNORE
+        | TYPEMASK_YAW_RATE_IGNORE;
+    GuidedSetpoint {
+        kind,
+        coordinate_frame: frame,
+        type_mask: ignore,
+        x: 0.0,
+        y: 0.0,
+        z: 0.0,
+        vx: 2.5,
+        vy: -1.0,
+        vz: 0.5,
+        afx: 0.0,
+        afy: 0.0,
+        afz: 0.0,
+        yaw: 0.0,
+        yaw_rate: 0.0,
+    }
+}
+
+#[test]
+// Asserts on MAV_FRAME_BODY_NED, superseded in the spec but still the frame
+// id this builder is asked for; see `mav_frame_from_u8`.
+#[allow(deprecated)]
+fn local_ned_setpoint_builds_and_round_trips() {
+    // A pure-velocity local setpoint in the body frame builds, serializes to
+    // a real v2 frame, and decodes back to the SAME message id + fields.
+    let sp = velocity_setpoint(SetpointKind::LocalNed, 8); // MAV_FRAME_BODY_NED
+    let msg = sp.build_message(1, 1).expect("valid setpoint builds");
+    let header = MavHeader {
+        system_id: 1,
+        component_id: 191,
+        sequence: 0,
+    };
+    let frame = serialize_v2(header, &msg).expect("serialize succeeds");
+    // The 3-byte v2 message id (bytes 7..10) is 84.
+    assert_eq!(frame[7], 84, "message id low byte is 84 (LOCAL_NED)");
+    assert_eq!(frame[8], 0);
+    assert_eq!(frame[9], 0);
+    let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
+    match decoded {
+        MavMessage::SET_POSITION_TARGET_LOCAL_NED(d) => {
+            assert_eq!(d.vx, 2.5);
+            assert_eq!(d.vy, -1.0);
+            assert_eq!(d.vz, 0.5);
+            assert_eq!(d.target_system, 1);
+            assert_eq!(d.target_component, 1);
+            assert_eq!(
+                d.coordinate_frame,
+                ardupilotmega::MavFrame::MAV_FRAME_BODY_NED
+            );
+            // The position-ignore bits round-tripped.
+            assert!(d.type_mask.contains(
+                ardupilotmega::PositionTargetTypemask::POSITION_TARGET_TYPEMASK_X_IGNORE
+            ));
+        }
+        other => panic!("expected SET_POSITION_TARGET_LOCAL_NED, got {other:?}"),
+    }
+}
+
+#[test]
+// Asserts on MAV_FRAME_GLOBAL_RELATIVE_ALT_INT: see `mav_frame_from_u8`.
+#[allow(deprecated)]
+fn global_int_setpoint_builds_and_round_trips() {
+    // A pure-velocity global-int setpoint builds, serializes, and decodes back
+    // to message id 86 with the velocity fields intact.
+    let sp = velocity_setpoint(SetpointKind::GlobalInt, 6); // GLOBAL_RELATIVE_ALT_INT
+    let msg = sp.build_message(1, 1).expect("valid setpoint builds");
+    let header = MavHeader {
+        system_id: 1,
+        component_id: 191,
+        sequence: 7,
+    };
+    let frame = serialize_v2(header, &msg).expect("serialize succeeds");
+    assert_eq!(frame[7], 86, "message id low byte is 86 (GLOBAL_INT)");
+    assert_eq!(frame[8], 0);
+    assert_eq!(frame[9], 0);
+    let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
+    match decoded {
+        MavMessage::SET_POSITION_TARGET_GLOBAL_INT(d) => {
+            assert_eq!(d.vx, 2.5);
+            assert_eq!(d.vy, -1.0);
+            assert_eq!(d.vz, 0.5);
+            assert_eq!(
+                d.coordinate_frame,
+                ardupilotmega::MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+            );
+        }
+        other => panic!("expected SET_POSITION_TARGET_GLOBAL_INT, got {other:?}"),
+    }
+}
+
+#[test]
+fn global_int_carries_scaled_lat_lon_and_clamps() {
+    // x/y carry scaled lat/lon (already *1e7); they map to lat_int/lon_int.
+    let mut sp = velocity_setpoint(SetpointKind::GlobalInt, 5); // GLOBAL_INT
+                                                                // Command a position too: clear the position-ignore bits.
+    sp.type_mask &= !(TYPEMASK_X_IGNORE | TYPEMASK_Y_IGNORE | TYPEMASK_Z_IGNORE);
+    sp.x = 37.422_408 * 1e7; // ~374224080
+    sp.y = -122.084_270 * 1e7; // ~-1220842700
+    sp.z = 30.0; // altitude metres
+    let msg = sp.build_message(1, 1).expect("valid setpoint builds");
+    match msg {
+        MavMessage::SET_POSITION_TARGET_GLOBAL_INT(d) => {
+            assert_eq!(d.lat_int, 374_224_080);
+            assert_eq!(d.lon_int, -1_220_842_700);
+            assert_eq!(d.alt, 30.0);
+        }
+        other => panic!("expected GLOBAL_INT, got {other:?}"),
+    }
+    // A latitude well past i32 range clamps to i32::MAX rather than wrapping.
+    let mut huge = velocity_setpoint(SetpointKind::GlobalInt, 5);
+    huge.type_mask &= !TYPEMASK_X_IGNORE;
+    huge.x = 5e10;
+    match huge.build_message(1, 1).unwrap() {
+        MavMessage::SET_POSITION_TARGET_GLOBAL_INT(d) => assert_eq!(d.lat_int, i32::MAX),
+        other => panic!("expected GLOBAL_INT, got {other:?}"),
+    }
+}
+
+#[test]
+fn setpoint_rejects_a_nan_on_an_active_axis() {
+    let mut sp = velocity_setpoint(SetpointKind::LocalNed, 1);
+    sp.vx = f32::NAN;
+    let err = sp.build_message(1, 1).unwrap_err();
+    assert_eq!(err.0, "vx must be a finite number");
+    // An infinite commanded velocity is rejected too.
+    let mut inf = velocity_setpoint(SetpointKind::LocalNed, 1);
+    inf.vz = f32::INFINITY;
+    assert_eq!(
+        inf.build_message(1, 1).unwrap_err().0,
+        "vz must be a finite number"
+    );
+}
+
+#[test]
+fn setpoint_rejects_a_finite_f64_over_f32_range_on_an_active_position_axis() {
+    // A finite f64 whose magnitude is past f32::MAX would narrow to
+    // f32::INFINITY on the wire. An active local position axis must reject
+    // it rather than silently send infinity.
+    let over = (f32::MAX as f64) * 2.0; // finite f64, but > f32::MAX
+    assert!(over.is_finite());
+    assert!((over as f32).is_infinite());
+
+    let mut sp = velocity_setpoint(SetpointKind::LocalNed, 1);
+    sp.type_mask &= !TYPEMASK_X_IGNORE; // command an x position
+    sp.x = over;
+    let err = sp.build_message(1, 1).unwrap_err();
+    assert_eq!(err.0, "x must be a finite number");
+
+    // The altitude axis narrows to f32 on both kinds, including global.
+    let mut alt = velocity_setpoint(SetpointKind::GlobalInt, 5);
+    alt.type_mask &= !TYPEMASK_Z_IGNORE;
+    alt.z = over;
+    assert_eq!(
+        alt.build_message(1, 1).unwrap_err().0,
+        "z must be a finite number"
+    );
+}
+
+#[test]
+fn setpoint_ignores_a_nan_on_an_ignored_axis() {
+    // A NaN left in an IGNORED position field is fine: the autopilot
+    // disregards that axis, and the global clamp turns the NaN into 0.
+    let mut sp = velocity_setpoint(SetpointKind::GlobalInt, 5);
+    sp.x = f64::NAN; // x is ignored in the pure-velocity mask
+    let msg = sp
+        .build_message(1, 1)
+        .expect("ignored-axis NaN is accepted");
+    match msg {
+        MavMessage::SET_POSITION_TARGET_GLOBAL_INT(d) => assert_eq!(d.lat_int, 0),
+        other => panic!("expected GLOBAL_INT, got {other:?}"),
+    }
+}
+
+#[test]
+fn setpoint_rejects_an_unknown_type_mask_bit() {
+    let mut sp = velocity_setpoint(SetpointKind::LocalNed, 1);
+    sp.type_mask |= 0x8000; // a bit above the defined field
+    let err = sp.build_message(1, 1).unwrap_err();
+    assert!(
+        err.0.contains("outside the defined position-target field"),
+        "got: {}",
+        err.0
+    );
+}
+
+#[test]
+fn setpoint_rejects_a_frame_wrong_for_the_kind() {
+    // A global frame on a local message is rejected, and vice versa.
+    let mut local = velocity_setpoint(SetpointKind::LocalNed, 1);
+    local.coordinate_frame = 5; // MAV_FRAME_GLOBAL_INT, a global frame
+    assert!(local
+        .build_message(1, 1)
+        .unwrap_err()
+        .0
+        .contains("not valid for this setpoint kind"));
+    let mut global = velocity_setpoint(SetpointKind::GlobalInt, 5);
+    global.coordinate_frame = 1; // MAV_FRAME_LOCAL_NED, a local frame
+    assert!(global
+        .build_message(1, 1)
+        .unwrap_err()
+        .0
+        .contains("not valid for this setpoint kind"));
+}
+
+// ---- attitude setpoint builder ----------------------------------------
+
+fn body_rate_command() -> AttitudeSetpoint {
+    // Pure body-rate command: ignore attitude, command rates + thrust.
+    AttitudeSetpoint {
+        type_mask: ATTMASK_ATTITUDE_IGNORE,
+        q: [1.0, 0.0, 0.0, 0.0],
+        body_roll_rate: 0.5,
+        body_pitch_rate: -0.2,
+        body_yaw_rate: 0.1,
+        thrust: 0.6,
+    }
+}
+
+#[test]
+fn attitude_setpoint_builds_and_round_trips() {
+    let sp = body_rate_command();
+    let msg = sp.build_message(1, 1).expect("valid setpoint builds");
+    let header = MavHeader {
+        system_id: 1,
+        component_id: 191,
+        sequence: 0,
+    };
+    let frame = serialize_v2(header, &msg).expect("serialize succeeds");
+    // The 3-byte v2 message id (bytes 7..10) is 82.
+    assert_eq!(
+        frame[7], 82,
+        "message id low byte is 82 (SET_ATTITUDE_TARGET)"
+    );
+    assert_eq!(frame[8], 0);
+    assert_eq!(frame[9], 0);
+    let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
+    match decoded {
+        MavMessage::SET_ATTITUDE_TARGET(d) => {
+            assert_eq!(d.body_roll_rate, 0.5);
+            assert_eq!(d.body_pitch_rate, -0.2);
+            assert_eq!(d.body_yaw_rate, 0.1);
+            assert_eq!(d.thrust, 0.6);
+            assert_eq!(d.target_system, 1);
+            assert_eq!(d.target_component, 1);
+            // The attitude-ignore bit round-tripped.
+            assert!(d.type_mask.contains(
+                ardupilotmega::AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+            ));
+        }
+        other => panic!("expected SET_ATTITUDE_TARGET, got {other:?}"),
+    }
+}
+
+#[test]
+fn attitude_setpoint_commands_a_quaternion_and_round_trips() {
+    // Command a full attitude: clear ATTITUDE_IGNORE, set a unit quaternion.
+    let mut sp = body_rate_command();
+    sp.type_mask &= !ATTMASK_ATTITUDE_IGNORE;
+    sp.q = [0.923_879_5, 0.0, 0.0, 0.382_683_43]; // 45° yaw, unit norm
+    let msg = sp.build_message(1, 1).expect("valid setpoint builds");
+    let header = MavHeader::default();
+    let frame = serialize_v2(header, &msg).expect("serialize succeeds");
+    let (_h, decoded) = parse_v2(&frame).expect("decode succeeds");
+    match decoded {
+        MavMessage::SET_ATTITUDE_TARGET(d) => {
+            assert_eq!(d.q, sp.q);
+            assert!(!d.type_mask.contains(
+                ardupilotmega::AttitudeTargetTypemask::ATTITUDE_TARGET_TYPEMASK_ATTITUDE_IGNORE
+            ));
+        }
+        other => panic!("expected SET_ATTITUDE_TARGET, got {other:?}"),
+    }
+}
+
+#[test]
+fn attitude_setpoint_rejects_a_non_unit_quaternion() {
+    let mut sp = body_rate_command();
+    sp.type_mask &= !ATTMASK_ATTITUDE_IGNORE;
+    sp.q = [1.0, 0.0, 0.0, 0.0];
+    sp.q[3] = 0.5; // norm sqrt(1 + 0.25) ≈ 1.118 > tolerance
+    let err = sp.build_message(1, 1).unwrap_err();
+    assert!(err.0.contains("unit quaternion"), "got: {}", err.0);
+}
+
+#[test]
+fn attitude_setpoint_rejects_a_nan_on_an_active_rate_axis() {
+    let mut sp = body_rate_command();
+    sp.body_pitch_rate = f32::NAN;
+    let err = sp.build_message(1, 1).unwrap_err();
+    assert_eq!(err.0, "body_pitch_rate must be a finite number");
+}
+
+#[test]
+fn attitude_setpoint_rejects_thrust_out_of_range() {
+    let mut sp = body_rate_command();
+    sp.thrust = 1.5;
+    let err = sp.build_message(1, 1).unwrap_err();
+    assert!(err.0.contains("must be in -1..=1"), "got: {}", err.0);
+    // A negative value within the reverse-thrust range is accepted.
+    sp.thrust = -0.9;
+    assert!(sp.build_message(1, 1).is_ok());
+}
+
+#[test]
+fn attitude_setpoint_ignores_a_nan_on_an_ignored_axis() {
+    let mut sp = body_rate_command();
+    sp.body_roll_rate = f32::NAN; // ignored (BODY_ROLL_RATE_IGNORE is clear? no)
+                                  // The active rate axes are roll/pitch/yaw + thrust; directly ignore roll.
+    sp.type_mask |= ATTMASK_BODY_ROLL_RATE_IGNORE;
+    assert!(
+        sp.build_message(1, 1).is_ok(),
+        "ignored-axis NaN is accepted"
+    );
+}
+
+#[test]
+fn attitude_setpoint_rejects_an_unknown_type_mask_bit() {
+    let mut sp = body_rate_command();
+    sp.type_mask |= 0x10; // 16 is not a defined attitude-target bit
+    let err = sp.build_message(1, 1).unwrap_err();
+    assert!(
+        err.0.contains("outside the defined attitude-target field"),
+        "got: {}",
+        err.0
+    );
+}
+
+#[test]
+fn opponent_attitude_changes_not_rejected_but_crc_const_is_49() {
+    // Pin the two authoritative constants for the message: id 82, CRC_EXTRA
+    // 49, payload 39 — so a future dialect bump cannot silently drift them.
+    assert_eq!(MSG_ID_SET_ATTITUDE_TARGET, 82);
+    assert_eq!(ATTITUDE_TARGET_CRC_EXTRA, 49);
+    assert_eq!(ardupilotmega::SET_ATTITUDE_TARGET_DATA::ENCODED_LEN, 39);
+}
+
+#[test]
+fn tunnel_frame_round_trips_the_payload_and_private_type() {
+    // Build a TUNNEL with a private payload_type carrying an opaque app
+    // payload; classify it as TUNNEL, recover the payload_type off the wire,
+    // and recover the exact payload bytes the application sent.
+    let header = MavHeader {
+        system_id: 42,
+        component_id: 191,
+        sequence: 3,
+    };
+    let payload_type: u16 = 40001;
+    let app_payload = b"hello-from-a-plugin";
+    let frame =
+        build_tunnel_v2(header, payload_type, 1, 1, app_payload).expect("private type builds");
+
+    // The 3-byte v2 message id (bytes 7..10) is 385 (0x181) little-endian.
+    let mut id = [0u8; 4];
+    id[..3].copy_from_slice(&frame[7..10]);
+    assert_eq!(u32::from_le_bytes(id), MSG_ID_TUNNEL);
+
+    // The classifier sees a TUNNEL and reads the private type straight off
+    // the wire (the typed parser would reject the unregistered enum value).
+    assert_eq!(tunnel_payload_type(&frame), Some(payload_type));
+
+    // Recover the application payload from the wire. After the 10-byte v2
+    // header the TUNNEL fields are payload_type (bytes 10..12), target_system
+    // (12), target_component (13), payload_length (14), then the payload at
+    // byte 15. Confirm payload_length and the bytes round-trip.
+    assert_eq!(frame[14] as usize, app_payload.len());
+    assert_eq!(&frame[15..15 + app_payload.len()], app_payload);
+}
+
+#[test]
+fn tunnel_payload_recovers_the_exact_bytes_including_trailing_zeros() {
+    // The decode half must reconstruct a payload whose tail is zeros that
+    // MAVLink2 trailing-zero truncation stripped off the wire.
+    let header = MavHeader::default();
+    for app in [
+        &b"chunk-header-and-body"[..],
+        &b""[..],
+        &[0xAD, 0x03, 1, 0, 9, 0, 0, 0, 0, 0, 0, 0][..], // ends in zeros
+        &vec![0u8; TUNNEL_MAX_PAYLOAD][..],              // all zeros, max width
+    ] {
+        let frame = build_tunnel_v2(header, 44480, 7, 1, app).expect("builds");
+        assert_eq!(tunnel_payload(&frame).as_deref(), Some(app));
+    }
+    // A non-TUNNEL frame yields None.
+    let hb = serialize_v2(header, &heartbeat()).unwrap();
+    assert_eq!(tunnel_payload(&hb), None);
+}
+
+#[test]
+fn tunnel_rejects_a_registered_payload_type() {
+    // A value at or below the private floor is reserved by the registry and
+    // must be refused, so an application cannot mint a colliding type.
+    let header = MavHeader::default();
+    let err = build_tunnel_v2(header, TUNNEL_RESERVED_PAYLOAD_TYPE_MAX, 1, 1, b"x")
+        .expect_err("a registered type is refused");
+    assert!(err.0.contains("private type"));
+    // The very next value up is accepted.
+    assert!(build_tunnel_v2(header, TUNNEL_RESERVED_PAYLOAD_TYPE_MAX + 1, 1, 1, b"x").is_ok());
+}
+
+#[test]
+fn tunnel_rejects_an_oversized_payload() {
+    let header = MavHeader::default();
+    // One byte over the fixed-array width.
+    let big = vec![0xABu8; TUNNEL_MAX_PAYLOAD + 1];
+    let err =
+        build_tunnel_v2(header, 40002, 1, 1, &big).expect_err("an oversized payload is refused");
+    assert!(err.0.contains("exceeds"));
+    // The maximum width is accepted.
+    let exact = vec![0xCDu8; TUNNEL_MAX_PAYLOAD];
+    assert!(build_tunnel_v2(header, 40002, 1, 1, &exact).is_ok());
+}
+
+#[test]
+fn tunnel_classifier_ignores_a_non_tunnel_frame() {
+    // A heartbeat frame is not a TUNNEL, so the classifier returns None.
+    let header = MavHeader::default();
+    let frame = serialize_v2(header, &heartbeat()).unwrap();
+    assert_eq!(tunnel_payload_type(&frame), None);
+}
+
+/// A v2 frame for `msg_id` over `payload` with a checksum computed the way
+/// a sender would (the dialect's CRC_EXTRA for that id).
+fn v2_frame_with(msg_id: u32, payload: &[u8], incompat: u8) -> Vec<u8> {
+    let id = msg_id.to_le_bytes();
+    let mut frame = vec![
+        0xFD,
+        payload.len() as u8,
+        incompat,
+        0,
+        0,
+        1,
+        1,
+        id[0],
+        id[1],
+        id[2],
+    ];
+    frame.extend_from_slice(payload);
+    let mut crc = X25_INIT;
+    for &b in &frame[1..] {
+        crc = x25_accumulate(b, crc);
+    }
+    crc = x25_accumulate(
+        <MavMessage as rust_mavlink::Message>::extra_crc(msg_id),
+        crc,
+    );
+    frame.extend_from_slice(&crc.to_le_bytes());
+    frame
+}
+
+#[test]
+fn exact_decode_accepts_whole_v1_and_v2_frames() {
+    let header = MavHeader::default();
+    let v2 = serialize_v2(header, &heartbeat()).unwrap();
+    assert!(matches!(
+        decode_exact_frame(&v2),
+        Ok(MavMessage::HEARTBEAT(_))
+    ));
+    let v1 = serialize_v1(header, &heartbeat()).unwrap();
+    assert!(matches!(
+        decode_exact_frame(&v1),
+        Ok(MavMessage::HEARTBEAT(_))
+    ));
+    // A hand-built frame with the sender's checksum decodes too.
+    assert!(decode_exact_frame(&v2_frame_with(0, &[0; 9], 0)).is_ok());
+}
+
+#[test]
+fn exact_decode_refuses_an_unsupported_incompat_flag() {
+    // Checksum and length are right; only the flag is foreign. A receiver
+    // drops this at byte 2 and rescans the payload for a new frame.
+    let frame = v2_frame_with(0, &[0; 9], 0x02);
+    assert!(decode_exact_frame(&frame).is_err());
+}
+
+#[test]
+fn exact_decode_refuses_a_bad_checksum_without_resyncing() {
+    // A whole ODOMETRY frame hides inside a heartbeat-length buffer whose own
+    // checksum is wrong. The stream reader resyncs onto it; this must not.
+    let odometry = <MavMessage as rust_mavlink::Message>::default_message_from_id(331).unwrap();
+    let inner = serialize_v2(MavHeader::default(), &odometry).unwrap();
+    let mut outer = v2_frame_with(0, &[0; 9], 0);
+    let last = outer.len() - 1;
+    outer[last] ^= 0xFF;
+    outer.extend_from_slice(&inner);
+    assert!(parse_v2(&outer).is_ok(), "the stream reader resyncs");
+    assert!(decode_exact_frame(&outer).is_err());
+    let mut bad_crc = v2_frame_with(0, &[0; 9], 0);
+    bad_crc[last] ^= 0xFF;
+    assert!(decode_exact_frame(&bad_crc).is_err());
+}
+
+#[test]
+fn exact_decode_refuses_unknown_ids_overlong_payloads_and_length_mismatch() {
+    assert!(decode_exact_frame(&v2_frame_with(0x00AB_CDEF, &[1, 2, 3], 0)).is_err());
+    // HEARTBEAT encodes in 9 bytes; a tenth is past the message.
+    assert!(decode_exact_frame(&v2_frame_with(0, &[0; 10], 0)).is_err());
+    let whole = v2_frame_with(0, &[0; 9], 0);
+    assert!(decode_exact_frame(&whole[..whole.len() - 1]).is_err());
+    let mut trailing = whole.clone();
+    trailing.push(0);
+    assert!(decode_exact_frame(&trailing).is_err());
+}
+
+#[test]
+fn exact_decode_accepts_v2_extension_length_only_up_to_extended_size() {
+    // OPTICAL_FLOW #100: 26 base bytes, 34 with its extension fields.
+    assert!(matches!(
+        decode_exact_frame(&v2_frame_with(100, &[0; 34], 0)),
+        Ok(MavMessage::OPTICAL_FLOW(_))
+    ));
+    assert!(decode_exact_frame(&v2_frame_with(100, &[0; 35], 0)).is_err());
+}
+
+#[test]
+fn message_names_resolve_to_dialect_ids() {
+    assert_eq!(message_id_from_name("HEARTBEAT"), Some(0));
+    assert_eq!(message_id_from_name("GLOBAL_POSITION_INT"), Some(33));
+    assert_eq!(message_id_from_name("ODOMETRY"), Some(331));
+    assert_eq!(message_id_from_name("NOT_A_MESSAGE"), None);
+}

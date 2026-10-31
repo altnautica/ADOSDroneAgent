@@ -97,14 +97,43 @@ pub const SIDECARS: &[ContractMeta] = &[
     ContractMeta { id: "capture-storage", version: 1, wire: "json", transport: "/run/ados/capture-storage/capture-storage.json", status: "sidecar", description: "The capture storage root, its volume, capture usage against the budget and free-space floor, session counts, and the admission state (ok, near_full, full) a new capture session is checked against." },
 ];
 
-/// Look up the registered version of an IPC contract by id.
-pub fn contract_version(id: &str) -> Option<u16> {
-    CONTRACTS.iter().find(|c| c.id == id).map(|c| c.version)
+/// Look up the registered version of an IPC contract by id. `const`, so a
+/// version constant is defined as its registry row rather than a copy.
+pub const fn contract_version(id: &str) -> Option<u16> {
+    find_version(CONTRACTS, id)
 }
 
 /// Look up the registered version of a state sidecar by id.
-pub fn sidecar_version(id: &str) -> Option<u16> {
-    SIDECARS.iter().find(|c| c.id == id).map(|c| c.version)
+pub const fn sidecar_version(id: &str) -> Option<u16> {
+    find_version(SIDECARS, id)
+}
+
+/// The version of the row in `rows` whose id is `id`.
+const fn find_version(rows: &[ContractMeta], id: &str) -> Option<u16> {
+    let mut i = 0;
+    while i < rows.len() {
+        if str_eq(rows[i].id, id) {
+            return Some(rows[i].version);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Byte-wise string equality, usable in `const` context.
+const fn str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// Every agent profile, in canonical order.

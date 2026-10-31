@@ -17,9 +17,10 @@ use tokio::io::AsyncReadExt;
 
 use crate::frame::{encode_frame, FrameError, MAVLINK_MAX_FRAME};
 
-/// Wire version of the router → client record; mirrors the `mavlink.socket`
-/// row in `contracts.toml`.
-pub const MAVLINK_SOCKET_VERSION: u16 = 2;
+/// Wire version of the router → client record: the `mavlink.socket` row of the
+/// generated contract registry, so `contracts.toml` is the only place it is set.
+pub const MAVLINK_SOCKET_VERSION: u16 = crate::contracts::contract_version("mavlink.socket")
+    .expect("mavlink.socket is registered in contracts.toml");
 
 /// Length of the `rx_mono_ns` header that leads every router → client body.
 pub const MAVLINK_SOCKET_HEADER_LEN: usize = 8;

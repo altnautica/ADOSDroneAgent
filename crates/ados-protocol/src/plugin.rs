@@ -7,8 +7,8 @@
 //! exp)`; the token rides in every envelope and the supervisor verifies it
 //! before routing.
 //!
-//! This mirrors `ADOSDroneAgent/src/ados/plugins/rpc.py` exactly, so a Rust
-//! plugin or a Rust core speaks the identical wire as the Python supervisor.
+//! The wire must agree with `src/ados/plugins/rpc.py`, so a Rust plugin and a
+//! Python plugin speak the identical protocol.
 
 use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
