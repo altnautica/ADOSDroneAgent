@@ -194,12 +194,12 @@ pub fn roll_back(replaced: &[PathBuf]) -> RollbackReport {
     report.config_restored = restored.config;
     report.failed.extend(restored.failed);
     for unit in units_running(&report.restored, &read_units(UNIT_DIRS)) {
-        let wanted = crate::exec::run_ok("systemctl", &["is-enabled", "--quiet", &unit])
-            || crate::exec::run_ok("systemctl", &["is-active", "--quiet", &unit]);
+        let wanted = ados_term::exec::run_ok("systemctl", &["is-enabled", "--quiet", &unit])
+            || ados_term::exec::run_ok("systemctl", &["is-active", "--quiet", &unit]);
         if !wanted {
             continue;
         }
-        if crate::exec::run_ok("systemctl", &["restart", "--no-block", &unit]) {
+        if ados_term::exec::run_ok("systemctl", &["restart", "--no-block", &unit]) {
             report.restarted.push(unit);
         } else {
             report.restart_failed.push(unit);

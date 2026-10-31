@@ -16,7 +16,7 @@
 //! Verification checks LAN reachability (the default gateway answers), NOT
 //! internet, so a genuinely-degraded link can never read as connected.
 
-use crate::exec;
+use ados_term::exec;
 
 /// One scanned network row.
 #[derive(Debug, Clone, PartialEq, Eq)]

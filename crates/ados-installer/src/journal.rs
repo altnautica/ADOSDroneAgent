@@ -17,7 +17,7 @@ pub fn init_logging() {
             let _ = tracing_subscriber::registry()
                 .with(EnvFilter::new(&filter))
                 .with(journald)
-                .with(crate::ui::ChannelLayer)
+                .with(ados_term::progress::ChannelLayer)
                 .try_init();
             return;
         }

@@ -11,7 +11,11 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use ados_installer::graph::StepOutcome;
-use ados_installer::ui::{self, ProgressSink, RenderMode, SummaryData, Theme};
+use ados_installer::ui::groups::INSTALL_SPEC;
+use ados_installer::ui::summary::SummaryData;
+use ados_term::progress::{self, ProgressSink, RenderMode};
+use ados_term::theme::Theme;
+use ados_term::tty::Tty;
 
 fn step(sink: &ProgressSink, id: &str, ms: u64) {
     sink.step_started(id);
@@ -35,16 +39,8 @@ fn main() {
     let theme = Theme::detect(false, false);
     let header = "Installing the ADOS Drone Agent (drone)…".to_string();
     // Preview the full-screen renderer when a controlling terminal is reachable.
-    let (mode, tty) = ui::resolve_live_mode(RenderMode::Rich, None);
-    let (sink, render) = ui::start(
-        mode,
-        header,
-        theme,
-        tty,
-        ui::INSTALL_GROUPS,
-        ui::INSTALL_FOOTER,
-        true,
-    );
+    let (mode, tty) = progress::resolve_live_mode(RenderMode::Rich, None, Tty::open_controlling);
+    let (sink, render) = progress::start(mode, header, theme, tty, INSTALL_SPEC, true);
 
     // Checking system: preflight runs, purge_residue is a cached no-op.
     step(&sink, "preflight", 250);
@@ -113,12 +109,12 @@ fn main() {
         // Downstream skipped by the engine; mirror that here.
         sink.step_result("start", &StepOutcome::Skipped);
         sink.step_result("health", &StepOutcome::Skipped);
-        sink.summary(summary("failed", &["systemd"]));
+        sink.summary(Box::new(summary("failed", &["systemd"])));
     } else {
         step(&sink, "systemd", 500);
         step(&sink, "start", 1500);
         step(&sink, "health", 600);
-        sink.summary(summary("ok", &[]));
+        sink.summary(Box::new(summary("ok", &[])));
     }
     sink.finish();
     render.finish();

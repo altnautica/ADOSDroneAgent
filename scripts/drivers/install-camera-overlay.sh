@@ -90,7 +90,7 @@ if [ "$(id -u)" -ne 0 ] && [ "${ADOS_OVERLAY_ALLOW_NONROOT:-0}" != "1" ]; then
 fi
 
 # ----------------------------------------------------------------------------
-# Board fingerprint (mirrors install-display-overlay.sh detect_board)
+# Board fingerprint (same rules as detect_board in lib/display-detect.sh)
 # ----------------------------------------------------------------------------
 detect_board() {
     if [ -f "${ETC_ADOS_DIR}/board_override" ]; then
@@ -134,7 +134,7 @@ fi
 
 # ----------------------------------------------------------------------------
 # YAML readers (pure awk, scoped to the top-level cameras: block, keyed on the
-# camera id — mirrors install-display-overlay.sh's display_*_from_yaml so this
+# camera id, same approach as display_*_from_yaml in lib/display-yaml.sh, so this
 # works on a fresh BSP with no PyYAML).
 # ----------------------------------------------------------------------------
 

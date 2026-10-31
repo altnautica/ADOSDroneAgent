@@ -46,9 +46,9 @@
 use std::path::Path;
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::net;
+use ados_term::exec;
 
 /// Where the scoped libmali userspace lands (never the system libdir). Flattened
 /// so a single-directory `LD_LIBRARY_PATH` resolves both the wrapper shims and

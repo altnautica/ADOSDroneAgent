@@ -4,17 +4,15 @@
 //! few choices the agent needs (profile, components, Wi-Fi, name, pairing),
 //! collecting them into [`Args`] plus a small [`WizardExtras`] for the install
 //! to act on exactly as the flag-driven path would. It renders over a
-//! self-opened `/dev/tty` (see [`crate::ui::tty`]) so it works under
-//! `curl … | sudo bash`, where stdin is the piped script rather than the
-//! keyboard.
+//! self-opened `/dev/tty` (see [`ados_term::tty::Tty::open_controlling`]) so it
+//! works under `curl … | sudo bash`, where stdin is the piped script rather
+//! than the keyboard.
 //!
 //! The wizard NEVER runs when a decisive flag already answered the questions,
 //! in a machine/CI context, or when no controlling terminal is available. In
 //! those cases the install proceeds silently with the auto-detected defaults —
 //! a fresh box still comes up fully installed with zero follow-up commands.
 
-pub mod frame;
-pub mod render;
 pub mod widgets;
 
 mod catalog;
@@ -22,9 +20,10 @@ mod hw;
 mod screens;
 pub mod wifi;
 
+use ados_term::theme::Theme;
+use ados_term::tty::Tty;
+
 use crate::cli::Args;
-use crate::ui::theme::Theme;
-use crate::ui::tty::Tty;
 
 /// Choices the wizard collects that are not existing [`Args`] fields. They are
 /// applied to the run context after parsing, so the install writes them at
@@ -55,7 +54,7 @@ pub enum WizardControl {
 /// flag, we are not in a machine/CI mode, and a controlling terminal is
 /// actually reachable. Anything else falls to the silent auto-detected install.
 pub fn should_run(args: &Args) -> bool {
-    flags_allow_wizard(args) && env_allows_interactive() && Tty::is_available()
+    flags_allow_wizard(args) && env_allows_interactive() && Tty::is_available_controlling()
 }
 
 /// The pure part of the gate: do the parsed flags leave room for the wizard?
@@ -92,7 +91,7 @@ fn env_allows_interactive() -> bool {
 /// on the normal terminal.
 pub fn run(args: &mut Args) -> anyhow::Result<(WizardControl, Option<Tty>)> {
     let theme = Theme::detect(args.no_color, args.ascii);
-    let mut tty = match Tty::open()? {
+    let mut tty = match Tty::open_controlling()? {
         Some(t) => t,
         None => return Ok((WizardControl::Skipped, None)),
     };

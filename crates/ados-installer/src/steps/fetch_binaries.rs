@@ -48,8 +48,9 @@ use crate::ctx::Ctx;
 use crate::env;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::net;
-use crate::ui::{activity, ProgressSink};
 use crate::verify::{self, SignaturePolicy};
+use ados_term::fmt::fmt_bytes;
+use ados_term::progress::ProgressSink;
 
 mod manifest;
 

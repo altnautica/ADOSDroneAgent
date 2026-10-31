@@ -24,9 +24,9 @@
 //! already-enabled case.
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::steps::boot_config::{self, BootConfigEdit};
+use ados_term::exec;
 
 /// The modules-load drop-in that loads `i2c-dev` every boot.
 const MODULES_LOAD_PATH: &str = "/etc/modules-load.d/ados-i2c.conf";

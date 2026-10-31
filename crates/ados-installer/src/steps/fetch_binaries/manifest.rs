@@ -247,7 +247,7 @@ mod tests {
     use crate::binaries::{self, PREBUILT};
     use crate::steps::fetch_binaries::tests::{fake_elf, sha256_sidecar_body};
     use crate::steps::fetch_binaries::{base_or_default, install_one_at, AssetSource};
-    use crate::ui::ProgressSink;
+    use ados_term::progress::ProgressSink;
 
     const COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 

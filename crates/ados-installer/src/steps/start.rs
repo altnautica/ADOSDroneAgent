@@ -14,8 +14,8 @@ use std::path::Path;
 
 use crate::ctx::Ctx;
 use crate::env::{CONFIG_DIR, SERVICE_NAME};
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use ados_term::exec;
 
 /// Start the top-level supervisor unit (+ the GS unit set on a ground station).
 pub struct Start;

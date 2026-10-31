@@ -156,6 +156,18 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::BestEffort,
         profiles: GS_VISOR,
     },
+    // The first-boot captive portal, exec'd by `ados-setup-captive.service`:
+    // answers the OS connectivity probes on the setup AP and redirects every
+    // page to the setup webapp until the node is paired. Best-effort: a
+    // missing portal leaves setup reachable by address, only without the
+    // phone's sign-in sheet.
+    PrebuiltBinary {
+        service: "ados-captive",
+        asset: "ados-captive-aarch64",
+        dest: "/opt/ados/bin/ados-captive",
+        gate: Gate::BestEffort,
+        profiles: GROUND,
+    },
     PrebuiltBinary {
         service: "ados-pic",
         asset: "ados-pic-aarch64",
@@ -190,6 +202,16 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         dest: "/opt/ados/bin/ados-oled-i2c",
         gate: Gate::BestEffort,
         profiles: GS_VISOR,
+    },
+    // The HDMI kiosk, exec'd by `ados-kiosk.service`: a full-screen browser on
+    // the cockpit, under cage or inside a running desktop session. Ground
+    // station only, matching the unit's profile list.
+    PrebuiltBinary {
+        service: "ados-kiosk",
+        asset: "ados-kiosk-aarch64",
+        dest: "/opt/ados/bin/ados-kiosk",
+        gate: Gate::BestEffort,
+        profiles: GROUND,
     },
     PrebuiltBinary {
         service: "ados-vision",

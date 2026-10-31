@@ -279,7 +279,7 @@ fn download_with_retry(
     for attempt in 1..=ATTEMPTS {
         let fetched = fetch_capped(source, url, ARCHIVE_MAX_BYTES)
             .map_err(|e| e.to_string())
-            .and_then(|archive| match verify_sha256(&archive, sha256) {
+            .and_then(|archive| match verify_sha256(&archive, Some(sha256)) {
                 Ok(()) => Ok(archive),
                 Err(e) => Err(e.to_string()),
             });

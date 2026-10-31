@@ -12,7 +12,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crate::exec;
+use ados_term::exec;
 
 /// How long a transfer may make no meaningful progress before it is abandoned.
 ///

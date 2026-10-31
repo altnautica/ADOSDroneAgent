@@ -6,24 +6,21 @@
 //! best-effort capability missing), non-zero for `failed` (a Required step
 //! failed and the install aborted).
 
-use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Result;
 
-use ados_installer::binaries;
 use ados_installer::checkpoint::Checkpoint;
-use ados_installer::cli::{usage, Args, RunMode};
+use ados_installer::cli::{render_flags, usage, Args, RunMode};
 use ados_installer::ctx::{artifacts_conflict, resolve_channel, rev_channel_conflict, Ctx};
-use ados_installer::env::{self, EnvInfo, RESULT_PATH};
-use ados_installer::exec;
+use ados_installer::env::{self, EnvInfo};
 use ados_installer::graph::run_graph;
 use ados_installer::journal::init_logging;
-use ados_installer::result::{now_iso8601_utc, FailureAccumulator, InstallResult};
 use ados_installer::steps::full_install_chain;
-use ados_installer::ui;
-use ados_installer::uninstall;
+use ados_installer::ui::{groups::INSTALL_SPEC, groups::UNINSTALL_SPEC};
 use ados_installer::wizard::{self, WizardControl};
+use ados_installer::{pair_only, report, status, uninstall};
+use ados_term::{exec, progress, progress::RenderMode, theme::Theme, tty::Tty};
 
 /// Ignore `SIGHUP` so a controlling-terminal hangup (a dropped SSH session)
 /// cannot kill the running install. Best-effort and idempotent; a failure to
@@ -34,7 +31,7 @@ fn ignore_sighup() {
     use nix::sys::signal::{sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
     let action = SigAction::new(SigHandler::SigIgn, SaFlags::empty(), SigSet::empty());
     // Safety: SigIgn installs no handler function, so there is nothing
-    // async-signal-unsafe to run; mirrors the SIGINT/SIGWINCH setup in ui/tty.
+    // async-signal-unsafe to run.
     unsafe {
         let _ = sigaction(Signal::SIGHUP, &action);
     }
@@ -128,7 +125,7 @@ async fn main() -> Result<ExitCode> {
 
     match mode {
         RunMode::Status => {
-            print_status(&args);
+            status::print_status(&args);
             Ok(ExitCode::SUCCESS)
         }
         RunMode::Uninstall => {
@@ -137,19 +134,12 @@ async fn main() -> Result<ExitCode> {
             let purge = args.force;
             // Drive the same full-screen (or fallback) progress UI the install
             // uses, over the uninstall group set.
-            let base = ui::detect_mode(&args);
-            let theme = ui::Theme::detect(args.no_color, args.ascii);
-            let (render_mode, tty) = ui::resolve_live_mode(base, None);
+            let base = progress::detect_mode(render_flags(&args));
+            let theme = Theme::detect(args.no_color, args.ascii);
+            let (render_mode, tty) = progress::resolve_live_mode(base, None, Tty::open_controlling);
             let header = "Removing the ADOS Drone Agent…".to_string();
-            let (sink, render) = ui::start(
-                render_mode,
-                header,
-                theme,
-                tty,
-                ui::UNINSTALL_GROUPS,
-                ui::UNINSTALL_FOOTER,
-                false,
-            );
+            let (sink, render) =
+                progress::start(render_mode, header, theme, tty, UNINSTALL_SPEC, false);
             let res = uninstall::run_uninstall(purge, &sink);
             sink.finish();
             render.finish();
@@ -168,7 +158,7 @@ async fn main() -> Result<ExitCode> {
                 }
             }
         }
-        RunMode::PairOnly => match run_pair_only(&args) {
+        RunMode::PairOnly => match pair_only::run(&args) {
             Ok(()) => Ok(ExitCode::SUCCESS),
             Err(e) => {
                 eprintln!("pair: {e}");
@@ -230,7 +220,7 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     let mut wizard_extras: Option<wizard::WizardExtras> = None;
     // The wizard hands back its still-open `/dev/tty` on completion so the
     // install progress renders in the SAME alternate-screen session.
-    let mut carried_tty: Option<ui::tty::Tty> = None;
+    let mut carried_tty: Option<Tty> = None;
     if mode == RunMode::FreshInstall && wizard::should_run(&args) {
         match wizard::run(&mut args) {
             Ok((WizardControl::Completed(extras), tty)) => {
@@ -252,22 +242,22 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     // immediately. The base mode is chosen from stderr + the environment;
     // `resolve_live_mode` upgrades it to the full-screen renderer when a
     // controlling terminal is reachable (a carried wizard tty, or a fresh open).
-    let base_mode = ui::detect_mode(&args);
-    let theme = ui::Theme::detect(args.no_color, args.ascii);
+    let base_mode = progress::detect_mode(render_flags(&args));
+    let theme = Theme::detect(args.no_color, args.ascii);
     // The onboarding wizard ran (and carried its tty) only on an interactive
     // install; that gates the full-screen "installed" completion + key wait so
     // an automated install never blocks. Capture it before the tty is consumed.
     let interactive = carried_tty.is_some();
-    let (render_mode, live_tty) = ui::resolve_live_mode(base_mode, carried_tty);
+    let (render_mode, live_tty) =
+        progress::resolve_live_mode(base_mode, carried_tty, Tty::open_controlling);
     let profile_hint = args.profile.clone().unwrap_or_else(|| "drone".to_string());
     let header = format!("Installing the ADOS Drone Agent ({profile_hint})…");
-    let (sink, render) = ui::start(
+    let (sink, render) = progress::start(
         render_mode,
         header,
         theme,
         live_tty,
-        ui::INSTALL_GROUPS,
-        ui::INSTALL_FOOTER,
+        INSTALL_SPEC,
         interactive,
     );
 
@@ -322,21 +312,21 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
     // Build + write the result contract (best-effort: a dev host where
     // /var/lib is not writable must not panic the binary). The profile was
     // resolved into ctx by preflight, so read it back from there.
-    write_result(&ctx.failures, status, &ctx.profile);
+    report::write_result(&ctx.failures, status, &ctx.profile);
 
     // Keep this installer on the box so `ados uninstall` can run the one
     // uninstall path offline. Only after an install that did not fail: a
     // failed run leaves the previous copy in place.
     if status != "failed" {
-        persist_installer();
+        report::persist_installer();
     }
 
     // Hand the renderer the closing summary, then wait for it to draw the
     // success card / failure panel and restore the terminal.
-    if render_mode == ui::RenderMode::Json {
-        print_result_json();
+    if render_mode == RenderMode::Json {
+        report::print_result_json();
     }
-    sink.summary(build_summary(status, &ctx));
+    sink.summary(Box::new(report::build_summary(status, &ctx)));
     sink.finish();
     render.finish();
 
@@ -361,375 +351,5 @@ fn run_install(mut args: Args, mode: RunMode) -> Result<ExitCode> {
         Ok(ExitCode::from(1))
     } else {
         Ok(ExitCode::SUCCESS)
-    }
-}
-
-/// Fast re-pair against an already-installed, running agent: write fresh
-/// pairing material and nudge the agent to pick it up, without the full install
-/// chain (no re-fetch, no re-provision). Reached only when the install-presence
-/// probe confirmed the agent is on disk and a bare `--pair CODE` was given.
-///
-/// The agent auto-reloads `pairing.json` when its on-disk mtime is newer than
-/// the in-memory copy, so writing a fresh file is sufficient for correctness;
-/// restarting the cloud-relay unit forces an immediate re-read and re-beacon so
-/// the operator sees the new code take effect at once rather than on the next
-/// reload tick. The restart is best-effort: a write that lands but a restart
-/// that fails still re-pairs on the agent's own reload.
-fn run_pair_only(args: &Args) -> Result<()> {
-    let code = validate_pair_code(args.pair.as_deref())?;
-
-    write_pairing_material(&code)?;
-    nudge_cloud_relay();
-
-    println!(
-        "pair: re-paired the running agent with code {}",
-        code.to_ascii_uppercase()
-    );
-    Ok(())
-}
-
-/// Validate the supplied pairing code (pure): trim surrounding whitespace and
-/// reject an absent or blank code. Returns the trimmed code on success.
-fn validate_pair_code(pair: Option<&str>) -> Result<String> {
-    match pair.map(str::trim) {
-        Some(c) if !c.is_empty() => Ok(c.to_string()),
-        _ => anyhow::bail!("no pairing code supplied"),
-    }
-}
-
-/// Write `/etc/ados/pairing.json` with the supplied code (uppercased, stamped),
-/// reusing the same body builder the install's config step uses so the on-disk
-/// shape never drifts, and the same durable atomic writer so a power cut can
-/// never leave a truncated file and the 0600 mode is set before the file is
-/// visible at its final path — it carries pairing identity.
-fn write_pairing_material(code: &str) -> Result<()> {
-    use ados_installer::steps::config_identity::{mint_pending_api_key, pairing_json};
-    let pending_api_key = mint_pending_api_key();
-    let body = pairing_json(code, now_epoch(), pending_api_key.as_deref());
-    env::write_atomic_durable(Path::new(env::PAIRING_JSON), body.as_bytes(), Some(0o600))
-        .map_err(|e| anyhow::anyhow!("write {} failed: {e}", env::PAIRING_JSON))?;
-    tracing::info!(code = %code.to_ascii_uppercase(), "pairing material rewritten for re-pair");
-    Ok(())
-}
-
-/// Restart the cloud unit that beacons the pair code so the new code is re-read
-/// immediately. The single `ados-cloud` unit serves both profiles — it spawns
-/// the ground-station bridge when the role resolves to a ground station — so one
-/// unit covers every box. Only an installed-and-active unit restarts; otherwise
-/// this is a harmless no-op. Best-effort by design — see [`run_pair_only`].
-fn nudge_cloud_relay() {
-    const UNIT: &str = "ados-cloud";
-    // Only restart a unit that is actually active so we never spuriously start a
-    // unit that has not come up yet on this box.
-    if exec::run_ok("systemctl", &["is-active", "--quiet", UNIT]) {
-        if exec::run_ok("systemctl", &["restart", UNIT]) {
-            tracing::info!(
-                unit = UNIT,
-                "restarted cloud relay to re-beacon the new pair code"
-            );
-        } else {
-            tracing::warn!(
-                unit = UNIT,
-                "cloud relay restart failed; the agent will re-read pairing.json on its next reload"
-            );
-        }
-    }
-}
-
-/// Seconds since the Unix epoch (for the pairing stamp).
-fn now_epoch() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
-/// Assemble the renderer's closing-summary payload from the resolved context.
-///
-/// No URL is built here. The card's reach block is composed by
-/// `ui::summary::console_urls`, which gates the `<host>.local` form on the
-/// hostname actually being resolvable and otherwise lists the LAN addresses the
-/// box owns. This function used to also carry a `setup_url` of
-/// `http://<hostname>.local:8080/setup` — a name built with no such gate (so a
-/// box named `localhost` was handed `localhost.local`) on a path the control
-/// front does not serve. Nothing rendered it, which is the only reason it never
-/// reached an operator; it is gone rather than repointed.
-fn build_summary(status: &str, ctx: &Ctx) -> ui::SummaryData {
-    ui::SummaryData {
-        status: status.to_string(),
-        version: installed_version(),
-        profile: ctx.profile.clone(),
-        board: board_id(),
-        device_id: read_device_id(),
-        hostname: env::read_hostname(),
-        lan_ips: env::lan_ips(),
-        paired: pairing_present(),
-        ap_ssid: read_ap_ssid(&ctx.profile),
-        ap_passphrase: read_ap_passphrase(),
-        failed_steps: ctx.failures.failed.clone(),
-        required_failures: ctx.failures.required.clone(),
-        failure_reasons: ctx.failures.required_reasons.clone(),
-        pending_reboot: ctx.pending_reboot.clone(),
-    }
-}
-
-/// The AP's SSID, when this profile runs one.
-///
-/// Read out of the rendered hostapd config rather than rebuilt from a prefix,
-/// so the card names the network the operator will actually see rather than
-/// the one we would have chosen — an operator who renamed the AP was being
-/// pointed at a network that no longer exists.
-///
-/// `None` when this profile runs no access point. Gated on the profile, not on
-/// the passphrase file: file presence answers "has some manager run yet",
-/// which on a fresh install is a race and on a drone is simply the wrong
-/// question.
-fn read_ap_ssid(profile: &str) -> Option<String> {
-    if !matches!(profile, "ground_station" | "visor") {
-        return None;
-    }
-    let body = std::fs::read_to_string(env::HOSTAPD_CONF_PATH).ok()?;
-    body.lines()
-        .find_map(|l| l.strip_prefix("ssid="))
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// The AP passphrase the agent persisted, if any.
-///
-/// It is generated per unit rather than being one published default, so this
-/// is the first moment an operator can learn it. Absent on a profile that runs
-/// no access point.
-fn read_ap_passphrase() -> Option<String> {
-    let body = std::fs::read_to_string(env::AP_PASSPHRASE_PATH).ok()?;
-    let trimmed = body.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-/// The node's device id (the full 12-hex id), or `unknown`.
-fn read_device_id() -> String {
-    Some(ados_protocol::identity::device_id(None))
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-/// Whether pairing material is present on disk.
-fn pairing_present() -> bool {
-    std::fs::metadata(env::PAIRING_JSON)
-        .map(|m| m.len() > 0)
-        .unwrap_or(false)
-}
-
-/// Print the install-result contract to stdout (for `--json`).
-fn print_result_json() {
-    if let Ok(body) = std::fs::read_to_string(RESULT_PATH) {
-        print!("{body}");
-    }
-}
-
-/// Copy the running installer to [`env::INSTALLED_INSTALLER`] (atomic, 0755).
-/// Best-effort: a failure only means `ados uninstall` downloads the installer
-/// instead, so it is logged, never fatal.
-fn persist_installer() {
-    let dest = Path::new(env::INSTALLED_INSTALLER);
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "could not locate the running installer to keep a copy");
-            return;
-        }
-    };
-    if exe == dest {
-        return;
-    }
-    let written =
-        std::fs::read(&exe).and_then(|bytes| env::write_atomic_durable(dest, &bytes, Some(0o755)));
-    if let Err(e) = written {
-        tracing::warn!(error = %e, dest = %dest.display(), "keeping a copy of the installer failed");
-    }
-}
-
-/// Assemble + write the install-result contract with the real probed fields.
-fn write_result(failures: &FailureAccumulator, status: &str, profile: &str) {
-    let result = InstallResult {
-        status: status.to_string(),
-        version: installed_version(),
-        profile: profile.to_string(),
-        board: board_id(),
-        kernel_release: kernel_release(),
-        wfb_module_source: wfb_module_source(),
-        failed_steps: failures.failed.clone(),
-        required_failures: failures.required.clone(),
-        ts: now_iso8601_utc(),
-    };
-
-    let path = Path::new(RESULT_PATH);
-    if !result_path_writable(path) {
-        tracing::warn!(path = %RESULT_PATH, "result path not writable; skipping result write (dev host?)");
-        return;
-    }
-    if let Err(e) = result.write_atomic(path) {
-        tracing::warn!(error = %e, path = %RESULT_PATH, "failed to write install result");
-    }
-}
-
-/// The installed agent version, or `unknown` when the venv cannot report it.
-fn installed_version() -> String {
-    env::installed_agent_version().unwrap_or_else(|| "unknown".to_string())
-}
-
-/// The board id: the persisted override sentinel first, then the device-tree
-/// model, else `unknown` (mirrors the bash `write_install_result` board read).
-fn board_id() -> String {
-    if let Ok(s) = std::fs::read_to_string("/etc/ados/board_override") {
-        let v = s.trim().trim_matches('\0').trim();
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
-    if let Ok(s) = std::fs::read_to_string("/proc/device-tree/model") {
-        // The device-tree model is NUL-terminated; strip NULs + trim.
-        let v = s.replace('\0', "");
-        let v = v.trim();
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
-    "unknown".to_string()
-}
-
-/// `uname -r`. Shells out via the exec primitive; `unknown` on any failure.
-fn kernel_release() -> String {
-    let res = exec::run("uname", &["-r"]);
-    if res.success() {
-        let v = res.stdout.trim();
-        if !v.is_empty() {
-            return v.to_string();
-        }
-    }
-    "unknown".to_string()
-}
-
-/// The WFB module source sentinel the driver step / driver script wrote
-/// (`prebuilt` | `dkms`), or empty when no RTL adapter / driver is present.
-fn wfb_module_source() -> String {
-    std::fs::read_to_string("/run/ados/wfb-module-source")
-        .map(|s| s.trim().trim_matches('\0').trim().to_string())
-        .unwrap_or_default()
-}
-
-/// True when the result file's parent directory exists and is writable. Guards
-/// the write so a dev host (no `/var/lib/ados`) does not error.
-fn result_path_writable(path: &Path) -> bool {
-    match path.parent() {
-        Some(parent) => parent.is_dir() && is_writable(parent),
-        None => false,
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn is_writable(dir: &Path) -> bool {
-    use nix::unistd::{access, AccessFlags};
-    access(dir, AccessFlags::W_OK).is_ok()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_writable(dir: &Path) -> bool {
-    // Off Linux: probe by metadata read-only flag. Conservative — a false
-    // negative only skips a result write on a dev host.
-    std::fs::metadata(dir)
-        .map(|m| !m.permissions().readonly())
-        .unwrap_or(false)
-}
-
-/// Print install status: the install-result contract (if present), the
-/// completed checkpoints, and the per-binary presence for the resolved profile.
-fn print_status(args: &Args) {
-    // 1. The install-result contract.
-    match std::fs::read_to_string(RESULT_PATH) {
-        Ok(body) => {
-            println!("install-result ({RESULT_PATH}):");
-            print!("{body}");
-            if !body.ends_with('\n') {
-                println!();
-            }
-        }
-        Err(_) => {
-            println!("install-result: none at {RESULT_PATH} (no install recorded yet)");
-        }
-    }
-
-    // 2. Completed checkpoints.
-    let checkpoint = Checkpoint::new();
-    let done = checkpoint.list();
-    if done.is_empty() {
-        println!("\ncheckpoints: none");
-    } else {
-        println!("\ncheckpoints completed:");
-        for cp in &done {
-            println!("  [x] {cp}");
-        }
-    }
-
-    // 3. Per-binary presence for the profile. The profile flag wins; else the
-    // persisted profile.conf; else drone (matches preflight's resolution).
-    let profile = resolve_status_profile(args);
-    println!("\nprebuilt binaries ({profile}):");
-    for b in binaries::for_profile(&profile) {
-        let present = std::fs::metadata(b.dest)
-            .map(|m| m.is_file())
-            .unwrap_or(false);
-        let mark = if present { "[x]" } else { "[ ]" };
-        let gate = match b.gate {
-            binaries::Gate::Hard => "hard",
-            binaries::Gate::BestEffort => "best-effort",
-        };
-        println!("  {mark} {} ({gate})", b.service);
-    }
-}
-
-/// Resolve the profile for `--status` reporting: `--profile` flag, else the
-/// persisted `profile.conf`, else `drone`. Reuses preflight's pure resolver.
-fn resolve_status_profile(args: &Args) -> String {
-    let conf_body = std::fs::read_to_string(env::PROFILE_CONF).ok();
-    ados_installer::steps::preflight::resolve_profile(args.profile.as_deref(), conf_body.as_deref())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validate_pair_code_trims_and_rejects_blank() {
-        // A real code is accepted, trimmed of surrounding whitespace.
-        assert_eq!(
-            validate_pair_code(Some("  ABCD-1234 ")).unwrap(),
-            "ABCD-1234"
-        );
-        assert_eq!(validate_pair_code(Some("code")).unwrap(), "code");
-        // Absent or blank → an error (a re-pair with no code must not proceed).
-        assert!(validate_pair_code(None).is_err());
-        assert!(validate_pair_code(Some("")).is_err());
-        assert!(validate_pair_code(Some("   ")).is_err());
-    }
-
-    #[test]
-    fn pair_only_resolves_only_for_an_installed_box_with_a_bare_code() {
-        // A bare pair code resolves to PairOnly only when the install probe says
-        // the agent is already on disk; on a fresh box the same code installs.
-        let a = Args {
-            pair: Some("ABCD-1234".to_string()),
-            ..Args::default()
-        };
-        assert_eq!(RunMode::resolve(&a, true), RunMode::PairOnly);
-        assert_eq!(RunMode::resolve(&a, false), RunMode::FreshInstall);
-        // --upgrade or --force never short-circuits to a re-pair.
-        let up = Args {
-            upgrade: true,
-            ..a.clone()
-        };
-        assert_eq!(RunMode::resolve(&up, true), RunMode::Upgrade);
-        let force = Args { force: true, ..a };
-        assert_eq!(RunMode::resolve(&force, true), RunMode::ForceReinstall);
     }
 }

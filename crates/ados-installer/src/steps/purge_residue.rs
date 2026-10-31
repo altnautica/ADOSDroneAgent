@@ -27,9 +27,9 @@
 //! HDMI, never take it away.
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::steps::boot_config::{self, BootConfigEdit};
+use ados_term::exec;
 
 /// Parse `ip route show default` output and return the `ip route del ...`
 /// argument vector for an orphan gateway-less default route, or `None` when no

@@ -17,9 +17,9 @@ use std::path::Path;
 
 use crate::ctx::Ctx;
 use crate::env;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::ui::activity;
+use ados_term::exec;
 
 /// The RTL8812EU module name the driver build exposes.
 const MODULE_NAME: &str = "8812eu";

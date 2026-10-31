@@ -12,8 +12,8 @@ use std::io;
 use std::path::Path;
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use ados_term::exec;
 
 /// The drop-in, relative to the filesystem root.
 pub const CONF_REL: &str = "etc/chrony/conf.d/ados.conf";

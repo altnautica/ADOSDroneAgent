@@ -1,13 +1,88 @@
 //! The closing screen: success card + first-run guide, or failure panel.
 //!
 //! Plain renderers print [`plain_lines`] verbatim. The rich renderer wraps the
-//! same information in a styled box (see `rich.rs`), so the *content* is
-//! identical whether or not the terminal supports color.
+//! same information in a styled box ([`rich_lines`]), so the *content* is
+//! identical whether or not the terminal supports color. [`SummaryData`]
+//! implements [`SummaryView`], which is how the shared renderers draw it.
 
 use std::collections::VecDeque;
 
-use crate::ui::events::SummaryData;
-use crate::ui::theme::Theme;
+use ados_term::progress::SummaryView;
+use ados_term::render::{fit_to, truncate, visible_width};
+use ados_term::theme::Theme;
+
+/// The data the renderer needs to draw the final success card or failure panel.
+/// Assembled by the installer after the graph run; the renderer combines it with
+/// its own buffered log lines for the failure panel.
+#[derive(Debug, Clone)]
+pub struct SummaryData {
+    /// `ok` | `degraded` | `failed`.
+    pub status: String,
+    /// Installed agent version, or `unknown`.
+    pub version: String,
+    /// `drone` | `ground_station` | `workstation` | `compute` | `visor`.
+    pub profile: String,
+    /// Detected board model.
+    pub board: String,
+    /// The 12-hex device id.
+    pub device_id: String,
+    /// Hostname. Drives the `<host>.local` line of the card's reach block, which
+    /// is gated on the name being resolvable — see `console_urls`.
+    pub hostname: String,
+    /// Non-loopback IPv4 addresses the box owns, in interface order. The
+    /// success card lists one reach URL per entry so the console stays
+    /// reachable even when `<host>.local` mDNS does not resolve.
+    pub lan_ips: Vec<String>,
+    /// Whether the agent has pairing material on disk.
+    pub paired: bool,
+    /// The access point's SSID and passphrase, on a profile that runs one.
+    ///
+    /// Shown because the passphrase is now generated per unit rather than
+    /// being one published default on every box. Nothing in the product
+    /// displayed it before, so a generated value would be undiscoverable and
+    /// the access point unjoinable — this is the first place an operator can
+    /// read it, and it must not be dropped without a replacement.
+    pub ap_ssid: Option<String>,
+    pub ap_passphrase: Option<String>,
+    /// Every step that did not succeed.
+    pub failed_steps: Vec<String>,
+    /// The subset that were Required (hard failures).
+    pub required_failures: Vec<String>,
+    /// Why each required step failed (`<step>: <reason>`), named on the failure
+    /// card: a refusal the operator acts on must not read as a bare step name.
+    pub failure_reasons: Vec<String>,
+    /// Provisioning that is staged but needs a reboot to take effect (a camera
+    /// or display overlay, an I2C dtparam), one reason per entry.
+    ///
+    /// Rendered as its own block: the provisioners have always recorded this in
+    /// `/run/ados/reboot-required`, and until the closing card said so an
+    /// operator was never told their camera would not work until a reboot.
+    pub pending_reboot: Vec<String>,
+}
+
+impl SummaryView for SummaryData {
+    fn plain_lines(&self) -> Vec<String> {
+        plain_lines(self)
+    }
+
+    fn rich_lines(&self, theme: &Theme, logs: &VecDeque<String>) -> Vec<String> {
+        rich_lines(self, theme, logs)
+    }
+
+    fn fullscreen_grid(
+        &self,
+        theme: &Theme,
+        journal: &VecDeque<String>,
+        cols: usize,
+        rows: usize,
+    ) -> Vec<String> {
+        fullscreen_grid(self, theme, journal, cols, rows)
+    }
+
+    fn failed(&self) -> bool {
+        self.status == "failed"
+    }
+}
 
 /// The curated next-step commands shown after a successful install, each with a
 /// short plain-language description. Product-facing copy only — no internal
@@ -369,80 +444,10 @@ fn frame_width() -> usize {
         .clamp(40, 64)
 }
 
-/// Truncate to `max` columns with an ellipsis when clipped.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    if max == 0 {
-        return String::new();
-    }
-    let mut out: String = s.chars().take(max - 1).collect();
-    out.push('…');
-    out
-}
-
-/// Truncate then right-pad to exactly `w` columns (plain text).
-fn pad_to(s: &str, w: usize) -> String {
-    let t = truncate(s, w);
-    let pad = w.saturating_sub(t.chars().count());
-    format!("{t}{}", " ".repeat(pad))
-}
-
-/// Right-pad `s` to `w` *visible* columns, ignoring embedded ANSI SGR escapes
-/// so a colored body line still aligns to the box border. A line whose visible
-/// content overflows `w` is stripped of styling and hard-truncated so the right
-/// border never drifts.
-fn fit_to(s: &str, w: usize) -> String {
-    let vis = visible_width(s);
-    if vis <= w {
-        format!("{s}{}", " ".repeat(w - vis))
-    } else {
-        pad_to(&strip_ansi(s), w)
-    }
-}
-
-/// The number of display columns `s` occupies, skipping ANSI SGR escape
-/// sequences (`\x1b[...m`, as emitted by the color helpers).
-fn visible_width(s: &str) -> usize {
-    let mut width = 0;
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            // Consume the CSI parameters up to (and including) the terminator.
-            for nc in chars.by_ref() {
-                if nc == 'm' {
-                    break;
-                }
-            }
-        } else {
-            width += 1;
-        }
-    }
-    width
-}
-
-/// Drop ANSI SGR escape sequences, leaving the visible text.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            for nc in chars.by_ref() {
-                if nc == 'm' {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ados_term::theme::ColorTier;
 
     fn sample(status: &str) -> SummaryData {
         SummaryData {
@@ -536,7 +541,7 @@ mod tests {
     fn rich_card_reach_block_has_mdns_and_lan_ip_but_never_localhost() {
         let theme = Theme {
             ascii: false,
-            tier: crate::ui::theme::ColorTier::None,
+            tier: ColorTier::None,
         };
         let logs = VecDeque::new();
         let joined = rich_lines(&sample("ok"), &theme, &logs).join("\n");
@@ -550,7 +555,7 @@ mod tests {
     fn fullscreen_grid_centers_the_card_full_screen() {
         let theme = Theme {
             ascii: false,
-            tier: crate::ui::theme::ColorTier::None,
+            tier: ColorTier::None,
         };
         let journal = VecDeque::new();
         let grid = fullscreen_grid(&sample("ok"), &theme, &journal, 100, 30);
@@ -614,15 +619,6 @@ mod tests {
         s.hostname = "localhost".to_string();
         let urls = console_urls(&s);
         assert_eq!(urls, vec!["http://192.168.1.42:8080".to_string()]);
-    }
-
-    #[test]
-    fn visible_width_ignores_ansi_escapes() {
-        // A colored string measures by its visible glyphs, not its escape bytes.
-        let colored = "\u{1b}[36m➜\u{1b}[39m";
-        assert_eq!(visible_width(colored), 1);
-        assert_eq!(strip_ansi(colored), "➜");
-        assert_eq!(visible_width("plain"), 5);
     }
 
     #[test]

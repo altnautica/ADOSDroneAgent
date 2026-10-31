@@ -5,7 +5,7 @@
 # syntax errors, missing includes, and stale dt-binding references
 # before they ship to a real SBC. Mirrors the cpp + dtc pipeline
 # used by scripts/drivers/install-display-overlay.sh at install time
-# (see install-display-overlay.sh:368-381) so a green CI run implies
+# (see scripts/drivers/lib/display-dtbo.sh) so a green CI run implies
 # a green install-time compile.
 #
 # Usage:

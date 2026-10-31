@@ -21,9 +21,9 @@ use std::path::{Path, PathBuf};
 
 use crate::ctx::Ctx;
 use crate::env::{self, CONFIG_DIR, DEVICE_ID_FILE, INSTALL_DIR};
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::steps::boot_config;
+use ados_term::exec;
 
 /// Where unit files + dropins are deployed.
 const SYSTEMD_DIR: &str = "/etc/systemd/system";

@@ -31,8 +31,8 @@ use serde::Deserialize;
 
 use crate::ctx::Ctx;
 use crate::env::CONFIG_YAML;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use ados_term::exec;
 
 /// The SoC watchdog character device. Its presence is the hardware gate.
 const WATCHDOG_DEV: &str = "/dev/watchdog";

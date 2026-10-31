@@ -6,7 +6,18 @@
 //! re-pair), while the same invocation on a fresh box resolves to
 //! `FreshInstall` (which pairs at the end of the chain).
 
+use ados_term::progress::ModeFlags;
+
 use super::args::Args;
+
+/// The render-mode flags of the parsed command line.
+pub fn render_flags(args: &Args) -> ModeFlags {
+    ModeFlags {
+        json: args.json,
+        quiet: args.quiet,
+        plain: args.plain,
+    }
+}
 
 /// What the installer is being asked to do this run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

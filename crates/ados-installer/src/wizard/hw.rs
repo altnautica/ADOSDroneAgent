@@ -8,7 +8,7 @@
 //! absent tool or an empty result just reads as "not detected". The parsing is
 //! pure so it is unit-tested without any hardware.
 
-use crate::exec;
+use ados_term::exec;
 
 /// What the pre-wizard hardware sweep found on this box. The camera is kept in
 /// the reduced shape because the component checklist pre-seeds its default from

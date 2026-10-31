@@ -34,10 +34,10 @@ use ados_hal_probe::board_sidecar::{load_profiles, resolve_profile};
 use ados_hal_probe::host_facts::probe_host_facts;
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::steps::boot_config::{self, BootConfigEdit};
 use crate::steps::wfb_ng::on_path;
+use ados_term::exec;
 
 /// Basename of the generated overlay (`<name>.dts` / `<name>.dtbo`).
 pub const OVERLAY_NAME: &str = "ados-pps";

@@ -56,8 +56,8 @@ use std::time::Duration;
 use crate::binaries::{self, Gate};
 use crate::ctx::Ctx;
 use crate::env::{SERVICE_NAME, VENV_DIR};
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use ados_term::exec;
 
 /// The set of systemd units that MUST be enabled for a profile's install to be
 /// complete: the unit table's `health_check` rows for the profile. Drone needs

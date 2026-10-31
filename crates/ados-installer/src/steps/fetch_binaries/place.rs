@@ -145,7 +145,7 @@ pub(super) fn install_global_symlinks() {
     }
     for (target, link) in global_symlinks() {
         // `ln -sf` overwrites an existing link idempotently.
-        if !crate::exec::run_ok("ln", &["-sf", &target, link]) {
+        if !ados_term::exec::run_ok("ln", &["-sf", &target, link]) {
             tracing::warn!(target = %target, link, "global symlink install failed");
         }
     }

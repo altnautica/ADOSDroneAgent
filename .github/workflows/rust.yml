@@ -73,11 +73,13 @@ env:
     ados-cloud-aarch64
     ados-groundlink-aarch64
     ados-net-aarch64
+    ados-captive-aarch64
     ados-pic-aarch64
     ados-input-aarch64
     ados-display-aarch64
     ados-display-probe-aarch64
     ados-oled-i2c-aarch64
+    ados-kiosk-aarch64
     ados-vision-aarch64
     ados-swarmbus-aarch64
     ados-logd-aarch64

@@ -146,6 +146,28 @@ fn any_is_the_canonical_profile_list() {
     assert_eq!(supervisor.profiles, ados_protocol::contracts::PROFILES);
 }
 
+/// The captive portal and the HDMI kiosk are ground-station services: their
+/// units run only on that profile, so only it fetches them, at the paths the
+/// units exec.
+#[test]
+fn only_the_ground_station_fetches_the_portal_and_the_kiosk() {
+    for (svc, dest) in [
+        ("ados-captive", "/opt/ados/bin/ados-captive"),
+        ("ados-kiosk", "/opt/ados/bin/ados-kiosk"),
+    ] {
+        let entry = PREBUILT
+            .iter()
+            .find(|b| b.service == svc)
+            .unwrap_or_else(|| panic!("{svc} must be in the catalog"));
+        assert_eq!(entry.dest, dest);
+        assert_eq!(entry.gate, Gate::BestEffort);
+        for profile in ["drone", "ground_station", "workstation", "compute", "visor"] {
+            let fetched = for_profile(profile).iter().any(|b| b.service == svc);
+            assert_eq!(fetched, profile == "ground_station", "{profile} / {svc}");
+        }
+    }
+}
+
 /// A visor runs cameras, vision, a MAVLink link to its sensor hub, the setup
 /// access point and a small panel with buttons. It has no long-range radio,
 /// no RC link and no swarm bus.

@@ -18,9 +18,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::env;
-use crate::exec;
 use crate::net;
 use crate::verify;
+use ados_term::exec;
 
 /// GitHub release-download base for the portable CPython distribution.
 const PBS_BASE: &str = "https://github.com/astral-sh/python-build-standalone/releases/download";

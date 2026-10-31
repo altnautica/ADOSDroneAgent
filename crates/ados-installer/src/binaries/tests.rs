@@ -132,8 +132,8 @@ fn the_publish_job_builds_one_release_and_moves_one_pointer() {
 }
 
 #[test]
-fn catalog_has_twenty_seven_entries() {
-    assert_eq!(PREBUILT.len(), 27);
+fn catalog_has_twenty_nine_entries() {
+    assert_eq!(PREBUILT.len(), 29);
 }
 
 #[test]

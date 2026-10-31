@@ -23,8 +23,8 @@
 use std::path::Path;
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use ados_term::exec;
 
 /// iptables-persistent's saved IPv4 ruleset.
 const RULES_V4_PATH: &str = "/etc/iptables/rules.v4";

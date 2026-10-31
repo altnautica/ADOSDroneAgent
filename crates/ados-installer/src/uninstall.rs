@@ -15,9 +15,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::env;
-use crate::exec;
 use crate::graph::StepOutcome;
-use crate::ui::ProgressSink;
+use ados_term::exec;
+use ados_term::progress::ProgressSink;
 
 /// The systemd directory all ados units + dropins live under.
 const SYSTEMD_DIR: &str = "/etc/systemd/system";
@@ -235,7 +235,7 @@ fn remove_path(path: &Path) -> std::io::Result<()> {
 }
 
 /// Run the uninstall, emitting progress through `sink` so the live UI shows each
-/// teardown phase (the ids match [`crate::ui::UNINSTALL_GROUPS`]). `purge`
+/// teardown phase (the ids match [`crate::ui::groups::UNINSTALL_GROUPS`]). `purge`
 /// additionally removes `/etc/ados` (device id, pairing, config) for a
 /// from-clean reinstall.
 pub fn run_uninstall(purge: bool, sink: &ProgressSink) -> anyhow::Result<()> {

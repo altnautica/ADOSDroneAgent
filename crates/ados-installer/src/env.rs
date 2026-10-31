@@ -83,7 +83,7 @@ pub fn read_hostname() -> String {
             return v.to_string();
         }
     }
-    let res = crate::exec::run("uname", &["-n"]);
+    let res = ados_term::exec::run("uname", &["-n"]);
     if res.success() {
         let v = res.stdout.trim();
         if !v.is_empty() {
@@ -124,7 +124,7 @@ pub fn lan_ips() -> Vec<String> {
     // The hotspot AP gateway is not a real LAN reach — drop it so it never shows
     // as a reach IP (the agent gates its hotspot URL the same way).
     const HOTSPOT_AP_IP: &str = "192.168.4.1";
-    let res = crate::exec::run("ip", &["-o", "-4", "addr", "show"]);
+    let res = ados_term::exec::run("ip", &["-o", "-4", "addr", "show"]);
     if res.success() {
         let ips: Vec<String> = parse_ip_o_4(&res.stdout)
             .into_iter()
@@ -134,7 +134,7 @@ pub fn lan_ips() -> Vec<String> {
             return ips;
         }
     }
-    let res = crate::exec::run("hostname", &["-I"]);
+    let res = ados_term::exec::run("hostname", &["-I"]);
     if res.success() {
         return parse_hostname_i(&res.stdout)
             .into_iter()
@@ -492,7 +492,7 @@ pub fn read_persisted_version() -> Option<String> {
 /// venv is absent or cannot import the package.
 pub fn installed_agent_version() -> Option<String> {
     let py = format!("{VENV_DIR}/bin/python");
-    let res = crate::exec::run(&py, &["-c", "import ados; print(ados.__version__)"]);
+    let res = ados_term::exec::run(&py, &["-c", "import ados; print(ados.__version__)"]);
     let v = res.stdout.trim();
     (res.success() && !v.is_empty()).then(|| v.to_string())
 }

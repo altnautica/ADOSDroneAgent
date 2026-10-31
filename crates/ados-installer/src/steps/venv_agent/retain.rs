@@ -12,8 +12,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::exec;
 use crate::rollback::snapshots::{record_snapshot, KIND_WHEEL};
+use ados_term::exec;
 
 /// File-name prefix of every agent wheel.
 const WHEEL_PREFIX: &str = "ados_drone_agent-";

@@ -283,7 +283,7 @@ pub(super) fn install_one_at(
         let size = std::fs::metadata(&dl_bin).map(|m| m.len()).unwrap_or(0);
         sink.sub_log(
             "fetch_binaries",
-            &format!("✓ {} {}", b.service, activity::fmt_bytes(size)),
+            &format!("✓ {} {}", b.service, fmt_bytes(size)),
         );
 
         // chmod the temp, then atomically swap it over the (possibly running)

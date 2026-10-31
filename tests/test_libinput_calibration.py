@@ -1,8 +1,9 @@
 """The overlay installer's libinput calibration matrix.
 
-``compute_libinput_matrix`` in ``scripts/drivers/install-display-overlay.sh``
-writes the touch calibration matrix at install time. These vectors pin its
-output for the bounds, swap and inversion cases.
+``compute_libinput_matrix`` in ``scripts/drivers/lib/display-touch.sh`` (sourced
+by ``install-display-overlay.sh``) writes the touch calibration matrix at
+install time. These vectors pin its output for the bounds, swap and inversion
+cases.
 """
 
 from __future__ import annotations
@@ -14,16 +15,16 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-OVERLAY_SCRIPT = REPO_ROOT / "scripts" / "drivers" / "install-display-overlay.sh"
+TOUCH_LIB = REPO_ROOT / "scripts" / "drivers" / "lib" / "display-touch.sh"
 
 
 def _shell_matrix(x0, x1, y0, y1, swap, ix, iy) -> tuple[float, ...]:
     """Invoke the installer's compute_libinput_matrix and parse its 6 floats.
 
-    Extracts just the function body from the installer so sourcing it does not
-    run the whole installer (which parses args + exits early).
+    The touch library holds function definitions only, so sourcing it runs
+    nothing.
     """
-    harness = _SHELL_HARNESS.replace("__SCRIPT__", str(OVERLAY_SCRIPT))
+    harness = _SHELL_HARNESS.replace("__LIB__", str(TOUCH_LIB))
     out = subprocess.run(
         ["bash", "-c", harness, "--",
          str(x0), str(x1), str(y0), str(y1), str(swap), str(ix), str(iy)],
@@ -34,13 +35,9 @@ def _shell_matrix(x0, x1, y0, y1, swap, ix, iy) -> tuple[float, ...]:
     return tuple(float(v) for v in out.stdout.split())
 
 
-# Source only the function definition out of the installer by extracting the
-# compute_libinput_matrix body with awk, so sourcing does not run the whole
-# installer (which parses args + exits).
 _SHELL_HARNESS = r"""
 set -euo pipefail
-fn="$(awk '/^compute_libinput_matrix\(\) \{/{c=1} c{print} c&&/^\}/{exit}' "__SCRIPT__")"
-eval "$fn"
+. "__LIB__"
 compute_libinput_matrix "$1" "$2" "$3" "$4" "$5" "$6" "$7"
 """
 

@@ -40,10 +40,10 @@ use std::time::Duration;
 
 use crate::ctx::Ctx;
 use crate::env::{self, CONFIG_YAML};
-use crate::exec::{self, CmdResult};
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::rollback::snapshots::{record_snapshot, KIND_CONFIG, RUN_RECORD};
 use crate::steps::venv_agent::venv_python;
+use ados_term::exec::{self, CmdResult};
 
 /// The migration entrypoint inside the agent package. Invoked as a module so
 /// the step does not depend on the `ados` console script being on PATH yet

@@ -131,7 +131,7 @@ pub fn restore_snapshots(
 /// Reinstall a retained wheel into the agent venv, exactly as it was.
 pub fn reinstall_wheel(wheel: &Path) -> Result<(), String> {
     let wheel_s = wheel.to_string_lossy().into_owned();
-    let res = crate::exec::run(
+    let res = ados_term::exec::run(
         &crate::steps::venv_agent::venv_pip(),
         &["install", "--no-deps", "--force-reinstall", &wheel_s],
     );

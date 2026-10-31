@@ -20,9 +20,9 @@ use std::path::Path;
 
 use crate::ctx::Ctx;
 use crate::env;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
 use crate::ui::activity;
+use ados_term::exec;
 
 /// The userspace binaries the bind protocol + radio services need on PATH.
 const REQUIRED_BINS: &[&str] = &["wfb_tx", "wfb_rx", "wfb_keygen", "wfb-server"];

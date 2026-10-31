@@ -10,9 +10,9 @@
 use std::path::{Path, PathBuf};
 
 use super::{BOOT_DIR, EXTLINUX_MIN_BYTES, MODULES_LOAD_FILE, OVERLAY_NAME, PPS_MODULE};
-use crate::exec;
 use crate::steps::boot_config::{self, BootConfigEdit};
 use crate::steps::wfb_ng::on_path;
+use ados_term::exec;
 
 /// Regenerate `extlinux.conf` with `uboot_update`, restoring it when the
 /// regeneration fails or truncates it. Takes the keep-first pristine snapshot

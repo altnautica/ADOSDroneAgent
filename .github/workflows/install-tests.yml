@@ -48,6 +48,7 @@ jobs:
             scripts/drivers/lib-prebuilt.sh \
             scripts/check-release-signatures.sh \
             scripts/drivers/install-display-overlay.sh \
+            scripts/drivers/lib/display-*.sh \
             scripts/drivers/install-rtl8812eu.sh \
             scripts/test/e2e-install-rig.sh \
             scripts/test/minisign_verify_smoke.sh \

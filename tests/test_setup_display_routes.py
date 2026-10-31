@@ -350,10 +350,13 @@ class TestInstallShellPersistence:
         from pathlib import Path
 
         repo_root = Path(__file__).resolve().parents[1]
-        # The clone destination lives in the installer's venv_agent step.
-        venv_agent = (
-            repo_root / "crates" / "ados-installer" / "src" / "steps" / "venv_agent.rs"
-        ).read_text()
+        # The clone destination lives in the installer's venv_agent step and
+        # its child modules.
+        step = repo_root / "crates" / "ados-installer" / "src" / "steps"
+        sources = [step / "venv_agent.rs", *sorted((step / "venv_agent").glob("*.rs"))]
+        venv_agent = "\n".join(
+            p.read_text() for p in sources if p.name != "tests.rs"
+        )
         # The clone target is the canonical persistence root...
         assert "/source" in venv_agent and "INSTALL_DIR" in venv_agent
         # ...and the clone is explicitly kept (not deleted) so the tree survives.

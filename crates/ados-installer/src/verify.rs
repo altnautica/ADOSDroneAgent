@@ -20,7 +20,7 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use crate::exec;
+use ados_term::exec;
 
 /// The trust anchor for every artifact the installer fetches from a release:
 /// the public half of the minisign keypair CI signs each asset's `.minisig`

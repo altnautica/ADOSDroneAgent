@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use crate::ctx::Ctx;
 use crate::env::{self, PROFILE_CONF};
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use ados_term::exec;
 
 /// Parse a `profile.conf` body into a normalized profile, accepting both the
 /// YAML form (`profile: X`) and the legacy key=value form (`profile=X`). An

@@ -29,8 +29,8 @@
 use std::path::Path;
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use ados_term::exec;
 
 /// The logind drop-in this step writes (keeps the appliance awake).
 const LOGIND_NO_IDLE_CONF: &str = "/etc/systemd/logind.conf.d/90-ados-no-idle.conf";

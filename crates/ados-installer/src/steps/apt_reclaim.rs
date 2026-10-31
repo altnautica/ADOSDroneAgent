@@ -34,8 +34,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
+use ados_term::exec;
 
 /// Where apt parks the `.deb` files it downloaded.
 const APT_ARCHIVE_DIR: &str = "/var/cache/apt/archives";

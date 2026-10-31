@@ -10,7 +10,7 @@ use crate::cli::args::normalize_profile;
 use crate::cli::Args;
 use crate::env::EnvInfo;
 use crate::result::FailureAccumulator;
-use crate::ui::ProgressSink;
+use ados_term::progress::ProgressSink;
 
 /// Per-run state shared (by `&mut`) across the step graph.
 #[derive(Debug)]

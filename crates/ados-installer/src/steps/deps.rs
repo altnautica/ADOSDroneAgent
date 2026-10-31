@@ -9,9 +9,10 @@
 mod apt_lock;
 
 use crate::ctx::Ctx;
-use crate::exec;
 use crate::graph::{Step, StepKind, StepOutcome};
-use crate::ui::{activity, ProgressSink};
+use crate::ui::activity;
+use ados_term::exec;
+use ados_term::progress::ProgressSink;
 
 use apt_lock::{apt_argv, apt_waiting_for_lock};
 

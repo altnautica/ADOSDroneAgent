@@ -11,6 +11,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use ados_term::StepOutcome;
+
 use crate::ctx::Ctx;
 
 /// Whether a step's failure is fatal to the install.
@@ -20,18 +22,6 @@ pub enum StepKind {
     Required,
     /// Failure degrades the install (status → `degraded`); the run continues.
     Optional,
-}
-
-/// The result of running (or not running) a single step.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StepOutcome {
-    /// The step did its work successfully.
-    Ok,
-    /// The step had nothing to do (e.g. checkpoint already marked, or the step
-    /// does not apply to this profile). Treated as success for dependents.
-    Skipped,
-    /// The step failed, with a human-readable reason.
-    Failed(String),
 }
 
 /// A single install step. Implementors are unit structs (no per-step state);
