@@ -194,7 +194,7 @@ impl PackState {
     }
 }
 
-/// The battery health engine: one [`PackState`] per BATTERY_STATUS id.
+/// The battery health engine: one `PackState` per BATTERY_STATUS id.
 #[derive(Debug)]
 pub struct BatteryEngine {
     config: BatteryConfig,

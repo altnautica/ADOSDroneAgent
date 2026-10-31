@@ -9,7 +9,7 @@
 //! - [`config`] is the `battery:` block of the agent config.
 //! - [`rules`] and [`predict`] are pure functions over samples.
 //! - [`engine`] holds the per-pack sample window, live anomalies and history.
-//! - [`task`] is the only I/O: it feeds the engine from the state socket and
+//! - `task` is the only I/O: it feeds the engine from the state socket and
 //!   the board-bound [`ina226`] gauge, hot-reloads the config, and records
 //!   each anomaly transition in the logging store.
 

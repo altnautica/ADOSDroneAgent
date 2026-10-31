@@ -1419,7 +1419,7 @@ async fn the_full_status_names_the_firmware_and_carries_no_capabilities_block() 
     state
         .state
         .set_snapshot_for_test(json!({"fc_firmware": "ardupilot", "armed": false}));
-    let Json(body) = get_full_status(State(state)).await;
+    let body = serde_json::to_value(get_full_status(State(state)).await.0).unwrap();
     assert_eq!(body["fcFirmware"], json!("ardupilot"));
     assert!(body.get("capabilities").is_none());
     for key in [
@@ -1540,7 +1540,7 @@ async fn fc_identity_block_reads_sidecar() {
     let d = dir.path();
     let state = state_in(d);
     // Before the reconciler's first tick the block is null.
-    let Json(body) = get_full_status(State(state.clone())).await;
+    let body = serde_json::to_value(get_full_status(State(state.clone())).await.0).unwrap();
     assert_eq!(body["fc_identity"], Value::Null);
 
     std::fs::write(
@@ -1555,7 +1555,7 @@ async fn fc_identity_block_reads_sidecar() {
             "injector_arbitration": "off",
             "agent_signing": "active",
         }));
-    let Json(body) = get_full_status(State(state)).await;
+    let body = serde_json::to_value(get_full_status(State(state)).await.0).unwrap();
     assert_eq!(body["fc_identity"]["outcome"], json!("disabled"));
     assert_eq!(body["fc_identity"]["current_system_id"], json!(7));
     assert_eq!(body["mavlink_proxy_posture"]["tcp_listening"], json!(true));

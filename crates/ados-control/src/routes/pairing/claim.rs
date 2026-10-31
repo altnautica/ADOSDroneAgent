@@ -12,8 +12,8 @@ pub struct ClaimRequest {
 /// strings); 409 `{"detail":"Already paired. Unpair first."}` when already
 /// paired.
 ///
-/// Writes `pairing.json` (mirroring `PairingManager.claim` exactly: atomic,
-/// 0600, the four Python keys, code + pending key dropped) and returns the key.
+/// Writes `pairing.json` (the document the Python `PairingManager.claim` writes:
+/// atomic, 0600, the four keys, code + pending key dropped) and returns the key.
 /// No credential required and only works while unpaired. Being on the device's
 /// own networks is the gate: the edge refuses a remote caller (a public-WAN
 /// host, or anything relayed through a proxy or tunnel) before this handler
@@ -86,8 +86,8 @@ pub async fn claim_pairing(
 
     let cfg = PairingConfig::load_from(&paths.config);
     let device_id = cfg.agent.device_id.clone();
-    // The FastAPI claim emits `app.config.agent.name` RAW (no "ADOS Agent"
-    // fallback — that fallback is the /info route's, not the claim's).
+    // The claim emits `agent.name` RAW (no "ADOS Agent" fallback — that
+    // fallback is the /info route's, not the claim's).
     let name = cfg.agent.name.clone();
     // The GCS persists this as the node's canonical reach and six consumers
     // prefer it over the IPv4 they just proved. So it must be the name this
@@ -116,9 +116,9 @@ pub async fn claim_pairing(
 /// `POST /api/pairing/unpair` → `{"status":"unpaired","new_code":<code>}`; 409
 /// `{"detail":"Not paired"}` when not paired.
 ///
-/// Clears `pairing.json` (mirroring `PairingManager.unpair` → empty object) and
+/// Clears `pairing.json` (to the empty object `PairingManager.unpair` writes) and
 /// mints a fresh pairing code. Requires a valid API key, enforced by the auth
-/// middleware (this path is NOT in the public set), matching the FastAPI route.
+/// middleware (this path is NOT in the public set).
 /// The `_ados._tcp` advert picks the change up on its own refresh cadence, as
 /// it does for a claim.
 pub async fn unpair(State(state): State<AppState>) -> Response {
@@ -150,8 +150,8 @@ pub async fn unpair(State(state): State<AppState>) -> Response {
     }
     state.pairing.invalidate();
 
-    // Mint + persist the fresh code, mirroring the FastAPI route's
-    // `get_or_create_code()` after the unpair. A code that could not be
+    // Mint + persist the fresh code after the unpair, the same rule the Python
+    // `get_or_create_code()` applies. A code that could not be
     // persisted is refused, as `/code` refuses it: an in-memory one is not what
     // the device holds. The node is already unpaired, so `/code` mints one once
     // the fault clears.

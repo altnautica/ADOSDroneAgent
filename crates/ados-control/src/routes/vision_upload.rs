@@ -149,10 +149,10 @@ pub struct UploadMeta {
 ///
 /// Returns `{status:"ok", id, filename, sha256, size_bytes}` on success, a 400
 /// when the metadata id is missing/empty/invalid or the file is missing/empty,
-/// a 413 when the file exceeds [`MAX_MODEL_BYTES`] or any other part exceeds
-/// [`PART_MAX_BYTES`], a 401 `E_DIGEST_MISMATCH` when the file does not hash
+/// a 413 when the file exceeds `MAX_MODEL_BYTES` or any other part exceeds
+/// `PART_MAX_BYTES`, a 401 `E_DIGEST_MISMATCH` when the file does not hash
 /// to `X-Content-SHA256`, a 507 when storing it would leave less than
-/// [`MIN_FREE_AFTER_UPLOAD`] free on the models filesystem, and a 500 when the
+/// `MIN_FREE_AFTER_UPLOAD` free on the models filesystem, and a 500 when the
 /// file or the catalog cannot be written.
 ///
 /// The file part is streamed straight to a tmp file in the models dir (hashing as

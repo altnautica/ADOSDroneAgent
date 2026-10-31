@@ -2,9 +2,9 @@
 //!
 //! Six read-only routes the GCS Hardware tab polls on a ground-station node. All
 //! are profile-gated: a node whose resolved profile is not `ground-station` gets
-//! a 404 with the `E_PROFILE_MISMATCH` code (the same body the FastAPI gate
-//! raises). The mesh-state reads add a second gate: a node in the `direct` role is
-//! not in a mesh, so they 404 with `E_NOT_IN_MESH`.
+//! a 404 with the `E_PROFILE_MISMATCH` code. The mesh-state reads add a second
+//! gate: a node in the `direct` role is not in a mesh, so they 404 with
+//! `E_NOT_IN_MESH`.
 //!
 //! - **`GET /api/v1/ground-station/role`** — the current mesh role (read from the
 //!   on-disk role sentinel, defaulting to `direct`), the role configured in the
@@ -48,8 +48,7 @@ use ados_supervisor::role::{role_units, ALL_ROLE_UNITS};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
-// Profile + role gating (mirrors the FastAPI `_require_ground_profile` +
-// `role_manager.get_current_role`).
+// Profile + role gating (ground-station profile, then the mesh role sentinel).
 // ---------------------------------------------------------------------------
 
 /// Resolve the wire profile off explicit config + profile.conf + role-sentinel
@@ -79,7 +78,7 @@ fn is_ground_station_at(config: &Path, profile_conf: &Path, role_path: &Path) ->
     resolved_profile_at(config, profile_conf, role_path) == "ground-station"
 }
 
-/// The FastAPI profile-mismatch error: a 404 whose `detail` is the nested
+/// The profile-mismatch error: a 404 whose `detail` is the nested
 /// `{"error": {"code": "E_PROFILE_MISMATCH"}}` object the gate raises (NOT a plain
 /// string). Built directly here because the shared `crate::routes::detail` helper
 /// emits a string `detail`, which would not match this route's nested shape.
@@ -87,7 +86,7 @@ fn profile_mismatch() -> Response {
     nested_detail(StatusCode::NOT_FOUND, json!({"code": "E_PROFILE_MISMATCH"}))
 }
 
-/// The FastAPI not-in-mesh error: a 404 whose `detail` is the nested
+/// The not-in-mesh error: a 404 whose `detail` is the nested
 /// `{"error": {"code": "E_NOT_IN_MESH"}}` object the mesh reads raise on a `direct`
 /// node.
 fn not_in_mesh() -> Response {
@@ -195,7 +194,7 @@ fn default_gs_role() -> String {
 
 impl Default for GroundStationSection {
     fn default() -> Self {
-        // Mirror the Python `GroundStationConfig` defaults: an absent section still
+        // Match the Python `GroundStationConfig` defaults: an absent section still
         // reads `role: "direct"` (the role route's `configured` default), not an
         // empty string. The `#[derive(Default)]` for `String` would give `""`.
         GroundStationSection {
@@ -239,30 +238,6 @@ fn mesh_state_path(run_dir: &Path) -> PathBuf {
     run_dir.join(ados_protocol::paths::MESH_STATE_JSON)
 }
 
-/// Read a JSON sidecar into an object map, returning the empty object on any failure or a falsy /
-/// non-object body. A falsy parse (null/false/0/""/[]/{}) and a non-object body both read as the
-/// empty object, so the slice routes never index into a non-map.
-fn read_json_object_or_empty(path: &Path) -> Map<String, Value> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => {
-                // This helper reads only the `mesh-state.json` sidecar in this
-                // module. Best-effort schema-drift signal (never reject): warn on a
-                // producer/reader version mismatch, then read anyway. The writer
-                // const lives in the groundlink crate, so compare against the
-                // shared registry.
-                let got = map.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
-                if let Some(ours) = ados_protocol::contracts::sidecar_version("mesh-state") {
-                    ados_protocol::sidecar::check_sidecar_version("mesh-state", got, ours);
-                }
-                map
-            }
-            _ => Map::new(),
-        },
-        Err(_) => Map::new(),
-    }
-}
-
 /// How fresh a mesh snapshot must be to be served as the current mesh: the same
 /// window the `/status` mesh block applies to the same `mesh.state` rows and
 /// sidecar, so the two surfaces never disagree about a dead poll loop.
@@ -296,7 +271,7 @@ fn fresh_mesh_sidecar(path: &Path, now: std::time::SystemTime) -> Map<String, Va
     if !ados_protocol::sidecar::file_age(path, now).is_some_and(|age| age <= mesh_fresh_window()) {
         return Map::new();
     }
-    read_json_object_or_empty(path)
+    crate::sidecar::read_versioned(path, "mesh-state").unwrap_or_default()
 }
 
 /// Project the `/mesh/neighbors` shape from a snapshot body: `{"neighbors": ...}`,

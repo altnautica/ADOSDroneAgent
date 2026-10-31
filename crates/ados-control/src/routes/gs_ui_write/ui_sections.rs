@@ -86,11 +86,10 @@ pub struct ButtonsUpdate {
 /// `PUT .../ui/buttons` → the full UI config blob with the button section replaced.
 ///
 /// `404` off a panel profile. When `mapping` is supplied, the WHOLE buttons
-/// section becomes `{"mapping": <mapping>}` (wholesale replace, matching the
-/// FastAPI handler — NOT a merge); when omitted, the buttons section keeps its
-/// loaded value. Persists the section into the YAML config, signals the button
-/// service to reload, and echoes the full UI config blob. A persist fault is a
-/// `500 E_UI_SAVE_FAILED`.
+/// section becomes `{"mapping": <mapping>}` (wholesale replace — NOT a merge);
+/// when omitted, the buttons section keeps its loaded value. Persists the section
+/// into the YAML config, signals the button service to reload, and echoes the full
+/// UI config blob. A persist fault is a `500 E_UI_SAVE_FAILED`.
 pub async fn put_ui_buttons(
     State(state): State<AppState>,
     Json(update): Json<ButtonsUpdate>,
@@ -115,13 +114,10 @@ pub(super) fn put_ui_buttons_at(
 ) -> Response {
     let mut data = load_ui_config(profile, encoder, &read_gs_section(config_path, "ui"));
     if let Some(mapping) = &update.mapping {
-        // Wholesale replace: the FastAPI handler sets
-        // `data["buttons"] = {"mapping": dict(update.mapping)}`. The mapping is a
-        // BTreeMap so the serialized key order is deterministic; the FastAPI
-        // handler preserves the request dict's order (Python dicts are ordered),
-        // but the GCS sends the canonical action set and the conformance check is
-        // on the response shape, so a stable sort is the faithful deterministic
-        // choice.
+        // Wholesale replace: `buttons` becomes `{"mapping": <mapping>}`. The
+        // mapping is a BTreeMap so the serialized key order is deterministic
+        // (sorted, not the request's order); the GCS sends the canonical action
+        // set and only the response shape is contractual.
         let mut m = Map::new();
         for (k, v) in mapping {
             m.insert(k.clone(), Value::String(v.clone()));

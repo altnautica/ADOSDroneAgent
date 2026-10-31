@@ -6,21 +6,18 @@
 //! owns the whole agent process tree. Both shell `systemctl` through a bounded
 //! `tokio::process` spawn. The property reads and the supervisor's
 //! fire-and-forget restart go through [`crate::probe`]; the single-unit restart
-//! builds its own bounded spawn because it needs a non-zero exit, a timeout and
-//! a spawn fault kept apart (the `RestartRun` outcomes), which the probe seam
-//! deliberately folds into one degraded value.
+//! calls `ados_proc::run::run` directly because it needs a non-zero exit, a
+//! timeout and a spawn fault kept apart (the `RestartRun` outcomes), which the
+//! probe seam deliberately folds into one degraded value.
 //!
 //! ## Why these answer HTTP 200 with a status field, not a 4xx
 //!
-//! The FastAPI handlers return a plain dict for every outcome — success, an
-//! unknown service, a failed restart, a timeout — so the HTTP status is always
-//! 200 and the body carries the verdict in a `status` (`restart`) or `ok`
-//! (`restart-supervisor`) field. This surface reproduces that exactly: an
-//! unknown unit name is a `{"status":"error", ...}` body at 200, NOT a 400. The
-//! GCS parses the body field, so matching the envelope is the parity contract,
-//! not the status code. (These two routes therefore do not use the crate's
-//! `{"detail"}` 4xx helper — that shape is for the routes whose FastAPI twins
-//! raise an `HTTPException`; these never do.)
+//! Every outcome — success, an unknown service, a failed restart, a timeout —
+//! is a plain JSON body at HTTP 200, with the verdict in a `status` (`restart`)
+//! or `ok` (`restart-supervisor`) field. An unknown unit name is a
+//! `{"status":"error", ...}` body at 200, NOT a 400. The GCS parses the body
+//! field, so the envelope is the wire contract, not the status code. (These two
+//! routes therefore do not use the crate's `{"detail"}` 4xx helper.)
 //!
 //! ## The restart-service name guard
 //!
@@ -47,20 +44,18 @@
 //! ## The supervisor-restart background fire
 //!
 //! Restarting the supervisor kills the very process serving the request, so the
-//! FastAPI route schedules the `systemctl restart ados-supervisor` as a
-//! background task and returns `{"ok":true}` immediately, letting the HTTP layer
-//! flush the response before the unit signals the agent. This surface does the
-//! same: it spawns the restart on the runtime (after a short delay that lets the
-//! reply flush) and returns at once. The route reports `ok:false` only when it
-//! cannot even schedule the restart (no `systemctl` on PATH).
+//! route spawns the `systemctl restart ados-supervisor` on the runtime (after a
+//! short delay that lets the reply flush) and returns `{"ok":true}` at once.
+//! The route reports `ok:false` only when it cannot even schedule the restart
+//! (no `systemctl` on PATH).
 
-use std::process::Stdio;
 use std::time::Duration;
 
 use axum::extract::Path;
 use axum::Json;
 use serde_json::{json, Value};
-use tokio::process::Command;
+
+use ados_proc::run::RunOutcome;
 
 /// Whether the restart route may touch `unit` (an `ados-<name>` stem): the
 /// unit table's `api_restartable` column. The column refuses this process
@@ -84,13 +79,12 @@ pub fn allowed_units() -> impl Iterator<Item = &'static str> {
 const SUPERVISOR_UNIT: &str = "ados-supervisor";
 
 /// How long the restart-confirmation poll runs: 50 iterations × 100 ms ≈ 5 s.
-/// Matches the FastAPI `ITER` / `SLEEP_S`; the window is ~5 s because a slow
-/// Pi 4B under load (or a Pi Zero 2 W) takes longer than 2 s to spawn a fresh
-/// MainPID after a restart.
+/// The window is ~5 s because a slow Pi 4B under load (or a Pi Zero 2 W) takes
+/// longer than 2 s to spawn a fresh MainPID after a restart.
 const CONFIRM_ITERATIONS: u32 = 50;
 const CONFIRM_SLEEP: Duration = Duration::from_millis(100);
 
-/// The `systemctl restart` subprocess timeout, matching the FastAPI `timeout=30`.
+/// The `systemctl restart` subprocess timeout.
 /// It also bounds the supervisor restart: `probe::PROBE_TIMEOUT` is sized for a
 /// read-only probe and would kill a healthy supervisor restart mid-flight.
 const RESTART_TIMEOUT: Duration = Duration::from_secs(30);
@@ -153,7 +147,7 @@ async fn perform_restart(svc_name: &str) -> Value {
     let ts_before = active_enter_ts(svc_name).await;
 
     // `systemctl restart` with the 30 s timeout. A spawn failure (no systemctl)
-    // or a timeout map to the same error bodies the FastAPI `except` arms emit.
+    // or a timeout each map to a `{"status":"error"}` body.
     match run_with_timeout("systemctl", &["restart", svc_name], RESTART_TIMEOUT).await {
         RestartRun::Completed { code, stderr } => {
             if code != 0 {
@@ -172,9 +166,7 @@ async fn perform_restart(svc_name: &str) -> Value {
             });
         }
         RestartRun::SpawnError(err) => {
-            // Mirrors the FastAPI catch-all `except Exception as exc: return
-            // {"status":"error","message": str(exc)}` — a spawn fault (no
-            // systemctl binary) surfaces its error string.
+            // A spawn fault (no systemctl binary) surfaces its error string.
             return json!({"status": "error", "message": err});
         }
     }
@@ -288,9 +280,8 @@ impl PidSettle {
 }
 
 /// Read one `systemctl show <unit> -p <prop> --value` property, trimmed. An empty
-/// string on any spawn / non-UTF-8 / read error, matching the FastAPI `_show`
-/// helper's `except subprocess.SubprocessError: return ""` plus its
-/// already-stripped output (a missing systemctl yields `""` here too).
+/// string on any spawn / non-UTF-8 / read error (a missing systemctl yields `""`
+/// too).
 ///
 /// Routed through [`crate::probe::capture_systemctl`], which additionally folds a
 /// non-zero exit into `""`. That is the same answer the blocking version gave in
@@ -339,42 +330,19 @@ enum RestartRun {
     SpawnError(String),
 }
 
-/// Spawn `program args…`, capture its output, and bound it to a wall-clock
+/// Run `program args…`, capture its output, and bound it to a wall-clock
 /// timeout. On the agent's boards `systemctl restart` settles well within the
-/// timeout; this kills a wedged restart so the route returns the FastAPI timeout
-/// body rather than hanging the connection. A spawn failure (binary absent) is
+/// timeout; this kills a wedged restart so the route returns the timeout body
+/// rather than hanging the connection. A spawn failure (binary absent) is
 /// reported distinctly so the caller can surface its error string.
-///
-/// This builds the bounded spawn here rather than calling [`crate::probe`]
-/// because `ProbeOutput` folds a non-zero exit, a timeout and a spawn fault into
-/// one `Unavailable`, and all three are separate response bodies on this route.
-/// The idiom is the probe seam's: `tokio::process` + `tokio::time::timeout` +
-/// `kill_on_drop`, which replaced a hand-rolled `try_wait()` / 50 ms thread-sleep
-/// poll that held a reactor worker for the whole restart — up to the full 30 s
-/// when the restart wedged. `kill_on_drop` also reaps the child when the timeout
-/// (or a disconnected client) drops this future, which the old loop only did on
-/// the timeout path.
 async fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> RestartRun {
-    let child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn();
-    let child = match child {
-        Ok(c) => c,
-        Err(e) => return RestartRun::SpawnError(e.to_string()),
-    };
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) => RestartRun::Completed {
-            code: out.status.code().unwrap_or(-1),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+    match ados_proc::run::run(program, args, &[], timeout).await {
+        RunOutcome::Exited { code, stderr, .. } => RestartRun::Completed {
+            code: code.unwrap_or(-1),
+            stderr,
         },
-        // An I/O fault while collecting the child's exit was the `try_wait`
-        // `Err(e)` arm, which reported `SpawnError`. Keep it there.
-        Ok(Err(e)) => RestartRun::SpawnError(e.to_string()),
-        Err(_) => RestartRun::TimedOut,
+        RunOutcome::SpawnFailed(e) | RunOutcome::WaitFailed(e) => RestartRun::SpawnError(e),
+        RunOutcome::TimedOut => RestartRun::TimedOut,
     }
 }
 
@@ -384,7 +352,7 @@ async fn run_with_timeout(program: &str, args: &[&str], timeout: Duration) -> Re
 /// Schedules `systemctl restart ados-supervisor` and returns immediately, so the
 /// HTTP response flushes before the unit kills the serving process. Reports
 /// `ok:false` only when the restart cannot even be scheduled (no `systemctl` on
-/// PATH), matching the FastAPI handler's two outcomes.
+/// PATH).
 pub async fn restart_supervisor() -> Json<Value> {
     if which_systemctl().is_none() {
         return Json(json!({
@@ -394,10 +362,9 @@ pub async fn restart_supervisor() -> Json<Value> {
     }
 
     // Fire the restart on the runtime after a short delay that lets this reply
-    // flush, then return at once. The FastAPI route uses a BackgroundTasks hook
-    // that sleeps 200 ms before the `systemctl restart`; this mirrors that — the
-    // restart kills the agent process the supervisor owns, so any post-spawn
-    // error is benign (the unit IS restarting).
+    // flush, then return at once. The restart kills the agent process the
+    // supervisor owns, so any post-spawn error is benign (the unit IS
+    // restarting).
     tokio::spawn(async move {
         // The 200 ms delay is load-bearing: it is what lets the response above
         // reach the client before the supervisor restarts the process serving it.
@@ -418,7 +385,7 @@ pub async fn restart_supervisor() -> Json<Value> {
     }))
 }
 
-/// Resolve a `systemctl` executable on `PATH`, mirroring `shutil.which`. Returns
+/// Resolve a `systemctl` executable on `PATH`. Returns
 /// the first `PATH` entry that holds an existing `systemctl` file, or `None` when
 /// no entry does (a non-systemd dev host). Used by the supervisor route to pick
 /// `ok:false` when it cannot schedule the restart at all.

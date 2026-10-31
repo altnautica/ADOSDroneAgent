@@ -61,7 +61,7 @@ pub const CAPABILITIES: [&str; 13] = [
 ];
 
 /// `GET /api/version` → `{api_version, agent_version, capabilities}`. Stable
-/// shape; mirrors `version.py:get_version`.
+/// shape.
 pub async fn get_version(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "api_version": API_VERSION,
@@ -70,8 +70,7 @@ pub async fn get_version(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
-/// `GET /healthz` → `{status: "ok", version}`. The liveness probe; mirrors
-/// `server.py:health_check`.
+/// `GET /healthz` → `{status: "ok", version}`. The liveness probe.
 pub async fn healthz(State(state): State<AppState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
@@ -81,7 +80,7 @@ pub async fn healthz(State(state): State<AppState>) -> Json<Value> {
 
 /// `GET /api/time` → `{time_ns, monotonic_ns, ntp_synced}`. The GCS browser uses
 /// Cristian's algorithm against this to estimate the drone↔browser clock offset.
-/// Mirrors `system.py:get_time`: a wall-clock nanosecond stamp, a monotonic
+/// The reply carries a wall-clock nanosecond stamp, a monotonic
 /// nanosecond counter, and the best-effort NTP-synced flag. These are live clock
 /// reads, so the values change per call; the contract is the shape + types +
 /// the `ntp_synced` semantics. This route is NOT in the auth-exempt set.

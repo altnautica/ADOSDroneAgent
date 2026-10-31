@@ -12,8 +12,8 @@ pub struct PicConfirmTokenRequest {
 ///
 /// `404 E_PROFILE_MISMATCH` off a ground station. Otherwise forwards a
 /// `confirm_token` op and returns `{token: <32-hex>, ttl_seconds: 2}` — the
-/// arbiter mints a plain string token, and the FastAPI route reports the fixed
-/// `ttl_seconds: 2` it hard-codes for the string-token path. An unreachable
+/// arbiter mints a plain string token, and the route reports a fixed
+/// `ttl_seconds: 2`. An unreachable
 /// socket → `500 E_PIC_TOKEN_FAILED`.
 pub async fn post_pic_confirm_token(
     State(state): State<AppState>,
@@ -61,7 +61,7 @@ pub struct PicHeartbeatRequest {
 /// `heartbeat` op. On a held claim the reply's `ok_heartbeat` is true and the
 /// route returns `{ok:true, claimed_by, claim_counter, last_heartbeat_ts}` at
 /// HTTP 200. When the caller does not hold PIC the reply's `ok_heartbeat` is
-/// false and the route raises the FastAPI `410` carrying the
+/// false and the route returns a `410` carrying the
 /// `E_PIC_NO_ACTIVE_CLAIM` error object with the reply's `error` message + the
 /// `current_pic`. An unreachable socket → `500 E_PIC_HEARTBEAT_FAILED`.
 pub async fn post_pic_heartbeat(
@@ -87,18 +87,18 @@ pub async fn post_pic_heartbeat(
     }
 }
 
-/// Map the daemon's `heartbeat` reply to the FastAPI response. The reply's
+/// Map the daemon's `heartbeat` reply to the route response. The reply's
 /// `ok_heartbeat` flag is the arbiter's `ok`: when true the route returns the
 /// `{ok:true, claimed_by, claim_counter, last_heartbeat_ts}` dict at 200; when
-/// false the FastAPI route raises `HTTPException(status, detail={"error":
-/// {"code":"E_PIC_NO_ACTIVE_CLAIM","message":<error>,"current_pic":<cp>}})` — the
+/// false the route returns `(status, {"detail": {"error":
+/// {"code":"E_PIC_NO_ACTIVE_CLAIM","message":<error>,"current_pic":<cp>}}})` — the
 /// status from the reply (410), the error object carrying the reply's `error`
 /// string and the current holder.
 pub(super) fn heartbeat_response(reply: &Map<String, Value>) -> Response {
     if heartbeat_ok(reply) {
         return Json(heartbeat_ok_body(reply)).into_response();
     }
-    // The not-holder path: the FastAPI route raises the 410 with the error object.
+    // The not-holder path: the 410 with the error object.
     let status = reply
         .get("status")
         .and_then(Value::as_u64)

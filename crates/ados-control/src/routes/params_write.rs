@@ -19,16 +19,12 @@
 //! which is the only period a two-second ack could miss and is also the one period
 //! no operator write is in flight.
 //!
-//! ## Why this is the WORKING write path
+//! ## Why the route writes the socket
 //!
-//! On the Rust-hybrid agent the FastAPI `params.py` route reaches for the FC
-//! connection object, which is `None` on the API process because the native
-//! router owns the FC serial link. So the FastAPI route always 503s after its
-//! known-param check. This native route is the working replacement: it builds the
-//! `PARAM_SET` frame itself and writes it to the same socket the router reads, the
-//! socket the Python MAVLink IPC client writes to. The parity target is therefore
-//! the MAVLink bytes the FastAPI route's `PARAM_SET` send WOULD have produced, plus
-//! the FastAPI route's exact guard order and response shapes.
+//! The native router owns the FC serial link, so no other process holds an FC
+//! connection object. The route builds the `PARAM_SET` frame itself and writes it
+//! to the socket the router reads, then reports through the guard order and
+//! response shapes below.
 //!
 //! ## Guard order
 //!
@@ -105,15 +101,14 @@ fn is_identity_param(name: &str) -> bool {
 const PARAM_ID_LEN: usize = 16;
 
 /// How long to poll the cached param blob for the FC's `PARAM_VALUE` echo before
-/// reporting `ack: false`, matching the FastAPI route's 2-second deadline.
+/// reporting `ack: false`.
 const ACK_POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// One poll interval between cache reads while waiting for the echo, matching the
-/// FastAPI route's `await asyncio.sleep(0.1)`.
+/// One poll interval between cache reads while waiting for the echo.
 const ACK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// The message the route reports when the FC did not echo a `PARAM_VALUE` within
-/// the poll window, byte-identical to the FastAPI route's text.
+/// the poll window.
 const NO_ACK_MESSAGE: &str = "FC did not echo PARAM_VALUE within 2s";
 
 /// The `POST /api/params/{name}` request body. A single required numeric `value` to
@@ -124,7 +119,7 @@ pub struct ParamSetRequest {
 }
 
 /// A 4xx/5xx the write path raises before or instead of sending: a non-finite
-/// value (400), an unknown param (404), or no FC link (503). Carries the FastAPI
+/// value (400), an unknown param (404), or no FC link (503). Carries the HTTP
 /// status + detail so it renders as the `{"detail"}` shape.
 #[derive(Debug)]
 struct ParamError {
@@ -140,12 +135,11 @@ impl IntoResponse for ParamError {
 
 /// `POST /api/params/{name}` → `{"name", "value", "ack", "cached_value", "message"}`.
 ///
-/// Validates the body and the known-param + FC-connected guards in the FastAPI
-/// route's order, builds the `PARAM_SET` frame, writes it to the MAVLink socket,
+/// Validates the body and the known-param + FC-connected guards in the
+/// documented order, builds the `PARAM_SET` frame, writes it to the MAVLink socket,
 /// then polls the cached param blob for the FC's echo to set `ack`. Degrades to
 /// the documented 4xx/5xx `{"detail"}` bodies on each guard; it never panics on a
-/// seam error (an absent MAVLink socket maps to a 503, the same no-link posture as
-/// the FastAPI route).
+/// seam error (an absent MAVLink socket maps to a 503, the no-link posture).
 pub async fn set_param(
     Path(name): Path<String>,
     State(state): State<AppState>,
@@ -153,7 +147,7 @@ pub async fn set_param(
 ) -> Response {
     let target = req.value;
 
-    // 1. The value must be finite (the FastAPI `math.isfinite` guard) → 400.
+    // 1. The value must be finite → 400.
     if !target.is_finite() {
         return ParamError {
             status: StatusCode::BAD_REQUEST,
@@ -201,7 +195,7 @@ pub(crate) async fn send_param_set(
 ) -> Result<(bool, Option<f64>), Response> {
     // 3. The parameter must be one the agent has already observed. The native
     //    front's only param source is the router's on-disk cache; a name absent
-    //    from it (or an unreadable cache) is refused with the FastAPI 404.
+    //    from it (or an unreadable cache) is refused with a 404.
     let Some(cached) = crate::param_store::read_param(&state.params_path, name)
         .ok()
         .flatten()
@@ -222,7 +216,7 @@ pub(crate) async fn send_param_set(
         return Err(type_unknown(name));
     };
 
-    // 5. The FC must be connected (the FastAPI `fc.connected` guard) → 503.
+    // 5. The FC must be connected → 503.
     let snapshot = state.state.snapshot();
     let connected = snapshot
         .as_ref()
@@ -284,8 +278,7 @@ pub(crate) async fn send_param_set(
     };
 
     // 7. Send the frame. An absent or broken MAVLink socket means no live FC link
-    //    from this surface's view → 503 (the native equivalent of the FastAPI
-    //    `conn is None` / send-raise paths); the write is never silently dropped.
+    //    from this surface's view → 503; the write is never silently dropped.
     if let Err(e) = state.mavlink.send(&frame).await {
         tracing::warn!(error = %e, param = %name, "param_set send to the mavlink socket failed");
         return Err(ParamError {
@@ -297,8 +290,7 @@ pub(crate) async fn send_param_set(
 
     // Poll the cached params for up to two seconds for the FC's PARAM_VALUE echo.
     // The router rewrites its cache file as PARAM_VALUE frames land; this re-reads
-    // it each tick, the native equivalent of the FastAPI route polling its
-    // in-process cache.
+    // it each tick.
     let (ack, cached_value) = poll_for_ack(state, name, encoded.stored).await;
 
     tracing::info!(param = %name, value = target, param_type, ack, "param_set");
@@ -397,8 +389,8 @@ fn cached_param_value(state: &AppState, name: &str) -> Option<f64> {
         .map(|p| p.value)
 }
 
-/// Build the success body, mirroring the FastAPI `ParamSetResponse`. The message
-/// is empty on an ack, else the FastAPI's no-echo text; `cached_value` is the last
+/// Build the success body. The message is empty on an ack, else the no-echo
+/// text; `cached_value` is the last
 /// value seen in the cache (a JSON number, or `null` when the cache never carried
 /// the param).
 fn build_set_response(name: &str, value: f64, ack: bool, cached_value: Option<f64>) -> Value {

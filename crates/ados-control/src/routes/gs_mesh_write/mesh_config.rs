@@ -3,7 +3,7 @@
 use super::*;
 
 /// The `PUT .../mesh/config` body: three optional fields, each applied only when present.
-/// [`validate_mesh_config`] holds `carrier` to `802.11s`/`ibss`, `channel` to 1..=13 and `mesh_id`
+/// `validate_mesh_config` holds `carrier` to `802.11s`/`ibss`, `channel` to 1..=13 and `mesh_id`
 /// to a 1..=32-byte printable name before anything is written.
 #[derive(Debug, Default, Deserialize)]
 pub struct MeshConfigUpdate {
@@ -34,8 +34,8 @@ pub async fn put_mesh_config(
 }
 
 /// The merge logic against an explicit config path (a test points it at a temp
-/// file). The response mirrors the FastAPI handler, which echoes the post-mutation
-/// `mesh.{mesh_id,carrier,channel}` model values + `applied`. An out-of-range
+/// file). The response echoes the post-mutation `mesh.{mesh_id,carrier,channel}`
+/// values + `applied`. An out-of-range
 /// field is a 422 `E_INVALID_MESH_CONFIG` and nothing is written.
 pub(super) fn put_mesh_config_at(config_path: &Path, update: &MeshConfigUpdate) -> Response {
     if let Err(message) = validate_mesh_config(update) {

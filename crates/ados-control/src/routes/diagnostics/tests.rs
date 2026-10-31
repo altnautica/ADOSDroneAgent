@@ -97,8 +97,7 @@ fn board_projects_the_sidecar_summary() {
 fn board_of_an_absent_sidecar_is_the_default_summary() {
     let dir = tempfile::tempdir().unwrap();
     let b = collect_board(&dir.path().join("nope.json"));
-    // The same `"--"` / `"unknown"` / `0` the FastAPI route emits when its own
-    // detect_board() raises.
+    // The `"--"` / `"unknown"` / `0` default summary.
     assert_eq!(b["name"], json!("--"));
     assert_eq!(b["soc"], json!("unknown"));
     assert_eq!(b["arch"], json!("unknown"));

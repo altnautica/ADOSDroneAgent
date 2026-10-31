@@ -53,7 +53,7 @@ pub(crate) fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String
     let mut out: Vec<(String, Value)> = Vec::new();
 
     // --- Management-link guardian → `managementLink` ---------------------------
-    if let Some(ml) = read_versioned_sidecar(&run_dir.join("mgmt-link.json"), "mgmt-link") {
+    if let Some(ml) = crate::sidecar::read_versioned(&run_dir.join("mgmt-link.json"), "mgmt-link") {
         if sidecar_fresh(&ml, now, MGMT_LINK_FRESH_S) {
             // The GCS clamp accepts the block only on a known state, so an
             // unrecognised verdict is dropped here rather than shipped.
@@ -81,7 +81,9 @@ pub(crate) fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String
     }
 
     // --- Reach-back mode → `mgmtLinkMode` + the two failover scalars -----------
-    if let Some(mf) = read_versioned_sidecar(&run_dir.join("mgmt-failover.json"), "mgmt-failover") {
+    if let Some(mf) =
+        crate::sidecar::read_versioned(&run_dir.join("mgmt-failover.json"), "mgmt-failover")
+    {
         if sidecar_fresh(&mf, now, MGMT_FAILOVER_FRESH_S) {
             if let Some(mode) = mf.get("mgmt_link_mode").and_then(Value::as_str) {
                 if matches!(mode, "primary" | "wifi_heartbeat" | "none") {
@@ -107,7 +109,8 @@ pub(crate) fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String
     // `usbRehomeCooldownSeconds` fixed is what now tells an operator that a
     // radio has been failing for a while — a number that keeps moving, rather
     // than a state that says the vehicle gave up.
-    if let Some(ur) = read_versioned_sidecar(&run_dir.join("usb-rehome.json"), "usb-rehome") {
+    if let Some(ur) = crate::sidecar::read_versioned(&run_dir.join("usb-rehome.json"), "usb-rehome")
+    {
         if sidecar_fresh(&ur, now, USB_REHOME_FRESH_S) {
             if let Some(state) = ur.get("usb_rehome_state").and_then(Value::as_str) {
                 if matches!(state, "idle" | "rehoming" | "guard_blocked") {
@@ -143,7 +146,7 @@ pub(crate) fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String
         std::time::SystemTime::now(),
     );
     if let Reading::Fresh(ps) = reading {
-        warn_on_version_drift(&ps, "wifi-powersave");
+        crate::sidecar::warn_on_version_drift(&ps, "wifi-powersave");
         if let Some(ifaces) = ps.get("interfaces").and_then(Value::as_object) {
             let rows: Vec<Value> = ifaces
                 .iter()
@@ -178,33 +181,6 @@ pub(crate) fn read_reconciler_status_in(run_dir: &Path, now: f64) -> Vec<(String
 /// `wifi-powersave`.
 pub(crate) const WIFI_POWERSAVE_FRESH: Duration =
     Duration::from_millis(paths::WIFI_POWERSAVE_MAX_AGE_MS);
-
-/// Read a sidecar object and emit the best-effort schema-drift warning against the
-/// shared contract registry. Never rejects on a version mismatch — a stale sidecar
-/// from an older agent still reads.
-pub(crate) fn read_versioned_sidecar(path: &Path, contract_id: &str) -> Option<Map<String, Value>> {
-    let obj = read_sidecar_object(path)?;
-    warn_on_version_drift(&obj, contract_id);
-    Some(obj)
-}
-
-/// The best-effort schema-drift warning for a parsed sidecar object.
-pub(crate) fn warn_on_version_drift(obj: &Map<String, Value>, contract_id: &str) {
-    let got = obj.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
-    if let Some(ours) = ados_protocol::contracts::sidecar_version(contract_id) {
-        ados_protocol::sidecar::check_sidecar_version(contract_id, got, ours);
-    }
-}
-
-/// Read + parse a sidecar file into an object, or `None` on any gap (absent /
-/// read error / non-object body).
-pub(crate) fn read_sidecar_object(path: &Path) -> Option<Map<String, Value>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Value>(&text) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
-}
 
 /// How far ahead of `now` an in-body timestamp may sit and still count. Writer
 /// and reader share one clock, so anything beyond rounding is a clock step and

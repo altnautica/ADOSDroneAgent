@@ -342,7 +342,7 @@ fn the_priority_success_body_echoes_the_persisted_list() {
 #[test]
 fn the_ethernet_static_missing_fields_guard_fires_on_missing_gateway() {
     // The in-handler guard fires when mode=static and ip/gateway is missing,
-    // mirroring the FastAPI E_ETHERNET_STATIC_MISSING_FIELDS 400. The valid
+    // the E_ETHERNET_STATIC_MISSING_FIELDS 400. The valid
     // path (ip + gateway present) forwards to the daemon, bench-validated.
     let no_gw = EthernetConfigUpdate {
         mode: "static".to_string(),

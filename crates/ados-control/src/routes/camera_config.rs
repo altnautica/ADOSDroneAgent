@@ -47,7 +47,7 @@ fn config_path() -> PathBuf {
 }
 
 /// The discovery sidecar the Python camera enumeration writes
-/// (`/run/ados/cameras-discovered.json`). Mirrors the Python
+/// (`/run/ados/cameras-discovered.json`). Matches the Python
 /// `cameras_discovered_path()`.
 fn discovered_path() -> PathBuf {
     paths::run_path("cameras-discovered")
@@ -444,10 +444,7 @@ fn declared_legs(cfg: &RosterVideoConfig, has_discovered: bool) -> Vec<CameraLeg
 /// Read + parse the discovery sidecar, or an empty list on any read/parse failure
 /// (an absent sidecar on a fresh boot, a dev host with no runtime dir).
 fn load_discovered(path: &Path) -> Vec<DiscoveredCamera> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    serde_json::from_str::<DiscoveredSnapshot>(&text)
+    crate::sidecar::read_typed::<DiscoveredSnapshot>(path)
         .map(|s| s.cameras)
         .unwrap_or_default()
 }
@@ -458,10 +455,7 @@ fn load_discovered(path: &Path) -> Vec<DiscoveredCamera> {
 /// what is plugged in rather than reconcile it into the roster. Empty on any
 /// read/parse failure, like [`load_discovered`].
 pub(crate) fn discovered_camera_entries() -> Vec<Map<String, Value>> {
-    let Ok(text) = std::fs::read_to_string(discovered_path()) else {
-        return Vec::new();
-    };
-    let Ok(Value::Object(mut doc)) = serde_json::from_str::<Value>(&text) else {
+    let Some(mut doc) = crate::sidecar::read_object(&discovered_path()) else {
         return Vec::new();
     };
     match doc.remove("cameras") {
@@ -479,10 +473,7 @@ pub(crate) fn discovered_camera_entries() -> Vec<Map<String, Value>> {
 /// Read + parse the live-streams sidecar into an `id -> live` map, or an empty map
 /// on any failure (an absent sidecar — the single-stream path never writes one).
 fn load_live(path: &Path) -> HashMap<String, Option<bool>> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return HashMap::new();
-    };
-    let Ok(snap) = serde_json::from_str::<LiveSnapshot>(&text) else {
+    let Some(snap) = crate::sidecar::read_typed::<LiveSnapshot>(path) else {
         return HashMap::new();
     };
     snap.streams

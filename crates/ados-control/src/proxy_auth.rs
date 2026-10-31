@@ -1,13 +1,13 @@
 //! The auth decision for PROXIED (non-native) routes.
 //!
 //! The native front already authenticates the routes it serves itself
-//! ([`crate::serve::tcp_edge`]). The routes it does NOT serve fall through to
-//! the reverse proxy. This module ports the two former Python auth middlewares
-//! into Rust so the front runs the SAME decision on a proxied request before
-//! forwarding it, making the front the single authenticator for the whole
-//! surface (the residual Python no longer carries its own auth layers).
+//! (`crate::serve::tcp_edge`). The routes it does NOT serve fall through to
+//! the reverse proxy. This module is the auth decision the front runs on a
+//! proxied request before forwarding it, so the front is the single
+//! authenticator for the whole surface; the residual Python carries no auth
+//! layer of its own.
 //!
-//! Two auth gates are ported:
+//! Two auth gates run in order:
 //!
 //! 1. The API-key gate: the exempt set, the OPTIONS bypass, on-box trust, the
 //!    cloud-posture setup routes, the setup-mutation routes, the unpaired-open
@@ -16,9 +16,8 @@
 //!    target, the nonce, the timestamp and the body, plus a nonce/timestamp
 //!    replay window, applied to mutating methods when HMAC is enabled.
 //!
-//! Status codes, body shapes, and message strings are preserved byte-for-byte
-//! from the predecessor middlewares so a GCS that surfaces the rejection body
-//! reads stable text across the cutover.
+//! Status codes, body shapes, and message strings are fixed wire contract: a
+//! GCS surfaces the rejection body, so its text must stay stable.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -43,9 +42,8 @@ pub use types::*;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// The same-origin setup token lives at `/etc/ados/secrets/setup-token` — the
-/// `SECRETS_DIR / "setup-token"` the Python `ados.core.paths.SETUP_TOKEN_PATH`
-/// points at. Overridable via `ADOS_SETUP_TOKEN_PATH` for tests, mirroring the
+/// The setup token lives at `/etc/ados/secrets/setup-token`.
+/// Overridable via `ADOS_SETUP_TOKEN_PATH` for tests, following the
 /// env-override convention the sibling paths use.
 pub const DEFAULT_SETUP_TOKEN_PATH: &str = "/etc/ados/secrets/setup-token";
 
@@ -70,54 +68,39 @@ const EXEMPT_PATHS: &[&str] = &[
     "/api/pairing/claim",
 ];
 
-/// Cosmetic setup-wizard mutations under the same-origin trust model. Mirrors
-/// `auth.py` `SAME_ORIGIN_SETUP_PATHS`.
-const SAME_ORIGIN_SETUP_PATHS: &[&str] = &[
+/// Cosmetic setup-wizard mutations. Open on an unpaired node, or with the
+/// setup token when `security.setup_token_required` is set.
+const SETUP_MUTATION_PATHS: &[&str] = &[
     "/api/v1/setup/finish",
     "/api/v1/setup/skip",
     "/api/v1/setup/reset",
 ];
 
 /// Cloud-posture-mutating setup routes that always require a credential, even
-/// while unpaired. Mirrors `auth.py` `SAME_ORIGIN_SETUP_CLOUD_PATHS`.
-const SAME_ORIGIN_SETUP_CLOUD_PATHS: &[&str] = &[
+/// while unpaired.
+const SETUP_CLOUD_PATHS: &[&str] = &[
     "/api/v1/setup/remote-access/cloudflare",
     "/api/v1/setup/cloud-choice",
 ];
 
-/// Path prefixes that follow the same same-origin trust model as the exact
-/// setup-mutation set. Mirrors `auth.py` `SAME_ORIGIN_SETUP_PREFIXES`.
-const SAME_ORIGIN_SETUP_PREFIXES: &[&str] = &["/api/v1/setup/step/", "/api/v1/setup/nudges"];
-
-/// Hostnames the agent itself binds; a request whose Origin/Referer host
-/// matches one is same-origin. Mirrors `auth.py` `LOCAL_HOST_DEFAULTS`.
-///
-/// Parity gap: the Python set is augmented at runtime by the discovered
-/// listener IPs (`setup/service.py`). That augmentation is NOT mirrored here —
-/// a same-origin request whose host is a runtime-discovered LAN IP that is
-/// neither one of these defaults nor the request's own `Host` header would be
-/// accepted by the residual Python's middleware but not by this gate. In
-/// practice the `host == request_host` fallback below covers the common case (a
-/// browser served the webapp from `http://<lan-ip>:8080` sends Origin host ==
-/// Host host), so this gap only bites a cross-host same-origin setup mutation,
-/// which is not a real flow.
-const LOCAL_HOST_DEFAULTS: &[&str] = &["localhost", "127.0.0.1", "192.168.4.1", "192.168.7.1"];
+/// Path prefixes that follow the same trust model as the exact setup-mutation
+/// set.
+const SETUP_MUTATION_PREFIXES: &[&str] = &["/api/v1/setup/step/", "/api/v1/setup/nudges"];
 
 /// The one mutation exempt from HMAC verification even when HMAC is enabled:
 /// the pairing claim, made by a fresh operator who holds no secret yet. Every
 /// other pairing mutation (unpair, accept) is signed like any write.
 const HMAC_EXEMPT_ROUTES: &[&str] = &["/api/pairing/claim"];
 
-/// The replay window in seconds. Mirrors the `window_seconds=300.0` the
-/// `SecurityMiddleware` constructs its `ReplayDetector` with.
+/// The replay window in seconds: a signed request's timestamp must fall within
+/// this many seconds of now.
 const REPLAY_WINDOW_SECONDS: f64 = 300.0;
 
-/// The nonce-store cap. Mirrors `max_nonces=50000` in the middleware.
+/// The nonce-store cap; the store prunes when it grows past this.
 const REPLAY_MAX_NONCES: usize = 50_000;
 
-/// The minimum HMAC secret length (in bytes) the gate activates at. Mirrors the
-/// `len(secret_bytes) >= 16` guard in `SecurityMiddleware.__init__` and the
-/// `HmacSigner` constructor.
+/// The minimum HMAC secret length (in bytes) the gate activates at. A shorter
+/// secret leaves the HMAC gate inactive.
 const HMAC_MIN_SECRET_LEN: usize = 16;
 
 /// The header an upload carries its body digest on: the lowercase hex
@@ -187,8 +170,7 @@ impl ProxiedAuth {
     }
 
     /// Whether the HMAC gate is active: enabled in config AND the secret is at
-    /// least the minimum length. Mirrors the predecessor middleware's
-    /// `enabled and bool(secret)` plus the `>= 16` length guard.
+    /// least the minimum length.
     pub fn hmac_active(&self) -> bool {
         let cfg = self.config();
         cfg.security.hmac_enabled && cfg.security.hmac_secret.len() >= HMAC_MIN_SECRET_LEN
@@ -207,10 +189,9 @@ impl ProxiedAuth {
         *method == Method::POST && contains(DIGEST_SIGNED_ROUTES, path)
     }
 
-    /// The API-key gate (the `ApiKeyAuthMiddleware.dispatch` order). Returns
-    /// `Accept` to pass to the HMAC gate / forward, or `Reject` with the exact
-    /// Python status + body. `on_box` is the front's resolved on-box trust for
-    /// this peer (the front computes it once in `tcp_edge`).
+    /// The API-key gate. Returns `Accept` to pass to the HMAC gate / forward,
+    /// or `Reject` with the status + body. `on_box` is the front's resolved
+    /// on-box trust for this peer (the front computes it once in `tcp_edge`).
     pub fn decide_api_key(
         &self,
         method: &Method,
@@ -234,7 +215,7 @@ impl ProxiedAuth {
         // 4. Cloud-posture-mutating setup routes: require a valid key OR a valid
         //    setup token, BEFORE the unpaired-open pass, so a fresh agent cannot
         //    have its cloud posture flipped by a forged-Origin LAN caller.
-        if contains(SAME_ORIGIN_SETUP_CLOUD_PATHS, path) {
+        if contains(SETUP_CLOUD_PATHS, path) {
             if self.valid_api_key(headers, pairing) || self.valid_setup_token(headers) {
                 return Decision::Accept;
             }
@@ -244,32 +225,21 @@ impl ProxiedAuth {
                 messages::CLOUD_POSTURE,
             );
         }
-        // 5. Cosmetic setup-wizard mutations under the same-origin trust model,
-        //    with the token escalation knob. The same-origin shortcut holds only
-        //    on an unpaired node: Origin and Host are caller-chosen, so once
-        //    paired a wizard mutation needs the key like every other route.
-        let is_setup_mutation = contains(SAME_ORIGIN_SETUP_PATHS, path)
-            || SAME_ORIGIN_SETUP_PREFIXES
-                .iter()
-                .any(|p| path.starts_with(p));
-        if is_setup_mutation {
-            let require_token = self.config().security.setup_token_required;
-            if !require_token && matches!(pairing, Pairing::Unpaired) && is_same_origin(headers) {
+        // 5. Cosmetic setup-wizard mutations with the token escalation knob.
+        //    With the knob set, the setup token is required even while
+        //    unpaired. Without it, the mutation takes the general posture
+        //    below: open while unpaired, the key once paired.
+        let is_setup_mutation = contains(SETUP_MUTATION_PATHS, path)
+            || SETUP_MUTATION_PREFIXES.iter().any(|p| path.starts_with(p));
+        if is_setup_mutation && self.config().security.setup_token_required {
+            if self.valid_setup_token(headers) {
                 return Decision::Accept;
             }
-            if require_token {
-                if self.valid_setup_token(headers) {
-                    return Decision::Accept;
-                }
-                return reject(
-                    StatusCode::UNAUTHORIZED,
-                    BodyField::Detail,
-                    messages::SETUP_TOKEN,
-                );
-            }
-            // require_token false but not same-origin: fall through to the
-            // general paired/unpaired posture below (matches the Python, which
-            // does not return from the setup-mutation block in this case).
+            return reject(
+                StatusCode::UNAUTHORIZED,
+                BodyField::Detail,
+                messages::SETUP_TOKEN,
+            );
         }
         // 6. Unpaired ⇒ all routes open.
         if matches!(pairing, Pairing::Unpaired) {
@@ -404,8 +374,7 @@ impl ProxiedAuth {
 
     /// True when the request carries a valid API key: the manually-configured
     /// `security.api.api_key` (constant-time compared) OR a key matching the
-    /// pairing posture. Mirrors `auth.py` `_valid_api_key`. A missing/empty key
-    /// is not valid.
+    /// pairing posture. A missing/empty key is not valid.
     fn valid_api_key(&self, headers: &RequestHeaders, pairing: &Pairing) -> bool {
         crate::auth::credential_matches(
             pairing,
@@ -417,12 +386,12 @@ impl ProxiedAuth {
     /// Whether `path` is a cloud-posture route that a dashboard session must
     /// not unlock: it demands a real key or the setup token.
     pub fn is_cloud_posture_path(path: &str) -> bool {
-        contains(SAME_ORIGIN_SETUP_CLOUD_PATHS, path)
+        contains(SETUP_CLOUD_PATHS, path)
     }
 
-    /// True when the request carries the valid `X-ADOS-Setup-Token`. Mirrors
-    /// `auth.py` `_valid_setup_token` + `_load_setup_token`: read the on-disk
-    /// token, compare to the header. A missing header or absent token file → no.
+    /// True when the request carries the valid `X-ADOS-Setup-Token`: read the
+    /// on-disk token and compare it to the header. A missing header or absent
+    /// token file → no.
     fn valid_setup_token(&self, headers: &RequestHeaders) -> bool {
         let Some(provided) = non_empty(headers.x_ados_setup_token.as_deref()) else {
             return false;
@@ -430,8 +399,7 @@ impl ProxiedAuth {
         let Some(expected) = self.load_setup_token() else {
             return false;
         };
-        // The Python compares with plain `==`; use a constant-time compare here
-        // (strictly stronger, same accept/reject result).
+        // Constant-time compare so the token cannot be probed byte by byte.
         constant_time_eq(provided.as_bytes(), expected.as_bytes())
     }
 

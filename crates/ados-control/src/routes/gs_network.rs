@@ -38,7 +38,7 @@
 //!   wired port's live carrier, speed, address and gateway.
 //! - **`GET .../network/client/scan`** — a fresh nearby-network scan run by the
 //!   Wi-Fi command socket's `wifi_scan` op (see
-//!   [`crate::routes::network_write::wifi_scan`]).
+//!   `crate::routes::network_write::wifi_scan`).
 //! - **`GET .../network/modem`** — the modem view (same leg as `modem_4g`).
 //! - **`GET .../network/priority`** — the uplink priority list.
 //! - **`GET .../modem-status`** — the cellular detail snapshot; the front has no
@@ -234,7 +234,7 @@ pub async fn get_network_priority() -> Response {
 /// when the file is absent / unparseable / carries an empty or non-string list.
 fn priority_list() -> Value {
     let default = || Value::Array(DEFAULT_PRIORITY.iter().map(|s| json!(s)).collect());
-    let Some(obj) = load_json_object(&gs_uplink_json()) else {
+    let Some(obj) = crate::sidecar::read_object(&gs_uplink_json()) else {
         return default();
     };
     let Some(arr) = obj.get("priority").and_then(Value::as_array) else {
@@ -326,16 +326,6 @@ async fn latest_modem_usage(state: &AppState) -> Option<Map<String, Value>> {
 // ---------------------------------------------------------------------------
 // Config + file helpers.
 // ---------------------------------------------------------------------------
-
-/// Read a JSON file into its object map, or `None` on absence / parse error /
-/// non-object root. Used for the priority / modem / wifi-client side-files.
-fn load_json_object(path: &Path) -> Option<Map<String, Value>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Value>(&text) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
-}
 
 /// The `ground_station.share_uplink` flag from the agent config, defaulting to `false`
 /// when the section / field is absent. Any read failure reads the same way.

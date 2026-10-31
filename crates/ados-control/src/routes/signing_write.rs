@@ -31,7 +31,7 @@
 //! Writing the frame proves only that the router took it. An FC that already
 //! enforces signing drops an unsigned `SETUP_SIGNING` on every link but its
 //! USB channel, and says nothing. So each route watches the FC's own frames
-//! for [`VERIFY_WINDOW`] after the send, on the same socket connection:
+//! for `VERIFY_WINDOW` after the send, on the same socket connection:
 //! enrollment is `verified` once a frame from the target arrives signed with
 //! the new key, and a disable once a frame from the target arrives unsigned.
 //! `verified: false` means no such frame was seen, not that the write failed.
@@ -121,7 +121,7 @@ pub struct EnrollRequest {
 /// (`400` with the exact parse error on a bad body), then builds `SETUP_SIGNING`
 /// and writes it to the MAVLink socket twice. On success returns `{sent: true,
 /// verified, key_id, enrolled_at}` — `verified` is whether a frame from the
-/// target signed with this key was seen within [`VERIFY_WINDOW`], `key_id` the
+/// target signed with this key was seen within `VERIFY_WINDOW`, `key_id` the
 /// first 8 hex of sha256(key), never the key. A failure to reach the socket is
 /// the Python `503 "MAVLink command link unavailable"`; any other failure is the
 /// Python `500 "enrollment failed"`. The parsed key bytes are zeroized before the
@@ -298,7 +298,7 @@ pub struct DisableRequest {
 /// (`503` when not), then sends `SETUP_SIGNING` with an all-zero key + a zero
 /// timestamp (ArduPilot reads this as "disable signing") and returns `{sent:
 /// true, verified}`, `verified` being whether an unsigned frame from the target
-/// was seen within [`VERIFY_WINDOW`]. The frame itself is unsigned, so an FC
+/// was seen within `VERIFY_WINDOW`. The frame itself is unsigned, so an FC
 /// that enforces signing applies it only from its USB channel; anywhere else
 /// it is dropped and `verified` stays false. A socket failure is the Python
 /// `503 "MAVLink command link unavailable"`; any other failure is the Python

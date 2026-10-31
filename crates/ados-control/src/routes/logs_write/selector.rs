@@ -72,10 +72,10 @@ or a relative duration like -5m"
 }
 
 /// Parse a `90s` / `5m` / `2h` / `1d` / `500ms` magnitude+unit into microseconds.
-/// `None` on a malformed input. Mirrors the Python `_parse_relative`.
+/// `None` on a malformed input. Matches the Python `_parse_relative`.
 pub(super) fn parse_relative(rest: &str) -> Option<i64> {
     let rest = rest.trim();
-    // Split at the first ASCII alphabetic char (the unit), mirroring the Python
+    // Split at the first ASCII alphabetic char (the unit), as the Python does:
     // `next((i for i,c in enumerate(rest) if c.isascii() and c.isalpha()), None)`.
     let split = rest
         .char_indices()
@@ -158,7 +158,7 @@ pub(super) fn civil_to_unix_secs(s: &str) -> Option<i64> {
 
 /// Normalize and validate the requested window kinds. An empty/absent list selects
 /// all four; an unknown kind is `Err(bad_kind)`; order is preserved and duplicates
-/// dropped. Mirrors the Python `validate_kinds`.
+/// dropped. Matches the Python `validate_kinds`.
 pub(super) fn validate_kinds(kinds: Option<Vec<String>>) -> Result<Vec<String>, TriggerError> {
     let kinds = match kinds {
         Some(k) if !k.is_empty() => k,

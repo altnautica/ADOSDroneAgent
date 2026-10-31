@@ -11,17 +11,12 @@
 //! lowercases `cmd` before dispatch), so the fleet board's camelCase action names
 //! resolve to the same frame.
 //!
-//! ## Why this is the WORKING command path
+//! ## How commands reach the FC
 //!
-//! On the current Rust-hybrid agent the FastAPI `commands.py` route is
-//! effectively broken: it reaches for `fc.connection` (a pymavlink connection
-//! object), which is always `None` because the native router owns the FC serial
-//! link after the MAVLink-router cutover. So the FastAPI route always returns 503
-//! "No MAVLink connection". This native route is the working replacement: it
-//! builds the MAVLink frame itself and writes it to the socket the router reads,
-//! the router's MAVLink socket. The parity
-//! target is therefore NOT the broken 503 — it is the MAVLink bytes the
-//! `commands.py` pymavlink calls WOULD have produced (`arducopter_arm()`,
+//! The native router owns the FC serial link, so there is no in-process
+//! MAVLink connection to command through. This route builds the MAVLink frame
+//! itself and writes it to the router's MAVLink socket. Each frame carries the
+//! standard pymavlink encoding of the command (`arducopter_arm()`,
 //! `command_long_send(...)`, `set_mode_apm(...)`).
 //!
 //! ## What each command maps to
@@ -165,8 +160,7 @@ const SIMPLE_COMMANDS: &[(&str, &str)] = &[
 const SOURCE_SYSTEM_ID: u8 = 1;
 const SOURCE_COMPONENT_ID: u8 = 191;
 
-/// Default takeoff altitude in metres when the request carries no `args[0]`,
-/// matching the FastAPI route's `float(req.args[0]) if req.args else 10.0`.
+/// Default takeoff altitude in metres when the request carries no `args[0]`.
 const DEFAULT_TAKEOFF_ALT_M: f32 = 10.0;
 
 /// The upper bound the takeoff route accepts, in metres above the takeoff point.
@@ -357,7 +351,7 @@ pub async fn execute_command(
 
     // Send the command and correlate the FC's COMMAND_ACK on a dedicated socket
     // connection. An absent MAVLink socket or a broken write means no live FC
-    // link → 503, matching the FastAPI route's no-connection 503.
+    // link → 503.
     match send_awaiting_ack(&state.mavlink, &base_long, &AckConfig::default()).await {
         Ok(outcome) => {
             merge_ack(&mut body, &outcome);
@@ -387,7 +381,7 @@ impl IntoResponse for CommandError {
 }
 
 /// `GET /api/commands` → `{"commands": {name: description, ...}}`. The catalog,
-/// byte-identical to the FastAPI `SIMPLE_COMMANDS`.
+/// in its fixed wire order.
 pub async fn list_commands() -> Json<Value> {
     let mut commands = serde_json::Map::new();
     for (name, desc) in SIMPLE_COMMANDS {

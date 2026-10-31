@@ -42,12 +42,10 @@
 //! ## Persist-failure is a 500, not a degraded body
 //!
 //! Unlike the WFB-config write (which degrades to `persisted: false` on a write
-//! fault), the FastAPI UI handlers wrap the persist in a `try/except OSError` and
-//! raise `500 {"detail": {"error": {"code": "E_UI_SAVE_FAILED", "message":
-//! "<io error>"}}}`. The YAML-config persist also fails (the FastAPI
-//! `_persist_gs_ui_section` raises `OSError`) when the writer is not root, because
-//! the config is 0600 root-owned — so a non-root front lands on the same 500. The
-//! front reproduces that 500 envelope on any persist fault.
+//! fault), a UI-write persist fault answers `500 {"detail": {"error": {"code":
+//! "E_UI_SAVE_FAILED", "message": "<io error>"}}}`. The YAML-config persist fails
+//! when the writer is not root, because the config is 0600 root-owned — so a
+//! non-root front lands on the same 500.
 //!
 //! ## Service reload signal
 //!
@@ -61,7 +59,7 @@
 //! write returns 200 while the running config is unchanged and nothing explains
 //! why. It is also BOUNDED: the SIGHUP goes through [`crate::probe`], so a
 //! `systemctl` blocked on a busy bus can no longer stall the write's response.
-//! See [`signal_reload`].
+//! See `signal_reload`.
 //!
 //! ## The profile gate
 //!
@@ -100,20 +98,18 @@ pub use ui_sections::put_ui_screens;
 use ui_sections::*;
 
 // ---------------------------------------------------------------------------
-// Error envelopes (matched to the FastAPI handlers' error-object detail shape).
+// Error envelopes (the error-object detail shape).
 // ---------------------------------------------------------------------------
 
-/// A FastAPI error-object body: `(status, {"detail": {"error": {"code": <code>}}})`.
-/// Mirrors the Python `HTTPException(detail={"error": {"code": ...}})` shape (with
-/// no message), used by the display 400.
+/// An error-object body with no message:
+/// `(status, {"detail": {"error": {"code": <code>}}})`, used by the display 400.
 fn error_code(status: StatusCode, code: &str) -> Response {
     (status, Json(json!({"detail": {"error": {"code": code}}}))).into_response()
 }
 
-/// A FastAPI error-object body with a message:
-/// `(status, {"detail": {"error": {"code": <code>, "message": <message>}}})`.
-/// Mirrors the Python `HTTPException(detail={"error": {"code": ..., "message":
-/// ...}})` the UI persist failure raises.
+/// An error-object body with a message:
+/// `(status, {"detail": {"error": {"code": <code>, "message": <message>}}})`,
+/// used by the UI persist failure.
 fn error_message(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
         status,

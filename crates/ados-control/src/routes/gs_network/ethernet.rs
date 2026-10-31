@@ -9,7 +9,7 @@ use super::*;
 /// `"netplan-eth0"`) from a read-only `nmcli` connection list, `null` only when
 /// no NM-managed ethernet profile exists. `link`, `speed_mbps`, `current_ip` and
 /// `current_gateway` are read live from the board's wired port, resolved by
-/// device class (see [`wired_link`]); every leg is `null` when the board has no
+/// device class (see `wired_link`); every leg is `null` when the board has no
 /// wired port. The configured legs (`mode`, `ip`, `gateway`, `dns`) stay `null`:
 /// nothing here reads the saved profile's settings, and a default would be an
 /// assertion ("DHCP is configured") rather than a reading.

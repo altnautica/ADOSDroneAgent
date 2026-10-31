@@ -459,7 +459,7 @@ impl DashboardPin {
 
     /// Whether `token` is a valid dashboard session minted while the node is
     /// UNPAIRED. When unpaired there is no pairing key on file, so the session is
-    /// minted (by [`mint_session`]) under the empty-key issuer; this validates a
+    /// minted (by `mint_session`) under the empty-key issuer; this validates a
     /// token against that same issuer + the stored salt. This is the credential
     /// the PIN gate on an unpaired node's data routes requires a trusted-LAN
     /// browser to hold: the browser mints a session via `/api/dashboard/pin/{set,

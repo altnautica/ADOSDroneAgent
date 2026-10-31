@@ -19,28 +19,23 @@
 //!
 //! ## Why the socket is the only write path on this front
 //!
-//! The FastAPI route branches on whether the native radio is the running transmit
-//! plane: native → forward to the command socket; otherwise reach for an
-//! in-process Python WFB manager. This front sits in front of the standalone API
-//! process and holds NO in-process manager. So the radio command socket is the
-//! only write seam it can drive, and an unreachable socket is the no-link
-//! condition: the front returns the FastAPI route's no-manager `503 "WFB-ng
-//! service not running"`, which is exactly the terminal posture the FastAPI route
-//! takes when the socket is unreachable AND no manager is present (the
-//! native-radio box's only state). The front never panics on an absent socket; it
-//! degrades to that 503.
+//! The transmit plane runs in the `ados-radio` process and this front holds NO
+//! in-process manager. So the radio command socket is the only write seam it can
+//! drive, and an unreachable socket is the no-link condition: the front returns
+//! the no-manager `503 "WFB-ng service not running"`. The front never panics on
+//! an absent socket; it degrades to that 503.
 //!
-//! ## Guard order + envelopes (matched to the FastAPI routes)
+//! ## Guard order + envelopes
 //!
 //! Channel:
 //! 1. The channel must be a standard WFB channel → `400 {"detail": "Invalid
-//!    channel <n>. Valid channels: [..]"}`, byte-identical to the FastAPI text.
+//!    channel <n>. Valid channels: [..]"}`.
 //! 2. The hop is forwarded to the radio command socket. A reply with `ok: true`
 //!    is `202 {"status": "initiated", "target_channel": <echoed>, "frequency_mhz":
 //!    <derived>}`; a reply with `ok: false` is `409 {"detail": {"error":
 //!    "hop_refused", "message": <reason>}}`.
 //! 3. An unreachable socket is the no-manager `503 {"detail": "WFB-ng service not
-//!    running"}`; a socket that does not reply within [`RADIO_CMD_TIMEOUT`] is
+//!    running"}`; a socket that does not reply within `RADIO_CMD_TIMEOUT` is
 //!    `504`, and an unparseable reply `502`.
 //!
 //! TX-power:
@@ -51,8 +46,8 @@
 //!    yields the effective dBm; a reply with `ok: false` is `500 {"detail":
 //!    {"error": "apply_failed", "message": <reason>}}`. An unreachable socket is
 //!    the no-manager `503 {"detail": "WFB-ng service not running"}`, a silent one
-//!    `504` and an unparseable reply `502`; none of those persist, matching the
-//!    FastAPI route, which only persists after a non-raising apply.
+//!    `504` and an unparseable reply `502`; none of those persist (only an
+//!    accepted apply persists).
 //! 4. On accept the value is persisted to `video.wfb.tx_power_dbm` through the
 //!    shared config store (every other key preserved; a document that cannot be
 //!    read or parsed is never written over) and the route returns `200
@@ -153,8 +148,8 @@ pub struct ChannelRequest {
 /// Validates the channel against the standard set (`400` on an unknown channel),
 /// then forwards a coordinated hop to the radio command socket. A reply with
 /// `ok: true` is `202 {"status":"initiated","target_channel":<echoed>,
-/// "frequency_mhz":<derived>}`; a reply with `ok: false` is the FastAPI `409
-/// hop_refused` body; an unreachable socket is the FastAPI no-manager `503`.
+/// "frequency_mhz":<derived>}`; a reply with `ok: false` is the `409
+/// hop_refused` body; an unreachable socket is the no-manager `503`.
 pub async fn set_wfb_channel(Json(req): Json<ChannelRequest>) -> Response {
     set_wfb_channel_at(&radio_cmd_sock(), req.channel).await
 }
@@ -164,7 +159,7 @@ pub async fn set_wfb_channel(Json(req): Json<ChannelRequest>) -> Response {
 /// so a test can point it at a temp socket without mutating process-global env.
 async fn set_wfb_channel_at(socket: &Path, channel: i64) -> Response {
     // 1. The channel must be a standard WFB channel. An unknown channel is the
-    //    FastAPI 400 with the valid-channel list rendered as a Python-list repr.
+    //    400 with the valid-channel list rendered as a Python-list repr.
     let ch = match ados_protocol::wfb_status::get_channel(channel) {
         Some(ch) => ch,
         None => {
@@ -191,7 +186,7 @@ async fn set_wfb_channel_at(socket: &Path, channel: i64) -> Response {
 
 /// Map a radio command-socket reply to the channel route's response. `ok: true` is
 /// the initiated body (the echoed target channel preferred, the frequency derived
-/// from it); anything else is the FastAPI `409 hop_refused` body with the reply's
+/// from it); anything else is the `409 hop_refused` body with the reply's
 /// `error` text (or the default `"hop refused"`). Factored out so the
 /// reply→response mapping is testable without the socket.
 fn channel_reply_response(reply: &Value, requested_channel: i64, frequency_mhz: i64) -> Response {
@@ -216,7 +211,7 @@ fn channel_reply_response(reply: &Value, requested_channel: i64, frequency_mhz: 
             .into_response();
     }
 
-    // ok != true: the radio refused the hop. The FastAPI route's 409 carries an
+    // ok != true: the radio refused the hop. The 409 carries an
     // object detail with the reply's error text, defaulting to "hop refused".
     let message = reply
         .get("error")
@@ -240,11 +235,10 @@ pub struct TxPowerRequest {
     pub tx_power_dbm: i64,
 }
 
-/// The floor the FastAPI route refuses below: a request under 1 dBm is a 400.
+/// The floor the route refuses below: a request under 1 dBm is a 400.
 const TX_POWER_FLOOR: i64 = 1;
 
-/// The default ceiling when `video.wfb.tx_power_max_dbm` is absent, matching the
-/// FastAPI `int(getattr(wfb_cfg, "tx_power_max_dbm", 15))` default.
+/// The default ceiling when `video.wfb.tx_power_max_dbm` is absent.
 const TX_POWER_DEFAULT_CEILING: i64 = 15;
 
 /// `PUT /api/wfb/tx-power` → set the WFB-ng TX power at runtime.
@@ -252,7 +246,7 @@ const TX_POWER_DEFAULT_CEILING: i64 = 15;
 /// Refuses below 1 dBm and above the configured ceiling (`400` each), forwards the
 /// value to the radio command socket, persists the accepted value to config, and
 /// returns `{requested_dbm, effective_dbm, tx_power_max_dbm}`. A reply with
-/// `ok: false` is the FastAPI `500 apply_failed`; an unreachable socket is the
+/// `ok: false` is the `500 apply_failed`; an unreachable socket is the
 /// no-manager `503` (no persist). Never panics on an absent socket.
 pub async fn set_wfb_tx_power(Json(req): Json<TxPowerRequest>) -> Response {
     set_wfb_tx_power_at(&wfb_cmd_sock(), &config_yaml_path(), req.tx_power_dbm).await
@@ -283,14 +277,13 @@ async fn set_wfb_tx_power_at(socket: &Path, config_path: &Path, requested: i64) 
 
     // 3. Forward to the radio command socket. The front has no in-process manager,
     //    so an unreachable socket is the no-manager 503; neither it nor a silent or
-    //    garbled socket persists, matching the FastAPI route, which only persists
-    //    after a non-raising apply.
+    //    garbled socket persists; only an accepted apply persists.
     let request = json!({"op": "set_tx_power", "tx_power_dbm": requested});
     let effective: Value = match radio_cmd_roundtrip(socket, &request).await {
         Ok(reply) => match tx_power_effective_from_reply(&reply) {
             Ok(eff) => eff,
             Err(TxPowerRefusal::Refused(message)) => {
-                // ok: false → the FastAPI `RadioCmdError` 500 apply_failed body.
+                // ok: false → the 500 apply_failed body.
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"detail": {"error": "apply_failed", "message": message}})),
@@ -367,7 +360,7 @@ fn tx_power_effective_from_reply(reply: &Value) -> Result<Value, TxPowerRefusal>
 }
 
 /// The agent config path (`ADOS_CONFIG`, default `/etc/ados/config.yaml`), the
-/// same resolution the sibling read routes use. Mirrors the Python `CONFIG_YAML`.
+/// same resolution the sibling read routes use and the Python `CONFIG_YAML`.
 pub(crate) fn config_yaml_path() -> PathBuf {
     PathBuf::from(
         std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string()),
@@ -376,8 +369,7 @@ pub(crate) fn config_yaml_path() -> PathBuf {
 
 /// The configured TX-power ceiling: `video.wfb.tx_power_max_dbm` from the agent
 /// config at `path`, or [`TX_POWER_DEFAULT_CEILING`] (15) when the field is absent
-/// / non-numeric / the config is unreadable. Mirrors the FastAPI `int(getattr(
-/// wfb_cfg, "tx_power_max_dbm", 15))`.
+/// / non-numeric / the config is unreadable.
 fn configured_tx_power_ceiling(path: &Path) -> i64 {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
@@ -396,8 +388,7 @@ fn configured_tx_power_ceiling(path: &Path) -> i64 {
 }
 
 /// Coerce a serde_norway scalar to `i64`, accepting an integer or a float (the
-/// config field may be either). `None` for a non-number. Mirrors the Python
-/// `int(...)` over a numeric config value.
+/// config field may be either; a float truncates). `None` for a non-number.
 fn norway_to_i64(v: &serde_norway::Value) -> Option<i64> {
     match v {
         serde_norway::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),

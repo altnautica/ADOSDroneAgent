@@ -40,7 +40,7 @@ pub const RELAYED_HEADER: &str = "x-ados-relayed";
 ///
 /// Every literal here is asserted against the committed route table
 /// (`docs/api-surface.md`) by
-/// [`tests::every_denylisted_path_is_a_route_something_actually_serves`]. A
+/// `tests::every_denylisted_path_is_a_route_something_actually_serves`. A
 /// denylist entry that matches no served path is worse than no entry: it reads
 /// as covered while the real path is wide open.
 /// Takes the normalized [`decision_path`], never `request.uri().path()`.

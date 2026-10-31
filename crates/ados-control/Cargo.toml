@@ -33,6 +33,7 @@ ados-protocol = { workspace = true, features = ["mavlink"] }
 # report the same tier the drone runs on, not a second implementation.
 ados-offload = { workspace = true }
 ados-config = { path = "../ados-config" }
+ados-proc = { path = "../ados-proc" }
 # The sensor bus: rig validation against the capture contract, RTCM
 # fragment counting and the one-shot publish the RTCM route injects with.
 ados-sensorbus = { path = "../ados-sensorbus" }
@@ -90,6 +91,8 @@ ados-plugin-host = { path = "../ados-plugin-host" }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# JSON Schema of the `/api/status/full` body (schemas/api/status-full.schema.json).
+schemars = { workspace = true }
 # Dynamic msgpack values for the vision-socket envelope (designate route).
 rmpv = { workspace = true }
 rmp-serde = { workspace = true }

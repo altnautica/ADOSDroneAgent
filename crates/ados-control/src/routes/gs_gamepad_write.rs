@@ -2,41 +2,35 @@
 //!
 //! - **`PUT /api/v1/ground-station/gamepads/primary`** — select the primary
 //!   gamepad the PIC arbiter binds to. The body is `{"device_id"}`; the route
-//!   returns `{"primary_id": <device_id>, "result": null}`, the exact shape the
-//!   FastAPI route returns (the in-process `set_primary` returns `None`, which
-//!   the route reports as `result: null`).
+//!   returns `{"primary_id": <device_id>, "result": null}`.
 //!
 //! ## Why this forwards to the input command socket (the live-primary owner)
 //!
 //! The running primary-gamepad selection is owned by the `ados-input` daemon's
 //! hotplug tracker: it is the value the 1 Hz hotplug poll consults so it does not
-//! re-promote a different device when the selected one is present. The Python
-//! `InputManager.set_primary` does two things — update the in-process singleton
-//! AND persist the `ground-station-input.json` sidecar. The native front has no
-//! in-process tracker, and writing only the on-disk sidecar would leave the
-//! running daemon's primary stale until its next restart. So the front forwards a
-//! `set_primary` op to the daemon's command socket at `/run/ados/hid-cmd.sock`;
-//! the daemon applies it to the running tracker and persists the sidecar in
-//! lockstep — the same two effects the Python `set_primary` produces. This is the
+//! re-promote a different device when the selected one is present. The native
+//! front has no in-process tracker, and writing only the on-disk
+//! `ground-station-input.json` sidecar would leave the running daemon's primary
+//! stale until its next restart. So the front forwards a `set_primary` op to the
+//! daemon's command socket at `/run/ados/hid-cmd.sock`; the daemon applies it to
+//! the running tracker and persists the sidecar in lockstep. This is the
 //! command-socket forward the sibling network/radio write routes use; the socket
 //! and its `set_primary` op are owned by the `ados-input` daemon.
 //!
 //! ## Response shape + the degrade posture
 //!
 //! On a successful apply the body is `{"primary_id": <device_id>, "result":
-//! null}` — `primary_id` is the request's `device_id` (the FastAPI route echoes
-//! `update.device_id`), and `result` is null (the Python `set_primary` returns
-//! `None`). The daemon's `set_primary` reply may carry a `persist_error` field
+//! null}` — `primary_id` echoes the request's `device_id`, and `result` is
+//! always null. The daemon's `set_primary` reply may carry a `persist_error` field
 //! when the running primary updated but the sidecar write failed; the route still
-//! reports success (the running state is the authority, matching the Python which
-//! updates the singleton before — and regardless of — the persist outcome). An
-//! unreachable command socket → the FastAPI `500 E_GAMEPAD_PRIMARY_FAILED`
-//! error-object body, the arm the Python route takes when the call raises.
+//! reports success (the running state is the authority, regardless of the
+//! persist outcome). An unreachable command socket → the
+//! `500 E_GAMEPAD_PRIMARY_FAILED` error-object body.
 //!
 //! ## The profile gate
 //!
 //! Like every ground-station route, this first gates on the resolved profile
-//! being a ground station and returns the FastAPI
+//! being a ground station and returns
 //! `404 {"detail":{"error":{"code":"E_PROFILE_MISMATCH"}}}` on a drone.
 
 use std::path::{Path, PathBuf};
@@ -51,7 +45,7 @@ use serde_json::{json, Value};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
-// Profile gate (mirrors the FastAPI `_require_ground_profile`).
+// Profile gate: ground-station profile only.
 // ---------------------------------------------------------------------------
 
 /// True when the node resolves to the ground-station profile. Resolves through
@@ -73,10 +67,8 @@ fn profile_mismatch() -> Response {
         .into_response()
 }
 
-/// Build a gamepad-route 5xx body in the FastAPI error-object detail shape:
-/// `(status, {"detail": {"error": {"code", "message"}}})`. The FastAPI gamepad
-/// route raises `HTTPException(500, detail={"error": {...}})` when its
-/// `set_primary` call raises; the front takes the same shape when the daemon
+/// Build a gamepad-route 5xx body in the error-object detail shape:
+/// `(status, {"detail": {"error": {"code", "message"}}})`, used when the daemon
 /// command socket is unreachable (its only apply path).
 fn gamepad_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
@@ -100,7 +92,7 @@ fn hid_cmd_sock(run_dir: &Path) -> PathBuf {
 /// The outcome of a `set_primary` command-socket round-trip: the daemon's reply
 /// object on `ok:true`, or `None` when the socket was unreachable / replied
 /// unparseably / replied `ok:false` (a transport-level failure the front maps to
-/// the FastAPI `E_GAMEPAD_PRIMARY_FAILED` 500).
+/// the `E_GAMEPAD_PRIMARY_FAILED` 500).
 async fn set_primary_cmd(socket: &Path, device_id: &str) -> Option<Value> {
     let request = json!({"op": "set_primary", "device_id": device_id});
     let obj = crate::ipc::cmd::roundtrip_object(socket, &request, crate::ipc::cmd::QUICK)
@@ -108,7 +100,7 @@ async fn set_primary_cmd(socket: &Path, device_id: &str) -> Option<Value> {
         .ok()?;
     // A transport-level failure (`ok:false`, e.g. a missing-device-id reply the
     // front never sends, or an encode fault) is treated as unavailable — the
-    // apply did not succeed, which maps to the FastAPI 500 error path.
+    // apply did not succeed, which maps to the 500 error path.
     if obj.get("ok") == Some(&Value::Bool(false)) {
         return None;
     }
@@ -131,9 +123,7 @@ pub struct GamepadPrimaryUpdate {
 /// Gates on the ground-station profile (404 on a drone), forwards a `set_primary`
 /// op to the `ados-input` daemon command socket (applying it to the running
 /// tracker + persisting the sidecar), and returns `{"primary_id": <device_id>,
-/// "result": null}` — the same body the FastAPI route returns (its `set_primary`
-/// returns `None`). An unreachable socket → the FastAPI
-/// `500 E_GAMEPAD_PRIMARY_FAILED`.
+/// "result": null}`. An unreachable socket → `500 E_GAMEPAD_PRIMARY_FAILED`.
 pub async fn put_gamepad_primary(
     State(state): State<AppState>,
     Json(update): Json<GamepadPrimaryUpdate>,
@@ -142,12 +132,9 @@ pub async fn put_gamepad_primary(
         return profile_mismatch();
     }
     match set_primary_cmd(&hid_cmd_sock(&state.run_dir), &update.device_id).await {
-        // The FastAPI route returns {"primary_id": update.device_id, "result":
-        // result}, where result is the set_primary return value (None). The
-        // daemon may report a persist_error, but the running primary updated, so
-        // the route still reports success with result: null — the running state
-        // is the authority, matching the Python which updates the singleton
-        // before (and regardless of) the persist outcome.
+        // The daemon may report a persist_error, but the running primary
+        // updated, so the route still reports success with result: null — the
+        // running state is the authority regardless of the persist outcome.
         Some(_reply) => {
             Json(json!({"primary_id": update.device_id, "result": Value::Null})).into_response()
         }

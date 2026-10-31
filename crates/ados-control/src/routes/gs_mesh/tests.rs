@@ -160,26 +160,6 @@ fn slicers_project_a_populated_snapshot() {
 }
 
 #[test]
-fn read_json_object_or_empty_handles_absent_and_non_object() {
-    let dir = tempfile::tempdir().unwrap();
-    // Absent file → empty object.
-    assert_eq!(
-        read_json_object_or_empty(&dir.path().join("absent.json")),
-        Map::new()
-    );
-    // A non-object body (a JSON list) → empty object.
-    let list = dir.path().join("list.json");
-    std::fs::write(&list, "[1,2,3]").unwrap();
-    assert_eq!(read_json_object_or_empty(&list), Map::new());
-    // A real object body round-trips.
-    let obj = dir.path().join("obj.json");
-    std::fs::write(&obj, r#"{"neighbors":[],"gateways":[]}"#).unwrap();
-    let got = read_json_object_or_empty(&obj);
-    assert!(got.contains_key("neighbors"));
-    assert!(got.contains_key("gateways"));
-}
-
-#[test]
 fn a_mesh_sidecar_a_dead_poll_loop_left_behind_reads_empty() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("mesh-state.json");

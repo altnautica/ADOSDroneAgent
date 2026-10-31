@@ -13,8 +13,8 @@ pub(super) async fn latest_status_mesh_block(state: &AppState) -> Option<Value> 
 }
 
 /// Project the `/status` `mesh` block from a FRESH mesh snapshot body (the stored
-/// event detail or the sidecar). Mirrors the Python `bool(...)` / `len(...)`
-/// coercions exactly, and carries `stale: false` so a client always reads the
+/// event detail or the sidecar). Flags are truthiness-coerced and lists reduced to
+/// their length, and the block carries `stale: false` so a client always reads the
 /// verdict off the same key instead of inferring it from a key's absence.
 pub(super) fn mesh_block_from_snapshot(snap: &Map<String, Value>) -> Value {
     let peer_count = snap
@@ -98,7 +98,7 @@ pub(super) fn stale_snapshot_body(last_known: Map<String, Value>) -> Value {
 /// `404` `E_WRONG_ROLE` off a relay node. On a relay, reads the store's
 /// most-recent `gs.relay_state` event (the relay loop ships the same body it
 /// writes to the sidecar), falling back to the `/run/ados/wfb-relay.json`
-/// sidecar. Both reads are age-gated to [`SNAPSHOT_FRESH_S`]; with neither
+/// sidecar. Both reads are age-gated to `SNAPSHOT_FRESH_S`; with neither
 /// current the body is the nulled `stale: true` shape, never the counters a dead
 /// relay loop last wrote.
 pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
@@ -115,7 +115,10 @@ pub async fn get_wfb_relay_status(State(state): State<AppState>) -> Response {
     let path = wfb_relay_path(&state.run_dir);
     match read_fresh_json(&path, SystemTime::now()) {
         Some(snap) => Json(fresh_snapshot_body(snap)).into_response(),
-        None => Json(stale_snapshot_body(read_json_or_empty(&path))).into_response(),
+        None => Json(stale_snapshot_body(
+            crate::sidecar::read_object(&path).unwrap_or_default(),
+        ))
+        .into_response(),
     }
 }
 
@@ -211,7 +214,7 @@ pub(super) fn receiver_combined_stale() -> Value {
 /// `GET /api/v1/ground-station/wfb` → `{channel, tx_power_dbm}` read from the
 /// live radio sidecar (`wfb-stats.json`): the channel the radio is actually
 /// tuned to and its effective TX power. Each is `null` when the sidecar is
-/// absent, older than [`SNAPSHOT_FRESH_S`], or does not carry it — never a
+/// absent, older than `SNAPSHOT_FRESH_S`, or does not carry it — never a
 /// configured default dressed up as a reading. `404` `E_PROFILE_MISMATCH` off a
 /// ground-station node.
 pub async fn get_wfb(State(state): State<AppState>) -> Response {

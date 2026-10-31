@@ -84,12 +84,12 @@ use edge_util::{
 /// same on-box trust the native edge applies. It is STRIPPED from every inbound
 /// request first, then set only when the edge classified the caller
 /// [`CallerClass::OnBox`], so a value arriving from off-box can never be spoofed
-/// in. See [`tcp_edge`]. Native handlers read the [`CallerClass`] request
+/// in. See `tcp_edge`. Native handlers read the [`CallerClass`] request
 /// extension instead.
 pub const ONBOX_HEADER: &str = "x-ados-onbox";
 
 /// The peer address of the accepted TCP connection, attached to each LAN-edge
-/// request as an extension so [`tcp_edge`] can classify the caller. Absent on
+/// request as an extension so `tcp_edge` can classify the caller. Absent on
 /// the Unix edge.
 ///
 /// It cannot be forged: the accept loop inserts it from the real socket, and
@@ -345,9 +345,6 @@ fn collect_headers(map: &axum::http::HeaderMap) -> RequestHeaders {
             .map(str::to_string)
     };
     RequestHeaders {
-        origin: get("origin"),
-        referer: get("referer"),
-        host: get("host"),
         x_ados_key: get("x-ados-key"),
         x_ados_setup_token: get("x-ados-setup-token"),
         x_ados_dashboard_session: get(crate::dashboard_pin::DASHBOARD_SESSION_HEADER),
@@ -357,9 +354,8 @@ fn collect_headers(map: &axum::http::HeaderMap) -> RequestHeaders {
     }
 }
 
-/// Turn a `Reject` into the FastAPI-shaped JSON response, rendering the message
-/// under `detail` (the API-key middleware) or `error` (the HMAC middleware) so
-/// the body matches the Python byte-for-byte.
+/// Turn a `Reject` into the JSON response, rendering the message under
+/// `detail` (the API-key gate) or `error` (the HMAC gate).
 fn reject_response(status: StatusCode, field: BodyField, message: &str) -> Response {
     match field {
         BodyField::Detail => detail(status, message),

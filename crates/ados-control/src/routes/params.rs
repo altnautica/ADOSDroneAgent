@@ -30,8 +30,7 @@
 //! actionable empty state instead of looping forever.
 //!
 //! With no router running (an absent snapshot and no cache file), the route
-//! returns the same empty shape the FastAPI route returns when its own source is
-//! empty: `params:{}`, the counts zero, the flags false, and a `progress` of
+//! returns an empty shape: `params:{}`, the counts zero, the flags false, and a `progress` of
 //! `{got:0, expected:0}` — a valid, GCS-parseable body, never a 500.
 //!
 //! `GET /api/params/{name}` (a single parameter by name) is a path-param route
@@ -69,10 +68,9 @@ pub async fn get_all_params(State(state): State<AppState>) -> Response {
     }
 }
 
-/// Build the parameter-list body from the cached map plus a state-IPC snapshot,
-/// mirroring the FastAPI route's IPC-snapshot fallback (the production path on the
-/// multi-process supervisor, where no in-process param cache or vehicle state
-/// exists).
+/// Build the parameter-list body from the cached map plus a state-IPC snapshot
+/// (the multi-process supervisor has no in-process param cache or vehicle
+/// state).
 ///
 /// * `params` is the flattened `{name: value}` map [`crate::param_store`] read off
 ///   disk, already degraded to empty for a missing or unreadable cache.
@@ -83,8 +81,8 @@ pub async fn get_all_params(State(state): State<AppState>) -> Response {
 /// * `count` is `expected` when it is non-zero, else `cached` (Python
 ///   `expected or cached`).
 /// * the three priming flags come from the snapshot when it carries
-///   `param_priming`, else all three are `false` (the Python `_resolve_priming_flags`
-///   fallback when the snapshot has not yet reported the sweep state).
+///   `param_priming`, else all three are `false` (the snapshot has not yet
+///   reported the sweep state).
 fn build_params_body(snapshot: Option<&Value>, params: Map<String, Value>) -> Value {
     let obj = snapshot.and_then(Value::as_object);
 
@@ -107,10 +105,8 @@ fn build_params_body(snapshot: Option<&Value>, params: Map<String, Value>) -> Va
 
 /// Resolve the three param-sweep flags, preferring the snapshot. When the snapshot
 /// carries `param_priming`, the flags are read from it (each coerced to a bool,
-/// mirroring the Python `bool(ipc.get(...))`); otherwise all three are `false`
-/// (the Python fallback that returns `getattr(fc, ..., False)` against a `None` FC
-/// handle on the API process). Returns `(priming, priming_timeout,
-/// priming_send_failed)`.
+/// with Python-style truthiness); otherwise all three are `false`. Returns
+/// `(priming, priming_timeout, priming_send_failed)`.
 fn resolve_priming_flags(obj: Option<&Map<String, Value>>) -> (bool, bool, bool) {
     let Some(map) = obj else {
         return (false, false, false);
@@ -229,8 +225,7 @@ mod tests {
 
     /// The golden production body for a representative snapshot: a two-parameter
     /// cache mid-sweep, with the FC having advertised 700 total. This is the exact
-    /// JSON the FastAPI `get_all_params` route returns on the multi-process
-    /// supervisor (no in-process cache, the IPC-snapshot fallback). `assert_eq!`
+    /// JSON the route returns on the multi-process supervisor. `assert_eq!`
     /// on `serde_json::Value` compares the maps semantically (same keys, values,
     /// types, nesting), which is the parity contract the conformance harness and
     /// the GCS both rely on.

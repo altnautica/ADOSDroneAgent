@@ -1,0 +1,1174 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HeartbeatPayload",
+  "description": "The cloud status heartbeat payload.\n\nFields are grouped by source (board, perception, health, FC link, services,\nvideo, auxiliary blocks); the receiver validates by key, so order carries no\nmeaning on the wire. Required-on-wire fields are plain; everything the strip\nstep may remove is `Option<T>` + `skip_serializing_if`.",
+  "type": "object",
+  "properties": {
+    "agentVersion": {
+      "type": "string"
+    },
+    "apiUrl": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "boardArch": {
+      "type": "string"
+    },
+    "boardName": {
+      "type": "string"
+    },
+    "boardRamMb": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "boardSoc": {
+      "type": "string"
+    },
+    "boardTier": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "canBuses": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/CanBus"
+      }
+    },
+    "configErrors": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/ConfigErrorEntry"
+      }
+    },
+    "cpuCores": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "cpuHistory": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "number",
+        "format": "double"
+      }
+    },
+    "cpuPercent": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "crsf": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CrsfBlock"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deviceId": {
+      "type": "string"
+    },
+    "diskPercent": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "diskTotalGb": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "diskUsedGb": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "displayType": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fcBaud": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "fcConnected": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "fcLinkHint": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fcPort": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fcSource": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fcVariant": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hasAccelerator": {
+      "type": "boolean"
+    },
+    "heartbeatAgeS": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "lastIp": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "last_plugin_update_check_at": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "lcdActivePage": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lcdLastGesture": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lcdLastTouchAt": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "lcdRotation": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "lcdSnapshotUrl": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "lcdTouchCalibrated": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "linkedPeers": {
+      "description": "The WFB peers a ground station relays (the drones a GCS paired only to\nthis ground node transitively enrols), folded from the\n/run/ados/linked-peers.json sidecar. Absent on a drone / a peerless\nground node so the heartbeat stays byte-identical.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/LinkedPeerHb"
+      }
+    },
+    "macStability": {
+      "description": "Per-adapter stable-MAC verdicts, `{adapters: [...]}` from\n`/etc/ados/mac-pins.state`. Omitted on a node that has pinned nothing —\nthe GCS clamp hides its card unless `adapters` is an array, and an empty\none would claim the node looked and found no adapter.\n\nAlready camelCase at the source, so the Convex relay's snake→camel remap\nmust NOT be applied to it. Carried as a `Value` because the block is a\npass-through the GCS validates, not a shape this crate owns."
+    },
+    "mavlinkAlive": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "mavlinkWsPort": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "mavlinkWsUrl": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "mdnsHost": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "memoryHistory": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "number",
+        "format": "double"
+      }
+    },
+    "memoryPercent": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "memoryTotalMb": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "memoryUsedMb": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "missionControlUrl": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "npuTops": {
+      "type": "number",
+      "format": "double"
+    },
+    "perceptionOffloadTarget": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "perceptionTier": {
+      "type": "string"
+    },
+    "peripherals": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/Peripheral"
+      }
+    },
+    "pluginState": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": true
+    },
+    "profile": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "radio": {
+      "$ref": "#/$defs/RadioBlock"
+    },
+    "remoteAccess": {
+      "$ref": "#/$defs/RemoteAccess"
+    },
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "services": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/ServiceEntry"
+      }
+    },
+    "setupUrl": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "temperature": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "transportOpen": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "uiTheme": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "uptimeSeconds": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "version": {
+      "type": "string"
+    },
+    "videoLocalDecoderActive": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "videoLocalDecoderFps": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "videoLocalDecoderType": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "videoRecording": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "videoState": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "videoStreams": {
+      "description": "Per-leg video streams a multi-stream node serves, folded from the\n/run/ados/video-streams.json sidecar. Absent on a single-stream node so\nthe heartbeat stays byte-identical.\n\nEach entry carries the SAME-ORIGIN relative `whepUrl` the node actually\nserves, so the GCS resolves it against the node's own reachable base URL\nand the media plane keeps going through the agent's :8080 proxy (and its\n`ados_session` media-auth gate). Never an absolute `host:port`: this\ncontract used to instruct the GCS to build `:8889/<id>/whep` against the\nnode host — a name the agent does not proxy, which an HTTPS ground\nstation rejects as mixed content, which cannot resolve off-LAN, and which\nnothing in the agent proves reachable.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/VideoStreamHb"
+      }
+    },
+    "videoWhepPort": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "int64"
+    },
+    "videoWhepUrl": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wfbAdapterChipset": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "wfbAdapterInjectionOk": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "deviceId",
+    "version",
+    "uptimeSeconds",
+    "boardName",
+    "boardTier",
+    "boardSoc",
+    "boardArch",
+    "npuTops",
+    "hasAccelerator",
+    "perceptionTier",
+    "agentVersion",
+    "remoteAccess",
+    "radio",
+    "wfbAdapterChipset",
+    "wfbAdapterInjectionOk"
+  ],
+  "$defs": {
+    "CanBus": {
+      "description": "One FC CAN bus entry. The block is omitted from the payload when no CAN\nparams are cached; each present entry carries `port`, `driver`, `bitrate`,\n`protocol` (camelCase via the root rename does not apply to a nested struct,\nbut these keys are single-word so casing is identical either way; the Python\nemit uses these exact snake-equal-to-camel names).",
+      "type": "object",
+      "properties": {
+        "bitrate": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "driver": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "port": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "protocol": {
+          "type": "integer",
+          "format": "int64"
+        }
+      },
+      "required": [
+        "port",
+        "driver",
+        "bitrate",
+        "protocol"
+      ]
+    },
+    "ConfigErrorEntry": {
+      "description": "One service's live config-parse fault, surfaced from its config-status\nsidecar onto the heartbeat under `configErrors`. `service` is the sidecar's\nservice label (e.g. `\"cloud\"`, `\"mavlink\"`), `error` the exact parser\nmessage. Both keys are single words so the casing is identical; the rename is\nexplicit for consistency with the other nested wire structs. Present only for\nservices whose current config is malformed — a valid config publishes a null\nerror and is omitted.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "service",
+        "error"
+      ]
+    },
+    "CrsfBlock": {
+      "description": "The OPTIONAL nested `crsf` block: the CRSF/ExpressLRS RC control lane's\nstate, projected from the lane service's stats sidecar\n(`/run/ados/crsf-stats.json`). Exactly the pinned sidecar field set,\nsnake_case like the `radio` block (the receiver's generic snake→camel remap\nowns the casing). The whole block is ABSENT from the payload when the lane\nservice is not running or its sidecar is stale — never a fabricated\nall-null block for a node without the lane. Inside a present block each\nfield keeps its nested `null` when unmeasured (the Python projection keeps\n`None` values, matching the radio-block convention), so there is no\n`skip_serializing_if` on the fields.",
+      "type": "object",
+      "properties": {
+        "band": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "channel_source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fc_command_down_gated": {
+          "description": "The MAVLink-over-ELRS command-down gate, projected from the lane sidecar's\n`fc_command_down_gated`. `Some(true)` a MAVLink-over-ELRS source is\ntelemetry-only (command path gated closed), `Some(false)` the command path\nis open, `None` no such source exists (nothing to gate) — never a\nfabricated false. Lets a consumer reading ONLY the crsf lane see the ELRS\nMAVLink command path's gate without the top-level FC status surface.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "lq_downlink": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "lq_uplink": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "packet_rate_hz": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "relay_role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rf_unverified": {
+          "description": "The transmit-proof verdict: `Some(false)` = a received-side proof\nexists, `Some(true)` = transmitting provably unheard, `None` = no\nverdict yet — never a fabricated false.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "rssi_dbm": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "rx_frames_per_s": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "snr_db": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "state": {
+          "description": "`unconfigured|ready|link_ok|degraded|rf_unverified|disabled`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tx_frames_per_s": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tx_power_mw": {
+          "description": "Conducted TX power in MILLIWATTS, mapped from the module's power-table\nindex by the lane. Matches the sidecar + LAN route key `tx_power_mw`; a\n`tx_power_dbm` here silently dropped the value (serde ignored the real\nkey), so a cloud-reached node showed no TX power.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "v": {
+          "description": "The sidecar schema version, forwarded so the receiver can gate on it.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "required": [
+        "v",
+        "state",
+        "rssi_dbm",
+        "lq_uplink",
+        "lq_downlink",
+        "snr_db",
+        "band",
+        "packet_rate_hz",
+        "tx_power_mw",
+        "tx_frames_per_s",
+        "rx_frames_per_s",
+        "rf_unverified",
+        "mode",
+        "channel_source",
+        "relay_role",
+        "fc_command_down_gated"
+      ]
+    },
+    "LinkedPeerHb": {
+      "description": "One WFB peer a ground station reports it relays, folded from the\n`/run/ados/linked-peers.json` sidecar the receive-side presence listener\nwrites. A ground station can relay more than one drone, so the payload\ncarries a LIST; each entry is exactly what the PresenceBeacon + the listener\ndecode (device-id, role, channel, RSSI, last-seen), no richer identity than\nthe wire itself provides. `rename_all = \"camelCase\"` maps the snake fields to\nthe `deviceId`/`rssiDbm`/`seenAtUnix` wire keys the GCS `LinkedPeer` consumes\nand the strict cloud validator declares. Absent on a drone / a peerless\nground node so the heartbeat stays byte-identical.",
+      "type": "object",
+      "properties": {
+        "channel": {
+          "type": "integer",
+          "format": "uint8",
+          "maximum": 255,
+          "minimum": 0
+        },
+        "deviceId": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "rssiDbm": {
+          "type": "integer",
+          "format": "int8",
+          "maximum": 127,
+          "minimum": -128
+        },
+        "seenAtUnix": {
+          "description": "Wall-clock unix SECONDS of the last decoded beacon (the relay freshness\nsignal; the GCS multiplies by 1000 for a ms timestamp).",
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "deviceId",
+        "role",
+        "channel",
+        "rssiDbm",
+        "seenAtUnix"
+      ]
+    },
+    "Peripheral": {
+      "description": "One attached-peripheral entry (the SPI LCD today). The `peripherals[]` array\nis omitted entirely when no peripheral is provisioned, so the model carries\nthe entry shape and the payload holds `Option<Vec<Peripheral>>`. The keys are\nsnake_case in the Python `collect_attached_display` output (it is consumed by\nthe infer-capabilities pipeline, which reads snake_case), so this struct\nkeeps snake_case field names with no rename. `extra` is an open map.",
+      "type": "object",
+      "properties": {
+        "address": {
+          "type": "string"
+        },
+        "bus": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "extra": true,
+        "id": {
+          "type": "string"
+        },
+        "last_reading": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "rate_hz": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "status": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "category",
+        "type",
+        "bus",
+        "address",
+        "rate_hz",
+        "status",
+        "last_reading",
+        "extra"
+      ]
+    },
+    "RadioBlock": {
+      "description": "The snake_case `radio` link block (`state`, `iface`, `driver`, `channel`,\n`freq_mhz`, ...). This is the BASE block the native loop emits; the radio\nenrichment producer replaces the whole `radio` key when it has a live view,\nso this carries a subset of that producer's field set rather than mirroring\nit one-for-one. The Python builder keeps `None` values in this nested dict\n(only top-level keys are stripped), so these `Option`s serialize as JSON\n`null` when absent — that is intentional parity. The block is always present\nin the payload (an all-`absent` block when no radio status is available).\n`Deserialize` + a container `default` so the block can be built by\ndeserializing `ados_protocol::wfb_status::build_radio_block`'s output — the one\nderivation, shared with the LAN routes, rather than a second one written here.\nThe container default is what lets the three `skip_serializing_if` fields and\nthe non-`Option` `paired` come back from the 37-key absent form.",
+      "type": "object",
+      "properties": {
+        "acquire_state": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "adapter_chipset": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "adapter_injection_ok": {
+          "description": "The adapter injection verdict. `Some(false)` is a MEASURED outcome (the\nscan ran and proved no injection-capable adapter — the loud stranded\nradio signal); `None` means no verdict exists (no radio view, a\nnever-scanned rig) and serializes as JSON `null` so the three-state\nconsumer reads \"unknown\" instead of a fabricated scan result.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "adapter_usb_degraded": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "adapter_usb_speed_mbps": {
+          "description": "The selected adapter's USB link health. A full-speed (12 Mbps) RTL\nenumeration advances `tx_bytes_per_s` yet emits no usable RF; the speed +\ndegraded flag let a consumer warn instead of reading the advancing counter\nas a healthy link. `None` (never a confident `false` for `_degraded`) when\nno enumeration happened — a `false` there claims a measured-healthy USB link\nnothing examined.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "auto_pair_enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "bandwidth_mhz": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "bitrate_kbps": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "channel": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "channel_locked": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "driver": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "fec_lost": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "fec_recovered": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "freq_mhz": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "iface": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "loss_percent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "mcs_index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "noise_dbm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "packets_lost": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "paired": {
+          "type": "boolean",
+          "default": false
+        },
+        "paired_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "paired_with_device_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "phy_muted": {
+          "description": "The TX PHY pinned at the muted not-permitted floor: it injects frames but\nradiates nothing. `None` on a view with no TX PHY reading (the receive side,\nan older sidecar) — never a fabricated `false` asserting a healthy PHY.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "public_key_fingerprint": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "reacquire_kills": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "restart_count": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "rf_unverified": {
+          "description": "The two halves of the received-side proof. `channel_locked` is true once\na verified return signal was heard; `rf_unverified` is true when the\ntransmit counter advances while none has been. `None` when there is no\nverdict to report — never a confident `false`, which would claim an\nunproven transmit path had been proven.",
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "rssi_dbm": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "rx_silent_seconds": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "snr_db": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        },
+        "state": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "topology": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "tx_bytes_per_s": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "tx_power_dbm": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "tx_power_max_dbm": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "tx_video_recvq_bytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "tx_video_stall_kills": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        },
+        "tx_video_stalled": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "default": null
+        },
+        "tx_zombie_kills": {
+          "description": "Radio-data-plane churn + transmit-rate observability, forwarded so a\ncloud-reached node surfaces a thrashing or zombie transmitter. These three\nare SIDECAR-ONLY: the wire contract OMITS them from the absent\nblock (they only mean anything with a live radio view), so they carry\n`skip_serializing_if` to mirror that exactly — omitted (not `null`) on\n`absent()`, present (value or null) once a live view populates them. A `None`\non a populated block still reads as \"no reading\" (never a fabricated zero).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "valid_rx_packets_per_s": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "default": null
+        }
+      },
+      "required": [
+        "state",
+        "iface",
+        "driver",
+        "channel",
+        "freq_mhz",
+        "bandwidth_mhz",
+        "tx_power_dbm",
+        "tx_power_max_dbm",
+        "topology",
+        "rssi_dbm",
+        "snr_db",
+        "noise_dbm",
+        "bitrate_kbps",
+        "fec_recovered",
+        "fec_lost",
+        "packets_lost",
+        "loss_percent",
+        "mcs_index",
+        "rx_silent_seconds",
+        "paired",
+        "paired_with_device_id",
+        "paired_at",
+        "public_key_fingerprint",
+        "auto_pair_enabled",
+        "tx_video_stalled",
+        "tx_video_stall_kills",
+        "tx_video_recvq_bytes",
+        "acquire_state",
+        "channel_locked",
+        "rf_unverified",
+        "reacquire_kills",
+        "valid_rx_packets_per_s",
+        "adapter_chipset",
+        "adapter_injection_ok",
+        "adapter_usb_speed_mbps",
+        "adapter_usb_degraded",
+        "phy_muted"
+      ]
+    },
+    "RemoteAccess": {
+      "description": "The `remoteAccess` sub-object. Always present in the payload; both fields are\nalways set (provider string + list of public URLs).",
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string"
+        },
+        "publicUrls": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "provider",
+        "publicUrls"
+      ]
+    },
+    "ServiceEntry": {
+      "description": "One service entry in the heartbeat `services[]` array. `name` and `status`\nare always present; the per-unit accounting (`cpuPercent`, `memoryMb`,\n`uptimeSeconds`) and `pid` are included only when a producer measured them —\nthe receiver declares each optional, and a fabricated `0` reads as a real\n\"0 MB, up 0 s\".",
+      "type": "object",
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "cpuPercent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "memoryMb": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "status": {
+          "type": "string"
+        },
+        "uptimeSeconds": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        }
+      },
+      "required": [
+        "name",
+        "status",
+        "category"
+      ]
+    },
+    "VideoStreamHb": {
+      "description": "One advertised video leg on the heartbeat: its stable id (the mediamtx path\nand WHEP id), a logical role (eo, eo_wide, ir), the codec, and the\nsame-origin relative URL the node serves that leg at.\n\nKeys are single words, so the casing is identical either way, except\n`whep_url` → `whepUrl`, which is renamed explicitly to match the\n`RosterCamera.whep_url` shape the cockpit already consumes.",
+      "type": "object",
+      "properties": {
+        "codec": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "live": {
+          "description": "Per-leg liveness, deserialized straight from the sidecar's `live`:\n`Some(true)` the path is receiving, `Some(false)` a publisher leg is flat\n(degraded), absent = not sampled / an idle on-demand leg (unknown, not\ndead — the GCS keeps it selectable).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "role": {
+          "type": "string"
+        },
+        "whepUrl": {
+          "description": "The leg's WHEP endpoint as a SAME-ORIGIN relative path\n(`/whep?camera=<id>`), which is the form the agent's media proxy really\nserves. Derived when the sidecar is folded, never read from it, so a\nstale sidecar cannot pin an old URL shape.\n\nDeliberately no `hlsUrl` companion: the only consumer of this payload is\nthe cloud GCS, which has no HLS player, and advertising a reach nothing\ncan use is the same defect as the absolute port this field replaced. The\nagent's own on-box cockpit gets `hls_url` from `/api/status/full`\ninstead.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "role",
+        "codec"
+      ]
+    }
+  }
+}

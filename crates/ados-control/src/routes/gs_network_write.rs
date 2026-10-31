@@ -14,8 +14,8 @@
 //!
 //! - **Config-file persists the daemon reconciles**: `PUT .../network/priority`
 //!   atomically writes `{"priority": [...]}` to the uplink file. The daemon reads
-//!   it on its own cadence, so the front persisting is wire-equivalent to the
-//!   FastAPI route persisting, with no second writer.
+//!   it on its own cadence, so the persist is the whole effect, with no second
+//!   writer.
 //! - **Command-socket forwards**: `PUT .../network/ap`, `PUT .../network/ethernet`,
 //!   `PUT .../network/modem` and `PUT .../network/share_uplink` each forward one
 //!   `{"op":...}` request to the `ados-net` command socket at
@@ -24,22 +24,21 @@
 //!   returns. The AP route additionally persists the channel/ssid, and the
 //!   share-uplink route the flag, to the agent config (the daemon owns the radio
 //!   and firewall; the REST layer owns the config-file persist that survives a
-//!   reboot), mirroring the FastAPI route's own post-apply `_save_config`.
+//!   reboot).
 //!
 //! ## Degrade posture
 //!
-//! The FastAPI command-socket routes have no fallback that the front can mirror
-//! without driving the hardware itself, so an unreachable / non-replying socket
-//! degrades to a `503` rather than a `500` (the same no-link posture the
-//! Wi-Fi-client writes + the param-write surface take on an absent seam). The
-//! command is never silently dropped.
+//! The front has no fallback that does not drive the hardware itself, so an
+//! unreachable / non-replying socket degrades to a `503` rather than a `500` (the
+//! same no-link posture the Wi-Fi-client writes + the param-write surface take on
+//! an absent seam). The command is never silently dropped.
 //!
 //! ## The profile gate
 //!
 //! Like every ground-station route, each first gates on the resolved profile being
-//! a ground station and returns the FastAPI
+//! a ground station and returns
 //! `404 {"detail":{"error":{"code":"E_PROFILE_MISMATCH"}}}` on a drone. This
-//! surface uses the FastAPI network route's *error-object* detail shape
+//! surface uses the *error-object* detail shape
 //! (`{"detail":{"error":{"code","message"}}}`) for its own 4xx/5xx too, NOT the
 //! bare-string `{"detail":"..."}` the rest of the front uses — so it builds those
 //! bodies directly rather than through the crate's bare-string
@@ -73,10 +72,10 @@ pub use share_uplink::put_network_share_uplink;
 use share_uplink::*;
 
 // ---------------------------------------------------------------------------
-// Profile gate (mirrors the read module + the Python `_require_ground_profile`).
+// Profile gate (byte-identical to the read module).
 // ---------------------------------------------------------------------------
 
-/// The FastAPI `_require_ground_profile` 404 body: a `detail` carrying the
+/// The profile-mismatch 404 body: a `detail` carrying the
 /// `E_PROFILE_MISMATCH` error object. A drone-profile caller hits every
 /// ground-station route with this exact shape.
 fn profile_mismatch() -> Response {
@@ -200,13 +199,12 @@ fn classify_reply(line: &str) -> NetCmd {
 }
 
 // ---------------------------------------------------------------------------
-// Error envelopes (the FastAPI network-route error-object detail shape).
+// Error envelopes (the network-route error-object detail shape).
 // ---------------------------------------------------------------------------
 
-/// Build a network-route 4xx/5xx body in the FastAPI error-object detail shape:
+/// Build a network-route 4xx/5xx body in the error-object detail shape:
 /// `(status, {"detail": {"error": {"code": <code>, "message": <message>}}})`.
-/// This surface uses this shape (NOT the bare-string `{"detail"}`) because its
-/// FastAPI twin raises `HTTPException(detail={"error": {...}})`.
+/// This surface uses this shape, NOT the bare-string `{"detail"}`.
 fn error_body(status: StatusCode, code: &str, message: &str) -> Response {
     (
         status,
@@ -216,7 +214,7 @@ fn error_body(status: StatusCode, code: &str, message: &str) -> Response {
 }
 
 /// Build a network-route error body whose `error` object carries an extra `hint`
-/// field (the ethernet apply-failed case). Mirrors the FastAPI
+/// field (the ethernet apply-failed case):
 /// `detail={"error": {"code", "message", "hint"}}`.
 fn error_body_with_hint(status: StatusCode, code: &str, message: &str, hint: &Value) -> Response {
     (
@@ -227,8 +225,8 @@ fn error_body_with_hint(status: StatusCode, code: &str, message: &str, hint: &Va
 }
 
 /// The native no-fallback 503 the front returns when the command socket is
-/// unreachable. The FastAPI route drives the manager in-process here; the front
-/// cannot (it must not race the daemon), so it takes the no-link posture.
+/// unreachable. The front cannot drive the manager itself (it must not race the
+/// daemon), so it takes the no-link posture.
 fn socket_unavailable(code: &str) -> Response {
     error_body(
         StatusCode::SERVICE_UNAVAILABLE,

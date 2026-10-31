@@ -1,0 +1,945 @@
+{
+  "$defs": {
+    "CloudChoiceStatus": {
+      "description": "Cloud posture chosen during the onboarding wizard.\n\nSet by ``POST /api/v1/setup/cloud-choice`` and surfaced read-only on\nevery ``SetupStatus`` response. Values mirror ``ServerConfig.mode``\nplus a small set of operator-facing diagnostics.",
+      "properties": {
+        "backend_url": {
+          "default": "",
+          "title": "Backend Url",
+          "type": "string"
+        },
+        "last_checked": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Checked"
+        },
+        "mode": {
+          "default": "local",
+          "enum": [
+            "cloud",
+            "self_hosted",
+            "local"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "pair_code_required": {
+          "default": false,
+          "title": "Pair Code Required",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "backend_url",
+        "last_checked",
+        "mode",
+        "pair_code_required"
+      ],
+      "title": "CloudChoiceStatus",
+      "type": "object"
+    },
+    "HardwareCheckItem": {
+      "description": "One row in the hardware-check step's per-component readout.",
+      "properties": {
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        },
+        "fix_hint": {
+          "default": "",
+          "title": "Fix Hint",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "state": {
+          "default": "unknown",
+          "enum": [
+            "ok",
+            "missing",
+            "warning",
+            "checking",
+            "unknown"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "detail",
+        "fix_hint",
+        "id",
+        "label",
+        "required",
+        "state"
+      ],
+      "title": "HardwareCheckItem",
+      "type": "object"
+    },
+    "HardwareCheckStatus": {
+      "description": "Profile-aware hardware presence + readiness snapshot.",
+      "properties": {
+        "ground_role": {
+          "default": "",
+          "title": "Ground Role",
+          "type": "string"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/HardwareCheckItem"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "last_run": {
+          "default": "",
+          "title": "Last Run",
+          "type": "string"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ground_role",
+        "items",
+        "last_run",
+        "profile"
+      ],
+      "title": "HardwareCheckStatus",
+      "type": "object"
+    },
+    "MavlinkAccess": {
+      "properties": {
+        "authenticated_websocket_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authenticated Websocket Path"
+        },
+        "authenticated_websocket_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authenticated Websocket Url"
+        },
+        "baud": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Baud"
+        },
+        "connected": {
+          "default": false,
+          "title": "Connected",
+          "type": "boolean"
+        },
+        "port": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Port"
+        },
+        "public_websocket_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Public Websocket Url"
+        },
+        "tcp_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tcp Url"
+        },
+        "websocket_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Websocket Url"
+        }
+      },
+      "required": [
+        "authenticated_websocket_path",
+        "authenticated_websocket_url",
+        "baud",
+        "connected",
+        "port",
+        "public_websocket_url",
+        "tcp_url",
+        "websocket_url"
+      ],
+      "title": "MavlinkAccess",
+      "type": "object"
+    },
+    "NetworkStatus": {
+      "properties": {
+        "api_port": {
+          "default": 8080,
+          "title": "Api Port",
+          "type": "integer"
+        },
+        "hostname": {
+          "default": "",
+          "title": "Hostname",
+          "type": "string"
+        },
+        "hotspot_enabled": {
+          "default": false,
+          "title": "Hotspot Enabled",
+          "type": "boolean"
+        },
+        "hotspot_ssid": {
+          "default": "",
+          "title": "Hotspot Ssid",
+          "type": "string"
+        },
+        "ip_addresses": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Ip Addresses",
+          "type": "object"
+        },
+        "local_ips": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Local Ips",
+          "type": "array"
+        },
+        "mdns_host": {
+          "default": "",
+          "title": "Mdns Host",
+          "type": "string"
+        },
+        "rssi_dbm": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rssi Dbm"
+        },
+        "uplink_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Uplink Kind"
+        },
+        "wifi_ssid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Wifi Ssid"
+        }
+      },
+      "required": [
+        "api_port",
+        "hostname",
+        "hotspot_enabled",
+        "hotspot_ssid",
+        "ip_addresses",
+        "local_ips",
+        "mdns_host",
+        "rssi_dbm",
+        "uplink_kind",
+        "wifi_ssid"
+      ],
+      "title": "NetworkStatus",
+      "type": "object"
+    },
+    "ProfileSuggestion": {
+      "description": "Result of the boot-time hardware fingerprint surfaced to the wizard.\n\nThe wizard's profile step pre-selects ``detected`` and shows the per-\nsignal map so the operator can sanity-check the auto-pick before\nconfirming. ``confirmed`` flips true once the operator submits the\nprofile step at least once for the active config value. ``source``\nmarks which branch of the decision tail produced the profile so the\ndashboard can show \"auto\" vs \"needs review\" affordances cleanly.",
+      "properties": {
+        "air_score": {
+          "default": 0,
+          "title": "Air Score",
+          "type": "integer"
+        },
+        "confirmed": {
+          "default": false,
+          "title": "Confirmed",
+          "type": "boolean"
+        },
+        "detected": {
+          "default": "drone",
+          "enum": [
+            "drone",
+            "ground_station",
+            "visor"
+          ],
+          "title": "Detected",
+          "type": "string"
+        },
+        "detected_at": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detected At"
+        },
+        "ground_role_hint": {
+          "default": "direct",
+          "enum": [
+            "direct",
+            "relay",
+            "receiver"
+          ],
+          "title": "Ground Role Hint",
+          "type": "string"
+        },
+        "ground_score": {
+          "default": 0,
+          "title": "Ground Score",
+          "type": "integer"
+        },
+        "signals": {
+          "additionalProperties": {
+            "type": "boolean"
+          },
+          "title": "Signals",
+          "type": "object"
+        },
+        "source": {
+          "default": "detected",
+          "enum": [
+            "detected",
+            "tiebreaker",
+            "override",
+            "default"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "visor_score": {
+          "default": 0,
+          "title": "Visor Score",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "air_score",
+        "confirmed",
+        "detected",
+        "detected_at",
+        "ground_role_hint",
+        "ground_score",
+        "signals",
+        "source",
+        "visor_score"
+      ],
+      "title": "ProfileSuggestion",
+      "type": "object"
+    },
+    "RemoteAccessStatus": {
+      "properties": {
+        "configured": {
+          "default": false,
+          "title": "Configured",
+          "type": "boolean"
+        },
+        "enabled": {
+          "default": false,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "error": {
+          "default": "",
+          "title": "Error",
+          "type": "string"
+        },
+        "provider": {
+          "default": "none",
+          "enum": [
+            "none",
+            "cloudflare"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "public_urls": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Public Urls",
+          "type": "array"
+        },
+        "status": {
+          "default": "disabled",
+          "enum": [
+            "disabled",
+            "configured",
+            "running",
+            "stopped",
+            "error"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "configured",
+        "enabled",
+        "error",
+        "provider",
+        "public_urls",
+        "status"
+      ],
+      "title": "RemoteAccessStatus",
+      "type": "object"
+    },
+    "SetupAccessUrl": {
+      "properties": {
+        "codec": {
+          "default": "",
+          "title": "Codec",
+          "type": "string"
+        },
+        "id": {
+          "default": "",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "setup",
+            "api",
+            "mission_control",
+            "video",
+            "mavlink",
+            "cloud"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "primary": {
+          "default": false,
+          "title": "Primary",
+          "type": "boolean"
+        },
+        "role": {
+          "default": "",
+          "title": "Role",
+          "type": "string"
+        },
+        "source": {
+          "enum": [
+            "local",
+            "hotspot",
+            "usb",
+            "mdns",
+            "cloud",
+            "configured"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "url": {
+          "title": "Url",
+          "type": "string"
+        }
+      },
+      "required": [
+        "codec",
+        "id",
+        "kind",
+        "label",
+        "primary",
+        "role",
+        "source",
+        "url"
+      ],
+      "title": "SetupAccessUrl",
+      "type": "object"
+    },
+    "SetupStep": {
+      "properties": {
+        "action_label": {
+          "default": "",
+          "title": "Action Label",
+          "type": "string"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        },
+        "href": {
+          "default": "",
+          "title": "Href",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "complete",
+            "needs_action",
+            "optional",
+            "blocked",
+            "not_applicable"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "action_label",
+        "detail",
+        "href",
+        "id",
+        "label",
+        "state"
+      ],
+      "title": "SetupStep",
+      "type": "object"
+    },
+    "VideoAccess": {
+      "properties": {
+        "encoder": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Encoder"
+        },
+        "encoder_hw": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Encoder Hw"
+        },
+        "hls_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hls Url"
+        },
+        "pipeline_state": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pipeline State"
+        },
+        "public_hls_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Public Hls Url"
+        },
+        "public_whep_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Public Whep Url"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "recording": {
+          "default": false,
+          "title": "Recording",
+          "type": "boolean"
+        },
+        "state": {
+          "default": "not_initialized",
+          "title": "State",
+          "type": "string"
+        },
+        "streams": {
+          "items": {
+            "$ref": "#/$defs/VideoStreamAccess"
+          },
+          "title": "Streams",
+          "type": "array"
+        },
+        "whep_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Whep Url"
+        }
+      },
+      "required": [
+        "encoder",
+        "encoder_hw",
+        "hls_url",
+        "pipeline_state",
+        "public_hls_url",
+        "public_whep_url",
+        "reason",
+        "recording",
+        "state",
+        "streams",
+        "whep_url"
+      ],
+      "title": "VideoAccess",
+      "type": "object"
+    },
+    "VideoStreamAccess": {
+      "description": "One video leg the node exposes: its stable id, role, codec, and the WHEP /\nHLS URLs a viewer connects to. On a single-leg node this is just the `main`\nstream; a multi-stream node (a smart pod) lists one per leg.",
+      "properties": {
+        "codec": {
+          "default": "",
+          "title": "Codec",
+          "type": "string"
+        },
+        "hls_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hls Url"
+        },
+        "id": {
+          "default": "main",
+          "title": "Id",
+          "type": "string"
+        },
+        "role": {
+          "default": "",
+          "title": "Role",
+          "type": "string"
+        },
+        "whep_url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Whep Url"
+        }
+      },
+      "required": [
+        "codec",
+        "hls_url",
+        "id",
+        "role",
+        "whep_url"
+      ],
+      "title": "VideoStreamAccess",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "access_urls": {
+      "items": {
+        "$ref": "#/$defs/SetupAccessUrl"
+      },
+      "title": "Access Urls",
+      "type": "array"
+    },
+    "cloud_choice": {
+      "$ref": "#/$defs/CloudChoiceStatus"
+    },
+    "completion_percent": {
+      "title": "Completion Percent",
+      "type": "integer"
+    },
+    "device_id": {
+      "title": "Device Id",
+      "type": "string"
+    },
+    "device_name": {
+      "title": "Device Name",
+      "type": "string"
+    },
+    "ground_role": {
+      "default": "",
+      "title": "Ground Role",
+      "type": "string"
+    },
+    "hardware_check": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HardwareCheckStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "lan_host": {
+      "default": "",
+      "title": "Lan Host",
+      "type": "string"
+    },
+    "mavlink": {
+      "$ref": "#/$defs/MavlinkAccess"
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkStatus"
+    },
+    "next_action": {
+      "title": "Next Action",
+      "type": "string"
+    },
+    "paired": {
+      "default": false,
+      "title": "Paired",
+      "type": "boolean"
+    },
+    "pairing_code": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pairing Code"
+    },
+    "profile": {
+      "title": "Profile",
+      "type": "string"
+    },
+    "profile_source": {
+      "default": "detected",
+      "enum": [
+        "detected",
+        "tiebreaker",
+        "override",
+        "default",
+        "user"
+      ],
+      "title": "Profile Source",
+      "type": "string"
+    },
+    "profile_suggestion": {
+      "$ref": "#/$defs/ProfileSuggestion"
+    },
+    "remote_access": {
+      "$ref": "#/$defs/RemoteAccessStatus"
+    },
+    "setup_complete": {
+      "title": "Setup Complete",
+      "type": "boolean"
+    },
+    "setup_finalized": {
+      "default": false,
+      "title": "Setup Finalized",
+      "type": "boolean"
+    },
+    "setup_skipped": {
+      "default": false,
+      "title": "Setup Skipped",
+      "type": "boolean"
+    },
+    "setup_state": {
+      "default": "auto",
+      "enum": [
+        "auto",
+        "needs_review",
+        "configured"
+      ],
+      "title": "Setup State",
+      "type": "string"
+    },
+    "skipped_steps": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Skipped Steps",
+      "type": "array"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/SetupStep"
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "version": {
+      "title": "Version",
+      "type": "string"
+    },
+    "video": {
+      "$ref": "#/$defs/VideoAccess"
+    }
+  },
+  "required": [
+    "access_urls",
+    "cloud_choice",
+    "completion_percent",
+    "device_id",
+    "device_name",
+    "ground_role",
+    "hardware_check",
+    "lan_host",
+    "mavlink",
+    "network",
+    "next_action",
+    "paired",
+    "pairing_code",
+    "profile",
+    "profile_source",
+    "profile_suggestion",
+    "remote_access",
+    "setup_complete",
+    "setup_finalized",
+    "setup_skipped",
+    "setup_state",
+    "skipped_steps",
+    "steps",
+    "version",
+    "video"
+  ],
+  "title": "SetupStatus",
+  "type": "object"
+}

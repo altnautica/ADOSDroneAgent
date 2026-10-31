@@ -83,63 +83,6 @@ pub(super) fn is_verified_method(method: &Method) -> bool {
     )
 }
 
-/// True when the request's Origin/Referer host points at this agent. Mirrors
-/// `auth.py` `_is_same_origin` + `_origin_host`: the host comes from Origin or
-/// (falling back to) Referer; it is same-origin when it is one of the local
-/// defaults OR equals the request's own `Host` header host.
-pub(super) fn is_same_origin(headers: &RequestHeaders) -> bool {
-    let Some(host) = origin_host(headers) else {
-        // No Origin / Referer → a server-to-server caller, not same-origin.
-        return false;
-    };
-    if LOCAL_HOST_DEFAULTS.contains(&host.as_str()) {
-        return true;
-    }
-    let request_host = headers
-        .host
-        .as_deref()
-        .map(|h| h.split(':').next().unwrap_or(h).to_string())
-        .unwrap_or_default();
-    !request_host.is_empty() && host == request_host
-}
-
-/// The host part of the Origin (or Referer) header. Returns `None` when neither header
-/// is present or the value has no host.
-pub(super) fn origin_host(headers: &RequestHeaders) -> Option<String> {
-    let raw = headers.origin.as_deref().or(headers.referer.as_deref())?;
-    parse_hostname(raw)
-}
-
-/// Extract the hostname from a URL the way `urllib.parse.urlparse(...).hostname`
-/// does: drop the scheme, drop any `userinfo@`, take up to the next `/?#`, drop
-/// a `:port` suffix, lowercase. A bracketed IPv6 literal keeps its inner host.
-/// Returns `None` when there is no host component.
-pub(super) fn parse_hostname(url: &str) -> Option<String> {
-    // Strip the scheme (`scheme://`); a value with no `://` has no netloc, so it
-    // has no hostname (matches urlparse, which puts a bare `host/path` in the
-    // path, not the netloc).
-    let after_scheme = url.split_once("://").map(|(_, rest)| rest)?;
-    // The netloc ends at the first `/`, `?`, or `#`.
-    let netloc_end = after_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(after_scheme.len());
-    let netloc = &after_scheme[..netloc_end];
-    // Drop any `userinfo@`.
-    let host_port = netloc.rsplit_once('@').map(|(_, h)| h).unwrap_or(netloc);
-    // A bracketed IPv6 literal: take the inside of the brackets.
-    let host = if let Some(rest) = host_port.strip_prefix('[') {
-        rest.split_once(']').map(|(inner, _)| inner).unwrap_or(rest)
-    } else {
-        // Drop a `:port` suffix.
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_ascii_lowercase())
-    }
-}
-
 /// The parts of a request the HMAC signature covers.
 #[derive(Clone, Copy)]
 pub(crate) struct SignedRequest<'a> {
@@ -186,8 +129,7 @@ pub(super) fn verify_hmac(secret: &[u8], signed: &SignedRequest<'_>, presented_h
     signed.feed(&mut mac);
     let expected = mac.finalize().into_bytes();
     let expected_hex = hex::encode(expected);
-    // Compare the hex strings constant-time, mirroring Python's
-    // `hmac.compare_digest(expected_hex, signature)`.
+    // Compare the hex strings constant-time.
     constant_time_eq(expected_hex.as_bytes(), presented_hex.as_bytes())
 }
 
@@ -196,9 +138,8 @@ pub(super) fn contains(set: &[&str], value: &str) -> bool {
     set.contains(&value)
 }
 
-/// `Some(s)` when the option holds a non-empty string, else `None`. Mirrors the
-/// Python truthiness check on a header (`if not api_key` etc.): a present-but-
-/// empty header is treated as absent.
+/// `Some(s)` when the option holds a non-empty string, else `None`: a
+/// present-but-empty header is treated as absent.
 pub(super) fn non_empty(value: Option<&str>) -> Option<&str> {
     value.filter(|s| !s.is_empty())
 }

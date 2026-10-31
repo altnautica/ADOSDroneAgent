@@ -7,8 +7,8 @@
 //! from `routing::native_route_table()`, naming the regenerate command.
 //!
 //! Only the native half is asserted here. The residual half comes from
-//! importing the FastAPI routers, which this process cannot do; the Python
-//! side is covered by the generator being the only writer and by the client
+//! importing the residual app's `ados.api.routes` routers, which this process
+//! cannot do; the Python side is covered by the generator being the only writer and by the client
 //! check failing on anything it omits.
 
 use std::collections::BTreeSet;

@@ -198,7 +198,7 @@ fn on_box_accepts_a_paired_route_with_no_key() {
 #[test]
 fn cloud_posture_paths_reject_without_credential_even_unpaired() {
     let auth = auth_basic();
-    for path in SAME_ORIGIN_SETUP_CLOUD_PATHS {
+    for path in SETUP_CLOUD_PATHS {
         let d = auth.decide_api_key(
             &Method::POST,
             path,
@@ -308,13 +308,9 @@ fn cloud_posture_path_accepts_with_a_valid_setup_token() {
 // ---- setup mutations ----
 
 #[test]
-fn setup_mutation_same_origin_accepts_when_token_not_required() {
+fn setup_mutation_open_while_unpaired_when_token_not_required() {
     let auth = auth_basic(); // setup_token_required defaults false
-    let headers = RequestHeaders {
-        origin: Some("http://192.168.4.1:8080".to_string()),
-        host: Some("192.168.4.1:8080".to_string()),
-        ..Default::default()
-    };
+    let headers = RequestHeaders::default();
     assert_eq!(
         auth.decide_api_key(
             &Method::POST,
@@ -347,11 +343,7 @@ fn setup_mutation_rejects_when_token_required_and_absent() {
         PathBuf::from("/nonexistent"),
         ReplayDetector::default_security(),
     );
-    let headers = RequestHeaders {
-        origin: Some("http://192.168.4.1:8080".to_string()),
-        host: Some("192.168.4.1:8080".to_string()),
-        ..Default::default()
-    };
+    let headers = RequestHeaders::default();
     assert_eq!(
         auth.decide_api_key(
             &Method::POST,
@@ -393,34 +385,11 @@ fn setup_mutation_accepts_when_token_required_and_valid() {
 }
 
 #[test]
-fn setup_mutation_not_same_origin_falls_through_to_paired_gate() {
-    // token not required, NOT same-origin, paired → falls through to the
-    // paired-key requirement (matches the Python, which does not early-return
-    // from the setup block in this branch).
+fn paired_setup_mutation_without_key_is_401() {
+    // Token not required, paired → the paired-key requirement applies.
     let auth = auth_basic();
     let p = paired("k");
-    let headers = RequestHeaders::default(); // no origin → not same-origin
-    let d = auth.decide_api_key(&Method::POST, "/api/v1/setup/finish", &headers, false, &p);
-    assert_eq!(
-        d,
-        reject(
-            StatusCode::UNAUTHORIZED,
-            BodyField::Detail,
-            messages::MISSING_KEY
-        )
-    );
-}
-
-#[test]
-fn paired_same_origin_without_key_is_401() {
-    // Origin and Host are caller-chosen; once paired they grant nothing.
-    let auth = auth_basic();
-    let p = paired("k");
-    let headers = RequestHeaders {
-        origin: Some("http://192.168.4.1:8080".to_string()),
-        host: Some("192.168.4.1:8080".to_string()),
-        ..Default::default()
-    };
+    let headers = RequestHeaders::default();
     let d = auth.decide_api_key(&Method::POST, "/api/v1/setup/finish", &headers, false, &p);
     assert_eq!(
         d,
@@ -557,55 +526,6 @@ fn paired_configured_key_accepts_independent_of_pairing_key() {
     );
 }
 
-// ---- same-origin host parsing ----
-
-#[test]
-fn origin_host_parses_like_urlparse() {
-    assert_eq!(
-        parse_hostname("http://localhost:8080"),
-        Some("localhost".to_string())
-    );
-    assert_eq!(
-        parse_hostname("https://192.168.4.1/path?x=1"),
-        Some("192.168.4.1".to_string())
-    );
-    assert_eq!(
-        parse_hostname("http://user:pw@host.local:9/p"),
-        Some("host.local".to_string())
-    );
-    assert_eq!(
-        parse_hostname("http://[::1]:8080/x"),
-        Some("::1".to_string())
-    );
-    assert_eq!(parse_hostname("not-a-url"), None);
-    assert_eq!(parse_hostname("http://"), None);
-    assert_eq!(
-        parse_hostname("HTTP://LocalHost"),
-        Some("localhost".to_string())
-    );
-}
-
-#[test]
-fn same_origin_falls_back_to_referer_and_host_match() {
-    // Referer used when Origin is absent; host == request Host host.
-    let h = RequestHeaders {
-        referer: Some("http://my-drone.local:8080/setup".to_string()),
-        host: Some("my-drone.local:8080".to_string()),
-        ..Default::default()
-    };
-    assert!(is_same_origin(&h));
-    // A cross-origin host that matches neither a default nor the Host → not
-    // same-origin.
-    let h2 = RequestHeaders {
-        origin: Some("http://evil.example/".to_string()),
-        host: Some("my-drone.local:8080".to_string()),
-        ..Default::default()
-    };
-    assert!(!is_same_origin(&h2));
-    // No Origin/Referer → not same-origin.
-    assert!(!is_same_origin(&RequestHeaders::default()));
-}
-
 // ---- HMAC / replay ----
 
 /// A known secret + a hand-computed signature to lock the wire format.
@@ -649,7 +569,7 @@ fn hmac_inactive_when_disabled_or_short_secret() {
     c.hmac_secret = "a-long-enough-secret-key".to_string();
     let a = ProxiedAuth::with_paths(c, PathBuf::from("/x"), ReplayDetector::default_security());
     assert!(!a.hmac_active());
-    // Enabled but a < 16-byte secret → not active (matches the Python guard).
+    // Enabled but a < 16-byte secret → not active.
     let mut c2 = cfg();
     c2.hmac_enabled = true;
     c2.hmac_secret = "short".to_string();

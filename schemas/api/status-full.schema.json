@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatusFullResponse",
+  "description": "The consolidated status body. Field order is the wire order.",
+  "type": "object",
+  "properties": {
+    "board": true,
+    "capture_storage": {
+      "type": "boolean"
+    },
+    "clock": {
+      "type": "boolean"
+    },
+    "fcCommandDownGated": {
+      "type": "boolean"
+    },
+    "fcFirmware": {
+      "type": "string"
+    },
+    "fcLinkHint": {
+      "type": "string"
+    },
+    "fcReachable": {
+      "type": "boolean"
+    },
+    "fcSource": {
+      "type": "string"
+    },
+    "fcVariant": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fc_baud": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "fc_connected": {
+      "type": "boolean"
+    },
+    "fc_identity": {
+      "description": "The FC identity reconciler's last verdict, null before its first tick."
+    },
+    "fc_port": {
+      "type": "string"
+    },
+    "gnss": {
+      "type": "boolean"
+    },
+    "hasAccelerator": {
+      "type": "boolean"
+    },
+    "health": true,
+    "heartbeatAgeS": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "format": "double"
+    },
+    "lora": {
+      "type": "boolean"
+    },
+    "mavlinkAlive": {
+      "type": "boolean"
+    },
+    "mesh": true,
+    "neighbors": {
+      "description": "The swarm neighbour table, omitted when no swarm bus has published one."
+    },
+    "npuTops": {
+      "type": "number",
+      "format": "double"
+    },
+    "perceptionOffloadTarget": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "perceptionTier": {
+      "type": "string"
+    },
+    "plugin_loopback_guard": {
+      "type": "string"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "radio": true,
+    "relaySecretPresent": {
+      "type": "boolean"
+    },
+    "resources": true,
+    "role": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "runtimeMode": {
+      "type": "string"
+    },
+    "sensor_hub": {
+      "type": "boolean"
+    },
+    "services": {
+      "type": "array",
+      "items": true
+    },
+    "sim": {
+      "type": "boolean"
+    },
+    "telemetry": true,
+    "transportOpen": {
+      "type": "boolean"
+    },
+    "uptime_seconds": {
+      "description": "The service uptime from the router snapshot, else the process uptime.",
+      "type": "number",
+      "format": "double"
+    },
+    "version": {
+      "type": "string"
+    },
+    "video": true
+  },
+  "additionalProperties": true,
+  "required": [
+    "version",
+    "uptime_seconds",
+    "board",
+    "npuTops",
+    "hasAccelerator",
+    "perceptionTier",
+    "perceptionOffloadTarget",
+    "health",
+    "fc_connected",
+    "fc_port",
+    "sim",
+    "clock",
+    "sensor_hub",
+    "gnss",
+    "capture_storage",
+    "lora",
+    "fc_baud",
+    "transportOpen",
+    "mavlinkAlive",
+    "heartbeatAgeS",
+    "fcSource",
+    "fcLinkHint",
+    "fcReachable",
+    "fcVariant",
+    "fcFirmware",
+    "fcCommandDownGated",
+    "services",
+    "resources",
+    "video",
+    "telemetry",
+    "mesh",
+    "radio",
+    "profile",
+    "role",
+    "runtimeMode",
+    "relaySecretPresent",
+    "plugin_loopback_guard",
+    "fc_identity"
+  ]
+}

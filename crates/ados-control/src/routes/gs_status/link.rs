@@ -82,7 +82,7 @@ pub(super) fn link_view_from(path: &Path) -> Value {
 
     // Live snapshot wins. `bitrate_mbps` is derived from `bitrate_kbps`;
     // `fec_lost`/`fec_failed` both mirror the payload `fec_failed`; the channel
-    // from the file wins over the (null) config. Mirrors the Python merge exactly.
+    // from the file wins over the (null) config.
     let rssi = payload.get("rssi_dbm").filter(|v| v.is_number()).cloned();
     let bitrate_kbps = payload.get("bitrate_kbps").and_then(Value::as_f64);
     let bitrate_mbps = bitrate_kbps.map(|k| round2(k / 1000.0));

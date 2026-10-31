@@ -67,8 +67,7 @@ pub(crate) fn radio_to_camel(block: Value) -> Value {
 }
 
 /// `a_b_c` → `aBC`: the head segment lower-cased verbatim, each later segment
-/// title-cased and concatenated. Mirrors the Python
-/// `head + "".join(p.title() for p in tail)`.
+/// title-cased and concatenated.
 pub(crate) fn snake_to_camel(key: &str) -> String {
     let mut parts = key.split('_');
     let head = parts.next().unwrap_or("");

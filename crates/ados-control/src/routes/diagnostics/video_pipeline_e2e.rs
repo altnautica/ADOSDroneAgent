@@ -14,7 +14,7 @@
 //! `tx_bytes_per_s` / `link_diag`) and the mediamtx `main` ingest counter — never a
 //! single snapshot and never process-liveness. So each scenario builds a REAL pair
 //! of window samples: the wfb-stats sidecar is a real JSON file read off disk (the
-//! sidecar canonical object, driven through the real `read_run_sidecar_at` read and
+//! sidecar canonical object, driven through the real `sidecar::read_object` read and
 //! the real accessors), rewritten between the two reads to model a counter that
 //! advances or freezes; the mediamtx ingest counter is injected per read (a
 //! controllable mock of that hop counter — its live HTTP read is separate plumbing).

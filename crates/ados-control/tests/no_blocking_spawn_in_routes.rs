@@ -126,7 +126,7 @@ const EXEMPT: &[(&str, &str)] = &[
          is probed at most once per HOSTNAME_PROBE_TTL rather than per request",
     ),
     (
-        "ados-macpin/src/engine.rs",
+        "ados-macpin/src/engine/linux.rs",
         "both route-reachable entry points (`apply_live`, `remove_pin_link`) \
          are async over tokio::process with a timeout and kill_on_drop; the \
          remaining sync `Command` sites are reachable only from \

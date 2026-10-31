@@ -21,10 +21,9 @@
 //!    the process. The default pool is ~512 threads, so this degrades slowly
 //!    and invisibly rather than failing.
 //!
-//! So the seam here is `tokio::process` plus `tokio::time::timeout` plus
-//! `kill_on_drop`, which bounds the run and reaps the child — the same idiom
-//! the Bluetooth route (`routes::gs_bluetooth::btctl`) and `ados-net`'s
-//! `CmdRunner` already use. Every probe returns a degraded value rather than an
+//! So the seam here is `ados_proc::run::run`: `tokio::process` plus
+//! `tokio::time::timeout` plus `kill_on_drop`, which bounds the run and reaps
+//! the child. Every probe returns a degraded value rather than an
 //! error, because every call site it replaces already swallowed spawn failures
 //! into a default: an absent binary and a hung one now produce the same "we do
 //! not know" the route was already designed to render.
@@ -34,10 +33,17 @@
 //! async too, so the class of defect this module fixes cannot be reintroduced
 //! by accident.
 
-use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::Command;
+use ados_proc::run::{run, RunOutcome};
+
+/// The environment every `systemctl` probe forces: plain, uncoloured,
+/// unpaged `C` output.
+const SYSTEMD_ENV: [(&str, &str); 3] = [
+    ("SYSTEMD_COLORS", "0"),
+    ("SYSTEMD_PAGER", ""),
+    ("LANG", "C"),
+];
 
 /// Default bound for a local, read-only probe.
 ///
@@ -88,21 +94,16 @@ impl ProbeOutput {
 /// stray `nmcli` behind — which the blocking version did on every abandoned
 /// request.
 pub async fn capture(program: &str, args: &[&str], timeout: Duration) -> ProbeOutput {
-    let child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn();
-    let child = match child {
-        Ok(c) => c,
-        Err(_) => return ProbeOutput::Unavailable,
-    };
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) if out.status.success() => {
-            ProbeOutput::Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        }
+    to_probe(run(program, args, &[], timeout).await)
+}
+
+fn to_probe(outcome: RunOutcome) -> ProbeOutput {
+    match outcome {
+        RunOutcome::Exited {
+            code: Some(0),
+            stdout,
+            ..
+        } => ProbeOutput::Ok(stdout),
         _ => ProbeOutput::Unavailable,
     }
 }
@@ -112,29 +113,9 @@ pub async fn capture(program: &str, args: &[&str], timeout: Duration) -> ProbeOu
 ///
 /// `systemctl` prefixes a failed unit's row with a status glyph and will page or
 /// colour its output depending on the caller's environment. Every `systemctl`
-/// probe in this crate parses columns, so every one of them needs this — and
-/// each was setting the three variables itself.
+/// probe in this crate parses columns, so every one of them needs this.
 pub async fn capture_systemctl(args: &[&str], timeout: Duration) -> ProbeOutput {
-    let child = Command::new("systemctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .env("SYSTEMD_COLORS", "0")
-        .env("SYSTEMD_PAGER", "")
-        .env("LANG", "C")
-        .kill_on_drop(true)
-        .spawn();
-    let child = match child {
-        Ok(c) => c,
-        Err(_) => return ProbeOutput::Unavailable,
-    };
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(out)) if out.status.success() => {
-            ProbeOutput::Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-        }
-        _ => ProbeOutput::Unavailable,
-    }
+    to_probe(run("systemctl", args, &SYSTEMD_ENV, timeout).await)
 }
 
 /// Run `program args…` for its exit status only, discarding output.
@@ -142,21 +123,7 @@ pub async fn capture_systemctl(args: &[&str], timeout: Duration) -> ProbeOutput 
 /// For the signal-style commands (`systemctl kill -s HUP`) whose output nobody
 /// reads.
 pub async fn status_only(program: &str, args: &[&str], timeout: Duration) -> bool {
-    let child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-    matches!(
-        tokio::time::timeout(timeout, child.wait()).await,
-        Ok(Ok(status)) if status.success()
-    )
+    run(program, args, &[], timeout).await.success()
 }
 
 /// Move a blocking closure off the reactor, folding a panic or a cancelled join
@@ -187,21 +154,11 @@ where
 /// duplicated liveness probe is how two surfaces come to give an operator two
 /// different answers about the same unit.
 pub async fn unit_state(unit: &str) -> Option<bool> {
-    let child = Command::new("systemctl")
-        .args(["is-active", unit])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .env("SYSTEMD_COLORS", "0")
-        .env("LANG", "C")
-        .kill_on_drop(true)
-        .spawn()
-        .ok()?;
-    let out = tokio::time::timeout(PROBE_TIMEOUT, child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
-    parse_is_active(&String::from_utf8_lossy(&out.stdout))
+    let env = [("SYSTEMD_COLORS", "0"), ("LANG", "C")];
+    match run("systemctl", &["is-active", unit], &env, PROBE_TIMEOUT).await {
+        RunOutcome::Exited { stdout, .. } => parse_is_active(&stdout),
+        _ => None,
+    }
 }
 
 /// Read a `systemctl is-active` answer. Empty output is no answer.

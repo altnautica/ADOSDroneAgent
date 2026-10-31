@@ -22,7 +22,7 @@ use crate::security_state::SecurityState;
 
 /// The agent version string, resolved live on each call (through
 /// [`AppState::agent_version`]), so the native surface reports the exact same
-/// version the FastAPI surface does (`/api/version`, `/healthz`, `/api/status`)
+/// version on every surface (`/api/version`, `/healthz`, `/api/status`)
 /// and tracks an upgrade without a front restart. Resolution order:
 /// 1. `ADOS_AGENT_VERSION` env, when a caller/unit pins it explicitly;
 /// 2. the `version` the installer records in the install-result contract
@@ -75,9 +75,8 @@ fn version_from_install_result_at(path: &std::path::Path) -> Option<String> {
 /// The HAL-detected board name the pairing-info route reports. Read live from the
 /// `name` field of the board sidecar (`/run/ados/board.json`) the detector
 /// persists — the same on-disk source the status route's board block reads. The
-/// FastAPI route reports `app.board_name or "unknown"`, where `app.board_name` is
-/// the HAL `board.name` (e.g. `"Raspberry Pi 4B"`); reading the sidecar's `name`
-/// field matches that exactly. Falls back to `"unknown"` only when the sidecar is
+/// sidecar's `name` field is the HAL `board.name` (e.g. `"Raspberry Pi 4B"`).
+/// Falls back to `"unknown"` only when the sidecar is
 /// absent / unreadable / carries no usable `name` (a fresh boot before the first
 /// status write, or a host with no detector running).
 pub fn board_name(board_path: &std::path::Path) -> String {
@@ -105,8 +104,8 @@ fn board_name_at(path: &std::path::Path) -> Option<String> {
 
 /// The on-disk paths the pairing routes read and write. Cloned per connection
 /// (it is small + cheap). The pairing-info route reads the config, the pairing
-/// document, the radio key dir, and the bind-state sidecar live on each request
-/// (mirroring the FastAPI route, which reads the live runtime), so the paths —
+/// document, the radio key dir, and the bind-state sidecar live on each request,
+/// so the paths —
 /// not pre-read snapshots — live in the state. Each is injectable so a test
 /// redirects them at a tempdir.
 #[derive(Clone, Debug)]
@@ -158,8 +157,7 @@ pub struct AppState {
     /// The HAL board sidecar (`/run/ados/board.json`) the status route reads the
     /// full board dict from. The detector persists it; when absent (a fresh boot
     /// before the first write, or a host with no detector running), the status
-    /// route reports an empty board object — the same shape the FastAPI route
-    /// emits when its own HAL detect raises.
+    /// route reports an empty board object.
     pub board_path: PathBuf,
     /// The MAVLink router's on-disk parameter cache. The router persists it
     /// atomically and it is now the ONLY reachable parameter source: the map left
@@ -382,8 +380,7 @@ impl AppState {
     /// Whether the FC is connected, read from the live state snapshot's
     /// `fc_connected` runtime extra (the same field the status + pairing-info
     /// routes read). The command route gates on this: an absent snapshot or a
-    /// `false` flag means no FC link, which the route answers with a 503 — the
-    /// same posture the FastAPI command route takes when `fc.connected` is false.
+    /// `false` flag means no FC link, which the route answers with a 503.
     pub fn fc_connected(&self) -> bool {
         self.state
             .snapshot()
@@ -557,7 +554,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("board.json");
         // The on-rig sidecar shape: a full board dict whose `name` field is the
-        // friendly HAL board name the FastAPI route reports as `app.board_name`.
+        // friendly HAL board name the pairing route reports as `board`.
         std::fs::write(
             &path,
             r#"{"arch":"aarch64","cpu_cores":4,"model":"Raspberry Pi 4 Model B Rev 1.5","name":"Raspberry Pi 4B"}"#,

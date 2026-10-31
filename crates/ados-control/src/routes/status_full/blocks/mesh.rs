@@ -1,6 +1,5 @@
 //! Mesh block: ground-station profile, non-direct role only.
 
-use super::super::*;
 use ados_protocol::paths;
 use ados_protocol::paths::run_dir;
 use ados_protocol::wfb_status::json_truthy;
@@ -11,13 +10,12 @@ use std::path::Path;
 
 /// Build the consolidated-status `mesh` block. Populated only when the RAW config
 /// profile is exactly `"ground_station"` (the underscore form, NOT the resolved
-/// wire form — matching the Python gate `app.config.agent.profile ==
-/// "ground_station"`); a drone or an `"auto"`/empty config gets an empty object.
+/// wire form); a drone or an `"auto"`/empty config gets an empty object.
 ///
 /// On a ground station it carries `role` + `mesh_capable`; for a `relay`/`receiver`
 /// role it also folds in the `up` / `peer_count` / `selected_gateway` / `partition`
 /// fields from `/run/ados/mesh-state.json`. Every read degrades to omitting that
-/// field rather than failing. Mirrors the FastAPI mesh block.
+/// field rather than failing.
 pub(crate) async fn build_mesh_block(config_profile: &str) -> Value {
     if config_profile != "ground_station" {
         return json!({});
@@ -54,15 +52,7 @@ pub(crate) fn build_mesh_block_at(
     mesh.insert("mesh_capable".to_string(), json!(mesh_capable));
 
     if role == "relay" || role == "receiver" {
-        if let Some(snap) = read_sidecar_object(mesh_state_path) {
-            // Best-effort schema-drift signal (never reject): warn when the
-            // mesh-state sidecar was written by an agent with a different schema
-            // version, then read anyway. The writer const lives in the groundlink
-            // crate, so compare against the shared registry.
-            let got = snap.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
-            if let Some(ours) = ados_protocol::contracts::sidecar_version("mesh-state") {
-                ados_protocol::sidecar::check_sidecar_version("mesh-state", got, ours);
-            }
+        if let Some(snap) = crate::sidecar::read_versioned(mesh_state_path, "mesh-state") {
             mesh.insert(
                 "up".to_string(),
                 json!(snap.get("up").map(json_truthy).unwrap_or(false)),

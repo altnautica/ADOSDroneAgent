@@ -3,8 +3,7 @@
 //! Two read-only routes the GS setup UI + the GCS Hardware tab poll on a
 //! ground-station node, both gated on the node resolving to the ground-station
 //! profile. On a drone-profile node each answers `404` with the body
-//! `{"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}}` — the same shape the
-//! FastAPI `_require_ground_profile` gate raises, so the GCS distinguishes
+//! `{"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}}`, so the GCS distinguishes
 //! "wrong profile" from "endpoint missing".
 //!
 //! - **`GET /api/v1/ground-station/gamepads`** — the attached controllers
@@ -40,7 +39,7 @@ use serde_json::{json, Value};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
-// Profile gate (mirrors the FastAPI `_require_ground_profile`).
+// Profile gate: ground-station profile only.
 // ---------------------------------------------------------------------------
 
 /// True when the node resolves to the ground-station profile. Resolves through
@@ -79,7 +78,7 @@ fn profile_mismatch() -> Response {
 ///
 /// The enumeration opens and ioctls every `/dev/input/event*` node and the
 /// sidecar read is a blocking file read, so both run on the blocking pool under
-/// [`ENUMERATION_TIMEOUT`]; a wedged input node answers `503` instead of parking
+/// `ENUMERATION_TIMEOUT`; a wedged input node answers `503` instead of parking
 /// an async worker.
 pub async fn get_gamepads(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {

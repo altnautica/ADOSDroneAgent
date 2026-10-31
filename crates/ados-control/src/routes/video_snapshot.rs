@@ -4,7 +4,7 @@
 //! path with a one-shot `ffmpeg`, and answers it as `image/jpeg`. Nothing is
 //! cached or stored, so the frame is never older than the request: the
 //! `X-Captured-At` header (RFC 3339, UTC) carries the moment the frame arrived
-//! from the stream (see [`capture_time`]), and `Cache-Control: no-store` keeps a
+//! from the stream (see `capture_time`), and `Cache-Control: no-store` keeps a
 //! browser from replaying it.
 //!
 //! ## Why the deadline follows the stream rate
@@ -18,7 +18,7 @@
 //! itself: the wait for the next frame after PLAY, plus one more frame period,
 //! because the demuxer's parser closes an access unit only when the next one
 //! begins. The deadline is therefore sized from the live encoder rate the video
-//! profile sidecar publishes ([`snapshot_deadline`]), never below the floor a
+//! profile sidecar publishes (`snapshot_deadline`), never below the floor a
 //! full-rate stream is held to.
 //!
 //! When no frame can be had (no publisher on `main`, `ffmpeg` missing or failing,

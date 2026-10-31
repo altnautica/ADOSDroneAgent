@@ -21,7 +21,7 @@ pub(super) const VIDEO_SAMPLE_WINDOW_MS: u64 = 2000;
 /// It reads ONLY reliable cumulative/rate counters on the CANONICAL objects (the
 /// mediamtx `main` path, the wfb-stats sidecar, the WHEP endpoint) — never
 /// tcpdump, `/proc/net/udp` queue depth, or a single snapshot — and samples each
-/// twice over [`VIDEO_SAMPLE_WINDOW_MS`] so a hop is judged by data actually
+/// twice over `VIDEO_SAMPLE_WINDOW_MS` so a hop is judged by data actually
 /// moving, not by a process being alive (the pipeline runbook).
 ///
 /// Drone (video SOURCE) hops: camera→mediamtx (mediamtx `main` bytesReceived
@@ -116,7 +116,7 @@ impl VideoSample {
         Self {
             mtx_bytes_received,
             mtx_serving,
-            wfb: read_run_sidecar_at(run_dir, ados_protocol::paths::WFB_STATS_JSON),
+            wfb: crate::sidecar::read_object(&run_dir.join(ados_protocol::paths::WFB_STATS_JSON)),
         }
     }
 
@@ -138,17 +138,6 @@ impl VideoSample {
             .get(key)
             .and_then(Value::as_str)
             .map(str::to_string)
-    }
-}
-
-/// Read a `<run_dir>/<name>` JSON sidecar object from an explicit dir. `None` when
-/// absent / unparseable / not a JSON object. Pure (no env read), so a test drives
-/// it with a tempdir without touching process-global env.
-pub(super) fn read_run_sidecar_at(run_dir: &Path, name: &str) -> Option<Map<String, Value>> {
-    let text = std::fs::read_to_string(run_dir.join(name)).ok()?;
-    match serde_json::from_str::<Value>(&text).ok()? {
-        Value::Object(m) => Some(m),
-        _ => None,
     }
 }
 

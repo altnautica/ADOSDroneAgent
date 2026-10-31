@@ -9,7 +9,7 @@ use super::*;
 /// degrades to the full default the Python `except` returns.
 pub(super) async fn wifi_client_view() -> Value {
     let status = wifi_status(&wifi_cmd_sock()).await;
-    let enabled_on_boot = load_json_object(&gs_wifi_client_json())
+    let enabled_on_boot = crate::sidecar::read_object(&gs_wifi_client_json())
         .and_then(|m| m.get("enabled_on_boot").map(json_truthy))
         .unwrap_or(false);
     wifi_client_view_compose(status.as_ref(), enabled_on_boot)
@@ -68,7 +68,7 @@ pub(super) fn wifi_client_view_compose(
 /// `_modem_view()` body after persisting the config sidecar, so the PUT response
 /// is the GET response over the freshly-persisted config.
 pub(crate) async fn modem_view(state: &AppState) -> Value {
-    let cfg = load_json_object(&gs_modem_json()).unwrap_or_default();
+    let cfg = crate::sidecar::read_object(&gs_modem_json()).unwrap_or_default();
     modem_body(&cfg, latest_modem_usage(state).await.as_ref())
 }
 

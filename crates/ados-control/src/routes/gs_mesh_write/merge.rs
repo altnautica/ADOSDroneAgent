@@ -19,7 +19,7 @@ pub(super) fn merge_ground_station_role(config_path: &Path, role: &str) -> Resul
 
 /// Merge the supplied `ground_station.mesh` fields into the on-disk config and
 /// return the resolved view values + whether anything was applied. Each view value
-/// resolves the FastAPI way over the post-mutation model: the request value when
+/// resolves over the post-mutation config: the request value when
 /// supplied, else the existing on-disk value, else the config-model default
 /// (`mesh_id: null`, `carrier: "802.11s"`, `channel: 1`). `applied` is true iff at
 /// least one field was supplied and written. A document the config store refuses
@@ -54,9 +54,9 @@ pub(super) fn merge_mesh_config(
     .map_err(|e| e.to_string())?
     .value;
 
-    // The resolved view: request → existing → config-model default. The FastAPI
-    // route returns the post-mutation model fields, where an unset request field
-    // keeps its on-disk value and an absent on-disk value reads the model default.
+    // The resolved view: request → existing → config-model default. An unset
+    // request field keeps its on-disk value and an absent on-disk value reads the
+    // model default.
     let mesh_id = match &update.mesh_id {
         Some(id) => Value::String(id.clone()),
         None => existing.mesh_id,
@@ -87,8 +87,7 @@ pub(super) struct ExistingMesh {
 
 /// Read the existing `ground_station.mesh` view fields from the parsed config
 /// mapping. An absent section reads `mesh_id: null` + no carrier/channel, so the
-/// resolved view falls through to the config-model defaults — byte-identical to
-/// the FastAPI route reading the default-constructed `MeshConfig`.
+/// resolved view falls through to the Python `MeshConfig` defaults.
 pub(super) fn existing_mesh(root: &serde_norway::Mapping) -> ExistingMesh {
     let mesh = root.get("ground_station").and_then(|v| v.get("mesh"));
     let Some(mesh) = mesh else {

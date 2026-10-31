@@ -92,6 +92,22 @@ const FLAG_GATED: &[FlagGated] = &[
         profiles: &["drone", "ground-station", "visor"],
         opt_out: true,
     },
+    // The first-boot captive portal and the HDMI kiosk: native-only, ground
+    // station only (the installer fetches both for that profile alone).
+    FlagGated {
+        name: "captive",
+        flag: None,
+        binaries: &["ados-captive"],
+        profiles: &["ground-station"],
+        opt_out: false,
+    },
+    FlagGated {
+        name: "kiosk",
+        flag: None,
+        binaries: &["ados-kiosk"],
+        profiles: &["ground-station"],
+        opt_out: false,
+    },
 ];
 
 /// The core binaries the installer fetches for `profile`.
@@ -247,17 +263,53 @@ mod tests {
                 "ados-cloud",
                 "ados-mavlink-router",
                 "ados-net",
+                "ados-captive",
                 "ados-groundlink",
                 "ados-plugin-host",
                 "ados-pic",
                 "ados-input",
                 "ados-display",
                 "ados-display-probe",
+                "ados-kiosk",
             ],
         );
         assert_eq!(compute("ground-station", bin.path(), etc.path()), "native");
         // The same layout is hybrid for a drone, which needs ados-video.
         assert_eq!(compute("drone", bin.path(), etc.path()), "hybrid");
+    }
+
+    #[test]
+    fn a_ground_station_without_its_kiosk_or_portal_is_hybrid() {
+        let ground = [
+            "ados-supervisor",
+            "ados-cloud",
+            "ados-mavlink-router",
+            "ados-net",
+            "ados-captive",
+            "ados-groundlink",
+            "ados-plugin-host",
+            "ados-pic",
+            "ados-input",
+            "ados-display",
+            "ados-display-probe",
+            "ados-kiosk",
+        ];
+        for missing in ["ados-captive", "ados-kiosk"] {
+            let bin = tempfile::tempdir().unwrap();
+            let etc = tempfile::tempdir().unwrap();
+            let present: Vec<&str> = ground.into_iter().filter(|b| *b != missing).collect();
+            install(bin.path(), &present);
+            assert_eq!(
+                compute("ground-station", bin.path(), etc.path()),
+                "hybrid",
+                "{missing}"
+            );
+        }
+        // Neither is held against a drone or a visor, which never fetch them.
+        let bin = tempfile::tempdir().unwrap();
+        install(bin.path(), DRONE_SET);
+        let etc = tempfile::tempdir().unwrap();
+        assert_eq!(compute("drone", bin.path(), etc.path()), "native");
     }
 
     #[cfg(unix)]

@@ -50,7 +50,7 @@ fn plugin_socket_dir() -> PathBuf {
 /// `GET /api/plugins/{plugin_id}/state` → the plugin's latest published state.
 ///
 /// Reads `<plugin_socket_dir>/<plugin_id>-state.json` and returns it as JSON.
-/// `404` when the sidecar is absent, stale (mtime older than [`STALE_AFTER`]),
+/// `404` when the sidecar is absent, stale (mtime older than `STALE_AFTER`),
 /// unreadable, or malformed; never a `500`.
 pub async fn get_plugin_state(AxumPath(plugin_id): AxumPath<String>) -> Response {
     read_plugin_state(&plugin_socket_dir(), &plugin_id, SystemTime::now())

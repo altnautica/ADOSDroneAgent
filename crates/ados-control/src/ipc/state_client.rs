@@ -83,7 +83,7 @@ type Snapshot = Arc<Mutex<Option<(Instant, Value)>>>;
 /// Cheap to clone (the snapshot is an `Arc`); the route surface holds one in the
 /// app state and the background reader task holds another. Build it with
 /// [`StateIpcClient::spawn`], which starts the connect-and-read loop; drop the
-/// returned client (or call [`StateIpcClient::shutdown`]) to stop the task.
+/// returned client (or call `StateIpcClient::shutdown`) to stop the task.
 #[derive(Clone)]
 pub struct StateIpcClient {
     snapshot: Snapshot,

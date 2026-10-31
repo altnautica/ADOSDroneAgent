@@ -2,14 +2,14 @@
 //!
 //! The same Router is served on two edges. The trusted local Unix socket
 //! carries no auth and no rate limit: anything on-box that can open the socket
-//! is already inside the trust boundary. The LAN TCP edge mirrors the agent's
-//! HTTP auth posture exactly:
+//! is already inside the trust boundary. The LAN TCP edge enforces the agent's
+//! HTTP auth posture:
 //!
 //! - **Unpaired ⇒ all routes open.** A fresh agent has no key; physical presence
 //!   on the LAN is the gate, the same stance the pairing-claim flow takes.
 //! - **Paired ⇒ `X-ADOS-Key` required** and must equal the stored pairing key.
 //!
-//! On top of the pairing gate two trust shortcuts mirror the Python middleware:
+//! On top of the pairing gate the edge applies two trust shortcuts:
 //!
 //! - **Public paths** ([`is_public`]) are open on both edges even when paired,
 //!   so a fresh GCS can read `/api/version` and walk the pairing handshake

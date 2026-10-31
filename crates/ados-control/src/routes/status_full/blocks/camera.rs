@@ -32,14 +32,9 @@ pub(crate) fn read_camera_status(run_dir: &Path) -> Vec<(String, Value)> {
 pub(crate) fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Value)> {
     let mut out: Vec<(String, Value)> = Vec::new();
 
-    if let Some(camera) = read_sidecar_object(&run_dir.join("camera-state.json")) {
-        // Best-effort schema-drift signal (never reject): warn on a producer/reader
-        // version mismatch, then read anyway. The writer const lives in the
-        // ados-video crate, so compare against the shared registry.
-        let got = camera.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
-        if let Some(ours) = ados_protocol::contracts::sidecar_version("camera-state") {
-            ados_protocol::sidecar::check_sidecar_version("camera-state", got, ours);
-        }
+    if let Some(camera) =
+        crate::sidecar::read_versioned(&run_dir.join("camera-state.json"), "camera-state")
+    {
         // Discovery alone is not health: a detected camera over a failed
         // pipeline reads as `error`, so the cockpit warns instead of showing a
         // confident camera pill over a dead pane.
@@ -51,14 +46,10 @@ pub(crate) fn read_camera_status_in(run_dir: &Path, now: f64) -> Vec<(String, Va
         }
     }
 
-    if let Some(rec) = read_sidecar_object(&run_dir.join("camera-usb-recovery.json")) {
-        // Best-effort schema-drift signal (never reject): warn on a producer/reader
-        // version mismatch, then read anyway. The writer const lives in the
-        // ados-supervisor crate, so compare against the shared registry.
-        let got = rec.get("version").and_then(Value::as_u64).unwrap_or(0) as u16;
-        if let Some(ours) = ados_protocol::contracts::sidecar_version("camera-usb-recovery") {
-            ados_protocol::sidecar::check_sidecar_version("camera-usb-recovery", got, ours);
-        }
+    if let Some(rec) = crate::sidecar::read_versioned(
+        &run_dir.join("camera-usb-recovery.json"),
+        "camera-usb-recovery",
+    ) {
         if sidecar_fresh(&rec, now, CAMERA_RECOVERY_FRESH_S) {
             let state = rec.get("camera_usb_recovery_state").and_then(Value::as_str);
             if let Some(state) = state {

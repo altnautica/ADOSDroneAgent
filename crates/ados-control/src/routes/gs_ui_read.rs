@@ -5,9 +5,8 @@
 //! The panel read is served on every profile that carries a front panel
 //! (`ground_station` and `visor`, see [`ados_protocol::panel_ui::has_panel`]);
 //! the kiosk read is ground-station only. Off those profiles each answers `404`
-//! with the body `{"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}}` — the
-//! same shape the FastAPI `_require_ground_profile` gate raises, so the GCS
-//! distinguishes "wrong profile" from "endpoint missing".
+//! with the body `{"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}}`, so the
+//! GCS distinguishes "wrong profile" from "endpoint missing".
 //!
 //! - **`GET /api/v1/ground-station/ui`** — the full persisted UI config blob:
 //!   `{oled, buttons, screens}`, each section the persisted `ground_station.ui`
@@ -155,8 +154,7 @@ fn yaml_to_json(value: &serde_norway::Value) -> Value {
 }
 
 /// Merge a persisted section over a defaults map: start from the defaults, then
-/// overlay every key the persisted section carries. Mirrors the Python
-/// `{**_DEFAULT_X, **(data.get("x") or {})}` spread: a falsy / non-object section
+/// overlay every key the persisted section carries (a shallow spread): a falsy / non-object section
 /// contributes nothing (the defaults stand), and present keys win. The defaults
 /// supply the key set and the fallbacks; the persisted section supplies overrides.
 fn merge_over_defaults(defaults: Map<String, Value>, section: Option<&Value>) -> Value {
@@ -170,7 +168,7 @@ fn merge_over_defaults(defaults: Map<String, Value>, section: Option<&Value>) ->
 }
 
 // ---------------------------------------------------------------------------
-// The built-in default blobs (mirror the Python `_DEFAULT_*`).
+// The built-in default blobs.
 // ---------------------------------------------------------------------------
 
 /// The default OLED block: the SSD1306 contrast on the native 0-255 scale

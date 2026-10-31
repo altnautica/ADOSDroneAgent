@@ -8,7 +8,7 @@
 //!
 //! - **`PUT /role`** — change the mesh role. The validation gates (profile,
 //!   mesh-capability, relay-must-be-paired, valid role) run here against the same
-//!   on-disk files the FastAPI route reads, then the transition itself
+//!   on-disk files the read module uses, then the transition itself
 //!   (stop/start + mask/unmask of the role units, the sentinel flip, the
 //!   `role_changed` event) is forwarded to the supervisor control socket's
 //!   `set_role` op. The supervisor executes it because it is the one process no
@@ -20,8 +20,8 @@
 //! - **`PUT /mesh/gateway_preference`** — pin a gateway / let batman auto-pick /
 //!   disable client mode. Forwarded to the `set_gateway_preference` op, which
 //!   persists `/etc/ados/mesh/gateway.json` and drives `batctl`. The route gates
-//!   on the profile and the not-`direct` role first (the FastAPI 404
-//!   `E_NOT_IN_MESH`), then maps the op reply to the FastAPI response body
+//!   on the profile and the not-`direct` role first (404 `E_NOT_IN_MESH`), then
+//!   maps the op reply to the response body
 //!   (`{mode,pinned_mac,persisted[,persist_error]}`) or the 503 `E_BATCTL_UNAVAILABLE`.
 //! - **`PUT /mesh/config`** — set the configured mesh transport fields
 //!   (`mesh_id`/`carrier`/`channel`). Its whole effect is a config-file persist
@@ -71,8 +71,7 @@ use mesh_config::*;
 const ROLE_TRANSITION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
-// Profile + role gating (mirrors the FastAPI `_require_ground_profile` +
-// `role_manager.get_current_role`, byte-identical to the read module).
+// Profile + role gating (byte-identical to the read module).
 // ---------------------------------------------------------------------------
 
 /// The carrier-config default, matching the Python `MeshConfig.carrier` default.
@@ -151,9 +150,8 @@ async fn mesh_capable_live() -> bool {
         .unwrap_or(false)
 }
 
-/// True when the mesh identity (id + psk) is already on disk. Mirrors the Python
-/// `has_persisted_identity` (`MESH_ID_PATH.is_file() and MESH_PSK_PATH.is_file()`)
-/// the relay-role gate consults.
+/// True when the mesh identity (id + psk) is already on disk: both the `id` and
+/// `psk.key` files exist. The relay-role gate consults this.
 fn has_persisted_identity() -> bool {
     let dir = mesh_dir();
     dir.join("id").is_file() && dir.join("psk.key").is_file()
@@ -164,10 +162,9 @@ fn has_persisted_identity() -> bool {
 // ---------------------------------------------------------------------------
 
 /// The `PUT .../role` request body: `role` plus an optional `confirm_token` (currently unused by the
-/// handler, but accepted so an old client's body still deserializes). The FastAPI model types
-/// `role` as a `Literal["direct","relay","receiver"]`, so an out-of-range value is a 422 there; the
-/// front has no such pre-validation, so an unknown role reaches the handler and is rejected with
-/// the FastAPI 400 `E_INVALID_ROLE` the in-process `apply_role`'s `ValueError` would surface.
+/// handler, but accepted so an old client's body still deserializes). `role` is a plain string
+/// with no pre-validation, so an unknown role reaches the handler and is rejected with a 400
+/// `E_INVALID_ROLE`.
 #[derive(Debug, Default, Deserialize)]
 pub struct RoleChangeRequest {
     #[serde(default)]
@@ -178,13 +175,12 @@ pub struct RoleChangeRequest {
 
 /// `PUT .../role` → the role-transition metadata.
 ///
-/// Gates (in the FastAPI order): profile (404 `E_PROFILE_MISMATCH`), valid role
+/// Gates (in order): profile (404 `E_PROFILE_MISMATCH`), valid role
 /// (400 `E_INVALID_ROLE`), mesh-capability for relay/receiver (409
 /// `E_MESH_NOT_CAPABLE`), relay-must-be-paired (409 `E_NOT_PAIRED`). Then forwards
 /// the `set_role` op to the data-plane command socket and returns its
 /// `{role,previous,units_started,units_stopped,ts_ms,noop}` reply. A best-effort
-/// `ground_station.role` config merge follows (mirroring the FastAPI post-apply
-/// save), never affecting the response.
+/// `ground_station.role` config merge follows, never affecting the response.
 pub async fn put_role(
     State(_state): State<AppState>,
     Json(req): Json<RoleChangeRequest>,
@@ -195,10 +191,8 @@ pub async fn put_role(
     let role = match req.role.as_deref() {
         Some(r) if VALID_ROLES.contains(&r) => r.to_string(),
         other => {
-            // The FastAPI `Literal` rejects an out-of-range role with a 422 before
-            // the handler; the front mirrors the in-process `apply_role`
-            // ValueError → 400 `E_INVALID_ROLE` for an unknown value (it has no
-            // Pydantic pre-validation). A `null` role is treated the same way.
+            // An unknown role → 400 `E_INVALID_ROLE` (there is no body
+            // pre-validation). A `null` role is treated the same way.
             let got = other.unwrap_or("");
             return nested_detail(
                 StatusCode::BAD_REQUEST,
@@ -292,10 +286,10 @@ pub struct MeshGatewayPreferenceUpdate {
 /// `PUT .../mesh/gateway_preference` → `{mode, pinned_mac, persisted[, persist_error]}`.
 ///
 /// Gates on the profile (404 `E_PROFILE_MISMATCH`) and the not-`direct` role (404
-/// `E_NOT_IN_MESH`, matching the FastAPI `get_current_role() == "direct"` guard),
+/// `E_NOT_IN_MESH` when the role is `direct`),
 /// then forwards the `set_gateway_preference` op (which persists
-/// `gateway.json` + drives `batctl`) and maps its reply to the FastAPI response.
-/// A reply carrying `E_BATCTL_UNAVAILABLE` becomes the FastAPI 503; an absent
+/// `gateway.json` + drives `batctl`) and maps its reply to the response.
+/// A reply carrying `E_BATCTL_UNAVAILABLE` becomes a 503; an absent
 /// socket becomes a 503 too (the front cannot drive `batctl` itself).
 pub async fn put_gateway_preference(
     State(_state): State<AppState>,
@@ -304,7 +298,7 @@ pub async fn put_gateway_preference(
     if !is_ground_station() {
         return profile_mismatch();
     }
-    // The not-in-mesh gate: a `direct` node is not in a mesh, so the FastAPI route
+    // The not-in-mesh gate: a `direct` node is not in a mesh, so the route
     // 404s with `E_NOT_IN_MESH` before touching batman. Resolved from the role
     // sentinel, the same source the read module uses.
     if ados_config::read_mesh_role(&ados_config::mesh_role_path()) == "direct" {
@@ -319,8 +313,8 @@ pub async fn put_gateway_preference(
     });
     let reply = match groundlink_cmd_roundtrip(&request).await {
         Some(r) => r,
-        // The FastAPI route's reachable failure here is only the absent-batctl
-        // 503; an unreachable socket is the front's no-link posture, also a 503.
+        // An unreachable socket is the no-link posture: a 503, the same status
+        // as an absent batctl.
         None => {
             return nested_detail(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -332,9 +326,8 @@ pub async fn put_gateway_preference(
     match strip_ok(reply) {
         Ok(body) => Json(Value::Object(body)).into_response(),
         Err(err) => {
-            // The socket maps an absent `batctl` to `E_BATCTL_UNAVAILABLE`; the
-            // FastAPI route raises that as a 503. An `E_INVALID_MODE` (an
-            // out-of-range mode the Pydantic Literal would 422) maps to a 400.
+            // The socket maps an absent `batctl` to `E_BATCTL_UNAVAILABLE`, which
+            // is a 503. An `E_INVALID_MODE` (an out-of-range mode) maps to a 400.
             match err.code.as_str() {
                 "E_BATCTL_UNAVAILABLE" => nested_detail(
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -351,7 +344,7 @@ pub async fn put_gateway_preference(
 // ---------------------------------------------------------------------------
 
 /// A command-socket failure reply: the apply-time `error` code + an optional
-/// `message`. The route maps each to the FastAPI 4xx/5xx body.
+/// `message`. The route maps each to its 4xx/5xx body.
 #[derive(Debug)]
 pub struct SocketError {
     pub code: String,

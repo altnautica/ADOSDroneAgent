@@ -171,8 +171,8 @@ pub async fn post_wfb_pair(
         return profile_mismatch();
     }
 
-    // The typed `pair_key` is no longer supported; surface the clear 400 the
-    // FastAPI route raises when an old client sends it without a blob.
+    // The typed `pair_key` is no longer supported; surface a clear 400 when an
+    // old client sends it without a blob.
     let blob_present = req
         .blob_b64
         .as_deref()
@@ -298,7 +298,7 @@ pub async fn post_wfb_pair(
         // Forward the install. The socket's pair_keypair op decodes +
         // validates the blob, writes rx.key + the pair state, drops the
         // sentinel, and restarts the receive unit; its reply carries the
-        // install body the FastAPI route returned.
+        // install body.
         let request = json!({
             "op": "pair_keypair",
             "blob_b64": blob_b64,
@@ -367,10 +367,10 @@ pub(super) fn release_reserved_slot(device_id: &str) {
     }
 }
 
-/// Map a `pair_keypair` failure reply to the FastAPI status + body. The op returns
+/// Map a `pair_keypair` failure reply to the status + body. The op returns
 /// `E_BLOB_BASE64` for an undecodable blob, `E_INVALID_KEY_BLOB` for a wrong length
-/// (both 400 on the FastAPI side), and `E_PAIR_FAILED` for an IO fault (500). An
-/// unexpected code is treated as a 500 `E_PAIR_FAILED` (the FastAPI catch-all).
+/// (both 400), and `E_PAIR_FAILED` for an IO fault (500). An unexpected code is
+/// treated as a 500 `E_PAIR_FAILED` (the catch-all).
 pub(super) fn map_pair_error(err: SocketError) -> Response {
     let (status, code) = match err.code.as_str() {
         "E_BLOB_BASE64" => (StatusCode::BAD_REQUEST, "E_BLOB_BASE64"),

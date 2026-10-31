@@ -3,7 +3,7 @@
 //! * `POST /api/wfb/pair/local-bind` opens a bind window through the supervisor
 //!   control socket's `start_bind` op, which answers once the rendezvous ends.
 //!   The rendezvous waits for a peer with no deadline of its own, so the route
-//!   caps the wait at [`LOCAL_BIND_CAP`]; when the cap elapses it sends
+//!   caps the wait at `LOCAL_BIND_CAP`; when the cap elapses it sends
 //!   `cancel_bind` on a second connection and returns the terminal session the
 //!   first connection then reports.
 //! * `GET /api/wfb/pair/local-bind` is the latest session (`bind_status`), or `{}`

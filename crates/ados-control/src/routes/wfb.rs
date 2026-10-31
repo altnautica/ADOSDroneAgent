@@ -28,8 +28,7 @@
 //!   `"local"`.
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / key file degrades to
-//! the same empty/default shape the FastAPI route returns when its own source is
-//! unavailable, never a 500. The routes carry no path params and never mutate, so
+//! an empty/default shape, never a 500. The routes carry no path params and never mutate, so
 //! they are safe to serve natively while the channel/tx-power write routes stay on
 //! the residual surface.
 
@@ -82,7 +81,7 @@ fn wfb_failover_path(run_dir: &Path) -> PathBuf {
 ///
 /// Reads the radio's full status body from the store's most-recent
 /// `link.wfb_status` event while that row is fresh, else from the
-/// `wfb-stats.json` sidecar (see [`choose_wfb_status`]). Both paths produce a
+/// `wfb-stats.json` sidecar (see `choose_wfb_status`). Both paths produce a
 /// byte-identical body: the config-seeded base, the producer payload merged over
 /// it, the live `regulatory_domain` re-asserted, the frequency/bandwidth
 /// re-derived from the channel, and the `bitrate_mbps` shim. Guaranteed 200.
@@ -252,7 +251,7 @@ async fn latest_wfb_history(state: &AppState, seconds: i64) -> Option<Value> {
 // GET /api/wfb/pair — pair-state snapshot.
 // ---------------------------------------------------------------------------
 
-/// `GET /api/wfb/pair` → the pair-state snapshot ([`crate::wfb_pair_state`])
+/// `GET /api/wfb/pair` → the pair-state snapshot (`crate::wfb_pair_state`)
 /// plus the fleet slot table.
 ///
 /// `slots` is the fleet roster: which drone holds which slot, and when it was

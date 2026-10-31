@@ -2,10 +2,10 @@
 
 use super::*;
 
-/// The nonce/timestamp replay detector, mirroring `security/replay.py`. Holds a
-/// `nonce -> timestamp` map behind a mutex (the front shares one detector across
-/// all connections), pruning expired nonces on the same cadence as the Python:
-/// every `window` seconds, or whenever the store exceeds `max_nonces`.
+/// The nonce/timestamp replay detector. Holds a `nonce -> timestamp` map behind
+/// a mutex (the front shares one detector across all connections), pruning
+/// expired nonces every `window` seconds, or whenever the store exceeds
+/// `max_nonces`.
 pub struct ReplayDetector {
     pub(super) window: f64,
     pub(super) max_nonces: usize,
@@ -30,16 +30,14 @@ impl ReplayDetector {
         }
     }
 
-    /// The 300s / 50000-nonce detector the `SecurityMiddleware` builds.
+    /// The 300 s / 50000-nonce detector the proxied-route HMAC gate uses.
     pub fn default_security() -> Self {
         Self::new(REPLAY_WINDOW_SECONDS, REPLAY_MAX_NONCES)
     }
 
     /// True when the message is fresh (timestamp within the window AND the nonce
-    /// is unseen), false when it should be rejected. Mirrors
-    /// `ReplayDetector.check`: an out-of-window timestamp or a duplicate nonce
-    /// is rejected; a fresh message records its nonce and prunes when due.
-    /// `now` is supplied so a test can pin the clock.
+    /// is unseen), false when it should be rejected. A fresh message records its
+    /// nonce and prunes when due. `now` is supplied so a test can pin the clock.
     pub fn check_at(&self, timestamp: f64, nonce: &str, now: f64) -> bool {
         // Reject messages outside the time window.
         let age = (now - timestamp).abs();
@@ -68,7 +66,7 @@ impl ReplayDetector {
     }
 }
 
-/// Wall-clock seconds since the epoch as `f64`, matching Python `time.time()`.
+/// Wall-clock seconds since the epoch as `f64`.
 pub(super) fn unix_now() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

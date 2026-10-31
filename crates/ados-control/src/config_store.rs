@@ -85,7 +85,7 @@ pub struct ConfigWrite<T> {
 /// The lock file guarding `config_path`: the shared node lock for the canonical
 /// document, a sibling `<name>.lock` for any other path (a test fixture, a
 /// staging copy), so a non-canonical write neither contends on nor is serialised
-/// by the node's. Mirrors the Python writer's resolution.
+/// by the node's. Same resolution as the Python writer's `_lock_path_for`.
 pub fn lock_path_for(config_path: &Path) -> PathBuf {
     if config_path == Path::new(crate::config::CONFIG_YAML) {
         return PathBuf::from(CONFIG_LOCK_PATH);

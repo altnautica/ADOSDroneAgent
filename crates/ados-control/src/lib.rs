@@ -37,6 +37,7 @@ pub mod routing;
 pub mod runtime_mode;
 pub mod security_state;
 pub mod serve;
+pub(crate) mod sidecar;
 pub mod state;
 pub mod vehicle_guard;
 mod wfb_pair_state;

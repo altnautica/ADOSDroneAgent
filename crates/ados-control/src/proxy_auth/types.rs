@@ -12,9 +12,6 @@ pub fn is_sha256_hex(value: &str) -> bool {
 /// them out of the live `HeaderMap` once).
 #[derive(Debug, Clone, Default)]
 pub struct RequestHeaders {
-    pub origin: Option<String>,
-    pub referer: Option<String>,
-    pub host: Option<String>,
     pub x_ados_key: Option<String>,
     pub x_ados_setup_token: Option<String>,
     /// The dashboard-access session token (`X-ADOS-Dashboard-Session`). Not read
@@ -38,24 +35,22 @@ pub enum Decision {
     Reject {
         status: StatusCode,
         /// The error message text. `field` selects whether it renders under the
-        /// `detail` key (the API-key middleware) or `error` (the HMAC
-        /// middleware), matching each Python middleware's body shape.
+        /// `detail` key (the API-key gate) or `error` (the HMAC gate).
         field: BodyField,
         message: &'static str,
     },
 }
 
-/// Which JSON key the rejection body renders the message under, mirroring the
-/// two Python middlewares: the API-key middleware uses `{"detail": ...}`, the
-/// HMAC middleware uses `{"error": ...}`.
+/// Which JSON key the rejection body renders the message under: the API-key
+/// gate uses `{"detail": ...}`, the HMAC gate uses `{"error": ...}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyField {
     Detail,
     Error,
 }
 
-/// The fixed message strings, kept verbatim from the Python so a GCS reading the
-/// body sees identical text against either surface.
+/// The fixed message strings. They are wire contract: a GCS surfaces the body
+/// text, so the strings must not drift.
 pub(super) mod messages {
     pub const CLOUD_POSTURE: &str = "This setup route changes cloud posture and \
 requires the API key (X-ADOS-Key) or the setup token (X-ADOS-Setup-Token, \

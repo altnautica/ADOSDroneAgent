@@ -5,17 +5,12 @@
 //!
 //! ## Why this surface serves the systemd view
 //!
-//! The FastAPI route first consults an in-process service tracker (the asyncio
-//! task list + a transition log of the single supervisor process), and only
-//! falls back to systemd's view of every `ados-*` unit when that tracker has no
-//! actionable entries. The native control surface is a separate daemon with no
-//! such in-process tracker, so the actionable-tracker branch is empty here and
-//! the route serves the systemd-fallback shape: the live unit list from
-//! `systemctl list-units`. That is the exact same `{name, active, state,
-//! sub_state, pid, load_state}` shape the FastAPI route emits on its fallback
-//! path, so the GCS sees an identical body either way.
+//! The control surface is a separate daemon with no in-process service tracker,
+//! so the route serves systemd's view of every `ados-*` unit: the live unit list
+//! from `systemctl list-units`, as `{name, active, state, sub_state, pid,
+//! load_state}` objects.
 //!
-//! ## Parity contract
+//! ## Wire contract
 //!
 //! - **`services`** — one object per `ados-*.service` unit:
 //!   `{name, active, state, sub_state, pid, load_state, memory_mb}`. `name` is
@@ -29,9 +24,8 @@
 //!   `services` list). The dashboard renders a different empty state for each
 //!   case.
 //! - **`process`** — `{pid, cpu_percent, memory_mb}` for the serving process. The
-//!   CPU figure is `0.0` (the FastAPI route's per-request psutil sampler reports
-//!   `0.0` on its first observation, which is the only observation a stateless
-//!   request makes), and `memory_mb` is this process's RSS in MiB rounded to one
+//!   CPU figure is `0.0` (a stateless request has no prior sample to diff
+//!   against), and `memory_mb` is this process's RSS in MiB rounded to one
 //!   decimal.
 //!
 //! Every external read degrades in place: an absent `systemctl` yields an empty
@@ -46,7 +40,7 @@ use serde_json::{json, Value};
 
 /// The unit glob the route asks systemd about. Covers every drone +
 /// ground-station + agent unit on a stock install; a new `ados-*` unit is picked
-/// up automatically with no change here. Mirrors the Python fallback pattern.
+/// up automatically with no change here.
 const SYSTEMD_FALLBACK_GLOB: &str = "ados-*.service";
 
 /// `GET /api/services` → `{services, systemd_available, process}`.
@@ -107,8 +101,8 @@ async fn systemd_inventory() -> (Vec<Value>, bool) {
     .await;
 
     // Unreachable systemd: distinct from "no units" — the dashboard renders a
-    // different empty state. Widens the Python `except (SubprocessError,
-    // FileNotFoundError)` branch to the timeout the bounded probe adds.
+    // different empty state. A spawn failure, a missing binary, and a probe
+    // timeout all land here.
     if !out.is_ok() {
         return (Vec::new(), false);
     }
@@ -125,7 +119,7 @@ async fn systemd_inventory() -> (Vec<Value>, bool) {
 /// whitespace runs into the columns `unit load active sub description`. The first
 /// four are taken; the unit basename has `.service` stripped to form `name`.
 /// `active` is `active_state == "active"`, `pid` is always `null` on this
-/// fallback path. Mirrors the Python parser, including the four-column minimum.
+/// fallback path. Lines with fewer than four columns are skipped.
 pub(crate) fn parse_unit_line(line: &str) -> Option<Value> {
     let mut stripped = line.trim();
     if stripped.is_empty() {
@@ -135,14 +129,14 @@ pub(crate) fn parse_unit_line(line: &str) -> Option<Value> {
     // Drop a leading status glyph. The first guard matches a non-alphanumeric
     // non-ASCII leading char (`●` U+25CF, `×` U+00D7); the second matches the
     // ASCII bullet/glyph set `* ● ×`. Either way the leading token is removed and
-    // the remainder re-trimmed, matching the Python `split(None, 1)[-1]`.
+    // the remainder re-trimmed.
     let first = stripped.chars().next()?;
     let is_glyph =
         (!first.is_alphanumeric() && !first.is_ascii()) || matches!(first, '*' | '●' | '×');
     if is_glyph {
         match stripped.split_once(char::is_whitespace) {
             Some((_, rest)) => stripped = rest.trim_start(),
-            // No whitespace after the glyph: the Python code yields "" → skip.
+            // No whitespace after the glyph: nothing left → skip.
             None => return None,
         }
     }
@@ -180,8 +174,7 @@ pub(crate) fn parse_unit_line(line: &str) -> Option<Value> {
 /// Resolves each entry's owning systemd unit, scans `/proc` once to sum each
 /// unit's grouped PSS, and writes the MiB figure back onto every entry that maps
 /// to that unit. Entries with no resolvable unit, or a unit with no running
-/// process, get `0.0` — the same value the FastAPI live `/proc` scan reports for
-/// an absent unit. A single scan serves every entry (units sharing a process are
+/// process, get `0.0`. A single scan serves every entry (units sharing a process are
 /// summed once).
 pub(crate) async fn attach_service_memory(services: &mut [Value]) {
     // One /proc PSS scan groups every running ados-* process by its cgroup unit.
@@ -307,7 +300,7 @@ fn scan_pss_by_unit() -> BTreeMap<String, f64> {
 /// Extract the `ados-*.service` unit from a `/proc/<pid>/cgroup` body, or `None`
 /// when no ados unit appears (the process belongs to another slice or no unit).
 ///
-/// Matches the Python regex `(ados-[a-z0-9-]+\.service)`: a literal `ados-`
+/// Matches the pattern `(ados-[a-z0-9-]+\.service)`: a literal `ados-`
 /// followed by one-or-more lowercase-alphanumeric-or-dash chars, then `.service`.
 /// Scans the whole body and returns the first match. Pure + testable.
 fn unit_from_cgroup(text: &str) -> Option<String> {
@@ -359,10 +352,8 @@ fn pss_kib_from_rollup(text: &str) -> u64 {
 
 /// The serving process's metrics: `{pid, cpu_percent, memory_mb}`.
 ///
-/// `pid` is this process's PID. `cpu_percent` is `0.0`: the FastAPI route reads
-/// CPU through psutil's `cpu_percent(interval=0)`, which returns `0.0` on its
-/// first observation against a fresh cache, and a stateless request makes exactly
-/// that one observation. `memory_mb` is this process's resident set size in MiB,
+/// `pid` is this process's PID. `cpu_percent` is `0.0`: a stateless request has
+/// no prior sample to diff against. `memory_mb` is this process's resident set size in MiB,
 /// rounded to one decimal — the same field psutil's `memory_info().rss` reports,
 /// read here from `/proc/self`. On a non-Linux dev host the RSS read is `0.0`.
 fn process_metrics() -> Value {
@@ -417,8 +408,7 @@ fn page_size_bytes() -> u64 {
     }
 }
 
-/// Round to one decimal place, matching the Python `round(x, 1)` the memory paths
-/// apply.
+/// Round to one decimal place for the memory figures.
 fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
 }

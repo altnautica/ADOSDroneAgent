@@ -31,7 +31,7 @@ fn groundlink_cmd_sock() -> PathBuf {
 
 /// One exchange with the data-plane command socket. Returns the parsed object
 /// reply (its `ok` flag intact), or `None` when no object reply arrived within
-/// [`GROUNDLINK_CMD_TIMEOUT`].
+/// `GROUNDLINK_CMD_TIMEOUT`.
 pub async fn groundlink_cmd_roundtrip(request: &Value) -> Option<Value> {
     crate::ipc::cmd::roundtrip_object(&groundlink_cmd_sock(), request, GROUNDLINK_CMD_TIMEOUT)
         .await

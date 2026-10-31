@@ -8,13 +8,13 @@ use serde_json::Map;
 use serde_json::Value;
 use std::path::Path;
 
-/// mediamtx default ports (matching the Python `_MEDIAMTX_*_PORT`).
+/// mediamtx default ports.
 pub(crate) const MEDIAMTX_API_PORT: u16 = 9997;
 pub(crate) const MEDIAMTX_WEBRTC_PORT: u16 = 8889;
 
 /// Build the consolidated-status `video` block for the multi-process case.
 ///
-/// There is no in-process pipeline on this daemon, so the FastAPI route branches
+/// There is no in-process pipeline on this daemon, so the block branches
 /// on the resolved profile (NOT on pipeline presence):
 ///
 /// - **drone** — the local mediamtx serves its own camera regardless of the WFB
@@ -27,7 +27,6 @@ pub(crate) const MEDIAMTX_WEBRTC_PORT: u16 = 8889;
 ///   delivering → `stopped`.
 ///
 /// The recording block is always empty (no in-process recorder on this daemon).
-/// Mirrors the FastAPI `pipeline is None` branch exactly.
 ///
 /// This resolves the live mediamtx readiness once (the real loopback probes) and
 /// hands it to the pure [`build_video_block_with`] core, so the block-shape logic
@@ -88,7 +87,7 @@ pub(crate) fn read_pipeline_outcome() -> PipelineSidecar {
 /// The path-injectable core of [`read_pipeline_outcome`], so a test drives it
 /// with a tempdir instead of the process-global `ADOS_RUN_DIR`.
 pub(crate) fn read_pipeline_outcome_in(run_dir: &Path, now: f64) -> PipelineSidecar {
-    let Some(doc) = read_sidecar_object(&run_dir.join("camera-state.json")) else {
+    let Some(doc) = crate::sidecar::read_object(&run_dir.join("camera-state.json")) else {
         return PipelineSidecar::default();
     };
     if !sidecar_fresh(&doc, now, CAMERA_STATE_FRESH_S) {

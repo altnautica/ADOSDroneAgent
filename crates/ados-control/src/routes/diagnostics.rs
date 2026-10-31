@@ -1,9 +1,8 @@
 //! `GET /api/v1/diagnostics` — the composite triage snapshot.
 //!
-//! Byte-faithful to the FastAPI `diagnostics.get_diagnostics`: one read-mostly
-//! object the LCD Diagnostics drilldown + the Mission Control remote-display pane
-//! poll, composing six sections so the operator can triage from the panel without
-//! a phone or laptop:
+//! One read-mostly object the LCD Diagnostics drilldown + the Mission Control
+//! remote-display pane poll, composing six sections so the operator can triage
+//! from the panel without a phone or laptop:
 //!
 //! * `agent` — version + uptime + this daemon's process metrics.
 //! * `board` — the HAL board summary (`name` / `soc` / `arch` / `ram_total_mb`),
@@ -16,14 +15,14 @@
 //! * `logs.agent` — the last few `ados-agent` log lines.
 //!
 //! Every section is fault-tolerant: an absent store / sidecar / config / `/sys`
-//! file degrades that section to the same default the FastAPI route emits when its
-//! own source is unavailable (the board summary's `"--"` / `"unknown"` / `0`, the
-//! system block's nulls, a `null` IP/MAC, the device `"--"`), never a 500. The
-//! route is guaranteed-200.
+//! file degrades that section to its default when its source is unavailable
+//! (the board summary's `"--"` / `"unknown"` / `0`, the system block's nulls,
+//! a `null` IP/MAC, the device `"--"`), never a 500. The route is
+//! guaranteed-200.
 //!
-//! The FastAPI route's `system` block is the `derive_resources` projection (the
-//! `temperature` primary zone, the `memory_*` MB ints, the `disk_*` GB floats, the
-//! 1/5/15 load average), so the native maps the same merged signals to those names
+//! The `system` block is the resource projection (the `temperature` primary
+//! zone, the `memory_*` MB ints, the `disk_*` GB floats, the 1/5/15 load
+//! average), so the native maps the same merged signals to those names
 //! and reads the load average straight from `/proc/loadavg` (the same value
 //! `os.getloadavg()` reports) — there is no psutil to fall back to, so a store
 //! miss degrades the block to nulls rather than a live probe.
@@ -48,11 +47,9 @@ const BYTES_PER_MB: f64 = 1024.0 * 1024.0;
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// `GET /api/v1/diagnostics`. Guaranteed 200: every section degrades to its
-/// FastAPI default rather than failing when its source is unavailable.
+/// default rather than failing when its source is unavailable.
 ///
-/// The FastAPI route wraps the body in a 1-second TTL cache so concurrent LCD +
-/// GCS polls do not fan out to journalctl + psutil; that is a cost optimisation,
-/// not part of the contract, so the native composes fresh each call.
+/// The body is composed fresh on each call; there is no response cache.
 pub async fn get_diagnostics(State(state): State<AppState>) -> Json<Value> {
     // The log store ships off, so on a stock node the store has no signals; the
     // host read is the same fallback `/api/status/full` takes. The degraded
@@ -79,10 +76,9 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> Json<Value> {
 // agent — version + uptime + process metrics.
 // ---------------------------------------------------------------------------
 
-/// The agent identity + this daemon's process metrics, mirroring the FastAPI
-/// `_collect_agent`: the resolved version, the runtime uptime (the daemon's own
-/// process uptime, the same fallback the Python route lands on when the runtime
-/// has no tracked value), and the per-process CPU + RSS.
+/// The agent identity + this daemon's process metrics: the resolved version,
+/// the runtime uptime (the daemon's own process uptime), and the per-process
+/// CPU + RSS.
 ///
 /// The process metrics come from `/proc/self`: RSS from `/proc/self/statm`,
 /// reported in MB rounded to one decimal like the Python `memory_info().rss / MiB`
@@ -146,13 +142,11 @@ fn page_size_bytes() -> f64 {
 // board — the HAL summary.
 // ---------------------------------------------------------------------------
 
-/// The board summary, mirroring the FastAPI `_collect_board`: `name` (or `"--"`),
+/// The board summary: `name` (or `"--"`),
 /// `soc` (or `"unknown"`), `arch` (or `"unknown"`), and `ram_total_mb` (`ram_mb`
 /// as an int, or `0`). Projected from the full board dict the detector persists to
-/// the board sidecar — the same `name` / `soc` / `arch` / `ram_mb` fields the
-/// FastAPI `detect_board()` returns. An absent / unreadable / non-object sidecar
-/// degrades every field to its default, the same shape the FastAPI route emits
-/// when its own `detect_board()` raises.
+/// the board sidecar (its `name` / `soc` / `arch` / `ram_mb` fields). An absent /
+/// unreadable / non-object sidecar degrades every field to its default.
 fn collect_board(board_path: &Path) -> Value {
     let board = crate::routes::status::read_board(board_path);
     let obj = board.as_object();
@@ -192,7 +186,7 @@ fn collect_board(board_path: &Path) -> Value {
 // system — CPU / RAM / disk / temp / load average.
 // ---------------------------------------------------------------------------
 
-/// The system block, mirroring the FastAPI `_collect_system`: the hardware
+/// The system block: the hardware
 /// signals (the log store's when it runs, else the host's own read through
 /// [`crate::hw_local`]) mapped to the diagnostics field set (`cpu_percent`,
 /// `memory_used_mb`, `memory_total_mb`, `disk_used_gb`, `disk_total_gb`,
@@ -305,10 +299,9 @@ fn read_cpu_temp_sysfs() -> Option<f64> {
 // network — primary IPv4 + ethernet/wlan MAC.
 // ---------------------------------------------------------------------------
 
-/// The network block, mirroring the FastAPI `_collect_network`: the primary
+/// The network block: the primary
 /// non-loopback IPv4 and the `eth0` / `wlan0` MAC addresses. Each leg degrades to
-/// `null` when its source is unavailable, the same `None` the Python reads return
-/// on a miss.
+/// `null` when its source is unavailable.
 fn collect_network() -> Value {
     json!({
         "ip": read_primary_ipv4().map(Value::from).unwrap_or(Value::Null),

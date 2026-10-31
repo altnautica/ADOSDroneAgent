@@ -1,11 +1,11 @@
 //! The slice of `/etc/ados/config.yaml` the pairing-info route projects.
 //!
-//! The FastAPI pairing-info endpoint reads its identity fields off the loaded
-//! agent config: the device id, the human name, the profile, and the radio
-//! peer's device id. This module reads the same on-disk YAML directly, typing
-//! only the fields the route needs and tolerating every other section, the same
-//! pattern the cloud relay's config reader uses. A config the Python agent wrote
-//! reads identically here because the field names + defaults are mirrored.
+//! The pairing-info route reports identity fields off the agent config: the
+//! device id, the human name, the profile, and the radio peer's device id. This
+//! module reads the on-disk YAML directly, typing only the fields the route
+//! needs and tolerating every other section, the same pattern the cloud relay's
+//! config reader uses. A config the Python agent wrote reads identically here
+//! because the field names + defaults match the Python config models.
 //!
 //! The reader is total: a missing or unparseable file yields the all-defaults
 //! snapshot rather than an error, so the guaranteed-200 pairing-info contract
@@ -37,7 +37,7 @@ pub fn device_id_file_for(config: &Path) -> PathBuf {
 }
 
 /// The `agent:` section: the device identity the pairing-info route reports.
-/// Defaults mirror the Python `AgentConfig` field defaults so an absent section
+/// Defaults match the Python `AgentConfig` field defaults so an absent section
 /// reads the same value the loaded Python config would (`name: "my-drone"`,
 /// `profile: "auto"`).
 #[derive(Debug, Clone, Deserialize)]
@@ -69,8 +69,8 @@ impl Default for AgentSection {
 }
 
 /// The `video.wfb:` slice the pairing-info route reads. Only the radio peer's
-/// device id is typed; every other wfb field is tolerated. Mirrors the Python
-/// `video.wfb.paired_with_device_id`, which persists on both profiles once a
+/// device id is typed; every other wfb field is tolerated. Same key as the
+/// Python `video.wfb.paired_with_device_id`, which persists on both profiles once a
 /// bind tunnel (or a PresenceBeacon) back-fills it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WfbSection {
@@ -131,9 +131,7 @@ impl PairingConfig {
     }
 
     /// The radio peer's device id, or `None` when no peer is recorded or it is
-    /// the empty string. Mirrors the Python guard
-    /// (`isinstance(peer_raw, str) and peer_raw`): a present-but-empty value is
-    /// treated as no peer.
+    /// the empty string: a present-but-empty value is treated as no peer.
     pub fn radio_peer_device_id(&self) -> Option<String> {
         self.video
             .wfb
@@ -145,7 +143,7 @@ impl PairingConfig {
 }
 
 /// The `security.api:` slice the proxied-route auth gate reads. Only the
-/// manually-configured key is typed; every other field is tolerated. Mirrors
+/// manually-configured key is typed; every other field is tolerated. Matches
 /// the Python `ApiSecurityConfig.api_key` (default `""`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApiSecuritySection {
@@ -153,7 +151,7 @@ pub struct ApiSecuritySection {
     pub api_key: String,
     /// Browser origins allowed to make cross-origin calls to this edge.
     ///
-    /// Mirrors the Python `ApiSecurityConfig.cors_origins` field name and
+    /// Matches the Python `ApiSecurityConfig.cors_origins` field name and
     /// default so a config either half wrote reads identically here. The
     /// defaults ALWAYS apply on top (see
     /// [`ApiSecuritySection::effective_cors_origins`]), for the same reason
@@ -221,7 +219,7 @@ impl ApiSecuritySection {
 }
 
 /// The `security:` section of `/etc/ados/config.yaml` the proxied-route auth
-/// gate reads. Mirrors the Python `SecurityConfig` field names + defaults so a
+/// gate reads. Matches the Python `SecurityConfig` field names + defaults so a
 /// config the Python agent wrote reads identically here:
 ///
 /// - `api.api_key` ⇒ the manually-configured key (default `""`).
@@ -253,7 +251,7 @@ pub struct ControlSecurityConfig {
 }
 
 /// The `mcp:` section: the AI-control-surface posture the LAN auth edge reads.
-/// A control-front-only section (no Python mirror). Default all-off, so the MCP
+/// A control-front-only section (no Python counterpart). Default all-off, so the MCP
 /// token path is inert until an operator opts in.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct McpSection {

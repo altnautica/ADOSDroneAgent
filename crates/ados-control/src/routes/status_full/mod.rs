@@ -5,8 +5,7 @@
 //! separate requests (`/api/status` + `/api/services` + `/api/system` +
 //! `/api/video`). On this native front the agent runs as a separate daemon with
 //! no in-process service tracker, no video pipeline object, and no in-process WFB
-//! manager — so each block is sourced the same way the FastAPI route's
-//! multi-process branch is:
+//! manager — so each block is sourced from the multi-process seams:
 //!
 //! - **agent info** (`version`, `uptime_seconds`, `board`, `health`,
 //!   `fc_connected`/`fc_port`/`fc_baud`) — the same seams `/api/status` reads: the
@@ -21,11 +20,9 @@
 //!   reads `state: "idle"` with `reason: "condition_unmet"`, as the supervisor
 //!   holds it.
 //! - **`resources`** — CPU / memory / swap / disk / temperature derived from the
-//!   store's most-recent hardware snapshots, the same 13-field subset the FastAPI
-//!   `/api/status/full` selects from `derive_resources`. An unreachable store (or
-//!   one missing an essential field) degrades to an empty object — the most-
-//!   degraded shape the FastAPI route emits when both the store and psutil are
-//!   unavailable.
+//!   store's most-recent hardware snapshots, a fixed 13-field subset. An
+//!   unreachable store (or one missing an essential field) degrades to an empty
+//!   object.
 //! - **`video`** — the multi-process branch: there is no in-process pipeline, so
 //!   the block is built from a mediamtx probe (drone profile) or gated on the WFB
 //!   receive link actually delivering frames (ground-station profile), with an
@@ -64,8 +61,7 @@
 //!   when no fresh peer is decoded, never a fabricated block.
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / config / systemctl
-//! degrades that block to the same empty/default shape the FastAPI route returns
-//! when its own source is unavailable, never a 500. The route carries no path
+//! degrades that block to an empty/default shape, never a 500. The route carries no path
 //! params and never mutates.
 
 use crate::state::AppState;
@@ -80,9 +76,15 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 
 mod blocks;
 mod presence;
+mod response;
+#[cfg(test)]
+mod schema_file;
+
+pub use response::StatusFullResponse;
 
 pub(crate) use blocks::{
     base::*, camera::*, crsf::*, fc_identity::*, mesh::*, peers::*, radio::*, reconcilers::*,
@@ -96,10 +98,10 @@ pub(crate) use blocks::{
 /// `GET /api/status/full` → the consolidated status body.
 ///
 /// Sources every block from the multi-process seams (the state snapshot, the
-/// logging store, the radio sidecar, systemd, and the config), exactly as the
-/// FastAPI route's no-in-process-object branch does. Guaranteed 200: each block
+/// logging store, the radio sidecar, systemd, and the config). Guaranteed 200:
+/// each block
 /// degrades in place when its source is unavailable.
-pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
+pub async fn get_full_status(State(state): State<AppState>) -> Json<StatusFullResponse> {
     let config_profile = config_agent_profile(&state.pairing_paths.config);
     let (resolved_profile, resolved_role) =
         crate::profile::current_profile_and_role(&config_profile);
@@ -169,32 +171,9 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
     let (npu_tops, has_accelerator, perception_tier, offload_target) =
         crate::routes::status::perception_fields(&board, backend_inference_capable);
 
-    let mut payload = Map::new();
-    payload.insert("version".to_string(), json!(state.agent_version()));
-    payload.insert("uptime_seconds".to_string(), uptime);
-    payload.insert("board".to_string(), board);
-    payload.insert("npuTops".to_string(), json!(npu_tops));
-    payload.insert("hasAccelerator".to_string(), json!(has_accelerator));
-    payload.insert("perceptionTier".to_string(), json!(perception_tier));
-    payload.insert(
-        "perceptionOffloadTarget".to_string(),
-        match offload_target {
-            Some(t) => Value::String(t),
-            None => Value::Null,
-        },
-    );
-    // Derived before the inserts below move `fc_liveness`'s fields out.
+    // Derived before the fields below move `fc_liveness`'s values out.
     let fc_reachable = super::status::derive_fc_reachable(&fc_liveness);
-    let fc_variant = fc_liveness.fc_variant.clone();
-    payload.insert("health".to_string(), health);
-    payload.insert("fc_connected".to_string(), fc_connected);
-    payload.insert("fc_port".to_string(), fc_port);
-    payload.insert(
-        "sim".to_string(),
-        json!(ados_config::simulation::simulation_enabled()),
-    );
-    presence::insert_presence_flags(
-        &mut payload,
+    let presence = presence::presence_flags(
         &resolved_profile,
         &presence::PresenceDirs {
             run: &state.run_dir,
@@ -205,114 +184,94 @@ pub async fn get_full_status(State(state): State<AppState>) -> Json<Value> {
                 .unwrap_or_else(|| Path::new("/etc/ados")),
             bin: &state.bin_dir,
         },
+        SystemTime::now(),
     );
-    payload.insert(
-        "lora".to_string(),
-        json!(crate::routes::lora::lora_present(
-            &state.pairing_paths.config,
-            &resolved_profile
-        )),
-    );
-    payload.insert("fc_baud".to_string(), fc_baud);
-    payload.insert(
-        "transportOpen".to_string(),
-        json!(fc_liveness.transport_open),
-    );
-    payload.insert("mavlinkAlive".to_string(), json!(fc_liveness.mavlink_alive));
-    payload.insert("heartbeatAgeS".to_string(), fc_liveness.heartbeat_age_s);
-    payload.insert("fcSource".to_string(), fc_liveness.fc_source);
-    payload.insert("fcLinkHint".to_string(), fc_liveness.fc_link_hint);
-    // The honest connected-or-reachable verdict, and the protocol family it was
-    // identified as. `/api/status` has carried both for a while; the full
-    // payload did not, so a LAN-polling consumer had no way to tell a healthy
-    // MSP flight controller (which never emits a MAVLink heartbeat, so
-    // `fc_connected` stays false) from an absent one, and reported "no flight
-    // controller" over a working link.
-    payload.insert("fcReachable".to_string(), json!(fc_reachable));
-    payload.insert("fcVariant".to_string(), fc_variant);
-    // The firmware family, named the same way `/api/status` and the cloud
-    // heartbeat name it, so a LAN-only node carries its ArduPilot/PX4 badge.
-    payload.insert("fcFirmware".to_string(), fc_liveness.fc_firmware);
-    payload.insert(
-        "fcCommandDownGated".to_string(),
-        json!(fc_liveness.fc_command_down_gated),
-    );
-    payload.insert("services".to_string(), services);
-    payload.insert("resources".to_string(), resources);
-    payload.insert("video".to_string(), video);
-    payload.insert("telemetry".to_string(), telemetry);
-    payload.insert("mesh".to_string(), mesh);
-    payload.insert("radio".to_string(), radio);
-    payload.insert("profile".to_string(), json!(resolved_profile));
-    payload.insert(
-        "role".to_string(),
-        resolved_role.map(Value::from).unwrap_or(Value::Null),
-    );
-    payload.insert(
-        "runtimeMode".to_string(),
-        json!(crate::runtime_mode::current_in(
-            &resolved_profile,
-            &state.bin_dir
-        )),
-    );
-    // Whether this node holds the per-pair credential its ground station's
-    // relayed calls must present. Reported because the consequence is
-    // operator-visible: with no secret on file every relayed request but the
-    // credential delivery itself is refused, and without this field a fleet
-    // operator has no way to tell an unprovisioned aircraft apart from a
-    // radio fault.
-    payload.insert(
-        "relaySecretPresent".to_string(),
-        json!(
-            ados_protocol::relay_ticket::load_secret_at(&state.pairing_paths.relay_secret)
-                .is_some()
-        ),
-    );
-    // Whether the rule keeping a network-capable plugin off this node's own
-    // loopback listeners is loaded. While it reads `unavailable`, a
-    // `network.outbound` grant is refused and a unit holding one keeps the
-    // no-network sandbox, so an operator can see why a plugin has no network.
-    payload.insert(
-        "plugin_loopback_guard".to_string(),
-        json!(ados_protocol::plugin_loopback_guard::read_state().label()),
-    );
+    let lora = crate::routes::lora::lora_present(&state.pairing_paths.config, &resolved_profile);
+    let runtime_mode = crate::runtime_mode::current_in(&resolved_profile, &state.bin_dir);
 
     // The sidecar folds, computed together with the services list above:
     // camera presence + USB recovery, the reconciler verdicts (management-link
     // guardian, reach-back failover, USB rehome, WiFi power-save), per-adapter
     // stable-MAC verdicts, linked WFB peers and the CRSF lane state. Each key is
-    // present only when its source is fresh, never a fabricated block.
-    if let Some(Value::Object(folds)) = slow.get("folds") {
-        for (k, v) in folds {
-            payload.insert(k.clone(), v.clone());
-        }
-    }
+    // present only when its source is fresh, never a fabricated block. The
+    // router extras follow them.
+    let mut extras = match slow.get("folds") {
+        Some(Value::Object(folds)) => folds.clone(),
+        _ => Map::new(),
+    };
+    extras.extend(router_extras);
 
-    // The FC identity reconciler's last verdict (`/run/ados/fc-identity.json`),
-    // or null before its first tick.
-    payload.insert("fc_identity".to_string(), read_fc_identity(&state.run_dir));
-    for (k, v) in router_extras {
-        payload.insert(k, v);
-    }
-
-    // The swarm neighbour table, folded in only when `ados-swarmbus` has actually
-    // published one. PROFILE-AGNOSTIC: a drone carries its own fleet view over the
-    // LAN path, which is the whole point of a decentralized bus. The key is OMITTED
-    // rather than emitted as `[]` when the bus is silent, because an empty array
-    // would claim "this node hears no neighbours" — a different fact from "this node
-    // runs no swarm bus". A client that wants the counters, or
-    // the degraded shape explicitly, reads `/api/swarm/neighbors`.
-    if let Some(neighbors) = super::swarm::neighbors_for_full_status(&state) {
-        payload.insert("neighbors".to_string(), neighbors);
-    }
-
-    Json(Value::Object(payload))
+    Json(StatusFullResponse {
+        version: state.agent_version(),
+        uptime_seconds: uptime,
+        board,
+        npu_tops,
+        has_accelerator,
+        perception_tier: perception_tier.to_string(),
+        perception_offload_target: offload_target,
+        health,
+        fc_connected: fc_connected.as_bool().unwrap_or(false),
+        fc_port,
+        sim: ados_config::simulation::simulation_enabled(),
+        presence,
+        lora,
+        fc_baud,
+        transport_open: fc_liveness.transport_open,
+        mavlink_alive: fc_liveness.mavlink_alive,
+        heartbeat_age_s: fc_liveness.heartbeat_age_s,
+        fc_source: fc_liveness.fc_source,
+        fc_link_hint: fc_liveness.fc_link_hint,
+        // The honest connected-or-reachable verdict, and the protocol family it
+        // was identified as: a healthy MSP flight controller never emits a
+        // MAVLink heartbeat, so `fc_connected` alone reads it as absent.
+        fc_reachable,
+        fc_variant: fc_liveness.fc_variant,
+        // The firmware family, named the same way `/api/status` and the cloud
+        // heartbeat name it, so a LAN-only node carries its ArduPilot/PX4 badge.
+        fc_firmware: fc_liveness.fc_firmware,
+        fc_command_down_gated: fc_liveness.fc_command_down_gated,
+        services,
+        resources,
+        video,
+        telemetry,
+        mesh,
+        radio,
+        profile: resolved_profile,
+        role: resolved_role,
+        runtime_mode: runtime_mode.to_string(),
+        // Whether this node holds the per-pair credential its ground station's
+        // relayed calls must present. With no secret on file every relayed
+        // request but the credential delivery itself is refused, and without
+        // this field a fleet operator cannot tell an unprovisioned aircraft
+        // apart from a radio fault.
+        relay_secret_present: ados_protocol::relay_ticket::load_secret_at(
+            &state.pairing_paths.relay_secret,
+        )
+        .is_some(),
+        // Whether the rule keeping a network-capable plugin off this node's own
+        // loopback listeners is loaded. While it reads `unavailable`, a
+        // `network.outbound` grant is refused, so an operator can see why a
+        // plugin has no network.
+        plugin_loopback_guard: ados_protocol::plugin_loopback_guard::read_state()
+            .label()
+            .to_string(),
+        // The FC identity reconciler's last verdict (`/run/ados/fc-identity.json`),
+        // or null before its first tick.
+        fc_identity: read_fc_identity(&state.run_dir),
+        // The swarm neighbour table, present only when `ados-swarmbus` has
+        // published one. PROFILE-AGNOSTIC: a drone carries its own fleet view
+        // over the LAN path. The key is OMITTED rather than `[]` when the bus is
+        // silent: an empty array would claim "this node hears no neighbours", a
+        // different fact from "this node runs no swarm bus".
+        neighbors: super::swarm::neighbors_for_full_status(&state),
+        extras,
+    })
 }
 
 /// The agent's raw `agent.profile` config value (underscore form, e.g. `"drone"`
 /// / `"ground_station"` / `"auto"`), used both to resolve the wire profile and to
 /// gate the mesh block on the raw `"ground_station"` value. Defaults to `"auto"`
-/// (the Python `AgentConfig` default) when the file is absent.
+/// (the Python `AgentConfig.profile` default) when the file is absent.
 fn config_agent_profile(config_path: &Path) -> String {
     crate::config::PairingConfig::cached(config_path)
         .agent

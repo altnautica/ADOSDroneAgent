@@ -10,14 +10,12 @@ pub(crate) const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// Derive the consolidated-status `resources` block from merged hardware signals.
 ///
-/// Returns the exact 13-field subset the FastAPI `/api/status/full` selects from
-/// `derive_resources`: `cpu_percent`, the memory family, the swap family, the disk
+/// Returns a fixed 13-field subset of the derived resources: `cpu_percent`, the memory family, the swap family, the disk
 /// family, and `temperature` (the `temperatures` map + `load_avg` list the helper
 /// also produces are NOT carried by the consolidated route). Returns an empty
 /// object `{}` when the store is unreachable or an essential field is missing —
-/// the most-degraded shape the FastAPI route emits (both the store and psutil
-/// unavailable). The essential set mirrors the Python guard: memory total +
-/// available, aggregate CPU, and filesystem total + used.
+/// the most-degraded shape. The essential set is memory total + available,
+/// aggregate CPU, and filesystem total + used.
 pub(crate) fn derive_resources_subset(signals: Option<&Map<String, Value>>) -> Value {
     let Some(signals) = signals else {
         return json!({});
@@ -31,7 +29,7 @@ pub(crate) fn derive_resources_subset(signals: Option<&Map<String, Value>>) -> V
 
     // Any missing essential → the route falls back to a complete read; on this
     // daemon there is no psutil fallback, so the most-degraded path is an empty
-    // object, matching the Python `except ImportError: pass` (resources stays {}).
+    // object.
     let (Some(total), Some(avail), Some(cpu), Some(disk_total), Some(disk_used)) =
         (total, avail, cpu, disk_total, disk_used)
     else {
@@ -79,7 +77,7 @@ pub(crate) fn derive_resources_subset(signals: Option<&Map<String, Value>>) -> V
 }
 
 /// A numeric signal value, or `None` if absent / non-numeric. A JSON `bool` is not
-/// a `Number`, so it is excluded naturally (matching the Python `_num` bool guard).
+/// a `Number`, so it is excluded naturally.
 pub(crate) fn signal_num(signals: &Map<String, Value>, key: &str) -> Option<f64> {
     match signals.get(key) {
         Some(Value::Number(n)) => n.as_f64(),
@@ -222,8 +220,8 @@ pub(crate) fn apply_condition_unmet(
 /// systemd prefixes a failed unit's row with a status glyph and will colour or
 /// page its output otherwise, and this parser splits on columns. `rc != 0` and a
 /// missing binary both arrive as [`crate::probe::ProbeOutput::Unavailable`],
-/// which is the empty list the Python returns for either — as is a probe that
-/// times out on a wedged bus.
+/// which yields the empty list — as does a probe that times out on a wedged
+/// bus.
 pub(crate) async fn systemd_services_fallback() -> Vec<Value> {
     let out = crate::probe::capture_systemctl(
         &[

@@ -114,11 +114,8 @@ struct GsPairStatus {
     paired: bool,
 }
 
-/// Read the GS pair status. Mirrors the bits of `PairManager.status("gs")` the
-/// FastAPI route consulted. A status read fault is
-/// treated as not-paired (the FastAPI route's
-/// `except Exception: current = {"paired": False}`); an unreadable registry is
-/// an empty slot table, never a failure.
+/// Read the GS pair status. A status read fault is treated as not-paired; an
+/// unreadable registry is an empty slot table, never a failure.
 fn gs_pair_status() -> GsPairStatus {
     let key = rx_key_path();
     let mut paired = std::fs::metadata(&key)
@@ -233,7 +230,7 @@ fn load_slot_system_ids() -> std::collections::BTreeMap<u8, SlotSystemId> {
 ///
 /// Gates on the profile, then forwards the `unpair` op (which wipes both key
 /// files, clears the persisted pair state, restarts the receive unit) and returns
-/// its reply. A socket-reported failure is the FastAPI 500 `E_UNPAIR_FAILED`; an
+/// its reply. A socket-reported failure is a 500 `E_UNPAIR_FAILED`; an
 /// unreachable socket degrades to a 503.
 pub async fn delete_wfb_pair(State(_state): State<AppState>) -> Response {
     if !is_ground_station() {
@@ -364,9 +361,8 @@ fn split_reply(reply: Value) -> Result<Map<String, Value>, SocketError> {
 }
 
 /// The front's no-link 500-family error when the data-plane command socket is
-/// unreachable. The FastAPI route installs/wipes the key in-process; the front
-/// cannot, so an absent socket degrades to a 503 with the route's error code
-/// rather than a 500.
+/// unreachable. The front cannot install/wipe the key itself, so an absent socket
+/// degrades to a 503 with the route's error code rather than a 500.
 fn socket_unavailable(code: &str) -> Response {
     nested_detail(
         StatusCode::SERVICE_UNAVAILABLE,

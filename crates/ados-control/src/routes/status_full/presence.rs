@@ -8,7 +8,9 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use ados_config::capture_storage::SIDECAR_MAX_AGE;
-use serde_json::{Map, Value};
+use schemars::JsonSchema;
+use serde::Serialize;
+use serde_json::Value;
 
 use crate::routes::sensing::run_relative;
 use crate::routes::sensing::storage::CAPTURE_PROFILES;
@@ -30,13 +32,22 @@ pub(crate) struct PresenceDirs<'a> {
     pub bin: &'a Path,
 }
 
+/// The four flags, flattened onto the top level of the status body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
+pub(crate) struct PresenceFlags {
+    pub clock: bool,
+    pub sensor_hub: bool,
+    pub gnss: bool,
+    pub capture_storage: bool,
+}
+
 /// The four flags for `profile`, in either the wire form (`ground-station`,
 /// what `/api/status/full` resolves) or the unit-table form (`ground_station`).
 pub(crate) fn presence_flags(
     profile: &str,
     dirs: &PresenceDirs<'_>,
     now: SystemTime,
-) -> [(&'static str, bool); 4] {
+) -> PresenceFlags {
     let gate = profile.replace('-', "_");
     let profile = gate.as_str();
     // The unit execs /bin/true until its best-effort binary lands, so the
@@ -53,21 +64,11 @@ pub(crate) fn presence_flags(
             SIDECAR_MAX_AGE,
             now,
         );
-    [
-        ("clock", clock),
-        ("sensor_hub", sensor_hub),
-        ("gnss", gnss),
-        ("capture_storage", capture_storage),
-    ]
-}
-
-pub(super) fn insert_presence_flags(
-    payload: &mut Map<String, Value>,
-    profile: &str,
-    dirs: &PresenceDirs<'_>,
-) {
-    for (k, v) in presence_flags(profile, dirs, SystemTime::now()) {
-        payload.insert(k.to_string(), Value::Bool(v));
+    PresenceFlags {
+        clock,
+        sensor_hub,
+        gnss,
+        capture_storage,
     }
 }
 
@@ -109,10 +110,8 @@ mod tests {
             etc: &f.etc,
             bin: &f.bin,
         };
-        presence_flags(profile, &dirs, now)
-            .iter()
-            .map(|x| x.1)
-            .collect()
+        let p = presence_flags(profile, &dirs, now);
+        vec![p.clock, p.sensor_hub, p.gnss, p.capture_storage]
     }
 
     fn flags(profile: &str, f: &Fixture) -> Vec<bool> {

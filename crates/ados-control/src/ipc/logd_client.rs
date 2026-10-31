@@ -11,8 +11,7 @@
 //! A store snapshot is sparse per tick (each signal class fires on its own
 //! cadence), so a single latest row does not carry every field; the merge folds
 //! the most recent handful of snapshots into one map, newest value winning, so a
-//! full picture is assembled from the last couple of seconds — the same merge the
-//! Python `latest_hw_signals` helper does.
+//! full picture is assembled from the last couple of seconds.
 //!
 //! When the store is unreachable, returns an error or `None` (not an empty map),
 //! so the caller falls back to its own default rather than serving a half-empty
@@ -28,7 +27,7 @@ pub const LOGD_QUERY_SOCKET_NAME: &str = "logd-query.sock";
 /// How many recent hardware snapshots to merge into one signal map. At the
 /// collector's base tick this is ~2 s of history — comfortably more than the
 /// slowest signal-class cadence, so every field appears at least once in the
-/// window. Mirrors the Python helper's merge window.
+/// window.
 const MERGE_ROWS: u32 = 20;
 
 /// A hard ceiling on the response read. A `kind=hw&limit=20` page of signal maps
@@ -181,7 +180,7 @@ impl LogdQueryClient {
 
     /// A minimal HTTP/1.1 `GET` over the query Unix socket. Returns the status code
     /// and the response body bytes. `Connection: close` lets the body be read to
-    /// EOF; a chunked body is de-chunked. Bounded by [`MAX_READ_BYTES`] so a
+    /// EOF; a chunked body is de-chunked. Bounded by `MAX_READ_BYTES` so a
     /// runaway response cannot exhaust memory, and by [`QUERY_TIMEOUT`] end to
     /// end so a store that accepts and then stalls cannot hang the route.
     pub async fn get(&self, path: &str) -> std::io::Result<(u16, Vec<u8>)> {

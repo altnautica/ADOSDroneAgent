@@ -10,7 +10,7 @@
 //! playlist or segment fetch needs. No `X-ADOS-Key`, `Authorization` or cookie
 //! ever reaches mediamtx, and its logs never carry a credential.
 //!
-//! The response streams through unbuffered ([`crate::proxy::relay_response`]),
+//! The response streams through unbuffered (`crate::proxy::relay_response`),
 //! so a segment flows to the player as mediamtx produces it and a low-latency
 //! blocking playlist reload is held open rather than cut.
 

@@ -374,7 +374,7 @@ async fn url_install_walks_the_job_and_reports_the_archive_digest() {
     let (status, body) = post_json(
         &f.state,
         "/api/plugins/install_from_url",
-        json!({"url": url, "expected_sha256": "00", "job_id": "j2"}),
+        json!({"url": url, "expected_sha256": "00".repeat(32), "job_id": "j2"}),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

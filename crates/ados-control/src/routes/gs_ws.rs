@@ -201,7 +201,7 @@ async fn close_profile_mismatch(socket: &mut WebSocket) {
 }
 
 // ---------------------------------------------------------------------------
-// Handshake auth (mirrors the Python `authenticate_websocket`).
+// Handshake auth (the same decision as the Python `authenticate_websocket`).
 // ---------------------------------------------------------------------------
 
 /// The outcome of the WebSocket handshake auth decision.
@@ -334,7 +334,7 @@ fn upgrade_with(ws: WebSocketUpgrade, auth: WsAuth) -> Option<(WebSocketUpgrade,
 }
 
 // ---------------------------------------------------------------------------
-// Profile gate (mirrors the FastAPI `_require_ground_profile`).
+// Profile gate: ground-station profile only.
 // ---------------------------------------------------------------------------
 
 /// True when the node resolves to the ground-station profile, the same source of

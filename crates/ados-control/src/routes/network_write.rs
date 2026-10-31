@@ -29,21 +29,17 @@
 //! strips the transport `ok` flag so the body matches the manager's own shape. The
 //! ops are `wifi_join` / `wifi_leave` / `wifi_forget` / `wifi_autoconnect`.
 //!
-//! ## Degrade posture (parity with the FastAPI route's reachable arm)
+//! ## Degrade posture
 //!
-//! The FastAPI join/leave/forget routes fall back to the packaged in-process
-//! `nmcli` manager when the socket is unreachable. The native front cannot mirror
-//! that fallback — it must not drive `nmcli` and race the daemon — so an
-//! unreachable / non-replying socket degrades to a `503 "Wi-Fi command socket
+//! The front never drives `nmcli` itself — it must not race the daemon for the
+//! radio — so an unreachable / non-replying socket degrades to a `503 "Wi-Fi command socket
 //! unavailable"` rather than a `500`, the same no-link posture the param-write
 //! surface takes when its own seam (the MAVLink socket) is absent. The command is
-//! never silently dropped. The autoconnect route's FastAPI twin has no fallback
-//! arm at all (it always calls the manager directly), so its unreachable case
-//! takes the same `503` posture.
+//! never silently dropped. The autoconnect route's unreachable case takes the
+//! same `503` posture.
 //!
 //! A reply with `ok:false` carries the daemon's `error` code; the route surfaces
-//! it as a `500` with the FastAPI `E_WIFI_*_FAILED` error-object body, matching
-//! the FastAPI server-reported-failure arm.
+//! it as a `500` with the `E_WIFI_*_FAILED` error-object body.
 
 use axum::extract::{Path, State};
 
@@ -76,10 +72,10 @@ enum NetCmd {
     /// the transport `ok` flag stripped.
     Reply(Map<String, Value>),
     /// A reply with `ok:false`: the daemon's `error` code (or a generic message
-    /// when the field is absent), surfaced as the FastAPI server-failure 500.
+    /// when the field is absent), surfaced as the server-failure 500.
     Error(String),
     /// The socket was unreachable / did not reply / replied unparseably: the
-    /// FastAPI command-socket-unavailable case the front maps to a 503.
+    /// command-socket-unavailable case the front maps to a 503.
     Unavailable,
     /// The daemon accepted the command but had not answered by the deadline. The
     /// operation may still complete (a join waits on NetworkManager), so this is
@@ -109,9 +105,8 @@ async fn wifi_cmd(sock: &std::path::Path, request: &Value) -> NetCmd {
 /// replies, so the deadline sits above that.
 pub(crate) const WIFI_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
-/// Branch a raw reply line on its transport `ok` flag, mirroring the FastAPI
-/// round-trip tail (`resp.get("ok") is False` → server-failure error, else strip
-/// `ok`). An unparseable / non-object reply is treated as unavailable.
+/// Branch a raw reply line on its transport `ok` flag (`ok: false` →
+/// server-failure error, else strip `ok`). An unparseable / non-object reply is treated as unavailable.
 fn classify_reply(line: &str) -> NetCmd {
     let parsed: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -120,8 +115,8 @@ fn classify_reply(line: &str) -> NetCmd {
     let Some(obj) = parsed.as_object() else {
         return NetCmd::Unavailable;
     };
-    // The FastAPI client branches only on `ok is False`; any other value
-    // (true / absent) proceeds to strip-ok and return the body.
+    // Only an explicit `ok: false` is a failure; any other value (true /
+    // absent) proceeds to strip-ok and return the body.
     if obj.get("ok") == Some(&Value::Bool(false)) {
         let err = obj
             .get("error")
@@ -138,10 +133,10 @@ fn classify_reply(line: &str) -> NetCmd {
 }
 
 // ---------------------------------------------------------------------------
-// Error envelopes (the FastAPI E_WIFI_* error-object bodies).
+// Error envelopes (the E_WIFI_* error-object bodies).
 // ---------------------------------------------------------------------------
 
-/// Build the FastAPI Wi-Fi error body: `(status, {"detail": {"error": {"code",
+/// Build the Wi-Fi error body: `(status, {"detail": {"error": {"code",
 /// "message"}}})`. The Wi-Fi routes raise an error whose `detail` is an error
 /// OBJECT (not the bare-string `detail` the rest of this surface uses), so these
 /// reproduce that exact nested shape.
@@ -154,9 +149,8 @@ fn wifi_error(status: StatusCode, code: &str, message: impl Into<String>) -> Res
 }
 
 /// The native no-fallback 503 the front returns when the command socket is
-/// unreachable. The FastAPI route falls back to the in-process `nmcli` manager
-/// here; the front cannot (it must not race the daemon for the radio), so it takes
-/// the same no-link posture the param-write surface takes on an absent seam.
+/// unreachable. The front never falls back to driving `nmcli` itself (it must not
+/// race the daemon for the radio), so it takes the same no-link posture the param-write surface takes on an absent seam.
 fn socket_unavailable(code: &str) -> Response {
     wifi_error(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -180,8 +174,7 @@ fn command_in_progress(code: &str) -> Response {
 // PUT /api/v1/network/client/join
 // ---------------------------------------------------------------------------
 
-/// The `PUT /client/join` request body. Mirrors the FastAPI join request: a
-/// required `ssid`, an optional `passphrase`, and an optional `force` flag
+/// The `PUT /client/join` request body: a required `ssid`, an optional `passphrase`, and an optional `force` flag
 /// (defaulting false).
 #[derive(Debug, Deserialize)]
 pub struct WifiJoinRequest {
@@ -195,11 +188,11 @@ pub struct WifiJoinRequest {
 /// `PUT /api/v1/network/client/join` → `{"joined", "ip", "gateway", "error"}`.
 ///
 /// Forwards a `wifi_join` op to the `ados-net` command socket. A reply with
-/// `joined:false` and the AP-busy error code maps to the FastAPI `409`
+/// `joined:false` and the AP-busy error code maps to a `409`
 /// (`E_WLAN0_BUSY_AP_ACTIVE` + `needs_force:true`); every other reply maps to the
-/// `{joined, ip, gateway, error}` success body the FastAPI route composes (each
+/// `{joined, ip, gateway, error}` success body (each
 /// field defaulting to false/null when absent). An unreachable socket → 503; an
-/// `ok:false` reply → the FastAPI `E_WIFI_JOIN_FAILED` 500.
+/// `ok:false` reply → the `E_WIFI_JOIN_FAILED` 500.
 pub async fn put_client_join(
     State(state): State<AppState>,
     Json(req): Json<WifiJoinRequest>,
@@ -227,7 +220,7 @@ async fn put_client_join_at(sock: &std::path::Path, req: WifiJoinRequest) -> Res
     };
 
     // The AP-mutex conflict: a join refused because the AP is up and `force` was
-    // not set. The FastAPI route turns this single result into a 409.
+    // not set. The route turns this single result into a 409.
     let joined = reply.get("joined").map(json_truthy).unwrap_or(false);
     if !joined {
         let err = reply.get("error").and_then(Value::as_str).unwrap_or("");
@@ -253,8 +246,7 @@ async fn put_client_join_at(sock: &std::path::Path, req: WifiJoinRequest) -> Res
     Json(join_response(&reply)).into_response()
 }
 
-/// Build the `{joined, ip, gateway, error}` success body, mirroring the FastAPI
-/// route's final dict: each field is read off the reply, defaulting to
+/// Build the `{joined, ip, gateway, error}` success body: each field is read off the reply, defaulting to
 /// false/null when absent.
 fn join_response(reply: &Map<String, Value>) -> Value {
     json!({
@@ -329,7 +321,7 @@ pub(crate) fn wifi_scan_response(result: Result<Vec<Value>, WifiScanError>) -> R
 ///
 /// Forwards a `wifi_leave` op to the `ados-net` command socket and returns the
 /// reply verbatim (the `ok` flag already stripped). An unreachable socket → 503;
-/// an `ok:false` reply → the FastAPI `E_WIFI_LEAVE_FAILED` 500.
+/// an `ok:false` reply → the `E_WIFI_LEAVE_FAILED` 500.
 pub async fn delete_client(State(state): State<AppState>) -> Response {
     delete_client_at(&wifi_cmd_sock_in(&state.run_dir)).await
 }
@@ -356,9 +348,9 @@ async fn delete_client_at(sock: &std::path::Path) -> Response {
 /// `{"forgot", "name", "error"}`.
 ///
 /// Forwards a `wifi_forget` op to the `ados-net` command socket. A reply with
-/// `forgot:false` maps to the FastAPI `400` (`E_WIFI_FORGET_FAILED` carrying the
+/// `forgot:false` maps to a `400` (`E_WIFI_FORGET_FAILED` carrying the
 /// reply's `error`); a `forgot:true` reply is returned verbatim. An unreachable
-/// socket → 503; an `ok:false` reply → the FastAPI `E_WIFI_FORGET_FAILED` 500.
+/// socket → 503; an `ok:false` reply → the `E_WIFI_FORGET_FAILED` 500.
 pub async fn delete_client_configured(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -381,7 +373,7 @@ async fn delete_client_configured_at(sock: &std::path::Path, name: String) -> Re
         NetCmd::TimedOut => return command_in_progress("E_WIFI_FORGET_IN_PROGRESS"),
     };
 
-    // A processed-but-failed forget (forgot:false) is the FastAPI 400, with the
+    // A processed-but-failed forget (forgot:false) is a 400, with the
     // reply's `error` as the message (defaulting to nmcli_failed).
     let forgot = reply.get("forgot").map(json_truthy).unwrap_or(false);
     if !forgot {
@@ -401,9 +393,9 @@ async fn delete_client_configured_at(sock: &std::path::Path, name: String) -> Re
 // PUT /api/v1/network/client/configured/{name}/autoconnect
 // ---------------------------------------------------------------------------
 
-/// The `PUT .../autoconnect` request body. Mirrors the FastAPI route, which reads
-/// `bool(body.get("enabled"))` off an untyped dict: a missing / null / falsey
-/// value is `false`, so the field is optional and defaults to `false`.
+/// The `PUT .../autoconnect` request body. `enabled` is read with truthiness: a
+/// missing / null / falsey value is `false`, so the field is optional and
+/// defaults to `false`.
 #[derive(Debug, Default, Deserialize)]
 pub struct AutoconnectRequest {
     #[serde(default)]
@@ -416,10 +408,10 @@ pub struct AutoconnectRequest {
 /// Forwards a `wifi_autoconnect` op to the `ados-net` command socket (the daemon
 /// runs `nmcli connection modify <name> connection.autoconnect yes|no` through its
 /// Wi-Fi-client manager). A reply with a non-null `error` (a missing connection,
-/// an `nmcli` failure, or an empty name → `name_required`) maps to the FastAPI
+/// an `nmcli` failure, or an empty name → `name_required`) maps to a
 /// `400` (`E_WIFI_AUTOCONNECT_FAILED` carrying the manager's `error`); an
 /// `error:null` reply is returned verbatim. An unreachable socket → 503; an
-/// `ok:false` reply → the FastAPI `E_WIFI_AUTOCONNECT_FAILED` 500.
+/// `ok:false` reply → the `E_WIFI_AUTOCONNECT_FAILED` 500.
 pub async fn put_client_autoconnect(
     State(state): State<AppState>,
     Path(name): Path<String>,
@@ -450,8 +442,8 @@ async fn put_client_autoconnect_at(
     };
 
     // A processed-but-failed toggle carries a truthy `error` (the manager reports
-    // name_required / nmcli_failed / the trimmed nmcli stderr); the FastAPI route
-    // turns any truthy `error` into a 400 with that message.
+    // name_required / nmcli_failed / the trimmed nmcli stderr); the route turns
+    // any truthy `error` into a 400 with that message.
     if let Some(err) = reply.get("error").filter(|v| json_truthy(v)) {
         let message = err
             .as_str()
@@ -471,8 +463,8 @@ async fn put_client_autoconnect_at(
 // Small shared helper.
 // ---------------------------------------------------------------------------
 
-/// Python `bool(x)` truthiness over a JSON value, matching the `result.get(...)`
-/// truthiness checks the FastAPI route uses on the manager reply.
+/// Python-style `bool(x)` truthiness over a JSON value, applied to the fields of
+/// the manager reply.
 fn json_truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,

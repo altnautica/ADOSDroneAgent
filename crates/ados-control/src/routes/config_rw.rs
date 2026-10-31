@@ -14,7 +14,7 @@
 //!   schema; a string value is coerced to the field's current type (text callers
 //!   can only send strings); the result is validated against the field's schema
 //!   (type, enum, bounds), then the whole resulting config against the model's
-//!   cross-field rules ([`CROSS_FIELD`]), and merged into `config.yaml` through
+//!   cross-field rules (`CROSS_FIELD`), and merged into `config.yaml` through
 //!   the shared config store, which preserves every other key and the file's
 //!   0600 mode. A write that landed then runs the config side effects (enable
 //!   markers, unit kicks; [`ados_config::side_effects`]).

@@ -314,12 +314,14 @@ fn download_refusal(e: DownloadError) -> Refusal {
         | DownloadError::NotHttps
         | DownloadError::NoHost
         | DownloadError::HostNotAllowed(_) => Refusal::usage("url_invalid", e.to_string()),
-        DownloadError::Transport(_) | DownloadError::Io(_) => Refusal::new(
-            20,
-            "download_failed",
-            e.to_string(),
-            StatusCode::BAD_GATEWAY,
-        ),
+        DownloadError::Transport(_) | DownloadError::Io(_) | DownloadError::InvalidPin(_) => {
+            Refusal::new(
+                20,
+                "download_failed",
+                e.to_string(),
+                StatusCode::BAD_GATEWAY,
+            )
+        }
     }
 }
 
@@ -342,7 +344,8 @@ async fn download_archive(
             }
         };
         let body = fetch_capped(source, &url, ARCHIVE_MAX_BYTES).map_err(download_refusal)?;
-        verify_sha256(&body, &expected_sha256).map_err(|e| {
+        let pin = (!expected_sha256.is_empty()).then_some(expected_sha256.as_str());
+        verify_sha256(&body, pin).map_err(|e| {
             tracing::debug!(error = %e, "plugin archive sha256 mismatch");
             download_refusal(e)
         })?;

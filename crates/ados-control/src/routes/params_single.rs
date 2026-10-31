@@ -13,9 +13,8 @@
 //! When the name is present the body is `{"name": <name>, "value": <value>}` with
 //! the value passed through verbatim from the cache (preserving its exact JSON
 //! number form, the same way the full-list route clones the blob). When the name
-//! is absent — an empty cache, or a name not in it — the route returns the
-//! FastAPI 404 `{"detail": "Parameter '<name>' not found"}`, the exact status and
-//! message the proxied FastAPI route raised. A cache that exists but cannot be
+//! is absent — an empty cache, or a name not in it — the route returns
+//! 404 `{"detail": "Parameter '<name>' not found"}`. A cache that exists but cannot be
 //! read or parsed is a 503.
 
 use axum::extract::{Path, State};
@@ -32,8 +31,8 @@ use crate::state::AppState;
 ///
 /// Reads the value from the router's on-disk parameter cache (the same source the
 /// full-list read uses). A name present in the cache returns `200` with the value
-/// verbatim; an absent file or a missing name returns the FastAPI `404` with the
-/// byte-identical not-found message. A cache file that exists but cannot be read
+/// verbatim; an absent file or a missing name returns `404` with the not-found
+/// message. A cache file that exists but cannot be read
 /// or parsed is a `503`, never a false "not found".
 pub async fn get_param(Path(name): Path<String>, State(state): State<AppState>) -> Response {
     let params = match crate::param_store::read_param_blob(&state.params_path) {
@@ -175,8 +174,7 @@ mod tests {
     #[tokio::test]
     async fn an_absent_cache_file_is_the_404_not_found_case_never_a_500() {
         // No cache file at all (a fresh boot, or no router running) reads as
-        // not-found, the same 404 the FastAPI route returns with its empty
-        // in-process cache.
+        // not-found: a 404.
         let dir = tempfile::tempdir().unwrap();
         let state = test_state(dir.path());
         let resp = get_param(Path("WPNAV_SPEED".to_string()), State(state)).await;

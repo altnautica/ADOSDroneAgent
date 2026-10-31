@@ -26,7 +26,7 @@ pub enum PredictionState {
     /// Not discharging, or not enough data to say.
     Idle,
     Normal,
-    /// Discharging faster than [`HIGH_DROP_PCT_PER_S`].
+    /// Discharging faster than `HIGH_DROP_PCT_PER_S`.
     High,
     /// Already at or below the reserve.
     Past,

@@ -17,8 +17,7 @@
 //! handler and adding the flag back in the same change.
 //!
 //! The `501` body (`{"error": ..., "message": ...}`, in that key order) is the
-//! shipped wire form a GCS already parses, so it stays fixed even though the
-//! FastAPI handler it was first written to mirror has since been retired.
+//! shipped wire form a GCS already parses, so it stays fixed.
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

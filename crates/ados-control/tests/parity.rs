@@ -1,9 +1,9 @@
 //! Golden-fixture parity + auth-gate integration tests for the native control
 //! surface.
 //!
-//! The golden fixtures (`tests/fixtures/{healthz,version}.json`) were captured
-//! from the FastAPI route sources (`version.py` / `server.py`). The Rust
-//! handlers must emit the identical JSON SHAPE: the same key set, the same value
+//! The golden fixtures (`tests/fixtures/{healthz,version}.json`) are FROZEN: a
+//! record of the agreed wire shape, not a live copy of another implementation.
+//! The Rust handlers must emit the identical JSON SHAPE: the same key set, the same value
 //! types, and — for the static parts — the same scalar values (the capability
 //! list verbatim, `api_version` exactly, `status` exactly). The one field that
 //! legitimately differs between fixture-capture time and run time is
@@ -585,7 +585,7 @@ fn assert_same_shape(got: &Value, want: &Value, path: &str) {
 
 /// A mock state-socket server that accepts one connection, pushes a single canned
 /// snapshot frame in the requested wire format, then idles (holding the
-/// connection open) until the test drops it. Mirrors the real producer's
+/// connection open) until the test drops it, like the real producer's
 /// push-on-connect behaviour.
 struct MockStateServer {
     path: PathBuf,
@@ -1444,7 +1444,7 @@ use tokio::sync::Mutex;
 
 /// A mock MAVLink command socket. Accepts one connection, reads exactly one
 /// length-prefixed frame, decodes it with `parse_v2`, and stores the decoded
-/// `COMMAND_LONG` for the test to assert. Mirrors the real router's read side
+/// `COMMAND_LONG` for the test to assert, like the real router's read side
 /// (which forwards a client-written frame to the FC).
 struct MockMavlinkServer {
     path: PathBuf,

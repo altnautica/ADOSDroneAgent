@@ -42,10 +42,9 @@
 //! ## The profile gate
 //!
 //! Like every ground-station route, this first gates on the resolved profile
-//! being a ground station and returns the FastAPI
+//! being a ground station and returns
 //! `404 {"detail":{"error":{"code":"E_PROFILE_MISMATCH"}}}` on a drone.
 
-use std::process::Stdio;
 use std::time::Duration;
 
 use axum::extract::{Path, State};
@@ -54,12 +53,13 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::process::Command;
+
+use ados_proc::run::RunOutcome;
 
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
-// Profile gate (mirrors the FastAPI `_require_ground_profile`).
+// Profile gate: ground-station profile only.
 // ---------------------------------------------------------------------------
 
 /// True when the node resolves to the ground-station profile.
@@ -93,48 +93,23 @@ fn scan_failed(message: String) -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// bluetoothctl seam (mirrors the Python `_btctl` return-code conventions).
+// bluetoothctl seam.
 // ---------------------------------------------------------------------------
 
-/// One `bluetoothctl <args>` run: `(rc, stdout, stderr)`. Reproduces the Python
-/// `_btctl` conventions exactly:
-/// * a spawn failure (no `bluetoothctl` on PATH) → `(127, "", <error>)`;
+/// One `bluetoothctl <args>` run: `(rc, stdout, stderr)`.
+/// * a spawn or wait failure (no `bluetoothctl` on PATH) → `(127, "", <error>)`;
 /// * a timeout → `(124, "", "timeout")` (the child is killed);
 /// * otherwise the child's exit code (`None` → `0`) with lossy-decoded
-///   stdout/stderr (`decode(errors="replace")`).
+///   stdout/stderr.
 async fn btctl(args: &[&str], timeout: Duration) -> (i32, String, String) {
-    let child = Command::new("bluetoothctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // Reap the child if this future is dropped, so a cancelled request never
-        // leaks a lingering bluetoothctl.
-        .kill_on_drop(true)
-        .spawn();
-    let child = match child {
-        Ok(c) => c,
-        // The Python spawn-failure path returns rc=127 with the error in stderr.
-        Err(e) => return (127, String::new(), e.to_string()),
-    };
-
-    // Bound the run on the per-step timeout. On a timeout, kill + reap the child
-    // and return the Python `(124, "", "timeout")` contract; otherwise collect
-    // its exit code + lossy-decoded output.
-    let collected = tokio::time::timeout(timeout, child.wait_with_output()).await;
-    match collected {
-        Ok(Ok(output)) => {
-            let rc = output.status.code().unwrap_or(0);
-            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            (rc, stdout, stderr)
-        }
-        // A wait error (rare): treat like a spawn-level failure with rc 127.
-        Ok(Err(e)) => (127, String::new(), e.to_string()),
-        // The Python timeout path kills the child and returns rc=124. The
-        // `wait_with_output` future was dropped at the timeout boundary; with
-        // `kill_on_drop(true)` set above, dropping it kills + reaps the child.
-        Err(_elapsed) => (124, String::new(), "timeout".to_string()),
+    match ados_proc::run::run("bluetoothctl", args, &[], timeout).await {
+        RunOutcome::Exited {
+            code,
+            stdout,
+            stderr,
+        } => (code.unwrap_or(0), stdout, stderr),
+        RunOutcome::SpawnFailed(e) | RunOutcome::WaitFailed(e) => (127, String::new(), e),
+        RunOutcome::TimedOut => (124, String::new(), "timeout".to_string()),
     }
 }
 

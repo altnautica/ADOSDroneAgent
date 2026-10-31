@@ -142,7 +142,7 @@ pub struct TicketRequest {
 
 /// Mint a short-lived ticket for the named WebSocket scope. Authenticated by the
 /// LAN-edge auth (`X-ADOS-Key` when paired); a scoped MCP token additionally
-/// needs the ticket's scope class (see [`credential_allows`]), else `403`.
+/// needs the ticket's scope class (see `credential_allows`), else `403`.
 /// Returns the FastAPI-compatible `{ok, ticket, scope, expires_at}` shape; an
 /// unknown scope is a 400 carrying the same
 /// `{"detail": {"error": {"code": "E_UNKNOWN_SCOPE", ...}}}` body the Python

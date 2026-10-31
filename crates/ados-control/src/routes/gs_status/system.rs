@@ -86,9 +86,9 @@ pub(super) fn ram_mb(signals: &Map<String, Value>) -> Option<(i64, i64)> {
 }
 
 /// System uptime in whole seconds from `/proc/uptime`, the kernel's own counter.
-/// Mirrors the Python `int(time.time() - psutil.boot_time())` — `/proc/uptime`'s
-/// first field is exactly that delta. Degrades to `0` when the file is absent
-/// (a non-Linux dev host) or unparseable, matching the psutil-failure default.
+/// `/proc/uptime`'s first field is the time since boot, truncated to whole
+/// seconds. Degrades to `0` when the file is absent (a non-Linux dev host) or
+/// unparseable.
 pub(super) fn proc_uptime_seconds() -> i64 {
     match std::fs::read_to_string("/proc/uptime") {
         Ok(text) => text

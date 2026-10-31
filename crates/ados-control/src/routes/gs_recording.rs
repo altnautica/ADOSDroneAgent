@@ -26,24 +26,23 @@
 //! (the ffmpeg child) must live ACROSS them — a per-request recorder would lose
 //! the child between start and stop. The native front is the cross-profile
 //! long-lived daemon that serves the ground-station routes, so it holds the one
-//! [`GroundStationRecorder`] for the life of the process behind a `OnceLock`,
-//! mirroring the Python `get_recorder()` module-level singleton the FastAPI
-//! route read. Both READ surfaces — the `/status` recording legs and the
-//! `/recording/list` envelope — derive their live recording state from this same
-//! handle through [`recording_view`], so there is one answer to "is a capture in
+//! [`GroundStationRecorder`] for the life of the process behind a `OnceLock`.
+//! Both READ surfaces — the `/status` recording legs and the `/recording/list`
+//! envelope — derive their live recording state from this same
+//! handle through `recording_view`, so there is one answer to "is a capture in
 //! flight" rather than one per route.
 //!
 //! The recorder lifecycle logic lives in the `ados-video` crate (it is the owner
 //! of the media subprocesses' process-group teardown); this module is the thin
 //! REST surface over `start()` / `stop()`.
 //!
-//! ## Error shape (parity with the FastAPI route)
+//! ## Error shape
 //!
-//! The FastAPI route raises `HTTPException(detail={"error": {"code", "message"}})`
-//! on a recorder failure, so the 4xx/5xx bodies here use that error-OBJECT detail
-//! shape (NOT the bare-string `{"detail"}` the rest of the front uses), and the
-//! profile-mismatch 404 carries the `E_PROFILE_MISMATCH` object the sibling
-//! ground-station routes serve.
+//! A recorder failure answers `{"detail": {"error": {"code", "message"}}}`, so
+//! the 4xx/5xx bodies here use that error-OBJECT detail shape (NOT the
+//! bare-string `{"detail"}` the rest of the front uses), and the profile-mismatch
+//! 404 carries the `E_PROFILE_MISMATCH` object the sibling ground-station routes
+//! serve.
 
 use std::sync::{Arc, OnceLock};
 
@@ -139,27 +138,26 @@ pub(crate) async fn recording_view(recorder: &GroundStationRecorder) -> (bool, V
 }
 
 // ---------------------------------------------------------------------------
-// Error mapping (the RecorderError code → HTTP status the FastAPI route used).
+// Error mapping (the RecorderError code → HTTP status).
 // ---------------------------------------------------------------------------
 
-/// Map a `RecorderError` code to its HTTP status, matching the FastAPI
-/// `_error_status_code`: the already/not-active codes are `409`, the
-/// ffmpeg-missing / spawn-failed / dir-unwritable codes are `503`, the
-/// disk-full code is `507`, and any other code degrades to `500`.
+/// Map a `RecorderError` code to its HTTP status: the already/not-active codes
+/// are `409`, the ffmpeg-missing / spawn-failed / dir-unwritable codes are `503`,
+/// the disk-full code is `507`, and any other code degrades to `500`.
 fn error_status(code: &str) -> StatusCode {
     match code {
         "E_RECORDING_ACTIVE" | "E_RECORDING_NOT_ACTIVE" => StatusCode::CONFLICT,
         "E_FFMPEG_NOT_FOUND" | "E_RECORDER_SPAWN_FAILED" | "E_RECORDING_DIR_UNWRITABLE" => {
             StatusCode::SERVICE_UNAVAILABLE
         }
-        // 507 INSUFFICIENT_STORAGE is the WebDAV status the FastAPI route raises
-        // for a full volume; axum has no named constant, so use the code.
+        // 507 INSUFFICIENT_STORAGE is the WebDAV status for a full volume; axum
+        // has no named constant, so use the code.
         "E_DISK_FULL" => StatusCode::from_u16(507).unwrap_or(StatusCode::INSUFFICIENT_STORAGE),
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 
-/// Build the FastAPI recorder-error body: `(status, {"detail": {"error":
+/// Build the recorder-error body: `(status, {"detail": {"error":
 /// {"code", "message"}}})`. The recorder routes raise an error whose `detail` is
 /// an error OBJECT (not the bare-string `detail`), so this reproduces that exact
 /// nested shape with the recorder's own code + message.
@@ -187,7 +185,7 @@ pub struct RecordingStartRequest {
 ///
 /// `404` `E_PROFILE_MISMATCH` off a drone-profile node. On a ground station,
 /// spawns the recorder ffmpeg and returns the start summary; a recorder failure
-/// maps to the FastAPI status for its code (`409` already recording, `503`
+/// maps to the status for its code (`409` already recording, `503`
 /// ffmpeg-missing / unwritable-dir / spawn-failed, `507` disk-full) with the
 /// error-object detail body.
 pub async fn post_recording_start(
@@ -222,7 +220,7 @@ async fn start_recording(req: Option<Json<RecordingStartRequest>>) -> Response {
 ///
 /// `404` `E_PROFILE_MISMATCH` off a drone-profile node. On a ground station,
 /// stops the in-flight capture and returns the stop summary; no active capture
-/// is the FastAPI `409` `E_RECORDING_NOT_ACTIVE` error-object body.
+/// is the `409` `E_RECORDING_NOT_ACTIVE` error-object body.
 pub async fn post_recording_stop(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
@@ -263,7 +261,7 @@ pub async fn post_video_record_stop() -> Response {
 }
 
 /// A `200` JSON body. The recorder returns the body as a `serde_json::Value`
-/// already shaped exactly as the FastAPI route's dict, so this is a thin wrapper.
+/// already in its wire shape, so this is a thin wrapper.
 fn json_ok(body: Value) -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }

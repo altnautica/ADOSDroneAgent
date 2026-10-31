@@ -23,20 +23,19 @@
 //!   clear its override entry and remove its `.link`. Returns `{status, iface,
 //!   adapterKey, removedOverride, removedLinkFile, note}`.
 //!
-//! ## Why these port cleanly to the native front
+//! ## Why there is no daemon round-trip
 //!
 //! Unlike the radio/Wi-Fi writes, the MAC-pin write path has no in-process manager
-//! and no command-socket seam: the FastAPI route writes a config override + (on
-//! delete) a `.link` file directly, and the always-on supervisor reconciler is what
-//! later turns an override into a `.link`. So the front does the identical two
-//! things the FastAPI route does — an atomic YAML merge of the override into
-//! `network.mac_pin.overrides` (the same merge the WFB tx-power write uses for its
-//! key) and a `.link` removal — with no daemon round-trip. The `.link` removal +
-//! the optional live re-tag reuse the shared `ados-macpin` engine, the same code
+//! and no command-socket seam: the route writes a config override + (on delete) a
+//! `.link` file directly, and the always-on supervisor reconciler is what later
+//! turns an override into a `.link`. So the front does two things — an atomic
+//! YAML merge of the override into `network.mac_pin.overrides` (the same merge
+//! the WFB tx-power write uses for its key) and a `.link` removal. The `.link`
+//! removal + the optional live re-tag reuse the shared `ados-macpin` engine, the same code
 //! the installer step + the supervisor reconciler drive, so the bytes written /
 //! removed are identical to what the rest of the system expects.
 //!
-//! ## Guard order + envelopes (matched to the FastAPI routes)
+//! ## Guard order + envelopes
 //!
 //! Pin (POST):
 //! 1. Resolve the MAC from the body, falling back to the state file's
@@ -51,12 +50,12 @@
 //!    (`appliedLive` + a human `note`). The live re-tag is refused when
 //!    `apply_live_allowed` is false, when the management interface cannot be
 //!    determined, or when the named interface IS the management interface — each
-//!    with the FastAPI note text, byte-identical.
+//!    with its fixed note text.
 //!
 //! Unpin (DELETE):
 //! 1. The override entry is popped from the config; `removedOverride` reflects
 //!    whether it was present. A persist fault after a successful pop is swallowed
-//!    (matching the FastAPI `except: pass`).
+//!    silently.
 //! 2. The `.link` is removed; `removedLinkFile` reflects whether a file existed.
 //!    A `.link` that exists but cannot be removed adds `link_error`.
 //! 3. The static `note` reminds the operator a known no-efuse chipset is re-pinned
@@ -114,11 +113,8 @@ fn layout_in(dir: &Path) -> PinLayout {
     }
 }
 
-/// Build a FastAPI-shaped error-object response: `(status, {"detail": {"error":
-/// {"code": <code>, "message": <message>}}})`. Mirrors the Python
-/// `HTTPException(status_code=..., detail={"error": {"code": ..., "message":
-/// ...}})` shape these routes raise (FastAPI wraps the detail dict under
-/// `"detail"`).
+/// Build an error-object response: `(status, {"detail": {"error":
+/// {"code": <code>, "message": <message>}}})`.
 fn error_object(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
         status,
@@ -167,8 +163,8 @@ fn normalise_mac(mac: &str) -> String {
 
 /// The learner-proposed `pinned_mac` for the named interface from the state file,
 /// or `None` when the file is absent / malformed / has no adapter with that name
-/// and a truthy `pinned_mac`. Mirrors the Python fallback that scans
-/// `read_mac_pins_state()["adapters"]` for `a["name"] == iface and a["pinned_mac"]`.
+/// and a truthy `pinned_mac`: the first `adapters` entry whose `name` is `iface`
+/// and whose `pinned_mac` is non-empty.
 fn proposed_mac_for(state_path: &Path, iface: &str) -> Option<String> {
     let text = std::fs::read_to_string(state_path).ok()?;
     let doc: Value = serde_json::from_str(&text).ok()?;
@@ -299,7 +295,7 @@ fn parse_route_get_dev(text: &str) -> Option<String> {
 /// Re-tag the live interface to `mac` now (down → set address → up), reusing the
 /// shared `ados-macpin` engine so the bytes are identical to the installer /
 /// reconciler path. Returns `Ok(())` on success, `Err(message)` on any failure
-/// (mapped to the FastAPI "live re-tag failed" note). Linux-only; a non-Linux
+/// (mapped to the "live re-tag failed" note). Linux-only; a non-Linux
 /// build never reaches this (the management-iface gate refuses first when the
 /// route cannot be determined).
 ///

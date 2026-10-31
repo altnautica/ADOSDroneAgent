@@ -21,12 +21,12 @@ pub struct EthernetConfigUpdate {
 /// `PUT .../network/ethernet` → the live `config()` view.
 ///
 /// Gates on the ground-station profile (404 on a drone). For `mode=static`,
-/// rejects a missing ip / gateway with the FastAPI 400
+/// rejects a missing ip / gateway with the 400
 /// `E_ETHERNET_STATIC_MISSING_FIELDS` (the in-handler guard) before forwarding.
 /// Forwards an `eth_config` op to the `ados-net` command socket (the daemon
 /// applies it through its live ethernet manager and replies with the `config()`
 /// view, or an apply-failed payload), then returns the view. An apply that returns
-/// `applied:false` maps to the FastAPI 500 — `E_ETHERNET_NO_CONNECTION` when the
+/// `applied:false` maps to a 500 — `E_ETHERNET_NO_CONNECTION` when the
 /// manager reports `no_ethernet_connection`, else `E_ETHERNET_APPLY_FAILED`,
 /// carrying the manager's `hint`. An unreachable socket → 503.
 pub async fn put_network_ethernet(
@@ -39,7 +39,7 @@ pub async fn put_network_ethernet(
 
     let is_static = update.mode == "static";
     if is_static {
-        // The FastAPI in-handler guard: static requires ip + gateway.
+        // The in-handler guard: static requires ip + gateway.
         let ip_present = update.ip.as_deref().is_some_and(|s| !s.is_empty());
         let gw_present = update.gateway.as_deref().is_some_and(|s| !s.is_empty());
         if !ip_present || !gw_present {
@@ -64,8 +64,7 @@ pub async fn put_network_ethernet(
     };
 
     // The unreachable / server-error codes differ between the static + dhcp apply
-    // failures (the FastAPI route wraps each manager call in its own except), so
-    // the socket-transport failure code follows the requested mode.
+    // failures, so the socket-transport failure code follows the requested mode.
     let transport_code = if is_static {
         "E_ETHERNET_STATIC_FAILED"
     } else {
@@ -80,9 +79,9 @@ pub async fn put_network_ethernet(
         NetCmd::Unavailable | NetCmd::TimedOut => return socket_unavailable(transport_code),
     };
 
-    // A processed-but-failed apply (`applied:false`) is the FastAPI
-    // `result.get("ok") is False` arm: 500 with E_ETHERNET_NO_CONNECTION when the
-    // manager reports a missing connection, else E_ETHERNET_APPLY_FAILED, carrying
+    // A processed-but-failed apply (`applied:false`) is a 500 with
+    // E_ETHERNET_NO_CONNECTION when the manager reports a missing connection,
+    // else E_ETHERNET_APPLY_FAILED, carrying
     // the manager's `error` text + `hint`.
     if reply.get("applied") == Some(&Value::Bool(false)) {
         let error = reply
@@ -129,9 +128,8 @@ pub struct ModemConfigUpdate {
 /// `ados-net` command socket (the daemon persists the config sidecar through its
 /// live modem manager; its poll loop reconciles the live session), then returns
 /// the modem view — the SAME `_modem_view()` body the GET route serves over the
-/// freshly-persisted config (config file + the store's `net.modem_usage` overlay),
-/// exactly as the FastAPI modem PUT returns `_modem_view()` after `configure()`. A
-/// failed configure maps to the FastAPI 500 `E_MODEM_CONFIGURE_FAILED`; an
+/// freshly-persisted config (config file + the store's `net.modem_usage` overlay).
+/// A failed configure maps to the 500 `E_MODEM_CONFIGURE_FAILED`; an
 /// unreachable socket → 503.
 pub async fn put_network_modem(
     State(state): State<AppState>,
@@ -149,8 +147,7 @@ pub async fn put_network_modem(
         }
     }
 
-    // cap_gb wins; otherwise convert cap_mb → cap_gb (mirrors the Python
-    // `update.cap_mb / 1024.0`).
+    // cap_gb wins; otherwise convert cap_mb → cap_gb (`cap_mb / 1024.0`).
     let cap_gb = update
         .cap_gb
         .or_else(|| update.cap_mb.map(|mb| mb as f64 / 1024.0));

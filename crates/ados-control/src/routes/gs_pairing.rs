@@ -7,23 +7,21 @@
 //!
 //! - **`GET /api/v1/ground-station/pair/pending`** — the mesh pairing snapshot
 //!   (the open Accept window + the list of pending relay join requests). The
-//!   pairing state lives in `ados-mesh-pairing.service`, its only owner: the
-//!   route reaches it over the pairing daemon's Unix socket (`/run/ados/pairing.sock`) with a single-shot newline-
-//!   JSON `snapshot` op and relays the result. A daemon that is unreachable yields
-//!   `503` with `E_PAIR_DAEMON_UNAVAILABLE`, the same status the FastAPI route
-//!   raises when its own socket round-trip fails.
+//!   pairing state lives in `ados-mesh-pairing.service` (`ados-groundlink
+//!   --pairing`), its only owner: the route reaches it over the pairing
+//!   socket (`/run/ados/pairing.sock`) with a single-shot newline-JSON
+//!   `snapshot` op and relays the result. A daemon that is unreachable yields
+//!   `503` with `E_PAIR_DAEMON_UNAVAILABLE`.
 //! - **`GET /api/v1/ground-station/pic`** — served by [`crate::routes::gs_pic`],
 //!   which owns the PIC control socket. It is NOT in this module: it used to be,
 //!   answering from a hardcoded unclaimed body.
 //!
-//! Every read is fault-tolerant: an absent daemon socket / config degrades to the
-//! same status + body the FastAPI route returns when its own source is
-//! unavailable, never a `500`/panic.
+//! Every read is fault-tolerant: an absent daemon socket / config degrades to a
+//! stable status + body, never a `500`/panic.
 //!
 //! Error bodies use the ground-station routes' nested
 //! `{"detail": {"error": {"code": ...}}}` shape (NOT the flat `{"detail": "..."}`
-//! the other native routes use), because the FastAPI ground-station handlers
-//! raise that nested shape and the GCS parses it for the stable error code.
+//! the other native routes use); the GCS parses it for the stable error code.
 
 use std::path::{Path, PathBuf};
 
@@ -36,8 +34,7 @@ use serde_json::{json, Value};
 use crate::config::PairingConfig;
 use crate::profile::current_profile_and_role_at;
 
-/// The pairing daemon's Unix socket basename under the runtime dir. Mirrors the
-/// Python `PAIRING_SOCK` (`ADOS_RUN_DIR / "pairing.sock"`).
+/// The pairing service's Unix socket basename under the runtime dir.
 const PAIRING_SOCK_NAME: &str = "pairing.sock";
 
 // ---------------------------------------------------------------------------
@@ -80,7 +77,7 @@ fn is_ground_station_at(config: &Path, profile_conf: &Path, role_path: &Path) ->
 // ---------------------------------------------------------------------------
 
 /// Build a ground-station error response: `(status, {"detail": {"error":
-/// {"code": code}}})`. The nested shape the FastAPI ground-station handlers raise
+/// {"code": code}}})`. The nested ground-station error shape
 /// (NOT the flat `{"detail": "..."}` the other native routes use).
 fn gs_error(status: StatusCode, code: &str) -> Response {
     let body = json!({ "detail": { "error": { "code": code } } });
@@ -125,8 +122,7 @@ async fn pair_pending_body(socket: &Path) -> Response {
 /// newline-terminated JSON request `{"op":"snapshot","args":{}}`, reads one
 /// newline-terminated JSON reply `{"ok":bool,"result":{...}}`, and returns the
 /// `result` object. Any connect / IO / parse failure, or a reply with
-/// `ok != true`, is an error — the caller maps that to the `503` the FastAPI
-/// route raises on a `PairingRpcError`. Mirrors the Python single-shot `_call`.
+/// `ok != true`, is an error — the caller maps that to `503`.
 async fn pairing_daemon_snapshot(socket: &Path) -> Result<Value, crate::ipc::cmd::CmdFailure> {
     let reply = crate::ipc::cmd::roundtrip(
         socket,
@@ -137,8 +133,7 @@ async fn pairing_daemon_snapshot(socket: &Path) -> Result<Value, crate::ipc::cmd
     if reply.get("ok").and_then(Value::as_bool) != Some(true) {
         return Err(crate::ipc::cmd::CmdFailure::BadReply);
     }
-    // `result or {}` in the Python: a missing / non-object result is the empty
-    // object.
+    // A missing / non-object result is the empty object.
     Ok(reply
         .get("result")
         .filter(|v| v.is_object())

@@ -30,7 +30,7 @@
 //! `OnceLock` because start and stop arrive as separate requests. So this
 //! surface and `/status` answered differently about the same capture, one of them
 //! known-false. Both now read
-//! [`crate::routes::gs_recording::recording_view`] — one derivation, not a copy
+//! `crate::routes::gs_recording::recording_view` — one derivation, not a copy
 //! per route.
 //!
 //! ## Recording is moving to mediamtx's native recorder

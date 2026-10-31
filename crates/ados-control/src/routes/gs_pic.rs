@@ -12,9 +12,8 @@
 //!   body is `{"client_id", "confirm_token"?, "force"?}`; the route returns the
 //!   arbiter outcome dict (`{claimed, claimed_by, claim_counter, ...}` on success,
 //!   `{claimed:false, error, current_pic, needs_confirm:true, status:409}` on a
-//!   soft-reject) at HTTP 200 throughout — the same shape + status the FastAPI
-//!   route returns (the arbiter NEVER raises, so the FastAPI route's `409`/`400`
-//!   exception arms are unreachable; the soft-reject rides in the 200 body).
+//!   soft-reject) at HTTP 200 throughout (the soft-reject rides in the 200 body,
+//!   never as a `409`/`400` status).
 //! - **`POST /api/v1/ground-station/pic/release`** — release PIC held by a
 //!   client; returns `{released, previous_pic}` or `{released:false, error,
 //!   current_pic, status:403}`, HTTP 200 throughout.
@@ -35,27 +34,24 @@
 //! arbiter (that would split-brain the state the WS + display read) — it forwards
 //! each write to the daemon's socket with one newline-terminated JSON request,
 //! reads one newline-terminated JSON reply, and translates the reply back into
-//! the exact FastAPI route body. The ops are `get_state` / `claim` / `release` /
+//! the route body. The ops are `get_state` / `claim` / `release` /
 //! `confirm_token` / `heartbeat`, the same ops the daemon's dispatch implements.
 //!
-//! The socket reply carries a richer shape than the FastAPI body (a transport
+//! The socket reply carries a richer shape than the route body (a transport
 //! `ok` flag plus a `mode` discriminant on claim, an `ok_heartbeat` flag on
-//! heartbeat); each handler maps that reply to the byte-exact dict the Python
-//! arbiter returned and the FastAPI route relayed.
+//! heartbeat); each handler maps that reply to the byte-exact arbiter dict.
 //!
 //! ## Degrade posture (the daemon socket is the only path)
 //!
-//! The FastAPI route reaches an in-process arbiter that is always present. This
-//! front cannot — it has no in-process arbiter — so an unreachable / non-replying
-//! socket degrades to the FastAPI `500 E_PIC_*_FAILED` error-object body (the
-//! arm the Python route takes when the arbiter call raises) for the writes, and
+//! The front has no in-process arbiter, so an unreachable / non-replying socket
+//! degrades to the `500 E_PIC_*_FAILED` error-object body for the writes, and
 //! to `503 E_PIC_ARBITER_UNAVAILABLE` for the read. The write is never silently
 //! dropped and the read never substitutes a plausible state for an absent one.
 //!
 //! ## The profile gate
 //!
 //! Like every ground-station route, this first gates on the resolved profile
-//! being a ground station and returns the FastAPI
+//! being a ground station and returns
 //! `404 {"detail":{"error":{"code":"E_PROFILE_MISMATCH"}}}` on a drone.
 
 use axum::extract::State;
@@ -77,7 +73,7 @@ pub use token_heartbeat::PicHeartbeatRequest;
 use token_heartbeat::*;
 
 // ---------------------------------------------------------------------------
-// Profile gate (mirrors the FastAPI `_require_ground_profile`).
+// Profile gate: ground-station profile only.
 // ---------------------------------------------------------------------------
 
 /// True when the node resolves to the ground-station profile. Resolves through
@@ -102,10 +98,9 @@ fn profile_mismatch() -> Response {
         .into_response()
 }
 
-/// Build a PIC route 4xx/5xx body in the FastAPI error-object detail shape:
-/// `(status, {"detail": {"error": {"code", "message"}}})`. The PIC routes raise
-/// `HTTPException(detail={"error": {...}})`, NOT the bare-string `detail` the rest
-/// of the front uses, so these reproduce that nested shape.
+/// Build a PIC route 4xx/5xx body in the error-object detail shape:
+/// `(status, {"detail": {"error": {"code", "message"}}})`, NOT the bare-string
+/// `detail` the rest of the front uses.
 fn pic_error(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (
         status,
@@ -246,11 +241,10 @@ pub struct PicClaimRequest {
 /// `POST /api/v1/ground-station/pic/claim` → the arbiter outcome dict at HTTP 200.
 ///
 /// `404 E_PROFILE_MISMATCH` off a ground station. Otherwise forwards a `claim` op
-/// to the PIC control socket and translates the reply to the exact Python arbiter
+/// to the PIC control socket and translates the reply to the exact arbiter
 /// dict: a fresh / idempotent / forced / transferred grant, or the soft-reject
 /// (`{claimed:false, error, current_pic, needs_confirm:true, status:409}`) — all
-/// at HTTP 200, the same status the FastAPI route returns (its arbiter never
-/// raises, so the 409/400 exception arms never fire). An unreachable socket →
+/// at HTTP 200 (the soft-reject is never a 409/400 status). An unreachable socket →
 /// `500 E_PIC_CLAIM_FAILED`.
 pub async fn post_pic_claim(
     State(state): State<AppState>,
@@ -375,8 +369,8 @@ pub struct PicReleaseRequest {
 /// `404 E_PROFILE_MISMATCH` off a ground station. Otherwise forwards a `release`
 /// op and returns `{released:true, previous_pic}` on success or `{released:false,
 /// error:"not_current_pic", current_pic, status:403}` when the caller does not
-/// hold PIC — both at HTTP 200 (the FastAPI route returns the arbiter dict as-is;
-/// the arbiter never raises). An unreachable socket → `500 E_PIC_RELEASE_FAILED`.
+/// hold PIC — both at HTTP 200 (the arbiter dict as-is). An unreachable socket
+/// → `500 E_PIC_RELEASE_FAILED`.
 pub async fn post_pic_release(
     State(state): State<AppState>,
     Json(req): Json<PicReleaseRequest>,

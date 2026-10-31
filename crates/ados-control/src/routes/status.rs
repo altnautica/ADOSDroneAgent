@@ -13,8 +13,7 @@
 //!   the host itself), degrading to the zero-valued default when the store is
 //!   unreachable; **board** (the full HAL dict) is read from the board sidecar the
 //!   detector persists, degrading to an empty object when that file is absent (a
-//!   fresh boot, or a host with no detector running — the same shape the FastAPI
-//!   route emits when its own HAL detect raises).
+//!   fresh boot, or a host with no detector running).
 //! - **`/api/telemetry`** is the vehicle-state dict with the runtime-only extras
 //!   in `IPC_ONLY_KEYS` stripped. When the snapshot reports `mavlink_alive:
 //!   false` the vehicle fields are withheld — they would be stale defaults — and
@@ -198,7 +197,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     let snapshot = state.state.snapshot();
 
     // FC connection triple + uptime from the snapshot extras. Absent snapshot →
-    // disconnected with the FastAPI defaults (port "", baud 0).
+    // disconnected with the defaults (port "", baud 0).
     let (fc_connected, fc_port, fc_baud, snapshot_uptime) = fc_from_snapshot(snapshot.as_ref());
     let uptime = snapshot_uptime.unwrap_or_else(|| json!(state.process_uptime_seconds()));
 
@@ -275,8 +274,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
 
     // Fold in the camera presence + USB-recovery keys (the same `cameraState` /
     // `cameraUsbRecovery` the cloud heartbeat and the consolidated status carry),
-    // present only when their sidecars are fresh + valid. Mirrors the FastAPI
-    // status route folding `_read_camera_status()` into the body.
+    // present only when their sidecars are fresh + valid.
     if let Some(obj) = body.as_object_mut() {
         for (key, value) in crate::routes::status_full::read_camera_status(&state.run_dir) {
             obj.insert(key, value);
@@ -293,21 +291,20 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
 }
 
 /// `GET /api/telemetry` → the vehicle-state dict from the live snapshot, with the
-/// four runtime-only extras stripped. An absent snapshot returns `{}`, matching
-/// the Python fallback when no state has arrived. Mirrors `vehicle_state_dict`.
+/// four runtime-only extras stripped. An absent snapshot (no state has arrived
+/// yet) returns `{}`.
 pub async fn get_telemetry(State(state): State<AppState>) -> Json<Value> {
     let snapshot = state.state.snapshot();
     Json(project_telemetry(snapshot))
 }
 
-/// Build the `health` block from merged hardware signals, mirroring the FastAPI
-/// `SystemHealth.to_dict()` shape: `{cpu_percent, memory_percent, disk_percent,
+/// Build the `health` block from merged hardware signals: `{cpu_percent, memory_percent, disk_percent,
 /// temperature, timestamp}`.
 ///
 /// `cpu_percent` is the aggregate CPU utilization, `memory_percent` and
 /// `disk_percent` are derived used/total ratios (the same arithmetic `psutil`
 /// reports), `temperature` is the primary thermal zone. The timestamp is stamped
-/// at request time, as the Python `check_system()` does.
+/// at request time.
 ///
 /// ## An unmeasured field is `null`, never `0.0`
 ///
@@ -343,8 +340,7 @@ pub(crate) fn derive_health(signals: Option<&Map<String, Value>>) -> Value {
 
 /// Read the full HAL board dict from the board sidecar the detector persists. A
 /// present, well-formed JSON object is returned verbatim; an absent file, a read
-/// error, or a non-object body degrades to `{}` — the same shape the FastAPI
-/// route emits when its own `detect_board()` raises.
+/// error, or a non-object body degrades to `{}`.
 ///
 /// Shared with the consolidated `/api/status/full` route, which serves the same
 /// board block from the same sidecar.

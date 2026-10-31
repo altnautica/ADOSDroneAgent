@@ -141,7 +141,7 @@ fn read_state_file(path: &Path) -> Option<Map<String, Value>> {
 ///
 /// Reads the store first; falls back to the live `lcd-latency.json` read when the
 /// store is unreachable, the SEI probe has produced no samples, or every sample
-/// in the store is older than [`LATENCY_STALE_AFTER_S`]. Guaranteed 200.
+/// in the store is older than `LATENCY_STALE_AFTER_S`. Guaranteed 200.
 pub async fn get_video_latency(State(state): State<AppState>) -> Json<Value> {
     if let Some(derived) = latest_video_latency(&state).await {
         return Json(derived);

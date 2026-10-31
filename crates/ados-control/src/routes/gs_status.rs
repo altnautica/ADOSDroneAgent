@@ -3,8 +3,8 @@
 //! Five read-only routes the GCS Hardware tab + the OLED dashboard poll, all
 //! gated on the node resolving to the ground-station profile. On a drone-profile
 //! node every one answers `404` with the body `{"detail": {"error": {"code":
-//! "E_PROFILE_MISMATCH"}}}` — the same shape the FastAPI `_require_ground_profile`
-//! gate raises, so the GCS distinguishes "wrong profile" from "endpoint missing".
+//! "E_PROFILE_MISMATCH"}}}`, so the GCS distinguishes "wrong profile" from
+//! "endpoint missing".
 //!
 //! - **`GET /api/v1/ground-station/status`** — the OLED-aligned composite
 //!   snapshot: profile, the paired-drone identity (device id + key fingerprint),
@@ -27,13 +27,12 @@
 //!   up}`, same store-first/sidecar-fallback. `404` off a receiver.
 //!
 //! Every read is fault-tolerant: an absent store / sidecar / key file degrades to
-//! the same empty/default shape the FastAPI route returns when its own source is
-//! unavailable, never a 500. The native front runs the radio in sibling processes
-//! (no in-process manager to call), so the live radio legs read the durable store
-//! and the on-disk sidecars the sibling services write — exactly the seams the
-//! FastAPI handlers fall back to. The RECORDER is the exception: it is held
-//! in-process by [`crate::routes::gs_recording`] (start and stop arrive as
-//! separate requests), so the recording legs read that singleton directly.
+//! its empty/default shape, never a 500. The native front runs the radio in
+//! sibling processes (no in-process manager to call), so the live radio legs read
+//! the durable store and the on-disk sidecars the sibling services write. The
+//! RECORDER is the exception: it is held in-process by
+//! [`crate::routes::gs_recording`] (start and stop arrive as separate
+//! requests), so the recording legs read that singleton directly.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -162,21 +161,6 @@ fn wfb_receiver_path(run_dir: &Path) -> PathBuf {
 /// thresholds drift apart, and then two blocks of the same `/status` response
 /// disagree about whether the node is stale.
 pub(crate) const SNAPSHOT_FRESH_S: f64 = paths::WFB_RELAY_MAX_AGE_MS as f64 / 1000.0;
-
-/// Read a JSON object sidecar, returning the empty map on absence / a read error / a parse error /
-/// a non-object body.
-///
-/// Carries NO freshness judgement — use [`read_fresh_json`] for anything a client
-/// reads as a current measurement.
-fn read_json_or_empty(path: &Path) -> Map<String, Value> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(Value::Object(map)) => map,
-            _ => Map::new(),
-        },
-        Err(_) => Map::new(),
-    }
-}
 
 /// Read a JSON object sidecar only when its mtime is within
 /// [`SNAPSHOT_FRESH_S`] of `now`; `None` when the file is absent, unreadable,
@@ -373,8 +357,8 @@ fn config_gs_peer(config_path: &Path) -> Value {
 }
 
 /// The configured ground-station role (`ground_station.role`), defaulting to
-/// `"direct"` when the section / field is absent or non-string. Mirrors the Python
-/// `getattr(app.config.ground_station, "role", "direct")`.
+/// `"direct"` when the section / field is absent or non-string (the Python
+/// `GroundStationConfig.role` default).
 fn ground_station_config_role(config_path: &Path) -> String {
     crate::config::load_config_object(config_path)
         .get("ground_station")

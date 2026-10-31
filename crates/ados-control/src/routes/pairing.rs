@@ -1,10 +1,9 @@
 //! Pairing routes: the LAN node-identity probe + the local pairing handshake.
 //!
-//! These are the parity-critical routes: the GCS Add-a-Node flow probes
+//! These are the contract-critical routes: the GCS Add-a-Node flow probes
 //! `/api/pairing/info`, then POSTs `/api/pairing/claim`, and stores the returned
-//! key. The native surface must answer these byte-identically to the FastAPI
-//! surface, down to every field name and the null-as-null shape, or pairing
-//! breaks silently.
+//! key. The wire shape is fixed down to every field name and the null-as-null
+//! shape; a drift breaks pairing silently.
 //!
 //! - **`GET /api/pairing/info`** — the node-identity probe. Emits all 19 fields
 //!   even when null (no field is ever omitted), reading device identity +
@@ -19,7 +18,8 @@
 //!   once it is older than `pairing_store::CODE_TTL_SECONDS` (the same lifetime
 //!   the Python writer applies); 409 when paired.
 //! - **`POST /api/pairing/claim`** — claim the agent for a user. Writes
-//!   `pairing.json` (mirroring `PairingManager.claim` exactly) and returns the
+//!   `pairing.json` (the same document the Python `PairingManager.claim`
+//!   writes) and returns the
 //!   key; 409 when already paired; 503 when the pairing file cannot be read.
 //!   Never served to a request that crossed the radio relay.
 //! - **`POST /api/pairing/unpair`** — clear pairing + mint a fresh code; 409 when
@@ -116,7 +116,7 @@ pub async fn get_pairing_info(
     // change of the file; this is a probe the GCS polls).
     let cfg = PairingConfig::cached(&paths.config);
     let device_id = cfg.agent.device_id.clone();
-    // The FastAPI route falls back to "ADOS Agent" when the config name is empty
+    // Falls back to "ADOS Agent" when the config name is empty
     // (`name or "ADOS Agent"`); the config default is "my-drone", so a configured
     // agent carries a real name here.
     let name = if cfg.agent.name.is_empty() {
@@ -166,9 +166,8 @@ pub async fn get_pairing_info(
         "device_id": device_id,
         "name": name,
         "version": state.agent_version(),
-        // Board is HAL-detected at runtime in the Python (the FastAPI route reads
-        // `app.board_name`); the native surface has no in-process HAL-detect port,
-        // so it reads the `name` field live off the board sidecar
+        // The native surface has no in-process HAL detect, so the board name is
+        // read live off the `name` field of the board sidecar
         // (`/run/ados/board.json`) the detector persists — the same on-disk source
         // the status route's board block reads. Defaults to "unknown" when the
         // sidecar is absent (a fresh boot before the first status write).
@@ -187,8 +186,8 @@ pub async fn get_pairing_info(
         // true with no Python process running.
         "runtime_mode": crate::runtime_mode::current_in(&profile, &state.bin_dir),
         "bind_state": bind_state,
-        // Reserved for a future in-process radio reader; null today, exactly as
-        // the FastAPI route emits (the GCS falls back to radio_paired).
+        // Reserved for a future in-process radio reader; always null today (the
+        // GCS falls back to radio_paired).
         "radio": Value::Null,
         "fc_connected": fc_connected,
         "fc_port": fc_port,
@@ -298,9 +297,8 @@ fn truthy(v: &Value) -> bool {
 
 /// Fold the WFB bind-session snapshot from the cross-process sentinel. Absent
 /// file (no bind has run) or a sentinel with no `state` → `null`. Each field is
-/// read by key with a missing field tolerated, mirroring the FastAPI
-/// `.get()`-guarded fold. Only the six fields the FastAPI route folds are
-/// emitted, each as JSON null when absent in the sentinel.
+/// read by key with a missing field tolerated. Only six fields are emitted, each
+/// as JSON null when absent in the sentinel.
 fn read_bind_state(paths: &PairingPaths) -> Value {
     let Ok(text) = std::fs::read_to_string(&paths.bind_state) else {
         return Value::Null;
@@ -319,7 +317,7 @@ fn read_bind_state(paths: &PairingPaths) -> Value {
     if let Some(ours) = ados_protocol::contracts::sidecar_version("bind-state") {
         ados_protocol::sidecar::check_sidecar_version("bind-state", got, ours);
     }
-    // The FastAPI route only folds when `sess.get("state")` is truthy.
+    // Only fold when the sentinel's `state` is truthy.
     let state_truthy = obj
         .get("state")
         .map(|v| !v.is_null() && v != &json!("") && v != &json!(false))
@@ -339,8 +337,7 @@ fn read_bind_state(paths: &PairingPaths) -> Value {
 }
 
 /// Read the FC connection triple out of the live state snapshot's runtime extras.
-/// Returns `(fc_connected, fc_port, fc_baud)` as JSON values. Mirrors the FastAPI
-/// route's `fc_status()`: a connected FC reports a string port + int baud, an
+/// Returns `(fc_connected, fc_port, fc_baud)` as JSON values: a connected FC reports a string port + int baud, an
 /// absent / disconnected one reports `false` + JSON `null` + JSON `null` (the
 /// pairing-info defaults are `None`, unlike the status route's `""`/`0`).
 pub(crate) fn fc_from_snapshot(snapshot: Option<&Value>) -> (Value, Value, Value) {
@@ -349,8 +346,7 @@ pub(crate) fn fc_from_snapshot(snapshot: Option<&Value>) -> (Value, Value, Value
         .and_then(|m| m.get("fc_connected"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    // The FastAPI route reports `str(fc.port) if fc.port else None` and
-    // `int(fc.baud) if fc.baud else None`: a missing, null, or falsey value → null.
+    // A missing, null, or falsey port / baud → null.
     let port = obj
         .and_then(|m| m.get("fc_port"))
         .filter(|v| v.is_string() && !v.as_str().unwrap_or("").is_empty())

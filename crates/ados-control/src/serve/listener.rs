@@ -41,8 +41,8 @@ pub async fn bind_tcp(port: u16) -> Result<Vec<TcpListener>> {
 
 /// Bind one address-family listener on the wildcard address for its family.
 /// `v6only` forces `IPV6_V6ONLY` on the AF_INET6 socket so the v6 leg never
-/// claims IPv4-mapped traffic the v4 leg owns. `SO_REUSEADDR` mirrors the Python
-/// helper so a quick restart does not trip `EADDRINUSE` on the TIME_WAIT window.
+/// claims IPv4-mapped traffic the v4 leg owns. `SO_REUSEADDR` is set so a quick
+/// restart does not trip `EADDRINUSE` on the TIME_WAIT window.
 /// The socket is set non-blocking and handed to tokio as a [`TcpListener`].
 pub(super) fn bind_one(domain: Domain, port: u16, v6only: bool) -> std::io::Result<TcpListener> {
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
@@ -56,7 +56,7 @@ pub(super) fn bind_one(domain: Domain, port: u16, v6only: bool) -> std::io::Resu
         SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port))
     };
     socket.bind(&addr.into())?;
-    // The same backlog depth the Python helper uses; comfortably above the burst
+    // A backlog depth comfortably above the burst
     // a fresh GCS opens while it walks the pairing handshake.
     socket.listen(2048)?;
     socket.set_nonblocking(true)?;
@@ -93,9 +93,9 @@ pub async fn serve_unix(listener: OperatorListener, app: Router, stop: oneshot::
 /// the logd listener, the accepted peer and local addresses are threaded into
 /// each connection so the edge middleware can classify the caller.
 ///
-/// Connections are capped: [`MAX_TCP_CONNECTIONS`] in total,
-/// [`MAX_TCP_CONNECTIONS_PER_PEER`] per off-box caller, and
-/// [`MAX_REMOTE_LOOPBACK_CONNS`] across every loopback peer together (the
+/// Connections are capped: `MAX_TCP_CONNECTIONS` in total,
+/// `MAX_TCP_CONNECTIONS_PER_PEER` per off-box caller, and
+/// `MAX_REMOTE_LOOPBACK_CONNS` across every loopback peer together (the
 /// relay, a tunnel's ingress and the CLI share one address). One host opening
 /// connections and trickling header bytes used to exhaust the process's
 /// descriptors and cut every client off; past a cap the new connection is

@@ -122,9 +122,9 @@ pub(super) async fn post_mac_pin_at(
         .into_response()
 }
 
-/// The `apply_now` decision, mirroring the Python branch exactly: refuse when the
-/// config flag is off, when the management interface cannot be determined, or when
-/// the named interface IS the management interface — each with the FastAPI note;
+/// The `apply_now` decision: refuse when the config flag is off, when the
+/// management interface cannot be determined, or when the named interface IS the
+/// management interface — each with its fixed note;
 /// otherwise re-tag the live interface and report success (or the failure note).
 ///
 /// `mgmt_iface` is the already-resolved default-route interface (`None` when it

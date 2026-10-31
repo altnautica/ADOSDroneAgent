@@ -44,12 +44,12 @@
 //! built with the protocol crate's raw COMMAND_LONG builder for an arbitrary
 //! command id, byte-identical to a named-id frame on the wire.
 //!
-//! ## Error shape (parity with the FastAPI route)
+//! ## Error shape
 //!
 //! The `501` carries a bare-string `detail` ("drone does not advertise
 //! multi-camera support"), the `400`/`503` carry the error-OBJECT detail
 //! (`{"detail":{"error":{"code","message"}}}`), and the profile-mismatch `404`
-//! carries the `E_PROFILE_MISMATCH` object — each matching the FastAPI route.
+//! carries the `E_PROFILE_MISMATCH` object.
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -366,7 +366,7 @@ fn invalid_camera_id() -> Response {
 
 /// The `503` MAVLink-IPC-unavailable response, matching the FastAPI
 /// `E_MAVLINK_IPC_UNAVAILABLE` error-object body. The `message` carries the
-/// underlying connection error, the same as the FastAPI route's `str(exc)`.
+/// underlying connection error.
 fn mavlink_ipc_unavailable(message: &str) -> Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,

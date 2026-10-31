@@ -3,8 +3,7 @@
 use super::*;
 
 /// Merge a persisted section over a defaults map: start from the defaults, then
-/// overlay every key the persisted section carries. Mirrors the Python
-/// `{**_DEFAULT_X, **(data.get("x") or {})}` spread.
+/// overlay every key the persisted section carries (a shallow spread).
 pub(super) fn merge_over_defaults(
     defaults: Map<String, Value>,
     section: Option<&Value>,

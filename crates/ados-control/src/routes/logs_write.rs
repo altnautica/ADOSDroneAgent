@@ -80,15 +80,15 @@ use selector::*;
 // ---------------------------------------------------------------------------
 
 /// The window kinds the store exports, one table each. An empty selection means
-/// all four; anything outside this set is rejected. Mirrors the Python
-/// `VALID_KINDS`.
+/// all four; anything outside this set is rejected. Matches the Python
+/// `log_push_trigger.VALID_KINDS`.
 const VALID_KINDS: [&str; 4] = ["logs", "metrics", "events", "hw"];
 
 /// How long the waited call polls for the cloud service's result before returning
-/// the pending placeholder. Mirrors the Python `_DEFAULT_POLL_SECONDS`.
+/// the pending placeholder. Matches the Python `_DEFAULT_POLL_SECONDS`.
 const DEFAULT_POLL_SECONDS: f64 = 8.0;
 
-/// The interval between result-file polls. Mirrors the Python
+/// The interval between result-file polls. Matches the Python
 /// `_POLL_INTERVAL_SECONDS`.
 const POLL_INTERVAL_SECONDS: f64 = 0.2;
 
@@ -191,7 +191,7 @@ fn read_result_file(result_path: &Path) -> Option<Value> {
 }
 
 /// Coerce the cloud service's result onto the stable outcome shape, filling in
-/// defaults for any field an older service omits. Mirrors the Python
+/// defaults for any field an older service omits. Matches the Python
 /// `_normalize_result(raw, accepted=True)`.
 fn normalize_result(raw: &Value) -> Value {
     let error = raw.get("error");
@@ -394,7 +394,7 @@ async fn push_logs_at(body: &Value, run_dir: &Path, poll_seconds: f64) -> Respon
 
 /// Poll the result file every [`POLL_INTERVAL_SECONDS`] for up to `poll_seconds`
 /// for a result whose `request_id` matches, returning the normalized result on a
-/// match or the pending placeholder on the timeout. Mirrors the Python
+/// match or the pending placeholder on the timeout. Matches the Python
 /// `read_result`.
 async fn poll_result(request_id: &str, run_dir: &Path, poll_seconds: f64) -> Value {
     let result_path = run_dir.join("logd-push-result.json");

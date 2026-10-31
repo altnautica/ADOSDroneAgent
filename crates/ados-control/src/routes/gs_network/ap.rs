@@ -69,47 +69,32 @@ pub(super) async fn ap_view(cfg: &Value) -> Value {
 
 /// Merge the setup-AP guard's live decision (`standing_down` + reason + phy count +
 /// client-uplink flag) into the AP view so an operator can see WHY the AP is up or down.
+/// The count + client flag pass through verbatim (a JSON number / bool, or null
+/// when absent); an absent or unreadable sidecar reads as not standing down,
+/// reason `unknown`.
 pub(super) fn merge_ap_guard_diagnostics(view: &mut Value) {
     let Some(obj) = view.as_object_mut() else {
         return;
     };
-    let (standing_down, reason, phy_count, client_up) = read_ap_guard_sidecar();
-    obj.insert("standing_down".to_string(), Value::Bool(standing_down));
-    obj.insert("standdown_reason".to_string(), Value::String(reason));
-    obj.insert("wifi_phy_count".to_string(), phy_count);
-    obj.insert("client_uplink_active".to_string(), client_up);
-}
-
-/// Read the guard sidecar into `(standing_down, standdown_reason,
-/// wifi_phy_count, client_uplink_active)`. The count + client flag pass through
-/// verbatim (a JSON number / bool, or null when absent), matching the Python
-/// `data.get(...)` semantics.
-pub(super) fn read_ap_guard_sidecar() -> (bool, String, Value, Value) {
-    let default = (false, "unknown".to_string(), Value::Null, Value::Null);
-    let Ok(bytes) = std::fs::read(AP_GUARD_SIDECAR) else {
-        return default;
-    };
-    let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
-        return default;
-    };
-    if !v.is_object() {
-        return default;
-    }
-    let standing_down = v
+    let guard = crate::sidecar::read_object(Path::new(AP_GUARD_SIDECAR)).unwrap_or_default();
+    let standing_down = guard
         .get("standing_down")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let reason = v
+    let reason = guard
         .get("reason")
         .and_then(Value::as_str)
         .unwrap_or("unknown")
         .to_string();
-    let phy_count = v.get("wifi_phy_count").cloned().unwrap_or(Value::Null);
-    let client_up = v
+    let phy_count = guard.get("wifi_phy_count").cloned().unwrap_or(Value::Null);
+    let client_up = guard
         .get("client_uplink_active")
         .cloned()
         .unwrap_or(Value::Null);
-    (standing_down, reason, phy_count, client_up)
+    obj.insert("standing_down".to_string(), Value::Bool(standing_down));
+    obj.insert("standdown_reason".to_string(), Value::String(reason));
+    obj.insert("wifi_phy_count".to_string(), phy_count);
+    obj.insert("client_uplink_active".to_string(), client_up);
 }
 
 /// Compose the `_ap_view` body from already-probed pieces: the resolved SSID, the

@@ -24,7 +24,7 @@ pub async fn get_enrollment() -> Json<Value> {
 
 /// `GET /api/fleet/peers` → `[]`. With enrollment off, no peers are known, so
 /// the body is the empty list — a bare JSON array, the steady-state "no peers
-/// yet" response. Mirrors the Python `fleet.py:list_peers`, which returns `[]`.
+/// yet" response.
 pub async fn list_peers() -> Json<Value> {
     Json(json!([]))
 }
@@ -39,7 +39,7 @@ mod tests {
     #[tokio::test]
     async fn enrollment_is_the_not_enrolled_object() {
         let Json(body) = get_enrollment().await;
-        // Byte-shape parity with the Python handler's fixed dict.
+        // The fixed not-enrolled object.
         assert_eq!(body, json!({ "enrolled": false }));
         // Belt-and-suspenders: it is an object carrying exactly one key.
         let obj = body.as_object().expect("enrollment body is an object");
@@ -53,7 +53,7 @@ mod tests {
     #[tokio::test]
     async fn peers_is_the_empty_array() {
         let Json(body) = list_peers().await;
-        // Byte-shape parity with the Python handler's bare `[]`.
+        // The bare `[]`.
         assert_eq!(body, json!([]));
         // It is an array (not an object) and it is empty.
         let arr = body.as_array().expect("peers body is an array");

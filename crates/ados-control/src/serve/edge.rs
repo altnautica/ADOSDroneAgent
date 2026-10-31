@@ -101,9 +101,11 @@ impl EdgeAuth {
 ///    always trustworthy.
 /// 2. **Auth.** A route the front serves natively keeps the full agent auth
 ///    posture (public bypass, on-box trust, rate-limit, `X-ADOS-Key`). A route
-///    that is NOT native falls through to the reverse-proxy: the Rust auth is
-///    SKIPPED and the residual FastAPI applies its own auth on the forwarded
-///    request (which now carries the trustworthy `X-ADOS-Onbox`).
+///    that is NOT native goes to the reverse proxy only after the front runs
+///    [`crate::proxy_auth::ProxiedAuth::decide_api_key`] and then
+///    [`crate::proxy_auth::ProxiedAuth::decide_hmac`] on it; the residual
+///    Python applies no auth of its own and relies on this gate (and the
+///    trustworthy `X-ADOS-Onbox` it forwards).
 pub(super) async fn tcp_edge(
     State(edge): State<EdgeAuth>,
     mut request: Request,

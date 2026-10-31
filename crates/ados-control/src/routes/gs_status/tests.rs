@@ -414,7 +414,7 @@ fn an_aged_relay_sidecar_nulls_its_counters_under_a_stale_flag() {
         read_fresh_json(&path, later_than_the_window()).is_none(),
         "an aged sidecar must not read as fresh"
     );
-    let stale = stale_snapshot_body(read_json_or_empty(&path));
+    let stale = stale_snapshot_body(crate::sidecar::read_object(&path).unwrap_or_default());
     assert_eq!(stale["stale"], json!(true));
     assert_eq!(stale["up"], Value::Null);
     assert_eq!(

@@ -44,7 +44,8 @@ use crate::state::AppState;
 
 /// The env var that points the proxy at the residual API's internal Unix socket.
 /// When set it wins as an absolute path; otherwise the default resolves under the
-/// runtime dir. Mirrors the Python `API_INTERNAL_SOCKET_ENV`.
+/// runtime dir. The residual Python binds the same path from the same variable
+/// (`ados.api.internal_socket.API_INTERNAL_SOCKET_ENV`).
 pub const API_INTERNAL_SOCKET_ENV: &str = "ADOS_API_INTERNAL_SOCKET";
 
 /// The internal-socket file name under the runtime dir.
@@ -100,7 +101,7 @@ pub async fn non_native_fallback(State(_state): State<AppState>, request: Reques
 }
 
 /// The testable core: forward `request` to the residual API at `socket`. Split
-/// out from [`proxy_to_residual`] so a test can point it at a mock Unix backend.
+/// out from `proxy_to_residual` so a test can point it at a mock Unix backend.
 pub async fn proxy_with_socket(socket: &Path, request: Request) -> Response {
     if is_websocket_upgrade(request.headers()) {
         return proxy_upgrade(socket, request).await;
@@ -134,13 +135,9 @@ async fn proxy_plain_within(
     request: Request,
     head_timeout: std::time::Duration,
 ) -> Response {
-    // Decided on the same once-decoded path the auth edge decided on, so an
-    // encoded spelling of a permanent-Python route still reads as an absent
-    // feature (501) rather than an unknown route (404).
-    let raw = request.uri().path();
-    let permanent = routing::is_permanent_python_path(
-        &crate::auth::decision_path(raw).unwrap_or_else(|_| raw.to_string()),
-    );
+    // The LAN edge has already rewritten an encoded spelling to the canonical
+    // encoding of the path it authorized, so this is the path auth decided on.
+    let permanent = routing::is_permanent_python_path(request.uri().path());
     forward_within(socket, request, head_timeout, move || {
         absent_reply(permanent)
     })
@@ -521,18 +518,6 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
         let body = body_bytes(resp).await;
         assert_eq!(body, br#"{"detail":"Not Found"}"#);
-    }
-
-    #[tokio::test]
-    async fn an_encoded_permanent_prefix_is_still_an_absent_feature() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("absent.sock");
-        let request = http::Request::builder()
-            .uri("/api/%76ision/state")
-            .body(Body::empty())
-            .unwrap();
-        let resp = proxy_with_socket(&path, request).await;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     #[tokio::test]
