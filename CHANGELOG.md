@@ -41,12 +41,33 @@ the project follows [Semantic Versioning](https://semver.org/).
   the published `ghcr.io/altnautica/ados-mcp` image, alongside the
   from-source command. The Docker command targets the agent's LAN address,
   since `.local` names may not resolve inside a container.
+- Mesh pairing (`ados-mesh-pairing`), mesh bring-up (`ados-batman`), the
+  setup captive portal (`ados-setup-captive`) and the HDMI kiosk
+  (`ados-kiosk`) run as Rust: `ados-groundlink --pairing`,
+  `ados-groundlink --mesh-bringup`, and the new `ados-captive` and
+  `ados-kiosk` binaries. Unit names, the pairing socket protocol, the
+  pairing snapshot and the pair-event journal are unchanged; the Python
+  services are removed.
+- `ados-term` (MIT OR Apache-2.0): the terminal toolkit the installer runs
+  on (themed frames, `/dev/tty` and crossterm backends, live step progress,
+  wizard widgets, command runner).
+- JSON Schemas for `/api/status/full`, the cloud heartbeat and
+  `/api/v1/setup/status` under `schemas/api/`, and TypeScript types
+  generated from them for the dashboard, the cockpit and Mission Control.
 
 ### Changed
 
 - The quick actions overlay no longer carries Pair, Logs or Unpair (the
   Pairing settings page and the Logs tab replace them), and actions no longer
   have single-key shortcuts on the main screen.
+- Process-group handling for every child the agent spawns (wfb, video
+  pipelines, dnsmasq, socat, batctl, systemctl probes) is one shared
+  implementation: null stdin, kill on drop, SIGTERM then SIGKILL to the whole
+  group, capped stderr logs, and line readers that bound line length and
+  survive non-UTF-8 output.
+- `/api/status/full` is built from a typed response; the wire keys are
+  unchanged.
+- The `ground-station` Python extra drops packages nothing imports.
 
 ### Fixed
 
@@ -69,6 +90,25 @@ the project follows [Semantic Versioning](https://semver.org/).
   columns.
 - Dependency updates: rustls 0.23.46, rustls-webpki 0.103.16,
   webpki-roots and webpki-root-certs 1.0.10.
+- **A cloud plugin install verified the archive against the manifest
+  hash.** It now verifies against `archiveSha256` and refuses a job without
+  one. An empty or malformed pin is refused everywhere instead of skipping
+  the check.
+- The aux RPC response listener retries a failed bind every 3 s instead of
+  stopping for good, binds with the command-socket mode, and pauses after an
+  accept error.
+- A frame-bus reader could read a slot's length before the acquire fence.
+- Disconnected IPC clients are dropped when they hang up, not on the next
+  broadcast, so a socket that never broadcasts no longer leaks a handle and
+  a descriptor per connection.
+- Promoting a new agent source tree moves the old one aside and puts it back
+  if the swap fails, instead of deleting it first.
+- Revoking a plugin grant takes effect on the plugin's next request.
+- Radio process respawn waits 2 s; the MQTT transport stops its event loop
+  when dropped; `batctl` neighbour queries name the mesh interface.
+- `factory-reset.sh` refuses to run without root and stops every agent unit
+  before wiping; `install.sh` bounds `wget` and refetches once from scratch
+  after a failed verification.
 
 - **The simulator clock never locked.** Simulator time from the video SEI is
   paired with the frame's arrival on the host, so every pair carries the

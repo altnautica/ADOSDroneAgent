@@ -28,7 +28,7 @@ apply through the normal install or upgrade path.
 ## Stack and Commands
 
 - Rust, stable toolchain, MSRV 1.93. The workspace manifest is
-  `crates/Cargo.toml` with 32 members; `cargo` must be run from `crates/`,
+  `crates/Cargo.toml` with 44 members; `cargo` must be run from `crates/`,
   there is no manifest at the repository root.
 - Python 3.11+, Click, Pydantic, Rich, structlog, and systemd-oriented
   services. FastAPI is the residual HTTP surface that runs behind the native
@@ -77,7 +77,7 @@ you touched and do not treat the full run as a gate.
 
 ## Architecture Map
 
-Rust, under `crates/`, 42 workspace members; 17 of them are published
+Rust, under `crates/`, 44 workspace members; 18 of them are publishable
 library crates (see "Published crates" below). The flight-critical path:
 
 - Service supervision: `crates/ados-supervisor/`
