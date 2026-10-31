@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision-engine", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-offload", "ados-swarmbus", "ados-sensorhub-service", "ados-sensorbus", "ados-gnss", "ados-clock-service", "ados-sensorhub", "ados-lora-service", "ados-vision", "ados-lora", "ados-crsf-codec", "ados-positioning", "ados-rtcm", "ados-clock", "ados-swarm", "ados-mavlink-tunnel", "ados-display-driver", "ados-hmi"]
+members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision-engine", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-offload", "ados-swarmbus", "ados-sensorhub-service", "ados-sensorbus", "ados-gnss", "ados-clock-service", "ados-sensorhub", "ados-lora-service", "ados-vision", "ados-lora", "ados-crsf-codec", "ados-positioning", "ados-rtcm", "ados-clock", "ados-swarm", "ados-mavlink-tunnel", "ados-display-driver", "ados-hmi", "ados-proc", "ados-term"]
 
 [workspace.package]
-version = "0.106.3"
+version = "0.107.0"
 edition = "2021"
 # Minimum supported Rust. `slice::as_chunks` / `as_chunks_mut`, which the
 # protocol decode, the display blitter and the vision crop use to state a
@@ -30,13 +30,13 @@ homepage = "https://altnautica.com"
 # Published crates (crates.io). Every in-tree consumer reaches them through these
 # entries so the path and the registry version stay together. The lockstep
 # pins must equal the workspace version (scripts/check-version-sync.sh).
-ados-protocol = { path = "ados-protocol", version = "=0.106.3" }
-ados-vision = { path = "ados-vision", version = "=0.106.3" }
-ados-gpio = { path = "ados-gpio", version = "=0.106.3" }
-ados-hal-probe = { path = "ados-hal-probe", version = "=0.106.3" }
+ados-protocol = { path = "ados-protocol", version = "=0.107.0" }
+ados-vision = { path = "ados-vision", version = "=0.107.0" }
+ados-gpio = { path = "ados-gpio", version = "=0.107.0" }
+ados-hal-probe = { path = "ados-hal-probe", version = "=0.107.0" }
 ados-sensorhub = { path = "ados-sensorhub", version = "0.1.0" }
 ados-offload = { path = "ados-offload", version = "0.1.0" }
-ados-macpin = { path = "ados-macpin", version = "0.1.1" }
+ados-macpin = { path = "ados-macpin", version = "0.1.2" }
 ados-lora = { path = "ados-lora", version = "0.1.1" }
 ados-crsf-codec = { path = "ados-crsf-codec", version = "0.1.1" }
 ados-positioning = { path = "ados-positioning", version = "0.1.0" }
@@ -45,9 +45,15 @@ ados-clock = { path = "ados-clock", version = "0.1.1" }
 ados-swarm = { path = "ados-swarm", version = "0.1.0" }
 ados-mavlink-tunnel = { path = "ados-mavlink-tunnel", version = "0.1.0" }
 ados-display-driver = { path = "ados-display-driver", version = "0.1.1" }
-ados-hmi = { path = "ados-hmi", version = "0.1.1" }
+ados-hmi = { path = "ados-hmi", version = "0.1.2" }
+ados-term = { path = "ados-term", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# JSON Schema for the agent's REST and heartbeat wire types. The committed
+# schemas under `schemas/api/` feed the TypeScript codegen. No
+# `preserve_order`: that would flip serde_json's map ordering for every crate
+# built in the same workspace graph.
+schemars = "1"
 rmp-serde = "1.3"
 rmpv = { version = "1.3", features = ["with-serde"] }
 hmac = "0.13"
@@ -103,8 +109,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Async methods on the plugin SDK's driver and lifecycle traits; keeps the
 # traits object-safe behind a `Box<dyn ...>`.
 async-trait = "0.1"
-# Trait-only `Stream` for the SDK driver iterators (mirrors the Python
-# `AsyncIterator` returns). The minimal crate, no full futures stack.
+# Trait-only `Stream` for the SDK driver iterators (the Rust counterpart of
+# the Python SDK's `AsyncIterator` returns). The minimal crate, no full futures stack.
 futures-core = "0.3"
 # Linux-only deps (systemd notify + journald). Declared here; the consuming
 # crate pulls them in only under `[target.'cfg(target_os = "linux")'.dependencies]`

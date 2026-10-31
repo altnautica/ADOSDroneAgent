@@ -26,10 +26,11 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "ados-capabilities-codegen"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "hex",
  "serde",
+ "serde_json",
  "sha2 0.11.0",
  "toml",
 ]
@@ -44,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "ados-clock-service"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -66,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "ados-cloud"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-macpin",
@@ -81,6 +82,7 @@ dependencies = [
  "reqwest",
  "rumqttc-next",
  "rustls",
+ "schemars",
  "sd-notify",
  "serde",
  "serde_json",
@@ -99,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "ados-config"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-macpin",
  "ados-protocol",
@@ -114,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "ados-config-tunnel"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-mavlink-tunnel",
@@ -133,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "ados-control"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-groundlink",
@@ -145,6 +147,7 @@ dependencies = [
  "ados-net",
  "ados-offload",
  "ados-plugin-host",
+ "ados-proc",
  "ados-protocol",
  "ados-radio",
  "ados-rtcm",
@@ -174,6 +177,7 @@ dependencies = [
  "rmp-serde",
  "rmpv",
  "rustls",
+ "schemars",
  "sd-notify",
  "serde",
  "serde_json",
@@ -196,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "ados-crsf"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-crsf-codec",
@@ -220,18 +224,20 @@ version = "0.1.1"
 
 [[package]]
 name = "ados-display"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ab_glyph",
  "ados-config",
  "ados-display-driver",
  "ados-hid",
  "ados-hmi",
+ "ados-proc",
  "ados-protocol",
  "anyhow",
  "embedded-graphics",
  "evdev",
  "image",
+ "nix 0.29.0",
  "png 0.17.16",
  "qrcode",
  "sd-notify",
@@ -259,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "ados-gnss"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-positioning",
@@ -280,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "ados-gpio"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -297,10 +303,11 @@ dependencies = [
 
 [[package]]
 name = "ados-groundlink"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-plugin-host",
+ "ados-proc",
  "ados-protocol",
  "ados-radio",
  "ados-supervisor",
@@ -331,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hal-probe"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -346,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hid"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-hmi",
@@ -371,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hmi"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "getrandom 0.4.2",
  "hex",
@@ -384,13 +391,14 @@ dependencies = [
 
 [[package]]
 name = "ados-installer"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
  "ados-macpin",
  "ados-plugin-host",
  "ados-protocol",
+ "ados-term",
  "anyhow",
  "base64 0.23.1",
  "getrandom 0.4.2",
@@ -414,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "ados-logd"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -459,7 +467,7 @@ dependencies = [
 
 [[package]]
 name = "ados-lora-service"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-gpio",
@@ -479,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "ados-macpin"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "getrandom 0.4.2",
  "hex",
@@ -493,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "ados-mavlink-router"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -527,9 +535,10 @@ version = "0.1.0"
 
 [[package]]
 name = "ados-net"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
+ "ados-proc",
  "ados-protocol",
  "anyhow",
  "async-trait",
@@ -558,7 +567,7 @@ dependencies = [
 
 [[package]]
 name = "ados-plugin-host"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -603,8 +612,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-proc"
+version = "0.107.0"
+dependencies = [
+ "nix 0.29.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "ados-protocol"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -631,9 +650,10 @@ dependencies = [
 
 [[package]]
 name = "ados-radio"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
+ "ados-proc",
  "ados-protocol",
  "ados-video",
  "anyhow",
@@ -660,7 +680,7 @@ version = "0.1.0"
 
 [[package]]
 name = "ados-sdk"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-plugin-host",
  "ados-protocol",
@@ -683,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorbus"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-protocol",
  "hex",
@@ -714,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorhub-service"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -734,11 +754,12 @@ dependencies = [
 
 [[package]]
 name = "ados-supervisor"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
  "ados-macpin",
+ "ados-proc",
  "ados-protocol",
  "anyhow",
  "async-trait",
@@ -768,7 +789,7 @@ dependencies = [
 
 [[package]]
 name = "ados-swarmbus"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-protocol",
  "ados-radio",
@@ -791,8 +812,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ados-term"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "nix 0.29.0",
+ "ratatui",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "ados-tui"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -809,10 +841,11 @@ dependencies = [
 
 [[package]]
 name = "ados-video"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
+ "ados-proc",
  "ados-protocol",
  "ados-vision-engine",
  "anyhow",
@@ -831,14 +864,14 @@ dependencies = [
 
 [[package]]
 name = "ados-vision"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-protocol",
 ]
 
 [[package]]
 name = "ados-vision-engine"
-version = "0.106.3"
+version = "0.107.0"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -1877,6 +1910,12 @@ checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
 ]
+
+[[package]]
+name = "dyn-clone"
+version = "1.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
 name = "ed25519"
@@ -4378,6 +4417,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ref-cast"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e440fb4e4b4147295338efb76001ab9e4efc0e5839df2c47fc5ac2381d365c3"
+dependencies = [
+ "ref-cast-impl",
+]
+
+[[package]]
+name = "ref-cast-impl"
+version = "1.0.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92ecd8964f8453721699a1ed72037b0db49ce2f5a5138486ee89bed6f67cdf3a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "regex"
 version = "1.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4657,6 +4716,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "schemars"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab508826f74a77ca9d5aba6ff19b522583ee3eaf28a19384ff3d0e5835fadf6e"
+dependencies = [
+ "dyn-clone",
+ "ref-cast",
+ "schemars_derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1c3a92094fa7d61aa124645844facb6b554dfc797136d0f5fd1f890e2bffc69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals",
+ "syn 3.0.6",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4734,6 +4818,17 @@ name = "serde_derive"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "serde_derive_internals"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f852137cce035d6a4df67ccce505ff6b3e9fd3a10e3e52b24dc71e650bb1a9bd"
 dependencies = [
  "proc-macro2",
  "quote",

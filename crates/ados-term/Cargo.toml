@@ -1,0 +1,30 @@
+[package]
+name = "ados-term"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/ados-term"
+readme = "README.md"
+description = "Full-screen terminal toolkit for installers and deploy wizards: amber-on-charcoal theme with color tiers, frame compositor, raw tty backends, live step-progress renderers and a streaming command runner."
+keywords = ["terminal", "tui", "installer", "progress", "ansi"]
+categories = ["command-line-interface", "command-line-utilities"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+# Only `ratatui::crossterm` is used: terminal size, cursor and clear for the
+# inline renderer, and raw mode + key events for the stdio backend.
+ratatui = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+
+# The controlling-terminal backend opens /dev/tty with termios raw mode, polls
+# it, and installs SIGWINCH / SIGINT handlers.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
