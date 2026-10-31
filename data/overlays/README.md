@@ -147,7 +147,7 @@ set a pull-up bias.**
    Both must exit 0. The compile script no-ops on macOS (no kernel
    headers); use a Linux box or the CI run for that pass.
 8. Add board detection in
-   `scripts/drivers/install-display-overlay.sh:129-168` so the
+   `scripts/drivers/lib/display-detect.sh` (`detect_board`) so the
    installer picks the new overlay automatically.
 
 ## Validating on a real board
