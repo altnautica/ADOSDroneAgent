@@ -6,31 +6,24 @@
 //! a bare `.kill()`, orphaning the bridge ffmpeg onto the mediamtx `/main`
 //! publisher slot → two publishers fought → black video (the v0.46.4 bug).
 //!
-//! [`ManagedProcess`] makes the fix structural:
-//! - `setsid()` in the pre-exec hook makes the child its own process-group
-//!   leader (PGID == PID);
-//! - [`terminate`](ManagedProcess::terminate) does the graceful
-//!   `killpg(SIGTERM)` → wait(grace) → `killpg(SIGKILL)` of the Python
-//!   `_terminate_process_group`;
-//! - `kill_on_drop` + a `Drop` `killpg` guarantee nothing outlives its owner
-//!   even if a future is dropped mid-flight;
-//! - [`kill_orphans`] is the pre-spawn `pgrep` sweep for a straggler left by a
-//!   previously crashed run (which would otherwise hold the publisher slot).
+//! [`ManagedProcess`] makes the fix structural: the leader is an
+//! [`ados_proc::GroupChild`] (its own process group; terminated, killed and
+//! dropped as a whole group), an SEI publish stage joins that group, and
+//! [`kill_orphans`] is the pre-spawn `pgrep` sweep for a straggler left by a
+//! previously crashed run (which would otherwise hold the publisher slot).
 
 use std::process::Stdio;
 use std::time::Duration;
 
+use ados_proc::{GroupChild, Spec, StderrMode, StdoutMode};
 use tokio::process::{ChildStderr, ChildStdout, Command};
 use tokio::task::JoinHandle;
 
 /// A media subprocess (encoder bash pipeline, wfb_tee ffmpeg, cloud-push
 /// ffmpeg, mediamtx) running as its own process-group leader.
 pub struct ManagedProcess {
-    label: String,
-    #[cfg(target_os = "linux")]
-    pgid: nix::unistd::Pid,
-    inner: tokio::process::Child,
-    /// The publish stage of an SEI-split encoder, in the same process group.
+    leader: GroupChild,
+    /// The publish stage of an SEI-split encoder, in the leader's group.
     companion: Option<tokio::process::Child>,
     /// The in-process SEI pump between the two stages.
     pump: Option<JoinHandle<()>>,
@@ -41,7 +34,7 @@ impl ManagedProcess {
     /// stderr is piped for the caller to drain (rate-limited). `label` is for
     /// log lines only.
     pub fn spawn(label: &str, program: &str, args: &[String]) -> std::io::Result<Self> {
-        Self::spawn_with(label, program, args, Stdio::null())
+        Self::spawn_with(label, program, args, StdoutMode::Null)
     }
 
     /// Like [`spawn`](Self::spawn) but pipes stdout so the caller can read it —
@@ -52,49 +45,26 @@ impl ManagedProcess {
         program: &str,
         args: &[String],
     ) -> std::io::Result<Self> {
-        Self::spawn_with(label, program, args, Stdio::piped())
+        Self::spawn_with(label, program, args, StdoutMode::Piped)
     }
 
     fn spawn_with(
         label: &str,
         program: &str,
         args: &[String],
-        stdout: Stdio,
+        stdout: StdoutMode,
     ) -> std::io::Result<Self> {
-        let mut cmd = Command::new(program);
-        cmd.args(args)
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(Stdio::piped())
-            // Cross-platform single-PID backstop; the Linux killpg in Drop is
-            // the real group backstop.
-            .kill_on_drop(true);
-
-        #[cfg(target_os = "linux")]
-        // Safety: setsid() is async-signal-safe and is the only call in the hook.
-        unsafe {
-            cmd.pre_exec(|| {
-                nix::unistd::setsid().map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-                Ok(())
-            });
-        }
-
-        let child = cmd.spawn()?;
-
-        #[cfg(target_os = "linux")]
-        let pgid = {
-            let raw = child
-                .id()
-                .ok_or_else(|| std::io::Error::other("media child has no PID yet"))?;
-            // After setsid the child leads its own group: PGID == PID.
-            nix::unistd::Pid::from_raw(raw as i32)
-        };
-
+        let leader = GroupChild::spawn(
+            label,
+            Spec {
+                program,
+                args,
+                stdout,
+                stderr: StderrMode::Piped,
+            },
+        )?;
         Ok(Self {
-            label: label.to_string(),
-            #[cfg(target_os = "linux")]
-            pgid,
-            inner: child,
+            leader,
             companion: None,
             pump: None,
         })
@@ -118,68 +88,55 @@ impl ManagedProcess {
         let (pub_prog, pub_args) = publish
             .split_first()
             .ok_or_else(|| std::io::Error::other("empty publish stage"))?;
-        let mut leader = Self::spawn_with(label, enc_prog, enc_args, Stdio::piped())?;
-        let stdout = leader
-            .inner
-            .stdout
-            .take()
+        let mut pipeline = Self::spawn_with(label, enc_prog, enc_args, StdoutMode::Piped)?;
+        let stdout = pipeline
+            .leader
+            .take_stdout()
             .ok_or_else(|| std::io::Error::other("encode stage has no stdout"))?;
-
-        let mut cmd = Command::new(pub_prog);
-        cmd.args(pub_args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
-            .kill_on_drop(true);
-        #[cfg(target_os = "linux")]
-        {
-            let pgid = leader.pgid;
-            // Safety: setpgid() is async-signal-safe and is the only call in
-            // the hook. Joining the leader's group makes one killpg reap both.
-            unsafe {
-                cmd.pre_exec(move || {
-                    nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), pgid)
-                        .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-                    Ok(())
-                });
-            }
-        }
-        // On a spawn error `leader` drops here and its group is killed.
-        let mut publisher = cmd.spawn()?;
+        // On a spawn error `pipeline` drops here and its group is killed.
+        let mut publisher = pipeline.leader.spawn_joined(
+            Spec {
+                program: pub_prog,
+                args: pub_args,
+                stdout: StdoutMode::Null,
+                stderr: StderrMode::Inherit,
+            },
+            true,
+        )?;
         let stdin = publisher
             .stdin
             .take()
             .ok_or_else(|| std::io::Error::other("publish stage has no stdin"))?;
-        leader.pump = Some(tokio::spawn(crate::sei::pump(stdout, stdin)));
-        leader.companion = Some(publisher);
-        Ok(leader)
+        pipeline.pump = Some(tokio::spawn(crate::sei::pump(stdout, stdin)));
+        pipeline.companion = Some(publisher);
+        Ok(pipeline)
     }
 
     /// Take the piped stdout handle (only present after
     /// [`spawn_capturing_stdout`](Self::spawn_capturing_stdout)).
     pub fn take_stdout(&mut self) -> Option<ChildStdout> {
-        self.inner.stdout.take()
+        self.leader.take_stdout()
     }
 
     /// The OS PID (for `/proc/<pid>/...` reads + liveness checks).
     pub fn pid(&self) -> Option<u32> {
-        self.inner.id()
+        self.leader.pid()
     }
 
     /// The display label (for orchestrator log lines).
     pub fn label(&self) -> &str {
-        &self.label
+        self.leader.label()
     }
 
     /// Take the piped stderr handle (for the rate-limited drain task).
     pub fn take_stderr(&mut self) -> Option<ChildStderr> {
-        self.inner.stderr.take()
+        self.leader.take_stderr()
     }
 
     /// True while the process (and, for an SEI pipeline, its publish stage
     /// and the pump between them) has not yet exited.
     pub fn is_running(&mut self) -> bool {
-        let leader = matches!(self.inner.try_wait(), Ok(None));
+        let leader = self.leader.is_running();
         let companion = self
             .companion
             .as_mut()
@@ -188,36 +145,10 @@ impl ManagedProcess {
         leader && companion && pump
     }
 
-    /// Graceful teardown of the whole process group: `SIGTERM`, wait up to `grace`,
-    /// then `SIGKILL`.
-    #[cfg(target_os = "linux")]
+    /// Graceful teardown of the whole process group: `SIGTERM`, wait up to
+    /// `grace`, then `SIGKILL`; the publish stage is reaped with it.
     pub async fn terminate(&mut self, grace: Duration) {
-        use nix::sys::signal::{killpg, Signal};
-        let _ = killpg(self.pgid, Signal::SIGTERM);
-        let all_exited = async {
-            let _ = self.inner.wait().await;
-            if let Some(c) = self.companion.as_mut() {
-                let _ = c.wait().await;
-            }
-        };
-        if tokio::time::timeout(grace, all_exited).await.is_err() {
-            tracing::warn!(label = %self.label, "process group did not exit on SIGTERM; SIGKILL");
-            let _ = killpg(self.pgid, Signal::SIGKILL);
-            let _ = self.inner.wait().await;
-            if let Some(c) = self.companion.as_mut() {
-                let _ = c.wait().await;
-            }
-        }
-        if let Some(p) = self.pump.take() {
-            p.abort();
-        }
-    }
-
-    /// Non-Linux fallback: single-PID kill (no process groups in the test host).
-    #[cfg(not(target_os = "linux"))]
-    pub async fn terminate(&mut self, _grace: Duration) {
-        let _ = self.inner.start_kill();
-        let _ = self.inner.wait().await;
+        self.leader.terminate(grace).await;
         if let Some(c) = self.companion.as_mut() {
             let _ = c.start_kill();
             let _ = c.wait().await;
@@ -226,20 +157,11 @@ impl ManagedProcess {
             p.abort();
         }
     }
-
-    #[cfg(target_os = "linux")]
-    fn killpg_now(&self) {
-        use nix::sys::signal::{killpg, Signal};
-        let _ = killpg(self.pgid, Signal::SIGKILL);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn killpg_now(&self) {}
 }
 
 impl Drop for ManagedProcess {
     fn drop(&mut self) {
-        self.killpg_now();
+        // The leader's `GroupChild` drop kills the group.
         if let Some(p) = self.pump.take() {
             p.abort();
         }

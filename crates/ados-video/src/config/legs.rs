@@ -23,7 +23,7 @@ fn default_true() -> bool {
 /// USB cameras get a `vid:pid[:serial]` string; CSI cameras get the sensor name
 /// plus the camera port index. Every field is optional — an absent `match` means
 /// the leg is pinned only by its `source` locator (a network URL never moves, so
-/// a network leg carries no fingerprint). Mirrors the Python `CameraMatch`.
+/// a network leg carries no fingerprint). Matches the Python `CameraMatch`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CameraMatch {
     /// USB fingerprint, `vid:pid` or `vid:pid:serial` (lowercase hex vid/pid).
@@ -122,7 +122,7 @@ pub struct CameraLeg {
     // --- Encode-plane (image-transform + encoder-selection) keys. Unlike the
     // roster metadata above, these ARE read by the encode pipeline, so they plug
     // straight through to the encoder command builder via [`ResolvedLeg`]. All
-    // additive + default-safe (mirror Python `CameraLeg`).
+    // additive + default-safe (matching the Python `CameraLeg`).
     /// Clockwise image rotation in degrees — 0 | 90 | 180 | 270, default 0
     /// (distinct from the coarse-mount `orientation` metadata above).
     #[serde(default = "default_rotation")]

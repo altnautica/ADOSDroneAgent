@@ -271,7 +271,7 @@ impl MediamtxManager {
 /// error worth seeing (a slow reader discarding frames, a refused publisher)
 /// and the volume is low; they are logged at warn.
 async fn drain_mediamtx_log<R: tokio::io::AsyncRead + Unpin>(stream: R) {
-    let mut lines = crate::stderr_drain::BoundedLines::new(stream);
+    let mut lines = ados_proc::lines::BoundedLines::new(stream);
     while let Some(line) = lines.next_line().await {
         let text = line.trim_end();
         if !text.is_empty() {

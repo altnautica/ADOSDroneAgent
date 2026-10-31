@@ -184,8 +184,8 @@ pub struct CameraStateSnapshot {
 impl CameraStateSnapshot {
     /// Apply the ready-gate: a stale primary can linger while the live camera
     /// count is zero (a just-unplugged node), so never advertise `ready`
-    /// without at least one discovered camera. Mirrors the Python gate
-    /// (`primary is not None and total > 0`).
+    /// without at least one discovered camera (`ready` requires a primary AND a
+    /// non-zero camera count).
     pub fn from_discovery(
         primary: Option<(Option<String>, Option<String>)>,
         total_cameras: u32,

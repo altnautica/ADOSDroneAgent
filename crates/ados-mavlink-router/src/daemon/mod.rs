@@ -1,12 +1,10 @@
 //! The `ados-mavlink-router` service body.
 //!
 //! Owns the FC serial link and serves the MAVLink + state IPC sockets plus the
-//! direct-GCS TCP/UDP proxies. Mirrors the Python `ados-mavlink` service
-//! (`python -m ados.services.mavlink`): the IPC servers, the FC connection, the
-//! 1 Hz companion heartbeat, the 10 Hz state publish, the adaptive stream
-//! cadence, and the parameter sweep. The state socket is published as
-//! length-prefixed msgpack (v2), the versioned wire the shared reader
-//! auto-detects.
+//! direct-GCS TCP/UDP proxies: the IPC servers, the FC connection, the 1 Hz
+//! companion heartbeat, the 10 Hz state publish, the adaptive stream cadence,
+//! and the parameter sweep. The state socket is published as length-prefixed
+//! msgpack (v2), the versioned wire the shared reader auto-detects.
 //!
 //! The binary's `main` is a thin call into [`run`]; everything the process
 //! wires up at start lives here and in the sibling modules.

@@ -66,9 +66,8 @@ impl VehicleSource {
     }
 }
 
-/// The unified vehicle state. Field set and defaults mirror the Python
-/// dataclass; only the fields the wire snapshot needs are surfaced by
-/// [`VehicleState::to_wire`].
+/// The unified vehicle state. Only the fields the wire snapshot needs are
+/// surfaced by [`VehicleState::to_wire`].
 #[derive(Debug, Clone)]
 pub struct VehicleState {
     // HEARTBEAT
@@ -213,13 +212,11 @@ impl Default for VehicleState {
 
 impl VehicleState {
     /// Apply one MAVLink message. `now_iso` is the current ISO-8601 UTC
-    /// timestamp (the caller computes it once per update, as the Python
-    /// producer does with `datetime.now(timezone.utc).isoformat()`).
+    /// timestamp (the caller computes it once per update).
     ///
     /// Returns `Some((name, value, param_type))` when the message was a
-    /// `PARAM_VALUE`, so the caller can persist it to the param cache (the
-    /// Python producer writes the cache inline; keeping it I/O-free here lets
-    /// the caller own persistence). The value is decoded for the vehicle's
+    /// `PARAM_VALUE`, so the caller can persist it to the param cache (keeping
+    /// it I/O-free here lets the caller own persistence). The value is decoded for the vehicle's
     /// firmware: a PX4 integer parameter arrives as its integer bytes in the
     /// float field, and its float reading would be garbage.
     pub fn update_from_message(
@@ -365,7 +362,7 @@ impl VehicleState {
         }
     }
 
-    /// The vehicle-derived wire snapshot (the Python `to_dict()` shape).
+    /// The vehicle-derived wire snapshot.
     ///
     /// `position_age_ms` is evaluated against the clock at call time, so this is
     /// a snapshot-at-an-instant rather than a pure projection of the struct.
@@ -444,8 +441,8 @@ impl VehicleState {
 
     /// The full state-socket payload: the vehicle snapshot with the service's
     /// runtime extras merged on top (`fc_connected`, `service_uptime`, the
-    /// param-sweep flags, `param_generation`, ...). The Python producer builds
-    /// this in `__main__.py`; the merge order is the same (extras overwrite).
+    /// param-sweep flags, `param_generation`, ...). Extras overwrite vehicle
+    /// fields on a key clash.
     pub fn to_wire_with(&self, extras: &Map<String, Value>) -> Value {
         let mut wire = self.to_wire();
         if let Value::Object(map) = &mut wire {

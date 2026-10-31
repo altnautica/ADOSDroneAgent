@@ -45,7 +45,7 @@ const PRESENCE_MAGIC: &[u8; 8] = b"AD05PRES";
 const HOP_VERSION: u8 = 3;
 const PRESENCE_VERSION: u8 = 1;
 
-/// Trigger byte values (hop_supervisor.py:119-130).
+/// Trigger byte values.
 ///
 /// `Manual` is an operator-initiated coordinated hop (the radio command socket):
 /// it announces + dwell-syncs exactly like a periodic/reactive hop so the ground
@@ -156,7 +156,7 @@ pub fn hop_announce_delay_ms(pkt: &[u8]) -> Option<u64> {
         .map(|b| u64::from_be_bytes(b.try_into().expect("9..17 is exactly 8 bytes")))
 }
 
-/// Build a 68-byte PresenceBeacon (hop_supervisor.py:235-250).
+/// Build a 68-byte PresenceBeacon.
 ///
 /// Layout:
 ///   [0..8]  magic "AD05PRES"

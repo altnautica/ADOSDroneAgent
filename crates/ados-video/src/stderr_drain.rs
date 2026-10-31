@@ -18,7 +18,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use ados_proc::lines::BoundedLines;
+use tokio::io::AsyncRead;
 
 /// Lower-cased fragments of ffmpeg / GStreamer lines that name a failure of
 /// the ENCODER itself (codec init, frame submission, a hardware encoder
@@ -42,79 +43,6 @@ pub fn is_encoder_side_error(line: &str) -> bool {
     ENCODER_ERROR_MARKERS.iter().any(|m| l.contains(m))
         || (HW_ENCODER_NAMES.iter().any(|n| l.contains(n))
             && (l.contains("error") || l.contains("fail")))
-}
-
-/// The longest stderr line kept, in bytes; the rest of a longer line is
-/// discarded up to its terminator.
-pub const MAX_LINE_BYTES: usize = 4096;
-
-/// A line reader for child stderr that can neither grow without bound nor
-/// wait forever on a newline.
-///
-/// `BufReader::lines` splits on `\n` only and buffers the whole line first.
-/// ffmpeg's periodic stats report (the default `-stats` output of the 5.x CLI)
-/// ends every update with `\r` and never with `\n`, so a healthy encoder's
-/// stderr is one endless "line": the drain's buffer grew for the life of the
-/// stream and the first real warning then logged the whole accumulated blob.
-/// This splits on either terminator and caps each line at [`MAX_LINE_BYTES`].
-pub struct BoundedLines<R> {
-    reader: BufReader<R>,
-    line: Vec<u8>,
-    eof: bool,
-}
-
-impl<R: AsyncRead + Unpin> BoundedLines<R> {
-    pub fn new(reader: R) -> Self {
-        Self {
-            reader: BufReader::new(reader),
-            line: Vec::new(),
-            eof: false,
-        }
-    }
-
-    /// The next `\n`- or `\r`-terminated line (possibly empty), truncated to
-    /// [`MAX_LINE_BYTES`]. `None` once the stream has ended or failed and any
-    /// unterminated tail has been returned.
-    pub async fn next_line(&mut self) -> Option<String> {
-        loop {
-            if self.eof {
-                if self.line.is_empty() {
-                    return None;
-                }
-                return Some(self.take_line());
-            }
-            let buf = match self.reader.fill_buf().await {
-                Ok(buf) if !buf.is_empty() => buf,
-                _ => {
-                    self.eof = true;
-                    continue;
-                }
-            };
-            match buf.iter().position(|b| *b == b'\n' || *b == b'\r') {
-                Some(end) => {
-                    push_bounded(&mut self.line, &buf[..end]);
-                    self.reader.consume(end + 1);
-                    return Some(self.take_line());
-                }
-                None => {
-                    let n = buf.len();
-                    push_bounded(&mut self.line, buf);
-                    self.reader.consume(n);
-                }
-            }
-        }
-    }
-
-    fn take_line(&mut self) -> String {
-        let text = String::from_utf8_lossy(&self.line).into_owned();
-        self.line.clear();
-        text
-    }
-}
-
-fn push_bounded(line: &mut Vec<u8>, bytes: &[u8]) {
-    let room = MAX_LINE_BYTES.saturating_sub(line.len());
-    line.extend_from_slice(&bytes[..bytes.len().min(room)]);
 }
 
 /// At most this many real-diagnostic lines per [`DRAIN_WINDOW`] reach the log.
@@ -296,26 +224,6 @@ mod tests {
         let counter = std::sync::Arc::new(AtomicU32::new(0));
         drain_encoder(&stream[..], "test", counter.clone()).await;
         assert_eq!(counter.load(Ordering::Acquire), 2);
-    }
-
-    #[tokio::test]
-    async fn carriage_return_status_lines_are_split_and_every_line_is_bounded() {
-        // ffmpeg's stats report: `\r`-terminated updates and never a newline,
-        // then a pathological unterminated tail far past the cap.
-        let mut stream = Vec::new();
-        for i in 0..2000 {
-            stream.extend_from_slice(format!("frame={i} fps=30 q=23.0 size=1kB   \r").as_bytes());
-        }
-        stream.extend(std::iter::repeat_n(b'x', 1 << 20));
-        let mut lines = BoundedLines::new(&stream[..]);
-        let mut count = 0usize;
-        let mut longest = 0usize;
-        while let Some(line) = lines.next_line().await {
-            count += 1;
-            longest = longest.max(line.len());
-        }
-        assert_eq!(count, 2001, "each \\r-terminated update is its own line");
-        assert!(longest <= MAX_LINE_BYTES, "a line is capped, got {longest}");
     }
 
     #[tokio::test]

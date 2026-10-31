@@ -2,8 +2,9 @@
 //! lives in this process: the bind FSM and the ground-station role transition.
 //!
 //! The bind orchestrator and the role transition run in this (supervisor)
-//! process, but they are triggered from the REST front, the FastAPI routes and
-//! the cloud auto-pair supervisor, which run in OTHER processes. They reach it
+//! process, but they are triggered from the REST front, the Python
+//! ground-station role manager and the cloud auto-pair supervisor, which run in
+//! OTHER processes. They reach it
 //! over a Unix socket at [`SUPERVISOR_SOCK_NAME`] under the run dir, speaking one newline-JSON request →
 //! newline-JSON response per connection:
 //!   - `{"op":"start_bind","role":"drone","peer_device_id":null,"source":"operator",
@@ -19,9 +20,8 @@
 //!
 //! `cancel_bind` arrives on a SEPARATE connection from the blocked `start_bind`,
 //! so it routes through [`BindOrchestrator::cancel_current`] (a notify), not the
-//! per-call cancel future. The caller (FastAPI) applies its own wall-clock
-//! timeout and fires `cancel_bind` on timeout, matching the Python route's
-//! `wait_for` + per-request cancel_event.
+//! per-call cancel future. The caller applies its own wall-clock timeout and
+//! fires `cancel_bind` on timeout.
 //!
 //! `set_role` is handed to the supervisor loop, which owns the service table,
 //! and runs there to completion: a requester that disconnects, or that is killed

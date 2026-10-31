@@ -1,4 +1,10 @@
+use super::peer::{peer_evidence_verdict, upstream_key_fresh};
+use super::prep::{parse_iface_mode, summarize_precheck};
+use super::state::video_nudge_after_failed_bind;
 use super::*;
+use crate::bind::fsm::{now_monotonic, BindState};
+use crate::bind::{BindRole, WAITING_PEER_WATCHDOG};
+use std::sync::atomic::Ordering;
 
 #[test]
 fn a_failed_bind_cycles_video_only_on_a_drone_that_holds_a_key() {

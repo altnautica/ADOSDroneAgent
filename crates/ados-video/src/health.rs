@@ -164,7 +164,7 @@ pub enum InboundDecision {
 /// `prev` is the previously recorded counter (`< 0` ⇒ no sample yet).
 /// `since_change` is how long the counter has sat flat. `interval` floors the
 /// elapsed used for the bytes/s rate so a zero-elapsed sample cannot divide by
-/// zero (mirrors the Python `max(now - changed_at, interval)`).
+/// zero (the elapsed is `max(since_change, interval)`).
 pub fn inbound_decision(
     prev: i64,
     current: i64,

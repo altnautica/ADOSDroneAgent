@@ -39,7 +39,7 @@ async fn dispatch_bad_json_and_bad_op_and_bad_role() {
 async fn dispatch_start_bind_drone_fails_preflight_off_rig() {
     // No /etc/bind.key on the dev host → the FSM lands on "failed", and the
     // op still returns ok:true with the terminal session (a successful RPC
-    // carrying a failed bind, which is what the FastAPI route relays).
+    // carrying a failed bind, which is what the REST route relays).
     let orch = Arc::new(BindOrchestrator::new());
     let v = dispatch(
         br#"{"op":"start_bind","role":"drone","source":"operator"}"#,

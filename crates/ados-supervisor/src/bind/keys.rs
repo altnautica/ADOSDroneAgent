@@ -382,7 +382,7 @@ async fn apply_keypair_inner(
         fleet,
     );
 
-    // Best-effort setup-complete sentinel (captive_dns stops redirecting).
+    // Best-effort setup-complete sentinel (the captive portal stands down).
     let body = format!("{paired_at}\n");
     if let Err(e) = write_atomic(
         Path::new(super::SETUP_COMPLETE_PATH),

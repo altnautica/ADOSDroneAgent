@@ -1,6 +1,6 @@
 //! Agent profile / role / video resolution.
 //!
-//! Mirrors the Python wire-contract helpers (`core/profile.py` +
+//! Matches the Python wire-contract helpers (`core/profile.py` +
 //! `ground_station/role_manager.get_current_role`): the agent stores the
 //! profile in underscore form on disk and exposes the hyphenated wire form,
 //! and the active ground-station role comes from an on-disk sentinel so it

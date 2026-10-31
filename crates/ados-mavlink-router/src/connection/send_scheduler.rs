@@ -23,7 +23,7 @@ use ados_protocol::mavlink::{self, MavHeader};
 use super::transport::write_then_flush;
 use super::FcConnection;
 
-/// Adaptive stream-request cadence (mirrors connection.py:24-32).
+/// Adaptive stream-request cadence.
 const STREAM_MIN: Duration = Duration::from_secs(10);
 pub(super) const STREAM_DEFAULT: Duration = Duration::from_secs(30);
 const STREAM_MAX: Duration = Duration::from_secs(60);

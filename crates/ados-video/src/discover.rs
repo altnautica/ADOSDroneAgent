@@ -9,7 +9,7 @@
 //! and map the result onto the encoder's [`crate::encoder::CameraInfo`] +
 //! the [`crate::camera_state::CameraStateSnapshot`] sidecar.
 //!
-//! The JSON wire contract (mirrors `hal/camera_cli.py` `_build_result`):
+//! The JSON wire contract (must agree with `_build_result` in `src/ados/hal/camera_cli.py`):
 //! ```json
 //! {
 //!   "cameras": [

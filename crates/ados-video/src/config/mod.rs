@@ -1,5 +1,5 @@
 //! Video camera configuration, read from the `video.camera:` block of
-//! `/etc/ados/config.yaml`. Field names and defaults mirror the Python
+//! `/etc/ados/config.yaml`. Field names and defaults match the Python
 //! `CameraConfig` model (`core/config/video.py`). Only the fields the encoder
 //! command builder reads are modelled here.
 

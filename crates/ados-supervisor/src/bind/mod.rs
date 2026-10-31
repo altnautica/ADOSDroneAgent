@@ -10,9 +10,9 @@
 //! `wfb_keygen`, `systemctl`, `pkill`, `ip`, and the upstream
 //! `wfb_bind_{server,client}.sh` wrappers that own the wire protocol.
 //!
-//! The only legitimately-Python part is the thin FastAPI `/wfb/pair/local-bind`
-//! route, which forwards the trigger to this orchestrator over the cross-process
-//! seam (the supervisor control socket, wired at cutover). For out-of-process
+//! The REST front's `/wfb/pair/local-bind` route forwards the trigger to this
+//! orchestrator over the cross-process seam (the supervisor control socket).
+//! For out-of-process
 //! liveness checks (the hop supervisor + the radio service, which both need
 //! `is_bind_active()`), every transition writes an atomic sentinel at
 //! [`BIND_STATE_SENTINEL`] that any process can read lock-free.
@@ -74,7 +74,8 @@ pub const RX_KEY_PATH: &str = "/etc/ados/wfb/rx.key";
 pub const CONFIG_YAML: &str = "/etc/ados/config.yaml";
 /// flock serialising concurrent config rewrites (GCS PUT vs CLI vs bind).
 pub const CONFIG_LOCK_PATH: &str = "/run/ados/config.yaml.lock";
-/// Setup-complete sentinel — captive_dns stops redirecting once it exists.
+/// Setup-complete sentinel — the captive portal (`ados-captive`) stands down
+/// once it exists.
 pub const SETUP_COMPLETE_PATH: &str = "/var/lib/ados/setup-complete";
 /// Cross-process bind-liveness sentinel. Written atomically on every
 /// transition so the radio service + hop supervisor (separate processes) can
@@ -87,7 +88,7 @@ pub const BIND_STATE_SENTINEL: &str = "/run/ados/bind-state.json";
 /// registry in `contracts.toml`.
 pub const BIND_STATE_SIDECAR_VERSION: u16 = 1;
 
-// ── Timeouts (mirror the Python constants exactly). ─────────────────────────
+// ── Timeouts. ───────────────────────────────────────────────────────────────
 /// Tunnel bring-up budget (`OPENING_TUNNEL`).
 pub const TUNNEL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Iface poll cadence while waiting for the tunnel.

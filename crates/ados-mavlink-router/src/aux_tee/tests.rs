@@ -1,8 +1,13 @@
 use super::*;
+use ados_protocol::aux_egress::AuxEgress;
 use ados_protocol::aux_mux;
+use ados_protocol::aux_mux::{AuxChannel, AUX_HEADER_LEN, AUX_MAX_PAYLOAD};
+use ados_protocol::shutdown::Shutdown;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UdpSocket, UnixListener};
+use tokio::sync::broadcast;
 
 /// A minimal MAVLink v2 frame carrying `msg_id` and `payload_len` bytes of
 /// payload. Only the header fields the tee reads need to be real.

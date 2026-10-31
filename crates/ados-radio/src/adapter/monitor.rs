@@ -12,7 +12,7 @@ use super::{control_interface, run_cmd, run_cmd_output};
 /// `max_retries` times with 500ms backoff. Returns true only on verified
 /// monitor mode.
 ///
-/// Sequence (mirrors adapter.py:471-561):
+/// Sequence:
 ///   nmcli dev set <if> managed no  (best-effort)
 ///   ip link set <if> down
 ///   iw <if> set type monitor        (primary)

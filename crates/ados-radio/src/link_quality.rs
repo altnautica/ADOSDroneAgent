@@ -1,6 +1,6 @@
 //! WFB link-quality monitor — parses the `wfb_rx -l 1000` stats stream.
 //!
-//! Mirrors `services/wfb/link_quality.py`. wfb-ng (v25+) emits, per stats
+//! wfb-ng (v25+) emits, per stats
 //! interval, one or more `RX_ANT` lines followed by one `PKT` line on the
 //! receiver's stdout:
 //!

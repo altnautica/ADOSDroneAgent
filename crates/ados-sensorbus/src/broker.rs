@@ -27,7 +27,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, RwLock};
 
 use crate::client::read_frame;
-use crate::frame::{encode, BusFrame, Kind};
+use crate::frame::{BusFrame, Kind};
 
 const SUB_QUEUE: usize = 1024;
 /// Pause after a failed `accept()` (fd exhaustion, ...) before the next try.
@@ -142,17 +142,20 @@ async fn client(
             continue;
         }
         stats.frames_in.fetch_add(1, Ordering::Relaxed);
-        if let Ok(bytes) = encode(&frame) {
-            let bytes = Arc::new(bytes);
-            for (sid, sub) in subs.read().await.iter() {
-                if *sid == id || !sub.kinds.contains(&frame.kind) {
-                    continue;
-                }
-                if sub.tx.try_send(bytes.clone()).is_ok() {
-                    stats.frames_out.fetch_add(1, Ordering::Relaxed);
-                } else {
-                    stats.dropped.fetch_add(1, Ordering::Relaxed);
-                }
+        // Forward the bytes as read (length prefix + the body still in `buf`)
+        // rather than re-encoding the decoded frame.
+        let mut raw = Vec::with_capacity(4 + buf.len());
+        raw.extend_from_slice(&(buf.len() as u32).to_be_bytes());
+        raw.extend_from_slice(&buf);
+        let bytes = Arc::new(raw);
+        for (sid, sub) in subs.read().await.iter() {
+            if *sid == id || !sub.kinds.contains(&frame.kind) {
+                continue;
+            }
+            if sub.tx.try_send(bytes.clone()).is_ok() {
+                stats.frames_out.fetch_add(1, Ordering::Relaxed);
+            } else {
+                stats.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
         if let Some(tap) = &tap {
@@ -170,6 +173,7 @@ async fn client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::encode;
     use crate::{v1, Origin, Publisher, Subscriber, SyncObs, SyncSource};
     use ados_protocol::ipc::{bind_reader_socket, classify_peer, SENSORS_GROUP};
 

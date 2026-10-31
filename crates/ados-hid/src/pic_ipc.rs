@@ -1,7 +1,7 @@
 //! PIC IPC seam — the single-owner socket for the arbiter state.
 //!
 //! The `ados-pic` daemon is the SOLE owner of the [`ados_hmi::pic::PicArbiter`]
-//! state. Every other process that needs PIC (the FastAPI `/pic/*` routes, the
+//! state. Every other process that needs PIC (the REST `/pic/*` routes, the
 //! HDMI kiosk, the input-hotplug hooks) reaches it over a Unix-domain socket at
 //! [`PIC_SOCK`] rather than each instantiating its own arbiter — that
 //! split-brain (one arbiter per process) is exactly the bug this seam closes.
@@ -14,7 +14,7 @@
 //!
 //! On every reply `ok:true` means the RPC itself succeeded; the FSM outcome
 //! rides in the body (`claimed` / `released` / `ok_heartbeat`), and `status`
-//! carries the HTTP code the FastAPI route relays (409 confirm-needed, 403
+//! carries the HTTP code the REST route relays (409 confirm-needed, 403
 //! not-current-pic, 410 no-active-claim). Request ops and their replies:
 //!
 //! ```text

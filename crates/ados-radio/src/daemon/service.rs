@@ -26,6 +26,9 @@ use super::tasks::GroupTasks;
 use super::txrate::TxRates;
 use super::CONFIG_YAML;
 
+/// Fixed pause before the radio processes are respawned after an exit.
+const RESPAWN_DELAY: Duration = Duration::from_secs(2);
+
 /// Process-lifetime state shared by every radio-group bring-up.
 pub(super) struct Service<'a> {
     pub(super) cfg: &'a WfbConfig,
@@ -304,7 +307,7 @@ pub(super) async fn run_service(cfg: &WfbConfig, mut shutdown: watch::Receiver<b
         tokio::select! {
             biased;
             _ = wait_for_shutdown_flag(&mut shutdown) => return,
-            _ = tokio::time::sleep(Duration::from_secs(1)) => {}
+            _ = tokio::time::sleep(RESPAWN_DELAY) => {}
         }
     }
 }

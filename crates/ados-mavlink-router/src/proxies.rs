@@ -1,7 +1,7 @@
 //! Direct GCS transport proxies.
 //!
-//! Mirror the Python TCP (`tcp_proxy.py`, port 5760), UDP (`udp_proxy.py`,
-//! ports 14550/14551), and WebSocket (port 8765) proxies: a GCS connects
+//! TCP (port 5760), UDP (ports 14550/14551), and WebSocket (port 8765)
+//! proxies: a GCS connects
 //! directly and exchanges raw MAVLink frames with the FC, bypassing the cloud
 //! relay. Each proxy relays the FC frame stream (via [`FcConnection::subscribe`])
 //! out to its clients and forwards client bytes back with
@@ -53,7 +53,8 @@ const WS_KEY_HEADER: &str = "x-ados-key";
 /// that cannot set `X-ADOS-Key` on the handshake: it dials
 /// `new WebSocket(url, ["ados-ws-ticket", <token>])`. The agent echoes the
 /// marker back on the accepted handshake per RFC 6455. Matches the GCS
-/// `WS_TICKET_PROTOCOL` and the Python `ws_auth.WS_TICKET_PROTOCOL`.
+/// `WS_TICKET_PROTOCOL` and the Python `WS_TICKET_PROTOCOL` in
+/// `api/middleware/ws_auth.py`.
 const WS_TICKET_SUBPROTOCOL: &str = "ados-ws-ticket";
 
 /// How long a loaded pairing state is trusted before `pairing.json` is re-read.

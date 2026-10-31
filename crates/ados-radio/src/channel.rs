@@ -1,11 +1,11 @@
 //! WFB channel scanning + quietest-channel selection.
 //!
-//! Mirrors `services/wfb/channel.py`: parse `iw <iface> scan`, count nearby
+//! Parse `iw <iface> scan`, count nearby
 //! APs per standard 5 GHz WFB channel, and pick the least-congested one inside
 //! the configured band. Used by the hop supervisor to choose a hop target.
 //!
 //! A monitor-mode interface often rejects `iw scan`; on any failure we fall
-//! back to "all channels, zero interference" (same as Python), and the caller
+//! back to "all channels, zero interference", and the caller
 //! then rotates rather than blindly staying put.
 
 use std::collections::BTreeSet;
@@ -38,7 +38,7 @@ fn band_channels(band: &str) -> Vec<u8> {
 }
 
 /// Parse `iw scan` stdout into `(freq_mhz, signal_dbm)` pairs. Matches each
-/// `freq: <n>` with the next `signal: <n>` (mirrors `_parse_scan_results`).
+/// `freq: <n>` with the next `signal: <n>`.
 pub fn parse_scan_results(output: &str) -> Vec<(u32, i32)> {
     let mut out = Vec::new();
     let mut cur_freq: u32 = 0;

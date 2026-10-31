@@ -3,13 +3,13 @@
 //! The Python predecessor (`_run_socat_with_kill_on_cancel`) spawned socat with
 //! `asyncio.create_subprocess_exec` and relied on a `finally` `proc.kill()` to
 //! reap it on cancel — single-PID, so the `EXEC:`-spawned shell child could
-//! orphan. This port uses the same `setsid` + `killpg` RAII discipline as the
-//! radio service's `WfbProcess`: the child is its own process-group leader, and
-//! both an explicit `kill()` and `Drop` `killpg(SIGKILL)` the whole group, so a
-//! dropped future (timeout / operator abort) can never leak the socat tree.
+//! orphan. Here socat runs as an `ados_proc::GroupChild`: its own
+//! process-group leader, whose `Drop` kills the whole group, so a dropped
+//! future (timeout / operator abort) can never leak the socat tree.
 
 use std::process::Stdio;
 
+use ados_proc::{GroupChild, Spec, StderrMode, StdoutMode};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
@@ -61,52 +61,32 @@ pub fn gs_client_args() -> Vec<String> {
 
 /// A live socat child in its own process group.
 pub struct SocatProcess {
-    #[cfg(target_os = "linux")]
-    pgid: nix::unistd::Pid,
-    inner: tokio::process::Child,
+    child: GroupChild,
 }
 
 impl SocatProcess {
     /// Spawn `socat <args>` as a process-group leader with stdout + stderr
     /// piped (both drained by [`run`](Self::run)).
     pub fn spawn(args: &[String]) -> std::io::Result<Self> {
-        let mut cmd = Command::new("socat");
-        cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        #[cfg(target_os = "linux")]
-        // Safety: setsid() is async-signal-safe and is the only call in the hook.
-        unsafe {
-            cmd.pre_exec(|| {
-                nix::unistd::setsid().map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
-                Ok(())
-            });
-        }
-
-        let child = cmd.spawn()?;
-
-        #[cfg(target_os = "linux")]
-        let pgid = {
-            let raw = child
-                .id()
-                .ok_or_else(|| std::io::Error::other("socat child has no PID yet"))?;
-            nix::unistd::Pid::from_raw(raw as i32)
-        };
-
-        Ok(Self {
-            #[cfg(target_os = "linux")]
-            pgid,
-            inner: child,
-        })
+        let child = GroupChild::spawn(
+            "socat",
+            Spec {
+                program: "socat",
+                args,
+                stdout: StdoutMode::Piped,
+                stderr: StderrMode::Piped,
+            },
+        )?;
+        Ok(Self { child })
     }
 
     /// Drain stdout + stderr to EOF and wait for exit. Returns
     /// `(returncode, stdout, stderr)`; a signal death yields `-1` (non-zero) so
-    /// the caller's `rc != 0` check trips, matching the Python contract. If the
-    /// enclosing future is dropped before this resolves, [`Drop`] `killpg`s the
-    /// group.
+    /// the caller's `rc != 0` check trips. If the enclosing future is dropped
+    /// before this resolves, the `GroupChild` drop kills the group.
     pub async fn run(&mut self) -> std::io::Result<(i32, Vec<u8>, Vec<u8>)> {
-        let mut out = self.inner.stdout.take();
-        let mut err = self.inner.stderr.take();
+        let mut out = self.child.take_stdout();
+        let mut err = self.child.take_stderr();
         let out_fut = async {
             let mut buf = Vec::new();
             if let Some(s) = out.as_mut() {
@@ -121,24 +101,9 @@ impl SocatProcess {
             }
             Ok::<_, std::io::Error>(buf)
         };
-        let (stdout, stderr, status) = tokio::join!(out_fut, err_fut, self.inner.wait());
+        let (stdout, stderr, status) = tokio::join!(out_fut, err_fut, self.child.wait());
         let rc = status?.code().unwrap_or(-1);
         Ok((rc, stdout?, stderr?))
-    }
-
-    #[cfg(target_os = "linux")]
-    fn killpg_now(&self) {
-        use nix::sys::signal::{self, Signal};
-        let _ = signal::killpg(self.pgid, Signal::SIGKILL);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    fn killpg_now(&self) {}
-}
-
-impl Drop for SocatProcess {
-    fn drop(&mut self) {
-        self.killpg_now();
     }
 }
 

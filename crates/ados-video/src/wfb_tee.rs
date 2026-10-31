@@ -428,7 +428,7 @@ pub fn wfb_tee_output_is_stalled(
 /// noise); only real ffmpeg diagnostics reach the warn log, and only up to the
 /// rate limit, with a suppressed-count summary at the end of each window.
 pub async fn drain_wfb_tee_stderr(stderr: ChildStderr, tracker: ProgressTracker) {
-    let mut lines = crate::stderr_drain::BoundedLines::new(stderr);
+    let mut lines = ados_proc::lines::BoundedLines::new(stderr);
     let mut window_start = Instant::now();
     let mut logged: u32 = 0;
     let mut suppressed: u32 = 0;

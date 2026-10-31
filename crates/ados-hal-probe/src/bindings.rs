@@ -1,8 +1,8 @@
 //! Optional sensor bindings a board profile may declare: the IMU source, the
 //! GNSS source, a USB sensor hub and a host-I2C battery gauge.
 //!
-//! Mirrors the Python `ImuBinding`, `GnssBinding`, `SensorHubBinding` and
-//! `BatteryGaugeBinding` models in `src/ados/hal/_detect_models.py`; both sides
+//! Same shape as the Python `ImuBinding`, `GnssBinding`, `SensorHubBinding` and
+//! `BatteryGaugeBinding` models in `src/ados/hal/_detect_bindings.py`; both sides
 //! parse the same board-profile YAMLs.
 
 use serde::{Deserialize, Serialize};

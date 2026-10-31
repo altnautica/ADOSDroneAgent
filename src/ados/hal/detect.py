@@ -10,13 +10,23 @@ import yaml
 
 from ados.core.logging import get_logger
 from ados.core.paths import BOARD_OVERRIDE_PATH as _BOARD_OVERRIDE_PATH
-from ados.hal._detect_models import (
+from ados.hal._detect_bindings import (
     BatteryGaugeBinding,
-    BoardInfo,
-    BoardProfile,
     BoardVariant,
     BoardVariantMatch,
     ButtonPins,
+    EncoderPins,
+    GnssBinding,
+    GpioButton,
+    GpioOutput,
+    ImuBinding,
+    SensorHubBinding,
+)
+from ados.hal._detect_models import (
+    BoardInfo,
+    BoardProfile,
+)
+from ados.hal._detect_sections import (
     CameraBinding,
     CameraMode,
     CamerasSection,
@@ -25,16 +35,10 @@ from ados.hal._detect_models import (
     DisplayGpio,
     DisplaysSection,
     DisplayTouch,
-    EncoderPins,
     FcInterface,
     FlightControllerSection,
-    GnssBinding,
-    GpioButton,
-    GpioOutput,
-    ImuBinding,
     RadioBinding,
     RadiosSection,
-    SensorHubBinding,
     VideoSection,
 )
 
@@ -196,9 +200,7 @@ def _read_board_override() -> str:
     return ""
 
 
-def _match_profile(
-    profiles: list[BoardProfile], model_string: str
-) -> BoardProfile | None:
+def _match_profile(profiles: list[BoardProfile], model_string: str) -> BoardProfile | None:
     """Find the first profile whose pattern matches the model string."""
     model_lower = model_string.lower()
     for profile in profiles:
@@ -208,9 +210,7 @@ def _match_profile(
     return None
 
 
-def _match_override(
-    profiles: list[BoardProfile], token: str
-) -> BoardProfile | None:
+def _match_override(profiles: list[BoardProfile], token: str) -> BoardProfile | None:
     """Resolve a board-override token (a YAML filename stem) to its profile."""
     wanted = token.strip().lower()
     if not wanted:
@@ -457,14 +457,10 @@ def _detect_board_uncached() -> BoardInfo:
     # at all is worse off on exactly the hardware that needs a fallback most.
     # The Rust sidecar writer degrades identically.
     generic_stem, fallback_name = _generic_identity()
-    detected_model = (
-        _read_device_model() or _read_cpuinfo_model() or _read_device_compatible()
-    )
+    detected_model = _read_device_model() or _read_cpuinfo_model() or _read_device_compatible()
     for profile in profiles:
         if profile.stem == generic_stem:
-            board = _board_from_profile(
-                profile, detected_model or fallback_name, ram_mb, cpu_cores
-            )
+            board = _board_from_profile(profile, detected_model or fallback_name, ram_mb, cpu_cores)
             board.name = fallback_name
             # The generic profile's default_tier is a placeholder; an unknown
             # board is tiered from what it actually has.

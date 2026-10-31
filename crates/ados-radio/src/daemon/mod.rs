@@ -1,11 +1,10 @@
 //! The `ados-radio` service — the WFB TX service for the drone profile.
 //!
-//! Mirrors `python -m ados.services.wfb` (drone profile path):
-//! waits for the WFB TX key, selects the injection adapter, sets monitor mode,
-//! spawns `wfb_tx` in its own process group (setsid + killpg — the structural
-//! fix for the orphaned-wfb_tx bug class), runs the liveness watchdogs and the
-//! FHSS hop supervisor UDP tasks, writes Contract E sidecars, and shuts down
-//! cleanly on SIGTERM/SIGINT. The `[[bin]]` is a thin wrapper over [`run`].
+//! Waits for the WFB TX key, selects the injection adapter, sets monitor mode,
+//! spawns `wfb_tx` in its own process group (setsid + killpg, so a wfb binary
+//! never outlives the service), runs the liveness watchdogs and the FHSS hop
+//! supervisor UDP tasks, writes Contract E sidecars, and shuts down cleanly on
+//! SIGTERM/SIGINT. The `[[bin]]` is a thin wrapper over [`run`].
 
 // Focused sibling modules the orchestrator (`run` + `service::run_service`)
 // drives. Each groups one concern; the service behaves identically.

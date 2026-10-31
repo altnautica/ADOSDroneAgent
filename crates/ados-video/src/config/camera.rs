@@ -85,7 +85,7 @@ fn default_thumbnail_bitrate_kbps() -> u32 {
 /// The `video.camera.thumbnail:` sub-block — the non-hero encoder profile, what
 /// a drone streams while some OTHER drone holds the operator's attention. The
 /// hero profile is the top-level [`CameraConfig`] `width`/`height`/`fps`/
-/// `bitrate_kbps` (unchanged defaults). Mirrors the Python
+/// `bitrate_kbps` (unchanged defaults). Matches the Python
 /// `CameraThumbnailProfile`; the airtime arithmetic that fixes these numbers is
 /// documented on [`crate::profile`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -111,7 +111,7 @@ impl Default for CameraProfile {
     }
 }
 
-/// Camera capture/encode settings. Mirrors the Python `CameraConfig`.
+/// Camera capture/encode settings. Matches the Python `CameraConfig`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CameraConfig {
     /// "csi" | "usb" | "ip" device hint, or a device path / RTSP URL.

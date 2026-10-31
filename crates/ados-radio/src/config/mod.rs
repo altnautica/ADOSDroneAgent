@@ -1,6 +1,6 @@
 //! WFB service configuration, read from the `video.wfb:` block of
-//! `/etc/ados/config.yaml`. Field names and defaults mirror the Python
-//! `WfbConfig` dataclass (__main__.py:71, wfb.py:10-105).
+//! `/etc/ados/config.yaml`. Field names and defaults match the Python
+//! `WfbConfig` model (`core/config/wfb.py`).
 
 use serde::{Deserialize, Serialize};
 
@@ -382,7 +382,7 @@ impl WfbConfig {
     /// lets a rig with hand-tuned values keep them untouched. Any other known
     /// preset forces the trio so the operator can widen the link by changing one
     /// field instead of three. An unknown preset is a no-op (the current values
-    /// stand). Byte-identical behaviour to the Python `_apply_link_preset`.
+    /// stand).
     pub fn apply_link_preset(&mut self) {
         if self.wfb_link_preset == "conservative" {
             // Respect the explicit config; do not override.

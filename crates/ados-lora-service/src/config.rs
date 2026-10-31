@@ -1,6 +1,6 @@
 //! The `lora:` config block.
 //!
-//! Mirrors the Pydantic model `src/ados/core/config/lora.py`; the effective
+//! Must agree with the Pydantic model in `src/ados/core/config/lora.py`; the effective
 //! config (schema defaults overlaid with `config.yaml`) is read through
 //! `ados_config::schema::load_slice` by the daemon.
 

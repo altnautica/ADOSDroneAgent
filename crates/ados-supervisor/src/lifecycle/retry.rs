@@ -82,7 +82,6 @@ impl Supervisor {
             && !self.restart_blocked_by_bind(name).await
         {
             self.restart_service(name).await;
-            self.work_proof.forget(name);
         }
         true
     }

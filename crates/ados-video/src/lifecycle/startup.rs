@@ -64,7 +64,7 @@ impl VideoOrchestrator {
 
     /// Start the encoding + streaming pipeline. Returns `true` on success.
     ///
-    /// Exact order mirrors `pipeline.py::start_stream`: reap stale encoder →
+    /// Order: reap stale encoder →
     /// discover + persist camera-state → bail on no-primary → orphan sweeps →
     /// detect encoder → build command → optional SEI split → mediamtx
     /// config+start → spawn encoder + encoder-error stderr drain → latch Running →

@@ -27,6 +27,7 @@ bench-adapters = []
 # the logging daemon's ingest socket alongside journald; never on the hot path.
 ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
+ados-proc = { path = "../ados-proc" }
 # The adaptive ladder publishes its rung's bitrate to the video encoder as a
 # ceiling, so a degrading link emits FEWER on-air bytes rather than more. Only
 # `ados_video::profile`'s command-socket client is used. No cycle: ados-video

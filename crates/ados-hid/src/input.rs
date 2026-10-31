@@ -1,7 +1,6 @@
 //! Input-device lifecycle for the ground-station profile.
 //!
-//! Originally ported from the Python input manager, which has since been
-//! deleted. Covers USB gamepad enumeration via evdev, the 1 Hz hotplug poll of `/dev/input`, the
+//! Covers USB gamepad enumeration via evdev, the 1 Hz hotplug poll of `/dev/input`, the
 //! gamepad-detection predicate, stable device-id formatting, and primary-device
 //! persistence to `/etc/ados/ground-station-input.json` (reusing the chunk-1
 //! [`crate::sidecar::GroundStationInput`] helper).
@@ -26,8 +25,8 @@ pub const HOTPLUG_POLL_SECONDS: f64 = 1.0;
 /// fall below this button floor or miss the absolute axes.
 pub const MIN_GAMEPAD_BUTTONS: usize = 8;
 
-/// One attached gamepad. Field set mirrors the Python enumeration dict that the
-/// REST layer and the hotplug watcher both consume.
+/// One attached gamepad. The field set is the enumeration record the REST layer
+/// and the hotplug watcher both consume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gamepad {
     pub device_id: String,

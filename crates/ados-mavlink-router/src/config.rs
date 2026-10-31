@@ -1,8 +1,8 @@
 //! MAVLink service configuration.
 //!
-//! Reads the `mavlink:` section of `/etc/ados/config.yaml`. Mirrors the Python
-//! `MavlinkConfig` (core/config/mavlink.py): the same field names and the same
-//! defaults so a config written by the Python agent is read identically here.
+//! Reads the `mavlink:` section of `/etc/ados/config.yaml`. Field names and
+//! defaults match the Python `MavlinkConfig` (core/config/mavlink.py) so a
+//! config written by the Python agent is read identically here.
 //! serde ignores every other section, so the large operator config is
 //! untouched.
 

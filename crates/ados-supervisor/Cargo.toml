@@ -22,6 +22,7 @@ ados-hal-probe = { workspace = true }
 # the logging daemon's ingest socket alongside journald; never on the hot path.
 ados-protocol = { workspace = true, features = ["tracing-layer"] }
 ados-config = { path = "../ados-config" }
+ados-proc = { path = "../ados-proc" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

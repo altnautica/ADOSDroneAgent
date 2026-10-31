@@ -71,10 +71,9 @@ async fn serve() -> Result<()> {
     // service starts, so the first reader never sees an absent file. This is now
     // its ONLY writer: every Rust reader of the board's identity (the pairing
     // route's board field, the status route's board object, the cloud offload
-    // reconciler's npu_tops) used to depend on a Python call inside the FastAPI
-    // runtime, so on the advertised zero-Python headless profile it was never
-    // written — board `unknown`, and an NPU board offloading detection it could
-    // have run onboard. Best-effort: a run dir that is not yet writable is
+    // reconciler's npu_tops) depends on it, including on the zero-Python
+    // headless profile; without it the board reads `unknown` and an NPU board
+    // offloads detection it could run onboard. Best-effort: a run dir that is not yet writable is
     // logged and self-heals on the next start.
     match ados_hal_probe::board_sidecar::publish() {
         Ok(_) => {}
@@ -103,9 +102,9 @@ async fn serve() -> Result<()> {
     // with death-detection, auto-restart and hot-plug handling all dead.
     sdnotify::spawn_watchdog_pinger(supervisor.progress(), MONITOR_INTERVAL);
 
-    // Cross-process trigger seam: the REST front and the FastAPI routes forward
-    // bind start/cancel/status and ground-station role changes here over the
-    // control socket. Always served (cheap). The socket lives under the run dir,
+    // Cross-process trigger seam: the REST front and the Python role manager
+    // forward bind start/cancel/status and ground-station role changes here over
+    // the control socket. Always served (cheap). The socket lives under the run dir,
     // honouring `ADOS_RUN_DIR` (the same override the sibling daemons read) so a
     // rootless per-user install lands it under `$HOME/.ados/run` instead of the
     // root-owned `/run/ados`. Role changes come back to this loop on
@@ -125,7 +124,7 @@ async fn serve() -> Result<()> {
 
     // Local-radio auto-pair: drive the first-boot bind in-process (moved out of
     // the cloud relay, which is idle in local-first mode). Bindable role only;
-    // the orchestrator is shared so a manual / FastAPI bind still mutexes.
+    // the orchestrator is shared so a manual / REST bind still mutexes.
     if let Some(role) = auto_pair_role {
         let orch = bind_orch.clone();
         let shutdown = shutdown_rx.clone();
