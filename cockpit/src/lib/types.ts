@@ -119,21 +119,6 @@ export interface StatusStream {
   live?: boolean | null;
 }
 
-/** The subset of `GET /api/status/full` the cockpit reads. */
-export interface StatusFull {
-  version?: string | null;
-  uptime_seconds?: number | null;
-  health?: Record<string, unknown> | null;
-  resources?: Record<string, unknown> | null;
-  fc_connected?: boolean | null;
-  video?: Record<string, unknown> | null;
-  telemetry?: VehicleState | null;
-  radio?: Record<string, unknown> | null;
-  profile?: string | null;
-  perceptionTier?: string | null;
-  heartbeatAgeS?: number | null;
-}
-
 /** One battery pack from `GET /api/v1/battery`. */
 export interface BatteryPack {
   id: number;

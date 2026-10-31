@@ -6,10 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Generates the ADOS capability catalog (Python, Rust, TypeScript) from a single capabilities.toml source of truth."
+description = "Generates the ADOS capability catalog (Python, Rust, TypeScript) and the agent API TypeScript types from single sources of truth."
 
 [dependencies]
 serde = { workspace = true }
 toml = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+serde_json = { workspace = true }

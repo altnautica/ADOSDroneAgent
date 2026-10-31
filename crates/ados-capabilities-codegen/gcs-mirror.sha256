@@ -2,5 +2,7 @@
 # target's expected content, so agent-only CI catches a mirror that was
 # never regenerated. Do not edit by hand; run the codegen.
 6edad32d1418077662bec273c4006e4b0ec3dd48344c65424843029790e57634  ADOSMissionControl/src/lib/plugins/gcs-capabilities.generated.ts
+7571941aadebdb2000b0d53cb7e95f755b7c9776686810afed6f4e860b430727  ADOSMissionControl/src/lib/agent/agent-api.generated.ts
 8740c8a91fe9cb34b2250171bc7017d6e648d3367f61a7e2c8196f1f8508f7fb  ADOSMissionControl/src/lib/plugins/agent-capabilities.generated.ts
 875d16fb5528a4ee2081f29966f6c6185b33c99666d59228165b958f5d0500d6  ADOSMissionControl/src/lib/plugins/contracts.generated.ts
+a9c99444cde718bfaf302fda5cfebf3fdea4bf8f19d73d6187456e3ba80e79d1  ADOSMissionControl/convex/lib/agentHeartbeat.generated.ts

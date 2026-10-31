@@ -15,14 +15,14 @@
  * @module lib/hotspot
  */
 
-import type { NetworkInfo } from "./types";
+import type { NetworkStatus } from "@/shared/agent-api.generated";
 
 export type HotspotSsid =
   | { known: true; ssid: string }
   | { known: false };
 
 /** Read the access point name the agent published, if it published one. */
-export function resolveHotspotSsid(network?: NetworkInfo): HotspotSsid {
+export function resolveHotspotSsid(network?: NetworkStatus): HotspotSsid {
   const ssid = network?.hotspot_ssid?.trim();
   if (!ssid) return { known: false };
   return { known: true, ssid };

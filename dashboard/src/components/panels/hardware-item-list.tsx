@@ -18,17 +18,17 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { cn } from "@/lib/utils";
-import type { HardwareItem, HardwareItemState } from "@/lib/types";
+import type { HardwareCheckItem } from "@/shared/agent-api.generated";
 
 interface HardwareItemListProps {
-  items: HardwareItem[];
+  items: HardwareCheckItem[];
   emptyText?: string;
   showOptionalSection?: boolean;
   className?: string;
 }
 
 const STATE_META: Record<
-  HardwareItemState,
+  HardwareCheckItem["state"],
   {
     tone: string;
     Icon: typeof CheckCircle2;
@@ -87,7 +87,7 @@ export function HardwareItemList({
   );
 }
 
-function Section({ title, items }: { title: string; items: HardwareItem[] }) {
+function Section({ title, items }: { title: string; items: HardwareCheckItem[] }) {
   return (
     <div>
       <div className="text-xs uppercase tracking-wider text-muted-foreground mb-1.5">
@@ -102,7 +102,7 @@ function Section({ title, items }: { title: string; items: HardwareItem[] }) {
   );
 }
 
-function HardwareItemRow({ item }: { item: HardwareItem }) {
+function HardwareItemRow({ item }: { item: HardwareCheckItem }) {
   const { t } = useTranslation();
   const { tone, Icon, labelKey } = STATE_META[item.state];
   const label = t(labelKey);

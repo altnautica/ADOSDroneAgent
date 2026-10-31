@@ -9,6 +9,8 @@
 #
 # Plain copies rather than a package link: the copies are ordinary files, so
 # each app builds on its own and the CI drift check is a byte comparison.
+# Test files (*.test.ts) are not copied: they run once, from web-shared/
+# itself, through the dashboard's vitest config.
 
 set -euo pipefail
 
@@ -37,6 +39,7 @@ fi
 stage="$(mktemp -d)"
 trap 'rm -rf "${stage}"' EXIT
 cp -R "${src_dir}/." "${stage}/"
+find "${stage}" -name '*.test.ts' -type f -delete
 cp "${preset}" "${stage}/tailwind-preset.cjs"
 
 drift=0

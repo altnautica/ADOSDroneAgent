@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import { buildTiles, type TileInputs } from "./status-tiles";
-import type { DashboardSnapshot, SetupStatus } from "./types";
+import type { SetupStatus } from "@/shared/agent-api.generated";
+import type { DashboardSnapshot } from "./types";
 
 function snapshot(fcConnected: boolean, pairingCode = "", mode = "cloud"): DashboardSnapshot {
   return {

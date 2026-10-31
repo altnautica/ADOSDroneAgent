@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfig } from "@/hooks/use-config";
 import { useStatus } from "@/hooks/use-status";
-import type { SetupAccessUrl } from "@/lib/types";
+import type { SetupAccessUrl } from "@/shared/agent-api.generated";
 
 /** A single advertised reach entry: its label, source, and clickable URL. */
 function ReachRow({ entry }: { entry: SetupAccessUrl }) {

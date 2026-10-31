@@ -7,7 +7,8 @@ import i18n from "@/i18n";
 
 import { mspVariant } from "./fc-firmware";
 import { summarizeHardware } from "./hardware-summary";
-import type { DashboardSnapshot, SetupStatus } from "./types";
+import type { SetupStatus } from "@/shared/agent-api.generated";
+import type { DashboardSnapshot } from "./types";
 import { fmtBitrate, severityFromState, type Severity } from "@/shared/format";
 
 export interface Tile {

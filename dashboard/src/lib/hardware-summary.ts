@@ -1,6 +1,6 @@
-import type { HardwareItem, HardwareItemState } from "@/lib/types";
+import type { HardwareCheckItem } from "@/shared/agent-api.generated";
 
-const STATE_RANK: Record<HardwareItemState, number> = {
+const STATE_RANK: Record<HardwareCheckItem["state"], number> = {
   ok: 0,
   unknown: 1,
   checking: 2,
@@ -9,19 +9,19 @@ const STATE_RANK: Record<HardwareItemState, number> = {
 };
 
 // Counts split by required/optional, plus the worst state among required items.
-export function summarizeHardware(items: HardwareItem[]): {
+export function summarizeHardware(items: HardwareCheckItem[]): {
   requiredOk: number;
   requiredTotal: number;
   optionalOk: number;
   optionalTotal: number;
-  worstState: HardwareItemState;
+  worstState: HardwareCheckItem["state"];
 } {
   let requiredOk = 0;
   let requiredTotal = 0;
   let optionalOk = 0;
   let optionalTotal = 0;
   let worstRank = 0;
-  let worstState: HardwareItemState = "ok";
+  let worstState: HardwareCheckItem["state"] = "ok";
   for (const item of items) {
     if (item.required) {
       requiredTotal += 1;

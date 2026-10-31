@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { apiFetch } from "@/shared/api-fetch";
-import type { SetupStatus } from "@/lib/types";
+import type { SetupStatus } from "@/shared/agent-api.generated";
 
 /** Poll cadence on the pages that own the status (Home, Settings). */
 export const STATUS_POLL_MS = 20_000;

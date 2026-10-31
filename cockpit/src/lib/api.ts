@@ -1,6 +1,7 @@
 // Typed helpers over the agent REST surface on the same origin (:8080). The
 // transport (credentials, errors) is the shared `apiFetch`.
 
+import type { StatusFull } from "@/shared/agent-api.generated";
 import { apiFetch } from "@/shared/api-fetch";
 import type {
   AgentConfig,
@@ -8,7 +9,6 @@ import type {
   GsStatus,
   LinkView,
   RosterCamera,
-  StatusFull,
   VehicleState,
 } from "@/lib/types";
 
