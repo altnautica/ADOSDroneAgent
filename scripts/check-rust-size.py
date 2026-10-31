@@ -9,6 +9,9 @@ whole file when it has none), so inline test modules never count against it.
   grow past its recorded count. Shrinking is always fine; ``--update`` lowers
   the recorded counts (and drops files that fell under the limit).
 - Generated files are exempt.
+- Test-only files are exempt: a file named ``tests.rs`` or ``*_tests.rs``, and
+  any file under a ``tests/`` directory (integration tests). They hold nothing
+  but test code, the same code the ``#[cfg(test)]`` cut excludes inline.
 
     python scripts/check-rust-size.py            # check, exit 1 on a violation
     python scripts/check-rust-size.py --update   # rewrite the baseline
@@ -46,11 +49,18 @@ def measure(path: Path) -> int:
     return count
 
 
+def is_test_file(rel: Path) -> bool:
+    name = rel.name
+    return name == "tests.rs" or name.endswith("_tests.rs") or "tests" in rel.parts[:-1]
+
+
 def sources(root: Path) -> dict[str, int]:
     out: dict[str, int] = {}
     for path in sorted(root.rglob("*.rs")):
         rel = path.relative_to(root)
         if any(part in SKIP_DIRS for part in rel.parts) or path.name in GENERATED:
+            continue
+        if is_test_file(rel):
             continue
         out[rel.as_posix()] = measure(path)
     return out
