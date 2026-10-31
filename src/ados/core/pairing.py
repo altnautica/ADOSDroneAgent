@@ -79,12 +79,11 @@ def _normalize_convex_site_url(url: str) -> str:
 class PairingManager:
     """Manages pairing state, code generation, and API key validation.
 
-    The agent runs three processes that each instantiate this class
-    (ados-api, ados-cloud, ados-supervisor). Without cross-process
-    coordination they would each carry their own in-memory snapshot
-    of ``pairing.json`` and diverge from disk as soon as one of them
-    rotated the pair code. The mtime-tracked reload below keeps all
-    three convergent within one public-read cycle.
+    The residual Python API holds one instance, but the Rust control front
+    owns the pairing routes and writes ``pairing.json`` itself (code
+    rotation, claim, unpair). An in-memory snapshot would diverge from disk
+    as soon as the front changed the file, so the mtime-tracked reload
+    below re-reads it whenever it changes.
     """
 
     def __init__(self, state_path: str = PAIRING_STATE_PATH):

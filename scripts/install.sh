@@ -317,17 +317,27 @@ fetch() {
     url="$1"; dest="$2"; force4="${3:-}"
     # --continue-at - resumes a partial transfer so a mid-download drop on a
     # flaky link continues from the last byte instead of restarting from zero.
-    # The transfer is bounded on a STALL (under 1 KB/s for 60 s), not on total
-    # time: a flat ceiling kills a slow but healthy link mid-download, which is
-    # the same lesson the installer's own fetcher encodes.
+    # FETCH_FRESH=1 drops the resume for a clean refetch: a corrupt partial
+    # file must not be continued. The transfer is bounded on a STALL (under
+    # 1 KB/s for 60 s), not on total time: a flat ceiling kills a slow but
+    # healthy link mid-download, which is the same lesson the installer's own
+    # fetcher encodes.
+    resume="--continue-at -"
+    if [ -n "${FETCH_FRESH:-}" ]; then
+        resume=""
+        rm -f "$dest"
+    fi
     if command -v curl >/dev/null 2>&1; then
         if [ -n "$force4" ]; then
-            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --speed-time 60 --speed-limit 1024 --retry 3 --retry-delay 2 --continue-at - -4 "$url" -o "$dest"
+            # shellcheck disable=SC2086
+            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --speed-time 60 --speed-limit 1024 --retry 3 --retry-delay 2 $resume -4 "$url" -o "$dest"
         else
-            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --speed-time 60 --speed-limit 1024 --retry 3 --retry-delay 2 --continue-at - "$url" -o "$dest"
+            # shellcheck disable=SC2086
+            curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' --connect-timeout 10 --speed-time 60 --speed-limit 1024 --retry 3 --retry-delay 2 $resume "$url" -o "$dest"
         fi
     elif command -v wget >/dev/null 2>&1; then
-        wget --inet4-only --header='Cache-Control: no-cache' --header='Pragma: no-cache' -q -O "$dest" "$url"
+        # --timeout bounds each connect and read stall at 60 s.
+        wget --inet4-only --timeout=60 --header='Cache-Control: no-cache' --header='Pragma: no-cache' -q -O "$dest" "$url"
     else
         echo "ERROR: neither curl nor wget is available to fetch the installer" >&2
         exit 1
@@ -413,16 +423,28 @@ fi
 # A line of feedback for the short pre-binary window; the installer renders its
 # own live progress once it execs below.
 echo "Fetching ADOS installer…" >&2
-get "${REL_BASE}/${asset}" "${tmp}/${asset}"
-get "${REL_BASE}/${asset}.sha256" "${tmp}/${asset}.sha256"
-# A failed signature fetch is reported by verify_download, which names it.
-get "${REL_BASE}/${asset}.minisig" "${tmp}/${asset}.minisig" 2>/dev/null || rm -f "${tmp}/${asset}.minisig"
-
-# 5. Verify: sha256 and signature, both mandatory, on every channel.
-verify_download "${tmp}/${asset}" || {
-    echo "ERROR: refusing to run an unverified ${asset} (no fallback)" >&2
-    exit 1
+fetch_installer() {
+    get "${REL_BASE}/${asset}" "${tmp}/${asset}"
+    get "${REL_BASE}/${asset}.sha256" "${tmp}/${asset}.sha256"
+    # A failed signature fetch is reported by verify_download, which names it.
+    get "${REL_BASE}/${asset}.minisig" "${tmp}/${asset}.minisig" 2>/dev/null || rm -f "${tmp}/${asset}.minisig"
 }
+fetch_installer
+
+# 5. Verify: sha256 and signature, both mandatory, on every channel. A failure
+#    can be a corrupt resumed partial, so the files are deleted and fetched once
+#    more from scratch, then verified again. Still fail closed.
+if ! verify_download "${tmp}/${asset}"; then
+    echo "Verification failed; fetching the installer once more from scratch…" >&2
+    rm -f "${tmp}/${asset}" "${tmp}/${asset}.sha256" "${tmp}/${asset}.minisig"
+    FETCH_FRESH=1
+    fetch_installer
+    FETCH_FRESH=
+    verify_download "${tmp}/${asset}" || {
+        echo "ERROR: refusing to run an unverified ${asset} (no fallback)" >&2
+        exit 1
+    }
+fi
 
 # 6. Install + run, passing all flags through verbatim. Not `exec`: the shell
 #    must outlive the installer so the temp dir (on tmpfs, RAM on most boards)

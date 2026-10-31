@@ -1,3 +1,4 @@
+# Exempt from 300 LOC soft rule: route conformance data registry
 """The route cases the harness diffs: the native-vs-Python comparison set.
 
 Each ``RouteCase`` is one HTTP request issued identically to both transports,

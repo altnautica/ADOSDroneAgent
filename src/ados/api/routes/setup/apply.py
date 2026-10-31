@@ -8,12 +8,12 @@ from fastapi import APIRouter, HTTPException
 
 from ados.api.deps import get_agent_app
 from ados.setup import display_install
+from ados.setup._regulatory import apply_regulatory
 from ados.setup.advanced import apply_advanced, read_board_override, write_board_override
 from ados.setup.models import SetupActionResult
 from ados.setup.network import apply_network
 from ados.setup.profile import (
     apply_profile,
-    apply_regulatory,
     apply_ui,
     apply_wfb,
     dispatch_profile_restart,

@@ -98,8 +98,8 @@ def test_applying_a_regulatory_posture_records_exactly_one_decision(
 ) -> None:
     """The end-to-end check: the surface that owns region writes the trail."""
     from ados.core.config import ADOSConfig
+    from ados.setup._regulatory import apply_regulatory
     from ados.setup.models import RegulatoryApplyRequest
-    from ados.setup.profile import apply_regulatory
     from tests.api_runtime_utils import build_api_runtime
 
     runtime = build_api_runtime(config=ADOSConfig())

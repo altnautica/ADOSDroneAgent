@@ -3,6 +3,8 @@
 # Wipes config, device identity, and certs. Agent will re-enter setup mode on next boot.
 set -euo pipefail
 
+[ "$(id -u)" -eq 0 ] || { echo "factory-reset must run as root" >&2; exit 1; }
+
 CONFIG_DIR="/etc/ados"
 
 echo "=== ADOS Drone Agent — Factory Reset ==="
@@ -31,8 +33,10 @@ if [ "${1:-}" != "--force" ]; then
     fi
 fi
 
-# Stop service(s)
+# Stop the supervisor first so it cannot restart what is stopped next, then
+# every agent unit, so no service rewrites a credential while it is wiped.
 systemctl stop ados-supervisor 2>/dev/null || true
+systemctl stop 'ados-*.service' 2>/dev/null || true
 
 # Wipe. This list is mirrored by FACTORY_RESET_FILES / FACTORY_RESET_DIRS in
 # `src/ados/core/paths.py`, and a test asserts the two agree — the reset paths

@@ -18,7 +18,6 @@ import httpx
 from ados.core._contracts_generated import PROFILES
 from ados.core.paths import ADOS_RUN_DIR
 from ados.setup._persist import persist_config
-from ados.setup._regulatory import _is_valid_region_code, apply_regulatory  # noqa: F401
 from ados.setup.models import (
     ProfileSuggestion,
     SetupActionResult,

@@ -100,7 +100,12 @@ COMMENT_MARKER = re.compile(r"^\s*(?:///|//!|//)\s?")
 #: 87 -> 86: the run-dir sidecar paths and freshness windows moved into the
 #: generated `ados-protocol` paths table, so the config route's wfb stats path
 #: is read from that one source and no longer mirrors `WFB_STATS_JSON`.
-MIN_CITATIONS = 86
+#:
+#: 86 -> 54: the stale-comment sweep rewrote every citation of deleted Python
+#: (pairing, mesh bring-up, captive portal, kiosk, the residual auth module)
+#: to describe the Rust behaviour; citations of Python that still exists say
+#: "must agree with" instead of "mirrors".
+MIN_CITATIONS = 54
 
 
 def _rust_sources() -> list[Path]:

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Ratchet the size of every Rust source file under ``crates/``.
 
-A file's size is its line count before the first ``#[cfg(test)]`` line (the
-whole file when it has none), so inline test modules never count against it.
+A file's size is its line count before the first ``#[cfg(test)]`` test module
+(the whole file when it has none), so inline test modules never count against
+it. A ``#[cfg(test)]`` on any other item (a ``use``, a helper ``fn``) does not
+end the count: only the attribute that opens a ``mod`` does.
 
 - A file at or under ``LIMIT`` lines passes.
 - A file over ``LIMIT`` must be listed in ``crates/.loc-baseline`` and may not
@@ -24,6 +26,7 @@ is fixed by splitting the file, not by editing the baseline. ``--update
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -37,16 +40,33 @@ LIMIT = 500
 GENERATED = {"capabilities.rs", "dispatch.rs", "wfb_tables.rs", "contracts.rs", "paths.rs"}
 SKIP_DIRS = {"target", ".git"}
 TEST_MARKER = "#[cfg(test)]"
+MOD_DECL = re.compile(r"^(pub(\([^)]*\))?\s+)?mod\s")
+LEADING_ATTR = re.compile(r"^#\[[^\]]*\]\s*")
+
+
+def _item_after_attrs(text: str) -> str:
+    while True:
+        stripped = LEADING_ATTR.sub("", text, count=1)
+        if stripped == text:
+            return text
+        text = stripped
 
 
 def measure(path: Path) -> int:
-    count = 0
-    with path.open(encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            if line.strip().startswith(TEST_MARKER):
-                break
-            count += 1
-    return count
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for i, line in enumerate(lines):
+        if not line.strip().startswith(TEST_MARKER):
+            continue
+        # The item the attribute applies to: the rest of this line, else the
+        # next line that is not itself only attributes.
+        item = _item_after_attrs(line.strip())
+        j = i + 1
+        while not item and j < len(lines):
+            item = _item_after_attrs(lines[j].strip())
+            j += 1
+        if MOD_DECL.match(item):
+            return i
+    return len(lines)
 
 
 def is_test_file(rel: Path) -> bool:

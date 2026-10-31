@@ -85,14 +85,7 @@ dev = [
 # the ground_station profile or when a developer runs
 # `pip install -e ".[ground-station]"`. The drone profile never needs these.
 ground-station = [
-    "gpiozero>=2.0",
-    "dbus-next>=0.2.3",
     "smbus2>=0.4.3",
-    "evdev>=1.6.1",
-    # Pillow is used by the video local-tap, which decodes the keyframe
-    # JPEG snapshot the GCS preview reads. Pinned explicitly so the
-    # dependency graph stays stable across the ground-station extra.
-    "Pillow>=10.0.0",
 ]
 # Vision inference extras. The RKNN and Hailo inference sidecars
 # import numpy lazily on the real infer path; pulled only when a
