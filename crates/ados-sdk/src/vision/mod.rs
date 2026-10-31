@@ -120,7 +120,7 @@ impl VisionClient {
     }
 
     /// Resolve frame rings under `dir` instead of `/dev/shm`, with an empty
-    /// ring cache. Mirrors the Python client's `shm_dir`; the engine's
+    /// ring cache. Matches the Python client's `shm_dir`; the engine's
     /// counterpart is `ADOS_SHM_DIR`. Call before subscribing: an existing
     /// subscription keeps the cache it was registered with.
     pub fn with_shm_dir(self, dir: impl Into<PathBuf>) -> Self {

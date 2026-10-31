@@ -1,6 +1,6 @@
 //! Error types for the plugin lifecycle controller.
 //!
-//! Mirrors the Python `ados.plugins.errors` hierarchy. [`SignatureError`]
+//! Matches the Python `ados.plugins.errors` hierarchy. [`SignatureError`]
 //! carries a structured [`SignatureErrorKind`] so a caller (CLI / REST) can map
 //! a failure to the right exit code without string matching, exactly as the
 //! Python `SignatureError.kind` attribute is consumed.

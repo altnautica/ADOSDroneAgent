@@ -4,9 +4,7 @@
 //! Each handler returns `(status, result, data)`: `status` is `completed` or
 //! `failed`, `result` is the small ACK doc, `data` is the optional larger
 //! payload. Plugin lifecycle commands route to the frozen `PluginSupervisor`
-//! through [`plugin_commands`] (idempotent). Originally ported from the Python
-//! dispatcher's `execute_command`, which has since been deleted; this is the
-//! implementation.
+//! through [`plugin_commands`] (idempotent).
 
 pub mod executed_commands;
 pub mod install;
@@ -36,8 +34,8 @@ impl CommandStatus {
 }
 
 /// The dispatch outcome: the status plus the small `result` ACK doc and the
-/// optional larger `data` payload. Mirrors the Python `(status, result, data)`
-/// tuple, with `result` carrying `{success, message}`.
+/// optional larger `data` payload, with `result` carrying `{success,
+/// message}`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandResult {
     pub status: CommandStatus,

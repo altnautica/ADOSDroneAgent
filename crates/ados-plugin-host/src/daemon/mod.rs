@@ -61,7 +61,7 @@ use startup::*;
 use tasks::*;
 
 /// The running agent semver, used by the supervisor's compatibility gate. The
-/// `ADOS_AGENT_VERSION` env mirrors the Python `ados.__version__` source; the
+/// `ADOS_AGENT_VERSION` env carries the Python `ados.__version__` value; the
 /// crate version is the inert fallback when the env is unset.
 fn agent_version() -> String {
     std::env::var("ADOS_AGENT_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").to_string())

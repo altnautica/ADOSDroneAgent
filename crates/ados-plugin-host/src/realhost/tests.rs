@@ -641,7 +641,7 @@ fn string_component_id_participates_in_vio_gate() {
 fn mavlink_send_validates_before_capability_gate() {
     // Ordering parity: a non-bytes msg_bytes AND a VIO component_id without
     // the cap fails validation FIRST (msg_bytes must be bytes), not on the
-    // capability gate. Mirrors the Python source order.
+    // capability gate.
     let host = RealHost::new();
     let args = map(&[
         ("msg_bytes", Value::Integer(7.into())),
@@ -1086,8 +1086,7 @@ async fn config_set_validation() {
 
 #[tokio::test]
 async fn config_set_falsy_scope_coerces_to_drone() {
-    // Mirrors Python `scope = args.get("scope") or "drone"`: any falsy scope
-    // value is accepted and treated as "drone".
+    // Any falsy scope value is accepted and treated as "drone".
     let host = RealHost::new();
     for falsy in [
         Value::Nil,

@@ -43,17 +43,20 @@
 //! `None` fields as JSON `null` deliberately -- the opposite of the top-level
 //! rule, and load-bearing in the same way.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 mod blocks;
 pub use blocks::{CrsfBlock, RadioBlock};
+#[cfg(test)]
+mod schema_file;
 
 /// One service entry in the heartbeat `services[]` array. `name` and `status`
 /// are always present; the per-unit accounting (`cpuPercent`, `memoryMb`,
 /// `uptimeSeconds`) and `pid` are included only when a producer measured them —
 /// the receiver declares each optional, and a fabricated `0` reads as a real
 /// "0 MB, up 0 s".
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceEntry {
     pub name: String,
@@ -71,7 +74,7 @@ pub struct ServiceEntry {
 
 /// The `remoteAccess` sub-object. Always present in the payload; both fields are
 /// always set (provider string + list of public URLs).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteAccess {
     pub provider: String,
@@ -84,7 +87,7 @@ pub struct RemoteAccess {
 /// snake_case in the Python `collect_attached_display` output (it is consumed by
 /// the infer-capabilities pipeline, which reads snake_case), so this struct
 /// keeps snake_case field names with no rename. `extra` is an open map.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct Peripheral {
     pub id: String,
     pub name: String,
@@ -101,11 +104,11 @@ pub struct Peripheral {
 
 /// The cloud status heartbeat payload.
 ///
-/// Field set + order mirrors the Python cloud loop's `payload` dict. Order does
-/// not affect the receiver (it validates by key), but it is kept aligned with the
-/// Python source for readability. Required-on-wire fields are plain; everything
-/// the strip step may remove is `Option<T>` + `skip_serializing_if`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Fields are grouped by source (board, perception, health, FC link, services,
+/// video, auxiliary blocks); the receiver validates by key, so order carries no
+/// meaning on the wire. Required-on-wire fields are plain; everything the strip
+/// step may remove is `Option<T>` + `skip_serializing_if`.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HeartbeatPayload {
     // --- required on wire ---
@@ -364,7 +367,7 @@ pub struct HeartbeatPayload {
 /// explicit for consistency with the other nested wire structs. Present only for
 /// services whose current config is malformed — a valid config publishes a null
 /// error and is omitted.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigErrorEntry {
     pub service: String,
@@ -378,7 +381,7 @@ pub struct ConfigErrorEntry {
 /// Keys are single words, so the casing is identical either way, except
 /// `whep_url` → `whepUrl`, which is renamed explicitly to match the
 /// `RosterCamera.whep_url` shape the cockpit already consumes.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct VideoStreamHb {
     pub id: String,
     pub role: String,
@@ -412,7 +415,7 @@ pub struct VideoStreamHb {
 /// the `deviceId`/`rssiDbm`/`seenAtUnix` wire keys the GCS `LinkedPeer` consumes
 /// and the strict cloud validator declares. Absent on a drone / a peerless
 /// ground node so the heartbeat stays byte-identical.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkedPeerHb {
     pub device_id: String,
@@ -429,7 +432,7 @@ pub struct LinkedPeerHb {
 /// `protocol` (camelCase via the root rename does not apply to a nested struct,
 /// but these keys are single-word so casing is identical either way; the Python
 /// emit uses these exact snake-equal-to-camel names).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct CanBus {
     pub port: i64,
     pub driver: i64,

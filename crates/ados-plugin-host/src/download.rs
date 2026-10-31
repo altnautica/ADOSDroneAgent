@@ -62,6 +62,8 @@ pub enum DownloadError {
     TooLarge(u64),
     #[error("sha256 mismatch: expected {expected}, got {actual}")]
     Sha256Mismatch { expected: String, actual: String },
+    #[error("sha256 pin {0:?} is not 64 hex characters")]
+    InvalidPin(String),
     #[error("download transport failed: {0}")]
     Transport(String),
     #[error("download write failed: {0}")]
@@ -107,12 +109,16 @@ pub fn validate_parsed_url(url: &reqwest::Url) -> Result<(), DownloadError> {
     }
 }
 
-/// Verify a body against an expected SHA256 (case-insensitive hex). An empty
-/// `expected` is a no-op: the caller declared no hash and the archive's Ed25519
-/// check is the backstop.
-pub fn verify_sha256(body: &[u8], expected: &str) -> Result<(), DownloadError> {
-    if expected.is_empty() {
+/// Verify a body against an expected SHA256 (case-insensitive hex). `None`
+/// means the caller holds no pin: the check is skipped and the archive's
+/// Ed25519 signature is the backstop. A pin that is not 64 hex characters
+/// (including an empty one) is refused rather than treated as "no pin".
+pub fn verify_sha256(body: &[u8], expected: Option<&str>) -> Result<(), DownloadError> {
+    let Some(expected) = expected else {
         return Ok(());
+    };
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(DownloadError::InvalidPin(expected.to_string()));
     }
     let actual = hex::encode(Sha256::digest(body));
     if actual.eq_ignore_ascii_case(expected) {
@@ -421,11 +427,19 @@ mod tests {
     fn verify_sha256_matches_case_insensitively() {
         let body = b"abc";
         let h = hex::encode(Sha256::digest(body));
-        assert!(verify_sha256(body, &h).is_ok());
-        assert!(verify_sha256(body, &h.to_uppercase()).is_ok());
-        assert!(verify_sha256(body, "").is_ok());
+        assert!(verify_sha256(body, Some(&h)).is_ok());
+        assert!(verify_sha256(body, Some(&h.to_uppercase())).is_ok());
+        assert!(verify_sha256(body, None).is_ok());
         assert!(matches!(
-            verify_sha256(body, &"00".repeat(32)),
+            verify_sha256(body, Some("")),
+            Err(DownloadError::InvalidPin(_))
+        ));
+        assert!(matches!(
+            verify_sha256(body, Some("zz")),
+            Err(DownloadError::InvalidPin(_))
+        ));
+        assert!(matches!(
+            verify_sha256(body, Some(&"00".repeat(32))),
             Err(DownloadError::Sha256Mismatch { .. })
         ));
     }

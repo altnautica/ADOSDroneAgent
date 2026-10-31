@@ -162,8 +162,8 @@ fn paired_full_matches_python_emit() {
         paired_with_device_id: Some("ados-peer".to_string()),
         adapter_chipset: Some("RTL8812EU".to_string()),
         adapter_injection_ok: Some(true),
-        // The sidecar-only churn counters are present on a populated block (they
-        // ride the Python present branch); the golden asserts they serialize with
+        // The sidecar-only churn counters are present on a populated block (the
+        // frozen fixture's present branch); the golden asserts they serialize with
         // values here, distinct from the absent block that omits them.
         tx_zombie_kills: Some(2),
         tx_bytes_per_s: Some(412345.6),
@@ -230,15 +230,14 @@ fn paired_full_matches_python_emit() {
 
 #[test]
 fn radio_block_base_carries_the_usb_phy_and_churn_fields() {
-    // The struct carries all six fields the Python producer emits. Their wire shape
-    // mirrors the Python producer branch-for-branch:
+    // The struct carries all six fields the frozen wire model defines. Their wire
+    // shape, branch by branch:
     //
     // - adapter-USB-health + muted-PHY: present as `null` on the absent block (a
-    //   `false` would claim a measured-healthy state nothing examined), matching
-    //   the Python absent branch which keeps them null.
+    //   `false` would claim a measured-healthy state nothing examined).
     // - the sidecar-only churn counters: OMITTED from the absent block (they mean
-    //   nothing without a live radio view), matching the Python absent branch which
-    //   drops them, then present once a live view populates them.
+    //   nothing without a live radio view), then present once a live view
+    //   populates them.
     let absent = serde_json::to_value(RadioBlock::absent()).expect("serialize absent block");
     for key in [
         "adapter_usb_speed_mbps",

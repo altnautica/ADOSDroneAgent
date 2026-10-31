@@ -45,16 +45,15 @@ pub use transport::{
 };
 pub use webrtc_signaling::{run_webrtc_signaling, WebrtcSignalingRelay};
 
-/// The MQTT broker host the cloud relay dials. Mirrors the Python
-/// `CloudConfig.mqtt_broker` default.
+/// The MQTT broker host the cloud relay dials. Matches the Python
+/// `CloudServerConfig.mqtt_broker` default.
 pub const DEFAULT_BROKER_HOST: &str = "mqtt.altnautica.com";
 
-/// The broker port. Mirrors the Python `CloudConfig.mqtt_port` default (443,
+/// The broker port. Matches the Python `CloudServerConfig.mqtt_port` default (443,
 /// WSS through the tunnel).
 pub const DEFAULT_BROKER_PORT: u16 = 443;
 
-/// The WebSocket path the broker serves MQTT on. Mirrors
-/// `ws_set_options(path="/mqtt")`.
+/// The WebSocket path the broker serves MQTT on.
 pub const WS_PATH: &str = "/mqtt";
 
 /// Build the canonical topic strings for a device id.

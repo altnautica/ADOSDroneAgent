@@ -31,25 +31,33 @@ impl<H: HostServices> Connection<H> {
         in_flight: &mut JoinSet<DetachedReply>,
     ) -> Result<(), ServerError> {
         let req_id = env.request_id.clone();
-        if token.is_expired(now_secs()) {
-            // The token aged out mid-session. The session itself is still
-            // authenticated (it passed `hello`), so the honest answer is to
-            // re-mint from authoritative state rather than to refuse: the TTL
-            // exists to bound a leaked token, not to end a plugin's access at
-            // the ten-minute mark. `mint_current` re-reads the grant set, so a
-            // capability the operator revoked in the meantime is NOT carried
-            // into the new token, and it rewrites the env file so a reconnect
-            // presents the live token too.
+        let expired_now = token.is_expired(now_secs());
+        let state_moved = self.state_moved();
+        if expired_now || state_moved {
+            // Two reasons to re-mint before gating. The token aged out
+            // mid-session: the session itself is still authenticated (it passed
+            // `hello`), so the honest answer is to re-mint from authoritative
+            // state rather than to refuse: the TTL exists to bound a leaked
+            // token, not to end a plugin's access at the ten-minute mark. Or the
+            // grant state file changed since this session last looked: a revoke
+            // then applies on this request rather than at token expiry.
+            // `mint_current` re-reads the grant set, so a capability the
+            // operator revoked is NOT carried into the new token, and it
+            // rewrites the env file so a reconnect presents the live token too.
             match self
                 .mint
                 .as_ref()
                 .and_then(|m| m.mint_current(&self.plugin_id))
             {
+                // State moved but the grant set did not (or a rotation already
+                // delivered it): the session token is current.
+                Some(fresh) if !expired_now && fresh.granted_caps == token.granted_caps => {}
                 Some(fresh) => {
                     tracing::info!(
                         plugin_id = %self.plugin_id,
                         expires_at = fresh.expires_at,
-                        "re-minted an expired capability token mid-session"
+                        expired = expired_now,
+                        "re-minted the capability token mid-session"
                     );
                     let wire = fresh.to_token_string();
                     let expires_at = fresh.expires_at;
@@ -90,12 +98,14 @@ impl<H: HostServices> Connection<H> {
                     };
                     write_frame(write_half, &notice).await?;
                 }
-                // No mint wired, or the plugin is no longer enabled: the
-                // expired token stays expired and the request is refused.
-                None => {
+                // No mint wired, or the plugin is no longer enabled: an expired
+                // token stays expired and the request is refused. A live token
+                // keeps gating until the reconciler tears the plugin down.
+                None if expired_now => {
                     return send_error(write_half, &req_id, crate::dispatch::errors::TOKEN_EXPIRED)
                         .await
                 }
+                None => {}
             }
         }
         let expired = token.is_expired(now_secs());
@@ -133,6 +143,22 @@ impl<H: HostServices> Connection<H> {
                 )
                 .await
             }
+        }
+    }
+
+    /// Whether the grant state file changed since this session last looked.
+    /// Records the new mtime, so each change is reported once.
+    fn state_moved(&self) -> bool {
+        let Some(mint) = self.mint.as_ref() else {
+            return false;
+        };
+        let now = mint.state_mtime();
+        let mut seen = self.state_seen.lock().unwrap_or_else(|e| e.into_inner());
+        if *seen == now {
+            false
+        } else {
+            *seen = now;
+            true
         }
     }
 

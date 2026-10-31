@@ -8,7 +8,7 @@
 
 use thiserror::Error;
 
-/// A driver-layer failure. The variants mirror the Python `DriverError`
+/// A driver-layer failure. The variants match the Python `DriverError`
 /// subclasses; [`DriverError::Other`] carries any predictable, recoverable
 /// condition that does not fit the named kinds.
 #[derive(Debug, Error)]

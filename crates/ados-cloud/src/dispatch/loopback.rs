@@ -173,8 +173,8 @@ pub async fn forward_to(
             let r = http.post(&url).query(&route.query);
             match &route.body {
                 Some(b) => r.json(b),
-                // FastAPI routes that take a body model still accept an empty
-                // object; the no-body routes ignore it.
+                // Routes that take a body still accept an empty object; the
+                // no-body routes ignore it.
                 None => r.json(&serde_json::json!({})),
             }
         }
@@ -224,7 +224,7 @@ pub fn interpret(name: &str, http_status: u16, payload: serde_json::Value) -> Co
     if failed {
         let msg = body_message
             .or_else(|| {
-                // FastAPI raises wrap the error under `detail`.
+                // Error bodies wrap the message under `detail`.
                 payload
                     .get("detail")
                     .map(|d| d.to_string())

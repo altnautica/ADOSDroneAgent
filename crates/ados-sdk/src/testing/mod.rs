@@ -1,6 +1,6 @@
 //! Test harness for vision plugins.
 //!
-//! Mirrors the Python `ados.sdk.testing` ergonomics for the Rust SDK: a plugin
+//! The Rust SDK counterpart of the Python `ados.sdk.testing` ergonomics: a plugin
 //! author exercises a frame-consuming plugin without a real plugin host, vision
 //! engine, shared memory, or socket. [`FakeVisionEngine`] emits synthetic
 //! frames (from an in-memory list or a directory of raw frame files) into the

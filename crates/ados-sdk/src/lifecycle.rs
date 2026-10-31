@@ -35,7 +35,7 @@ use thiserror::Error;
 use crate::client::{ClientError, PluginIpcClient};
 use crate::context::PluginContext;
 
-/// The lifecycle hook trait a Rust plugin implements. Mirrors the duck-typed
+/// The lifecycle hook trait a Rust plugin implements. Matches the duck-typed
 /// `on_install` / `on_enable` / `on_configure` / `on_start` / `on_stop` /
 /// `on_disable` methods the Python runner calls via `getattr`.
 ///
@@ -81,8 +81,7 @@ pub enum RunnerError {
     #[error("missing plugin id argument")]
     MissingPluginId,
     /// `--socket` / `ADOS_PLUGIN_SOCKET` or `--token` / `ADOS_PLUGIN_TOKEN` was
-    /// absent, so there is no host to connect to. Mirrors the Python runner's
-    /// fall-back-to-null-ipc path; here it is an explicit error because a Rust
+    /// absent, so there is no host to connect to. An explicit error because a
     /// `runtime: rust` plugin is always launched with the bridge wired.
     #[error("no supervisor socket/token supplied (set --socket and --token)")]
     NoBridge,
@@ -103,7 +102,7 @@ pub enum RunnerError {
 /// appears as `$CREDENTIALS_DIRECTORY/<this>` inside the plugin process.
 pub const TOKEN_CREDENTIAL_NAME: &str = "ados-plugin-token";
 
-/// The parsed runner arguments. Mirrors the `plugin_id` positional plus the
+/// The parsed runner arguments. Matches the `plugin_id` positional plus the
 /// `--socket` / `--token` / `--agent-id` options the Python runner reads, with
 /// the `ADOS_PLUGIN_SOCKET` / `ADOS_PLUGIN_TOKEN` / `ADOS_PLUGIN_AGENT_ID`
 /// fallbacks read from the token credential.
@@ -310,7 +309,7 @@ fn ensure_data_dir(data_dir: Option<&str>) {
 }
 
 /// Drive the hook sequence. Separated so the teardown hooks run even when a
-/// startup hook errors. Mirrors the Python runner's try/finally shape.
+/// startup hook errors, the same try/finally shape as the Python runner.
 ///
 /// The run phase ends on the shutdown signal or on the loss of the host
 /// session, whichever comes first. A lost session still runs the teardown

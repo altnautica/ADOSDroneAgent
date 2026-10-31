@@ -2,8 +2,7 @@
 //!
 //! Every 5 s, when paired, GET `{convex}/agent/commands?deviceId=...` with
 //! `X-ADOS-Key`, dispatch each command, and ACK the result to
-//! `{convex}/agent/commands/ack`. Originally ported from the Python poll loop,
-//! which has since been deleted. The auth is always the `X-ADOS-Key` header,
+//! `{convex}/agent/commands/ack`. The auth is always the `X-ADOS-Key` header,
 //! never a URL/query param.
 
 use std::time::Duration;

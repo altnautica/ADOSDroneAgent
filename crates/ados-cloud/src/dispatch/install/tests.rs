@@ -2,6 +2,7 @@ use super::*;
 use ados_plugin_host::backend::RecordingBackend;
 use ados_plugin_host::download::StaticDownloadSource;
 use ados_plugin_host::supervisor::Paths;
+use sha2::Digest;
 use std::io::Write;
 use std::sync::Arc;
 use zip::write::SimpleFileOptions;
@@ -63,13 +64,20 @@ fn signed_supervisor(dir: &Path) -> PluginSupervisor {
     sup
 }
 
-fn install_cmd(job: &str, url: &str) -> InstallCommand {
+/// The test archive plus a source serving it and its sha256 pin.
+fn fixture() -> (StaticDownloadSource, String) {
+    let body = build_archive();
+    let sha = hex::encode(sha2::Sha256::digest(&body));
+    (fake_source(body), sha)
+}
+
+fn install_cmd(job: &str, url: &str, sha: &str) -> InstallCommand {
     InstallCommand {
         job_id: job.to_string(),
         plugin_id: Some("com.example.thermal".to_string()),
         signed_url: url.to_string(),
         requested_permissions: vec!["hardware.spi".to_string()],
-        expected_sha256: String::new(),
+        expected_sha256: sha.to_string(),
     }
 }
 
@@ -78,10 +86,10 @@ fn install_downloads_stages_and_installs() {
     let dir = tempfile::tempdir().unwrap();
     let mut sup = supervisor(dir.path());
     let seen = dir.path().join("seen.json");
-    let src = fake_source(build_archive());
+    let (src, sha) = fixture();
     let r = handle_install(
         &mut sup,
-        &install_cmd("j1", "https://abc.convex.cloud/x"),
+        &install_cmd("j1", "https://abc.convex.cloud/x", &sha),
         &src,
         &seen,
     );
@@ -94,7 +102,7 @@ fn install_downloads_stages_and_installs() {
     // Idempotent on replay.
     let r2 = handle_install(
         &mut sup,
-        &install_cmd("j1", "https://abc.convex.cloud/x"),
+        &install_cmd("j1", "https://abc.convex.cloud/x", &sha),
         &src,
         &seen,
     );
@@ -110,10 +118,10 @@ fn cloud_install_rejects_an_unsigned_archive_when_signing_is_required() {
     let dir = tempfile::tempdir().unwrap();
     let mut sup = signed_supervisor(dir.path());
     let seen = dir.path().join("seen.json");
-    let src = fake_source(build_archive()); // build_archive() is unsigned
+    let (src, sha) = fixture(); // build_archive() is unsigned
     let r = handle_install(
         &mut sup,
-        &install_cmd("j-unsigned", "https://abc.convex.cloud/x"),
+        &install_cmd("j-unsigned", "https://abc.convex.cloud/x", &sha),
         &src,
         &seen,
     );
@@ -131,7 +139,7 @@ fn cloud_install_rejects_an_unsigned_archive_when_signing_is_required() {
     // can still succeed rather than short-circuiting as already-processed.
     let again = handle_install(
         &mut sup,
-        &install_cmd("j-unsigned", "https://abc.convex.cloud/x"),
+        &install_cmd("j-unsigned", "https://abc.convex.cloud/x", &sha),
         &src,
         &seen,
     );
@@ -148,10 +156,10 @@ fn install_rejects_off_allowlist_url_before_download() {
     let dir = tempfile::tempdir().unwrap();
     let mut sup = supervisor(dir.path());
     let seen = dir.path().join("seen.json");
-    let src = fake_source(build_archive());
+    let (src, sha) = fixture();
     let r = handle_install(
         &mut sup,
-        &install_cmd("j2", "https://evil.example.com/x"),
+        &install_cmd("j2", "https://evil.example.com/x", &sha),
         &src,
         &seen,
     );
@@ -164,8 +172,8 @@ fn install_sha_mismatch_fails() {
     let dir = tempfile::tempdir().unwrap();
     let mut sup = supervisor(dir.path());
     let seen = dir.path().join("seen.json");
-    let src = fake_source(build_archive());
-    let mut cmd = install_cmd("j3", "https://abc.convex.cloud/x");
+    let (src, sha) = fixture();
+    let mut cmd = install_cmd("j3", "https://abc.convex.cloud/x", &sha);
     cmd.expected_sha256 = "00".repeat(32);
     let r = handle_install(&mut sup, &cmd, &src, &seen);
     assert_eq!(r.status, CommandStatus::Failed);
@@ -176,10 +184,10 @@ fn missing_job_id_fails() {
     let dir = tempfile::tempdir().unwrap();
     let mut sup = supervisor(dir.path());
     let seen = dir.path().join("seen.json");
-    let src = fake_source(build_archive());
+    let (src, sha) = fixture();
     let r = handle_install(
         &mut sup,
-        &install_cmd("", "https://abc.convex.cloud/x"),
+        &install_cmd("", "https://abc.convex.cloud/x", &sha),
         &src,
         &seen,
     );
@@ -191,12 +199,62 @@ fn an_archive_for_another_plugin_is_refused_before_install() {
     let dir = tempfile::tempdir().unwrap();
     let mut sup = supervisor(dir.path());
     let seen = dir.path().join("seen.json");
-    let src = fake_source(build_archive());
-    let mut cmd = install_cmd("j-other", "https://abc.convex.cloud/x");
+    let (src, sha) = fixture();
+    let mut cmd = install_cmd("j-other", "https://abc.convex.cloud/x", &sha);
     cmd.plugin_id = Some("com.example.other".to_string());
     let r = handle_install(&mut sup, &cmd, &src, &seen);
     assert_eq!(r.status, CommandStatus::Failed);
     assert_eq!(r.data.unwrap()["code"], "plugin_mismatch");
     assert!(sup.find_install("com.example.thermal").is_none());
     assert!(sup.find_install("com.example.other").is_none());
+}
+
+fn row(args: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"_id": "row-1", "args": args})
+}
+
+#[test]
+fn the_archive_is_checked_against_archive_sha256_not_manifest_hash() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sup = supervisor(dir.path());
+    let seen = dir.path().join("seen.json");
+    let (src, sha) = fixture();
+    let cmd = InstallCommand::from_row(&row(serde_json::json!({
+        "jobId": "j-pin",
+        "pluginId": "com.example.thermal",
+        "signedUrl": "https://abc.convex.cloud/x",
+        "requestedPermissions": ["hardware.spi"],
+        "manifestHash": hex::encode(sha2::Sha256::digest(MANIFEST.as_bytes())),
+        "archiveSha256": sha,
+    })));
+    assert_eq!(cmd.expected_sha256, sha);
+    let r = handle_install(&mut sup, &cmd, &src, &seen);
+    assert_eq!(r.status, CommandStatus::Completed);
+    assert!(sup.find_install("com.example.thermal").is_some());
+}
+
+#[test]
+fn a_row_without_archive_sha256_fails_before_download() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut sup = supervisor(dir.path());
+    let seen = dir.path().join("seen.json");
+    // No URL is served: a download attempt would fail with a transport error,
+    // so the "archiveSha256 missing" message proves no download happened.
+    let src = StaticDownloadSource::default();
+    let cmd = InstallCommand::from_row(&row(serde_json::json!({
+        "jobId": "j-nopin",
+        "pluginId": "com.example.thermal",
+        "signedUrl": "https://abc.convex.cloud/x",
+        "manifestHash": "00".repeat(32),
+    })));
+    let r = handle_install(&mut sup, &cmd, &src, &seen);
+    assert_eq!(r.status, CommandStatus::Failed);
+    assert!(r.result["message"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("archiveSha256 missing"));
+    let data = r.data.unwrap();
+    assert_eq!(data["code"], "download_failed");
+    assert_eq!(data["jobId"], "j-nopin");
+    assert!(sup.find_install("com.example.thermal").is_none());
 }

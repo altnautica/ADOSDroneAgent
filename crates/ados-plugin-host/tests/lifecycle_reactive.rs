@@ -410,6 +410,37 @@ async fn a_revoke_reaches_the_live_session_on_the_state_poll_alone() {
 }
 
 #[tokio::test]
+async fn a_revoke_applies_on_the_next_request_without_a_rotation() {
+    // Neither the control-socket poke nor the state poll runs here: the
+    // session itself sees the grant state file change and re-gates.
+    let h = harness();
+    write_state(&h.state_path, PluginStatus::Running, &["mavlink.read"]);
+    h.reconciler.reconcile();
+    let sock = ados_plugin_host::plugin_socket_path(&h.socket_dir, PLUGIN_ID);
+    let token = token_from_env(&h.socket_dir);
+    let mut client = UnixStream::connect(&sock).await.unwrap();
+    send(&mut client, &request("hello", &token)).await;
+    assert_eq!(arg_bool(&recv(&mut client).await, "ready"), Some(true));
+
+    // Guarantee a distinct mtime even on a coarse-grained filesystem clock.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    write_state(&h.state_path, PluginStatus::Running, &[]);
+
+    send(&mut client, &request("mavlink.subscribe", &token)).await;
+    let refresh = recv(&mut client).await;
+    assert_eq!(refresh.method, "token.refresh", "{refresh:?}");
+    let denied = recv(&mut client).await;
+    assert!(
+        denied
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("capability_denied"),
+        "the revoked capability must be refused on the next request, got {denied:?}"
+    );
+}
+
+#[tokio::test]
 async fn an_unreadable_state_file_keeps_every_plugin_served() {
     // A failed read is not "nothing enabled": the pass must leave the socket
     // and the token env file in place instead of tearing the plugin down.

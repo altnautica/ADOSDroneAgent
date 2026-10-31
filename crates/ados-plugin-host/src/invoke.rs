@@ -27,7 +27,7 @@ use rmpv::Value;
 use tokio::sync::{mpsc, oneshot};
 
 /// The default per-invoke timeout. A tool that needs longer returns a job
-/// handle rather than blocking the channel (mirrors the Python host's 5 s).
+/// handle rather than blocking the channel.
 pub const DEFAULT_INVOKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// One outbound tool invocation handed to a live plugin connection. The

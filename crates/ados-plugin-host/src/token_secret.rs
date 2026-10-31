@@ -62,7 +62,7 @@ pub const ENV_AGENT_ID: &str = "ADOS_PLUGIN_AGENT_ID";
 /// The credential key carrying the plugin's per-drone data directory.
 pub const ENV_DATA_DIR: &str = "ADOS_PLUGIN_DATA_DIR";
 /// Default base of the persistent plugin data tree (`ADOS_PLUGIN_DATA_DIR_ROOT`
-/// overrides it, see [`crate::supervisor::Paths`]). Mirrors the Python
+/// overrides it, see [`crate::supervisor::Paths`]). Matches the Python
 /// `PLUGIN_DATA_DIR`. Each plugin's unit binds only its own `<base>/<id>`
 /// writable.
 pub const PLUGIN_DATA_DIR: &str = "/var/ados/plugin-data";
@@ -249,6 +249,14 @@ impl TokenMint {
     /// The plugin's socket path under this mint's socket dir.
     pub fn socket_path(&self, plugin_id: &str) -> PathBuf {
         crate::server::plugin_socket_path(&self.socket_dir, plugin_id)
+    }
+
+    /// The modification time of the grant state file this mint reads, or
+    /// `None` when it is absent or unreadable.
+    pub fn state_mtime(&self) -> Option<std::time::SystemTime> {
+        std::fs::metadata(&self.state_path)
+            .and_then(|m| m.modified())
+            .ok()
     }
 
     /// Mint a fresh token for `plugin_id` from the current grant set and

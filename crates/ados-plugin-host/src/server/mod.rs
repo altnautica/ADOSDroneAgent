@@ -328,6 +328,7 @@ impl<H: HostServices> PluginIpcServer<H> {
                     socket_dir: socket_dir.clone(),
                     invoke: invoke.clone(),
                     refresh: refresh.clone(),
+                    state_seen: std::sync::Mutex::new(mint.as_ref().and_then(|m| m.state_mtime())),
                     mint: mint.clone(),
                     shared_topics: shared_topics.clone(),
                 };
@@ -409,8 +410,13 @@ struct Connection<H: HostServices> {
     /// The shared refresh registry: this connection registers a token sender
     /// here so a rotation reaches the live session, not just the credential.
     refresh: Arc<RefreshRegistry>,
-    /// Mints this plugin's current token from state, for the on-expiry re-mint.
+    /// Mints this plugin's current token from state, for the on-expiry re-mint
+    /// and the re-mint after the grant state file changes.
     mint: Option<Arc<TokenMint>>,
+    /// The grant state file's mtime when this session last read it. A request
+    /// that finds it changed re-mints first, so a revoke applies on the next
+    /// request rather than at token expiry.
+    state_seen: std::sync::Mutex<Option<std::time::SystemTime>>,
     /// The shared topics of the served plugins.
     shared_topics: Arc<SharedTopics>,
 }

@@ -285,8 +285,8 @@ pub struct AgentBlock {
     #[serde(default)]
     pub resources: ResourceLimits,
     /// Basenames the plugin may `process.spawn` at runtime. The host enforces
-    /// the `process.spawn` allowlist against this list (mirrors the Python
-    /// `AgentBlock.subprocess_spawn`). Empty (the default) means no spawn is
+    /// the `process.spawn` allowlist against this list (the same field as the
+    /// Python `AgentBlock.subprocess_spawn`). Empty (the default) means no spawn is
     /// permitted even with the `process.spawn` capability.
     #[serde(default)]
     pub subprocess_spawn: Vec<String>,

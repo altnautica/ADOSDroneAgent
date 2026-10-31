@@ -77,8 +77,8 @@ pub struct TrustedKey {
 /// Load every PEM public key from the trusted-keys directory. The map is keyed
 /// by `signer_id` (the filename stem). A missing or empty directory returns an
 /// empty map; the caller decides whether that is fatal. A key file that fails
-/// to read or fails to decode as an Ed25519 SPKI PEM is skipped (mirroring the
-/// Python loader's per-file tolerance).
+/// to read or fails to decode as an Ed25519 SPKI PEM is skipped, so one bad
+/// file never hides the other trusted keys.
 pub fn load_trusted_keys(keys_dir: Option<&Path>) -> BTreeMap<String, TrustedKey> {
     let base: PathBuf = keys_dir
         .map(Path::to_path_buf)
@@ -256,9 +256,9 @@ pub fn merge_revocations(path: &Path, incoming: &Revocations) -> Result<bool, St
 /// **Security boundary** — the signed payload is the 32-byte canonical payload
 /// hash, base64 sig decoded to the raw 64-byte Ed25519 signature, verified
 /// against the trusted key for `signer_id`. Returns `Ok(())` on success and a
-/// kinded [`SignatureError`] on every failure path (revoked, unknown signer,
-/// malformed base64, wrong-length sig, verify failure), matching the order and
-/// `kind` of the Python `verify_archive_signature`.
+/// kinded [`SignatureError`] on every failure, checked in this order: a revoked
+/// signer (`revoked`), a signer with no trusted key (`unknown_signer`), then
+/// malformed base64, a wrong-length signature or a failed verify (`invalid`).
 pub fn verify_archive_signature(
     payload_hash: &[u8; 32],
     signature_b64: &str,
@@ -292,8 +292,7 @@ pub fn verify_archive_signature(
 }
 
 /// Verify a base64 Ed25519 signature over `data` with `key`. Any decode or
-/// length failure verifies as `false`, mirroring the Python signing verifier's
-/// catch-all-and-return-false posture (the caller maps a `false` to the
+/// length failure verifies as `false` (the caller maps a `false` to the
 /// `invalid` kind).
 pub fn verify_ed25519(data: &[u8], signature_b64: &str, key: &VerifyingKey) -> bool {
     let Ok(sig_bytes) = base64::engine::general_purpose::STANDARD.decode(signature_b64) else {

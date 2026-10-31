@@ -338,25 +338,22 @@ impl TransportConfig {
 pub struct RumqttcTransport {
     client: AsyncClient,
     incoming: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
-    /// The CONFIRMED broker connection state, driven by the event loop: set
-    /// `true` only on a successful `ConnAck` and back to `false` on a
-    /// `Disconnect`, a poll error, or the loop ending. A consumer must read this
-    /// to know the link is live — `connect()` returns immediately because
-    /// rumqttc dials lazily and retries a down broker forever, so the existence
-    /// of this transport (or of its event-loop task) is NOT proof of a session.
+    /// The CONFIRMED broker session state: `true` only after a `ConnAck`, back
+    /// to `false` on a `Disconnect`, a poll error, or the loop ending. rumqttc
+    /// dials lazily and retries forever, so this transport existing is NOT
+    /// proof of a session.
     connected: Arc<AtomicBool>,
     /// Every subscription taken on this transport, replayed on each accepted
     /// session. Without it a reconnect silently drops the inbound half of the
     /// link (see [`SubscriptionSet`]).
     subs: Arc<SubscriptionSet>,
-    _eventloop: tokio::task::JoinHandle<()>,
+    eventloop: tokio::task::JoinHandle<()>,
 }
 
 impl RumqttcTransport {
-    /// Connect (lazily — rumqttc connects on the first event-loop poll) and
-    /// spawn the event-loop task. Incoming publishes land on the channel
-    /// returned by [`incoming`](Self::incoming). Fails only when the dial config
-    /// cannot describe a broker at all (an unparseable host).
+    /// Connect lazily (rumqttc dials on the first event-loop poll) and spawn the
+    /// event loop; incoming publishes land on [`incoming`](Self::incoming).
+    /// Fails only when the config cannot describe a broker (unparseable host).
     pub fn connect(config: &TransportConfig) -> Result<Arc<Self>, TransportError> {
         let opts = config.build_options()?;
         let (client, mut eventloop) = AsyncClient::builder(opts).build();
@@ -372,10 +369,9 @@ impl RumqttcTransport {
             loop {
                 let event = match eventloop.poll().await {
                     Ok(event) => classify_event(&event),
-                    // A connection error is transient; rumqttc reconnects on the
-                    // next poll. The session is down until the next ConnAck, so
-                    // clear the flag and wait the fixed recovery interval before
-                    // the next dial.
+                    // A connection error is transient; rumqttc redials on the
+                    // next poll. The session is down until the next ConnAck:
+                    // clear the flag and wait the fixed recovery interval.
                     Err(e) => {
                         tracing::debug!(error = %e, "mqtt event loop poll error");
                         tokio::time::sleep(RECONNECT_DELAY).await;
@@ -396,7 +392,7 @@ impl RumqttcTransport {
             incoming: tokio::sync::Mutex::new(Some(rx)),
             connected,
             subs,
-            _eventloop: eventloop,
+            eventloop,
         }))
     }
 
@@ -426,6 +422,13 @@ impl RumqttcTransport {
     /// MAVLink relay's bounded publisher).
     pub fn client(&self) -> &AsyncClient {
         &self.client
+    }
+}
+
+/// Stop the event loop (and its dialer) with the transport: no orphan redials.
+impl Drop for RumqttcTransport {
+    fn drop(&mut self) {
+        self.eventloop.abort();
     }
 }
 

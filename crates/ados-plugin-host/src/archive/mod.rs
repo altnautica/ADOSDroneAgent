@@ -320,7 +320,7 @@ fn read_entries(raw: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, ArchiveError> {
     Ok(entries)
 }
 
-/// Parse the two-line `SIGNATURE` blob. Mirrors the Python `_read_signature`:
+/// Parse the two-line `SIGNATURE` blob, as the Python `_read_signature` does:
 /// strip blank lines, require exactly two non-blank lines, return
 /// `(signer_id, signature_b64)`. A non-UTF-8 or mis-shaped blob is a
 /// [`SignatureError`] of kind `invalid`.

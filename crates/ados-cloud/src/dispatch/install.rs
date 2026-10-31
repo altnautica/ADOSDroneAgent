@@ -33,8 +33,9 @@ pub struct InstallCommand {
     pub plugin_id: Option<String>,
     pub signed_url: String,
     pub requested_permissions: Vec<String>,
-    /// Optional defense-in-depth manifest hash (verified against the download
-    /// before the supervisor's own Ed25519 check). Empty when the row omits it.
+    /// SHA256 of the plugin archive (`archiveSha256`), checked against the
+    /// download before the supervisor's own Ed25519 check. Empty when the row
+    /// omits it, which refuses the install before any download.
     pub expected_sha256: String,
 }
 
@@ -67,8 +68,7 @@ impl InstallCommand {
             })
             .unwrap_or_default();
         let expected_sha256 = args
-            .get("manifestHash")
-            .or_else(|| args.get("archiveSha256"))
+            .get("archiveSha256")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -82,10 +82,11 @@ impl InstallCommand {
     }
 }
 
-/// Run the cloud-relay install. Mirrors `RemoteInstallReceiver.handle_install`:
-/// validate jobId, idempotency short-circuit, download (allowlist + size cap +
-/// optional sha), parse the archive and check it is the commanded plugin,
-/// install, grant the requested permissions, mark seen, return the ACK.
+/// Run the cloud-relay install: require a jobId, short-circuit a job already
+/// processed, require an `archiveSha256` pin, download (allowlist + size cap)
+/// and check the archive against the pin, parse the archive and check it is
+/// the commanded plugin, install, grant the requested permissions, mark the
+/// job seen, return the ACK.
 pub fn handle_install(
     supervisor: &mut PluginSupervisor,
     cmd: &InstallCommand,
@@ -101,6 +102,10 @@ pub fn handle_install(
             "replay": true,
         }));
     }
+    if cmd.expected_sha256.is_empty() {
+        return CommandResult::failed("download failed: archiveSha256 missing")
+            .with_data(serde_json::json!({"code": "download_failed", "jobId": cmd.job_id}));
+    }
 
     // Validate + download.
     if let Err(e) = validate_download_url(&cmd.signed_url) {
@@ -114,7 +119,7 @@ pub fn handle_install(
                 .with_data(serde_json::json!({"code": "download_failed", "jobId": cmd.job_id}));
         }
     };
-    if let Err(e) = verify_sha256(&archive_bytes, &cmd.expected_sha256) {
+    if let Err(e) = verify_sha256(&archive_bytes, Some(&cmd.expected_sha256)) {
         return CommandResult::failed(format!("download failed: {e}"))
             .with_data(serde_json::json!({"code": "download_failed", "jobId": cmd.job_id}));
     }

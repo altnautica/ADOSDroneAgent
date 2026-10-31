@@ -1,8 +1,8 @@
 //! Cloud relay configuration.
 //!
-//! Reads the sections of `/etc/ados/config.yaml` the relay needs. Mirrors the
-//! Python config field names + defaults so a config written by the Python agent
-//! is read identically here; serde ignores every other section, so the large
+//! Reads the sections of `/etc/ados/config.yaml` the relay needs. Field names +
+//! defaults match the Python config models so a config written by the Python
+//! agent is read identically here; serde ignores every other section, so the large
 //! operator config is untouched. The long-running relay tasks read additional
 //! keys; this carries the foundation (the convex relay URL) the chunk-1
 //! skeleton resolves at startup.
@@ -70,7 +70,7 @@ impl Default for CloudSection {
 /// MQTT broker. `url` is the convex-URL fallback when `pairing.convex_url` is
 /// empty but the operator chose the self_hosted posture, so a self-hosted pair
 /// that only wrote `server.self_hosted.url` still beacons. `mqtt_broker` /
-/// `mqtt_port` are the broker the relay dials in that posture. Mirrors the
+/// `mqtt_port` are the broker the relay dials in that posture. Matches the
 /// Python `SelfHostedServerConfig`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SelfHostedSection {
@@ -109,7 +109,7 @@ pub struct ServerSection {
     /// the durable on-device store is the source of truth and nothing is exported
     /// to the cloud account unless the operator turns this on. Even when on, an
     /// export only runs on an explicit operator-triggered request — there is no
-    /// continuous firehose. Mirrors the Python `server.cloud_logs_enabled`.
+    /// continuous firehose. Same key as the Python `server.cloud_logs_enabled`.
     #[serde(default)]
     pub cloud_logs_enabled: bool,
 }
@@ -219,7 +219,7 @@ pub const AUX_MIN_INTERVAL_S: f64 = 0.2;
 pub struct WfbSection {
     /// Whether auto-pair is armed. Default true, the schema default; a
     /// successful pair disarms it and the operator re-arms it via the GCS /
-    /// captive portal / REST. Mirrors the Python `video.wfb.auto_pair_enabled`.
+    /// captive portal / REST. Same key as the Python `video.wfb.auto_pair_enabled`.
     #[serde(default = "default_auto_pair_enabled")]
     pub auto_pair_enabled: bool,
     /// Whether this node publishes its status + identity on the auxiliary lane

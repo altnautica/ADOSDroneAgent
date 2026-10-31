@@ -3,23 +3,23 @@
 //! The cloud loops gate on whether the agent is paired and use the pairing API
 //! key for `X-ADOS-Key` auth. The pairing state is owned by the API process and
 //! persisted to `/etc/ados/pairing.json`; the cloud relay reads it (re-reading
-//! per loop tick so a pair/unpair transition is observed). Mirrors the slice of
-//! `ados.core.pairing.PairingManager` the loops use: `is_paired`, `api_key`.
+//! per loop tick so a pair/unpair transition is observed). Reads the slice of
+//! `ados.core.pairing.PairingManager` state the loops use: `is_paired`, `api_key`.
 
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-/// Canonical pairing-state path. Mirrors `PAIRING_JSON`.
+/// Canonical pairing-state path. Same path as the Python `PAIRING_JSON`.
 pub const PAIRING_JSON: &str = "/etc/ados/pairing.json";
 
 /// The pairing code's lifetime in seconds, before an unpaired agent rolls it.
-/// Mirrors the Python `CODE_TTL` (24 h). Used to derive the code-expiry epoch the
+/// Matches the Python `CODE_TTL` (24 h). Used to derive the code-expiry epoch the
 /// beacon advertises so the GCS can render a countdown clock.
 pub const CODE_TTL_SECS: f64 = 24.0 * 60.0 * 60.0;
 
 /// The pairing-state document. Only the fields the loops + beacon read are typed;
-/// every other field is tolerated. Mirrors the slice of `pairing.json` the Python
+/// every other field is tolerated. Reads the slice of `pairing.json` the Python
 /// `PairingManager` persists.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct PairingState {

@@ -15,7 +15,7 @@ use super::*;
 /// derivation, shared with the LAN routes, rather than a second one written here.
 /// The container default is what lets the three `skip_serializing_if` fields and
 /// the non-`Option` `paired` come back from the 37-key absent form.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct RadioBlock {
     pub state: Option<String>,
@@ -160,7 +160,7 @@ impl RadioBlock {
 /// field keeps its nested `null` when unmeasured (the Python projection keeps
 /// `None` values, matching the radio-block convention), so there is no
 /// `skip_serializing_if` on the fields.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CrsfBlock {
     /// The sidecar schema version, forwarded so the receiver can gate on it.
     pub v: Option<i64>,

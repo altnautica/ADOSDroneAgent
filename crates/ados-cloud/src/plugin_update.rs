@@ -114,7 +114,7 @@ impl UpdateSource for CloudUpdateSource {
     fn download(&self, url: &str, sha256: &str) -> Result<Vec<u8>, String> {
         let body =
             fetch_capped(&self.download, url, ARCHIVE_MAX_BYTES).map_err(|e| e.to_string())?;
-        verify_sha256(&body, sha256).map_err(|e| e.to_string())?;
+        verify_sha256(&body, Some(sha256)).map_err(|e| e.to_string())?;
         Ok(body)
     }
 

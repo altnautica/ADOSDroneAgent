@@ -31,6 +31,8 @@ ados-macpin = { workspace = true }
 ados-video = { path = "../ados-video" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# JSON Schema of the heartbeat body (schemas/api/heartbeat.schema.json).
+schemars = { workspace = true }
 # YAML config reader (/etc/ados/config.yaml), the same reader the other crates
 # use so a config written by the Python agent is read identically here.
 serde_norway = { workspace = true }

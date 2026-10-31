@@ -27,9 +27,8 @@ impl<H: HostServices> Connection<H> {
         // and a frame receiver from the host's MAVLink client; a per-subscription
         // forwarder task pulls frames and tags them with the msg_name into one
         // merged channel, so a single select branch writes the `mavlink.deliver`
-        // envelopes without competing writers on the socket. Mirrors the Python
-        // pump (one pump task per subscription) collapsed onto this connection's
-        // single writer. The Vec records active names for the already-subscribed
+        // envelopes without competing writers on the socket: one pump per
+        // subscription, collapsed onto this connection's single writer. The Vec records active names for the already-subscribed
         // dedupe; the forwarders own the receivers.
         let mut mavlink_subs: Vec<String> = Vec::new();
         let (mav_tx, mut mav_rx) = tokio::sync::mpsc::channel::<MavlinkDelivery>(256);

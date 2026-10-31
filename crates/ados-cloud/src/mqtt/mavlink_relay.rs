@@ -47,7 +47,6 @@ pub const BATCH_WINDOW: Duration = Duration::from_millis(50);
 pub const BATCH_MAX_BYTES: usize = 4096;
 
 /// Throughput counters logged periodically and surfaced for diagnostics.
-/// Field names mirror the Python `_metrics` dict.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RelayMetrics {
     pub frames_in: u64,

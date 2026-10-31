@@ -44,8 +44,8 @@ tracing = { workspace = true }
 # plugin can `impl CameraDriver` with `async fn` bodies and the trait stays
 # object-safe behind a `Box<dyn ...>`.
 async-trait = { workspace = true }
-# `Stream` for the frame/fix/telemetry iterators that mirror the Python
-# `AsyncIterator` return of the driver base classes. futures-core is the
+# `Stream` for the frame/fix/telemetry iterators, the Rust counterpart of the
+# Python driver base classes' `AsyncIterator` returns. futures-core is the
 # minimal trait-only crate; the SDK does not pull the full `futures` stack.
 futures-core = { workspace = true }
 # Map the vision frame ring out of /dev/shm read-only so a frame consumer
