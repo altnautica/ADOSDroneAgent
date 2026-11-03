@@ -739,6 +739,20 @@ fn exact_decode_accepts_v2_extension_length_only_up_to_extended_size() {
         Ok(MavMessage::OPTICAL_FLOW(_))
     ));
     assert!(decode_exact_frame(&v2_frame_with(100, &[0; 35], 0)).is_err());
+    // OBSTACLE_DISTANCE #330: 158 base bytes, 167 with increment_f,
+    // angle_offset and frame (what a lidar proximity source sends).
+    assert!(matches!(
+        decode_exact_frame(&v2_frame_with(330, &[0; 167], 0)),
+        Ok(MavMessage::OBSTACLE_DISTANCE(_))
+    ));
+    assert!(decode_exact_frame(&v2_frame_with(330, &[0; 168], 0)).is_err());
+    // ODOMETRY #331: 230 base bytes, 233 with reset_counter, estimator_type
+    // and quality (what an external-navigation source sends).
+    assert!(matches!(
+        decode_exact_frame(&v2_frame_with(331, &[0; 233], 0)),
+        Ok(MavMessage::ODOMETRY(_))
+    ));
+    assert!(decode_exact_frame(&v2_frame_with(331, &[0; 234], 0)).is_err());
 }
 
 #[test]

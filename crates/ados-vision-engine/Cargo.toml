@@ -61,10 +61,15 @@ memmap2 = { workspace = true }
 # ONNX Runtime, gated behind the `onnx` feature. The `load-dynamic` feature
 # (enabled by the `onnx` feature) dlopens the shared library at start from
 # ORT_DYLIB_PATH, so the compiled binary never link-depends on the runtime's
-# glibc/libstdc++. Default features are kept for the pregenerated bindings; the
-# build-time download is never linked (load-dynamic) and the shipped runtime is
-# a separate glibc-2.17 manylinux build the installer places on the box.
-ort = { version = "2.0.0-rc.13", optional = true }
+# glibc/libstdc++. The build-time download is never linked (load-dynamic) and the
+# shipped runtime is a separate glibc-2.17 manylinux build the installer places
+# on the box, at the version CI pins (ORT_RUNTIME_VERSION in rust.yml, 1.24.x).
+# ort's default `api-27` refuses any runtime older than 1.27 at load, so the
+# API level is pinned to that runtime's (`api-24`) and the other defaults are
+# listed explicitly. Raise it together with ORT_RUNTIME_VERSION.
+ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = [
+  "std", "ndarray", "tracing", "download-binaries", "tls-native", "copy-dylibs", "api-24",
+] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = { workspace = true }

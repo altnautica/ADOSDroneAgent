@@ -161,12 +161,18 @@ pub fn decode_exact_frame(frame: &[u8]) -> Result<MavMessage, MavlinkError> {
 }
 
 /// Full MAVLink 2 payload length (base plus extension fields) for messages the
-/// agent receives with extensions. The generated dialect omits extension
-/// fields, so their length is not derivable from it.
+/// agent receives or plugins send with extensions. The generated dialect omits
+/// extension fields, so their length is not derivable from it.
 fn v2_extended_len(msg_id: u32) -> Option<usize> {
     match msg_id {
         // OPTICAL_FLOW: 26 base bytes + flow_rate_x/flow_rate_y (2 x f32).
         100 => Some(34),
+        // OBSTACLE_DISTANCE: 158 base bytes + increment_f, angle_offset (2 x f32)
+        // and frame (u8). ArduPilot reads `frame` and `increment_f`.
+        330 => Some(167),
+        // ODOMETRY: 230 base bytes + reset_counter, estimator_type, quality (3 x u8).
+        // ArduPilot reads `reset_counter` and `quality`.
+        331 => Some(233),
         _ => None,
     }
 }
