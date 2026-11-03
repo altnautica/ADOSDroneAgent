@@ -31,10 +31,12 @@ class ResourceLimits(_StrictModel):
 
     model_config = ConfigDict(validate_by_name=True, serialize_by_alias=True)
 
-    resource_class: Literal["standard", "heavy"] = Field("standard", alias="class")
-    max_ram_mb: int = Field(96, ge=8, le=65536)
-    max_cpu_percent: int = Field(25, ge=1, le=3200)
-    max_pids: int = Field(12, ge=1, le=4096)
+    # `default=` by keyword: a positional default is invisible to type
+    # checkers, which would then read every field as required.
+    resource_class: Literal["standard", "heavy"] = Field(default="standard", alias="class")
+    max_ram_mb: int = Field(default=96, ge=8, le=65536)
+    max_cpu_percent: int = Field(default=25, ge=1, le=3200)
+    max_pids: int = Field(default=12, ge=1, le=4096)
 
     @model_validator(mode="after")
     def _enforce_class_ceilings(self) -> ResourceLimits:

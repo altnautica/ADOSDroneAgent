@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict
@@ -72,7 +73,7 @@ def _normalize_profiles(raw: Any) -> Any:
     return [_PROFILE_ALIASES.get(p, p) if isinstance(p, str) else p for p in raw]
 
 
-def _require_non_empty_profiles(value: list[str] | None, field: str) -> None:
+def _require_non_empty_profiles(value: Sequence[str] | None, field: str) -> None:
     if value is not None and not value:
         raise ManifestError(f"{field} must list at least one profile when present")
 

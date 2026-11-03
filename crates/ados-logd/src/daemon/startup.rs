@@ -65,11 +65,21 @@ pub(super) fn open_and_verify(path: &Path) -> Result<()> {
     }
 }
 
-/// Rename a broken store aside with a timestamped suffix and create a fresh one
+/// Rename a broken store aside with a sequence suffix and create a fresh one
 /// from the embedded schema. The caller has already established the file at
 /// `path` exists and is unusable.
+///
+/// The suffix is the quarantine time in microseconds, raised past every
+/// existing quarantine's suffix when the clock says otherwise (a clock stepped
+/// back, two corruptions inside one tick). Suffixes therefore strictly increase
+/// in quarantine order, which is what [`prune_quarantines`] keeps by.
 pub(super) fn quarantine_and_recreate(path: &Path) -> Result<()> {
-    let quarantine = path.with_extension(format!("db.corrupt-{}", now_us()));
+    let next = quarantines(path)
+        .iter()
+        .map(|(seq, _)| seq.saturating_add(1))
+        .max()
+        .map_or(now_us(), |floor| floor.max(now_us()));
+    let quarantine = path.with_extension(format!("db.corrupt-{next}"));
     std::fs::rename(path, &quarantine).with_context(|| format!("quarantine {}", path.display()))?;
     tracing::warn!(
         quarantine = %quarantine.display(),
@@ -98,27 +108,16 @@ pub(super) const QUARANTINE_KEEP: usize = 1;
 ///
 /// Best effort throughout: this runs on the boot path after a corruption has
 /// already been survived, so a directory that cannot be read or a file that
-/// cannot be removed must never stop the daemon coming up. Ordering is by
-/// modification time rather than by the timestamp in the name, because that
-/// suffix is a plain integer whose digit count changes and so does not sort
-/// lexicographically.
+/// cannot be removed must never stop the daemon coming up. "Newest" is the
+/// largest numeric suffix (see [`quarantine_and_recreate`]), compared as a
+/// number: the suffix's digit count changes, so it does not sort as text, and
+/// modification times can tie or run backwards with the clock.
 pub(super) fn prune_quarantines(path: &Path) {
-    let Some(dir) = path.parent() else { return };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut found: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().contains("db.corrupt-"))
-        .filter_map(|e| {
-            let modified = e.metadata().ok()?.modified().ok()?;
-            Some((modified, e.path()))
-        })
-        .collect();
+    let mut found = quarantines(path);
     if found.len() <= QUARANTINE_KEEP {
         return;
     }
-    found.sort_by_key(|(t, _)| *t);
+    found.sort();
     let excess = found.len() - QUARANTINE_KEEP;
     for (_, victim) in found.into_iter().take(excess) {
         match std::fs::remove_file(&victim) {
@@ -133,4 +132,25 @@ pub(super) fn prune_quarantines(path: &Path) {
             ),
         }
     }
+}
+
+/// Every quarantined store beside `path` with its sequence suffix. A name
+/// whose suffix is not a number sorts oldest (sequence 0), so it is the first
+/// pruned rather than one kept forever.
+fn quarantines(path: &Path) -> Vec<(i64, std::path::PathBuf)> {
+    let Some(dir) = path.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            let (_, suffix) = name.split_once("db.corrupt-")?;
+            Some((suffix.parse::<i64>().unwrap_or(0), e.path()))
+        })
+        .collect()
 }

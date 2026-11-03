@@ -264,10 +264,10 @@ class PluginManifest(_StrictModel):
                 raise ManifestError(
                     f"shared topic {shared.topic!r} must start with {prefix!r}"
                 )
-            cap = shared.subscribe_capability
-            if not is_known_agent_capability(cap) and cap not in declared:
+            sub_cap = shared.subscribe_capability
+            if not is_known_agent_capability(sub_cap) and sub_cap not in declared:
                 raise ManifestError(
-                    f"shared topic {shared.topic!r} subscribe_capability {cap!r} is "
+                    f"shared topic {shared.topic!r} subscribe_capability {sub_cap!r} is "
                     "neither a known agent capability nor one of this plugin's "
                     "declared_capabilities"
                 )

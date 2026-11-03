@@ -87,7 +87,7 @@ class AgentBlock(_StrictModel):
     Default false preserves single-config behavior from the v1
     schema. Schema v2."""
 
-    target_profiles: list[Profile] = Field(default_factory=lambda: ["drone"])
+    target_profiles: list[Profile] = Field(default_factory=lambda: list[Profile](["drone"]))
     """Node profiles the plugin is compatible with. Default ``["drone"]``
     so manifests that omit the field stay drone-only. A plugin that wants
     to surface on a ground station declares ``["ground-station"]``, on the

@@ -38,17 +38,23 @@ the project follows [Semantic Versioning](https://semver.org/).
 - **Vision backend state.** `GET /api/vision/status` carries `backend_state`
   (`ready`, `mock` only when configured, or `unavailable`) and
   `backend_reason`.
-- **Person detector for the ONNX CPU backend.** `scripts/models/` exports
-  YOLOX-Tiny (Apache-2.0) as a person-only ONNX graph that carries its own
-  metadata, so the existing head decoder reads it with no extra code. The
+- **Person detector for the ONNX CPU backend.** The model registry lists
+  `person_yolox_tiny_v1`: YOLOX-Tiny (Apache-2.0), person-only, one 640×640
+  ONNX variant (`runtime: onnx`, `head: yolo5`) for boards without an NPU.
+  `scripts/models/export_yolox_person.py` reproduces it from the upstream
+  checkpoint: the graph decodes its own boxes, carries the `ados.*` metadata
+  the ONNX backend reads at load (head layout, classes, input size), and the
+  script prints the size and sha256 the registry records. The
   `detect_bench` example times a detector over a folder of recorded frames.
 - **Re-identification embeddings for the tracker.** Track appearance comes
-  from an OSNet re-id model (`vision.reid`, exported by
-  `scripts/models/export_osnet_reid.py`) when one is loaded, otherwise from a
+  from a re-id model (`vision.reid`) when one is loaded, otherwise from a
   16-bin colour descriptor of the box's upper and lower halves. Both are
   L2-normalised and compared by cosine similarity, and each detection names
   its source in `embedding_model` (the model id, or `histogram`). Off unless
-  `vision.reid_enabled` is set.
+  `vision.reid_enabled` is set. The OSNet re-id models in the registry
+  (`scripts/models/export_osnet_reid.py` reproduces the ONNX one) are marked
+  `benchmark_only` because their weights carry research-use terms, so the
+  colour descriptor is the shipped default.
 - **Runtime-aware model selection.** The model manager picks only variants
   this board can run: `rknn`, `hailo` or `onnx` as configured, or under
   `auto` the NPU first when the board declares NPU TOPS, then ONNX. NPU TOPS
@@ -180,6 +186,10 @@ the project follows [Semantic Versioning](https://semver.org/).
   sensor.
 - `docs/api-surface.md` marks every route under a relay-forbidden path as
   relay-forbidden, as the agent enforces it, not only exact matches.
+- The log store keeps the most recent quarantined copy even when two
+  corruptions land inside one clock tick or the clock was stepped back:
+  quarantine suffixes now strictly increase and the prune orders by them,
+  not by modification time.
 - **The web dashboard showed every node as unrestricted.** The region page,
   the Home region chip and the LoRa region hints read the regulatory posture
   from the setup status, which never carries it, so a pinned region looked

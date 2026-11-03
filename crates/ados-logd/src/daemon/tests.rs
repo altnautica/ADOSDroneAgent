@@ -138,13 +138,12 @@ fn repeated_corruption_does_not_accumulate_quarantines() {
     let path = dir.path().join("logs.db");
 
     // Corrupt and recover several times over, as a unit that keeps losing
-    // power mid-write would. Each round quarantines the broken store.
+    // power mid-write would. Each round quarantines the broken store. No
+    // pause between rounds: two quarantines inside one clock tick must still
+    // get distinct, ordered suffixes.
     for round in 0..4u32 {
         std::fs::write(&path, format!("garbage from round {round}")).unwrap();
         open_and_verify(&path).expect("a broken store must be recreated");
-        // The timestamped suffix has microsecond resolution; make sure two
-        // rounds cannot land on the same name or share a modified time.
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
     let quarantined: Vec<_> = std::fs::read_dir(dir.path())
@@ -179,14 +178,12 @@ fn a_healthy_start_reclaims_quarantines_left_by_an_older_build() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("logs.db");
 
-    // A healthy live store, with two stale quarantines beside it.
+    // A healthy live store, with two stale quarantines beside it. The newer
+    // one has the larger suffix but is written first, so it is also the one
+    // with the older modification time: the suffix, not the mtime, decides.
     open_and_verify(&path).expect("a fresh store comes up healthy");
-    for (i, name) in ["logs.db.corrupt-100", "logs.db.corrupt-200"]
-        .into_iter()
-        .enumerate()
-    {
+    for (i, name) in [(1, "logs.db.corrupt-200"), (0, "logs.db.corrupt-100")] {
         std::fs::write(dir.path().join(name), format!("dead copy {i}")).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 
     // Starting again, with nothing wrong, must still reclaim them.
@@ -206,6 +203,31 @@ fn a_healthy_start_reclaims_quarantines_left_by_an_older_build() {
         std::fs::read(quarantined[0].path()).unwrap(),
         b"dead copy 1",
         "the newest is the one kept for a post-mortem"
+    );
+}
+
+#[test]
+fn a_quarantine_after_a_clock_step_back_is_still_the_newest() {
+    // A quarantine left with a suffix far in the future (the clock was ahead
+    // then and has since been stepped back) must not outrank the next one.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("logs.db");
+    let future = dir.path().join(format!("logs.db.corrupt-{}", i64::MAX / 2));
+    std::fs::write(&future, "from before the step").unwrap();
+
+    std::fs::write(&path, "garbage after the step").unwrap();
+    open_and_verify(&path).expect("a broken store must be recreated");
+
+    let quarantined: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("db.corrupt-"))
+        .collect();
+    assert_eq!(quarantined.len(), QUARANTINE_KEEP);
+    assert_eq!(
+        std::fs::read(quarantined[0].path()).unwrap(),
+        b"garbage after the step",
+        "the latest quarantine is kept whatever the clock did"
     );
 }
 
