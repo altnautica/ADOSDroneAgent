@@ -20,12 +20,22 @@
 //! state survives a plugin reconnect (the merge reads the prior sidecar back in)
 //! and a partial write never leaves a torn file (temp + rename). At the slow
 //! cadence a state read-back is published this is cheap; the cap bounds the work.
+//! Writes are serialized ([`WRITE_LOCK`]): two topics of one plugin share one
+//! file and one temp path, and their throttled trailing writes run on separate
+//! runtime threads, so unserialized they renamed each other's temp file away
+//! (`ENOENT` on rename) and dropped each other's merged topic.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use parking_lot::Mutex;
 use rmpv::Value;
 use serde_json::{json, Map, Value as Json};
+
+/// Held across one sidecar's load → merge → write so concurrent records of the
+/// same file neither clobber the shared temp file nor lose a topic. One lock for
+/// every plugin: the writes are throttled to a few per second in total.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 mod throttle;
 
@@ -87,6 +97,7 @@ pub fn record(
     ts_ms: i64,
 ) -> std::io::Result<()> {
     let path = sidecar_path(socket_dir, plugin_id);
+    let _guard = WRITE_LOCK.lock();
     let mut entries = load_entries(&path);
 
     let payload_json = msgpack_to_json(payload);
@@ -464,6 +475,31 @@ mod tests {
         let tmp = sidecar_path(p, "demo").with_extension("json.tmp");
         assert!(!tmp.exists(), "the temp file must be renamed away");
         assert!(sidecar_path(p, "demo").exists());
+    }
+
+    #[test]
+    fn concurrent_topics_of_one_plugin_neither_fail_nor_drop_each_other() {
+        // A pose and a scan topic of one plugin: their trailing writes run on
+        // separate runtime threads against one file and one temp path.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().to_path_buf();
+        let workers: Vec<_> = ["plugin.demo.pose", "plugin.demo.scan"]
+            .into_iter()
+            .map(|topic| {
+                let p = p.clone();
+                std::thread::spawn(move || {
+                    for i in 0..200i64 {
+                        record(&p, "demo", topic, &Value::from(i), i).expect("record");
+                    }
+                })
+            })
+            .collect();
+        for w in workers {
+            w.join().unwrap();
+        }
+        let doc = read_doc(&sidecar_path(&p, "demo"));
+        assert_eq!(doc["plugin.demo.pose"]["ts_ms"], json!(199));
+        assert_eq!(doc["plugin.demo.scan"]["ts_ms"], json!(199));
     }
 
     #[test]
