@@ -1,7 +1,7 @@
 // View model for the "Available extensions" catalog grid. Pure so the error
 // and update rules are unit-testable.
 
-import i18n from "@/i18n";
+import i18n from "@/shared/i18n";
 
 export interface CatalogEntry {
   id: string;

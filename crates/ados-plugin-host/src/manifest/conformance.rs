@@ -45,6 +45,7 @@ const AGENT: &[&str] = &[
     "runtime",
     "permissions",
     "resources",
+    "resources_by_profile",
     "contributes",
     "mavlink_components",
     "contains_vendor_binary",
@@ -349,6 +350,26 @@ fn check_agent(agent: &Value) -> Result<(), ManifestError> {
     keys("agent", Some(agent), AGENT)?;
     permissions("agent.permissions", agent.get("permissions"))?;
     keys("agent.resources", agent.get("resources"), RESOURCES)?;
+    if let Some(by_profile) = agent.get("resources_by_profile").filter(|v| !v.is_null()) {
+        let Some(map) = by_profile.as_mapping() else {
+            return err("agent.resources_by_profile must be a mapping".to_string());
+        };
+        for (profile, limits) in map {
+            let Some(profile) = profile.as_str() else {
+                return err("agent.resources_by_profile keys must be profile names".to_string());
+            };
+            if !limits.is_mapping() {
+                return err(format!(
+                    "agent.resources_by_profile.{profile} must be an object"
+                ));
+            }
+            keys(
+                &format!("agent.resources_by_profile.{profile}"),
+                Some(limits),
+                RESOURCES,
+            )?;
+        }
+    }
     opt_bool("agent.per_drone_config", agent.get("per_drone_config"))?;
     opt_bool("agent.http", agent.get("http"))?;
     strings("agent.subprocess_spawn", agent.get("subprocess_spawn"))?;

@@ -140,3 +140,63 @@ fn a_dead_fc_body_reads_as_not_connected() {
     assert!(text.contains("No live vehicle telemetry"), "{text}");
     assert!(!text.contains("roll "), "{text}");
 }
+
+fn nav_status() -> Value {
+    json!({
+        "pose": {"ts_ms": 1, "age_ms": 20, "data": {"health": "good"}},
+        "follow": {"ts_ms": 1, "age_ms": 40, "data": {
+            "phase": "coasting", "track_id": 12, "range_m": 10.2, "range_sigma_m": 0.6,
+            "reacquire_mode": "smart", "coast_remaining_s": 1.4}},
+        "nav": {"ts_ms": 1, "age_ms": 30, "data": {
+            "mode": "external_nav", "active_set": 1, "extnav_health": "good",
+            "odom_rate_hz": 30.0, "obstacle_rate_hz": 10.0, "min_obstacle_m": 3.0, "gps_fix": 0}},
+        "scan": {"ts_ms": 1, "age_ms": 50, "data": {"ranges_m": [0.0, 4.5, 2.5, 0.0]}},
+        "map": {"ts_ms": 1, "age_ms": 500, "data": {
+            "placement": "hybrid", "sweep_points": 120000, "area_m2": 850.0, "voxel_m": 0.1,
+            "memory_used_mb": 210, "memory_budget_mb": 614, "keyframes_dropped": 0}},
+    })
+}
+
+#[test]
+fn the_autonomy_block_shows_follow_nav_lidar_and_map_as_words() {
+    let mut app = live_app();
+    land(&mut app, ResourceId::NavStatus, nav_status());
+    let text = draw(&mut app, 120, 40);
+    for want in [
+        "Autonomy",
+        "coasting #12 1.4 s",
+        "10.2 m ± 0.6 m",
+        "smart",
+        "set 1 · ext nav good",
+        "30 Hz · GPS no fix",
+        "min 2.5 m · 10 Hz",
+        "120000 pts · 850 m²",
+        "210/614 MB (34%) · voxel 10 cm",
+    ] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+}
+
+#[test]
+fn the_autonomy_block_says_when_nothing_publishes() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        json!({"pose": null, "scan": null, "nav": null, "follow": null, "map": null}),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("no autonomy plugin is publishing"), "{text}");
+}
+
+#[test]
+fn the_vehicle_tab_polls_nav_status_at_two_hertz() {
+    let app = live_app();
+    let subs = app.tabs.vehicle.subs(&app.core);
+    let nav = subs
+        .iter()
+        .find(|s| s.id == ResourceId::NavStatus)
+        .expect("nav status subscribed");
+    assert_eq!(nav.path, "/api/v1/nav/status");
+    assert_eq!(nav.period, Duration::from_millis(500));
+}

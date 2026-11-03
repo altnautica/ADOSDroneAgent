@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -64,7 +65,7 @@ class VisionClient:
 
     async def _request(
         self, method: str, capability: str, args: dict[str, Any]
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Send one vision RPC through whatever sender the IPC exposes.
 
         The IPC client owns the wire (request id, token, capability tag). This
@@ -76,11 +77,12 @@ class VisionClient:
         send = getattr(self._ipc, "_send_request", None)
         if send is not None:
             env = await send(method, capability=capability, args=args)
-            return getattr(env, "args", {})
+            reply: dict[str, Any] = getattr(env, "args", {})
+            return reply
         # Duck-typed fallback for stubs that expose a request shim directly.
-        return await self._ipc.vision_request(  # type: ignore[attr-defined]
-            method, capability=capability, args=args
-        )
+        shim = self._ipc.vision_request  # type: ignore[attr-defined]
+        reply = await shim(method, capability=capability, args=args)
+        return reply
 
     async def subscribe_frames(
         self,
@@ -111,8 +113,8 @@ class VisionClient:
             if frame is None:
                 return
             result = callback(frame)
-            if hasattr(result, "__await__"):
-                await result  # type: ignore[union-attr]
+            if inspect.isawaitable(result):
+                await result
 
         # Tell the engine to start (or widen) the stream toward this plugin.
         sub_args: dict[str, Any] = {}
@@ -127,6 +129,7 @@ class VisionClient:
         callback: DetectionCallback,
         *,
         camera_id: str | None = None,
+        embeddings: bool = False,
     ) -> None:
         """Subscribe to published detection batches, optionally filtered to one
         ``camera_id``. Gated on ``vision.detection.subscribe``.
@@ -138,6 +141,15 @@ class VisionClient:
         each batch as a ``vision.deliver_detection`` event whose ``batch`` field
         is the encoded :class:`DetectionBatch`; this decodes it and invokes
         ``callback`` with the batch.
+
+        ``embeddings=True`` asks the engine for a per-detection appearance
+        embedding: each box-bearing detection then carries
+        ``attributes["embedding"]`` (an L2-normalized ``list[float]``) and
+        ``attributes["embedding_model"]`` (the re-id model id, or
+        ``"histogram"`` for the model-free colour descriptor). Compare two
+        embeddings only when their ``embedding_model`` is equal. A detection
+        without them (box-less, or a frame the engine could not embed) is
+        motion-only.
 
         The deliver event carries no ``topic`` field, so it is routed explicitly
         by the IPC reader by method name (like ``mavlink.deliver``) rather than
@@ -156,12 +168,14 @@ class VisionClient:
             if want is not None and batch.camera_id != want:
                 return
             result = callback(batch)
-            if hasattr(result, "__await__"):
-                await result  # type: ignore[union-attr]
+            if inspect.isawaitable(result):
+                await result
 
         sub_args: dict[str, Any] = {}
         if camera_id is not None:
             sub_args["camera_id"] = camera_id
+        if embeddings:
+            sub_args["embeddings"] = True
         await self._request(
             SUBSCRIBE_DETECTIONS, "vision.detection.subscribe", sub_args
         )
@@ -174,7 +188,7 @@ class VisionClient:
         *,
         class_label: str = "",
         confidence: float = 1.0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Designate the engine's single follow target on ``camera_id`` (the
         operator's click-to-follow pick), overriding the auto-lock. Gated on
         ``vision.track.designate``. Returns the engine's response args
@@ -190,7 +204,7 @@ class VisionClient:
             },
         )
 
-    async def register_model(self, model: ModelMetadata) -> dict:
+    async def register_model(self, model: ModelMetadata) -> dict[str, Any]:
         """Register an inference model with the engine. Carries the metadata as
         a msgpack blob the engine decodes. Gated on ``vision.model.register``.
         """
@@ -216,7 +230,7 @@ class VisionClient:
         )
         return _decode_infer_reply(resp).detections
 
-    async def publish_detection(self, batch: DetectionBatch) -> dict:
+    async def publish_detection(self, batch: DetectionBatch) -> dict[str, Any]:
         """Publish a detection batch on ``vision.detection``. Carries the batch
         as a msgpack blob. Gated on ``vision.detection.publish``."""
         return await self._request(
@@ -227,7 +241,7 @@ class VisionClient:
 
     async def publish_one(
         self, model_id: str, frame: Frame, detection: Detection
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Publish a single detection against one frame, building the
         :class:`DetectionBatch` from the frame's source camera and id. A
         convenience over :meth:`publish_detection` for the common
@@ -245,7 +259,7 @@ class VisionClient:
         )
         return await self.publish_detection(batch)
 
-    async def register_vio_component(self) -> dict:
+    async def register_vio_component(self) -> dict[str, Any]:
         """Register this plugin as the visual-odometry MAVLink component so the
         FC attributes injected pose to a vision source. Call once before
         :meth:`inject_pose` / :meth:`inject_odometry`."""
@@ -253,7 +267,7 @@ class VisionClient:
             VIO_COMPONENT_ID, "vio"
         )
 
-    async def inject_pose(self, pose: Pose) -> dict:
+    async def inject_pose(self, pose: Pose) -> dict[str, Any]:
         """Build a VISION_POSITION_ESTIMATE from ``pose`` and send it to the FC
         over the host's MAVLink path under the visual-odometry component id."""
         frame = pose.to_vision_position_estimate_frame()
@@ -261,7 +275,7 @@ class VisionClient:
             frame, component_id=VIO_COMPONENT_ID
         )
 
-    async def inject_odometry(self, odometry: Odometry) -> dict:
+    async def inject_odometry(self, odometry: Odometry) -> dict[str, Any]:
         """Build an ODOMETRY message from ``odometry`` (pose plus body-frame
         twist) and send it to the FC under the visual-odometry component id."""
         frame = odometry.to_odometry_frame()

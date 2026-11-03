@@ -60,7 +60,7 @@ pub(crate) use telemetry::*;
 /// keeps its single-pack `battery` block. `fc_frames_decoded` is the cumulative FC frame counter
 /// the supervisor judges the router's work on. `fc_device` is the canonical
 /// serial path of the FC link, read alongside `fc_port`.
-const IPC_ONLY_KEYS: [&str; 15] = [
+const IPC_ONLY_KEYS: [&str; 16] = [
     "fc_connected",
     "fc_port",
     "fc_device",
@@ -73,6 +73,7 @@ const IPC_ONLY_KEYS: [&str; 15] = [
     "fc_link_hint",
     "fc_command_down_gated",
     "fc_variant",
+    "fc_msp_armed",
     "fc_firmware",
     "fc_frames_decoded",
     "batteries",
@@ -260,6 +261,7 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
         "fcLinkHint": liveness.fc_link_hint,
         "fcCommandDownGated": liveness.fc_command_down_gated,
         "fcVariant": liveness.fc_variant,
+        "fcMspArmed": liveness.fc_msp_armed,
         "fcFirmware": liveness.fc_firmware,
         "fcReachable": fc_reachable,
         "npuTops": npu_tops,

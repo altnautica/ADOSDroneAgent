@@ -76,6 +76,22 @@
         "resources": {
           "$ref": "#/$defs/ResourceLimits"
         },
+        "resources_by_profile": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ResourceLimits"
+          },
+          "propertyNames": {
+            "enum": [
+              "drone",
+              "ground-station",
+              "workstation",
+              "compute",
+              "visor"
+            ]
+          },
+          "title": "Resources By Profile",
+          "type": "object"
+        },
         "runtime": {
           "default": "python",
           "enum": [

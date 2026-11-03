@@ -189,6 +189,11 @@ pub(super) fn build_roster(
         rows.push(json!({
             "id": leg.id,
             "name": opt_str(leg.name.as_deref()),
+            // The display label: the operator's name, else the agent's label
+            // for the role (a `down` leg reads "Belly").
+            "label": opt_str(leg.name.as_deref().or_else(|| {
+                leg.role.as_deref().and_then(ados_video::config::role_label)
+            })),
             "source": leg.source,
             "role": opt_str(leg.role.as_deref()),
             "purpose": leg.purpose,

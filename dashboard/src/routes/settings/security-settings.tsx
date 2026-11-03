@@ -10,9 +10,9 @@ import { Switch } from "@/components/ui/switch";
 import { useConfig } from "@/hooks/use-config";
 import { usePairingInfo } from "@/hooks/use-pairing";
 import { apiKeyView } from "@/lib/api-key-state";
-import { putConfigChecked } from "@/lib/apply-actions";
-import { fetchPinStatus } from "@/lib/pin";
-import { toast, toastFromError } from "@/lib/toast";
+import { putConfigChecked } from "@/shared/api/apply-actions";
+import { fetchPinStatus } from "@/shared/api/pin";
+import { toast, toastFromError } from "@/shared/api/toast";
 
 /** Read-only state row with a coloured badge. */
 function StateCard({

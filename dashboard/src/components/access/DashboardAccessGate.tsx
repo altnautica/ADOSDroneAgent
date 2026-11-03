@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 
 import { useTranslation } from "react-i18next";
 
-import { verifyAccess } from "@/lib/access";
+import { verifyAccess } from "@/shared/api/access";
 import { setAuthChallengeHandler } from "@/shared/api-fetch";
-import { fetchPinStatus, type PinStatus } from "@/lib/pin";
+import { fetchPinStatus, type PinStatus } from "@/shared/api/pin";
 import { PinSplash } from "./PinSplash";
 
 type GateState = "checking" | "ok" | "locked";

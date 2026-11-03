@@ -52,6 +52,7 @@ pub mod daemon;
 pub mod dispatch;
 pub mod download;
 pub mod errors;
+pub mod event_export;
 pub mod frame_link;
 pub mod handlers;
 pub mod host;

@@ -104,7 +104,7 @@ pub fn topic_matches(pattern: &str, topic: &str) -> bool {
 
 /// Whether `topic` (or a pattern) is a well-formed bus name: non-empty,
 /// printable ASCII, within [`EVENT_TOPIC_MAX_BYTES`].
-fn topic_well_formed(topic: &str) -> bool {
+pub(crate) fn topic_well_formed(topic: &str) -> bool {
     !topic.is_empty()
         && topic.len() <= EVENT_TOPIC_MAX_BYTES
         && topic.bytes().all(|b| b.is_ascii_graphic())

@@ -154,6 +154,9 @@ pub(crate) struct FcLiveness {
     /// The FC firmware family from the USB descriptor (`betaflight`/`inav`), or
     /// null for a MAVLink/unknown FC. Lets the GCS badge an MSP FC honestly.
     pub fc_variant: Value,
+    /// The MSP FC's armed flag the router read off a recent status reply, or
+    /// null when none was read lately (unknown, never "disarmed").
+    pub fc_msp_armed: Value,
     /// The canonical FC firmware family: `ardupilot`/`px4` (MAVLink, from the
     /// decoded HEARTBEAT.autopilot discriminator) or `betaflight`/`inav` (MSP,
     /// from the USB descriptor), or `unknown` when no verified FC identity is
@@ -199,6 +202,11 @@ pub(crate) fn fc_liveness_from_snapshot(snapshot: Option<&Value>) -> FcLiveness 
             .and_then(|m| m.get("fc_command_down_gated"))
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        fc_msp_armed: obj
+            .and_then(|m| m.get("fc_msp_armed"))
+            .filter(|v| v.is_boolean())
+            .cloned()
+            .unwrap_or(Value::Null),
         fc_variant: obj
             .and_then(|m| m.get("fc_variant"))
             .cloned()

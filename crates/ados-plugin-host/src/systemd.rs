@@ -87,6 +87,9 @@ pub const ENV_PLUGIN_SOCKET: &str = "ADOS_PLUGIN_SOCKET";
 /// `workstation`, `compute`), so a plugin that behaves per profile needs no
 /// read of the agent's config files.
 pub const ENV_NODE_PROFILE: &str = "ADOS_NODE_PROFILE";
+/// The plugin unit's `MemoryMax` in bytes, exported to the plugin so it can
+/// size its own caches without reading its cgroup.
+pub const ENV_PLUGIN_MEMORY_MAX: &str = "ADOS_PLUGIN_MEMORY_MAX_BYTES";
 /// The run-dir subdirectory holding each `agent.http` plugin's socket dir.
 pub const PLUGIN_HTTP_SUBDIR: &str = "plugin-http";
 /// The HTTP socket file inside a plugin's HTTP dir.
@@ -224,7 +227,7 @@ pub fn build_unit_spec(
     spec.argv = argv;
     spec.log_path = log_path_for(&paths.log_dir, &manifest.id);
     spec.restart = "on-failure".to_string();
-    spec.resources = agent.resources.clone();
+    spec.resources = agent.resources_for(profile).clone();
     // The capability-backed half of the sandbox: these lines change with the
     // operator's grants, which is why a grant or revoke re-renders the unit.
     spec.sandbox_directives = sandbox_directives(granted, loopback_guard_active, &[]);
@@ -618,6 +621,7 @@ ExecStart=/var/ados/plugins/com.example.rustplug/agent/bin/com.example.rustplug 
 Restart=on-failure
 RestartSec=2s
 MemoryMax=96M
+Environment=ADOS_PLUGIN_MEMORY_MAX_BYTES=100663296
 CPUQuota=25%
 TasksMax=12
 StandardOutput=append:/var/log/ados/plugins/com-example-rustplug-3bb2d8d0.log
@@ -716,6 +720,7 @@ WantedBy=ados-supervisor.service
             "ExecStart=/opt/ados/venv/bin/ados-plugin-runner com.example.thermal-lepton"
         ));
         assert!(unit.contains("MemoryMax=128M"));
+        assert!(unit.contains("Environment=ADOS_PLUGIN_MEMORY_MAX_BYTES=134217728"));
         assert!(unit.contains("CPUQuota=40%"));
         assert!(unit.contains("TasksMax=16"));
         for flag in [

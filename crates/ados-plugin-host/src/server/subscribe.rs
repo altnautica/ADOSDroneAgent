@@ -348,7 +348,8 @@ impl<H: HostServices> Connection<H> {
     /// pushes each batch into the merged delivery channel, so the select
     /// loop writes `vision.deliver_detection` envelopes. A camera_id of ""
     /// subscribes to every camera (the host fans out all batches); the
-    /// response echoes the requested camera_id.
+    /// response echoes the requested camera_id. `embeddings: true` asks the
+    /// engine for per-detection appearance embeddings.
     pub(super) async fn subscribe_detections<W: AsyncWriteExt + Unpin>(
         &self,
         write_half: &mut W,
@@ -358,6 +359,7 @@ impl<H: HostServices> Connection<H> {
         forwarders: &mut Forwarders,
     ) -> Result<(), ServerError> {
         let camera_id = vision_subscribe_camera_id(&env.args);
+        let embeddings = vision_subscribe_embeddings(&env.args);
         if detection_subs.iter().any(|c| c == &camera_id) {
             let result = Value::Map(vec![(
                 Value::from("already_subscribed"),
@@ -366,9 +368,9 @@ impl<H: HostServices> Connection<H> {
             return send_response(write_half, &env.request_id, result).await;
         }
         detection_subs.push(camera_id.clone());
-        if let Some(mut rx) = self
-            .host
-            .vision_subscribe_detection_stream(&self.plugin_id, &camera_id)
+        if let Some(mut rx) =
+            self.host
+                .vision_subscribe_detection_stream(&self.plugin_id, &camera_id, embeddings)
         {
             let tx = det_tx.clone();
             forwarders.push(
@@ -391,6 +393,7 @@ impl<H: HostServices> Connection<H> {
         let result = Value::Map(vec![
             (Value::from("subscribed"), Value::Boolean(true)),
             (Value::from("camera_id"), Value::from(camera_id.as_str())),
+            (Value::from("embeddings"), Value::Boolean(embeddings)),
         ]);
         send_response(write_half, &env.request_id, result).await
     }

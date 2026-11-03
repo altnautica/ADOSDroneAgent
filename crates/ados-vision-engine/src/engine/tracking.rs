@@ -14,25 +14,35 @@ impl VisionEngine {
     /// batch from the frame descriptor and the model's id. When the tracker is
     /// enabled, the detections pass through the camera's single-object tracker
     /// first so the locked object carries a stable `track_id` + `lock_state`.
+    /// Embeddings are extracted once per frame, when the re-id tracker or a
+    /// subscriber needs them, and put on the detections only for a subscriber.
     pub async fn infer_and_publish(
         &self,
         model_id: &str,
         desc: &FrameDescriptor,
         frame: &[u8],
     ) -> Result<DetectionBatch> {
-        let detections = self
+        let mut detections = self
             .infer(model_id, frame, desc.width, desc.height, desc.format)
             .await?;
-        let detections = if self.tracker_enabled {
-            self.apply_tracker(
-                &desc.camera_id,
-                detections,
-                frame,
-                desc.width,
-                desc.height,
-                desc.format,
+        let for_tracker = self.tracker_enabled && self.reid_enabled;
+        let for_wire = self.embeddings_requested();
+        let appearances = if for_tracker || for_wire {
+            Some(
+                self.extract_appearances(frame, desc.width, desc.height, desc.format, &detections)
+                    .await,
             )
-            .await
+        } else {
+            None
+        };
+        if for_wire {
+            if let Some(apps) = &appearances {
+                embeddings::stamp_embeddings(&mut detections, apps);
+            }
+        }
+        let detections = if self.tracker_enabled {
+            let apps = if for_tracker { appearances } else { None };
+            self.track(&desc.camera_id, detections, apps).await
         } else {
             detections
         };
@@ -58,7 +68,10 @@ impl VisionEngine {
     /// are stamped onto its detection. On a measured frame the stamp lands on the
     /// best-matching input box; on a coast/ambiguous frame (no measured box) the
     /// tracker's predicted box is appended so the held target stays visible and
-    /// followable.
+    /// followable. With re-id on, the frame's embeddings are extracted first.
+    /// The tests' entry to the tracker; `infer_and_publish` extracts once and
+    /// calls [`Self::track`] itself.
+    #[cfg(test)]
     pub(super) async fn apply_tracker(
         &self,
         camera_id: &str,
@@ -68,10 +81,6 @@ impl VisionEngine {
         height: u32,
         format: FrameFormat,
     ) -> Vec<Detection> {
-        // Extract appearance embeddings BEFORE taking the tracker lock (the
-        // extraction takes the accelerator lease + the model lock; keeping the
-        // lock order accel→models, distinct from the tracker lock, avoids any
-        // nesting). When re-id is off this is skipped entirely (motion-only).
         let appearances = if self.reid_enabled {
             Some(
                 self.extract_appearances(frame, width, height, format, &detections)
@@ -80,7 +89,19 @@ impl VisionEngine {
         } else {
             None
         };
+        self.track(camera_id, detections, appearances).await
+    }
 
+    /// The tracker step proper, on embeddings already extracted (or motion-only
+    /// with `None`). Extraction happens before the tracker lock is taken: it
+    /// takes the accelerator lease + the model lock, and keeping the lock order
+    /// accel→models, distinct from the tracker lock, avoids any nesting.
+    async fn track(
+        &self,
+        camera_id: &str,
+        detections: Vec<Detection>,
+        appearances: Option<embeddings::FrameAppearances>,
+    ) -> Vec<Detection> {
         let mut trackers = self.trackers.lock().await;
         let tracker = trackers
             .entry(camera_id.to_string())
@@ -90,7 +111,7 @@ impl VisionEngine {
                 let candidates: Vec<Candidate> = detections
                     .iter()
                     .cloned()
-                    .zip(apps)
+                    .zip(apps.per_detection)
                     .map(|(det, app)| match app {
                         Some(a) => Candidate::with_appearance(det, a),
                         None => Candidate::motion_only(det),
@@ -101,86 +122,6 @@ impl VisionEngine {
             None => tracker.update(&detections),
         };
         merge_tracked(detections, update)
-    }
-
-    /// Extract a per-detection appearance embedding for the re-id path: crop each
-    /// box to the re-id model's input, run the model's `embed`, and L2-normalize
-    /// the result. Returns one `Option<Appearance>` per detection (in order); a
-    /// `None` means motion-only for that box (the re-id model is not loaded, the
-    /// crop was degenerate, or the embed failed) and never blocks tracking. The
-    /// embeds run under the accelerator lease so they never contend with the
-    /// detector on the shared NPU.
-    pub(super) async fn extract_appearances(
-        &self,
-        frame: &[u8],
-        width: u32,
-        height: u32,
-        format: FrameFormat,
-        detections: &[Detection],
-    ) -> Vec<Option<Appearance>> {
-        let none = || vec![None; detections.len()];
-        if format != FrameFormat::Rgb24 {
-            // The crop + ONNX/RKNN embed paths are rgb24; a non-rgb24 frame
-            // degrades to motion-only rather than guessing a conversion.
-            return none();
-        }
-        let Some(model_id) = self.reid_model_id.clone() else {
-            return none();
-        };
-        // The re-id model's input dims, if it is registered + loaded.
-        let dims = {
-            let models = self.models.lock().await;
-            match models.get(&model_id) {
-                Some(reg) if reg.loaded.is_some() => {
-                    Some((reg.meta.input_width, reg.meta.input_height))
-                }
-                _ => None,
-            }
-        };
-        let Some((iw, ih)) = dims else {
-            return none();
-        };
-        // Crop every box first (no lock needed). A box-less percept has no box
-        // to crop, so it gets no appearance embedding (motion-only for it).
-        let crops: Vec<Option<Vec<u8>>> = detections
-            .iter()
-            .map(|d| {
-                d.bbox.as_ref().and_then(|b| {
-                    ados_vision::reid::crop_resize_rgb24(frame, width, height, b, iw, ih)
-                })
-            })
-            .collect();
-
-        // Embed under the accelerator lease, with the registry lock released
-        // before the blocking calls. If the lease can't be acquired (a closing
-        // engine), degrade to motion-only rather than running embeds lease-less
-        // against a concurrent detector inference.
-        let _permit = match self.accel_lease.acquire().await {
-            Ok(p) => p,
-            Err(_) => return none(),
-        };
-        let loaded = {
-            let models = self.models.lock().await;
-            match models.get(&model_id).and_then(|reg| reg.loaded.clone()) {
-                Some(loaded) => loaded,
-                None => return none(),
-            }
-        };
-        run_blocking(|| {
-            crops
-                .into_iter()
-                .map(|crop| {
-                    let crop = crop?;
-                    match loaded.embed(&crop, iw, ih, FrameFormat::Rgb24) {
-                        Ok(Some(mut emb)) if !emb.is_empty() => {
-                            ados_vision::reid::l2_normalize(&mut emb);
-                            Some(Appearance::from_features(emb))
-                        }
-                        _ => None,
-                    }
-                })
-                .collect()
-        })
     }
 
     /// The track id the camera's lock currently holds (confirmed or coasting), if

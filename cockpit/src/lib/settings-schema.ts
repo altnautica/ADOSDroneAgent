@@ -234,6 +234,18 @@ export function isRedacted(dotpath: string): boolean {
   return REDACTED_PATHS.has(dotpath);
 }
 
+/** A short right-hand display of a leaf value for a settings row. */
+export function formatDisplayValue(dotpath: string, value: ConfigValue | undefined): string {
+  if (isRedacted(dotpath)) return "•••• hidden";
+  if (value === undefined) return "—";
+  if (value === null) return "unset";
+  if (typeof value === "boolean") return value ? "on" : "off";
+  if (typeof value === "number") return String(value);
+  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? "" : "s"}`;
+  if (typeof value === "string") return value === "" ? "—" : value;
+  return String(value);
+}
+
 // ── curated groups (the common set leads; "All settings" holds the long tail) ─
 
 export interface CuratedGroup {

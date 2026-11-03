@@ -1,7 +1,7 @@
 // Pure helpers for the node identity (profile + ground role) and the
 // profile gate decision. Kept free of React so they are unit-testable.
 
-import type { GroundRole, Profile } from "./types";
+import type { GroundRole, Profile } from "@/shared/api/types";
 
 export type AllowedProfile = "drone" | "ground_station" | "workstation" | "compute" | "visor";
 

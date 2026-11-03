@@ -17,8 +17,8 @@ import {
   startCapture,
   stopCapture,
   type CaptureState,
-} from "@/lib/capture";
-import { toastFromError } from "@/lib/toast";
+} from "@/shared/api/capture";
+import { toastFromError } from "@/shared/api/toast";
 import { apiFetch } from "@/shared/api-fetch";
 import { fmtDuration } from "@/shared/format";
 

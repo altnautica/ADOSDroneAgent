@@ -149,6 +149,17 @@ pub struct VehicleState {
     /// than a wall-clock stamp so a clock step cannot make a stale fix look
     /// fresh, and so no consumer needs an RFC3339 parser to gate on it.
     pub position_at: Option<std::time::Instant>,
+    /// The last EKF_STATUS_REPORT `flags` and when it was decoded, monotonic.
+    /// `None` until the FC sends one (PX4 never does). Published as the
+    /// `ekf` block with an age, so a surface showing what the EKF navigates
+    /// on can tell a live report from a frozen one.
+    pub ekf_flags: Option<u16>,
+    pub ekf_at: Option<std::time::Instant>,
+    /// The last LOCAL_POSITION_NED (x, y, z, vx, vy, vz in metres and m/s)
+    /// and when it was decoded. With no GNSS this is the only position the FC
+    /// has, so the local-frame minimap draws the vehicle from it.
+    pub local_ned: Option<[f64; 6]>,
+    pub local_at: Option<std::time::Instant>,
     // The FC-advertised parameter total. The VALUES are not mirrored here: the
     // persistent [`crate::param_cache::ParamCache`] owns them, and this type's
     // copy was never serialised into `to_wire`, so it was a second 700-entry map
@@ -205,6 +216,10 @@ impl Default for VehicleState {
             // No position has been seen yet, which a consumer must treat as
             // infinitely stale rather than as "just now".
             position_at: None,
+            ekf_flags: None,
+            ekf_at: None,
+            local_ned: None,
+            local_at: None,
             param_count: 0,
         }
     }
@@ -303,6 +318,23 @@ impl VehicleState {
                 self.gps_epv = (m.epv != u16::MAX).then(|| m.epv as f64 / 100.0);
                 None
             }
+            MavMessage::EKF_STATUS_REPORT(m) => {
+                self.ekf_flags = Some(m.flags.bits());
+                self.ekf_at = Some(std::time::Instant::now());
+                None
+            }
+            MavMessage::LOCAL_POSITION_NED(m) => {
+                self.local_ned = Some([
+                    m.x as f64,
+                    m.y as f64,
+                    m.z as f64,
+                    m.vx as f64,
+                    m.vy as f64,
+                    m.vz as f64,
+                ]);
+                self.local_at = Some(std::time::Instant::now());
+                None
+            }
             MavMessage::VFR_HUD(m) => {
                 self.airspeed = m.airspeed as f64;
                 self.groundspeed = m.groundspeed as f64;
@@ -373,11 +405,20 @@ impl VehicleState {
         // `null`, never a number, when no position has ever been decoded. A
         // sentinel like 0 would read as "fixed a moment ago" — the single worst
         // possible reading, since it is the one a freshness gate passes.
-        let position_age_ms = self.position_at.map(|at| {
-            std::time::Instant::now()
-                .saturating_duration_since(at)
-                .as_millis() as u64
-        });
+        let position_age_ms = self.position_at.map(age_ms);
+        // Both blocks are `null` until their message has been decoded once, and
+        // carry an age so a reader can gate on freshness, as for the position.
+        let ekf = match (self.ekf_flags, self.ekf_at) {
+            (Some(flags), Some(at)) => json!({ "flags": flags, "age_ms": age_ms(at) }),
+            _ => Value::Null,
+        };
+        let local_position = match (self.local_ned, self.local_at) {
+            (Some([x, y, z, vx, vy, vz]), Some(at)) => json!({
+                "x": x, "y": y, "z": z, "vx": vx, "vy": vy, "vz": vz,
+                "age_ms": age_ms(at),
+            }),
+            _ => Value::Null,
+        };
         json!({
             "mav_type": self.mav_type,
             "autopilot": self.autopilot,
@@ -436,6 +477,8 @@ impl VehicleState {
             // has a fresh `last_update` and an ever-growing `position_age_ms`,
             // and only the second one catches it.
             "position_age_ms": position_age_ms,
+            "ekf": ekf,
+            "local_position": local_position,
         })
     }
 
@@ -452,6 +495,13 @@ impl VehicleState {
         }
         wire
     }
+}
+
+/// Milliseconds since `at` on the monotonic clock, evaluated now.
+fn age_ms(at: std::time::Instant) -> u64 {
+    std::time::Instant::now()
+        .saturating_duration_since(at)
+        .as_millis() as u64
 }
 
 /// Trim the trailing NUL padding from a fixed-width MAVLink `param_id` field,

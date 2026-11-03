@@ -7,8 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useMspSettings } from "@/hooks/use-msp-settings";
-import type { MspFirmware, MspSetting } from "@/lib/msp/fc-settings";
-import { toast } from "@/lib/toast";
+import type { MspFirmware, MspSetting } from "@/shared/api/msp/fc-settings";
+import { toast } from "@/shared/api/toast";
 import { cn } from "@/lib/utils";
 
 interface Props {

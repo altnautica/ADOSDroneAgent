@@ -87,9 +87,9 @@ async fn main() {
     );
     // The tracker is off unless the config opts in. When on, the published
     // detection batch carries a stable track_id + lock_state on the locked
-    // object; when off, the engine publishes raw detections. When re-id is on
-    // and a re-id model is configured, the tracker associates on the model's
-    // appearance embedding (registered below); otherwise it is motion-only.
+    // object; when off, the engine publishes raw detections. When re-id is on,
+    // the tracker associates on appearance embeddings: the configured re-id
+    // model's (registered below), else the model-free colour histogram.
     let reid_model_id = config.reid.as_ref().map(|r| r.model_id.clone());
     let engine = VisionEngine::with_tracker_reid(
         backend,
@@ -136,11 +136,13 @@ async fn main() {
         None
     };
 
-    // Register the appearance (re-id) model when enabled. It is loaded as a
-    // second engine-run model whose `embed` the tracker calls per detection; a
-    // failed load (missing file / sidecar) leaves the tracker motion-only.
-    if config.reid_enabled {
-        if let Some(reid) = &config.reid {
+    // Register the appearance (re-id) model whenever one is configured. It is
+    // loaded as a second engine-run model whose `embed` produces the embeddings
+    // the re-id tracker associates on and that a subscriber can request on the
+    // detection wire. A failed load (missing file / sidecar) falls back to the
+    // colour histogram descriptor.
+    match &config.reid {
+        Some(reid) => {
             let meta = reid.to_metadata();
             let id = meta.id.clone();
             match engine.register_model(meta).await {
@@ -150,11 +152,11 @@ async fn main() {
                 ),
                 Err(e) => tracing::error!(model = %id, error = %e, "re-id registration failed"),
             }
-        } else {
-            tracing::warn!(
-                "reid_enabled but no vision.reid model configured; tracker stays motion-only"
-            );
         }
+        None if config.reid_enabled => tracing::warn!(
+            "reid_enabled but no vision.reid model configured; the tracker associates on the colour histogram"
+        ),
+        None => {}
     }
 
     // Build the per-camera schedule input: every registered engine-run detection

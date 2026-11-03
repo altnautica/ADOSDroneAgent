@@ -3,8 +3,8 @@ import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { isSecured, securityLabel, signalToBars } from "@/lib/wifi";
-import type { WifiNetwork } from "@/lib/types";
+import { isSecured, securityLabel, signalToBars } from "@/shared/api/wifi";
+import type { WifiNetwork } from "@/shared/api/types";
 
 interface Props {
   network: WifiNetwork;

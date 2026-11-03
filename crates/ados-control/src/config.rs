@@ -363,6 +363,15 @@ pub fn config_snapshot(path: &Path, ttl: Duration) -> ConfigSnapshot {
     snapshot
 }
 
+/// Drop the cached snapshot of `path`, so the next read stats and parses the
+/// file again. A writer that changes a credential calls this once its write
+/// has landed: without it the change would be honoured only after
+/// [`CONFIG_CACHE_TTL`], and not at all while a rewrite left the file's size
+/// and modification time as they were (a rotated key is the same length).
+pub fn forget_config_snapshot(path: &Path) {
+    CONFIG_CACHE.lock().remove(path);
+}
+
 fn parse_snapshot(path: &Path) -> ConfigSnapshot {
     let (doc, error): (ConfigDoc, Option<String>) = match std::fs::read_to_string(path) {
         // The dedupe key names the file, so a parse error is logged once per

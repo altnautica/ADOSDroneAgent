@@ -11,7 +11,7 @@ mod sections;
 
 pub use agent::AgentVideoConfig;
 pub use camera::{is_network_url, CameraConfig, CameraProfile, MAX_KEYFRAME_INTERVAL};
-pub use legs::{CameraLeg, CameraMatch, ResolvedLeg};
+pub use legs::{role_label, CameraLeg, CameraMatch, ResolvedLeg, ROLE_DOWN, ROLE_PRIMARY};
 pub use roster::RosterVideoConfig;
 pub use sections::{RecordingConfig, VisionTapConfig, WfbVideoConfig};
 

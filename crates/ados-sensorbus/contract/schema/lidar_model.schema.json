@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://altnautica.com/schemas/ados-capture/1/lidar_model.schema.json",
+  "title": "LidarModel",
+  "description": "Scan model of a `lidar` rig sensor. Angles are in the sensor frame (FLU): azimuth counter-clockwise from +x, elevation positive up.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "model",
+    "pattern",
+    "h_fov_deg",
+    "v_min_deg",
+    "v_max_deg",
+    "rate_hz",
+    "points_per_s",
+    "min_range_m",
+    "max_range_m",
+    "range_sigma_m"
+  ],
+  "properties": {
+    "model": {
+      "description": "Device model id the drivers dispatch on, e.g. `rplidar-c1`, `livox-mid360`.",
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "pattern": {
+      "description": "Scan geometry. `planar` is a single level ring (z = 0 in the sensor frame); `spinning` is a multi-beam rotating head; `solid` is a non-repetitive solid-state pattern.",
+      "type": "string",
+      "enum": ["planar", "spinning", "solid"]
+    },
+    "h_fov_deg": { "description": "Horizontal field of view, degrees.", "type": "number" },
+    "v_min_deg": { "description": "Lowest beam elevation, degrees.", "type": "number" },
+    "v_max_deg": { "description": "Highest beam elevation, degrees.", "type": "number" },
+    "rate_hz": { "description": "Scans (revolutions or frames) per second.", "type": "number" },
+    "points_per_s": { "description": "Range samples per second.", "type": "number" },
+    "min_range_m": { "description": "Shortest valid range, metres.", "type": "number" },
+    "max_range_m": { "description": "Longest valid range, metres.", "type": "number" },
+    "range_sigma_m": { "description": "One-sigma range noise, metres.", "type": "number" },
+    "blocked_azimuth_deg": {
+      "description": "Azimuth sectors `[start, end]` the rig itself occludes, degrees counter-clockwise from +x; a sector may wrap through 0. Default empty.",
+      "type": "array",
+      "items": {
+        "type": "array",
+        "items": { "type": "number" },
+        "minItems": 2,
+        "maxItems": 2
+      }
+    }
+  }
+}

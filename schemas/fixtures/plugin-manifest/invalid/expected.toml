@@ -131,6 +131,12 @@ rule = "resource_impact.cpu_percent_peak is 0..=1000"
 [resource-impact-unknown-field]
 rule = "no unknown resource_impact field"
 
+[resources-by-profile-standard-ceiling]
+rule = "a per-profile envelope keeps its class ceilings"
+
+[resources-by-profile-unknown-profile]
+rule = "resources_by_profile keys are node profiles"
+
 [resources-floor]
 rule = "resource floors"
 

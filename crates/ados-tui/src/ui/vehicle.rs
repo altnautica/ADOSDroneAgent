@@ -1,5 +1,5 @@
 //! Tab 2, Vehicle: attitude, heading, GPS, flight state, altitude and battery
-//! trends, battery packs, and the sensor/clock row.
+//! trends, battery packs, the autonomy block, and the sensor/clock row.
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -9,12 +9,14 @@ use ratatui::Frame;
 
 use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx};
+use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
 use crate::model::fix_label;
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
 use crate::poll::{ResourceId, Sub};
 use crate::ui::widgets::{chip, kv, kv_text, panel};
 
 mod attitude;
+mod autonomy;
 pub(in crate::ui) mod chart;
 mod packs;
 
@@ -31,6 +33,7 @@ pub struct VehicleTab {
     tel: Option<Telemetry>,
     fc: FcIdent,
     bat: Option<Batteries>,
+    auto: Option<Autonomy>,
     hist: VehicleHistory,
 }
 
@@ -268,6 +271,7 @@ impl Tab for VehicleTab {
             Sub::every_ms(ResourceId::Telemetry, "/api/telemetry", 1000),
             Sub::every_ms(ResourceId::Snapshot, "/api/v1/dashboard/snapshot", 2000),
             Sub::every_ms(ResourceId::Battery, "/api/v1/battery", 2000),
+            Sub::every_ms(ResourceId::NavStatus, NAV_STATUS_PATH, 500),
         ]
     }
 
@@ -287,6 +291,7 @@ impl Tab for VehicleTab {
             }
             ResourceId::Snapshot => self.fc = FcIdent::from_snapshot(v),
             ResourceId::Battery => self.bat = Some(Batteries::from_value(v)),
+            ResourceId::NavStatus => self.auto = Some(Autonomy::from_value(v)),
             _ => {}
         }
     }
@@ -333,7 +338,10 @@ impl Tab for VehicleTab {
         self.sensors(f, top[2], core, stale);
         self.charts(f, rows[1], core);
         let packs_hidden = stale.then_some(HIDDEN_STALE);
-        packs::render(f, rows[2], core, self.bat.as_ref(), packs_hidden);
+        let bottom =
+            Layout::horizontal([Constraint::Min(40), Constraint::Length(44)]).split(rows[2]);
+        packs::render(f, bottom[0], core, self.bat.as_ref(), packs_hidden);
+        autonomy::render(f, bottom[1], core, self.auto.as_ref(), packs_hidden);
     }
 
     fn context_line(&self, _core: &Core) -> Option<String> {

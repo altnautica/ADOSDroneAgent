@@ -8,8 +8,10 @@
 
 import { useEffect, useState } from "react";
 
+import { completePanelHold } from "@/lib/hold-input";
 import { ReconnectBackoff } from "@/lib/reconnect-backoff";
 import { useConfirmStore } from "@/stores/confirm-store";
+import { useInputStore } from "@/stores/input-store";
 import { useNavStore } from "@/stores/nav-store";
 import { useProfile } from "@/shared/use-profile";
 import type { NavCommand } from "@/nav/navigator";
@@ -169,14 +171,19 @@ export function useButtons(): ButtonsState {
         }
         const cmd = eventToCommand(frame as ButtonEvent);
         const ev = frame as ButtonEvent;
+        if (cmd) useInputStore.getState().setSource("panel");
+        const longSelect = cmd === "quick-menu" && ev.kind === "long";
         const confirm = useConfirmStore.getState();
         if (confirm.pending) {
           // A skill sheet is open: a long-press of select completes its hold,
           // back cancels it, nothing navigates underneath it.
-          if (cmd === "quick-menu" && ev.kind === "long") confirm.panelConfirm();
+          if (longSelect) confirm.panelConfirm();
           else if (cmd === "back") confirm.cancel();
           return;
         }
+        // A focused guarded button or slide-to-confirm takes the long press as
+        // its completed hold.
+        if (longSelect && completePanelHold()) return;
         if (cmd) command(cmd);
       };
 

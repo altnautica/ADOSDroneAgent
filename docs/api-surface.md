@@ -185,7 +185,7 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/ground-station/wfb/invite/{id}/reject` |  |
 | DELETE | `/api/v1/ground-station/wfb/pair` | relay-forbidden |
 | POST | `/api/v1/ground-station/wfb/pair` | relay-forbidden |
-| DELETE | `/api/v1/ground-station/wfb/pair/{device_id}` |  |
+| DELETE | `/api/v1/ground-station/wfb/pair/{device_id}` | relay-forbidden |
 | GET | `/api/v1/ground-station/wfb/receiver/combined` |  |
 | GET | `/api/v1/ground-station/wfb/receiver/relays` |  |
 | GET | `/api/v1/ground-station/wfb/relay/status` |  |
@@ -196,6 +196,9 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/v1/lora` |  |
 | GET | `/api/v1/lora/beacons` |  |
 | GET | `/api/v1/lora/regions` |  |
+| GET | `/api/v1/map/live` |  |
+| GET | `/api/v1/nav/status` |  |
+| WS | `/api/v1/nav/stream` | unauthenticated by design |
 | DELETE | `/api/v1/network/client` |  |
 | GET | `/api/v1/network/client/configured` |  |
 | DELETE | `/api/v1/network/client/configured/{name}` |  |
@@ -208,6 +211,8 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/api/v1/network/mac/{iface}` |  |
 | GET | `/api/v1/plugins/catalog` |  |
 | GET | `/api/v1/radio/adapters` |  |
+| DELETE | `/api/v1/security/api-key` | relay-forbidden |
+| POST | `/api/v1/security/api-key/rotate` | relay-forbidden |
 | GET | `/api/v1/sensors` |  |
 | PUT | `/api/v1/sensors/rig` |  |
 | GET | `/api/v1/storage` |  |
@@ -248,7 +253,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-223 native routes.
+228 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
@@ -284,7 +289,7 @@ known feature, not on this profile) rather than `404`.
 | GET | `/api/v1/setup/nudges` |  |
 | POST | `/api/v1/setup/nudges/{nudge_id}/ack` |  |
 | POST | `/api/v1/setup/profile` | relay-forbidden |
-| POST | `/api/v1/setup/profile/redetect` |  |
+| POST | `/api/v1/setup/profile/redetect` | relay-forbidden |
 | POST | `/api/v1/setup/reboot` |  |
 | POST | `/api/v1/setup/remote-access/cloudflare` | relay-forbidden |
 | POST | `/api/v1/setup/reset` | relay-forbidden |

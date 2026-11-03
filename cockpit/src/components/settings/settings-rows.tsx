@@ -11,28 +11,16 @@ import { ChevronRight, List } from "lucide-react";
 import { markRebootPending, type WriteResult } from "@/stores/config-store";
 import type { AgentConfig, ConfigValue } from "@/lib/types";
 import {
+  formatDisplayValue,
   getAtPath,
   isGroup,
   isReadOnly,
-  isRedacted,
   leafKind,
   needsReboot,
   prettify,
 } from "@/lib/settings-schema";
 import { cn } from "@/lib/utils";
 import { Toggle } from "@/components/settings/widgets";
-
-/** A short right-hand display of a leaf value for the row. */
-export function formatDisplayValue(dotpath: string, value: ConfigValue | undefined): string {
-  if (isRedacted(dotpath)) return "•••• hidden";
-  if (value === undefined) return "—";
-  if (value === null) return "unset";
-  if (typeof value === "boolean") return value ? "on" : "off";
-  if (typeof value === "number") return String(value);
-  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? "" : "s"}`;
-  if (typeof value === "string") return value === "" ? "—" : value;
-  return String(value);
-}
 
 /** A small accent "restart" chip flagging a reboot-gated path. */
 function RestartChip() {

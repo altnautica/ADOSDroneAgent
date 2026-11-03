@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useNodeProfile } from "@/hooks/use-node-profile";
 import type { PairingInfo } from "@/hooks/use-pairing";
 import { groundRoleFrom } from "@/lib/node-identity";
-import type { GroundRole, Profile } from "@/lib/types";
+import type { GroundRole, Profile } from "@/shared/api/types";
 import { apiFetch } from "@/shared/api-fetch";
 
 export interface NodeIdentity {

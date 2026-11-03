@@ -36,6 +36,15 @@ export interface ExtensionBinding {
   stateTopic: string | null;
 }
 
+/** A plugin parameter offered as a quick setting on a toggle skill: a
+ *  two-value enum drawn as a segmented toggle (follow-me's `reacquire_mode`,
+ *  STRICT | SMART). Written with `PUT /api/plugins/{id}/config`. */
+export interface SkillSetting {
+  key: string;
+  values: [string, string];
+  defaultValue: string | null;
+}
+
 export interface Skill {
   /** Stable id: `arm`, `mode:LOITER`, or `<pluginId>:<localId>`. */
   id: string;
@@ -51,6 +60,8 @@ export interface Skill {
   takesAltitude?: boolean;
   /** Lucide icon name (extension skills declare one). */
   icon?: string;
+  /** Extension toggle skills: the plugin's quick settings. */
+  settings?: SkillSetting[];
 }
 
 /** The hold the gesture needs, in ms (0 for tap). */
@@ -134,6 +145,8 @@ export interface ReportedSkillState {
   state: "active" | "idle" | "disabled";
   badge?: string;
   reason?: string;
+  /** The applied value of each quick setting, as the plugin echoes it. */
+  echo?: Record<string, string>;
 }
 
 /** Inputs that decide whether a skill is drivable. */

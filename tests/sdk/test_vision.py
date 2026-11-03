@@ -779,6 +779,31 @@ async def test_subscribe_detections_filters_by_camera_id():
     assert [b.camera_id for b in seen] == ["uvc-9"]
 
 
+async def test_subscribe_detections_requests_embeddings_and_delivers_them():
+    ipc = _ipc({"vision.detection.subscribe"})
+    client = VisionClient(ipc)
+    seen: list[DetectionBatch] = []
+    await client.subscribe_detections(lambda b: seen.append(b), embeddings=True)
+    # The opt-in rides in the RPC argument; without it the argument is absent.
+    _, args = ipc.requests[-1]
+    assert args == {"embeddings": True}
+
+    batch = DetectionBatch(
+        model_id="m", camera_id="uvc-0", frame_id=1, ts_ms=1,
+        detections=[
+            Detection(
+                BoundingBox(0, 0, 4, 8), "person", 0.9,
+                attributes={"embedding": [0.6, 0.8], "embedding_model": "histogram"},
+            )
+        ],
+    )
+    await ipc.deliver_detection({"batch": batch.to_msgpack(), "timestamp_ms": 1})
+    attrs = seen[0].detections[0].attributes
+    assert attrs is not None
+    assert attrs["embedding_model"] == "histogram"
+    assert attrs["embedding"] == pytest.approx([0.6, 0.8])
+
+
 async def test_subscribe_detections_drops_a_malformed_batch():
     ipc = _ipc({"vision.detection.subscribe"})
     client = VisionClient(ipc)

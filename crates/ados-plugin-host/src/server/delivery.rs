@@ -414,6 +414,19 @@ pub(super) fn vision_subscribe_camera_id(args: &Value) -> String {
     }
 }
 
+/// Whether a `vision.subscribe_detections` asked for per-detection appearance
+/// embeddings (`embeddings: true`). Absent or not a bool reads as no.
+pub(super) fn vision_subscribe_embeddings(args: &Value) -> bool {
+    match args {
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("embeddings"))
+            .and_then(|(_, v)| v.as_bool())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
 /// Forward the host's vehicle-state snapshots to one connection, at most one
 /// per `min_interval`, newest wins: a snapshot that arrives inside the interval
 /// replaces the one waiting, so a producer burst never becomes a plugin burst

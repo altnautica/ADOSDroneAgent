@@ -110,6 +110,9 @@ async fn handle_client(
     let writer = Arc::new(tokio::sync::Mutex::new(write_half));
     let mut frame_task: Option<tokio::task::JoinHandle<()>> = None;
     let mut detection_task: Option<tokio::task::JoinHandle<()>> = None;
+    // Held while this connection's detection subscription asked for
+    // embeddings; dropped with the connection (or a re-subscribe without).
+    let mut embedding_interest: Option<crate::engine::EmbeddingInterest> = None;
 
     loop {
         let mut header = [0u8; HEADER_SIZE];
@@ -156,20 +159,26 @@ async fn handle_client(
 
         if env.method == methods::SUBSCRIBE_DETECTIONS {
             // Acknowledge, then start (or restart) the detection-batch push task.
+            let with_embeddings = embeddings_requested_in(&env.args);
             send_response(
                 &writer,
                 &env.request_id,
-                ok_map(&[("subscribed", Value::Boolean(true))]),
+                ok_map(&[
+                    ("subscribed", Value::Boolean(true)),
+                    ("embeddings", Value::Boolean(with_embeddings)),
+                ]),
                 None,
             )
             .await?;
             if let Some(t) = detection_task.take() {
                 t.abort();
             }
+            embedding_interest = with_embeddings.then(|| engine.request_embeddings());
             detection_task = Some(spawn_detection_push(
                 engine.clone(),
                 writer.clone(),
                 filter_camera(&env.args),
+                with_embeddings,
             ));
             continue;
         }
@@ -184,6 +193,7 @@ async fn handle_client(
     if let Some(t) = detection_task.take() {
         t.abort();
     }
+    drop(embedding_interest);
     Ok(())
 }
 
@@ -214,14 +224,22 @@ async fn handle_list_models(engine: &Arc<VisionEngine>) -> Result<Value> {
     // registered — `models` alone answers nothing in that case.
     let models = engine.list_models().await;
     let bytes = rmp_serde::to_vec_named(&models).map_err(|e| anyhow!("encode models: {e}"))?;
-    Ok(ok_map(&[
+    let mut reply = vec![
         ("models", Value::Binary(bytes)),
         ("backend", Value::from(engine.backend_name())),
         (
             "backend_inference_capable",
             Value::Boolean(engine.is_inference_capable()),
         ),
-    ]))
+        (
+            "backend_state",
+            Value::from(engine.backend_state().as_str()),
+        ),
+    ];
+    if let Some(reason) = engine.backend_unavailable_reason() {
+        reply.push(("backend_reason", Value::from(reason)));
+    }
+    Ok(ok_map(&reply))
 }
 
 /// Handle `vision.register_model`. The host stamps the calling plugin's id, and
@@ -373,16 +391,21 @@ fn spawn_detection_push(
     engine: Arc<VisionEngine>,
     writer: Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
     camera_filter: Option<String>,
+    with_embeddings: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut rx = engine.subscribe_detections();
         loop {
             match rx.recv().await {
-                Ok(batch) => {
+                Ok(mut batch) => {
                     if let Some(want) = &camera_filter {
                         if &batch.camera_id != want {
                             continue;
                         }
+                    }
+                    // Embeddings ride only to a connection that asked for them.
+                    if !with_embeddings {
+                        crate::engine::strip_embeddings(&mut batch);
                     }
                     let frame = match deliver_detection(&batch) {
                         Ok(f) => f,
@@ -459,6 +482,19 @@ fn filter_camera(args: &Value) -> Option<String> {
             .find(|(k, _)| k.as_str() == Some("camera_id"))
             .and_then(|(_, v)| v.as_str().map(str::to_owned)),
         _ => None,
+    }
+}
+
+/// The optional `embeddings: true` flag on a `subscribe_detections` request:
+/// the subscriber wants each detection's appearance embedding.
+fn embeddings_requested_in(args: &Value) -> bool {
+    match args {
+        Value::Map(entries) => entries
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("embeddings"))
+            .and_then(|(_, v)| v.as_bool())
+            .unwrap_or(false),
+        _ => false,
     }
 }
 
@@ -799,6 +835,47 @@ mod tests {
             _ => panic!("args not a map"),
         };
         assert_eq!(DetectionBatch::from_msgpack(&bytes).unwrap(), batch);
+    }
+
+    #[test]
+    fn embeddings_flag_is_opt_in() {
+        let yes = Value::Map(vec![(Value::from("embeddings"), Value::Boolean(true))]);
+        let no = Value::Map(vec![(Value::from("embeddings"), Value::Boolean(false))]);
+        assert!(embeddings_requested_in(&yes));
+        assert!(!embeddings_requested_in(&no));
+        assert!(!embeddings_requested_in(&Value::Map(vec![])));
+        assert!(!embeddings_requested_in(&Value::Nil));
+    }
+
+    #[tokio::test]
+    async fn list_models_reports_the_backend_state_and_reason() {
+        let mock = engine();
+        let (resp, err) = dispatch(&mock, &req_env(methods::LIST_MODELS, Value::Nil)).await;
+        assert!(err.is_none());
+        let map = as_map(&resp);
+        assert_eq!(get(&map, "backend_state"), Some(Value::from("mock")));
+        assert_eq!(get(&map, "backend_reason"), None);
+
+        let missing = VisionEngine::new(
+            Box::new(crate::backend::UnavailableBackend::new(
+                "onnx",
+                "not compiled in",
+            )),
+            4,
+        );
+        let (resp, err) = dispatch(&missing, &req_env(methods::LIST_MODELS, Value::Nil)).await;
+        assert!(err.is_none());
+        let map = as_map(&resp);
+        assert_eq!(get(&map, "backend"), Some(Value::from("onnx")));
+        assert_eq!(get(&map, "backend_state"), Some(Value::from("unavailable")));
+        assert_eq!(
+            get(&map, "backend_reason"),
+            Some(Value::from("not compiled in"))
+        );
+        assert_eq!(
+            get(&map, "backend_inference_capable"),
+            Some(Value::Boolean(false))
+        );
     }
 
     #[test]

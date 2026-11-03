@@ -6,7 +6,7 @@
 # checkout is present. Refresh by copying the files and updating the hashes.
 upstream_repo = "https://github.com/altnautica/ADOSExtensions"
 upstream_path = "extensions/world-engine/contract"
-upstream_commit = "3e91558d6d0b3b3028e133166cf9fac7559c4749"
+upstream_commit = "206277c0b368eeb7d416eaa18824887eb509161b"
 
 [files]
 "LICENSE" = "8008f798233a3d9ce323f9afd798d75facf3157a53c4cec60bc8fa5386950386"
@@ -17,5 +17,6 @@ upstream_commit = "3e91558d6d0b3b3028e133166cf9fac7559c4749"
 "proto/ados/capture/v1/trigger.proto" = "08ee1ef05b33a660ccdd972ff4fe5125d789310fe8b3e5dd296a76da3e24cc50"
 "schema/camera_model.schema.json" = "32b0f6dc6e0150007dc90b2ed5147579911771c1c1c783ec841910def465a7bf"
 "schema/geo_anchor.schema.json" = "d7ffeaef33ba32a66320940f39c1e7da15dd269ddf6417a9a90cf33759b9ad07"
+"schema/lidar_model.schema.json" = "d33b03fbb6b37e0430720c47c4095cd0901d0eacb00752271d2d0b3f3b48990c"
 "schema/manifest.schema.json" = "c34a4597bd7e487bc3a8364830667b5c971a13c2c945341519ab4e0a8f693294"
-"schema/rig.schema.json" = "bc07897a1cb45d222a17247b94b9218000c5b9e618e230ef0d38bef70696f2d1"
+"schema/rig.schema.json" = "59ac98e7d7d52494648940193b4c47d050909da53f98c45600b43d602a6a6cad"

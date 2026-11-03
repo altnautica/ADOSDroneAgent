@@ -2,12 +2,12 @@ import { Ban } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 
-import i18n from "@/i18n";
+import i18n from "@/shared/i18n";
 
 import { Button } from "@/components/ui/button";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { gateDecision, type AllowedProfile } from "@/lib/node-identity";
-import type { GroundRole, Profile } from "@/lib/types";
+import type { GroundRole, Profile } from "@/shared/api/types";
 
 export type { AllowedProfile };
 

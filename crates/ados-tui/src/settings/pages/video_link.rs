@@ -293,4 +293,29 @@ mod tests {
         assert!(page.on_command(core, Command::Activate));
         assert_eq!(core.overlays.len(), 1, "a number opens its editor");
     }
+
+    #[test]
+    fn an_armed_refusal_is_shown_as_the_armed_lock() {
+        let mut app = crate::ui::tests::test_app();
+        let core = &mut app.core;
+        let mut page = Page::default();
+        page.on_reply(
+            core,
+            Reply {
+                route: ROUTE,
+                purpose: Purpose::Page {
+                    tag: "video",
+                    data: json!("mcs"),
+                },
+                result: Err(ados_protocol::rest::RestError::Status {
+                    code: 409,
+                    body: Some(
+                        json!({"error":"E_ARMED","message":"Vehicle is armed","override":"force"}),
+                    ),
+                }),
+            },
+        );
+        let last = core.toasts.history().last().map(|t| t.text.clone());
+        assert_eq!(last, Some(format!("MCS: {}", crate::app::ARMED_REFUSAL)));
+    }
 }

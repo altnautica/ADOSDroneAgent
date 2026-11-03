@@ -347,6 +347,7 @@ fn catalog_lists_every_dispatchable_command() {
             "killSwitch",
             "pauseMission",
             "resumeMission",
+            "ekfSourceSet",
         ]
     );
 }
@@ -385,6 +386,33 @@ fn pause_and_resume_are_do_pause_continue() {
     assert_eq!(resume.command, MavCmd::MAV_CMD_DO_PAUSE_CONTINUE);
     assert_eq!(resume.param1, 1.0, "continue");
     assert_eq!(rbody["cmd"], json!("resumeMission"));
+}
+
+#[test]
+fn ekf_source_set_carries_the_set_in_param1() {
+    let (d, body) = build_command("ekfsourceset", &[json!(2)], COPTER).unwrap();
+    assert_eq!(d.command, MavCmd::MAV_CMD_SET_EKF_SOURCE_SET);
+    assert_eq!(d.param1, 2.0);
+    assert_eq!(d.param2, 0.0);
+    assert_eq!(body["cmd"], json!("ekfSourceSet"));
+    assert_eq!(body["set"], json!(2));
+    let (s, _) = build_command("ekfsourceset", &[json!("3")], COPTER).unwrap();
+    assert_eq!(s.param1, 3.0);
+}
+
+#[test]
+fn ekf_source_set_refuses_anything_but_one_two_or_three() {
+    for args in [
+        vec![],
+        vec![json!(0)],
+        vec![json!(4)],
+        vec![json!(1.5)],
+        vec![json!("x")],
+        vec![json!(null)],
+    ] {
+        let err = build_command("ekfsourceset", &args, COPTER).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST, "{args:?}");
+    }
 }
 
 #[test]

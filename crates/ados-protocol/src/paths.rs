@@ -156,6 +156,7 @@ pub const SENSOR_BUS_SOCK: &str = "sensors.sock";
 pub const VISION_SOCK: &str = "vision.sock";
 pub const WFB_CMD_SOCK: &str = "wfb-cmd.sock";
 pub const WIFI_CMD_SOCK: &str = "wifi-cmd.sock";
+pub const PLUGIN_EVENTS_SOCK: &str = "_events.sock";
 
 /// Every registered sidecar.
 #[rustfmt::skip]
@@ -246,6 +247,7 @@ pub const SOCKETS: &[SocketPath] = &[
     SocketPath { id: "vision", path: "/run/ados/vision.sock", owner: "ados-vision" },
     SocketPath { id: "wfb-cmd", path: "/run/ados/wfb-cmd.sock", owner: "ados-radio" },
     SocketPath { id: "wifi-cmd", path: "/run/ados/wifi-cmd.sock", owner: "ados-net" },
+    SocketPath { id: "plugin-events", path: "/run/ados/plugin-host/_events.sock", owner: "ados-plugin-host" },
 ];
 
 /// The run directory: `ADOS_RUN_DIR` when set and non-empty, else

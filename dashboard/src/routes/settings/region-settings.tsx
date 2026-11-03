@@ -17,10 +17,10 @@ import {
   normalizeRegion,
   regionFromConfig,
   regionLabel,
-} from "@/lib/region";
-import { postRegion } from "@/lib/setup-actions";
-import { toast, toastFromError } from "@/lib/toast";
-import type { RegulatoryMode } from "@/lib/types";
+} from "@/shared/api/region";
+import { postRegion } from "@/shared/api/setup-actions";
+import { toast, toastFromError } from "@/shared/api/toast";
+import type { RegulatoryMode } from "@/shared/api/types";
 
 const MODE_OPTIONS = [
   {

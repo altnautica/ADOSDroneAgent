@@ -4,7 +4,7 @@ import { useLocation } from "react-router-dom";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useSnapshot } from "@/hooks/use-snapshot";
-import { buildBanners } from "@/lib/banners";
+import { buildBanners } from "@/shared/api/banners";
 import { cn } from "@/lib/utils";
 
 /** The FC-link banner reads the snapshot, so it polls (every 3 s) only on the

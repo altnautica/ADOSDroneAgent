@@ -15,11 +15,11 @@ import { useEffect, useState } from "react";
 /** Fixed pause before a dropped or failed MSP session is redialled. */
 const MSP_RECONNECT_MS = 3000;
 
-import type { MspVariant } from "@/lib/fc-firmware";
+import type { MspVariant } from "@/shared/api/fc-firmware";
 import {
   MspTelemetryClient,
   type MspTelemetrySnapshot,
-} from "@/lib/msp/msp-telemetry-poller";
+} from "@/shared/api/msp/msp-telemetry-poller";
 
 /** True while the tab is visible; flips on `visibilitychange`. */
 function usePageVisible(): boolean {

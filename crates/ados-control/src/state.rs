@@ -213,6 +213,10 @@ pub struct AppState {
     /// The plugin lifecycle the `/api/plugins/*` routes drive: the write lock
     /// around the node's `PluginSupervisor` plus the seams tests redirect.
     pub plugins: crate::routes::plugins_lifecycle::PluginLifecycle,
+    /// The navigation hub the `/api/v1/nav/*` and `/api/v1/map/live` routes
+    /// serve. The daemon feeds it from the plugin host's event export; a state
+    /// built without that reader serves every kind as `null`.
+    pub nav: crate::routes::nav::NavHub,
 }
 
 /// The aux response listener's shutdown handles.
@@ -284,6 +288,7 @@ impl AppState {
                 BatteryConfig::default(),
             ))),
             plugins,
+            nav: crate::routes::nav::NavHub::new(),
         }
     }
 

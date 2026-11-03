@@ -1,7 +1,7 @@
 import { MspSettingsTab } from "@/components/fc/msp-settings-tab";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useSnapshot } from "@/hooks/use-snapshot";
-import { resolveFirmwareType } from "@/lib/fc-firmware";
+import { resolveFirmwareType } from "@/shared/api/fc-firmware";
 
 import { MavlinkParams } from "./mavlink-params";
 

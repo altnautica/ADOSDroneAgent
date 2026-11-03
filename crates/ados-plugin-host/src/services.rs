@@ -211,7 +211,7 @@ pub fn build_service_spec(
     spec.working_dir = Some(working_dir);
     spec.log_path = service_log_path_for(&paths.log_dir, &manifest.id, &service.name);
     spec.restart = service.restart.clone();
-    spec.resources = agent.resources.clone();
+    spec.resources = agent.resources_for(profile).clone();
     spec.sandbox_directives =
         sandbox_directives(granted, loopback_guard_active, &service.listen_ports);
     spec.sandbox_directives

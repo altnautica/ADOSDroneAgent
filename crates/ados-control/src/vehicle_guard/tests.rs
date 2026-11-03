@@ -160,6 +160,7 @@ async fn a_visor_passes_disarm_and_kill_but_refuses_every_other_command() {
             r#"{"cmd":"takeoff","args":[5]}"#,
             r#"{"cmd":"mode","args":["GUIDED"]}"#,
             r#"{"cmd":"rtl"}"#,
+            r#"{"cmd":"ekfSourceSet","args":[2]}"#,
             r#"not json"#,
             r#"{"command":"disarm"}"#,
         ] {

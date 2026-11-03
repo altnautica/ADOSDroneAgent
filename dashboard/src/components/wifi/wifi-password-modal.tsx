@@ -13,8 +13,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ApiError } from "@/shared/api-fetch";
-import { toast, toastFromError } from "@/lib/toast";
-import { isSecured, joinWifi } from "@/lib/wifi";
+import { toast, toastFromError } from "@/shared/api/toast";
+import { isSecured, joinWifi } from "@/shared/api/wifi";
 
 interface Target {
   ssid: string;

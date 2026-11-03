@@ -1,6 +1,6 @@
 // The safety band at the top of the Feed, always visible: exit (not on the
 // kiosk), node name and reach, arm state, flight mode, battery with time to
-// reserve, GPS, link, video, the pilot-in-command holder when reported, the
+// reserve, the navigation source (13-hud-v2 §8.3), link, video, the pilot-in-command holder when reported, the
 // preflight checks, the recording timer, the flight timer and a guarded Kill.
 // Values never wrap; on a narrow panel the band scrolls sideways instead of
 // overlapping anything. Every chip pairs its colour with text.
@@ -12,20 +12,19 @@ import {
   ClipboardCheck,
   OctagonX,
   Radio,
-  Satellite,
   ShieldCheck,
   Timer,
   Video,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
+import { NavSourceChip } from "@/components/feed/nav-source-chip";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { isKiosk } from "@/lib/kiosk";
 import {
   armLabel,
   batteryLabel,
   fmtClock,
-  gpsLabel,
   linkLabel,
   preflightChecks,
   reachBadge,
@@ -193,9 +192,7 @@ export function SafetyBand() {
       <Chip icon={Battery} label="Battery">
         {batteryLabel(battery, telemetry)}
       </Chip>
-      <Chip icon={Satellite} label="GPS">
-        {gpsLabel(telemetry, live)}
-      </Chip>
+      <NavSourceChip />
       <Chip icon={Radio} label="Link">
         {linkLabel(status)}
       </Chip>

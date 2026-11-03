@@ -29,6 +29,8 @@
     "RigSensor": {
       "type": "object",
       "required": ["id", "kind", "role", "T_body_sensor", "time_offset_ns"],
+      "if": { "properties": { "kind": { "const": "lidar" } }, "required": ["kind"] },
+      "then": { "required": ["lidar"] },
       "properties": {
         "id": {
           "description": "Channel id used in MCAP topics (`/cam/<id>/image`, `/imu/<id>`, ...).",
@@ -48,6 +50,10 @@
         "camera": {
           "description": "Projection model; present for `camera` and `thermal` sensors.",
           "$ref": "camera_model.schema.json"
+        },
+        "lidar": {
+          "description": "Scan model; present for `lidar` sensors.",
+          "$ref": "lidar_model.schema.json"
         },
         "imu_noise": { "$ref": "#/$defs/ImuNoise" },
         "time_offset_ns": {

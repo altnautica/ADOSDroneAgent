@@ -8,15 +8,15 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useConfig } from "@/hooks/use-config";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
-import { putConfigChecked } from "@/lib/apply-actions";
+import { putConfigChecked } from "@/shared/api/apply-actions";
 import {
   getModemStatus,
   getModemView,
   setModem,
   type ModemPresence,
   type ModemView,
-} from "@/lib/modem";
-import { toast, toastFromError } from "@/lib/toast";
+} from "@/shared/api/modem";
+import { toast, toastFromError } from "@/shared/api/toast";
 
 const POLL_MS = 10_000;
 // Example APN value, not copy.

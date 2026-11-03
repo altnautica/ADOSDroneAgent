@@ -8,7 +8,7 @@
 // sentinel back.
 
 import { useState } from "react";
-import { AlertTriangle, RotateCw } from "lucide-react";
+import { RotateCw, TriangleAlert } from "lucide-react";
 
 import { ActionButton, ConfirmButton, EmptyNote } from "@/components/ui/data";
 import { OnScreenKeyboard } from "@/components/settings/on-screen-keyboard";
@@ -132,7 +132,7 @@ export function LeafEditor({
       {check.error && !unchanged ? <div className="text-[0.75rem] text-warn">{check.error}</div> : null}
       {error ? (
         <div className="flex items-start gap-[0.4rem] rounded-md bg-err/10 px-[0.6rem] py-[0.4rem] text-[0.75rem] text-err">
-          <AlertTriangle className="mt-[0.1rem] h-[0.9rem] w-[0.9rem] shrink-0" aria-hidden />
+          <TriangleAlert className="mt-[0.1rem] h-[0.9rem] w-[0.9rem] shrink-0" aria-hidden />
           <span className="min-w-0 break-words">{error}</span>
         </div>
       ) : null}

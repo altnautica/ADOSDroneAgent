@@ -733,3 +733,48 @@ fn not_reported_sentinels_are_published_as_null() {
         assert_eq!(pack[key], Value::Null, "batteries[0].{key}");
     }
 }
+
+#[test]
+fn ekf_status_and_local_position_are_published_with_an_age() {
+    use ados_protocol::mavlink::ardupilotmega::{
+        EkfStatusFlags, EKF_STATUS_REPORT_DATA, LOCAL_POSITION_NED_DATA,
+    };
+    let mut s = VehicleState::default();
+    let wire = s.to_wire();
+    assert_eq!(wire["ekf"], Value::Null, "no report yet is not a report");
+    assert_eq!(wire["local_position"], Value::Null);
+
+    s.update_from_message(
+        &MavMessage::EKF_STATUS_REPORT(EKF_STATUS_REPORT_DATA {
+            flags: EkfStatusFlags::from_bits_truncate(2 | 8),
+            velocity_variance: 0.1,
+            pos_horiz_variance: 0.1,
+            pos_vert_variance: 0.1,
+            compass_variance: 0.1,
+            terrain_alt_variance: 0.0,
+        }),
+        TS,
+    );
+    s.update_from_message(
+        &MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
+            time_boot_ms: 0,
+            x: 3.5,
+            y: -1.25,
+            z: -4.0,
+            vx: 0.5,
+            vy: 0.0,
+            vz: -0.25,
+        }),
+        TS,
+    );
+    let wire = s.to_wire();
+    assert_eq!(wire["ekf"]["flags"], json!(10));
+    assert!(wire["ekf"]["age_ms"].as_u64().unwrap() < 1_000);
+    let lp = &wire["local_position"];
+    assert_eq!(lp["x"], json!(3.5));
+    assert_eq!(lp["y"], json!(-1.25));
+    assert_eq!(lp["z"], json!(-4.0));
+    assert_eq!(lp["vx"], json!(0.5));
+    assert_eq!(lp["vz"], json!(-0.25));
+    assert!(lp["age_ms"].as_u64().unwrap() < 1_000);
+}

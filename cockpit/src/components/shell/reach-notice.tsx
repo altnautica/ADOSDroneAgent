@@ -14,8 +14,13 @@
 // modal would take away the operator's ability to look around the node while
 // they deal with it.
 
+import { Suspense, lazy } from "react";
+
 import { useReachStore } from "@/stores/reach-store";
-import { SetUpAccess } from "@/components/shell/set-up-access";
+
+// The PIN form carries the access locale, so it loads only when a refusal
+// actually shows it, never in the shell's own chunk.
+const SetUpAccess = lazy(() => import("@/components/shell/set-up-access").then((m) => ({ default: m.SetUpAccess })));
 
 export function ReachNotice() {
   const refusal = useReachStore((s) => s.refusal);
@@ -50,18 +55,18 @@ export function ReachNotice() {
         ) : null}
         {!unpaired ? (
           <span className="text-muted-foreground">
-            Sign in on this node&apos;s dashboard and return here.
+            Enter this node&apos;s access PIN below to unlock it from this browser.
           </span>
         ) : null}
       </div>
-      {/* The founder's route past an unpaired door: set or enter the dashboard
-          PIN to unlock the DATA surfaces from this trusted-LAN browser, exactly
-          as they chose over blind trusted-network-open. */}
-      {unpaired ? (
-        <div className="flex w-full max-w-[34rem] justify-center">
+      {/* The way past either refusal from a trusted-LAN browser: set or enter
+          the node's access PIN, which mints a short-lived session the agent
+          accepts as the data-plane credential. */}
+      <div className="flex w-full max-w-[34rem] justify-center">
+        <Suspense fallback={null}>
           <SetUpAccess />
-        </div>
-      ) : null}
+        </Suspense>
+      </div>
     </div>
   );
 }

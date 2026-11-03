@@ -58,10 +58,15 @@ impl VisionBackend for OnnxBackend {
             .first()
             .map(|i| i.name().to_string())
             .ok_or_else(|| anyhow::anyhow!("onnx model has no inputs"))?;
+        // A self-describing file states its own head, classes and input size.
+        let mut meta = meta.clone();
+        if let Ok(md) = session.metadata() {
+            super::model_props::apply_model_props(&mut meta, |k| md.custom(k));
+        }
         Ok(Box::new(OnnxModel {
             session: Mutex::new(session),
             input_name,
-            meta: meta.clone(),
+            meta,
         }))
     }
     fn name(&self) -> &str {
@@ -139,6 +144,10 @@ impl LoadedModel for OnnxModel {
         // The engine L2-normalizes uniformly across backends (the trait
         // contract), so the raw model output is returned here.
         Ok(Some(data.to_vec()))
+    }
+
+    fn resolved_metadata(&self) -> Option<&ModelMetadata> {
+        Some(&self.meta)
     }
 }
 

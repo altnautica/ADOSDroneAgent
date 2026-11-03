@@ -122,6 +122,7 @@ SENSOR_BUS_SOCK = "sensors.sock"
 VISION_SOCK = "vision.sock"
 WFB_CMD_SOCK = "wfb-cmd.sock"
 WIFI_CMD_SOCK = "wifi-cmd.sock"
+PLUGIN_EVENTS_SOCK = "_events.sock"
 
 SIDECAR_PATHS: dict[str, dict[str, object]] = {
     "cloud-link": {"path": "/run/ados/cloud-link.json", "max_age_ms": None, "writer": "ados-cloud"},
@@ -208,6 +209,7 @@ SOCKET_PATHS: dict[str, dict[str, str]] = {
     "vision": {"path": "/run/ados/vision.sock", "owner": "ados-vision"},
     "wfb-cmd": {"path": "/run/ados/wfb-cmd.sock", "owner": "ados-radio"},
     "wifi-cmd": {"path": "/run/ados/wifi-cmd.sock", "owner": "ados-net"},
+    "plugin-events": {"path": "/run/ados/plugin-host/_events.sock", "owner": "ados-plugin-host"},
 }
 
 

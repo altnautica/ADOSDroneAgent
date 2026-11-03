@@ -8,7 +8,7 @@ import { useSnapshot } from "@/hooks/use-snapshot";
 import { useStatus } from "@/hooks/use-status";
 import { useWfb } from "@/hooks/use-wfb";
 import { fmtBitrate, fmtNum } from "@/shared/format";
-import { capturedLabel, fetchSnapshot } from "@/lib/snapshot";
+import { capturedLabel, fetchSnapshot } from "@/shared/api/snapshot";
 import { cn } from "@/lib/utils";
 import { useProfile } from "@/shared/use-profile";
 import { useVideoTransport } from "@/shared/use-video-transport";

@@ -84,6 +84,9 @@ export interface GsStatus {
    *  from `/api/status/full` on a drone, from `/api/status` on a ground station
    *  (the composite itself does not report it). */
   fc_connected?: boolean;
+  /** How the FC is configured (`mavlink` / `msp`), from `/api/status/full` on
+   *  a drone or visor; null or absent while not identified. */
+  fc_family?: "mavlink" | "msp" | null;
   /** Where detections come from (`local` / `offload` / `hybrid`), or `none`
    *  when the node has no working vision path; absent when not reported. */
   perception_tier?: string | null;
@@ -256,6 +259,20 @@ export interface VehicleState {
     system_id?: number | null;
     frames_decoded?: number | null;
     frames_undecodable?: number | null;
+  } | null;
+  /** The last EKF_STATUS_REPORT `flags` and its age when the snapshot was
+   *  taken; null until the FC sent one (PX4 never does). */
+  ekf?: { flags: number; age_ms: number } | null;
+  /** The last LOCAL_POSITION_NED (metres, m/s) and its age; null until the FC
+   *  sent one. With no GNSS this is the only position the FC has. */
+  local_position?: {
+    x: number;
+    y: number;
+    z: number;
+    vx: number;
+    vy: number;
+    vz: number;
+    age_ms: number;
   } | null;
 }
 

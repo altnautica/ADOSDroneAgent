@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PROFILE_RETRY_MS, probeProfile } from "./use-profile";
+import { PROFILE_RETRY_MS, groundRoleFrom, probeProfile } from "./use-profile";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -29,5 +29,14 @@ describe("probeProfile", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(settled).toHaveBeenCalledWith("drone");
+  });
+});
+
+describe("groundRoleFrom", () => {
+  it("maps the wire role, defaulting to direct", () => {
+    expect(groundRoleFrom("relay")).toBe("relay");
+    expect(groundRoleFrom("receiver")).toBe("receiver");
+    expect(groundRoleFrom(null)).toBe("direct");
+    expect(groundRoleFrom("bogus")).toBe("direct");
   });
 });

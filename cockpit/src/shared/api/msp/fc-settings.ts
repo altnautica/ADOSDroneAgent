@@ -1,0 +1,263 @@
+/**
+ * MSP settings client for the browser dashboard.
+ *
+ * Betaflight and iNav have no `/api/params` cache on the agent (the agent is a
+ * byte-pipe for MSP), so the dashboard runs the MSP codec itself over the
+ * transparent `ws://<host>:8765/` proxy and reads settings directly from the FC:
+ *
+ *   - iNav  — the name-indexed MSP2_COMMON_SETTING(_INFO) protocol carries every
+ *             setting's type, range, enum labels, and current value inline.
+ *   - Betaflight — the ~810 named settings live only in the `#` CLI; `dump`
+ *             enumerates current values and the bundled catalog supplies the
+ *             enum/range metadata separately.
+ *
+ * @module lib/msp/fc-settings
+ * @license GPL-3.0-only
+ */
+
+import i18n from "../../i18n";
+import { categoryFromName } from "../params";
+
+import { BfCliSession } from "./bf-cli";
+import { BfCliSettings } from "./bf-cli-settings";
+import { MspParser } from "./parser";
+import { MspSerialQueue } from "./serial-queue";
+import { SettingsClient, type SettingInfo } from "./settings-client";
+import { MSP_CMD, decodeInavStatus, decodeStatusEx } from "./telemetry-decoders";
+import { WebSocketTransport, mavlinkWsUrl } from "./transport";
+import { WS_TICKET_PROTOCOL, mintWsTicket } from "../../ws-ticket";
+import type { CliSettingChange } from "./types";
+
+/** MSP_EEPROM_WRITE — persist the RAM settings to EEPROM (no payload). */
+const MSP_EEPROM_WRITE = 250;
+const CONNECT_TIMEOUT_MS = 4000;
+
+/**
+ * Why a settings write must not go out, or null when it may. Only a vehicle the
+ * FC itself reports as disarmed is written to: an armed one is refused, and so
+ * is one whose state could not be read, because "unknown" is not "disarmed".
+ */
+export function armedWriteRefusal(armed: boolean | null): string | null {
+  if (armed === false) return null;
+  return armed
+    ? i18n.t("fc.write.refusedArmed")
+    : i18n.t("fc.write.refusedUnknown");
+}
+
+/**
+ * The outcome of an iNav save: every `set` must have landed AND the EEPROM
+ * write must have succeeded. iNav answers MSP_EEPROM_WRITE with an error while
+ * armed, and a RAM-only change is lost at the next power cycle, so a refused
+ * EEPROM write is a failed save, never "saved".
+ */
+export function inavSaveOutcome(
+  rejected: string[],
+  eepromError: string | null,
+): { ok: boolean; message: string } {
+  if (rejected.length) return { ok: false, message: i18n.t("fc.write.rejected", { names: rejected.join(", ") }) };
+  if (eepromError) {
+    return { ok: false, message: i18n.t("fc.write.eepromFailed", { error: eepromError }) };
+  }
+  return { ok: true, message: i18n.t("fc.write.savedEeprom") };
+}
+
+/** One selectable enum option: what the operator sees and what gets written. */
+export interface MspOption {
+  label: string;
+  /** The value string a `set` writes for this option (iNav: code; BF: label). */
+  send: string;
+}
+
+/**
+ * A normalized FC setting, firmware-agnostic, for the dashboard table.
+ * `value` is always the string a `set` would write (iNav: the code; Betaflight:
+ * the CLI text / enum label); `displayValue` is the human label to show.
+ */
+export interface MspSetting {
+  name: string;
+  category: string;
+  value: string;
+  displayValue: string;
+  /** Enum options for a dropdown, when the setting is a lookup. */
+  options?: MspOption[];
+  /** Inclusive numeric range for a ranged numeric setting. */
+  range?: { min: number; max: number };
+}
+
+export type MspFirmware = "betaflight" | "inav";
+
+/** Map one iNav SETTING_INFO into the normalized shape (enum labels + range
+ *  come straight from the FC). */
+function fromInav(info: SettingInfo): MspSetting {
+  const labels = info.enumValues;
+  const value = info.value;
+  const valueStr = value !== undefined ? String(value) : "";
+  if (labels && labels.length > 0) {
+    const options = labels.map((label, i) => ({ label, send: String(info.min + i) }));
+    const idx = value !== undefined ? value - info.min : -1;
+    return {
+      name: info.name,
+      category: categoryFromName(info.name),
+      value: valueStr,
+      displayValue: idx >= 0 && idx < labels.length ? labels[idx] : valueStr,
+      options,
+    };
+  }
+  return {
+    name: info.name,
+    category: categoryFromName(info.name),
+    value: valueStr,
+    displayValue: valueStr,
+    range: { min: info.min, max: info.max },
+  };
+}
+
+/**
+ * A live MSP settings session over the agent proxy. One instance owns one WS
+ * connection; call `disconnect()` when done. Not concurrency-safe across
+ * `enumerate` / `apply` — the caller serializes them.
+ */
+export class MspFcClient {
+  private transport = new WebSocketTransport();
+  private parser = new MspParser();
+  private queue: MspSerialQueue | null = null;
+  private bfCli: BfCliSession | null = null;
+  private bfSettings: BfCliSettings | null = null;
+  private cliActive = false;
+
+  constructor(private readonly firmware: MspFirmware) {}
+
+  /** Route inbound bytes to the CLI session while it's active, else the MSP parser. */
+  private onData = (data: Uint8Array): void => {
+    if (this.cliActive && this.bfCli) this.bfCli.feed(data);
+    else this.parser.feed(data);
+  };
+
+  /** Open the WS proxy (ticket-authenticated when paired, bare otherwise). */
+  async connect(signal?: AbortSignal): Promise<void> {
+    const ticket = await mintWsTicket("gs.mavlink_ws", signal);
+    const url = mavlinkWsUrl();
+    await Promise.race([
+      this.transport.connect(url, ticket ? [WS_TICKET_PROTOCOL, ticket] : undefined),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("WebSocket connect timeout")), CONNECT_TIMEOUT_MS),
+      ),
+    ]);
+    this.transport.on("data", this.onData);
+    this.queue = new MspSerialQueue(
+      (bytes) => this.transport.send(bytes),
+      this.parser,
+    );
+    if (this.firmware === "betaflight") {
+      this.bfCli = new BfCliSession({
+        send: (bytes) => this.transport.send(bytes),
+        setActive: (active) => {
+          this.cliActive = active;
+        },
+      });
+      this.bfSettings = new BfCliSettings(this.bfCli);
+    }
+  }
+
+  /** Enumerate every setting from the FC, normalized. */
+  async enumerate(): Promise<MspSetting[]> {
+    if (this.firmware === "inav") {
+      if (!this.queue) throw new Error("not connected");
+      const client = new SettingsClient(this.queue);
+      const infos = await client.enumerateAllSettings();
+      return infos.map(fromInav);
+    }
+    // Betaflight — dump current values; enum/range metadata is overlaid from the
+    // bundled catalog by the caller (the FC's CLI gives values only).
+    if (!this.bfSettings) throw new Error("not connected");
+    const dumped = await this.bfSettings.enumerate();
+    return dumped.map((s) => ({
+      name: s.name,
+      category: categoryFromName(s.name),
+      value: s.value,
+      displayValue: s.value,
+    } satisfies MspSetting));
+  }
+
+  /**
+   * Write staged changes to the FC, persisting to EEPROM. For iNav each change
+   * is a typed `set` then one EEPROM write; for Betaflight the CLI applies all
+   * changes and `save noreboot`s in one session.
+   */
+  async apply(changes: CliSettingChange[]): Promise<{ ok: boolean; message: string }> {
+    if (changes.length === 0) return { ok: true, message: i18n.t("fc.write.noChanges") };
+    const refusal = armedWriteRefusal(await this.readArmed());
+    if (refusal) return { ok: false, message: refusal };
+    if (this.firmware === "inav") {
+      if (!this.queue) throw new Error("not connected");
+      const client = new SettingsClient(this.queue);
+      const failed: string[] = [];
+      for (const c of changes) {
+        try {
+          await client.set(c.name, /^-?\d+(\.\d+)?$/.test(c.value) ? Number(c.value) : c.value);
+        } catch {
+          failed.push(c.name);
+        }
+      }
+      let eepromError: string | null = null;
+      if (failed.length === 0) {
+        try {
+          await this.queue.send(MSP_EEPROM_WRITE);
+        } catch (err) {
+          eepromError = err instanceof Error ? err.message : String(err);
+        }
+      }
+      return inavSaveOutcome(failed, eepromError);
+    }
+    if (!this.bfSettings) throw new Error("not connected");
+    const res = await this.bfSettings.applySettings(changes, { persist: true });
+    return { ok: res.success, message: res.message };
+  }
+
+  /**
+   * Open the interactive Betaflight CLI, streaming every inbound line to
+   * `onText`. Refused (the reason is returned, nothing is sent) unless the FC
+   * itself reports disarmed: CLI `set`/`save` write the FC. Null on success.
+   */
+  async openCli(onText: (text: string) => void): Promise<string | null> {
+    if (!this.bfCli) throw new Error("not connected");
+    const refusal = armedWriteRefusal(await this.readArmed());
+    if (refusal) return refusal;
+    this.bfCli.attachInteractive(onText);
+    return null;
+  }
+
+  /** Send one raw line to the open interactive CLI. */
+  sendCli(line: string): void {
+    if (!this.bfCli) throw new Error("not connected");
+    this.bfCli.sendInteractive(line);
+  }
+
+  /** Leave the interactive CLI without a reboot (`exit noreboot`). */
+  closeCli(): void {
+    this.bfCli?.detachInteractive();
+  }
+
+  /** The FC's own armed flag over MSP (MSP_STATUS_EX on Betaflight,
+   *  MSP2_INAV_STATUS on iNav), or null when it could not be read. */
+  private async readArmed(): Promise<boolean | null> {
+    if (!this.queue) return null;
+    const inav = this.firmware === "inav";
+    try {
+      const frame = await this.queue.send(inav ? MSP_CMD.MSP2_INAV_STATUS : MSP_CMD.MSP_STATUS_EX);
+      const status = inav ? decodeInavStatus(frame.payload) : decodeStatusEx(frame.payload);
+      return status ? status.armed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Tear down the WS and flush the queue. Idempotent. */
+  async disconnect(): Promise<void> {
+    this.transport.off("data", this.onData);
+    this.queue?.destroy();
+    this.queue = null;
+    this.parser.reset();
+    await this.transport.disconnect();
+  }
+}

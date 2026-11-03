@@ -1,0 +1,176 @@
+//! The Autonomy block from `/api/v1/nav/status`: follow phase, lock and range,
+//! the re-acquire mode, the navigation source, the lidar and the map session.
+//! Every state is a symbol and a word; colour only repeats what the word says.
+
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::Paragraph;
+use ratatui::Frame;
+
+use crate::app::Core;
+use crate::model::autonomy::{gps_fix_word, health_tone, phase_tone, Autonomy, Tone};
+use crate::ui::widgets::{kv, kv_text, panel};
+
+/// Label column width.
+const LABEL: usize = 9;
+
+/// The block's text when nothing has published any kind yet.
+pub const NOTHING_TEXT: &str = "no autonomy plugin is publishing";
+
+fn tone_span(core: &Core, tone: Tone, word: String) -> Span<'static> {
+    let t = &core.theme;
+    let (sym, color): (&str, Option<Color>) = match tone {
+        Tone::Good => (core.sym.ok, Some(t.success())),
+        Tone::Caution => (core.sym.warn, Some(t.warning())),
+        Tone::Fault => (core.sym.err, Some(t.error())),
+        Tone::Neutral => (core.sym.info, None),
+    };
+    let text = format!("{sym} {word}");
+    match color {
+        Some(c) => Span::styled(text, Style::default().fg(c)),
+        None => Span::styled(text, t.text()),
+    }
+}
+
+fn stale_suffix(stale: bool) -> &'static str {
+    if stale {
+        " (stale)"
+    } else {
+        ""
+    }
+}
+
+fn opt<T>(v: Option<T>, fmt: impl Fn(T) -> String) -> String {
+    v.map(fmt).unwrap_or_else(|| "–".to_string())
+}
+
+/// The block's lines for `a`.
+pub fn lines(core: &Core, a: &Autonomy) -> Vec<Line<'static>> {
+    let t = &core.theme;
+    let mut out = Vec::new();
+    if let Some(follow) = &a.follow {
+        let phase = follow.phase.clone().unwrap_or_else(|| "unknown".into());
+        let mut word = phase.clone();
+        if let Some(id) = follow.track_id {
+            word.push_str(&format!(" #{id}"));
+        }
+        if phase == "coasting" {
+            if let Some(s) = follow.coast_remaining_s {
+                word.push_str(&format!(" {s:.1} s"));
+            }
+        }
+        word.push_str(stale_suffix(follow.stale));
+        out.push(kv(
+            t,
+            "Follow",
+            LABEL,
+            tone_span(core, phase_tone(&phase), word),
+        ));
+        let range = match (follow.range_m, follow.range_sigma_m) {
+            (Some(r), Some(s)) => format!("{r:.1} m ± {s:.1} m"),
+            (Some(r), None) => format!("{r:.1} m"),
+            _ => "–".to_string(),
+        };
+        out.push(kv_text(t, "Range", LABEL, range));
+        out.push(kv_text(
+            t,
+            "Reacquire",
+            LABEL,
+            follow.reacquire_mode.clone().unwrap_or_else(|| "–".into()),
+        ));
+    }
+    if let Some(nav) = &a.nav {
+        let health = nav
+            .extnav_health
+            .clone()
+            .unwrap_or_else(|| "unknown".into());
+        let word = format!(
+            "set {} · ext nav {health}{}",
+            opt(nav.active_set, |s| s.to_string()),
+            stale_suffix(nav.stale)
+        );
+        out.push(kv(
+            t,
+            "Nav",
+            LABEL,
+            tone_span(core, health_tone(&health), word),
+        ));
+        out.push(kv_text(
+            t,
+            "Odometry",
+            LABEL,
+            format!(
+                "{} · GPS {}",
+                opt(nav.odom_rate_hz, |r| format!("{r:.0} Hz")),
+                opt(nav.gps_fix, |f| gps_fix_word(f).to_string())
+            ),
+        ));
+    }
+    let nearest = a
+        .lidar
+        .as_ref()
+        .and_then(|l| l.min_range_m)
+        .or_else(|| a.nav.as_ref().and_then(|n| n.min_obstacle_m));
+    if a.lidar.is_some() || a.nav.as_ref().is_some_and(|n| n.min_obstacle_m.is_some()) {
+        let rate = a.nav.as_ref().and_then(|n| n.obstacle_rate_hz);
+        let stale = a.lidar.as_ref().is_some_and(|l| l.stale);
+        out.push(kv_text(
+            t,
+            "Lidar",
+            LABEL,
+            format!(
+                "min {} · {}{}",
+                opt(nearest, |m| format!("{m:.1} m")),
+                opt(rate, |r| format!("{r:.0} Hz")),
+                stale_suffix(stale)
+            ),
+        ));
+    }
+    if let Some(map) = &a.map {
+        out.push(kv_text(
+            t,
+            "Map",
+            LABEL,
+            format!(
+                "{} pts · {}{}",
+                opt(map.sweep_points, |p| p.to_string()),
+                opt(map.area_m2, |m| format!("{m:.0} m²")),
+                stale_suffix(map.stale)
+            ),
+        ));
+        let memory = match (map.memory_used_mb, map.memory_budget_mb) {
+            (Some(u), Some(b)) if b > 0.0 => {
+                format!("{u:.0}/{b:.0} MB ({:.0}%)", 100.0 * u / b)
+            }
+            (Some(u), _) => format!("{u:.0} MB"),
+            _ => "–".to_string(),
+        };
+        let tone = match (map.memory_used_mb, map.memory_budget_mb) {
+            (Some(u), Some(b)) if b > 0.0 && u / b >= 0.9 => Tone::Caution,
+            _ => Tone::Neutral,
+        };
+        let word = format!(
+            "{memory} · voxel {}",
+            opt(map.voxel_m, |v| format!("{:.0} cm", v * 100.0))
+        );
+        out.push(kv(t, "Memory", LABEL, tone_span(core, tone, word)));
+    }
+    out
+}
+
+pub fn render(f: &mut Frame, area: Rect, core: &Core, a: Option<&Autonomy>, hidden: Option<&str>) {
+    let t = &core.theme;
+    let block = panel(t, core.sym, "Autonomy");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    let note = |text: &str| Paragraph::new(Span::styled(text.to_string(), t.dim()));
+    if let Some(why) = hidden {
+        f.render_widget(note(why), inner);
+        return;
+    }
+    match a.filter(|a| a.any()) {
+        Some(a) => f.render_widget(Paragraph::new(lines(core, a)), inner),
+        None => f.render_widget(note(NOTHING_TEXT), inner),
+    }
+}

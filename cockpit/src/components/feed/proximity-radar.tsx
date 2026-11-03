@@ -11,15 +11,25 @@
 // animation — the arrow/marker are data-driven, not decorative motion). Honest
 // surfaces: with no live heading, track, or obstacle it shows the
 // compass frame + "no heading" rather than a fabricated pose.
+//
+// With the companion lidar running it also draws the raw planar scan (nav
+// stream `scan` frames) as dots rotated north-up, on a 3 / 6 / 12 m or AUTO
+// range the operator cycles from the corner label, and the readout carries the
+// nearest return with its CLEAR / CAUTION / DANGER word.
 
+import { useNow } from "@/hooks/use-now";
 import { useFlightStore } from "@/stores/flight-store";
+import { useSettingsStore } from "@/stores/settings-store";
+import { ageOf, useNavStreamStore } from "@/stores/nav-stream-store";
 import {
   bearingToXY,
   obstacleSectors,
   sectorArcPath,
   trackBearing,
 } from "@/lib/radar-geometry";
+import { buildRadarView } from "@/lib/radar-scan-view";
 import { cn } from "@/lib/utils";
+import { cycleRadarScale, type RadarBand } from "@/shared/hud/radar-scan";
 
 const CX = 50;
 const CY = 50;
@@ -40,9 +50,20 @@ const CARDINALS: { label: string; bearing: number }[] = [
   { label: "W", bearing: 270 },
 ];
 
-export function ProximityRadar() {
+const BAND_CLASS: Record<RadarBand, string> = {
+  clear: "text-ok",
+  caution: "text-warn",
+  danger: "text-err",
+};
+
+export function ProximityRadar({ className }: { className?: string } = {}) {
   const telemetry = useFlightStore((s) => s.telemetry);
   const live = useFlightStore((s) => s.live);
+  const scan = useNavStreamStore((s) => s.scan);
+  const nav = useNavStreamStore((s) => s.nav);
+  const setting = useSettingsStore((s) => s.radarScale);
+  const setSetting = useSettingsStore((s) => s.setRadarScale);
+  const now = useNow(scan !== null || nav !== null ? 250 : null);
 
   const pos = telemetry?.position;
   const vel = telemetry?.velocity;
@@ -56,28 +77,41 @@ export function ProximityRadar() {
     obs?.angle_offset_deg ?? 0,
   );
 
-  const nearestM = field.closestCm != null ? field.closestCm / 100 : null;
+  const view = buildRadarView({
+    scan: scan?.data ?? null,
+    scanAgeMs: ageOf(scan, now),
+    headingDeg: heading,
+    setting,
+    fcNearestM: field.closestCm != null ? field.closestCm / 100 : null,
+    fcPresent: (obs?.distances_cm?.length ?? 0) > 0,
+    minObstacleM: nav?.data.minObstacleM ?? null,
+    navAgeMs: ageOf(nav, now),
+    radiusPx: OUTER_R,
+    cx: CX,
+    cy: CY,
+  });
   const trackPt = track != null ? bearingToXY(track, OUTER_R - 3, CX, CY) : null;
 
-  // The bottom readout: nearest obstacle takes priority, else the heading value,
-  // else the honest empty state. Never a fabricated "clear".
-  const bottom =
-    nearestM != null
+  // The bottom readout: the nearest obstacle with its band word takes
+  // priority, else the heading value, else the honest empty state. CLEAR is
+  // shown only while an obstacle source is live.
+  const bottom = view.readout
+    ? {
+        text: view.readout.band === "clear" && view.readout.range === "—"
+          ? view.readout.word
+          : `${view.readout.range} ${view.readout.word}`,
+        cls: BAND_CLASS[view.readout.band],
+      }
+    : heading != null
       ? {
-          text: `${nearestM.toFixed(1)} m`,
-          cls: nearestM < 2 ? "text-err" : "text-warn",
+          text: `${String(Math.round(heading) % 360).padStart(3, "0")}°`,
+          cls: "text-surface-foreground/80",
         }
-      : heading != null
-        ? {
-            text: `${String(Math.round(heading) % 360).padStart(3, "0")}°`,
-            cls: "text-surface-foreground/80",
-          }
-        : { text: "no heading", cls: "text-muted-foreground" };
+      : { text: "no heading", cls: "text-muted-foreground" };
 
   return (
     <div
-      className="pointer-events-none relative h-[5.6rem] w-[5.6rem] shrink-0"
-      aria-hidden
+      className={cn("pointer-events-none relative h-[5.6rem] w-[5.6rem] shrink-0", className)}
     >
       <div
         className={cn(
@@ -85,14 +119,26 @@ export function ProximityRadar() {
           !live && "opacity-70",
         )}
       >
-        <span className="absolute left-[0.25rem] top-[0.1rem] z-10 text-[0.75rem] uppercase tracking-wide text-muted-foreground">
+        <span
+          className="absolute left-[0.25rem] top-[0.1rem] z-10 text-[0.75rem] uppercase tracking-wide text-muted-foreground"
+          aria-hidden
+        >
           Radar
         </span>
+        <button
+          type="button"
+          onClick={() => setSetting(cycleRadarScale(setting))}
+          aria-label={`Radar range ${view.scaleLabel}; change range`}
+          className="pointer-events-auto absolute right-[0.15rem] top-0 z-10 min-h-[24px] rounded px-[0.2rem] font-mono text-[0.65rem] text-surface-foreground/80"
+        >
+          {view.scaleLabel}
+        </button>
 
         <svg
           viewBox="0 0 100 100"
           className="h-full w-full"
           style={{ filter: "drop-shadow(0 0 1px rgba(0,0,0,0.9))" }}
+          aria-hidden
         >
           {/* range rings + cardinal cross */}
           <g fill="none" stroke="currentColor" className="text-surface-foreground/15">
@@ -115,6 +161,13 @@ export function ProximityRadar() {
               strokeWidth={0.8}
             />
           ))}
+
+          {/* raw lidar returns, north-up, scaled to the display range */}
+          <g className="text-hud-ink" fill="currentColor">
+            {view.dots.map((d, i) => (
+              <circle key={i} cx={d.x} cy={d.y} r={0.9} />
+            ))}
+          </g>
 
           {/* cardinal labels */}
           <g className="text-muted-foreground" fill="currentColor" fontFamily="monospace">
@@ -159,7 +212,7 @@ export function ProximityRadar() {
         </svg>
 
         {/* bottom readout: nearest obstacle / heading / honest empty state */}
-        <div className="absolute bottom-[0.1rem] left-0 right-0 text-center">
+        <div className="absolute bottom-[0.1rem] left-0 right-0 text-center" role="status">
           <span className={cn("font-mono text-[0.75rem]", bottom.cls)}>
             {bottom.text}
           </span>

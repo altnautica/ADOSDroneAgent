@@ -143,6 +143,10 @@ struct PushState {
     wanted: bool,
     /// The engine accepted the subscribe on the current connection.
     armed: bool,
+    /// A subscriber asked for per-detection embeddings (detection push only).
+    embeddings: bool,
+    /// The current connection's subscribe carried `embeddings: true`.
+    armed_embeddings: bool,
 }
 
 /// The two engine push streams a plugin subscribe arms.
@@ -219,13 +223,14 @@ impl VisionClient {
     /// while disconnected, it records the want and the push arms as soon as the
     /// engine connects.
     pub async fn arm_frame_push(&self) {
-        self.shared.arm(Push::Frames).await;
+        self.shared.arm(Push::Frames, false).await;
     }
 
-    /// Ask the ENGINE to push detection batches. Same arming contract as
-    /// [`Self::arm_frame_push`].
-    pub async fn arm_detection_push(&self) {
-        self.shared.arm(Push::Detections).await;
+    /// Ask the ENGINE to push detection batches, with per-detection appearance
+    /// embeddings when `embeddings` (sticky: once asked, every later arm and
+    /// re-arm carries them). Same arming contract as [`Self::arm_frame_push`].
+    pub async fn arm_detection_push(&self, embeddings: bool) {
+        self.shared.arm(Push::Detections, embeddings).await;
     }
 
     /// Proxy a `register_model` request to the engine and return its response

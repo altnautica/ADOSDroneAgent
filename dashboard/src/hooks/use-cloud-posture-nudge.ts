@@ -12,7 +12,7 @@ import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast as sonnerToast } from "sonner";
 
-import i18n from "@/i18n";
+import i18n from "@/shared/i18n";
 import { apiFetch } from "@/shared/api-fetch";
 
 const NUDGE_ID = "cloud_posture_default_changed";

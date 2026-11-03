@@ -1,16 +1,27 @@
-import { Suspense } from "react";
+import { Suspense, useEffect } from "react";
 import { Outlet } from "react-router-dom";
-import { Toaster } from "sonner";
+import { Toaster, toast as sonnerToast } from "sonner";
 
 import { BannerHost } from "./banner-host";
 import { BottomDock } from "./bottom-dock";
 import { Header } from "./header";
 import { Sidebar } from "./sidebar";
 import { RouteFallback } from "@/components/route-fallback";
+import { onToast, type ToastMessage } from "@/shared/api/toast";
 import { useUiStore } from "@/stores/ui-store";
+
+/** Draw one message from the shared toast bus with sonner. */
+function showToast({ kind, message, description }: ToastMessage): void {
+  const opts = description ? { description } : undefined;
+  if (kind === "ok") sonnerToast.success(message, opts);
+  else if (kind === "err") sonnerToast.error(message, opts);
+  else sonnerToast(message, opts);
+}
 
 export function AppShell() {
   const theme = useUiStore((s) => s.theme);
+  // The shell is the one toast host: every screen posts to the shared bus.
+  useEffect(() => onToast(showToast), []);
   return (
     <div className="flex flex-col min-h-dvh">
       <Header />

@@ -25,7 +25,7 @@ import { NavLink } from "react-router-dom";
 import { Separator } from "@/components/ui/separator";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
-import type { GroundRole, Profile } from "@/lib/types";
+import type { GroundRole, Profile } from "@/shared/api/types";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/stores/ui-store";
 

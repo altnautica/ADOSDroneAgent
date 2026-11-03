@@ -27,6 +27,7 @@ from ._model_types import (
     ModelRefLike,
     ModelResolution,
     ResolutionState,
+    available_runtimes,
     board_family,
     registry_auth_headers,
     sha256_file,
@@ -41,6 +42,9 @@ class ModelManager:
     def __init__(self, config: VisionConfig, npu_tops: float = 0.0) -> None:
         self._config = config
         self._npu_tops = npu_tops
+        # The runtimes this board can run, most preferred first (None: no
+        # preference, the mock backend). Variant selection keys on this first.
+        self._runtimes = available_runtimes(str(getattr(config, "backend", "auto")), npu_tops)
         self._models_dir = Path(config.models_dir)
         self._registry: list[ModelInfo] = []
         self._etag: str = ""
@@ -66,17 +70,7 @@ class ModelManager:
         """Load registry from local cache file."""
         data = json.loads(self._cache_path.read_text())
         models = data if isinstance(data, list) else data.get("models", [])
-        self._registry = [
-            ModelInfo(
-                id=m.get("id", ""),
-                name=m.get("name", ""),
-                description=m.get("description", ""),
-                task=m.get("task", ""),
-                variants=m.get("variants", []),
-                recommended=bool(m.get("recommended", False)),
-            )
-            for m in models
-        ]
+        self._registry = [ModelInfo.from_registry(m) for m in models]
 
     async def fetch_registry(self) -> list[ModelInfo]:
         """Fetch model registry from remote URL with ETag caching."""
@@ -108,17 +102,7 @@ class ModelManager:
                 data = resp.json()
                 models = data if isinstance(data, list) else data.get("models", [])
 
-                self._registry = [
-                    ModelInfo(
-                        id=m.get("id", ""),
-                        name=m.get("name", ""),
-                        description=m.get("description", ""),
-                        task=m.get("task", ""),
-                        variants=m.get("variants", []),
-                        recommended=bool(m.get("recommended", False)),
-                    )
-                    for m in models
-                ]
+                self._registry = [ModelInfo.from_registry(m) for m in models]
 
                 # Cache locally
                 self._models_dir.mkdir(parents=True, exist_ok=True)
@@ -190,40 +174,55 @@ class ModelManager:
     def recommended_detector(self) -> str | None:
         """The model id to auto-provision as the detector for a fresh board.
 
-        Picks the registry's recommended detection model (``recommended: true``),
-        else the first detection-task model the registry lists, else ``None`` when
-        the registry has no detection model. This is what lets an NPU board come up
-        already detecting with zero operator steps: ``select_best_variant`` then
-        chooses the best *variant* of this model for the board's NPU TOPS.
+        Only a detection model this board can run (a variant in an available
+        runtime with a download URL) and that is not ``benchmark_only`` is a
+        candidate. Among those the registry's ``recommended`` model wins, else
+        the first listed; ``None`` when there is no candidate. This is what lets
+        a board come up already detecting with zero operator steps:
+        ``select_best_variant`` then chooses the variant.
         """
-        detection = [m for m in self._registry if (m.task or "").lower() == "detection"]
-        for m in detection:
+        candidates = [
+            m
+            for m in self._registry
+            if (m.task or "").lower() == "detection"
+            and not m.benchmark_only
+            and (self.select_best_variant(m.id) or {}).get("url")
+        ]
+        for m in candidates:
             if m.recommended:
                 return m.id
-        return detection[0].id if detection else None
+        return candidates[0].id if candidates else None
 
     def select_best_variant(self, model_id: str) -> dict[str, Any] | None:
-        """Select the best model variant for the current board's NPU TOPS."""
-        model = None
-        for m in self._registry:
-            if m.id == model_id:
-                model = m
-                break
+        """Select the variant of ``model_id`` this board should run.
+
+        Runtime first: only a variant whose ``runtime`` the board can run is a
+        candidate (a variant that names no runtime counts as runnable anywhere),
+        and an earlier runtime in the board's preference order wins. NPU TOPS
+        break the tie within a runtime: the most demanding variant that fits the
+        board, else the least demanding one. ``None`` when the model is unknown
+        or no variant runs here.
+        """
+        model = next((m for m in self._registry if m.id == model_id), None)
         if not model or not model.variants:
             return None
+        runtimes = self._runtimes
 
-        # Sort variants by min_tops descending, pick the highest that fits
-        eligible = [
-            v for v in model.variants
-            if v.get("min_tops", 0) <= self._npu_tops
-        ]
-        if not eligible:
-            # Fall back to lowest requirement variant
-            eligible = sorted(model.variants, key=lambda v: v.get("min_tops", 0))
-            return eligible[0] if eligible else None
+        def runtime_rank(v: dict[str, Any]) -> int | None:
+            rt = v.get("runtime")
+            if runtimes is None or not rt:
+                return len(runtimes or ())
+            return runtimes.index(rt) if rt in runtimes else None
 
-        eligible.sort(key=lambda v: v.get("min_tops", 0), reverse=True)
-        return eligible[0]
+        ranked = [(r, v) for v in model.variants if (r := runtime_rank(v)) is not None]
+        if not ranked:
+            return None
+        best_rank = min(r for r, _ in ranked)
+        same = [v for r, v in ranked if r == best_rank]
+        fitting = [v for v in same if v.get("min_tops", 0) <= self._npu_tops]
+        if fitting:
+            return max(fitting, key=lambda v: v.get("min_tops", 0))
+        return min(same, key=lambda v: v.get("min_tops", 0))
 
     async def download_model(self, model_id: str) -> str:
         """Download a model, selecting the best variant for this board.

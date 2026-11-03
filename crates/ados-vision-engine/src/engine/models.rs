@@ -48,6 +48,16 @@ impl VisionEngine {
             None
         };
         let had_backend = loaded.is_some();
+        // A self-describing model file may refine the registered metadata (its
+        // head, classes or input size); the registry records what actually runs.
+        let meta = loaded
+            .as_ref()
+            .and_then(|m| m.resolved_metadata().cloned())
+            .map(|resolved| ModelMetadata {
+                id: meta.id.clone(),
+                ..resolved
+            })
+            .unwrap_or(meta);
         let id = meta.id.clone();
         let mut models = self.models.lock().await;
         if let Some(owner) = owner.as_deref() {

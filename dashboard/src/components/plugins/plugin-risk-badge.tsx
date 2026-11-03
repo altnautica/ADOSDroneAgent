@@ -5,7 +5,7 @@
 import { AlertTriangle, Check, Circle, ShieldAlert } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import type { RiskLevel } from "@/lib/plugin-install";
+import type { RiskLevel } from "@/shared/api/plugin-install";
 import { cn } from "@/lib/utils";
 
 interface PluginRiskBadgeProps {

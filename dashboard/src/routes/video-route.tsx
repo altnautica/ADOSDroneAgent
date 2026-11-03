@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
 import { fmtBitrate, fmtNum } from "@/shared/format";
-import { capturedLabel, fetchSnapshot } from "@/lib/snapshot";
+import { capturedLabel, fetchSnapshot } from "@/shared/api/snapshot";
 
 interface VideoCamerasResponse {
   cameras: Array<{

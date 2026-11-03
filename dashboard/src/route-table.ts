@@ -1,7 +1,7 @@
 import { lazy, type ComponentType } from "react";
 
 import type { AllowedProfile } from "@/components/profile-gate";
-import type { GroundRole } from "@/lib/types";
+import type { GroundRole } from "@/shared/api/types";
 
 import { HomeRoute } from "@/routes/home";
 

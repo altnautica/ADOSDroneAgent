@@ -33,13 +33,19 @@ const PLUGIN_ID: &str = "com.example.vision";
 struct VisionTestHost {
     frames: broadcast::Sender<Vec<u8>>,
     detections: broadcast::Sender<Vec<u8>>,
+    /// The `embeddings` flag of every detection subscribe the server routed.
+    detection_embeddings: std::sync::Mutex<Vec<bool>>,
 }
 
 impl VisionTestHost {
     fn new() -> Self {
         let (frames, _rx) = broadcast::channel(256);
         let (detections, _drx) = broadcast::channel(256);
-        Self { frames, detections }
+        Self {
+            frames,
+            detections,
+            detection_embeddings: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     /// Publish a frame descriptor as if the vision engine pushed it.
@@ -66,7 +72,9 @@ impl HostServices for VisionTestHost {
         &self,
         _plugin_id: &str,
         _camera_id: &str,
+        embeddings: bool,
     ) -> Option<broadcast::Receiver<Vec<u8>>> {
+        self.detection_embeddings.lock().unwrap().push(embeddings);
         Some(self.detections.subscribe())
     }
 

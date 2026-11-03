@@ -2,19 +2,23 @@
 // summary (current / configured / supported) and the mesh health (carrier up,
 // peer count, selected gateway, partition) come from the GS-status composite the
 // shell already polls, so they never drift from the OLED. The neighbour and
-// gateway detail comes from `GET /api/v1/ground-station/mesh`, which returns the
-// raw mesh-state object when this node is a relay/receiver and a not-in-mesh
-// note when it is a plain `direct` receiver. Read-only — a null reading renders a
-// dash, never a fabricated value.
+// gateway detail comes from `GET /api/v1/ground-station/mesh`: the mesh-state
+// object while a snapshot is current, `{}` while the poll loop is not reporting
+// (which is not "no peers"), and 404 on a plain `direct` receiver. Read-only — a
+// null reading renders a dash, never a fabricated value.
 
 import { useCallback } from "react";
+import { useTranslation } from "react-i18next";
 
-import { Panel, PanelHeader } from "@/components/ui/panel";
-import { Dot, EmptyNote, Row, SectionHeader, StaleBadge, Tile, TileGrid, type Tone } from "@/components/ui/data";
-import { useResource } from "@/shared/use-resource";
-import { useStatusStore } from "@/stores/status-store";
+import { ConsoleScaffold } from "@/components/ui/console-scaffold";
+import { Dot, EmptyNote, Row, SectionHeader, StaleBadge, Tile, TileGrid } from "@/components/ui/data";
+import { meshViewKind } from "@/lib/ground-station";
+import type { Tone } from "@/lib/tone";
 import { apiFetch } from "@/shared/api-fetch";
 import { DASH, fmtInt, fmtTq } from "@/shared/format";
+import "@/shared/i18n";
+import { useResource } from "@/shared/use-resource";
+import { useStatusStore } from "@/stores/status-store";
 
 /** One `mesh-state` neighbour (crates/ados-groundlink mesh/state.rs). */
 interface MeshNeighbor {
@@ -32,6 +36,8 @@ interface MeshGateway {
   [k: string]: unknown;
 }
 interface MeshState {
+  up?: boolean;
+  role?: string;
   neighbors?: MeshNeighbor[];
   gateways?: MeshGateway[];
   selected_gateway?: string | null;
@@ -47,94 +53,117 @@ function identity(n: { orig?: string; mac?: string; address?: string; name?: str
   return n.orig ?? n.mac ?? n.address ?? n.name ?? DASH;
 }
 
-
 export function MeshScreen() {
+  const { t } = useTranslation();
   const status = useStatusStore((s) => s.status);
   const mesh = useResource<MeshState>(
     useCallback((s) => apiFetch<MeshState>("/api/v1/ground-station/mesh", { signal: s }), []),
-    1500,
+    2000,
   );
 
   const role = status?.role;
   const health = status?.mesh;
-  const current = role?.current ?? DASH;
+  const current = role?.current ?? mesh.data?.role ?? null;
   const meshCapable = role?.mesh_capable ?? false;
-  const inMesh = current === "relay" || current === "receiver";
-  const carrierUp = health?.up ?? false;
-  const carrierTone: Tone = inMesh ? (carrierUp ? "ok" : "err") : "muted";
-
   const state = mesh.data;
+  const kind = meshViewKind({ data: state, httpStatus: mesh.status, error: mesh.error, role: current });
+
+  const carrierUp = state?.up ?? health?.up ?? false;
+  const carrierTone: Tone = kind === "ok" ? (carrierUp ? "ok" : "err") : "muted";
   const neighbors = state?.neighbors ?? [];
   const gateways = state?.gateways ?? [];
   const selectedGw = state?.selected_gateway ?? health?.selected_gateway ?? null;
+  const partition = state?.partition ?? health?.partition ?? false;
+
+  let body;
+  if (kind === "not-in-mesh") {
+    body = <EmptyNote>{t("cockpit.mesh.direct")}</EmptyNote>;
+  } else if (kind === "error") {
+    body = <EmptyNote>{t("panels.mesh.readError")}</EmptyNote>;
+  } else if (kind === "loading") {
+    body = <EmptyNote>{t("panels.mesh.loading")}</EmptyNote>;
+  } else if (kind === "no-snapshot") {
+    body = <EmptyNote>{t("panels.mesh.noSnapshot")}</EmptyNote>;
+  } else {
+    body = (
+      <>
+        <SectionHeader>{t("cockpit.mesh.health")}</SectionHeader>
+        <TileGrid>
+          <Tile
+            label={t("panels.mesh.carrier")}
+            value={carrierUp ? t("panels.mesh.up") : t("panels.mesh.down")}
+            tone={carrierTone}
+          />
+          <Tile label={t("panels.mesh.peers")} value={fmtInt(neighbors.length)} />
+          <Tile
+            label={t("panels.mesh.partition")}
+            value={partition ? t("panels.mesh.partitioned") : t("panels.mesh.joined")}
+            tone={partition ? "warn" : "ok"}
+          />
+        </TileGrid>
+        <Row label={t("panels.mesh.meshId")} value={state?.mesh_id ?? health?.mesh_id ?? DASH} />
+        <Row label={t("cockpit.mesh.carrierIface")} value={state?.bat_iface ?? state?.carrier ?? DASH} />
+        {state?.channel != null ? <Row label={t("cockpit.mesh.channel")} value={`ch${state.channel}`} /> : null}
+
+        <SectionHeader>{t("panels.mesh.gateway")}</SectionHeader>
+        {gateways.length ? (
+          gateways.map((g, i) => {
+            const selected = g.selected === true || identity(g) === selectedGw;
+            return (
+              <Row
+                key={identity(g) + i}
+                label={identity(g)}
+                left={<Dot tone={selected ? "ok" : "muted"} />}
+                value={selected ? t("cockpit.mesh.selected") : ""}
+                tone="ok"
+              />
+            );
+          })
+        ) : (
+          <Row
+            label={t("cockpit.mesh.selectedGateway")}
+            value={selectedGw ?? t("panels.mesh.noneElected")}
+            tone={selectedGw ? "ok" : "muted"}
+          />
+        )}
+
+        <SectionHeader>{t("cockpit.mesh.neighbours", { count: neighbors.length })}</SectionHeader>
+        {neighbors.length ? (
+          neighbors.map((n, i) => (
+            <Row key={identity(n) + i} label={identity(n)} value={fmtTq(n.tq)} hint={t("cockpit.mesh.linkQuality")} />
+          ))
+        ) : (
+          <EmptyNote>{t("panels.mesh.noNeighbours")}</EmptyNote>
+        )}
+      </>
+    );
+  }
 
   return (
-    <Panel>
-      <PanelHeader
-        title="Mesh"
-        right={
-          <div className="flex items-center gap-[0.5rem]">
-            <Dot tone={carrierTone} />
-            <span className="text-[0.8rem] text-surface-foreground">{current}</span>
-            <StaleBadge stale={mesh.stale && inMesh} />
-          </div>
-        }
-      />
-
+    <ConsoleScaffold
+      title={t("panels.mesh.title")}
+      actions={
+        <span className="flex items-center gap-[0.5rem]">
+          <Dot tone={carrierTone} />
+          <span className="text-[0.8rem] text-surface-foreground">{current ?? DASH}</span>
+          <StaleBadge stale={mesh.stale && kind === "ok"} />
+        </span>
+      }
+    >
       <div className="flex flex-col gap-[0.15rem]">
-        <SectionHeader>Role</SectionHeader>
-        <Row label="Current" value={current} tone={inMesh ? "ok" : "muted"} />
-        <Row label="Configured" value={role?.configured ?? DASH} />
-        <Row label="Mesh-capable" left={<Dot tone={meshCapable ? "ok" : "muted"} />} value={meshCapable ? "yes" : "no"} />
+        <SectionHeader>{t("cockpit.mesh.role")}</SectionHeader>
+        <Row label={t("cockpit.mesh.current")} value={current ?? DASH} tone={kind === "ok" ? "ok" : "muted"} />
+        <Row label={t("cockpit.mesh.configured")} value={role?.configured ?? DASH} />
+        <Row
+          label={t("cockpit.mesh.capable")}
+          left={<Dot tone={meshCapable ? "ok" : "muted"} />}
+          value={meshCapable ? t("cockpit.mesh.yes") : t("cockpit.mesh.no")}
+        />
         {role?.supported?.length ? (
-          <Row label="Supported roles" value={role.supported.join(" · ")} mono={false} />
+          <Row label={t("cockpit.mesh.supported")} value={role.supported.join(" · ")} mono={false} />
         ) : null}
-
-        {inMesh ? (
-          <>
-            <SectionHeader>Mesh health</SectionHeader>
-            <TileGrid>
-              <Tile label="Carrier" value={carrierUp ? "up" : "down"} tone={carrierTone} />
-              <Tile label="Peers" value={fmtInt(health?.peer_count)} />
-              <Tile label="Partition" value={health?.partition ? "yes" : "no"} tone={health?.partition ? "warn" : "ok"} />
-            </TileGrid>
-            <Row label="Mesh ID" value={health?.mesh_id ?? state?.mesh_id ?? DASH} />
-            <Row label="Carrier iface" value={state?.bat_iface ?? state?.carrier ?? DASH} />
-            {state?.channel != null ? <Row label="Channel" value={`ch${state.channel}`} /> : null}
-
-            <SectionHeader>Gateway</SectionHeader>
-            {gateways.length ? (
-              gateways.map((g, i) => (
-                <Row
-                  key={identity(g) + i}
-                  label={identity(g)}
-                  left={<Dot tone={g.selected || identity(g) === selectedGw ? "ok" : "muted"} />}
-                  value={g.selected || identity(g) === selectedGw ? "selected" : ""}
-                  tone="ok"
-                />
-              ))
-            ) : (
-              <Row label="Selected gateway" value={selectedGw ?? "none elected"} tone={selectedGw ? "ok" : "muted"} />
-            )}
-
-            <SectionHeader>Neighbours ({neighbors.length})</SectionHeader>
-            {mesh.status === 404 ? (
-              <EmptyNote>Not participating in a mesh.</EmptyNote>
-            ) : neighbors.length ? (
-              neighbors.map((n, i) => (
-                <Row key={identity(n) + i} label={identity(n)} value={fmtTq(n.tq)} hint="link quality" />
-              ))
-            ) : (
-              <EmptyNote>No mesh neighbours discovered yet.</EmptyNote>
-            )}
-          </>
-        ) : (
-          <EmptyNote>
-            This node is a plain <span className="text-surface-foreground">direct</span> receiver — not in a mesh. Set the
-            role to relay or receiver in Settings to join one.
-          </EmptyNote>
-        )}
+        {body}
       </div>
-    </Panel>
+    </ConsoleScaffold>
   );
 }

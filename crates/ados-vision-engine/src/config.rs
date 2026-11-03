@@ -110,10 +110,10 @@ impl DetectorConfig {
     }
 }
 
-/// An appearance (re-id) model the engine loads alongside the detector so the
-/// tracker can re-identify its locked subject by learned appearance, not motion
-/// alone. Required when `reid_enabled` is set; absent ⇒ the tracker stays
-/// motion-only even with `reid_enabled` (the engine degrades cleanly).
+/// An appearance (re-id) model the engine loads alongside the detector. Its
+/// embeddings feed the re-id tracker (`reid_enabled`) and any subscriber that
+/// asks for embeddings on the detection wire. Absent (or failing to load) ⇒
+/// both fall back to the model-free colour histogram descriptor.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReidConfig {
     /// Model id the engine registers the re-id model under; it must match the
@@ -227,9 +227,9 @@ pub struct VisionConfig {
     /// Default off: the engine publishes raw detections, exactly as before.
     #[serde(default)]
     pub tracker_enabled: bool,
-    /// Build the tracker with an appearance (re-id) model so identity survives a
-    /// crossing. Requires `tracker_enabled` and a resident re-id model; default
-    /// off. When off the tracker is motion-only.
+    /// Build the tracker with appearance association so identity survives a
+    /// crossing. Requires `tracker_enabled`; uses the `reid` model when it is
+    /// loaded, else the colour histogram. Default off: motion-only.
     #[serde(default)]
     pub reid_enabled: bool,
     /// The re-id model id the appearance model loads in the sidecar (when
@@ -245,8 +245,8 @@ pub struct VisionConfig {
     /// produce the detection stream. Absent ⇒ no engine-driven detections.
     #[serde(default)]
     pub detector: Option<DetectorConfig>,
-    /// The appearance (re-id) model the engine loads when `reid_enabled`. Absent
-    /// ⇒ the tracker stays motion-only even with `reid_enabled`.
+    /// The appearance (re-id) model the engine loads whenever it is set. Absent
+    /// ⇒ embeddings come from the colour histogram descriptor.
     #[serde(default)]
     pub reid: Option<ReidConfig>,
 }

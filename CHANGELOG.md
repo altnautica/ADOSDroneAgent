@@ -6,8 +6,99 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.0] - 2026-11-03
+
 ### Added
 
+- **Navigation and map APIs owned by the agent.** Every operator surface reads
+  autonomy state from the agent itself instead of an extension's iframe.
+  - `WS /api/v1/nav/stream` sends `{kind, ts_ms, data}` frames for `pose`,
+    `scan`, `nav`, `follow` and `map`, each kind at most 10 Hz with the newest
+    value winning, plus `follow_event` frames for `follow.reacquired` and
+    `follow.lost`. A new client first gets the latest frame of every kind. The
+    upgrade takes the API key or a one-shot ticket of the new `nav.stream`
+    scope.
+  - `GET /api/v1/nav/status` returns `{ts_ms, age_ms, data}` per kind, or
+    `null` for a kind nothing has published.
+  - `GET /api/v1/map/live?since=<seq>` returns the live occupancy tiles that
+    changed after `seq` (an empty list when none did).
+  - An MCP token reads both `GET` routes with the `read` scope.
+- **Plugin event socket.** The plugin host exports bus events on a root-only
+  unix socket (`/run/ados/plugin-host/_events.sock`, contract `plugin.events`
+  v1): a client subscribes to topics and receives one newline-JSON line per
+  event, with the publisher id stamped by the host. The navigation APIs read
+  from it; with no plugin host running, every kind stays `null`.
+- **Per-profile plugin resources.** A manifest may set
+  `agent.resources_by_profile: {<profile>: <resources>}`. A plugin's unit on a
+  node of a listed profile runs under that envelope, anywhere else under
+  `agent.resources`. Unknown profiles, unknown keys, a profile listed under two
+  spellings, and an envelope above its own class ceiling are refused.
+- Plugin units get `ADOS_PLUGIN_MEMORY_MAX_BYTES`, the same limit as their
+  `MemoryMax=`, so a plugin can size its caches without reading its cgroup.
+- **Vision backend state.** `GET /api/vision/status` carries `backend_state`
+  (`ready`, `mock` only when configured, or `unavailable`) and
+  `backend_reason`.
+- **Person detector for the ONNX CPU backend.** `scripts/models/` exports
+  YOLOX-Tiny (Apache-2.0) as a person-only ONNX graph that carries its own
+  metadata, so the existing head decoder reads it with no extra code. The
+  `detect_bench` example times a detector over a folder of recorded frames.
+- **Re-identification embeddings for the tracker.** Track appearance comes
+  from an OSNet re-id model (`vision.reid`, exported by
+  `scripts/models/export_osnet_reid.py`) when one is loaded, otherwise from a
+  16-bin colour descriptor of the box's upper and lower halves. Both are
+  L2-normalised and compared by cosine similarity, and each detection names
+  its source in `embedding_model` (the model id, or `histogram`). Off unless
+  `vision.reid_enabled` is set.
+- **Runtime-aware model selection.** The model manager picks only variants
+  this board can run: `rknn`, `hailo` or `onnx` as configured, or under
+  `auto` the NPU first when the board declares NPU TOPS, then ONNX. NPU TOPS
+  break ties within a runtime. A registry model marked `benchmark_only` is
+  never auto-provisioned or recommended.
+- **Flight-controller telemetry for onboard autonomy.**
+  - On the `drone` profile, outside a capture session, the router requests
+    the streams onboard autonomy steers from: local NED position and velocity
+    (20 Hz), the downward rangefinder, faster attitude, and GNSS.
+  - Telemetry gains an `ekf` block (`EKF_STATUS_REPORT` flags) and a
+    `local_position` block (x, y, z, vx, vy, vz). Each carries `age_ms` and is
+    `null` until the message arrives.
+  - `fc_msp_armed` reports an MSP flight controller's armed flag, read
+    observe-only from the status replies a poller draws through the MSP
+    proxy. It is `null` when nothing was read in the last 5 s, never "disarmed".
+- The `ekfSourceSet` command switches the EKF3 source set (`args: [set]`,
+  1–3) with `MAV_CMD_SET_EKF_SOURCE_SET`.
+- **Operator API key rotate and clear.** `POST /api/v1/security/api-key/rotate`
+  replaces `security.api.api_key` and returns the new key once with
+  `rotated_at`. `DELETE /api/v1/security/api-key` clears it; the pairing key
+  keeps working. The old key stops working at once. Both need operator
+  authentication, are refused through a relay, are not reachable by MCP
+  tokens, and log `security.api_key_rotated` / `security.api_key_cleared`
+  without the value.
+- **Autonomy block in the terminal UI.** The Vehicle tab shows the follow
+  phase, lock, range ± sigma and re-acquire mode; the navigation source, the
+  external-nav health and odometry rate; the lidar's nearest obstacle and scan
+  rate; and the map session. It is polled from `/api/v1/nav/status`, and every
+  state is a symbol plus a word.
+- **The cockpit gains the dashboard's features.**
+  - Console building blocks: scaffold with hint bar, two-pane, sheet, dialog,
+    menu, one toast host, guarded button, slide-to-confirm, setting rows.
+    Gamepad, button and touch focus work the same in all of them.
+  - Layouts follow four width classes (compact, medium, expanded, TV or
+    `?kiosk=1`). Settings add glove mode (larger touch targets) and a dark,
+    light or night-vision theme.
+  - New screens: Logs, Peripherals, Parameters, MSP, Video, Transmit, IO,
+    GNSS, LoRa, Capture, Sensors and Sources. Workstation and compute nodes
+    get a Node home. Every destructive action needs a guarded press or a slide
+    to confirm.
+- **HUD on the cockpit Feed.** Each target state has its own box style and
+  text label: candidate, tracked, following, coasting, searching, re-acquired
+  and lost. Tap a box to act on it, or long-press and drag to designate one.
+  The Feed also shows a follow range panel, a navigation-source chip (with a
+  manual EKF source-set switch), the strict/smart re-acquire toggle, lidar
+  scan dots on the proximity radar, a local-frame minimap with live occupancy
+  and the SLAM trail, and a belly-camera picture-in-picture with its own
+  overlay.
+- Camera role `down`, labelled "Belly" in ground-station views: a downward
+  camera for mapping texture, downward optical flow and precision landing.
 - **The terminal UI is a full operator console.** `ados` (and `ados-tui`) now
   opens a tabbed console instead of a read-only cockpit: Overview, Vehicle
   (Ground on a ground station), Link, Video, Params, Extensions, Logs, System
@@ -57,6 +148,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- More writes are refused with `409 E_ARMED` while the vehicle is armed
+  (`"force": true` overrides):
+  - `PUT /api/config` of the flight-controller link keys `mavlink.source`,
+    `serial_port`, `baud_rate`, `system_id` and `component_id`;
+  - `POST /api/video/config` carrying a link-tuning knob (`fec_k`, `fec_n`,
+    `mcs`, `preset`, `auto`, `tier_idx`).
+- A plugin's published-state sidecar file is written at most twice a second
+  per plugin and topic. A trailing write keeps the newest value.
+- The dashboard and the cockpit share one copy of the agent API clients, the
+  locale and the toast bus (`web-shared/`).
 - The quick actions overlay no longer carries Pair, Logs or Unpair (the
   Pairing settings page and the Logs tab replace them), and actions no longer
   have single-key shortcuts on the main screen.
@@ -71,6 +172,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **A build without a detector backend ran the mock and reported it as
+  working.** A backend that cannot run now resolves to `unavailable`, never
+  to the mock, and logs `vision_backend_unavailable` at error level.
+- The sensor bus's copy of the capture contract lagged its upstream: `rig.json`
+  validation now knows the `lidar` scan model and requires it on a `lidar`
+  sensor.
+- `docs/api-surface.md` marks every route under a relay-forbidden path as
+  relay-forbidden, as the agent enforces it, not only exact matches.
 - **The web dashboard showed every node as unrestricted.** The region page,
   the Home region chip and the LoRa region hints read the regulatory posture
   from the setup status, which never carries it, so a pinned region looked

@@ -118,6 +118,16 @@ impl FcConnection {
     pub async fn fc_variant(&self) -> Option<String> {
         self.fc_variant.lock().await.clone()
     }
+    /// The MSP FC's armed flag from a status reply read within
+    /// `MSP_ARMED_TTL`, or `None` when no poller has drawn one lately (unknown,
+    /// never "disarmed").
+    pub async fn msp_armed(&self) -> Option<bool> {
+        self.msp_armed
+            .lock()
+            .await
+            .filter(|(_, at)| at.elapsed() < super::MSP_ARMED_TTL)
+            .map(|(armed, _)| armed)
+    }
     pub async fn port(&self) -> String {
         self.port.lock().await.clone()
     }

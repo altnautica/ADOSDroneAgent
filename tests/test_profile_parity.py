@@ -66,7 +66,7 @@ _TS_UNIONS = [
     ("web-shared/src/use-profile.ts", "AgentProfile", {"unknown"}),
     ("cockpit/src/shared/use-profile.ts", "AgentProfile", {"unknown"}),
     ("dashboard/src/shared/use-profile.ts", "AgentProfile", {"unknown"}),
-    ("dashboard/src/lib/types.ts", "Profile", {"auto", "unknown"}),
+    ("web-shared/src/api/types.ts", "Profile", {"auto", "unknown"}),
     ("dashboard/src/lib/node-identity.ts", "AllowedProfile", None),
 ]
 

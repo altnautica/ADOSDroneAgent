@@ -280,6 +280,40 @@ fn a_confirm_row_asks_before_writing() {
     }
 }
 
+/// The agent refuses a flight-controller link key while the vehicle is armed.
+/// The terminal shows its armed lock and never offers to force the write.
+#[test]
+fn an_armed_refusal_of_a_link_key_shows_the_lock_and_never_forces() {
+    use crate::worker::{Purpose, Reply, Route};
+    let mut app = profile_app("drone");
+    with_config(&mut app);
+    app.tabs.settings.goto_page(&mut app.core, "mavlink");
+    let overlays = app.core.overlays.len();
+    app.tabs.settings.row_reply(
+        &mut app.core,
+        Reply {
+            route: Route::tab(TabId::Settings),
+            purpose: Purpose::ConfigSet {
+                key: "mavlink.baud_rate".into(),
+                row: "mavlink/mavlink.baud_rate".into(),
+            },
+            result: Err(ados_protocol::rest::RestError::Status {
+                code: 409,
+                body: Some(
+                    json!({"error":"E_ARMED","message":"Vehicle is armed","override":"force"}),
+                ),
+            }),
+        },
+    );
+    let last = app.core.toasts.history().last().map(|t| t.text.clone());
+    assert!(
+        last.as_deref()
+            .is_some_and(|t| t.ends_with(crate::app::ARMED_REFUSAL)),
+        "{last:?}"
+    );
+    assert_eq!(app.core.overlays.len(), overlays, "no force prompt opens");
+}
+
 #[test]
 fn config_pages_show_schema_rows_with_curated_labels() {
     let mut app = profile_app("drone");

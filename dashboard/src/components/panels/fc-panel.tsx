@@ -9,7 +9,7 @@ import {
 } from "@/components/ui/card";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useSnapshot } from "@/hooks/use-snapshot";
-import { mspVariant, mspVariantLabel } from "@/lib/fc-firmware";
+import { mspVariant, mspVariantLabel } from "@/shared/api/fc-firmware";
 import { fmtNum, fmtPct, fmtVoltage } from "@/shared/format";
 
 function Row({

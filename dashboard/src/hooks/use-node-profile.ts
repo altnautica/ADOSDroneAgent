@@ -1,4 +1,4 @@
-import type { Profile } from "@/lib/types";
+import type { Profile } from "@/shared/api/types";
 import { useProfile } from "@/shared/use-profile";
 
 /** The node profile from the public pairing-info probe, in the dashboard's

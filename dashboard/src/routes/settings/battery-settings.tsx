@@ -8,7 +8,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { useBatteryHealth } from "@/hooks/use-battery-health";
-import { useConfig, type AgentConfig } from "@/hooks/use-config";
+import { useConfig } from "@/hooks/use-config";
+import type { AgentConfig } from "@/shared/api/types";
 
 type BatteryKey = Exclude<keyof NonNullable<AgentConfig["battery"]>, "enabled">;
 

@@ -296,6 +296,33 @@ fn unit_env_token_and_socket_are_consistent_for_both_runtimes() {
     }
 }
 
+/// A per-profile resource envelope becomes the generated unit's cgroup limits
+/// on a node of that profile; any other profile keeps the default envelope.
+#[test]
+fn the_unit_takes_the_envelope_of_the_node_profile() {
+    use crate::backend::render_systemd;
+    use crate::systemd::build_unit_spec;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = paths_in(dir.path());
+    let manifest = crate::PluginManifest::from_yaml_text(
+        "id: com.example.envelope\nversion: 1.0.0\ncompatibility:\n  ados_version: \">=0.1.0,<99.0.0\"\nagent:\n  entrypoint: agent/x\n  target_profiles: [drone, workstation]\n  resources:\n    max_ram_mb: 2048\n    max_cpu_percent: 100\n  resources_by_profile:\n    drone:\n      max_ram_mb: 768\n      max_cpu_percent: 50\n",
+    )
+    .expect("manifest");
+    let unit_on = |profile: &str| {
+        render_systemd(
+            &build_unit_spec(&manifest, &paths, profile, &BTreeSet::new(), false)
+                .expect("build")
+                .expect("unit"),
+        )
+    };
+    let drone = unit_on("drone");
+    assert!(drone.contains("MemoryMax=768M"), "{drone}");
+    assert!(drone.contains("CPUQuota=50%"), "{drone}");
+    let workstation = unit_on("workstation");
+    assert!(workstation.contains("MemoryMax=2048M"), "{workstation}");
+}
+
 /// Injector arbitration is OFF unless the flag is explicitly set true. The
 /// default-off path is the load-bearing invariant: with no flag, no config,
 /// or a config that omits it, the host declares no injector and the gate

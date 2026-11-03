@@ -30,13 +30,13 @@ use crate::state::AppState;
 /// to the routes it knows about stops a stray client minting tickets for a scope
 /// the agent never checks. Each entry must have a handler that verifies a ticket
 /// for it (`gs.*` in [`crate::routes::gs_ws`], the MAVLink-WS scope in the router
-/// proxy, the vision + setup streams, the plugin install-job progress stream,
-/// a plugin's HTTP passthrough).
+/// proxy, the vision + setup streams, the nav stream in [`crate::routes::nav`],
+/// the plugin install-job progress stream, a plugin's HTTP passthrough).
 ///
 /// The class is what a scoped MCP token must hold to mint the ticket: the
 /// MAVLink WebSocket carries arbitrary commands to the flight controller, so its
 /// ticket is flight-class; the others are read-only event streams.
-const TICKET_SCOPES: [(&str, ScopeClass); 7] = [
+const TICKET_SCOPES: [(&str, ScopeClass); 8] = [
     ("setup.cloudflare_logs", ScopeClass::Read),
     ("gs.pic_events", ScopeClass::Read),
     ("gs.mavlink_ws", ScopeClass::Flight),
@@ -44,6 +44,7 @@ const TICKET_SCOPES: [(&str, ScopeClass); 7] = [
     ("gs.mesh_events", ScopeClass::Read),
     ("gs.button_events", ScopeClass::Read),
     ("vision.detections", ScopeClass::Read),
+    (crate::routes::nav::SCOPE_NAV_STREAM, ScopeClass::Read),
 ];
 
 /// The plugin install-job progress scope is bound to one job:
@@ -238,13 +239,18 @@ mod tests {
             "gs.uplink_events",
             "gs.mesh_events",
             "gs.button_events",
+            crate::routes::nav::SCOPE_NAV_STREAM,
         ] {
             assert!(
                 ticket_scope_class(scope).is_some(),
                 "{scope} must be mintable"
             );
         }
-        assert_eq!(TICKET_SCOPES.len(), 7);
+        assert_eq!(TICKET_SCOPES.len(), 8);
+        assert_eq!(
+            ticket_scope_class(crate::routes::nav::SCOPE_NAV_STREAM),
+            Some(ScopeClass::Read)
+        );
         assert_eq!(ticket_scope_class("gs.unknown"), None);
     }
 

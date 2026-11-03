@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
-import { setVideoConfig, type VideoConfigPatch } from "@/lib/wfb";
+import { setVideoConfig, type VideoConfigPatch } from "@/shared/api/wfb";
 
 const FEC_RATIOS: Array<[number, number]> = [
   [8, 16],

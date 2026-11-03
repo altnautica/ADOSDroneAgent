@@ -2,7 +2,7 @@
 //!
 //! `POST /api/command` is the GCS's control path: it names one of a small fixed
 //! set of high-level commands (`arm`, `disarm`, `takeoff`, `land`, `rtl`,
-//! `mode`, `killSwitch`, `pauseMission`, `resumeMission`), and the route turns
+//! `mode`, `killSwitch`, `pauseMission`, `resumeMission`, `ekfSourceSet`), and the route turns
 //! that into the corresponding MAVLink frame, writes it to
 //! `/run/ados/mavlink.sock` (which the router forwards to the FC), and correlates
 //! the flight controller's `COMMAND_ACK` so the response reports whether the FC
@@ -37,6 +37,7 @@
 //! | killSwitch    | MAV_CMD_COMPONENT_ARM_DISARM 400| p1=0.0, p2=21196 (force), rest 0 |
 //! | pauseMission  | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=0.0 (pause), rest 0           |
 //! | resumeMission | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=1.0 (continue), rest 0        |
+//! | ekfSourceSet N| MAV_CMD_SET_EKF_SOURCE_SET 42007| p1=N (1, 2 or 3), rest 0         |
 //!
 //! ## killSwitch is a FORCE-DISARM, not a graceful stop
 //!
@@ -57,6 +58,14 @@
 //! They are a pair over one opcode exactly as `arm`/`disarm` are over
 //! `COMPONENT_ARM_DISARM`. A vehicle that is not running an auto mission will
 //! report the FC's own rejection in the `ack` block (honest, never masked).
+//!
+//! ## ekfSourceSet
+//!
+//! `ekfSourceSet` switches ArduPilot's EKF3 between its three configured
+//! source sets (`EK3_SRCn_*`) with `MAV_CMD_SET_EKF_SOURCE_SET` (42007),
+//! `param1` = the set number. Only 1, 2 and 3 exist; anything else is a 400
+//! before any frame is built. PX4 has no source sets and answers UNSUPPORTED,
+//! which the `ack` block reports.
 //!
 //! ## Flight-mode encoding: ArduPilot vs PX4
 //!
@@ -131,8 +140,9 @@ use ack::*;
 use build::*;
 
 /// The command catalog: name → human description. The first six are the original
-/// text commands; the last three are agent-native additions the fleet board
-/// drives (kill / pause / resume). Order is preserved (it is emitted as a JSON
+/// text commands; the next three are agent-native additions the fleet board
+/// drives (kill / pause / resume), and `ekfSourceSet` is the cockpit's nav-source
+/// switch. Order is preserved (it is emitted as a JSON
 /// object; serde_json keeps insertion order). The names are the canonical strings
 /// a caller sends; the dispatch match is case-insensitive.
 const SIMPLE_COMMANDS: &[(&str, &str)] = &[
@@ -152,6 +162,10 @@ const SIMPLE_COMMANDS: &[(&str, &str)] = &[
         "Pause the current mission / auto flight (hold position)",
     ),
     ("resumeMission", "Resume a paused mission / auto flight"),
+    (
+        "ekfSourceSet",
+        "Switch the EKF3 source set (args: [set], 1, 2 or 3)",
+    ),
 ];
 
 /// The source identity stamped on every command frame: the agent/companion

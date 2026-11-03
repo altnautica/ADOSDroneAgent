@@ -16,6 +16,11 @@ path = "src/lib.rs"
 name = "ados-vision"
 path = "src/bin/ados-vision.rs"
 
+# Times the ONNX detector on recorded frames (see the file header).
+[[example]]
+name = "detect_bench"
+required-features = ["onnx"]
+
 [features]
 # The default build carries no native inference runtime so it compiles fast
 # everywhere; the MockBackend and the RKNN sidecar IPC client cover the baseline.

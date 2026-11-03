@@ -15,6 +15,7 @@
 //! models, runs inference, and publishes detections).
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use ados_protocol::framebus::{
@@ -25,11 +26,16 @@ use ados_protocol::vision_rpc::owned_model_id;
 use anyhow::{anyhow, Result};
 use tokio::sync::{broadcast, Mutex, Semaphore};
 
-use crate::backend::{LoadedModel, VisionBackend};
+use crate::backend::{BackendState, LoadedModel, VisionBackend};
 use crate::camera_control::CameraControls;
 use crate::ring::{FrameTiming, RingWriter};
+mod embeddings;
 mod models;
 mod tracking;
+
+pub use embeddings::{
+    strip_embeddings, EmbeddingInterest, EMBEDDING_ATTR, EMBEDDING_MODEL_ATTR, HISTOGRAM_EMBEDDING,
+};
 
 use ados_vision::tracker::{Appearance, Candidate, SingleObjectTracker, TrackerConfig};
 
@@ -144,8 +150,11 @@ pub struct VisionEngine {
     /// locked subject across a distractor crossing or a brief occlusion, not by
     /// motion alone. Off ⇒ the long-standing motion-only association.
     reid_enabled: bool,
-    /// The registered model id whose `embed` produces the appearance embedding.
+    /// The registered model id whose `embed` produces the appearance embedding
+    /// (for the re-id tracker and for subscribers that ask for embeddings).
     reid_model_id: Option<String>,
+    /// How many subscribers currently want embeddings on the detection wire.
+    embedding_consumers: AtomicUsize,
     /// Per-model rolling inference timing (fps + latency), fed by `infer` and read
     /// by `list_models` for the telemetry surface.
     timings: Mutex<HashMap<String, ModelTiming>>,
@@ -237,6 +246,7 @@ impl VisionEngine {
             tracker_cfg,
             reid_enabled,
             reid_model_id,
+            embedding_consumers: AtomicUsize::new(0),
             timings: Mutex::new(HashMap::new()),
             camera_controls: CameraControls::default(),
         })
@@ -256,6 +266,17 @@ impl VisionEngine {
     /// The backend name (for logs and the socket info reply).
     pub fn backend_name(&self) -> &str {
         self.backend.name()
+    }
+
+    /// The backend's operator-facing state (`ready` | `mock` | `unavailable`),
+    /// reported by `GET /api/vision/status`.
+    pub fn backend_state(&self) -> BackendState {
+        self.backend.state()
+    }
+
+    /// Why the backend cannot run inference, when it knows.
+    pub fn backend_unavailable_reason(&self) -> Option<&str> {
+        self.backend.unavailable_reason()
     }
 
     /// The camera control routes. The source factory registers each camera
@@ -407,6 +428,8 @@ impl VisionEngine {
     }
 }
 
+#[cfg(test)]
+mod embeddings_tests;
 #[cfg(test)]
 mod ring_tests;
 #[cfg(test)]

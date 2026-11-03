@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 
-import { formatParamValue } from "@/lib/params";
+import { formatParamValue } from "@/shared/api/params";
 
 interface Props {
   /** Enum code → label. */

@@ -23,7 +23,7 @@ import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
 import { refusalDetail } from "@/lib/refusal";
 import { cn } from "@/lib/utils";
-import { modeFromConfig, regionFromConfig } from "@/lib/region";
+import { modeFromConfig, regionFromConfig } from "@/shared/api/region";
 
 export function HomeRoute() {
   const status = useStatus({ poll: true });

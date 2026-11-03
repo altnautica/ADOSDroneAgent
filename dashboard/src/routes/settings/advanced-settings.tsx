@@ -8,8 +8,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useConfig } from "@/hooks/use-config";
-import { advancedSectionSchema, postApply } from "@/lib/apply-actions";
-import { toast, toastFromError } from "@/lib/toast";
+import { advancedSectionSchema, postApply } from "@/shared/api/apply-actions";
+import { toast, toastFromError } from "@/shared/api/toast";
 
 const LOG_LEVELS = ["debug", "info", "warning", "error", "critical"] as const;
 type LogLevel = (typeof LOG_LEVELS)[number];

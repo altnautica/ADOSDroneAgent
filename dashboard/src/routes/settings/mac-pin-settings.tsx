@@ -7,8 +7,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfig } from "@/hooks/use-config";
-import { getMacAdapters, pinMac, unpinMac, type MacAdapter } from "@/lib/mac-pin";
-import { toast, toastFromError } from "@/lib/toast";
+import { getMacAdapters, pinMac, unpinMac, type MacAdapter } from "@/shared/api/mac-pin";
+import { toast, toastFromError } from "@/shared/api/toast";
 
 const ADAPTERS_KEY = ["mac-adapters"] as const;
 

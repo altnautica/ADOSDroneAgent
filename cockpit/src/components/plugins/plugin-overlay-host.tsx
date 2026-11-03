@@ -3,35 +3,47 @@
 // document from `lib/plugin-frame`, and answers its bridge requests through
 // `lib/plugin-host`, which enforces the granted capabilities. Host events
 // (theme, the plugin's stored config) are posted only after the frame has
-// loaded, so none are lost to a document that is not listening yet.
+// loaded, so none are lost to a document that is not listening yet; a theme
+// switch while the frame is open is posted again. A mount may pass one
+// `hostEvent` (the `video.overlay.props` host props): it is posted on load
+// and again each time the mount hands in a new one.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { followTheme, themeChangedEvent } from "@/lib/extension-theme";
 import type { InstalledExtension } from "@/lib/extensions";
 import { buildPluginFrameHtml } from "@/lib/plugin-frame";
 import { PROTOCOL_VERSION, createPluginHost, type RpcEnvelope } from "@/lib/plugin-host";
 import { cn } from "@/lib/utils";
 import { apiFetch, credentialHeaders } from "@/shared/api-fetch";
-import { EXTENSION_THEMES, type ExtensionThemeId } from "@/shared/extension-theme.generated";
+import { useSettingsStore } from "@/stores/settings-store";
 
-function currentTheme(): ExtensionThemeId {
-  const t = typeof document !== "undefined" ? document.documentElement.dataset.theme : undefined;
-  return t === "light" ? "brand-light" : t === "nvg" ? "nvg" : "brand-dark";
+/** A host → frame event a mount keeps current. */
+export interface HostEvent {
+  method: string;
+  /** The capability tag the event carries ("" when none). */
+  capability?: string;
+  args: unknown;
 }
 
 export function PluginFrameHost({
   ext,
   title,
   className,
+  hostEvent = null,
 }: {
   ext: InstalledExtension;
   title: string;
   className?: string;
+  hostEvent?: HostEvent | null;
 }) {
   const [bundle, setBundle] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const entrypoint = ext.entrypoint;
+  // The frame's live poster once it has loaded, and the newest host event.
+  const postRef = useRef<((env: RpcEnvelope) => void) | null>(null);
+  const hostEventRef = useRef(hostEvent);
 
   useEffect(() => {
     if (!entrypoint) return;
@@ -59,6 +71,7 @@ export function PluginFrameHost({
     const post = (env: RpcEnvelope) => iframe.contentWindow?.postMessage(env, "*");
     const host = createPluginHost(ext, post);
     let disposed = false;
+    let loaded = false;
 
     const onMessage = (ev: MessageEvent<RpcEnvelope>) => {
       if (ev.source !== iframe.contentWindow) return;
@@ -67,13 +80,11 @@ export function PluginFrameHost({
       host.handle(env);
     };
     const onLoad = () => {
-      post({
-        type: "event",
-        method: "theme.changed",
-        capability: "theme.useTheme",
-        args: EXTENSION_THEMES[currentTheme()],
-        version: PROTOCOL_VERSION,
-      });
+      loaded = true;
+      postRef.current = post;
+      post(themeChangedEvent(useSettingsStore.getState().theme));
+      const he = hostEventRef.current;
+      if (he) post({ type: "event", method: he.method, capability: he.capability ?? "", args: he.args, version: PROTOCOL_VERSION });
       apiFetch<Record<string, unknown>>(`/api/plugins/${encodeURIComponent(ext.pluginId)}/config`)
         .then((values) => {
           if (!disposed && values && typeof values === "object") {
@@ -83,15 +94,32 @@ export function PluginFrameHost({
         .catch(() => undefined);
     };
 
+    const offTheme = followTheme(post, () => loaded);
+
     window.addEventListener("message", onMessage);
     iframe.addEventListener("load", onLoad);
     return () => {
       disposed = true;
+      postRef.current = null;
+      offTheme();
       window.removeEventListener("message", onMessage);
       iframe.removeEventListener("load", onLoad);
       host.dispose();
     };
   }, [srcDoc, ext]);
+
+  useEffect(() => {
+    hostEventRef.current = hostEvent;
+    if (hostEvent) {
+      postRef.current?.({
+        type: "event",
+        method: hostEvent.method,
+        capability: hostEvent.capability ?? "",
+        args: hostEvent.args,
+        version: PROTOCOL_VERSION,
+      });
+    }
+  }, [hostEvent]);
 
   if (!entrypoint || ext.isolation === "inline") {
     return (

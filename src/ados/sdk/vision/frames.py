@@ -162,7 +162,8 @@ class FrameDescriptor:
         )
 
     def to_msgpack(self) -> bytes:
-        return msgpack.packb(self.to_dict(), use_bin_type=True)
+        packed: bytes = msgpack.packb(self.to_dict(), use_bin_type=True)
+        return packed
 
     @classmethod
     def from_msgpack(cls, blob: bytes) -> FrameDescriptor:

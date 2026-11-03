@@ -14,7 +14,7 @@ import {
   type LockScope,
   type NodeIdentity,
   type PinStatus,
-} from "@/lib/pin";
+} from "@/shared/api/pin";
 
 /** One numeric PIN field: 4-12 digits, the agent's own rule (`isValidPin`). */
 function PinField({

@@ -16,7 +16,6 @@ fn rate(table: &[(u32, f32)], id: u32) -> Option<f32> {
 #[test]
 fn base_table_outside_capture() {
     for (profile, capture) in [
-        ("drone", false),
         ("ground-station", false),
         ("ground-station", true),
         ("workstation", true),
@@ -25,6 +24,30 @@ fn base_table_outside_capture() {
         assert_eq!(t, BASE_RATES, "{profile} capture={capture}");
         assert_eq!(rate(t, 105), None);
         assert_eq!(rate(t, 24), Some(2.0));
+        assert_eq!(rate(t, 32), None);
+    }
+}
+
+#[test]
+fn drone_table_streams_the_autonomy_inputs() {
+    let t = stream_rates("drone", false);
+    assert_eq!(t, DRONE_RATES);
+    assert_eq!(rate(t, 32), Some(20.0), "LOCAL_POSITION_NED");
+    assert_eq!(rate(t, 132), Some(20.0), "DISTANCE_SENSOR");
+    assert_eq!(rate(t, 30), Some(50.0), "ATTITUDE");
+    assert_eq!(rate(t, 24), Some(5.0), "GPS_RAW_INT");
+    assert_eq!(rate(t, 105), None, "no capture streams outside a capture");
+    // Every base stream is requested, at its base rate unless raised.
+    for &(id, hz) in BASE_RATES {
+        let got = rate(t, id).expect("base stream kept");
+        assert!(got >= hz, "base stream {id}");
+    }
+    // The capture table is a superset, so a capture never drops a drone stream
+    // and ending one never hands it back to the FC default.
+    let capture = stream_rates("drone", true);
+    for &(id, hz) in DRONE_RATES {
+        let got = rate(capture, id).expect("drone stream kept while capturing");
+        assert!(got >= hz, "message {id}");
     }
 }
 
@@ -184,11 +207,14 @@ async fn capture_end_restores_the_default_rate_of_every_capture_only_stream() {
     conn.tick_streams().await;
     let after = intervals(&wrx);
     let restored: Vec<u32> = after.iter().filter(|e| e.1 == 0.0).map(|e| e.0).collect();
-    assert_eq!(restored, vec![105, 31, 32, 2, 29], "{after:?}");
+    assert_eq!(restored, vec![105, 31, 2, 29], "{after:?}");
+    // The drone's own autonomy inputs stay requested at the drone rate.
+    assert!(after.contains(&(32, 50_000.0)), "{after:?}");
+    assert!(after.contains(&(132, 50_000.0)), "{after:?}");
     // Never a stop: -1 would kill ArduPilot's own SRx default streams.
     assert!(!after.iter().any(|e| e.1 < 0.0), "{after:?}");
-    // GPS_RAW_INT stays, back at its base rate.
-    assert!(after.contains(&(24, 500_000.0)), "{after:?}");
+    // GPS_RAW_INT stays, back at the drone rate (5 Hz).
+    assert!(after.contains(&(24, 200_000.0)), "{after:?}");
     assert!(conn.sensor_streams().sensor_rates_hz().is_empty());
     // Nothing more to hand back on the next refresh.
     *conn.last_stream_req.lock().await = None;

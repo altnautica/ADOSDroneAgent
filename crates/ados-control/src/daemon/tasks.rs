@@ -102,6 +102,14 @@ where
     .with_battery(battery)
     .with_security(Arc::clone(&security));
 
+    // The plugin event-bus export reader feeding the nav hub the
+    // `/api/v1/nav/*` and `/api/v1/map/live` routes serve. Same posture as the
+    // swarm reader: an absent plugin host leaves every kind `null`.
+    let events_handle = crate::ipc::plugin_events_client::spawn(
+        crate::ipc::default_events_socket(),
+        state.nav.clone(),
+    );
+
     // Native-vs-residual gate for the PIC / gamepad / Bluetooth writes, resolved
     // once at startup (the profile is fixed for the process). Those are served
     // natively only on the profiles whose unit table runs the daemons binding
@@ -313,6 +321,7 @@ where
     state_handle.shutdown().await;
     battery_handle.shutdown().await;
     swarm_handle.shutdown().await;
+    events_handle.shutdown().await;
 
     // tmpfs cleanup: a stale socket path confuses a probing reader on restart.
     let _ = std::fs::remove_file(&paths.control_socket);

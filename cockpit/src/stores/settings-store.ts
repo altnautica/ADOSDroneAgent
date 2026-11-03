@@ -1,9 +1,15 @@
 // Local cockpit UI preferences, persisted to localStorage. The UI-scale knob
 // multiplies the fluid root font-size (styles/globals.css `--ui-scale`) so an
 // operator can size the whole layout up or down for their panel and eyesight
-// without changing the layout itself.
+// without changing the layout itself. The theme picks the token set
+// (`data-theme` on the root), glove mode grows every touch target, and the
+// split ratio is the video share of the Feed's video/map split.
 
 import { create } from "zustand";
+
+import { clampSplit, SPLIT_DEFAULT } from "@/lib/cockpit-layout";
+import type { MinimapPin } from "@/shared/hud/minimap-mode";
+import type { RadarScaleSetting } from "@/shared/hud/radar-scan";
 
 const PERSIST_KEY = "ados-cockpit-ui-scale";
 
@@ -86,6 +92,53 @@ function loadAltRef(): AltRef {
   }
 }
 
+function loadString(key: string): string | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveString(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Storage disabled: the choice lasts for this session.
+  }
+}
+
+const THEME_KEY = "ados-cockpit-theme";
+const GLOVE_KEY = "ados-cockpit-glove";
+const SPLIT_KEY = "ados-cockpit-split";
+
+/** The token sets the generated brand CSS carries. */
+export type CockpitTheme = "dark" | "light" | "nvg";
+export const COCKPIT_THEMES: readonly CockpitTheme[] = ["dark", "light", "nvg"];
+
+function loadTheme(): CockpitTheme {
+  const raw = loadString(THEME_KEY);
+  return raw === "light" || raw === "nvg" ? raw : "dark";
+}
+
+function loadSplit(): number {
+  const raw = loadString(SPLIT_KEY);
+  return raw == null ? SPLIT_DEFAULT : clampSplit(Number(raw));
+}
+
+const MINIMAP_PIN_KEY = "ados-cockpit-minimap-pin";
+const RADAR_SCALE_KEY = "ados-cockpit-radar-scale";
+
+function loadMinimapPin(): MinimapPin {
+  const raw = loadString(MINIMAP_PIN_KEY);
+  return raw === "local" || raw === "map" ? raw : "auto";
+}
+
+function loadRadarScale(): RadarScaleSetting {
+  const n = Number(loadString(RADAR_SCALE_KEY));
+  return n === 3 || n === 6 || n === 12 ? n : "auto";
+}
+
 interface SettingsState {
   /** Altitude tape reference: home-relative or above mean sea level. */
   altRef: AltRef;
@@ -97,6 +150,20 @@ interface SettingsState {
   skillButtons: Record<string, number>;
   bindSkillButton: (skillId: string, button: number | null) => void;
   resetSkillButtons: () => void;
+  theme: CockpitTheme;
+  setTheme: (theme: CockpitTheme) => void;
+  /** Glove mode: every touch target grows by the glove factor. */
+  glove: boolean;
+  setGlove: (on: boolean) => void;
+  /** Video share of the Feed's video/map split, 0.2..0.8. */
+  splitRatio: number;
+  setSplitRatio: (ratio: number) => void;
+  /** The minimap frame pin: AUTO (local without GPS), LOCAL or MAP. */
+  minimapPin: MinimapPin;
+  setMinimapPin: (pin: MinimapPin) => void;
+  /** The proximity radar's display range, or `auto`. */
+  radarScale: RadarScaleSetting;
+  setRadarScale: (scale: RadarScaleSetting) => void;
 }
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
@@ -129,5 +196,31 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
   resetSkillButtons: () => {
     persistBindings({ ...DEFAULT_SKILL_BUTTONS });
     set({ skillButtons: { ...DEFAULT_SKILL_BUTTONS } });
+  },
+  theme: loadTheme(),
+  setTheme: (theme) => {
+    saveString(THEME_KEY, theme);
+    set({ theme });
+  },
+  glove: loadString(GLOVE_KEY) === "1",
+  setGlove: (on) => {
+    saveString(GLOVE_KEY, on ? "1" : "0");
+    set({ glove: on });
+  },
+  splitRatio: loadSplit(),
+  setSplitRatio: (ratio) => {
+    const r = clampSplit(ratio);
+    saveString(SPLIT_KEY, String(r));
+    set({ splitRatio: r });
+  },
+  minimapPin: loadMinimapPin(),
+  setMinimapPin: (minimapPin) => {
+    saveString(MINIMAP_PIN_KEY, minimapPin);
+    set({ minimapPin });
+  },
+  radarScale: loadRadarScale(),
+  setRadarScale: (radarScale) => {
+    saveString(RADAR_SCALE_KEY, String(radarScale));
+    set({ radarScale });
   },
 }));

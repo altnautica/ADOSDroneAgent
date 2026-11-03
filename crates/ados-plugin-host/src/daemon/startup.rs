@@ -12,6 +12,10 @@ pub(super) struct WiredDaemon<H: crate::HostServices> {
     /// supervisor sends after an enable or a permission change), and its accept
     /// task. Bound once for the whole daemon, not per plugin.
     pub(super) control: Option<(PathBuf, JoinHandle<()>)>,
+    /// The event-bus export socket (`plugin.events`) the native control front
+    /// reads the navigation, mapping and follow topics through, and its accept
+    /// task. Bound once for the whole daemon, beside the control socket.
+    pub(super) export: Option<(PathBuf, JoinHandle<()>)>,
     /// The state-poll and token-rotation loops.
     pub(super) loops: (JoinHandle<()>, JoinHandle<()>),
     /// The plugin event bus the host publishes its own lifecycle topics on.
@@ -32,6 +36,10 @@ impl<H: crate::HostServices> WiredDaemon<H> {
         self.loops.1.abort();
         self.reconciler.shutdown();
         if let Some((path, handle)) = self.control {
+            handle.abort();
+            let _ = std::fs::remove_file(&path);
+        }
+        if let Some((path, handle)) = self.export {
             handle.abort();
             let _ = std::fs::remove_file(&path);
         }
@@ -310,7 +318,7 @@ pub(super) async fn wire(
         host.clone(),
         server.invoke_registry(),
         Some(lifecycle),
-        control_dir,
+        control_dir.clone(),
     ) {
         Ok((path, handle)) => {
             tracing::info!(socket = %path.display(), "serving plugin-host control socket");
@@ -322,6 +330,19 @@ pub(super) async fn wire(
                 "failed to bind plugin-host control socket; GCS plugin config writes, \
                  tool invocations and lifecycle pokes will fall back to the state poll"
             );
+            None
+        }
+    };
+    // The event-bus export: the native control front's reach into this
+    // daemon's bus for the operator navigation and mapping streams. A bind
+    // failure is non-fatal for plugins; those streams report absent.
+    let export = match crate::event_export::serve_event_export(Arc::clone(&bus), control_dir) {
+        Ok((path, handle)) => {
+            tracing::info!(socket = %path.display(), "serving plugin event export socket");
+            Some((path, handle))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to bind plugin event export socket");
             None
         }
     };
@@ -341,6 +362,7 @@ pub(super) async fn wire(
         reconciler,
         issuer,
         control,
+        export,
         loops,
         bus,
     }

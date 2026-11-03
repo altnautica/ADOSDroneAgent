@@ -1,18 +1,29 @@
-// System — box health and operations. Reads `GET /api/system` (CPU / RAM / disk /
-// temperatures), the GS-status composite (agent version + uptime, drift-proof),
+// System — the node's identity, health and box-level operations, for every
+// profile. Reads the pairing info (name, mDNS reach name, profile, role), the
+// status poll (version, uptime), `GET /api/system` (CPU / RAM / disk / temps),
 // `GET /api/v1/diagnostics` (board identity), `GET /api/services` (the ados-*
-// unit list), and the recording list. Write actions: record start/stop and a
-// two-tap-confirmed per-service restart (`POST /api/services/{name}/restart`).
-// Honest surfaces: a null reading renders a dash, and a button reflects the
-// agent's real state on the next poll rather than an optimistic flip.
+// units) and, on a ground station, the recording list.
+//
+// Write actions: record start/stop, a guarded per-service restart
+// (`POST /api/services/{name}/restart`) and a guarded board reboot
+// (`POST /api/v1/setup/reboot`). Honest surfaces: a null reading renders a
+// dash, a restart reply is judged by its body (the route answers 200 for every
+// outcome), and buttons follow the next poll rather than an optimistic flip.
 
-import { useCallback, useState } from "react";
-import { Circle, RotateCw, Square } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Check, Circle, Copy, Power, RotateCw, ScrollText, Square, Usb } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
-import { Panel, PanelHeader } from "@/components/ui/panel";
+import { HardwareCard } from "@/components/system/hardware-card";
+import { SparklinesCard } from "@/components/system/sparklines-card";
+import { FcCard } from "@/components/system/fc-card";
+import { VideoCard } from "@/components/system/video-card";
+import { NetworkCard } from "@/components/system/network-card";
+import { CloudCard } from "@/components/system/cloud-card";
+import { StatusTilesCard } from "@/components/system/status-tiles-card";
+import { ConsoleScaffold } from "@/components/ui/console-scaffold";
 import {
   ActionButton,
-  ConfirmButton,
   Dot,
   EmptyNote,
   MeterTile,
@@ -21,15 +32,21 @@ import {
   StaleBadge,
   Tile,
   TileGrid,
-  type Tone,
 } from "@/components/ui/data";
-import { useProfile } from "@/shared/use-profile";
+import { GuardedButton } from "@/components/ui/guarded-button";
+import { ListItem } from "@/components/ui/list-item";
+import { startRecording, stopRecording } from "@/lib/api";
+import { fmtBytes, fmtClock, fmtGb, fmtMb } from "@/lib/format-status";
+import { maxTemp, parseServices, restartVerdict, serviceTone, shortServiceName } from "@/lib/system-ops";
+import { apiFetch } from "@/shared/api-fetch";
+import { rebootAgent } from "@/shared/api/setup-actions";
+import { toast, toastFromError } from "@/shared/api/toast";
+import { DASH, fmtInt, fmtPct, fmtTemp, fmtUptime } from "@/shared/format";
+import "@/shared/i18n";
+import { probePairingInfo, useProfile, type PairingInfoLite } from "@/shared/use-profile";
 import { useResource } from "@/shared/use-resource";
 import { useStatusStore } from "@/stores/status-store";
-import { startRecording, stopRecording } from "@/lib/api";
-import { apiFetch } from "@/shared/api-fetch";
-import { DASH, fmtInt, fmtPct, fmtTemp, fmtUptime } from "@/shared/format";
-import { fmtBytes, fmtClock, fmtGb, fmtMb } from "@/lib/format-status";
+import type { ScreenAction } from "@/nav/navigator";
 
 interface SystemResources {
   cpu_percent?: number | null;
@@ -42,17 +59,6 @@ interface SystemResources {
   disk_percent?: number | null;
   temperatures?: Record<string, number>;
   available?: boolean;
-}
-interface ServiceEntry {
-  name: string;
-  active?: boolean;
-  state?: string;
-  sub_state?: string;
-  memory_mb?: number | null;
-}
-interface ServicesResponse {
-  services?: ServiceEntry[];
-  systemd_available?: boolean;
 }
 interface Diagnostics {
   board?: { name?: string | null; soc?: string | null; arch?: string | null; ram_total_mb?: number | null };
@@ -68,39 +74,63 @@ interface RecordingList {
   items?: RecordingItem[];
 }
 
-function serviceTone(s: ServiceEntry): Tone {
-  if (s.state === "failed" || s.sub_state === "failed") return "err";
-  if (s.active) return "ok";
-  if (s.state === "activating") return "warn";
-  return "muted";
+/** The node's mDNS reach name with a copy control. Only the name the agent
+ *  reports avahi as publishing, never one built from the device label. */
+function CopyHost({ host }: { host: string }) {
+  const { t } = useTranslation();
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(host);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.err(t("cockpit.system.copyFailed"));
+    }
+  };
+  const Icon = copied ? Check : Copy;
+  return (
+    <button
+      type="button"
+      onClick={() => void copy()}
+      aria-label={t("layout.header.copyHost", { host })}
+      className="touch-target inline-flex items-center gap-[0.35rem] rounded-md px-[0.4rem] font-mono text-[0.82rem] text-surface-foreground hover:bg-input/40"
+    >
+      <span className="select-text">{host}</span>
+      <Icon className={copied ? "h-[0.9rem] w-[0.9rem] text-ok" : "h-[0.9rem] w-[0.9rem] text-muted-foreground"} aria-hidden />
+    </button>
+  );
 }
 
-function maxTemp(temps: Record<string, number> | undefined): number | null {
-  if (!temps) return null;
-  const vals = Object.values(temps).filter((v) => typeof v === "number" && Number.isFinite(v));
-  return vals.length ? Math.max(...vals) : null;
-}
-
-/** A short unit name without the `ados-`/`.service` decoration. */
-function shortName(name: string): string {
-  return name.replace(/^ados-/, "").replace(/\.service$/, "");
-}
-
-export function SystemScreen() {
+export function SystemScreen({ dispatch }: { dispatch: (action: ScreenAction) => void }) {
+  const { t } = useTranslation();
   const status = useStatusStore((s) => s.status);
+  const profile = useProfile();
   // The recorder and its file list exist only on a ground station.
-  const hasRecorder = useProfile() === "ground_station";
+  const hasRecorder = profile === "ground_station";
+
+  const [identity, setIdentity] = useState<PairingInfoLite | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void probePairingInfo().then((info) => {
+      if (!cancelled) setIdentity(info);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [profile]);
+
   const sys = useResource<SystemResources>(
     useCallback((s) => apiFetch<SystemResources>("/api/system", { signal: s }), []),
-    2000,
+    5000,
   );
   const diag = useResource<Diagnostics>(
     useCallback((s) => apiFetch<Diagnostics>("/api/v1/diagnostics", { signal: s }), []),
-    5000,
+    10_000,
   );
-  const services = useResource<ServicesResponse>(
-    useCallback((s) => apiFetch<ServicesResponse>("/api/services", { signal: s }), []),
-    3000,
+  const services = useResource(
+    useCallback(async (s: AbortSignal) => parseServices(await apiFetch<unknown>("/api/services", { signal: s })), []),
+    8000,
   );
   const recording = useResource<RecordingList | null>(
     useCallback(
@@ -114,36 +144,46 @@ export function SystemScreen() {
   );
 
   const [restarting, setRestarting] = useState<string | null>(null);
-  // The restart route answers HTTP 200 for every outcome and carries the
-  // verdict in `status`; a refused or unconfirmed restart is shown here until
-  // the next restart attempt.
-  const [restartError, setRestartError] = useState<string | null>(null);
+  const [rebooting, setRebooting] = useState(false);
   const [recordBusy, setRecordBusy] = useState(false);
 
   const r = sys.data;
   const box = status?.system;
   const temp = maxTemp(r?.temperatures) ?? box?.temp_c ?? null;
   const board = diag.data?.board;
-  const svcList = services.data?.services ?? [];
+  const inventory = services.data;
   const isRecording = recording.data?.recording ?? status?.recording ?? false;
 
   const restartService = async (name: string) => {
     if (restarting) return;
+    const short = shortServiceName(name);
     setRestarting(name);
-    setRestartError(null);
     try {
-      const res = await apiFetch<{ status?: string; message?: string }>(
-        `/api/services/${encodeURIComponent(name)}/restart`,
-        { method: "POST", body: {} },
+      const verdict = restartVerdict(
+        await apiFetch<unknown>(`/api/services/${encodeURIComponent(name)}/restart`, { method: "POST", body: {} }),
       );
-      if (res.status !== "ok") {
-        setRestartError(`${shortName(name)} not restarted: ${res.message ?? "the agent refused"}`);
-      }
+      if (verdict.ok) toast.ok(verdict.message ?? t("diagnostics.services.restarted", { name: short }));
+      else toast.err(t("diagnostics.services.notRestarted", { name: short }), verdict.message ?? undefined);
     } catch (err) {
-      setRestartError(`${shortName(name)} not restarted: ${err instanceof Error ? err.message : "request failed"}`);
+      toastFromError(err, t("diagnostics.services.restartFailed"));
     } finally {
       setRestarting(null);
       services.refresh();
+    }
+  };
+
+  const reboot = async () => {
+    if (rebooting) return;
+    setRebooting(true);
+    // If the board never goes down, return to the armed state so the operator
+    // can retry rather than sit on "Rebooting…".
+    window.setTimeout(() => setRebooting(false), 25_000);
+    try {
+      await rebootAgent();
+      toast.ok(t("diagnostics.reboot.queued"), t("cockpit.system.rebootDetail"));
+    } catch (err) {
+      setRebooting(false);
+      toastFromError(err, t("diagnostics.reboot.failed"));
     }
   };
 
@@ -152,64 +192,108 @@ export function SystemScreen() {
     setRecordBusy(true);
     try {
       await (isRecording ? stopRecording() : startRecording());
-    } catch {
-      // the recording poll keeps the button honest.
+    } catch (err) {
+      toastFromError(err, t("cockpit.system.recordFailed"));
     } finally {
       setRecordBusy(false);
       recording.refresh();
     }
   };
 
-  return (
-    <Panel>
-      <PanelHeader
-        title="System"
-        right={
-          <div className="flex items-center gap-[0.5rem]">
-            <span className="font-mono text-[0.78rem] text-muted-foreground">{box?.agent_version ?? DASH}</span>
-            <StaleBadge stale={sys.stale} />
-          </div>
-        }
-      />
+  const role = identity?.role ?? null;
+  const mdnsHost = identity?.mdns_host?.trim() || null;
 
+  return (
+    <ConsoleScaffold
+      title={t("cockpit.system.title")}
+      actions={
+        <div className="flex items-center gap-[0.5rem]">
+          <span className="font-mono text-[0.78rem] text-muted-foreground">{box?.agent_version ?? DASH}</span>
+          <StaleBadge stale={sys.stale || services.stale} />
+        </div>
+      }
+    >
       <div className="flex flex-col gap-[0.15rem]">
-        <SectionHeader>Box health</SectionHeader>
+        <SectionHeader>{t("cockpit.system.identity")}</SectionHeader>
+        <Row label={t("cockpit.system.name")} value={identity?.name?.trim() || DASH} />
+        <Row label={t("cockpit.system.reachName")} value={mdnsHost ? <CopyHost host={mdnsHost} /> : DASH} />
+        <Row
+          label={t("cockpit.system.profile")}
+          value={profile && profile !== "unknown" ? profile.replace("_", " ") : DASH}
+          hint={role ? t("cockpit.system.roleHint", { role }) : undefined}
+        />
+        <Row label={t("cockpit.system.version")} value={box?.agent_version ?? DASH} mono />
+        <Row label={t("cockpit.system.uptime")} value={fmtUptime(box?.uptime_seconds)} />
+        {board?.name ? (
+          <Row label={t("cockpit.system.board")} value={board.name} hint={[board.soc, board.arch].filter(Boolean).join(" · ") || undefined} />
+        ) : null}
+        {board?.ram_total_mb ? <Row label={t("cockpit.system.ramInstalled")} value={fmtMb(board.ram_total_mb)} /> : null}
+        <div className="mt-[0.3rem] flex">
+          <GuardedButton
+            label={rebooting ? t("diagnostics.reboot.rebooting") : t("diagnostics.reboot.button")}
+            guardLabel={t("cockpit.system.rebootGuard")}
+            icon={Power}
+            disabled={rebooting}
+            onFired={() => void reboot()}
+          />
+        </div>
+
+        <SectionHeader>{t("cockpit.system.tools")}</SectionHeader>
+        <ListItem
+          icon={Usb}
+          headline={t("peripherals.page.title")}
+          supporting={t("cockpit.system.peripheralsHint")}
+          onClick={() => dispatch({ kind: "open-detail", id: "peripherals" })}
+        />
+        <ListItem
+          icon={ScrollText}
+          headline={t("logs.page.title")}
+          supporting={t("cockpit.system.logsHint")}
+          onClick={() => dispatch({ kind: "open-detail", id: "logs" })}
+        />
+
+        <SectionHeader>{t("cockpit.system.health")}</SectionHeader>
+        <StatusTilesCard />
+        <SparklinesCard />
+        <FcCard />
+        <VideoCard />
+        <NetworkCard />
+        <CloudCard />
         <TileGrid>
-          <MeterTile label="CPU" value={r?.cpu_percent} display={fmtPct(r?.cpu_percent)} />
+          <MeterTile label={t("diagnostics.metrics.cpu")} value={r?.cpu_percent} display={fmtPct(r?.cpu_percent)} />
           <MeterTile
-            label="RAM"
+            label={t("diagnostics.metrics.memory")}
             value={r?.memory_used_mb}
             max={r?.memory_total_mb ?? undefined}
             display={r?.memory_total_mb ? `${fmtMb(r?.memory_used_mb)} / ${fmtMb(r.memory_total_mb)}` : fmtPct(r?.memory_percent)}
           />
           <MeterTile
-            label="Disk"
+            label={t("diagnostics.metrics.disk")}
             value={r?.disk_used_gb}
             max={r?.disk_total_gb ?? undefined}
             display={r?.disk_total_gb ? `${fmtGb(r?.disk_used_gb)} / ${fmtGb(r.disk_total_gb)}` : fmtPct(r?.disk_percent)}
           />
-          <Tile label="Temp" value={fmtTemp(temp)} tone={temp != null && temp >= 80 ? "err" : temp != null && temp >= 70 ? "warn" : undefined} />
-          <Tile label="Uptime" value={fmtUptime(box?.uptime_seconds)} />
-          <Tile label="Cores" value={fmtInt(r?.cpu_count)} />
+          <Tile
+            label={t("diagnostics.metrics.temp")}
+            value={fmtTemp(temp)}
+            tone={temp != null && temp >= 80 ? "err" : temp != null && temp >= 70 ? "warn" : undefined}
+          />
+          <Tile label={t("cockpit.system.cores")} value={fmtInt(r?.cpu_count)} />
         </TileGrid>
-
-        <SectionHeader>Agent &amp; board</SectionHeader>
-        <Row label="Agent version" value={box?.agent_version ?? DASH} />
-        {board?.name ? <Row label="Board" value={board.name} hint={[board.soc, board.arch].filter(Boolean).join(" · ") || undefined} /> : null}
-        {board?.ram_total_mb ? <Row label="RAM installed" value={fmtMb(board.ram_total_mb)} /> : null}
+        <HardwareCard />
 
         {hasRecorder ? (
           <>
-            <SectionHeader>Recording</SectionHeader>
+            <SectionHeader>{t("cockpit.system.recording")}</SectionHeader>
             <div className="flex items-center gap-[0.5rem]">
               <Dot tone={isRecording ? "err" : "muted"} />
               <span className="flex-1 truncate text-[0.85rem] text-surface-foreground">
-                {isRecording ? recording.data?.current_filename ?? "recording…" : "idle"}
+                {isRecording ? (recording.data?.current_filename ?? t("cockpit.system.recordingNow")) : t("cockpit.system.recordingIdle")}
               </span>
               <ActionButton
-                label={isRecording ? "Stop" : "Record"}
+                label={isRecording ? t("cockpit.system.stop") : t("cockpit.system.record")}
                 icon={isRecording ? Square : Circle}
-                onClick={toggleRecord}
+                onClick={() => void toggleRecord()}
                 variant={isRecording ? "danger" : "default"}
                 busy={recordBusy}
               />
@@ -217,48 +301,41 @@ export function SystemScreen() {
             {recording.data?.items?.length ? (
               <div className="mt-[0.2rem] flex flex-col gap-[0.15rem]">
                 {recording.data.items.slice(0, 4).map((it, i) => (
-                  <Row
-                    key={(it.filename ?? "") + i}
-                    label={it.filename ?? DASH}
-                    hint={fmtClock(it.mtime)}
-                    value={fmtBytes(it.size_bytes)}
-                  />
+                  <Row key={(it.filename ?? "") + i} label={it.filename ?? DASH} hint={fmtClock(it.mtime)} value={fmtBytes(it.size_bytes)} />
                 ))}
               </div>
             ) : null}
           </>
         ) : null}
 
-        <SectionHeader>
-          Services{services.data?.systemd_available === false ? " (systemd unavailable)" : ""}
-        </SectionHeader>
-        {restartError ? <div className="truncate text-[0.75rem] text-err">{restartError}</div> : null}
-        {svcList.length ? (
-          svcList.map((s) => (
+        <SectionHeader>{t("diagnostics.services.title")}</SectionHeader>
+        {inventory && !inventory.systemdAvailable ? (
+          <EmptyNote>{t("cockpit.system.noSystemd")}</EmptyNote>
+        ) : inventory?.services.length ? (
+          inventory.services.map((s) => (
             <div key={s.name} className="flex items-center gap-[0.5rem] rounded-md bg-input/30 px-[0.6rem] py-[0.3rem]">
               <Dot tone={serviceTone(s)} />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[0.82rem] text-surface-foreground">{shortName(s.name)}</div>
+                <div className="truncate text-[0.82rem] text-surface-foreground">{shortServiceName(s.name)}</div>
                 <div className="truncate text-[0.75rem] text-muted-foreground">
                   {s.state ?? DASH}
                   {s.sub_state && s.sub_state !== s.state ? ` · ${s.sub_state}` : ""}
                   {s.memory_mb != null ? ` · ${fmtMb(s.memory_mb)}` : ""}
                 </div>
               </div>
-              <ConfirmButton
-                label={`Restart ${shortName(s.name)}`}
-                confirmLabel="Confirm restart"
+              <GuardedButton
+                label={restarting === s.name ? t("cockpit.system.restarting") : t("diagnostics.services.restart")}
+                guardLabel={t("cockpit.system.restartGuard")}
                 icon={RotateCw}
-                onConfirm={() => restartService(s.name)}
-                busy={restarting === s.name}
-                compact
+                disabled={restarting !== null}
+                onFired={() => void restartService(s.name)}
               />
             </div>
           ))
         ) : (
-          <EmptyNote>No agent services reported.</EmptyNote>
+          <EmptyNote>{services.ready ? t("cockpit.system.noServices") : t("diagnostics.services.loading")}</EmptyNote>
         )}
       </div>
-    </Panel>
+    </ConsoleScaffold>
   );
 }

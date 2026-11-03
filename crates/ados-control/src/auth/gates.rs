@@ -99,6 +99,8 @@ pub const RELAY_FORBIDDEN_PATHS: &[&str] = &[
     "/api/mcp/revoke",
     "/api/dashboard/pin/set",
     "/api/dashboard/pin/clear",
+    // Covers `/api/v1/security/api-key/rotate` as a sub-path.
+    "/api/v1/security/api-key",
     "/api/plugins/capability-token",
     "/api/wfb/pair/local-bind",
     "/api/wfb/pair/unpair",
@@ -186,6 +188,8 @@ pub fn is_public(path: &str) -> bool {
             | "/api/v1/ground-station/pic/events"
             | "/api/v1/ground-station/ws/mesh"
             | "/api/v1/ground-station/ws/buttons"
+            // The nav stream authenticates its own handshake the same way.
+            | "/api/v1/nav/stream"
     )
 }
 

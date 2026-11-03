@@ -69,6 +69,16 @@ pub(super) fn build_command(
             ),
             json!({"status": "ok", "cmd": "resumeMission"}),
         )),
+        "ekfsourceset" => {
+            let set = ekf_source_set(args)?;
+            Ok((
+                command_long(
+                    MavCmd::MAV_CMD_SET_EKF_SOURCE_SET,
+                    [f32::from(set), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ),
+                json!({"status": "ok", "cmd": "ekfSourceSet", "set": set}),
+            ))
+        }
         "mode" => {
             // `mode` needs a name; 400 "Mode name required" when args empty.
             let name = match args.first().and_then(arg_as_str) {
@@ -253,6 +263,24 @@ pub(super) fn takeoff_altitude(args: &[Value]) -> Result<f32, CommandError> {
                 "takeoff altitude must be a finite number greater than 0 and at \
                  most {MAX_TAKEOFF_ALT_M} metres"
             ),
+        }),
+    }
+}
+
+/// The EKF source set from `args[0]`: exactly 1, 2 or 3, as a JSON integer or
+/// its string form. A missing, fractional or out-of-range set is a 400; the
+/// set number goes into `param1` verbatim, so it is never defaulted.
+pub(super) fn ekf_source_set(args: &[Value]) -> Result<u8, CommandError> {
+    let parsed = match args.first() {
+        Some(Value::Number(n)) => n.as_u64(),
+        Some(Value::String(s)) => s.trim().parse::<u64>().ok(),
+        _ => None,
+    };
+    match parsed {
+        Some(set @ 1..=3) => Ok(set as u8),
+        _ => Err(CommandError {
+            status: StatusCode::BAD_REQUEST,
+            detail: "EKF source set must be 1, 2 or 3".to_string(),
         }),
     }
 }

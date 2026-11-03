@@ -3,13 +3,13 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import "@/i18n";
+import "@/shared/i18n";
 
 import { CaptureView } from "@/components/panels/capture-panel";
 import { LoraView } from "@/components/panels/lora-panel";
 import { SensorsView } from "@/components/panels/sensors-panel";
 import { ProfileGateView } from "@/components/profile-gate";
-import { captureErrorCode, markCapture, startCapture, type CaptureState } from "@/lib/capture";
+import { captureErrorCode, markCapture, startCapture, type CaptureState } from "@/shared/api/capture";
 import {
   loraChips,
   meterTone,
@@ -17,8 +17,8 @@ import {
   type LoraRegionRow,
   type LoraRule,
   type LoraStatus,
-} from "@/lib/lora";
-import { rateVerdict, type SensorsStatus } from "@/lib/sensors";
+} from "@/shared/api/lora";
+import { rateVerdict, type SensorsStatus } from "@/shared/api/sensors";
 import { ROUTES } from "@/route-table";
 
 const html = (el: Parameters<typeof renderToStaticMarkup>[0]) => renderToStaticMarkup(el);

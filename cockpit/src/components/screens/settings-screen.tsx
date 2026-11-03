@@ -13,11 +13,25 @@
 //   #            the raw root (all top-level config sections)
 //   #<dotpath>   a raw object's fields
 //   @<dotpath>   a leaf's touch editor
+//   !<id>        a panel page (appearance, gamepad) or an agent settings
+//                section (lib/settings-sections.ts)
 
-import type { ReactNode } from "react";
-import { ChevronLeft, ChevronRight, Gamepad2, Layers, Settings as SettingsIcon } from "lucide-react";
+import { Suspense, type ReactNode } from "react";
+import { useTranslation } from "react-i18next";
+import { ChevronLeft, ChevronRight, Gamepad2, Layers, Palette, Settings as SettingsIcon } from "lucide-react";
 
+import { AppearanceSettings } from "@/components/settings/appearance-settings";
 import { GamepadBindings } from "@/components/settings/gamepad-bindings";
+import { SECTION_ICONS, SECTION_PAGES } from "@/components/settings/sections/registry";
+import {
+  SETTINGS_SECTIONS,
+  isSettingsSectionId,
+  sectionVisibleFor,
+  visibleSections,
+  type SettingsSectionId,
+} from "@/lib/settings-sections";
+import { useNodeIdentity, type NodeIdentityLite } from "@/shared/use-profile";
+import "@/shared/i18n";
 
 import { Panel } from "@/components/ui/panel";
 import { EmptyNote, StaleBadge } from "@/components/ui/data";
@@ -56,12 +70,19 @@ export function SettingsScreen({
   const edit = (p: string) => dispatch({ kind: "open-detail", id: `settings:@${p}` });
   const back = () => dispatch({ kind: "back" });
 
-  const { title, hint } = headerFor(mode, rest);
+  const { t } = useTranslation();
+  const identity = useNodeIdentity();
+  const { title, hint } = headerFor(mode, rest, (id) => ({
+    title: t(`cockpit.settingsSections.${id}.title`),
+    hint: t(`cockpit.settingsSections.${id}.summary`),
+  }));
   const isRoot = mode === "~" && rest === "";
 
   let body: ReactNode;
-  if (mode === "!") {
-    body = <GamepadBindings />;
+  if (mode === "!" && isSettingsSectionId(rest)) {
+    body = <SectionBody id={rest} identity={identity} />;
+  } else if (mode === "!") {
+    body = rest === "appearance" ? <AppearanceSettings /> : <GamepadBindings />;
   } else if (config == null) {
     body = <EmptyNote>{ready ? error ?? "Configuration is unavailable." : "Reading configuration…"}</EmptyNote>;
   } else if (mode === "@") {
@@ -73,6 +94,14 @@ export function SettingsScreen({
         onGroup={(id) => dispatch({ kind: "open-detail", id: `settings:~${id}` })}
         onAll={() => drill("")}
         onGamepad={() => dispatch({ kind: "open-detail", id: "settings:!gamepad" })}
+        onAppearance={() => dispatch({ kind: "open-detail", id: "settings:!appearance" })}
+        sections={visibleSections(identity.profile, identity.role).map((s) => s.id)}
+        onSection={(id) => dispatch({ kind: "open-detail", id: `settings:!${id}` })}
+        sectionLabel={(id) => ({
+          title: t(`cockpit.settingsSections.${id}.title`),
+          summary: t(`cockpit.settingsSections.${id}.summary`),
+        })}
+        sectionsHeading={t("cockpit.settingsSections.heading")}
       />
     );
   } else if (mode === "~") {
@@ -118,11 +147,21 @@ function CuratedRoot({
   onGroup,
   onAll,
   onGamepad,
+  onAppearance,
+  sections,
+  onSection,
+  sectionLabel,
+  sectionsHeading,
 }: {
   config: AgentConfig;
   onGroup: (id: string) => void;
   onAll: () => void;
   onGamepad: () => void;
+  onAppearance: () => void;
+  sections: SettingsSectionId[];
+  onSection: (id: SettingsSectionId) => void;
+  sectionLabel: (id: SettingsSectionId) => { title: string; summary: string };
+  sectionsHeading: string;
 }) {
   return (
     <div className="flex flex-col gap-[0.3rem]">
@@ -164,6 +203,18 @@ function CuratedRoot({
       </button>
       <button
         type="button"
+        onClick={onAppearance}
+        className="touch-target flex w-full items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.45rem] text-left hover:bg-muted active:bg-muted"
+      >
+        <Palette className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-[0.95rem] text-surface-foreground">Appearance</div>
+          <div className="truncate text-[0.75rem] text-muted-foreground">Theme and glove mode on this panel</div>
+        </div>
+        <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
+      </button>
+      <button
+        type="button"
         onClick={onGamepad}
         className="touch-target flex w-full items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.45rem] text-left hover:bg-muted active:bg-muted"
       >
@@ -176,7 +227,59 @@ function CuratedRoot({
         </div>
         <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
       </button>
+
+      {sections.length ? (
+        <h2 className="px-[0.2rem] pt-[0.6rem] text-[0.75rem] font-semibold uppercase tracking-wide text-muted-foreground">
+          {sectionsHeading}
+        </h2>
+      ) : null}
+      {sections.map((id) => {
+        const Icon = SECTION_ICONS[id];
+        const label = sectionLabel(id);
+        return (
+          <button
+            key={id}
+            type="button"
+            onClick={() => onSection(id)}
+            className="touch-target flex w-full items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.45rem] text-left hover:bg-muted active:bg-muted"
+          >
+            <Icon className="h-[1.4rem] w-[1.4rem] shrink-0 text-hud-primary" aria-hidden />
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-[0.95rem] text-surface-foreground">{label.title}</div>
+              <div className="truncate text-[0.75rem] text-muted-foreground">{label.summary}</div>
+            </div>
+            <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
+          </button>
+        );
+      })}
     </div>
+  );
+}
+
+// ── an agent settings section page ───────────────────────────────────────────
+
+function SectionBody({
+  id,
+  identity,
+}: {
+  id: SettingsSectionId;
+  identity: NodeIdentityLite;
+}) {
+  const { t } = useTranslation();
+  const spec = SETTINGS_SECTIONS.find((s) => s.id === id);
+  // Wait for the profile before refusing a gated section, so a deep link does
+  // not flash "not on this node" while the probe is in flight.
+  if (spec?.profiles && identity.profile == null) {
+    return <EmptyNote>{t("cockpit.settingsSections.loading")}</EmptyNote>;
+  }
+  if (!spec || !sectionVisibleFor(spec, identity.profile, identity.role)) {
+    return <EmptyNote>{t("cockpit.settingsSections.notOnProfile")}</EmptyNote>;
+  }
+  const Page = SECTION_PAGES[id];
+  return (
+    <Suspense fallback={<EmptyNote>{t("cockpit.settingsSections.loading")}</EmptyNote>}>
+      <Page />
+    </Suspense>
   );
 }
 
@@ -260,8 +363,14 @@ function RawView({
 
 // ── header title + hint ──────────────────────────────────────────────────────
 
-function headerFor(mode: string, rest: string): { title: string; hint?: string } {
+function headerFor(
+  mode: string,
+  rest: string,
+  sectionHeader: (id: SettingsSectionId) => { title: string; hint?: string },
+): { title: string; hint?: string } {
   if (mode === "~" && rest === "") return { title: "Settings" };
+  if (mode === "!" && isSettingsSectionId(rest)) return sectionHeader(rest);
+  if (mode === "!" && rest === "appearance") return { title: "Appearance", hint: "Settings" };
   if (mode === "!") return { title: "Gamepad skill buttons", hint: "Settings" };
   if (mode === "~") {
     const g = curatedGroupById(rest);

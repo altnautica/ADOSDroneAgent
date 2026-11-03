@@ -72,6 +72,10 @@ module.exports = {
           "glass-strong": "var(--hud-glass-strong)",
           hair: "var(--hud-hair)",
           "hair-2": "var(--hud-hair-2)",
+          track: "var(--hud-track)",
+          lead: "var(--hud-lead)",
+          coast: "var(--hud-coast)",
+          gt: "var(--hud-gt)",
         },
       },
       borderRadius: {
@@ -97,6 +101,15 @@ module.exports = {
       },
       backdropBlur: {
         hud: "9px",
+      },
+      borderWidth: {
+        "hud-target": "var(--hud-target-stroke)",
+      },
+      letterSpacing: {
+        "hud-tag": "var(--hud-target-tag-tracking)",
+      },
+      spacing: {
+        "hud-tag": "var(--hud-target-tag-pad)",
       },
     },
   },

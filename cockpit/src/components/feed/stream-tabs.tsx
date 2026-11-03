@@ -3,12 +3,9 @@
 // re-points the video layer to it. Shown under the safety band.
 
 import { useFeedStore } from "@/stores/feed-store";
+import { cameraLabel } from "@/lib/feed-legs";
 import type { RosterCamera } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-function cameraLabel(cam: RosterCamera): string {
-  return cam.label ?? cam.name ?? cam.role ?? cam.id;
-}
 
 export function StreamTabs({ cameras }: { cameras: RosterCamera[] }) {
   const activeCameraId = useFeedStore((s) => s.activeCameraId);

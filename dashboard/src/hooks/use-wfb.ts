@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { getWfbStatus } from "@/lib/wfb";
+import { getWfbStatus } from "@/shared/api/wfb";
 
 export function useWfb() {
   return useQuery({

@@ -230,6 +230,15 @@ status = "active"
 rust_const = "ados_sensorbus::SENSOR_BUS_VERSION"
 description = "The sensor bus (seam J): length-prefixed msgpack frames {v, kind, src, origin, payload} brokered by ados-clock on sensors.sock. clock/imu/gnss/trigger payloads are the capture contract ados.capture.v1 protobuf messages, with every t_ns on the host monotonic clock; baro, mag and sync are msgpack; rtcm is raw RTCM3 bytes toward the receivers."
 
+[[contract]]
+id = "plugin.events"
+version = 1
+wire = "newline-json"
+transport = "unix-stream"
+status = "active"
+rust_const = "ados_plugin_host::event_export::EVENT_EXPORT_VERSION"
+description = "The plugin event-bus export (seam K): a host service opens the plugin host's root-only _events.sock, writes one {v, op: subscribe, topics: [exact topic names]} line, and reads one {v, topic, publisher, ts_ms, payload} line per bus event on those topics. Every event already passed the host's publish check; the publisher id is host-stamped. The native control front reads the navigation, mapping and follow topics through it."
+
 # ===========================================================================
 # SIDECARS — versioned on-disk state files
 # ===========================================================================
@@ -810,3 +819,8 @@ owner = "ados-radio"
 id = "wifi-cmd"
 path = "/run/ados/wifi-cmd.sock"
 owner = "ados-net"
+
+[[socket]]
+id = "plugin-events"
+path = "/run/ados/plugin-host/_events.sock"
+owner = "ados-plugin-host"

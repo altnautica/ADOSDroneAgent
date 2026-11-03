@@ -1,10 +1,10 @@
-// Pure state mapping for the Feed's safety band: reach badge, arm state, GPS,
+// Pure state mapping for the Feed's safety band: reach badge, arm state,
 // link, video, battery and the preflight checks the cockpit can evaluate.
 // Unknown is always a dash, never a fabricated value.
 
 import { BATTERY_LOW_PCT, batteryReading } from "@/lib/alerts";
 import type { BatteryHealth, GsStatus, VehicleState } from "@/lib/types";
-import { DASH, fmtGpsFix } from "@/shared/format";
+import { DASH } from "@/shared/format";
 import type { AgentProfile } from "@/shared/use-profile";
 import type { VideoTransportSnapshot } from "@/shared/video-transport";
 import type { HomePoint } from "@/stores/flight-store";
@@ -23,15 +23,6 @@ export function reachBadge(profile: AgentProfile | null, hostname: string): Reac
 export function armLabel(live: boolean, armed: boolean | undefined): string {
   if (!live || armed === undefined) return DASH;
   return armed ? "ARMED" : "DISARMED";
-}
-
-/** GPS fix and satellites, e.g. `3D 14`, `RTK fix 21`; a dash when unknown. */
-export function gpsLabel(t: VehicleState | null, live: boolean): string {
-  if (!live) return DASH;
-  const fix = fmtGpsFix(t?.gps?.fix_type);
-  const sats = t?.gps?.satellites;
-  const satText = typeof sats === "number" && sats <= 200 ? ` ${sats}` : "";
-  return fix === DASH ? DASH : `${fix}${satText}`;
 }
 
 /** The link chip: heartbeat age on a drone, RSSI on a ground station. */

@@ -3,13 +3,14 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { TAB_ORDER } from "@/nav/navigator";
 import { useNavStore } from "@/stores/nav-store";
 
-/** The tabs a drone shows: the ground-station-only screens are hidden. */
-const DRONE_TABS = TAB_ORDER.filter((id) => id !== "mesh" && id !== "uplink");
+/** The tabs a drone shows: the ground-station and compute screens are hidden. */
+const DRONE_TABS = TAB_ORDER.filter((id) => id !== "mesh" && id !== "sources" && id !== "uplink" && id !== "node");
 
-function reset(tabs: string[] = [...TAB_ORDER], active = tabs[0]) {
+function reset(tabs: string[] = [...TAB_ORDER], active = tabs[0], chosen = false) {
   useNavStore.setState({
     activeTabId: active,
     detailStack: [],
+    tabChosen: chosen,
     menuFocusIndex: 0,
     quickMenuOpen: false,
     menuCollapsed: false,
@@ -106,5 +107,46 @@ describe("declaring the visible tabs", () => {
     reset(DRONE_TABS);
     useNavStore.getState().setMenuFocus(DRONE_TABS.length + 3);
     expect(useNavStore.getState().menuFocusIndex).toBe(0);
+  });
+});
+
+describe("the profile's home tab", () => {
+  it("opens on the home tab when the operator never chose one", () => {
+    reset([...TAB_ORDER], "feed");
+    useNavStore.getState().setVisibleTabs(["feed", "node", "settings"], "node");
+    const s = useNavStore.getState();
+    expect(s.activeTabId).toBe("node");
+    expect(s.visibleTabs[s.menuFocusIndex]).toBe("node");
+  });
+
+  it("keeps a tab the operator chose", () => {
+    reset([...TAB_ORDER], "settings", true);
+    useNavStore.getState().setVisibleTabs(["feed", "node", "settings"], "node");
+    expect(useNavStore.getState().activeTabId).toBe("settings");
+  });
+
+  it("leaves a chosen tab the profile hides for the home tab", () => {
+    reset([...TAB_ORDER], "mesh", true);
+    useNavStore.getState().setVisibleTabs(DRONE_TABS, "feed");
+    expect(useNavStore.getState().activeTabId).toBe("feed");
+  });
+
+  it("stays put while the profile is unknown", () => {
+    reset([...TAB_ORDER], "settings");
+    useNavStore.getState().setVisibleTabs([...TAB_ORDER], null);
+    expect(useNavStore.getState().activeTabId).toBe("settings");
+  });
+
+  it("ignores a home tab the profile does not show", () => {
+    reset([...TAB_ORDER], "feed");
+    useNavStore.getState().setVisibleTabs(DRONE_TABS, "capture");
+    expect(useNavStore.getState().activeTabId).toBe("feed");
+  });
+
+  it("points the focus ring at the chosen tab's visible position", () => {
+    reset(DRONE_TABS, "feed");
+    useNavStore.getState().goTab("settings");
+    const s = useNavStore.getState();
+    expect(s.visibleTabs[s.menuFocusIndex]).toBe("settings");
   });
 });

@@ -2,7 +2,7 @@
 // strength; a null reading (no packet decoded yet) shows every bar muted rather
 // than a fabricated level. Purely presentational.
 
-import type { Tone } from "@/components/ui/data";
+import type { Tone } from "@/lib/tone";
 import { cn } from "@/lib/utils";
 
 const BAR_HEIGHTS = ["0.32rem", "0.46rem", "0.6rem", "0.74rem"];

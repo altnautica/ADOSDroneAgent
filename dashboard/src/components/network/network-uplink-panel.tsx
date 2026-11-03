@@ -12,8 +12,8 @@ import {
   setShareUplink,
   setUplinkPriority,
   type GsNetworkView,
-} from "@/lib/uplink";
-import { toast, toastFromError } from "@/lib/toast";
+} from "@/shared/api/uplink";
+import { toast, toastFromError } from "@/shared/api/toast";
 
 const POLL_MS = 5_000;
 

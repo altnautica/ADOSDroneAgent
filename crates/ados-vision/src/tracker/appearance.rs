@@ -2,9 +2,9 @@
 
 use ados_protocol::framebus::{BoundingBox, Detection};
 
-/// Length of the model-free appearance descriptor the interim
-/// [`HistogramAppearance`] produces. Small and fixed so it is cheap to compare
-/// and carry; a learned embedding would pick its own length behind the trait.
+/// Length of the model-free appearance descriptor
+/// ([`crate::histogram::histogram_descriptor`]). Small and fixed so it is cheap
+/// to compare and carry; a learned embedding picks its own length.
 pub const APPEARANCE_DIM: usize = 16;
 
 /// An appearance descriptor for one candidate box.
@@ -55,15 +55,14 @@ pub trait AppearanceModel: Send + Sync {
     fn similarity(&self, a: &Appearance, b: &Appearance) -> f32;
 }
 
-/// The model-free interim appearance backend: cosine similarity over the
-/// descriptor vectors.
+/// The model-free appearance backend: cosine similarity over the descriptor
+/// vectors.
 ///
-/// It does NOT extract from pixels (a real deployment swaps in a re-id model for
-/// that); it scores descriptors the caller already holds. Cosine
-/// similarity is scale-invariant and maps cleanly onto `0..=1` after clamping,
-/// so a colour/gradient histogram now and a learned embedding later both work
-/// through the same `similarity`. Two equal vectors score 1.0; orthogonal ones
-/// score 0.0.
+/// It scores descriptors the caller already holds: the colour histogram
+/// [`crate::histogram::histogram_descriptor`] computes from a box's pixels, or
+/// a learned re-id embedding. Cosine similarity is scale-invariant and maps
+/// cleanly onto `0..=1` after clamping, so both work through the same
+/// `similarity`. Two equal vectors score 1.0; orthogonal ones score 0.0.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HistogramAppearance;
 
@@ -100,8 +99,8 @@ pub(super) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// [`Detection`] with `appearance: None`; the appearance-aware
 /// [`SingleObjectTracker::update_with_appearance`](super::SingleObjectTracker::update_with_appearance) path carries a descriptor per
 /// candidate (extracted from pixels in a real deployment, supplied directly by
-/// the synthetic harness). The descriptor never reaches the wire, only the
-/// resulting lock-state / association confidence does.
+/// the synthetic harness). The tracker never writes the descriptor onto the
+/// detection; only the resulting lock-state / association confidence does.
 #[derive(Debug, Clone)]
 pub struct Candidate {
     /// The detection as it would appear on the wire (no appearance field).

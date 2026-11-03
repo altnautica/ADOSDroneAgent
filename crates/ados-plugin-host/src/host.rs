@@ -549,6 +549,8 @@ pub trait HostServices: Send + Sync + 'static {
     /// `vision.subscribe_detections` and pushes each batch to the plugin as a
     /// `vision.deliver_detection` event, mirroring the frame-descriptor pump.
     /// The bytes are an encoded `ados_protocol::framebus::DetectionBatch`.
+    /// `embeddings` is the subscriber's opt-in to per-detection appearance
+    /// embeddings (the `embedding` / `embedding_model` detection attributes).
     ///
     /// The default returns `None`, keeping [`NoopHost`] unaffected (no push
     /// stream). A real host returns a receiver whenever its vision slot is
@@ -557,6 +559,7 @@ pub trait HostServices: Send + Sync + 'static {
         &self,
         _plugin_id: &str,
         _camera_id: &str,
+        _embeddings: bool,
     ) -> Option<tokio::sync::broadcast::Receiver<Vec<u8>>> {
         None
     }

@@ -4,9 +4,11 @@
 // focus ring highlights the focused entry so the menu is fully operable
 // eyes-on-panel with any input source.
 
-import { useProfile } from "@/shared/use-profile";
+import { useNodeIdentity } from "@/shared/use-profile";
 import { useNavStore } from "@/stores/nav-store";
+import { useStatusStore } from "@/stores/status-store";
 import { tabScreens } from "@/nav/registry";
+import { CHROME } from "@/lib/cockpit-layout";
 import { cn } from "@/lib/utils";
 
 export function MenuRail({ floating = false }: { floating?: boolean }) {
@@ -14,15 +16,17 @@ export function MenuRail({ floating = false }: { floating?: boolean }) {
   const menuFocusIndex = useNavStore((s) => s.menuFocusIndex);
   const goTab = useNavStore((s) => s.goTab);
   const setMenuFocus = useNavStore((s) => s.setMenuFocus);
-  const profile = useProfile();
-  const tabs = tabScreens(profile);
+  const { profile, role } = useNodeIdentity();
+  const fcFamily = useStatusStore((s) => s.status?.fc_family ?? null);
+  const tabs = tabScreens(profile, role, fcFamily);
 
   return (
     <nav
       className={cn(
         "flex shrink-0 gap-[0.3rem] overflow-auto p-[0.3rem]",
         // rail (landscape) vs strip (portrait)
-        "landscape:w-[6.5rem] landscape:flex-col portrait:w-full portrait:flex-row",
+        "landscape:flex-col portrait:w-full portrait:flex-row",
+        CHROME.menuSize,
         floating
           ? "pointer-events-auto landscape:bg-background/45 portrait:bg-background/60 backdrop-blur-sm"
           : "landscape:border-r landscape:border-border portrait:border-t portrait:border-border bg-surface/50",

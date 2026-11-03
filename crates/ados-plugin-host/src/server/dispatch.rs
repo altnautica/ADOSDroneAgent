@@ -239,23 +239,17 @@ impl<H: HostServices> Connection<H> {
                         // Persist the latest event per topic to the plugin's
                         // state sidecar before fanning out, so the native front
                         // can serve the plugin's own published state to the GCS
-                        // over the LAN. The publish authorization is the security
-                        // boundary; a write fault is logged, never fatal to the
-                        // publish.
-                        if let Err(e) = crate::state_sidecar::record(
+                        // over the LAN. Written at most 2 Hz per topic, the last
+                        // value always landing; a write fault is logged, never
+                        // fatal to the publish. The publish authorization is the
+                        // security boundary.
+                        crate::state_sidecar::record_throttled(
                             &self.socket_dir,
                             &self.plugin_id,
                             &event.topic,
                             &event.payload,
                             event.timestamp_ms,
-                        ) {
-                            tracing::warn!(
-                                plugin_id = %self.plugin_id,
-                                topic = %event.topic,
-                                error = %e,
-                                "failed to write plugin state sidecar"
-                            );
-                        }
+                        );
                         let delivered = self.bus.publish(event);
                         let result = Value::Map(vec![(
                             Value::from("delivered"),

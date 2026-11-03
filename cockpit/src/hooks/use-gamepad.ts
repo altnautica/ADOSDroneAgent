@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { publishGamepadButtons } from "@/lib/gamepad-bus";
 import type { NavCommand } from "@/nav/navigator";
 import { useConfirmStore } from "@/stores/confirm-store";
+import { useInputStore } from "@/stores/input-store";
 import { useNavStore } from "@/stores/nav-store";
 
 // Standard-mapping button indices (https://w3c.github.io/gamepad/#remapping).
@@ -72,6 +73,7 @@ export function useGamepad(): GamepadState {
         const was = prev.current;
         prev.current = pressed;
         publishGamepadButtons(pressed);
+        if (pressed.some((p, i) => p && !was[i])) useInputStore.getState().setSource("gamepad");
 
         const confirm = useConfirmStore.getState();
         if (confirm.pending) {

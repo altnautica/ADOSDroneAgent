@@ -2,29 +2,36 @@
 // button/gamepad focus ring, and the quick menu. Mirrors the TFT
 // `PageNavigator`: one place decides what is on screen. The active tab is
 // persisted to localStorage so a kiosk reload returns to the same screen
-// (the TFT persists to /run/ados/lcd-state.json for the same reason).
+// (the TFT persists to /run/ados/lcd-state.json for the same reason). With
+// nothing persisted, the cockpit opens on the profile's home screen once the
+// profile is known.
 
 import { create } from "zustand";
 
+import { offerCommand } from "@/lib/command-stack";
 import {
   DEFAULT_TAB_ID,
   TAB_ORDER,
   type NavCommand,
   type ScreenAction,
 } from "@/nav/navigator";
+import { useDirtyStore } from "@/stores/dirty-store";
 
 const PERSIST_KEY = "ados-cockpit-active-tab";
 
-function loadPersistedTab(): string {
-  if (typeof localStorage === "undefined") return DEFAULT_TAB_ID;
+/** The tab the operator last chose, or null when none was saved. */
+function loadPersistedTab(): string | null {
+  if (typeof localStorage === "undefined") return null;
   try {
     const saved = localStorage.getItem(PERSIST_KEY);
     if (saved && TAB_ORDER.includes(saved)) return saved;
   } catch {
     // storage disabled — fall through to the default
   }
-  return DEFAULT_TAB_ID;
+  return null;
 }
+
+const PERSISTED_TAB = loadPersistedTab();
 
 function persistTab(id: string): void {
   if (typeof localStorage === "undefined") return;
@@ -45,6 +52,9 @@ interface NavState {
   activeTabId: string;
   /** Detail screens stacked above the active tab, top of stack last. */
   detailStack: string[];
+  /** Whether the operator chose the active tab (it was persisted or picked
+   *  this session). An unchosen tab follows the profile's home screen. */
+  tabChosen: boolean;
   /** The focus-ring index across the tab menu (moved by buttons/gamepad). */
   menuFocusIndex: number;
   /** Whether the quick menu overlay is open. */
@@ -70,17 +80,20 @@ interface NavState {
   openDetail: (id: string) => void;
   back: () => void;
   setMenuFocus: (index: number) => void;
-  /** Declare which tabs this profile shows. Idempotent; the shell calls it once
-   *  the profile probe resolves. */
-  setVisibleTabs: (ids: string[]) => void;
+  /** Declare which tabs this profile shows and its home tab (null until the
+   *  profile is known). Idempotent; the shell calls it once the profile probe
+   *  resolves. An unchosen active tab, or one the profile hides, moves to the
+   *  home tab. */
+  setVisibleTabs: (ids: string[], home?: string | null) => void;
   toggleMenuCollapsed: () => void;
   closeQuickMenu: () => void;
 }
 
 export const useNavStore = create<NavState>((set, get) => ({
-  activeTabId: loadPersistedTab(),
+  activeTabId: PERSISTED_TAB ?? DEFAULT_TAB_ID,
   detailStack: [],
-  menuFocusIndex: tabIndex(loadPersistedTab()),
+  tabChosen: PERSISTED_TAB !== null,
+  menuFocusIndex: tabIndex(PERSISTED_TAB ?? DEFAULT_TAB_ID),
   quickMenuOpen: false,
   menuCollapsed: false,
   // Until the profile resolves, every tab is assumed visible — the historical
@@ -107,6 +120,8 @@ export const useNavStore = create<NavState>((set, get) => ({
   },
 
   command: (cmd) => {
+    // An open overlay, or a screen that owns the command, takes it first.
+    if (offerCommand(cmd)) return;
     const s = get();
     switch (cmd) {
       case "prev": {
@@ -124,19 +139,15 @@ export const useNavStore = create<NavState>((set, get) => ({
         break;
       }
       case "activate":
-        // In the quick menu, activate the focused tab; on a screen it acts as
-        // "open the focused menu entry".
+        // With no overlay open, activate opens the focused menu entry (an open
+        // quick menu or sheet takes the command first, through the stack).
         {
           const target = s.visibleTabs[s.menuFocusIndex];
           if (target) s.goTab(target);
         }
         break;
       case "back":
-        if (s.quickMenuOpen) {
-          set({ quickMenuOpen: false });
-        } else {
-          s.back();
-        }
+        s.back();
         break;
       case "cycle-tab": {
         const tabs = s.visibleTabs;
@@ -156,13 +167,21 @@ export const useNavStore = create<NavState>((set, get) => ({
 
   goTab: (id) => {
     if (!TAB_ORDER.includes(id)) return;
-    persistTab(id);
-    set({
-      activeTabId: id,
-      detailStack: [],
-      menuFocusIndex: tabIndex(id),
-      quickMenuOpen: false,
-    });
+    const s0 = get();
+    const go = () => {
+      persistTab(id);
+      set((s) => ({
+        activeTabId: id,
+        detailStack: [],
+        tabChosen: true,
+        // The ring indexes the VISIBLE tabs, the list the menu renders.
+        menuFocusIndex: Math.max(0, s.visibleTabs.indexOf(id)),
+        quickMenuOpen: false,
+      }));
+    };
+    // Leaving the current screen with unsaved drafts asks first (dirty-store).
+    if (s0.activeTabId === id && s0.detailStack.length === 0) go();
+    else useDirtyStore.getState().requestLeave(go);
   },
 
   openDetail: (id) => {
@@ -170,10 +189,9 @@ export const useNavStore = create<NavState>((set, get) => ({
   },
 
   back: () => {
-    set((s) =>
-      s.detailStack.length > 0
-        ? { detailStack: s.detailStack.slice(0, -1) }
-        : {},
+    if (get().detailStack.length === 0) return;
+    useDirtyStore.getState().requestLeave(() =>
+      set((s) => (s.detailStack.length > 0 ? { detailStack: s.detailStack.slice(0, -1) } : {})),
     );
   },
 
@@ -185,22 +203,31 @@ export const useNavStore = create<NavState>((set, get) => ({
     set({ menuFocusIndex: index });
   },
 
-  setVisibleTabs: (ids) =>
+  setVisibleTabs: (ids, home = null) =>
     set((s) => {
-      if (
-        s.visibleTabs.length === ids.length &&
-        s.visibleTabs.every((id, i) => id === ids[i])
-      ) {
-        return s;
-      }
+      // The active tab follows the profile's home when the operator never
+      // chose one, or when the chosen one is hidden on this profile.
+      const homeVisible = home !== null && ids.includes(home);
+      const relocate =
+        homeVisible && s.activeTabId !== home && (!s.tabChosen || !ids.includes(s.activeTabId));
+      const sameTabs =
+        s.visibleTabs.length === ids.length && s.visibleTabs.every((id, i) => id === ids[i]);
+      if (sameTabs && !relocate) return s;
+      const activeTabId = relocate ? (home as string) : s.activeTabId;
       // Keep the focus ring on the tab it was on if that tab survived, so a
       // profile resolving mid-session does not silently move the operator's
       // selection; otherwise fall back to the active tab, then to the start.
-      const focused = s.visibleTabs[s.menuFocusIndex];
+      const focused = relocate ? undefined : s.visibleTabs[s.menuFocusIndex];
       const kept = focused ? ids.indexOf(focused) : -1;
-      const onActive = ids.indexOf(s.activeTabId);
+      const onActive = ids.indexOf(activeTabId);
       const menuFocusIndex = kept >= 0 ? kept : onActive >= 0 ? onActive : 0;
-      return { ...s, visibleTabs: ids, menuFocusIndex };
+      return {
+        ...s,
+        visibleTabs: ids,
+        menuFocusIndex,
+        activeTabId,
+        detailStack: relocate ? [] : s.detailStack,
+      };
     }),
 
   toggleMenuCollapsed: () => set((s) => ({ menuCollapsed: !s.menuCollapsed })),

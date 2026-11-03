@@ -27,6 +27,10 @@ use std::path::{Path, PathBuf};
 use rmpv::Value;
 use serde_json::{json, Map, Value as Json};
 
+mod throttle;
+
+pub use throttle::{record_throttled, MIN_INTERVAL};
+
 /// Maximum distinct event topics retained in one plugin's sidecar. A plugin that
 /// publishes more than this keeps the most-recently-updated topics (the oldest
 /// by last-update timestamp is evicted), so the file stays bounded.
@@ -107,9 +111,12 @@ pub fn record(
     write_atomic(&path, body.as_bytes())
 }
 
-/// Remove a plugin's sidecar (on plugin stop). Best-effort: an absent file is a
-/// no-op; an unlink fault is swallowed so a stop path never fails on it.
+/// Remove a plugin's sidecar (on plugin stop), cancelling its pending
+/// throttled writes first so a trailing write cannot recreate it. Best-effort:
+/// an absent file is a no-op; an unlink fault is swallowed so a stop path never
+/// fails on it.
 pub fn remove(socket_dir: &Path, plugin_id: &str) {
+    throttle::forget(socket_dir, plugin_id);
     let _ = std::fs::remove_file(sidecar_path(socket_dir, plugin_id));
 }
 
@@ -230,7 +237,7 @@ fn estimate_one(topic: &str, payload: &Json) -> usize {
 /// published shapes; the few edge cases (a non-string map key, a binary blob)
 /// degrade to a stable JSON form rather than failing, so a malformed payload can
 /// never break the sidecar write.
-fn msgpack_to_json(value: &Value) -> Json {
+pub(crate) fn msgpack_to_json(value: &Value) -> Json {
     match value {
         Value::Nil => Json::Null,
         Value::Boolean(b) => Json::Bool(*b),

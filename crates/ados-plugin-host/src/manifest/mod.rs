@@ -81,6 +81,26 @@ fn deserialize_opt_profiles<'de, D: Deserializer<'de>>(
     Option::<Vec<String>>::deserialize(d).map(|v| v.map(normalize_profiles))
 }
 
+/// A profile-keyed map, keys normalised like a profile list. An unknown key is
+/// kept verbatim for [`PluginManifest::validate`] to name; a profile listed
+/// twice (`ground_station` and `ground-station`) is refused.
+fn deserialize_profile_map<'de, D: Deserializer<'de>, V: Deserialize<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, V>, D::Error> {
+    let raw = BTreeMap::<String, V>::deserialize(d)?;
+    let mut out = BTreeMap::new();
+    for (key, value) in raw {
+        let key = canonical_profile(&key).map_or(key, str::to_string);
+        if out.contains_key(&key) {
+            return Err(serde::de::Error::custom(format!(
+                "profile {key:?} is listed twice"
+            )));
+        }
+        out.insert(key, value);
+    }
+    Ok(out)
+}
+
 fn default_target_profiles() -> Vec<String> {
     vec!["drone".to_string()]
 }
@@ -98,6 +118,9 @@ pub use validate::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod resources_tests;
 
 #[cfg(test)]
 mod profile_tests {

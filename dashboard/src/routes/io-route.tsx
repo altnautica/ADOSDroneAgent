@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
-import { toast, toastFromError } from "@/lib/toast";
+import { toast, toastFromError } from "@/shared/api/toast";
 
 // GET /api/v1/ground-station/gamepads — the live evdev controllers plus the
 // persisted primary selection.

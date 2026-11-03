@@ -15,8 +15,10 @@ VISION_DETECTION_TOPIC = "vision.detection"
 # registry (crates/ados-protocol/contracts.toml) so the Python producer stamps
 # the same integer the Rust ingress checks — a mismatch is rejected loudly at
 # the host rather than silently mis-parsed.
-_DETECTION_WIRE_VERSION = contract_version("vision.detection")
-assert _DETECTION_WIRE_VERSION is not None, "vision.detection missing from the contract registry"
+_detection_version = contract_version("vision.detection")
+if _detection_version is None:
+    raise RuntimeError("vision.detection missing from the contract registry")
+_DETECTION_WIRE_VERSION: int = _detection_version
 
 # Plugin RPC method names for the vision surface. The plugin host gates each on
 # the matching capability before routing to the vision engine.

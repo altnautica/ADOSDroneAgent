@@ -72,7 +72,7 @@ use crate::errors::{
 };
 use crate::manifest::{
     bin_reference, host_arch_os, AgentIsolation, BoardId, DeclaredCapability, GcsIsolation,
-    PluginManifest, ResourceClass, PAYLOAD_MAX_BYTES,
+    PluginManifest, PAYLOAD_MAX_BYTES,
 };
 use crate::plugin_account::{host_accounts, Accounts};
 use crate::server::{plugin_socket_dir, plugin_socket_path};

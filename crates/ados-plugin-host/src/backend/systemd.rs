@@ -48,6 +48,13 @@ pub fn render_systemd(spec: &UnitSpec) -> String {
         format!("Restart={}", spec.restart),
         "RestartSec=2s".to_string(),
         format!("MemoryMax={}M", res.max_ram_mb),
+        // The cap as the plugin sees it: a cgroup namespace or
+        // ProtectControlGroups can keep it from reading `memory.max`.
+        format!(
+            "Environment={}={}",
+            crate::systemd::ENV_PLUGIN_MEMORY_MAX,
+            u64::from(res.max_ram_mb) * 1024 * 1024
+        ),
         format!("CPUQuota={}%", res.max_cpu_percent),
         format!("TasksMax={}", res.max_pids),
         format!("StandardOutput=append:{log}"),

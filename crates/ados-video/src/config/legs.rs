@@ -65,9 +65,11 @@ pub struct CameraLeg {
     /// `http://` URL (a secondary network leg mediamtx pulls on demand).
     #[serde(default = "default_source")]
     pub source: String,
-    /// Logical role: `"primary"` designates the WFB/cloud stream; any other
-    /// value (or absent) is a LAN-WHEP-only secondary. Absent on every leg ⇒ the
-    /// first leg is the primary.
+    /// Logical role: `"primary"` ([`ROLE_PRIMARY`]) designates the WFB/cloud
+    /// stream; any other value (or absent) is a LAN-WHEP-only secondary.
+    /// Absent on every leg ⇒ the first leg is the primary. A downward-facing
+    /// (belly) camera declares [`ROLE_DOWN`]; operator surfaces label it
+    /// [`role_label`].
     #[serde(default)]
     pub role: Option<String>,
     /// Wire codec for this leg. Same single accepted value as
@@ -174,6 +176,22 @@ impl CameraLeg {
         } else {
             self.source.clone()
         }
+    }
+}
+
+/// The role that designates the transport primary leg.
+pub const ROLE_PRIMARY: &str = "primary";
+/// The role of a downward-facing (belly) camera: mapping texture, downward
+/// optical flow, precision landing.
+pub const ROLE_DOWN: &str = "down";
+
+/// The operator-facing label of a camera role the agent defines, for a leg
+/// with no operator-given name. `None` for a role with no agent label (the
+/// surfaces then fall back to the role string or the leg id).
+pub fn role_label(role: &str) -> Option<&'static str> {
+    match role {
+        ROLE_DOWN => Some("Belly"),
+        _ => None,
     }
 }
 

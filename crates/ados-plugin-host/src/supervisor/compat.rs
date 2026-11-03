@@ -208,17 +208,15 @@ impl PluginSupervisor {
         Ok(())
     }
 
-    /// Reject `resources.class: heavy` from a non-first-party signer: the
-    /// lifted bounds let one plugin take most of a node.
+    /// Reject `resources.class: heavy` (in the default envelope or any
+    /// per-profile one) from a non-first-party signer: the lifted bounds let
+    /// one plugin take most of a node.
     pub(super) fn reject_heavy_for_third_party(
         &self,
         manifest: &PluginManifest,
         first_party: bool,
     ) -> Result<(), LifecycleError> {
-        let heavy = manifest
-            .agent
-            .as_ref()
-            .is_some_and(|a| a.resources.class == ResourceClass::Heavy);
+        let heavy = manifest.agent.as_ref().is_some_and(|a| a.any_heavy());
         if heavy && !first_party {
             return Err(
                 SupervisorError("refused: heavy_resources_first_party_only".to_string()).into(),

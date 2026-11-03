@@ -8,7 +8,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useResource } from "@/hooks/use-resource";
-import { logsEmptyState } from "@/lib/logs-empty";
+import { logsEmptyState } from "@/shared/api/logs-empty";
 
 interface LogEntry {
   seq?: number;

@@ -1,0 +1,21 @@
+id: com.example.corpus
+version: 1.0.0
+name: Corpus Example
+risk: low
+compatibility:
+  ados_version: ">=0.1.0,<99.0.0"
+agent:
+  entrypoint: plugin:Corpus
+  isolation: subprocess
+  target_profiles: [drone, ground_station, workstation]
+  resources:
+    max_ram_mb: 2048
+    max_cpu_percent: 100
+    max_pids: 64
+  resources_by_profile:
+    drone:
+      max_ram_mb: 512
+      max_cpu_percent: 50
+      max_pids: 32
+    ground_station:
+      max_ram_mb: 256

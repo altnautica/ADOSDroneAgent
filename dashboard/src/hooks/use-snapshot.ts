@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { apiFetch } from "@/shared/api-fetch";
-import type { DashboardSnapshot } from "@/lib/types";
+import type { DashboardSnapshot } from "@/shared/api/types";
 
 export interface SnapshotOptions {
   /** Poll cadence; the live panels default to 1 Hz. */

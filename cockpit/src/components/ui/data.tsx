@@ -8,35 +8,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
-
-/** A semantic status colour keyed off a link/service state string. */
-export type Tone = "ok" | "warn" | "err" | "muted";
-
-export function toneClass(tone: Tone): string {
-  switch (tone) {
-    case "ok":
-      return "text-ok";
-    case "warn":
-      return "text-warn";
-    case "err":
-      return "text-err";
-    default:
-      return "text-muted-foreground";
-  }
-}
-
-function toneDotClass(tone: Tone): string {
-  switch (tone) {
-    case "ok":
-      return "bg-ok";
-    case "warn":
-      return "bg-warn";
-    case "err":
-      return "bg-err";
-    default:
-      return "bg-muted-foreground";
-  }
-}
+import { toneClass, toneDotClass, type Tone } from "@/lib/tone";
 
 /** A small round status dot. */
 export function Dot({ tone }: { tone: Tone }) {

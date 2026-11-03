@@ -12,6 +12,7 @@ const RIG: &str = include_str!("../contract/schema/rig.schema.json");
 const CAMERA_MODEL: &str = include_str!("../contract/schema/camera_model.schema.json");
 const MANIFEST: &str = include_str!("../contract/schema/manifest.schema.json");
 const GEO_ANCHOR: &str = include_str!("../contract/schema/geo_anchor.schema.json");
+const LIDAR_MODEL: &str = include_str!("../contract/schema/lidar_model.schema.json");
 static SCHEMA: LazyLock<JSONSchema> = LazyLock::new(|| {
     let parse = |s: &str| serde_json::from_str::<Value>(s).expect("vendored schema is JSON");
     JSONSchema::options()
@@ -22,6 +23,7 @@ static SCHEMA: LazyLock<JSONSchema> = LazyLock::new(|| {
         )
         .with_document(format!("{BASE}manifest.schema.json"), parse(MANIFEST))
         .with_document(format!("{BASE}geo_anchor.schema.json"), parse(GEO_ANCHOR))
+        .with_document(format!("{BASE}lidar_model.schema.json"), parse(LIDAR_MODEL))
         .compile(&parse(RIG))
         .expect("vendored rig schema compiles")
 });
@@ -105,5 +107,29 @@ mod tests {
         contract["contract"] = json!("other/9");
         assert!(validate(&contract).is_err());
         assert!(validate(&json!({"rig_id": "x"})).is_err());
+    }
+
+    #[test]
+    fn a_lidar_sensor_needs_its_scan_model() {
+        let lidar = json!({
+            "id": "lidar0", "kind": "lidar", "role": "nav",
+            "T_body_sensor": [1.0,0.0,0.0,0.0, 0.0,1.0,0.0,0.0, 0.0,0.0,1.0,0.0, 0.0,0.0,0.0,1.0],
+            "lidar": {"model": "planar-12m", "pattern": "planar", "h_fov_deg": 360.0,
+                      "v_min_deg": 0.0, "v_max_deg": 0.0, "rate_hz": 10.0,
+                      "points_per_s": 5000.0, "min_range_m": 0.05, "max_range_m": 12.0,
+                      "range_sigma_m": 0.01},
+            "time_offset_ns": 0
+        });
+        let mut with = rig();
+        with["sensors"].as_array_mut().unwrap().push(lidar.clone());
+        assert_eq!(
+            validate(&with).unwrap().sensor("lidar0").unwrap().kind,
+            "lidar"
+        );
+        let mut bare = lidar;
+        bare.as_object_mut().unwrap().remove("lidar");
+        let mut without = rig();
+        without["sensors"].as_array_mut().unwrap().push(bare);
+        assert!(validate(&without).is_err());
     }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildBanners } from "./banners";
+import { buildBanners } from "@/shared/api/banners";
 import { gateDecision, groundRoleFrom } from "./node-identity";
 
 describe("gateDecision", () => {

@@ -53,6 +53,11 @@ class AgentBlock(_StrictModel):
 
     permissions: list[PermissionRef] = Field(default_factory=list)
     resources: ResourceLimits = Field(default_factory=ResourceLimits)
+    resources_by_profile: dict[Profile, ResourceLimits] = Field(default_factory=dict)
+    """Per-node-profile resource envelopes. The plugin's unit on a node of a
+    listed profile runs under that entry; any other profile runs under
+    ``resources``. ``ground_station`` is accepted and rewritten to
+    ``ground-station``; a profile listed under both spellings is refused."""
     contributes: AgentContributes = Field(default_factory=AgentContributes)
     mavlink_components: list[MavlinkComponent] = Field(default_factory=list)
     contains_vendor_binary: bool = False
@@ -109,6 +114,21 @@ class AgentBlock(_StrictModel):
     @classmethod
     def _canonical_profiles(cls, raw: Any) -> Any:
         return _normalize_profiles(raw)
+
+    @field_validator("resources_by_profile", mode="before")
+    @classmethod
+    def _canonical_profile_keys(cls, raw: Any) -> Any:
+        if not isinstance(raw, dict):
+            return raw
+        out: dict[Any, Any] = {}
+        for key, value in raw.items():
+            canon = _normalize_profiles([key])[0]
+            if canon in out:
+                raise ManifestError(
+                    f"agent.resources_by_profile lists profile {canon!r} twice",
+                )
+            out[canon] = value
+        return out
 
     @field_validator("target_profiles")
     @classmethod

@@ -269,6 +269,7 @@ fn is_public_is_exactly_the_exempt_paths() {
         "/api/v1/ground-station/pic/events",
         "/api/v1/ground-station/ws/mesh",
         "/api/v1/ground-station/ws/buttons",
+        "/api/v1/nav/stream",
     ] {
         assert!(is_public(p), "{p} should be public");
     }
@@ -280,6 +281,9 @@ fn is_public_is_exactly_the_exempt_paths() {
         // PIN reset is NOT public — it stays behind the normal on-box/key gate.
         "/api/dashboard/pin/clear",
         "/v1/openapi.json",
+        // The nav reads behind the stream stay behind the normal gate.
+        "/api/v1/nav/status",
+        "/api/v1/map/live",
     ] {
         assert!(!is_public(p), "{p} should NOT be public");
     }

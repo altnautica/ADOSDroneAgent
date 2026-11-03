@@ -3,7 +3,7 @@
 use serde::Deserialize;
 
 use super::camera::CameraConfig;
-use super::legs::{CameraLeg, ResolvedLeg};
+use super::legs::{CameraLeg, ResolvedLeg, ROLE_PRIMARY};
 use super::sections::{RecordingConfig, VisionTapConfig, WfbVideoConfig};
 
 fn default_video_mode() -> String {
@@ -159,7 +159,7 @@ impl AgentVideoConfig {
             return vec![ResolvedLeg {
                 id: "main".to_string(),
                 source: camera.source.clone(),
-                role: "primary".to_string(),
+                role: ROLE_PRIMARY.to_string(),
                 codec: camera.codec.clone(),
                 is_primary: true,
                 is_network_pull: false,
@@ -187,7 +187,7 @@ impl AgentVideoConfig {
                 // back to "primary"/"secondary" only when the leg declared no role.
                 let role = c.role.clone().unwrap_or_else(|| {
                     if is_primary {
-                        "primary".to_string()
+                        ROLE_PRIMARY.to_string()
                     } else {
                         "secondary".to_string()
                     }
@@ -252,7 +252,7 @@ pub(super) fn primary_leg_index(cameras: &[CameraLeg]) -> Option<usize> {
     Some(
         cameras
             .iter()
-            .position(|c| c.role.as_deref() == Some("primary"))
+            .position(|c| c.role.as_deref() == Some(ROLE_PRIMARY))
             .unwrap_or(0),
     )
 }

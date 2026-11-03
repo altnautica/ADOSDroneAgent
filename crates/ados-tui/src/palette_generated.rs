@@ -24,6 +24,8 @@ pub struct TuiPalette {
     pub warning: Tone,
     pub error: Tone,
     pub info: Tone,
+    pub track: Tone,
+    pub coast: Tone,
 }
 
 /// Theme `terminal-amber`.
@@ -67,6 +69,14 @@ pub const AMBER: TuiPalette = TuiPalette {
     info: Tone {
         rgb: (127, 178, 229),
         idx: 110,
+    },
+    track: Tone {
+        rgb: (255, 90, 31),
+        idx: 202,
+    },
+    coast: Tone {
+        rgb: (227, 199, 102),
+        idx: 179,
     },
 };
 
@@ -112,6 +122,14 @@ pub const BRAND_DARK: TuiPalette = TuiPalette {
         rgb: (91, 154, 255),
         idx: 69,
     },
+    track: Tone {
+        rgb: (255, 90, 31),
+        idx: 202,
+    },
+    coast: Tone {
+        rgb: (245, 158, 11),
+        idx: 214,
+    },
 };
 
 /// Theme `brand-light`.
@@ -156,6 +174,14 @@ pub const BRAND_LIGHT: TuiPalette = TuiPalette {
         rgb: (37, 99, 235),
         idx: 26,
     },
+    track: Tone {
+        rgb: (255, 90, 31),
+        idx: 202,
+    },
+    coast: Tone {
+        rgb: (245, 158, 11),
+        idx: 214,
+    },
 };
 
 /// Theme `nvg`.
@@ -199,5 +225,13 @@ pub const NVG: TuiPalette = TuiPalette {
     info: Tone {
         rgb: (0, 204, 0),
         idx: 40,
+    },
+    track: Tone {
+        rgb: (255, 51, 51),
+        idx: 203,
+    },
+    coast: Tone {
+        rgb: (170, 136, 0),
+        idx: 136,
     },
 };

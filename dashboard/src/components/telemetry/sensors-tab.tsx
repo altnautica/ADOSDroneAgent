@@ -6,7 +6,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useResource } from "@/hooks/use-resource";
 import { useSnapshot } from "@/hooks/use-snapshot";
-import { resolveFirmwareType } from "@/lib/fc-firmware";
+import { resolveFirmwareType } from "@/shared/api/fc-firmware";
 import { fmtNum, fmtPct, fmtVoltage } from "@/shared/format";
 
 export function SensorsTab() {

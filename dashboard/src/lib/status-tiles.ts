@@ -3,12 +3,12 @@
 
 import { Cloud, Cpu, KeyRound, Radio, Video, Wifi, type LucideIcon } from "lucide-react";
 
-import i18n from "@/i18n";
+import i18n from "@/shared/i18n";
 
-import { mspVariant } from "./fc-firmware";
+import { mspVariant } from "@/shared/api/fc-firmware";
 import { summarizeHardware } from "./hardware-summary";
 import type { SetupStatus } from "@/shared/agent-api.generated";
-import type { DashboardSnapshot } from "./types";
+import type { DashboardSnapshot } from "@/shared/api/types";
 import { fmtBitrate, severityFromState, type Severity } from "@/shared/format";
 
 export interface Tile {

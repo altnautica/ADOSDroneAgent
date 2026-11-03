@@ -3,14 +3,16 @@
 // extensions' skills after them. Each slot shows its disabled reason as text
 // under the button (a tooltip is unreachable on a touch panel), every non-tap
 // skill opens the shared confirm sheet, and Kill is always present behind its
-// guard in the safety band.
+// guard in the safety band. A toggle skill with plugin quick settings (the
+// follow skill's re-acquire STRICT | SMART) carries a small settings button
+// that opens its popover.
 
-import { memo, useState } from "react";
+import { lazy, memo, Suspense, useState } from "react";
 import {
   ChevronLeft,
   CircleDot,
   Gauge,
-  Home,
+  House,
   OctagonX,
   Pause,
   PlaneLanding,
@@ -19,11 +21,14 @@ import {
   Power,
   PowerOff,
   Puzzle,
-  Sliders,
+  SlidersHorizontal,
+  SlidersVertical,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
+import { useFollowSkill } from "@/hooks/use-follow-skill";
 import { useSkillContext } from "@/hooks/use-skill-context";
+import type { AnchorRect } from "@/lib/menu-placement";
 import { requestSkill } from "@/lib/skill-runner";
 import {
   CORE_BY_ID,
@@ -38,12 +43,14 @@ import { useConfirmStore } from "@/stores/confirm-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { useFlightStore } from "@/stores/flight-store";
 
+const SkillSettingsPopover = lazy(() => import("@/components/feed/skill-settings-popover"));
+
 const CORE_ICONS: Record<string, LucideIcon> = {
   arm: Power,
   disarm: PowerOff,
   takeoff: PlaneTakeoff,
   land: PlaneLanding,
-  rtl: Home,
+  rtl: House,
   pause: Pause,
   resume: Play,
   kill: OctagonX,
@@ -55,18 +62,20 @@ const SkillSlot = memo(function SkillSlot({
   state,
   busy,
   onPress,
+  onSettings,
 }: {
   skill: Skill;
   icon: LucideIcon;
   state: SkillState;
   busy: boolean;
   onPress: (skill: Skill) => void;
+  onSettings: (skill: Skill, anchor: AnchorRect) => void;
 }) {
   const danger = skill.gesture === "guarded";
   // Kill stays available while another command awaits its acknowledgement.
   const enabled = state.enabled && (!busy || danger);
   return (
-    <div className="flex w-[4.4rem] flex-col items-center gap-[0.15rem]">
+    <div className="relative flex w-[var(--skill-slot)] flex-col items-center gap-[0.15rem]">
       <button
         type="button"
         onClick={() => onPress(skill)}
@@ -74,7 +83,7 @@ const SkillSlot = memo(function SkillSlot({
         aria-label={state.enabled ? skill.label : `${skill.label}: ${state.reason ?? "unavailable"}`}
         aria-pressed={skill.extension?.toggle ? state.active === true : undefined}
         className={cn(
-          "relative flex min-h-[max(3.2rem,48px)] w-full flex-col items-center justify-center gap-[0.15rem] rounded-lg border px-[0.3rem] backdrop-blur-hud transition-colors duration-quick disabled:opacity-45",
+          "relative flex min-h-[var(--skill-slot)] w-full flex-col items-center justify-center gap-[0.15rem] rounded-lg border px-[0.3rem] backdrop-blur-hud transition-colors duration-quick disabled:opacity-45",
           danger
             ? "border-err/60 bg-err/15 text-err"
             : state.active
@@ -90,6 +99,17 @@ const SkillSlot = memo(function SkillSlot({
           </span>
         ) : null}
       </button>
+      {skill.settings && skill.settings.length > 0 ? (
+        <button
+          type="button"
+          onClick={(e) => onSettings(skill, e.currentTarget.getBoundingClientRect())}
+          aria-label={`${skill.label} settings`}
+          aria-haspopup="dialog"
+          className="absolute bottom-[0.15rem] left-[0.15rem] flex h-[1.4rem] w-[1.4rem] items-center justify-center rounded text-hud-ink-2 hover:bg-hud-hair"
+        >
+          <SlidersHorizontal className="h-[0.8rem] w-[0.8rem]" aria-hidden />
+        </button>
+      ) : null}
       {!state.enabled && state.reason ? (
         <span className="w-full truncate text-center text-[0.75rem] leading-tight text-hud-ink-2">
           {state.reason}
@@ -99,7 +119,13 @@ const SkillSlot = memo(function SkillSlot({
   );
 });
 
-function slots(skills: Skill[], ctx: SkillContext, busy: boolean, onPress: (s: Skill) => void) {
+function slots(
+  skills: Skill[],
+  ctx: SkillContext,
+  busy: boolean,
+  onPress: (s: Skill) => void,
+  onSettings: (s: Skill, anchor: AnchorRect) => void,
+) {
   return skills.map((skill) => (
     <SkillSlot
       key={skill.id}
@@ -111,6 +137,7 @@ function slots(skills: Skill[], ctx: SkillContext, busy: boolean, onPress: (s: S
       state={resolveSkillState(skill, ctx)}
       busy={busy}
       onPress={onPress}
+      onSettings={onSettings}
     />
   ));
 }
@@ -122,6 +149,9 @@ export function SkillBar() {
   const ack = useConfirmStore((s) => s.ack);
   const extensions = useExtensionsStore((s) => s.extensions);
   const [page, setPage] = useState<"primary" | "mode">("primary");
+  const [settingsFor, setSettingsFor] = useState<{ skill: Skill; anchor: AnchorRect } | null>(null);
+  const followSkillId = useFollowSkill()?.skill.id ?? null;
+  const onSettings = (skill: Skill, anchor: AnchorRect) => setSettingsFor({ skill, anchor });
 
   const onPress = (skill: Skill) => {
     if (requestSkill(skill, ctx) && skill.category === "mode") setPage("primary");
@@ -158,30 +188,30 @@ export function SkillBar() {
         <div className="flex max-w-full items-start gap-[0.35rem] overflow-x-auto">
           {page === "mode" ? (
             <>
-              <div className="flex w-[4.4rem] flex-col items-center">
+              <div className="flex w-[var(--skill-slot)] flex-col items-center">
                 <button
                   type="button"
                   onClick={() => setPage("primary")}
-                  className="flex min-h-[max(3.2rem,48px)] w-full flex-col items-center justify-center gap-[0.15rem] rounded-lg border border-hud-hair bg-hud-glass text-hud-ink backdrop-blur-hud"
+                  className="flex min-h-[var(--skill-slot)] w-full flex-col items-center justify-center gap-[0.15rem] rounded-lg border border-hud-hair bg-hud-glass text-hud-ink backdrop-blur-hud"
                 >
                   <ChevronLeft className="h-[1.35rem] w-[1.35rem]" aria-hidden />
                   <span className="text-[0.75rem] font-medium leading-none">Back</span>
                 </button>
               </div>
-              {slots(modePresetsFor(autopilot), ctx, busy, onPress)}
+              {slots(modePresetsFor(autopilot), ctx, busy, onPress, onSettings)}
             </>
           ) : (
             <>
-              {slots(primary, ctx, busy, onPress)}
-              <div className="flex w-[4.4rem] flex-col items-center gap-[0.15rem]">
+              {slots(primary, ctx, busy, onPress, onSettings)}
+              <div className="flex w-[var(--skill-slot)] flex-col items-center gap-[0.15rem]">
                 <button
                   type="button"
                   onClick={() => setPage("mode")}
                   disabled={!modeGate.enabled || busy}
                   aria-label={modeGate.enabled ? "Mode" : `Mode: ${modeGate.reason ?? "unavailable"}`}
-                  className="flex min-h-[max(3.2rem,48px)] w-full flex-col items-center justify-center gap-[0.15rem] rounded-lg border border-hud-hair bg-hud-glass text-hud-ink backdrop-blur-hud disabled:opacity-45"
+                  className="flex min-h-[var(--skill-slot)] w-full flex-col items-center justify-center gap-[0.15rem] rounded-lg border border-hud-hair bg-hud-glass text-hud-ink backdrop-blur-hud disabled:opacity-45"
                 >
-                  <Sliders className="h-[1.35rem] w-[1.35rem]" aria-hidden />
+                  <SlidersVertical className="h-[1.35rem] w-[1.35rem]" aria-hidden />
                   <span className="text-[0.75rem] font-medium leading-none">Mode</span>
                 </button>
                 {!modeGate.enabled && modeGate.reason ? (
@@ -190,11 +220,21 @@ export function SkillBar() {
                   </span>
                 ) : null}
               </div>
-              {slots(extensionSkills, ctx, busy, onPress)}
+              {slots(extensionSkills, ctx, busy, onPress, onSettings)}
             </>
           )}
         </div>
       </div>
+      {settingsFor ? (
+        <Suspense fallback={null}>
+          <SkillSettingsPopover
+            skill={settingsFor.skill}
+            anchor={settingsFor.anchor}
+            showPhase={settingsFor.skill.id === followSkillId}
+            onClose={() => setSettingsFor(null)}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

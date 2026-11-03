@@ -11,9 +11,22 @@
 // launch proxy), labelled as such, not the flight controller's home. With no
 // valid fix it shows a plain "No GPS fix" state; when the fix goes stale it dims
 // the last known track rather than pinning a live-looking marker.
+//
+// Without GNSS the minimap switches to the local frame (see
+// `local-mini-map`): AUTO goes local after 2 s below a 3D fix or while the
+// active EKF horizontal source is ExternalNav or None; the operator can pin
+// LOCAL or MAP from the header (persisted). The header also opens the Map
+// panel while a mapping session reports.
 
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { Layers } from "lucide-react";
 
+import { LocalMiniMap } from "@/components/feed/local-mini-map";
+import { useNow } from "@/hooks/use-now";
+import { minimapFrame, nextMinimapPin } from "@/lib/local-minimap";
+import { nextNoFixSince } from "@/shared/hud/minimap-mode";
+import { useNavStreamStore } from "@/stores/nav-stream-store";
+import { useSettingsStore } from "@/stores/settings-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useStatusStore } from "@/stores/status-store";
 import {
@@ -39,7 +52,82 @@ function headingOrNull(h: number | null | undefined): number | null {
   return h != null && Number.isFinite(h) && h >= 0 && h <= 360 ? h : null;
 }
 
-export function MiniMap() {
+const MapPanel = lazy(() => import("@/components/feed/map-panel"));
+
+const PIN_WORD = { auto: "AUTO", local: "LOCAL", map: "MAP" } as const;
+
+export function MiniMap({ className }: { className?: string } = {}) {
+  const telemetry = useFlightStore((s) => s.telemetry);
+  const live = useFlightStore((s) => s.live);
+  const nav = useNavStreamStore((s) => s.nav);
+  const lastCommandedSet = useNavStreamStore((s) => s.lastCommandedSet);
+  const ekfParams = useNavStreamStore((s) => s.ekfParams);
+  const hasMapStatus = useNavStreamStore((s) => s.map !== null);
+  const pin = useSettingsStore((s) => s.minimapPin);
+  const setPin = useSettingsStore((s) => s.setMinimapPin);
+  const now = useNow(500);
+  const [panelOpen, setPanelOpen] = useState(false);
+
+  // The start of the current below-3D run, updated as the fix changes.
+  const fix = live ? (telemetry?.gps?.fix_type ?? null) : null;
+  const [noFix, setNoFix] = useState<{ fix: number | null; since: number | null }>({ fix: null, since: null });
+  if (noFix.fix !== fix) setNoFix({ fix, since: nextNoFixSince(noFix.since, fix, now) });
+
+  const { frame, reason } = minimapFrame({
+    pin,
+    noFixSince: noFix.since,
+    now,
+    ekfParams,
+    activeSet: nav?.data.activeSet ?? lastCommandedSet,
+  });
+  const local = frame === "local";
+
+  return (
+    <div className={cn("relative h-[5.6rem] w-[5.6rem] shrink-0", className)}>
+      <div
+        className={cn(
+          "relative h-full w-full overflow-hidden rounded-lg border border-surface-foreground/15 bg-background/55 backdrop-blur-sm",
+          !live && "opacity-70",
+        )}
+      >
+        {local ? <LocalMiniMap /> : <GlobalMiniMap />}
+        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-[0.2rem] px-[0.25rem]">
+          <span className="pt-[0.1rem] text-[0.75rem] uppercase tracking-wide text-muted-foreground">
+            {local ? (reason === "pinned" ? "Local" : "Local · no GPS") : "Map"}
+          </span>
+          <span className="flex gap-[0.15rem]">
+            {hasMapStatus ? (
+              <button
+                type="button"
+                onClick={() => setPanelOpen(true)}
+                aria-haspopup="dialog"
+                aria-label="Mapping status"
+                className="pointer-events-auto flex min-h-[24px] items-center rounded px-[0.25rem] text-hud-ink hover:bg-hud-hair"
+              >
+                <Layers className="h-[0.8rem] w-[0.8rem]" aria-hidden />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setPin(nextMinimapPin(pin))}
+              aria-label={`Minimap frame ${PIN_WORD[pin]}; change`}
+              className="pointer-events-auto min-h-[24px] rounded px-[0.25rem] font-mono text-[0.65rem] text-surface-foreground/80 hover:bg-hud-hair"
+            >
+              {PIN_WORD[pin]}
+            </button>
+          </span>
+        </div>
+      </div>
+      {panelOpen ? (
+        <Suspense fallback={null}>
+          <MapPanel onClose={() => setPanelOpen(false)} />
+        </Suspense>
+      ) : null}
+    </div>
+  );
+}
+
+function GlobalMiniMap() {
   const telemetry = useFlightStore((s) => s.telemetry);
   const live = useFlightStore((s) => s.live);
   const status = useStatusStore((s) => s.status);
@@ -115,20 +203,8 @@ export function MiniMap() {
   const dronePt = view && droneEN ? projectEN(droneEN.e, droneEN.n, view) : null;
 
   return (
-    <div
-      className="pointer-events-none relative h-[5.6rem] w-[5.6rem] shrink-0"
-      aria-hidden
-    >
-      <div
-        className={cn(
-          "relative h-full w-full overflow-hidden rounded-lg border border-surface-foreground/15 bg-background/55 backdrop-blur-sm",
-          !live && "opacity-70",
-        )}
-      >
-        {/* top-left label */}
-        <span className="absolute left-[0.25rem] top-[0.1rem] z-10 text-[0.75rem] uppercase tracking-wide text-muted-foreground">
-          Map
-        </span>
+    <div className="pointer-events-none relative h-full w-full" aria-hidden>
+      <div className="relative h-full w-full">
 
         {empty ? (
           <div className="flex h-full w-full items-center justify-center px-[0.3rem] text-center text-[0.75rem] text-muted-foreground">

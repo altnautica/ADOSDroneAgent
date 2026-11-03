@@ -99,6 +99,45 @@ async fn subscribe_detections_delivers_n_batches_in_order() {
 }
 
 #[tokio::test]
+async fn subscribe_detections_passes_the_embeddings_opt_in_to_the_host() {
+    let h = harness();
+    let token = h
+        .issuer
+        .mint(PLUGIN_ID, &caps(&["vision.detection.subscribe"]), 600)
+        .to_token_string();
+    let mut client = connect(&h.path).await;
+    send(&mut client, &request("hello", &token, Value::Map(vec![]))).await;
+    let _ = recv(&mut client).await; // ready
+
+    // A camera-less subscribe without the flag, then one camera with it.
+    send(
+        &mut client,
+        &request(methods::SUBSCRIBE_DETECTIONS, &token, Value::Map(vec![])),
+    )
+    .await;
+    let plain = recv(&mut client).await;
+    assert_eq!(args_bool(&plain, "embeddings"), Some(false));
+
+    let args = Value::Map(vec![
+        (Value::from("camera_id"), Value::from("uvc-0")),
+        (Value::from("embeddings"), Value::Boolean(true)),
+    ]);
+    send(
+        &mut client,
+        &request(methods::SUBSCRIBE_DETECTIONS, &token, args),
+    )
+    .await;
+    let with = recv(&mut client).await;
+    assert_eq!(with.error, None);
+    assert_eq!(args_bool(&with, "embeddings"), Some(true));
+
+    assert_eq!(
+        *h.host.detection_embeddings.lock().unwrap(),
+        vec![false, true]
+    );
+}
+
+#[tokio::test]
 async fn second_subscribe_detections_to_same_camera_reports_already_subscribed() {
     let h = harness();
     let token = h

@@ -38,6 +38,7 @@ mod framing;
 pub mod imu_fallback;
 pub mod injector_gate;
 mod link_state;
+mod msp_armed;
 mod send_scheduler;
 pub use send_scheduler::ClientOrigin;
 pub(crate) use send_scheduler::FC_MAX_SINGLE_WRITE;
@@ -105,6 +106,10 @@ const UNPROVEN_LINK_TIMEOUT: Duration = Duration::from_secs(HEARTBEAT_TIMEOUT.as
 /// Generous relative to the read cadence so a steady MSP stream holds the hint,
 /// and the hint ages out on its own once the byte stream goes quiet.
 const MSP_HINT_TTL: Duration = Duration::from_secs(5);
+
+/// How long an armed flag read off an MSP status reply stays current. With no
+/// poller on the proxy the FC sends no status, so the flag ages out to unknown.
+const MSP_ARMED_TTL: Duration = Duration::from_secs(5);
 
 /// The rolling window over which MSP frame starts are accumulated before the
 /// link hint is armed. Requiring two starts inside this window (rather than a
@@ -265,6 +270,10 @@ pub struct FcConnection {
     /// True once the MSP-detected condition has been logged for the current MSP
     /// episode, so the warning fires once per episode rather than every read.
     msp_warned: AtomicBool,
+    /// The MSP FC's armed flag from the last status reply a proxy poller drew
+    /// (`MSP_STATUS(_EX)` / `MSP2_INAV_STATUS`), with when it was read. Observe-
+    /// only; cleared on teardown.
+    msp_armed: Mutex<Option<(bool, Instant)>>,
     stream_interval: Mutex<Duration>,
     last_stream_req: Mutex<Option<Instant>>,
     param_priming: AtomicBool,
@@ -354,6 +363,7 @@ impl FcConnection {
             last_heartbeat_at: Mutex::new(None),
             last_msp_at: Mutex::new(None),
             msp_warned: AtomicBool::new(false),
+            msp_armed: Mutex::new(None),
             stream_interval: Mutex::new(STREAM_DEFAULT),
             last_stream_req: Mutex::new(None),
             param_priming: AtomicBool::new(false),

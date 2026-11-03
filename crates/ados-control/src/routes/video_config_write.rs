@@ -6,6 +6,10 @@
 //! `GET /api/video/config` body, re-read after the write, plus a `warnings` list
 //! naming every knob that did not take, so a partial success is visible.
 //!
+//! A body carrying any radio knob is refused `409 E_ARMED` while the vehicle is
+//! armed by the router's armed interlock (`armed_guard`), unless it sets
+//! `"force": true`.
+//!
 //! The FEC, MCS, preset and link-tier knobs go to the radio's data-plane command
 //! socket (`wfb-cmd.sock`), which applies them to the running transmitter. A knob
 //! the radio applied is persisted to `video.wfb` in the agent config so it

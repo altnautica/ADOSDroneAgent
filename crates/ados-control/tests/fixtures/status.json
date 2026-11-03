@@ -25,6 +25,7 @@
   "fcLinkHint": "none",
   "fcCommandDownGated": false,
   "fcVariant": null,
+  "fcMspArmed": null,
   "fcFirmware": "unknown",
   "fcReachable": false,
   "npuTops": 0.0,

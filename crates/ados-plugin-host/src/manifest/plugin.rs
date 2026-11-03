@@ -148,7 +148,11 @@ impl PluginManifest {
             ));
         }
         validate_profile_list("agent.target_profiles", &agent.target_profiles)?;
-        agent.resources.validate()?;
+        agent.resources.validate("agent.resources")?;
+        for (profile, limits) in &agent.resources_by_profile {
+            validate_profile_list("agent.resources_by_profile", std::slice::from_ref(profile))?;
+            limits.validate(&format!("agent.resources_by_profile.{profile}"))?;
+        }
         for (name, by_arch) in &agent.binaries {
             if !is_bin_name(name) {
                 return Err(ManifestError(format!(

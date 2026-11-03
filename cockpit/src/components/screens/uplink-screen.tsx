@@ -8,7 +8,8 @@
 import { useCallback } from "react";
 
 import { Panel, PanelHeader } from "@/components/ui/panel";
-import { Dot, EmptyNote, MeterTile, Row, SectionHeader, StaleBadge, type Tone } from "@/components/ui/data";
+import { Dot, EmptyNote, MeterTile, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
+import type { Tone } from "@/lib/tone";
 import { useResource } from "@/shared/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
 import { DASH } from "@/shared/format";

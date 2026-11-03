@@ -1,179 +1,238 @@
-// "Set up access" — the PIN-gated cockpit-door flow for a browser reaching the
-// node from the trusted LAN while the node is not paired.
+// The PIN access gate, drawn inside the reach notice whenever the agent refuses
+// this browser: an unpaired node (403) or a paired node with no credential for
+// us (401). An off-box browser that opens the cockpit therefore lands on this
+// form, with the shell still around it.
 //
-// An unpaired node answers its own identity and refuses every DATA route to an
-// ordinary LAN peer; the owner's browser lands on the cockpit with every field
-// dashed and the pairing code in the banner. Pairing from Mission Control is
-// one way out. This is the other, the one the founder chose over blind
-// trusted-network-open: set or enter the dashboard PIN, and the browser holds a
-// short-lived dashboard session that the agent accepts as the data-plane
-// credential while the node stays unpaired.
+// The flow uses the agent's public PIN routes (`@/shared/api/pin`):
+//   1. `GET  /api/dashboard/pin/status` picks the mode: set, enter, locked, or
+//      unknown when the read failed (never guessed as `set`).
+//   2. `set`   → `POST /api/dashboard/pin/set` (trust-on-first-use), entered
+//               twice so a typo cannot lock the owner out.
+//      `enter` → `POST /api/dashboard/pin/verify`.
+//   3. A success stores the signed session (`setSession`), so every later
+//      `apiFetch` carries it and the next poll loads the data.
+// A wrong PIN reports the attempts left; a lockout shows its countdown (this
+// browser) or the node-wide lock message, and the form returns by itself when
+// a per-browser lockout ends.
 //
-// The flow mirrors the dashboard's PIN splash exactly (and reuses its routes):
-//   1. `GET  /api/dashboard/pin/status` → is a PIN already set?
-//   2. No  → `POST /api/dashboard/pin/set`     (trust-on-first-use, as the
-//           dashboard-PIN store already authorizes `!pin_set` in-handler)
-//      Yes → `POST /api/dashboard/pin/verify`  (enter the existing PIN)
-//   3. The successful response carries a signed `session` + `expires_at`,
-//      stored via `setSession` — the same key the dashboard writes, so every
-//      `/api/*` call (apiFetch reads `getSession`) now carries
-//      `X-ADOS-Dashboard-Session` and the data loads on the next poll.
-//
-// The route that answers "who are you" is deliberately public, so /pin/status,
-// /pin/set and /pin/verify are reachable before any credential exists; the data
-// routes behind them stay gated until the session is held.
+// Loaded lazily by the reach notice, so its locale stays out of the shell.
 
-import { useState } from "react";
-import { KeyRound } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { KeyRound, RotateCw } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 import { ActionButton } from "@/components/ui/data";
-import { ApiError, apiFetch } from "@/shared/api-fetch";
-import { setSession } from "@/shared/session";
+import { canSubmitPin, fmtMMSS, lockRemainingS, pinFeedback, pinMismatch } from "@/lib/access-gate";
+import {
+  PIN_MAX_LENGTH,
+  fetchPinStatus,
+  lockMessage,
+  setDashboardPin,
+  splashMode,
+  verifyDashboardPin,
+  type LockScope,
+  type PinStatus,
+  type SplashMode,
+} from "@/shared/api/pin";
+import "@/shared/i18n";
 import { useReachStore } from "@/stores/reach-store";
 
-interface PinStatus {
-  pin_set?: boolean;
-  locked?: boolean;
-  locked_until?: number | null;
-}
-
-interface PinResponse {
-  ok?: boolean;
-  session?: string;
-  expires_at?: number;
-  remaining_attempts?: number;
-  locked_until?: number;
-}
-
-/** Minimum PIN length, mirroring the agent's dashboard_pin MIN_PIN_LEN. */
-const MIN_PIN = 4;
-
-/** What to tell the operator when the PIN route refuses. The verify route
- *  answers a wrong PIN with 401 `{remaining_attempts}`, a lockout with 429
- *  `{locked_until}` (unix seconds), and a refused set with a `{detail}`. */
-function pinRefusalMessage(e: unknown): string {
-  if (!(e instanceof ApiError)) return "Access setup failed.";
-  const body = (e.body && typeof e.body === "object" ? e.body : {}) as Record<string, unknown>;
-  if (e.status === 401) {
-    const left = typeof body.remaining_attempts === "number" ? body.remaining_attempts : null;
-    return left != null && left > 0
-      ? `Incorrect PIN. ${left} attempt${left === 1 ? "" : "s"} left.`
-      : "Incorrect PIN.";
-  }
-  if (e.status === 429) {
-    const until = typeof body.locked_until === "number" ? body.locked_until : null;
-    const secs = until != null ? Math.max(0, Math.ceil(until - Date.now() / 1000)) : null;
-    return secs ? `Too many attempts. Try again in ${secs} s.` : "Too many attempts. Try again shortly.";
-  }
-  return typeof body.detail === "string" && body.detail ? body.detail : e.message;
+function PinField({
+  value,
+  onChange,
+  onEnter,
+  disabled,
+  label,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onEnter: () => void;
+  disabled: boolean;
+  label: string;
+}) {
+  return (
+    <input
+      type="password"
+      inputMode="numeric"
+      pattern="[0-9]*"
+      autoComplete="off"
+      maxLength={PIN_MAX_LENGTH}
+      value={value}
+      disabled={disabled}
+      aria-label={label}
+      placeholder={label}
+      onChange={(e) => onChange(e.target.value.replace(/\D/g, "").slice(0, PIN_MAX_LENGTH))}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") onEnter();
+      }}
+      className="touch-target w-full min-w-0 rounded-lg bg-input px-[0.7rem] text-center font-mono text-[1.1rem] tracking-[0.3em] text-foreground"
+    />
+  );
 }
 
 export function SetUpAccess() {
-  const [mode, setMode] = useState<"idle" | "set" | "enter">("idle");
+  const { t } = useTranslation();
+  const [mode, setMode] = useState<SplashMode | "loading">("loading");
   const [pin, setPin] = useState("");
+  const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lockedUntil, setLockedUntil] = useState<number | null>(null);
+  const [lockScope, setLockScope] = useState<LockScope>("peer");
+  const [now, setNow] = useState(() => Date.now());
 
-  const begin = async () => {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const status = await apiFetch<PinStatus>("/api/dashboard/pin/status");
-      setMode(status.pin_set ? "enter" : "set");
-    } catch {
-      setError("Could not read the access-PIN status on this node.");
-      setMode("idle");
-    } finally {
-      setBusy(false);
-    }
-  };
+  const applyStatus = useCallback((st: PinStatus | null) => {
+    setMode(splashMode(st));
+    setLockedUntil(st?.locked ? (st.locked_until ?? null) : null);
+    setLockScope(st?.scope === "node" ? "node" : "peer");
+  }, []);
+  // A failed read is `unknown`, never guessed as `set`.
+  const load = useCallback(
+    () => fetchPinStatus().then(applyStatus, () => applyStatus(null)),
+    [applyStatus],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPinStatus().then(
+      (st) => !cancelled && applyStatus(st),
+      () => !cancelled && applyStatus(null),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [applyStatus]);
+
+  // Tick the lockout countdown; when a per-browser lockout ends, re-read the
+  // status so the form comes back in the right mode.
+  const remaining = lockRemainingS(lockedUntil, now);
+  useEffect(() => {
+    if (lockedUntil == null) return;
+    const id = setInterval(() => {
+      const t0 = Date.now();
+      setNow(t0);
+      if (lockRemainingS(lockedUntil, t0) <= 0) {
+        clearInterval(id);
+        setLockedUntil(null);
+        void load();
+      }
+    }, 1000);
+    return () => clearInterval(id);
+  }, [lockedUntil, load]);
+
+  const locked = lockedUntil != null && remaining > 0;
+  const formMode: SplashMode = mode === "loading" ? "unknown" : locked ? "locked" : mode === "locked" ? "enter" : mode;
+  const form = { mode: formMode, pin, confirm, busy, locked };
 
   const submit = async () => {
-    if (busy) return;
-    if (!pin || pin.length < MIN_PIN) {
-      setError("Enter at least 4 digits.");
+    if (!canSubmitPin(form)) return;
+    if (pinMismatch(form)) {
+      setError(t("access.splash.mismatch"));
+      setConfirm("");
       return;
     }
     setBusy(true);
     setError(null);
-    try {
-      const body = { pin };
-      const res = await apiFetch<PinResponse>(
-        mode === "set" ? "/api/dashboard/pin/set" : "/api/dashboard/pin/verify",
-        { method: "POST", body },
-      );
-      if (res.session) {
-        setSession(res.session, res.expires_at ?? 0);
-      }
-      // Success clears the refusal: the next poll carries the session and the
-      // DATA surfaces load without a reload.
-      useReachStore.getState().report(null, true);
-      setPin("");
-      setMode("idle");
-    } catch (e) {
-      setError(pinRefusalMessage(e));
-    } finally {
-      setBusy(false);
+    const res = formMode === "set" ? await setDashboardPin(pin) : await verifyDashboardPin(pin);
+    setBusy(false);
+    setPin("");
+    setConfirm("");
+    const fb = pinFeedback(res);
+    switch (fb.kind) {
+      case "unlocked":
+        // The session is stored; clear the refusal so the next poll loads.
+        useReachStore.getState().report(null, true);
+        return;
+      case "locked":
+        setNow(Date.now());
+        setLockedUntil(fb.lockedUntil);
+        setLockScope(fb.scope);
+        return;
+      case "wrong":
+        setError(
+          fb.remaining > 0
+            ? t("access.splash.incorrectRemaining", { count: fb.remaining })
+            : t("access.splash.incorrect"),
+        );
+        return;
+      case "message":
+        setError(fb.message);
+        return;
     }
   };
 
-  const cancel = () => {
-    setMode("idle");
-    setPin("");
-    setError(null);
-  };
+  if (mode === "loading") {
+    return <span className="text-[0.78rem] text-muted-foreground">{t("cockpit.access.reading")}</span>;
+  }
 
-  const open = mode === "set" || mode === "enter";
+  if (formMode === "unknown") {
+    return (
+      <div className="flex flex-col items-center gap-[0.3rem]">
+        <span className="text-[0.78rem] text-muted-foreground">{t("access.splash.unknownState")}</span>
+        <ActionButton label={t("cockpit.access.retry")} icon={RotateCw} onClick={() => {
+            setMode("loading");
+            setError(null);
+            void load();
+          }} />
+      </div>
+    );
+  }
 
+  if (locked) {
+    const lockText =
+      lockScope === "node" ? lockMessage("node", remaining) : `${lockMessage("peer", remaining)} ${fmtMMSS(remaining)}`;
+    return (
+      <div role="status" className="flex flex-col items-center gap-[0.2rem] text-[0.8rem]">
+        <span className="font-semibold text-err">{t("cockpit.access.locked")}</span>
+        <span className="text-muted-foreground">
+          {lockText}
+        </span>
+      </div>
+    );
+  }
+
+  const setting = formMode === "set";
   return (
     <div className="flex w-full flex-col items-center gap-[0.4rem]">
-      {!open ? (
+      <span className="text-[0.78rem] text-muted-foreground">
+        {setting ? t("access.splash.setPrompt") : t("access.splash.enterPrompt")}
+      </span>
+      <div className="flex w-full max-w-[22rem] flex-col items-stretch gap-[0.35rem]">
+        <PinField
+          value={pin}
+          onChange={(v) => {
+            setPin(v);
+            setError(null);
+          }}
+          onEnter={() => void submit()}
+          disabled={busy}
+          label={setting ? t("access.splash.newPin") : t("access.splash.pin")}
+        />
+        {setting ? (
+          <PinField
+            value={confirm}
+            onChange={(v) => {
+              setConfirm(v);
+              setError(null);
+            }}
+            onEnter={() => void submit()}
+            disabled={busy}
+            label={t("access.splash.confirmPin")}
+          />
+        ) : null}
         <ActionButton
-          label="Set up access with the dashboard PIN"
+          label={setting ? t("access.splash.setPin") : t("access.splash.unlock")}
           icon={KeyRound}
-          onClick={begin}
+          onClick={() => void submit()}
           busy={busy}
+          disabled={!canSubmitPin(form)}
+          variant="primary"
           full
         />
-      ) : (
-        <>
-          <span className="text-[0.78rem] text-muted-foreground">
-            {mode === "set"
-              ? "No access PIN is set yet. Choose a 4–12 digit PIN:"
-              : "Enter this node’s dashboard PIN to unlock its data:"}
-          </span>
-          <div className="flex w-full max-w-[20rem] items-center gap-[0.4rem]">
-            <input
-              type="password"
-              inputMode="numeric"
-              pattern="[0-9]*"
-              autoComplete="off"
-              maxLength={12}
-              value={pin}
-              disabled={busy}
-              onChange={(e) => {
-                setPin(e.target.value.replace(/\D/g, ""));
-                setError(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-              }}
-              aria-label={mode === "set" ? "Choose a PIN" : "Enter the PIN"}
-              className="touch-target w-full min-w-0 rounded-lg bg-input px-[0.7rem] text-center font-mono text-[1.1rem] tracking-[0.3em] text-foreground"
-            />
-            <ActionButton label="Unlock" onClick={submit} busy={busy} variant="primary" />
-          </div>
-          <button
-            type="button"
-            onClick={cancel}
-            disabled={busy}
-            className="touch-target text-[0.75rem] text-muted-foreground hover:text-foreground"
-          >
-            Cancel
-          </button>
-        </>
-      )}
+      </div>
+      <span className="text-[0.72rem] text-muted-foreground">
+        {setting ? t("access.splash.setFooter") : t("access.splash.enterFooter")}
+      </span>
       {error ? <span className="text-[0.75rem] text-err">{error}</span> : null}
     </div>
   );

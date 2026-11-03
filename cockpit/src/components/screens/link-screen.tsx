@@ -16,13 +16,13 @@ import {
   StaleBadge,
   Tile,
   TileGrid,
-  type Tone,
 } from "@/components/ui/data";
+import type { Tone } from "@/lib/tone";
 import { useResource } from "@/shared/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
 import { DASH, fmtChannel, fmtDbm, fmtInt, fmtMbps } from "@/shared/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct, fmtMhz } from "@/lib/format-status";
-import { linkDiagView } from "@/lib/link-diag";
+import { adapterDetail, linkDiagView } from "@/lib/link-diag";
 import { cn } from "@/lib/utils";
 
 interface WfbStatus {
@@ -90,29 +90,6 @@ interface HistorySample {
 interface WfbHistory {
   samples?: HistorySample[];
   count?: number;
-}
-
-/** A one-line adapter detail, or nothing.
- *
- * The agent sends `adapter` as an object; this screen used to hand it straight
- * to a React child, which threw "objects are not valid as a React child" and
- * took the whole tab down the moment it was opened. Rendering a string is the
- * only safe contract here, so anything that is not one is reduced to one or
- * dropped.
- *
- * Empty strings inside the object are treated as absent rather than joined into
- * a stray separator — on a ground station whose radio has not been probed yet,
- * every field is `""`, and " · " is not a useful hint.
- */
-export function adapterDetail(
-  adapter: { chipset?: string | null; driver?: string | null } | string | null | undefined,
-): string | undefined {
-  if (typeof adapter === "string") return adapter.trim() || undefined;
-  if (!adapter || typeof adapter !== "object") return undefined;
-  const parts = [adapter.driver, adapter.chipset]
-    .map((p) => (typeof p === "string" ? p.trim() : ""))
-    .filter((p) => p.length > 0);
-  return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
 function linkTone(state: string | undefined, active: boolean | undefined): Tone {

@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import type { WifiSavedConnection } from "@/lib/types";
+import type { WifiSavedConnection } from "@/shared/api/types";
 
 interface Props {
   connection: WifiSavedConnection;

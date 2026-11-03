@@ -28,14 +28,21 @@ impl PluginIpcClient {
 
 impl PluginIpcClient {
     /// Arm the host's detection-batch push stream for this connection.
+    /// `embeddings` asks for each detection's appearance embedding (the
+    /// `embedding` / `embedding_model` detection attributes).
     pub async fn vision_subscribe_detections(
         &self,
         camera_id: Option<&str>,
+        embeddings: bool,
     ) -> Result<Value, ClientError> {
-        let args = Value::Map(vec![(
+        let mut args = vec![(
             Value::from("camera_id"),
             Value::from(camera_id.unwrap_or("")),
-        )]);
+        )];
+        if embeddings {
+            args.push((Value::from("embeddings"), Value::Boolean(true)));
+        }
+        let args = Value::Map(args);
         Ok(self
             .send_request(
                 ados_protocol::framebus::methods::SUBSCRIBE_DETECTIONS,

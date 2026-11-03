@@ -45,12 +45,32 @@ const BASE_RATES: &[(u32, f32)] = &[
     (65, 4.0),  // RC_CHANNELS
 ];
 
-/// [`BASE_RATES`] plus the sensor streams a capture session records: the
+/// [`BASE_RATES`] plus what a drone's onboard autonomy steers from: the local
+/// NED position and velocity the guided setpoints are expressed in, the
+/// downward rangefinder that gives height above ground, attitude at the rate
+/// an external-navigation odometry stamps roll and pitch from, and the GNSS
+/// fix at the rate a GNSS-loss source switch watches. The router owns these
+/// rates so the plugins that read them never send competing requests.
+const DRONE_RATES: &[(u32, f32)] = &[
+    (0, 1.0),    // HEARTBEAT
+    (30, 50.0),  // ATTITUDE
+    (33, 5.0),   // GLOBAL_POSITION_INT
+    (1, 2.0),    // SYS_STATUS
+    (24, 5.0),   // GPS_RAW_INT
+    (74, 4.0),   // VFR_HUD
+    (147, 1.0),  // BATTERY_STATUS
+    (65, 4.0),   // RC_CHANNELS
+    (32, 20.0),  // LOCAL_POSITION_NED
+    (132, 20.0), // DISTANCE_SENSOR
+];
+
+/// [`DRONE_RATES`] plus the sensor streams a capture session records: the
 /// inertial, attitude, local position, GNSS, clock and pressure streams at
-/// rates a visual-inertial pipeline can use.
+/// rates a visual-inertial pipeline can use. A superset of the drone table,
+/// so ending a capture never hands a drone stream back to the FC default.
 const CAPTURE_RATES: &[(u32, f32)] = &[
     (0, 1.0),     // HEARTBEAT
-    (30, 10.0),   // ATTITUDE
+    (30, 50.0),   // ATTITUDE
     (33, 5.0),    // GLOBAL_POSITION_INT
     (1, 2.0),     // SYS_STATUS
     (24, 10.0),   // GPS_RAW_INT
@@ -62,16 +82,18 @@ const CAPTURE_RATES: &[(u32, f32)] = &[
     (32, 50.0),   // LOCAL_POSITION_NED
     (2, 1.0),     // SYSTEM_TIME
     (29, 10.0),   // SCALED_PRESSURE
+    (132, 20.0),  // DISTANCE_SENSOR
 ];
 
 /// The stream table for a node of `profile`: a visor always records sensor
-/// streams, a drone only while a capture session is active (`capture_active`),
-/// every other profile never.
+/// streams, a drone records them while a capture session is active
+/// (`capture_active`) and otherwise streams its autonomy inputs, every other
+/// profile the base set.
 pub(crate) fn stream_rates(profile: &str, capture_active: bool) -> &'static [(u32, f32)] {
-    if profile == "visor" || (profile == "drone" && capture_active) {
-        CAPTURE_RATES
-    } else {
-        BASE_RATES
+    match (profile, capture_active) {
+        ("visor", _) | ("drone", true) => CAPTURE_RATES,
+        ("drone", false) => DRONE_RATES,
+        _ => BASE_RATES,
     }
 }
 

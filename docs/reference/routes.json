@@ -1523,7 +1523,7 @@
     },
     {
       "method": "DELETE",
-      "notes": null,
+      "notes": "relay-forbidden",
       "path": "/api/v1/ground-station/wfb/pair/{device_id}",
       "public": false,
       "relay_forbidden": false,
@@ -1619,6 +1619,33 @@
       "relay_forbidden": false,
       "served_by": "native",
       "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/map/live",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/nav/status",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "WS",
+      "notes": "unauthenticated by design",
+      "path": "/api/v1/nav/stream",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": true
     },
     {
       "method": "DELETE",
@@ -1759,6 +1786,24 @@
       "method": "GET",
       "notes": null,
       "path": "/api/v1/radio/adapters",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "DELETE",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/security/api-key",
+      "public": false,
+      "relay_forbidden": true,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": "relay-forbidden",
+      "path": "/api/v1/security/api-key/rotate",
       "public": false,
       "relay_forbidden": false,
       "served_by": "native",
@@ -1910,7 +1955,7 @@
     },
     {
       "method": "POST",
-      "notes": null,
+      "notes": "relay-forbidden",
       "path": "/api/v1/setup/profile/redetect",
       "public": false,
       "relay_forbidden": false,

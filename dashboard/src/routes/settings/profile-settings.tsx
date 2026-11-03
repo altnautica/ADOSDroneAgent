@@ -11,10 +11,10 @@ import { Switch } from "@/components/ui/switch";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
-import { toast, toastFromError } from "@/lib/toast";
-import { type ApplyPayload, type ApplyProfile, postApply, profileFromStatus } from "@/lib/apply-actions";
-import { withArmedRetry } from "@/lib/armed-retry";
-import type { GroundRole } from "@/lib/types";
+import { toast, toastFromError } from "@/shared/api/toast";
+import { type ApplyPayload, type ApplyProfile, postApply, profileFromStatus } from "@/shared/api/apply-actions";
+import { withArmedRetry } from "@/shared/api/armed-retry";
+import type { GroundRole } from "@/shared/api/types";
 import { apiFetch } from "@/shared/api-fetch";
 import { invalidateProfile } from "@/shared/use-profile";
 

@@ -12,7 +12,7 @@ import {
   type ClockStatus,
   type RateVerdict,
   type SensorsStatus,
-} from "@/lib/sensors";
+} from "@/shared/api/sensors";
 import { fmtNum } from "@/shared/format";
 
 const VERDICT_VARIANT: Record<RateVerdict, BadgeProps["variant"]> = {

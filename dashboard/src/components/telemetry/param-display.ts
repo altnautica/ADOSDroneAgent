@@ -1,6 +1,6 @@
-import i18n from "@/i18n";
-import type { ParamMetadata } from "@/lib/param-metadata";
-import { formatParamValue } from "@/lib/params";
+import i18n from "@/shared/i18n";
+import type { ParamMetadata } from "@/shared/api/param-metadata";
+import { formatParamValue } from "@/shared/api/params";
 
 /** Current value decorated with its enum label or set bitmask flags, when
  *  the metadata names them. */

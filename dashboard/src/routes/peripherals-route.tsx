@@ -5,7 +5,7 @@ import { PageShell } from "@/components/page-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
-import i18n from "@/i18n";
+import i18n from "@/shared/i18n";
 
 interface PeripheralEntry {
   id: string;

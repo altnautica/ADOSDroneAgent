@@ -114,8 +114,11 @@ pub async fn designate(State(_state): State<AppState>, Json(req): Json<Designate
 
 /// `GET /api/vision/status` — the engine's registered-model read-back, so the
 /// GCS vision hub shows every model loaded on the drone (task, execution,
-/// backend-loaded), not only the ones actively publishing detections. An
-/// unreachable engine (vision off / not up) is a 503, never a silent empty.
+/// backend-loaded), not only the ones actively publishing detections, plus the
+/// inference backend and its state: `backend_state` is `ready`, `mock` (the
+/// explicitly configured mock) or `unavailable` (the requested backend cannot
+/// run here; `backend_reason` says why). An unreachable engine (vision off /
+/// not up) is a 503, never a silent empty.
 pub async fn engine_status(State(state): State<AppState>) -> Response {
     let client = VisionIpcClient::default_socket();
     // The node NPU utilization from the logging store's hardware signals. `None`
@@ -132,22 +135,52 @@ pub async fn engine_status(State(state): State<AppState>) -> Response {
                 Ok(m) => m,
                 Err(msg) => return detail(StatusCode::BAD_GATEWAY, msg),
             };
-            let model_count = models.len();
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "models": models,
-                    "modelCount": model_count,
-                    "npuUtilizationPct": npu_util,
-                })),
-            )
-                .into_response()
+            (StatusCode::OK, Json(status_body(&resp, models, npu_util))).into_response()
         }
         Err(e) => detail(
             StatusCode::SERVICE_UNAVAILABLE,
             format!("vision engine unavailable: {e}"),
         ),
     }
+}
+
+/// The `/api/vision/status` body from the engine's `list_models` reply. An
+/// engine reply without a `backend_state` (none ships without one) reads as
+/// `unavailable` rather than a claimed `ready`. Every key is snake_case, the
+/// form the GCS client reads.
+fn status_body(resp: &Value, models: Vec<ModelInfo>, npu_util: Option<f64>) -> serde_json::Value {
+    let field = |key: &str| -> Option<&str> {
+        resp.as_map()
+            .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(key)))
+            .and_then(|(_, v)| v.as_str())
+    };
+    let model_count = models.len();
+    let models: Vec<serde_json::Value> = models.iter().map(model_json).collect();
+    json!({
+        "models": models,
+        "model_count": model_count,
+        "npu_utilization_pct": npu_util,
+        "backend": field("backend"),
+        "backend_state": field("backend_state").unwrap_or("unavailable"),
+        "backend_reason": field("backend_reason"),
+    })
+}
+
+/// One registered model as the vision routes serve it, every key snake_case.
+/// The engine reports 0.0 fps/latency for a model that has not run yet; that
+/// is "no data", so it goes out as null rather than a measured zero.
+fn model_json(m: &ModelInfo) -> serde_json::Value {
+    let measured = |v: f32| (v > 0.0).then_some(v);
+    json!({
+        "id": m.id,
+        "kind": m.kind,
+        "execution": m.execution,
+        "backend_loaded": m.backend_loaded,
+        "output_classes": m.output_classes,
+        "fps": measured(m.fps),
+        "latency_ms": measured(m.latency_ms),
+        "is_inference_capable": m.is_inference_capable,
+    })
 }
 
 /// Decode the engine's `list_models` reply (`{models: Binary(msgpack)}`) into
@@ -231,7 +264,7 @@ fn capabilities_body(
             "available": resolved.is_some(),
             "kind": k,
             "class": class,
-            "model": resolved,
+            "model": resolved.map(model_json),
         }));
     }
     // A class without a kind is meaningless.
@@ -256,9 +289,10 @@ fn capabilities_body(
         }
         classes.sort();
         let is_inference_capable = of_kind.iter().any(|m| m.is_inference_capable);
+        let of_kind: Vec<serde_json::Value> = of_kind.into_iter().map(model_json).collect();
         capabilities.push(json!({
             "kind": k,
-            "isInferenceCapable": is_inference_capable,
+            "is_inference_capable": is_inference_capable,
             "classes": classes,
             "models": of_kind,
         }));
@@ -337,6 +371,50 @@ mod tests {
     }
 
     #[test]
+    fn status_reports_the_backend_state_and_reason() {
+        let reply = Value::Map(vec![
+            (Value::from("backend"), Value::from("onnx")),
+            (Value::from("backend_state"), Value::from("unavailable")),
+            (
+                Value::from("backend_reason"),
+                Value::from("this build does not include the onnx inference runtime"),
+            ),
+        ]);
+        let body = status_body(
+            &reply,
+            vec![mi("det", ModelKind::Detection, &[], false)],
+            None,
+        );
+        assert_eq!(body["backend"], "onnx");
+        assert_eq!(body["backend_state"], "unavailable");
+        assert!(body["backend_reason"].as_str().unwrap().contains("onnx"));
+        assert_eq!(body["model_count"], 1);
+        assert!(body["npu_utilization_pct"].is_null());
+        // Model fields are snake_case, the form the GCS client reads.
+        let m = &body["models"][0];
+        assert_eq!(m["id"], "det");
+        assert_eq!(m["is_inference_capable"], false);
+        assert!(m.get("latency_ms").is_some());
+        assert!(m.get("latencyMs").is_none());
+
+        let ready = Value::Map(vec![
+            (Value::from("backend"), Value::from("rknn")),
+            (Value::from("backend_state"), Value::from("ready")),
+        ]);
+        let body = status_body(&ready, Vec::new(), Some(42.5));
+        assert_eq!(body["backend_state"], "ready");
+        assert!(body["backend_reason"].is_null());
+        assert_eq!(body["npu_utilization_pct"], 42.5);
+    }
+
+    #[test]
+    fn a_reply_without_a_backend_state_is_not_claimed_ready() {
+        let body = status_body(&Value::Map(vec![]), Vec::new(), None);
+        assert_eq!(body["backend_state"], "unavailable");
+        assert!(body["backend"].is_null());
+    }
+
+    #[test]
     fn parse_kind_reads_the_wire_form() {
         assert_eq!(parse_kind("detection"), Some(ModelKind::Detection));
         assert_eq!(parse_kind("REID"), Some(ModelKind::Reid));
@@ -368,6 +446,8 @@ mod tests {
         assert_eq!(body["available"], json!(true));
         assert_eq!(body["kind"], json!("detection"));
         assert_eq!(body["model"]["id"], json!("person-det"));
+        assert_eq!(body["model"]["is_inference_capable"], json!(true));
+        assert!(body["model"].get("isInferenceCapable").is_none());
 
         // A missing capability is honestly unavailable, not an error.
         let none = capabilities_body(&models, Some("depth"), None).unwrap();
@@ -407,8 +487,12 @@ mod tests {
         // Class union across both detectors, sorted.
         assert_eq!(caps[0]["classes"], json!(["car", "person"]));
         // Any inference-capable detector makes the kind capable.
-        assert_eq!(caps[0]["isInferenceCapable"], json!(true));
+        assert_eq!(caps[0]["is_inference_capable"], json!(true));
         assert_eq!(caps[1]["kind"], json!("depth"));
-        assert_eq!(caps[1]["isInferenceCapable"], json!(false));
+        assert_eq!(caps[1]["is_inference_capable"], json!(false));
+        // Every key snake_case, down to the grouped models.
+        assert!(caps[0].get("isInferenceCapable").is_none());
+        assert_eq!(caps[0]["models"][0]["output_classes"], json!(["person"]));
+        assert!(caps[0]["models"][0].get("latencyMs").is_none());
     }
 }

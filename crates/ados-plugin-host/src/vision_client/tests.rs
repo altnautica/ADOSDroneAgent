@@ -410,3 +410,54 @@ async fn a_frame_push_with_no_subscriber_is_dropped_before_the_decode() {
     let got = client.register_model(&args).await.unwrap();
     assert_eq!(got, result);
 }
+
+#[tokio::test]
+async fn a_first_embeddings_request_resubscribes_the_detection_push_with_them() {
+    let path = temp_sock("embeddings");
+    let (server, inbound) = IpcBroadcast::bind(&path, 256, false, Some(16))
+        .await
+        .unwrap();
+    let server = std::sync::Arc::new(server);
+    // An engine that reports each request's method and its `embeddings` flag.
+    let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel::<(String, bool)>();
+    let mut inbound = inbound.unwrap();
+    let answering = server.clone();
+    let _engine = tokio::spawn(async move {
+        while let Some(cmd) = inbound.recv().await {
+            let req = Envelope::from_msgpack(&cmd.payload).expect("a request envelope");
+            let embeddings = match &req.args {
+                Value::Map(m) => m
+                    .iter()
+                    .any(|(k, v)| k.as_str() == Some("embeddings") && v.as_bool() == Some(true)),
+                _ => false,
+            };
+            let _ = seen_tx.send((req.method.clone(), embeddings));
+            answering
+                .broadcast(response_envelope(Value::Map(vec![])).into())
+                .await;
+        }
+    });
+    let client = connected_client(&path).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let detection_subscribe =
+        |embeddings: bool| (methods::SUBSCRIBE_DETECTIONS.to_string(), embeddings);
+    let within = Duration::from_secs(2);
+
+    client.arm_detection_push(false).await;
+    let got = tokio::time::timeout(within, seen.recv()).await.unwrap();
+    assert_eq!(got, Some(detection_subscribe(false)));
+    // The first embeddings request re-subscribes with the flag.
+    client.arm_detection_push(true).await;
+    let got = tokio::time::timeout(within, seen.recv()).await.unwrap();
+    assert_eq!(got, Some(detection_subscribe(true)));
+    // Sticky: a later plain subscriber neither re-requests nor drops them.
+    tokio::time::timeout(Duration::from_millis(500), client.arm_detection_push(false))
+        .await
+        .expect("an armed push does not re-request");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), seen.recv())
+            .await
+            .is_err(),
+        "no further subscribe was sent"
+    );
+}

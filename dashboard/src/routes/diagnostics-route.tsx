@@ -16,8 +16,8 @@ import { Card, CardContent } from "@/components/ui/card";
 import { useResource } from "@/hooks/use-resource";
 import { apiFetch } from "@/shared/api-fetch";
 import { fmtNum } from "@/shared/format";
-import { rebootAgent } from "@/lib/setup-actions";
-import { toast, toastFromError } from "@/lib/toast";
+import { rebootAgent } from "@/shared/api/setup-actions";
+import { toast, toastFromError } from "@/shared/api/toast";
 
 // Every numeric field is null in the degraded body the agent serves when its
 // metrics store is unreachable (`available: false`).

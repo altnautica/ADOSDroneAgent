@@ -176,6 +176,7 @@ pub fn state_label(value: &str) -> String {
     }
 }
 
+pub mod autonomy;
 mod urls;
 use urls::*;
 mod from_status;

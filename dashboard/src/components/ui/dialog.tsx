@@ -7,7 +7,7 @@ import {
   type HTMLAttributes,
 } from "react";
 
-import i18n from "@/i18n";
+import i18n from "@/shared/i18n";
 import { cn } from "@/lib/utils";
 
 export const Dialog = DialogPrimitive.Root;

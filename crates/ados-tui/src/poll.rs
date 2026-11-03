@@ -93,6 +93,8 @@ pub enum ResourceId {
     SensorsStatus,
     /// `GET /api/v1/clock` (the Sensors settings page's clock sources).
     ClockStatus,
+    /// `GET /api/v1/nav/status` (the Vehicle tab's Autonomy block).
+    NavStatus,
 }
 
 /// A subscription: read `path` into `id` every `period`; `Duration::ZERO`

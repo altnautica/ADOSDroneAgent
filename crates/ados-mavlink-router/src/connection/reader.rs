@@ -165,6 +165,7 @@ impl FcConnection {
             self.connected.store(false, Ordering::Relaxed);
             *self.last_heartbeat_at.lock().await = None;
             *self.last_msp_at.lock().await = None;
+            *self.msp_armed.lock().await = None;
             *self.fc_variant.lock().await = None;
             *self.fc_device.lock().await = None;
             self.fc_signed.store(false, Ordering::Relaxed);
@@ -269,7 +270,10 @@ impl FcConnection {
         // read loop (set before it starts, cleared only after it returns), so
         // capture it once and forward the raw bytes below. A MAVLink FC captures
         // false here, so the frame path is byte-unchanged.
-        let is_msp = self.fc_variant.lock().await.is_some();
+        let msp_variant = self.fc_variant.lock().await.clone();
+        let is_msp = msp_variant.is_some();
+        // Observe-only reader of the FC's status replies to a proxy poller.
+        let mut msp_sniffer = super::msp_armed::MspResponseSniffer::default();
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut chunk = [0u8; 2048];
         let mut since_save = Instant::now();
@@ -302,6 +306,16 @@ impl FcConnection {
             if is_msp {
                 self.link_proven.store(true, Ordering::Relaxed);
                 let _ = self.raw_tx.send(Bytes::copy_from_slice(&chunk[..n]));
+                let variant = msp_variant.as_deref().unwrap_or_default();
+                let mut latest = None;
+                msp_sniffer.feed(&chunk[..n], |cmd, payload| {
+                    if let Some(armed) = super::msp_armed::armed_from_frame(variant, cmd, payload) {
+                        latest = Some(armed);
+                    }
+                });
+                if let Some(armed) = latest {
+                    *self.msp_armed.lock().await = Some((armed, Instant::now()));
+                }
                 continue;
             }
             buf.extend_from_slice(&chunk[..n]);

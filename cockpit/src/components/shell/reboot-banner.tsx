@@ -2,13 +2,13 @@
 // reads only at startup, that path is recorded in the config store and this
 // amber bar appears across the top of every screen — the honest surface:
 // the panel never shows a reboot-gated change as already live. It offers a
-// two-tap "Reboot now" (POST /api/v1/setup/reboot) and stays until the box has
+// guarded "Reboot now" (tap arms, hold fires; POST /api/v1/setup/reboot) and stays until the box has
 // actually rebooted, which it detects from the agent's uptime and auto-clears.
 
 import { useEffect, useState } from "react";
 import { RotateCw } from "lucide-react";
 
-import { ConfirmButton } from "@/components/ui/data";
+import { GuardedButton } from "@/components/ui/guarded-button";
 import { useConfigStore } from "@/stores/config-store";
 import { useStatusStore } from "@/stores/status-store";
 import { apiFetch } from "@/shared/api-fetch";
@@ -64,12 +64,7 @@ export function RebootBanner({ floating = false }: { floating?: boolean }) {
         <div className="truncate text-[0.75rem] opacity-80">{summary}</div>
       </div>
       {!rebooting ? (
-        <ConfirmButton
-          label="Reboot now"
-          confirmLabel="Tap to reboot"
-          icon={RotateCw}
-          onConfirm={reboot}
-        />
+        <GuardedButton label="Reboot now" guardLabel="Hold to reboot" icon={RotateCw} onFired={() => void reboot()} />
       ) : null}
     </div>
   );

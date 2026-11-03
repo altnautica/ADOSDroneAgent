@@ -19,7 +19,10 @@
 //!   pose or setpoints to the flight controller);
 //! - body-scoped: `POST /api/v1/setup/apply` carrying a `profile`, `wfb`,
 //!   `network` or `regulatory` section, and `PUT /api/config` of a profile,
-//!   role, radio or regulatory key.
+//!   role, radio, regulatory or flight-controller link key (`mavlink.source`,
+//!   `serial_port`, `baud_rate`, `system_id`, `component_id`), and
+//!   `POST /api/video/config` carrying a link-tuning knob (FEC, MCS, preset,
+//!   link tier, adaptive switch).
 //!
 //! While the vehicle is armed each one answers `409` with
 //! `{"error":"E_ARMED","message":"Vehicle is armed","override":"force"}` unless
@@ -110,8 +113,9 @@ fn restart_drops_link(unit: &str) -> bool {
     found.is_some_and(|u| u.drops_link)
 }
 
-/// Config keys whose write switches the profile or role, or retunes the radio
-/// or its regulatory domain.
+/// Config keys whose write switches the profile or role, retunes the radio or
+/// its regulatory domain, or changes the flight-controller link (its transport,
+/// port, baud rate, or the agent's MAVLink identity on it).
 const GUARDED_CONFIG_KEYS: &[&str] = &[
     "agent.profile",
     "ground_station.role",
@@ -120,6 +124,11 @@ const GUARDED_CONFIG_KEYS: &[&str] = &[
     "video.wfb.mcs",
     "network.regulatory",
     "lora.region",
+    "mavlink.source",
+    "mavlink.serial_port",
+    "mavlink.baud_rate",
+    "mavlink.system_id",
+    "mavlink.component_id",
 ];
 
 /// Setup-apply sections that restart the supervisor or retune a link.
@@ -142,12 +151,24 @@ fn lora_body_is_guarded(body: &Value) -> bool {
     body.get("region").is_some()
 }
 
+/// The link-tuning knobs of `POST /api/video/config` that retune the running
+/// radio (FEC, MCS, preset, link tier, adaptive switch). A body carrying only
+/// `bitrate_kbps` (refused by the route anyway) or nothing is not guarded.
+const VIDEO_CONFIG_LINK_FIELDS: &[&str] = &["fec_k", "fec_n", "mcs", "preset", "auto", "tier_idx"];
+
+fn video_config_body_is_guarded(body: &Value) -> bool {
+    VIDEO_CONFIG_LINK_FIELDS
+        .iter()
+        .any(|field| body.get(*field).is_some_and(|v| !v.is_null()))
+}
+
 /// The body predicate for a route guarded only for some bodies.
 fn body_rule(method: &str, path: &str) -> Option<fn(&Value) -> bool> {
     match (method, trim_trailing_slash(path)) {
         ("POST", "/api/v1/setup/apply") => Some(apply_body_is_guarded),
         ("PUT", "/api/config") => Some(config_body_is_guarded),
         ("PUT", "/api/v1/lora") => Some(lora_body_is_guarded),
+        ("POST", "/api/video/config") => Some(video_config_body_is_guarded),
         _ => None,
     }
 }

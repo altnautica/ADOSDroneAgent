@@ -14,8 +14,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useStatus } from "@/hooks/use-status";
 import { fmtRelativeTime } from "@/shared/format";
-import { refreshHardwareCheck } from "@/lib/setup-actions";
-import { toast, toastFromError } from "@/lib/toast";
+import { refreshHardwareCheck } from "@/shared/api/setup-actions";
+import { toast, toastFromError } from "@/shared/api/toast";
 import { cn } from "@/lib/utils";
 
 const STALE_AFTER_MS = 5 * 60 * 1000;

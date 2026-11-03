@@ -21,7 +21,9 @@ import type { ReactNode } from "react";
 
 import { SignalBars } from "@/components/shell/signal-bars";
 import { WallClock } from "@/components/shell/wall-clock";
-import { Dot, toneClass, type Tone } from "@/components/ui/data";
+import { Dot } from "@/components/ui/data";
+import { toneClass, type Tone } from "@/lib/tone";
+import { CHROME } from "@/lib/cockpit-layout";
 import { useStatusStore } from "@/stores/status-store";
 import { fmtChannel, fmtDbm, fmtMbps, fmtPct, fmtTemp, DASH } from "@/shared/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct } from "@/lib/format-status";
@@ -185,7 +187,8 @@ export function StatusStrip({ floating = false }: { floating?: boolean }) {
   return (
     <div
       className={cn(
-        "flex items-center gap-[0.9rem] overflow-hidden px-[0.75rem] py-[0.4rem]",
+        "flex shrink-0 items-center gap-[0.9rem] overflow-hidden px-[0.75rem]",
+        CHROME.stripHeight,
         floating
           ? "pointer-events-auto bg-background/60 backdrop-blur-sm"
           : "border-b border-border bg-surface/70",

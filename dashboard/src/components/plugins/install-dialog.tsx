@@ -32,7 +32,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { toast } from "@/lib/toast";
+import { toast } from "@/shared/api/toast";
 import {
   disablePlugin,
   groupPermissions,
@@ -41,7 +41,7 @@ import {
   requiresCoolOff,
   type PluginManifestSummary,
   type PluginSource,
-} from "@/lib/plugin-install";
+} from "@/shared/api/plugin-install";
 
 type Stage = "summary" | "permissions" | "installing";
 

@@ -24,6 +24,19 @@ fn send_command_forwards_the_full_cmd_args_body() {
         t.body,
         Some(serde_json::json!({"cmd": "takeoff", "args": [25]}))
     );
+
+    // The EKF source-set switch rides the same verbatim passthrough, so the
+    // cloud queue reaches the same command route and its gates.
+    let e = route_for(
+        "send_command",
+        &serde_json::json!({"cmd": "ekfSourceSet", "args": [2]}),
+    )
+    .unwrap();
+    assert_eq!(e.path, "/api/command");
+    assert_eq!(
+        e.body,
+        Some(serde_json::json!({"cmd": "ekfSourceSet", "args": [2]}))
+    );
 }
 
 #[test]

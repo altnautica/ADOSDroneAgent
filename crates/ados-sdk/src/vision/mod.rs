@@ -19,6 +19,7 @@
 //! `vision.model.register`, `vision.detection.publish` and
 //! `vision.offload.advertise`.
 
+pub mod embedding;
 pub mod pose;
 
 use std::collections::HashMap;
@@ -35,6 +36,10 @@ use rmpv::Value;
 
 use crate::client::{ClientError, OffloadAdvertisement, PluginIpcClient};
 
+pub use embedding::{
+    detection_embedding, DetectionSubscription, EMBEDDING_ATTR, EMBEDDING_MODEL_ATTR,
+    HISTOGRAM_EMBEDDING,
+};
 pub use pose::{Odometry, Pose, POSE_COVARIANCE_LEN, VIO_COMPONENT_ID};
 
 /// A resolved camera frame: the descriptor the engine published plus the pixel
@@ -294,17 +299,33 @@ impl VisionClient {
     /// `camera_id` of `None` receives every camera. The engine fans all cameras
     /// onto one stream, so a `Some(id)` filter is applied here rather than
     /// narrowed at the engine — matching the frame subscription and the Python
-    /// client.
-    ///
-    /// A batch that will not decode is dropped rather than surfaced: the wire
-    /// carries a version and an older producer round-trips, so an undecodable
-    /// batch means a genuinely broken frame, not a version skew the caller could
-    /// act on.
+    /// client. Same as [`Self::subscribe_detections_with`] without embeddings.
     pub async fn subscribe_detections(
         &self,
         camera_id: Option<&str>,
         callback: DetectionCallback,
     ) -> Result<(), ClientError> {
+        let options = DetectionSubscription {
+            camera_id,
+            embeddings: false,
+        };
+        self.subscribe_detections_with(options, callback).await
+    }
+
+    /// Receive the engine's detection batches with [`DetectionSubscription`]
+    /// options. With `embeddings`, each box-bearing detection carries its
+    /// appearance embedding; read it with [`detection_embedding`].
+    ///
+    /// A batch that will not decode is dropped rather than surfaced: the wire
+    /// carries a version and an older producer round-trips, so an undecodable
+    /// batch means a genuinely broken frame, not a version skew the caller could
+    /// act on.
+    pub async fn subscribe_detections_with(
+        &self,
+        options: DetectionSubscription<'_>,
+        callback: DetectionCallback,
+    ) -> Result<(), ClientError> {
+        let camera_id = options.camera_id;
         let filter = camera_id.map(str::to_string);
         let on_deliver = move |args: Value| {
             let Some(Value::Binary(blob)) = map_get(&args, "batch") else {
@@ -322,7 +343,9 @@ impl VisionClient {
         };
         self.ipc
             .register_detection_callback(camera_id, Arc::new(on_deliver));
-        self.ipc.vision_subscribe_detections(camera_id).await?;
+        self.ipc
+            .vision_subscribe_detections(camera_id, options.embeddings)
+            .await?;
         Ok(())
     }
 

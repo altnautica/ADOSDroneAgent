@@ -34,9 +34,14 @@ impl Shared {
     }
 
     /// A plugin subscribed: record the want and arm the current connection.
-    pub(super) async fn arm(&self, push: Push) {
+    /// `embeddings` asks the engine for per-detection appearance embeddings;
+    /// once any subscriber asked, the push keeps carrying them (the engine
+    /// strips nothing on this connection, and plugins that did not ask ignore
+    /// the extra attributes).
+    pub(super) async fn arm(&self, push: Push, embeddings: bool) {
         let mut state = self.push_state(push).lock().await;
         state.wanted = true;
+        state.embeddings |= embeddings;
         self.arm_locked(push, &mut state).await;
     }
 
@@ -49,7 +54,10 @@ impl Shared {
     }
 
     pub(super) async fn arm_locked(&self, push: Push, state: &mut PushState) {
-        if state.armed {
+        // Armed with what is wanted already: nothing to do. A first request
+        // for embeddings on an armed push re-subscribes so the engine restarts
+        // the push with them.
+        if state.armed && state.armed_embeddings == state.embeddings {
             return;
         }
         if !self.connected.load(Ordering::Acquire) {
@@ -59,14 +67,18 @@ impl Shared {
             );
             return;
         }
-        match self
-            .request(push.method(), push.capability(), &Value::Map(vec![]))
-            .await
-        {
+        let args = if state.embeddings {
+            Value::Map(vec![(Value::from("embeddings"), Value::Boolean(true))])
+        } else {
+            Value::Map(vec![])
+        };
+        match self.request(push.method(), push.capability(), &args).await {
             Ok(_) => {
                 state.armed = true;
+                state.armed_embeddings = state.embeddings;
                 tracing::info!(
                     push = push.label(),
+                    embeddings = state.embeddings,
                     "vision push armed on the engine connection"
                 );
             }
@@ -86,7 +98,9 @@ impl Shared {
         self.connected.store(conn.is_some(), Ordering::Release);
         *request = conn;
         frames.armed = false;
+        frames.armed_embeddings = false;
         detections.armed = false;
+        detections.armed_embeddings = false;
     }
 
     /// Write one request envelope toward the engine and await the response. The

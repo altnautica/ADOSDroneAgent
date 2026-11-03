@@ -17,6 +17,7 @@ import {
 
 import { useNavStore } from "@/stores/nav-store";
 import { useSettingsStore, UI_SCALE_STEP } from "@/stores/settings-store";
+import { CHROME } from "@/lib/cockpit-layout";
 import { cn } from "@/lib/utils";
 
 export interface InputStatus {
@@ -81,7 +82,8 @@ export function ActionBar({
   return (
     <div
       className={cn(
-        "flex items-center gap-[0.4rem] px-[0.4rem]",
+        "flex shrink-0 items-center gap-[0.4rem] px-[0.4rem]",
+        CHROME.barHeight,
         floating
           ? "pointer-events-auto bg-background/60 backdrop-blur-sm"
           : "border-t border-border bg-surface/70",

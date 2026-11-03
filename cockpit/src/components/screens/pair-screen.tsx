@@ -1,43 +1,47 @@
-// Pair — local-first pairing over the LAN/RF. Three facets, all honest reads:
-//   1. This ground station: whether a GCS has claimed the box, and the pairing
-//      code + mDNS reach a GCS uses to claim it (from `GET /api/pairing/info`).
+// Pair — local-first pairing over the LAN/RF. Four facets, all honest reads:
+//   1. Mission Control owner: whether a GCS has claimed this node, its owner,
+//      and the pairing code + mDNS reach a GCS uses to claim it
+//      (`GET /api/pairing/info`). An unpaired node also accepts a code issued by
+//      Mission Control (`POST /api/pairing/accept`; the route answers 200 with
+//      `ok:false` on refusal), and a paired one can be released
+//      (`POST /api/pairing/unpair`, guarded).
 //   2. The drone RF link: the WFB pair state (peer device, key fingerprint,
 //      auto-pair) from `GET /api/wfb/pair`, plus a Pair-drone action that opens a
 //      local bind window (`POST /api/wfb/pair/local-bind`) and an Unpair action
-//      (`POST /api/wfb/pair/unpair`, two-tap confirmed — it wipes the key and
-//      disables auto-bind). The open mesh pair window (`GET .../pair/pending`)
-//      surfaces as a countdown strip while a window is open.
-//   3. Phone receivers: phones with their own radio waiting for the fleet
-//      receive keys (`GET /api/v1/ground-station/wfb/invite`), approved or
-//      rejected after the operator compares the fingerprint with the phone's.
+//      (`POST /api/wfb/pair/unpair`, guarded — it wipes the key and disables
+//      auto-bind). The open mesh pair window (`GET .../pair/pending`) surfaces as
+//      a countdown strip while a window is open.
+//   3. Phone receivers (ground station only): phones with their own radio
+//      waiting for the fleet receive keys (`GET /api/v1/ground-station/wfb/invite`),
+//      approved or rejected after the operator compares fingerprints.
+//   4. Browser access (PIN).
 
 import { useCallback, useState } from "react";
-import { Check, Link2, Smartphone, Unlink, X } from "lucide-react";
+import { Check, KeyRound, Link2, Smartphone, Unlink, X } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
-import { Panel, PanelHeader } from "@/components/ui/panel";
-import {
-  ActionButton,
-  ConfirmButton,
-  Dot,
-  EmptyNote,
-  Row,
-  SectionHeader,
-  StaleBadge,
-  type Tone,
-} from "@/components/ui/data";
 import { SetUpAccess } from "@/components/shell/set-up-access";
+import { ConsoleScaffold } from "@/components/ui/console-scaffold";
+import { ActionButton, Dot, EmptyNote, Row, SectionHeader, StaleBadge } from "@/components/ui/data";
+import { GuardedButton } from "@/components/ui/guarded-button";
+import { TextSettingRow } from "@/components/ui/setting-row";
+import { fmtCountdown } from "@/lib/format-status";
+import { acceptPairingCode, normalizePairingCode, PAIR_ACTION_GUARD, unpairCloud } from "@/lib/pairing-api";
+import type { Tone } from "@/lib/tone";
+import { apiFetch } from "@/shared/api-fetch";
+import { toast, toastFromError } from "@/shared/api/toast";
+import { DASH } from "@/shared/format";
+import "@/shared/i18n";
 import { useProfile } from "@/shared/use-profile";
 import { useResource } from "@/shared/use-resource";
-import { apiFetch } from "@/shared/api-fetch";
-import { DASH } from "@/shared/format";
-import { fmtCountdown } from "@/lib/format-status";
 
 interface PairingInfo {
   device_id?: string | null;
   name?: string | null;
   paired?: boolean;
   owner_id?: string | null;
-  paired_at?: string | null;
+  /** Unix seconds. */
+  paired_at?: number | null;
   pairing_code?: string | null;
   mdns_host?: string | null;
 }
@@ -77,24 +81,23 @@ interface PhoneInvite {
 }
 
 function PhoneReceivers() {
+  const { t } = useTranslation();
   const invites = useResource<{ pending: PhoneInvite[] }>(
     useCallback((s) => apiFetch<{ pending: PhoneInvite[] }>("/api/v1/ground-station/wfb/invite", { signal: s }), []),
     2000,
   );
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
 
   const decide = async (id: string, decision: "approve" | "reject") => {
     if (busyId) return;
     setBusyId(id);
-    setFailed(false);
     try {
       await apiFetch(`/api/v1/ground-station/wfb/invite/${encodeURIComponent(id)}/${decision}`, {
         method: "POST",
         body: {},
       });
-    } catch {
-      setFailed(true);
+    } catch (err) {
+      toastFromError(err, t("pairing.phones.decideError"));
     } finally {
       setBusyId(null);
       invites.refresh();
@@ -105,15 +108,15 @@ function PhoneReceivers() {
   return (
     <>
       <div className="flex items-center justify-between">
-        <SectionHeader>Phone receivers</SectionHeader>
+        <SectionHeader>{t("pairing.phones.title")}</SectionHeader>
         <StaleBadge stale={invites.stale && invites.data !== null} />
       </div>
       {invites.data === null && invites.error ? (
-        <EmptyNote>Could not read waiting phones: {invites.error}</EmptyNote>
+        <EmptyNote>{t("pairing.phones.readError")}</EmptyNote>
       ) : invites.data === null ? (
-        <EmptyNote>Reading waiting phones…</EmptyNote>
+        <EmptyNote>{t("pairing.page.loading")}</EmptyNote>
       ) : pending.length === 0 ? (
-        <EmptyNote>No phone is waiting for approval.</EmptyNote>
+        <EmptyNote>{t("pairing.phones.empty")}</EmptyNote>
       ) : (
         pending.map((p) => (
           <div key={p.invite_id} className="flex flex-col gap-[0.3rem] rounded-md bg-input/40 px-[0.6rem] py-[0.5rem]">
@@ -126,14 +129,14 @@ function PhoneReceivers() {
             </span>
             <div className="flex gap-[0.4rem]">
               <ActionButton
-                label="Reject"
+                label={t("pairing.phones.reject")}
                 icon={X}
                 onClick={() => void decide(p.invite_id, "reject")}
                 disabled={busyId !== null}
                 full
               />
               <ActionButton
-                label="Approve"
+                label={t("pairing.phones.approve")}
                 icon={Check}
                 variant="primary"
                 onClick={() => void decide(p.invite_id, "approve")}
@@ -145,16 +148,157 @@ function PhoneReceivers() {
           </div>
         ))
       )}
-      {failed ? <Row label="Last decision" value="refused (invite expired?)" tone="warn" mono={false} /> : null}
-      <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">
-        Approve only when this fingerprint matches the one on the phone. A phone receives video and
-        telemetry; it never transmits.
+      <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("pairing.phones.description")}</p>
+    </>
+  );
+}
+
+/** An unpair rendered through its declared confirm gate (`PAIR_ACTION_GUARD`,
+ *  pinned by the pairing test): `guarded` arms then holds; a gate set to `none`
+ *  would fall back to a plain danger button. */
+function UnpairAction({
+  gate,
+  label,
+  guardLabel,
+  onFired,
+  disabled,
+}: {
+  gate: (typeof PAIR_ACTION_GUARD)[keyof typeof PAIR_ACTION_GUARD];
+  label: string;
+  guardLabel: string;
+  onFired: () => void;
+  disabled: boolean;
+}) {
+  if (gate === "guarded") {
+    return <GuardedButton label={label} guardLabel={guardLabel} icon={Unlink} onFired={onFired} disabled={disabled} full />;
+  }
+  return <ActionButton label={label} icon={Unlink} variant="danger" onClick={onFired} disabled={disabled} full />;
+}
+
+function CloudOwner({ info, onChanged }: { info: PairingInfo | null; onChanged: () => void }) {
+  const { t } = useTranslation();
+  const profile = useProfile();
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState<null | "accept" | "unpair">(null);
+  const [refusal, setRefusal] = useState<string | null>(null);
+
+  const subject =
+    profile === "ground_station"
+      ? t("pairing.subject.groundStation")
+      : profile === "visor"
+        ? t("pairing.subject.visor")
+        : t("pairing.subject.drone");
+  const claimed = info?.paired ?? false;
+  const normalized = normalizePairingCode(code);
+
+  const accept = () => {
+    if (busy || !normalized) return;
+    setBusy("accept");
+    setRefusal(null);
+    acceptPairingCode(normalized, t("pairing.accept.failedDefault"))
+      .then(() => {
+        toast.ok(t("pairing.accept.success"));
+        setCode("");
+      })
+      .catch((err: unknown) => setRefusal(err instanceof Error ? err.message : t("pairing.accept.failed")))
+      .finally(() => {
+        setBusy(null);
+        onChanged();
+      });
+  };
+
+  const unpair = () => {
+    if (busy) return;
+    setBusy("unpair");
+    unpairCloud()
+      .then(() => toast.ok(t("cockpit.pair.unpaired")))
+      .catch((err: unknown) => toastFromError(err, t("pairing.page.unpairFailed")))
+      .finally(() => {
+        setBusy(null);
+        onChanged();
+      });
+  };
+
+  return (
+    <>
+      <SectionHeader>{t("cockpit.pair.owner")}</SectionHeader>
+      <p className="mb-[0.2rem] px-[0.15rem] text-[0.75rem] text-muted-foreground">
+        {t("pairing.page.blurb", { subject })}
       </p>
+      {info == null ? (
+        <EmptyNote>{t("pairing.page.loading")}</EmptyNote>
+      ) : (
+        <>
+          <Row
+            label={t("cockpit.pair.claimed")}
+            left={<Dot tone={claimed ? "ok" : "muted"} />}
+            value={claimed ? t("pairing.page.paired") : t("pairing.page.awaiting")}
+            tone={claimed ? "ok" : "muted"}
+          />
+          {claimed && info.owner_id ? <Row label={t("pairing.page.owner")} value={info.owner_id} /> : null}
+          {claimed && info.paired_at ? (
+            <Row label={t("cockpit.pair.since")} value={new Date(info.paired_at * 1000).toLocaleString()} mono={false} />
+          ) : null}
+          {info.name ? <Row label={t("cockpit.pair.name")} value={info.name} mono={false} /> : null}
+          {info.mdns_host ? <Row label={t("cockpit.pair.reach")} value={info.mdns_host} /> : null}
+        </>
+      )}
+
+      {info && claimed ? (
+        <div className="mt-[0.4rem]">
+          <UnpairAction
+            gate={PAIR_ACTION_GUARD.cloudUnpair}
+            label={t("cockpit.pair.unpairOwner")}
+            guardLabel={t("cockpit.pair.holdToUnpair")}
+            onFired={unpair}
+            disabled={busy !== null}
+          />
+          <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("pairing.confirm.description")}</p>
+        </div>
+      ) : null}
+
+      {info && !claimed ? (
+        <>
+          {info.pairing_code ? (
+            <div className="mt-[0.3rem] flex flex-col items-center rounded-md bg-input/40 px-[0.6rem] py-[0.6rem]">
+              <span className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">{t("cockpit.pair.codeLabel")}</span>
+              <span className="select-text font-mono text-[1.7rem] font-semibold tracking-[0.2em] text-hud-primary">
+                {info.pairing_code}
+              </span>
+              {info.mdns_host ? (
+                <span className="select-text text-[0.75rem] text-muted-foreground">{info.mdns_host}</span>
+              ) : null}
+            </div>
+          ) : (
+            <EmptyNote>{t("pairing.page.codeHidden")}</EmptyNote>
+          )}
+          <SectionHeader>{t("pairing.accept.cardTitle")}</SectionHeader>
+          <TextSettingRow
+            title={t("pairing.accept.label")}
+            value={code}
+            onChange={setCode}
+            placeholder={t("pairing.accept.placeholder")}
+            inputMode="numeric"
+            enabled={busy === null}
+          />
+          <ActionButton
+            label={t("pairing.accept.pair")}
+            icon={KeyRound}
+            variant="primary"
+            onClick={accept}
+            busy={busy === "accept"}
+            disabled={!normalized || busy !== null}
+            full
+          />
+          {refusal ? <Row label={t("pairing.accept.failed")} value={refusal} tone="err" mono={false} /> : null}
+        </>
+      ) : null}
     </>
   );
 }
 
 export function PairScreen() {
+  const { t } = useTranslation();
   const isGroundStation = useProfile() === "ground_station";
   const info = useResource<PairingInfo>(
     useCallback((s) => apiFetch<PairingInfo>("/api/pairing/info", { signal: s }), []),
@@ -180,8 +324,8 @@ export function PairScreen() {
     setBusy("pair");
     try {
       await apiFetch("/api/wfb/pair/local-bind", { method: "POST", body: {} });
-    } catch {
-      // the next poll reflects the agent's real bind state; nothing is faked.
+    } catch (err) {
+      toastFromError(err, t("cockpit.pair.bindFailed"));
     } finally {
       setBusy(null);
       rf.refresh();
@@ -189,13 +333,14 @@ export function PairScreen() {
     }
   };
 
-  const unpair = async () => {
+  const unpairRf = async () => {
     if (busy) return;
     setBusy("unpair");
     try {
       await apiFetch("/api/wfb/pair/unpair", { method: "POST", body: {} });
-    } catch {
-      // the next poll keeps the paired state honest.
+      toast.ok(t("cockpit.pair.rfUnpaired"));
+    } catch (err) {
+      toastFromError(err, t("pairing.page.unpairFailed"));
     } finally {
       setBusy(null);
       rf.refresh();
@@ -204,114 +349,82 @@ export function PairScreen() {
 
   const rfPaired = rf.data?.paired ?? false;
   const rfTone: Tone = rfPaired ? "ok" : "muted";
-  const gcsClaimed = info.data?.paired ?? false;
   const windowOpen = pending.data?.open ?? false;
   const phase = bindPhase(bind.data);
 
   return (
-    <Panel>
-      <PanelHeader
-        title="Pair"
-        right={
-          <div className="flex items-center gap-[0.5rem]">
-            <Dot tone={rfTone} />
-            <span className="text-[0.8rem] text-surface-foreground">{rfPaired ? "linked" : "unpaired"}</span>
-            <StaleBadge stale={rf.stale} />
-          </div>
-        }
-      />
-
+    <ConsoleScaffold
+      title={t("pairing.page.title")}
+      actions={
+        <span className="flex items-center gap-[0.5rem]">
+          <Dot tone={rfTone} />
+          <span className="text-[0.8rem] text-surface-foreground">
+            {rfPaired ? t("cockpit.pair.linked") : t("cockpit.pair.unpairedState")}
+          </span>
+          <StaleBadge stale={rf.stale || info.stale} />
+        </span>
+      }
+    >
       {windowOpen ? (
         <div className="mb-[0.3rem] flex items-center justify-between rounded-md bg-primary/15 px-[0.6rem] py-[0.4rem]">
-          <span className="text-[0.8rem] text-hud-primary">Pair window open</span>
+          <span className="text-[0.8rem] text-hud-primary">{t("cockpit.pair.windowOpen")}</span>
           <span className="font-mono text-[0.85rem] text-hud-primary">{fmtCountdown(pending.data?.closes_at_ms)}</span>
         </div>
       ) : null}
 
       <div className="flex flex-col gap-[0.15rem]">
-        <SectionHeader>Drone RF link</SectionHeader>
+        <CloudOwner info={info.data} onChanged={info.refresh} />
+
+        <SectionHeader>{t("cockpit.pair.rfLink")}</SectionHeader>
         {rfPaired ? (
           <>
             <Row
-              label="Paired drone"
+              label={t("cockpit.pair.pairedDrone")}
               left={<Dot tone="ok" />}
-              value={rf.data?.paired_with_device_id ?? "linked"}
+              value={rf.data?.paired_with_device_id ?? t("cockpit.pair.linked")}
               tone="ok"
             />
-            {rf.data?.fingerprint ? <Row label="Key fingerprint" value={rf.data.fingerprint} /> : null}
-            <Row label="Role" value={rf.data?.role ?? DASH} />
+            {rf.data?.fingerprint ? <Row label={t("cockpit.pair.fingerprint")} value={rf.data.fingerprint} /> : null}
+            <Row label={t("cockpit.pair.role")} value={rf.data?.role ?? DASH} />
             <Row
-              label="Auto-pair"
-              value={rf.data?.auto_pair_enabled == null ? DASH : rf.data.auto_pair_enabled ? "on" : "off"}
+              label={t("cockpit.pair.autoPair")}
+              value={rf.data?.auto_pair_enabled == null ? DASH : rf.data.auto_pair_enabled ? t("cockpit.pair.on") : t("cockpit.pair.off")}
             />
             <div className="mt-[0.5rem]">
-              <ConfirmButton
-                label="Unpair drone"
-                confirmLabel="Tap again to unpair"
-                icon={Unlink}
-                onConfirm={unpair}
-                busy={busy === "unpair"}
-                full
+              <UnpairAction
+                gate={PAIR_ACTION_GUARD.rfUnpair}
+                label={t("cockpit.pair.unpairDrone")}
+                guardLabel={t("cockpit.pair.holdToUnpair")}
+                onFired={() => void unpairRf()}
+                disabled={busy !== null}
               />
-              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">
-                Wipes the RF key and disables auto-bind. The drone must be re-paired to reconnect.
-              </p>
+              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("cockpit.pair.rfUnpairNote")}</p>
             </div>
           </>
         ) : (
           <>
-            <EmptyNote>No drone is paired to this ground station over the radio link.</EmptyNote>
-            {phase ? <Row label="Bind session" value={phase} tone="warn" /> : null}
+            <EmptyNote>{t("cockpit.pair.noDrone")}</EmptyNote>
+            {phase ? <Row label={t("cockpit.pair.bindSession")} value={phase} tone="warn" /> : null}
             <div className="mt-[0.3rem]">
               <ActionButton
-                label={busy === "pair" ? "Opening bind window…" : "Pair a drone"}
+                label={busy === "pair" ? t("cockpit.pair.opening") : t("cockpit.pair.pairDrone")}
                 icon={Link2}
-                onClick={startBind}
+                onClick={() => void startBind()}
                 variant="primary"
                 busy={busy === "pair"}
                 full
               />
-              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">
-                Opens a local bind window over the radio. Power the drone nearby; auto-bind completes the pair.
-              </p>
+              <p className="mt-[0.3rem] px-[0.2rem] text-[0.75rem] text-muted-foreground">{t("cockpit.pair.bindNote")}</p>
             </div>
           </>
         )}
 
         {isGroundStation ? <PhoneReceivers /> : null}
 
-        <SectionHeader>This ground station</SectionHeader>
-        <Row
-          label="Claimed by a GCS"
-          left={<Dot tone={gcsClaimed ? "ok" : "muted"} />}
-          value={gcsClaimed ? "yes" : "no"}
-          tone={gcsClaimed ? "ok" : "muted"}
-        />
-        {gcsClaimed && info.data?.owner_id ? <Row label="Owner" value={info.data.owner_id} /> : null}
-        {info.data?.name ? <Row label="Name" value={info.data.name} mono={false} /> : null}
-        {info.data?.mdns_host ? <Row label="Reach" value={info.data.mdns_host} /> : null}
-
-        {!gcsClaimed && info.data?.pairing_code ? (
-          <div className="mt-[0.3rem] flex flex-col items-center rounded-md bg-input/40 px-[0.6rem] py-[0.6rem]">
-            <span className="text-[0.75rem] uppercase tracking-wide text-muted-foreground">
-              Pairing code — enter in Mission Control
-            </span>
-            <span className="select-text font-mono text-[1.7rem] font-semibold tracking-[0.2em] text-hud-primary">
-              {info.data.pairing_code}
-            </span>
-            {info.data?.mdns_host ? (
-              <span className="select-text text-[0.75rem] text-muted-foreground">{info.data.mdns_host}</span>
-            ) : null}
-          </div>
-        ) : null}
-
-        <SectionHeader>Access from a browser</SectionHeader>
-        <p className="mb-[0.2rem] px-[0.15rem] text-[0.75rem] text-muted-foreground">
-          Unlock this node&apos;s data (status, video, command) from a browser on the
-          trusted LAN by setting or entering its dashboard PIN.
-        </p>
+        <SectionHeader>{t("cockpit.pair.browserAccess")}</SectionHeader>
+        <p className="mb-[0.2rem] px-[0.15rem] text-[0.75rem] text-muted-foreground">{t("cockpit.pair.browserAccessNote")}</p>
         <SetUpAccess />
       </div>
-    </Panel>
+    </ConsoleScaffold>
   );
 }

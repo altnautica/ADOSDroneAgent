@@ -15,9 +15,9 @@ import { useTranslation } from "react-i18next";
 
 import { Card, CardContent } from "@/components/ui/card";
 import { useMspTelemetry } from "@/hooks/use-msp-telemetry";
-import type { MspVariant } from "@/lib/fc-firmware";
+import type { MspVariant } from "@/shared/api/fc-firmware";
 import { fmtNum, fmtPct, fmtRelativeTime, fmtVoltage } from "@/shared/format";
-import { gpsFixLabel } from "@/lib/msp/telemetry-decoders";
+import { gpsFixLabel } from "@/shared/api/msp/telemetry-decoders";
 import { cn } from "@/lib/utils";
 
 /** A frame older than this reads as stale in the header. */

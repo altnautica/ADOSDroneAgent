@@ -399,6 +399,14 @@
       "type": "integer"
     },
     {
+      "default": null,
+      "description": "Resources By Profile",
+      "enum": null,
+      "path": "agent.resources_by_profile",
+      "required": false,
+      "type": "object"
+    },
+    {
       "default": "python",
       "description": "Runtime",
       "enum": [

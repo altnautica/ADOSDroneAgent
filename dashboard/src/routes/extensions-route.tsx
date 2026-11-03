@@ -20,8 +20,8 @@ import {
   parsePlugin,
   type PluginManifestSummary,
   type PluginSource,
-} from "@/lib/plugin-install";
-import { toast, toastFromError } from "@/lib/toast";
+} from "@/shared/api/plugin-install";
+import { toast, toastFromError } from "@/shared/api/toast";
 import { cn } from "@/lib/utils";
 
 interface InstallEntry {

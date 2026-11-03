@@ -52,14 +52,14 @@ assert_ne!(coast.detection.and_then(|d| d.lock_state), Some(LockState::Locked));
 
 - Pure and deterministic: no camera, socket or clock. The same input sequence always yields the same id assignment.
 - Never-silent identity: when two candidates look alike, the lock goes `Uncertain` and raises a re-designation request instead of guessing.
-- Appearance-first association with a pluggable [`AppearanceModel`](https://docs.rs/ados-vision/latest/ados_vision/tracker/trait.AppearanceModel.html); a colour/gradient histogram ships, a learned embedding plugs in through the same trait.
+- Appearance-first association with a pluggable [`AppearanceModel`](https://docs.rs/ados-vision/latest/ados_vision/tracker/trait.AppearanceModel.html); a model-free colour histogram descriptor ships, a learned embedding plugs in through the same trait.
 - YOLOv8/v11 and YOLOv5/v7 head decoding with class-agnostic non-maximum suppression.
-- 63 tests, including adversarial suites that try to provoke identity swaps, locks onto noise and distractor capture.
+- 69 tests, including adversarial suites that try to provoke identity swaps, locks onto noise and distractor capture.
 - One dependency: [`ados-protocol`](https://crates.io/crates/ados-protocol) for the shared `Detection` type.
 
 ## How it works
 
-The crate has three modules.
+The crate has four modules.
 
 ### [`tracker`](https://docs.rs/ados-vision/latest/ados_vision/tracker/index.html)
 
@@ -80,6 +80,10 @@ All thresholds live in [`TrackerConfig`](https://docs.rs/ados-vision/latest/ados
 ### [`reid`](https://docs.rs/ados-vision/latest/ados_vision/reid/index.html)
 
 Helpers for a re-identification model such as OSNet: crop and resize a detection box out of an rgb24 frame, normalize the crop with ImageNet statistics into an NCHW tensor, and L2-normalize the returned embedding so cosine similarity becomes a dot product.
+
+### [`histogram`](https://docs.rs/ados-vision/latest/ados_vision/histogram/index.html)
+
+[`histogram_descriptor`](https://docs.rs/ados-vision/latest/ados_vision/histogram/fn.histogram_descriptor.html) is the model-free fallback appearance descriptor: a 16-bin colour histogram of a detection box (six chroma-weighted hue sectors plus dark and light achromatic bins, for the upper and lower half of the box), each half normalized against exposure and the whole L2-normalized. It is far less discriminative than a learned embedding, and exists so appearance gating degrades rather than disappears when no re-id model is loaded.
 
 ## Part of ADOS
 

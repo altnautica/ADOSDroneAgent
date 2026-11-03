@@ -6,6 +6,7 @@
 import { useEffect, useRef } from "react";
 
 import { useVideoTransport } from "@/shared/use-video-transport";
+import type { VideoTransportSnapshot } from "@/shared/video-transport";
 import { useFeedStore } from "@/stores/feed-store";
 
 const ORDER: ("whep" | "hls")[] = ["whep", "hls"];
@@ -14,6 +15,7 @@ export function VideoLayer({
   whepUrl,
   hlsUrl,
   reconnectKey,
+  onSnapshot,
 }: {
   /** WHEP endpoint for the active leg (`/whep`, or `/whep?camera=<id>`). */
   whepUrl: string;
@@ -21,15 +23,21 @@ export function VideoLayer({
   hlsUrl: string;
   /** Changing this tears the session down and dials again. */
   reconnectKey?: string;
+  /** A secondary instance (the picture-in-picture inset) receives its
+   *  snapshot here instead, so it never overwrites the main video's state in
+   *  the feed store. */
+  onSnapshot?: (snapshot: VideoTransportSnapshot) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const snapshot = useVideoTransport(videoRef, { order: ORDER, whepUrl, hlsUrl, reconnectKey });
   const setVideo = useFeedStore((s) => s.setVideo);
+  const ownsStore = onSnapshot === undefined;
 
   useEffect(() => {
-    setVideo(snapshot);
-  }, [snapshot, setVideo]);
-  useEffect(() => () => setVideo(null), [setVideo]);
+    if (onSnapshot) onSnapshot(snapshot);
+    else setVideo(snapshot);
+  }, [snapshot, setVideo, onSnapshot]);
+  useEffect(() => (ownsStore ? () => setVideo(null) : undefined), [ownsStore, setVideo]);
 
   const message =
     snapshot.state === "connecting"

@@ -3,6 +3,7 @@
 
 import type { StatusFull } from "@/shared/agent-api.generated";
 import { apiFetch } from "@/shared/api-fetch";
+import { fcFamilyOf } from "@/nav/navigator";
 import type {
   AgentConfig,
   BatteryHealth,
@@ -92,6 +93,7 @@ export function droneStatusFromFull(full: StatusFull, diag: LinkDiagnosis | null
   return {
     profile: "drone",
     fc_connected: full.fc_connected === true,
+    fc_family: fcFamilyOf(str(full.fcFirmware), str(full.fcVariant)),
     perception_tier: str(full.perceptionTier),
     heartbeat_age_s: num(full.heartbeatAgeS),
     paired_drone: {
@@ -191,7 +193,8 @@ export type FlightCommand =
   | "mode"
   | "killswitch"
   | "pausemission"
-  | "resumemission";
+  | "resumemission"
+  | "ekfsourceset";
 
 /** Send one high-level flight command (`POST /api/command`). Throws `ApiError`
  *  on a 503 (no FC link) or 400 (unknown command / bad argument). */
@@ -215,4 +218,54 @@ export function startRecording(signal?: AbortSignal): Promise<unknown> {
 /** Stop the in-flight recording. */
 export function stopRecording(signal?: AbortSignal): Promise<unknown> {
   return apiFetch("/api/v1/ground-station/recording/stop", { method: "POST", body: {}, signal });
+}
+
+/** Start this node's own recorder (`/api/video/record/*`, any profile). */
+export function startNodeRecording(signal?: AbortSignal): Promise<unknown> {
+  return apiFetch("/api/video/record/start", { method: "POST", body: {}, signal });
+}
+
+/** Stop this node's own recorder. */
+export function stopNodeRecording(signal?: AbortSignal): Promise<unknown> {
+  return apiFetch("/api/video/record/stop", { method: "POST", body: {}, signal });
+}
+
+/** The `POST /api/vision/designate` answer. */
+export interface DesignateResponse {
+  designated: boolean;
+  track_id: number | null;
+  camera_id: string;
+}
+
+/** Lock the vision engine's tracker for `cameraId` onto a box in frame px.
+ *  Throws `ApiError` on a 400 (rejected) or 503 (no vision engine). */
+export function designateTarget(
+  cameraId: string,
+  bbox: { x: number; y: number; width: number; height: number },
+  opts: { classLabel?: string; confidence?: number } = {},
+): Promise<DesignateResponse> {
+  return apiFetch<DesignateResponse>("/api/vision/designate", {
+    method: "POST",
+    body: {
+      camera_id: cameraId,
+      bbox,
+      ...(opts.classLabel ? { class_label: opts.classLabel } : {}),
+      ...(opts.confidence !== undefined ? { confidence: opts.confidence } : {}),
+    },
+  });
+}
+
+/** Write one plugin config key (`PUT /api/plugins/{id}/config`). */
+export function putPluginConfig(pluginId: string, key: string, value: unknown): Promise<unknown> {
+  return apiFetch(`/api/plugins/${encodeURIComponent(pluginId)}/config`, {
+    method: "PUT",
+    body: { key, value },
+  });
+}
+
+/** One FC parameter (`GET /api/params/{name}`), or null when the FC has not
+ *  reported it. */
+export async function getParam(name: string, signal?: AbortSignal): Promise<number | null> {
+  const body = await apiFetch<{ value?: unknown }>(`/api/params/${encodeURIComponent(name)}`, { signal });
+  return typeof body?.value === "number" && Number.isFinite(body.value) ? body.value : null;
 }

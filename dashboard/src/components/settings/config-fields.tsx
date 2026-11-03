@@ -16,8 +16,8 @@ import { Label } from "@/components/ui/label";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { Switch } from "@/components/ui/switch";
 import { useConfig } from "@/hooks/use-config";
-import { putConfigChecked } from "@/lib/apply-actions";
-import { toast, toastFromError } from "@/lib/toast";
+import { putConfigChecked } from "@/shared/api/apply-actions";
+import { toast, toastFromError } from "@/shared/api/toast";
 
 /** A read-only label/value row for facts the operator cannot change. */
 export function ReadRow({

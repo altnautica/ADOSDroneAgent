@@ -195,7 +195,7 @@ async fn read_request(stream: &mut UnixStream) -> std::io::Result<Option<Vec<u8>
 /// Create the control dir and lock it to its owner (`0700`). The daemon runs as
 /// root, so nothing but root can traverse to the socket inside it. A dir this
 /// process cannot lock down is an error, never a silently wider socket.
-fn prepare_control_dir(control_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn prepare_control_dir(control_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(control_dir)?;
     std::fs::set_permissions(control_dir, std::fs::Permissions::from_mode(0o700))
 }

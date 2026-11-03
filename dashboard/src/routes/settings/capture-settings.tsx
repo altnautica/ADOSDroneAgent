@@ -15,9 +15,9 @@ import {
   putCaptureExposure,
   type CaptureExposure,
   type CaptureState,
-} from "@/lib/capture";
-import { STORAGE_PATH, type StorageStatus } from "@/lib/sensors";
-import { toast, toastFromError } from "@/lib/toast";
+} from "@/shared/api/capture";
+import { STORAGE_PATH, type StorageStatus } from "@/shared/api/sensors";
+import { toast, toastFromError } from "@/shared/api/toast";
 import { apiFetch } from "@/shared/api-fetch";
 import { fmtNum } from "@/shared/format";
 

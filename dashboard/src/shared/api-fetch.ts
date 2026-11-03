@@ -83,6 +83,14 @@ export function setAuthChallengeHandler(fn: AuthChallengeHandler | null): void {
   authChallengeHandler = fn;
 }
 
+/** Hand a refusal to the registered access gate. `apiFetch` calls this on a
+ *  401/403; a caller that just made its own credential invalid (clearing the
+ *  key it held) calls it directly so the gate takes over before any request
+ *  fails. */
+export function raiseAuthChallenge(status: number): void {
+  authChallengeHandler?.(status);
+}
+
 export interface FetchOptions {
   method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   /** JSON-encoded, except a FormData body, which is sent as multipart. */
@@ -116,7 +124,7 @@ export async function apiFetch<T = unknown>(
   // accepted (expired or revoked by a PIN reset): drop it.
   if (res.status === 401 && creds["X-ADOS-Dashboard-Session"]) clearSession();
   if (isAuthChallenge(res.status) && !opts.signal?.aborted && !opts.skipAuthSignal) {
-    authChallengeHandler?.(res.status);
+    raiseAuthChallenge(res.status);
   }
 
   let body: unknown = null;

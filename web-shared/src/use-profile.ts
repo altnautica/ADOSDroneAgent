@@ -9,6 +9,7 @@
 import { useEffect, useState } from "react";
 
 import { apiFetch } from "./api-fetch";
+import type { GroundRole } from "./api/types";
 
 export type AgentProfile = "drone" | "ground_station" | "workstation" | "compute" | "visor" | "unknown";
 
@@ -18,6 +19,11 @@ export interface PairingInfoLite {
   paired?: boolean | null;
   device_id?: string | null;
   name?: string | null;
+  /** The ground-station role (`direct`, `relay`, `receiver`). */
+  role?: string | null;
+  /** The reach name avahi publishes (already `.local`-qualified); absent when
+   *  the agent does not publish one. */
+  mdns_host?: string | null;
 }
 
 export const PROFILE_RETRY_MS = 3000;
@@ -116,4 +122,37 @@ export function useProfile(): AgentProfile | null {
   }, [profile, generation]);
 
   return profile;
+}
+
+/** The wire ground-station role (`/api/pairing/info.role`). A missing or
+ *  unrecognised role reads `direct`, the ground-station default. */
+export function groundRoleFrom(raw: string | null | undefined): GroundRole {
+  if (raw === "relay" || raw === "receiver") return raw;
+  return "direct";
+}
+
+export interface NodeIdentityLite {
+  /** Null until the agent first answers. */
+  profile: AgentProfile | null;
+  /** The ground-station role; null on any other profile and until known. */
+  role: GroundRole | null;
+}
+
+/** The profile plus, on a ground station, its role, from the same probe. */
+export function useNodeIdentity(): NodeIdentityLite {
+  const profile = useProfile();
+  const [role, setRole] = useState<GroundRole | null>(null);
+
+  useEffect(() => {
+    if (profile !== "ground_station") return;
+    let cancelled = false;
+    void probePairingInfo().then((info) => {
+      if (!cancelled) setRole(groundRoleFrom(info.role));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [profile]);
+
+  return { profile, role: profile === "ground_station" ? role : null };
 }

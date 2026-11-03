@@ -24,7 +24,10 @@ from ados.services.vision.model_manager import ModelManager
 
 async def main():
     cfg = load_config()
-    vision = cfg.vision
+    # This step provisions the RKNN NPU path (enable_vision_config writes
+    # backend: rknn right after), so pick the model and variant for that
+    # runtime rather than for whatever the config says before it is written.
+    vision = cfg.vision.model_copy(update={"backend": "rknn"})
     mgr = ModelManager(vision)
     # Populate the registry so the recommended pick can see it (best-effort: an
     # offline board falls back to any locally-cached registry).

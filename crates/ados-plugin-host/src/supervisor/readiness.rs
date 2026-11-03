@@ -39,8 +39,15 @@ impl PluginSupervisor {
                         crate::services::probe_http(*port, path, url.starts_with("https://"))
                     }
                     Some(ReadyCheck::Command(argv)) => {
-                        match probe_spec(manifest, argv, &self.paths, &granted, guard.active)
-                            .and_then(|probe| self.backend.probe(&probe))
+                        match probe_spec(
+                            manifest,
+                            argv,
+                            &self.paths,
+                            &self.current_profile,
+                            &granted,
+                            guard.active,
+                        )
+                        .and_then(|probe| self.backend.probe(&probe))
                         {
                             Ok(()) => (true, None),
                             Err(e) => (false, Some(e.0.chars().take(200).collect())),

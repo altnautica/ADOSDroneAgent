@@ -8,7 +8,9 @@ import { CockpitShell } from "@/components/shell/cockpit-shell";
 import { ErrorBoundary } from "@/shared/error-boundary";
 import { useButtons } from "@/hooks/use-buttons";
 import { useGamepad } from "@/hooks/use-gamepad";
-import { useUiScale } from "@/hooks/use-ui-scale";
+import { useAppearance } from "@/hooks/use-appearance";
+import { ToastHost } from "@/components/ui/toast";
+import { useInputSourceTracking } from "@/stores/input-store";
 import { useWakeLock } from "@/shared/wake-lock";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 
@@ -22,15 +24,17 @@ import { activeScreenId, useNavStore } from "@/stores/nav-store";
  *  `App`, anything they threw escaped straight to the root and blanked the
  *  screen — on a panel with no console and no way to read the stack. */
 function CockpitRoot() {
-  useUiScale();
+  useAppearance();
+  useInputSourceTracking();
   const { connected: buttonsConnected } = useButtons();
   const { connected: gamepadConnected } = useGamepad();
   const { held: wakeHeld } = useWakeLock();
 
   return (
-    <CockpitShell
-      input={{ buttonsConnected, gamepadConnected, wakeHeld }}
-    />
+    <>
+      <CockpitShell input={{ buttonsConnected, gamepadConnected, wakeHeld }} />
+      <ToastHost />
+    </>
   );
 }
 

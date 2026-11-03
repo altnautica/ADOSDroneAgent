@@ -134,8 +134,13 @@ fn the_wifi_powersave_object_is_reshaped_into_the_array_the_gcs_clamps() {
 fn node_flags_match_the_lan_presence_rules() {
     let run = tempfile::tempdir().unwrap();
     let etc = tempfile::tempdir().unwrap();
-    let now = std::time::SystemTime::now();
-    let flags = node_flags_in("ground-station", run.path(), etc.path(), false, now);
+    let flags = node_flags_in(
+        "ground-station",
+        run.path(),
+        etc.path(),
+        false,
+        std::time::SystemTime::now(),
+    );
     assert_eq!(
         Value::Object(flags),
         json!({"gnss": false, "lora": false, "sim": false})
@@ -143,6 +148,9 @@ fn node_flags_match_the_lan_presence_rules() {
 
     write(run.path(), "gnss.json", "{}");
     write(etc.path(), "lora-enabled", "");
+    // Read the clock after the writes: an mtime later than `now` is stale by
+    // design, so a `now` taken before them makes the sidecar look future-dated.
+    let now = std::time::SystemTime::now();
     let flags = node_flags_in("ground-station", run.path(), etc.path(), true, now);
     assert_eq!(
         Value::Object(flags),

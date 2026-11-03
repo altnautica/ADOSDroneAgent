@@ -1,0 +1,129 @@
+// The following-mode chrome's pure rules (13-hud-v2 §8.2, §8.4, §11): which
+// right-rail buttons a width class shows and how big they are, the follow
+// button's word, a quick setting's pending/echo state (STRICT | SMART), the
+// rail's bottom clearance over the radar, and the re-acquired toast text.
+// DOM-free, so every rule is unit-tested.
+
+import { GLOVE_TOUCH_SCALE, SKILL_BAR_CLEARANCE_PX, type WidthClass } from "@/lib/cockpit-layout";
+import type { FollowEvent, FollowPhase } from "@/shared/hud/nav-types";
+
+export type RailButton = "follow" | "mode" | "camSwap" | "rec" | "hold" | "rtl" | "land";
+
+/** A setting write with no echo after this reverts with a warning (§8.2 #2). */
+export const SETTING_ECHO_TIMEOUT_MS = 3000;
+/** How long the re-acquired toast stays (advisory). */
+export const REACQUIRED_TOAST_MS = 4000;
+/** Below this safe height the compact rail folds buttons 3–4 into `⋯`. */
+export const RAIL_FOLD_HEIGHT_PX = 360;
+/** Gap between rail buttons. */
+export const RAIL_GAP_PX = 6;
+
+/** The radar's edge per width class (§11), which the rail keeps clear of. */
+export const RADAR_PX: Record<WidthClass, number> = { compact: 88, medium: 100, expanded: 140, tv: 176 };
+
+/** Rail button edge per width class, ×1.25 in glove mode. */
+export function railButtonPx(width: WidthClass, glove: boolean): number {
+  const base = width === "tv" ? 64 : width === "expanded" ? 56 : 48;
+  return glove ? base * GLOVE_TOUCH_SCALE : base;
+}
+
+export interface RailInput {
+  width: WidthClass;
+  /** A follow-type toggle skill is installed. */
+  followInstalled: boolean;
+  /** The follow skill carries the re-acquire setting. */
+  hasModeSetting: boolean;
+  /** A second concurrent leg is in the PiP to swap with. */
+  canSwap: boolean;
+  /** The Feed region's height, for the compact fold. */
+  safeHeightPx: number;
+}
+
+export interface RailLayout {
+  /** Buttons shown directly, top to bottom. */
+  buttons: RailButton[];
+  /** Buttons behind the `⋯` button (compact, short panels). */
+  folded: RailButton[];
+  /** A divider before the flight mirrors (expanded, tv). */
+  divider: boolean;
+}
+
+/** The rail for a width class: 1–4 on compact and medium, 1–7 above. */
+export function railLayout(i: RailInput): RailLayout {
+  const top: RailButton[] = [];
+  if (i.followInstalled) top.push("follow");
+  if (i.followInstalled && i.hasModeSetting) top.push("mode");
+  const extra: RailButton[] = [];
+  if (i.canSwap) extra.push("camSwap");
+  extra.push("rec");
+  const wide = i.width === "expanded" || i.width === "tv";
+  const fold = i.width === "compact" && i.safeHeightPx < RAIL_FOLD_HEIGHT_PX;
+  return {
+    buttons: [...top, ...(fold ? [] : extra), ...(wide ? (["hold", "rtl", "land"] as RailButton[]) : [])],
+    folded: fold ? extra : [],
+    divider: wide,
+  };
+}
+
+/** The rail's bottom clearance: above the Skill Bar, and above the radar where
+ *  the radar sits in the bottom-right corner (compact, medium). At expanded
+ *  and tv the radar sits left of the rail, so only the Skill Bar counts. */
+export function railBottomPx(width: WidthClass, hasRadar: boolean): number {
+  const radar = hasRadar && (width === "compact" || width === "medium") ? RADAR_PX[width] + 8 : 0;
+  return SKILL_BAR_CLEARANCE_PX + radar;
+}
+
+/** The follow button: `FOLLOW` while idle with a target designated, `TRACKING`
+ *  (with ×) while active; hidden otherwise. */
+export function followButton(
+  active: boolean,
+  phase: FollowPhase | null,
+  designated: boolean,
+): "follow" | "tracking" | null {
+  if (active || (phase !== null && phase !== "idle")) return "tracking";
+  return designated ? "follow" : null;
+}
+
+export interface SettingDisplayInput {
+  /** The value the plugin echoes it runs with, or null. */
+  echo: string | null;
+  /** The manifest default, shown before any echo. */
+  fallback: string | null;
+  /** The value this cockpit last wrote, while unconfirmed. */
+  requested: string | null;
+  requestedAt: number | null;
+  now: number;
+}
+
+export interface SettingDisplay {
+  value: string | null;
+  /** Written, not yet echoed: drawn with a dashed outline. */
+  pending: boolean;
+  /** Written and never echoed within the timeout: revert and warn. */
+  expired: boolean;
+  /** The echo matched the request: the request can be dropped. */
+  confirmed: boolean;
+}
+
+/** A quick setting's shown value: the request while pending, the echo once it
+ *  matches, and the echo (or default) again when no echo came in 3 s. */
+export function settingDisplay(i: SettingDisplayInput): SettingDisplay {
+  const applied = i.echo ?? i.fallback;
+  if (i.requested === null) return { value: applied, pending: false, expired: false, confirmed: false };
+  if (i.echo === i.requested) return { value: i.echo, pending: false, expired: false, confirmed: true };
+  if (i.requestedAt !== null && i.now - i.requestedAt > SETTING_ECHO_TIMEOUT_MS) {
+    return { value: applied, pending: false, expired: true, confirmed: false };
+  }
+  return { value: i.requested, pending: true, expired: false, confirmed: false };
+}
+
+/** The warning raised when a setting write was never echoed. */
+export function settingNotAppliedText(key: string): string {
+  return key === "reacquire_mode" ? "Re-acquire mode not applied" : `${key} not applied`;
+}
+
+/** `Re-acquired #15 · 0.86 · 1.8 s gap` for a `follow.reacquired` event. */
+export function reacquiredToastText(ev: FollowEvent): string | null {
+  if (ev.topic !== "follow.reacquired") return null;
+  return `Re-acquired #${ev.trackId} · ${ev.similarity.toFixed(2)} · ${ev.gapS.toFixed(1)} s gap`;
+}

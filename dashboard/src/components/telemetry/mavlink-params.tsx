@@ -15,8 +15,8 @@ import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { useResource } from "@/hooks/use-resource";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { ApiError, apiFetch } from "@/shared/api-fetch";
-import { resolveFirmwareType } from "@/lib/fc-firmware";
-import { loadParamMetadata } from "@/lib/param-metadata";
+import { resolveFirmwareType } from "@/shared/api/fc-firmware";
+import { loadParamMetadata } from "@/shared/api/param-metadata";
 import {
   buildRows,
   paramWriteBlock,
@@ -24,8 +24,8 @@ import {
   filterRows,
   type FilterState,
   type ParamRow,
-} from "@/lib/params";
-import { toast } from "@/lib/toast";
+} from "@/shared/api/params";
+import { toast } from "@/shared/api/toast";
 import { cn } from "@/lib/utils";
 import { useParamsStore } from "@/stores/params-store";
 

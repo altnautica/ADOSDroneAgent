@@ -4,7 +4,8 @@
 // opened via `open-detail`) without touching the shell or the navigator.
 //
 // Feed is wired now (video + HUD); Link/Mesh/Pair/Uplink/System read their live
-// agent surfaces. Settings is the full config tree: its tab renders the curated
+// agent surfaces; Node is the compute node's home (World Engine jobs, products
+// and perception offload). Each profile opens on its own home tab. Settings is the full config tree: its tab renders the curated
 // root, and each drill level (`settings:<path>`) resolves to a Settings screen
 // bound to that path — so the shell's detail stack + hardware "back" drive the
 // drill without a static screen per config group.
@@ -12,25 +13,52 @@
 import {
   Gauge,
   Radio,
+  Server,
   Network,
   Link2,
   SlidersHorizontal,
   Cpu,
   Settings,
   Blocks,
+  Layers,
+  ScrollText,
+  Usb,
+  Wrench,
+  Terminal,
+  Video,
+  Antenna,
+  RadioTower,
+  Satellite,
+  Activity,
+  Gamepad2,
+  ScanLine,
 } from "lucide-react";
 
 import { FeedScreen } from "@/components/screens/feed-screen";
 import {
   ExtensionsScreen,
+  LogsScreen,
+  PeripheralsScreen,
   LinkScreen,
   MeshScreen,
+  NodeScreen,
+  MspScreen,
+  ParamsScreen,
   PairScreen,
   SettingsScreen,
+  SourcesScreen,
   SystemScreen,
   UplinkScreen,
+  VideoScreen,
+  TransmitScreen,
+  LoraScreen,
+  GnssScreen,
+  SensorsScreen,
+  IoScreen,
+  CaptureScreen,
 } from "@/nav/lazy-screens";
-import { DEFAULT_TAB_ID, type ScreenSpec } from "@/nav/navigator";
+import { DEFAULT_TAB_ID, homeTabId, tabVisibleFor, type FcFamily, type ScreenSpec } from "@/nav/navigator";
+import type { GroundRole } from "@/shared/api/types";
 import type { AgentProfile } from "@/shared/use-profile";
 
 /** Prefix on the detail-stack id for a Settings drill level. Everything after
@@ -48,6 +76,23 @@ const SCREENS: ScreenSpec[] = [
     render: () => <FeedScreen />,
   },
   {
+    id: "node",
+    title: "Node",
+    icon: Server,
+    kind: "tab",
+    profiles: ["workstation", "compute"],
+    render: () => <NodeScreen />,
+  },
+  {
+    // The visor's home (HOME_BY_PROFILE.visor): the world-engine capture session.
+    id: "capture",
+    title: "Capture",
+    icon: ScanLine,
+    kind: "tab",
+    profiles: ["visor"],
+    render: () => <CaptureScreen />,
+  },
+  {
     id: "link",
     title: "Link",
     icon: Radio,
@@ -55,12 +100,72 @@ const SCREENS: ScreenSpec[] = [
     render: () => <LinkScreen />,
   },
   {
+    id: "video",
+    title: "Video",
+    icon: Video,
+    kind: "tab",
+    profiles: ["drone", "visor"],
+    render: () => <VideoScreen />,
+  },
+  {
+    id: "transmit",
+    title: "Transmit",
+    icon: Antenna,
+    kind: "tab",
+    profiles: ["drone"],
+    render: () => <TransmitScreen />,
+  },
+  {
+    id: "lora",
+    title: "LoRa",
+    icon: RadioTower,
+    kind: "tab",
+    profiles: ["drone", "ground_station"],
+    render: () => <LoraScreen />,
+  },
+  {
+    id: "gnss",
+    title: "GNSS",
+    icon: Satellite,
+    kind: "tab",
+    profiles: ["ground_station", "visor"],
+    render: () => <GnssScreen />,
+  },
+  {
+    id: "sensors",
+    title: "Sensors",
+    icon: Activity,
+    kind: "tab",
+    profiles: ["drone", "visor"],
+    render: () => <SensorsScreen />,
+  },
+  {
+    id: "io",
+    title: "IO",
+    icon: Gamepad2,
+    kind: "tab",
+    profiles: ["ground_station"],
+    render: () => <IoScreen />,
+  },
+  {
     id: "mesh",
     title: "Mesh",
     icon: Network,
     kind: "tab",
     profiles: ["ground_station"],
+    // A direct ground station is not in a mesh.
+    roles: ["relay", "receiver"],
     render: () => <MeshScreen />,
+  },
+  {
+    id: "sources",
+    title: "Sources",
+    icon: Layers,
+    kind: "tab",
+    profiles: ["ground_station"],
+    // Only a receiver combines fragments from relays.
+    roles: ["receiver"],
+    render: () => <SourcesScreen />,
   },
   {
     id: "pair",
@@ -82,7 +187,22 @@ const SCREENS: ScreenSpec[] = [
     title: "System",
     icon: Cpu,
     kind: "tab",
-    render: () => <SystemScreen />,
+    render: (ctx) => <SystemScreen dispatch={ctx.dispatch} />,
+  },
+  {
+    id: "peripherals",
+    title: "Peripherals",
+    icon: Usb,
+    // Opened from the System screen with `open-detail`.
+    kind: "detail",
+    render: () => <PeripheralsScreen />,
+  },
+  {
+    id: "logs",
+    title: "Logs",
+    icon: ScrollText,
+    kind: "detail",
+    render: () => <LogsScreen />,
   },
   {
     id: "extensions",
@@ -92,6 +212,24 @@ const SCREENS: ScreenSpec[] = [
     // Lists every running extension and hosts its tabs and panels; a node with
     // none shows a plain empty state.
     render: () => <ExtensionsScreen />,
+  },
+  {
+    id: "params",
+    title: "Params",
+    icon: Wrench,
+    kind: "tab",
+    profiles: ["drone", "visor"],
+    fcFamily: "mavlink",
+    render: () => <ParamsScreen />,
+  },
+  {
+    id: "msp",
+    title: "MSP",
+    icon: Terminal,
+    kind: "tab",
+    profiles: ["drone", "visor"],
+    fcFamily: "msp",
+    render: () => <MspScreen />,
   },
   {
     id: "settings",
@@ -109,16 +247,20 @@ export function allScreens(): ScreenSpec[] {
   return SCREENS;
 }
 
-/** The top-level tab screens, in menu order, filtered for the agent profile.
- *  A tab with `profiles` shows only on those profiles (Mesh and Uplink are
- *  ground-station only). Before the probe resolves, or on a profile the probe
- *  does not recognise, every tab shows and the menu settles once it is known. */
-export function tabScreens(profile?: AgentProfile | null): ScreenSpec[] {
-  return SCREENS.filter((s) => {
-    if (s.kind !== "tab") return false;
-    if (!s.profiles || !profile || profile === "unknown") return true;
-    return s.profiles.includes(profile);
-  });
+/** The top-level tab screens, in menu order, for the agent profile, on a
+ *  ground station its role, and the FC family once identified (see
+ *  `tabVisibleFor`). */
+export function tabScreens(
+  profile?: AgentProfile | null,
+  role?: GroundRole | null,
+  fcFamily?: FcFamily | null,
+): ScreenSpec[] {
+  return SCREENS.filter((s) => s.kind === "tab" && tabVisibleFor(s, profile, role, fcFamily));
+}
+
+/** The home tab for `profile`, or null while the profile is unknown. */
+export function homeTabFor(profile: AgentProfile | null | undefined): string | null {
+  return homeTabId(profile, (id) => REGISTRY.has(id));
 }
 
 /** Resolve a screen by id, falling back to the default tab if the id is

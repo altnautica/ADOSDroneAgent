@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { armLabel, batteryLabel, gpsLabel, linkLabel, preflightChecks, reachBadge, videoLabel } from "@/lib/safety-band";
-import type { GsStatus, VehicleState } from "@/lib/types";
+import { armLabel, batteryLabel, linkLabel, preflightChecks, reachBadge, videoLabel } from "@/lib/safety-band";
+import type { GsStatus } from "@/lib/types";
 
 describe("safety band mapping", () => {
   it("names the reach", () => {
@@ -13,15 +13,12 @@ describe("safety band mapping", () => {
 
   it("shows a dash for every unknown value", () => {
     expect(armLabel(false, true)).toBe("—");
-    expect(gpsLabel(null, true)).toBe("—");
     expect(linkLabel(null)).toBe("—");
     expect(batteryLabel(null, { battery: { voltage: 0, current: null, remaining: 0, temperature: null } })).toBe("—");
   });
 
   it("formats known values", () => {
-    const t: VehicleState = { armed: true, gps: { fix_type: 6, satellites: 21, eph: null, epv: null } };
     expect(armLabel(true, true)).toBe("ARMED");
-    expect(gpsLabel(t, true)).toBe("RTK fix 21");
     expect(linkLabel({ heartbeat_age_s: 0.42 } as GsStatus)).toBe("HB 0.4s");
     expect(
       batteryLabel(

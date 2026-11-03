@@ -27,11 +27,18 @@
 //! `/run/ados/swarm.sock` and publishes the fleet's neighbour table there at 2 Hz.
 //! Same posture as the state client — read-only, absent socket is normal, the route
 //! degrades to a structurally-complete empty table rather than failing.
+//!
+//! [`plugin_events_client`] is the read side of the plugin event-bus export
+//! (seam K, contract `plugin.events`): the plugin host serves its bus on a
+//! root-only socket and this client feeds the navigation, mapping and follow
+//! topics into the [`crate::routes::nav::NavHub`] the nav routes serve. Same
+//! posture: read-only, an absent socket is normal and the routes report `null`.
 
 pub mod cmd;
 pub mod logd_client;
 pub mod mavlink_client;
 pub mod plugin_control_client;
+pub mod plugin_events_client;
 pub mod state_client;
 pub mod swarm_client;
 pub mod vision_client;
@@ -39,6 +46,7 @@ pub mod vision_client;
 pub use logd_client::LogdQueryClient;
 pub use mavlink_client::{AckStream, FrameRead, MavlinkIpcClient};
 pub use plugin_control_client::{PluginControlClient, PluginControlError};
+pub use plugin_events_client::{default_events_socket, PluginEventsHandle};
 pub use state_client::StateIpcClient;
 pub use swarm_client::{default_swarm_socket, SwarmIpcClient, SwarmIpcHandle};
 pub use vision_client::VisionIpcClient;

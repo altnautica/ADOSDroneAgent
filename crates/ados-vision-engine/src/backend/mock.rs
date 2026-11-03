@@ -26,6 +26,9 @@ impl VisionBackend for MockBackend {
     fn is_inference_capable(&self) -> bool {
         false
     }
+    fn state(&self) -> BackendState {
+        BackendState::Mock
+    }
 }
 
 /// The mock backend with `vision.mock_target` on: every model it loads emits
@@ -97,6 +100,9 @@ impl VisionBackend for MockTargetBackend {
     }
     fn is_inference_capable(&self) -> bool {
         false
+    }
+    fn state(&self) -> BackendState {
+        BackendState::Mock
     }
 }
 

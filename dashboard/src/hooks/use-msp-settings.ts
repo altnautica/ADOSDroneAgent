@@ -12,10 +12,10 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import i18n from "@/i18n";
-import { MspFcClient, type MspFirmware, type MspSetting } from "@/lib/msp/fc-settings";
-import type { CliSettingChange } from "@/lib/msp/types";
-import { loadParamMetadata } from "@/lib/param-metadata";
+import i18n from "@/shared/i18n";
+import { MspFcClient, type MspFirmware, type MspSetting } from "@/shared/api/msp/fc-settings";
+import type { CliSettingChange } from "@/shared/api/msp/types";
+import { loadParamMetadata } from "@/shared/api/param-metadata";
 
 export interface MspSettingsState {
   settings: MspSetting[];

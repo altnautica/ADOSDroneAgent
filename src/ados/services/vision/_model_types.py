@@ -67,6 +67,23 @@ class ModelInfo:
     # an operator choosing one. Absent in the registry ⇒ False (nothing is a
     # default unless the registry says so).
     recommended: bool = False
+    # True when the registry marks the model for benchmarks and explicit
+    # operator installs only: its weights carry terms that keep it out of every
+    # default (it is never auto-provisioned or recommended). Absent ⇒ False.
+    benchmark_only: bool = False
+
+    @classmethod
+    def from_registry(cls, m: dict[str, Any]) -> ModelInfo:
+        """Build from one registry entry; absent keys take the defaults."""
+        return cls(
+            id=m.get("id", ""),
+            name=m.get("name", ""),
+            description=m.get("description", ""),
+            task=m.get("task", ""),
+            variants=m.get("variants", []),
+            recommended=bool(m.get("recommended", False)),
+            benchmark_only=bool(m.get("benchmark_only", False)),
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -76,7 +93,21 @@ class ModelInfo:
             "task": self.task,
             "variants": self.variants,
             "recommended": self.recommended,
+            "benchmark_only": self.benchmark_only,
         }
+
+
+def available_runtimes(backend: str, npu_tops: float) -> list[str] | None:
+    """The model runtimes this board can run, most preferred first, from the
+    configured vision backend: an explicit ``rknn`` / ``hailo`` / ``onnx`` runs
+    only that; ``auto`` runs the NPU sidecar (``rknn``) when the board declares
+    NPU TOPS, then the ONNX CPU backend. ``None`` (no preference) for the
+    ``mock`` backend, which runs nothing real."""
+    if backend in ("rknn", "hailo", "onnx"):
+        return [backend]
+    if backend == "auto":
+        return ["rknn", "onnx"] if npu_tops > 0 else ["onnx"]
+    return None
 
 
 @runtime_checkable

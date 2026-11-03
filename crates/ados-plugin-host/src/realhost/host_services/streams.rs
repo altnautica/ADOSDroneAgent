@@ -50,15 +50,17 @@ impl RealHost {
         &self,
         _plugin_id: &str,
         _camera_id: &str,
+        embeddings: bool,
     ) -> Option<broadcast::Receiver<Vec<u8>>> {
         // The engine fans every camera's detection batches out on one broadcast;
         // the per-camera filter is applied plugin-side (the SDK callback drops a
         // non-matching camera). Same reconnect posture as the frame stream.
         //
-        // Same upstream-arming rule as the frame stream above.
+        // Same upstream-arming rule as the frame stream above. A subscriber that
+        // asks for embeddings makes the engine extract and carry them.
         let client = self.vision.as_ref()?.clone();
         let rx = client.subscribe_detections();
-        tokio::spawn(async move { client.arm_detection_push().await });
+        tokio::spawn(async move { client.arm_detection_push(embeddings).await });
         Some(rx)
     }
 

@@ -204,21 +204,42 @@ impl std::io::Write for Captured {
     }
 }
 
+/// The parse-failure log callsite lives in `ados-config` and is reached by
+/// tests all over the crate (the security posture, edge and config-write
+/// tests parse malformed files too) on threads with no scoped subscriber, and
+/// other tests raise and drop subscribers of their own. Each of those rebuilds
+/// the global callsite interest and max level; one racing this test's scope can
+/// store a stale "disabled" after this test's rebuild, and the counted event is
+/// dropped. A dropped event is the harness, not the dedupe, so each attempt
+/// uses a fresh malformed file (the dedupe key is per file): no attempt may
+/// log more than once, and at least one must log exactly once.
 #[test]
 fn a_malformed_config_logs_its_parse_error_once() {
     let _serial = PARSE_LOG_CALLSITE.lock();
-    let (_dir, path) = temp_yaml("agent: {profile: [unclosed\n");
-    let captured = Captured::default();
-    let writer = captured.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(move || writer.clone())
-        .with_ansi(false)
-        .finish();
-    tracing::subscriber::with_default(subscriber, || {
-        for _ in 0..100 {
-            let _ = config_snapshot(&path, Duration::ZERO);
+    let (_warm_dir, warm_path) = temp_yaml("agent: {profile: [unclosed\n");
+    let _ = config_snapshot(&warm_path, Duration::ZERO);
+    let mut logged_once = false;
+    for _ in 0..5 {
+        let (_dir, path) = temp_yaml("agent: {profile: [unclosed\n");
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            for _ in 0..100 {
+                let _ = config_snapshot(&path, Duration::ZERO);
+            }
+        });
+        let text = String::from_utf8(captured.0.lock().clone()).unwrap();
+        let count = text.matches("config parse failed").count();
+        assert!(count <= 1, "a parse error was logged {count} times: {text}");
+        if count == 1 {
+            logged_once = true;
+            break;
         }
-    });
-    let text = String::from_utf8(captured.0.lock().clone()).unwrap();
-    assert_eq!(text.matches("config parse failed").count(), 1, "{text}");
+    }
+    assert!(logged_once, "the parse error was never logged");
 }

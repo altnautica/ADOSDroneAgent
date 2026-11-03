@@ -154,7 +154,9 @@ impl ResourceLimits {
         }
     }
 
-    pub(super) fn validate(&self) -> Result<(), ManifestError> {
+    /// Check the limits against this class's floors and ceilings. `at` is the
+    /// manifest field the limits came from, named in the refusal.
+    pub(super) fn validate(&self, at: &str) -> Result<(), ManifestError> {
         let (ram, cpu, pids) = self.ceilings();
         let class = match self.class {
             ResourceClass::Standard => "standard",
@@ -167,8 +169,7 @@ impl ResourceLimits {
         ] {
             if !(min..=max).contains(&value) {
                 return Err(ManifestError(format!(
-                    "agent.resources.{field} {value} is outside {min}..={max} for the {class} \
-                     resource class"
+                    "{at}.{field} {value} is outside {min}..={max} for the {class} resource class"
                 )));
             }
         }
@@ -284,6 +285,13 @@ pub struct AgentBlock {
     pub permissions: Vec<PermissionRef>,
     #[serde(default)]
     pub resources: ResourceLimits,
+    /// Per-node-profile resource envelopes, keyed by profile (the underscore
+    /// spelling is read as the hyphen form). The unit for a node of a listed
+    /// profile gets that entry; any other profile gets [`Self::resources`]. One
+    /// envelope sized for a workstation would otherwise be the cgroup limit on a
+    /// 4 GB companion board too, and bound nothing there.
+    #[serde(default, deserialize_with = "deserialize_profile_map")]
+    pub resources_by_profile: BTreeMap<String, ResourceLimits>,
     /// Basenames the plugin may `process.spawn` at runtime. The host enforces
     /// the `process.spawn` allowlist against this list (the same field as the
     /// Python `AgentBlock.subprocess_spawn`). Empty (the default) means no spawn is
@@ -329,6 +337,22 @@ impl AgentBlock {
     /// Whether the agent half installs on a node of `profile`.
     pub fn targets_profile(&self, profile: &str) -> bool {
         self.target_profiles.iter().any(|p| p == profile)
+    }
+
+    /// The resource envelope the agent half runs under on a node of `profile`:
+    /// its [`Self::resources_by_profile`] entry, else [`Self::resources`].
+    pub fn resources_for(&self, profile: &str) -> &ResourceLimits {
+        let profile = canonical_profile(profile).unwrap_or(profile);
+        self.resources_by_profile
+            .get(profile)
+            .unwrap_or(&self.resources)
+    }
+
+    /// Whether any envelope (the default or a per-profile one) is `heavy`.
+    pub fn any_heavy(&self) -> bool {
+        std::iter::once(&self.resources)
+            .chain(self.resources_by_profile.values())
+            .any(|r| r.class == ResourceClass::Heavy)
     }
 
     /// The shared topics declared under `contributes.shared_topics`. Empty when

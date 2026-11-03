@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { apiFetch } from "@/shared/api-fetch";
-import type { AgentHeartbeat } from "@/lib/types";
+import type { AgentHeartbeat } from "@/shared/api/types";
 
 export function useHeartbeat() {
   return useQuery<AgentHeartbeat>({

@@ -123,22 +123,47 @@ fn picker_auto_selects_sidecar_on_rockchip() {
     // A Jetson has no accelerated backend: auto must not route it to the
     // RKNN sidecar, which cannot run there.
     assert_ne!(select_backend("tegra234", &prefs).name(), "rknn");
-    // A CPU-only SoC under auto prefers the real ONNX CPU backend when it is
-    // compiled in, and only falls back to the detection-less mock when no
-    // runtime is available. Either way it never silently picks mock when a
-    // real CPU backend exists.
+    // A CPU-only SoC under auto takes the ONNX CPU backend when it is compiled
+    // in; without it the picker says so (unavailable), never a silent mock.
     let cpu = select_backend("bcm2711", &prefs);
     #[cfg(feature = "onnx")]
     {
         assert_eq!(cpu.name(), "onnx");
         assert!(cpu.is_inference_capable());
+        assert_eq!(cpu.state(), BackendState::Ready);
     }
     #[cfg(not(feature = "onnx"))]
     {
-        assert_eq!(cpu.name(), "mock");
-        // The mock is honestly flagged as not running real inference.
+        assert_eq!(cpu.name(), "onnx");
         assert!(!cpu.is_inference_capable());
+        assert_eq!(cpu.state(), BackendState::Unavailable);
+        assert!(cpu.unavailable_reason().unwrap().contains("onnx"));
     }
+}
+
+#[test]
+fn an_unavailable_backend_loads_nothing_and_says_why() {
+    let b = UnavailableBackend::new("onnx", "not compiled in");
+    assert_eq!(b.name(), "onnx");
+    assert_eq!(b.state(), BackendState::Unavailable);
+    assert_eq!(b.state().as_str(), "unavailable");
+    assert_eq!(b.unavailable_reason(), Some("not compiled in"));
+    let err = b.load(&meta()).err().expect("load is refused").to_string();
+    assert!(err.contains("not compiled in"), "{err}");
+}
+
+#[test]
+fn backend_states_have_stable_wire_names() {
+    assert_eq!(BackendState::Ready.as_str(), "ready");
+    assert_eq!(BackendState::Mock.as_str(), "mock");
+    assert_eq!(BackendState::Unavailable.as_str(), "unavailable");
+    assert_eq!(MockBackend.state(), BackendState::Mock);
+    assert_eq!(MockTargetBackend.state(), BackendState::Mock);
+    // A sidecar that is not answering is unavailable, not ready.
+    assert_eq!(
+        SidecarBackend::new("/nonexistent/ados-vision-rknn.sock", "rknn").state(),
+        BackendState::Unavailable
+    );
 }
 
 #[test]
@@ -194,18 +219,30 @@ fn picker_honours_explicit_preference() {
     };
     assert_eq!(select_backend("rk3576", &prefs).name(), "mock");
 
-    // onnx falls back to mock when not compiled in.
+    // onnx without the feature is unavailable, not a mock.
     let prefs_onnx = BackendPrefs {
         preference: "onnx",
         rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
         hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         mock_target: false,
     };
-    let name = select_backend("x86", &prefs_onnx).name().to_string();
+    let onnx = select_backend("x86", &prefs_onnx);
+    assert_eq!(onnx.name(), "onnx");
     #[cfg(feature = "onnx")]
-    assert_eq!(name, "onnx");
+    assert_eq!(onnx.state(), BackendState::Ready);
     #[cfg(not(feature = "onnx"))]
-    assert_eq!(name, "mock");
+    assert_eq!(onnx.state(), BackendState::Unavailable);
+
+    // An unknown backend name is unavailable, with the name in the reason.
+    let prefs_bad = BackendPrefs {
+        preference: "tpu9000",
+        rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
+        hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
+        mock_target: false,
+    };
+    let bad = select_backend("x86", &prefs_bad);
+    assert_eq!(bad.state(), BackendState::Unavailable);
+    assert!(bad.unavailable_reason().unwrap().contains("tpu9000"));
 }
 
 #[test]

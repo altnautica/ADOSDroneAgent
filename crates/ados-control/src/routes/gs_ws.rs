@@ -148,7 +148,7 @@ const PEER_SILENCE_LIMIT: Duration = Duration::from_secs(30);
 
 /// A ticker whose first tick lands one [`KEEPALIVE_INTERVAL`] after accept; a
 /// late tick is delayed rather than burst.
-fn keepalive_ticker() -> tokio::time::Interval {
+pub(crate) fn keepalive_ticker() -> tokio::time::Interval {
     let mut ticker =
         tokio::time::interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -165,7 +165,7 @@ async fn send_bounded(socket: &mut WebSocket, msg: Message) -> bool {
 }
 
 /// Serialize `value` and send it as one bounded text frame.
-async fn send_json(socket: &mut WebSocket, value: &Value) -> bool {
+pub(crate) async fn send_json(socket: &mut WebSocket, value: &Value) -> bool {
     match serde_json::to_string(value) {
         Ok(text) => send_bounded(socket, Message::Text(text.into())).await,
         // A value that cannot serialize is skipped, not a dead client.
@@ -176,7 +176,7 @@ async fn send_json(socket: &mut WebSocket, value: &Value) -> bool {
 /// One keepalive beat: give up on a client silent past [`PEER_SILENCE_LIMIT`],
 /// otherwise send the keepalive text frame and a Ping (whose Pong counts as
 /// hearing from the client). False when the stream should end.
-async fn keepalive_beat(socket: &mut WebSocket, last_heard: Instant) -> bool {
+pub(crate) async fn keepalive_beat(socket: &mut WebSocket, last_heard: Instant) -> bool {
     if last_heard.elapsed() > PEER_SILENCE_LIMIT {
         return false;
     }
@@ -186,7 +186,7 @@ async fn keepalive_beat(socket: &mut WebSocket, last_heard: Instant) -> bool {
 
 /// Whether an inbound read leaves the client connected. Any frame, a Pong
 /// included, means the client is alive.
-fn client_still_open(incoming: &Option<Result<Message, axum::Error>>) -> bool {
+pub(crate) fn client_still_open(incoming: &Option<Result<Message, axum::Error>>) -> bool {
     !matches!(incoming, None | Some(Ok(Message::Close(_))) | Some(Err(_)))
 }
 
@@ -205,7 +205,7 @@ async fn close_profile_mismatch(socket: &mut WebSocket) {
 // ---------------------------------------------------------------------------
 
 /// The outcome of the WebSocket handshake auth decision.
-enum WsAuth {
+pub(crate) enum WsAuth {
     /// Admit, echoing no subprotocol (the unpaired path or the `X-ADOS-Key`
     /// header path; there is nothing to echo).
     AcceptPlain,
@@ -253,7 +253,7 @@ fn extract_ticket(offered: &[String]) -> Option<&str> {
 ///
 /// `caller` is the class the TCP edge stamped; the Unix socket edge stamps
 /// none and is the trusted on-box plane.
-fn decide_ws_auth(
+pub(crate) fn decide_ws_auth(
     state: &AppState,
     headers: &HeaderMap,
     scope: &str,
@@ -315,14 +315,17 @@ fn decide_ws_auth(
 
 /// The caller class the TCP edge stamped, or the on-box class on the Unix
 /// socket edge, which stamps none and is reachable only from the box itself.
-fn caller_of(caller: Option<Extension<CallerClass>>) -> CallerClass {
+pub(crate) fn caller_of(caller: Option<Extension<CallerClass>>) -> CallerClass {
     caller.map_or(CallerClass::OnBox, |Extension(c)| c)
 }
 
 /// Resolve the `on_upgrade` subprotocol selection from the auth outcome: the
 /// ticket path echoes the marker (RFC 6455 requires selecting an offered
 /// subprotocol), the plain path echoes nothing.
-fn upgrade_with(ws: WebSocketUpgrade, auth: WsAuth) -> Option<(WebSocketUpgrade, WsAuth)> {
+pub(crate) fn upgrade_with(
+    ws: WebSocketUpgrade,
+    auth: WsAuth,
+) -> Option<(WebSocketUpgrade, WsAuth)> {
     match auth {
         WsAuth::Reject => None,
         WsAuth::AcceptTicket => {
@@ -487,7 +490,7 @@ fn close_frame(code: u16, reason: &str) -> axum::extract::ws::CloseFrame {
 /// fails we never call `on_upgrade`, so the HTTP response is a `401` with the
 /// FastAPI-shaped detail, matching the residual handler closing 4401 (a browser
 /// reads a refused handshake either way; an HTTP 401 carries a clear body).
-fn ws_reject() -> Response {
+pub(crate) fn ws_reject() -> Response {
     crate::routes::detail(
         axum::http::StatusCode::UNAUTHORIZED,
         "Missing or invalid WebSocket credentials.",

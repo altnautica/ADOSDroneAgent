@@ -9,10 +9,10 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { WifiPanel } from "@/components/wifi/wifi-panel";
 import { useStatus } from "@/hooks/use-status";
-import { postApply } from "@/lib/apply-actions";
-import { toast, toastFromError } from "@/lib/toast";
-import { getWifiStatus } from "@/lib/wifi";
-import { resolveHotspotSsid } from "@/lib/hotspot";
+import { postApply } from "@/shared/api/apply-actions";
+import { toast, toastFromError } from "@/shared/api/toast";
+import { getWifiStatus } from "@/shared/api/wifi";
+import { resolveHotspotSsid } from "@/shared/api/hotspot";
 
 export function NetworkSettings() {
   const { t } = useTranslation();

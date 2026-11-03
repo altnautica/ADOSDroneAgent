@@ -12,9 +12,9 @@ import { RadioCardGroup } from "@/components/ui/radio-card-group";
 import { useConfig } from "@/hooks/use-config";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useStatus } from "@/hooks/use-status";
-import { selfHostedSeed } from "@/lib/cloud-seed";
-import { toast, toastFromError } from "@/lib/toast";
-import { cloudSectionSchema, postApply } from "@/lib/apply-actions";
+import { selfHostedSeed } from "@/shared/api/cloud-seed";
+import { toast, toastFromError } from "@/shared/api/toast";
+import { cloudSectionSchema, postApply } from "@/shared/api/apply-actions";
 
 type CloudMode = "cloud" | "self_hosted" | "local";
 

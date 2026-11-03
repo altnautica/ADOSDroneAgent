@@ -41,11 +41,17 @@ const PLUGIN_HOST_DIR_DEFAULT: &str = "/run/ados/plugin-host";
 /// The control socket file name under the control directory.
 const CONTROL_SOCKET_NAME: &str = "_control.sock";
 
+/// The plugin-host control directory (`ADOS_PLUGIN_HOST_DIR`-aware). The
+/// control socket and the event-export socket both live in it.
+pub(crate) fn plugin_host_dir() -> PathBuf {
+    std::env::var("ADOS_PLUGIN_HOST_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(PLUGIN_HOST_DIR_DEFAULT))
+}
+
 /// The default control socket path (`ADOS_PLUGIN_HOST_DIR`-aware).
 pub fn default_control_socket() -> PathBuf {
-    let dir =
-        std::env::var("ADOS_PLUGIN_HOST_DIR").unwrap_or_else(|_| PLUGIN_HOST_DIR_DEFAULT.into());
-    Path::new(&dir).join(CONTROL_SOCKET_NAME)
+    plugin_host_dir().join(CONTROL_SOCKET_NAME)
 }
 
 /// A plugin-config control error.

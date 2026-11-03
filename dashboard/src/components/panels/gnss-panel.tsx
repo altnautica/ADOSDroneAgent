@@ -9,8 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useResource } from "@/hooks/use-resource";
-import { GNSS_PATH, putGnssBase, type GnssStatus } from "@/lib/sensors";
-import { toast, toastFromError } from "@/lib/toast";
+import { GNSS_PATH, putGnssBase, type GnssStatus } from "@/shared/api/sensors";
+import { toast, toastFromError } from "@/shared/api/toast";
 import { fmtNum } from "@/shared/format";
 
 /** Receivers, base mode (survey/off) and the RTCM output of the GS GNSS. */

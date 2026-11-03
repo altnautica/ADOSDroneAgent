@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { ConfirmDialog } from "@/components/settings/confirm-dialog";
-import { toast, toastFromError } from "@/lib/toast";
+import { toast, toastFromError } from "@/shared/api/toast";
 import {
   forgetWifi,
   getSavedWifi,
@@ -15,11 +15,11 @@ import {
   leaveWifi,
   scanWifi,
   setWifiAutoconnect,
-} from "@/lib/wifi";
+} from "@/shared/api/wifi";
 import type {
   WifiNetwork,
   WifiSavedConnection,
-} from "@/lib/types";
+} from "@/shared/api/types";
 
 import { WifiManualEntryRow } from "./wifi-manual-entry-row";
 import { WifiNetworkRow } from "./wifi-network-row";

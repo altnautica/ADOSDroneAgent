@@ -28,11 +28,20 @@ interface FeedState {
   video: VideoTransportSnapshot;
   /** True while the video layer is mounted (only on the Feed). */
   videoMounted: boolean;
+  /** The leg the main video shows, as the Feed resolved it (null before the
+   *  first roster). */
+  mainCameraId: string | null;
+  /** The leg the picture-in-picture inset shows, or null with no inset. */
+  pipCameraId: string | null;
 
   setActiveCamera: (id: string | null) => void;
   reconnectStream: () => void;
   setActiveStreamLabel: (label: string | null) => void;
   setVideo: (video: VideoTransportSnapshot | null) => void;
+  /** The Feed reports the legs it resolved for the main video and the inset. */
+  syncLegs: (mainId: string | null, pipId: string | null) => void;
+  /** Swap the main video and the inset: the old main moves into the inset. */
+  swapPip: () => void;
 }
 
 export const useFeedStore = create<FeedState>((set) => ({
@@ -41,9 +50,18 @@ export const useFeedStore = create<FeedState>((set) => ({
   activeStreamLabel: null,
   video: IDLE_VIDEO,
   videoMounted: false,
+  mainCameraId: null,
+  pipCameraId: null,
   setActiveCamera: (id) => set({ activeCameraId: id }),
   reconnectStream: () => set((s) => ({ streamNonce: s.streamNonce + 1 })),
   setActiveStreamLabel: (label) => set({ activeStreamLabel: label }),
   setVideo: (video) =>
     set(video ? { video, videoMounted: true } : { video: IDLE_VIDEO, videoMounted: false }),
+  syncLegs: (mainCameraId, pipCameraId) => set({ mainCameraId, pipCameraId }),
+  swapPip: () =>
+    set((s) =>
+      s.pipCameraId === null
+        ? {}
+        : { activeCameraId: s.pipCameraId, pipCameraId: s.mainCameraId, mainCameraId: s.pipCameraId },
+    ),
 }));

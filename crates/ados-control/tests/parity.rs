@@ -160,18 +160,25 @@ async fn start_full(
 /// port with a listener that never accepts, the connect-only form reported ready
 /// and the retry below never fired. Requiring a well-formed HTTP status line
 /// makes the probe specific to a server that is actually serving.
+///
+/// The probe asks `/healthz`, the liveness route, which touches no sidecar,
+/// socket or store. It used to ask `/api/status`, which fans out to the state
+/// socket, the log store and the board sidecar: on a loaded gate run its first
+/// answer could take longer than the read window, so a healthy server on a
+/// port nobody else held read as dead air on every retry, and the test failed
+/// before it ran. The read window is generous for the same reason.
 async fn tcp_ready(port: u16) -> bool {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         if let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
-            let req = "GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+            let req = "GET /healthz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
             if stream.write_all(req.as_bytes()).await.is_ok() {
                 let mut buf = Vec::new();
                 // A listener that never accepts leaves this pending until the
                 // timeout; one that accepts without speaking HTTP returns
                 // something that is not a status line.
                 let read =
-                    tokio::time::timeout(Duration::from_millis(500), stream.read_to_end(&mut buf))
+                    tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut buf))
                         .await;
                 if read.is_ok() && buf.starts_with(b"HTTP/1.1 ") {
                     return true;
@@ -1958,6 +1965,7 @@ async fn commands_catalog_matches_the_simple_commands() {
                        vehicle drops.",
         "pauseMission": "Pause the current mission / auto flight (hold position)",
         "resumeMission": "Resume a paused mission / auto flight",
+        "ekfSourceSet": "Switch the EKF3 source set (args: [set], 1, 2 or 3)",
     });
     assert_eq!(
         &Value::Object(commands.clone()),

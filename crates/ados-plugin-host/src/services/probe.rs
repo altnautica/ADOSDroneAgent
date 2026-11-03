@@ -3,12 +3,13 @@
 use super::*;
 
 /// The readiness probe for a command `ready_check`: the argv run in the
-/// plugin's install dir with the plugin's resource envelope and capability
-/// sandbox.
+/// plugin's install dir with the plugin's resource envelope for this node's
+/// `profile` and its capability sandbox.
 pub fn probe_spec(
     manifest: &PluginManifest,
     argv: &[String],
     paths: &Paths,
+    profile: &str,
     granted: &BTreeSet<String>,
     loopback_guard_active: bool,
 ) -> Result<ProbeSpec, SupervisorError> {
@@ -24,7 +25,7 @@ pub fn probe_spec(
         resources: manifest
             .agent
             .as_ref()
-            .map(|a| a.resources.clone())
+            .map(|a| a.resources_for(profile).clone())
             .unwrap_or_default(),
         exec_paths: exec_paths_for(manifest, paths)?,
         sandbox_directives: directives,

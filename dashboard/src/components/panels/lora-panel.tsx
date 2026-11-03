@@ -31,9 +31,9 @@ import {
   type LoraRegionRow,
   type LoraRule,
   type LoraStatus,
-} from "@/lib/lora";
-import { regionFromConfig } from "@/lib/region";
-import { toast, toastFromError } from "@/lib/toast";
+} from "@/shared/api/lora";
+import { regionFromConfig } from "@/shared/api/region";
+import { toast, toastFromError } from "@/shared/api/toast";
 import { ApiError } from "@/shared/api-fetch";
 
 const FOLLOW_COUNTRY = "";

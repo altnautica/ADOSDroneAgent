@@ -16,8 +16,8 @@ import {
   putRig,
   type ClockStatus,
   type SensorsStatus,
-} from "@/lib/sensors";
-import { toast } from "@/lib/toast";
+} from "@/shared/api/sensors";
+import { toast } from "@/shared/api/toast";
 import { ApiError, errorDetail } from "@/shared/api-fetch";
 import { fmtNum } from "@/shared/format";
 

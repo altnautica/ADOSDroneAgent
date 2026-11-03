@@ -707,3 +707,28 @@ fn iso8601_formats_known_epochs() {
         "2024-12-31T23:59:59+00:00"
     );
 }
+
+#[test]
+fn msp_armed_passes_a_boolean_and_reads_anything_else_as_unknown() {
+    let armed = json!({"fc_variant": "betaflight", "fc_msp_armed": true});
+    assert_eq!(
+        fc_liveness_from_snapshot(Some(&armed)).fc_msp_armed,
+        json!(true)
+    );
+    let disarmed = json!({"fc_msp_armed": false});
+    assert_eq!(
+        fc_liveness_from_snapshot(Some(&disarmed)).fc_msp_armed,
+        json!(false)
+    );
+    for snap in [
+        json!({"fc_msp_armed": null}),
+        json!({"fc_msp_armed": 1}),
+        json!({}),
+    ] {
+        assert_eq!(
+            fc_liveness_from_snapshot(Some(&snap)).fc_msp_armed,
+            Value::Null
+        );
+    }
+    assert_eq!(fc_liveness_from_snapshot(None).fc_msp_armed, Value::Null);
+}

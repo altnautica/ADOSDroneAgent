@@ -20,6 +20,21 @@
   :root {
     /* Operator UI-scale knob (persisted). 1 = the reference size. */
     --ui-scale: 1;
+    /* Glove mode (persisted): every touch target grows by this factor. */
+    --touch-scale: 1;
+    /* The space the floating shell chrome takes over a full-bleed screen:
+     * the status strip above, the utility bar below, the menu rail to the
+     * left in landscape and the menu strip above the utility bar in portrait.
+     * Named once here: the chrome takes these sizes (lib/cockpit-layout
+     * CHROME) and the Feed's layouts keep clear of them. The bars holding
+     * touch targets grow with glove mode. */
+    --chrome-top: 3.1rem;
+    --chrome-bottom: calc(3rem * var(--touch-scale));
+    --chrome-rail: 6.6rem;
+    --chrome-strip: calc(3.6rem * var(--touch-scale));
+    --chrome-gap: 0.4rem;
+    /* A Skill Bar slot's edge; the Feed sets it per width class. */
+    --skill-slot: 4.4rem;
   }
 
   html {
@@ -55,8 +70,8 @@
 @layer components {
   /* Any interactive row/control opts into a 48px-floored hit target. */
   .touch-target {
-    min-height: max(2.75rem, 48px);
-    min-width: max(2.75rem, 48px);
+    min-height: calc(max(2.75rem, 48px) * var(--touch-scale));
+    min-width: calc(max(2.75rem, 48px) * var(--touch-scale));
   }
 
   /* The shared focus ring the single input dispatcher moves across touch,

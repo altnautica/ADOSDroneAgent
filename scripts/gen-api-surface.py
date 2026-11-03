@@ -90,6 +90,7 @@ UNAUTHENTICATED = {
     ("WS", "/api/v1/ground-station/pic/events"),
     ("WS", "/api/v1/ground-station/ws/mesh"),
     ("WS", "/api/v1/ground-station/ws/buttons"),
+    ("WS", "/api/v1/nav/stream"),
 }
 
 
@@ -183,9 +184,26 @@ def note_for(method: str, path: str) -> str:
     notes = []
     if (method, path) in UNAUTHENTICATED:
         notes.append("unauthenticated by design")
-    if path in RELAY_FORBIDDEN:
+    if any(relay_covers(denied, path) for denied in RELAY_FORBIDDEN):
         notes.append("relay-forbidden")
     return "; ".join(notes)
+
+
+def relay_covers(denied: str, path: str) -> bool:
+    """Mirrors `auth::gates::path_covers`: `denied` covers the same route and
+    anything beneath it, and a `{name}` segment in `denied` matches any one
+    non-empty segment."""
+    actual = path.split("/")
+    wanted = denied.split("/")
+    if len(actual) < len(wanted):
+        return False
+    for want, seg in zip(wanted, actual):
+        if len(want) >= 2 and want.startswith("{") and want.endswith("}"):
+            if not seg:
+                return False
+        elif seg != want:
+            return False
+    return True
 
 
 def shadow_native(
@@ -326,6 +344,7 @@ RELAY_FORBIDDEN = {
     "/api/mcp/revoke",
     "/api/dashboard/pin/set",
     "/api/dashboard/pin/clear",
+    "/api/v1/security/api-key",
     "/api/plugins/capability-token",
     "/api/wfb/pair/local-bind",
     "/api/wfb/pair/unpair",

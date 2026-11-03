@@ -28,7 +28,7 @@ import type { AllowedProfile } from "@/components/profile-gate";
 import { RouteFallback } from "@/components/route-fallback";
 import { useNodeProfile } from "@/hooks/use-node-profile";
 import { useStatus } from "@/hooks/use-status";
-import type { Profile } from "@/lib/types";
+import type { Profile } from "@/shared/api/types";
 import { cn } from "@/lib/utils";
 
 // The settings nav is grouped into two tiers: a small uppercase group header

@@ -10,6 +10,7 @@
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
 
+import type { GroundRole } from "@/shared/api/types";
 import type { AgentProfile } from "@/shared/use-profile";
 
 /** A screen-raised navigation intent — the web analog of the TFT `HitAction`.
@@ -61,11 +62,17 @@ export interface ScreenSpec {
    *  receive-side concepts only a ground station has). Absent = shown on every
    *  profile. */
   profiles?: AgentProfile[];
+  /** On a ground station, the roles the tab appears on (`direct`, `relay`,
+   *  `receiver`). Absent = every role. Ignored on other profiles. */
+  roles?: GroundRole[];
+  /** The flight-controller protocol the tab serves (MAVLink parameters vs MSP
+   *  configurator). Absent = any FC. Ignored while the FC is not identified. */
+  fcFamily?: FcFamily;
   render: (ctx: ScreenContext) => ReactNode;
 }
 
-/** The default tab the navigator opens on (the Feed, the pilot's flying view).
- *  Restored from persistence when a valid id was saved. */
+/** The fallback tab: the Feed, the pilot's flying view. A profile's own home
+ *  tab (`homeTabFor`) takes over once the profile is known. */
 export const DEFAULT_TAB_ID = "feed";
 
 /** The ordered tab ids, left-to-right / top-to-bottom in the menu. The store
@@ -74,11 +81,69 @@ export const DEFAULT_TAB_ID = "feed";
  *  listed here. */
 export const TAB_ORDER: readonly string[] = [
   "feed",
+  "node",
   "link",
   "mesh",
+  "sources",
   "pair",
   "uplink",
   "system",
   "extensions",
   "settings",
 ];
+
+/** How the node's flight controller is configured: `mavlink` (ArduPilot, PX4)
+ *  or `msp` (Betaflight, iNav). */
+export type FcFamily = "mavlink" | "msp";
+
+/** The FC family from the agent's firmware family and MSP variant, or null
+ *  while it is not identified. */
+export function fcFamilyOf(fcFirmware?: string | null, fcVariant?: string | null): FcFamily | null {
+  const fw = (fcFirmware ?? "").toLowerCase();
+  const variant = (fcVariant ?? "").toLowerCase();
+  if (fw === "betaflight" || fw === "inav" || variant === "betaflight" || variant === "inav") return "msp";
+  if (fw === "ardupilot" || fw === "px4") return "mavlink";
+  return null;
+}
+
+/** Whether a screen's tab shows on `profile` and, on a ground station, on
+ *  `role`. A tab with `profiles` shows only on those profiles (Mesh and Uplink
+ *  are ground-station only); a tab with `roles` only on those ground-station
+ *  roles (Mesh needs a relay or a receiver); a tab with `fcFamily` only for
+ *  that kind of flight controller. Before the probe resolves, or on a profile
+ *  it does not recognise, every tab shows and the menu settles once it is
+ *  known; an unknown role or FC family hides no tab. */
+export function tabVisibleFor(
+  spec: Pick<ScreenSpec, "profiles" | "roles" | "fcFamily">,
+  profile?: AgentProfile | null,
+  role?: GroundRole | null,
+  fcFamily?: FcFamily | null,
+): boolean {
+  if (!profile || profile === "unknown") return true;
+  if (spec.profiles && !spec.profiles.includes(profile)) return false;
+  if (spec.roles && profile === "ground_station" && role && !spec.roles.includes(role)) return false;
+  if (spec.fcFamily && fcFamily && spec.fcFamily !== fcFamily) return false;
+  return true;
+}
+
+/** Each profile's home tab. A ground station receives its drone's video, so
+ *  it opens on the Feed like a drone; a visor opens on Capture; a workstation
+ *  or compute node on its node screen. */
+export const HOME_BY_PROFILE: Readonly<Record<Exclude<AgentProfile, "unknown">, string>> = {
+  drone: "feed",
+  ground_station: "feed",
+  visor: "capture",
+  workstation: "node",
+  compute: "node",
+};
+
+/** The home tab id for `profile`, or null while the profile is unknown. A
+ *  home the build does not register (`registered`) falls back to the Feed. */
+export function homeTabId(
+  profile: AgentProfile | null | undefined,
+  registered: (id: string) => boolean,
+): string | null {
+  if (!profile || profile === "unknown") return null;
+  const home = HOME_BY_PROFILE[profile];
+  return registered(home) ? home : DEFAULT_TAB_ID;
+}

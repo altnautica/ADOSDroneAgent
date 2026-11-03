@@ -148,6 +148,12 @@ pub(super) async fn build_extras(
         "fc_variant".into(),
         fc_variant.as_ref().map(|v| json!(v)).unwrap_or(Value::Null),
     );
+    // The MSP FC's armed flag, read observe-only off the status replies a proxy
+    // poller draws; null when none was read lately (unknown, never disarmed).
+    extras.insert(
+        "fc_msp_armed".into(),
+        fc.msp_armed().await.map(Value::Bool).unwrap_or(Value::Null),
+    );
     // The honest connected-or-reachable verdict, computed once here (the
     // router owns every input) so every consumer reads the SAME answer
     // instead of re-deriving it from the parts. `/api/status` and

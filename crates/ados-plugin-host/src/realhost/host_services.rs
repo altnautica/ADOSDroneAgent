@@ -248,8 +248,9 @@ impl HostServices for RealHost {
         &self,
         _plugin_id: &str,
         _camera_id: &str,
+        embeddings: bool,
     ) -> Option<broadcast::Receiver<Vec<u8>>> {
-        self.serve_vision_subscribe_detection_stream(_plugin_id, _camera_id)
+        self.serve_vision_subscribe_detection_stream(_plugin_id, _camera_id, embeddings)
     }
 
     fn button_subscribe_stream(&self, _plugin_id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {

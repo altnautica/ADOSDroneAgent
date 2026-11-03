@@ -302,6 +302,64 @@ async fn config_put_of_theme_passes_while_armed() {
     assert_eq!(hits, 1);
 }
 
+/// The config keys that change the flight-controller link.
+const MAVLINK_LINK_KEYS: [(&str, &str); 5] = [
+    ("mavlink.source", r#""serial""#),
+    ("mavlink.serial_port", r#""/dev/ttyAMA0""#),
+    ("mavlink.baud_rate", "921600"),
+    ("mavlink.system_id", "2"),
+    ("mavlink.component_id", "190"),
+];
+
+#[tokio::test]
+async fn config_put_of_a_mavlink_link_key_is_refused_while_armed() {
+    for (key, value) in MAVLINK_LINK_KEYS {
+        let (_dir, state) = armed_drone();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let router = guarded_router(state, Arc::clone(&hits));
+        let body = format!(r#"{{"key":"{key}","value":{value}}}"#);
+        let (status, reply) = send(router, "PUT", "/api/config", &body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{key}");
+        assert_eq!(reply["error"], "E_ARMED", "{key}");
+        assert_eq!(reply["override"], "force", "{key}");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "{key} must not reach the handler"
+        );
+    }
+}
+
+#[tokio::test]
+async fn config_put_of_a_mavlink_link_key_passes_forced_or_disarmed() {
+    for (key, value) in MAVLINK_LINK_KEYS {
+        let forced = format!(r#"{{"key":"{key}","value":{value},"force":true}}"#);
+        let (status, hits) = send_armed("PUT", "/api/config", &forced).await;
+        assert_eq!((status, hits), (StatusCode::OK, 1), "{key} forced");
+
+        let (_dir, state) = state_for_profile("drone");
+        state.state.set_snapshot_for_test(json!({"armed": false}));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let router = guarded_router(state, Arc::clone(&hits));
+        let body = format!(r#"{{"key":"{key}","value":{value}}}"#);
+        let (status, _) = send(router, "PUT", "/api/config", &body).await;
+        assert_eq!(status, StatusCode::OK, "{key} disarmed");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "{key} disarmed");
+    }
+}
+
+#[tokio::test]
+async fn config_put_of_a_mavlink_key_off_the_link_passes_while_armed() {
+    for body in [
+        r#"{"key":"mavlink.route_aware","value":true}"#,
+        r#"{"key":"mavlink.legacy_stream_request","value":true}"#,
+        r#"{"key":"mavlink.ws_proxy_enforce_auth","value":false}"#,
+    ] {
+        let (status, hits) = send_armed("PUT", "/api/config", body).await;
+        assert_eq!((status, hits), (StatusCode::OK, 1), "{body}");
+    }
+}
+
 #[tokio::test]
 async fn lora_region_change_is_refused_while_armed() {
     let (status, hits) = send_armed("PUT", "/api/v1/lora", r#"{"region":"EU"}"#).await;
@@ -319,6 +377,29 @@ async fn lora_power_change_without_a_region_passes_while_armed() {
     let (status, hits) = send_armed("PUT", "/api/v1/lora", r#"{"erp_mw":14}"#).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(hits, 1);
+}
+
+#[tokio::test]
+async fn link_tuning_is_refused_while_armed() {
+    for body in [
+        r#"{"mcs":3}"#,
+        r#"{"fec_k":8,"fec_n":12}"#,
+        r#"{"preset":"aggressive"}"#,
+        r#"{"auto":true}"#,
+        r#"{"tier_idx":1}"#,
+    ] {
+        let (status, hits) = send_armed("POST", "/api/video/config", body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(hits, 0, "{body}");
+    }
+}
+
+#[tokio::test]
+async fn link_tuning_passes_with_force_or_without_a_link_knob() {
+    let (status, hits) = send_armed("POST", "/api/video/config", r#"{"mcs":3,"force":true}"#).await;
+    assert_eq!((status, hits), (StatusCode::OK, 1));
+    let (status, hits) = send_armed("POST", "/api/video/config", r#"{"bitrate_kbps":4000}"#).await;
+    assert_eq!((status, hits), (StatusCode::OK, 1));
 }
 
 #[tokio::test]
