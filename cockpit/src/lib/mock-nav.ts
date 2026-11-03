@@ -83,7 +83,7 @@ class MockNavStream {
 
     store.ingest({
       kind: "pose",
-      data: { R: [c, -s, 0, s, c, 0, 0, 0, 1], t: [x, y, -3], health: "good", frame: "map_frd", source: "lidar_planar" },
+      data: { R: [c, -s, 0, s, c, 0, 0, 0, 1], t: [x, y, -3], health: "good", frame: "map_ned", source: "lidar_planar" },
     });
     store.ingest({
       kind: "scan",

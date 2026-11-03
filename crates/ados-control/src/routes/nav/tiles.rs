@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 pub(crate) const MAX_TILES: usize = 4096;
 
 /// The frame the live map is drawn in (see the shared topic contract).
-const DEFAULT_FRAME: &str = "map_frd";
+const DEFAULT_FRAME: &str = "map_ned";
 
 #[derive(Debug, Clone)]
 struct Tile {

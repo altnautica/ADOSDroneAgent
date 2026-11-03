@@ -6,7 +6,7 @@ import { ageOf, reduceNavFrame, useNavStreamStore } from "@/stores/nav-stream-st
 const IDENT = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 const pose = (x: number, y: number) => ({
   kind: "pose" as const,
-  data: { R: IDENT, t: [x, y, 0] as [number, number, number], health: "good" as const, frame: "map_frd", source: null },
+  data: { R: IDENT, t: [x, y, 0] as [number, number, number], health: "good" as const, frame: "map_ned", source: null },
 });
 const designated = { cameraId: "main", trackId: 12, bbox: { x: 0, y: 0, width: 10, height: 20 } };
 
@@ -59,7 +59,7 @@ describe("useNavStreamStore", () => {
   });
 
   it("merges occupancy and stamps the poll", () => {
-    useNavStreamStore.getState().mergeOccupancy({ seq: 7, frame: "map_frd", resM: 0.05, tileCells: 64, tiles: [] }, 900);
+    useNavStreamStore.getState().mergeOccupancy({ seq: 7, frame: "map_ned", resM: 0.05, tileCells: 64, tiles: [] }, 900);
     const s = useNavStreamStore.getState();
     expect(s.occupancy.seq).toBe(7);
     expect(s.occupancyAt).toBe(900);

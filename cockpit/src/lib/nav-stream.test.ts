@@ -8,7 +8,7 @@ describe("parseNavFrame", () => {
   it("parses each kind's payload", () => {
     expect(parseNavFrame({ kind: "pose", data: { R: IDENT, t: [1, 2, 3], health: "good" } })).toEqual({
       kind: "pose",
-      data: { R: IDENT, t: [1, 2, 3], health: "good", frame: "map_frd", source: null },
+      data: { R: IDENT, t: [1, 2, 3], health: "good", frame: "map_ned", source: null },
     });
     const scan = parseNavFrame({ kind: "scan", data: { angle_start_rad: 0, angle_increment_rad: 0.1, ranges_m: [1, "x"] } });
     expect(scan).toEqual({

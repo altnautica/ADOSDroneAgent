@@ -17,7 +17,7 @@ fn live_tiles(seq: u64, tiles: &[(i64, i64, &str)]) -> Value {
     json!({
         "kind": "live",
         "seq": seq,
-        "frame": "map_frd",
+        "frame": "map_ned",
         "res_m": 0.05,
         "tile_cells": 64,
         "tiles": tiles
@@ -179,7 +179,7 @@ async fn follow_events_fan_out_as_discrete_frames() {
 fn map_live_is_empty_before_any_tile() {
     let body = NavHub::new().map_live_body(0);
     assert_eq!(body["seq"], 0);
-    assert_eq!(body["frame"], "map_frd");
+    assert_eq!(body["frame"], "map_ned");
     assert_eq!(body["tiles"], json!([]));
 }
 
