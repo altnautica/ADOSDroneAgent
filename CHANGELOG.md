@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.3] - 2026-11-05
+
+### Fixed
+
+- Installer health check no longer reports `mediamtx-missing` on workstation and compute installs, which never receive mediamtx; the check now follows the same per-profile fetch catalog, so those installs stop showing `degraded` for it.
+
 ## [0.108.2] - 2026-11-04
 
 ### Fixed
