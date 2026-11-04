@@ -165,17 +165,18 @@ impl PluginIpcClient {
 /// Run one host-to-plugin `tool.invoke` and write its `response` frame. The
 /// request args are `{tool, arguments}`; the response carries the tool result
 /// as args, or the error string in `err`. Every invocation is answered, so the
-/// host never waits out its timeout for a reply that cannot come: a handler
-/// that panics answers `tool_handler_panicked`, and a result that cannot be
-/// framed (over the frame cap, or not encodable) answers
-/// `tool_reply_unencodable`.
+/// host never waits out its timeout for a reply that cannot come: a process
+/// with no tool handler answers [`TOOL_HANDLER_MISSING`] (the host then offers
+/// the call to the plugin's other sessions), a handler that panics answers
+/// `tool_handler_panicked`, and a result that cannot be framed (over the frame
+/// cap, or not encodable) answers `tool_reply_unencodable`.
 pub(super) async fn answer_tool_invoke(
     handler: Option<ToolHandler>,
     writer: Arc<AsyncMutex<Option<OwnedWriteHalf>>>,
     req: Envelope,
 ) {
     let outcome = match handler {
-        None => Err("tool_handler_missing".to_string()),
+        None => Err(TOOL_HANDLER_MISSING.to_string()),
         Some(h) => match map_get_str(&req.args, "tool") {
             None => Err("tool name missing".to_string()),
             Some(tool) => {

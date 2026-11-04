@@ -26,6 +26,7 @@ use ados_protocol::frame::{decode_len, FrameError, HEADER_SIZE, PLUGIN_MAX_FRAME
 use ados_protocol::node_info::NodeInfo;
 use ados_protocol::plugin::{
     CapabilityToken, Envelope, PROTOCOL_VERSION, TELEMETRY_STATE_TOPIC, TOKEN_REFRESH_METHOD,
+    TOOL_HANDLER_MISSING,
 };
 use ados_protocol::vision_rpc;
 use rmpv::Value;

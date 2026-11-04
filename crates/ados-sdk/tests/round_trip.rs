@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ados_plugin_host::{EventBus, NoopHost, PluginIpcServer};
-use ados_protocol::plugin::TokenIssuer;
+use ados_plugin_host::{EventBus, InvokeRegistry, NoopHost, PluginIpcServer};
+use ados_protocol::plugin::{TokenIssuer, TOOL_HANDLER_MISSING};
 use ados_sdk::{PluginContext, PluginIpcClient};
 use rmpv::Value;
 
@@ -29,6 +29,8 @@ fn caps(items: &[&str]) -> BTreeSet<String> {
 struct Harness {
     issuer: Arc<TokenIssuer>,
     path: std::path::PathBuf,
+    /// The seam the control socket's `tool.invoke` goes through.
+    invoke: Arc<InvokeRegistry>,
     _accept: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
 }
@@ -43,6 +45,7 @@ fn harness() -> Harness {
     Harness {
         issuer,
         path,
+        invoke: server.invoke_registry(),
         _accept: accept,
         _dir: dir,
     }
@@ -83,6 +86,77 @@ async fn handshake_then_ping_round_trips() {
     assert_eq!(id_v, Some(PLUGIN_ID));
 
     ipc.close().await;
+}
+
+/// Connect one process of the plugin; with `serves_tools` it registers a tool
+/// handler that echoes the tool name and arguments. Returns once the host's
+/// session for it is serving (a ping round trip), so its invoke sender is
+/// registered.
+async fn plugin_process(h: &Harness, serves_tools: bool) -> Arc<PluginIpcClient> {
+    let (ipc, ctx) = connect(h, &["mcp.expose"]).await;
+    if serves_tools {
+        ctx.tools.serve(Arc::new(|tool: String, arguments: Value| {
+            Box::pin(async move {
+                Ok(Value::Map(vec![
+                    (Value::from("ran"), Value::from(tool)),
+                    (Value::from("arguments"), arguments),
+                ]))
+            })
+        }));
+    }
+    ctx.ping_supervisor().await.expect("session serving");
+    ipc
+}
+
+/// A plugin's declared service connects under the plugin's id beside its main
+/// process, and only the main process serves the tools. A control-socket
+/// `tool.invoke` reaches the main process whichever of the two connected last;
+/// with the main process gone the service's `tool_handler_missing` is the
+/// answer.
+#[tokio::test]
+async fn a_tool_invoke_reaches_the_process_serving_tools_beside_a_service() {
+    let args = Value::Map(vec![(Value::from("site"), Value::from("bay-2"))]);
+    for service_last in [true, false] {
+        let h = harness();
+        let (main, service) = if service_last {
+            let main = plugin_process(&h, true).await;
+            (main, plugin_process(&h, false).await)
+        } else {
+            let service = plugin_process(&h, false).await;
+            (plugin_process(&h, true).await, service)
+        };
+
+        let out = h
+            .invoke
+            .invoke(PLUGIN_ID, "capture_start", args.clone(), Duration::from_secs(2))
+            .await
+            .unwrap_or_else(|e| panic!("service_last={service_last}: {e}"));
+        assert_eq!(
+            out,
+            Value::Map(vec![
+                (Value::from("ran"), Value::from("capture_start")),
+                (Value::from("arguments"), args.clone()),
+            ]),
+            "service_last={service_last}"
+        );
+
+        // The main process exits: the service alone cannot run a tool.
+        main.close().await;
+        let mut err = String::new();
+        for _ in 0..50 {
+            err = h
+                .invoke
+                .invoke(PLUGIN_ID, "capture_start", args.clone(), Duration::from_secs(2))
+                .await
+                .expect_err("no process serves the tools");
+            if err == TOOL_HANDLER_MISSING {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(err, TOOL_HANDLER_MISSING, "service_last={service_last}");
+        service.close().await;
+    }
 }
 
 #[tokio::test]

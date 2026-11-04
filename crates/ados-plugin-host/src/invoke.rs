@@ -9,12 +9,19 @@
 //!
 //! [`InvokeRegistry`] is that seam, decoupled from the (all-sync) [`HostServices`]
 //! trait. Each live plugin connection registers an outbound [`InvokeRequest`]
-//! sender under its plugin id; [`InvokeRegistry::invoke`] looks the sender up,
-//! hands the connection a request plus a one-shot reply channel, and awaits the
-//! reply. The connection task writes the `tool.invoke` envelope, tracks the
-//! pending reply by request id, and resolves the one-shot when the plugin's
-//! `response` frame arrives. A plugin with no live connection, a closed channel,
-//! or a slow plugin surfaces as a typed error, never a hang.
+//! sender under its plugin id; [`InvokeRegistry::invoke`] hands a connection a
+//! request plus a one-shot reply channel and awaits the reply. The connection
+//! task writes the `tool.invoke` envelope, tracks the pending reply by request
+//! id, and resolves the one-shot when the plugin's `response` frame arrives. A
+//! plugin with no live connection, a closed channel, or a slow plugin surfaces
+//! as a typed error, never a hang.
+//!
+//! One plugin may hold several sessions at once: its main process, each
+//! declared service (`agent.contributes.services` connect under the plugin's
+//! id), and a reconnect overlapping its predecessor. Only the process that
+//! registered a tool handler can answer a tool, so an invoke is offered to the
+//! sessions newest first and passes over each that answers
+//! [`TOOL_HANDLER_MISSING`] (nothing ran there) until one answers.
 //!
 //! [`HostServices`]: crate::host::HostServices
 
@@ -23,6 +30,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use ados_protocol::plugin::TOOL_HANDLER_MISSING;
 use rmpv::Value;
 use tokio::sync::{mpsc, oneshot};
 
@@ -52,7 +60,8 @@ pub struct InvokeRequest {
 /// [`invoke`](Self::invoke)). Cheap to clone behind an `Arc`.
 #[derive(Debug, Default)]
 pub struct InvokeRegistry {
-    senders: Mutex<HashMap<String, mpsc::Sender<InvokeRequest>>>,
+    /// Each plugin's live sessions in registration order, newest last.
+    senders: Mutex<HashMap<String, Vec<mpsc::Sender<InvokeRequest>>>>,
     seq: AtomicU64,
 }
 
@@ -61,40 +70,40 @@ impl InvokeRegistry {
         Self::default()
     }
 
-    /// Register (or replace) the outbound-request sender for a live plugin
-    /// connection. Called when a connection's session is up.
+    /// Register the outbound-request sender of a live plugin connection,
+    /// beside any other live session of the same plugin. Called when a
+    /// connection's session is up.
     pub fn register(&self, plugin_id: &str, sender: mpsc::Sender<InvokeRequest>) {
         self.senders
             .lock()
             .expect("invoke registry mutex")
-            .insert(plugin_id.to_string(), sender);
+            .entry(plugin_id.to_string())
+            .or_default()
+            .push(sender);
     }
 
-    /// Remove a plugin's sender (its connection ended). A later invoke against
-    /// it fails closed with `plugin_not_running`.
-    pub fn unregister(&self, plugin_id: &str) {
-        self.senders
-            .lock()
-            .expect("invoke registry mutex")
-            .remove(plugin_id);
-    }
-
-    /// Identity-checked unregister: remove the plugin's sender ONLY when the
-    /// stored sender is `sender`'s own channel. On a reconnect overlap the old
-    /// connection's teardown must not evict the NEW connection's freshly
-    /// registered sender (which would leave the live plugin reporting
-    /// `plugin_not_running` until the daemon restarts). `same_channel` compares
-    /// channel identity, so an unregister from a superseded connection is a no-op.
+    /// Identity-checked unregister: remove only `sender`'s own channel, so an
+    /// ended session never evicts another live session of the same plugin (a
+    /// declared service, or the successor of a reconnect overlap). With no
+    /// session left, a later invoke fails closed with `plugin_not_running`.
     pub fn unregister_if(&self, plugin_id: &str, sender: &mpsc::Sender<InvokeRequest>) {
         let mut map = self.senders.lock().expect("invoke registry mutex");
-        if map.get(plugin_id).is_some_and(|s| s.same_channel(sender)) {
-            map.remove(plugin_id);
+        if let Some(senders) = map.get_mut(plugin_id) {
+            senders.retain(|held| !held.same_channel(sender));
+            if senders.is_empty() {
+                map.remove(plugin_id);
+            }
         }
     }
 
-    /// Ask the live plugin connection to run `tool` with `arguments` and return
-    /// its result. Fails (never hangs) when the plugin is not connected, its
-    /// channel is closed, the connection drops the reply, or the timeout fires.
+    /// Ask the plugin to run `tool` with `arguments` and return its result.
+    ///
+    /// The plugin's live sessions are asked newest first; a session that
+    /// answers [`TOOL_HANDLER_MISSING`] or has already closed its channel is
+    /// passed over for the next. Any other answer is final, error or not, so a
+    /// tool runs at most once. One `timeout` bounds the whole call. Fails
+    /// (never hangs) when no session is connected, a connection drops the
+    /// reply, or the timeout fires.
     pub async fn invoke(
         &self,
         plugin_id: &str,
@@ -102,40 +111,54 @@ impl InvokeRegistry {
         arguments: Value,
         timeout: Duration,
     ) -> Result<Value, String> {
-        let sender = {
+        let senders = {
             let map = self.senders.lock().expect("invoke registry mutex");
-            map.get(plugin_id).cloned()
+            map.get(plugin_id).cloned().unwrap_or_default()
         };
-        let Some(sender) = sender else {
-            return Err(format!("plugin_not_running: {plugin_id}"));
-        };
-        let request_id = format!("inv-{}", self.seq.fetch_add(1, Ordering::Relaxed));
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let req = InvokeRequest {
-            request_id,
-            tool: tool.to_string(),
-            arguments,
-            reply: reply_tx,
-        };
-        // One deadline bounds BOTH the enqueue and the reply, so a wedged plugin
-        // that stops draining its bounded channel cannot make the enqueue hang
+        // One deadline bounds every enqueue and reply, so a wedged plugin that
+        // stops draining its bounded channel cannot make the enqueue hang
         // (the original `sender.send().await` blocked forever on a full channel,
         // before the reply timeout could ever apply).
         let deadline = tokio::time::Instant::now() + timeout;
-        match tokio::time::timeout_at(deadline, sender.send(req)).await {
-            Ok(Ok(())) => {}
-            // The connection task dropped its receiver between the lookup and
-            // the send: treat as not running.
-            Ok(Err(_)) => return Err(format!("plugin_not_running: {plugin_id}")),
-            // The channel is full and the connection is not draining it.
-            Err(_) => return Err(format!("plugin_busy: {plugin_id}")),
+        let mut arguments = Some(arguments);
+        let mut handler_missing = false;
+        for (i, sender) in senders.iter().enumerate().rev() {
+            // The oldest session is the last one asked: it takes the arguments
+            // and every newer one gets a copy.
+            let arguments = if i == 0 {
+                arguments.take().unwrap_or(Value::Nil)
+            } else {
+                arguments.clone().unwrap_or(Value::Nil)
+            };
+            let request_id = format!("inv-{}", self.seq.fetch_add(1, Ordering::Relaxed));
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let req = InvokeRequest {
+                request_id,
+                tool: tool.to_string(),
+                arguments,
+                reply: reply_tx,
+            };
+            match tokio::time::timeout_at(deadline, sender.send(req)).await {
+                Ok(Ok(())) => {}
+                // The connection task dropped its receiver after the lookup:
+                // that session has ended, so ask the next.
+                Ok(Err(_)) => continue,
+                // The channel is full and the connection is not draining it.
+                Err(_) => return Err(format!("plugin_busy: {plugin_id}")),
+            }
+            match tokio::time::timeout_at(deadline, reply_rx).await {
+                Ok(Ok(Err(e))) if e == TOOL_HANDLER_MISSING => handler_missing = true,
+                Ok(Ok(result)) => return result,
+                // The connection dropped the reply sender without answering (it
+                // ended mid-invoke).
+                Ok(Err(_)) => return Err(format!("plugin_disconnected: {plugin_id}")),
+                Err(_) => return Err(format!("tool_timeout: {tool}")),
+            }
         }
-        match tokio::time::timeout_at(deadline, reply_rx).await {
-            Ok(Ok(result)) => result,
-            // The connection dropped the reply sender without answering (it
-            // ended mid-invoke).
-            Ok(Err(_)) => Err(format!("plugin_disconnected: {plugin_id}")),
-            Err(_) => Err(format!("tool_timeout: {tool}")),
+        if handler_missing {
+            Err(TOOL_HANDLER_MISSING.to_string())
+        } else {
+            Err(format!("plugin_not_running: {plugin_id}"))
         }
     }
 
@@ -218,14 +241,123 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unregister_makes_a_plugin_not_running() {
+    async fn unregistering_the_last_session_makes_a_plugin_not_running() {
         let reg = InvokeRegistry::new();
         let (tx, _rx) = mpsc::channel::<InvokeRequest>(4);
-        reg.register("com.x.p", tx);
+        reg.register("com.x.p", tx.clone());
         assert!(reg.is_connected("com.x.p"));
-        reg.unregister("com.x.p");
+        reg.unregister_if("com.x.p", &tx);
         assert!(!reg.is_connected("com.x.p"));
     }
+
+    /// A fake session that answers every request with `answer` and records them.
+    fn session(
+        reg: &InvokeRegistry,
+        answer: Result<&'static str, &'static str>,
+    ) -> (
+        mpsc::Sender<InvokeRequest>,
+        tokio::task::JoinHandle<Vec<(String, Value)>>,
+    ) {
+        let (tx, mut rx) = mpsc::channel::<InvokeRequest>(4);
+        reg.register("com.x.p", tx.clone());
+        let task = tokio::spawn(async move {
+            let mut seen = Vec::new();
+            while let Some(req) = rx.recv().await {
+                seen.push((req.tool.clone(), req.arguments.clone()));
+                let _ = req.reply.send(
+                    answer
+                        .map(Value::from)
+                        .map_err(|e| e.to_string()),
+                );
+            }
+            seen
+        });
+        (tx, task)
+    }
+
+    #[tokio::test]
+    async fn a_session_without_a_tool_handler_passes_the_call_to_the_one_with_it() {
+        // The plugin's main process serves the tools; its declared service
+        // connects later under the same id and serves none.
+        let reg = InvokeRegistry::new();
+        let (main_tx, main) = session(&reg, Ok("started"));
+        let (service_tx, service) = session(&reg, Err(TOOL_HANDLER_MISSING));
+        let args = Value::Map(vec![(Value::from("site"), Value::from("bay"))]);
+        let out = reg
+            .invoke("com.x.p", "capture_start", args.clone(), DEFAULT_INVOKE_TIMEOUT)
+            .await
+            .expect("the main process answers");
+        assert_eq!(out, Value::from("started"));
+        reg.unregister_if("com.x.p", &main_tx);
+        reg.unregister_if("com.x.p", &service_tx);
+        drop((main_tx, service_tx));
+        let expected = vec![("capture_start".to_string(), args)];
+        assert_eq!(service.await.unwrap(), expected, "asked first, newest");
+        assert_eq!(main.await.unwrap(), expected, "then the main process");
+    }
+
+    #[tokio::test]
+    async fn the_newest_session_with_a_handler_answers_alone() {
+        // A reconnect overlap: the new session answers, the old one is never asked.
+        let reg = InvokeRegistry::new();
+        let (old_tx, old) = session(&reg, Ok("old"));
+        let (new_tx, new) = session(&reg, Ok("new"));
+        let out = reg
+            .invoke("com.x.p", "t", Value::Nil, DEFAULT_INVOKE_TIMEOUT)
+            .await
+            .expect("a result");
+        assert_eq!(out, Value::from("new"));
+        reg.unregister_if("com.x.p", &old_tx);
+        reg.unregister_if("com.x.p", &new_tx);
+        drop((old_tx, new_tx));
+        assert!(old.await.unwrap().is_empty());
+        assert_eq!(new.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_tool_error_is_final_and_never_offered_to_another_session() {
+        let reg = InvokeRegistry::new();
+        let (old_tx, old) = session(&reg, Ok("ran twice"));
+        let (new_tx, _new) = session(&reg, Err("no storage"));
+        let err = reg
+            .invoke("com.x.p", "t", Value::Nil, DEFAULT_INVOKE_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(err, "no storage");
+        reg.unregister_if("com.x.p", &old_tx);
+        reg.unregister_if("com.x.p", &new_tx);
+        drop((old_tx, new_tx));
+        assert!(old.await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_session_with_a_handler_answers_tool_handler_missing() {
+        let reg = InvokeRegistry::new();
+        let (_a, _ta) = session(&reg, Err(TOOL_HANDLER_MISSING));
+        let (_b, _tb) = session(&reg, Err(TOOL_HANDLER_MISSING));
+        let err = reg
+            .invoke("com.x.p", "t", Value::Nil, DEFAULT_INVOKE_TIMEOUT)
+            .await
+            .unwrap_err();
+        assert_eq!(err, TOOL_HANDLER_MISSING);
+    }
+
+    #[tokio::test]
+    async fn a_closed_session_is_passed_over() {
+        let reg = InvokeRegistry::new();
+        let (live_tx, _live) = session(&reg, Ok("live"));
+        // A session whose connection task already ended, not yet unregistered.
+        let (dead_tx, dead_rx) = mpsc::channel::<InvokeRequest>(4);
+        reg.register("com.x.p", dead_tx);
+        drop(dead_rx);
+        let out = reg
+            .invoke("com.x.p", "t", Value::Nil, DEFAULT_INVOKE_TIMEOUT)
+            .await
+            .expect("the live session answers");
+        assert_eq!(out, Value::from("live"));
+        drop(live_tx);
+    }
+
 
     #[tokio::test]
     async fn invoke_returns_busy_when_the_connection_never_drains() {
@@ -254,13 +386,15 @@ mod tests {
         let reg = InvokeRegistry::new();
         let (old_tx, _old_rx) = mpsc::channel::<InvokeRequest>(4);
         reg.register("com.x.p", old_tx.clone());
-        // The new connection replaces the sender.
         let (new_tx, _new_rx) = mpsc::channel::<InvokeRequest>(4);
         reg.register("com.x.p", new_tx.clone());
-        // The old connection tears down with an identity-checked unregister: it is
-        // a no-op because the stored sender is the new one.
+        // The old connection tears down with an identity-checked unregister:
+        // the new connection's sender stays.
         reg.unregister_if("com.x.p", &old_tx);
         assert!(reg.is_connected("com.x.p"), "the new connection survives");
+        // A repeated unregister of the old sender is a no-op.
+        reg.unregister_if("com.x.p", &old_tx);
+        assert!(reg.is_connected("com.x.p"));
         // The new connection's own identity-checked unregister does remove it.
         reg.unregister_if("com.x.p", &new_tx);
         assert!(!reg.is_connected("com.x.p"));

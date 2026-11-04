@@ -45,6 +45,13 @@ pub const TELEMETRY_STATE_MAX_HZ: u32 = 10;
 /// discovering it through a `capability_denied`.
 pub const TOKEN_REFRESH_METHOD: &str = "token.refresh";
 
+/// The error a plugin session answers a host `tool.invoke` with when that
+/// process registered no tool handler. Nothing ran, so the host may offer the
+/// call to another live session of the same plugin: a plugin's declared
+/// services connect under the plugin's id beside its main process, and only
+/// the process that serves the tools can answer them.
+pub const TOOL_HANDLER_MISSING: &str = "tool_handler_missing";
+
 /// The env var the host sets on an `agent.http` plugin's process, carrying the
 /// Unix socket path the plugin must serve HTTP on.
 pub const ENV_PLUGIN_HTTP_SOCKET: &str = "ADOS_PLUGIN_HTTP_SOCKET";
