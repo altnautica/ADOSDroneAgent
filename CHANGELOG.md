@@ -25,6 +25,11 @@ the project follows [Semantic Versioning](https://semver.org/).
   running as a ground station. An explicit `--profile` now rewrites that key
   too (comments and layout kept); an absent key or `auto` still defers to
   `profile.conf`, and an install without `--profile` leaves it alone.
+  `ados update` pins the profile the services run (`agent.profile`, then
+  `profile.conf`, or the running agent's when the config is not readable)
+  rather than `profile.conf` alone, so on a node whose profile was changed
+  through the setup API before this release the update keeps that profile
+  instead of rewriting the config back to the one `profile.conf` still names.
 - **A profile change through `POST /api/v1/setup/apply` switches the units
   too.** With `auto_restart` it only restarted the supervisor, so the old
   profile's units stayed enabled and any still running were carried over, and

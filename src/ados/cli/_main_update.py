@@ -12,11 +12,13 @@ import tempfile
 
 import click
 import httpx
+import yaml
 
 from ados.cli import _agent_http
 from ados.cli._main_install import _read_install_result
 from ados.cli._main_status import _request
-from ados.core.profile import _read_profile_conf_value
+from ados.core.config import ADOSConfig, load_config
+from ados.core.profile import _read_profile_conf_value, canonical_profile, current_profile_and_role
 
 # How old the vehicle state may be before an upgrade treats the vehicle as
 # armed; the same bound as `ados_protocol::armed::ARMED_STATE_MAX_AGE`.
@@ -68,23 +70,52 @@ def _latest_main_version() -> str | None:
         return None
 
 
+def _running_profile() -> str | None:
+    """The profile the running agent reports, underscore form, or ``None``."""
+    try:
+        response = _agent_http.call("GET", "/api/status/full", timeout=4.0)
+    except click.ClickException:
+        return None
+    body = response.body if response.ok and isinstance(response.body, dict) else {}
+    reported = body.get("profile")
+    return canonical_profile(reported) if isinstance(reported, str) else None
+
+
 def _upgrade_profile(override: str | None) -> str | None:
     """The profile an upgrade should pin, or ``None`` when it cannot be known.
 
     An upgrade must never be allowed to *change* what a box is. The installer
     resolves the profile itself when none is passed, and a gap in that
     resolution has re-profiled a live ground station to ``drone`` and left it
-    in a reboot loop that needed a reflash to recover. The box already knows
-    what it is — ``/etc/ados/profile.conf`` is written by both install.sh and
-    the wizard — so an upgrade states it explicitly rather than relying on a
-    default being right.
+    in a reboot loop that needed a reflash to recover. So an upgrade states the
+    profile explicitly rather than relying on a default being right.
+
+    The pinned profile is the one the services run: ``agent.profile`` in the
+    config first, then ``/etc/ados/profile.conf``, the order every service
+    resolves it in (:func:`current_profile_and_role`). ``profile.conf`` alone
+    is not enough: a profile changed through the setup API before the switch
+    kept it current left it naming the old profile, and the upgrade's
+    ``--profile`` would have rewritten the config back to that. When the config
+    is not readable (it is root-only and ``ados update`` may run as the
+    operator), the profile the running agent reports comes before
+    ``profile.conf``.
 
     An explicit ``--profile`` wins, for the one legitimate case: deliberately
     converting a box from one role to another.
     """
     if override:
         return override
-    return _read_profile_conf_value()
+    try:
+        config: ADOSConfig | None = load_config()
+    except PermissionError:
+        return _running_profile() or _read_profile_conf_value()
+    except (OSError, ValueError, yaml.YAMLError):
+        config = None
+    explicit = canonical_profile(getattr(getattr(config, "agent", None), "profile", None))
+    if explicit is None and _read_profile_conf_value() is None:
+        return None
+    profile, _role = current_profile_and_role(config)
+    return profile.replace("-", "_")
 
 
 def _vehicle_arm_state() -> tuple[str, str | None]:

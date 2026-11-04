@@ -466,6 +466,10 @@ def test_viewer_url_from_whep_relative_points_at_local_mediamtx() -> None:
     assert cli_main._viewer_url_from_whep("/whep") == "http://127.0.0.1:8889/main/"
 
 
+# A node whose config leaves the profile to profile.conf.
+_AUTO_CONFIG = SimpleNamespace(agent=SimpleNamespace(profile="auto"))
+
+
 def test_update_pins_the_boxs_own_profile_so_it_cannot_be_reprofiled() -> None:
     """An upgrade must never change what a box IS.
 
@@ -478,6 +482,8 @@ def test_update_pins_the_boxs_own_profile_so_it_cannot_be_reprofiled() -> None:
         patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
         patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
         patch("ados.cli._main_update._read_profile_conf_value", return_value="ground_station"),
+        patch("ados.core.profile._read_profile_conf_value", return_value="ground_station"),
+        patch("ados.cli._main_update.load_config", return_value=_AUTO_CONFIG),
         patch("ados.cli._main_update._armed_refusal", return_value=None),
         patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
@@ -540,6 +546,8 @@ def _update(args: list[str], status_body: dict | None, profile: str | None = "dr
         patch("ados.cli._main_update._installed_version", return_value="0.10.0"),
         patch("ados.cli._main_update._latest_main_version", return_value="0.10.1"),
         patch("ados.cli._main_update._read_profile_conf_value", return_value=profile),
+        patch("ados.core.profile._read_profile_conf_value", return_value=profile),
+        patch("ados.cli._main_update.load_config", return_value=_AUTO_CONFIG),
         patch("ados.cli._main_update._agent_http.call", _status_full(status_body)),
         patch("ados.cli._main_update._run_upgrade") as upgrade,
     ):
