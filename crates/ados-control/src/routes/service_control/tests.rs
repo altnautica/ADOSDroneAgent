@@ -25,36 +25,21 @@ async fn an_arbitrary_path_like_name_is_rejected() {
     );
 }
 
-#[tokio::test]
-async fn a_bare_name_is_normalized_to_the_ados_prefix_for_the_guard() {
-    // `mavlink` → `ados-mavlink` is in the allowlist, so it passes the guard
-    // and proceeds to the restart path. On a dev host with no systemctl the
-    // restart cannot spawn, so the body is the spawn-error shape — but the
-    // KEY parity point here is that the guard did NOT reject it (the message
-    // is not an "Unknown service" rejection).
-    let body = restart_service_result("mavlink").await;
-    assert_eq!(body["status"], json!("error"));
-    let msg = body["message"].as_str().unwrap();
-    assert!(
-        !msg.starts_with("Unknown service"),
-        "an allowlisted bare name must pass the guard, got: {msg}"
-    );
+#[test]
+fn a_bare_name_is_normalized_to_the_ados_prefix_for_the_guard() {
+    // `mavlink` → `ados-mavlink` is in the allowlist, so it passes the guard. The
+    // guard is checked on its own: running the restart here would restart (or ask
+    // polkit to restart) a real unit on a systemd host.
+    assert_eq!(guard_unit("mavlink").unwrap(), "ados-mavlink");
+    assert_eq!(guard_unit("ados-mavlink").unwrap(), "ados-mavlink");
 }
 
-#[tokio::test]
-async fn every_allowlisted_name_passes_the_guard() {
-    // Each allowlisted unit clears the name guard (it does not produce an
-    // "Unknown service" rejection). On a dev host the subsequent restart
-    // fails to spawn, which is a different, non-rejection error body.
+#[test]
+fn every_allowlisted_name_passes_the_guard() {
     for unit in allowed_units() {
         // Strip the `ados-` prefix to exercise the normalization path too.
         let bare = unit.strip_prefix("ados-").unwrap();
-        let body = restart_service_result(bare).await;
-        let msg = body["message"].as_str().unwrap_or_default();
-        assert!(
-            !msg.starts_with("Unknown service"),
-            "{unit} should pass the guard"
-        );
+        assert_eq!(guard_unit(bare).unwrap(), unit, "{unit} should pass the guard");
     }
 }
 

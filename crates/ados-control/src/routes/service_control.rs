@@ -113,24 +113,31 @@ pub async fn restart_unit(name: &str) -> Value {
     restart_service_result(name).await
 }
 
-/// The pure restart logic + the systemd shell-outs, factored out of the axum
-/// handler so the name guard and the body shapes are testable without the HTTP
-/// layer.
+/// The restart route's verdict for `name`: the guard, then the systemd shell-outs.
 async fn restart_service_result(name: &str) -> Value {
-    // Normalize to the `ados-<name>` form, then gate on the allowlist. The error
-    // body echoes the *original* request name.
+    match guard_unit(name) {
+        Ok(svc_name) => perform_restart(&svc_name).await,
+        Err(body) => body,
+    }
+}
+
+/// The name guard alone, with no `systemctl`: normalizes `name` to the `ados-<name>` form and
+/// returns that unit when the allowlist holds it, else the `Unknown service` error body,
+/// which echoes the *original* request name.
+fn guard_unit(name: &str) -> Result<String, Value> {
     let svc_name = if name.starts_with("ados-") {
         name.to_string()
     } else {
         format!("ados-{name}")
     };
-    if !restart_allowed(&svc_name) {
-        return json!({
+    if restart_allowed(&svc_name) {
+        Ok(svc_name)
+    } else {
+        Err(json!({
             "status": "error",
             "message": format!("Unknown service: {name}"),
-        });
+        }))
     }
-    perform_restart(&svc_name).await
 }
 
 /// Run the restart for an already-validated unit and confirm it executed.
