@@ -6,6 +6,26 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.2] - 2026-11-04
+
+### Fixed
+
+- **A profile switch no longer leaves the old profile's units running.** A
+  ground station reinstalled as a drone could keep `ados-mediamtx-gs` running,
+  holding the ports the drone's media server binds, so drone video stayed at
+  `connecting`; the reverse switch could keep `ados-video` running the same
+  way. The installer stopped those units while the previous profile's
+  supervisor was still up, the supervisor restarted them when they died, and
+  the supervisor restart that followed carried them over. The installer now
+  disables the other profile's units, then stops the supervisor, stops those
+  units and starts the supervisor again.
+- **An install with `--profile` switches the profile the agent runs.** The
+  installer rewrote `profile.conf`, but every service reads `agent.profile`
+  in `config.yaml` first, so a ground station reinstalled as a drone went on
+  running as a ground station. An explicit `--profile` now rewrites that key
+  too (comments and layout kept); an absent key or `auto` still defers to
+  `profile.conf`, and an install without `--profile` leaves it alone.
+
 ## [0.108.1] - 2026-11-04
 
 ### Fixed
