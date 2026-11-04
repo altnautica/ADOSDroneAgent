@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.4] - 2026-11-05
+
+### Fixed
+
+- A plugin MCP tool invoke (`POST /api/plugins/{plugin_id}/tools/{tool}/invoke`) no longer fails with `tool_handler_missing` when the plugin declares a service. Each declared service connects to the plugin host under the plugin's id beside the main process, and the host routed every invoke to whichever session connected last, usually a service with no tool handler. The host now keeps every live session of a plugin, asks them newest first, and passes over a session that answers `tool_handler_missing` (nothing ran there), so the call reaches the process that serves the tools. Any other answer is final, so a tool still runs at most once.
+
 ## [0.108.3] - 2026-11-05
 
 ### Fixed
