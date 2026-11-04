@@ -26,7 +26,9 @@
 //!
 //! Before migrating, the current config is copied to `config.yaml.pre-<ver>`
 //! and recorded as this run's config snapshot, so a failed install restores it
-//! (see [`crate::rollback`]). After migrating, the profile's injector
+//! (see [`crate::rollback`]). An explicit `--profile` then points
+//! `agent.profile` at the install's profile ([`profile`]), whether or not the
+//! migration itself succeeds. After migrating, the profile's injector
 //! arbitration policy is applied ([`arbitration`]): a drone has a single
 //! injector and drops `mavlink.injector_arbitration: true`; a ground station
 //! gains it when absent. The retired `video.cameras` / `vision.cameras` lists
@@ -34,6 +36,7 @@
 
 mod arbitration;
 mod cameras;
+mod profile;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -179,6 +182,12 @@ impl Step for ConfigMigrate {
         let config = Path::new(CONFIG_YAML);
         let version = env::installed_agent_version().unwrap_or_else(|| "unversioned".to_string());
         snapshot_config(config, &version, Path::new(RUN_RECORD));
+
+        if ctx.args.profile.is_some() {
+            if let Err(e) = profile::apply(config, &config_lock_path(), &ctx.profile) {
+                return StepOutcome::Failed(format!("agent profile: {e}"));
+            }
+        }
 
         let res = run_with_lock_wait(
             || exec::run(&venv_python(), MIGRATE_ARGS),

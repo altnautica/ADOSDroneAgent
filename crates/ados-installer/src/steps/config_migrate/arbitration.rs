@@ -16,7 +16,7 @@ use super::{LOCK_RETRY, LOCK_WAIT_ATTEMPTS};
 const KEY: &str = "injector_arbitration:";
 
 /// Indentation width of `line`, or `None` for a blank or comment-only line.
-fn indent_of(line: &str) -> Option<usize> {
+pub(super) fn indent_of(line: &str) -> Option<usize> {
     let trimmed = line.trim_start();
     if trimmed.is_empty() || trimmed.starts_with('#') {
         return None;
