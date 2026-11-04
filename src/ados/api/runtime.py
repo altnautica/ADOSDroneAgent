@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from ados.core.config import ADOSConfig, load_config
-from ados.core.config.writer import ConfigWriteResult, set_config_values
+from ados.core.config.writer import ConfigWriteResult, read_config_mapping, set_config_values
 from ados.core.paths import BOARD_JSON, CONFIG_YAML
 
 
@@ -136,6 +136,18 @@ class ApiRuntimeFacade:
         except Exception as exc:  # noqa: BLE001 — surfaced as persist_error
             return ConfigWriteResult(ok=False, error=str(exc))
 
+    def config_has_leaf(self, dotted: str) -> bool | None:
+        """Whether the on-disk config sets the dotted-path leaf ``dotted``.
+
+        ``None`` when this runtime cannot tell. The model alone cannot: a key
+        absent from the file reads as its default, like one set to it.
+        """
+        reader = getattr(self._runtime, "config_has_leaf", None)
+        if not callable(reader):
+            return None
+        has: bool = reader(dotted)
+        return has
+
     def state_ipc_state(self) -> dict:
         state_client = getattr(self._runtime, "state_client", None)
         if state_client and state_client.state:
@@ -244,6 +256,15 @@ class StandaloneApiRuntime:
         persisted. The next ``config`` read sees the write.
         """
         return set_config_values(values, path=self._config_path, model=ADOSConfig)
+
+    def config_has_leaf(self, dotted: str) -> bool:
+        """Whether the config document on disk sets the leaf ``dotted``."""
+        node: Any = read_config_mapping(self._config_path)
+        for part in dotted.split("."):
+            if not isinstance(node, dict) or part not in node:
+                return False
+            node = node[part]
+        return True
 
     def _initialize_board(self, board_json: Path, log: Any) -> None:
         """Set the board identity, independent of the model manager.

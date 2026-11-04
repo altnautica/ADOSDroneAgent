@@ -538,3 +538,34 @@ def test_the_switch_runs_the_supervisor_one_shot_as_a_transient_unit(
             "switch-profile",
         ]
     ]
+
+
+def test_a_rollback_keeps_an_explicit_arbitration_false(tmp_path) -> None:
+    # A false the operator wrote is restored as written; only a key the file
+    # never set is restored by removing it again.
+    from types import SimpleNamespace
+
+    from ados.api.routes.setup.apply import _capture_section_snapshot
+    from ados.api.runtime import ApiRuntimeFacade, StandaloneApiRuntime
+    from ados.core.config import ADOSConfig
+    from ados.core.config.writer import REMOVE
+
+    leaf = "mavlink.injector_arbitration"
+    explicit = tmp_path / "explicit.yaml"
+    explicit.write_text("mavlink:\n  injector_arbitration: false\n", encoding="utf-8")
+    absent = tmp_path / "absent.yaml"
+    absent.write_text("agent:\n  profile: drone\n", encoding="utf-8")
+
+    def has_leaf(path):
+        return lambda dotted: StandaloneApiRuntime.config_has_leaf(
+            SimpleNamespace(_config_path=path), dotted
+        )
+
+    def snapshot(**runtime) -> object:
+        facade = ApiRuntimeFacade(SimpleNamespace(config=ADOSConfig(), **runtime))
+        return _capture_section_snapshot(facade, "profile")[leaf]
+
+    assert snapshot(config_has_leaf=has_leaf(explicit)) is False
+    assert snapshot(config_has_leaf=has_leaf(absent)) is REMOVE
+    # A runtime that cannot tell restores the value it read.
+    assert snapshot() is False

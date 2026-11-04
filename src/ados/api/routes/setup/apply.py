@@ -274,13 +274,21 @@ def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
                 snap[dotted] = _read_leaf(config, dotted)
             except AttributeError as exc:
                 log.warning("snapshot_failed", section=name, leaf=dotted, error=str(exc))
-        # Off is the arbitration default: restore it by removing the key, as
-        # the profile switch does, rather than pinning an explicit false.
-        if snap.get(ARBITRATION_LEAF) is False:
+        # A key the file does not set reads as its default (off), and is
+        # restored by removing it again rather than pinning an explicit
+        # false; an explicit false the operator wrote is restored as written.
+        if snap.get(ARBITRATION_LEAF) is False and _leaf_absent(runtime, ARBITRATION_LEAF):
             snap[ARBITRATION_LEAF] = REMOVE
     if name == "advanced":
         snap["__board_override__"] = read_board_override()
     return snap
+
+
+def _leaf_absent(runtime: object, dotted: str) -> bool:
+    """Whether the on-disk config leaves ``dotted`` unset. A runtime that
+    cannot tell counts it as set, so its value is restored explicitly."""
+    has = getattr(runtime, "config_has_leaf", None)
+    return callable(has) and has(dotted) is False
 
 
 def _rollback_completed(
