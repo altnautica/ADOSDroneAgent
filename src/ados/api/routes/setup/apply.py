@@ -182,13 +182,15 @@ async def _apply_single_section(
     """
     if name == "profile":
         # The restart is dispatched by the batch only once every section
-        # succeeded; a restart cannot be rolled back.
+        # succeeded; a restart cannot be rolled back. The request's own
+        # auto_restart still shapes the message.
         return await asyncio.to_thread(
             lambda: apply_profile(
                 runtime,
                 profile=payload.profile,
                 ground_role=payload.ground_role,
-                auto_restart=False,
+                auto_restart=payload.auto_restart,
+                dispatch=False,
             )
         )
     if name == "network":

@@ -253,6 +253,7 @@ def apply_profile(
     profile: str,
     ground_role: str | None = None,
     auto_restart: bool = False,
+    dispatch: bool = True,
 ) -> SetupActionResult:
     """Persist the operator's profile choice to ``config.agent.profile``.
 
@@ -267,10 +268,12 @@ def apply_profile(
 
     ``restart_required`` compares against the profile the node is running
     (``auto`` resolved), not the literal config value. When ``auto_restart``
-    is true and a restart is required, dispatch a supervisor restart so the
-    new profile's services come up without the operator having to SSH in.
-    The restart is non-blocking, so the route response lands before the
-    agent goes down.
+    is true and a restart is required, apply it at once
+    (:func:`dispatch_profile_restart`: the unit switch for a profile change, a
+    supervisor restart for a role change), non-blocking, so the route response
+    lands before the agent goes down. ``dispatch=False`` leaves that to the
+    caller, which the batch apply does once every section has succeeded.
+    Without ``auto_restart`` the message says how to apply the change.
     """
     if profile not in WIZARD_PROFILES:
         return SetupActionResult(
@@ -356,7 +359,15 @@ def apply_profile(
         message = f"Profile set to {profile}."
 
     if auto_restart and data.get("restart_required"):
-        message += dispatch_profile_restart(data)
+        if dispatch:
+            message += dispatch_profile_restart(data)
+    elif data.get("profile_switch"):
+        # A plain restart leaves the old profile's services enabled, so the
+        # advice names the switch itself.
+        message += (
+            " Apply again with restart on, or run "
+            "`sudo /opt/ados/bin/ados-supervisor switch-profile` on the node."
+        )
     elif data.get("restart_required"):
         message += " Restart the agent to apply."
 

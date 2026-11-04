@@ -440,6 +440,40 @@ def test_a_profile_change_runs_the_unit_switch_not_a_restart(
     assert agent_app.config.agent.profile == "drone"
     # The ground station's arbitration goes with it, as an install does.
     assert agent_app.config.mavlink.injector_arbitration is False
+    assert section["message"] == "Profile set to drone. Restarting agent."
+
+
+def test_a_profile_change_without_restart_names_the_switch(
+    client, agent_app, monkeypatch
+) -> None:
+    # A plain restart leaves the old profile's services enabled, so the
+    # advice is the switch itself, not "restart the agent".
+    calls = _record_dispatch(monkeypatch)
+    agent_app.config.agent.profile = "ground_station"
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"profile": {"profile": "drone", "auto_restart": False}},
+    )
+    assert resp.status_code == 200
+    section = resp.json()["sections"]["profile"]
+    assert section["data"]["profile_switch"] is True
+    assert calls == []
+    assert "Restart the agent" not in section["message"]
+    assert "Apply again with restart on" in section["message"]
+    assert "sudo /opt/ados/bin/ados-supervisor switch-profile" in section["message"]
+
+
+def test_the_profile_route_dispatches_the_switch_itself(
+    client, agent_app, monkeypatch
+) -> None:
+    calls = _record_dispatch(monkeypatch)
+    agent_app.config.agent.profile = "ground_station"
+    resp = client.post(
+        "/api/v1/setup/profile", json={"profile": "drone", "auto_restart": True}
+    )
+    assert resp.status_code == 200
+    assert calls == ["switch"]
+    assert resp.json()["message"] == "Profile set to drone. Restarting agent."
 
 
 def test_a_switch_into_a_ground_station_turns_arbitration_on(
