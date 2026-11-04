@@ -36,9 +36,10 @@ pub(crate) fn profile_enable_units(profile: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// The other-profile teardown list for an install of `profile`
-/// (`disable_other_profile_units`): a ground station stops the air-side units,
-/// any other profile stops the ground-station units.
+/// The other-profile teardown list for an install of `profile`: a ground
+/// station drops the air-side units, any other profile the ground-station
+/// units. The systemd step disables them (`disable_other_profile_units`) and
+/// the start step stops them with the supervisor down (`cycle_supervisor`).
 pub(crate) fn other_profile_units(profile: &str) -> Vec<&'static str> {
     UNITS
         .iter()

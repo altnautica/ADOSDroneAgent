@@ -378,7 +378,7 @@ impl Step for Health {
             }
         }
 
-        // 4. REST reachable. The start step has just restarted the supervisor,
+        // 4. REST reachable. The start step has just stopped and started the supervisor,
         // so first wait (bounded) for the control front's unit to be active:
         // probing the port while the unit is still cycling is a race, and a unit
         // that never comes up is named with the state systemd reports instead of

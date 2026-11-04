@@ -190,7 +190,8 @@ impl Step for Systemd {
         //     root outside the paths its unit already covers (drone, visor).
         reconcile_capture_root_dropin(&ctx.profile);
 
-        // 6. Profile-specific enable + teardown.
+        // 6. Profile-specific enable, and the other profile's units unlinked
+        //    (the start step stops them once the supervisor is down).
         for unit in profile_enable_units(&ctx.profile) {
             enable_if_present(unit);
         }

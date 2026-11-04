@@ -48,10 +48,14 @@ pub(super) fn prune_retired_udev_rules() {
     }
 }
 
-/// Tear down (stop + disable) units belonging to the other profile.
+/// Unlink the units belonging to the other profile: `disable` drops their
+/// `.wants` links, so neither the supervisor's start nor a boot pulls them in
+/// again. Stopping them is the `start` step's job, done while the supervisor
+/// is down: the supervisor still running here is the previous profile's, and
+/// it restarts any unit it supervises the moment that unit dies, so a stop
+/// issued now is undone within one monitor pass.
 pub(super) fn disable_other_profile_units(profile: &str) {
     for unit in other_profile_units(profile) {
-        let _ = exec::run("systemctl", &["stop", unit]);
         let _ = exec::run("systemctl", &["disable", unit]);
     }
 }
