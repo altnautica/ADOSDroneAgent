@@ -23,8 +23,6 @@
 #   scripts/check-crates.sh --bump-only   # only bump (needs git and the crates/* tags)
 #
 # Linux only for package/doc/doctest: ados-protocol does not build on Windows.
-# The master repo's `scripts/linux-gate.sh crates` runs the bump check on the
-# host checkout and the rest in the Linux VM.
 #
 # Exit: 0 every check passed, 1 a check failed, 64 bad usage.
 set -euo pipefail
