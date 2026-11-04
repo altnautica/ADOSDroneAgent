@@ -29,9 +29,13 @@ EnvironmentFile=-/etc/ados/env
 # socket, and on a ground station creates + writes session recordings under
 # /var/ados/recordings. /var/ados (mutable agent data) and /var/lib/ados (the
 # install-result read) are both listed so writes resolve under ProtectSystem=strict
-# exactly as the sibling daemons do. /etc/systemd/network is where the MAC-pin
-# unpin route deletes its next-boot .link; it carries the '-' prefix because a
-# host without systemd-networkd may not have the directory.
+# exactly as the sibling daemons do.
+#
+# /etc is writable as a whole, as it is for ados-supervisor: a ground-station pair
+# creates the shared radio key /etc/drone.key (absent before the first bind, so it
+# cannot be listed as a file of its own), a ground-station factory reset deletes
+# /etc/drone.key and /etc/gs.key, the MAC-pin unpin route deletes its next-boot
+# .link under /etc/systemd/network, and /etc/ados holds the pairing document.
 #
 # It also serves the plugin lifecycle (/api/plugins): an install unpacks under
 # /var/ados/plugins and writes the plugin's units plus the shared slice under
@@ -40,7 +44,7 @@ EnvironmentFile=-/etc/ados/env
 NoNewPrivileges=yes
 ProtectSystem=strict
 PrivateTmp=yes
-ReadWritePaths=/var/ados /etc/ados /run/ados /var/lib/ados /var/log/ados /etc/systemd/system -/etc/systemd/network
+ReadWritePaths=/var/ados /etc /run/ados /var/lib/ados /var/log/ados
 
 # No Python runtime and no plugin code runs in-process, but a plugin install
 # holds the archive (at most 50 MiB) and its decompressed entries (at most

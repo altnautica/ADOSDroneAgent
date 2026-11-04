@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.1] - 2026-11-04
+
+### Fixed
+
+- **Ground-station pairing installs the shared radio key again.** The control
+  service runs read-only outside its listed paths, and `/etc` was not among
+  them, so a ground-station pair answered `"shared_key": "write_failed"` and
+  the drones' presence beacons never linked; a ground-station factory reset
+  could not delete `/etc/drone.key` or `/etc/gs.key` either. `/etc` is now
+  writable for `ados-control`, as it already was for `ados-supervisor`.
+
 ## [0.108.0] - 2026-11-03
 
 ### Added

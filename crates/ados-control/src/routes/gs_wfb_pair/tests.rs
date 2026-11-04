@@ -359,3 +359,29 @@ fn the_request_accepts_a_shared_key_and_still_parses_without_one() {
     let without: PairRequest = serde_json::from_str(r#"{"blob_b64":"x"}"#).unwrap();
     assert!(without.shared_key_b64.is_none());
 }
+
+/// The unit runs with `ProtectSystem=strict`, so the shared key's directory must
+/// be one of its `ReadWritePaths` (or under one): the pair creates the key there
+/// and a ground-station factory reset deletes it. Without that the pair answered
+/// `"shared_key": "write_failed"` (EROFS) and the presence beacons never linked.
+#[test]
+fn the_control_unit_can_write_the_shared_key() {
+    let unit = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../data/systemd/ados-control.service");
+    let body = std::fs::read_to_string(unit).expect("control unit ships");
+    assert!(body.contains("ProtectSystem=strict"));
+    let dir = std::path::Path::new(pair::SHARED_KEY_PATH)
+        .parent()
+        .expect("key path has a directory");
+    let writable = body
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("ReadWritePaths="))
+        .flat_map(str::split_whitespace)
+        .map(|p| p.trim_start_matches('-'))
+        .any(|p| dir.starts_with(p));
+    assert!(
+        writable,
+        "{} is under no ReadWritePaths entry",
+        dir.display()
+    );
+}

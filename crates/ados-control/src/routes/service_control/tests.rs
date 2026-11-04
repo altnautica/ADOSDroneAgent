@@ -39,7 +39,11 @@ fn every_allowlisted_name_passes_the_guard() {
     for unit in allowed_units() {
         // Strip the `ados-` prefix to exercise the normalization path too.
         let bare = unit.strip_prefix("ados-").unwrap();
-        assert_eq!(guard_unit(bare).unwrap(), unit, "{unit} should pass the guard");
+        assert_eq!(
+            guard_unit(bare).unwrap(),
+            unit,
+            "{unit} should pass the guard"
+        );
     }
 }
 
