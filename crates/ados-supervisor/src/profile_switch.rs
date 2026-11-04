@@ -112,12 +112,22 @@ fn persist_profile_conf(profile: &str) {
     }
 }
 
+/// Wait out the reply grace, then resolve the profile. The profile is read
+/// after the wait, not before: a config write that lands while the reply
+/// flushes is the one the switch has to follow.
+fn profile_after_grace(wait: impl FnOnce(), resolve: impl FnOnce() -> String) -> String {
+    wait();
+    resolve()
+}
+
 /// The `switch-profile` entry: resolve the profile exactly as the supervisor
 /// will at its start, then run the switch against the host's systemd.
 pub fn run() -> ExitCode {
-    let profile = AgentConfig::load_quiet().profile_gate();
+    let profile = profile_after_grace(
+        || std::thread::sleep(REPLY_GRACE),
+        || AgentConfig::load_quiet().profile_gate(),
+    );
     eprintln!("ados-supervisor switch-profile: switching units to {profile}");
-    std::thread::sleep(REPLY_GRACE);
     persist_profile_conf(&profile);
     let deployed = |unit: &str| Path::new(SYSTEMD_DIR).join(unit).exists();
     let mut systemctl = |args: &[&str]| {
@@ -234,5 +244,21 @@ mod tests {
             profile_conf_with("", "drone").as_deref(),
             Some("profile: drone\n")
         );
+    }
+
+    /// The profile was read before the reply grace, so a config write landing
+    /// while the reply flushed was missed.
+    #[test]
+    fn the_profile_is_read_after_the_grace() {
+        let order = std::cell::RefCell::new(Vec::new());
+        let profile = profile_after_grace(
+            || order.borrow_mut().push("wait"),
+            || {
+                order.borrow_mut().push("resolve");
+                "drone".to_string()
+            },
+        );
+        assert_eq!(profile, "drone");
+        assert_eq!(*order.borrow(), ["wait", "resolve"]);
     }
 }
