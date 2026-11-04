@@ -479,5 +479,8 @@ pub const RETIRED: &[&str] = &[
 
 mod lookup;
 mod roles;
-pub use lookup::{find, net_daemon_owns_wifi, supervised, units_for_profile};
+pub use lookup::{
+    find, health_units, net_daemon_owns_wifi, other_profile_units, profile_enable_units,
+    start_units, supervised, units_for_profile, universal_units,
+};
 pub use roles::{role_unit_count, role_unit_names};

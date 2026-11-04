@@ -342,6 +342,33 @@ def test_writer_calls_side_effects_binary(tmp_path, monkeypatch):
     assert len(calls) == 1
 
 
+def test_side_effects_hand_over_through_the_run_dir(tmp_path, monkeypatch):
+    """The API's sandbox leaves /tmp read-only. The handover file lives in the
+    run dir, and a handover that cannot be created never fails a write that
+    already landed (it reported a saved profile change as not saved)."""
+    import tempfile
+
+    import ados.core.config.writer as writer
+
+    cfg = _write_doc(tmp_path, "radio:\n  crsf:\n    enabled: false\n")
+    binary = tmp_path / "ados-control"
+    binary.write_text("", encoding="utf-8")
+    calls = _canonical(monkeypatch, cfg, binary)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(writer, "ADOS_RUN_DIR", run_dir)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "no-tmp"))
+
+    assert set_config_values({"radio.crsf.enabled": True}, path=cfg)
+    assert Path(calls[0][2]).parent == run_dir
+
+    # No usable directory at all: the write still reports what landed.
+    monkeypatch.setattr(writer, "ADOS_RUN_DIR", tmp_path / "absent")
+    assert set_config_values({"radio.crsf.enabled": False}, path=cfg)
+    assert _read(cfg) == {"radio": {"crsf": {"enabled": False}}}
+    assert len(calls) == 1
+
+
 def test_writer_skips_side_effects_without_the_binary(tmp_path, monkeypatch):
     cfg = _write_doc(tmp_path, "agent:\n  name: a\n")
     calls = _canonical(monkeypatch, cfg, tmp_path / "absent")
@@ -367,3 +394,23 @@ def test_injector_arbitration_on_drone_is_refused_at_write(tmp_path):
         tmp_path, "agent:\n  profile: drone\nmavlink:\n  injector_arbitration: true\n"
     )
     assert set_config_values({"agent.name": "kept-writable"}, path=legacy)
+
+
+def test_a_ground_station_switched_to_a_drone_drops_arbitration(tmp_path):
+    """The profile switch removes the ground station's arbitration key in the
+    same write; naming the profile alone is refused, so without the removal a
+    ground station could never be switched to a drone."""
+    from ados.core.config.writer import REMOVE
+
+    body = "agent:\n  profile: ground_station\nmavlink:\n  injector_arbitration: true\n  baud_rate: 57600\n"
+    cfg = _write_doc(tmp_path, body)
+    assert not set_config_values({"agent.profile": "drone"}, path=cfg)
+
+    assert set_config_values(
+        {"agent.profile": "drone", "mavlink.injector_arbitration": REMOVE}, path=cfg
+    )
+    assert _read(cfg) == {"agent": {"profile": "drone"}, "mavlink": {"baud_rate": 57600}}
+    # Removing a key that is not there, under a parent that is not there,
+    # changes nothing.
+    assert set_config_values({"video.wfb.absent": REMOVE}, path=cfg)
+    assert "video" not in _read(cfg)

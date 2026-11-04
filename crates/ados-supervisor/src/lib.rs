@@ -23,6 +23,7 @@ pub mod mgmt_link_guardian;
 pub mod oscmd;
 pub mod pair_proof;
 pub mod process_manager;
+pub mod profile_switch;
 pub mod reg_reconciler;
 pub mod registry;
 pub mod role;

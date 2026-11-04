@@ -1,7 +1,21 @@
-//! The unit lists the install acts on, each derived from the unit table
-//! (`ados_protocol::units`). Order follows the table.
+//! The unit lists the install acts on. Each lives in the unit table's crate
+//! (`ados_protocol::units`), shared with the runtime profile switch
+//! (`ados-supervisor switch-profile`); order follows the table.
+//!
+//! - `universal_units`: enable-linked on every install;
+//! - `profile_enable_units`: enable-linked for the profile (the START half is
+//!   the `start` step's job);
+//! - `other_profile_units`: the other profile's units, disabled by the systemd
+//!   step (`disable_other_profile_units`) and stopped by the start step with
+//!   the supervisor down (`cycle_supervisor`);
+//! - `start_units`: kicked by the `start` step with `--no-block`;
+//! - `health_units`: required enabled by the health gate. Every one is also
+//!   enable-linked by the systemd step, so completeness never demands a unit
+//!   the installer does not create.
 
-use ados_protocol::units::{Install, UNITS};
+pub(crate) use ados_protocol::units::{
+    health_units, other_profile_units, profile_enable_units, start_units, universal_units,
+};
 
 /// Units a prior release shipped and has since deleted, pruned on every
 /// install (`prune_retired_units`).
@@ -15,58 +29,6 @@ pub(super) const RETIRED_UDEV_RULES: &[&str] = &[
     // Started ados-modem.service on a SIMCom / Qualcomm 4G modem appearing.
     "99-ados-modem.rules",
 ];
-
-/// Units enable-linked on every install, whatever the profile: the
-/// supervisor, the control front and the self-gating cross-profile set.
-pub(crate) fn universal_units() -> Vec<&'static str> {
-    UNITS
-        .iter()
-        .filter(|u| u.install == Install::Universal)
-        .map(|u| u.name)
-        .collect()
-}
-
-/// The units the install enable-links for `profile` on top of the universal
-/// set (the START half is the `start` step's job).
-pub(crate) fn profile_enable_units(profile: &str) -> Vec<&'static str> {
-    UNITS
-        .iter()
-        .filter(|u| u.install == Install::Profile && u.profiles.contains(&profile))
-        .map(|u| u.name)
-        .collect()
-}
-
-/// The other-profile teardown list for an install of `profile`: a ground
-/// station drops the air-side units, any other profile the ground-station
-/// units. The systemd step disables them (`disable_other_profile_units`) and
-/// the start step stops them with the supervisor down (`cycle_supervisor`).
-pub(crate) fn other_profile_units(profile: &str) -> Vec<&'static str> {
-    UNITS
-        .iter()
-        .filter(|u| u.teardown && !u.on_profile(profile))
-        .map(|u| u.name)
-        .collect()
-}
-
-/// The units the `start` step kicks with `--no-block` on `profile`.
-pub(crate) fn start_units(profile: &str) -> Vec<&'static str> {
-    UNITS
-        .iter()
-        .filter(|u| u.start_on_install && u.on_profile(profile))
-        .map(|u| u.name)
-        .collect()
-}
-
-/// The units the health gate requires enabled on `profile`. Every one is also
-/// enable-linked by this step, so completeness never demands a unit the
-/// installer does not create.
-pub(crate) fn health_units(profile: &str) -> Vec<&'static str> {
-    UNITS
-        .iter()
-        .filter(|u| u.health_check && u.on_profile(profile))
-        .map(|u| u.name)
-        .collect()
-}
 
 #[cfg(test)]
 mod tests {

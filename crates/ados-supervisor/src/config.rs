@@ -208,6 +208,16 @@ impl AgentConfig {
     /// the same config file the rest of the node reads. Unset (the SBC default) →
     /// the `/etc/ados` FHS paths, unchanged.
     pub fn load() -> Self {
+        Self::load_canonical(true)
+    }
+
+    /// [`load`](Self::load) without publishing the config-status sidecar: for a
+    /// one-shot that only needs the resolved profile (`switch-profile`).
+    pub fn load_quiet() -> Self {
+        Self::load_canonical(false)
+    }
+
+    fn load_canonical(publish: bool) -> Self {
         let config_yaml = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| CONFIG_YAML.to_string());
         let profile_conf = ados_config::profile_conf_path();
         let mesh_role =
@@ -218,7 +228,7 @@ impl AgentConfig {
             &profile_conf,
             Path::new(&mesh_role),
             Path::new(&run_dir),
-            true,
+            publish,
         )
     }
 

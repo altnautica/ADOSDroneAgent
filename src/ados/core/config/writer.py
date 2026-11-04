@@ -48,13 +48,13 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import yaml
 from pydantic import BaseModel, ValidationError
 
 from ados.core.atomic import atomic_write_text
-from ados.core.paths import CONFIG_LOCK, CONFIG_YAML
+from ados.core.paths import ADOS_RUN_DIR, CONFIG_LOCK, CONFIG_YAML
 
 from ._defaults import packaged_defaults
 from ._lock import WRITE_LOCK_TIMEOUT_S, exclusive_config_lock
@@ -156,6 +156,10 @@ def _apply_side_effects(config_path: Path, previous: dict[str, Any]) -> None:
     the remote-access tunnel unit. Best-effort by contract: a failure is logged
     and never fails a write that has already landed.
 
+    The temp file goes under the run dir: the API's sandbox leaves ``/tmp``
+    read-only, and a temp file that could not be created there failed every
+    write that had already landed.
+
     Only runs for the node's canonical document. A staging or fixture path does
     not describe this node, so syncing this node's markers from it would be
     wrong, not merely untidy.
@@ -170,8 +174,13 @@ def _apply_side_effects(config_path: Path, previous: dict[str, Any]) -> None:
     if not binary.is_file():
         log.warning("config_side_effects_skipped_no_binary", binary=str(binary))
         return
-    fd, tmp = tempfile.mkstemp(prefix="ados-config-old-", suffix=".yaml")
+    tmp: str | None = None
     try:
+        fd, tmp = tempfile.mkstemp(
+            prefix="ados-config-old-",
+            suffix=".yaml",
+            dir=ADOS_RUN_DIR if ADOS_RUN_DIR.is_dir() else None,
+        )
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(dump_mapping(previous))
         result = subprocess.run(
@@ -189,8 +198,9 @@ def _apply_side_effects(config_path: Path, previous: dict[str, Any]) -> None:
     except (OSError, subprocess.SubprocessError, yaml.YAMLError) as exc:
         log.warning("config_side_effects_failed", error=str(exc))
     finally:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
 
 
 def update_config(
@@ -331,7 +341,8 @@ def set_config_values(
     """Set dotted-path leaves (``{"video.wfb.fec_k": 8}``) in the document.
 
     Each value is assigned to its leaf, not merged into it, and missing parent
-    mappings are materialised. Siblings of the leaf are untouched.
+    mappings are materialised. Siblings of the leaf are untouched. A value of
+    :data:`REMOVE` deletes the leaf instead (absent already is a no-op).
 
     With ``model``, the resulting document must still validate as that model
     (built exactly as the loader builds it) or nothing is written. An
@@ -371,16 +382,34 @@ def _dotted_paths(changes: Mapping[str, Any], prefix: str = "") -> list[str]:
     return out
 
 
+class _Remove:
+    """The type of :data:`REMOVE`."""
+
+    def __repr__(self) -> str:
+        return "REMOVE"
+
+
+#: A :func:`set_config_values` value that deletes its leaf, so the key goes
+#: back to tracking the shipped default instead of pinning one.
+REMOVE: Final = _Remove()
+
+
 def _assign(document: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
-    """Set one leaf in ``document``, materialising missing parent mappings."""
+    """Set one leaf in ``document``, materialising missing parent mappings, or
+    delete it when ``value`` is :data:`REMOVE`."""
     cursor = document
     for part in path[:-1]:
         nxt = cursor.get(part)
         if not isinstance(nxt, dict):
+            if value is REMOVE:
+                return
             nxt = {}
             cursor[part] = nxt
         cursor = nxt
-    cursor[path[-1]] = value
+    if value is REMOVE:
+        cursor.pop(path[-1], None)
+    else:
+        cursor[path[-1]] = value
 
 
 def baseline_model(model_cls: type[BaseModel], document: Mapping[str, Any]) -> BaseModel:
@@ -396,6 +425,7 @@ def baseline_model(model_cls: type[BaseModel], document: Mapping[str, Any]) -> B
 
 
 __all__ = [
+    "REMOVE",
     "SECRET_MODE",
     "ConfigWriteResult",
     "baseline_model",

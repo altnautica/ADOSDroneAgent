@@ -7,18 +7,24 @@ from typing import Any
 from unittest.mock import MagicMock
 
 from ados.core.config import ADOSConfig
-from ados.core.config.writer import ConfigWriteResult
+from ados.core.config.writer import REMOVE, ConfigWriteResult
 
 
 def apply_dotted_values(config: ADOSConfig, values: Mapping[str, Any]) -> ADOSConfig:
-    """``config`` with each dotted-path leaf in ``values`` set, re-validated."""
+    """``config`` with each dotted-path leaf in ``values`` set, re-validated.
+
+    A :data:`REMOVE` value drops the leaf, so it reads back as its default.
+    """
     document = config.model_dump()
     for dotted, value in values.items():
         cursor = document
         *parents, leaf = dotted.split(".")
         for part in parents:
             cursor = cursor.setdefault(part, {})
-        cursor[leaf] = value
+        if value is REMOVE:
+            cursor.pop(leaf, None)
+        else:
+            cursor[leaf] = value
     return ADOSConfig(**document)
 
 

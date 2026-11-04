@@ -25,6 +25,28 @@ the project follows [Semantic Versioning](https://semver.org/).
   running as a ground station. An explicit `--profile` now rewrites that key
   too (comments and layout kept); an absent key or `auto` still defers to
   `profile.conf`, and an install without `--profile` leaves it alone.
+- **A profile change through `POST /api/v1/setup/apply` switches the units
+  too.** With `auto_restart` it only restarted the supervisor, so the old
+  profile's units stayed enabled and any still running were carried over, and
+  the new profile's units were never enabled. It now runs
+  `ados-supervisor switch-profile` as a transient unit, which does what an
+  install of the new profile does to the units: stop the supervisor, stop and
+  disable the other profile's units, enable the new profile's, start the
+  supervisor and kick the new profile's start set. It also points
+  `profile.conf` at the new profile, so a later bare `--upgrade` keeps it.
+  The per-profile unit lists now live in one place, `ados_protocol::units`,
+  shared by the installer and the switch. A ground-station role change on the
+  same profile still restarts the supervisor. The injector-arbitration key
+  follows the profile the way an install applies it: a switch to a drone or
+  visor removes a ground station's `true` (until now the config writer refused
+  that switch outright) and a switch into a ground station turns it on.
+- **Config writes from the residual API no longer report failure after
+  landing.** The handover file for the config side effects was created in
+  `/tmp`, which the API's sandbox keeps read-only, so every changing write from
+  it (a setup profile, network or UI change among them) was saved but answered
+  "not saved" and skipped its side effects. The file now lives in the run
+  directory, and a handover that cannot be created is logged instead of
+  failing a write that already landed.
 
 ## [0.108.1] - 2026-11-04
 

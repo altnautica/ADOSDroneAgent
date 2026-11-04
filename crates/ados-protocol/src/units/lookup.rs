@@ -1,6 +1,8 @@
-//! Lookups over [`UNITS`]: by name, by tier and by profile.
+//! Lookups over [`UNITS`]: by name, by tier and by profile, and the per-profile
+//! unit lists a profile install or a runtime profile switch acts on. Every list
+//! follows table order.
 
-use super::{UnitSpec, UNITS};
+use super::{Install, UnitSpec, UNITS};
 
 /// The row for `name`, given as the unit file name (`ados-wfb.service`) or
 /// its stem (`ados-wfb`).
@@ -26,4 +28,52 @@ pub fn net_daemon_owns_wifi(profile: &str) -> bool {
 /// The units installed on `profile`, in table order.
 pub fn units_for_profile(profile: &str) -> impl Iterator<Item = &'static UnitSpec> + '_ {
     UNITS.iter().filter(move |u| u.on_profile(profile))
+}
+
+/// Units enable-linked whatever the profile: the supervisor, the control front
+/// and the self-gating cross-profile set.
+pub fn universal_units() -> Vec<&'static str> {
+    UNITS
+        .iter()
+        .filter(|u| u.install == Install::Universal)
+        .map(|u| u.name)
+        .collect()
+}
+
+/// The units enable-linked for `profile` (underscore form) on top of the
+/// universal set.
+pub fn profile_enable_units(profile: &str) -> Vec<&'static str> {
+    UNITS
+        .iter()
+        .filter(|u| u.install == Install::Profile && u.profiles.contains(&profile))
+        .map(|u| u.name)
+        .collect()
+}
+
+/// The units a switch to `profile` stops and disables: a ground station drops
+/// the air-side units, any other profile the ground-station units.
+pub fn other_profile_units(profile: &str) -> Vec<&'static str> {
+    UNITS
+        .iter()
+        .filter(|u| u.teardown && !u.on_profile(profile))
+        .map(|u| u.name)
+        .collect()
+}
+
+/// The units kicked with `--no-block` once the supervisor is up on `profile`.
+pub fn start_units(profile: &str) -> Vec<&'static str> {
+    UNITS
+        .iter()
+        .filter(|u| u.start_on_install && u.on_profile(profile))
+        .map(|u| u.name)
+        .collect()
+}
+
+/// The units an install's health gate requires enabled on `profile`.
+pub fn health_units(profile: &str) -> Vec<&'static str> {
+    UNITS
+        .iter()
+        .filter(|u| u.health_check && u.on_profile(profile))
+        .map(|u| u.name)
+        .collect()
 }

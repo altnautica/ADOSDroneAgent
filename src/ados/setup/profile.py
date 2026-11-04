@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from ados.core._contracts_generated import PROFILES
+from ados.core.config.writer import REMOVE
 from ados.core.paths import ADOS_RUN_DIR
 from ados.setup._persist import persist_config
 from ados.setup.models import (
@@ -28,6 +29,11 @@ from ados.setup.models import (
 #: The native control surface's trusted on-box socket.
 CONTROL_SOCK = ADOS_RUN_DIR / "control.sock"
 _NATIVE_TIMEOUT_S = 10.0
+
+#: The one-shot that moves the node's units onto a new profile:
+#: ``ados-supervisor switch-profile``, run as this transient unit.
+SUPERVISOR_BINARY = Path("/opt/ados/bin/ados-supervisor")
+PROFILE_SWITCH_UNIT = "ados-profile-switch"
 
 #: Profiles the wizard can pick (and the detector can suggest).
 WIZARD_PROFILES = ("drone", "ground_station", "visor")
@@ -168,6 +174,44 @@ def _restart_supervisor() -> tuple[bool, str]:
         return False, f"supervisor restart unavailable: {exc}"
 
 
+def _dispatch_profile_switch() -> tuple[bool, str]:
+    """Run ``ados-supervisor switch-profile`` as a transient unit.
+
+    A profile change is more than a supervisor restart: the previous
+    profile's units have to be stopped and disabled, the new profile's
+    enabled, and the supervisor stopped first and started after, never
+    restarted (the running supervisor revives a unit it supervises the moment
+    it dies, and a restart carries every still-active unit of the old profile
+    over). The sequence stops this API with the supervisor, and it writes unit
+    links this unit's sandbox cannot, so it runs where the display install
+    runs: in a transient unit parented by systemd, outside both. The one-shot
+    waits a moment before stopping anything, so this response is sent first.
+
+    Returns ``(ok, message)``; ``ok`` means the unit was queued.
+    """
+    import subprocess
+
+    cmd = [
+        "systemd-run",
+        f"--unit={PROFILE_SWITCH_UNIT}",
+        "--collect",
+        "--no-block",
+        "--quiet",
+        str(SUPERVISOR_BINARY),
+        "switch-profile",
+    ]
+    try:
+        result = subprocess.run(
+            cmd, check=False, capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"profile switch unavailable: {exc}"
+    if result.returncode == 0:
+        return True, "profile switch dispatched via systemd-run"
+    stderr = (result.stderr or "").strip()
+    return False, f"systemd-run failed: {stderr}"
+
+
 def _effective_profile(config: Any) -> str:
     """The profile the node is running now, underscore form.
 
@@ -179,6 +223,28 @@ def _effective_profile(config: Any) -> str:
 
     profile, _role = current_profile_and_role(config)
     return profile.replace("-", "_")
+
+
+#: The injector-arbitration key, which follows the profile.
+ARBITRATION_LEAF = "mavlink.injector_arbitration"
+
+
+def _arbitration_for(config: Any, profile: str, running_profile: str) -> object | None:
+    """The injector-arbitration change a switch to ``profile`` makes, if any.
+
+    The same policy an install of the profile applies: a drone or a visor has a
+    single MAVLink injector, so a ``true`` left by a ground station is removed
+    (the config writer refuses a drone profile with it on, so the switch could
+    not be saved at all otherwise); a node switching into the ground-station
+    profile arbitrates between its injectors, so it is turned on. A ground
+    station that stays one keeps whatever the operator set.
+    """
+    current = bool(getattr(config.mavlink, "injector_arbitration", False))
+    if profile in ("drone", "visor") and current:
+        return REMOVE
+    if profile == "ground_station" and running_profile != profile and not current:
+        return True
+    return None
 
 
 def apply_profile(
@@ -232,6 +298,9 @@ def apply_profile(
         values["agent.profile"] = profile
     if profile == "ground_station" and previous_role != role:
         values["ground_station.role"] = role
+    arbitration = _arbitration_for(config, profile, running_profile)
+    if arbitration is not None:
+        values[ARBITRATION_LEAF] = arbitration
     failed = persist_config(runtime, values, what="Profile")
     if failed is not None:
         return failed
@@ -242,9 +311,12 @@ def apply_profile(
         "ground_role": role or "",
         "changed": changed,
     }
-    if running_profile != profile or (
-        profile == "ground_station" and previous_role != role
-    ):
+    if running_profile != profile:
+        # The unit set changes with the profile, not only the services'
+        # behaviour; a role change alone is a plain restart.
+        data["restart_required"] = True
+        data["profile_switch"] = True
+    elif profile == "ground_station" and previous_role != role:
         data["restart_required"] = True
 
     # Advisory: hostname carries a strong signal about expected
@@ -292,11 +364,16 @@ def apply_profile(
 
 
 def dispatch_profile_restart(data: dict[str, object]) -> str:
-    """Restart the supervisor for a profile change; record the outcome in ``data``.
+    """Apply a profile or role change to the running node; record the outcome in ``data``.
 
+    A profile change runs the unit switch (:func:`_dispatch_profile_switch`);
+    a ground-station role change on the same profile restarts the supervisor.
     Returns the sentence to append to the operator-facing message.
     """
-    ok_restart, restart_msg = _restart_supervisor()
+    if data.get("profile_switch"):
+        ok_restart, restart_msg = _dispatch_profile_switch()
+    else:
+        ok_restart, restart_msg = _restart_supervisor()
     data["auto_restart_attempted"] = True
     data["auto_restart_ok"] = ok_restart
     data["auto_restart_message"] = restart_msg

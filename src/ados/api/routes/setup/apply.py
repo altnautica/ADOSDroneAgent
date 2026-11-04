@@ -7,12 +7,14 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 
 from ados.api.deps import get_agent_app
+from ados.core.config.writer import REMOVE
 from ados.setup import display_install
 from ados.setup._regulatory import apply_regulatory
 from ados.setup.advanced import apply_advanced, read_board_override, write_board_override
 from ados.setup.models import SetupActionResult
 from ados.setup.network import apply_network
 from ados.setup.profile import (
+    ARBITRATION_LEAF,
     apply_profile,
     apply_ui,
     apply_wfb,
@@ -57,7 +59,7 @@ def raise_if_armed(runtime, force: bool) -> None:
 # The config leaves each section writes. A rollback restores exactly these, as
 # they read before the section ran, in one write.
 _SECTION_LEAVES: dict[str, tuple[str, ...]] = {
-    "profile": ("agent.profile", "ground_station.role"),
+    "profile": ("agent.profile", "ground_station.role", ARBITRATION_LEAF),
     "network": (
         "network.wifi_client.ssid",
         "network.wifi_client.password",
@@ -270,6 +272,10 @@ def _capture_section_snapshot(runtime, name: str) -> dict[str, object]:
                 snap[dotted] = _read_leaf(config, dotted)
             except AttributeError as exc:
                 log.warning("snapshot_failed", section=name, leaf=dotted, error=str(exc))
+        # Off is the arbitration default: restore it by removing the key, as
+        # the profile switch does, rather than pinning an explicit false.
+        if snap.get(ARBITRATION_LEAF) is False:
+            snap[ARBITRATION_LEAF] = REMOVE
     if name == "advanced":
         snap["__board_override__"] = read_board_override()
     return snap

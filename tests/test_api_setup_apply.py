@@ -398,3 +398,109 @@ def test_a_refused_cloud_choice_changes_nothing() -> None:
     )
     assert result.ok is False
     assert runtime.config.server.mode == before
+
+
+def _record_dispatch(monkeypatch) -> list[str]:
+    """Replace both restart paths with recorders; returns the call log."""
+    import ados.setup.profile as profile_mod
+
+    calls: list[str] = []
+
+    def switch() -> tuple[bool, str]:
+        calls.append("switch")
+        return True, "queued"
+
+    def restart() -> tuple[bool, str]:
+        calls.append("restart")
+        return True, "queued"
+
+    monkeypatch.setattr(profile_mod, "_dispatch_profile_switch", switch)
+    monkeypatch.setattr(profile_mod, "_restart_supervisor", restart)
+    return calls
+
+
+def test_a_profile_change_runs_the_unit_switch_not_a_restart(
+    client, agent_app, monkeypatch
+) -> None:
+    # Regression: a runtime profile change only restarted the supervisor, so
+    # the previous profile's units stayed enabled and any still running were
+    # carried into the new profile.
+    calls = _record_dispatch(monkeypatch)
+    agent_app.config.agent.profile = "ground_station"
+    agent_app.config.mavlink.injector_arbitration = True
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"profile": {"profile": "drone", "auto_restart": True}},
+    )
+    assert resp.status_code == 200
+    section = resp.json()["sections"]["profile"]
+    assert section["data"]["profile_switch"] is True
+    assert section["data"]["auto_restart_ok"] is True
+    assert calls == ["switch"]
+    assert agent_app.config.agent.profile == "drone"
+    # The ground station's arbitration goes with it, as an install does.
+    assert agent_app.config.mavlink.injector_arbitration is False
+
+
+def test_a_switch_into_a_ground_station_turns_arbitration_on(
+    client, agent_app, monkeypatch
+) -> None:
+    calls = _record_dispatch(monkeypatch)
+    agent_app.config.agent.profile = "drone"
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={"profile": {"profile": "ground_station", "auto_restart": True}},
+    )
+    assert resp.status_code == 200
+    assert calls == ["switch"]
+    assert agent_app.config.agent.profile == "ground_station"
+    assert agent_app.config.mavlink.injector_arbitration is True
+
+
+def test_a_role_change_alone_restarts_the_supervisor(
+    client, agent_app, monkeypatch
+) -> None:
+    calls = _record_dispatch(monkeypatch)
+    agent_app.config.agent.profile = "ground_station"
+    agent_app.config.ground_station.role = "direct"
+    resp = client.post(
+        "/api/v1/setup/apply",
+        json={
+            "profile": {
+                "profile": "ground_station",
+                "ground_role": "relay",
+                "auto_restart": True,
+            }
+        },
+    )
+    assert resp.status_code == 200
+    assert "profile_switch" not in resp.json()["sections"]["profile"]["data"]
+    assert calls == ["restart"]
+
+
+def test_the_switch_runs_the_supervisor_one_shot_as_a_transient_unit(
+    monkeypatch,
+) -> None:
+    import subprocess
+
+    from ados.setup.profile import _dispatch_profile_switch
+
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _dispatch_profile_switch() == (True, "profile switch dispatched via systemd-run")
+    assert seen == [
+        [
+            "systemd-run",
+            "--unit=ados-profile-switch",
+            "--collect",
+            "--no-block",
+            "--quiet",
+            "/opt/ados/bin/ados-supervisor",
+            "switch-profile",
+        ]
+    ]
