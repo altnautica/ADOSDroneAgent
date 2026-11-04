@@ -208,3 +208,23 @@ fn every_profile_is_held_to_exactly_the_hard_binaries_it_fetches() {
         .collect();
     assert!(missing_hard_binaries("workstation", |d| ws_dests.contains(&d)).is_empty());
 }
+
+#[test]
+fn mediamtx_only_asserted_where_the_installer_fetches_it() {
+    // Non-video profiles never get mediamtx, so its absence is no failure.
+    for profile in ["workstation", "compute"] {
+        assert!(!mediamtx_missing(profile, || false), "{profile}");
+    }
+    // Video profiles still record the miss, and not when present.
+    for profile in ["drone", "ground_station", "visor"] {
+        assert!(mediamtx_missing(profile, || false), "{profile}");
+        assert!(!mediamtx_missing(profile, || true), "{profile}");
+    }
+    // The gate follows the fetch catalog for every profile.
+    for profile in ados_protocol::contracts::PROFILES {
+        assert_eq!(
+            mediamtx_missing(profile, || false),
+            crate::binaries::profile_ships(profile, "mediamtx")
+        );
+    }
+}

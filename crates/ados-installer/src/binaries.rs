@@ -369,6 +369,15 @@ pub fn for_profile(profile: &str) -> Vec<&'static PrebuiltBinary> {
         .collect()
 }
 
+/// True when the catalog fetches `service` for `profile`. The health gate asks
+/// this before asserting a best-effort binary, so it never reports a binary
+/// missing on a profile the installer never provides it to.
+pub fn profile_ships(profile: &str, service: &str) -> bool {
+    PREBUILT
+        .iter()
+        .any(|b| b.service == service && b.profiles.contains(&profile))
+}
+
 /// The ONNX-enabled `ados-vision` variant, fetched for a board that declares
 /// CPU-ONNX local inference (an NPU-less but CPU-strong board — see
 /// [`board_prefers_onnx_vision`]). Same install destination as the default vision

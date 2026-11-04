@@ -311,6 +311,17 @@ fn mediamtx_present() -> bool {
     radio_bin_present("mediamtx")
 }
 
+/// True when the profile's install should have mediamtx but it is absent. Only
+/// profiles the fetch catalog provides mediamtx to (the video-running ones) can
+/// miss it; a workstation or compute install never gets it by design. Pure
+/// given a `present` predicate so a unit test can exercise it.
+pub fn mediamtx_missing<F>(profile: &str, present: F) -> bool
+where
+    F: Fn() -> bool,
+{
+    binaries::profile_ships(profile, "mediamtx") && !present()
+}
+
 /// The names of the radio-stack components that are MISSING for a rig (the
 /// wfb-ng binaries, the bind artifacts, the service template). Both the drone
 /// and the ground station profile require the full set to auto-pair, so this is
@@ -455,8 +466,9 @@ impl Step for Health {
 
         // 9. mediamtx is best-effort (the video relay). A missing one degrades
         // streaming but must not abort an otherwise-working install, so record
-        // it as a non-required failure rather than adding it to `misses`.
-        if !mediamtx_present() {
+        // it as a non-required failure rather than adding it to `misses`. Only
+        // checked on profiles the installer fetches it for.
+        if mediamtx_missing(&ctx.profile, mediamtx_present) {
             ctx.failures.record("mediamtx-missing", false);
             tracing::warn!("mediamtx not present; video streaming degraded");
         }
