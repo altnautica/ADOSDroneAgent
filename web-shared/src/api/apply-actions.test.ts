@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const apiFetch = vi.fn();
 vi.mock("../api-fetch", () => ({ apiFetch: (...args: unknown[]) => apiFetch(...args) }));
 
-import { putConfigChecked } from "./apply-actions";
+import { profileChangeNoteKeys, putConfigChecked } from "./apply-actions";
 
 describe("putConfigChecked", () => {
   beforeEach(() => {
@@ -25,5 +25,28 @@ describe("putConfigChecked", () => {
       method: "PUT",
       body: { key: "mavlink.baud_rate", value: "115200", force: true },
     });
+  });
+});
+
+describe("profileChangeNoteKeys", () => {
+  it("says what a switch stops, and calls a role change a restart", () => {
+    expect(profileChangeNoteKeys("ground_station", "ground_station")).toEqual([
+      "settings.profile.confirmRoleRestart",
+    ]);
+    expect(profileChangeNoteKeys("ground_station", "drone")).toEqual([
+      "settings.profile.confirmSwitch",
+      "settings.profile.confirmKioskStops",
+      "settings.profile.confirmAccessPointStops",
+    ]);
+    // A visor keeps the access point; a ground station's kiosk still goes.
+    expect(profileChangeNoteKeys("ground_station", "visor")).toEqual([
+      "settings.profile.confirmSwitch",
+      "settings.profile.confirmKioskStops",
+    ]);
+    expect(profileChangeNoteKeys("visor", "drone")).toEqual([
+      "settings.profile.confirmSwitch",
+      "settings.profile.confirmAccessPointStops",
+    ]);
+    expect(profileChangeNoteKeys("drone", "ground_station")).toEqual(["settings.profile.confirmSwitch"]);
   });
 });

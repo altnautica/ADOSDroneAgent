@@ -9,34 +9,36 @@ const initial = { profile: "ground_station", role: "direct" } as const;
 
 describe("profileDirty", () => {
   it("counts a profile change, and a role change only on a ground station", () => {
-    expect(profileDirty({ ...initial, autoRestart: true }, initial)).toBe(false);
-    expect(profileDirty({ profile: "drone", role: "direct", autoRestart: true }, initial)).toBe(true);
-    expect(profileDirty({ profile: "ground_station", role: "relay", autoRestart: true }, initial)).toBe(true);
-    expect(
-      profileDirty({ profile: "drone", role: "relay", autoRestart: true }, { profile: "drone", role: "direct" }),
-    ).toBe(false);
-  });
-
-  it("never counts the auto-restart option", () => {
-    expect(profileDirty({ ...initial, autoRestart: false }, initial)).toBe(false);
+    expect(profileDirty({ ...initial }, initial)).toBe(false);
+    expect(profileDirty({ profile: "drone", role: "direct" }, initial)).toBe(true);
+    expect(profileDirty({ profile: "ground_station", role: "relay" }, initial)).toBe(true);
+    expect(profileDirty({ profile: "drone", role: "relay" }, { profile: "drone", role: "direct" })).toBe(false);
   });
 });
 
 describe("profilePayload", () => {
   it("sends the role only for a ground station and force only on the retry", () => {
-    expect(profilePayload({ profile: "drone", role: "relay", autoRestart: true }, false)).toEqual({
+    expect(profilePayload({ profile: "drone", role: "relay" }, false)).toEqual({
       profile: { profile: "drone", ground_role: undefined, auto_restart: true },
       force: undefined,
     });
-    expect(profilePayload({ profile: "ground_station", role: "relay", autoRestart: false }, true)).toEqual({
-      profile: { profile: "ground_station", ground_role: "relay", auto_restart: false },
+    expect(profilePayload({ profile: "ground_station", role: "relay" }, true)).toEqual({
+      profile: { profile: "ground_station", ground_role: "relay", auto_restart: true },
       force: true,
     });
+  });
+
+  it("always asks the agent to apply the change at once", () => {
+    // Without it the agent only persisted the profile, and the plain restart
+    // it then advised left the old profile's services enabled.
+    for (const profile of ["drone", "ground_station", "visor"] as const) {
+      expect(profilePayload({ profile, role: "direct" }, false).profile?.auto_restart).toBe(true);
+    }
   });
 });
 
 describe("profile apply gate", () => {
-  const draft: ProfileDraft = { profile: "visor", role: "direct", autoRestart: true };
+  const draft: ProfileDraft = { profile: "visor", role: "direct" };
 
   it("does not post until the slide confirms", () => {
     const post = vi.fn();

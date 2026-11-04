@@ -10,13 +10,13 @@ import { Trans, useTranslation } from "react-i18next";
 
 import { ActionButton, EmptyNote, Row } from "@/components/ui/data";
 import { ListItem } from "@/components/ui/list-item";
-import { SwitchSettingRow } from "@/components/ui/setting-row";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
+import { isKiosk } from "@/lib/kiosk";
 import { CLOSED_GATE, openGate, sectionVerdict, settleGate, type ConfirmGate } from "@/lib/settings/apply-form";
 import { PROFILE_OPTIONS, ROLE_OPTIONS, profileDirty, profilePayload, type ProfileDraft } from "@/lib/settings/profile";
 import { apiFetch } from "@/shared/api-fetch";
 import type { SetupStatus } from "@/shared/agent-api.generated";
-import { postApply, profileFromStatus } from "@/shared/api/apply-actions";
+import { postApply, profileChangeNoteKeys, profileFromStatus } from "@/shared/api/apply-actions";
 import { withArmedRetry } from "@/shared/api/armed-retry";
 import { toast } from "@/shared/api/toast";
 import "@/shared/i18n";
@@ -38,7 +38,7 @@ export function ProfileSection() {
   const initialProfile = profileFromStatus(identity.profile ?? undefined);
   const initialRole = identity.role ?? "direct";
 
-  const [draft, setDraft] = useState<ProfileDraft>({ profile: initialProfile, role: initialRole, autoRestart: true });
+  const [draft, setDraft] = useState<ProfileDraft>({ profile: initialProfile, role: initialRole });
   const [gate, setGate] = useState<ConfirmGate<ProfileDraft>>(CLOSED_GATE);
   const [busy, setBusy] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
@@ -141,13 +141,6 @@ export function ProfileSection() {
         </SectionGroup>
       ) : null}
 
-      <SwitchSettingRow
-        title={t("settings.profile.autoRestart")}
-        summary={t("settings.profile.autoRestartHint")}
-        checked={draft.autoRestart}
-        onChange={(v) => setDraft((d) => ({ ...d, autoRestart: v }))}
-      />
-
       <ApplyBar
         dirty={dirty}
         busy={busy}
@@ -178,7 +171,12 @@ export function ProfileSection() {
                 components={{ code: <span className="font-mono font-medium" /> }}
               />
             </div>
-            {gate.payload.autoRestart ? <div>{t("settings.profile.confirmRestart")}</div> : null}
+            {profileChangeNoteKeys(initialProfile, gate.payload.profile).map((key) => (
+              <div key={key}>{t(key)}</div>
+            ))}
+            {isKiosk() && initialProfile === "ground_station" && gate.payload.profile !== "ground_station" ? (
+              <div>{t("cockpit.settingsSections.profile.kioskScreenOff")}</div>
+            ) : null}
           </div>
         </SlideConfirmDialog>
       ) : null}

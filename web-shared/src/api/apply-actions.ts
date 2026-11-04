@@ -128,3 +128,26 @@ export function profileFromStatus(
   if (profile === "drone" || profile === "ground_station" || profile === "visor") return profile;
   return fallback;
 }
+
+/** A confirm line of a profile or role change. */
+export type ProfileChangeNoteKey =
+  | "settings.profile.confirmRoleRestart"
+  | "settings.profile.confirmSwitch"
+  | "settings.profile.confirmKioskStops"
+  | "settings.profile.confirmAccessPointStops";
+
+/**
+ * The confirm lines for applying `target` on a node now running `current`:
+ * what the change does to the node's services. A profile change moves the
+ * node onto the new profile's services (the agent stops and disables the old
+ * profile's, then restarts), so the HDMI kiosk goes with a ground station and
+ * the Wi-Fi access point with a ground station or visor that becomes a drone.
+ * A role change on the same profile is a plain restart.
+ */
+export function profileChangeNoteKeys(current: ApplyProfile, target: ApplyProfile): ProfileChangeNoteKey[] {
+  if (current === target) return ["settings.profile.confirmRoleRestart"];
+  const keys: ProfileChangeNoteKey[] = ["settings.profile.confirmSwitch"];
+  if (current === "ground_station") keys.push("settings.profile.confirmKioskStops");
+  if (current !== "drone" && target === "drone") keys.push("settings.profile.confirmAccessPointStops");
+  return keys;
+}

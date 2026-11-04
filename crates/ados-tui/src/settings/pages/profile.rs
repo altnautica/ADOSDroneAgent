@@ -1,6 +1,6 @@
 //! Settings page: IDENTITY › Profile. Shows the detected profile, its source
 //! and the ground role; ←/→ stages a new profile or role and Enter applies it
-//! (after a confirm naming the supervisor restart) through
+//! (after a confirm naming what the change stops) through
 //! `POST /api/v1/setup/apply {profile: {profile, ground_role?, auto_restart}}`.
 //! `d` re-runs hardware detection.
 
@@ -56,6 +56,31 @@ fn profile_label(p: &str) -> &str {
         "visor" => "Visor",
         other => other,
     }
+}
+
+/// What applying `target` on a node now running `current` does to its
+/// services, the same lines the web settings confirm with. A profile change
+/// moves the node onto the new profile's services; the HDMI kiosk goes with a
+/// ground station and the access point with a ground station or visor that
+/// becomes a drone. A role change is a plain restart.
+fn change_notes(current: &str, target: &str) -> Vec<&'static str> {
+    if current == target {
+        return vec![
+            "ados-supervisor restarts to apply the role. This session may disconnect for a few seconds.",
+        ];
+    }
+    let mut notes = vec![
+        "The node moves its services to the new profile: it stops and disables the old profile's services and restarts. This session may disconnect until the agent is back.",
+    ];
+    if current == "ground_station" {
+        notes.push("Leaving the ground-station profile turns off its HDMI kiosk screen.");
+    }
+    if current != "drone" && target == "drone" {
+        notes.push(
+            "A drone runs no Wi-Fi access point, so the node's access point stops. A client joined to it loses the node; reach it over another network.",
+        );
+    }
+    notes
 }
 
 impl Page {
@@ -138,7 +163,7 @@ impl Page {
         let detail = if self.busy {
             format!("{} Applying…", core.sym.spinner_frame(core.frame as usize))
         } else if self.dirty(core) {
-            "unsaved changes; restarts ados-supervisor".into()
+            "unsaved changes; applying restarts the agent's services".into()
         } else {
             "no changes".into()
         };
@@ -173,18 +198,18 @@ impl Page {
             return;
         }
         let (p, r) = self.effective(core);
+        let (cur_p, _) = current(core);
         let first = if p == "ground_station" {
             format!("The agent will reconfigure for {p} role {r}.")
         } else {
             format!("The agent will reconfigure for {p}.")
         };
+        let mut lines = vec![first];
+        lines.extend(change_notes(&cur_p, &p).into_iter().map(String::from));
         core.open(Overlay::confirm(
             Ret::new(route(), "apply").with(json!({ "profile": p, "role": r })),
             "Switch agent profile?",
-            vec![
-                first,
-                "ados-supervisor will restart automatically. This session may disconnect for a few seconds.".into(),
-            ],
+            lines,
         ));
     }
 
@@ -285,7 +310,7 @@ impl Bespoke for Page {
         let items = self.items(core);
         match self.rows.focused_key(&items)? {
             "apply" => Some(
-                "Apply the staged profile; ados-supervisor restarts so the new services come up"
+                "Apply the staged profile; the node stops the old profile's services and starts the new"
                     .into(),
             ),
             "redetect" => Some("Re-run the hardware probes and refresh the suggestion".into()),
@@ -295,5 +320,24 @@ impl Bespoke for Page {
 
     fn animating(&self, _core: &Core) -> bool {
         self.busy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::change_notes;
+
+    #[test]
+    fn the_confirm_names_what_a_switch_stops() {
+        assert_eq!(change_notes("ground_station", "ground_station").len(), 1);
+        assert!(change_notes("ground_station", "ground_station")[0].contains("role"));
+        let gs_to_drone = change_notes("ground_station", "drone");
+        assert_eq!(gs_to_drone.len(), 3);
+        assert!(gs_to_drone[1].contains("HDMI kiosk"));
+        assert!(gs_to_drone[2].contains("access point"));
+        // A visor keeps the access point; a visor that becomes a drone does not.
+        assert_eq!(change_notes("ground_station", "visor").len(), 2);
+        assert_eq!(change_notes("visor", "drone").len(), 2);
+        assert_eq!(change_notes("drone", "ground_station").len(), 1);
     }
 }

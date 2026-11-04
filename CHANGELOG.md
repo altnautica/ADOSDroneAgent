@@ -40,6 +40,20 @@ the project follows [Semantic Versioning](https://semver.org/).
   follows the profile the way an install applies it: a switch to a drone or
   visor removes a ground station's `true` (until now the config writer refused
   that switch outright) and a switch into a ground station turns it on.
+  A profile change applied without `auto_restart` no longer advises a plain
+  restart, which would leave the old profile's services enabled: the reply
+  says to apply again with restart on or to run
+  `sudo /opt/ados/bin/ados-supervisor switch-profile` on the node. The batch
+  apply also stops answering "Restart the agent to apply. Restarting agent."
+  for one request.
+- **The dashboard and cockpit apply a profile change at once, and say what it
+  stops.** Both always send `auto_restart: true`; the "Restart services after
+  apply" switch is gone, because leaving it off left the node half-switched.
+  The confirm says the node moves its services to the new profile, that
+  leaving the ground-station profile turns off its HDMI kiosk, and that a
+  switch to a drone stops the node's Wi-Fi access point and drops anyone on
+  it. On the kiosk screen itself the cockpit adds that the screen turns off
+  and does not come back. The TUI's profile page uses the same wording.
 - **Config writes from the residual API no longer report failure after
   landing.** The handover file for the config side effects was created in
   `/tmp`, which the API's sandbox keeps read-only, so every changing write from

@@ -28,24 +28,25 @@ export const ROLE_OPTIONS = [
 export interface ProfileDraft {
   profile: ApplyProfile;
   role: GroundRole;
-  autoRestart: boolean;
 }
 
-/** The role only counts on a ground station; auto-restart is an apply option,
- *  not a stored setting, so it never makes the page dirty. */
+/** The role only counts on a ground station. */
 export function profileDirty(draft: ProfileDraft, initial: { profile: ApplyProfile; role: GroundRole }): boolean {
   return (
     draft.profile !== initial.profile || (draft.profile === "ground_station" && draft.role !== initial.role)
   );
 }
 
-/** The apply body; `force` is set only on the armed-override retry. */
+/** The apply body; `force` is set only on the armed-override retry. Always
+ *  with the restart: a profile change takes effect only once the agent has
+ *  moved its services, and leaving that to a later plain restart left the old
+ *  profile's services enabled. */
 export function profilePayload(draft: ProfileDraft, force: boolean): ApplyPayload {
   return {
     profile: {
       profile: draft.profile,
       ground_role: draft.profile === "ground_station" ? draft.role : undefined,
-      auto_restart: draft.autoRestart,
+      auto_restart: true,
     },
     force: force || undefined,
   };

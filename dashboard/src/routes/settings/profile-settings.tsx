@@ -7,12 +7,17 @@ import { RiskBadge } from "@/components/settings/risk-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { RadioCardGroup } from "@/components/ui/radio-card-group";
-import { Switch } from "@/components/ui/switch";
 import { useDirtyGuard } from "@/hooks/use-dirty-guard";
 import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useStatus } from "@/hooks/use-status";
 import { toast, toastFromError } from "@/shared/api/toast";
-import { type ApplyPayload, type ApplyProfile, postApply, profileFromStatus } from "@/shared/api/apply-actions";
+import {
+  type ApplyPayload,
+  type ApplyProfile,
+  postApply,
+  profileChangeNoteKeys,
+  profileFromStatus,
+} from "@/shared/api/apply-actions";
 import { withArmedRetry } from "@/shared/api/armed-retry";
 import type { GroundRole } from "@/shared/api/types";
 import { apiFetch } from "@/shared/api-fetch";
@@ -63,7 +68,6 @@ export function ProfileSettings() {
 
   const [profile, setProfile] = useState<ApplyProfile>("drone");
   const [role, setRole] = useState<GroundRole>("direct");
-  const [autoRestart, setAutoRestart] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
@@ -106,11 +110,14 @@ export function ProfileSettings() {
     try {
       const res = await withArmedRetry(
         (force) => {
+          // Always with the restart: a profile change only takes effect once
+          // the agent has moved its services, and leaving that to a later
+          // plain restart left the old profile's services enabled.
           const payload: ApplyPayload = {
             profile: {
               profile,
               ground_role: profile === "ground_station" ? role : undefined,
-              auto_restart: autoRestart,
+              auto_restart: true,
             },
             force: force || undefined,
           };
@@ -211,25 +218,6 @@ export function ProfileSettings() {
         </div>
       )}
 
-      <Card>
-        <CardContent className="pt-5 pb-5 flex items-center justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2 text-sm font-medium">
-              {t("settings.profile.autoRestart")}
-              <RiskBadge tone="auto" />
-            </div>
-            <div className="text-xs text-muted-foreground mt-1">
-              {t("settings.profile.autoRestartHint")}
-            </div>
-          </div>
-          <Switch
-            checked={autoRestart}
-            onCheckedChange={setAutoRestart}
-            aria-label={t("settings.profile.autoRestart")}
-          />
-        </CardContent>
-      </Card>
-
       <div className="flex items-center justify-end gap-3">
         {dirty && (
           <span className="text-xs text-muted-foreground">{t("settings.shared.unsavedChanges")}</span>
@@ -264,9 +252,9 @@ export function ProfileSettings() {
                 />
               )}
             </div>
-            {autoRestart && (
-              <div>{t("settings.profile.confirmRestart")}</div>
-            )}
+            {profileChangeNoteKeys(initialProfile, profile).map((key) => (
+              <div key={key}>{t(key)}</div>
+            ))}
           </div>
         }
         confirmLabel={t("settings.shared.apply")}
