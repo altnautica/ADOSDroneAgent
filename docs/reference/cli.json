@@ -357,7 +357,7 @@
     },
     {
       "arguments": [],
-      "help": "Export a window of the store to the paired cloud account.\n\n    This is a thin front door: it records the request and lets the cloud service\n    do the export, upload, and mark. The cloud service refuses the push when the\n    agent is in local mode, is not cloud-paired, or has cloud log push disabled,\n    which is the correct state for an agent that has nothing to sync. By default\n    the command waits a few seconds for the result and prints what was pushed;\n    ``--no-wait`` returns as soon as the request is recorded.\n\n    The request file lives under the root-owned runtime dir: root records it\n    directly, while a non-root operator hands the write to the running agent on\n    loopback and only falls back to the direct seam if the agent is unreachable.",
+      "help": "Export a window of the store to the paired cloud account.\n\nThis is a thin front door: it records the request and lets the cloud service\ndo the export, upload, and mark. The cloud service refuses the push when the\nagent is in local mode, is not cloud-paired, or has cloud log push disabled,\nwhich is the correct state for an agent that has nothing to sync. By default\nthe command waits a few seconds for the result and prints what was pushed;\n``--no-wait`` returns as soon as the request is recorded.\n\nThe request file lives under the root-owned runtime dir: root records it\ndirectly, while a non-root operator hands the write to the running agent on\nloopback and only falls back to the direct seam if the agent is unreachable.",
       "options": [
         {
           "default": null,
@@ -1889,7 +1889,7 @@
     },
     {
       "arguments": [],
-      "help": "Collect one redacted archive for a support request.\n\n    Nothing is sent anywhere. The archive is written locally and the operator\n    decides who sees it.",
+      "help": "Collect one redacted archive for a support request.\n\nNothing is sent anywhere. The archive is written locally and the operator\ndecides who sees it.",
       "options": [
         {
           "default": null,

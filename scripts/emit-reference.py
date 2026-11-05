@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import inspect
 import json
 import subprocess
 import sys
@@ -95,6 +96,15 @@ def _option_default(option: Any) -> Any:
     return _json_value(value)
 
 
+def _help_text(text: str | None) -> str | None:
+    """Help text with docstring indentation stripped, or ``None`` when empty.
+
+    Python 3.13+ strips docstring indentation at compile time and older
+    Pythons keep it, so the text is normalised to read the same under each.
+    """
+    return inspect.cleandoc(text) or None if text else None
+
+
 def cli_commands(root: Any, listed: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
     """Every user-facing command under ``root`` (a click group), sorted by path.
 
@@ -122,13 +132,13 @@ def cli_commands(root: Any, listed: tuple[Any, ...] = ()) -> list[dict[str, Any]
                             "type": p.type.name,
                             "default": default,
                             "required": bool(p.required),
-                            "help": p.help,
+                            "help": _help_text(p.help),
                         }
                     )
             out.append(
                 {
                     "path": " ".join(path),
-                    "help": (cmd.help or cmd.short_help or "").strip() or None,
+                    "help": _help_text(cmd.help or cmd.short_help),
                     "arguments": arguments,
                     "options": options,
                 }
