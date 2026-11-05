@@ -7,7 +7,10 @@
 //!   video service resolves them), the readiness of mediamtx's `main` path, and a
 //!   bitrate measured off that path's received-bytes counter. `bitrate_kbps` is
 //!   null until two readings of a live stream exist, so a configured target never
-//!   reads as a measured rate.
+//!   reads as a measured rate. A camera counts as present when a V4L2 node is
+//!   enumerated or the `cameras` roster declares one the node runs without a
+//!   local device (a vision-captured entry or a network pull), so an
+//!   `rtsp://`-only node that is not publishing reads `ready`, not `no_camera`.
 //! - **`fc`** — the vehicle snapshot the router publishes over the state socket,
 //!   read through the state client, which drops a snapshot once the hub stops
 //!   publishing. A hub that went quiet therefore reads as a disconnected FC with
@@ -53,12 +56,18 @@ pub async fn get_dashboard_snapshot(
     let list = mediamtx_probe::read_paths_list().await;
     let main = list.as_ref().and_then(mediamtx_probe::main_path);
     let ready = main.is_some_and(mediamtx_probe::path_ready);
-    let camera = RosterVideoConfig::load_from(&paths.config).primary_camera();
+    let config_text = std::fs::read_to_string(&paths.config).unwrap_or_default();
+    let camera = RosterVideoConfig::from_text(&config_text).primary_camera();
+    let stream_state = video_state(
+        ready,
+        video_devices_present(),
+        roster_declares_camera(&config_text),
+    );
     let video = video_slice(
         &camera,
+        stream_state,
         ready,
         main,
-        video_devices_present(),
         &BITRATE_SAMPLE,
         Instant::now(),
     );
@@ -85,30 +94,45 @@ pub async fn get_dashboard_snapshot(
 }
 
 /// Any V4L2 node enumerated: the cheap kernel-side check that tells a node with
-/// a camera that is not yet publishing (`ready`) from one with none.
+/// a local camera that is not yet publishing (`ready`) from one with none.
 fn video_devices_present() -> bool {
     std::fs::read_dir("/sys/class/video4linux")
         .map(|mut entries| entries.next().is_some())
         .unwrap_or(false)
 }
 
-/// The video slice. `main` is mediamtx's `main` path object when listed;
-/// `ready` its live-publisher verdict.
-fn video_slice(
-    camera: &CameraConfig,
-    ready: bool,
-    main: Option<&Map<String, Value>>,
-    devices_present: bool,
-    sample: &Mutex<Option<(Instant, i64)>>,
-    now: Instant,
-) -> Value {
-    let state = if ready {
+/// Whether the `cameras` roster in config `text` declares a camera that needs
+/// no V4L2 node of its own: an enabled `capture: true` entry (the vision engine
+/// opens its device or `rtsp://` URL) or an enabled network-URL entry the video
+/// pipeline pulls. The same summary gates those services.
+fn roster_declares_camera(text: &str) -> bool {
+    let declared = ados_config::cameras::declared_cameras_from(text);
+    declared.captured > 0 || declared.network
+}
+
+/// The dashboard `video.state`: `running` while `main` has a live publisher,
+/// `ready` while a camera is present (a V4L2 node, or one the roster declares)
+/// but `main` is not publishing, and `no_camera` only when neither exists.
+fn video_state(ready: bool, devices_present: bool, roster_camera: bool) -> &'static str {
+    if ready {
         "running"
-    } else if devices_present {
+    } else if devices_present || roster_camera {
         "ready"
     } else {
         "no_camera"
-    };
+    }
+}
+
+/// The video slice. `state` is [`video_state`]'s verdict; `main` is mediamtx's
+/// `main` path object when listed; `ready` its live-publisher verdict.
+fn video_slice(
+    camera: &CameraConfig,
+    state: &'static str,
+    ready: bool,
+    main: Option<&Map<String, Value>>,
+    sample: &Mutex<Option<(Instant, i64)>>,
+    now: Instant,
+) -> Value {
     let mut codec = camera.codec.clone();
     let mut bitrate_kbps = None;
     match main.filter(|_| ready) {
@@ -345,146 +369,5 @@ fn mav_type_name(id: i64) -> Option<&'static str> {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-    use crate::ipc::state_client::STATE_STALE_AFTER;
-    use crate::ipc::StateIpcClient;
-
-    fn flying() -> Value {
-        json!({
-            "fc_connected": true,
-            "fc_port": "/dev/ttyACM0",
-            "fc_baud": 115200,
-            "autopilot": 3,
-            "mav_type": 2,
-            "armed": true,
-            "mode": "LOITER",
-            "last_heartbeat": "2026-09-24T10:00:00Z",
-            "gps": {"fix_type": 3, "satellites": 14, "eph": 0.8, "epv": 1.2},
-            "battery": {"voltage": 16.2, "remaining": 88},
-            "rc": {"rssi": 254},
-        })
-    }
-
-    #[test]
-    fn a_hub_that_stopped_publishing_reads_as_a_disconnected_fc() {
-        // The last frame said the vehicle was armed and flying; it is older
-        // than the staleness window, so none of it may be reported.
-        let client = StateIpcClient::disconnected();
-        client.set_aged_snapshot_for_test(flying(), STATE_STALE_AFTER + Duration::from_secs(1));
-        let fc = fc_slice(client.snapshot().as_ref());
-        assert_eq!(fc["connected"], json!(false));
-        for key in [
-            "vehicle",
-            "firmware",
-            "mode",
-            "armed",
-            "rc",
-            "fc_port",
-            "fc_baud",
-            "last_heartbeat",
-        ] {
-            assert_eq!(fc[key], Value::Null, "{key}");
-        }
-        assert_eq!(
-            fc["gps"],
-            json!({"fix_type": null, "satellites_visible": null, "hdop": null})
-        );
-        assert_eq!(fc["battery"], json!({"voltage": null, "remaining": null}));
-
-        // The same frame while fresh is reported in full.
-        client.set_aged_snapshot_for_test(flying(), Duration::from_millis(100));
-        let fc = fc_slice(client.snapshot().as_ref());
-        assert_eq!(fc["connected"], json!(true));
-        assert_eq!(fc["vehicle"], json!("Quadrotor"));
-        assert_eq!(fc["firmware"], json!("ArduPilot"));
-        assert_eq!(fc["armed"], json!(true));
-        assert_eq!(fc["mode"], json!("LOITER"));
-        assert_eq!(
-            fc["gps"],
-            json!({"fix_type": 3, "satellites_visible": 14, "hdop": 0.8})
-        );
-        assert_eq!(fc["rc"], json!(100));
-    }
-
-    #[test]
-    fn heartbeat_fields_stay_unknown_until_a_heartbeat_lands() {
-        // The router's zero-initialised snapshot: link up, nothing heard yet.
-        let snap = json!({
-            "fc_connected": true,
-            "armed": false,
-            "mode": "",
-            "autopilot": 0,
-            "mav_type": 0,
-            "last_heartbeat": "",
-            "gps": {"fix_type": 0, "satellites": 0, "eph": 0.0},
-        });
-        let fc = fc_slice(Some(&snap));
-        assert_eq!(fc["connected"], json!(true));
-        assert_eq!(fc["armed"], Value::Null, "not heard is not disarmed");
-        assert_eq!(fc["vehicle"], Value::Null);
-        assert_eq!(fc["firmware_id"], Value::Null);
-        assert_eq!(fc["gps"]["satellites_visible"], Value::Null);
-    }
-
-    #[test]
-    fn the_unknown_hdop_sentinel_is_not_a_reading() {
-        let mut snap = flying();
-        snap["gps"]["eph"] = json!(655.35);
-        assert_eq!(fc_slice(Some(&snap))["gps"]["hdop"], Value::Null);
-    }
-
-    fn live_main(bytes: i64) -> Map<String, Value> {
-        json!({"name": "main", "ready": true, "source": {}, "tracks": ["H265"], "bytesReceived": bytes})
-            .as_object()
-            .unwrap()
-            .clone()
-    }
-
-    #[test]
-    fn bitrate_is_measured_across_two_live_readings_and_reset_when_the_stream_drops() {
-        let camera = CameraConfig::default();
-        let sample = Mutex::new(None);
-        let t0 = Instant::now();
-        let first = video_slice(&camera, true, Some(&live_main(0)), true, &sample, t0);
-        assert_eq!(first["state"], json!("running"));
-        assert_eq!(
-            first["codec"],
-            json!("H265"),
-            "the live codec outranks config"
-        );
-        assert_eq!(
-            first["bitrate_kbps"],
-            Value::Null,
-            "one reading is not a rate"
-        );
-        assert_eq!(first["target_bitrate_kbps"], json!(4000));
-
-        let t1 = t0 + Duration::from_secs(1);
-        let second = video_slice(&camera, true, Some(&live_main(500_000)), true, &sample, t1);
-        assert_eq!(second["bitrate_kbps"], json!(4000));
-
-        // The stream drops: the slice falls back and the sample is forgotten,
-        // so the next live reading starts a fresh pair.
-        let dropped = video_slice(&camera, false, None, true, &sample, t1);
-        assert_eq!(dropped["state"], json!("ready"));
-        assert_eq!(dropped["codec"], json!("h264"));
-        assert_eq!(dropped["bitrate_kbps"], Value::Null);
-        let t2 = t1 + Duration::from_secs(1);
-        let again = video_slice(&camera, true, Some(&live_main(900_000)), true, &sample, t2);
-        assert_eq!(again["bitrate_kbps"], Value::Null);
-
-        let none = video_slice(&camera, false, None, false, &sample, t2);
-        assert_eq!(none["state"], json!("no_camera"));
-    }
-
-    #[test]
-    fn a_rewound_counter_is_not_a_rate() {
-        let t0 = Instant::now();
-        let t1 = t0 + Duration::from_secs(1);
-        assert_eq!(measured_kbps((t0, 1_000), (t1, 10)), None);
-        assert_eq!(measured_kbps((t0, 0), (t0, 1_000)), None);
-    }
-}
+#[path = "dashboard_tests.rs"]
+mod tests;
