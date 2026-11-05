@@ -43,6 +43,19 @@ fn state_color(core: &Core, state: &str) -> Color {
     }
 }
 
+/// The ground station's link key state from `GET /api/video/config` →
+/// `hopping.key_status`, as operator copy and whether it warns. `None` when
+/// the field is absent (drone side, older agent, no beacon heard yet) or
+/// carries an unknown value.
+pub(super) fn key_status_view(cfg: &Value) -> Option<(&'static str, bool)> {
+    match cfg.get("hopping")?.get("key_status")?.as_str()? {
+        "bound" => Some(("bound", false)),
+        "cold_start" => Some(("waiting for key (cold start)", true)),
+        "key_unavailable" => Some(("key unavailable", true)),
+        _ => None,
+    }
+}
+
 impl LinkTab {
     fn ground(core: &Core) -> bool {
         core.profile() == "ground_station"
@@ -174,6 +187,18 @@ impl LinkTab {
                 ),
             ));
         }
+        if let Some((label, warn)) = core
+            .value(&ResourceId::VideoConfig)
+            .and_then(key_status_view)
+        {
+            let color = if warn { t.warning() } else { t.success() };
+            lines.push(kv(
+                t,
+                "Link key",
+                W,
+                Span::styled(label, Style::default().fg(color)),
+            ));
+        }
         f.render_widget(Paragraph::new(lines), inner);
     }
 
@@ -271,6 +296,11 @@ impl Tab for LinkTab {
                 ResourceId::ReceiverRelays,
                 "/api/v1/ground-station/wfb/receiver/relays",
                 2000,
+            ));
+            subs.push(Sub::every_ms(
+                ResourceId::VideoConfig,
+                "/api/video/config",
+                5000,
             ));
         }
         subs

@@ -9,13 +9,17 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useResource } from "@/hooks/use-resource";
 import { useWfb } from "@/hooks/use-wfb";
+import { linkKeyStatusView } from "@/shared/link-key-status";
 import { fmtBitrate, fmtNum, fmtDbm } from "@/shared/format";
 
 export function WfbRxPanel() {
   const { t } = useTranslation();
   const wfb = useWfb();
   const w = wfb.data;
+  const videoConfig = useResource<unknown>("video-config", "/api/video/config", 5_000);
+  const keyStatus = linkKeyStatusView(videoConfig.data);
 
   const state = (w?.state ?? "unknown").toLowerCase();
   const iface = w?.interface ?? "";
@@ -114,6 +118,15 @@ export function WfbRxPanel() {
               <>
                 <div className="text-xs text-muted-foreground">{t("wfb.fields.restarts")}</div>
                 <div className="font-mono">{restarts}</div>
+              </>
+            )}
+
+            {keyStatus && (
+              <>
+                <div className="text-xs text-muted-foreground">{t("wfb.fields.linkKey")}</div>
+                <div className={`font-mono ${keyStatus.variant === "warn" ? "text-warn" : ""}`}>
+                  {t(keyStatus.labelKey)}
+                </div>
               </>
             )}
           </div>

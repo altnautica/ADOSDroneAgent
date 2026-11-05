@@ -172,3 +172,52 @@ fn leaving_the_tab_resets_counter_baselines() {
     land(&mut app, ResourceId::Wfb, gs(9100));
     assert!(draw(&mut app, 120, 40).contains("+100"));
 }
+
+#[test]
+fn key_status_view_maps_each_state_and_hides_the_rest() {
+    use super::key_status_view;
+    let cfg = |s: Value| json!({"hopping": {"enabled": true, "key_status": s}});
+    assert_eq!(
+        key_status_view(&cfg(json!("bound"))),
+        Some(("bound", false))
+    );
+    assert_eq!(
+        key_status_view(&cfg(json!("cold_start"))),
+        Some(("waiting for key (cold start)", true))
+    );
+    assert_eq!(
+        key_status_view(&cfg(json!("key_unavailable"))),
+        Some(("key unavailable", true))
+    );
+    assert_eq!(key_status_view(&cfg(Value::Null)), None);
+    assert_eq!(key_status_view(&cfg(json!("warp"))), None);
+    assert_eq!(
+        key_status_view(&json!({"hopping": {"enabled": true}})),
+        None
+    );
+    assert_eq!(key_status_view(&json!({})), None);
+}
+
+#[test]
+fn ground_station_card_shows_the_link_key_state() {
+    let mut app = app_for("ground_station");
+    let gs = json!({"state": "active", "interface": "wlan1", "profile": "ground_station",
+                    "adapters": [{"iface": "wlan1", "role": "rx", "packets": 1, "lost": 0}]});
+    land(&mut app, ResourceId::Wfb, gs);
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        !text.contains("Link key"),
+        "absent state stays hidden\n{text}"
+    );
+
+    land(
+        &mut app,
+        ResourceId::VideoConfig,
+        json!({"hopping": {"enabled": true, "source": "listener", "key_status": "cold_start"}}),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        text.contains("Link key  waiting for key (cold start)"),
+        "{text}"
+    );
+}

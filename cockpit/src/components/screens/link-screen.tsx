@@ -24,6 +24,9 @@ import { DASH, fmtChannel, fmtDbm, fmtInt, fmtMbps } from "@/shared/format";
 import { fmtDb, fmtKbpsAsMbps, fmtLossPct, fmtMhz } from "@/lib/format-status";
 import { adapterDetail, linkDiagView } from "@/lib/link-diag";
 import { cn } from "@/lib/utils";
+import { useTranslation } from "react-i18next";
+import "@/shared/i18n";
+import { linkKeyStatusView } from "@/shared/link-key-status";
 
 interface WfbStatus {
   state?: string;
@@ -144,6 +147,13 @@ export function LinkScreen() {
     useCallback((s) => apiFetch<WfbHistory>("/api/wfb/history?seconds=60", { signal: s }), []),
     2000,
   );
+  // Ground side only: which key the presence/hop control plane authenticates under.
+  const videoConfig = useResource<unknown>(
+    useCallback((s) => apiFetch<unknown>("/api/video/config", { signal: s }), []),
+    5000,
+  );
+  const keyStatus = linkKeyStatusView(videoConfig.data);
+  const { t } = useTranslation();
 
   const w = wfb.data;
   const adapterHint = adapterDetail(w?.adapter);
@@ -262,6 +272,9 @@ export function LinkScreen() {
           ) : null}
           {pair.data?.fingerprint ? (
             <Row label="Key" value={pair.data.fingerprint} />
+          ) : null}
+          {keyStatus ? (
+            <Row label="Link key" value={t(keyStatus.labelKey)} tone={keyStatus.variant} />
           ) : null}
           <Row
             label="Auto-pair"

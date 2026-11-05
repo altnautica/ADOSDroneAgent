@@ -358,7 +358,13 @@
       "snr": "snr",
       "noise": "noise",
       "packetLoss": "packet loss",
-      "fec": "FEC"
+      "fec": "FEC",
+      "linkKey": "link key"
+    },
+    "keyStatus": {
+      "bound": "bound",
+      "cold_start": "waiting for key (cold start)",
+      "key_unavailable": "key unavailable"
     },
     "state": {
       "connecting": "connecting",
