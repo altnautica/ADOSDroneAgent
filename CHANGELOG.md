@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.11] - 2026-11-05
+
+### Fixed
+
+- A capture plugin can start a capture session as soon as the agent is back up after a restart. The supervisor now writes the capture-storage file (`/run/ados/capture-storage/capture-storage.json`) before it reports ready, and plugins start only after that. Before, the first write came several seconds after the plugins had started. A `capture_start` in that window found the file missing (after a boot) or stale (after a quick restart) and was refused with HTTP 400 `E_STORAGE_FULL`.
+- `GET /api/status` now reports the node's `profile` (wire form, such as `drone` or `ground-station`) and its ground-station mesh `role` (null on other profiles). Both come from the same source as `GET /api/pairing/info`. Before, the route had no `profile` field, so a client reading it got `profile: null` on a drone.
+
 ## [0.108.10] - 2026-11-05
 
 ### Fixed
