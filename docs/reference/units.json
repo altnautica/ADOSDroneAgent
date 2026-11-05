@@ -652,7 +652,7 @@
       "description": "ADOS Vision Engine",
       "drops_link": false,
       "install": "none",
-      "memory_max": "256M",
+      "memory_max": "512M",
       "name": "ados-vision",
       "profiles": [
         "drone",

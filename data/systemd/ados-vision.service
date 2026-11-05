@@ -38,7 +38,13 @@ NoNewPrivileges=yes
 ProtectSystem=strict
 ReadWritePaths=/var/ados /run/ados /etc/ados /dev/shm
 
-MemoryMax=256M
+# The cgroup holds the engine and the decoders it spawns: an rtsp:// capture
+# camera runs two ffmpeg processes (demux and decode, about 60 MiB for a
+# 1280x720 stream), and the ONNX detector and re-id arenas grow on the first
+# inference. Two such cameras with the detector and re-id pass 256 MiB within
+# seconds of the first frames, so a host without swap OOM-killed the engine on
+# every restart.
+MemoryMax=512M
 
 StandardOutput=journal
 StandardError=journal
