@@ -1251,6 +1251,47 @@ async fn pairing_info_ground_station_reports_the_profile_and_role() {
     h.stop().await;
 }
 
+/// `/api/status` and `/api/pairing/info` read one profile resolver, so a
+/// status consumer never sees a profile the pairing probe contradicts. The
+/// status route used to carry no profile at all, which every reader of
+/// `/api/status` saw as `profile: null` on a drone.
+#[tokio::test]
+async fn status_reports_the_same_profile_and_role_as_pairing_info() {
+    for (config_profile, mesh_role, want_profile, want_role) in [
+        ("drone", None, "drone", Value::Null),
+        (
+            "ground_station",
+            Some("relay"),
+            "ground-station",
+            serde_json::json!("relay"),
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        seed_config(dir.path(), "abcdef1234567890", "node", config_profile);
+        if let Some(role) = mesh_role {
+            std::fs::write(dir.path().join("mesh-role"), format!("{role}\n")).unwrap();
+        }
+        let h = start_with_state(dir.path(), None, dir.path().join("absent-state.sock")).await;
+
+        let (status, body) = unix_get(&h.socket, "/api/status", None).await;
+        assert!(status.contains("200"), "{status}");
+        let got: Value = serde_json::from_str(&body).unwrap();
+        let (status, body) = unix_get(&h.socket, "/api/pairing/info", None).await;
+        assert!(status.contains("200"), "{status}");
+        let info: Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(
+            got["profile"],
+            serde_json::json!(want_profile),
+            "{config_profile}"
+        );
+        assert_eq!(got["role"], want_role, "{config_profile}");
+        assert_eq!(got["profile"], info["profile"], "{config_profile}");
+        assert_eq!(got["role"], info["role"], "{config_profile}");
+        h.stop().await;
+    }
+}
+
 #[tokio::test]
 async fn pairing_code_returns_the_code_unpaired_and_409s_paired() {
     let dir = tempfile::tempdir().unwrap();

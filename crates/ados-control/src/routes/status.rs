@@ -184,8 +184,8 @@ pub(crate) const VIDEO_DEPENDENCIES: [&str; 5] = [
     "gst-launch-1.0",
 ];
 
-/// `GET /api/status` → agent status: version, uptime, board, health, the FC
-/// connection triple, and the dependency map.
+/// `GET /api/status` → agent status: version, uptime, board, health, the node's
+/// profile and mesh role, the FC connection triple, and the dependency map.
 ///
 /// The FC triple + uptime are read from the live state snapshot's runtime extras
 /// (the MAVLink service publishes them alongside the vehicle state). The
@@ -245,9 +245,23 @@ pub async fn get_status(State(state): State<AppState>) -> Json<Value> {
     // are moved into the body below.
     let fc_reachable = derive_fc_reachable(&liveness);
 
+    // The node's wire-form profile and ground-station mesh role (null on every
+    // other profile), resolved exactly as `/api/pairing/info` resolves them, so
+    // the two never disagree about what this node is.
+    let paths = &state.pairing_paths;
+    let (profile, role) = crate::profile::current_profile_and_role_at(
+        &crate::config::PairingConfig::cached(&paths.config)
+            .agent
+            .profile,
+        &paths.profile_conf,
+        &paths.mesh_role,
+    );
+
     let mut body = json!({
         "version": state.agent_version(),
         "uptime_seconds": uptime,
+        "profile": profile,
+        "role": role,
         "board": board,
         "health": health,
         "fc_connected": fc_connected,
