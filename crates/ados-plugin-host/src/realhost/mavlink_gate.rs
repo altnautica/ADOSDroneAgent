@@ -26,6 +26,7 @@ pub const POSE_INJECT_MSG_IDS: &[u32] = &[
     138,   // ATT_POS_MOCAP (vicon-equivalent attitude path)
     232,   // GPS_INPUT (a MAVLink GPS the estimator fuses)
     113,   // HIL_GPS (the same GPS driver, HIL form)
+    48,    // SET_GPS_GLOBAL_ORIGIN (moves the EKF origin)
 ];
 
 /// Component ids the VIO permission covers. Registering one of these requires

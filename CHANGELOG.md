@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.12] - 2026-11-05
+
+### Security
+
+- A plugin sending `SET_GPS_GLOBAL_ORIGIN` (MAVLink message 48) now needs `estimator.pose.inject` on top of `mavlink.write`. The message moves the flight controller's EKF origin, which shifts every position the estimator reports, so it is gated like the other estimator inputs. A send holding only `mavlink.write` is refused with `capability_denied: estimator.pose.inject`.
+
 ## [0.108.11] - 2026-11-05
 
 ### Fixed

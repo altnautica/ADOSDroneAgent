@@ -400,6 +400,28 @@ fn the_global_frame_vision_estimate_is_gated_like_its_local_frame_sibling() {
 }
 
 #[test]
+fn setting_the_gps_global_origin_demands_the_pose_capability() {
+    // SET_GPS_GLOBAL_ORIGIN (48) moves the EKF origin, which shifts every
+    // position the estimator reports: a plugin holding only `mavlink.write`
+    // must not be able to send it.
+    let host = RealHost::new();
+    let args = map(&[("msg_bytes", Value::Binary(v2_frame(48)))]);
+    assert_eq!(
+        err_body(host.mavlink_send("p", &args, &caps(&["mavlink.write"]))),
+        "capability_denied: estimator.pose.inject"
+    );
+    let m = ok_map(host.mavlink_send(
+        "p",
+        &args,
+        &caps(&["mavlink.write", "estimator.pose.inject"]),
+    ));
+    assert_eq!(
+        field(&m, "error").and_then(Value::as_str),
+        Some("not_available")
+    );
+}
+
+#[test]
 fn a_buffer_that_is_not_whole_frames_is_refused_rather_than_guessed() {
     // The splitter stops at the first incomplete frame and returns what was
     // whole, but the router forwards the buffer INCLUDING the remainder.
