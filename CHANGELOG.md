@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.6] - 2026-11-05
+
+### Fixed
+
+- `ados-vision.service` is capped at 512 MiB instead of 256 MiB. Its cgroup holds the vision engine and the `ffmpeg` processes it starts for each `rtsp://` capture camera (a demuxer and a decoder, about 60 MiB for a 1280x720 stream). The ONNX detector and re-id arenas also grow on the first inference. Two such cameras with the detector and re-id went past 256 MiB within seconds of the first frames, so on a host without swap the kernel OOM-killed the engine every few seconds and the cameras reconnected over and over. Measured peak with that load: 324 MiB.
+
 ## [0.108.5] - 2026-11-05
 
 ### Fixed
