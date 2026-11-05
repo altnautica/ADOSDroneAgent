@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.5] - 2026-11-05
+
+### Fixed
+
+- A capture camera with an `rtsp://` source now delivers frames when its stream carries the H.264 parameter sets (SPS and PPS) only in the SDP (`sprop-parameter-sets`), as an encoder writing global headers publishes them behind a server that forwards its RTP packets as sent. `ados-vision` copies the stream to Annex-B with one `ffmpeg` and decodes it with a second; the copy dropped the parameter sets the demuxer held as extradata, so the decoder saw only slices naming a PPS it never got and decoded nothing. The source then went silent for 10 s, was reopened, and the cycle repeated, so the camera never reached the frame bus and `ados-video` never got a publisher for it. The copy now writes the parameter sets in-band before every keyframe (`dump_extra=freq=keyframe`, as the agent's own encoders do).
+
 ## [0.108.4] - 2026-11-05
 
 ### Fixed
