@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ados_config::capture_storage::{
-    CaptureStorageConfig, CaptureStorageSidecar, SysRoots, WriteProbe, SIDECAR_REFRESH,
+    CaptureStorageConfig, CaptureStorageSidecar, WriteProbe, SIDECAR_REFRESH,
 };
 use tokio::task::JoinHandle;
 
 use super::{
-    measure_write, mono_ns, probe_due, run_pass, write_sidecar, PassMode, PassTime, SizeCache,
-    PROBE_BYTES,
+    measure_write, mono_ns, probe_due, run_pass, write_sidecar, CaptureSources, PassMode, PassTime,
+    SizeCache, PROBE_BYTES,
 };
 use crate::sdnotify::MonitorProgress;
 
@@ -73,24 +73,25 @@ impl CaptureRuntime {
     }
 
     /// One capture pass on a blocking thread (directory walks and session
-    /// removal), then the sidecar write. `progress` is stamped between
-    /// sessions so a long pass keeps the watchdog fed. Returns the bytes
-    /// evicted.
+    /// removal), then the sidecar write to `sources.sidecar`. `progress` is
+    /// stamped between sessions so a long pass keeps the watchdog fed. Returns
+    /// the bytes evicted.
     pub async fn pass(
         &mut self,
         cfg: CaptureStorageConfig,
         mode: PassMode,
-        sidecar_path: &Path,
+        sources: &CaptureSources,
         progress: MonitorProgress,
     ) -> u64 {
         self.last_refresh = Some(Instant::now());
         let probe = self.probe.clone();
         let mut cache = std::mem::take(&mut self.cache);
+        let sys = sources.sys.clone();
         let joined = tokio::task::spawn_blocking(move || {
             let keepalive = move || progress.mark();
             let pass = run_pass(
                 &cfg,
-                &SysRoots::default(),
+                &sys,
                 mode,
                 probe,
                 &mut cache,
@@ -121,7 +122,7 @@ impl CaptureRuntime {
             }
             self.root_access_error = pass.root_access_error.clone();
         }
-        if let Err(e) = write_sidecar(sidecar_path, &pass.sidecar) {
+        if let Err(e) = write_sidecar(&sources.sidecar, &pass.sidecar) {
             tracing::debug!(error = %e, "capture-storage sidecar write failed");
         }
         self.root = Some(pass.root);

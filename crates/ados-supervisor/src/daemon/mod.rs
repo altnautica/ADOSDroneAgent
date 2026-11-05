@@ -90,7 +90,10 @@ async fn serve() -> Result<()> {
     // never races the auto-pair/bind that follows.
     crate::rtl_modprobe::reconcile_from_config(false);
 
-    // Tell systemd we are up (no-op off Linux / outside a notify unit).
+    // Tell systemd we are up (no-op off Linux / outside a notify unit). Plugin
+    // units are ordered after this unit, so they start now: everything they
+    // read at start, the capture-storage sidecar included, is published by
+    // `start()` above.
     sdnotify::ready();
 
     // Keep the systemd watchdog fed ONLY while the monitor pass keeps making

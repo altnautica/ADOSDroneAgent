@@ -43,6 +43,28 @@ pub fn active_for(profile: &str) -> bool {
     matches!(profile, "drone" | "visor")
 }
 
+/// Where the capture category reads its settings and the volumes, and where
+/// it writes `capture-storage.json`. On a node: the sidecar under the run dir
+/// and the config file the supervisor resolved at start, and the real system
+/// paths. A test points every one of them at a temporary tree.
+#[derive(Debug, Clone)]
+pub struct CaptureSources {
+    pub sidecar: PathBuf,
+    pub config_yaml: PathBuf,
+    pub sys: SysRoots,
+}
+
+impl CaptureSources {
+    /// The node's sources for the run dir and config file the supervisor uses.
+    pub fn for_node(run_dir: &Path, config_yaml: &Path) -> Self {
+        CaptureSources {
+            sidecar: cs::sidecar_path_in(run_dir),
+            config_yaml: config_yaml.to_path_buf(),
+            sys: SysRoots::default(),
+        }
+    }
+}
+
 /// What one capture pass does beyond rewriting the sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassMode {

@@ -240,6 +240,8 @@ impl Supervisor {
         bind: Arc<BindOrchestrator>,
         pm: Arc<dyn ProcessManager>,
     ) -> Self {
+        let capture_sources =
+            crate::janitor::capture::CaptureSources::for_node(&config.run_dir, &config.config_yaml);
         Supervisor {
             services: build_specs(),
             config_stamp: config_mtime(&config.config_yaml),
@@ -269,9 +271,10 @@ impl Supervisor {
             camera_usb_recovery: crate::usb_rehome::camera::CameraUsbRecovery::new(
                 ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
             ),
-            janitor: crate::janitor::Janitor::new(ados_protocol::logd::emitter::EventEmitter::new(
-                "ados-supervisor",
-            )),
+            janitor: crate::janitor::Janitor::new(
+                ados_protocol::logd::emitter::EventEmitter::new("ados-supervisor"),
+                capture_sources,
+            ),
             progress: MonitorProgress::new(),
             work_proof: crate::work_proof::WorkProof::new(),
             last_adoption_sweep: None,

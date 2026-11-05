@@ -228,15 +228,64 @@ pub struct Janitor {
     last_tick: Option<Instant>,
     events: EventEmitter,
     capture: capture::CaptureRuntime,
+    /// Where the capture category reads its settings and writes its sidecar.
+    pub(crate) capture_sources: capture::CaptureSources,
 }
 
 impl Janitor {
-    pub fn new(events: EventEmitter) -> Self {
+    pub fn new(events: EventEmitter, capture_sources: capture::CaptureSources) -> Self {
         Janitor {
             last_tick: None,
             events,
             capture: capture::CaptureRuntime::new(),
+            capture_sources,
         }
+    }
+
+    /// Write `capture-storage.json` now, on a node whose `profile` records
+    /// capture sessions, so it exists before anything can be asked to start
+    /// one.
+    ///
+    /// The supervisor calls this at the end of its start-up, before it tells
+    /// systemd it is ready. Plugin units are ordered after the supervisor, so
+    /// they start the moment it is; the first monitor pass reaches the janitor
+    /// only after every reconciler ahead of it, seconds later. A capture plugin
+    /// asked to start a session in that window found no sidecar (a fresh
+    /// boot), or the previous process's, past its freshness window, and
+    /// refused with `E_STORAGE_FULL`. Measure only: eviction stays on the
+    /// janitor interval, which the first tick starts.
+    pub async fn publish_capture_storage(
+        &mut self,
+        profile: &str,
+        progress: &crate::sdnotify::MonitorProgress,
+    ) {
+        #[cfg(not(target_os = "linux"))]
+        let _ = (profile, progress);
+        #[cfg(target_os = "linux")]
+        {
+            self.capture.set_active(capture::active_for(profile));
+            self.capture_pass(capture::PassMode::Refresh, progress)
+                .await;
+        }
+    }
+
+    /// One capture pass in `mode` when the capture category is active, with the
+    /// settings read fresh from the config file. Returns the bytes evicted.
+    #[cfg(target_os = "linux")]
+    async fn capture_pass(
+        &mut self,
+        mode: capture::PassMode,
+        progress: &crate::sdnotify::MonitorProgress,
+    ) -> u64 {
+        if !self.capture.active() {
+            return 0;
+        }
+        let (cfg, _) = ados_config::capture_storage::CaptureStorageConfig::load(
+            &self.capture_sources.config_yaml,
+        );
+        self.capture
+            .pass(cfg, mode, &self.capture_sources, progress.clone())
+            .await
     }
 
     /// One reconcile. Cheap when nothing is over its cap: a handful of directory
@@ -255,10 +304,10 @@ impl Janitor {
         let _ = progress;
         #[cfg(target_os = "linux")]
         {
-            let capture_sidecar =
-                ados_protocol::paths::run_path(ados_config::capture_storage::SIDECAR_ID);
             if self.capture.active() {
-                self.capture.service_probe(&capture_sidecar).await;
+                self.capture
+                    .service_probe(&self.capture_sources.sidecar)
+                    .await;
             }
 
             let cfg = read_config();
@@ -275,20 +324,12 @@ impl Janitor {
             if due || self.capture.refresh_due(now) {
                 self.capture
                     .set_active(capture::active_for(&ados_config::node_profile()));
-                if self.capture.active() {
-                    let (capture_cfg, _) = ados_config::capture_storage::CaptureStorageConfig::load(
-                        std::path::Path::new(CONFIG_YAML),
-                    );
-                    let mode = match (due, cfg.enabled) {
-                        (true, true) => capture::PassMode::Evict,
-                        (true, false) => capture::PassMode::Remeasure,
-                        (false, _) => capture::PassMode::Refresh,
-                    };
-                    capture_freed = self
-                        .capture
-                        .pass(capture_cfg, mode, &capture_sidecar, progress.clone())
-                        .await;
-                }
+                let mode = match (due, cfg.enabled) {
+                    (true, true) => capture::PassMode::Evict,
+                    (true, false) => capture::PassMode::Remeasure,
+                    (false, _) => capture::PassMode::Refresh,
+                };
+                capture_freed = self.capture_pass(mode, progress).await;
             }
             if !due || !cfg.enabled {
                 return;

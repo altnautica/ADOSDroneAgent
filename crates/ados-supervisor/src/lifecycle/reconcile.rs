@@ -146,6 +146,14 @@ impl Supervisor {
         for name in left_off {
             self.pm.reset_failed(name).await;
         }
+
+        // The capture-storage sidecar, before the daemon reports ready: plugin
+        // units order after the supervisor and start the moment it is, and a
+        // capture plugin admits a session only against a fresh sidecar. The
+        // monitor pass rewrites it from here on.
+        self.janitor
+            .publish_capture_storage(&self.config.profile_wire, &self.progress)
+            .await;
         tracing::info!(services = self.services.len(), "supervisor ready");
     }
 

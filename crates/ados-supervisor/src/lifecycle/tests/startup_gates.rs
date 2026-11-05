@@ -1,7 +1,91 @@
-//! Startup gate tests: which units the hardware-detect pass starts, and the
-//! cleanup it does for the units it leaves off.
+//! Startup gate tests: which units the hardware-detect pass starts, the
+//! cleanup it does for the units it leaves off, and what start-up publishes
+//! before the daemon reports ready.
 
 use super::*;
+
+use std::path::{Path, PathBuf};
+
+use ados_config::capture_storage::{self as cs, FsSpace, SysRoots, GIB};
+
+/// A capture volume with room, whatever path it is asked about.
+fn roomy(_: &Path) -> Option<FsSpace> {
+    Some(FsSpace {
+        total_bytes: 1000 * GIB,
+        free_bytes: 800 * GIB,
+    })
+}
+
+/// A drone supervisor whose capture category reads and writes only under
+/// `dir`: a capture volume mounted at `<dir>/mnt`, `storage.capture_root` on
+/// it, and the run dir at `<dir>/run`. `start()` publishes the capture
+/// sidecar, and a test must reach neither the host's volumes nor its run dir.
+/// Returns the supervisor and the capture root.
+fn drone_with_capture_fixture(dir: &Path, pm: Arc<MockProcessManager>) -> (Supervisor, PathBuf) {
+    let mount = dir.join("mnt");
+    let root = mount.join("ados/capture");
+    std::fs::create_dir_all(dir.join("sys/block/nvme0n1/nvme0n1p1")).unwrap();
+    std::fs::create_dir_all(dir.join("sys/block/nvme0n1/queue")).unwrap();
+    std::fs::write(dir.join("sys/block/nvme0n1/queue/rotational"), "0\n").unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        dir.join("mounts"),
+        format!("/dev/nvme0n1p1 {} ext4 rw 0 0\n", mount.display()),
+    )
+    .unwrap();
+    let config_yaml = dir.join("config.yaml");
+    std::fs::write(
+        &config_yaml,
+        format!("storage:\n  capture_root: {}\n", root.display()),
+    )
+    .unwrap();
+    let mut config = cfg("drone");
+    config.run_dir = dir.join("run");
+    config.config_yaml = config_yaml;
+    let mut sup = Supervisor::with_process_manager(config, Arc::new(BindOrchestrator::new()), pm);
+    sup.janitor.capture_sources.sys = SysRoots {
+        sys_block: dir.join("sys/block"),
+        mounts: dir.join("mounts"),
+        fallback_root: dir.join("fallback"),
+        sticky_file: dir.join("capture-root"),
+        stat: roomy,
+    };
+    (sup, root)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn startup_publishes_the_capture_sidecar_before_it_returns() {
+    // Plugin units order after the supervisor, so systemd starts them as soon
+    // as the daemon reports ready, which it does when `start()` returns. The
+    // first monitor pass reaches the janitor seconds later, so a capture
+    // plugin asked to start a session right after an agent restart found no
+    // sidecar (or the last process's, gone stale) and refused it as
+    // `E_STORAGE_FULL`. Start-up itself must leave a fresh, admitting sidecar.
+    let tmp = tempfile::tempdir().unwrap();
+    let pm = Arc::new(MockProcessManager::new());
+    let (mut sup, root) = drone_with_capture_fixture(tmp.path(), pm);
+    let sidecar = cs::sidecar_path_in(&tmp.path().join("run"));
+
+    sup.start().await;
+
+    let admitted = cs::admit_from_sidecar(&sidecar, std::time::SystemTime::now())
+        .expect("a capture session is admitted as soon as start-up returns");
+    assert_eq!(admitted.capture_root, root.display().to_string());
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn startup_publishes_no_capture_sidecar_on_a_profile_without_capture() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pm = Arc::new(MockProcessManager::new());
+    let (mut sup, _) = drone_with_capture_fixture(tmp.path(), pm);
+    sup.config.profile_wire = "workstation".to_string();
+
+    sup.start().await;
+
+    assert!(!cs::sidecar_path_in(&tmp.path().join("run")).exists());
+}
 
 #[tokio::test]
 async fn vision_enabled_starts_the_vision_engine() {
@@ -201,9 +285,9 @@ async fn startup_clears_a_stale_failure_on_a_unit_it_leaves_off() {
     // A previous process can leave an intentionally-off unit `failed`
     // (a stop that landed mid-start). Nothing starts it again, so without a
     // reset the status surface reports a failure for a unit meant to be off.
+    let tmp = tempfile::tempdir().unwrap();
     let pm = Arc::new(MockProcessManager::new());
-    let bind = Arc::new(BindOrchestrator::new());
-    let mut sup = Supervisor::with_process_manager(cfg("drone"), bind, pm.clone());
+    let (mut sup, _) = drone_with_capture_fixture(tmp.path(), pm.clone());
 
     sup.start().await;
 
