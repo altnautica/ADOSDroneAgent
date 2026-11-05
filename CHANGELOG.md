@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.7] - 2026-11-05
+
+### Fixed
+
+- The dashboard's video card reads `ready` instead of `no_camera` on a node whose cameras are all declared in the `cameras:` roster without a local V4L2 device (a `capture: true` entry the vision engine opens, or an `rtsp://` network source the video pipeline pulls) while the `main` stream is not yet publishing.
+- A vision camera whose frame source opens but delivers no frames is now visible. The engine logs a warning, `frame source delivered nothing; reopening`, with the camera id and how long it was silent, and records the error `delivered no frame for 10 s` for that camera until the next frame arrives. `/api/vision/status` gains two additive fields from the engine's status file: `source_errors`, a list of `{camera, error}` for every camera whose source is failing or silent (empty when the file is absent), and `live_inputs`, the number of cameras currently delivering frames (null when the file is absent).
+
+### Changed
+
+- The generated CLI reference normalises each command's help text with `inspect.cleandoc`, so `scripts/emit-reference.py --check` gives the same result on Python 3.12 and 3.14.
+
 ## [0.108.6] - 2026-11-05
 
 ### Fixed
