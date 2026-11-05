@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.10] - 2026-11-05
+
+### Fixed
+
+- `POST /api/v1/ground-station/wfb/pair` checks that the decoded key blob is 64 bytes before the fleet gate and refuses any other length with 400 `E_INVALID_KEY_BLOB`. A wrong-length key used to answer 409 `E_FLEET_KEY_MISMATCH` on a paired station, and on an unpaired one reserved a fleet slot and then rolled it back.
+- The station-wide unpair (`DELETE /api/v1/ground-station/wfb/pair`) now also removes the fleet roster (`/var/lib/ados/fleet.json`) and the shared beacon key (`/etc/drone.key`), as its documentation already said it did. The next fleet no longer inherits the old members' slots, and the presence plane returns to cold start instead of authenticating as the old fleet. A roster or key that cannot be removed is a 500 `E_UNPAIR_FAILED`.
+- The pair route's documentation states the full guard order, that `drone_device_id` is required, and that the route is LAN-only (relay-forbidden).
+
 ## [0.108.9] - 2026-11-05
 
 ### Fixed
