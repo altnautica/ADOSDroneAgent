@@ -1,7 +1,9 @@
 //! Ground-station WFB pair-key install / unpair write routes.
 //!
-//! The cloud-relay path installs a 64-byte rx-side wfb-ng key on the ground
-//! station (`POST .../wfb/pair`) and removes it (`DELETE .../wfb/pair`). These are
+//! A LAN caller installs a 64-byte rx-side wfb-ng key on the ground station
+//! (`POST .../wfb/pair`) and removes it (`DELETE .../wfb/pair`). Both are
+//! relay-forbidden (`RELAY_FORBIDDEN_PATHS` in `auth/gates.rs`): a cloud
+//! relay can never rekey a station. These are
 //! the writes the sibling read module ([`crate::routes::gs_status::get_wfb`]) and
 //! the GS-wfb config write deliberately left on the residual surface until the
 //! data-plane service grew a command socket; that socket now carries the
@@ -18,7 +20,10 @@
 //! `E_PROFILE_MISMATCH`); the deprecated-`pair_key` 400; the missing-`blob_b64`
 //! 400; the missing-`drone_device_id` 400 (`E_DEVICE_ID_REQUIRED`) or a
 //! malformed one (`E_DEVICE_ID_INVALID`, see
-//! [`ados_groundlink::is_valid_device_id`]); then the FLEET gate.
+//! [`ados_groundlink::is_valid_device_id`]); the blob's base64 decode (400
+//! `E_BLOB_BASE64`) and length (400 `E_INVALID_KEY_BLOB`), checked here so a
+//! malformed key never reaches the gate; the optional shared half (400
+//! `E_SHARED_KEY_INVALID`); then the FLEET gate.
 //!
 //! A fleet of up to [`FLEET_MAX_SLOTS`] drones shares ONE keypair — the wfb-ng
 //! `channel_id` separates the drones, not the key — so a second drone presenting
@@ -31,9 +36,8 @@
 //! `fleet_slot`, alongside the whole `slots` table.
 //!
 //! A fresh install is still forwarded to the command socket, whose
-//! `pair_keypair` op decodes + validates the blob (a base64 fault → 400
-//! `E_BLOB_BASE64`, a wrong length → 400 `E_INVALID_KEY_BLOB`, an IO fault →
-//! 500 `E_PAIR_FAILED`) and returns the
+//! `pair_keypair` op validates the blob again (the same 400 codes; an IO fault
+//! → 500 `E_PAIR_FAILED`) and returns the
 //! `{paired,paired_with_device_id,paired_at,fingerprint,role}` body this route
 //! extends. `DELETE .../wfb/pair` forwards the `unpair` op and returns
 //! `{paired:false, role:"gs"}`.
@@ -229,9 +233,12 @@ fn load_slot_system_ids() -> std::collections::BTreeMap<u8, SlotSystemId> {
 /// `DELETE .../wfb/pair` → `{paired:false, role:"gs"}`.
 ///
 /// Gates on the profile, then forwards the `unpair` op (which wipes both key
-/// files, clears the persisted pair state, restarts the receive unit) and returns
-/// its reply. A socket-reported failure is a 500 `E_UNPAIR_FAILED`; an
-/// unreachable socket degrades to a 503.
+/// files, clears the persisted pair state, restarts the receive unit). The
+/// station leaves its fleet, so this route then drops the fleet roster and the
+/// shared beacon key ([`clear_fleet_trust_at`]); the data-plane unit cannot
+/// write either path. A socket-reported failure, or a roster or key that could
+/// not be removed, is a 500 `E_UNPAIR_FAILED`; an unreachable socket degrades
+/// to a 503.
 pub async fn delete_wfb_pair(State(_state): State<AppState>) -> Response {
     if !is_ground_station() {
         return profile_mismatch();
@@ -240,17 +247,47 @@ pub async fn delete_wfb_pair(State(_state): State<AppState>) -> Response {
         Some(r) => r,
         None => return socket_unavailable("E_UNPAIR_FAILED"),
     };
+    let unpair_failed = |message: Option<String>| {
+        let mut error = Map::new();
+        error.insert("code".to_string(), json!("E_UNPAIR_FAILED"));
+        if let Some(msg) = message {
+            error.insert("message".to_string(), json!(msg));
+        }
+        nested_detail(StatusCode::INTERNAL_SERVER_ERROR, Value::Object(error))
+    };
     match split_reply(reply) {
-        Ok(body) => Json(Value::Object(body)).into_response(),
-        Err(err) => {
-            let mut error = Map::new();
-            error.insert("code".to_string(), json!("E_UNPAIR_FAILED"));
-            if let Some(msg) = err.message {
-                error.insert("message".to_string(), json!(msg));
+        Ok(body) => {
+            let _guard = fleet_registry_write();
+            if let Err(e) = clear_fleet_trust_at(
+                std::path::Path::new(FLEET_REGISTRY_PATH),
+                std::path::Path::new(pair::SHARED_KEY_PATH),
+            ) {
+                tracing::error!(error = %e, "unpair_fleet_trust_clear_failed");
+                return unpair_failed(Some(e));
             }
-            nested_detail(StatusCode::INTERNAL_SERVER_ERROR, Value::Object(error))
+            Json(Value::Object(body)).into_response()
+        }
+        Err(err) => unpair_failed(err.message),
+    }
+}
+
+/// Drop the fleet roster and the shared beacon key after a station-wide
+/// unpair. Both outlive the radio keys otherwise: the roster keeps every former
+/// member's slot, so the next fleet starts with slots it cannot reuse, and the
+/// shared key keeps the presence plane authenticating as the old fleet (`bound`)
+/// instead of returning to cold start. An already-absent file is not an error.
+fn clear_fleet_trust_at(
+    registry: &std::path::Path,
+    shared_key: &std::path::Path,
+) -> Result<(), String> {
+    for path in [registry, shared_key] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{}: {e}", path.display())),
         }
     }
+    Ok(())
 }
 
 /// `DELETE /api/v1/ground-station/wfb/pair/:device_id` — release ONE drone's

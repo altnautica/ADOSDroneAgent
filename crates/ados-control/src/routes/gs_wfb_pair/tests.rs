@@ -385,3 +385,49 @@ fn the_control_unit_can_write_the_shared_key() {
         dir.display()
     );
 }
+
+#[tokio::test]
+async fn a_wrong_length_blob_is_refused_before_the_fleet_gate() {
+    // A short or long key used to reach the byte-identity gate: on a paired
+    // station it read as a 409 fleet mismatch, on an unpaired one it reserved
+    // a slot and then rolled it back. It is a malformed key, nothing more.
+    use base64::Engine as _;
+    let b64 = |n: usize| base64::engine::general_purpose::STANDARD.encode(vec![7u8; n]);
+    for len in [0usize, 32, 63, 65, 128] {
+        let resp = *decode_pair_blob(&b64(len)).expect_err("wrong length refused");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "{len}");
+        assert_eq!(
+            body_json(resp).await["detail"]["error"]["code"],
+            "E_INVALID_KEY_BLOB",
+            "{len}"
+        );
+    }
+    let resp = *decode_pair_blob("not base64!").expect_err("bad base64 refused");
+    assert_eq!(
+        body_json(resp).await["detail"]["error"]["code"],
+        "E_BLOB_BASE64"
+    );
+    assert_eq!(decode_pair_blob(&b64(64)).unwrap(), vec![7u8; 64]);
+}
+
+#[test]
+fn a_station_wide_unpair_drops_the_roster_and_the_shared_key() {
+    // The radio keys went, but the roster and the beacon key stayed: the next
+    // fleet inherited every former member's slot, and the presence plane kept
+    // authenticating as the old fleet.
+    let dir = tempfile::tempdir().unwrap();
+    let registry = dir.path().join("fleet.json");
+    let shared = dir.path().join("drone.key");
+    let mut reg = FleetRegistry::default();
+    reg.allocate("drone-0001").unwrap();
+    reg.persist(&registry).unwrap();
+    std::fs::write(&shared, [5u8; 64]).unwrap();
+
+    clear_fleet_trust_at(&registry, &shared).unwrap();
+    assert!(!registry.exists());
+    assert!(!shared.exists());
+    assert!(FleetRegistry::load(&registry).is_empty());
+
+    // Running it again on a station already clear is not an error.
+    clear_fleet_trust_at(&registry, &shared).unwrap();
+}

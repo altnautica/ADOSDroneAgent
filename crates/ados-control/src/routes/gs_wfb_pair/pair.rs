@@ -3,9 +3,10 @@
 use super::*;
 
 /// The `POST .../wfb/pair` body: a base64 `blob_b64` (the 64-byte wfb-ng
-/// key), an optional `drone_device_id`, an optional `shared_key_b64`, and
-/// the legacy `pair_key` kept only so an old client gets a clear 400 instead
-/// of a 422.
+/// key), the `drone_device_id` the fleet slot is issued to (required; it is
+/// `Option` only so a missing id is the route's own 400 rather than a 422), an
+/// optional `shared_key_b64`, and the legacy `pair_key` kept only so an old
+/// client gets a clear 400 instead of a 422.
 #[derive(Debug, Default, Deserialize)]
 pub struct PairRequest {
     #[serde(default)]
@@ -62,6 +63,31 @@ pub(super) fn decode_shared_key(b64: &str) -> Result<Vec<u8>, String> {
             "shared key is {} bytes, expected {WFB_KEY_FILE_BYTES}",
             bytes.len()
         ));
+    }
+    Ok(bytes)
+}
+
+/// Decode the pair blob and check it is one wfb-ng key file: the 400
+/// `E_BLOB_BASE64` for bad base64, the 400 `E_INVALID_KEY_BLOB` for a wrong
+/// length, the same codes the command socket's `pair_keypair` op returns.
+pub(super) fn decode_pair_blob(b64: &str) -> Result<Vec<u8>, Box<Response>> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .map_err(|e| {
+            Box::new(nested_detail(
+                StatusCode::BAD_REQUEST,
+                json!({"code": "E_BLOB_BASE64", "message": e.to_string()}),
+            ))
+        })?;
+    if bytes.len() as u64 != WFB_KEY_FILE_BYTES {
+        return Err(Box::new(nested_detail(
+            StatusCode::BAD_REQUEST,
+            json!({
+                "code": "E_INVALID_KEY_BLOB",
+                "message": format!("key blob is {} bytes, expected {WFB_KEY_FILE_BYTES}", bytes.len()),
+            }),
+        )));
     }
     Ok(bytes)
 }
@@ -142,8 +168,9 @@ pub(super) fn pair_device_id(raw: Option<String>) -> Result<String, Box<Response
 /// `POST .../wfb/pair` →
 /// `{paired,paired_with_device_id,paired_at,fingerprint,role,fleet_slot,slots}`.
 ///
-/// Guards in order: profile, deprecated-`pair_key`, missing-blob, blob decode,
-/// then the FLEET gate.
+/// Guards in order: profile, deprecated-`pair_key`, missing-blob, missing or
+/// malformed `drone_device_id`, blob base64 decode, blob length, the optional
+/// shared half, then the FLEET gate.
 ///
 /// A fleet is one trust domain sharing one keypair — `channel_id` separates the
 /// drones, not the key — so a second drone presenting the SAME blob is a normal
@@ -202,20 +229,14 @@ pub async fn post_wfb_pair(
         Err(resp) => return *resp,
     };
 
-    // Decode here as well as in the socket op: the byte-identity gate below
-    // compares the presented key against the installed one, and a base64 fault
-    // must surface as the same 400 the op would have returned.
-    let blob = match base64::engine::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        blob_b64.as_bytes(),
-    ) {
+    // Decode and size-check here as well as in the socket op: the byte-identity
+    // gate below compares the presented key against the installed one, so a
+    // malformed blob must be refused before it. A wrong-length key used to reach
+    // the gate and read as a 409 fleet mismatch on a paired station, or reserve
+    // and then roll back a slot on an unpaired one.
+    let blob = match decode_pair_blob(&blob_b64) {
         Ok(b) => b,
-        Err(e) => {
-            return nested_detail(
-                StatusCode::BAD_REQUEST,
-                json!({"code": "E_BLOB_BASE64", "message": e.to_string()}),
-            )
-        }
+        Err(resp) => return *resp,
     };
 
     // The optional shared half is validated before anything changes, so a
