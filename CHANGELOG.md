@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.9] - 2026-11-05
+
+### Fixed
+
+- `GET /api/video/config` serves the `hopping` block from the hop-supervisor snapshot only while that file is inside its 10 s freshness window; past it, the route returns the config stub. A dead ground listener's last `key_status` and hop history no longer read as live. The drone radio rewrites its `key_unavailable` hop snapshot every 5 s, instead of once, so it stays fresh.
+
+### Changed
+
+- The link key row draws `bound` in the neutral value colour on the dashboard, cockpit and TUI, rather than as healthy: it means this station's own key reads, not that both ends hold the same key. The cockpit Link screen polls `/api/video/config` only on a ground station.
+
 ## [0.108.8] - 2026-11-05
 
 ### Added
