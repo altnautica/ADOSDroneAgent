@@ -191,13 +191,14 @@ impl LinkTab {
             .value(&ResourceId::VideoConfig)
             .and_then(key_status_view)
         {
-            let color = if warn { t.warning() } else { t.success() };
-            lines.push(kv(
-                t,
-                "Link key",
-                W,
-                Span::styled(label, Style::default().fg(color)),
-            ));
+            // `bound` is neutral: it says this station's key reads, not that
+            // the pair is keyed alike.
+            let style = if warn {
+                Style::default().fg(t.warning())
+            } else {
+                t.bright()
+            };
+            lines.push(kv(t, "Link key", W, Span::styled(label, style)));
         }
         f.render_widget(Paragraph::new(lines), inner);
     }

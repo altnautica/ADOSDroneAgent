@@ -9,11 +9,12 @@ export type LinkKeyStatus = "bound" | "cold_start" | "key_unavailable";
 export interface LinkKeyStatusView {
   /** i18n key for the operator copy. */
   labelKey: `wfb.keyStatus.${LinkKeyStatus}`;
-  variant: "ok" | "warn";
+  /** `bound` is neutral: it only says this station's own key reads, not that the pair matches. */
+  variant: "neutral" | "warn";
 }
 
 const VIEWS: Record<LinkKeyStatus, LinkKeyStatusView> = {
-  bound: { labelKey: "wfb.keyStatus.bound", variant: "ok" },
+  bound: { labelKey: "wfb.keyStatus.bound", variant: "neutral" },
   cold_start: { labelKey: "wfb.keyStatus.cold_start", variant: "warn" },
   key_unavailable: { labelKey: "wfb.keyStatus.key_unavailable", variant: "warn" },
 };

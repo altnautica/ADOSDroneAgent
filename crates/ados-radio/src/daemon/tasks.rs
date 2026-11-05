@@ -314,8 +314,15 @@ impl GroupTasks {
                 // and say why on the hop sidecar, rather than hopping under a
                 // key anyone can compute.
                 drop(manual_hop_rx);
-                write_hop_key_unavailable(&hop_cfg);
-                hop_cancel.wait().await;
+                // Rewritten on the supervisor's 5 s cadence: readers age this
+                // file out, so a one-shot write would read as a dead writer.
+                let mut t = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    tokio::select! {
+                        _ = t.tick() => write_hop_key_unavailable(&hop_cfg),
+                        _ = hop_cancel.wait() => break,
+                    }
+                }
                 return;
             };
             if hop_enabled {

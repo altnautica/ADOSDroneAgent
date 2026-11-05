@@ -331,7 +331,10 @@ fn config_of_an_empty_yaml_is_the_pydantic_default_shape() {
 
     // The hopping/link blocks are the config-seeded stubs with no sidecars
     // (point the sidecar paths at absent files in the tempdir).
-    let hopping = match read_state_file(&dir.path().join("hop-supervisor.json")) {
+    let hopping = match read_hop_supervisor_if_fresh(
+        &dir.path().join("hop-supervisor.json"),
+        std::time::SystemTime::now(),
+    ) {
         Some(snap) => Value::Object(snap),
         None => json!({
             "enabled": wfb.auto_hop_enabled,
@@ -622,14 +625,40 @@ fn metric_value_excludes_bools_and_non_numbers() {
 }
 
 #[test]
-fn read_state_file_tolerates_absent_and_non_object() {
+fn hop_supervisor_read_tolerates_absent_and_non_object() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(read_state_file(&dir.path().join("absent.json")).is_none());
+    let now = std::time::SystemTime::now();
+    assert!(read_hop_supervisor_if_fresh(&dir.path().join("absent.json"), now).is_none());
     std::fs::write(dir.path().join("arr.json"), "[1,2]").unwrap();
-    assert!(read_state_file(&dir.path().join("arr.json")).is_none());
+    assert!(read_hop_supervisor_if_fresh(&dir.path().join("arr.json"), now).is_none());
     std::fs::write(dir.path().join("obj.json"), r#"{"k":1}"#).unwrap();
     assert_eq!(
-        read_state_file(&dir.path().join("obj.json")).unwrap()["k"],
+        read_hop_supervisor_if_fresh(&dir.path().join("obj.json"), std::time::SystemTime::now())
+            .unwrap()["k"],
         json!(1)
+    );
+}
+
+#[test]
+fn a_stale_hop_supervisor_snapshot_falls_to_the_stub() {
+    // A dead ground listener leaves its last snapshot behind. Read past the
+    // writer's freshness window, its `key_status` would show as a live key
+    // state on every operator surface; it must read as no snapshot instead.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hop-supervisor.json");
+    std::fs::write(
+        &path,
+        r#"{"enabled": true, "source": "listener", "key_status": "bound"}"#,
+    )
+    .unwrap();
+    let written = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let fresh = read_hop_supervisor_if_fresh(&path, written).expect("just written is fresh");
+    assert_eq!(fresh["key_status"], json!("bound"));
+
+    let later = written
+        + std::time::Duration::from_millis(ados_protocol::paths::HOP_SUPERVISOR_MAX_AGE_MS + 1000);
+    assert!(
+        read_hop_supervisor_if_fresh(&path, later).is_none(),
+        "a snapshot past the window must not be served"
     );
 }

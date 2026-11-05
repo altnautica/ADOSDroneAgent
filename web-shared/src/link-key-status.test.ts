@@ -14,7 +14,7 @@ describe("linkKeyStatusView", () => {
   it("maps each reported state to copy and a tone", () => {
     expect(linkKeyStatusView({ hopping: { key_status: "bound" } })).toEqual({
       labelKey: "wfb.keyStatus.bound",
-      variant: "ok",
+      variant: "neutral",
     });
     expect(linkKeyStatusView({ hopping: { key_status: "cold_start" } })?.variant).toBe("warn");
     expect(linkKeyStatusView({ hopping: { key_status: "key_unavailable" } })?.variant).toBe("warn");

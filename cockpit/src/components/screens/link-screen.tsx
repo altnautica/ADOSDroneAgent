@@ -27,6 +27,7 @@ import { cn } from "@/lib/utils";
 import { useTranslation } from "react-i18next";
 import "@/shared/i18n";
 import { linkKeyStatusView } from "@/shared/link-key-status";
+import { useProfile } from "@/shared/use-profile";
 
 interface WfbStatus {
   state?: string;
@@ -148,11 +149,13 @@ export function LinkScreen() {
     2000,
   );
   // Ground side only: which key the presence/hop control plane authenticates under.
+  const isGroundStation = useProfile() === "ground_station";
   const videoConfig = useResource<unknown>(
     useCallback((s) => apiFetch<unknown>("/api/video/config", { signal: s }), []),
     5000,
+    { enabled: isGroundStation },
   );
-  const keyStatus = linkKeyStatusView(videoConfig.data);
+  const keyStatus = isGroundStation ? linkKeyStatusView(videoConfig.data) : null;
   const { t } = useTranslation();
 
   const w = wfb.data;
@@ -274,7 +277,11 @@ export function LinkScreen() {
             <Row label="Key" value={pair.data.fingerprint} />
           ) : null}
           {keyStatus ? (
-            <Row label="Link key" value={t(keyStatus.labelKey)} tone={keyStatus.variant} />
+            <Row
+              label="Link key"
+              value={t(keyStatus.labelKey)}
+              tone={keyStatus.variant === "warn" ? "warn" : undefined}
+            />
           ) : null}
           <Row
             label="Auto-pair"

@@ -122,14 +122,19 @@ fn wfb_stats_path() -> PathBuf {
     paths::run_path("wfb-stats")
 }
 
-/// Read a JSON snapshot file written by a sidecar producer, returning the parsed
-/// object, or `None` on any read / parse failure or a non-object body.
-fn read_state_file(path: &Path) -> Option<Map<String, Value>> {
-    let text = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<Value>(&text) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
+/// Read the hop-supervisor snapshot only while it is inside its registered
+/// freshness window; absent, unparseable, non-object and stale all read `None`.
+///
+/// Its writer rewrites it every few seconds. A file past the window was left
+/// by a dead writer, and its `key_status` / `history` would read as a live
+/// ground listener on every operator surface.
+fn read_hop_supervisor_if_fresh(path: &Path, now: SystemTime) -> Option<Map<String, Value>> {
+    read_fresh_at(
+        path,
+        Some(Duration::from_millis(paths::HOP_SUPERVISOR_MAX_AGE_MS)),
+        now,
+    )
+    .fresh()
 }
 
 // ===========================================================================
@@ -200,8 +205,8 @@ pub(crate) fn video_config_body(cfg: &VideoConfig) -> Value {
         read_stats_if_fresh(&wfb_stats_path()).as_ref(),
     );
 
-    // hopping: the supervisor snapshot, or a config-seeded stub when absent.
-    let hopping = match read_state_file(&hop_supervisor_path()) {
+    // hopping: the supervisor snapshot while fresh, else a config-seeded stub.
+    let hopping = match read_hop_supervisor_if_fresh(&hop_supervisor_path(), SystemTime::now()) {
         Some(snap) => {
             // Best-effort schema-drift signal (never reject): warn on a
             // producer/reader version mismatch, then read anyway. The writer const
