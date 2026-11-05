@@ -1,6 +1,7 @@
 //! An `rtsp://` capture camera: a simulated rig's camera, owned by the engine.
 //!
-//! One `ffmpeg` pulls the stream and copies its H.264 out as Annex-B; this
+//! One `ffmpeg` pulls the stream and copies its H.264 out as Annex-B, with the
+//! parameter sets written in-band before every keyframe ([`demuxer_args`]); this
 //! source splits it into NAL units, reads the World Engine frame identity out
 //! of each frame's SEI ([`crate::sei`]) and forwards the bytes to a second
 //! `ffmpeg` that decodes them to raw frames. Each decoded frame pairs, in
@@ -192,6 +193,45 @@ pub fn frame_timing(
     t
 }
 
+/// The demuxer's arguments: the stream at `url` over RTSP-over-TCP, its H.264
+/// copied to stdout as Annex-B.
+///
+/// `dump_extra=freq=keyframe` writes the stream's parameter sets (SPS and PPS)
+/// in-band before every keyframe. An RTSP stream may carry them only in its
+/// SDP (`sprop-parameter-sets`): an encoder that writes global headers does
+/// that, and a server that forwards its RTP packets as sent keeps it so. The
+/// demuxer holds them as extradata, which `-c:v copy -f h264` never writes
+/// (`h264_mp4toannexb` passes Annex-B input through), so the decoder on the
+/// pipe would see only slices that name a PPS it never got, and decode
+/// nothing.
+pub fn demuxer_args(url: &str) -> Vec<String> {
+    [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-rtsp_transport",
+        "tcp",
+        "-fflags",
+        "nobuffer",
+        "-flags",
+        "low_delay",
+        "-i",
+        url,
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-bsf:v",
+        "h264_mp4toannexb,dump_extra=freq=keyframe",
+        "-f",
+        "h264",
+        "-",
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect()
+}
+
 /// The decoder's arguments: Annex-B H.264 on stdin, raw `settings.format`
 /// frames on stdout, one out per picture in. No `-fflags nobuffer`: with it
 /// ffmpeg discards the packets it reads while probing the stream (the first
@@ -281,23 +321,7 @@ impl RtspSource {
         let s = &self.settings;
         check_format(s.format)?;
         let mut demux = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-rtsp_transport",
-                "tcp",
-            ])
-            .args(["-fflags", "nobuffer", "-flags", "low_delay", "-i", &s.url])
-            .args([
-                "-map",
-                "0:v:0",
-                "-c:v",
-                "copy",
-                "-bsf:v",
-                "h264_mp4toannexb",
-            ])
-            .args(["-f", "h264", "-"])
+            .args(demuxer_args(&s.url))
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -408,3 +432,9 @@ impl FrameSource for RtspSource {
 #[cfg(test)]
 #[path = "rtsp_tests.rs"]
 mod tests;
+
+// Runs the real `ffmpeg` (the agent's runtime dependency), as the decoder test
+// in `tests` does.
+#[cfg(all(test, target_os = "linux"))]
+#[path = "rtsp_server_tests.rs"]
+mod server_tests;
