@@ -12,6 +12,7 @@
 //! requires the pairing key when paired (the same posture as `/api/command`).
 
 use ados_protocol::framebus::{ModelInfo, ModelKind};
+use ados_protocol::vision_status::{VisionStatus, VISION_STATUS_FILE};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -135,7 +136,9 @@ pub async fn engine_status(State(state): State<AppState>) -> Response {
                 Ok(m) => m,
                 Err(msg) => return detail(StatusCode::BAD_GATEWAY, msg),
             };
-            (StatusCode::OK, Json(status_body(&resp, models, npu_util))).into_response()
+            let sidecar = read_vision_status(&vision_status_path()).await;
+            let body = status_body(&resp, models, npu_util, sidecar.as_ref());
+            (StatusCode::OK, Json(body)).into_response()
         }
         Err(e) => detail(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -144,11 +147,30 @@ pub async fn engine_status(State(state): State<AppState>) -> Response {
     }
 }
 
-/// The `/api/vision/status` body from the engine's `list_models` reply. An
-/// engine reply without a `backend_state` (none ships without one) reads as
-/// `unavailable` rather than a claimed `ready`. Every key is snake_case, the
-/// form the GCS client reads.
-fn status_body(resp: &Value, models: Vec<ModelInfo>, npu_util: Option<f64>) -> serde_json::Value {
+/// The engine's work sidecar (`vision-status.json` under the run directory).
+fn vision_status_path() -> std::path::PathBuf {
+    ados_protocol::paths::run_dir().join(VISION_STATUS_FILE)
+}
+
+/// Read the engine's work sidecar. `None` when it is absent or unreadable: the
+/// per-camera source state is then unknown, never an error for the route.
+async fn read_vision_status(path: &std::path::Path) -> Option<VisionStatus> {
+    let text = tokio::fs::read_to_string(path).await.ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// The `/api/vision/status` body from the engine's `list_models` reply and its
+/// work sidecar. An engine reply without a `backend_state` (none ships without
+/// one) reads as `unavailable` rather than a claimed `ready`. `source_errors`
+/// lists each camera whose frame source is failing (or silent) with the reason,
+/// empty without a sidecar; `live_inputs` is null without one. Every key is
+/// snake_case, the form the GCS client reads.
+fn status_body(
+    resp: &Value,
+    models: Vec<ModelInfo>,
+    npu_util: Option<f64>,
+    sidecar: Option<&VisionStatus>,
+) -> serde_json::Value {
     let field = |key: &str| -> Option<&str> {
         resp.as_map()
             .and_then(|m| m.iter().find(|(k, _)| k.as_str() == Some(key)))
@@ -163,6 +185,8 @@ fn status_body(resp: &Value, models: Vec<ModelInfo>, npu_util: Option<f64>) -> s
         "backend": field("backend"),
         "backend_state": field("backend_state").unwrap_or("unavailable"),
         "backend_reason": field("backend_reason"),
+        "source_errors": sidecar.map(|s| s.source_errors.as_slice()).unwrap_or_default(),
+        "live_inputs": sidecar.map(|s| s.live_inputs),
     })
 }
 
@@ -384,6 +408,7 @@ mod tests {
             &reply,
             vec![mi("det", ModelKind::Detection, &[], false)],
             None,
+            None,
         );
         assert_eq!(body["backend"], "onnx");
         assert_eq!(body["backend_state"], "unavailable");
@@ -401,7 +426,7 @@ mod tests {
             (Value::from("backend"), Value::from("rknn")),
             (Value::from("backend_state"), Value::from("ready")),
         ]);
-        let body = status_body(&ready, Vec::new(), Some(42.5));
+        let body = status_body(&ready, Vec::new(), Some(42.5), None);
         assert_eq!(body["backend_state"], "ready");
         assert!(body["backend_reason"].is_null());
         assert_eq!(body["npu_utilization_pct"], 42.5);
@@ -409,9 +434,36 @@ mod tests {
 
     #[test]
     fn a_reply_without_a_backend_state_is_not_claimed_ready() {
-        let body = status_body(&Value::Map(vec![]), Vec::new(), None);
+        let body = status_body(&Value::Map(vec![]), Vec::new(), None, None);
         assert_eq!(body["backend_state"], "unavailable");
         assert!(body["backend"].is_null());
+    }
+
+    #[tokio::test]
+    async fn a_camera_source_error_in_the_sidecar_reaches_the_status_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VISION_STATUS_FILE);
+        let sidecar = r#"{"version":1,"frames_consumed":7,"live_inputs":0,
+            "source_errors":[{"camera":"cam_fr","error":"delivered no frame for 10 s"}]}"#;
+        std::fs::write(&path, sidecar).unwrap();
+        let status = read_vision_status(&path).await;
+        let body = status_body(&Value::Map(vec![]), Vec::new(), None, status.as_ref());
+        assert_eq!(body["source_errors"][0]["camera"], "cam_fr");
+        assert_eq!(
+            body["source_errors"][0]["error"],
+            "delivered no frame for 10 s"
+        );
+        assert_eq!(body["live_inputs"], 0);
+    }
+
+    #[tokio::test]
+    async fn a_missing_sidecar_reads_as_no_source_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = read_vision_status(&dir.path().join(VISION_STATUS_FILE)).await;
+        assert!(status.is_none());
+        let body = status_body(&Value::Map(vec![]), Vec::new(), None, status.as_ref());
+        assert_eq!(body["source_errors"], serde_json::json!([]));
+        assert!(body["live_inputs"].is_null());
     }
 
     #[test]

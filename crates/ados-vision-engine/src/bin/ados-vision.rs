@@ -368,11 +368,14 @@ async fn run_camera(
                     let frame = match frame {
                         Ok(frame) => frame,
                         Err(_) => {
-                            tracing::debug!(
-                                camera = %camera_id,
-                                silent_s = INPUT_SILENCE_TIMEOUT.as_secs(),
-                                "frame source delivered nothing; reopening"
-                            );
+                            let reason = work_status::silence_reason(INPUT_SILENCE_TIMEOUT);
+                            if work_status::note_source_failure(&work, &mut last_error, &camera_id, reason) {
+                                tracing::warn!(
+                                    camera = %camera_id,
+                                    silent_s = INPUT_SILENCE_TIMEOUT.as_secs(),
+                                    "frame source delivered nothing; reopening"
+                                );
+                            }
                             break;
                         }
                     };
@@ -382,9 +385,7 @@ async fn run_camera(
                             if raw.dropped_corrupt > 0 {
                                 work.add_error_frames(u64::from(raw.dropped_corrupt));
                             }
-                            if last_error.take().is_some() {
-                                work.set_source_error(&camera_id, None);
-                            }
+                            work_status::note_source_recovered(&work, &mut last_error, &camera_id);
                             frame_id = frame_id.wrapping_add(1);
                             let mut spare = Some(raw.data);
                             let data_ref = spare.as_deref().unwrap_or(&[]);
@@ -444,10 +445,8 @@ async fn run_camera(
                         }
                         Err(e) => {
                             let reason = format!("{e:#}");
-                            if last_error.as_deref() != Some(reason.as_str()) {
+                            if work_status::note_source_failure(&work, &mut last_error, &camera_id, reason.clone()) {
                                 tracing::warn!(camera = %camera_id, error = %reason, "frame_source_failed; reopening");
-                                work.set_source_error(&camera_id, Some(reason.clone()));
-                                last_error = Some(reason);
                             }
                             break;
                         }

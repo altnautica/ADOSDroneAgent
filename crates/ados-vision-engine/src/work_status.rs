@@ -117,6 +117,36 @@ impl Drop for InputLiveness {
     }
 }
 
+/// The source-error reason for an input that delivered nothing for `silence`.
+pub fn silence_reason(silence: Duration) -> String {
+    format!("delivered no frame for {} s", silence.as_secs())
+}
+
+/// Note a camera's source failure: record `reason` in the sidecar unless it is
+/// already the camera's `last_error`. Returns `true` when the reason is new, so
+/// the caller logs it at warn once per distinct reason; the next delivered
+/// frame clears `last_error` and the sidecar entry.
+pub fn note_source_failure(
+    work: &WorkStatus,
+    last_error: &mut Option<String>,
+    camera: &str,
+    reason: String,
+) -> bool {
+    if last_error.as_deref() == Some(reason.as_str()) {
+        return false;
+    }
+    work.set_source_error(camera, Some(reason.clone()));
+    *last_error = Some(reason);
+    true
+}
+
+/// A camera's source delivered a frame: clear any noted failure.
+pub fn note_source_recovered(work: &WorkStatus, last_error: &mut Option<String>, camera: &str) {
+    if last_error.take().is_some() {
+        work.set_source_error(camera, None);
+    }
+}
+
 /// The sidecar path under the engine's socket directory.
 pub fn sidecar_path(socket_dir: &str) -> PathBuf {
     Path::new(socket_dir).join(VISION_STATUS_FILE)
@@ -162,6 +192,50 @@ pub async fn run_writer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_repeated_silence_is_noted_once_and_cleared_by_a_frame() {
+        let status = WorkStatus::new();
+        let mut last = None;
+        let reason = silence_reason(INPUT_SILENCE_TIMEOUT);
+        assert_eq!(reason, "delivered no frame for 10 s");
+        assert!(note_source_failure(
+            &status,
+            &mut last,
+            "cam",
+            reason.clone()
+        ));
+        assert!(!note_source_failure(
+            &status,
+            &mut last,
+            "cam",
+            reason.clone()
+        ));
+        let s = status.snapshot();
+        assert_eq!(s.source_errors.len(), 1);
+        assert_eq!(s.source_errors[0].error, reason);
+
+        note_source_recovered(&status, &mut last, "cam");
+        assert!(last.is_none());
+        assert!(status.snapshot().source_errors.is_empty());
+        // Silent again after recovering: noted afresh.
+        assert!(note_source_failure(&status, &mut last, "cam", reason));
+    }
+
+    #[test]
+    fn a_different_failure_reason_is_noted_again() {
+        let status = WorkStatus::new();
+        let mut last = None;
+        assert!(note_source_failure(&status, &mut last, "cam", "eof".into()));
+        let silence = silence_reason(INPUT_SILENCE_TIMEOUT);
+        assert!(note_source_failure(
+            &status,
+            &mut last,
+            "cam",
+            silence.clone()
+        ));
+        assert_eq!(status.snapshot().source_errors[0].error, silence);
+    }
 
     #[test]
     fn source_errors_and_corrupt_frames_reach_the_snapshot() {
