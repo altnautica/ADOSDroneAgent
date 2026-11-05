@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.8] - 2026-11-05
+
+### Added
+
+- The ground station's link key state (`hopping.key_status` in `GET /api/video/config`: `bound`, `cold_start` or `key_unavailable`) is shown on the dashboard's WFB Receive card, the cockpit's Link screen and the TUI Link tab's WFB radio card. Cold start and an unreadable key are drawn as warnings; the row is hidden when the field is absent (drone side, or before the first beacon is heard).
+
 ## [0.108.7] - 2026-11-05
 
 ### Fixed
