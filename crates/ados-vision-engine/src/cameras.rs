@@ -80,6 +80,8 @@ pub struct SourceFactory {
     pub triggers: TriggerFeed,
     pub sim: SimClock,
     pub controls: CameraControls,
+    /// ffmpeg threads each RTSP decoder runs on (`vision.decode_threads`).
+    pub decode_threads: u32,
 }
 
 impl SourceFactory {
@@ -118,6 +120,7 @@ impl SourceFactory {
                         width: cam.width,
                         height: cam.height,
                         format: cam.format.frame_format(),
+                        decode_threads: self.decode_threads,
                     },
                     self.triggers_for(cam, true),
                     self.sim.clone(),

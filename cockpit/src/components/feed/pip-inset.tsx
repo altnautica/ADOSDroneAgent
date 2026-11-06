@@ -25,11 +25,14 @@ export function PipInset({
   camera,
   streamNonce,
   visionCapable,
+  holdDetection,
   widthClass,
 }: {
   camera: RosterCamera;
   streamNonce: number;
   visionCapable: boolean;
+  /** This node's own engine feeds the overlay: hold its detection lease. */
+  holdDetection: boolean;
   widthClass: WidthClass;
 }) {
   const swapPip = useFeedStore((s) => s.swapPip);
@@ -59,6 +62,7 @@ export function PipInset({
           widthClass={widthClass}
           cameraYawOffsetDeg={camera.role === "down" ? null : 0}
           pip
+          holdDetection={holdDetection}
         />
       ) : null}
       <button

@@ -6,6 +6,24 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.13] - 2026-11-06
+
+### Changed
+
+- The onboard detector runs on a camera only while a consumer needs it there. A consumer holds a lease per camera that expires on its own: a plugin through `ctx.vision.request_detection(camera_id, hold_s)` (Rust SDK `request_detection(camera_id, hold)`, wire method `vision.request_detection`, capability `vision.track.designate`), an operator surface through `POST /api/vision/demand` `{camera_id, hold_s, owner?}`. Repeating a request renews the lease, `hold_s: 0` releases it, and the longest hold is 60 s. An operator designation holds detection on its camera for `vision.designate_hold_s` (default 30 s). Frame capture, the frame bus, video and every other frame consumer keep running on every camera. `vision.detection_demand: always` restores detection on every captured camera.
+- `vision.detector.rate_hz` defaults to 3 Hz per camera when absent; an explicit `0` keeps the unpaced behaviour (every frame the accelerator is free for).
+- The ONNX backend runs each session on a fixed thread budget with spin-waiting off: the detector on `vision.detector.threads` intra-op threads (default 1), the re-id model on one, inter-op on one. The RTSP frame decoder runs on `vision.decode_threads` ffmpeg threads (default 1). The runtimes' defaults (a thread per core, spin-waiting between nodes) contended with the flight stack for the CPU on a companion board.
+- Detections whose box covers more than `vision.max_box_area_frac` of the frame (default 0.5) are dropped before tracking and publishing, for every backend. A person that close is under a metre from the lens and never a follow target, and the small person detector reports full-frame boxes on close ground texture.
+- `GET /api/vision/status` carries a `detection` block: the demand mode and, per camera, whether detection runs and the leases holding it on (`owner`, `remaining_ms`).
+- `GET /api/vision/detections/latest` takes an optional `camera_id` and returns that camera's newest batch; without it the reply is unchanged.
+- Cockpit: the Feed's target overlay (main view and PiP) holds a detection lease on the camera it shows while on screen (`POST /api/vision/demand`, renewed every 2 s, released on close or camera change), and says "Detector idle" or "Detector unavailable" when the engine is not detecting on that camera.
+- Dashboard: Settings > Vision edits when detection runs (`vision.detection_demand`), the designation hold, the largest-box cutoff, decoder threads, and, with a detector selected, its rate and inference threads.
+- TUI: the Vehicle tab's Autonomy block shows the detector row ("idle" or "detecting: main"), read from `/api/vision/status`.
+
+### Fixed
+
+- Dashboard: numeric config fields write a JSON number, so an optional key that is still unset takes a value.
+
 ## [0.108.12] - 2026-11-05
 
 ### Security

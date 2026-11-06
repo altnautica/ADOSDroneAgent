@@ -1,4 +1,5 @@
-//! The vision designate route: operator click-to-follow.
+//! The vision write routes (operator click-to-follow and detection leases) and
+//! the engine read-backs.
 //!
 //! `POST /api/vision/designate` locks the vision engine's single-object tracker
 //! for a camera onto a specific box (the box the operator clicked in the GCS),
@@ -8,7 +9,11 @@
 //! shape the command route uses for a missing FC link, so a designate is never
 //! silently dropped.
 //!
-//! Auth: this is a write, so it sits outside the public set and the LAN edge
+//! `POST /api/vision/demand` takes, renews or releases an operator surface's
+//! lease on the detector for one camera (`vision.request_detection`): the
+//! engine runs detection on a camera only while some consumer holds a lease.
+//!
+//! Auth: these are writes, so they sit outside the public set and the LAN edge
 //! requires the pairing key when paired (the same posture as `/api/command`).
 
 use ados_protocol::framebus::{ModelInfo, ModelKind};
@@ -113,13 +118,85 @@ pub async fn designate(State(_state): State<AppState>, Json(req): Json<Designate
     }
 }
 
+/// The `POST /api/vision/demand` body.
+#[derive(Debug, Deserialize)]
+pub struct DemandBody {
+    /// The camera to run detection on.
+    pub camera_id: String,
+    /// Seconds to hold detection on, `0..=60`; `0` releases this owner's lease.
+    pub hold_s: f64,
+    /// Who holds the lease; one owner's renew or release never touches
+    /// another's. Default `operator`.
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// The lease owner when a `POST /api/vision/demand` names none.
+const DEFAULT_DEMAND_OWNER: &str = "operator";
+
+/// `POST /api/vision/demand` — hold (or release) detection on a camera.
+pub async fn demand(State(_state): State<AppState>, Json(req): Json<DemandBody>) -> Response {
+    demand_via(&VisionIpcClient::default_socket(), req).await
+}
+
+/// The demand route against a given engine socket. A malformed body is a 400
+/// before the engine is asked; the engine's refusal (a camera it does not
+/// capture) is a 400; an unreachable engine is a 503.
+async fn demand_via(client: &VisionIpcClient, req: DemandBody) -> Response {
+    use ados_protocol::vision_rpc::{self, MAX_DETECTION_HOLD_MS};
+
+    if req.camera_id.is_empty() {
+        return detail(StatusCode::BAD_REQUEST, "camera_id is required");
+    }
+    let max_s = MAX_DETECTION_HOLD_MS as f64 / 1000.0;
+    if !req.hold_s.is_finite() || !(0.0..=max_s).contains(&req.hold_s) {
+        return detail(
+            StatusCode::BAD_REQUEST,
+            format!("hold_s must be between 0 and {max_s}"),
+        );
+    }
+    let owner = req
+        .owner
+        .as_deref()
+        .filter(|o| !o.is_empty())
+        .unwrap_or(DEFAULT_DEMAND_OWNER);
+    let hold_ms = (req.hold_s * 1000.0).round() as u64;
+    let args = vision_rpc::with_owner(
+        &vision_rpc::request_detection_args(&req.camera_id, hold_ms),
+        owner,
+    );
+    match client.request_detection(args).await {
+        Ok(resp) => match vision_rpc::decode_request_detection_reply(&resp) {
+            Ok(reply) => (
+                StatusCode::OK,
+                Json(json!({
+                    "camera_id": reply.camera_id,
+                    "detecting": reply.detecting,
+                    "until_ms": reply.until_ms,
+                })),
+            )
+                .into_response(),
+            Err(e) => detail(
+                StatusCode::BAD_GATEWAY,
+                format!("vision engine reply unreadable: {e}"),
+            ),
+        },
+        Err(VisionError::Rpc(msg)) => detail(StatusCode::BAD_REQUEST, msg),
+        Err(e) => detail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("vision engine unavailable: {e}"),
+        ),
+    }
+}
+
 /// `GET /api/vision/status` — the engine's registered-model read-back, so the
 /// GCS vision hub shows every model loaded on the drone (task, execution,
 /// backend-loaded), not only the ones actively publishing detections, plus the
 /// inference backend and its state: `backend_state` is `ready`, `mock` (the
 /// explicitly configured mock) or `unavailable` (the requested backend cannot
-/// run here; `backend_reason` says why). An unreachable engine (vision off /
-/// not up) is a 503, never a silent empty.
+/// run here; `backend_reason` says why), and the detector's demand state
+/// (`detection`: mode, and per camera whether it detects and who holds it on).
+/// An unreachable engine (vision off / not up) is a 503, never a silent empty.
 pub async fn engine_status(State(state): State<AppState>) -> Response {
     let client = VisionIpcClient::default_socket();
     // The node NPU utilization from the logging store's hardware signals. `None`
@@ -163,8 +240,8 @@ async fn read_vision_status(path: &std::path::Path) -> Option<VisionStatus> {
 /// work sidecar. An engine reply without a `backend_state` (none ships without
 /// one) reads as `unavailable` rather than a claimed `ready`. `source_errors`
 /// lists each camera whose frame source is failing (or silent) with the reason,
-/// empty without a sidecar; `live_inputs` is null without one. Every key is
-/// snake_case, the form the GCS client reads.
+/// empty without a sidecar; `live_inputs` and `detection` are null without one.
+/// Every key is snake_case, the form the GCS client reads.
 fn status_body(
     resp: &Value,
     models: Vec<ModelInfo>,
@@ -187,6 +264,7 @@ fn status_body(
         "backend_reason": field("backend_reason"),
         "source_errors": sidecar.map(|s| s.source_errors.as_slice()).unwrap_or_default(),
         "live_inputs": sidecar.map(|s| s.live_inputs),
+        "detection": sidecar.and_then(|s| s.detection.as_ref()),
     })
 }
 
@@ -464,6 +542,147 @@ mod tests {
         let body = status_body(&Value::Map(vec![]), Vec::new(), None, status.as_ref());
         assert_eq!(body["source_errors"], serde_json::json!([]));
         assert!(body["live_inputs"].is_null());
+        assert!(body["detection"].is_null());
+    }
+
+    #[tokio::test]
+    async fn the_sidecars_detection_block_reaches_the_status_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(VISION_STATUS_FILE);
+        let sidecar = r#"{"version":1,"frames_consumed":7,"live_inputs":2,
+            "detection":{"mode":"on_demand","cameras":{
+              "main":{"detecting":false,"leases":[]},
+              "belly":{"detecting":true,"leases":[{"owner":"operator","remaining_ms":4200}]}}}}"#;
+        std::fs::write(&path, sidecar).unwrap();
+        let status = read_vision_status(&path).await;
+        let body = status_body(&Value::Map(vec![]), Vec::new(), None, status.as_ref());
+        let det = &body["detection"];
+        assert_eq!(det["mode"], "on_demand");
+        assert_eq!(det["cameras"]["main"]["detecting"], false);
+        assert_eq!(det["cameras"]["belly"]["detecting"], true);
+        assert_eq!(det["cameras"]["belly"]["leases"][0]["owner"], "operator");
+        assert_eq!(det["cameras"]["belly"]["leases"][0]["remaining_ms"], 4200);
+    }
+
+    /// A one-request engine on `path` that answers `vision.request_detection`
+    /// from the request it got (detecting while the hold is non-zero), and
+    /// hands the decoded request back for the test to inspect.
+    fn demand_engine(
+        path: &std::path::Path,
+    ) -> tokio::task::JoinHandle<ados_protocol::vision_rpc::RequestDetection> {
+        use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
+        use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
+        use ados_protocol::vision_rpc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::UnixListener::bind(path).unwrap();
+        tokio::spawn(async move {
+            let (mut conn, _addr) = listener.accept().await.unwrap();
+            let mut header = [0u8; HEADER_SIZE];
+            conn.read_exact(&mut header).await.unwrap();
+            let len = decode_len(header, PLUGIN_MAX_FRAME, false).unwrap();
+            let mut body = vec![0u8; len];
+            conn.read_exact(&mut body).await.unwrap();
+            let req = Envelope::from_msgpack(&body).unwrap();
+            assert_eq!(
+                req.method,
+                ados_protocol::framebus::methods::REQUEST_DETECTION
+            );
+            let decoded = vision_rpc::decode_request_detection(&req.args).unwrap();
+            let held = decoded.hold_ms > 0;
+            let reply = Envelope {
+                version: PROTOCOL_VERSION,
+                kind: "response".to_string(),
+                method: req.method,
+                capability: String::new(),
+                args: vision_rpc::request_detection_reply(&vision_rpc::DetectionDemandReply {
+                    camera_id: decoded.camera_id.clone(),
+                    detecting: held,
+                    until_ms: held.then_some(1_000 + decoded.hold_ms),
+                }),
+                request_id: req.request_id,
+                token: String::new(),
+                error: None,
+            };
+            conn.write_all(&reply.encode_frame().unwrap())
+                .await
+                .unwrap();
+            conn.flush().await.unwrap();
+            decoded
+        })
+    }
+
+    async fn body_json(resp: Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn demand_body(camera_id: &str, hold_s: f64, owner: Option<&str>) -> DemandBody {
+        DemandBody {
+            camera_id: camera_id.into(),
+            hold_s,
+            owner: owner.map(str::to_string),
+        }
+    }
+
+    #[tokio::test]
+    async fn demand_leases_the_camera_as_the_operator_by_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision.sock");
+        let engine = demand_engine(&path);
+        let resp = demand_via(&VisionIpcClient::new(path), demand_body("belly", 6.0, None)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body,
+            json!({"camera_id": "belly", "detecting": true, "until_ms": 7000})
+        );
+        let sent = engine.await.unwrap();
+        assert_eq!(sent.owner, DEFAULT_DEMAND_OWNER);
+        assert_eq!(sent.hold_ms, 6_000);
+    }
+
+    #[tokio::test]
+    async fn demand_with_a_zero_hold_releases_the_named_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision.sock");
+        let engine = demand_engine(&path);
+        let resp = demand_via(
+            &VisionIpcClient::new(path),
+            demand_body("main", 0.0, Some("gcs-overlay")),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["detecting"], false);
+        assert!(body["until_ms"].is_null());
+        let sent = engine.await.unwrap();
+        assert_eq!((sent.owner.as_str(), sent.hold_ms), ("gcs-overlay", 0));
+    }
+
+    #[tokio::test]
+    async fn demand_refuses_a_bad_body_and_reports_an_absent_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let absent = VisionIpcClient::new(dir.path().join("absent.sock"));
+        for bad in [
+            demand_body("", 6.0, None),
+            demand_body("main", 61.0, None),
+            demand_body("main", -1.0, None),
+            demand_body("main", f64::NAN, None),
+        ] {
+            assert_eq!(
+                demand_via(&absent, bad).await.status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            demand_via(&absent, demand_body("main", 6.0, None))
+                .await
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[test]

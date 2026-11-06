@@ -23,10 +23,12 @@
 //! | `vision.register_model` | `{model: bin(ModelMetadata)}` |
 //! | `vision.infer` | `{model_id: str, descriptor: bin(FrameDescriptor)}`; reply `{batch: bin(DetectionBatch)}` |
 //! | `vision.designate_track` | `{camera_id: str, bbox: {x, y, width, height}, class_label?: str, confidence?: num}` |
+//! | `vision.request_detection` | `{camera_id: str, hold_ms: int 0..=60000, owner: str}`; reply `{camera_id, detecting: bool, until_ms: int\|nil}` |
 //!
 //! `vision.designate_track` is a flat map instead, because the control plane's
 //! click-to-follow route sends the same request built from the operator's JSON
-//! pick.
+//! pick. `vision.request_detection` is flat for the same reason; a plugin's
+//! `owner` is stamped by the host, the control plane names its own.
 
 use rmpv::Value;
 use thiserror::Error;
@@ -254,6 +256,108 @@ pub fn decode_designate_track(args: &Value) -> Result<DesignateTrack, VisionArgs
     Ok(DesignateTrack { camera_id, target })
 }
 
+/// The longest lease one `vision.request_detection` may take.
+pub const MAX_DETECTION_HOLD_MS: u64 = 60_000;
+
+/// A decoded `vision.request_detection` request: run the detector on
+/// `camera_id` for `hold_ms` more milliseconds on behalf of `owner`, or, with
+/// `hold_ms == 0`, release that owner's lease on the camera.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestDetection {
+    pub camera_id: String,
+    pub hold_ms: u64,
+    pub owner: String,
+}
+
+/// `vision.request_detection` args, without the owner (the plugin host stamps
+/// it; a control-plane caller adds it with [`with_owner`]).
+pub fn request_detection_args(camera_id: &str, hold_ms: u64) -> Value {
+    map(vec![
+        ("camera_id", Value::from(camera_id)),
+        ("hold_ms", Value::from(hold_ms)),
+    ])
+}
+
+/// Decode `vision.request_detection` args. `camera_id` and `owner` must be
+/// non-empty; `hold_ms` is a whole number of milliseconds up to
+/// [`MAX_DETECTION_HOLD_MS`] (an integral float decodes too).
+pub fn decode_request_detection(args: &Value) -> Result<RequestDetection, VisionArgsError> {
+    let camera_id = field(args, "camera_id")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| decode_err("camera_id", "not a non-empty string"))?
+        .to_string();
+    let raw = field(args, "hold_ms")?;
+    let hold_ms = raw
+        .as_u64()
+        .or_else(|| {
+            raw.as_f64()
+                .filter(|f| f.is_finite() && *f >= 0.0 && f.fract() == 0.0)
+                .map(|f| f as u64)
+        })
+        .ok_or_else(|| decode_err("hold_ms", "not a non-negative whole number"))?;
+    if hold_ms > MAX_DETECTION_HOLD_MS {
+        return Err(decode_err(
+            "hold_ms",
+            format!("{hold_ms} exceeds the {MAX_DETECTION_HOLD_MS} ms maximum"),
+        ));
+    }
+    let owner = owner_of(args)?.to_string();
+    Ok(RequestDetection {
+        camera_id,
+        hold_ms,
+        owner,
+    })
+}
+
+/// The `vision.request_detection` reply: whether detection now runs on the
+/// camera and, while a lease holds it on, when the last lease ends (the
+/// engine's monotonic clock, milliseconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectionDemandReply {
+    pub camera_id: String,
+    pub detecting: bool,
+    pub until_ms: Option<u64>,
+}
+
+/// Encode the `vision.request_detection` reply.
+pub fn request_detection_reply(reply: &DetectionDemandReply) -> Value {
+    map(vec![
+        ("camera_id", Value::from(reply.camera_id.as_str())),
+        ("detecting", Value::Boolean(reply.detecting)),
+        (
+            "until_ms",
+            reply.until_ms.map(Value::from).unwrap_or(Value::Nil),
+        ),
+    ])
+}
+
+/// Decode the `vision.request_detection` reply.
+pub fn decode_request_detection_reply(
+    args: &Value,
+) -> Result<DetectionDemandReply, VisionArgsError> {
+    let camera_id = field(args, "camera_id")?
+        .as_str()
+        .ok_or_else(|| decode_err("camera_id", "not a string"))?
+        .to_string();
+    let detecting = field(args, "detecting")?
+        .as_bool()
+        .ok_or_else(|| decode_err("detecting", "not a bool"))?;
+    let until_ms = match field(args, "until_ms") {
+        Ok(Value::Nil) | Err(VisionArgsError::Missing(_)) => None,
+        Ok(v) => Some(
+            v.as_u64()
+                .ok_or_else(|| decode_err("until_ms", "not an unsigned integer"))?,
+        ),
+        Err(e) => return Err(e),
+    };
+    Ok(DetectionDemandReply {
+        camera_id,
+        detecting,
+        until_ms,
+    })
+}
+
 fn map(pairs: Vec<(&str, Value)>) -> Value {
     Value::Map(
         pairs
@@ -444,5 +548,81 @@ mod tests {
         );
         assert_eq!(field(&stamped, "model_id").unwrap().as_str(), Some("det"));
         assert!(owner_of(&map(vec![(OWNER_FIELD, Value::from(""))])).is_err());
+    }
+
+    #[test]
+    fn request_detection_round_trips_and_bounds_the_hold() {
+        let args = with_owner(
+            &request_detection_args("belly", 6_000),
+            "com.example.follow",
+        );
+        assert_eq!(
+            decode_request_detection(&args).unwrap(),
+            RequestDetection {
+                camera_id: "belly".into(),
+                hold_ms: 6_000,
+                owner: "com.example.follow".into(),
+            }
+        );
+        // Zero releases; the maximum is accepted; past it is refused.
+        let at = |hold: Value| {
+            map(vec![
+                ("camera_id", Value::from("belly")),
+                ("hold_ms", hold),
+                (OWNER_FIELD, Value::from("operator")),
+            ])
+        };
+        assert_eq!(
+            decode_request_detection(&at(Value::from(0)))
+                .unwrap()
+                .hold_ms,
+            0
+        );
+        assert_eq!(
+            decode_request_detection(&at(Value::from(MAX_DETECTION_HOLD_MS)))
+                .unwrap()
+                .hold_ms,
+            MAX_DETECTION_HOLD_MS
+        );
+        assert_eq!(
+            decode_request_detection(&at(Value::from(2000.0)))
+                .unwrap()
+                .hold_ms,
+            2000
+        );
+        for bad in [
+            Value::from(MAX_DETECTION_HOLD_MS + 1),
+            Value::from(-1),
+            Value::from(1.5),
+            Value::from("6000"),
+        ] {
+            assert!(matches!(
+                decode_request_detection(&at(bad)),
+                Err(VisionArgsError::Decode {
+                    field: "hold_ms",
+                    ..
+                })
+            ));
+        }
+        // Without an owner there is no lease to key.
+        assert!(decode_request_detection(&request_detection_args("belly", 1)).is_err());
+        assert!(
+            decode_request_detection(&with_owner(&request_detection_args("", 1), "o")).is_err()
+        );
+    }
+
+    #[test]
+    fn the_request_detection_reply_round_trips() {
+        for until_ms in [Some(12_345), None] {
+            let reply = DetectionDemandReply {
+                camera_id: "main".into(),
+                detecting: until_ms.is_some(),
+                until_ms,
+            };
+            assert_eq!(
+                decode_request_detection_reply(&request_detection_reply(&reply)).unwrap(),
+                reply
+            );
+        }
     }
 }

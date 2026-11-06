@@ -26,6 +26,14 @@ describe("putConfigChecked", () => {
       body: { key: "mavlink.baud_rate", value: "115200", force: true },
     });
   });
+
+  it("sends a number as a JSON number, so a null optional key can take it", async () => {
+    await putConfigChecked("vision.detector.rate_hz", 2.5);
+    expect(apiFetch).toHaveBeenCalledWith("/api/config", {
+      method: "PUT",
+      body: { key: "vision.detector.rate_hz", value: 2.5 },
+    });
+  });
 });
 
 describe("profileChangeNoteKeys", () => {

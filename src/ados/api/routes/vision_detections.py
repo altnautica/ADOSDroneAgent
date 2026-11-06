@@ -91,6 +91,17 @@ _WS_SCOPE = "vision.detections"
 # otherwise keep a click-to-track overlay frozen on boxes from the past.
 _LATEST_MAX_AGE_MS = 1000
 
+# How long a ``?camera_id=`` poll listens for that camera's next batch when the
+# replayed one is another camera's: half the freshness window, so a camera
+# detecting at a few hertz is found on the first poll.
+_CAMERA_WAIT_S = _LATEST_MAX_AGE_MS / 2000
+
+# The newest batch seen for each camera, fed by every latest poll. The engine
+# replays only its single most recent batch (whichever camera produced it), so
+# with two cameras detecting, the camera a caller asks for is often not the one
+# replayed.
+_latest_by_camera: dict[str, dict] = {}
+
 # The WS close reason when the engine socket cannot be reached: the same
 # ``available: false`` the latest poll reports, so a client tells "vision off"
 # apart from "nothing detected". Well under the 123-byte close-reason limit.
@@ -195,17 +206,58 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
             pass
 
 
+def _remember(batch: dict) -> None:
+    """Keep ``batch`` as its camera's newest, unless a newer one is held."""
+    camera = batch.get("camera_id")
+    ts_ms = batch.get("ts_ms")
+    if not isinstance(camera, str) or not isinstance(ts_ms, int):
+        return
+    held = _latest_by_camera.get(camera)
+    if held is None or held.get("ts_ms", -1) <= ts_ms:
+        _latest_by_camera[camera] = batch
+
+
+def _current(batch: dict | None) -> dict:
+    """The reply for ``batch``: it, if fresh, else the stale empty shape."""
+    ts_ms = None if batch is None else batch.get("ts_ms")
+    if (
+        batch is None
+        or not isinstance(ts_ms, int)
+        or time.monotonic_ns() // 1_000_000 - ts_ms > _LATEST_MAX_AGE_MS
+    ):
+        return {"detections": [], "stale": True, "available": True}
+    return {**batch, "available": True}
+
+
+async def _read_batch(reader: asyncio.StreamReader, timeout: float) -> dict | None:
+    """Read one frame off the broadcast as a batch (``None`` for a bad frame)."""
+    header = await asyncio.wait_for(reader.readexactly(_HEADER_SIZE), timeout=timeout)
+    (length,) = struct.unpack("!I", header)
+    if length == 0 or length > _MAX_FRAME_SIZE:
+        log.warning("vision_detections_latest_bad_frame_len", length=length)
+        return None
+    body = await asyncio.wait_for(reader.readexactly(length), timeout=timeout)
+    batch = _msgpack_loads(body)
+    if batch is None:
+        raise HTTPException(status_code=502, detail="malformed detection batch")
+    return batch
+
 
 @router.get("/vision/detections/latest")
-async def get_latest_detection() -> dict:
+async def get_latest_detection(camera_id: str | None = None) -> dict:
     """Return the most-recent detection batch, with an ``available`` flag.
 
     A poll target for a caller that cannot hold a WebSocket open — chiefly
     the ground-station WFB relay proxy (see the module docstring's
     WFB-RELAY FOLLOW-UP note), which only tunnels one request/response pair
     at a time. Connects to the same last-state broadcast socket the WS route
-    streams from, reads exactly one frame (the replayed most-recent batch),
-    and disconnects — no long-lived connection held per poll.
+    streams from, reads the replayed most-recent batch, and disconnects — no
+    long-lived connection held per poll.
+
+    With ``camera_id``, the reply is that camera's newest batch: when the
+    replayed batch is another camera's, the poll listens up to
+    ``_CAMERA_WAIT_S`` for one from the asked camera, and answers from the
+    newest batch any poll has seen for it.
 
     Auth is inherited from the agent's normal HTTP middleware (the same
     ``X-ADOS-Key`` gate every other REST route sits behind); this is a plain
@@ -226,26 +278,29 @@ async def get_latest_detection() -> dict:
         # Vision isn't running (or isn't up yet) on this board.
         return {"detections": [], "available": False}
     try:
-        header = await asyncio.wait_for(reader.readexactly(_HEADER_SIZE), timeout=1.0)
-        (length,) = struct.unpack("!I", header)
-        if length == 0 or length > _MAX_FRAME_SIZE:
-            log.warning("vision_detections_latest_bad_frame_len", length=length)
+        try:
+            batch = await _read_batch(reader, timeout=1.0)
+        except (asyncio.IncompleteReadError, ConnectionResetError, OSError, TimeoutError):
+            return {"detections": [], "available": False}
+        if batch is None:
             return {"detections": [], "available": True}
-        body = await asyncio.wait_for(reader.readexactly(length), timeout=1.0)
-    except (asyncio.IncompleteReadError, ConnectionResetError, OSError, TimeoutError):
-        return {"detections": [], "available": False}
+        _remember(batch)
+        if camera_id is None:
+            return _current(batch)
+        deadline = time.monotonic() + _CAMERA_WAIT_S
+        while batch is None or batch.get("camera_id") != camera_id:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                batch = await _read_batch(reader, timeout=remaining)
+            except (asyncio.IncompleteReadError, ConnectionResetError, OSError, TimeoutError):
+                break
+            if batch is not None:
+                _remember(batch)
+        return _current(_latest_by_camera.get(camera_id))
     finally:
         try:
             writer.close()
         except Exception:
             pass
-    batch = _msgpack_loads(body)
-    if batch is None:
-        raise HTTPException(status_code=502, detail="malformed detection batch")
-    ts_ms = batch.get("ts_ms")
-    if (
-        not isinstance(ts_ms, int)
-        or time.monotonic_ns() // 1_000_000 - ts_ms > _LATEST_MAX_AGE_MS
-    ):
-        return {"detections": [], "stale": True, "available": True}
-    return {**batch, "available": True}

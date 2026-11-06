@@ -49,6 +49,7 @@ REQUIRED_CAP: dict[str, str | None] = {
     "vision.publish_detection": "vision.detection.publish",
     "vision.subscribe_detections": "vision.detection.subscribe",
     "vision.designate_track": "vision.track.designate",
+    "vision.request_detection": "vision.track.designate",
     "display.page.set": "display.oled.page",
     "display.zone.subscribe": "display.oled.page",
     "button.subscribe": "button.subscribe",

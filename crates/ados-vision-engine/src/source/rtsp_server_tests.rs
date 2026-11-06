@@ -237,6 +237,7 @@ async fn a_stream_with_its_parameter_sets_only_in_the_sdp_decodes() {
             width: WIDTH,
             height: HEIGHT,
             format: FrameFormat::Gray8,
+            decode_threads: 1,
         },
         None,
         SimClock::default(),

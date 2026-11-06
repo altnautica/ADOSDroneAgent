@@ -24,6 +24,13 @@ pub const DELIVER_DETECTION: &str = "vision.deliver_detection";
 /// route sends it too.
 pub const DESIGNATE_TRACK: &str = "vision.designate_track";
 
+/// Lease the detector on one camera: it runs there only while some consumer
+/// holds a lease (unless `vision.detection_demand` is `always`). Repeating the
+/// request renews it; `hold_ms: 0` releases it. Gated on
+/// `vision.track.designate`, the capability of the follow flow it serves; the
+/// control plane's `POST /api/vision/demand` sends it too.
+pub const REQUEST_DETECTION: &str = "vision.request_detection";
+
 /// List the engine's registered models — a read-back of the model registry
 /// so the GCS vision hub can show every model loaded on the drone (not just
 /// the one publishing detections). No args; the reply carries the models as

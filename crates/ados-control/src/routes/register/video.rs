@@ -47,10 +47,11 @@ pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
         .post("/whep", whep::post_whep)
         .delete("/whep/{session_id}", whep::delete_whep)
         .patch("/whep/{session_id}", whep::patch_whep)
-        // Vision: operator click-to-follow, the registered-model read-back,
-        // the capability read, and the detector selection. The rest of
-        // `/api/vision` stays on the residual.
+        // Vision: operator click-to-follow, detection leases, the
+        // registered-model read-back, the capability read, and the detector
+        // selection. The rest of `/api/vision` stays on the residual.
         .post("/api/vision/designate", vision::designate)
+        .post("/api/vision/demand", vision::demand)
         .get("/api/vision/status", vision::engine_status)
         .get("/api/vision/capabilities", vision::engine_capabilities)
         .put("/api/vision/detector", vision_detector::put_detector)

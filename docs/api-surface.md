@@ -233,6 +233,7 @@ limiter, pairing gate, MCP-scope admission.
 | PUT | `/api/video/roster` |  |
 | GET | `/api/video/snapshot` |  |
 | GET | `/api/vision/capabilities` |  |
+| POST | `/api/vision/demand` |  |
 | POST | `/api/vision/designate` |  |
 | DELETE | `/api/vision/detector` |  |
 | PUT | `/api/vision/detector` |  |
@@ -253,7 +254,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-228 native routes.
+229 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

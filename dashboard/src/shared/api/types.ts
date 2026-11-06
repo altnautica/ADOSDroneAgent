@@ -271,6 +271,18 @@ export interface AgentConfig {
     confidence_threshold?: number;
     models_dir?: string;
     models_cache_max_mb?: number;
+    // Detection runs on a camera only while a consumer holds a lease on it
+    // (`on_demand`), or on every captured camera (`always`).
+    detection_demand?: string;
+    designate_hold_s?: number;
+    decode_threads?: number;
+    max_box_area_frac?: number;
+    // Null until a detector model is selected.
+    detector?: {
+      model_id?: string;
+      rate_hz?: number | null;
+      threads?: number;
+    } | null;
   };
   swarm?: {
     enabled?: boolean;

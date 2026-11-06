@@ -21,13 +21,15 @@
 //! - `vision.publish_detection` — publish a [`DetectionBatch`]. Used by
 //!   plugin-side models and offloaded detection.
 //! - `vision.designate_track` — lock a captured camera's tracker onto a box.
+//! - `vision.request_detection` — take, renew or release a consumer's lease on
+//!   detection for a captured camera ([`crate::engine`] demand gate).
 //! - `vision.unregister_owner` — drop every model one plugin registered (sent
 //!   by the host when it stops serving the plugin).
 //! - `camera.control.set` — set exposure, gain or auto exposure on a camera
 //!   this engine captures and answer the read-back
 //!   ([`crate::camera_control`]).
 //!
-//! The `args` of the four plugin-facing requests are the shapes
+//! The `args` of the five plugin-facing requests are the shapes
 //! [`ados_protocol::vision_rpc`] defines, decoded with its decoders so the SDK
 //! that built them and this server cannot disagree.
 //!
@@ -39,7 +41,7 @@ use std::sync::Arc;
 
 use ados_protocol::camera_control::CAMERA_CONTROL_METHOD;
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
-use ados_protocol::framebus::{methods, DetectionBatch, FrameDescriptor, VISION_DETECTION_VERSION};
+use ados_protocol::framebus::{methods, DetectionBatch, VISION_DETECTION_VERSION};
 use ados_protocol::plugin::{Envelope, PROTOCOL_VERSION};
 use ados_protocol::vision_rpc;
 use anyhow::{anyhow, Result};
@@ -48,6 +50,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use crate::engine::VisionEngine;
+
+mod push;
+use push::{spawn_detection_push, spawn_frame_push};
 
 /// Fixed wait after a failed `accept()` before accepting again, with no cap.
 const ACCEPT_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
@@ -204,6 +209,7 @@ async fn dispatch(engine: &Arc<VisionEngine>, env: &Envelope) -> (Value, Option<
         m if m == methods::INFER => handle_infer(engine, &env.args).await,
         m if m == methods::PUBLISH_DETECTION => handle_publish(engine, &env.args).await,
         m if m == methods::DESIGNATE_TRACK => handle_designate_track(engine, &env.args).await,
+        m if m == methods::REQUEST_DETECTION => handle_request_detection(engine, &env.args).await,
         m if m == methods::LIST_MODELS => handle_list_models(engine).await,
         m if m == vision_rpc::UNREGISTER_OWNER => handle_unregister_owner(engine, &env.args).await,
         m if m == CAMERA_CONTROL_METHOD => crate::camera_control::handle(engine, &env.args).await,
@@ -328,119 +334,23 @@ async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Res
     ]))
 }
 
-/// Spawn the per-connection frame-descriptor push task. Every published
-/// descriptor (optionally filtered to one camera) is wrapped in a
-/// `vision.deliver` event envelope and written to the connection. A lagged
-/// subscriber skips to the tail (latest-wins); a write error ends the task.
-fn spawn_frame_push(
-    engine: Arc<VisionEngine>,
-    writer: Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    camera_filter: Option<String>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut rx = engine.subscribe_frames();
-        loop {
-            match rx.recv().await {
-                Ok(desc) => {
-                    if let Some(want) = &camera_filter {
-                        if &desc.camera_id != want {
-                            continue;
-                        }
-                    }
-                    let frame = match deliver_frame(&desc) {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    };
-                    let mut w = writer.lock().await;
-                    if w.write_all(&frame).await.is_err() || w.flush().await.is_err() {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    })
-}
-
-/// Build a `vision.deliver` event frame carrying the descriptor as a binary
-/// `descriptor` field, ready to write.
-fn deliver_frame(desc: &FrameDescriptor) -> Result<Vec<u8>> {
-    let bytes = desc
-        .to_msgpack()
-        .map_err(|e| anyhow!("encode descriptor: {e}"))?;
-    let env = Envelope {
-        version: PROTOCOL_VERSION,
-        kind: "event".to_string(),
-        method: methods::DELIVER_FRAME.to_string(),
-        capability: "vision.frame.read".to_string(),
-        args: Value::Map(vec![(Value::from("descriptor"), Value::Binary(bytes))]),
-        request_id: format!("vis-frame-{}", desc.seq),
-        token: String::new(),
-        error: None,
-    };
-    env.encode_frame()
-        .map_err(|e| anyhow!("encode deliver envelope: {e}"))
-}
-
-/// Spawn the per-connection detection-batch push task. Every published batch
-/// (optionally filtered to one camera) is wrapped in a `vision.deliver_detection`
-/// event envelope and written to the connection. A lagged subscriber skips to
-/// the tail (latest-wins); a write error ends the task.
-fn spawn_detection_push(
-    engine: Arc<VisionEngine>,
-    writer: Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
-    camera_filter: Option<String>,
-    with_embeddings: bool,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut rx = engine.subscribe_detections();
-        loop {
-            match rx.recv().await {
-                Ok(mut batch) => {
-                    if let Some(want) = &camera_filter {
-                        if &batch.camera_id != want {
-                            continue;
-                        }
-                    }
-                    // Embeddings ride only to a connection that asked for them.
-                    if !with_embeddings {
-                        crate::engine::strip_embeddings(&mut batch);
-                    }
-                    let frame = match deliver_detection(&batch) {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    };
-                    let mut w = writer.lock().await;
-                    if w.write_all(&frame).await.is_err() || w.flush().await.is_err() {
-                        break;
-                    }
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    })
-}
-
-/// Build a `vision.deliver_detection` event frame carrying the encoded
-/// `DetectionBatch` as a binary `batch` field, ready to write.
-fn deliver_detection(batch: &DetectionBatch) -> Result<Vec<u8>> {
-    let bytes = batch
-        .to_msgpack()
-        .map_err(|e| anyhow!("encode detection batch: {e}"))?;
-    let env = Envelope {
-        version: PROTOCOL_VERSION,
-        kind: "event".to_string(),
-        method: methods::DELIVER_DETECTION.to_string(),
-        capability: "vision.detection.subscribe".to_string(),
-        args: Value::Map(vec![(Value::from("batch"), Value::Binary(bytes))]),
-        request_id: format!("vis-det-{}-{}", batch.camera_id, batch.frame_id),
-        token: String::new(),
-        error: None,
-    };
-    env.encode_frame()
-        .map_err(|e| anyhow!("encode deliver detection envelope: {e}"))
+/// Handle `vision.request_detection`: take, renew (`hold_ms > 0`) or release
+/// (`hold_ms == 0`) the caller's detection lease on a captured camera. The
+/// owner is the plugin the host stamped, or the name a control-plane caller
+/// gave. Any camera the engine does not capture is refused, so the lease map
+/// only ever names real cameras.
+async fn handle_request_detection(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
+    let req = vision_rpc::decode_request_detection(args)?;
+    if !engine.has_ring(&req.camera_id).await {
+        return Err(anyhow!("no camera {} on this node", req.camera_id));
+    }
+    let reply = engine.request_detection(
+        &req.camera_id,
+        &req.owner,
+        req.hold_ms,
+        ados_protocol::framebus::mono_ns() / 1_000_000,
+    );
+    Ok(vision_rpc::request_detection_reply(&reply))
 }
 
 /// Write a response envelope sharing `request_id`. An `error` sets the envelope
@@ -519,10 +429,12 @@ fn execution_str(e: ados_protocol::framebus::ModelExecution) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::push::{deliver_detection, deliver_frame};
     use super::*;
     use crate::backend::MockBackend;
     use ados_protocol::framebus::{
-        BoundingBox, Detection, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
+        BoundingBox, Detection, FrameDescriptor, FrameFormat, ModelExecution, ModelKind,
+        ModelMetadata,
     };
 
     fn engine() -> Arc<VisionEngine> {
@@ -961,6 +873,65 @@ mod tests {
         let args = Value::Map(vec![(Value::from("camera_id"), Value::from("cam-0"))]);
         let (_resp, err) = dispatch(&e, &req_env(methods::DESIGNATE_TRACK, args)).await;
         assert!(err.is_some(), "a missing bbox is a soft error, not a panic");
+    }
+
+    #[tokio::test]
+    async fn request_detection_leases_and_releases_a_captured_camera() {
+        let e = engine();
+        e.publish_frame(
+            "belly",
+            1,
+            crate::ring::FrameTiming::host(0),
+            2,
+            2,
+            FrameFormat::Rgb24,
+            &[0u8; 12],
+        )
+        .await
+        .unwrap();
+        let now = ados_protocol::framebus::mono_ns() / 1_000_000;
+        assert!(!e.detection_wanted("belly", now));
+
+        let lease = |hold_ms: u64| {
+            vision_rpc::with_owner(
+                &vision_rpc::request_detection_args("belly", hold_ms),
+                "com.example.follow",
+            )
+        };
+        let (resp, err) = dispatch(&e, &req_env(methods::REQUEST_DETECTION, lease(6_000))).await;
+        assert!(err.is_none(), "request_detection errored: {err:?}");
+        let reply = vision_rpc::decode_request_detection_reply(&resp).unwrap();
+        assert_eq!(reply.camera_id, "belly");
+        assert!(reply.detecting);
+        let until = reply.until_ms.expect("a lease end");
+        assert!(until >= now + 6_000);
+        assert!(e.detection_wanted("belly", now + 1));
+
+        // Releasing turns it off again.
+        let (resp, err) = dispatch(&e, &req_env(methods::REQUEST_DETECTION, lease(0))).await;
+        assert!(err.is_none());
+        let reply = vision_rpc::decode_request_detection_reply(&resp).unwrap();
+        assert!(!reply.detecting);
+        assert_eq!(reply.until_ms, None);
+    }
+
+    #[tokio::test]
+    async fn request_detection_refuses_an_uncaptured_camera_and_a_bad_hold() {
+        let e = engine();
+        let ghost = vision_rpc::with_owner(
+            &vision_rpc::request_detection_args("ghost-cam", 1_000),
+            "operator",
+        );
+        let (_resp, err) = dispatch(&e, &req_env(methods::REQUEST_DETECTION, ghost)).await;
+        assert!(err.unwrap().contains("no camera"));
+        assert!(e.detection_status(&[], 0).cameras.is_empty());
+
+        let too_long = vision_rpc::with_owner(
+            &vision_rpc::request_detection_args("ghost-cam", vision_rpc::MAX_DETECTION_HOLD_MS + 1),
+            "operator",
+        );
+        let (_resp, err) = dispatch(&e, &req_env(methods::REQUEST_DETECTION, too_long)).await;
+        assert!(err.unwrap().contains("hold_ms"));
     }
 
     fn as_map(v: &Value) -> Vec<(Value, Value)> {

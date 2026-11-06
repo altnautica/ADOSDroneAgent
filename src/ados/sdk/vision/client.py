@@ -11,8 +11,10 @@ import msgpack
 from ados.sdk.vision._constants import (
     DESIGNATE_TRACK,
     INFER,
+    MAX_DETECTION_HOLD_S,
     PUBLISH_DETECTION,
     REGISTER_MODEL,
+    REQUEST_DETECTION,
     SUBSCRIBE_DETECTIONS,
     SUBSCRIBE_FRAMES,
     VIO_COMPONENT_ID,
@@ -202,6 +204,26 @@ class VisionClient:
                 "class_label": class_label,
                 "confidence": float(confidence),
             },
+        )
+
+    async def request_detection(self, camera_id: str, hold_s: float) -> dict[str, Any]:
+        """Keep the engine's detector running on ``camera_id`` for ``hold_s``
+        more seconds (``0`` releases this plugin's lease; at most
+        ``MAX_DETECTION_HOLD_S``).
+
+        The engine runs detection on a camera only while some consumer holds a
+        lease on it, so a plugin that consumes detections renews well inside its
+        hold while it needs them and releases when done. The host records this
+        plugin as the lease owner. Gated on ``vision.track.designate``. Returns
+        ``{camera_id: str, detecting: bool, until_ms: int|None}``; an unknown
+        camera is an error.
+        """
+        if not 0 <= hold_s <= MAX_DETECTION_HOLD_S:
+            raise ValueError(f"hold_s must be between 0 and {MAX_DETECTION_HOLD_S}")
+        return await self._request(
+            REQUEST_DETECTION,
+            "vision.track.designate",
+            {"camera_id": camera_id, "hold_ms": round(hold_s * 1000)},
         )
 
     async def register_model(self, model: ModelMetadata) -> dict[str, Any]:

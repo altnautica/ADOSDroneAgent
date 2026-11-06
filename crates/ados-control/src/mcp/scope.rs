@@ -60,7 +60,7 @@ pub fn route_scope(method: &Method, path: &str) -> Option<ScopeClass> {
             // servos — a vehicle-command write on par with /api/command -> flight.
             "/api/can/passthrough" => Some(Flight),
             // Operator-facing safe writes.
-            "/api/vision/designate" | "/api/logs/push" => Some(SafeWrite),
+            "/api/vision/designate" | "/api/vision/demand" | "/api/logs/push" => Some(SafeWrite),
             // Unpairing tears down the trust relationship.
             "/api/pairing/unpair" => Some(Destructive),
             // RC channel injection and taking pilot-in-command command the

@@ -16,8 +16,13 @@
 //! stall verdict; an engine wedged anywhere else keeps its inputs live with a
 //! frozen count, which is exactly a stall.
 //!
+//! The sidecar also carries the detector's demand state ([`DetectionDemandStatus`]),
+//! which `GET /api/vision/status` serves as its `detection` block.
+//!
 //! Producer: `ados-vision`, rewritten about once a second under its socket
-//! directory. Consumer: the supervisor's work proof.
+//! directory. Consumers: the supervisor's work proof and the vision status route.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -51,6 +56,35 @@ pub struct VisionStatus {
     /// Cameras whose source is currently failing, with the reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_errors: Vec<SourceError>,
+    /// Where the detector runs, and which consumer leases keep it running.
+    /// Absent from an engine that predates the demand gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detection: Option<DetectionDemandStatus>,
+}
+
+/// The detector's demand state: the mode and, per captured camera, whether
+/// detection runs on it and the leases that hold it on.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetectionDemandStatus {
+    /// `on_demand` (run only under a lease) or `always` (every camera).
+    pub mode: String,
+    pub cameras: BTreeMap<String, CameraDemandStatus>,
+}
+
+/// One camera's demand state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraDemandStatus {
+    pub detecting: bool,
+    #[serde(default)]
+    pub leases: Vec<DemandLeaseStatus>,
+}
+
+/// One consumer's live lease on a camera.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DemandLeaseStatus {
+    pub owner: String,
+    /// Time left on the lease.
+    pub remaining_ms: u64,
 }
 
 impl VisionStatus {
@@ -93,6 +127,19 @@ mod tests {
                 camera: "cam_fl".into(),
                 error: "device busy".into(),
             }],
+            detection: Some(DetectionDemandStatus {
+                mode: "on_demand".into(),
+                cameras: BTreeMap::from([(
+                    "belly".into(),
+                    CameraDemandStatus {
+                        detecting: true,
+                        leases: vec![DemandLeaseStatus {
+                            owner: "operator".into(),
+                            remaining_ms: 4_000,
+                        }],
+                    },
+                )]),
+            }),
         };
         let text = serde_json::to_string(&s).unwrap();
         assert_eq!(serde_json::from_str::<VisionStatus>(&text).unwrap(), s);

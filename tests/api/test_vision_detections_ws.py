@@ -298,3 +298,65 @@ def test_get_latest_returns_empty_detections_when_socket_absent():
             base.rmdir()
         except OSError:
             pass
+
+
+@pytest.fixture
+def camera_cache():
+    """A clean per-camera latest cache for each test."""
+    route._latest_by_camera.clear()
+    yield route._latest_by_camera
+    route._latest_by_camera.clear()
+
+
+def _batch(camera_id: str, frame_id: int, age_ms: int = 0) -> dict:
+    return {
+        **SAMPLE_BATCH,
+        "camera_id": camera_id,
+        "frame_id": frame_id,
+        "ts_ms": time.monotonic_ns() // 1_000_000 - age_ms,
+    }
+
+
+def test_get_latest_for_a_camera_waits_past_another_cameras_replay(unpaired_client, camera_cache):
+    """The replayed batch is the main camera's; asking for the belly camera
+    answers with the belly batch that follows it."""
+    client, sock_path = unpaired_client
+    engine = _FakeEngineSocket(
+        sock_path, [_frame(_batch("main", 1)), _frame(_batch("belly", 2))]
+    )
+    engine.start()
+    try:
+        resp = client.get("/api/vision/detections/latest", params={"camera_id": "belly"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["camera_id"] == "belly"
+        assert body["frame_id"] == 2
+        assert body["available"] is True
+        # Every batch the poll read is kept as its camera's newest.
+        assert set(camera_cache) == {"main", "belly"}
+    finally:
+        engine.stop()
+
+
+def test_get_latest_for_a_camera_without_batches_is_stale(unpaired_client, camera_cache):
+    client, sock_path = unpaired_client
+    engine = _FakeEngineSocket(sock_path, [_frame(_batch("main", 1))])
+    engine.start()
+    try:
+        # Without the parameter the replayed batch is served, as before.
+        resp = client.get("/api/vision/detections/latest")
+        assert resp.json()["camera_id"] == "main"
+        # A camera no batch has come from reads as stale, not as another's.
+        resp = client.get("/api/vision/detections/latest", params={"camera_id": "belly"})
+        assert resp.status_code == 200
+        assert resp.json() == {"detections": [], "stale": True, "available": True}
+    finally:
+        engine.stop()
+
+
+def test_get_latest_for_a_camera_keeps_its_newest_batch(camera_cache):
+    route._remember(_batch("belly", 5))
+    route._remember(_batch("belly", 4, age_ms=200))
+    assert camera_cache["belly"]["frame_id"] == 5
+    assert route._current(camera_cache["belly"])["frame_id"] == 5
+    assert route._current(_batch("belly", 6, age_ms=5_000))["stale"] is True

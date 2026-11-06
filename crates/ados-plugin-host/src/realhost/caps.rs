@@ -164,6 +164,7 @@ pub(super) const ALL_DISPATCH_METHODS: &[crate::dispatch::Method] = {
         VisionPublishDetection,
         VisionSubscribeDetections,
         VisionDesignateTrack,
+        VisionRequestDetection,
         ButtonSubscribe,
     ]
 };

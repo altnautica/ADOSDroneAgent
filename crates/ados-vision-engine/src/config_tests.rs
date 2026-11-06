@@ -158,6 +158,57 @@ vision:
 }
 
 #[test]
+fn demand_keys_ship_their_defaults_and_parse() {
+    // Shipped defaults, with and without a vision block.
+    let (_d0, p0) = write_tmp("vision:\n  enabled: true\n");
+    for c in [VisionConfig::default(), VisionConfig::load_from(&p0)] {
+        assert_eq!(c.detection_demand, DetectionDemandMode::OnDemand);
+        assert_eq!(c.designate_hold_s, 30.0);
+        assert_eq!(c.decode_threads, 1);
+        assert_eq!(c.max_box_area_frac, 0.5);
+        assert_eq!(c.detector_threads(), 1);
+        assert_eq!(c.detection_policy(), DetectionPolicy::default());
+    }
+
+    let yaml = "\
+vision:
+  enabled: true
+  detection_demand: always
+  designate_hold_s: 12.5
+  decode_threads: 2
+  max_box_area_frac: 0.8
+  detector:
+    model_id: det
+    model_path: /m.onnx
+    threads: 2
+";
+    let (_d, p) = write_tmp(yaml);
+    let c = VisionConfig::load_from(&p);
+    assert_eq!(c.detection_demand, DetectionDemandMode::Always);
+    assert_eq!(c.decode_threads, 2);
+    assert_eq!(c.detector_threads(), 2);
+    let policy = c.detection_policy();
+    assert_eq!(policy.mode, DetectionDemandMode::Always);
+    assert_eq!(policy.designate_hold_ms, 12_500);
+    assert_eq!(policy.max_box_area_frac, 0.8);
+}
+
+#[test]
+fn an_absent_detector_rate_is_three_hz_and_an_explicit_zero_is_unpaced() {
+    let (_d, p) = write_tmp("vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n");
+    assert_eq!(VisionConfig::load_from(&p).detector.unwrap().rate_hz, 3.0);
+    let (_d0, p0) = write_tmp(
+        "vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n    rate_hz: 0\n",
+    );
+    assert_eq!(VisionConfig::load_from(&p0).detector.unwrap().rate_hz, 0.0);
+    // A zero thread count still runs on one.
+    let (_dt, pt) = write_tmp(
+        "vision:\n  detector:\n    model_id: det\n    model_path: /m.onnx\n    threads: 0\n",
+    );
+    assert_eq!(VisionConfig::load_from(&pt).detector_threads(), 1);
+}
+
+#[test]
 fn reid_absent_by_default_and_parses_to_portrait_metadata() {
     use ados_protocol::framebus::{FrameFormat, ModelExecution, ModelKind};
 

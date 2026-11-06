@@ -117,6 +117,7 @@ fn picker_auto_selects_sidecar_on_rockchip() {
         rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
         hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         mock_target: false,
+        onnx_threads: 1,
     };
     assert_eq!(select_backend("rk3576", &prefs).name(), "rknn");
     assert_eq!(select_backend("RK3588S2", &prefs).name(), "rknn");
@@ -216,6 +217,7 @@ fn picker_honours_explicit_preference() {
         rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
         hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         mock_target: false,
+        onnx_threads: 1,
     };
     assert_eq!(select_backend("rk3576", &prefs).name(), "mock");
 
@@ -225,6 +227,7 @@ fn picker_honours_explicit_preference() {
         rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
         hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         mock_target: false,
+        onnx_threads: 1,
     };
     let onnx = select_backend("x86", &prefs_onnx);
     assert_eq!(onnx.name(), "onnx");
@@ -239,6 +242,7 @@ fn picker_honours_explicit_preference() {
         rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
         hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         mock_target: false,
+        onnx_threads: 1,
     };
     let bad = select_backend("x86", &prefs_bad);
     assert_eq!(bad.state(), BackendState::Unavailable);
@@ -252,6 +256,7 @@ fn mock_target_orbits() {
         rknn_socket_path: "/run/ados/vision-rknn.sock".into(),
         hailo_socket_path: "/run/ados/vision-hailo.sock".into(),
         mock_target: true,
+        onnx_threads: 1,
     };
     let backend = select_backend("x86", &prefs);
     assert_eq!(backend.name(), "mock");
@@ -292,6 +297,7 @@ fn mock_target_orbits() {
     // Without the flag the mock stays empty.
     let plain = BackendPrefs {
         mock_target: false,
+        onnx_threads: 1,
         ..prefs
     };
     let m = select_backend("x86", &plain).load(&meta()).unwrap();

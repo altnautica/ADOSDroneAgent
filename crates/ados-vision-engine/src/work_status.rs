@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ados_protocol::vision_status::{
-    SourceError, VisionStatus, VISION_STATUS_FILE, VISION_STATUS_VERSION,
+    DetectionDemandStatus, SourceError, VisionStatus, VISION_STATUS_FILE, VISION_STATUS_VERSION,
 };
 
 /// How often the sidecar is rewritten.
@@ -54,6 +54,7 @@ impl WorkStatus {
                     error: error.clone(),
                 })
                 .collect(),
+            detection: None,
         }
     }
 
@@ -161,11 +162,13 @@ pub async fn write_status(path: &Path, status: &VisionStatus) -> std::io::Result
     tokio::fs::rename(&tmp, path).await
 }
 
-/// Publish `status` to `path` every [`WRITE_INTERVAL`] until `cancel` fires.
+/// Publish `status` to `path` every [`WRITE_INTERVAL`] until `cancel` fires,
+/// with `detection()` (the detector's demand state) read fresh on each write.
 /// A failed write is logged once per failure streak and retried on the next
 /// tick; the engine keeps running either way.
 pub async fn run_writer(
     status: Arc<WorkStatus>,
+    detection: impl Fn() -> Option<DetectionDemandStatus>,
     path: PathBuf,
     cancel: ados_protocol::shutdown::Shutdown,
 ) {
@@ -177,7 +180,9 @@ pub async fn run_writer(
             _ = tick.tick() => {}
             _ = cancel.wait() => return,
         }
-        match write_status(&path, &status.snapshot()).await {
+        let mut snapshot = status.snapshot();
+        snapshot.detection = detection();
+        match write_status(&path, &snapshot).await {
             Ok(()) => failing = false,
             Err(e) => {
                 if !failing {

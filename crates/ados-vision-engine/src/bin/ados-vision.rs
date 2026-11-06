@@ -69,6 +69,7 @@ async fn main() {
             rknn_socket_path: config.rknn_socket_path(),
             hailo_socket_path: config.hailo_socket_path(),
             mock_target: config.mock_target,
+            onnx_threads: config.detector_threads() as usize,
         },
     );
     tracing::info!(soc = %soc, backend = backend.name(), "vision backend selected");
@@ -98,6 +99,13 @@ async fn main() {
         ados_vision::tracker::TrackerConfig::default(),
         config.reid_enabled,
         reid_model_id,
+        config.detection_policy(),
+    );
+    tracing::info!(
+        demand = config.detection_demand.as_str(),
+        designate_hold_s = config.designate_hold_s,
+        max_box_area_frac = config.max_box_area_frac,
+        "detection demand policy"
     );
     if config.tracker_enabled {
         tracing::info!(reid = config.reid_enabled, "vision tracker enabled");
@@ -162,19 +170,18 @@ async fn main() {
     // Build the per-camera schedule input: every registered engine-run detection
     // model, each with a target rate + priority so the perception scheduler paces
     // them over the ONE accelerator. Sourced from the model registry (task-typed)
-    // so an added detection model auto-schedules. A single unpaced detector (the
-    // historical default) maps to one always-due model — byte-equivalent to the
-    // old single-detector loop.
+    // so an added detection model auto-schedules. The configured detector runs
+    // at `detector.rate_hz` (an explicit 0 is unpaced); a plugin-registered
+    // detection model is unpaced.
     let paces: Vec<ModelPace> = {
         let ids = engine.models_for_kind(ModelKind::Detection).await;
         let default_priority = 100u8;
         ids.into_iter()
             .map(|id| {
                 let (rate_hz, priority) = match &config.detector {
-                    Some(det) if det.model_id == id => (
-                        det.rate_hz.unwrap_or(0.0),
-                        det.priority.unwrap_or(default_priority),
-                    ),
+                    Some(det) if det.model_id == id => {
+                        (det.rate_hz, det.priority.unwrap_or(default_priority))
+                    }
                     _ => (0.0, default_priority),
                 };
                 ModelPace {
@@ -192,6 +199,7 @@ async fn main() {
     // The engine's cameras: the owned `capture: true` entries of `cameras[]`
     // and, when the video pipeline taps its flight camera, that tap.
     let cameras = camera_specs(&config);
+    let camera_ids: Vec<String> = cameras.iter().map(|c| c.id().to_string()).collect();
     tracing::info!(count = cameras.len(), "vision cameras resolved");
 
     let mut tasks = Vec::new();
@@ -202,6 +210,7 @@ async fn main() {
     // entries the engine does not own are refused as non-capture cameras.
     let mut factory = SourceFactory {
         controls: engine.camera_controls().clone(),
+        decode_threads: config.decode_threads,
         ..SourceFactory::default()
     };
     for id in &config.other_camera_ids {
@@ -237,8 +246,12 @@ async fn main() {
         let work = work.clone();
         let cancel = cancel.clone();
         let path = work_status::sidecar_path(&config.socket_dir);
+        let engine = engine.clone();
+        // The detector's demand state rides in the sidecar for
+        // `GET /api/vision/status`.
+        let detection = move || Some(engine.detection_status(&camera_ids, mono_ns() / 1_000_000));
         tasks.push(tokio::spawn(async move {
-            work_status::run_writer(work, path, cancel).await;
+            work_status::run_writer(work, detection, path, cancel).await;
         }));
     }
 
@@ -332,8 +345,9 @@ struct ModelPace {
 /// Inference is driven by a per-camera [`PerceptionScheduler`] over `paces`: on
 /// each free frame the scheduler returns the detection models DUE now (by rate +
 /// priority), and they run in one spawned batch that serializes on the engine's
-/// single accelerator lease. With one unpaced model the scheduler returns it
-/// every free frame, exactly the old single-detector loop.
+/// single accelerator lease. Only while the engine wants detection on this
+/// camera ([`VisionEngine::detection_wanted`]): otherwise frames are still
+/// published and nothing is scheduled, so no model's turn is spent.
 async fn run_camera(
     engine: Arc<VisionEngine>,
     cam: CameraSpec,
@@ -402,17 +416,19 @@ async fn run_camera(
                                 .await
                             {
                                 Ok(desc) => {
-                                    // Run the models DUE now, unless a batch is
+                                    // Run the models DUE now, unless detection is
+                                    // not wanted on this camera or a batch is
                                     // already in flight (skip then, keeping capture
                                     // decoupled, latest-wins). Acquire the slot
                                     // FIRST so a busy frame never consumes a model's
                                     // scheduling turn; only mark models run when they
                                     // actually run.
-                                    if !paces.is_empty() {
+                                    let now_ms = mono_ns() / 1_000_000;
+                                    if !paces.is_empty() && engine.detection_wanted(&camera_id, now_ms) {
                                         if let Ok(permit) =
                                             infer_sem.clone().try_acquire_owned()
                                         {
-                                            let due = scheduler.take_due(mono_ns() / 1_000_000);
+                                            let due = scheduler.take_due(now_ms);
                                             if !due.is_empty() {
                                                 let eng = engine.clone();
                                                 let data = spare.take().unwrap_or_default();

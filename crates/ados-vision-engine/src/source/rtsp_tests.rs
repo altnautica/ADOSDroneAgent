@@ -140,6 +140,7 @@ fn the_decoder_emits_every_picture_it_is_fed() {
         width: 320,
         height: 200,
         format: FrameFormat::Gray8,
+        decode_threads: 1,
     };
     let mut decode = std::process::Command::new("ffmpeg")
         .args(decoder_args(&settings))
@@ -155,6 +156,25 @@ fn the_decoder_emits_every_picture_it_is_fed() {
     feeder.join().unwrap().unwrap();
     assert!(decode.wait().unwrap().success());
     assert_eq!(raw.len(), 60 * 320 * 200, "one gray frame per picture");
+}
+
+#[test]
+fn the_decoder_runs_on_the_configured_thread_count() {
+    let settings = RtspSettings {
+        url: "rtsp://unused".into(),
+        width: 640,
+        height: 480,
+        format: FrameFormat::Rgb24,
+        decode_threads: 2,
+    };
+    let args = decoder_args(&settings);
+    let input = args.iter().position(|a| a == "-i").unwrap();
+    for flag in ["-threads", "-filter_threads"] {
+        let at = args.iter().position(|a| a == flag).unwrap();
+        assert_eq!(args[at + 1], "2", "{flag}");
+        // Before `-i`, so it applies to the decoder of that input.
+        assert!(at < input, "{flag} must precede -i");
+    }
 }
 
 fn pending(seq: u64) -> Pending {

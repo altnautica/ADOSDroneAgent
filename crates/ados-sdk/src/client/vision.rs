@@ -73,6 +73,30 @@ impl PluginIpcClient {
             .args)
     }
 
+    /// Take or renew this plugin's lease on the engine's detector for
+    /// `camera_id` for `hold` (a zero hold releases it; at most
+    /// [`vision_rpc::MAX_DETECTION_HOLD_MS`]). The engine runs detection on a
+    /// camera only while some consumer holds a lease on it, so a plugin that
+    /// consumes detections renews its lease while it needs them. The host
+    /// stamps this plugin as the lease owner. The required cap is
+    /// `vision.track.designate`.
+    pub async fn vision_request_detection(
+        &self,
+        camera_id: &str,
+        hold: std::time::Duration,
+    ) -> Result<vision_rpc::DetectionDemandReply, ClientError> {
+        let hold_ms = u64::try_from(hold.as_millis()).unwrap_or(u64::MAX);
+        let reply = self
+            .send_request(
+                ados_protocol::framebus::methods::REQUEST_DETECTION,
+                "vision.track.designate",
+                vision_rpc::request_detection_args(camera_id, hold_ms),
+            )
+            .await?
+            .args;
+        vision_rpc::decode_request_detection_reply(&reply).map_err(vision_args_error)
+    }
+
     /// Read this plugin's resolved model-delivery status. Sends
     /// [`framebus::methods::READ_MODEL`](ados_protocol::framebus::methods::READ_MODEL) (gated on `vision.model.read`); the host
     /// returns `{models: [ {state, model_id, runtime, path, reason}, ... ]}` off

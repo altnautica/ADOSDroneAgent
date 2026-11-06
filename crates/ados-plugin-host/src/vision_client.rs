@@ -264,6 +264,14 @@ impl VisionClient {
             .await
     }
 
+    /// Proxy a `request_detection` request (a detection lease on one camera)
+    /// to the engine and return its response `args`.
+    pub async fn request_detection(&self, args: &Value) -> Result<Value, VisionRpcError> {
+        self.shared
+            .request(methods::REQUEST_DETECTION, "vision.track.designate", args)
+            .await
+    }
+
     /// Proxy a `camera.control.set` request to the engine (exposure, gain or
     /// auto exposure on a camera it owns) and return its response `args`.
     pub async fn camera_control_set(&self, args: &Value) -> Result<Value, VisionRpcError> {

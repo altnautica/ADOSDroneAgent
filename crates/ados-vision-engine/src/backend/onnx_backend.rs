@@ -2,6 +2,7 @@
 
 use super::*;
 
+use ados_protocol::framebus::ModelKind;
 use ados_vision::yolo;
 
 /// Default detection thresholds, matching the Python sidecar's defaults.
@@ -10,7 +11,15 @@ const ONNX_NMS_IOU: f32 = 0.45;
 
 /// ONNX Runtime backend. Loads `model_path` into an ORT session and runs it
 /// on each frame. Built only under the `onnx` feature.
-pub struct OnnxBackend;
+///
+/// Every session runs on a fixed, small thread budget with spin-waiting off:
+/// ORT's default (one intra-op thread per core, each spinning between nodes)
+/// fights the flight stack for the CPU on a companion board and, under a CPU
+/// quota, makes each inference several times slower than a single thread.
+pub struct OnnxBackend {
+    /// Intra-op threads for a detection model (`vision.detector.threads`).
+    detector_threads: usize,
+}
 
 struct OnnxModel {
     /// `Session::run` takes `&mut self`, but `LoadedModel::infer` is `&self`
@@ -22,10 +31,21 @@ struct OnnxModel {
     meta: ModelMetadata,
 }
 
-#[allow(clippy::new_without_default)]
 impl OnnxBackend {
-    pub fn new() -> Self {
-        OnnxBackend
+    /// A backend whose detection sessions use `detector_threads` intra-op
+    /// threads (at least one). Every other model (the re-id embedder) uses one.
+    pub fn new(detector_threads: usize) -> Self {
+        OnnxBackend {
+            detector_threads: detector_threads.max(1),
+        }
+    }
+
+    /// The intra-op thread count a session for `kind` gets.
+    pub fn intra_threads_for(&self, kind: ModelKind) -> usize {
+        match kind {
+            ModelKind::Detection => self.detector_threads,
+            _ => 1,
+        }
     }
 }
 
@@ -35,7 +55,17 @@ impl VisionBackend for OnnxBackend {
             .model_path
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("onnx model has no model_path"))?;
-        let mut builder = ort::session::Session::builder()?;
+        let builder = ort::session::Session::builder()?;
+        let intra = self.intra_threads_for(meta.kind);
+        // `BuilderResult` errors carry the builder back and are not `Send`
+        // under every feature set, so each is flattened to a message.
+        #[allow(unused_mut)]
+        let mut builder = builder
+            .with_intra_threads(intra)
+            .and_then(|b| b.with_inter_threads(1))
+            .and_then(|b| b.with_intra_op_spinning(false))
+            .and_then(|b| b.with_inter_op_spinning(false))
+            .map_err(|e| anyhow!("configure onnx session threads: {e}"))?;
         // On the macOS workstation, register the CoreML execution provider so
         // inference runs on the Apple GPU/ANE instead of the CPU. Best-effort:
         // ORT falls back to CPU if CoreML cannot take a node. Only compiled in
@@ -160,5 +190,22 @@ fn last_two_dims(shape: &[i64]) -> (usize, usize) {
         0 => (0, 0),
         1 => (1, dims[0]),
         n => (dims[n - 2], dims[n - 1]),
+    }
+}
+
+#[cfg(test)]
+mod thread_tests {
+    use super::*;
+
+    #[test]
+    fn detection_sessions_take_the_configured_threads_and_every_other_model_one() {
+        let b = OnnxBackend::new(2);
+        assert_eq!(b.intra_threads_for(ModelKind::Detection), 2);
+        assert_eq!(b.intra_threads_for(ModelKind::Tracking), 1);
+        // Zero is never a valid ORT budget (it would mean "one per core").
+        assert_eq!(
+            OnnxBackend::new(0).intra_threads_for(ModelKind::Detection),
+            1
+        );
     }
 }

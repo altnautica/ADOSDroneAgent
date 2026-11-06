@@ -25,11 +25,15 @@ _DETECTION_WIRE_VERSION: int = _detection_version
 SUBSCRIBE_FRAMES = "vision.subscribe_frames"
 SUBSCRIBE_DETECTIONS = "vision.subscribe_detections"
 DESIGNATE_TRACK = "vision.designate_track"
+REQUEST_DETECTION = "vision.request_detection"
 REGISTER_MODEL = "vision.register_model"
 INFER = "vision.infer"
 PUBLISH_DETECTION = "vision.publish_detection"
 DELIVER_FRAME = "vision.deliver"
 DELIVER_DETECTION = "vision.deliver_detection"
+
+# The longest detection lease one ``vision.request_detection`` may take.
+MAX_DETECTION_HOLD_S = 60.0
 
 # MAVLink component id a vision plugin registers as when it feeds pose to the
 # flight controller. MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY (197): the FC tags

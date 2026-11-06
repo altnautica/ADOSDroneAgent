@@ -4,10 +4,11 @@
 //! length-prefixed msgpack [`Envelope`] wire (4-byte big-endian length + a
 //! msgpack envelope). Unlike the MAVLink socket (a broadcast the command route
 //! fires frames at), this is request/response: the front writes one request
-//! envelope and reads the matching reply. The only call the control surface
-//! needs is `vision.designate_track` (operator click-to-follow), which is
-//! infrequent, so this opens a fresh connection per call and closes it — no held
-//! state, no reconnect dance.
+//! envelope and reads the matching reply. The calls the control surface makes
+//! (`vision.designate_track` for click-to-follow, `vision.request_detection`
+//! for an operator's detection lease, `vision.list_models` for the status
+//! read-back) are small and infrequent, so this opens a fresh connection per
+//! call and closes it — no held state, no reconnect dance.
 //!
 //! An absent socket (no vision engine, or vision disabled) surfaces as
 //! [`VisionError::Io`], which the route maps to a 503 — a designate is never
@@ -90,6 +91,13 @@ impl VisionIpcClient {
     /// specific box) and return the engine's response args.
     pub async fn designate_track(&self, args: Value) -> Result<Value, VisionError> {
         self.request(methods::DESIGNATE_TRACK, "vision.track.designate", args)
+            .await
+    }
+
+    /// Send a `vision.request_detection` request (take, renew or release a
+    /// detection lease on one camera) and return the engine's response args.
+    pub async fn request_detection(&self, args: Value) -> Result<Value, VisionError> {
+        self.request(methods::REQUEST_DETECTION, "vision.track.designate", args)
             .await
     }
 
@@ -346,6 +354,60 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, VisionError::Rpc(m) if m.contains("missing bbox")));
+        server.await.unwrap();
+    }
+
+    /// `request_detection` sends the `vision.request_detection` method with
+    /// the args it was given and returns the engine's reply args.
+    #[tokio::test]
+    async fn request_detection_carries_the_method_and_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut conn, _addr) = listener.accept().await.unwrap();
+            let mut header = [0u8; HEADER_SIZE];
+            conn.read_exact(&mut header).await.unwrap();
+            let len = decode_len(header, PLUGIN_MAX_FRAME, false).unwrap();
+            let mut body = vec![0u8; len];
+            conn.read_exact(&mut body).await.unwrap();
+            let req = Envelope::from_msgpack(&body).unwrap();
+            assert_eq!(req.method, methods::REQUEST_DETECTION);
+            let decoded = ados_protocol::vision_rpc::decode_request_detection(&req.args).unwrap();
+            assert_eq!(decoded.owner, "operator");
+            let reply = Envelope {
+                version: PROTOCOL_VERSION,
+                kind: "response".to_string(),
+                method: req.method,
+                capability: String::new(),
+                args: ados_protocol::vision_rpc::request_detection_reply(
+                    &ados_protocol::vision_rpc::DetectionDemandReply {
+                        camera_id: decoded.camera_id,
+                        detecting: true,
+                        until_ms: Some(9_000),
+                    },
+                ),
+                request_id: req.request_id,
+                token: String::new(),
+                error: None,
+            };
+            conn.write_all(&reply.encode_frame().unwrap())
+                .await
+                .unwrap();
+            conn.flush().await.unwrap();
+        });
+
+        let args = ados_protocol::vision_rpc::with_owner(
+            &ados_protocol::vision_rpc::request_detection_args("belly", 6_000),
+            "operator",
+        );
+        let resp = VisionIpcClient::new(path)
+            .request_detection(args)
+            .await
+            .unwrap();
+        let reply = ados_protocol::vision_rpc::decode_request_detection_reply(&resp).unwrap();
+        assert_eq!(reply.camera_id, "belly");
+        assert_eq!(reply.until_ms, Some(9_000));
         server.await.unwrap();
     }
 }

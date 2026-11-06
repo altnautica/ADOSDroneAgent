@@ -51,7 +51,7 @@ fn coco_onnx_loads_and_infers_one_frame() {
         head: DetectionHead::Yolo8,
     };
 
-    let backend = OnnxBackend::new();
+    let backend = OnnxBackend::new(1);
     let model = backend.load(&meta).expect("load coco onnx");
 
     // A mid-grey 640x640 rgb24 frame: no real person, but the path must run.
@@ -94,7 +94,7 @@ fn coco_onnx_detects_a_real_person() {
         model_path: Some(model.to_string_lossy().into_owned()),
         head: DetectionHead::Yolo8,
     };
-    let model = OnnxBackend::new().load(&meta).expect("load coco onnx");
+    let model = OnnxBackend::new(1).load(&meta).expect("load coco onnx");
     let dets = model
         .infer(&frame, 640, 640, FrameFormat::Rgb24)
         .expect("inference runs");

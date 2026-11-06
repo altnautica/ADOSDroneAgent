@@ -250,6 +250,10 @@ fn writes_map_to_their_class() {
         Some(ScopeClass::SafeWrite)
     );
     assert_eq!(
+        route_scope(&Method::POST, "/api/vision/demand"),
+        Some(ScopeClass::SafeWrite)
+    );
+    assert_eq!(
         route_scope(&Method::PUT, "/api/plugins/battery-panel/config"),
         Some(ScopeClass::Admin)
     );

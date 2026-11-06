@@ -142,7 +142,9 @@ export function ConfigNumberField({
     if (!dirty || error || saving) return;
     setSaving(true);
     try {
-      await putConfigChecked(configKey, shown.trim());
+      // A number, not the text: an optional key that is still null has no
+      // live type for the agent to coerce a string to.
+      await putConfigChecked(configKey, Number(shown.trim()));
       toast.ok(t("settings.shared.saved"));
       config.refetch();
       setDraft(null);

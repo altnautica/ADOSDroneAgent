@@ -11,11 +11,13 @@ impl VisionEngine {
     }
 
     /// Convenience for the engine-run flow: infer then publish, building the
-    /// batch from the frame descriptor and the model's id. When the tracker is
-    /// enabled, the detections pass through the camera's single-object tracker
-    /// first so the locked object carries a stable `track_id` + `lock_state`.
-    /// Embeddings are extracted once per frame, when the re-id tracker or a
-    /// subscriber needs them, and put on the detections only for a subscriber.
+    /// batch from the frame descriptor and the model's id. Boxes larger than the
+    /// policy's `max_box_area_frac` of the frame are dropped first, whatever the
+    /// backend. When the tracker is enabled, the detections pass through the
+    /// camera's single-object tracker so the locked object carries a stable
+    /// `track_id` + `lock_state`. Embeddings are extracted once per frame, when
+    /// the re-id tracker or a subscriber needs them, and put on the detections
+    /// only for a subscriber.
     pub async fn infer_and_publish(
         &self,
         model_id: &str,
@@ -25,6 +27,12 @@ impl VisionEngine {
         let mut detections = self
             .infer(model_id, frame, desc.width, desc.height, desc.format)
             .await?;
+        super::demand::drop_oversized_boxes(
+            &mut detections,
+            desc.width,
+            desc.height,
+            self.policy.max_box_area_frac,
+        );
         let for_tracker = self.tracker_enabled && self.reid_enabled;
         let for_wire = self.embeddings_requested();
         let appearances = if for_tracker || for_wire {
@@ -136,8 +144,11 @@ impl VisionEngine {
 
     /// Operator designation: lock the camera's tracker onto a specific detection
     /// (the box the operator clicked), overriding the auto-lock. Returns the new
-    /// track id. Builds the camera's tracker if it does not exist yet.
+    /// track id. Builds the camera's tracker if it does not exist yet. The
+    /// designation also holds detection on for the camera (the policy's
+    /// designation hold), so the lock has detections to follow.
     pub async fn designate(&self, camera_id: &str, target: &Detection) -> Option<u64> {
+        self.grant_designation(camera_id, ados_protocol::framebus::mono_ns() / 1_000_000);
         let mut trackers = self.trackers.lock().await;
         let tracker = trackers
             .entry(camera_id.to_string())

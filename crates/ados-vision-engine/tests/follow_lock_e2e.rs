@@ -22,7 +22,7 @@ use ados_protocol::framebus::{
 };
 use ados_vision::tracker::TrackerConfig;
 use ados_vision_engine::backend::{LoadedModel, VisionBackend};
-use ados_vision_engine::engine::VisionEngine;
+use ados_vision_engine::engine::{DetectionPolicy, VisionEngine};
 
 const W: u32 = 320;
 const H: u32 = 240;
@@ -207,6 +207,7 @@ async fn build_engine(reid: bool, script: Script) -> Arc<VisionEngine> {
         TrackerConfig::default(),
         reid,
         if reid { Some("reid".to_string()) } else { None },
+        DetectionPolicy::default(),
     );
     engine.register_model(detector_meta()).await.unwrap();
     if reid {

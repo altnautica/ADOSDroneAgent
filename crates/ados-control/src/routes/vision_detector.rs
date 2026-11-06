@@ -338,6 +338,31 @@ mod tests {
         );
     }
 
+    /// Re-selecting the model keeps the detector's pacing and thread budget,
+    /// so a model change never silently returns the detector to other tuning.
+    #[test]
+    fn write_keeps_the_detectors_rate_and_threads() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.yaml");
+        std::fs::write(
+            &cfg,
+            "vision:\n  detection_demand: on_demand\n  detector:\n    model_id: old\n    model_path: /m/old.onnx\n    rate_hz: 5.0\n    threads: 2\n",
+        )
+        .unwrap();
+
+        write_detector_block(&cfg, "new-id", "/m/new-id.onnx").unwrap();
+
+        let parsed = read_yaml(&cfg);
+        let vision = parsed.get("vision").unwrap();
+        let detector = vision.get("detector").unwrap();
+        assert_eq!(detector.get("rate_hz").and_then(|v| v.as_f64()), Some(5.0));
+        assert_eq!(detector.get("threads").and_then(|v| v.as_u64()), Some(2));
+        assert_eq!(
+            vision.get("detection_demand").and_then(|v| v.as_str()),
+            Some("on_demand")
+        );
+    }
+
     #[test]
     fn resolve_prefers_the_exact_upload_name_then_a_board_download() {
         let dir = tempfile::tempdir().unwrap();

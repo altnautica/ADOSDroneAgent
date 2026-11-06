@@ -111,6 +111,28 @@ impl HostServices for VisionTestHost {
             (Value::from("camera_id"), Value::from(camera_id.as_str())),
         ]))
     }
+
+    async fn vision_request_detection(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        // Echo the lease back with the plugin the host attributed it to.
+        let camera_id = match args {
+            Value::Map(m) => m
+                .iter()
+                .find(|(k, _)| k.as_str() == Some("camera_id"))
+                .and_then(|(_, v)| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => String::new(),
+        };
+        Ok(Value::Map(vec![
+            (Value::from("camera_id"), Value::from(camera_id.as_str())),
+            (Value::from("detecting"), Value::Boolean(true)),
+            (Value::from("owner"), Value::from(plugin_id)),
+        ]))
+    }
 }
 
 fn caps(items: &[&str]) -> BTreeSet<String> {
@@ -354,6 +376,65 @@ async fn designate_track_routes_to_the_host() {
         _ => None,
     };
     assert_eq!(camera, Some("uvc-0"));
+}
+
+#[tokio::test]
+async fn request_detection_routes_to_the_host_under_the_designate_grant() {
+    let h = harness();
+    let granted = h
+        .issuer
+        .mint(PLUGIN_ID, &caps(&["vision.track.designate"]), 600)
+        .to_token_string();
+    let mut client = connect(&h.path).await;
+    send(&mut client, &request("hello", &granted, Value::Map(vec![]))).await;
+    let _ = recv(&mut client).await; // ready
+
+    let args = ados_protocol::vision_rpc::request_detection_args("belly", 6_000);
+    send(
+        &mut client,
+        &request(methods::REQUEST_DETECTION, &granted, args),
+    )
+    .await;
+    let resp = recv(&mut client).await;
+    assert_eq!(
+        resp.error, None,
+        "granted cap must not produce a gate error"
+    );
+    assert_eq!(args_bool(&resp, "detecting"), Some(true));
+    let owner = match &resp.args {
+        Value::Map(m) => m
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("owner"))
+            .and_then(|(_, v)| v.as_str()),
+        _ => None,
+    };
+    assert_eq!(owner, Some(PLUGIN_ID));
+}
+
+#[tokio::test]
+async fn request_detection_is_denied_without_the_designate_grant() {
+    let h = harness();
+    let token = h
+        .issuer
+        .mint(PLUGIN_ID, &caps(&["vision.frame.read"]), 600)
+        .to_token_string();
+    let mut client = connect(&h.path).await;
+    send(&mut client, &request("hello", &token, Value::Map(vec![]))).await;
+    let _ = recv(&mut client).await; // ready
+    send(
+        &mut client,
+        &request(
+            methods::REQUEST_DETECTION,
+            &token,
+            ados_protocol::vision_rpc::request_detection_args("belly", 6_000),
+        ),
+    )
+    .await;
+    let resp = recv(&mut client).await;
+    assert_eq!(
+        resp.error.as_deref(),
+        Some("capability_denied: vision.track.designate")
+    );
 }
 
 #[tokio::test]

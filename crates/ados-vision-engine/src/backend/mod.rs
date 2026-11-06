@@ -148,6 +148,9 @@ pub struct BackendPrefs<'a> {
     /// `vision.mock_target`: a resolved mock backend emits the orbiting
     /// synthetic target instead of no detections.
     pub mock_target: bool,
+    /// `vision.detector.threads`: intra-op threads an ONNX detection session
+    /// runs on (the re-id model always runs on one).
+    pub onnx_threads: usize,
 }
 
 /// Whether the build carries the ONNX CPU backend.
@@ -186,7 +189,7 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
             prefs.hailo_socket_path.clone(),
             "hailo",
         )),
-        "onnx" => onnx_backend_or_unavailable(),
+        "onnx" => onnx_backend_or_unavailable(prefs.onnx_threads),
         "mock" => mock_backend(prefs.mock_target),
         unknown => Box::new(UnavailableBackend::new(
             unknown,
@@ -221,10 +224,12 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
 
 /// The ONNX CPU backend when the build carries it, else an unavailable backend
 /// that says so.
-fn onnx_backend_or_unavailable() -> Box<dyn VisionBackend> {
+fn onnx_backend_or_unavailable(
+    #[allow(unused_variables)] threads: usize,
+) -> Box<dyn VisionBackend> {
     #[cfg(feature = "onnx")]
     {
-        Box::new(OnnxBackend::new())
+        Box::new(OnnxBackend::new(threads))
     }
     #[cfg(not(feature = "onnx"))]
     {

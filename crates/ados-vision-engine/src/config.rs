@@ -7,10 +7,13 @@
 //! does not run vision.
 
 use ados_config::cameras::{camera_entries, CaptureCamera, InvalidCamera};
-use ados_protocol::framebus::{
-    DetectionHead, FrameFormat, ModelExecution, ModelKind, ModelMetadata,
-};
 use serde::Deserialize;
+
+use crate::engine::{DetectionDemandMode, DetectionPolicy};
+
+mod models;
+use models::default_threads;
+pub use models::{DetectorConfig, ReidConfig};
 
 fn default_socket_dir() -> String {
     "/run/ados".to_string()
@@ -34,129 +37,12 @@ fn default_shm_budget_mb() -> u32 {
     (crate::ring::DEFAULT_RING_BUDGET_BYTES / (1024 * 1024)) as u32
 }
 
-fn default_detector_dim() -> u32 {
-    640
+fn default_designate_hold_s() -> f32 {
+    30.0
 }
 
-fn default_reid_width() -> u32 {
-    128
-}
-
-fn default_reid_height() -> u32 {
-    256
-}
-
-/// A detector model the engine auto-loads and runs on every captured frame to
-/// produce the `vision.detection` stream that follow / designate plugins
-/// subscribe to. Absent ⇒ the engine produces no detections on its own (a
-/// plugin must drive inference through the `vision.sock` register/infer RPCs).
-#[derive(Debug, Clone, Deserialize)]
-pub struct DetectorConfig {
-    /// Model id stamped on every published `DetectionBatch`.
-    pub model_id: String,
-    /// Resolved path to the model file (`.rknn` on an NPU board, `.onnx` on a
-    /// CPU build). Provisioning resolves a registry id to this path; a sideload
-    /// sets it directly.
-    pub model_path: String,
-    #[serde(default = "default_detector_dim")]
-    pub input_width: u32,
-    #[serde(default = "default_detector_dim")]
-    pub input_height: u32,
-    /// Output-head layout: `yolo8` (default) or `yolo5`.
-    #[serde(default)]
-    pub head: String,
-    /// Class labels in output-index order (e.g. the COCO-80 list). Empty ⇒
-    /// detections carry no class name (the track id still flows).
-    #[serde(default)]
-    pub class_labels: Vec<String>,
-    /// Target inference rate in Hz. Absent (or `<= 0`) ⇒ unpaced (run on every
-    /// captured frame), which is the historical single-detector behaviour. Set it
-    /// to pace this detector so it shares the one accelerator with other models
-    /// (`person@15Hz` + `depth@5Hz`) instead of monopolising it.
-    #[serde(default)]
-    pub rate_hz: Option<f32>,
-    /// Scheduling priority (higher runs first when several models are due at
-    /// once). Absent ⇒ a high default so a lone detector always wins.
-    #[serde(default)]
-    pub priority: Option<u8>,
-}
-
-impl DetectorConfig {
-    /// Build the engine-run [`ModelMetadata`] for this detector. Frames are fed
-    /// as RGB24; the head defaults to YOLOv8 (the current export).
-    pub fn to_metadata(&self) -> ModelMetadata {
-        ModelMetadata {
-            id: self.model_id.clone(),
-            kind: ModelKind::Detection,
-            execution: ModelExecution::EngineRun,
-            input_width: if self.input_width == 0 {
-                default_detector_dim()
-            } else {
-                self.input_width
-            },
-            input_height: if self.input_height == 0 {
-                default_detector_dim()
-            } else {
-                self.input_height
-            },
-            input_format: FrameFormat::Rgb24,
-            output_classes: self.class_labels.clone(),
-            model_path: Some(self.model_path.clone()),
-            head: match self.head.to_ascii_lowercase().as_str() {
-                "yolo5" | "yolov5" => DetectionHead::Yolo5,
-                _ => DetectionHead::Yolo8,
-            },
-        }
-    }
-}
-
-/// An appearance (re-id) model the engine loads alongside the detector. Its
-/// embeddings feed the re-id tracker (`reid_enabled`) and any subscriber that
-/// asks for embeddings on the detection wire. Absent (or failing to load) ⇒
-/// both fall back to the model-free colour histogram descriptor.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ReidConfig {
-    /// Model id the engine registers the re-id model under; it must match the
-    /// `reid_model_id` the tracker looks up.
-    pub model_id: String,
-    /// Resolved path to the re-id model file (`.rknn` on an NPU board, `.onnx`
-    /// on a CPU build). Provisioning resolves a registry id to this path; a
-    /// sideload sets it directly.
-    pub model_path: String,
-    /// Model input width. OSNet-class person re-id is portrait: 128 wide.
-    #[serde(default = "default_reid_width")]
-    pub input_width: u32,
-    /// Model input height. OSNet-class person re-id is portrait: 256 tall.
-    #[serde(default = "default_reid_height")]
-    pub input_height: u32,
-}
-
-impl ReidConfig {
-    /// Build the engine-run [`ModelMetadata`] for this re-id model. Crops are fed
-    /// as RGB24 at the model's input size; it carries no class labels (an
-    /// embedder, not a detector). The head is unused for embedding but the
-    /// metadata requires one, so it defaults to YOLOv8.
-    pub fn to_metadata(&self) -> ModelMetadata {
-        ModelMetadata {
-            id: self.model_id.clone(),
-            kind: ModelKind::Tracking,
-            execution: ModelExecution::EngineRun,
-            input_width: if self.input_width == 0 {
-                default_reid_width()
-            } else {
-                self.input_width
-            },
-            input_height: if self.input_height == 0 {
-                default_reid_height()
-            } else {
-                self.input_height
-            },
-            input_format: FrameFormat::Rgb24,
-            output_classes: Vec::new(),
-            model_path: Some(self.model_path.clone()),
-            head: DetectionHead::Yolo8,
-        }
-    }
+fn default_max_box_area_frac() -> f32 {
+    0.5
 }
 
 /// The `vision:` config block.
@@ -241,14 +127,30 @@ pub struct VisionConfig {
     /// camera per request.
     #[serde(default)]
     pub designate_camera: Option<String>,
-    /// A detector the engine auto-loads and runs on every captured frame to
-    /// produce the detection stream. Absent ⇒ no engine-driven detections.
+    /// A detector the engine auto-loads and runs on the cameras detection is
+    /// wanted on, to produce the detection stream. Absent ⇒ no engine-driven
+    /// detections.
     #[serde(default)]
     pub detector: Option<DetectorConfig>,
     /// The appearance (re-id) model the engine loads whenever it is set. Absent
     /// ⇒ embeddings come from the colour histogram descriptor.
     #[serde(default)]
     pub reid: Option<ReidConfig>,
+    /// When the detector runs: `on_demand` (default) only on a camera some
+    /// consumer holds a lease on; `always` on every captured camera.
+    #[serde(default)]
+    pub detection_demand: DetectionDemandMode,
+    /// Seconds of detection an operator designation holds on its camera.
+    #[serde(default = "default_designate_hold_s")]
+    pub designate_hold_s: f32,
+    /// ffmpeg threads each RTSP decoder runs on. Default 1.
+    #[serde(default = "default_threads")]
+    pub decode_threads: u32,
+    /// Detections whose box covers more than this fraction of the frame are
+    /// dropped before tracking (a person that close is under a metre from the
+    /// lens, never a follow target). Default 0.5; `1` keeps every box.
+    #[serde(default = "default_max_box_area_frac")]
+    pub max_box_area_frac: f32,
 }
 
 impl Default for VisionConfig {
@@ -275,6 +177,10 @@ impl Default for VisionConfig {
             designate_camera: None,
             detector: None,
             reid: None,
+            detection_demand: DetectionDemandMode::default(),
+            designate_hold_s: default_designate_hold_s(),
+            decode_threads: default_threads(),
+            max_box_area_frac: default_max_box_area_frac(),
         }
     }
 }
@@ -341,6 +247,14 @@ impl VisionConfig {
             detector: Option<DetectorConfig>,
             #[serde(default)]
             reid: Option<ReidConfig>,
+            #[serde(default)]
+            detection_demand: DetectionDemandMode,
+            #[serde(default = "default_designate_hold_s")]
+            designate_hold_s: f32,
+            #[serde(default = "default_threads")]
+            decode_threads: u32,
+            #[serde(default = "default_max_box_area_frac")]
+            max_box_area_frac: f32,
         }
 
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -407,7 +321,37 @@ impl VisionConfig {
             designate_camera: v.designate_camera,
             detector: v.detector,
             reid: v.reid,
+            detection_demand: v.detection_demand,
+            designate_hold_s: v.designate_hold_s,
+            decode_threads: v.decode_threads,
+            max_box_area_frac: v.max_box_area_frac,
         }
+    }
+
+    /// The engine's detection policy from the demand keys. A negative or
+    /// non-finite designation hold grants nothing; a non-finite box cutoff
+    /// keeps every box.
+    pub fn detection_policy(&self) -> DetectionPolicy {
+        let hold_s = if self.designate_hold_s.is_finite() {
+            self.designate_hold_s.max(0.0)
+        } else {
+            0.0
+        };
+        DetectionPolicy {
+            mode: self.detection_demand,
+            designate_hold_ms: (hold_s as f64 * 1000.0).round() as u64,
+            max_box_area_frac: if self.max_box_area_frac.is_finite() {
+                self.max_box_area_frac
+            } else {
+                1.0
+            },
+        }
+    }
+
+    /// The detector's inference threads (at least one), one when no detector
+    /// is configured.
+    pub fn detector_threads(&self) -> u32 {
+        self.detector.as_ref().map_or(1, |d| d.threads.max(1))
     }
 
     /// The slot count to size camera rings with, clamped to the range the ring

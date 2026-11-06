@@ -200,3 +200,78 @@ fn the_vehicle_tab_polls_nav_status_at_two_hertz() {
     assert_eq!(nav.path, "/api/v1/nav/status");
     assert_eq!(nav.period, Duration::from_millis(500));
 }
+
+fn vision_status(main: bool, belly: bool) -> Value {
+    json!({
+        "models": [],
+        "backend_state": "ready",
+        "detection": {"mode": "on_demand", "cameras": {
+            "main": {"detecting": main, "leases": []},
+            "belly": {"detecting": belly, "leases": []},
+        }},
+    })
+}
+
+#[test]
+fn the_autonomy_block_names_the_cameras_being_detected() {
+    let mut app = live_app();
+    land(&mut app, ResourceId::NavStatus, nav_status());
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(true, false),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("detecting: main"), "{text}");
+    assert!(!text.contains("belly"), "{text}");
+}
+
+#[test]
+fn an_idle_detector_reads_idle_even_with_nothing_publishing() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        json!({"pose": null, "scan": null, "nav": null, "follow": null, "map": null}),
+    );
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(false, false),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("Detector"), "{text}");
+    assert!(text.contains("idle"), "{text}");
+    assert!(text.contains("no autonomy plugin is publishing"), "{text}");
+}
+
+#[test]
+fn an_unreachable_engine_drops_the_detector_row() {
+    let mut app = live_app();
+    land(&mut app, ResourceId::NavStatus, nav_status());
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(true, true),
+    );
+    let id = ResourceId::VisionStatus;
+    if let Some(slot) = app.core.res.get_mut(&id) {
+        slot.error = Some("vision engine unavailable".into());
+        slot.code = Some(503);
+    }
+    app.tabs.vehicle.on_resource(&mut app.core, &id);
+    let text = draw(&mut app, 120, 40);
+    assert!(!text.contains("Detector"), "{text}");
+}
+
+#[test]
+fn the_vehicle_tab_polls_vision_status_every_second() {
+    let app = live_app();
+    let subs = app.tabs.vehicle.subs(&app.core);
+    let vision = subs
+        .iter()
+        .find(|s| s.id == ResourceId::VisionStatus)
+        .expect("vision status subscribed");
+    assert_eq!(vision.path, "/api/vision/status");
+    assert_eq!(vision.period, Duration::from_millis(1000));
+}

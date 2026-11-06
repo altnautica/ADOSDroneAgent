@@ -299,6 +299,14 @@ impl HostServices for RealHost {
         self.serve_vision_designate_track(plugin_id, args).await
     }
 
+    async fn vision_request_detection(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.serve_vision_request_detection(plugin_id, args).await
+    }
+
     async fn camera_control_set(
         &self,
         _plugin_id: &str,

@@ -1,8 +1,9 @@
 //! The autonomy readings from `GET /api/v1/nav/status`: the follow state, the
-//! navigation source, the lidar and the live map session.
+//! navigation source, the lidar and the live map session; and the detector's
+//! per-camera state from `GET /api/vision/status`.
 //!
-//! The route answers each kind as `{ts_ms, age_ms, data}`, or `null` when no
-//! plugin has published it, so every part here is optional and nothing is
+//! The nav route answers each kind as `{ts_ms, age_ms, data}`, or `null` when
+//! no plugin has published it, so every part here is optional and nothing is
 //! filled with a default.
 
 use serde_json::Value;
@@ -12,6 +13,10 @@ pub const NAV_STATUS_PATH: &str = "/api/v1/nav/status";
 
 /// A kind older than this is shown as stale rather than as current.
 pub const STALE_AFTER_MS: u64 = 3_000;
+
+/// The vision engine's status read (its `detection` block names the cameras
+/// the detector is running on).
+pub const VISION_STATUS_PATH: &str = "/api/vision/status";
 
 fn f(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(Value::as_f64).filter(|x| x.is_finite())
@@ -150,6 +155,45 @@ impl Autonomy {
     }
 }
 
+/// Where the detector runs: the engine detects on a camera only while a
+/// consumer holds it (`on_demand`), or on every captured camera (`always`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Detection {
+    pub mode: Option<String>,
+    /// The cameras detection is running on, sorted.
+    pub detecting: Vec<String>,
+}
+
+impl Detection {
+    /// The `detection` block of a `/api/vision/status` body; `None` when the
+    /// engine does not report one.
+    pub fn from_status(v: &Value) -> Option<Self> {
+        let d = v.get("detection").filter(|d| d.is_object())?;
+        let mut detecting: Vec<String> = d
+            .get("cameras")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter(|(_, cam)| cam.get("detecting").and_then(Value::as_bool) == Some(true))
+            .map(|(id, _)| id.clone())
+            .collect();
+        detecting.sort();
+        Some(Self {
+            mode: s(d, "mode"),
+            detecting,
+        })
+    }
+
+    /// `idle`, or `detecting: main, belly`.
+    pub fn word(&self) -> String {
+        if self.detecting.is_empty() {
+            "idle".to_string()
+        } else {
+            format!("detecting: {}", self.detecting.join(", "))
+        }
+    }
+}
+
 /// How a state word reads: good, a caution, a fault, or neutral. The panel
 /// pairs each with a symbol and a colour, and always prints the word.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,6 +286,38 @@ mod tests {
             &json!({"scan": {"ts_ms": 1, "age_ms": 1, "data": {"ranges_m": [0.0, 0.0]}}}),
         );
         assert_eq!(a.lidar.unwrap().min_range_m, None);
+    }
+
+    #[test]
+    fn detection_names_the_cameras_the_detector_runs_on() {
+        let d = Detection::from_status(&json!({"detection": {
+            "mode": "on_demand",
+            "cameras": {
+                "main": {"detecting": true, "leases": [{"owner": "cockpit", "remaining_ms": 4100}]},
+                "belly": {"detecting": false, "leases": []},
+                "aft": {"detecting": true, "leases": []},
+            },
+        }}))
+        .unwrap();
+        assert_eq!(d.mode.as_deref(), Some("on_demand"));
+        assert_eq!(d.detecting, vec!["aft", "main"]);
+        assert_eq!(d.word(), "detecting: aft, main");
+    }
+
+    #[test]
+    fn detection_with_no_camera_held_reads_idle() {
+        let d = Detection::from_status(&json!({"detection": {
+            "mode": "on_demand",
+            "cameras": {"main": {"detecting": false, "leases": []}},
+        }}))
+        .unwrap();
+        assert_eq!(d.word(), "idle");
+    }
+
+    #[test]
+    fn a_status_without_a_detection_block_has_no_detection() {
+        assert_eq!(Detection::from_status(&json!({"models": []})), None);
+        assert_eq!(Detection::from_status(&json!({"detection": null})), None);
     }
 
     #[test]

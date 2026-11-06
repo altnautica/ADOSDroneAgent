@@ -9,7 +9,7 @@ use ratatui::Frame;
 
 use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx};
-use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
+use crate::model::autonomy::{Autonomy, Detection, NAV_STATUS_PATH, VISION_STATUS_PATH};
 use crate::model::fix_label;
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
 use crate::poll::{ResourceId, Sub};
@@ -34,6 +34,9 @@ pub struct VehicleTab {
     fc: FcIdent,
     bat: Option<Batteries>,
     auto: Option<Autonomy>,
+    /// The detector's per-camera state; `None` while the engine is
+    /// unreachable or does not report it.
+    detection: Option<Detection>,
     hist: VehicleHistory,
 }
 
@@ -272,12 +275,21 @@ impl Tab for VehicleTab {
             Sub::every_ms(ResourceId::Snapshot, "/api/v1/dashboard/snapshot", 2000),
             Sub::every_ms(ResourceId::Battery, "/api/v1/battery", 2000),
             Sub::every_ms(ResourceId::NavStatus, NAV_STATUS_PATH, 500),
+            Sub::every_ms(ResourceId::VisionStatus, VISION_STATUS_PATH, 1000),
         ]
     }
 
     fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
-        let Some(v) = core
-            .slot(id)
+        let slot = core.slot(id);
+        if *id == ResourceId::VisionStatus {
+            // An unreachable engine (a 503) is no detector, not the last answer.
+            self.detection = slot
+                .filter(|s| s.error.is_none())
+                .and_then(|s| s.value.as_ref())
+                .and_then(Detection::from_status);
+            return;
+        }
+        let Some(v) = slot
             .filter(|s| s.error.is_none())
             .and_then(|s| s.value.as_ref())
         else {
@@ -341,7 +353,14 @@ impl Tab for VehicleTab {
         let bottom =
             Layout::horizontal([Constraint::Min(40), Constraint::Length(44)]).split(rows[2]);
         packs::render(f, bottom[0], core, self.bat.as_ref(), packs_hidden);
-        autonomy::render(f, bottom[1], core, self.auto.as_ref(), packs_hidden);
+        autonomy::render(
+            f,
+            bottom[1],
+            core,
+            self.auto.as_ref(),
+            self.detection.as_ref(),
+            packs_hidden,
+        );
     }
 
     fn context_line(&self, _core: &Core) -> Option<String> {

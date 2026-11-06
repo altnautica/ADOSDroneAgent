@@ -121,6 +121,9 @@ pub enum Method {
     VisionPublishDetection,
     VisionSubscribeDetections,
     VisionDesignateTrack,
+    /// Lease the engine's detector on a camera (renew by repeating, release
+    /// with a zero hold).
+    VisionRequestDetection,
     /// Arm the per-connection front-panel button push stream. Like the vision
     /// subscriptions this never reaches the facade: the server short-circuits it
     /// and pushes `button.deliver` events.
@@ -154,6 +157,9 @@ impl Method {
         }
         if name == vision_methods::DESIGNATE_TRACK {
             return Some(Self::VisionDesignateTrack);
+        }
+        if name == vision_methods::REQUEST_DETECTION {
+            return Some(Self::VisionRequestDetection);
         }
         if name == BUTTON_SUBSCRIBE {
             return Some(Self::ButtonSubscribe);
@@ -276,6 +282,7 @@ impl Method {
             Self::VisionPublishDetection => vision_methods::PUBLISH_DETECTION,
             Self::VisionSubscribeDetections => vision_methods::SUBSCRIBE_DETECTIONS,
             Self::VisionDesignateTrack => vision_methods::DESIGNATE_TRACK,
+            Self::VisionRequestDetection => vision_methods::REQUEST_DETECTION,
             Self::ButtonSubscribe => BUTTON_SUBSCRIBE,
         }
     }
@@ -606,6 +613,7 @@ mod tests {
         Method::VisionPublishDetection,
         Method::VisionSubscribeDetections,
         Method::VisionDesignateTrack,
+        Method::VisionRequestDetection,
         Method::ButtonSubscribe,
         Method::WhepOffer,
         Method::WhepClose,
@@ -681,6 +689,7 @@ mod tests {
                 "vision.detection.subscribe",
             ),
             (vision_methods::DESIGNATE_TRACK, "vision.track.designate"),
+            (vision_methods::REQUEST_DETECTION, "vision.track.designate"),
         ] {
             let row = DISPATCH_METHODS
                 .iter()

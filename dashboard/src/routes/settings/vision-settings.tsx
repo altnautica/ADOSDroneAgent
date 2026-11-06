@@ -9,6 +9,10 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { useConfig } from "@/hooks/use-config";
 import { visionBackendOptions } from "@/lib/vision-backends";
+import { detectionDemandOptions } from "@/lib/vision-demand";
+
+/** The detector's per-camera rate when `detector.rate_hz` is absent. */
+const DEFAULT_DETECTOR_RATE_HZ = 3;
 
 export function VisionSettings() {
   const { t } = useTranslation();
@@ -97,6 +101,94 @@ export function VisionSettings() {
                 <div className="border-t border-border pt-5">
                   <ReadRow label={t("settingsMore.vision.modelsDir")} value={vision.models_dir} />
                 </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="pt-5 pb-5 space-y-5">
+              <div className="space-y-4">
+                <div>
+                  <div className="text-sm font-semibold">{t("settingsMore.vision.demandTitle")}</div>
+                  <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                    {t("settingsMore.vision.demandHint")}
+                  </p>
+                </div>
+                <ConfigEnumField
+                  configKey="vision.detection_demand"
+                  value={vision.detection_demand}
+                  options={detectionDemandOptions(t)}
+                  columns={2}
+                />
+              </div>
+              <div className="border-t border-border pt-5">
+                <ConfigNumberField
+                  configKey="vision.designate_hold_s"
+                  id="vision-designate-hold"
+                  label={t("settingsMore.vision.designateHoldLabel")}
+                  hint={t("settingsMore.vision.designateHoldHint")}
+                  value={vision.designate_hold_s}
+                  integer={false}
+                  min={0}
+                  max={60}
+                />
+              </div>
+              <div className="border-t border-border pt-5">
+                <ConfigNumberField
+                  configKey="vision.max_box_area_frac"
+                  id="vision-max-box-area"
+                  label={t("settingsMore.vision.maxBoxAreaLabel")}
+                  hint={t("settingsMore.vision.maxBoxAreaHint")}
+                  value={vision.max_box_area_frac}
+                  integer={false}
+                  min={0}
+                  max={1}
+                />
+              </div>
+              <div className="border-t border-border pt-5">
+                <ConfigNumberField
+                  configKey="vision.decode_threads"
+                  id="vision-decode-threads"
+                  label={t("settingsMore.vision.decodeThreadsLabel")}
+                  hint={t("settingsMore.vision.decodeThreadsHint")}
+                  value={vision.decode_threads}
+                  integer
+                  min={1}
+                />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="pt-5 pb-5 space-y-5">
+              <div className="text-sm font-semibold">{t("settingsMore.vision.detectorTitle")}</div>
+              {vision.detector ? (
+                <>
+                  <ConfigNumberField
+                    configKey="vision.detector.rate_hz"
+                    id="vision-detector-rate"
+                    label={t("settingsMore.vision.detectorRateLabel")}
+                    hint={t("settingsMore.vision.detectorRateHint")}
+                    value={vision.detector.rate_hz ?? DEFAULT_DETECTOR_RATE_HZ}
+                    integer={false}
+                    min={0}
+                  />
+                  <div className="border-t border-border pt-5">
+                    <ConfigNumberField
+                      configKey="vision.detector.threads"
+                      id="vision-detector-threads"
+                      label={t("settingsMore.vision.detectorThreadsLabel")}
+                      hint={t("settingsMore.vision.detectorThreadsHint")}
+                      value={vision.detector.threads}
+                      integer
+                      min={1}
+                    />
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  {t("settingsMore.vision.noDetector")}
+                </p>
               )}
             </CardContent>
           </Card>

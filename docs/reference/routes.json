@@ -2190,6 +2190,15 @@
     {
       "method": "POST",
       "notes": null,
+      "path": "/api/vision/demand",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
       "path": "/api/vision/designate",
       "public": false,
       "relay_forbidden": false,

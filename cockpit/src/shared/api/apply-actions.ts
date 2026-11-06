@@ -97,13 +97,15 @@ export interface ConfigWriteResult {
 
 // A single dot-path config write (the same PUT /api/config the GCS uses) that
 // surfaces the agent's soft-error bodies as real failures, so a page can toast
-// and roll back instead of reporting a refused write as saved. The write is a
-// string; the agent coerces it to the leaf's live type (a bool key accepts
-// "true"/"false", an int key a numeric string, etc.). `force` overrides the
-// agent's armed interlock on link keys, sent only after the operator confirmed.
+// and roll back instead of reporting a refused write as saved. A string is
+// coerced by the agent to the leaf's live type (a bool key accepts
+// "true"/"false", an int key a numeric string, etc.); a number is taken as
+// sent, which is how a key whose current value is null (an optional field not
+// yet set) gets a numeric value. `force` overrides the agent's armed interlock
+// on link keys, sent only after the operator confirmed.
 export async function putConfigChecked(
   key: string,
-  value: string,
+  value: string | number,
   opts: { force?: boolean } = {},
 ): Promise<ConfigWriteResult> {
   const res = await apiFetch<ConfigWriteResult>("/api/config", {

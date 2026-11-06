@@ -1139,7 +1139,31 @@
       "cacheHint": "How much disk the downloaded-model cache may use before older models are pruned.",
       "modelsDir": "Models directory",
       "managedElsewhere": "Managed elsewhere",
-      "managedElsewhereBody": "The active detector model is not a config key here; it is selected in Mission Control's vision hub, which writes the engine's detector and restarts it."
+      "managedElsewhereBody": "The active detector model is not a config key here; it is selected in Mission Control's vision hub, which writes the engine's detector and restarts it.",
+      "demandTitle": "When detection runs",
+      "demandHint": "Detection costs CPU on every camera it runs on. On demand runs it only on cameras something is using; capture, video and the frame bus keep running either way.",
+      "demandModes": {
+        "on_demand": {
+          "label": "On demand",
+          "description": "Only on a camera a consumer holds: a cockpit or Mission Control overlay on screen, an active follow, or a recent designation."
+        },
+        "always": {
+          "label": "Always",
+          "description": "On every captured camera, all the time. For bench and diagnostic use."
+        }
+      },
+      "designateHoldLabel": "Designation hold (s)",
+      "designateHoldHint": "How long a target designation keeps detection running on its camera.",
+      "maxBoxAreaLabel": "Largest box (fraction of frame)",
+      "maxBoxAreaHint": "Detections whose box covers more of the frame than this are dropped before tracking, from 0 to 1. A person that close is within a metre of the lens.",
+      "decodeThreadsLabel": "Decoder threads",
+      "decodeThreadsHint": "Threads each network camera's video decoder may use.",
+      "detectorTitle": "Detector pacing",
+      "detectorRateLabel": "Detection rate (Hz)",
+      "detectorRateHint": "Inference rate per camera. 0 runs on every captured frame.",
+      "detectorThreadsLabel": "Inference threads",
+      "detectorThreadsHint": "CPU threads one inference may use. More threads finish an inference sooner but cost more CPU on a small board.",
+      "noDetector": "Detector pacing is available once a detector model is selected."
     }
   },
   "extensions": {

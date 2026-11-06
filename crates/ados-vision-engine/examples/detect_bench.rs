@@ -16,7 +16,7 @@
 //!
 //! ```text
 //! cargo run --release -p ados-vision-engine --features onnx --example detect_bench -- \
-//!     --model yolox_tiny_person_640.onnx --frames frames/ [--n 100] [--warmup 3]
+//!     --model yolox_tiny_person_640.onnx --frames frames/ [--n 100] [--warmup 3] [--threads 1]
 //! ```
 //!
 //! A self-describing model file (`ados.*` metadata) sets its own head, classes
@@ -40,6 +40,7 @@ struct Args {
     input: (u32, u32),
     head: DetectionHead,
     classes: Vec<String>,
+    threads: usize,
 }
 
 fn parse_args() -> Result<Args> {
@@ -51,6 +52,7 @@ fn parse_args() -> Result<Args> {
         input: (640, 640),
         head: DetectionHead::Yolo8,
         classes: Vec::new(),
+        threads: 1,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -60,6 +62,7 @@ fn parse_args() -> Result<Args> {
             "--frames" => args.frames = PathBuf::from(value()?),
             "--n" => args.n = value()?.parse().context("--n")?,
             "--warmup" => args.warmup = value()?.parse().context("--warmup")?,
+            "--threads" => args.threads = value()?.parse().context("--threads")?,
             "--input" => {
                 let v = value()?;
                 let (w, h) = v.split_once('x').ok_or_else(|| anyhow!("--input WxH"))?;
@@ -83,7 +86,7 @@ fn parse_args() -> Result<Args> {
         }
     }
     if args.model.as_os_str().is_empty() || args.frames.as_os_str().is_empty() {
-        bail!("usage: detect_bench --model <file.onnx> --frames <dir> [--n N] [--warmup N]");
+        bail!("usage: detect_bench --model <file.onnx> --frames <dir> [--n N] [--warmup N] [--threads N]");
     }
     Ok(args)
 }
@@ -156,7 +159,7 @@ fn main() -> Result<()> {
         model_path: Some(args.model.to_string_lossy().into_owned()),
         head: args.head,
     };
-    let model = OnnxBackend::new()
+    let model = OnnxBackend::new(args.threads)
         .load(&meta)
         .with_context(|| format!("load {}", args.model.display()))?;
 

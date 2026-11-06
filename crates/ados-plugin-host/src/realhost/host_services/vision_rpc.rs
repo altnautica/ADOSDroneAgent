@@ -106,4 +106,20 @@ impl RealHost {
             .await
             .map_err(|e| HostError::Rpc(e.0))
     }
+
+    /// Forward a detection lease request with the plugin's id stamped as the
+    /// owner, so one plugin can neither release nor renew another's lease.
+    pub(super) async fn serve_vision_request_detection(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        let Some(client) = self.vision.as_ref() else {
+            return Ok(not_implemented("vision.request_detection"));
+        };
+        client
+            .request_detection(&ados_protocol::vision_rpc::with_owner(args, plugin_id))
+            .await
+            .map_err(|e| HostError::Rpc(e.0))
+    }
 }

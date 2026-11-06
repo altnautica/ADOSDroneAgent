@@ -237,12 +237,21 @@ pub fn demuxer_args(url: &str) -> Vec<String> {
 /// ffmpeg discards the packets it reads while probing the stream (the first
 /// tens of pictures), so every decoded frame would pair with an identity that
 /// many pictures older. A 32-byte probe keeps the start-up delay as short.
+///
+/// `-threads` (decode) and `-filter_threads` (the scale) hold the process to
+/// `settings.decode_threads` threads; ffmpeg's default is one per core, which
+/// a companion board's flight stack cannot spare.
 pub fn decoder_args(settings: &RtspSettings) -> Vec<String> {
     let scale = format!("scale={}:{}", settings.width, settings.height);
+    let threads = settings.decode_threads.to_string();
     [
         "-hide_banner",
         "-loglevel",
         "error",
+        "-threads",
+        &threads,
+        "-filter_threads",
+        &threads,
         "-probesize",
         "32",
         "-flags",
@@ -274,6 +283,8 @@ pub struct RtspSettings {
     pub width: u32,
     pub height: u32,
     pub format: FrameFormat,
+    /// ffmpeg decode and filter threads (`vision.decode_threads`).
+    pub decode_threads: u32,
 }
 
 struct Running {

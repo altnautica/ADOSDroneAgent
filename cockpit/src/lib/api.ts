@@ -255,6 +255,30 @@ export function designateTarget(
   });
 }
 
+/** The `POST /api/vision/demand` answer: whether the engine now runs
+ *  detection on that camera, and until when (engine clock, ms), if leased. */
+export interface DetectionDemandResponse {
+  camera_id: string;
+  detecting: boolean;
+  until_ms: number | null;
+}
+
+/** Ask the vision engine to run detection on `cameraId` for `holdS` seconds
+ *  (0 releases this owner's lease). Repeat before it expires to keep it.
+ *  Throws `ApiError` on a 400 (camera not captured) or 503 (no vision engine). */
+export function requestDetection(
+  cameraId: string,
+  holdS: number,
+  owner = "cockpit",
+  signal?: AbortSignal,
+): Promise<DetectionDemandResponse> {
+  return apiFetch<DetectionDemandResponse>("/api/vision/demand", {
+    method: "POST",
+    body: { camera_id: cameraId, hold_s: holdS, owner },
+    signal,
+  });
+}
+
 /** Write one plugin config key (`PUT /api/plugins/{id}/config`). */
 export function putPluginConfig(pluginId: string, key: string, value: unknown): Promise<unknown> {
   return apiFetch(`/api/plugins/${encodeURIComponent(pluginId)}/config`, {

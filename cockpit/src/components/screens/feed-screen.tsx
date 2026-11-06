@@ -7,7 +7,8 @@
 //
 // Feed request budget with no extensions enabled (drone): /api/telemetry 5/s,
 // /api/status/full 1/s (shell), /api/v1/battery 0.2/s (shell), /api/wfb 0.1/s
-// (shell), /api/video/roster 1/30 s — about 6.3/s.
+// (shell), /api/video/roster 1/30 s — about 6.3/s. A node with a vision path
+// adds POST /api/vision/demand 0.5/s per shown target overlay (main and PiP).
 
 import { useEffect, useMemo, type CSSProperties } from "react";
 
@@ -121,6 +122,7 @@ export function FeedScreen() {
             cameraYawOffsetDeg={
               cameras.find((c) => c.id === resolveActiveCameraId(activeCameraId, cameras))?.role === "down" ? null : 0
             }
+            holdDetection={localVisionCapable}
           />
         ) : null}
       </>
@@ -152,6 +154,7 @@ export function FeedScreen() {
         camera={pipCamera}
         streamNonce={streamNonce}
         visionCapable={visionCapable}
+        holdDetection={localVisionCapable}
         widthClass={widthClass}
       />
     ) : null,

@@ -116,6 +116,7 @@ async fn engine_with(reid: bool) -> Arc<VisionEngine> {
         TrackerConfig::default(),
         false,
         reid.then(|| "reid".to_string()),
+        DetectionPolicy::default(),
     );
     e.register_model(model("det", ModelKind::Detection, 32, 32))
         .await

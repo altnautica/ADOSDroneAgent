@@ -29,10 +29,12 @@ use tokio::sync::{broadcast, Mutex, Semaphore};
 use crate::backend::{BackendState, LoadedModel, VisionBackend};
 use crate::camera_control::CameraControls;
 use crate::ring::{FrameTiming, RingWriter};
+mod demand;
 mod embeddings;
 mod models;
 mod tracking;
 
+pub use demand::{DetectionDemandMode, DetectionPolicy, DESIGNATE_OWNER};
 pub use embeddings::{
     strip_embeddings, EmbeddingInterest, EMBEDDING_ATTR, EMBEDDING_MODEL_ATTR, HISTOGRAM_EMBEDDING,
 };
@@ -160,6 +162,10 @@ pub struct VisionEngine {
     timings: Mutex<HashMap<String, ModelTiming>>,
     /// Where each camera's exposure and gain requests go.
     camera_controls: CameraControls,
+    /// Where the detector runs and which boxes it keeps.
+    policy: DetectionPolicy,
+    /// The live detection leases, per camera and owner.
+    demand: std::sync::Mutex<demand::DemandLeases>,
 }
 
 /// How a camera ring is sized.
@@ -212,7 +218,15 @@ impl VisionEngine {
         tracker_enabled: bool,
         tracker_cfg: TrackerConfig,
     ) -> Arc<Self> {
-        Self::with_tracker_reid(backend, sizing, tracker_enabled, tracker_cfg, false, None)
+        Self::with_tracker_reid(
+            backend,
+            sizing,
+            tracker_enabled,
+            tracker_cfg,
+            false,
+            None,
+            DetectionPolicy::default(),
+        )
     }
 
     /// Build the engine with the tracker and the learned-appearance (re-id) path
@@ -221,6 +235,7 @@ impl VisionEngine {
     /// (plus motion); otherwise it is motion-only. The re-id model is registered
     /// separately (a second `register_model`), so a missing/failed re-id model
     /// degrades cleanly to motion-only rather than rejecting the build.
+    /// `policy` says where the detector runs and which boxes it keeps.
     pub fn with_tracker_reid(
         backend: Box<dyn VisionBackend>,
         sizing: impl Into<RingSizing>,
@@ -228,6 +243,7 @@ impl VisionEngine {
         tracker_cfg: TrackerConfig,
         reid_enabled: bool,
         reid_model_id: Option<String>,
+        policy: DetectionPolicy,
     ) -> Arc<Self> {
         let (frame_tx, _) = broadcast::channel(BROADCAST_DEPTH);
         let (detection_tx, _) = broadcast::channel(BROADCAST_DEPTH);
@@ -249,6 +265,8 @@ impl VisionEngine {
             embedding_consumers: AtomicUsize::new(0),
             timings: Mutex::new(HashMap::new()),
             camera_controls: CameraControls::default(),
+            policy,
+            demand: std::sync::Mutex::new(demand::DemandLeases::default()),
         })
     }
 
@@ -428,6 +446,8 @@ impl VisionEngine {
     }
 }
 
+#[cfg(test)]
+mod demand_tests;
 #[cfg(test)]
 mod embeddings_tests;
 #[cfg(test)]

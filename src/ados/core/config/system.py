@@ -14,6 +14,10 @@ from ._bounds import I64_MAX, I64_MIN, U8_MAX, U32_MAX
 # set: any other name used to fall through to the mock engine silently.
 VisionBackend = Literal["auto", "rknn", "hailo", "onnx", "mock"]
 
+# When the engine runs its detector: only on a camera some consumer holds a
+# lease on (`on_demand`), or on every captured camera (`always`).
+VisionDetectionDemand = Literal["on_demand", "always"]
+
 
 # The vision sub-models default the fields the native engine requires
 # (`model_id`, `model_path`) to empty, so a partly written block never stops
@@ -23,7 +27,7 @@ VisionBackend = Literal["auto", "rknn", "hailo", "onnx", "mock"]
 
 
 class VisionDetectorConfig(BaseModel):
-    """The detector the engine runs on every frame for `vision.detection`."""
+    """The detector the engine runs on the cameras detection is wanted on."""
 
     model_id: str = ""
     model_path: str = ""
@@ -32,10 +36,13 @@ class VisionDetectorConfig(BaseModel):
     # Output-head layout: `yolo8` (empty is yolo8) or `yolo5`.
     head: str = ""
     class_labels: list[str] = Field(default_factory=list)
-    # Target inference rate; unset runs on every captured frame.
-    rate_hz: float | None = None
+    # Target inference rate per camera; 0 runs on every captured frame.
+    rate_hz: float = Field(default=3.0, ge=0)
     # Higher runs first when several models are due at once.
     priority: int | None = Field(default=None, ge=0, le=U8_MAX)
+    # Inference threads (ONNX Runtime intra-op; inter-op is one, and neither
+    # spin-waits).
+    threads: int = Field(default=1, ge=1, le=U32_MAX)
 
 
 class VisionReidConfig(BaseModel):
@@ -70,6 +77,15 @@ class VisionConfig(BaseModel):
     designate_camera: str | None = None
     detector: VisionDetectorConfig | None = None
     reid: VisionReidConfig | None = None
+    detection_demand: VisionDetectionDemand = "on_demand"
+    # Seconds of detection an operator designation holds on its camera.
+    designate_hold_s: float = Field(default=30.0, ge=0)
+    # ffmpeg threads each RTSP decoder runs on.
+    decode_threads: int = Field(default=1, ge=1, le=U32_MAX)
+    # Detections whose box covers more than this fraction of the frame are
+    # dropped before tracking (a person that close is under a metre from the
+    # lens); 1 keeps every box.
+    max_box_area_frac: float = Field(default=0.5, gt=0, le=1)
 
 
 class LogStoreConfig(BaseModel):

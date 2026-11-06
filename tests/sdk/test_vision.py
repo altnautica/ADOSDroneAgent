@@ -843,6 +843,36 @@ async def test_designate_track_denied_without_cap():
         await client.designate_track("uvc-0", BoundingBox(0, 0, 1, 1))
 
 
+async def test_request_detection_sends_the_hold_in_ms_under_the_designate_cap():
+    ipc = _ipc({"vision.track.designate"})
+    ipc.set_response(
+        "vision.request_detection",
+        {"camera_id": "belly", "detecting": True, "until_ms": 12_000},
+    )
+    client = VisionClient(ipc)
+    out = await client.request_detection("belly", 6.0)
+    method, args = ipc.requests[-1]
+    assert method == "vision.request_detection"
+    assert args == {"camera_id": "belly", "hold_ms": 6000}
+    assert out == {"camera_id": "belly", "detecting": True, "until_ms": 12_000}
+    # A zero hold releases.
+    await client.request_detection("belly", 0)
+    assert ipc.requests[-1][1]["hold_ms"] == 0
+
+
+async def test_request_detection_refuses_a_hold_out_of_range():
+    client = VisionClient(_ipc({"vision.track.designate"}))
+    for bad in (-1.0, 60.5, float("nan")):
+        with pytest.raises(ValueError):
+            await client.request_detection("belly", bad)
+
+
+async def test_request_detection_denied_without_cap():
+    client = VisionClient(_ipc(set()))
+    with pytest.raises(CapabilityDenied):
+        await client.request_detection("belly", 6.0)
+
+
 # ---------------------------------------------------------------------------
 # Pose / odometry injection.
 # ---------------------------------------------------------------------------

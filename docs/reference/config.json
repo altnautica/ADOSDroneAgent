@@ -3972,6 +3972,16 @@
       "type": "number"
     },
     {
+      "default": 1,
+      "description": "Decode Threads",
+      "enum": null,
+      "key": "vision.decode_threads",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": null,
       "description": "Designate Camera",
       "enum": null,
@@ -3980,6 +3990,29 @@
       "minimum": null,
       "secret": false,
       "type": "string|null"
+    },
+    {
+      "default": 30.0,
+      "description": "Designate Hold S",
+      "enum": null,
+      "key": "vision.designate_hold_s",
+      "maximum": null,
+      "minimum": 0,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": "on_demand",
+      "description": "Detection Demand",
+      "enum": [
+        "on_demand",
+        "always"
+      ],
+      "key": "vision.detection_demand",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
     },
     {
       "default": null,
@@ -4052,14 +4085,24 @@
       "type": "integer|null"
     },
     {
-      "default": null,
+      "default": 3.0,
       "description": "Rate Hz",
       "enum": null,
       "key": "vision.detector.rate_hz",
       "maximum": null,
-      "minimum": null,
+      "minimum": 0,
       "secret": false,
-      "type": "number|null"
+      "type": "number"
+    },
+    {
+      "default": 1,
+      "description": "Threads",
+      "enum": null,
+      "key": "vision.detector.threads",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
     },
     {
       "default": 480,
@@ -4090,6 +4133,16 @@
       "minimum": null,
       "secret": false,
       "type": "boolean"
+    },
+    {
+      "default": 0.5,
+      "description": "Max Box Area Frac",
+      "enum": null,
+      "key": "vision.max_box_area_frac",
+      "maximum": 1,
+      "minimum": 0,
+      "secret": false,
+      "type": "number"
     },
     {
       "default": false,

@@ -476,6 +476,7 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
                 .await
         }
         Method::VisionDesignateTrack => host.vision_designate_track(plugin_id, args).await,
+        Method::VisionRequestDetection => host.vision_request_detection(plugin_id, args).await,
         Method::CameraControlSet => host.camera_control_set(plugin_id, args).await,
         // The event surface, ping, and the streaming subscribe methods never
         // reach here; the server short-circuits `vision.subscribe_frames`,

@@ -1,5 +1,6 @@
 //! The Autonomy block from `/api/v1/nav/status`: follow phase, lock and range,
-//! the re-acquire mode, the navigation source, the lidar and the map session.
+//! the re-acquire mode, the navigation source, the lidar and the map session;
+//! and, from `/api/vision/status`, the cameras the detector is running on.
 //! Every state is a symbol and a word; colour only repeats what the word says.
 
 use ratatui::layout::Rect;
@@ -9,7 +10,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::Core;
-use crate::model::autonomy::{gps_fix_word, health_tone, phase_tone, Autonomy, Tone};
+use crate::model::autonomy::{gps_fix_word, health_tone, phase_tone, Autonomy, Detection, Tone};
 use crate::ui::widgets::{kv, kv_text, panel};
 
 /// Label column width.
@@ -45,10 +46,28 @@ fn opt<T>(v: Option<T>, fmt: impl Fn(T) -> String) -> String {
     v.map(fmt).unwrap_or_else(|| "–".to_string())
 }
 
-/// The block's lines for `a`.
-pub fn lines(core: &Core, a: &Autonomy) -> Vec<Line<'static>> {
+/// The detector row: `idle`, or the cameras it runs on, plus ` · always` when
+/// it runs on every camera regardless of demand.
+fn detector_line(core: &Core, d: &Detection) -> Line<'static> {
+    let tone = if d.detecting.is_empty() {
+        Tone::Neutral
+    } else {
+        Tone::Good
+    };
+    let mut word = d.word();
+    if d.mode.as_deref() == Some("always") {
+        word.push_str(" · always");
+    }
+    kv(&core.theme, "Detector", LABEL, tone_span(core, tone, word))
+}
+
+/// The block's lines for `a` and the detector state `det`.
+pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'static>> {
     let t = &core.theme;
     let mut out = Vec::new();
+    if let Some(d) = det {
+        out.push(detector_line(core, d));
+    }
     if let Some(follow) = &a.follow {
         let phase = follow.phase.clone().unwrap_or_else(|| "unknown".into());
         let mut word = phase.clone();
@@ -159,7 +178,14 @@ pub fn lines(core: &Core, a: &Autonomy) -> Vec<Line<'static>> {
     out
 }
 
-pub fn render(f: &mut Frame, area: Rect, core: &Core, a: Option<&Autonomy>, hidden: Option<&str>) {
+pub fn render(
+    f: &mut Frame,
+    area: Rect,
+    core: &Core,
+    a: Option<&Autonomy>,
+    det: Option<&Detection>,
+    hidden: Option<&str>,
+) {
     let t = &core.theme;
     let block = panel(t, core.sym, "Autonomy");
     let inner = block.inner(area);
@@ -169,8 +195,14 @@ pub fn render(f: &mut Frame, area: Rect, core: &Core, a: Option<&Autonomy>, hidd
         f.render_widget(note(why), inner);
         return;
     }
+    let empty = Autonomy::default();
     match a.filter(|a| a.any()) {
-        Some(a) => f.render_widget(Paragraph::new(lines(core, a)), inner),
+        Some(a) => f.render_widget(Paragraph::new(lines(core, a, det)), inner),
+        None if det.is_some() => {
+            let mut l = lines(core, &empty, det);
+            l.push(Line::from(Span::styled(NOTHING_TEXT.to_string(), t.dim())));
+            f.render_widget(Paragraph::new(l), inner);
+        }
         None => f.render_widget(note(NOTHING_TEXT), inner),
     }
 }

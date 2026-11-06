@@ -95,6 +95,8 @@ pub enum ResourceId {
     ClockStatus,
     /// `GET /api/v1/nav/status` (the Vehicle tab's Autonomy block).
     NavStatus,
+    /// `GET /api/vision/status` (the Vehicle tab's detector row).
+    VisionStatus,
 }
 
 /// A subscription: read `path` into `id` every `period`; `Duration::ZERO`

@@ -16,16 +16,23 @@
 // on empty video (after a 500 ms long-press on touch, past 12 px with a mouse)
 // draws a selection rect that designates on release; `[` / `]` cycle a focus
 // ring over the boxes and Enter opens the menu; Esc clears the focus.
+//
+// With `holdDetection` (a node whose own engine feeds this overlay), the layer
+// holds a detection lease on its camera while mounted, since the engine runs
+// detection only on cameras someone is watching, and says so when the
+// detector is idle or unavailable rather than showing an empty frame.
 
 import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Crosshair, Lock, LockOpen, Puzzle } from "lucide-react";
 
 import { Menu, type MenuItem } from "@/components/ui/menu";
 import { useElementSize } from "@/hooks/use-element-size";
+import { useDetectionLease } from "@/hooks/use-detection-lease";
 import { useNow } from "@/hooks/use-now";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { Z, type WidthClass } from "@/lib/cockpit-layout";
 import { computeRenderedRect, pickActiveBatch } from "@/lib/overlay-geometry";
+import { detectorNotice } from "@/lib/detection-lease";
 import { renderProfile } from "@/lib/render-profile";
 import { resolveSkillState } from "@/lib/skills";
 import { lockTarget, releaseTarget, runTargetAction, skillForConfigKey } from "@/lib/target-actions";
@@ -237,6 +244,8 @@ export interface TargetLayerProps {
   cameraYawOffsetDeg: number | null;
   /** The PiP: 9 px tags, candidate tags hidden, no keyboard focus cycle. */
   pip?: boolean;
+  /** Hold this node's detection lease on the camera while mounted. */
+  holdDetection?: boolean;
 }
 
 export function TargetLayer({
@@ -248,6 +257,7 @@ export function TargetLayer({
   widthClass,
   cameraYawOffsetDeg,
   pip = false,
+  holdDetection = false,
 }: TargetLayerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const size = useElementSize(containerRef);
@@ -271,6 +281,8 @@ export function TargetLayer({
   const input = targetInputFor(multiStream, cameraId, fresh);
   const camera = input.cameraId ?? cameraId ?? "main";
   const videoLost = isVideoLost(videoState, demo);
+  const detector = useDetectionLease(cameraId ?? "main", holdDetection);
+  const notice = videoLost ? null : detectorNotice(detector);
   const yawDeg = yawRad != null && Number.isFinite(yawRad) ? yawRad * RAD_TO_DEG : null;
 
   // The followed track's last rect (for the LOST fade) and the ghost path,
@@ -536,6 +548,17 @@ export function TargetLayer({
           <GlyphTags key={g.key} g={g} />
         ))}
       </div>
+      {notice ? (
+        <span
+          role="status"
+          className={cn(
+            "pointer-events-none absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-[4px] bg-hud-glass font-mono font-semibold uppercase tracking-hud-tag text-hud-muted backdrop-blur-hud",
+            pip ? "bottom-[0.25rem] px-[0.3rem] text-[9px]" : "bottom-[0.75rem] px-[0.5rem] text-[0.7rem]",
+          )}
+        >
+          {notice}
+        </span>
+      ) : null}
       {layouts.map((g) =>
         g.hit ? (
           <button
