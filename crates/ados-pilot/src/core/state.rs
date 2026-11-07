@@ -16,8 +16,8 @@ fn profile_name(p: Profile) -> &'static str {
 }
 
 impl Pilot {
-    /// The current `pilot` kind body. `mission` is filled by the control
-    /// front from the router's mission state.
+    /// The current `pilot` kind body. `mission` is the router's mission state,
+    /// read from its state socket.
     pub fn state(&self, now_ms: u64) -> PilotState {
         let fam = self.family();
         let owner = self.owner();

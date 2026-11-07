@@ -1,4 +1,5 @@
-//! Behaviour tests for the C2/C10 rules, against a scripted flight controller.
+//! Behaviour tests for the pilot rules, against a scripted flight controller.
 
 mod harness;
+mod mission;
 mod rules;

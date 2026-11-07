@@ -1,5 +1,6 @@
 //! The pilot's `state` and `obstacles` into the nav hub, and the hub's view
-//! demand back to the pilot.
+//! demand back to the pilot. The pilot reads the router's mission state itself,
+//! so its `state` already carries `mission`.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -46,21 +47,17 @@ pub fn demand_body(hub_demand: &crate::routes::nav::ViewDemand) -> ViewDemand {
     out
 }
 
-/// Fill the published `mission` from the router's mission state (`mission` of
-/// the vehicle state), which the pilot does not compute itself.
-pub type MissionSource = Box<dyn Fn() -> Option<Value> + Send + Sync>;
-
 /// Run forever: subscribe to the pilot, feed the hub, push view demand.
-pub async fn run(path: PathBuf, hub: NavHub, mission: MissionSource) {
+pub async fn run(path: PathBuf, hub: NavHub) {
     loop {
-        if let Err(e) = session(&path, &hub, &mission).await {
+        if let Err(e) = session(&path, &hub).await {
             tracing::debug!(error = %e, "pilot_ingest_disconnected");
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
-async fn session(path: &PathBuf, hub: &NavHub, mission: &MissionSource) -> std::io::Result<()> {
+async fn session(path: &PathBuf, hub: &NavHub) -> std::io::Result<()> {
     let stream = UnixStream::connect(path).await?;
     let (mut rd, mut wr) = stream.into_split();
     let sub = pilot::encode_op("subscribe", &()).map_err(std::io::Error::other)?;
@@ -80,18 +77,7 @@ async fn session(path: &PathBuf, hub: &NavHub, mission: &MissionSource) -> std::
                     m.remove("op");
                 }
                 match op.as_str() {
-                    "state" => {
-                        if let (Some(m), Some(mut mission)) = (json.as_object_mut(), mission()) {
-                            // The pilot kind carries the mission-state object only.
-                            if let Some(o) = mission.as_object_mut() {
-                                o.remove("items");
-                                o.remove("rev");
-                                o.remove("uploads_seen");
-                            }
-                            m.insert("mission".into(), mission);
-                        }
-                        hub.ingest_host(NavKind::Pilot, epoch_ms(), json);
-                    }
+                    "state" => hub.ingest_host(NavKind::Pilot, epoch_ms(), json),
                     "obstacles" => {
                         // The pilot stamps its own monotonic clock; surfaces
                         // compare `ts_ms` with wall time.

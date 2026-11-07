@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.5] - 2026-11-07
+
+### Fixed
+
+- The pilot never received the mission state. It now reads it from the router's state socket. A launch sequence that started the mission runs its "when done" (Land or RTH) once, when the mission reaches `complete` while airborne. `resume` continues any mission the router reports paused, including one stopped by a hold mode: with DO_PAUSE_CONTINUE in AUTO, otherwise by putting the flight controller back in AUTO at the item it was on. It refuses once the mission is complete or gone. The `mission` of the pilot state now comes from the pilot, and the control front no longer copies it in.
+- `land` while the flight controller is flying (a mission, or a mode of its own) now sets its LAND mode. Before, it waited for a pilot descent that never ran.
+- The pilot's `mission` object accepts null `seq`, `total` and `age_ms`, as the router publishes them before the first MISSION_CURRENT.
+
 ## [0.109.4] - 2026-11-07
 
 ### Added

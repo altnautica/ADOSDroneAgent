@@ -10,7 +10,8 @@
 //!
 //! The decision logic ([`core::Pilot`]) is a pure state machine driven by FC
 //! messages, client requests and a 50 Hz tick; the binary wires it to the
-//! MAVLink socket, the `pilot.v1` socket and the plugin event export.
+//! MAVLink socket, the `pilot.v1` socket, the plugin event export and the
+//! router's state socket (mission state).
 
 pub mod authority;
 pub mod config;
@@ -28,5 +29,6 @@ pub mod modes;
 pub mod obstacles;
 pub mod planner;
 pub mod readiness;
+pub mod router_state;
 pub mod runtime;
 pub mod setup;

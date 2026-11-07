@@ -1,7 +1,7 @@
 //! Named actions (C1 `action`) and the `launch` sequence (C10).
 
 use ados_protocol::mavlink::ardupilotmega::MavCmd;
-use ados_protocol::pilot::{AvoidMode, ControlMode, Owner, Profile, VehicleClass};
+use ados_protocol::pilot::{AvoidMode, ControlMode, Mission, Owner, Profile, VehicleClass};
 use serde_json::{json, Value};
 
 use super::{Out, Pilot};
@@ -392,16 +392,53 @@ impl Pilot {
         l.step_ms = now_ms;
     }
 
-    /// The "when done" action after a mission completes or a one-shot skill ends.
+    /// The "when done" action after a mission completes or a one-shot skill
+    /// ends. Only in the air: a mission that ended on the ground (a LAND item)
+    /// needs nothing more.
     pub(super) fn when_done(&mut self, now_ms: u64) {
         let Some(l) = &self.launch else { return };
         let Some(w) = l.when_done.clone() else { return };
         self.launch = None;
+        if !self.fc.armed || self.fc.landed() {
+            return;
+        }
         let _ = if w == "land" {
             self.do_land(now_ms)
         } else {
             self.do_rth(now_ms)
         };
+    }
+
+    /// The router's mission state, or `None` while it is unknown. A
+    /// launch whose after-takeoff action started the mission runs its "when
+    /// done" on the transition to `complete`; a finished or removed mission
+    /// leaves nothing to resume.
+    pub(super) fn on_mission(&mut self, m: Option<Mission>, now_ms: u64) {
+        let is = |m: &Option<Mission>, s: &str| m.as_ref().is_some_and(|m| m.state == s);
+        let completed = is(&m, "complete") && !is(&self.mission, "complete");
+        if is(&m, "complete") || is(&m, "none") {
+            self.mission_paused = false;
+        }
+        self.mission = m;
+        if completed
+            && self
+                .launch
+                .as_ref()
+                .is_some_and(|l| l.after == "mission" && l.step == LaunchStep::Done)
+        {
+            self.when_done(now_ms);
+        }
+    }
+
+    /// A mission is waiting for `resume`: the router reports it paused (a
+    /// pause in AUTO, or a hold mode mid-mission), or the pilot paused it
+    /// (Pause, a stick takeover) and the router does not report it finished.
+    fn mission_resumable(&self) -> bool {
+        match self.mission.as_ref().map(|m| m.state.as_str()) {
+            Some("paused") => true,
+            Some("complete" | "none") => false,
+            _ => self.mission_paused,
+        }
     }
 
     pub(super) fn skill_ended(&mut self, now_ms: u64) {
@@ -432,6 +469,12 @@ impl Pilot {
             }
             VehicleClass::Vtol if self.fc.vtol_forward() => {
                 self.set_mode(plane::QRTL, now_ms);
+                self.set_owner(Owner::FcMode, "land");
+            }
+            // The FC is flying (a mission, or a mode of its own): it lands.
+            class if matches!(self.owner(), Owner::MissionFc | Owner::FcMode) => {
+                let m = fam.land(class == VehicleClass::Vtol);
+                self.set_mode(m, now_ms);
                 self.set_owner(Owner::FcMode, "land");
             }
             _ => {
@@ -489,11 +532,15 @@ impl Pilot {
         Ok(())
     }
 
+    /// Continue a paused mission: in AUTO (a pause there) with
+    /// DO_PAUSE_CONTINUE, otherwise by putting the FC back in AUTO, where it
+    /// carries on from the item it was on. Either way the FC flies it
+    /// (`mission_fc`).
     fn do_resume(&mut self, now_ms: u64) -> ActionRes {
         if !self.fc.armed {
             return Err("disarmed".into());
         }
-        if !self.mission_paused && self.mission.as_ref().is_none_or(|m| m.state != "paused") {
+        if !self.mission_resumable() {
             return Err("nothing_paused".into());
         }
         let fam = self.family();
@@ -505,6 +552,8 @@ impl Pilot {
             self.mav(m);
         } else {
             self.set_mode(fam.auto(), now_ms);
+        }
+        if self.owner() != Owner::MissionFc {
             self.set_owner(Owner::MissionFc, "resume");
         }
         self.mission_paused = false;

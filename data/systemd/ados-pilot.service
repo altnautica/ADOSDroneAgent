@@ -1,7 +1,8 @@
 [Unit]
 Description=ADOS Pilot (on-board command authority)
-# Talks to the flight controller through the MAVLink router's socket and reads
-# the plugin event export; both reconnect on their own, so no hard ordering.
+# Talks to the flight controller through the MAVLink router's socket, reads
+# the router's state socket (mission state) and the plugin event export; all
+# reconnect on their own, so no hard ordering.
 After=ados-mavlink.service
 PartOf=ados-supervisor.service
 # The binary ships with the release assets; a node without it skips the

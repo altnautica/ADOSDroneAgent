@@ -137,7 +137,14 @@ impl Daemon {
         };
         let sock = run_dir.join(ados_protocol::paths::PILOT_SOCK);
         let server = tokio::spawn(async move { crate::ipc::serve(&sock, shared).await });
-        tokio::spawn(crate::events::run(crate::events::socket_path(), feed_tx));
+        tokio::spawn(crate::events::run(
+            crate::events::socket_path(),
+            feed_tx.clone(),
+        ));
+        tokio::spawn(crate::router_state::run(
+            crate::router_state::socket_path(),
+            feed_tx,
+        ));
         let mav_path = run_dir.join(ados_protocol::paths::MAVLINK_SOCK);
         tokio::spawn(mavlink_link(
             mav_path,

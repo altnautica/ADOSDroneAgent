@@ -315,7 +315,8 @@ impl Pilot {
         }
     }
 
-    /// Topics from the plugin event export (or a `feed` relay).
+    /// Topics from the plugin event export, the router's state socket
+    /// (`mission`) or a `feed` relay.
     pub fn on_feed(&mut self, topic: &str, payload: &serde_json::Value, now_ms: u64) {
         match topic {
             "plugin.world-engine.scan" => {
@@ -336,7 +337,10 @@ impl Pilot {
                 let pos = self.pos_ne(now_ms);
                 self.obstacles.ingest_pose(payload, pos);
             }
-            "mission" => self.mission = serde_json::from_value(payload.clone()).ok(),
+            "mission" => {
+                let m = <Mission as serde::Deserialize>::deserialize(payload).ok();
+                self.on_mission(m, now_ms);
+            }
             _ => {}
         }
     }

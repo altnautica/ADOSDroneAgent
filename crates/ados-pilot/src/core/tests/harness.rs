@@ -184,6 +184,48 @@ impl World {
         }))
     }
 
+    pub fn action_args(&mut self, name: &str, args: serde_json::Value) -> Reply {
+        self.req(Request::Action(ActionReq {
+            name: name.into(),
+            src: "mc".into(),
+            args: Some(args),
+            id: None,
+        }))
+    }
+
+    /// The router's state snapshot carrying mission state `state` at `seq`,
+    /// through the same path the state socket reader takes.
+    pub fn mission(&mut self, state: &str, seq: u32, total: u32) {
+        let snapshot = serde_json::json!({
+            "armed": self.armed,
+            "mission": {"state": state, "seq": seq, "total": total, "item_reached": seq.checked_sub(1),
+                        "id": null, "source": "mission_state", "age_ms": 100, "landing_seq": false,
+                        "rev": 1, "uploads_seen": 0, "items": [{"seq": 1, "cmd": 16}]},
+        });
+        let m = crate::router_state::mission_of(snapshot);
+        self.p
+            .on_feed(crate::router_state::MISSION_TOPIC, &m, self.now);
+        self.collect();
+    }
+
+    /// COMMAND_LONGs sent with `command` (and, when given, `param1`/`param2`).
+    pub fn commands(&self, command: MavCmd, param: Option<(usize, f32)>) -> usize {
+        self.sent
+            .iter()
+            .filter(|m| match m {
+                MavMessage::COMMAND_LONG(c) if c.command == command => {
+                    param.is_none_or(|(i, v)| [c.param1, c.param2][i] == v)
+                }
+                _ => false,
+            })
+            .count()
+    }
+
+    /// DO_SET_MODE commands sent for `mode`.
+    pub fn set_modes(&self, mode: u32) -> usize {
+        self.commands(MavCmd::MAV_CMD_DO_SET_MODE, Some((1, mode as f32)))
+    }
+
     pub fn input(&mut self, axes: [f32; 4]) {
         let r = Request::Input(Input {
             src: "mc".into(),

@@ -106,16 +106,18 @@ pub struct Readiness {
     pub msg: String,
 }
 
-/// FC mission state, computed by the router and copied here.
+/// FC mission state, computed by the router (`mission` of the vehicle state)
+/// and copied here. `seq`, `total` and `age_ms` are null until the FC has
+/// reported MISSION_CURRENT, as on the router's wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mission {
     pub state: String,
-    pub seq: u32,
-    pub total: u32,
+    pub seq: Option<u32>,
+    pub total: Option<u32>,
     pub item_reached: Option<u32>,
     pub id: Option<u32>,
     pub source: String,
-    pub age_ms: u64,
+    pub age_ms: Option<u64>,
     pub landing_seq: bool,
 }
 
