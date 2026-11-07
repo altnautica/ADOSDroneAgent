@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.14] - 2026-11-07
+
+### Added
+
+- Cockpit: the Feed draws the cockpit data layers over the video in one canvas between the target boxes and the instrument HUD: the agent's projected route (next waypoint gate with distance and ETA, the following waypoint, legs, home, off-screen arrows), the motion items (flight path vector, planned follow path coloured by the avoidance state, follow goal, orbit ring), per-camera obstacle nearness cells with a bottom-centre obstacle arc, and, when switched on, model depth cells and landing-zone candidates. The route follows the agent-computed mission state: paused greys and dashes it, a loaded plan previews while disarmed or under pilot or FC control, returning and complete hide it. Frames never re-render the page: a change-driven frame loop paints only when something changed, interpolates keyed items between frames, dims a layer after 0.5 s without data and replaces it with an "unavailable" chip after 2 s, and caps the kiosk display at 30 frames a second. `O` cycles the layer level (Full, Route, Off).
+- Cockpit: the Feed holds a view lease on the nav stream (`{"type":"view","camera_id","layers"}`, renewed every 2 s) for the on-screen camera and its enabled layers, and drops it when the page is hidden, so the agent computes these layers only for what is watched. Depth and landing zones each hold a vision demand lease (`POST /api/vision/demand` with `kind`) while on.
+- Cockpit: the Vision view's side panel: live detections, depth and surfaces switches, engine health and the detector model picker.
+- Cockpit: the nav stream parses the `pilot` kind (command authority state) for the flight-state chip and sheets.
+- Cockpit: demo mode (`?demo=1`) feeds every data layer and a pilot state.
+- Dashboard: the video panel draws the route, motion and obstacle layers at the Route level, read only, from a 5 Hz `GET /api/v1/nav/status?view=main:…` poll while live video shows. The dashboard gets no layer controls: it is the setup surface, and the cockpit is the flight surface.
+
 ## [0.108.13] - 2026-11-06
 
 ### Changed

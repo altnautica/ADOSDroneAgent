@@ -24,6 +24,7 @@ import type {
   NavState,
   OccupancyLive,
 } from "@/shared/hud/nav-types";
+import type { PilotState } from "@/shared/hud/cockpit-frames";
 import type { DesignatedRef } from "@/shared/hud/target-state";
 
 /** One received frame and the epoch ms it arrived. */
@@ -39,7 +40,8 @@ export type NavFrame =
   | { kind: "nav"; data: NavState }
   | { kind: "follow"; data: FollowState }
   | { kind: "map"; data: MapStatus }
-  | { kind: "follow_event"; data: FollowEvent };
+  | { kind: "follow_event"; data: FollowEvent }
+  | { kind: "pilot"; data: PilotState };
 
 export type NavLinkState = "idle" | "connected" | "reconnecting" | "closed";
 
@@ -50,6 +52,8 @@ export interface NavStreamState {
   scan: Stamped<NavScan> | null;
   map: Stamped<MapStatus> | null;
   event: Stamped<FollowEvent> | null;
+  /** The command authority's state (owner, control mode, mission, …). */
+  pilot: Stamped<PilotState> | null;
   occupancy: OccupancyGrid;
   /** Epoch ms of the last successful occupancy poll, or null. */
   occupancyAt: number | null;
@@ -79,6 +83,7 @@ const EMPTY = {
   scan: null,
   map: null,
   event: null,
+  pilot: null,
   occupancy: EMPTY_OCCUPANCY,
   occupancyAt: null,
   trail: [] as TrailPoint[],
@@ -113,6 +118,8 @@ export function reduceNavFrame(
       return { follow: { data: frame.data, at } };
     case "map":
       return { map: { data: frame.data, at } };
+    case "pilot":
+      return { pilot: { data: frame.data, at } };
     case "follow_event": {
       const ev = frame.data;
       if (ev.topic === "follow.reacquired") {

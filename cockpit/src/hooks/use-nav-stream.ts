@@ -4,6 +4,7 @@
 
 import { useEffect } from "react";
 
+import { mockLayerStream } from "@/lib/mock-layers";
 import { mockNavStream } from "@/lib/mock-nav";
 import { connectNavStream } from "@/lib/nav-stream";
 import { isDemoMode } from "@/lib/utils";
@@ -13,7 +14,11 @@ export function useNavStream(enabled: boolean): void {
     if (!enabled) return;
     if (isDemoMode()) {
       mockNavStream.start();
-      return () => mockNavStream.stop();
+      mockLayerStream.start();
+      return () => {
+        mockLayerStream.stop();
+        mockNavStream.stop();
+      };
     }
     return connectNavStream();
   }, [enabled]);

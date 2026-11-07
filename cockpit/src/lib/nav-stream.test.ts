@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { parseNavFrame } from "@/lib/nav-stream";
+import { layerFrames } from "@/lib/layer-frames";
+import { ingestLayerFrame, parseNavFrame } from "@/lib/nav-stream";
 
 const IDENT = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 
@@ -47,5 +48,28 @@ describe("parseNavFrame", () => {
     expect(parseNavFrame({ kind: "scan", data: { angle_start_rad: 0, angle_increment_rad: 0, ranges_m: [] } })).toBeNull();
     expect(parseNavFrame({ kind: "nav", data: { active_set: 1 } })).toBeNull();
     expect(parseNavFrame({ kind: "follow", data: { phase: "dancing" } })).toBeNull();
+  });
+});
+
+describe("cockpit v2 kinds", () => {
+  it("parses a pilot frame into the store shape", () => {
+    const f = parseNavFrame({ kind: "pilot", ts_ms: 1, data: { owner: "pilot", armed: true, landed: false, control_mode: "ados" } });
+    expect(f?.kind).toBe("pilot");
+    expect(f && f.kind === "pilot" ? f.data.controlMode : null).toBe("ados");
+    expect(parseNavFrame({ kind: "pilot", data: { owner: "nobody" } })).toBeNull();
+  });
+
+  it("routes per-frame layer kinds into the mutable frame store, not the nav store", () => {
+    layerFrames.clear();
+    const v0 = layerFrames.version;
+    expect(
+      ingestLayerFrame({ kind: "ar", data: { v: 1, ts_ms: 5, approx: false, reason: null, cameras: { main: { frame_w: 4, frame_h: 3, items: [] } } } }),
+    ).toBe(true);
+    expect(layerFrames.ar.data?.cameras.main.frameW).toBe(4);
+    expect(ingestLayerFrame({ kind: "obstacles", data: { sectors_m: [], cameras: {} } })).toBe(true);
+    expect(layerFrames.obstacles.data?.sectorsM).toHaveLength(72);
+    expect(layerFrames.version).toBeGreaterThan(v0);
+    expect(ingestLayerFrame({ kind: "pose", data: {} })).toBe(false);
+    expect(parseNavFrame({ kind: "ar", data: {} })).toBeNull();
   });
 });

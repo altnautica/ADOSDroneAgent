@@ -10,6 +10,7 @@ import { useWfb } from "@/hooks/use-wfb";
 import { fmtBitrate, fmtNum } from "@/shared/format";
 import { capturedLabel, fetchSnapshot } from "@/shared/api/snapshot";
 import { cn } from "@/lib/utils";
+import { VideoLayers } from "@/components/panels/video-layers";
 import { useProfile } from "@/shared/use-profile";
 import { useVideoTransport } from "@/shared/use-video-transport";
 import type { TransportKind } from "@/shared/video-transport";
@@ -208,6 +209,7 @@ export function VideoPanel() {
             autoPlay
             playsInline
           />
+          {!isGround && <VideoLayers active={state === "live"} videoRef={videoRef} />}
           {showSnapshot && snapshotUrl && (
             <img
               src={snapshotUrl}

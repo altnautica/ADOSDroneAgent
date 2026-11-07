@@ -18,6 +18,7 @@ import { FeedActionBar } from "@/components/feed/feed-action-bar";
 import { CompactLayout, PortraitLayout, SplitLayout, type FeedSlots } from "@/components/feed/feed-layouts";
 import { FollowChrome } from "@/components/feed/follow-chrome";
 import { HudCanvas } from "@/components/feed/hud-canvas";
+import { LayerStack } from "@/components/feed/layers/layer-stack";
 import { MiniMap } from "@/components/feed/mini-map";
 import { ProximityRadar } from "@/components/feed/proximity-radar";
 import { PipInset } from "@/components/feed/pip-inset";
@@ -125,6 +126,13 @@ export function FeedScreen() {
             holdDetection={localVisionCapable}
           />
         ) : null}
+        <LayerStack
+          cameraId={resolveActiveCameraId(activeCameraId, cameras)}
+          videoWidth={video.width}
+          videoHeight={video.height}
+          videoState={video.state}
+          widthClass={widthClass}
+        />
       </>
     ),
     hud: (

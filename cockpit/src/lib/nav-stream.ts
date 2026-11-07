@@ -11,7 +11,15 @@
 // store empty, and every surface reading it shows its absent state.
 
 import { ReconnectBackoff } from "@/lib/reconnect-backoff";
+import { layerFrames } from "@/lib/layer-frames";
 import { apiFetch } from "@/shared/api-fetch";
+import {
+  parseArFrame,
+  parseDepthFrame,
+  parseObstaclesFrame,
+  parsePilotState,
+  parseSurfacesFrame,
+} from "@/shared/hud/cockpit-frames";
 import {
   parseFollowEvent,
   parseFollowState,
@@ -33,6 +41,44 @@ export const NAV_SILENT_MS = 15_000;
 
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 10_000;
+
+/** The nav stream's view lease: the camera and layers on screen. The agent
+ *  computes `ar`/`obstacles`/`depth`/`surfaces` per camera only while some
+ *  client leases them; a lease lapses 6 s after its last renewal. */
+export interface ViewLease {
+  cameraId: string;
+  layers: string[];
+}
+/** Lease renewal period. */
+export const VIEW_LEASE_RENEW_MS = 2000;
+
+let viewLease: ViewLease | null = null;
+let leaseSocket: WebSocket | null = null;
+
+function sendViewLease(): void {
+  if (!leaseSocket || leaseSocket.readyState !== WebSocket.OPEN) return;
+  // A null lease is sent as an empty layer set, which drops this client's demand.
+  const msg = viewLease
+    ? { type: "view", camera_id: viewLease.cameraId, layers: viewLease.layers }
+    : { type: "view", camera_id: "", layers: [] };
+  try {
+    leaseSocket.send(JSON.stringify(msg));
+  } catch {
+    // closing; the next open re-sends
+  }
+}
+
+/** Set (or with null, drop) the view lease; sent at once when it changed. */
+export function setViewLease(lease: ViewLease | null): void {
+  const same =
+    lease === viewLease ||
+    (lease !== null &&
+      viewLease !== null &&
+      lease.cameraId === viewLease.cameraId &&
+      lease.layers.join(",") === viewLease.layers.join(","));
+  viewLease = lease;
+  if (!same) sendViewLease();
+}
 
 /** Parse one nav-stream frame; null for keepalives, unknown kinds and
  *  malformed payloads (never thrown). */
@@ -64,8 +110,45 @@ export function parseNavFrame(raw: unknown): NavFrame | null {
       const data = parseFollowEvent(f.topic, f.data);
       return data ? { kind: "follow_event", data } : null;
     }
+    case "pilot": {
+      const data = parsePilotState(f.data);
+      return data ? { kind: "pilot", data } : null;
+    }
     default:
       return null;
+  }
+}
+
+/**
+ * Route one per-frame layer kind (`ar`, `obstacles`, `depth`, `surfaces`)
+ * into the mutable layer frame store, outside React. True when consumed.
+ */
+export function ingestLayerFrame(raw: unknown): boolean {
+  if (typeof raw !== "object" || raw === null) return false;
+  const f = raw as { kind?: unknown; data?: unknown };
+  switch (f.kind) {
+    case "ar": {
+      const d = parseArFrame(f.data);
+      if (d) layerFrames.putAr(d);
+      return true;
+    }
+    case "obstacles": {
+      const d = parseObstaclesFrame(f.data);
+      if (d) layerFrames.putObstacles(d);
+      return true;
+    }
+    case "depth": {
+      const d = parseDepthFrame(f.data);
+      if (d) layerFrames.putDepth(d);
+      return true;
+    }
+    case "surfaces": {
+      const d = parseSurfacesFrame(f.data);
+      if (d) layerFrames.putSurfaces(d);
+      return true;
+    }
+    default:
+      return false;
   }
 }
 
@@ -129,6 +212,8 @@ export function connectNavStream(): () => void {
       return;
     }
     socket.onopen = () => {
+      leaseSocket = socket;
+      sendViewLease();
       backoff.opened();
       armSilence();
       store.setLink("connected");
@@ -142,10 +227,12 @@ export function connectNavStream(): () => void {
       } catch {
         return;
       }
+      if (ingestLayerFrame(raw)) return;
       const frame = parseNavFrame(raw);
       if (frame) useNavStreamStore.getState().ingest(frame);
     };
     socket.onclose = () => {
+      if (leaseSocket === socket) leaseSocket = null;
       socket = null;
       clearTimeout(silentTimer ?? undefined);
       scheduleReconnect();
@@ -161,6 +248,10 @@ export function connectNavStream(): () => void {
 
   void connect();
 
+  const leaseTimer = setInterval(() => {
+    if (viewLease) sendViewLease();
+  }, VIEW_LEASE_RENEW_MS);
+
   let inFlight: AbortController | null = null;
   const poll = setInterval(() => {
     if (closed || inFlight || document.visibilityState === "hidden") return;
@@ -175,6 +266,8 @@ export function connectNavStream(): () => void {
     closed = true;
     controller.abort();
     clearInterval(poll);
+    clearInterval(leaseTimer);
+    leaseSocket = null;
     inFlight?.abort();
     clearTimeout(reconnectTimer ?? undefined);
     clearTimeout(silentTimer ?? undefined);
@@ -189,5 +282,6 @@ export function connectNavStream(): () => void {
     }
     useNavStreamStore.getState().clear();
     useNavStreamStore.getState().setLink("closed");
+    layerFrames.clear();
   };
 }
