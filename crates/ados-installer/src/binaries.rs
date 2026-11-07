@@ -93,6 +93,15 @@ pub const PREBUILT: &[PrebuiltBinary] = &[
         gate: Gate::Hard,
         profiles: FC_VISOR,
     },
+    // The on-board command authority. Best-effort: without it the router keeps
+    // its own heartbeat and passes client stick frames through, as before.
+    PrebuiltBinary {
+        service: "ados-pilot",
+        asset: "ados-pilot-aarch64",
+        dest: "/opt/ados/bin/ados-pilot",
+        gate: Gate::BestEffort,
+        profiles: DRONE,
+    },
     PrebuiltBinary {
         service: "ados-radio",
         asset: "ados-radio-aarch64",

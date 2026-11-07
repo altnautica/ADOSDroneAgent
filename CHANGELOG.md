@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.2] - 2026-11-07
+
+### Added
+
+- The installer deploys `ados-pilot` on the drone profile from the release asset `ados-pilot-aarch64`, which the release workflow now builds. The binary is best-effort: an install without it keeps the router's own heartbeat and passes client stick frames through, as before.
+
 ## [0.109.1] - 2026-11-07
 
 ### Added
