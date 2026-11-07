@@ -167,6 +167,9 @@ pub struct Report {
 pub struct SetupView {
     pub v: u32,
     pub uid: Option<String>,
+    /// `uid`, `uid2`, or `derived` (no hardware id: hashed from the board and
+    /// firmware identity; surfaces say so).
+    pub uid_source: Option<super::fcstate::IdSource>,
     pub firmware: Option<String>,
     pub firmware_version: Option<String>,
     pub vehicle_class: Option<String>,

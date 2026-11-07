@@ -52,15 +52,17 @@ pub fn start(daemon: &Daemon) -> Arc<dyn SetupHandler> {
         start: Instant::now(),
     });
     let frames = daemon.fc_link.frames.subscribe();
+    let version_frames = daemon.fc_link.version_frames.subscribe();
     let tx = daemon.fc_link.tx.clone();
     let handle = daemon.handle.clone();
-    tokio::spawn(run(inner.clone(), frames, tx, handle));
+    tokio::spawn(run(inner.clone(), frames, version_frames, tx, handle));
     Arc::new(SetupService { inner })
 }
 
 async fn run(
     inner: Arc<Inner>,
     mut frames: broadcast::Receiver<(u8, u8, ados_protocol::mavlink::ardupilotmega::MavMessage)>,
+    mut version_frames: broadcast::Receiver<Vec<u8>>,
     tx: mpsc::Sender<ados_protocol::mavlink::ardupilotmega::MavMessage>,
     handle: PilotHandle,
 ) {
@@ -69,6 +71,9 @@ async fn run(
     let mut needed: Option<Option<String>> = None;
     loop {
         tokio::select! {
+            v = version_frames.recv() => if let Ok(frame) = v {
+                inner.engine.lock().expect("engine lock").on_version_frame(&frame);
+            },
             f = frames.recv() => match f {
                 Ok((sys, comp, msg)) => {
                     let now = inner.now();

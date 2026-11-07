@@ -44,6 +44,8 @@ pub struct FakeFc {
     pub effects: Vec<Effect>,
     pub inputs: PilotInputs,
     queue: VecDeque<MavMessage>,
+    /// Raw AUTOPILOT_VERSION frames for the engine's `uid2` path.
+    raw: VecDeque<Vec<u8>>,
     rebooting_until: Option<u64>,
     accel_pose: Option<u8>,
     mag: Option<(u64, f32)>,
@@ -54,6 +56,9 @@ pub struct FakeFc {
     last_tel: u64,
     manual_z: f32,
     pub reboots: u32,
+    /// AUTOPILOT_VERSION `uid` and `uid2` (the extension, sent as a raw frame).
+    pub uid: u64,
+    pub uid2: Option<[u8; 18]>,
 }
 
 pub fn ap_copter_params() -> BTreeMap<String, f32> {
@@ -166,6 +171,21 @@ fn text(s: &str) -> MavMessage {
     MavMessage::STATUSTEXT(STATUSTEXT_DATA { severity: MavSeverity::MAV_SEVERITY_INFO, text: s.into() })
 }
 
+/// A MAVLink 2 AUTOPILOT_VERSION frame carrying the `uid2` extension (the
+/// fixed fields at their wire offsets, CRC not checked by the reader).
+fn version_frame(uid: u64, uid2: [u8; 18]) -> Vec<u8> {
+    let mut payload = vec![0u8; 78];
+    payload[8..16].copy_from_slice(&uid.to_le_bytes());
+    payload[60..78].copy_from_slice(&uid2);
+    while payload.last() == Some(&0) {
+        payload.pop();
+    }
+    let mut f = vec![0xFD, payload.len() as u8, 0, 0, 0, 1, 1, 148, 0, 0];
+    f.extend_from_slice(&payload);
+    f.extend_from_slice(&[0, 0]);
+    f
+}
+
 fn ack(cmd: MavCmd, result: MavResult) -> MavMessage {
     MavMessage::COMMAND_ACK(COMMAND_ACK_DATA { command: cmd, result })
 }
@@ -189,6 +209,7 @@ impl FakeFc {
             effects: Vec::new(),
             inputs: PilotInputs::default(),
             queue: VecDeque::new(),
+            raw: VecDeque::new(),
             rebooting_until: None,
             accel_pose: None,
             mag: None,
@@ -199,6 +220,8 @@ impl FakeFc {
             last_tel: 0,
             manual_z: 0.5,
             reboots: 0,
+            uid: 0x00C0_FFEE_1234_5678,
+            uid2: None,
         }
     }
 
@@ -278,8 +301,11 @@ impl FakeFc {
         let mut result = MavResult::MAV_RESULT_ACCEPTED;
         match c.command {
             MAV_CMD_REQUEST_MESSAGE if c.param1 as u32 == 148 => {
+                if let Some(u2) = self.uid2 {
+                    self.raw.push_back(version_frame(self.uid, u2));
+                }
                 self.queue.push_back(MavMessage::AUTOPILOT_VERSION(AUTOPILOT_VERSION_DATA {
-                    uid: 0x00C0_FFEE_1234_5678,
+                    uid: self.uid,
                     flight_sw_version: (4 << 24) | (6 << 16) | (2 << 8),
                     ..Default::default()
                 }));
@@ -507,6 +533,9 @@ impl FakeFc {
         }
         self.physics(now);
         self.telemetry(now);
+        while let Some(f) = self.raw.pop_front() {
+            e.on_version_frame(&f);
+        }
         while let Some(m) = self.queue.pop_front() {
             e.on_fc(1, 1, &m, now);
         }

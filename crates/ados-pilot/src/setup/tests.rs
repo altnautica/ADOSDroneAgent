@@ -606,3 +606,82 @@ fn question_and_body_args_fill_every_placeholder() {
     assert_eq!(v.args["radius"], json!(30));
     assert_eq!(v.args["pct"], json!(80));
 }
+
+/// Boot a fake FC against an engine on `dir` until the engine files its state
+/// under an identity; returns the `GET /api/v1/fc-setup` view.
+fn boot(dir: &std::path::Path, mav_type: MavType, uid: u64, uid2: Option<[u8; 18]>) -> super::schema::SetupView {
+    let params = if mav_type == MavType::MAV_TYPE_FIXED_WING { ap_plane_params() } else { ap_copter_params() };
+    let mut e = Engine::new(dir, 0);
+    let mut fc = FakeFc::new(mav_type, params);
+    fc.uid = uid;
+    fc.uid2 = uid2;
+    let mut t = 0;
+    while e.uid.is_none() {
+        assert!(t < 10_000, "no identity adopted");
+        t += TICK;
+        fc.step(&mut e, t);
+    }
+    e.view(t)
+}
+
+#[test]
+fn identity_from_uid_then_uid2_then_derived() {
+    use super::fcstate::IdSource;
+    let dir = tempfile::tempdir().unwrap();
+    // A board with a 64-bit uid.
+    let v = boot(dir.path(), MavType::MAV_TYPE_QUADROTOR, 0x00C0_FFEE_1234_5678, None);
+    assert_eq!((v.uid.as_deref(), v.uid_source), (Some("00c0ffee12345678"), Some(IdSource::Uid)));
+    // uid 0 with a uid2 (the MAVLink 2 extension, read from the raw frame).
+    let mut u2 = [0u8; 18];
+    u2[..12].copy_from_slice(&[0x30, 0x00, 0x28, 0x00, 0x0b, 0x51, 0x33, 0x30, 0x38, 0x38, 0x36, 0x37]);
+    let v = boot(dir.path(), MavType::MAV_TYPE_QUADROTOR, 0, Some(u2));
+    assert_eq!(v.uid_source, Some(IdSource::Uid2));
+    assert_eq!(v.uid.as_deref(), Some("300028000b51333038383637000000000000"));
+    // uid2 supersedes a non-zero uid.
+    let v = boot(dir.path(), MavType::MAV_TYPE_QUADROTOR, 7, Some(u2));
+    assert_eq!(v.uid_source, Some(IdSource::Uid2));
+    // Neither (SITL): a derived id, stable across a reboot, different per vehicle type.
+    let a = boot(dir.path(), MavType::MAV_TYPE_QUADROTOR, 0, None);
+    assert_eq!(a.uid_source, Some(IdSource::Derived));
+    let id = a.uid.clone().unwrap();
+    assert!(id.starts_with('d') && id.len() == 17, "{id}");
+    let again = boot(dir.path(), MavType::MAV_TYPE_QUADROTOR, 0, Some([0; 18]));
+    assert_eq!(again.uid.as_deref(), Some(id.as_str()), "an all-zero uid2 counts as none");
+    let plane = boot(dir.path(), MavType::MAV_TYPE_FIXED_WING, 0, None);
+    assert_ne!(plane.uid, a.uid);
+    // The wizard starts on a derived id, and its state persists under it.
+    let mut e = Engine::new(dir.path(), 0);
+    let mut fc = FakeFc::new(MavType::MAV_TYPE_QUADROTOR, ap_copter_params());
+    fc.uid = 0;
+    let mut t = 0;
+    while e.uid.is_none() || !e.params.complete() {
+        t += TICK;
+        fc.step(&mut e, t);
+    }
+    assert_eq!(e.start(G, t)["ok"], json!(true));
+    let state = std::fs::read_to_string(dir.path().join(&id).join("state.json")).unwrap();
+    assert!(state.contains("\"uid_source\": \"derived\""), "{state}");
+    assert!(state.contains("\"state\": \"running\""), "{state}");
+}
+
+#[test]
+fn uid2_parses_from_trimmed_and_full_frames() {
+    use super::fcstate::uid2_from_frame;
+    let mut payload = vec![0u8; 78];
+    payload[60] = 0xAB;
+    payload[77] = 0xCD;
+    let mut f = vec![0xFD, 78, 0, 0, 0, 1, 1, 148, 0, 0];
+    f.extend_from_slice(&payload);
+    f.extend_from_slice(&[0, 0]);
+    let u = uid2_from_frame(&f).unwrap();
+    assert_eq!((u[0], u[17]), (0xAB, 0xCD));
+    // Trimmed to the fixed fields (no extension sent): all zero.
+    let mut g = vec![0xFD, 60, 0, 0, 0, 1, 1, 148, 0, 0];
+    g.extend_from_slice(&[1u8; 60]);
+    assert_eq!(uid2_from_frame(&g), Some([0u8; 18]));
+    // MAVLink 1 or another message: nothing.
+    assert_eq!(uid2_from_frame(&[0xFE, 60, 0, 1, 1, 148]), None);
+    let mut h = f.clone();
+    h[7] = 0;
+    assert_eq!(uid2_from_frame(&h), None);
+}

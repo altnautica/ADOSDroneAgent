@@ -67,8 +67,16 @@ pub struct FcState {
     pub mav_type: Option<MavType>,
     pub custom_mode: u32,
     pub armed: bool,
+    /// AUTOPILOT_VERSION `uid` (0 = the board reports none).
     pub uid: Option<u64>,
+    /// AUTOPILOT_VERSION `uid2` from the raw frame (all zero = none).
+    pub uid2: Option<[u8; 18]>,
     pub flight_sw_version: Option<u32>,
+    pub board_version: Option<u32>,
+    pub vendor_id: Option<u16>,
+    pub product_id: Option<u16>,
+    /// When AUTOPILOT_VERSION last arrived.
+    pub version_ms: Option<u64>,
     /// `(roll, pitch, yaw)` rad and when.
     pub attitude: Option<([f32; 3], u64)>,
     /// Commanded `(roll, pitch)` rad from ATTITUDE_TARGET or NAV_CONTROLLER_OUTPUT.
@@ -129,8 +137,35 @@ impl FcState {
         Some(((v >> 24) & 0xff, (v >> 16) & 0xff))
     }
 
-    pub fn uid_hex(&self) -> Option<String> {
-        self.uid.filter(|u| *u != 0).map(|u| format!("{u:016x}"))
+    /// The aircraft identity the setup state is filed under, and where it
+    /// came from. `uid2` supersedes `uid` when non-zero (MAVLink
+    /// AUTOPILOT_VERSION); with neither, a stable id is derived from the
+    /// board and firmware identity (`d` + 16 hex). `None` until
+    /// AUTOPILOT_VERSION and a heartbeat arrived.
+    pub fn identity(&self) -> Option<(String, IdSource)> {
+        if let Some(u2) = self.uid2.filter(|u| u.iter().any(|b| *b != 0)) {
+            let hex: String = u2.iter().map(|b| format!("{b:02x}")).collect();
+            return Some((hex, IdSource::Uid2));
+        }
+        if let Some(u) = self.uid.filter(|u| *u != 0) {
+            return Some((format!("{u:016x}"), IdSource::Uid));
+        }
+        self.uid?;
+        let mav_type = self.mav_type? as u32;
+        let autopilot = self.autopilot? as u32;
+        let mut h = Fnv64::new();
+        for word in [
+            autopilot,
+            mav_type,
+            self.vendor_id.unwrap_or(0) as u32,
+            self.product_id.unwrap_or(0) as u32,
+            self.board_version.unwrap_or(0),
+            self.flight_sw_version.unwrap_or(0),
+            self.sysid as u32,
+        ] {
+            h.write(&word.to_le_bytes());
+        }
+        Some((format!("d{:016x}", h.0), IdSource::Derived))
     }
 
     pub fn link_alive(&self, now_ms: u64) -> bool {
@@ -205,6 +240,10 @@ impl FcState {
             MavMessage::AUTOPILOT_VERSION(v) => {
                 self.uid = Some(v.uid);
                 self.flight_sw_version = Some(v.flight_sw_version);
+                self.board_version = Some(v.board_version);
+                self.vendor_id = Some(v.vendor_id);
+                self.product_id = Some(v.product_id);
+                self.version_ms = Some(now_ms);
             }
             MavMessage::ATTITUDE(a) => {
                 self.attitude = Some(([a.roll, a.pitch, a.yaw], now_ms));
@@ -290,4 +329,57 @@ impl FcState {
             _ => {}
         }
     }
+}
+
+/// Where the aircraft identity came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdSource {
+    Uid,
+    Uid2,
+    /// No hardware id: a hash of autopilot, vehicle type, vendor, product,
+    /// board and firmware version and system id. Stable across reboots; a
+    /// firmware update or a sysid change makes it a new aircraft.
+    Derived,
+}
+
+/// FNV-1a 64: a fixed hash, so a derived id is the same on every build.
+struct Fnv64(u64);
+
+impl Fnv64 {
+    fn new() -> Self {
+        Fnv64(0xcbf2_9ce4_8422_2325)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 ^= *b as u64;
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+}
+
+/// `uid2` from a raw AUTOPILOT_VERSION frame (MAVLink 2 only: the field is an
+/// extension). Wire order sorts fields by size: capabilities, uid (u64),
+/// four u32, vendor and product (u16), three 8-byte arrays, then the
+/// extension `uid2[18]` at offset 60. MAVLink 2 trims trailing zero bytes.
+pub fn uid2_from_frame(frame: &[u8]) -> Option<[u8; 18]> {
+    const HEADER: usize = 10;
+    const MSG_ID: u32 = 148;
+    const UID2_AT: usize = 60;
+    if frame.len() < HEADER || frame[0] != 0xFD {
+        return None;
+    }
+    let len = frame[1] as usize;
+    let id = u32::from_le_bytes([frame[7], frame[8], frame[9], 0]);
+    if id != MSG_ID || frame.len() < HEADER + len {
+        return None;
+    }
+    let payload = &frame[HEADER..HEADER + len];
+    let mut out = [0u8; 18];
+    if payload.len() > UID2_AT {
+        let src = &payload[UID2_AT..payload.len().min(UID2_AT + 18)];
+        out[..src.len()].copy_from_slice(src);
+    }
+    Some(out)
 }

@@ -36,7 +36,7 @@ use ados_protocol::mavlink::MavHeader;
 use serde_json::{json, Map, Value};
 
 use adapters::{Adapter, Mode};
-use fcstate::{Class, FcState, Fw};
+use fcstate::{Class, FcState, Fw, IdSource};
 use out::{Effect, Outbox};
 use params::ParamStore;
 use schema::{
@@ -56,6 +56,9 @@ pub const TAKEOVER_AXIS: f32 = 0.3;
 const PREARM_WINDOW_MS: u64 = 10_000;
 /// AUTOPILOT_VERSION message id.
 const MSG_AUTOPILOT_VERSION: u32 = 148;
+/// Wait this long after AUTOPILOT_VERSION before filing under an identity, so
+/// the raw frame's `uid2` (a separate channel) is in.
+const IDENTITY_SETTLE_MS: u64 = 300;
 
 struct Run {
     wizard: WizardId,
@@ -86,6 +89,7 @@ pub struct Engine {
     inputs: PilotInputs,
     /// `Some` once the FC's uid is known.
     uid: Option<String>,
+    uid_source: Option<IdSource>,
     state: AircraftState,
     snapshot_body: Option<String>,
     run: Option<Run>,
@@ -135,6 +139,7 @@ impl Engine {
             out: Outbox::new(),
             inputs: PilotInputs::default(),
             uid: None,
+            uid_source: None,
             state: AircraftState { v: 1, ..Default::default() },
             snapshot_body: None,
             run: None,
@@ -186,9 +191,6 @@ impl Engine {
             self.params.set_target(self.fc.sysid, self.fc.compid, self.fc.firmware() == Some(Fw::Px4));
         }
         self.params.on_msg(msg, now);
-        if let MavMessage::AUTOPILOT_VERSION(_) = msg {
-            self.adopt_uid(now);
-        }
         let Some(adapter) = self.adapter() else { return };
         if let Some(run) = self.run.as_mut() {
             let ground_done = self.state.ground.state == WizardState::Done;
@@ -211,19 +213,37 @@ impl Engine {
         }
     }
 
-    fn adopt_uid(&mut self, _now: u64) {
-        let Some(uid) = self.fc.uid_hex() else { return };
-        if self.uid.as_deref() == Some(uid.as_str()) {
+    /// A raw AUTOPILOT_VERSION frame: its `uid2` (the decoded message lacks it).
+    pub fn on_version_frame(&mut self, frame: &[u8]) {
+        if let Some(u2) = fcstate::uid2_from_frame(frame) {
+            self.fc.uid2 = Some(u2);
+        }
+    }
+
+    /// File the setup state under the aircraft identity once AUTOPILOT_VERSION
+    /// has settled (its raw `uid2` frame comes on a separate channel). The
+    /// first identity sticks for the session.
+    fn adopt_identity(&mut self, now: u64) {
+        if self.uid.is_some() {
             return;
         }
+        if self.fc.version_ms.is_none_or(|t| now.saturating_sub(t) < IDENTITY_SETTLE_MS) {
+            return;
+        }
+        let Some((uid, source)) = self.fc.identity() else { return };
         self.state = self.store.load(&uid);
+        self.state.uid_source = Some(source);
         self.snapshot_body = self
             .state
             .data
             .snapshot
             .as_deref()
             .and_then(|n| self.store.read_snapshot(&uid, n));
+        if source == IdSource::Derived {
+            tracing::info!(uid = %uid, "fc_setup_identity_derived");
+        }
         self.uid = Some(uid);
+        self.uid_source = Some(source);
         self.wizard_dirty = true;
     }
 
@@ -253,7 +273,7 @@ impl Engine {
     pub fn tick(&mut self, now: u64) {
         // Load identity and parameters as soon as an FC appears.
         if self.fc.heartbeat_ms.is_some() {
-            if self.fc.uid.is_none() && now.saturating_sub(self.version_asked_ms) >= 2000 {
+            if self.fc.version_ms.is_none() && now.saturating_sub(self.version_asked_ms) >= 2000 {
                 self.version_asked_ms = now;
                 self.out.request_message(MSG_AUTOPILOT_VERSION);
             }
@@ -262,6 +282,7 @@ impl Engine {
                 self.params.request_all(&mut self.out.msgs, now);
             }
         }
+        self.adopt_identity(now);
         self.params.tick(&mut self.out.msgs, now);
         self.tick_abort_flight(now);
         self.tick_run(now);
@@ -887,6 +908,7 @@ impl Engine {
         SetupView {
             v: 1,
             uid: self.uid.clone(),
+            uid_source: self.uid_source,
             firmware: a.map(|a| a.fw.as_str().to_string()),
             firmware_version: self.fc.version_string(),
             vehicle_class: a.map(|a| a.class.as_str().to_string()),

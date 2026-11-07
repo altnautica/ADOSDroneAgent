@@ -41,6 +41,8 @@ pub struct AircraftState {
     pub firmware: Option<String>,
     pub firmware_version: Option<String>,
     pub vehicle_class: Option<String>,
+    /// Where the identity this state is filed under came from.
+    pub uid_source: Option<super::fcstate::IdSource>,
     pub ground: WizardRecord,
     pub air: WizardRecord,
     pub data: WizardData,

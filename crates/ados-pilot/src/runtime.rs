@@ -27,6 +27,10 @@ const STATE_PERIOD_MS: u64 = 100;
 pub struct FcLink {
     pub tx: mpsc::Sender<MavMessage>,
     pub frames: broadcast::Sender<(u8, u8, MavMessage)>,
+    /// Raw AUTOPILOT_VERSION frames, for the fields the decoded message lacks:
+    /// the workspace builds the dialect without MAVLink 2 message extensions,
+    /// so `uid2` is dropped in decoding. Sent before the decoded message.
+    pub version_frames: broadcast::Sender<Vec<u8>>,
 }
 
 /// What the setup engine watches: readiness and the surface link.
@@ -102,12 +106,13 @@ impl Daemon {
     pub fn new(settings: Settings, config_path: PathBuf) -> Self {
         let (fc_tx, fc_out_rx) = mpsc::channel(512);
         let (frames, _) = broadcast::channel(1024);
+        let (version_frames, _) = broadcast::channel(8);
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
         let (axes_tx, axes_rx) = watch::channel([0.0; 4]);
         let (owner_tx, owner_rx) = watch::channel(ados_protocol::pilot::Owner::Idle);
         let (status_tx, status_rx) = watch::channel(SetupView::default());
         Self {
-            fc_link: FcLink { tx: fc_tx, frames },
+            fc_link: FcLink { tx: fc_tx, frames, version_frames },
             handle: PilotHandle {
                 cmd: cmd_tx,
                 tuning_axes: axes_rx,
@@ -150,6 +155,7 @@ impl Daemon {
             mav_path,
             self.fc_out_rx,
             self.fc_link.frames.clone(),
+            self.fc_link.version_frames.clone(),
         ));
         let mut pilot = Pilot::new(self.settings);
         pilot.epoch_offset_ms = epoch_ms();
@@ -306,6 +312,7 @@ async fn mavlink_link(
     path: PathBuf,
     mut out_rx: mpsc::Receiver<MavMessage>,
     frames: broadcast::Sender<(u8, u8, MavMessage)>,
+    version_frames: broadcast::Sender<Vec<u8>>,
 ) {
     let mut seq: u8 = 0;
     loop {
@@ -323,11 +330,15 @@ async fn mavlink_link(
                 };
                 if ok {
                     let frames = frames.clone();
+                    let version_frames = version_frames.clone();
                     let reader = tokio::spawn(async move {
                         while let Ok(Some(rec)) = mavlink_socket::read_frame(&mut rd).await {
                             if let Ok((h, msg)) = mavlink::parse_any(&rec.frame) {
                                 if h.system_id == SYSID && h.component_id == COMPID {
                                     continue;
+                                }
+                                if matches!(msg, MavMessage::AUTOPILOT_VERSION(_)) {
+                                    let _ = version_frames.send(rec.frame.clone());
                                 }
                                 let _ = frames.send((h.system_id, h.component_id, msg));
                             }

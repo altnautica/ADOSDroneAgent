@@ -49,7 +49,8 @@ impl Step for Detect {
                 ("firmware", Value::from(cx.adapter.fw.as_str())),
                 ("firmware_version", cx.fc.version_string().map(Value::from).unwrap_or(Value::Null)),
                 ("vehicle_class", Value::from(cx.adapter.class.as_str())),
-                ("uid", cx.fc.uid_hex().map(Value::from).unwrap_or(Value::Null)),
+                ("uid", cx.fc.identity().map(|(u, _)| Value::from(u)).unwrap_or(Value::Null)),
+                ("uid_source", cx.fc.identity().map(|(_, s)| serde_json::json!(s)).unwrap_or(Value::Null)),
                 ("params", Value::from(cx.params.count())),
                 (
                     "mission_state_inferred",

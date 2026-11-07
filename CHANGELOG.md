@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.8] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup on a flight controller that reports no hardware id (ArduPilot SITL, some boards): the wizards never started because AUTOPILOT_VERSION `uid` was 0. The setup state is now filed under `uid2` when it is non-zero (it supersedes `uid`; read from the raw frame, since the agent's MAVLink dialect is built without message extensions), else `uid`, else an id derived from the autopilot, vehicle type, vendor, product, board and firmware version and system id (`d` + 16 hex, a fixed FNV-1a hash, so it is the same after every reboot). `GET /api/v1/fc-setup` and the per-aircraft `state.json` carry `uid_source` (`uid`, `uid2` or `derived`) so surfaces can say the id is derived. A firmware update or a system id change gives a derived-id aircraft a new setup record.
+
 ## [0.109.7] - 2026-11-07
 
 ### Fixed
