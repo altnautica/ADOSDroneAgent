@@ -54,6 +54,24 @@ class VisionReidConfig(BaseModel):
     input_height: int = Field(default=256, ge=0, le=U32_MAX)
 
 
+class VisionDepthConfig(BaseModel):
+    """The monocular depth model behind the depth and surfaces layers. It runs
+    on a camera only while a depth or surfaces lease is held there. With no
+    block the engine looks for the default model in ``models_dir``."""
+
+    enabled: bool = True
+    model_id: str = "depth_midas_v21_small"
+    # The model file; unset is the default file in `models_dir`.
+    model_path: str | None = None
+    input_width: int = Field(default=256, ge=0, le=U32_MAX)
+    input_height: int = Field(default=256, ge=0, le=U32_MAX)
+    # Runs per second per camera; unset is 2 on the CPU runtime, 5 on an
+    # accelerator.
+    rate_hz: float | None = Field(default=None, gt=0)
+    # ONNX Runtime intra-op threads for the depth session.
+    threads: int = Field(default=2, ge=1, le=U32_MAX)
+
+
 class VisionConfig(BaseModel):
     enabled: bool = False
     backend: VisionBackend = "auto"
@@ -86,6 +104,7 @@ class VisionConfig(BaseModel):
     # dropped before tracking (a person that close is under a metre from the
     # lens); 1 keeps every box.
     max_box_area_frac: float = Field(default=0.5, gt=0, le=1)
+    depth: VisionDepthConfig = VisionDepthConfig()
 
 
 class LogStoreConfig(BaseModel):

@@ -199,7 +199,7 @@ impl LoadedModel for SidecarModel {
     ) -> Result<Vec<Detection>> {
         let fmt = fmt_str(format);
         self.ensure_loaded()?;
-        let req = infer_request(&self.model_id, frame, width, height, fmt);
+        let req = frame_request("infer", &self.model_id, frame, width, height, fmt);
         let resp = self.exchange(&req)?;
         match decode_detections(&resp) {
             Ok(dets) => Ok(dets),
@@ -207,8 +207,7 @@ impl LoadedModel for SidecarModel {
                 // The sidecar restarted and dropped the model: reload once and retry.
                 self.mark_unloaded();
                 self.ensure_loaded()?;
-                let resp2 =
-                    self.exchange(&infer_request(&self.model_id, frame, width, height, fmt))?;
+                let resp2 = self.exchange(&req)?;
                 decode_detections(&resp2)
             }
             Err(e) => Err(e),
@@ -235,6 +234,29 @@ impl LoadedModel for SidecarModel {
                 let resp2 =
                     self.exchange(&embed_request(&self.model_id, crop, width, height, fmt))?;
                 decode_embedding(&resp2).map(Some)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn infer_dense(
+        &self,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+    ) -> Result<DenseMap> {
+        let fmt = fmt_str(format);
+        self.ensure_loaded()?;
+        let req = frame_request("dense", &self.model_id, frame, width, height, fmt);
+        let resp = self.exchange(&req)?;
+        match decode_dense(&resp) {
+            Ok(map) => Ok(map),
+            Err(e) if is_not_loaded(&e) => {
+                // The sidecar restarted and dropped the model: reload + retry once.
+                self.mark_unloaded();
+                self.ensure_loaded()?;
+                decode_dense(&self.exchange(&req)?)
             }
             Err(e) => Err(e),
         }
@@ -293,7 +315,11 @@ fn load_request(
     ])
 }
 
-fn infer_request(
+/// A request that runs a resident model on one raw frame: `infer` (a
+/// detector, replying with detections) or `dense` (a depth model, replying
+/// with its per-pixel map).
+fn frame_request(
+    op: &str,
     model_id: &str,
     frame: &[u8],
     width: u32,
@@ -301,7 +327,7 @@ fn infer_request(
     format: &str,
 ) -> rmpv::Value {
     rmpv::Value::Map(vec![
-        (mv("op"), mv("infer")),
+        (mv("op"), mv(op)),
         (mv("model_id"), mv(model_id)),
         // bytes MUST be a msgpack bin, not an int array, so the sidecar can
         // np.frombuffer it.
@@ -310,6 +336,35 @@ fn infer_request(
         (mv("height"), rmpv::Value::from(height as u64)),
         (mv("format"), mv(format)),
     ])
+}
+
+/// Decode a `{status, width, height, data}` dense reply: `data` is
+/// `width * height` little-endian f32 values, row-major.
+fn decode_dense(resp: &rmpv::Value) -> Result<DenseMap> {
+    check_ok(resp)?;
+    let map = resp
+        .as_map()
+        .ok_or_else(|| anyhow!("response is not a map"))?;
+    let dim = |k: &str| {
+        map_get(map, k)
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok())
+            .ok_or_else(|| anyhow!("dense response has no {k}"))
+    };
+    let (w, h) = (dim("width")?, dim("height")?);
+    let Some(rmpv::Value::Binary(bytes)) = map_get(map, "data") else {
+        return Err(anyhow!("dense response has no binary data"));
+    };
+    if bytes.len() % 4 != 0 {
+        return Err(anyhow!("dense data of {} bytes is not f32", bytes.len()));
+    }
+    let data = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
+        .collect();
+    DenseMap::new(w, h, data)
 }
 
 /// An `embed` request: a pre-cropped, model-input-sized rgb24 crop the sidecar

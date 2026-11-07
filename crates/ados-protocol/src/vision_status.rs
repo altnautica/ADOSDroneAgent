@@ -60,6 +60,10 @@ pub struct VisionStatus {
     /// Absent from an engine that predates the demand gate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detection: Option<DetectionDemandStatus>,
+    /// The depth model's state and, per camera, whether depth and surfaces
+    /// run there. Absent from an engine that predates the depth layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depth: Option<DepthStatus>,
 }
 
 /// The detector's demand state: the mode and, per captured camera, whether
@@ -85,6 +89,42 @@ pub struct DemandLeaseStatus {
     pub owner: String,
     /// Time left on the lease.
     pub remaining_ms: u64,
+}
+
+/// The depth model's state: whether it can run, at what pace, and per camera
+/// what runs and how the last grid was scaled.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DepthStatus {
+    /// `ready` (loaded), `no_model` (no depth model configured or installed)
+    /// or `unavailable` (configured, but it did not load or its last run
+    /// failed).
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Why the state is not `ready`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The shortest gap between two depth runs on one camera.
+    pub interval_ms: u64,
+    pub cameras: BTreeMap<String, CameraDepthStatus>,
+}
+
+/// One camera's depth state.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CameraDepthStatus {
+    /// A depth lease is live: the grid is published.
+    pub depth: bool,
+    /// A surfaces lease is live: landing zones are published.
+    pub surfaces: bool,
+    /// Live leases, `owner` prefixed with the kind (`depth:operator`).
+    #[serde(default)]
+    pub leases: Vec<DemandLeaseStatus>,
+    /// `lidar` or `none` for the last grid; absent before the first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_source: Option<String>,
+    /// Grids computed on this camera since the engine started.
+    #[serde(default)]
+    pub runs: u64,
 }
 
 impl VisionStatus {
@@ -137,6 +177,25 @@ mod tests {
                             owner: "operator".into(),
                             remaining_ms: 4_000,
                         }],
+                    },
+                )]),
+            }),
+            depth: Some(DepthStatus {
+                state: "ready".into(),
+                model_id: Some("depth_midas_v21_small".into()),
+                reason: None,
+                interval_ms: 500,
+                cameras: BTreeMap::from([(
+                    "main".into(),
+                    CameraDepthStatus {
+                        depth: true,
+                        surfaces: false,
+                        leases: vec![DemandLeaseStatus {
+                            owner: "depth:operator".into(),
+                            remaining_ms: 5_000,
+                        }],
+                        scale_source: Some("lidar".into()),
+                        runs: 12,
                     },
                 )]),
             }),

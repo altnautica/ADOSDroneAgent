@@ -10,8 +10,10 @@
 //! silently dropped.
 //!
 //! `POST /api/vision/demand` takes, renews or releases an operator surface's
-//! lease on the detector for one camera (`vision.request_detection`): the
-//! engine runs detection on a camera only while some consumer holds a lease.
+//! lease on one camera (`vision.request_detection`): `kind` is `detection`
+//! (the default), `depth` (the depth grid) or `surfaces` (the landing zones).
+//! The engine runs each only on a camera some consumer holds a lease of that
+//! kind on.
 //!
 //! Auth: these are writes, so they sit outside the public set and the LAN edge
 //! requires the pairing key when paired (the same posture as `/api/command`).
@@ -121,9 +123,12 @@ pub async fn designate(State(_state): State<AppState>, Json(req): Json<Designate
 /// The `POST /api/vision/demand` body.
 #[derive(Debug, Deserialize)]
 pub struct DemandBody {
-    /// The camera to run detection on.
+    /// What to run: `detection` (default), `depth` or `surfaces`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// The camera to run it on.
     pub camera_id: String,
-    /// Seconds to hold detection on, `0..=60`; `0` releases this owner's lease.
+    /// Seconds to hold it on, `0..=60`; `0` releases this owner's lease.
     pub hold_s: f64,
     /// Who holds the lease; one owner's renew or release never touches
     /// another's. Default `operator`.
@@ -134,7 +139,8 @@ pub struct DemandBody {
 /// The lease owner when a `POST /api/vision/demand` names none.
 const DEFAULT_DEMAND_OWNER: &str = "operator";
 
-/// `POST /api/vision/demand` — hold (or release) detection on a camera.
+/// `POST /api/vision/demand` — hold (or release) detection, depth or surfaces
+/// on a camera.
 pub async fn demand(State(_state): State<AppState>, Json(req): Json<DemandBody>) -> Response {
     demand_via(&VisionIpcClient::default_socket(), req).await
 }
@@ -143,11 +149,23 @@ pub async fn demand(State(_state): State<AppState>, Json(req): Json<DemandBody>)
 /// before the engine is asked; the engine's refusal (a camera it does not
 /// capture) is a 400; an unreachable engine is a 503.
 async fn demand_via(client: &VisionIpcClient, req: DemandBody) -> Response {
-    use ados_protocol::vision_rpc::{self, MAX_DETECTION_HOLD_MS};
+    use ados_protocol::vision_rpc::{self, DemandKind, MAX_DETECTION_HOLD_MS};
 
     if req.camera_id.is_empty() {
         return detail(StatusCode::BAD_REQUEST, "camera_id is required");
     }
+    let kind = match req.kind.as_deref() {
+        None => DemandKind::Detection,
+        Some(k) => match DemandKind::parse(k) {
+            Some(kind) => kind,
+            None => {
+                return detail(
+                    StatusCode::BAD_REQUEST,
+                    "kind must be detection, depth or surfaces",
+                )
+            }
+        },
+    };
     let max_s = MAX_DETECTION_HOLD_MS as f64 / 1000.0;
     if !req.hold_s.is_finite() || !(0.0..=max_s).contains(&req.hold_s) {
         return detail(
@@ -162,7 +180,7 @@ async fn demand_via(client: &VisionIpcClient, req: DemandBody) -> Response {
         .unwrap_or(DEFAULT_DEMAND_OWNER);
     let hold_ms = (req.hold_s * 1000.0).round() as u64;
     let args = vision_rpc::with_owner(
-        &vision_rpc::request_detection_args(&req.camera_id, hold_ms),
+        &vision_rpc::request_demand_args(kind, &req.camera_id, hold_ms),
         owner,
     );
     match client.request_detection(args).await {
@@ -170,6 +188,7 @@ async fn demand_via(client: &VisionIpcClient, req: DemandBody) -> Response {
             Ok(reply) => (
                 StatusCode::OK,
                 Json(json!({
+                    "kind": reply.kind.as_str(),
                     "camera_id": reply.camera_id,
                     "detecting": reply.detecting,
                     "until_ms": reply.until_ms,
@@ -195,7 +214,9 @@ async fn demand_via(client: &VisionIpcClient, req: DemandBody) -> Response {
 /// inference backend and its state: `backend_state` is `ready`, `mock` (the
 /// explicitly configured mock) or `unavailable` (the requested backend cannot
 /// run here; `backend_reason` says why), and the detector's demand state
-/// (`detection`: mode, and per camera whether it detects and who holds it on).
+/// (`detection`: mode, and per camera whether it detects and who holds it on)
+/// and the depth layer's (`depth`: model state, pace, and per camera whether
+/// the grid and the landing zones run, their leases and the last scale source).
 /// An unreachable engine (vision off / not up) is a 503, never a silent empty.
 pub async fn engine_status(State(state): State<AppState>) -> Response {
     let client = VisionIpcClient::default_socket();
@@ -240,7 +261,8 @@ async fn read_vision_status(path: &std::path::Path) -> Option<VisionStatus> {
 /// work sidecar. An engine reply without a `backend_state` (none ships without
 /// one) reads as `unavailable` rather than a claimed `ready`. `source_errors`
 /// lists each camera whose frame source is failing (or silent) with the reason,
-/// empty without a sidecar; `live_inputs` and `detection` are null without one.
+/// empty without a sidecar; `live_inputs`, `detection` and `depth` are null
+/// without one.
 /// Every key is snake_case, the form the GCS client reads.
 fn status_body(
     resp: &Value,
@@ -265,6 +287,7 @@ fn status_body(
         "source_errors": sidecar.map(|s| s.source_errors.as_slice()).unwrap_or_default(),
         "live_inputs": sidecar.map(|s| s.live_inputs),
         "detection": sidecar.and_then(|s| s.detection.as_ref()),
+        "depth": sidecar.and_then(|s| s.depth.as_ref()),
     })
 }
 
@@ -596,6 +619,7 @@ mod tests {
                 method: req.method,
                 capability: String::new(),
                 args: vision_rpc::request_detection_reply(&vision_rpc::DetectionDemandReply {
+                    kind: decoded.kind,
                     camera_id: decoded.camera_id.clone(),
                     detecting: held,
                     until_ms: held.then_some(1_000 + decoded.hold_ms),
@@ -621,6 +645,7 @@ mod tests {
 
     fn demand_body(camera_id: &str, hold_s: f64, owner: Option<&str>) -> DemandBody {
         DemandBody {
+            kind: None,
             camera_id: camera_id.into(),
             hold_s,
             owner: owner.map(str::to_string),
@@ -637,7 +662,7 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(
             body,
-            json!({"camera_id": "belly", "detecting": true, "until_ms": 7000})
+            json!({"kind": "detection", "camera_id": "belly", "detecting": true, "until_ms": 7000})
         );
         let sent = engine.await.unwrap();
         assert_eq!(sent.owner, DEFAULT_DEMAND_OWNER);
@@ -663,6 +688,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_depth_lease_carries_its_kind_to_the_engine_and_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision.sock");
+        let engine = demand_engine(&path);
+        let body = DemandBody {
+            kind: Some("surfaces".into()),
+            ..demand_body("main", 6.0, None)
+        };
+        let resp = demand_via(&VisionIpcClient::new(path), body).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["kind"], "surfaces");
+        let sent = engine.await.unwrap();
+        assert_eq!(sent.kind, ados_protocol::vision_rpc::DemandKind::Surfaces);
+    }
+
+    #[tokio::test]
     async fn demand_refuses_a_bad_body_and_reports_an_absent_engine() {
         let dir = tempfile::tempdir().unwrap();
         let absent = VisionIpcClient::new(dir.path().join("absent.sock"));
@@ -671,6 +712,10 @@ mod tests {
             demand_body("main", 61.0, None),
             demand_body("main", -1.0, None),
             demand_body("main", f64::NAN, None),
+            DemandBody {
+                kind: Some("segmentation".into()),
+                ..demand_body("main", 6.0, None)
+            },
         ] {
             assert_eq!(
                 demand_via(&absent, bad).await.status(),

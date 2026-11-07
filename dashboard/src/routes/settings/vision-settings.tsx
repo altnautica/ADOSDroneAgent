@@ -14,6 +14,14 @@ import { detectionDemandOptions } from "@/lib/vision-demand";
 /** The detector's per-camera rate when `detector.rate_hz` is absent. */
 const DEFAULT_DETECTOR_RATE_HZ = 3;
 
+/** The depth model's threads when `depth.threads` is absent. */
+const DEFAULT_DEPTH_THREADS = 2;
+
+/** The depth pace when `depth.rate_hz` is absent: on the Rockchip
+ *  accelerator, and on the CPU runtime. */
+const DEPTH_RATE_ACCEL_HZ = 5;
+const DEPTH_RATE_CPU_HZ = 2;
+
 export function VisionSettings() {
   const { t } = useTranslation();
   const config = useConfig();
@@ -189,6 +197,46 @@ export function VisionSettings() {
                 <p className="text-xs text-muted-foreground leading-relaxed">
                   {t("settingsMore.vision.noDetector")}
                 </p>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardContent className="pt-5 pb-5 space-y-5">
+              <ConfigToggle
+                configKey="vision.depth.enabled"
+                label={t("settingsMore.vision.depthLabel")}
+                hint={t("settingsMore.vision.depthHint")}
+                value={vision.depth?.enabled ?? true}
+              />
+              {(vision.depth?.enabled ?? true) && (
+                <>
+                  <div className="border-t border-border pt-5">
+                    <ConfigNumberField
+                      configKey="vision.depth.rate_hz"
+                      id="vision-depth-rate"
+                      label={t("settingsMore.vision.depthRateLabel")}
+                      hint={t("settingsMore.vision.depthRateHint")}
+                      value={
+                        vision.depth?.rate_hz ??
+                        (vision.backend === "rknn" ? DEPTH_RATE_ACCEL_HZ : DEPTH_RATE_CPU_HZ)
+                      }
+                      integer={false}
+                      min={0.1}
+                    />
+                  </div>
+                  <div className="border-t border-border pt-5">
+                    <ConfigNumberField
+                      configKey="vision.depth.threads"
+                      id="vision-depth-threads"
+                      label={t("settingsMore.vision.depthThreadsLabel")}
+                      hint={t("settingsMore.vision.depthThreadsHint")}
+                      value={vision.depth?.threads ?? DEFAULT_DEPTH_THREADS}
+                      integer
+                      min={1}
+                    />
+                  </div>
+                </>
               )}
             </CardContent>
           </Card>

@@ -344,7 +344,8 @@ async fn handle_request_detection(engine: &Arc<VisionEngine>, args: &Value) -> R
     if !engine.has_ring(&req.camera_id).await {
         return Err(anyhow!("no camera {} on this node", req.camera_id));
     }
-    let reply = engine.request_detection(
+    let reply = engine.request_demand(
+        req.kind,
         &req.camera_id,
         &req.owner,
         req.hold_ms,

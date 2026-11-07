@@ -30,11 +30,13 @@ use crate::backend::{BackendState, LoadedModel, VisionBackend};
 use crate::camera_control::CameraControls;
 use crate::ring::{FrameTiming, RingWriter};
 mod demand;
+mod depth;
 mod embeddings;
 mod models;
 mod tracking;
 
 pub use demand::{DetectionDemandMode, DetectionPolicy, DESIGNATE_OWNER};
+pub use depth::{DepthModelState, DepthSetup, DEPTH_PERMIT_WAIT};
 pub use embeddings::{
     strip_embeddings, EmbeddingInterest, EMBEDDING_ATTR, EMBEDDING_MODEL_ATTR, HISTOGRAM_EMBEDDING,
 };
@@ -164,8 +166,18 @@ pub struct VisionEngine {
     camera_controls: CameraControls,
     /// Where the detector runs and which boxes it keeps.
     policy: DetectionPolicy,
-    /// The live detection leases, per camera and owner.
+    /// The live demand leases (detection, depth, surfaces), per camera and
+    /// owner.
     demand: std::sync::Mutex<demand::DemandLeases>,
+    /// Inference calls queued for the accelerator. A depth run yields while
+    /// any is, so the detector keeps priority.
+    priority_waiters: AtomicUsize,
+    /// The depth model, its pacing and the per-camera depth state.
+    depth: std::sync::Mutex<depth::DepthRuntime>,
+    /// The ranging the depth fit scales with.
+    range_feed: Arc<crate::depth::feed::RangeFeed>,
+    /// Every published depth grid and landing-zone frame.
+    depth_tx: broadcast::Sender<ados_protocol::vision_depth::DepthRecord>,
 }
 
 /// How a camera ring is sized.
@@ -267,6 +279,10 @@ impl VisionEngine {
             camera_controls: CameraControls::default(),
             policy,
             demand: std::sync::Mutex::new(demand::DemandLeases::default()),
+            priority_waiters: AtomicUsize::new(0),
+            depth: std::sync::Mutex::new(depth::DepthRuntime::default()),
+            range_feed: Arc::new(crate::depth::feed::RangeFeed::default()),
+            depth_tx: broadcast::channel(BROADCAST_DEPTH).0,
         })
     }
 
@@ -450,6 +466,8 @@ impl VisionEngine {
 mod demand_tests;
 #[cfg(test)]
 mod embeddings_tests;
+#[cfg(test)]
+mod depth_tests;
 #[cfg(test)]
 mod ring_tests;
 #[cfg(test)]

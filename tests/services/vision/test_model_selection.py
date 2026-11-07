@@ -108,14 +108,55 @@ def test_a_model_with_no_runnable_variant_has_none(tmp_path: Path) -> None:
 
 def test_recommended_detector_is_runnable_and_downloadable(tmp_path: Path) -> None:
     # The placeholder (no URL) is skipped on every board.
-    assert _loaded(_mgr(tmp_path, "rknn", 6.0), _registry()).recommended_detector() == "npu-det"
-    assert _loaded(_mgr(tmp_path, "auto", 0.0), _registry()).recommended_detector() == "cpu-det"
+    npu = _loaded(_mgr(tmp_path, "rknn", 6.0), _registry())
+    assert npu.recommended_model("detection") == "npu-det"
+    cpu = _loaded(_mgr(tmp_path, "auto", 0.0), _registry())
+    assert cpu.recommended_model("detection") == "cpu-det"
     # A recommended flag wins among the runnable candidates.
     entries = _registry()
     entries[3]["recommended"] = True
-    assert _loaded(_mgr(tmp_path, "auto", 0.0), entries).recommended_detector() == "both-det"
+    assert _loaded(_mgr(tmp_path, "auto", 0.0), entries).recommended_model("detection") == "both-det"
     # Nothing runnable: no pick.
-    assert _loaded(_mgr(tmp_path, "hailo", 13.0), _registry()).recommended_detector() is None
+    hailo = _loaded(_mgr(tmp_path, "hailo", 13.0), _registry())
+    assert hailo.recommended_model("detection") is None
+
+
+def test_the_depth_pick_is_its_own_task_and_follows_the_runtime(tmp_path: Path) -> None:
+    entries = _registry()
+    entries.append(
+        {
+            "id": "depth-small",
+            "task": "depth",
+            "recommended": True,
+            "variants": [_variant("onnx", 0, "depth-cpu"), _variant("rknn", 1.0, "depth-npu")],
+        }
+    )
+    cpu = _loaded(_mgr(tmp_path, "auto", 0.0), entries)
+    assert cpu.recommended_model("depth") == "depth-small"
+    assert cpu.select_best_variant("depth-small")["variant"] == "depth-cpu"
+    npu = _loaded(_mgr(tmp_path, "rknn", 6.0), entries)
+    assert npu.select_best_variant("depth-small")["variant"] == "depth-npu"
+    # A depth model is never the detector pick.
+    assert cpu.recommended_model("detection") == "cpu-det"
+    # The hailo runtime has no depth variant.
+    assert _loaded(_mgr(tmp_path, "hailo", 13.0), entries).recommended_model("depth") is None
+
+
+def test_an_installed_file_carries_the_task_of_the_registry_model_that_names_it(
+    tmp_path: Path,
+) -> None:
+    entries = _registry()
+    entries.append(
+        {"id": "depth-small", "task": "depth", "variants": [_variant("onnx", 0, "depth-cpu")]}
+    )
+    mgr = _loaded(_mgr(tmp_path, "auto", 0.0), entries)
+    (tmp_path / "depth-cpu.onnx").write_bytes(b"x")
+    (tmp_path / "fp32.onnx").write_bytes(b"x")
+    (tmp_path / "sideloaded.onnx").write_bytes(b"x")
+    by_id = {m["id"]: m for m in mgr.list_installed()}
+    assert (by_id["depth-cpu"]["task"], by_id["depth-cpu"]["registry_id"]) == ("depth", "depth-small")
+    assert by_id["fp32"]["task"] == "detection"
+    assert "task" not in by_id["sideloaded"]
 
 
 def test_a_benchmark_only_model_is_never_auto_picked_but_stays_installable(tmp_path: Path) -> None:
@@ -133,7 +174,7 @@ def test_a_benchmark_only_model_is_never_auto_picked_but_stays_installable(tmp_p
     info = next(m for m in mgr.registry if m.id == "bench-det")
     assert info.benchmark_only is True
     assert info.to_dict()["benchmark_only"] is True
-    assert mgr.recommended_detector() == "cpu-det"
+    assert mgr.recommended_model("detection") == "cpu-det"
     # An operator can still install it explicitly: a variant resolves.
     assert mgr.select_best_variant("bench-det")["variant"] == "bench"
     assert mgr.select_best_variant("reid-bench")["variant"] == "reid"

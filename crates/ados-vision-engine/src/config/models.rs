@@ -145,3 +145,150 @@ impl ReidConfig {
         }
     }
 }
+
+/// The depth model's registry id, and its file name in the models directory
+/// (`.onnx` for the CPU runtime, `.rknn` for the Rockchip accelerator).
+pub const DEFAULT_DEPTH_MODEL_ID: &str = "depth_midas_v21_small";
+pub const DEFAULT_DEPTH_FILE_STEM: &str = "midas_v21_small_256";
+
+/// The depth pace on a CPU runtime and on an accelerator, Hz.
+pub const DEPTH_RATE_CPU_HZ: f32 = 2.0;
+pub const DEPTH_RATE_ACCEL_HZ: f32 = 5.0;
+
+fn default_depth_model_id() -> String {
+    DEFAULT_DEPTH_MODEL_ID.to_string()
+}
+
+fn default_depth_dim() -> u32 {
+    256
+}
+
+fn default_depth_threads() -> u32 {
+    2
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// `vision.depth`: the monocular depth model behind the depth and surfaces
+/// layers. It runs on a camera only while a depth or surfaces lease is held
+/// there. Every key is optional: with no block at all the engine looks for
+/// the default model in the models directory, so installing the model from
+/// the registry is enough to turn the layers on.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DepthConfig {
+    /// `false` turns the depth layer off even when a model is installed.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_depth_model_id")]
+    pub model_id: String,
+    /// The model file; absent ⇒ the default file in the models directory.
+    #[serde(default)]
+    pub model_path: Option<String>,
+    #[serde(default = "default_depth_dim")]
+    pub input_width: u32,
+    #[serde(default = "default_depth_dim")]
+    pub input_height: u32,
+    /// Runs per second per camera; absent ⇒ 2 on the CPU runtime, 5 on an
+    /// accelerator.
+    #[serde(default)]
+    pub rate_hz: Option<f32>,
+    /// ONNX Runtime intra-op threads for the depth session. Default 2.
+    #[serde(default = "default_depth_threads")]
+    pub threads: u32,
+}
+
+impl Default for DepthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model_id: default_depth_model_id(),
+            model_path: None,
+            input_width: default_depth_dim(),
+            input_height: default_depth_dim(),
+            rate_hz: None,
+            threads: default_depth_threads(),
+        }
+    }
+}
+
+/// The depth model the engine should load, or why there is none.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DepthPlan {
+    /// Load this model and run it at most once per `interval_ms` per camera.
+    Load {
+        meta: ModelMetadata,
+        interval_ms: u64,
+    },
+    /// No depth model: the reason says what is missing.
+    None(String),
+}
+
+impl DepthConfig {
+    /// Resolve the model for `backend` (`onnx`, `rknn`, `hailo`, `mock`, ...)
+    /// with files under `models_dir`. `exists` checks a path (injected for
+    /// tests).
+    pub fn plan(
+        &self,
+        backend: &str,
+        models_dir: &str,
+        exists: impl Fn(&str) -> bool,
+    ) -> DepthPlan {
+        if !self.enabled {
+            return DepthPlan::None("vision.depth.enabled is false".into());
+        }
+        let (ext, accel) = match backend {
+            "rknn" => ("rknn", true),
+            "hailo" => {
+                return DepthPlan::None(
+                    "the hailo accelerator sidecar does not run depth models".into(),
+                )
+            }
+            _ => ("onnx", false),
+        };
+        let path = self.model_path.clone().unwrap_or_else(|| {
+            format!(
+                "{}/{DEFAULT_DEPTH_FILE_STEM}.{ext}",
+                models_dir.trim_end_matches('/')
+            )
+        });
+        // The mock runs a synthetic scene and needs no file.
+        if backend != "mock" && !exists(&path) {
+            return DepthPlan::None(format!(
+                "no depth model at {path}; install {} from the model registry",
+                self.model_id
+            ));
+        }
+        let rate = self
+            .rate_hz
+            .filter(|r| r.is_finite() && *r > 0.0)
+            .unwrap_or(if accel {
+                DEPTH_RATE_ACCEL_HZ
+            } else {
+                DEPTH_RATE_CPU_HZ
+            });
+        DepthPlan::Load {
+            meta: ModelMetadata {
+                id: self.model_id.clone(),
+                kind: ModelKind::Depth,
+                execution: ModelExecution::EngineRun,
+                input_width: if self.input_width == 0 {
+                    default_depth_dim()
+                } else {
+                    self.input_width
+                },
+                input_height: if self.input_height == 0 {
+                    default_depth_dim()
+                } else {
+                    self.input_height
+                },
+                input_format: FrameFormat::Rgb24,
+                output_classes: Vec::new(),
+                model_path: Some(path),
+                head: DetectionHead::Yolo8,
+            },
+            interval_ms: (1000.0 / rate).round() as u64,
+        }
+    }
+}

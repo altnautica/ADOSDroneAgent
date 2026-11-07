@@ -13,7 +13,10 @@ use crate::engine::{DetectionDemandMode, DetectionPolicy};
 
 mod models;
 use models::default_threads;
-pub use models::{DetectorConfig, ReidConfig};
+pub use models::{
+    DepthConfig, DepthPlan, DetectorConfig, ReidConfig, DEFAULT_DEPTH_FILE_STEM,
+    DEFAULT_DEPTH_MODEL_ID, DEPTH_RATE_ACCEL_HZ, DEPTH_RATE_CPU_HZ,
+};
 
 fn default_socket_dir() -> String {
     "/run/ados".to_string()
@@ -43,6 +46,10 @@ fn default_designate_hold_s() -> f32 {
 
 fn default_max_box_area_frac() -> f32 {
     0.5
+}
+
+fn default_models_dir() -> String {
+    "/opt/ados/models/vision".to_string()
 }
 
 /// The `vision:` config block.
@@ -151,6 +158,15 @@ pub struct VisionConfig {
     /// lens, never a follow target). Default 0.5; `1` keeps every box.
     #[serde(default = "default_max_box_area_frac")]
     pub max_box_area_frac: f32,
+    /// The depth model behind the depth and surfaces layers.
+    #[serde(default)]
+    pub depth: DepthConfig,
+    /// Where installed models live (the registry downloads here).
+    #[serde(default = "default_models_dir")]
+    pub models_dir: String,
+    /// Each camera's mount and field of view, from `cameras[]`.
+    #[serde(skip)]
+    pub camera_geometry: std::collections::HashMap<String, crate::depth::geometry::CameraGeometry>,
 }
 
 impl Default for VisionConfig {
@@ -181,6 +197,9 @@ impl Default for VisionConfig {
             designate_hold_s: default_designate_hold_s(),
             decode_threads: default_threads(),
             max_box_area_frac: default_max_box_area_frac(),
+            depth: DepthConfig::default(),
+            models_dir: default_models_dir(),
+            camera_geometry: std::collections::HashMap::new(),
         }
     }
 }
@@ -255,6 +274,10 @@ impl VisionConfig {
             decode_threads: u32,
             #[serde(default = "default_max_box_area_frac")]
             max_box_area_frac: f32,
+            #[serde(default)]
+            depth: DepthConfig,
+            #[serde(default = "default_models_dir")]
+            models_dir: String,
         }
 
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -276,6 +299,7 @@ impl VisionConfig {
             .partition(|c| c.capture && c.enabled);
         let other_camera_ids: Vec<String> = others.into_iter().map(|c| c.id).collect();
         let invalid_cameras = entries.invalid;
+        let camera_geometry = crate::depth::geometry::geometries_from_config(&text);
         let simulation = ados_config::simulation::read_gate_from(&text).enabled;
         let tap_sink = raw.video.vision.enabled.then(|| {
             raw.video
@@ -295,6 +319,7 @@ impl VisionConfig {
                 tap_sink,
                 simulation,
                 invalid_cameras,
+                camera_geometry,
                 ..VisionConfig::default()
             };
         };
@@ -325,6 +350,9 @@ impl VisionConfig {
             designate_hold_s: v.designate_hold_s,
             decode_threads: v.decode_threads,
             max_box_area_frac: v.max_box_area_frac,
+            depth: v.depth,
+            models_dir: v.models_dir,
+            camera_geometry,
         }
     }
 
@@ -407,6 +435,30 @@ impl VisionConfig {
             "{}/vision-frames.sock",
             self.socket_dir.trim_end_matches('/')
         )
+    }
+
+    /// The `vision-depth.sock` path: the broadcast of every depth grid and
+    /// landing-zone frame ([`ados_protocol::vision_depth::DepthRecord`]).
+    pub fn depth_socket_path(&self) -> String {
+        format!(
+            "{}/vision-depth.sock",
+            self.socket_dir.trim_end_matches('/')
+        )
+    }
+
+    /// The MAVLink broadcast socket the depth fit reads attitude and the
+    /// downward rangefinder from.
+    pub fn mavlink_socket_path(&self) -> String {
+        format!(
+            "{}/{}",
+            self.socket_dir.trim_end_matches('/'),
+            ados_protocol::paths::MAVLINK_SOCK
+        )
+    }
+
+    /// The depth model's ONNX intra-op threads (at least one).
+    pub fn depth_threads(&self) -> u32 {
+        self.depth.threads.max(1)
     }
 
     /// The accelerator sidecar socket path the RKNN backend talks to.

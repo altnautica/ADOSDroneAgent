@@ -288,6 +288,21 @@ fn the_autonomy_block_names_the_cameras_being_detected() {
 }
 
 #[test]
+fn the_autonomy_block_shows_where_depth_runs_and_its_scale() {
+    let mut app = live_app();
+    land(&mut app, ResourceId::NavStatus, nav_status());
+    let mut status = vision_status(false, false);
+    status["depth"] = json!({
+        "state": "ready", "interval_ms": 500,
+        "cameras": {"main": {"depth": true, "surfaces": true, "leases": [], "scale_source": "lidar", "runs": 4}},
+    });
+    land(&mut app, ResourceId::VisionStatus, status);
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("Depth"), "{text}");
+    assert!(text.contains("main (lidar) · zones: main"), "{text}");
+}
+
+#[test]
 fn an_idle_detector_reads_idle_even_with_nothing_publishing() {
     let mut app = live_app();
     land(

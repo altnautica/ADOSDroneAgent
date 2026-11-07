@@ -130,9 +130,12 @@ impl VisionEngine {
         // before the blocking calls. If the lease can't be acquired (a closing
         // engine), yield no embeddings rather than running embeds lease-less
         // against a concurrent detector inference.
-        let _permit = match self.accel_lease.acquire().await {
-            Ok(p) => p,
-            Err(_) => return none(&model_id),
+        let _permit = {
+            let _waiting = super::depth::PriorityWaiter::new(&self.priority_waiters);
+            match self.accel_lease.acquire().await {
+                Ok(p) => p,
+                Err(_) => return none(&model_id),
+            }
         };
         let loaded = {
             let models = self.models.lock().await;

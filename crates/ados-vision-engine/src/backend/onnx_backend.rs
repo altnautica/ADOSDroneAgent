@@ -19,6 +19,8 @@ const ONNX_NMS_IOU: f32 = 0.45;
 pub struct OnnxBackend {
     /// Intra-op threads for a detection model (`vision.detector.threads`).
     detector_threads: usize,
+    /// Intra-op threads for a depth model (`vision.depth.threads`).
+    depth_threads: usize,
 }
 
 struct OnnxModel {
@@ -33,10 +35,12 @@ struct OnnxModel {
 
 impl OnnxBackend {
     /// A backend whose detection sessions use `detector_threads` intra-op
-    /// threads (at least one). Every other model (the re-id embedder) uses one.
-    pub fn new(detector_threads: usize) -> Self {
+    /// threads and whose depth sessions use `depth_threads` (each at least
+    /// one). Every other model (the re-id embedder) uses one.
+    pub fn new(detector_threads: usize, depth_threads: usize) -> Self {
         OnnxBackend {
             detector_threads: detector_threads.max(1),
+            depth_threads: depth_threads.max(1),
         }
     }
 
@@ -44,6 +48,7 @@ impl OnnxBackend {
     pub fn intra_threads_for(&self, kind: ModelKind) -> usize {
         match kind {
             ModelKind::Detection => self.detector_threads,
+            ModelKind::Depth => self.depth_threads,
             _ => 1,
         }
     }
@@ -176,6 +181,31 @@ impl LoadedModel for OnnxModel {
         Ok(Some(data.to_vec()))
     }
 
+    fn infer_dense(&self, frame: &[u8], w: u32, h: u32, f: FrameFormat) -> Result<DenseMap> {
+        if f != FrameFormat::Rgb24 {
+            return Err(anyhow!("onnx depth requires rgb24 frames, got {f:?}"));
+        }
+        let iw = self.meta.input_width;
+        let ih = self.meta.input_height;
+        let chw = super::preprocess_depth_nchw(frame, w, h, iw, ih)
+            .ok_or_else(|| anyhow!("onnx depth preprocess failed (frame too small?)"))?;
+        let input = ort::value::Tensor::from_array(([1usize, 3, ih as usize, iw as usize], chw))?;
+        let mut session = self
+            .session
+            .lock()
+            .map_err(|_| anyhow!("onnx session lock poisoned"))?;
+        let outputs = session.run(ort::inputs![self.input_name.as_str() => input])?;
+        let value = outputs
+            .iter()
+            .next()
+            .map(|(_, v)| v)
+            .ok_or_else(|| anyhow!("onnx depth model produced no output"))?;
+        let (shape, data) = value.try_extract_tensor::<f32>()?;
+        // `[1, H, W]` or `[1, 1, H, W]`: the map is the last two axes.
+        let (rows, cols) = last_two_dims(shape);
+        DenseMap::new(cols as u32, rows as u32, data.to_vec())
+    }
+
     fn resolved_metadata(&self) -> Option<&ModelMetadata> {
         Some(&self.meta)
     }
@@ -198,14 +228,14 @@ mod thread_tests {
     use super::*;
 
     #[test]
-    fn detection_sessions_take_the_configured_threads_and_every_other_model_one() {
-        let b = OnnxBackend::new(2);
+    fn detection_and_depth_sessions_take_their_threads_and_every_other_model_one() {
+        let b = OnnxBackend::new(2, 3);
         assert_eq!(b.intra_threads_for(ModelKind::Detection), 2);
+        assert_eq!(b.intra_threads_for(ModelKind::Depth), 3);
         assert_eq!(b.intra_threads_for(ModelKind::Tracking), 1);
         // Zero is never a valid ORT budget (it would mean "one per core").
-        assert_eq!(
-            OnnxBackend::new(0).intra_threads_for(ModelKind::Detection),
-            1
-        );
+        let zero = OnnxBackend::new(0, 0);
+        assert_eq!(zero.intra_threads_for(ModelKind::Detection), 1);
+        assert_eq!(zero.intra_threads_for(ModelKind::Depth), 1);
     }
 }

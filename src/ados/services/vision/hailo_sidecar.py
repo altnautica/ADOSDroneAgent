@@ -170,6 +170,13 @@ class HailoBackend:
         detections = self._postprocess_yolo(np, outputs, req.width, req.height, loaded)
         return proto.ok_response(detections)
 
+    def dense(self, req: proto.DenseRequest) -> dict[str, Any]:
+        """Depth models are not compiled for the Hailo accelerator; the engine
+        never configures one on this backend, and a stray request says so."""
+        return proto.error_response(
+            f"the hailo sidecar does not run depth models ({req.model_id})"
+        )
+
     def _run_hef(self, loaded: _LoadedHef, req: proto.InferRequest) -> list[Any]:
         """Run one frame through the configured ``.hef``.
 

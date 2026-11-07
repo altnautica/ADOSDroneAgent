@@ -530,3 +530,78 @@ class _SilentLog:
     def info(self, *args, **kwargs) -> None: ...
     def warning(self, *args, **kwargs) -> None: ...
     def error(self, *args, **kwargs) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# Dense (depth) requests
+# ---------------------------------------------------------------------------
+
+
+def test_dense_request_round_trips_through_parse_as_its_own_type():
+    req = proto.DenseRequest("depth", b"\x01\x02\x03", 1, 1, "rgb24")
+    raw = req.to_dict()
+    assert raw["op"] == proto.OP_DENSE
+    decoded = proto.parse_request(raw)
+    assert isinstance(decoded, proto.DenseRequest)
+    assert (decoded.model_id, decoded.frame, decoded.width) == ("depth", b"\x01\x02\x03", 1)
+    # A plain infer still parses as an infer, not a dense request.
+    infer = proto.parse_request(InferRequest("m", b"\x00", 1, 1, "rgb24").to_dict())
+    assert not isinstance(infer, proto.DenseRequest)
+
+
+def test_dense_response_carries_little_endian_float32_and_checks_its_size():
+    data = struct.pack("<4f", 0.5, 1.0, 1.5, 2.0)
+    r = proto.dense_response(2, 2, data)
+    assert (r["status"], r["width"], r["height"]) == (proto.STATUS_OK, 2, 2)
+    assert struct.unpack("<4f", r["data"]) == (0.5, 1.0, 1.5, 2.0)
+    with pytest.raises(ValueError):
+        proto.dense_response(3, 2, data)
+
+
+def test_the_server_routes_a_dense_request_to_the_backend_dense_call():
+    seen: list[str] = []
+
+    class Backend:
+        def dense(self, req):
+            seen.append(type(req).__name__)
+            return proto.dense_response(1, 1, struct.pack("<f", 3.0))
+
+        def infer(self, req):  # pragma: no cover - must not be reached
+            seen.append("infer")
+            return proto.ok_response()
+
+    server = SidecarServer("/nonexistent", Backend(), _SilentLog())
+    resp = asyncio.run(server._dispatch(proto.DenseRequest("d", b"", 1, 1, "rgb24").to_dict()))
+    assert seen == ["DenseRequest"]
+    assert resp["width"] == 1
+
+
+def test_rknn_dense_unknown_model_is_an_error_and_hailo_refuses_depth():
+    from ados.services.vision.hailo_sidecar import HailoBackend
+    from ados.services.vision.rknn_sidecar import RknnBackend
+
+    req = proto.DenseRequest("missing", b"\x00" * 12, 2, 2, "rgb24")
+    assert RknnBackend().dense(req)["status"] == proto.STATUS_ERROR
+    resp = HailoBackend().dense(req)
+    assert resp["status"] == proto.STATUS_ERROR
+    assert "depth" in resp["error"]
+
+
+def test_rknn_dense_squeezes_the_frame_and_returns_the_map(tmp_path, monkeypatch):
+    np = pytest.importorskip("numpy")
+    model = tmp_path / "depth.rknn"
+    model.write_bytes(b"rknn")
+    backend, runtime_cls = _fake_rknn_backend(monkeypatch)
+    fed: list[tuple[int, ...]] = []
+
+    def inference(self, inputs):
+        fed.append(inputs[0].shape)
+        return [np.arange(16, dtype=np.float32).reshape(1, 4, 4)]
+
+    monkeypatch.setattr(runtime_cls, "inference", inference, raising=False)
+    backend.load_model(LoadModelRequest("depth", str(model), 4, 4, "rgb24", []))
+    resp = backend.dense(proto.DenseRequest("depth", bytes(8 * 6 * 3), 8, 6, "rgb24"))
+    assert resp["status"] == proto.STATUS_OK
+    assert fed == [(1, 4, 4, 3)]
+    assert (resp["width"], resp["height"]) == (4, 4)
+    assert struct.unpack("<16f", resp["data"])[5] == 5.0

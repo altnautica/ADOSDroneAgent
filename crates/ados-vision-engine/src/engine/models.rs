@@ -230,12 +230,15 @@ impl VisionEngine {
     ) -> Result<Vec<Detection>> {
         // Acquire the accelerator lease for the duration of the inference so two
         // models never contend for the shared NPU. The permit is held across the
-        // blocking call below.
-        let _permit = self
-            .accel_lease
-            .acquire()
-            .await
-            .map_err(|_| anyhow!("accelerator lease closed"))?;
+        // blocking call below. While queued, this call is counted as a priority
+        // waiter so a depth run stands aside for it.
+        let _permit = {
+            let _waiting = super::depth::PriorityWaiter::new(&self.priority_waiters);
+            self.accel_lease
+                .acquire()
+                .await
+                .map_err(|_| anyhow!("accelerator lease closed"))?
+        };
 
         // Take a handle on the loaded model and release the registry lock before
         // the (possibly slow) backend call, so model listing and registration

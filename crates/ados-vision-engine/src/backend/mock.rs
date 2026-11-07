@@ -14,7 +14,15 @@ impl LoadedModel for MockModel {
     fn infer(&self, _frame: &[u8], _w: u32, _h: u32, _f: FrameFormat) -> Result<Vec<Detection>> {
         Ok(Vec::new())
     }
+
+    fn infer_dense(&self, _frame: &[u8], _w: u32, _h: u32, _f: FrameFormat) -> Result<DenseMap> {
+        Ok(synthetic_depth(MOCK_DEPTH_W, MOCK_DEPTH_H))
+    }
 }
+
+/// The size of the synthetic depth map the mock models return.
+const MOCK_DEPTH_W: u32 = 64;
+const MOCK_DEPTH_H: u32 = 64;
 
 impl VisionBackend for MockBackend {
     fn load(&self, _meta: &ModelMetadata) -> Result<Box<dyn LoadedModel>> {
@@ -86,6 +94,10 @@ impl LoadedModel for MockTargetModel {
             w,
             h,
         )])
+    }
+
+    fn infer_dense(&self, _frame: &[u8], _w: u32, _h: u32, _f: FrameFormat) -> Result<DenseMap> {
+        Ok(synthetic_depth(MOCK_DEPTH_W, MOCK_DEPTH_H))
     }
 }
 

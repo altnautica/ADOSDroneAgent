@@ -171,6 +171,35 @@ class RknnBackend:
         )
         return proto.ok_response(detections)
 
+    def dense(self, req: proto.DenseRequest) -> dict[str, Any]:
+        """Run a resident depth model over one frame and return its per-pixel
+        relative inverse depth. The frame is resized (nearest sample, the whole
+        frame squeezed) to the model's input; the converted ``.rknn`` folds the
+        ImageNet normalization, so raw uint8 RGB is fed. The output's last two
+        axes are the map."""
+        model = self._models.get(req.model_id)
+        if model is None:
+            return proto.error_response(f"model not loaded: {req.model_id}")
+        try:
+            import numpy as np  # lazy: numpy only needed on the real infer path
+        except ImportError as exc:  # pragma: no cover - board has numpy
+            return proto.error_response(f"numpy unavailable: {exc}")
+        if req.format != "rgb24":
+            return proto.error_response(f"depth needs rgb24 frames, got {req.format}")
+        try:
+            tensor = resize_rgb24_nhwc(
+                np, req.frame, req.width, req.height, model.input_w, model.input_h
+            )
+            outputs = model.runtime.inference(inputs=[tensor])
+        except Exception as exc:  # pragma: no cover - depends on board wheel
+            log.error("rknn_dense_failed", model=req.model_id, error=str(exc))
+            return proto.error_response(f"rknn depth inference error: {exc}")
+        arr = np.asarray(outputs[0], dtype="<f4")
+        if arr.ndim < 2:
+            return proto.error_response(f"depth output has shape {arr.shape}")
+        h, w = arr.shape[-2], arr.shape[-1]
+        return proto.dense_response(w, h, arr.reshape(h, w).tobytes())
+
     def embed(self, req: proto.EmbedRequest) -> dict[str, Any]:
         """Run a resident re-id model over one pre-cropped box and return its
         embedding. The crop arrives already cropped + resized to the model's
@@ -446,6 +475,21 @@ def _run() -> None:
         pass
     finally:
         loop.close()
+
+
+def resize_rgb24_nhwc(
+    np: Any, frame: bytes, width: int, height: int, out_w: int, out_h: int
+) -> Any:
+    """Nearest-sample an RGB24 frame to ``out_w`` x ``out_h`` as a
+    ``(1, out_h, out_w, 3)`` uint8 tensor, the whole frame squeezed in."""
+    buf = np.frombuffer(frame, dtype=np.uint8)
+    expected = width * height * 3
+    if buf.size < expected:
+        raise ValueError(f"rgb24 frame is {buf.size} bytes, expected {expected}")
+    img = buf[:expected].reshape((height, width, 3))
+    ys = (np.arange(out_h) * height) // out_h
+    xs = (np.arange(out_w) * width) // out_w
+    return np.ascontiguousarray(img[ys][:, xs]).reshape((1, out_h, out_w, 3))
 
 
 if __name__ == "__main__":

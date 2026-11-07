@@ -36,12 +36,17 @@
 //!   capture thread that owns its device.
 //! - [`work_status`] — the frames-consumed and live-input counters, published
 //!   to the `vision-status.json` sidecar the supervisor judges the engine on.
+//! - [`depth`] — the depth layer: a monocular depth model's output pooled to
+//!   the per-camera grid, scaled with the ranging hits, and searched for
+//!   landing zones; [`depth_bus`] re-publishes it on `vision-depth.sock`.
 
 pub mod backend;
 pub mod camera_control;
 pub mod cameras;
 pub mod config;
 pub mod daemon_support;
+pub mod depth;
+pub mod depth_bus;
 pub mod detection_bus;
 pub mod engine;
 pub mod frame_bus;

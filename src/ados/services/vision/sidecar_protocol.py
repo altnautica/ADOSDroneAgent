@@ -11,12 +11,14 @@ other ADOS IPC socket uses: a 4-byte big-endian unsigned length prefix followed
 by a msgpack body (see ``ados.core.ipc`` and the ``frame`` contract in the
 ``ados-protocol`` crate).
 
-Four request operations cross the wire:
+Five request operations cross the wire:
 
 * ``load_model`` — open a model file and keep it resident, addressed by id.
   Loading an id that is already resident replaces it and releases the
   previous runtime.
 * ``infer`` — run a resident model against one raw frame, returning detections.
+* ``dense`` — run a resident depth model against one raw frame, returning its
+  per-pixel map (``width``, ``height``, ``data`` as little-endian float32).
 * ``embed`` — run a resident re-id model against one crop, returning a vector.
 * ``unload`` — release a resident model's runtime and forget the id.
 
@@ -50,6 +52,7 @@ MAX_FRAME_BYTES = 8 * 1024 * 1024
 # Request operations.
 OP_LOAD_MODEL = "load_model"
 OP_INFER = "infer"
+OP_DENSE = "dense"
 OP_EMBED = "embed"
 OP_UNLOAD = "unload"
 
@@ -150,6 +153,15 @@ class InferRequest:
 
 
 @dataclass
+class DenseRequest(InferRequest):
+    """Ask the sidecar to run a resident depth model against one raw frame and
+    return its dense per-pixel output (same fields as :class:`InferRequest`)."""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**super().to_dict(), "op": OP_DENSE}
+
+
+@dataclass
 class EmbedRequest:
     """Ask the sidecar to run a resident re-id model against one cropped box and
     return its appearance embedding.
@@ -209,13 +221,22 @@ class UnloadRequest:
 
 def parse_request(
     raw: dict[str, Any],
-) -> LoadModelRequest | InferRequest | EmbedRequest | UnloadRequest:
+) -> LoadModelRequest | InferRequest | DenseRequest | EmbedRequest | UnloadRequest:
     """Dispatch a decoded request mapping to its typed form by ``op``."""
     op = raw.get("op")
     if op == OP_LOAD_MODEL:
         return LoadModelRequest.from_dict(raw)
     if op == OP_INFER:
         return InferRequest.from_dict(raw)
+    if op == OP_DENSE:
+        base = InferRequest.from_dict(raw)
+        return DenseRequest(
+            model_id=base.model_id,
+            frame=base.frame,
+            width=base.width,
+            height=base.height,
+            format=base.format,
+        )
     if op == OP_EMBED:
         return EmbedRequest.from_dict(raw)
     if op == OP_UNLOAD:
@@ -290,6 +311,22 @@ def embedding_response(embedding: list[float], **extra: Any) -> dict[str, Any]:
     resp: dict[str, Any] = {"status": STATUS_OK, "embedding": [float(x) for x in embedding]}
     resp.update(extra)
     return resp
+
+
+def dense_response(width: int, height: int, data: bytes, **extra: Any) -> dict[str, Any]:
+    """Build an ``ok`` response carrying a dense map: ``width`` x ``height``
+    little-endian float32 values, row-major, as raw bytes."""
+    if len(data) != width * height * 4:
+        raise ValueError(f"dense data is {len(data)} bytes, not {width}x{height} float32")
+    resp: dict[str, Any] = {
+        "status": STATUS_OK,
+        "width": int(width),
+        "height": int(height),
+        "data": bytes(data),
+    }
+    resp.update(extra)
+    return resp
+
 
 
 def error_response(message: str, **extra: Any) -> dict[str, Any]:
@@ -388,6 +425,8 @@ class Backend(Protocol):
 
     def infer(self, req: InferRequest) -> dict[str, Any]: ...
 
+    def dense(self, req: DenseRequest) -> dict[str, Any]: ...
+
     def embed(self, req: EmbedRequest) -> dict[str, Any]: ...
 
     def unload(self, req: UnloadRequest) -> dict[str, Any]: ...
@@ -470,6 +509,8 @@ class SidecarServer:
             call: Any = self._backend.load_model
         elif isinstance(req, EmbedRequest):
             call = self._backend.embed
+        elif isinstance(req, DenseRequest):
+            call = self._backend.dense
         elif isinstance(req, UnloadRequest):
             call = self._backend.unload
         else:

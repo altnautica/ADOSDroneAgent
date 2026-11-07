@@ -283,6 +283,15 @@ export interface AgentConfig {
       rate_hz?: number | null;
       threads?: number;
     } | null;
+    // The depth model behind the depth and surfaces layers; every key is
+    // optional (an absent rate is 2 Hz on the CPU, 5 Hz on an accelerator).
+    depth?: {
+      enabled?: boolean;
+      model_id?: string;
+      model_path?: string | null;
+      rate_hz?: number | null;
+      threads?: number;
+    };
   };
   swarm?: {
     enabled?: boolean;

@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-use ados_protocol::vision_rpc::DetectionDemandReply;
+use ados_protocol::vision_rpc::{DemandKind, DetectionDemandReply};
 use ados_protocol::vision_status::{CameraDemandStatus, DemandLeaseStatus, DetectionDemandStatus};
 use serde::Deserialize;
 
@@ -69,10 +69,11 @@ impl Default for DetectionPolicy {
     }
 }
 
-/// The live leases: camera → owner → expiry.
+/// The live leases: (kind, camera) → owner → expiry. Detection, depth and
+/// surfaces share the map, each kind holding its cameras independently.
 #[derive(Debug, Default)]
 pub(super) struct DemandLeases {
-    by_camera: BTreeMap<String, BTreeMap<String, u64>>,
+    by_camera: BTreeMap<(DemandKind, String), BTreeMap<String, u64>>,
 }
 
 impl DemandLeases {
@@ -84,38 +85,40 @@ impl DemandLeases {
         });
     }
 
-    /// Hold `camera` for `owner` until `now_ms + hold_ms`, or release that
-    /// owner's lease with `hold_ms == 0`.
-    fn set(&mut self, camera: &str, owner: &str, hold_ms: u64, now_ms: u64) {
+    /// Hold `kind` on `camera` for `owner` until `now_ms + hold_ms`, or
+    /// release that owner's lease with `hold_ms == 0`.
+    fn set(&mut self, kind: DemandKind, camera: &str, owner: &str, hold_ms: u64, now_ms: u64) {
         self.prune(now_ms);
+        let key = (kind, camera.to_string());
         if hold_ms == 0 {
-            if let Some(owners) = self.by_camera.get_mut(camera) {
+            if let Some(owners) = self.by_camera.get_mut(&key) {
                 owners.remove(owner);
                 if owners.is_empty() {
-                    self.by_camera.remove(camera);
+                    self.by_camera.remove(&key);
                 }
             }
         } else {
             self.by_camera
-                .entry(camera.to_string())
+                .entry(key)
                 .or_default()
                 .insert(owner.to_string(), now_ms.saturating_add(hold_ms));
         }
     }
 
-    /// When the last live lease on `camera` ends, if any is live.
-    fn until(&mut self, camera: &str, now_ms: u64) -> Option<u64> {
+    /// When the last live `kind` lease on `camera` ends, if any is live.
+    fn until(&mut self, kind: DemandKind, camera: &str, now_ms: u64) -> Option<u64> {
         self.prune(now_ms);
         self.by_camera
-            .get(camera)
+            .get(&(kind, camera.to_string()))
             .and_then(|owners| owners.values().copied().max())
     }
 
-    /// The live leases on `camera`, by owner, with the time left on each.
-    fn leases(&mut self, camera: &str, now_ms: u64) -> Vec<DemandLeaseStatus> {
+    /// The live `kind` leases on `camera`, by owner, with the time left on
+    /// each.
+    fn leases(&mut self, kind: DemandKind, camera: &str, now_ms: u64) -> Vec<DemandLeaseStatus> {
         self.prune(now_ms);
         self.by_camera
-            .get(camera)
+            .get(&(kind, camera.to_string()))
             .map(|owners| {
                 owners
                     .iter()
@@ -128,10 +131,17 @@ impl DemandLeases {
             .unwrap_or_default()
     }
 
-    /// Every camera holding a live lease.
-    fn cameras(&mut self, now_ms: u64) -> Vec<String> {
+    /// Every camera holding a live lease of one of `kinds`.
+    fn cameras(&mut self, kinds: &[DemandKind], now_ms: u64) -> Vec<String> {
         self.prune(now_ms);
-        self.by_camera.keys().cloned().collect()
+        let mut ids: Vec<String> = self
+            .by_camera
+            .keys()
+            .filter(|(k, _)| kinds.contains(k))
+            .map(|(_, c)| c.clone())
+            .collect();
+        ids.dedup();
+        ids
     }
 }
 
@@ -141,7 +151,7 @@ impl VisionEngine {
         self.policy.mode
     }
 
-    fn leases(&self) -> std::sync::MutexGuard<'_, DemandLeases> {
+    pub(super) fn leases(&self) -> std::sync::MutexGuard<'_, DemandLeases> {
         // A panic while holding this lock leaves the map consistent (every
         // mutation is a single insert/remove), so a poisoned lock is reused.
         self.demand
@@ -153,22 +163,55 @@ impl VisionEngine {
     /// asks this before scheduling inference on a frame.
     pub fn detection_wanted(&self, camera_id: &str, now_ms: u64) -> bool {
         self.policy.mode == DetectionDemandMode::Always
-            || self.leases().until(camera_id, now_ms).is_some()
+            || self
+                .leases()
+                .until(DemandKind::Detection, camera_id, now_ms)
+                .is_some()
     }
 
-    /// `camera_id`'s demand state now.
+    /// Whether a depth grid and landing zones are wanted on `camera_id` now:
+    /// `(depth, surfaces)`.
+    pub fn depth_wanted(&self, camera_id: &str, now_ms: u64) -> (bool, bool) {
+        let mut l = self.leases();
+        (
+            l.until(DemandKind::Depth, camera_id, now_ms).is_some(),
+            l.until(DemandKind::Surfaces, camera_id, now_ms).is_some(),
+        )
+    }
+
+    /// `camera_id`'s detection demand state now.
     pub fn detection_demand(&self, camera_id: &str, now_ms: u64) -> DetectionDemandReply {
-        let until_ms = self.leases().until(camera_id, now_ms);
+        self.demand_state(DemandKind::Detection, camera_id, now_ms)
+    }
+
+    /// `camera_id`'s demand state for `kind` now. Depth and surfaces run only
+    /// while a depth model is loaded, so a lease without one is not running.
+    pub fn demand_state(
+        &self,
+        kind: DemandKind,
+        camera_id: &str,
+        now_ms: u64,
+    ) -> DetectionDemandReply {
+        let until_ms = self.leases().until(kind, camera_id, now_ms);
+        let running = match kind {
+            DemandKind::Detection => {
+                self.policy.mode == DetectionDemandMode::Always || until_ms.is_some()
+            }
+            DemandKind::Depth | DemandKind::Surfaces => {
+                until_ms.is_some() && self.depth_model_ready()
+            }
+        };
         DetectionDemandReply {
+            kind,
             camera_id: camera_id.to_string(),
-            detecting: self.policy.mode == DetectionDemandMode::Always || until_ms.is_some(),
+            detecting: running,
             until_ms,
         }
     }
 
-    /// Take, renew (`hold_ms > 0`) or release (`hold_ms == 0`) `owner`'s lease
-    /// on `camera_id`, and return the camera's demand state after it. The
-    /// caller has checked the camera is one the engine captures.
+    /// Take, renew (`hold_ms > 0`) or release (`hold_ms == 0`) `owner`'s
+    /// detection lease on `camera_id`, and return the camera's demand state
+    /// after it. The caller has checked the camera is one the engine captures.
     pub fn request_detection(
         &self,
         camera_id: &str,
@@ -176,14 +219,27 @@ impl VisionEngine {
         hold_ms: u64,
         now_ms: u64,
     ) -> DetectionDemandReply {
-        self.leases().set(camera_id, owner, hold_ms, now_ms);
-        self.detection_demand(camera_id, now_ms)
+        self.request_demand(DemandKind::Detection, camera_id, owner, hold_ms, now_ms)
+    }
+
+    /// [`Self::request_detection`] for a lease of any kind.
+    pub fn request_demand(
+        &self,
+        kind: DemandKind,
+        camera_id: &str,
+        owner: &str,
+        hold_ms: u64,
+        now_ms: u64,
+    ) -> DetectionDemandReply {
+        self.leases().set(kind, camera_id, owner, hold_ms, now_ms);
+        self.demand_state(kind, camera_id, now_ms)
     }
 
     /// An operator designated a target on `camera_id`: hold detection on it for
     /// the configured designation hold.
     pub(super) fn grant_designation(&self, camera_id: &str, now_ms: u64) {
         self.leases().set(
+            DemandKind::Detection,
             camera_id,
             DESIGNATE_OWNER,
             self.policy.designate_hold_ms,
@@ -197,12 +253,16 @@ impl VisionEngine {
     pub fn detection_status(&self, cameras: &[String], now_ms: u64) -> DetectionDemandStatus {
         let mut leases = self.leases();
         let mut ids: Vec<String> = cameras.to_vec();
-        ids.extend(leases.cameras(now_ms));
+        for id in leases.cameras(&[DemandKind::Detection], now_ms) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
         let always = self.policy.mode == DetectionDemandMode::Always;
         let cameras = ids
             .into_iter()
             .map(|id| {
-                let held = leases.leases(&id, now_ms);
+                let held = leases.leases(DemandKind::Detection, &id, now_ms);
                 let status = CameraDemandStatus {
                     detecting: always || !held.is_empty(),
                     leases: held,
@@ -214,6 +274,41 @@ impl VisionEngine {
             mode: self.policy.mode.as_str().to_string(),
             cameras,
         }
+    }
+
+    /// Each of `cameras` plus any camera with a depth or surfaces lease, with
+    /// its live depth and surfaces leases (owners prefixed with the kind).
+    pub(super) fn depth_leases(
+        &self,
+        cameras: &[String],
+        now_ms: u64,
+    ) -> Vec<(String, Vec<DemandLeaseStatus>, bool, bool)> {
+        let mut leases = self.leases();
+        let mut ids: Vec<String> = cameras.to_vec();
+        for id in leases.cameras(&[DemandKind::Depth, DemandKind::Surfaces], now_ms) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        ids.into_iter()
+            .map(|id| {
+                let mut held = Vec::new();
+                let mut on = [false; 2];
+                for (slot, kind) in [DemandKind::Depth, DemandKind::Surfaces]
+                    .into_iter()
+                    .enumerate()
+                {
+                    for l in leases.leases(kind, &id, now_ms) {
+                        on[slot] = true;
+                        held.push(DemandLeaseStatus {
+                            owner: format!("{}:{}", kind.as_str(), l.owner),
+                            remaining_ms: l.remaining_ms,
+                        });
+                    }
+                }
+                (id, held, on[0], on[1])
+            })
+            .collect()
     }
 }
 

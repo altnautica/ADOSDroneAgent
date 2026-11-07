@@ -145,6 +145,9 @@ class ModelManager:
         scan finds and a catalog entry for the same id collapse to one record that
         keeps the richer catalog metadata, so a sideloaded model appears once with
         its classes/head/dims rather than as a bare ``{id, filename}`` twin.
+        A file a registry variant names carries that model's ``task`` (and
+        ``registry_id``), so a surface can tell a depth model from a detector;
+        a file no registry entry names carries no ``task``.
         """
         installed: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -157,34 +160,48 @@ class ModelManager:
             installed.append({**entry, "id": mid, "custom": True})
             seen.add(mid)
 
+        by_filename = {
+            v.get("filename"): m
+            for m in self._registry
+            for v in m.variants
+            if isinstance(v, dict) and v.get("filename")
+        }
         valid_suffixes = {".rknn", ".tflite", ".onnx"}
         for model_file in sorted(self._models_dir.iterdir()):
             if model_file.is_file() and model_file.suffix in valid_suffixes:
                 if model_file.stem in seen:
                     continue
-                installed.append({
+                record: dict[str, Any] = {
                     "id": model_file.stem,
                     "filename": model_file.name,
                     "size_bytes": model_file.stat().st_size,
                     "format": model_file.suffix.lstrip("."),
-                })
+                }
+                owner = by_filename.get(model_file.name)
+                if owner is not None and owner.task:
+                    record["task"] = owner.task
+                    record["registry_id"] = owner.id
+                installed.append(record)
                 seen.add(model_file.stem)
         return installed
 
-    def recommended_detector(self) -> str | None:
-        """The model id to auto-provision as the detector for a fresh board.
+    def recommended_model(self, task: str) -> str | None:
+        """The model id to auto-provision for ``task`` (``detection``,
+        ``depth``, ...) on a fresh board.
 
-        Only a detection model this board can run (a variant in an available
-        runtime with a download URL) and that is not ``benchmark_only`` is a
-        candidate. Among those the registry's ``recommended`` model wins, else
-        the first listed; ``None`` when there is no candidate. This is what lets
-        a board come up already detecting with zero operator steps:
+        Only a model of that task this board can run (a variant in an
+        available runtime with a download URL) and that is not
+        ``benchmark_only`` is a candidate. Among those the registry's
+        ``recommended`` model wins, else the first listed; ``None`` when there
+        is no candidate. This is what lets a board come up already detecting
+        with zero operator steps, and what the depth layer installs:
         ``select_best_variant`` then chooses the variant.
         """
+        want = task.lower()
         candidates = [
             m
             for m in self._registry
-            if (m.task or "").lower() == "detection"
+            if (m.task or "").lower() == want
             and not m.benchmark_only
             and (self.select_best_variant(m.id) or {}).get("url")
         ]

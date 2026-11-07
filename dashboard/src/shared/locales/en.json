@@ -1166,7 +1166,13 @@
       "detectorRateHint": "Inference rate per camera. 0 runs on every captured frame.",
       "detectorThreadsLabel": "Inference threads",
       "detectorThreadsHint": "CPU threads one inference may use. More threads finish an inference sooner but cost more CPU on a small board.",
-      "noDetector": "Detector pacing is available once a detector model is selected."
+      "noDetector": "Detector pacing is available once a detector model is selected.",
+      "depthLabel": "Depth and landing-zone layers",
+      "depthHint": "Runs the depth model on a camera only while a cockpit shows its depth or landing-zone layer. Install the depth model from Mission Control's vision hub first.",
+      "depthRateLabel": "Depth rate (Hz)",
+      "depthRateHint": "Depth runs per second on a watched camera. 2 on the CPU runtime and 5 on the Rockchip accelerator when unset.",
+      "depthThreadsLabel": "Depth threads",
+      "depthThreadsHint": "CPU threads one depth run may use on the CPU runtime."
     }
   },
   "extensions": {

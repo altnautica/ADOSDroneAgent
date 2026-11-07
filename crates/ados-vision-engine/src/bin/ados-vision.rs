@@ -18,15 +18,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ados_protocol::framebus::mono_ns;
-use ados_protocol::framebus::ModelKind;
+use ados_protocol::framebus::{FrameDescriptor, ModelKind};
 use ados_vision_engine::backend::{select_backend, BackendPrefs};
 use ados_vision_engine::cameras::{camera_specs, needs_triggers, CameraSpec, SourceFactory};
-use ados_vision_engine::config::VisionConfig;
+use ados_vision_engine::config::{DepthPlan, VisionConfig};
 use ados_vision_engine::daemon_support::{
     backoff, board_soc, init_tracing, sd_ready, wait_for_shutdown,
 };
+use ados_vision_engine::depth::feed;
+use ados_vision_engine::depth_bus;
 use ados_vision_engine::detection_bus;
-use ados_vision_engine::engine::VisionEngine;
+use ados_vision_engine::engine::{DepthSetup, VisionEngine};
 use ados_vision_engine::frame_bus;
 use ados_vision_engine::perception_scheduler::PerceptionScheduler;
 use ados_vision_engine::source::{AnySource, FrameSource, SimClock};
@@ -70,6 +72,7 @@ async fn main() {
             hailo_socket_path: config.hailo_socket_path(),
             mock_target: config.mock_target,
             onnx_threads: config.detector_threads() as usize,
+            depth_threads: config.depth_threads() as usize,
         },
     );
     tracing::info!(soc = %soc, backend = backend.name(), "vision backend selected");
@@ -167,6 +170,56 @@ async fn main() {
         None => {}
     }
 
+    // The depth model behind the depth and surfaces layers. It loads when its
+    // file is installed (or the mock is the backend); without one, depth and
+    // surfaces leases are accepted but report not running, and the status
+    // says why.
+    let depth_interval_ms = {
+        let plan = config
+            .depth
+            .plan(engine.backend_name(), &config.models_dir, |p| {
+                Path::new(p).is_file()
+            });
+        let (model_id, unavailable, interval_ms) = match plan {
+            DepthPlan::Load { meta, interval_ms } => {
+                let id = meta.id.clone();
+                match engine.register_model(meta).await {
+                    Ok((_, true)) => {
+                        tracing::info!(model = %id, interval_ms, "depth model registered");
+                        (Some(id), None, interval_ms)
+                    }
+                    Ok((_, false)) => {
+                        tracing::warn!(model = %id, "depth model backend not loaded");
+                        (
+                            Some(id),
+                            Some("the depth model did not load".to_string()),
+                            interval_ms,
+                        )
+                    }
+                    Err(e) => {
+                        tracing::error!(model = %id, error = %e, "depth model registration failed");
+                        (
+                            None,
+                            Some(format!("depth model registration failed: {e:#}")),
+                            0,
+                        )
+                    }
+                }
+            }
+            DepthPlan::None(reason) => {
+                tracing::info!(reason = %reason, "no depth model");
+                (None, None, 0)
+            }
+        };
+        engine.configure_depth(DepthSetup {
+            model_id,
+            unavailable,
+            interval_ms,
+            geometries: config.camera_geometry.clone(),
+        });
+        interval_ms
+    };
+
     // Build the per-camera schedule input: every registered engine-run detection
     // model, each with a target rate + priority so the perception scheduler paces
     // them over the ONE accelerator. Sourced from the model registry (task-typed)
@@ -247,11 +300,15 @@ async fn main() {
         let cancel = cancel.clone();
         let path = work_status::sidecar_path(&config.socket_dir);
         let engine = engine.clone();
-        // The detector's demand state rides in the sidecar for
-        // `GET /api/vision/status`.
-        let detection = move || Some(engine.detection_status(&camera_ids, mono_ns() / 1_000_000));
+        // The detector's and the depth layer's demand state ride in the
+        // sidecar for `GET /api/vision/status`.
+        let fill = move |s: &mut ados_protocol::vision_status::VisionStatus| {
+            let now_ms = mono_ns() / 1_000_000;
+            s.detection = Some(engine.detection_status(&camera_ids, now_ms));
+            s.depth = Some(engine.depth_status(&camera_ids, now_ms));
+        };
         tasks.push(tokio::spawn(async move {
-            work_status::run_writer(work, detection, path, cancel).await;
+            work_status::run_writer(work, fill, path, cancel).await;
         }));
     }
 
@@ -264,7 +321,16 @@ async fn main() {
         let work = work.clone();
         let factory = factory.clone();
         tasks.push(tokio::spawn(async move {
-            run_camera(engine, cam, factory, paces, (input, work), cancel).await;
+            run_camera(
+                engine,
+                cam,
+                factory,
+                paces,
+                depth_interval_ms,
+                (input, work),
+                cancel,
+            )
+            .await;
         }));
     }
 
@@ -309,6 +375,30 @@ async fn main() {
         }));
     }
 
+    // The depth layer: its broadcast, and the ranging its scale fit reads
+    // (the planar scan off the plugin event export, attitude and the downward
+    // rangefinder off the MAVLink socket). Only when a depth model runs.
+    if depth_interval_ms > 0 {
+        let engine_bus = engine.clone();
+        let cancel_bus = cancel.clone();
+        let sock = config.depth_socket_path();
+        tasks.push(tokio::spawn(async move {
+            if let Err(e) = depth_bus::serve(engine_bus, &sock, cancel_bus).await {
+                tracing::error!(error = %e, "vision_depth_serve_failed");
+            }
+        }));
+        tasks.push(tokio::spawn(feed::run_scan_reader(
+            feed::default_events_socket(),
+            engine.range_feed(),
+            cancel.clone(),
+        )));
+        tasks.push(tokio::spawn(feed::run_mavlink_reader(
+            config.mavlink_socket_path().into(),
+            engine.range_feed(),
+            cancel.clone(),
+        )));
+    }
+
     sd_ready();
     tracing::info!("ados-vision ready");
     wait_for_shutdown().await;
@@ -333,6 +423,61 @@ struct ModelPace {
     priority: u8,
 }
 
+/// One camera's depth runs: at most one per `interval_ms`, one in flight,
+/// each reading its frame back out of the ring into a reused buffer. With a
+/// zero interval (no depth model) it never runs.
+struct DepthPacer {
+    interval_ms: u64,
+    last_ms: Option<u64>,
+    busy: Arc<tokio::sync::Semaphore>,
+    buf: Arc<tokio::sync::Mutex<Vec<u8>>>,
+}
+
+impl DepthPacer {
+    fn new(interval_ms: u64) -> Self {
+        Self {
+            interval_ms,
+            last_ms: None,
+            busy: Arc::new(tokio::sync::Semaphore::new(1)),
+            buf: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Start a depth run on the frame `desc` names when the camera wants
+    /// depth or surfaces, the pace allows, and no run is in flight.
+    fn offer(&mut self, engine: &Arc<VisionEngine>, desc: &FrameDescriptor, now_ms: u64) {
+        if self.interval_ms == 0
+            || self
+                .last_ms
+                .is_some_and(|t| now_ms.saturating_sub(t) < self.interval_ms)
+        {
+            return;
+        }
+        let (depth, surfaces) = engine.depth_wanted(&desc.camera_id, now_ms);
+        if !(depth || surfaces) {
+            return;
+        }
+        let Ok(permit) = self.busy.clone().try_acquire_owned() else {
+            return;
+        };
+        self.last_ms = Some(now_ms);
+        let engine = engine.clone();
+        let desc = desc.clone();
+        let buf = self.buf.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let mut frame = buf.lock().await;
+            if let Err(e) = engine.read_frame_into(&desc, &mut frame).await {
+                tracing::debug!(camera = %desc.camera_id, error = %e, "depth_frame_read_failed");
+                return;
+            }
+            if let Err(e) = engine.run_depth(&desc, &frame, now_ms).await {
+                tracing::warn!(camera = %desc.camera_id, error = %e, "depth_infer_failed");
+            }
+        });
+    }
+}
+
 /// Run one camera's capture loop: open its source, pull frames (each in the
 /// source's native format), and publish each into the engine ring. A source
 /// error backs off and re-opens.
@@ -353,6 +498,7 @@ async fn run_camera(
     cam: CameraSpec,
     factory: SourceFactory,
     paces: Vec<ModelPace>,
+    depth_interval_ms: u64,
     (mut input, work): (InputLiveness, Arc<WorkStatus>),
     cancel: ados_protocol::shutdown::Shutdown,
 ) {
@@ -366,6 +512,8 @@ async fn run_camera(
     // busy is skipped, so capture (and the video ring) never blocks on
     // inference. Decoupled, latest-frame-wins.
     let infer_sem = Arc::new(tokio::sync::Semaphore::new(1));
+    // The camera's depth runs: paced, one in flight.
+    let mut depth = DepthPacer::new(depth_interval_ms);
     // The last source failure, surfaced in the status sidecar and logged at
     // warn once per distinct reason, cleared by the next delivered frame.
     let mut last_error: Option<String> = None;
@@ -424,6 +572,7 @@ async fn run_camera(
                                     // scheduling turn; only mark models run when they
                                     // actually run.
                                     let now_ms = mono_ns() / 1_000_000;
+                                    depth.offer(&engine, &desc, now_ms);
                                     if !paces.is_empty() && engine.detection_wanted(&camera_id, now_ms) {
                                         if let Ok(permit) =
                                             infer_sem.clone().try_acquire_owned()

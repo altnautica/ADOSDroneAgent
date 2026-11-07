@@ -3308,6 +3308,18 @@
           "title": "Decode Threads",
           "type": "integer"
         },
+        "depth": {
+          "$ref": "#/$defs/VisionDepthConfig",
+          "default": {
+            "enabled": true,
+            "input_height": 256,
+            "input_width": 256,
+            "model_id": "depth_midas_v21_small",
+            "model_path": null,
+            "rate_hz": null,
+            "threads": 2
+          }
+        },
         "designate_camera": {
           "anyOf": [
             {
@@ -3460,6 +3472,69 @@
         }
       },
       "title": "VisionConfig",
+      "type": "object"
+    },
+    "VisionDepthConfig": {
+      "description": "The monocular depth model behind the depth and surfaces layers. It runs\non a camera only while a depth or surfaces lease is held there. With no\nblock the engine looks for the default model in ``models_dir``.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "input_height": {
+          "default": 256,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Input Height",
+          "type": "integer"
+        },
+        "input_width": {
+          "default": 256,
+          "maximum": 4294967295,
+          "minimum": 0,
+          "title": "Input Width",
+          "type": "integer"
+        },
+        "model_id": {
+          "default": "depth_midas_v21_small",
+          "title": "Model Id",
+          "type": "string"
+        },
+        "model_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Path"
+        },
+        "rate_hz": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rate Hz"
+        },
+        "threads": {
+          "default": 2,
+          "maximum": 4294967295,
+          "minimum": 1,
+          "title": "Threads",
+          "type": "integer"
+        }
+      },
+      "title": "VisionDepthConfig",
       "type": "object"
     },
     "VisionDetectorConfig": {
@@ -4572,6 +4647,15 @@
         "backend": "auto",
         "confidence_threshold": 0.5,
         "decode_threads": 1,
+        "depth": {
+          "enabled": true,
+          "input_height": 256,
+          "input_width": 256,
+          "model_id": "depth_midas_v21_small",
+          "model_path": null,
+          "rate_hz": null,
+          "threads": 2
+        },
         "designate_camera": null,
         "designate_hold_s": 30.0,
         "detection_demand": "on_demand",

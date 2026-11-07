@@ -159,7 +159,7 @@ fn main() -> Result<()> {
         model_path: Some(args.model.to_string_lossy().into_owned()),
         head: args.head,
     };
-    let model = OnnxBackend::new(args.threads)
+    let model = OnnxBackend::new(args.threads, 1)
         .load(&meta)
         .with_context(|| format!("load {}", args.model.display()))?;
 

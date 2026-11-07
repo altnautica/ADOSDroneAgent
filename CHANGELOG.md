@@ -6,6 +6,22 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.16] - 2026-11-07
+
+### Added
+
+- Depth and landing-zone layers. The vision engine runs a monocular depth model (MiDaS v2.1 small, registry id `depth_midas_v21_small`) on a camera only while a consumer holds a `depth` or `surfaces` lease there, shared with the detection lease map: `vision.request_detection` and `POST /api/vision/demand` take an optional `kind` (`detection`, the default, `depth` or `surfaces`), and the reply names it. The model runs at 2 Hz on two ONNX threads on the CPU runtime, or 5 Hz on the Rockchip accelerator through the sidecar's new `dense` request, and only when no detector or re-id inference is waiting for the accelerator. Each run pools the map to a 32 x 18 grid (each cell's nearest tenth) and fits its scale and shift to the planar LiDAR returns and the downward rangefinder spot that land in the image (median pairwise slope, at least 8 points, smoothed with a 0.3 moving average held for 2 s); without a fit the grid is relative bands only and says `scale_source: "none"`. While surfaces are leased, the scaled map is cast into the levelled body frame and searched for 2 m ground bins with slope at most 10° and plane residual at most 0.1 m, near the rangefinder ground; joined bins become zones scored by area, at most once a second.
+- `vision-depth.sock`: the engine's depth grids and landing zones as length-prefixed msgpack records (`ados_protocol::vision_depth`).
+- `vision.depth` config (`enabled`, `model_id`, `model_path`, `input_width`, `input_height`, `rate_hz`, `threads`). Every key is optional: with no block the engine loads the default model file from `vision.models_dir` when it is installed. The model's camera geometry comes from each `cameras[]` entry's `fov_deg` and `mount_pitch_deg` (70° and level when unset).
+- `GET /api/vision/status` carries `depth`: the model state (`ready`, `no_model` or `unavailable` with a reason), its run interval, and per camera whether the grid and the zones run, their leases, the last scale source and the run count.
+- `GET /api/vision/models`: each installed file a registry variant names carries that model's `task` and `registry_id`. The model manager picks a recommended model per task (`recommended_model(task)`); the installer's detector pick uses it.
+- Dashboard: Settings > Vision edits the depth layer (on or off, rate, threads).
+- TUI: the Vehicle tab's Autonomy block shows a Depth row (where the grid and zones run and their scale, `idle`, or `no model`).
+
+### Changed
+
+- `PUT /api/vision/detector` refuses a model the cached registry gives a task other than detection (a depth model) with 422.
+
 ## [0.108.15] - 2026-11-07
 
 ### Added

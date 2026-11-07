@@ -55,6 +55,19 @@ pub trait LoadedModel: Send + Sync {
         Ok(None)
     }
 
+    /// Run a dense model (a monocular depth model) on one raw frame and
+    /// return its per-pixel output covering the whole frame. A detector or an
+    /// embedder has none, the default.
+    fn infer_dense(
+        &self,
+        _frame: &[u8],
+        _width: u32,
+        _height: u32,
+        _format: FrameFormat,
+    ) -> Result<DenseMap> {
+        Err(anyhow!("this model has no dense output"))
+    }
+
     /// The metadata the model actually runs with, when loading refined the
     /// registered one (a self-describing file's head, classes or input size;
     /// see [`model_props`]). `None` keeps the registered metadata.
@@ -121,6 +134,7 @@ pub trait VisionBackend: Send + Sync {
 
 // --- mock -----------------------------------------------------------------
 
+mod dense;
 mod mock;
 pub mod model_props;
 #[cfg(feature = "onnx")]
@@ -128,6 +142,7 @@ mod onnx_backend;
 mod sidecar;
 mod unavailable;
 
+pub use dense::{preprocess_depth_nchw, synthetic_depth, DenseMap};
 use mock::mock_backend;
 pub use mock::{mock_target_at, MockBackend, MockTargetBackend, MOCK_TARGET_TRACK_ID};
 #[cfg(feature = "onnx")]
@@ -151,6 +166,8 @@ pub struct BackendPrefs<'a> {
     /// `vision.detector.threads`: intra-op threads an ONNX detection session
     /// runs on (the re-id model always runs on one).
     pub onnx_threads: usize,
+    /// `vision.depth.threads`: intra-op threads an ONNX depth session runs on.
+    pub depth_threads: usize,
 }
 
 /// Whether the build carries the ONNX CPU backend.
@@ -189,7 +206,7 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
             prefs.hailo_socket_path.clone(),
             "hailo",
         )),
-        "onnx" => onnx_backend_or_unavailable(prefs.onnx_threads),
+        "onnx" => onnx_backend_or_unavailable(prefs.onnx_threads, prefs.depth_threads),
         "mock" => mock_backend(prefs.mock_target),
         unknown => Box::new(UnavailableBackend::new(
             unknown,
@@ -226,10 +243,11 @@ pub fn select_backend(board_soc: &str, prefs: &BackendPrefs) -> Box<dyn VisionBa
 /// that says so.
 fn onnx_backend_or_unavailable(
     #[allow(unused_variables)] threads: usize,
+    #[allow(unused_variables)] depth_threads: usize,
 ) -> Box<dyn VisionBackend> {
     #[cfg(feature = "onnx")]
     {
-        Box::new(OnnxBackend::new(threads))
+        Box::new(OnnxBackend::new(threads, depth_threads))
     }
     #[cfg(not(feature = "onnx"))]
     {

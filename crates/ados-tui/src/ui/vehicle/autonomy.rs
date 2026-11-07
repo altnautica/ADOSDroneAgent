@@ -12,7 +12,7 @@ use ratatui::Frame;
 
 use crate::app::Core;
 use crate::model::autonomy::{
-    gps_fix_word, health_tone, phase_tone, Autonomy, Detection, Pilot, Tone,
+    gps_fix_word, health_tone, phase_tone, Autonomy, DepthLayer, Detection, Pilot, Tone,
 };
 use crate::ui::widgets::{kv, kv_text, panel};
 
@@ -62,6 +62,18 @@ fn detector_line(core: &Core, d: &Detection) -> Line<'static> {
         word.push_str(" · always");
     }
     kv(&core.theme, "Detector", LABEL, tone_span(core, tone, word))
+}
+
+/// The depth row: where the depth grid and the landing zones run, `idle`, or
+/// why the layer cannot run (no model installed, model failed).
+fn depth_line(core: &Core, d: &DepthLayer) -> Line<'static> {
+    let tone = match d.state.as_str() {
+        "unavailable" => Tone::Fault,
+        "no_model" => Tone::Neutral,
+        _ if d.grids.is_empty() && d.surfaces.is_empty() => Tone::Neutral,
+        _ => Tone::Good,
+    };
+    kv(&core.theme, "Depth", LABEL, tone_span(core, tone, d.word()))
 }
 
 /// A control mode as the pilot names it.
@@ -130,6 +142,9 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
     let mut out = Vec::new();
     if let Some(d) = det {
         out.push(detector_line(core, d));
+        if let Some(depth) = &d.depth {
+            out.push(depth_line(core, depth));
+        }
     }
     out.extend(pilot_lines(core, a.pilot.as_ref()));
     if let Some(follow) = &a.follow {

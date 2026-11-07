@@ -23,7 +23,7 @@
 //! | `vision.register_model` | `{model: bin(ModelMetadata)}` |
 //! | `vision.infer` | `{model_id: str, descriptor: bin(FrameDescriptor)}`; reply `{batch: bin(DetectionBatch)}` |
 //! | `vision.designate_track` | `{camera_id: str, bbox: {x, y, width, height}, class_label?: str, confidence?: num}` |
-//! | `vision.request_detection` | `{camera_id: str, hold_ms: int 0..=60000, owner: str}`; reply `{camera_id, detecting: bool, until_ms: int\|nil}` |
+//! | `vision.request_detection` | `{camera_id: str, hold_ms: int 0..=60000, kind?: "detection"\|"depth"\|"surfaces", owner: str}`; reply `{kind, camera_id, detecting: bool, until_ms: int\|nil}` |
 //!
 //! `vision.designate_track` is a flat map instead, because the control plane's
 //! click-to-follow route sends the same request built from the operator's JSON
@@ -259,28 +259,86 @@ pub fn decode_designate_track(args: &Value) -> Result<DesignateTrack, VisionArgs
 /// The longest lease one `vision.request_detection` may take.
 pub const MAX_DETECTION_HOLD_MS: u64 = 60_000;
 
-/// A decoded `vision.request_detection` request: run the detector on
+/// What a `vision.request_detection` lease keeps running on its camera. The
+/// three kinds share one lease map in the engine, keyed by kind, camera and
+/// owner. An absent `kind` is [`DemandKind::Detection`], the request's
+/// original meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum DemandKind {
+    /// The object detector.
+    #[default]
+    Detection,
+    /// The monocular depth model and its per-camera depth grid.
+    Depth,
+    /// The landing-zone candidates, computed from the depth grid (a surfaces
+    /// lease runs the depth model too, without publishing its grid).
+    Surfaces,
+}
+
+impl DemandKind {
+    /// Every kind, in wire order.
+    pub const ALL: [DemandKind; 3] = [
+        DemandKind::Detection,
+        DemandKind::Depth,
+        DemandKind::Surfaces,
+    ];
+
+    /// The wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DemandKind::Detection => "detection",
+            DemandKind::Depth => "depth",
+            DemandKind::Surfaces => "surfaces",
+        }
+    }
+
+    /// Parse the wire spelling.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "detection" => Some(DemandKind::Detection),
+            "depth" => Some(DemandKind::Depth),
+            "surfaces" => Some(DemandKind::Surfaces),
+            _ => None,
+        }
+    }
+}
+
+/// A decoded `vision.request_detection` request: keep `kind` running on
 /// `camera_id` for `hold_ms` more milliseconds on behalf of `owner`, or, with
-/// `hold_ms == 0`, release that owner's lease on the camera.
+/// `hold_ms == 0`, release that owner's lease of that kind on the camera.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestDetection {
+    pub kind: DemandKind,
     pub camera_id: String,
     pub hold_ms: u64,
     pub owner: String,
 }
 
-/// `vision.request_detection` args, without the owner (the plugin host stamps
-/// it; a control-plane caller adds it with [`with_owner`]).
+/// `vision.request_detection` args for a detection lease, without the owner
+/// (the plugin host stamps it; a control-plane caller adds it with
+/// [`with_owner`]).
 pub fn request_detection_args(camera_id: &str, hold_ms: u64) -> Value {
-    map(vec![
+    request_demand_args(DemandKind::Detection, camera_id, hold_ms)
+}
+
+/// `vision.request_detection` args for a lease of `kind`, without the owner.
+/// A detection lease carries no `kind`, so an engine that predates the field
+/// reads it unchanged.
+pub fn request_demand_args(kind: DemandKind, camera_id: &str, hold_ms: u64) -> Value {
+    let mut pairs = vec![
         ("camera_id", Value::from(camera_id)),
         ("hold_ms", Value::from(hold_ms)),
-    ])
+    ];
+    if kind != DemandKind::Detection {
+        pairs.push(("kind", Value::from(kind.as_str())));
+    }
+    map(pairs)
 }
 
 /// Decode `vision.request_detection` args. `camera_id` and `owner` must be
 /// non-empty; `hold_ms` is a whole number of milliseconds up to
-/// [`MAX_DETECTION_HOLD_MS`] (an integral float decodes too).
+/// [`MAX_DETECTION_HOLD_MS`] (an integral float decodes too); `kind`, when
+/// present, is `detection`, `depth` or `surfaces`.
 pub fn decode_request_detection(args: &Value) -> Result<RequestDetection, VisionArgsError> {
     let camera_id = field(args, "camera_id")?
         .as_str()
@@ -302,19 +360,35 @@ pub fn decode_request_detection(args: &Value) -> Result<RequestDetection, Vision
             format!("{hold_ms} exceeds the {MAX_DETECTION_HOLD_MS} ms maximum"),
         ));
     }
+    let kind = decode_kind(args)?;
     let owner = owner_of(args)?.to_string();
     Ok(RequestDetection {
+        kind,
         camera_id,
         hold_ms,
         owner,
     })
 }
 
-/// The `vision.request_detection` reply: whether detection now runs on the
-/// camera and, while a lease holds it on, when the last lease ends (the
-/// engine's monotonic clock, milliseconds).
+/// The optional `kind` field: absent or nil is detection.
+fn decode_kind(args: &Value) -> Result<DemandKind, VisionArgsError> {
+    match field(args, "kind") {
+        Ok(Value::Nil) | Err(VisionArgsError::Missing(_)) => Ok(DemandKind::Detection),
+        Ok(v) => v
+            .as_str()
+            .and_then(DemandKind::parse)
+            .ok_or_else(|| decode_err("kind", "not one of detection, depth, surfaces")),
+        Err(e) => Err(e),
+    }
+}
+
+/// The `vision.request_detection` reply: whether `kind` now runs on the
+/// camera and, while a lease holds it on, when the last lease of that kind
+/// ends (the engine's monotonic clock, milliseconds). `detecting` keeps its
+/// name for every kind: it means "running".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectionDemandReply {
+    pub kind: DemandKind,
     pub camera_id: String,
     pub detecting: bool,
     pub until_ms: Option<u64>,
@@ -323,6 +397,7 @@ pub struct DetectionDemandReply {
 /// Encode the `vision.request_detection` reply.
 pub fn request_detection_reply(reply: &DetectionDemandReply) -> Value {
     map(vec![
+        ("kind", Value::from(reply.kind.as_str())),
         ("camera_id", Value::from(reply.camera_id.as_str())),
         ("detecting", Value::Boolean(reply.detecting)),
         (
@@ -332,7 +407,8 @@ pub fn request_detection_reply(reply: &DetectionDemandReply) -> Value {
     ])
 }
 
-/// Decode the `vision.request_detection` reply.
+/// Decode the `vision.request_detection` reply. A reply without `kind` (an
+/// engine that predates it) is a detection reply.
 pub fn decode_request_detection_reply(
     args: &Value,
 ) -> Result<DetectionDemandReply, VisionArgsError> {
@@ -352,6 +428,7 @@ pub fn decode_request_detection_reply(
         Err(e) => return Err(e),
     };
     Ok(DetectionDemandReply {
+        kind: decode_kind(args)?,
         camera_id,
         detecting,
         until_ms,
@@ -559,6 +636,7 @@ mod tests {
         assert_eq!(
             decode_request_detection(&args).unwrap(),
             RequestDetection {
+                kind: DemandKind::Detection,
                 camera_id: "belly".into(),
                 hold_ms: 6_000,
                 owner: "com.example.follow".into(),
@@ -612,9 +690,38 @@ mod tests {
     }
 
     #[test]
+    fn a_depth_or_surfaces_lease_carries_its_kind_and_a_bad_kind_is_refused() {
+        // A detection lease carries no kind, so an older engine reads it.
+        let Value::Map(entries) = request_detection_args("main", 1) else {
+            panic!("not a map");
+        };
+        assert!(entries.iter().all(|(k, _)| k.as_str() != Some("kind")));
+        for kind in DemandKind::ALL {
+            let args = with_owner(&request_demand_args(kind, "main", 6_000), "operator");
+            assert_eq!(decode_request_detection(&args).unwrap().kind, kind);
+            assert_eq!(DemandKind::parse(kind.as_str()), Some(kind));
+        }
+        let bad = map(vec![
+            ("camera_id", Value::from("main")),
+            ("hold_ms", Value::from(1)),
+            ("kind", Value::from("segmentation")),
+            (OWNER_FIELD, Value::from("operator")),
+        ]);
+        assert!(matches!(
+            decode_request_detection(&bad),
+            Err(VisionArgsError::Decode { field: "kind", .. })
+        ));
+    }
+
+    #[test]
     fn the_request_detection_reply_round_trips() {
-        for until_ms in [Some(12_345), None] {
+        for (kind, until_ms) in [
+            (DemandKind::Detection, Some(12_345)),
+            (DemandKind::Depth, None),
+            (DemandKind::Surfaces, Some(7)),
+        ] {
             let reply = DetectionDemandReply {
+                kind,
                 camera_id: "main".into(),
                 detecting: until_ms.is_some(),
                 until_ms,
@@ -624,5 +731,15 @@ mod tests {
                 reply
             );
         }
+        // An engine that predates `kind` replies without it: a detection reply.
+        let old = map(vec![
+            ("camera_id", Value::from("main")),
+            ("detecting", Value::Boolean(false)),
+            ("until_ms", Value::Nil),
+        ]);
+        assert_eq!(
+            decode_request_detection_reply(&old).unwrap().kind,
+            DemandKind::Detection
+        );
     }
 }

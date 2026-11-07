@@ -32,7 +32,7 @@ async def main():
     # Populate the registry so the recommended pick can see it (best-effort: an
     # offline board falls back to any locally-cached registry).
     await mgr.fetch_registry()
-    model_id = mgr.recommended_detector() or ""
+    model_id = mgr.recommended_model("detection") or ""
     if not model_id:
         print("DEFERRED")
         return

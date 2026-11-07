@@ -382,6 +382,7 @@ mod tests {
                 capability: String::new(),
                 args: ados_protocol::vision_rpc::request_detection_reply(
                     &ados_protocol::vision_rpc::DetectionDemandReply {
+                        kind: decoded.kind,
                         camera_id: decoded.camera_id,
                         detecting: true,
                         until_ms: Some(9_000),

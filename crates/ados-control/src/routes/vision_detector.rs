@@ -93,8 +93,12 @@ pub async fn put_detector(
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(str::to_string);
+    let dir = crate::routes::vision_upload::models_dir();
+    if let Some(task) = registry_task(&dir, &model_id).filter(|t| t != "detection") {
+        let msg = format!("model {model_id} is a {task} model, not a detector");
+        return detail(StatusCode::UNPROCESSABLE_ENTITY, msg);
+    }
     let resolved = supplied.or_else(|| {
-        let dir = crate::routes::vision_upload::models_dir();
         resolve_installed_model(&dir, &model_id).map(|p| p.to_string_lossy().into_owned())
     });
     let Some(model_path) = resolved else {
@@ -115,6 +119,31 @@ pub async fn put_detector(
         }),
         restart,
     )
+}
+
+/// The registry cache the model manager keeps in the models dir.
+const REGISTRY_CACHE: &str = ".registry_cache.json";
+
+/// The task (`detection`, `depth`, ...) the cached model registry gives the
+/// model `id`, matched by registry id or by the stem of a variant's file name
+/// (a registry download is installed under that name). `None` for a model the
+/// registry does not name (a sideload) or with no readable cache.
+fn registry_task(dir: &Path, id: &str) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(REGISTRY_CACHE)).ok()?;
+    let data: Value = serde_json::from_str(&text).ok()?;
+    let models = data.get("models").unwrap_or(&data).as_array()?;
+    models.iter().find_map(|m| {
+        let named = m.get("id").and_then(Value::as_str) == Some(id)
+            || m.get("variants")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.get("filename").and_then(Value::as_str))
+                .any(|f| f.rsplit_once('.').map_or(f, |(stem, _)| stem) == id);
+        named
+            .then(|| m.get("task").and_then(Value::as_str).map(str::to_string))
+            .flatten()
+    })
 }
 
 /// The installed file for model `id` under `dir`: `<id>.<ext>` (an upload)
@@ -306,6 +335,36 @@ mod tests {
         assert_eq!(
             detector.get("model_path").and_then(|v| v.as_str()),
             Some("/var/ados/models/custom-1.onnx")
+        );
+    }
+
+    #[test]
+    fn the_registry_names_the_task_of_a_model_by_id_or_by_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(REGISTRY_CACHE),
+            r#"{"version": 1, "models": [
+                {"id": "person-det", "task": "detection", "variants": [{"filename": "person_640.onnx"}]},
+                {"id": "depth-small", "task": "depth", "variants": [{"filename": "midas_small_256.onnx"}]}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            registry_task(dir.path(), "depth-small").as_deref(),
+            Some("depth")
+        );
+        assert_eq!(
+            registry_task(dir.path(), "midas_small_256").as_deref(),
+            Some("depth")
+        );
+        assert_eq!(
+            registry_task(dir.path(), "person_640").as_deref(),
+            Some("detection")
+        );
+        assert_eq!(registry_task(dir.path(), "sideloaded"), None);
+        assert_eq!(
+            registry_task(&dir.path().join("absent"), "depth-small"),
+            None
         );
     }
 
