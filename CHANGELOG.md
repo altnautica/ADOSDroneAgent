@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.20] - 2026-11-07
+
+### Fixed
+
+- The mission mirror also fetches the plan when the vehicle enters a mission mode with nothing mirrored, and when MISSION_CURRENT reports a seq past the mirror's last item. A plan uploaded over a link the router cannot see, on firmware whose MISSION_CURRENT carries no `total` (ArduPilot before 4.5), left the mirror empty and the mission state `none`.
+
 ## [0.108.19] - 2026-11-07
 
 ### Added

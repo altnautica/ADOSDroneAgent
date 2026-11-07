@@ -51,7 +51,7 @@ pub enum ModeTable {
 }
 
 impl ModeTable {
-    fn in_auto(self, cm: u32) -> bool {
+    pub(crate) fn in_auto(self, cm: u32) -> bool {
         match self {
             ModeTable::Copter => cm == 3 || cm == 27,
             ModeTable::Plane => cm == 10,

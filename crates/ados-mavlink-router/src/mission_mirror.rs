@@ -136,6 +136,7 @@ pub struct MirrorCore {
     foreign_at: Option<Instant>,
     pub tracker: MissionTracker,
     last_total: Option<u16>,
+    last_seq_probe: Option<u16>,
     /// Download outcomes, for the tests and the log.
     pub downloads_ok: u32,
     pub downloads_failed: u32,
@@ -161,6 +162,7 @@ impl MirrorCore {
             foreign_at: None,
             tracker: MissionTracker::default(),
             last_total: None,
+            last_seq_probe: None,
             downloads_ok: 0,
             downloads_failed: 0,
         }
@@ -220,7 +222,17 @@ impl MirrorCore {
                 self.vehicle = Some((m.sys, m.comp));
                 self.autopilot = autopilot;
                 self.mav_type = mav_type;
-                self.custom_mode = m.u32_at(0);
+                let mode = m.u32_at(0);
+                // Entering a mission mode with nothing mirrored: the plan
+                // reached the FC some way the router could not see (another
+                // link, or firmware that reports no `total`).
+                if mode != self.custom_mode
+                    && self.table().in_auto(mode)
+                    && self.mirror.items.len() <= usize::from(self.table().home_slot())
+                {
+                    self.want_download = true;
+                }
+                self.custom_mode = mode;
                 self.armed = m.u8_at(6) & 0x80 != 0;
                 if first {
                     self.want_download = true;
@@ -236,6 +248,7 @@ impl MirrorCore {
                 let mc = MissionCurrent::decode(m);
                 self.tracker.on_mission_current(mc, now);
                 self.check_total(mc);
+                self.check_seq(mc.seq);
             }
             MSG_MISSION_ITEM_REACHED => self.tracker.on_item_reached(m.u16_at(0)),
             MSG_COMMAND_ACK if m.u16_at(0) == 193 => {
@@ -330,6 +343,19 @@ impl MirrorCore {
             self.want_download = true;
         }
         self.last_total = Some(mc.total);
+    }
+
+    /// A current seq past the mirror's last item means the FC holds a plan
+    /// the mirror has not seen (an upload the router could not see, on
+    /// firmware whose MISSION_CURRENT carries no `total`). Asked once per seq.
+    fn check_seq(&mut self, seq: u16) {
+        if self.mirror.present
+            && usize::from(seq) >= self.mirror.items.len()
+            && self.last_seq_probe != Some(seq)
+        {
+            self.last_seq_probe = Some(seq);
+            self.want_download = true;
+        }
     }
 
     fn fc_target(&self) -> (u8, u8) {

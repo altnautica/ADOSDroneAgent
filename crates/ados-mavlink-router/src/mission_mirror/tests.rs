@@ -323,3 +323,38 @@ fn total_mismatch_triggers_a_download() {
     l.adv(200);
     assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
 }
+
+#[test]
+fn an_upload_the_router_never_saw_is_fetched_without_total() {
+    // ArduPilot 4.4: MISSION_CURRENT carries seq only. The plan was uploaded
+    // straight to the FC, so the mirror holds only the empty boot download.
+    let mut l = Link::new();
+    l.heartbeat(2, 0, false);
+    l.fc(wire::MSG_MISSION_COUNT, &count_payload(1, GCS));
+    l.fc(wire::MSG_MISSION_ITEM_INT, &item_payload(0, GCS, 16));
+    l.adv(3100);
+    l.take_sent();
+    // Entering AUTO with nothing mirrored asks for the plan.
+    l.heartbeat(2, 3, true);
+    l.adv(200);
+    assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+}
+
+#[test]
+fn a_seq_past_the_mirror_triggers_one_download() {
+    let mut l = copter_with_mission();
+    l.adv(3100);
+    l.take_sent();
+    l.current(9, 0, 0);
+    l.adv(200);
+    assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+    // The same seq again does not ask twice.
+    l.fc(wire::MSG_MISSION_COUNT, &count_payload(5, US));
+    for seq in 0..5 {
+        l.fc(wire::MSG_MISSION_ITEM_INT, &item_payload(seq, US, 16));
+    }
+    l.take_sent();
+    l.current(9, 0, 0);
+    l.adv(200);
+    assert!(l.take_sent().is_empty());
+}
