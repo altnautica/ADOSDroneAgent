@@ -25,6 +25,7 @@ pub mod fc_sensors;
 pub mod frame_ingest;
 pub mod mission_mirror;
 pub mod param_cache;
+pub mod pilot_link;
 pub mod proxies;
 pub mod relayed;
 pub mod routing;

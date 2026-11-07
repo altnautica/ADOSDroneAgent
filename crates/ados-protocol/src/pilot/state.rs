@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Who currently commands motion (C2 authority table).
+/// Who currently commands motion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Owner {
@@ -106,7 +106,7 @@ pub struct Readiness {
     pub msg: String,
 }
 
-/// FC mission state, computed by the router (C8) and copied here.
+/// FC mission state, computed by the router and copied here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Mission {
     pub state: String,
@@ -131,7 +131,7 @@ pub struct InputSession {
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Gate {
     pub pending: bool,
-    pub progress: f32,
+    pub progress: f64,
 }
 
 /// Progress of a `launch` sequence.
@@ -152,7 +152,7 @@ pub struct Banner {
     pub until_ms: u64,
 }
 
-/// The nav-stream `pilot` kind (C3 plus the C2b and C10 fields).
+/// The nav-stream `pilot` kind with the handover, launch and banner fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PilotState {
     pub owner: Owner,
@@ -170,18 +170,18 @@ pub struct PilotState {
     pub input_age_ms: Option<u64>,
     pub hold_reason: Option<String>,
     pub avoid_state: AvoidState,
-    pub min_clearance_m: Option<f32>,
-    pub goal_ned: Option<[f32; 3]>,
-    pub plan_ned: Vec<[f32; 2]>,
-    pub setpoint_ned: Option<[f32; 3]>,
+    pub min_clearance_m: Option<f64>,
+    pub goal_ned: Option<[f64; 3]>,
+    pub plan_ned: Vec<[f64; 2]>,
+    pub setpoint_ned: Option<[f64; 3]>,
     pub readiness: Vec<Readiness>,
-    pub link_loss_in_s: Option<f32>,
+    pub link_loss_in_s: Option<f64>,
     pub mission: Option<Mission>,
     pub input_session: Option<InputSession>,
     pub gate: Option<Gate>,
     pub sequence: Option<Sequence>,
     pub banner: Option<Banner>,
-    pub rth_countdown_s: Option<f32>,
+    pub rth_countdown_s: Option<f64>,
 }
 
 /// One camera's obstacle (or depth) grid: 32×18 cells, row-major, row 0 at
@@ -209,8 +209,14 @@ pub struct ObstaclesFrame {
     pub v: u8,
     pub ts_ms: u64,
     /// 72 sectors of 5°, body yaw 0 = nose, clockwise; `None` = no return.
-    pub sectors_m: Vec<Option<f32>>,
+    pub sectors_m: Vec<Option<f64>>,
     pub cameras: std::collections::BTreeMap<String, CameraGrid>,
+}
+
+/// A published float: millimetre precision, as f64 so JSON carries the
+/// decimal value rather than its f32 expansion.
+pub fn wire(v: f32) -> f64 {
+    (f64::from(v) * 1000.0).round() / 1000.0
 }
 
 /// Distance in metres of a grid code (0 = unknown → `None`).

@@ -20,6 +20,11 @@ pub(super) fn spawn_core(
     dir: &str,
     tasks: &mut Tasks,
 ) {
+    // The command-authority link (drone only): the pilot daemon owns motion
+    // while control.mode is `ados` and it is alive.
+    if cfg.is_drone() {
+        crate::pilot_link::start(control_mode(), std::path::Path::new(dir).join(ados_protocol::paths::PILOT_SOCK));
+    }
     // FC connect + read loop. In demo mode a synthetic source feeds the same
     // fan-out, state, and proxy paths a serial FC would; the serial path is
     // untouched when demo mode is off (the default).
@@ -172,7 +177,12 @@ pub(super) fn spawn_core(
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        fc.send_heartbeat().await;
+                        // The pilot sends the heartbeat the FC's GCS failsafe
+                        // watches while it owns motion; if it dies, that
+                        // heartbeat stops and the FC fails safe.
+                        if !crate::pilot_link::suppress_router_heartbeat() {
+                            fc.send_heartbeat().await;
+                        }
                         fc.tick_tx_watchdog().await;
                     }
                     _ = cancel.wait() => break,
@@ -213,4 +223,13 @@ pub(super) fn spawn_gate_feed(fc: &Arc<FcConnection>, cancel: &Shutdown, tasks: 
         injector_arbitration = fc.injector_arbitration_state(),
         "mavlink_injector_arbitration"
     );
+}
+
+/// `control.mode` from the agent config (schema default `ados`).
+fn control_mode() -> ados_protocol::pilot::ControlMode {
+    let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
+    ados_config::schema::load_slice::<String>(std::path::Path::new(&path), "/control/mode")
+        .ok()
+        .and_then(|m| ados_protocol::pilot::ControlMode::parse(&m))
+        .unwrap_or_default()
 }

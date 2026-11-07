@@ -266,6 +266,34 @@ pub trait HostServices: Send + Sync + 'static {
         Ok(not_implemented("flight.rate_setpoint.send"))
     }
 
+    /// Ask the pilot for its single motion lease (`{kind, skill_id}`); the host
+    /// stamps the caller as the holder. Gated on `flight.motion`. The default
+    /// returns `not_implemented`.
+    fn flight_lease_acquire(
+        &self,
+        _plugin_id: &str,
+        _args: &Value,
+    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
+        std::future::ready(Ok(not_implemented("flight.lease.acquire")))
+    }
+
+    /// Give the motion lease back (`{lease_id}`). Gated on `flight.motion`.
+    fn flight_lease_release(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("flight.lease.release"))
+    }
+
+    /// Send the pilot one goal under the caller's lease (`{lease_id, goal}`).
+    /// Gated on `flight.motion`.
+    fn flight_goal_send(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("flight.goal.send"))
+    }
+
+    /// Ask for the operator's shaped sticks as `flight.sticks` events while the
+    /// caller holds the lease. Gated on `flight.motion`.
+    fn flight_sticks_subscribe(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        Ok(not_implemented("flight.sticks.subscribe"))
+    }
+
     /// Open an additive auxiliary application stream on the radio link. A real
     /// host forwards the request to the radio service's auxiliary command socket,
     /// which brings up a transmit/receive pair on a separate radio-port from the

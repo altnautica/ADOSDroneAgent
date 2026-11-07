@@ -86,6 +86,11 @@ pub enum Method {
     GuidedSetpointSend,
     // Flight: send one attitude/body-rate + thrust setpoint (SET_ATTITUDE_TARGET).
     RateSetpointSend,
+    // Flight: the pilot's motion lease, its goals and the operator's stick nudges.
+    FlightLeaseAcquire,
+    FlightLeaseRelease,
+    FlightGoalSend,
+    FlightSticksSubscribe,
     // Radio: open / close an additive auxiliary application stream on the link.
     RadioAuxStreamOpen,
     RadioAuxStreamClose,
@@ -216,6 +221,10 @@ impl Method {
             "gpio.buzzer.beep" => Self::GpioBuzzerBeep,
             "flight.guided_setpoint.send" => Self::GuidedSetpointSend,
             "flight.rate_setpoint.send" => Self::RateSetpointSend,
+            "flight.lease.acquire" => Self::FlightLeaseAcquire,
+            "flight.lease.release" => Self::FlightLeaseRelease,
+            "flight.goal.send" => Self::FlightGoalSend,
+            "flight.sticks.subscribe" => Self::FlightSticksSubscribe,
             "radio.aux_stream.open" => Self::RadioAuxStreamOpen,
             "radio.aux_stream.close" => Self::RadioAuxStreamClose,
             "radio.aux_stream.send" => Self::RadioAuxStreamSend,
@@ -262,6 +271,10 @@ impl Method {
             Self::GpioBuzzerBeep => "gpio.buzzer.beep",
             Self::GuidedSetpointSend => "flight.guided_setpoint.send",
             Self::RateSetpointSend => "flight.rate_setpoint.send",
+            Self::FlightLeaseAcquire => "flight.lease.acquire",
+            Self::FlightLeaseRelease => "flight.lease.release",
+            Self::FlightGoalSend => "flight.goal.send",
+            Self::FlightSticksSubscribe => "flight.sticks.subscribe",
             Self::RadioAuxStreamOpen => "radio.aux_stream.open",
             Self::RadioAuxStreamClose => "radio.aux_stream.close",
             Self::RadioAuxStreamSend => "radio.aux_stream.send",
@@ -485,6 +498,22 @@ mod tests {
     }
 
     #[test]
+    fn motion_lease_methods_gate_on_flight_motion() {
+        for (name, method) in [
+            ("flight.lease.acquire", Method::FlightLeaseAcquire),
+            ("flight.lease.release", Method::FlightLeaseRelease),
+            ("flight.goal.send", Method::FlightGoalSend),
+            ("flight.sticks.subscribe", Method::FlightSticksSubscribe),
+        ] {
+            assert_eq!(
+                gate(name, false, &caps(&["flight.guided_setpoint"])),
+                Gate::CapabilityDenied("capability_denied: flight.motion".to_string())
+            );
+            assert_eq!(gate(name, false, &caps(&["flight.motion"])), Gate::Allow(method));
+        }
+    }
+
+    #[test]
     fn guided_setpoint_send_gates_on_the_guided_setpoint_capability() {
         // Refused without the cap, allowed with it.
         assert_eq!(
@@ -596,6 +625,10 @@ mod tests {
         Method::GpioBuzzerBeep,
         Method::GuidedSetpointSend,
         Method::RateSetpointSend,
+        Method::FlightLeaseAcquire,
+        Method::FlightLeaseRelease,
+        Method::FlightGoalSend,
+        Method::FlightSticksSubscribe,
         Method::RadioAuxStreamOpen,
         Method::RadioAuxStreamClose,
         Method::RadioAuxStreamSend,

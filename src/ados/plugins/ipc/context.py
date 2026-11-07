@@ -197,6 +197,35 @@ class _FlightClient:
             }
         )
 
+    async def lease_acquire(self, *, kind: str = "motion", skill_id: str) -> dict:
+        """Take the ADOS pilot's single motion lease for ``skill_id``.
+
+        Returns ``{"ok": True, "lease_id": n}`` or ``{"ok": False, "err": ...}``
+        (``busy``, ``disarmed``, ``not_guided_capable``, ``vehicle_class``,
+        ``pilot_unavailable``). While held, the pilot flies this skill's goals
+        through its limits and obstacle planner; it revokes the lease on pause,
+        land, return-home, a stick takeover or an FC mode change, delivered as
+        the ``flight.lease.revoked`` event. Requires ``flight.motion``.
+        """
+        return await self._ipc.flight_lease_acquire(kind=kind, skill_id=skill_id)
+
+    async def lease_release(self, lease_id: int | str) -> dict:
+        """Give the motion lease back. Requires ``flight.motion``."""
+        return await self._ipc.flight_lease_release(lease_id)
+
+    async def goal_send(self, lease_id: int | str, goal: dict) -> dict:
+        """Send one goal (``kind`` follow/orbit/position, ``n, e, d``, velocities,
+        ``max_speed_mps``, optional ``yaw``, ``subject_ne``, ``candidates`` and
+        ``margin_m``). A lease with no goal for one second is revoked. Requires
+        ``flight.motion``."""
+        return await self._ipc.flight_goal_send(lease_id, goal)
+
+    async def sticks_subscribe(self) -> dict:
+        """Receive the operator's shaped sticks as ``flight.sticks`` events
+        (``{lease_id, axes: [roll, pitch, thr, yaw]}``, 20 Hz) while holding the
+        lease. Requires ``flight.motion``."""
+        return await self._ipc.flight_sticks_subscribe()
+
     async def rate_setpoint(
         self,
         *,

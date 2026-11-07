@@ -307,6 +307,45 @@ class _PluginApiMixin(_IpcClientState):
             )
         ).args
 
+    async def flight_lease_acquire(self, *, kind: str, skill_id: str) -> dict:
+        """Ask the ADOS pilot for its motion lease. Gated on ``flight.motion``."""
+        return (
+            await self._send_request(
+                "flight.lease.acquire",
+                capability="flight.motion",
+                args={"kind": kind, "skill_id": skill_id},
+            )
+        ).args
+
+    async def flight_lease_release(self, lease_id: int | str) -> dict:
+        """Give the motion lease back. Gated on ``flight.motion``."""
+        return (
+            await self._send_request(
+                "flight.lease.release",
+                capability="flight.motion",
+                args={"lease_id": lease_id},
+            )
+        ).args
+
+    async def flight_goal_send(self, lease_id: int | str, goal: dict) -> dict:
+        """Send one goal under the held lease. Gated on ``flight.motion``."""
+        return (
+            await self._send_request(
+                "flight.goal.send",
+                capability="flight.motion",
+                args={"lease_id": lease_id, "goal": dict(goal)},
+            )
+        ).args
+
+    async def flight_sticks_subscribe(self) -> dict:
+        """Ask for ``flight.sticks`` events while holding the lease. Gated on
+        ``flight.motion``."""
+        return (
+            await self._send_request(
+                "flight.sticks.subscribe", capability="flight.motion", args={}
+            )
+        ).args
+
     # ---- Config kv ----------------------------------------------------
 
     async def config_get(self, key: str, default: Any = None) -> Any:

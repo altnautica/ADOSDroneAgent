@@ -1,0 +1,38 @@
+[Unit]
+Description=ADOS Pilot (on-board command authority)
+# Talks to the flight controller through the MAVLink router's socket and reads
+# the plugin event export; both reconnect on their own, so no hard ordering.
+After=ados-mavlink.service
+PartOf=ados-supervisor.service
+# The binary ships with the release assets; a node without it skips the
+# unit instead of restarting it forever, and the router keeps flying as before.
+ConditionPathExists=/opt/ados/bin/ados-pilot
+StartLimitIntervalSec=0
+
+[Service]
+Slice=ados.slice
+Type=simple
+# The only producer of motion setpoints while control.mode is "ados". If it
+# dies the router keeps its own heartbeat suppressed only while the pilot is
+# alive, so the FC's GCS failsafe sees the pilot heartbeat stop and returns
+# home; Restart=always brings the pilot back as the "fc_mode" owner.
+ExecStart=/opt/ados/bin/ados-pilot
+Restart=always
+RestartSec=3
+Environment=ADOS_CONFIG=/etc/ados/config.yaml
+EnvironmentFile=-/etc/ados/env
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+# /etc/ados: persists control.mode, pilot.profile and pilot.avoid changes.
+ReadWritePaths=/var/ados /run/ados /etc/ados
+
+MemoryMax=80M
+CPUQuota=40%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ados-pilot
+
+[Install]
+WantedBy=ados-supervisor.service

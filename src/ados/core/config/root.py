@@ -17,6 +17,7 @@ from .ground_station import GroundStationConfig
 from .lora import LoraConfig
 from .mavlink import MavlinkConfig
 from .network import NetworkConfig
+from .pilot import ControlConfig, PilotConfig
 from .radio import RadioConfig
 from .security import McpConfig, SecurityConfig
 from .sensors import SensorsConfig
@@ -81,6 +82,8 @@ class ADOSConfig(BaseModel):
     sensors: SensorsConfig = Field(default_factory=SensorsConfig)
     lora: LoraConfig = LoraConfig()
     clock: ClockConfig = Field(default_factory=ClockConfig)
+    control: ControlConfig = Field(default_factory=ControlConfig)
+    pilot: PilotConfig = Field(default_factory=PilotConfig)
 
     model_config = {"extra": "ignore"}
 

@@ -29,7 +29,7 @@ pub const PILOT_V1_VERSION: u16 = match crate::contracts::contract_version("pilo
 /// readiness item and a banner stays far below this.
 pub const PILOT_MAX_FRAME: usize = 256 * 1024;
 
-/// One goal from a skill holding the motion lease (C1 `goal`).
+/// One goal from a skill holding the motion lease.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Goal {
     /// `follow`, `orbit` or `position`.
@@ -69,7 +69,7 @@ pub enum GoalKind {
     Position,
 }
 
-/// Where the planner may look for a detour goal (C1 `candidates`).
+/// Where the planner may look for a detour goal.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Candidates {
     pub ring_center_ne: [f32; 2],
@@ -90,23 +90,55 @@ pub struct Holder {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     Input(Input),
-    Release { src: String, session: u32 },
-    SessionTake { src: String, session: u32 },
-    Hb { src: String },
+    Release {
+        src: String,
+        session: u32,
+    },
+    SessionTake {
+        src: String,
+        session: u32,
+    },
+    Hb {
+        src: String,
+    },
     Action(ActionReq),
-    LeaseAcquire { holder: Holder, kind: String },
-    LeaseRelease { lease_id: u64 },
-    Goal { lease_id: u64, goal: Goal },
-    Goto { n: f32, e: f32, d: f32, yaw: Option<f32> },
+    LeaseAcquire {
+        holder: Holder,
+        kind: String,
+    },
+    LeaseRelease {
+        lease_id: u64,
+    },
+    Goal {
+        lease_id: u64,
+        goal: Goal,
+    },
+    Goto {
+        n: f32,
+        e: f32,
+        d: f32,
+        yaw: Option<f32>,
+    },
     /// A velocity goal from the router's swarm loop (owner `swarm`).
-    SwarmGoal { vn: f32, ve: f32, vd: f32, yaw: Option<f32> },
+    SwarmGoal {
+        vn: f32,
+        ve: f32,
+        vd: f32,
+        yaw: Option<f32>,
+    },
     Subscribe,
     ViewDemand(ViewDemand),
-    Feed { topic: String, payload: rmpv::Value },
-    Other { op: String, body: rmpv::Value },
+    Feed {
+        topic: String,
+        payload: rmpv::Value,
+    },
+    Other {
+        op: String,
+        body: rmpv::Value,
+    },
 }
 
-/// The union of live view leases (C7), forwarded by the control front.
+/// The union of live view leases, forwarded by the control front.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ViewDemand {
     /// Served camera id → requested layer ids.
@@ -130,7 +162,7 @@ pub struct CameraModel {
     pub yaw_deg: f32,
 }
 
-/// One stick frame from a surface (C1 `input`).
+/// One stick frame from a surface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Input {
     pub src: String,
@@ -142,7 +174,7 @@ pub struct Input {
     pub buttons: u32,
 }
 
-/// A named action (C1 `action`).
+/// A named action.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ActionReq {
     pub name: String,

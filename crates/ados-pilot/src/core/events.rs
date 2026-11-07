@@ -1,0 +1,188 @@
+//! FC frames: arm/disarm, FC mode changes, adoption of an external GUIDED.
+
+use ados_protocol::mavlink::ardupilotmega::MavMessage;
+use ados_protocol::pilot::Owner;
+use serde_json::json;
+
+use super::Pilot;
+use crate::flows::banner;
+
+/// FC parameters the pilot reads.
+const EXTRA_PARAMS: &[&str] = &[
+    "Q_ENABLE",
+    "FLTMODE_CH",
+    "BATT_LOW_MAH",
+    "BATT_CAPACITY",
+    "TECS_CLMB_MAX",
+    "TECS_SINK_MAX",
+    "AIRSPEED_MIN",
+    "AIRSPEED_MAX",
+    "AIRSPEED_CRUISE",
+    "TKOFF_ALT",
+];
+/// Re-request missing parameters this often.
+const PARAM_RETRY_MS: u64 = 15_000;
+
+impl Pilot {
+    /// Fold one frame from the FC in.
+    pub fn on_fc(&mut self, sysid: u8, compid: u8, msg: &MavMessage, now_ms: u64) {
+        let was_armed = self.fc.armed;
+        let first = self.fc.heartbeat_ms == 0;
+        let changed = self.fc.update(sysid, compid, msg, now_ms);
+        if !matches!(msg, MavMessage::HEARTBEAT(_)) || self.fc.heartbeat_ms != now_ms {
+            return;
+        }
+        if first || now_ms.saturating_sub(self.params_ms) >= PARAM_RETRY_MS {
+            self.request_params(now_ms);
+        }
+        if was_armed && !self.fc.armed {
+            self.on_disarmed();
+            return;
+        }
+        if !was_armed && self.fc.armed && self.owner() == Owner::Idle && !self.in_guided() {
+            self.set_owner(Owner::FcMode, "fc-mode");
+        }
+        if let Some(prev) = changed {
+            if !first || self.fc.armed {
+                self.on_mode_change(prev, now_ms);
+            }
+        }
+    }
+
+    fn request_params(&mut self, now_ms: u64) {
+        self.params_ms = now_ms;
+        let Some(fw) = self.fc.firmware else { return };
+        let class = self.fc.vehicle_class();
+        let names: Vec<&str> = crate::fc_profile::all_names(fw, class)
+            .chain(EXTRA_PARAMS.iter().copied())
+            .collect();
+        for n in names {
+            if !self.fc.params.contains_key(n) {
+                let m = self.tx().param_request(n);
+                self.mav(m);
+            }
+        }
+    }
+
+    fn on_disarmed(&mut self) {
+        self.set_owner(Owner::Idle, "disarmed");
+        self.failsafe.reset_link();
+        self.landing = false;
+        self.goto = None;
+        self.swarm = None;
+        self.mission_paused = false;
+        self.rth_deadline_ms = None;
+        self.low_batt_cancelled = false;
+        self.hold_reason = None;
+        if self
+            .launch
+            .as_ref()
+            .is_some_and(|l| l.step != crate::flows::LaunchStep::Arm)
+        {
+            self.launch = None;
+        }
+    }
+
+    fn on_mode_change(&mut self, prev: u32, now_ms: u64) {
+        let fam = self.family();
+        let mode = self.fc.custom_mode;
+        if self.owner() == Owner::Tuning {
+            return;
+        }
+        if fam.is_autotune(mode) {
+            return;
+        }
+        if mode == fam.guided() {
+            let ours = self.mode_is_ours(mode, now_ms);
+            if self.fc.armed
+                && !ours
+                && matches!(self.owner(), Owner::FcMode | Owner::Idle | Owner::MissionFc)
+            {
+                self.adopt(now_ms);
+            }
+            return;
+        }
+        if fam.is_auto(mode) {
+            if self.owner() != Owner::MissionFc {
+                self.set_owner(Owner::MissionFc, "fc-mode");
+            }
+            self.mission_paused = false;
+            return;
+        }
+        if !self.fc.armed {
+            return;
+        }
+        // Any other mode: the FC flies.
+        let was_ours = self.mode_is_ours(mode, now_ms);
+        if self.owner() != Owner::FcMode {
+            self.set_owner(Owner::FcMode, "fc-mode");
+        }
+        if self.launch.is_some()
+            && !(fam == crate::modes::Family::Plane && mode == crate::modes::plane::TAKEOFF)
+        {
+            self.launch = None;
+        }
+        if !was_ours && prev != mode {
+            let name = fam.mode_name(mode);
+            let cause = if self.fc.rc.is_some() {
+                "rc_or_failsafe"
+            } else {
+                "fc"
+            };
+            self.banner = Some(banner(
+                "pilot.banner.fc_mode_change",
+                &[("mode", json!(name)), ("cause", json!(cause))],
+                now_ms,
+            ));
+        } else {
+            let name = fam.mode_name(mode);
+            self.banner = Some(banner(
+                "pilot.banner.fc_control",
+                &[("mode", json!(name))],
+                now_ms,
+            ));
+        }
+    }
+
+    /// Someone other than the pilot put the armed FC in GUIDED: take over.
+    fn adopt(&mut self, now_ms: u64) {
+        let source = if self.rc_at_ados_position() {
+            "rc"
+        } else {
+            "gcs"
+        };
+        self.set_owner(Owner::Pilot, "adopted");
+        self.engage_pilot(now_ms);
+        self.banner = Some(banner(
+            "pilot.banner.ados_engaged",
+            &[("source", json!(source))],
+            now_ms,
+        ));
+    }
+
+    /// True when the flight-mode channel sits at the slot labelled ADOS.
+    fn rc_at_ados_position(&self) -> bool {
+        let slot = self.settings.control.rc_ados_position;
+        if slot == 0 {
+            return false;
+        }
+        let ch = self.fc.params.get("FLTMODE_CH").copied().unwrap_or(5.0) as usize;
+        let Some(rc) = self.fc.rc else { return false };
+        let Some(&pwm) = rc.v.get(ch.saturating_sub(1)) else {
+            return false;
+        };
+        flight_mode_slot(pwm) == slot
+    }
+}
+
+/// ArduPilot's flight-mode slot for a channel PWM.
+pub fn flight_mode_slot(pwm: u16) -> u8 {
+    match pwm {
+        0..=1230 => 1,
+        1231..=1360 => 2,
+        1361..=1490 => 3,
+        1491..=1620 => 4,
+        1621..=1749 => 5,
+        _ => 6,
+    }
+}

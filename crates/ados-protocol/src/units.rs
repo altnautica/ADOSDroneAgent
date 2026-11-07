@@ -200,6 +200,15 @@ pub const UNITS: &[UnitSpec] = &[
         headless_keep: true,
         ..BASE
     },
+    // The on-board command authority: shapes operator sticks and arbitrates
+    // skills, gotos and swarm goals into guided setpoints. Drone only.
+    UnitSpec {
+        name: "ados-pilot.service",
+        category: Some(Core),
+        profiles: DRONE,
+        headless_keep: true,
+        ..BASE
+    },
     // The swarm state bus, the same seam as the router seen from either end.
     // A drone with no fleet slot yet exits 0 and idles.
     UnitSpec {

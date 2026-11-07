@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::{ActionReq, Goal, Holder, Input, Request, ViewDemand, PILOT_MAX_FRAME};
-use crate::frame::{decode_len, encode_frame, HEADER_SIZE};
+use crate::frame::encode_frame;
 
 /// Why a `pilot.v1` message could not be read or decoded.
 #[derive(Debug, thiserror::Error)]
@@ -23,21 +23,17 @@ pub enum PilotWireError {
 }
 
 /// Read one length-prefixed body. `Ok(None)` on a clean EOF before a header.
-pub async fn read_msg<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<Vec<u8>>, PilotWireError> {
-    let mut header = [0u8; HEADER_SIZE];
-    match r.read_exact(&mut header).await {
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e.into()),
-    }
-    let len = decode_len(header, PILOT_MAX_FRAME, true)?;
-    let mut body = vec![0u8; len];
-    r.read_exact(&mut body).await?;
-    Ok(Some(body))
+pub async fn read_msg<R: AsyncReadExt + Unpin>(
+    r: &mut R,
+) -> Result<Option<Vec<u8>>, PilotWireError> {
+    Ok(crate::ipc::read_length_prefixed(r, PILOT_MAX_FRAME, true).await?)
 }
 
 /// Write one body with its length prefix.
-pub async fn write_msg<W: AsyncWriteExt + Unpin>(w: &mut W, body: &[u8]) -> Result<(), PilotWireError> {
+pub async fn write_msg<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    body: &[u8],
+) -> Result<(), PilotWireError> {
     let framed = encode_frame(body, PILOT_MAX_FRAME)?;
     w.write_all(&framed).await?;
     Ok(())
@@ -46,15 +42,23 @@ pub async fn write_msg<W: AsyncWriteExt + Unpin>(w: &mut W, body: &[u8]) -> Resu
 /// Encode `body` (a struct or map) as a msgpack map with `op` added first.
 pub fn encode_op<T: Serialize + ?Sized>(op: &str, body: &T) -> Result<Vec<u8>, PilotWireError> {
     let named = rmp_serde::to_vec_named(body).map_err(|e| PilotWireError::Encode(e.to_string()))?;
-    let value = rmpv::decode::read_value(&mut named.as_slice()).map_err(|e| PilotWireError::Encode(e.to_string()))?;
+    let value = rmpv::decode::read_value(&mut named.as_slice())
+        .map_err(|e| PilotWireError::Encode(e.to_string()))?;
     let mut entries = vec![(rmpv::Value::from("op"), rmpv::Value::from(op))];
     match value {
-        rmpv::Value::Map(m) => entries.extend(m.into_iter().filter(|(k, _)| k.as_str() != Some("op"))),
+        rmpv::Value::Map(m) => {
+            entries.extend(m.into_iter().filter(|(k, _)| k.as_str() != Some("op")))
+        }
         rmpv::Value::Nil => {}
-        other => return Err(PilotWireError::Encode(format!("body is not a map: {other}"))),
+        other => {
+            return Err(PilotWireError::Encode(format!(
+                "body is not a map: {other}"
+            )))
+        }
     }
     let mut out = Vec::new();
-    rmpv::encode::write_value(&mut out, &rmpv::Value::Map(entries)).map_err(|e| PilotWireError::Encode(e.to_string()))?;
+    rmpv::encode::write_value(&mut out, &rmpv::Value::Map(entries))
+        .map_err(|e| PilotWireError::Encode(e.to_string()))?;
     Ok(out)
 }
 
@@ -73,7 +77,10 @@ pub fn peek_op(body: &[u8]) -> Result<(String, rmpv::Value), PilotWireError> {
 }
 
 fn field<T: DeserializeOwned>(op: &str, value: rmpv::Value) -> Result<T, PilotWireError> {
-    let malformed = |err: String| PilotWireError::Malformed { op: op.to_owned(), err };
+    let malformed = |err: String| PilotWireError::Malformed {
+        op: op.to_owned(),
+        err,
+    };
     let mut bytes = Vec::new();
     rmpv::encode::write_value(&mut bytes, &value).map_err(|e| malformed(e.to_string()))?;
     rmp_serde::from_slice(&bytes).map_err(|e| malformed(e.to_string()))
@@ -136,36 +143,65 @@ pub fn decode_request(body: &[u8]) -> Result<Request, PilotWireError> {
         "input" => Request::Input(field::<Input>(&op, value)?),
         "release" => {
             let s: SrcSession = field(&op, value)?;
-            Request::Release { src: s.src, session: s.session }
+            Request::Release {
+                src: s.src,
+                session: s.session,
+            }
         }
         "session.take" => {
             let s: SrcSession = field(&op, value)?;
-            Request::SessionTake { src: s.src, session: s.session }
+            Request::SessionTake {
+                src: s.src,
+                session: s.session,
+            }
         }
-        "hb" => Request::Hb { src: field::<Src>(&op, value)?.src },
+        "hb" => Request::Hb {
+            src: field::<Src>(&op, value)?.src,
+        },
         "action" => Request::Action(field::<ActionReq>(&op, value)?),
         "lease.acquire" => {
             let l: LeaseAcq = field(&op, value)?;
-            Request::LeaseAcquire { holder: l.holder, kind: l.kind }
+            Request::LeaseAcquire {
+                holder: l.holder,
+                kind: l.kind,
+            }
         }
-        "lease.release" => Request::LeaseRelease { lease_id: field::<LeaseRel>(&op, value)?.lease_id },
+        "lease.release" => Request::LeaseRelease {
+            lease_id: field::<LeaseRel>(&op, value)?.lease_id,
+        },
         "goal" => {
             let g: GoalReq = field(&op, value)?;
-            Request::Goal { lease_id: g.lease_id, goal: g.goal }
+            Request::Goal {
+                lease_id: g.lease_id,
+                goal: g.goal,
+            }
         }
         "goto" => {
             let g: GotoReq = field(&op, value)?;
-            Request::Goto { n: g.n, e: g.e, d: g.d, yaw: g.yaw }
+            Request::Goto {
+                n: g.n,
+                e: g.e,
+                d: g.d,
+                yaw: g.yaw,
+            }
         }
         "subscribe" => Request::Subscribe,
         "swarm.goal" => {
             let g: SwarmReq = field(&op, value)?;
-            Request::SwarmGoal { vn: g.vn, ve: g.ve, vd: g.vd, yaw: g.yaw }
+            Request::SwarmGoal {
+                vn: g.vn,
+                ve: g.ve,
+                vd: g.vd,
+                yaw: g.yaw,
+            }
         }
         "view_demand" => Request::ViewDemand(field::<ViewDemand>(&op, value)?),
         "feed" => {
             let f: FeedReq = field(&op, value)?;
-            Request::Feed { topic: f.topic, payload: f.payload }
+            Request::Feed {
+                topic: f.topic,
+                payload: f.payload,
+            }
         }
         _ => Request::Other { op, body: value },
     };
@@ -174,7 +210,9 @@ pub fn decode_request(body: &[u8]) -> Result<Request, PilotWireError> {
 
 /// Re-encode a JSON client frame (as a surface sends it over the pilot
 /// WebSocket) as a `pilot.v1` msgpack body, after checking it decodes.
-pub fn json_to_request_body(frame: &serde_json::Value) -> Result<(Request, Vec<u8>), PilotWireError> {
+pub fn json_to_request_body(
+    frame: &serde_json::Value,
+) -> Result<(Request, Vec<u8>), PilotWireError> {
     let body = rmp_serde::to_vec_named(frame).map_err(|e| PilotWireError::Encode(e.to_string()))?;
     let req = decode_request(&body)?;
     Ok((req, body))

@@ -166,6 +166,11 @@ impl SharedTopics {
 /// by subscribing to a longer prefix, and cannot spoof them by publishing under
 /// one.
 pub fn may_deliver(subscriber_id: &str, event: &Event, shared: &SharedTopics) -> bool {
+    // The pilot's lease events belong to the one plugin the host stamped.
+    if event.topic.starts_with(FLIGHT_NAMESPACE) {
+        return event.publisher_plugin_id == crate::vehicle_events::HOST_PUBLISHER
+            && crate::pilot_client::flight_event_for(subscriber_id, &event.payload);
+    }
     if !event.topic.starts_with(PLUGIN_NAMESPACE) {
         return true;
     }
@@ -186,6 +191,14 @@ pub const PUBLIC_TOPICS_FOR_SUBSCRIBE: &[&str] = &[
     "agent.ready",
     "agent.shutdown",
 ];
+
+/// Host-published pilot lease topics: a `flight.motion` holder may subscribe,
+/// and each event reaches only the plugin it names.
+pub const FLIGHT_TOPICS_FOR_SUBSCRIBE: &[&str] =
+    &[crate::pilot_client::STICKS_TOPIC, crate::pilot_client::REVOKED_TOPIC];
+
+/// Prefix of the host-only pilot lease topics.
+const FLIGHT_NAMESPACE: &str = "flight.";
 
 /// Reserved namespaces a plugin must not publish into. The set is enforced inline by
 /// `is_publish_allowed`. The `vision.` prefix is host-publish-only: the engine
@@ -208,6 +221,7 @@ const RESERVED_PUBLISH_PREFIXES: &[&str] = &[
     "vision.",
     "telemetry.",
     "plugin.",
+    "flight.",
 ];
 
 /// Whether the plugin may subscribe to `topic_pattern`. Mirrors
@@ -236,6 +250,9 @@ pub fn is_subscribe_allowed(
     }
     if topic_pattern.starts_with(&format!("{PLUGIN_NAMESPACE}{plugin_id}.")) {
         return true;
+    }
+    if FLIGHT_TOPICS_FOR_SUBSCRIBE.contains(&topic_pattern) {
+        return granted_caps.contains("flight.motion");
     }
     PUBLIC_TOPICS_FOR_SUBSCRIBE.contains(&topic_pattern)
 }
@@ -439,6 +456,10 @@ pub async fn route_host_method<H: HostServices + ?Sized>(
         Method::GpioBuzzerBeep => host.gpio_buzzer_beep(plugin_id, args).await,
         Method::GuidedSetpointSend => host.guided_setpoint_send(plugin_id, args),
         Method::RateSetpointSend => host.rate_setpoint_send(plugin_id, args),
+        Method::FlightLeaseAcquire => host.flight_lease_acquire(plugin_id, args).await,
+        Method::FlightLeaseRelease => host.flight_lease_release(plugin_id, args),
+        Method::FlightGoalSend => host.flight_goal_send(plugin_id, args),
+        Method::FlightSticksSubscribe => host.flight_sticks_subscribe(plugin_id, args),
         Method::RadioAuxStreamOpen => host.radio_aux_stream_open(plugin_id, session, args).await,
         Method::RadioAuxStreamClose => {
             host.radio_aux_stream_close(plugin_id, session, args).await

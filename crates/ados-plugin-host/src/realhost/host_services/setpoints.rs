@@ -17,6 +17,22 @@ impl RealHost {
         // setpoint) and must itself have the vehicle in its guided mode.
         let setpoint = parse_guided_setpoint(args)?;
 
+        // With the pilot up, a local setpoint becomes a position goal under an
+        // implicit lease, so the pilot's limits and obstacle planner apply.
+        if let (Some(pilot), Some(goal)) = (self.reachable_pilot(), legacy_goal(&setpoint)) {
+            let pilot = Arc::clone(pilot);
+            let plugin = _plugin_id.to_owned();
+            tokio::spawn(async move {
+                if !pilot.legacy_goal(&plugin, goal).await {
+                    tracing::debug!(plugin, "legacy_setpoint_no_lease");
+                }
+            });
+            return Ok(Value::Map(vec![
+                (Value::from("sent"), Value::Boolean(true)),
+                (Value::from("via"), Value::from("pilot")),
+            ]));
+        }
+
         // Target: explicit args, else the autopilot observed on the router link.
         let (target_system, target_component) = command_target(args, self.fc_identity.get())?;
 
@@ -124,4 +140,28 @@ impl RealHost {
             }
         }
     }
+}
+
+/// A `position` goal for a local-frame setpoint (`None` for a global one or a
+/// velocity-only one, which keep the direct path).
+fn legacy_goal(sp: &ados_protocol::mavlink::GuidedSetpoint) -> Option<Value> {
+    use ados_protocol::mavlink::SetpointKind;
+    if sp.kind != SetpointKind::LocalNed || sp.type_mask & 0b111 != 0 {
+        return None;
+    }
+    let speed = (sp.vx * sp.vx + sp.vy * sp.vy + sp.vz * sp.vz).sqrt();
+    let max_speed = if sp.type_mask & 0b111_000 == 0 && speed > 0.0 { speed.max(1.0) } else { 5.0 };
+    let yaw = if sp.type_mask & (1 << 10) == 0 { Value::F32(sp.yaw) } else { Value::Nil };
+    let f = |v: f64| Value::F32(v as f32);
+    Some(Value::Map(vec![
+        (Value::from("kind"), Value::from("position")),
+        (Value::from("n"), f(sp.x)),
+        (Value::from("e"), f(sp.y)),
+        (Value::from("d"), f(sp.z)),
+        (Value::from("vn"), Value::F32(sp.vx)),
+        (Value::from("ve"), Value::F32(sp.vy)),
+        (Value::from("vd"), Value::F32(sp.vz)),
+        (Value::from("yaw"), yaw),
+        (Value::from("max_speed_mps"), Value::F32(max_speed)),
+    ]))
 }

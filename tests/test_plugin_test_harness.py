@@ -230,3 +230,33 @@ async def test_flight_guided_setpoint_requires_the_capability() -> None:
                 kind="local_ned", coordinate_frame=1, type_mask=0
             )
         assert excinfo.value.capability == "flight.guided_setpoint"
+
+
+@pytest.mark.asyncio
+async def test_flight_motion_lease_round_trip() -> None:
+    async with PluginTestHarness(
+        plugin_id=PLUGIN_ID,
+        granted_capabilities={"flight.motion"},
+    ) as h:
+        lease = await h.context.flight.lease_acquire(skill_id="follow-me")
+        assert lease == {"ok": True, "lease_id": 1}
+        goal = {"kind": "follow", "n": 1.0, "e": 2.0, "d": -4.0, "max_speed_mps": 5.0}
+        await h.context.flight.goal_send(lease["lease_id"], goal)
+        await h.context.flight.sticks_subscribe()
+        await h.context.flight.lease_release(lease["lease_id"])
+        methods = [m for m, _ in h._ipc.requests]
+        assert methods == [
+            "flight.lease.acquire",
+            "flight.goal.send",
+            "flight.sticks.subscribe",
+            "flight.lease.release",
+        ]
+        assert h._ipc.requests[1][1] == {"lease_id": 1, "goal": goal}
+
+
+@pytest.mark.asyncio
+async def test_flight_motion_requires_the_capability() -> None:
+    async with PluginTestHarness(plugin_id=PLUGIN_ID) as h:
+        with pytest.raises(CapabilityDenied) as excinfo:
+            await h.context.flight.lease_acquire(skill_id="follow-me")
+        assert excinfo.value.capability == "flight.motion"

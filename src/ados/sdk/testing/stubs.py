@@ -163,6 +163,25 @@ class FakeIpcClient:
             "flight.guided_setpoint.send", {"ok": True}
         )
 
+    def _flight_motion(self, method: str, args: dict[str, Any]) -> dict[str, Any]:
+        if "flight.motion" not in self._granted:
+            raise CapabilityDenied(self.plugin_id, "flight.motion")
+        self.requests.append((method, args))
+        return self._responses.get(method, {"ok": True})
+
+    async def flight_lease_acquire(self, *, kind: str, skill_id: str) -> dict[str, Any]:
+        reply = self._flight_motion("flight.lease.acquire", {"kind": kind, "skill_id": skill_id})
+        return reply if "flight.lease.acquire" in self._responses else {"ok": True, "lease_id": 1}
+
+    async def flight_lease_release(self, lease_id: int | str) -> dict[str, Any]:
+        return self._flight_motion("flight.lease.release", {"lease_id": lease_id})
+
+    async def flight_goal_send(self, lease_id: int | str, goal: dict[str, Any]) -> dict[str, Any]:
+        return self._flight_motion("flight.goal.send", {"lease_id": lease_id, "goal": dict(goal)})
+
+    async def flight_sticks_subscribe(self) -> dict[str, Any]:
+        return self._flight_motion("flight.sticks.subscribe", {})
+
     async def vision_subscribe_detections(
         self, callback: Callable[[dict[str, Any]], Any]
     ) -> None:

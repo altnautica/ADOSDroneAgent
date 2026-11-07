@@ -1,0 +1,35 @@
+[package]
+name = "ados-pilot"
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The on-board command authority: shapes operator sticks, arbitrates skills, gotos and swarm goals, plans around obstacles and streams guided setpoints to the flight controller."
+
+[lib]
+name = "ados_pilot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ados-pilot"
+path = "src/main.rs"
+
+[dependencies]
+ados-protocol = { workspace = true, features = ["mavlink", "tracing-layer"] }
+ados-config = { path = "../ados-config" }
+base64 = { workspace = true }
+png = { workspace = true }
+rmp-serde = { workspace = true }
+rmpv = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_norway = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

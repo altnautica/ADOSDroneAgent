@@ -6,6 +6,25 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.0] - 2026-11-07
+
+### Added
+
+- ADOS Pilot (`ados-pilot`, drone profile, unit `ados-pilot.service`): the on-board command authority. While `control.mode` is `ados` it is the only producer of motion setpoints and the flight controller flies GUIDED, keeping stabilisation, the EKF, mixing and its own failsafe. It shapes operator sticks with the Cine / Normal / Sport profiles (`pilot.profile`): velocity with acceleration and jerk limits, position, altitude and heading hold when centred, the height reference from the downward rangefinder below 8 m (`pilot.height_ref`), a 0.5 m floor with landing protection, the `pilot.max_alt_agl_m` ceiling and the `pilot.max_dist_m` geofence. Fixed-wing and VTOL forward flight map the sticks to heading rate, climb rate and airspeed, sent as guided change commands.
+- The pilot arbitrates every motion source through one owner (`idle`, `pilot`, `skill`, `goto`, `swarm`, `mission_fc`, `fc_mode`, `tuning`). It yields to FC missions and FC modes, takes over on a stick deflection during a mission, adopts an external switch into GUIDED, and grants skills a single motion lease. A held stick (above 0.9 for 1 s), pause, land, return-home, a control-mode change, an FC mode change or one second without a goal revokes the lease.
+- Obstacles: the pilot builds a 128 × 128 clearance grid at 0.25 m from the live occupancy tiles and the levelled planar scan, with ground returns dropped. Stick flight brakes toward obstacles and slides along them (`pilot.avoid` `brake`). Skill and goto goals go through a planner that keeps a clear goal, otherwise detours to the cheapest reachable candidate that still sees the subject (A* over the grid), or holds when blocked. A return closer than 0.6 × the margin always holds. `pilot.obstacle_margin_m` defaults to 1.5 m.
+- Failsafes: controller loss (no stick frame for 300 ms) brakes to a hold; no operator surface for `pilot.link_loss_s` (10 s) runs `pilot.link_loss_action` (`rth`, `hold` or `land`); a low battery starts a cancellable 10 s return countdown. The pilot sends the 2 Hz heartbeat the FC's GCS failsafe watches, so a stopped pilot makes the FC fail safe.
+- Flows: arm, take off (`alt_m`, default 1.5 m), the one-action `launch` sequence (checks, arm, take off, then hold, a skill, the mission or a goto, with an optional land or return when done), land, return home, pause, resume, take control, hand to the FC, kill, and the profile, control-mode, avoidance and VTOL transition actions. Human-initiated handovers pass a centred-sticks gate; one stick session is accepted at a time, transferred with `session.take`; handovers raise a banner.
+- Readiness items for the pre-flight checklist, including `fc_profile`: the flight controller's failsafe parameters (`MAV_GCS_SYSID`, `FS_GCS_ENABLE` or `FS_GCS_ENABL`, the GCS timeouts, `GUID_TIMEOUT`, `RC_OVERRIDE_TIME`, the battery failsafe actions) must match before arming in `ados` mode.
+- The `pilot.v1` socket (`/run/ados/pilot.sock`) publishes `state` (the nav kind `pilot`) and `obstacles` (72 clearance sectors, plus per-camera grids only for cameras a viewer leased with the obstacles layer).
+- Plugin methods `flight.lease.acquire`, `flight.lease.release`, `flight.goal.send` and `flight.sticks.subscribe` under the new capability `flight.motion`, with the host events `flight.sticks` and `flight.lease.revoked` delivered only to the lease holder. A stopped plugin's lease is released. The Python SDK gains `ctx.flight.lease_acquire`, `lease_release`, `goal_send` and `sticks_subscribe`.
+- Config: `control.mode` (`ados`, `fc_manual` or `elrs`; default `ados`), `control.rc_ados_position`, and the `pilot` block.
+
+### Changed
+
+- With the pilot alive in `ados` mode, the router drops client MANUAL_CONTROL and RC_CHANNELS_OVERRIDE, redirects client gotos (DO_REPOSITION and position SET_POSITION_TARGET) to the pilot, stops its own heartbeat, and hands the swarm loop's velocities to the pilot. In `fc_manual` and `elrs`, or with the pilot stopped, nothing changes.
+- `flight.guided_setpoint.send` from older plugins becomes a position goal under an implicit motion lease while the pilot runs, so those setpoints also pass the pilot's limits and planner.
+
 ## [0.108.20] - 2026-11-07
 
 ### Fixed

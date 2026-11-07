@@ -126,6 +126,13 @@ pub(super) async fn build_host(
     let mut host = RealHost::new()
         .with_state_path(state_path)
         .with_vehicle_state_socket(run_dir.join("state.sock"));
+    // The ADOS pilot's motion lease. The link just retries while no pilot
+    // runs (a ground station, or a drone with the daemon stopped), and every
+    // lease method then answers `pilot_unavailable`.
+    host = host.with_pilot(crate::pilot_client::PilotClient::spawn(
+        run_dir.join(ados_protocol::paths::PILOT_SOCK),
+        Arc::clone(bus),
+    ));
 
     // Injector arbitration (default off). When armed, the MAVLink + MSP links
     // declare themselves autonomous injectors on every connection so the

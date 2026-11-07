@@ -61,6 +61,7 @@ pub mod invoke;
 pub mod loopback_guard;
 pub mod manifest;
 pub mod pic_gate;
+pub mod pilot_client;
 pub mod plugin_account;
 pub mod realhost;
 pub mod reconcile;

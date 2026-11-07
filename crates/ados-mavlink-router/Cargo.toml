@@ -26,6 +26,8 @@ ados-sensorbus = { path = "../ados-sensorbus" }
 ados-hal-probe = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# The pilot.v1 state map (`control_mode`) is read without a typed decode.
+rmpv = { workspace = true }
 serde_norway = { workspace = true }
 # Refcounted frame buffer for the FC fan-out. Every inbound MAVLink frame is
 # handed to the IPC socket, the aux tee, the relayed-vehicle projection and one

@@ -164,6 +164,12 @@ pub(super) async fn send_setpoint(fc: &Arc<FcConnection>, target: (u8, u8), setp
     if fc.is_visor() {
         return;
     }
+    // With the pilot owning motion, the velocity goes to it as a swarm goal
+    // so its obstacle limits and arbitration apply.
+    if let Some(link) = crate::pilot_link::global().filter(|l| l.gating()) {
+        link.send_swarm([setpoint.vn, setpoint.ve, setpoint.vd], None);
+        return;
+    }
     let msg = match setpoint_message(target, setpoint) {
         Ok(m) => m,
         Err(e) => {

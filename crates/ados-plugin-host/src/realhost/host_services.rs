@@ -4,6 +4,7 @@ mod aux_stream;
 mod devices;
 mod mavlink;
 mod mission;
+mod pilot;
 mod setpoints;
 mod streams;
 mod telemetry_config;
@@ -206,6 +207,7 @@ impl HostServices for RealHost {
     }
 
     async fn release_plugin(&self, plugin_id: &str) {
+        self.release_plugin_lease(plugin_id);
         self.serve_release_plugin(plugin_id).await
     }
 
@@ -219,6 +221,22 @@ impl HostServices for RealHost {
 
     fn rate_setpoint_send(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
         self.serve_rate_setpoint_send(_plugin_id, args)
+    }
+
+    async fn flight_lease_acquire(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.serve_flight_lease_acquire(plugin_id, args).await
+    }
+
+    fn flight_lease_release(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.serve_flight_lease_release(plugin_id, args)
+    }
+
+    fn flight_goal_send(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.serve_flight_goal_send(plugin_id, args)
+    }
+
+    fn flight_sticks_subscribe(&self, plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        self.serve_flight_sticks_subscribe(plugin_id)
     }
 
     fn begin_session(&self, _plugin_id: &str) -> u64 {

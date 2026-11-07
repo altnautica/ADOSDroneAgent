@@ -3,7 +3,14 @@ use crate::pilot::{decode_distance, encode_distance, GoalKind};
 
 #[test]
 fn input_round_trips_through_encode_op() {
-    let input = Input { src: "mc".into(), session: 7, seq: 42, t_ms: 1000, axes: [0.1, -0.5, 1.0, 0.0], buttons: 0b101 };
+    let input = Input {
+        src: "mc".into(),
+        session: 7,
+        seq: 42,
+        t_ms: 1000,
+        axes: [0.1, -0.5, 1.0, 0.0],
+        buttons: 0b101,
+    };
     let body = encode_op("input", &input).unwrap();
     assert_eq!(decode_request(&body).unwrap(), Request::Input(input));
 }
@@ -16,7 +23,9 @@ fn json_goal_frame_decodes_with_defaults() {
                  "subject_ne": [3.0, 4.0], "margin_m": 2.0}
     });
     let (req, _) = json_to_request_body(&frame).unwrap();
-    let Request::Goal { lease_id, goal } = req else { panic!("not a goal") };
+    let Request::Goal { lease_id, goal } = req else {
+        panic!("not a goal")
+    };
     assert_eq!(lease_id, 3);
     assert_eq!(goal.kind, GoalKind::Orbit);
     assert_eq!(goal.vn, 0.0);
@@ -68,4 +77,111 @@ async fn framing_round_trips() {
     let got = read_msg(&mut b).await.unwrap().unwrap();
     assert_eq!(decode_request(&got).unwrap(), Request::Subscribe);
     assert!(read_msg(&mut b).await.unwrap().is_none());
+}
+
+fn decode_json(v: serde_json::Value) -> Request {
+    json_to_request_body(&v).unwrap().0
+}
+
+#[test]
+fn every_client_op_decodes() {
+    use serde_json::json;
+    assert_eq!(
+        decode_json(json!({"op": "release", "src": "mc", "session": 4})),
+        Request::Release {
+            src: "mc".into(),
+            session: 4
+        }
+    );
+    assert_eq!(
+        decode_json(json!({"op": "session.take", "src": "android", "session": 9})),
+        Request::SessionTake {
+            src: "android".into(),
+            session: 9
+        }
+    );
+    assert_eq!(
+        decode_json(json!({"op": "hb", "src": "kiosk"})),
+        Request::Hb {
+            src: "kiosk".into()
+        }
+    );
+    match decode_json(json!({"op": "lease.acquire", "holder": {"plugin_id": "p", "skill_id": "s"}}))
+    {
+        Request::LeaseAcquire { kind, .. } => assert_eq!(kind, "motion"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        decode_json(json!({"op": "lease.release", "lease_id": 3})),
+        Request::LeaseRelease { lease_id: 3 }
+    );
+    assert_eq!(
+        decode_json(json!({"op": "goto", "n": 1.0, "e": 2.0, "d": -3.0})),
+        Request::Goto {
+            n: 1.0,
+            e: 2.0,
+            d: -3.0,
+            yaw: None
+        }
+    );
+    assert_eq!(
+        decode_json(json!({"op": "swarm.goal", "vn": 1.0, "ve": 0.5, "vd": 0.0, "yaw": 1.5})),
+        Request::SwarmGoal {
+            vn: 1.0,
+            ve: 0.5,
+            vd: 0.0,
+            yaw: Some(1.5)
+        }
+    );
+    match decode_json(
+        json!({"op": "view_demand", "cameras": {"main": ["obstacles"]},
+        "models": {"main": {"frame_w": 1280, "frame_h": 720, "hfov_deg": 80.0, "vfov_deg": 50.0,
+                            "tilt_down_deg": 10.0, "yaw_deg": 0.0}}}),
+    ) {
+        Request::ViewDemand(v) => {
+            assert_eq!(v.cameras["main"], vec!["obstacles".to_owned()]);
+            assert_eq!(v.models["main"].hfov_deg, 80.0);
+        }
+        other => panic!("{other:?}"),
+    }
+    match decode_json(json!({"op": "feed", "topic": "t", "payload": {"a": 1}})) {
+        Request::Feed { topic, .. } => assert_eq!(topic, "t"),
+        other => panic!("{other:?}"),
+    }
+    match decode_json(
+        json!({"op": "action", "name": "launch", "src": "mc", "id": "x1",
+        "args": {"after": "hold", "alt_m": 3}}),
+    ) {
+        Request::Action(a) => {
+            assert_eq!(a.id.as_deref(), Some("x1"));
+            assert_eq!(a.args.unwrap()["after"], "hold");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn string_session_is_rejected() {
+    let frame = serde_json::json!({"op": "input", "src": "mc", "session": "abc", "seq": 1, "t_ms": 1,
+        "axes": [0.0, 0.0, 0.0, 0.0], "buttons": 0});
+    assert!(matches!(
+        json_to_request_body(&frame),
+        Err(PilotWireError::Malformed { .. })
+    ));
+}
+
+#[tokio::test]
+async fn zero_length_and_oversized_frames_are_errors() {
+    let zero = 0u32.to_be_bytes();
+    assert!(read_msg(&mut &zero[..]).await.is_err());
+    let big = (PILOT_MAX_FRAME as u32 + 1).to_be_bytes();
+    assert!(read_msg(&mut &big[..]).await.is_err());
+    let truncated = [0u8, 0, 0, 8, 1, 2];
+    assert!(read_msg(&mut &truncated[..]).await.is_err());
+}
+
+#[test]
+fn wire_floats_are_short_decimals() {
+    let v = serde_json::to_value(crate::pilot::wire(2.4)).unwrap();
+    assert_eq!(v.to_string(), "2.4");
 }

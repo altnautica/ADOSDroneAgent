@@ -130,6 +130,28 @@ impl FcConnection {
             return false;
         }
         let data: &[u8] = &admitted;
+        // Command authority: while the pilot owns motion, client sticks are
+        // dropped and client gotos fly through the pilot instead.
+        let gated;
+        let data: &[u8] = match crate::pilot_link::global() {
+            Some(link) if link.gating() && !injector.is_some_and(|c| c.client_id == crate::pilot_link::PILOT_INJECTOR) => {
+                let geo = self.pilot_georef().await;
+                let (kept, gotos, dropped) = crate::pilot_link::filter(data, geo);
+                if dropped > 0 {
+                    link.dropped.fetch_add(dropped, Ordering::Relaxed);
+                    tracing::debug!(dropped, "client_motion_frames_dropped_pilot_owns");
+                }
+                for (ned, yaw) in gotos {
+                    link.send_goto(ned, yaw);
+                }
+                if kept.is_empty() {
+                    return true;
+                }
+                gated = kept;
+                &gated
+            }
+            _ => data,
+        };
         if self.client_tap.receiver_count() > 0 {
             let _ = self.client_tap.send(bytes::Bytes::copy_from_slice(data));
         }
@@ -226,5 +248,22 @@ impl FcConnection {
             );
         }
         let _ = self.send_bytes(data).await;
+    }
+
+    /// The vehicle's current global and local position, for turning a client's
+    /// global goto into the FC's local frame. `None` without a fix or a local
+    /// position.
+    async fn pilot_georef(&self) -> Option<crate::pilot_link::GeoRef> {
+        let st = self.state.lock().await;
+        let local = st.local_ned?;
+        if st.lat == 0.0 && st.lon == 0.0 {
+            return None;
+        }
+        Some(crate::pilot_link::GeoRef {
+            lat: st.lat,
+            lon: st.lon,
+            alt_rel: st.alt_rel,
+            local: [local[0], local[1], local[2]],
+        })
     }
 }

@@ -21,6 +21,7 @@ per-domain files alongside this barrel:
   :class:`HardwareConfig`
 * ``api.py`` — :class:`ApiConfig`, :class:`RestApiConfig`
 * ``battery.py`` — :class:`BatteryConfig`
+* ``pilot.py`` — :class:`ControlConfig`, :class:`PilotConfig`
 * ``system.py`` — :class:`VisionConfig`,
   :class:`LoggingConfig`, :class:`PairingConfig`, :class:`DiscoveryConfig`,
   :class:`SwarmConfig`, :class:`SwarmFlockConfig`,
@@ -81,6 +82,7 @@ from .network import (
     RegulatoryConfig,
     WifiClientConfig,
 )
+from .pilot import ControlConfig, PilotConfig
 from .radio import CrsfConfig, RadioConfig
 from .root import SECRET_PATHS, ADOSConfig
 from .security import (
@@ -119,6 +121,8 @@ __all__ = [
     "RestApiConfig",
     # battery
     "BatteryConfig",
+    "ControlConfig",
+    "PilotConfig",
     # clock
     "ClockConfig",
     "ClockSimConfig",

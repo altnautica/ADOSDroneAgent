@@ -204,6 +204,9 @@ pub struct RealHost {
     /// Where the WHEP and rig relays reach, and the WHEP sessions each plugin
     /// opened.
     media_relay: media_relay::MediaRelay,
+    /// The link to the ADOS pilot (motion lease, goals, stick nudges);
+    /// `None` where no pilot runs.
+    pilot: Option<Arc<crate::pilot_client::PilotClient>>,
 }
 
 impl RealHost {
@@ -237,7 +240,14 @@ impl RealHost {
             node_info_sources: NodeInfoSources::from_env(),
             mdns: mdns::MdnsRecords::default(),
             media_relay: media_relay::MediaRelay::default(),
+            pilot: None,
         }
+    }
+
+    /// Route motion-lease methods (and legacy setpoints) through the pilot.
+    pub fn with_pilot(mut self, client: Arc<crate::pilot_client::PilotClient>) -> Self {
+        self.pilot = Some(client);
+        self
     }
 
     /// Override the plugin-state path `vision.read_model` reads (builder style,
