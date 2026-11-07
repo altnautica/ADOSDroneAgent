@@ -33,8 +33,12 @@ export interface PadSample {
   values: number[];
   l2: number;
   r2: number;
-  /** `Gamepad.timestamp`: when the pad last reported (performance clock). */
+  /** `Gamepad.timestamp`: when the pad last reported a change. Chromium only
+   *  advances it when a value changes, so a stick held still freezes it. */
   timestamp: number;
+  /** When the poller last read this pad while it was connected
+   *  (`performance.now()`): the stick stream's liveness clock. */
+  polledAt: number;
 }
 
 interface InputState {

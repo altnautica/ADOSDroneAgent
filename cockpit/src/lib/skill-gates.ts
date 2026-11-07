@@ -1,4 +1,4 @@
-// The skill system's shared rules (C5), DOM-free so each is unit-tested:
+// The skill system's shared rules, DOM-free so each is unit-tested:
 //   - echo: an activation write is pending until the plugin's state echoes
 //     it, and reverts with "<skill> did not respond" after 3 s;
 //   - preemption: one motion skill at a time; GO on a second one first writes

@@ -89,9 +89,9 @@ export function registerFeedActions(): () => void {
       e.preventDefault();
       return;
     }
-    const profile = PROFILE_KEYS[key];
+    const profile = profileActionForKey(key);
     if (profile) {
-      runCockpitAction(`profile:${profile}`);
+      runCockpitAction(profile);
       e.preventDefault();
     }
   };
@@ -100,4 +100,10 @@ export function registerFeedActions(): () => void {
     offActions();
     window.removeEventListener("keydown", onKey);
   };
+}
+
+/** F1–F3 → the profile action. The spec's values are already the action ids
+ *  (`profile:cine`), so they pass through unprefixed. */
+export function profileActionForKey(key: string): string | null {
+  return PROFILE_KEYS[key.toLowerCase()] ?? null;
 }

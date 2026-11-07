@@ -1,4 +1,4 @@
-// The pre-flight checklist (C5), which gates the first arm of a session: the
+// The pre-flight checklist, which gates the first arm of a session: the
 // pilot's readiness items, the vehicle link, GNSS, battery and home from the
 // telemetry, the controller (when ADOS Pilot flies the sticks) and on-board
 // storage. A failing blocker keeps "Checks done" disabled; warnings are shown

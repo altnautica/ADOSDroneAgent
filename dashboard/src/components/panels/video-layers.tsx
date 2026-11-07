@@ -66,8 +66,6 @@ export function VideoLayers({
     });
     ro.observe(box);
 
-    let lastAr = -1;
-    let lastObst = -1;
     let lastMission = "";
     let inFlight: AbortController | null = null;
     const poll = () => {
@@ -87,19 +85,16 @@ export function VideoLayers({
               showLoaded: !pilot || !pilot.armed || pilot.owner === "pilot" || pilot.owner === "fc_mode",
             });
           }
-          if (body.ar && body.ar.ts_ms !== lastAr) {
+          // Every poll goes to the store: a repeated `ts_ms` is the agent's
+          // keep-alive, which refreshes only the receipt time (at - age_ms)
+          // so a still scene's route stays up without re-interpolating.
+          if (body.ar) {
             const f = parseArFrame(body.ar.data);
-            if (f) {
-              lastAr = body.ar.ts_ms;
-              store.putAr(f, at - body.ar.age_ms);
-            }
+            if (f) store.putAr(f, at - body.ar.age_ms);
           }
-          if (body.obstacles && body.obstacles.ts_ms !== lastObst) {
+          if (body.obstacles) {
             const f = parseObstaclesFrame(body.obstacles.data);
-            if (f) {
-              lastObst = body.obstacles.ts_ms;
-              store.putObstacles(f, at - body.obstacles.age_ms);
-            }
+            if (f) store.putObstacles(f, at - body.obstacles.age_ms);
           }
         })
         .catch(() => undefined)

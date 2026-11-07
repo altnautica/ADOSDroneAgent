@@ -1,4 +1,4 @@
-// The DJI-grid zones around the video (cockpit spec `layout.json`): the left
+// The cockpit grid's zones around the video (cockpit spec `layout.json`): the left
 // column (Take off / Land, Return home, Pause), the right column (shutter,
 // photo/video switch, zoom, gimbal pad, camera settings) and the bottom
 // telemetry row (D, H, H.S, V.S, AGL). Every control fires a cockpit action or

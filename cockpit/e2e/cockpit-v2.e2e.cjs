@@ -40,11 +40,8 @@ const PAD_INIT = () => {
     buttons[i].value = on ? 1 : 0;
     pad.timestamp = performance.now();
   };
-  const tick = () => {
-    pad.timestamp = performance.now();
-    requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
+  // Like Chromium, `timestamp` advances only when a value changes: a pad held
+  // still must keep streaming.
   navigator.getGamepads = () => [pad, null, null, null];
   window.addEventListener("load", () => window.dispatchEvent(Object.assign(new Event("gamepadconnected"), { gamepad: pad })));
 };

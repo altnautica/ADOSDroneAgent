@@ -1,16 +1,20 @@
-// The pre-flight checklist gate (C5): the first arm of a session (arm,
-// takeoff, launch) opens the checklist; once the operator has passed it, later
-// arms fire directly. A session is the page's lifetime.
+// The pre-flight checklist gate: the first arm of a session (arm, takeoff,
+// launch) opens the checklist; once the operator has passed it, later arms
+// fire directly. A session is the page's lifetime. Passing reopens the sheet
+// the checklist replaced (the Launch sheet), so its step strip, Abort and any
+// refusal stay in view.
 
 import { create } from "zustand";
 
-import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
+import { useCockpitUiStore, type CockpitSheet } from "@/stores/cockpit-ui-store";
 
 interface PreflightState {
   /** The operator passed the checklist this session. */
   passed: boolean;
   /** The action waiting behind the checklist. */
   pending: (() => void) | null;
+  /** The sheet the checklist replaced, reopened when it passes. */
+  returnTo: CockpitSheet;
   pass: () => void;
   dismiss: () => void;
 }
@@ -18,14 +22,17 @@ interface PreflightState {
 export const usePreflightStore = create<PreflightState>((set, get) => ({
   passed: false,
   pending: null,
+  returnTo: null,
   pass: () => {
-    const then = get().pending;
-    set({ passed: true, pending: null });
-    useCockpitUiStore.getState().closeSheet();
+    const { pending: then, returnTo } = get();
+    set({ passed: true, pending: null, returnTo: null });
+    const ui = useCockpitUiStore.getState();
+    if (returnTo) ui.openSheet(returnTo);
+    else ui.closeSheet();
     then?.();
   },
   dismiss: () => {
-    set({ pending: null });
+    set({ pending: null, returnTo: null });
     useCockpitUiStore.getState().closeSheet();
   },
 }));
@@ -37,6 +44,7 @@ export function requirePreflight(then: () => void): void {
     then();
     return;
   }
-  usePreflightStore.setState({ pending: then });
-  useCockpitUiStore.getState().openSheet("preflight");
+  const ui = useCockpitUiStore.getState();
+  usePreflightStore.setState({ pending: then, returnTo: ui.sheet === "preflight" ? null : ui.sheet });
+  ui.openSheet("preflight");
 }

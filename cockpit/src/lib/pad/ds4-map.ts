@@ -36,7 +36,7 @@ export type ControlId =
   | "touchpad"
   | "lightbar";
 
-export type Gesture = "tap" | "hold" | "double_tap" | "analog";
+export type Gesture = "press" | "tap" | "hold" | "double_tap" | "analog";
 
 export type WhenCondition =
   | "picker_open"
@@ -195,7 +195,7 @@ export function isControlId(v: unknown): v is ControlId {
   return typeof v === "string" && (CONTROL_IDS as readonly string[]).includes(v);
 }
 
-const GESTURES: readonly Gesture[] = ["tap", "hold", "double_tap", "analog"];
+const GESTURES: readonly Gesture[] = ["press", "tap", "hold", "double_tap", "analog"];
 export function isGesture(v: unknown): v is Gesture {
   return typeof v === "string" && (GESTURES as readonly string[]).includes(v);
 }

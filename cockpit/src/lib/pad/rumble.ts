@@ -1,4 +1,4 @@
-// Controller rumble (C4) through the Gamepad API's `vibrationActuator`
+// Controller rumble through the Gamepad API's `vibrationActuator`
 // (`dual-rumble`): 1 × 80 ms on a mode or skill change, 2 short on a warning,
 // 3 × 300 ms on a critical, single pulses for the hold ramp and the RTH
 // countdown. `pilotFeedback` decides which pattern a pilot-state change earns,

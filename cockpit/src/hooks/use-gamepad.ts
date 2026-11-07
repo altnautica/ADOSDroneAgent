@@ -15,7 +15,8 @@
 // Browsers expose a pad only after its first input, so `gamepadconnected`
 // alone marks it announced; the Controls screen says "Press any button" until
 // a sample arrives. A pad the browser does not report in the standard layout
-// is read through its recorded axis map, and flagged until calibrated.
+// drives nothing: its button and axis indices are unknown, so the gesture
+// engine and the stick stream ignore it and the top bar flags it.
 
 import { useEffect, useState } from "react";
 
@@ -96,6 +97,7 @@ function sampleOf(pad: Gamepad): PadSample {
     l2: values[BUTTON_INDEX.l2 ?? 6] ?? 0,
     r2: values[BUTTON_INDEX.r2 ?? 7] ?? 0,
     timestamp: pad.timestamp,
+    polledAt: performance.now(),
   };
 }
 
@@ -110,10 +112,12 @@ function pilotNow(): PilotState | null {
   return useNavStreamStore.getState().pilot?.data ?? null;
 }
 
-/** The ground station flies the sticks and the safety buttons natively. */
+/** The ground station flies the sticks and the safety buttons natively. On a
+ *  kiosk whose input status is not known yet (first poll pending or failed)
+ *  the browser assumes native input, so arm and kill never run twice. */
 export function nativeInputActive(): boolean {
   const c = useControlsStore.getState();
-  return c.stationKiosk && c.groundInput?.nativeSticks === true;
+  return c.stationKiosk && (c.groundInput === null || c.groundInput.nativeSticks === true);
 }
 
 function engineContext(): EngineContext {
@@ -250,6 +254,7 @@ export function useGamepad(): GamepadState {
       }
       onFeed = feed;
 
+      if (!sample.standard) return;
       if (feed) {
         const now = performance.now();
         const frame = padFrame(sample, now);
@@ -296,17 +301,14 @@ export function useGamepad(): GamepadState {
 export function usePadStatus(): PadStatus {
   const connected = useInputStore((s) => s.pad !== null);
   const name = useInputStore((s) => s.pad?.name ?? null);
-  const padId = useInputStore((s) => s.pad?.id ?? null);
   const standard = useInputStore((s) => s.pad?.standard ?? false);
-  // A non-standard pad counts once its axis map is recorded.
-  const mapped = useControlsStore((s) => (padId ? s.calibration[padId]?.axisMap != null : false));
   const ground = useControlsStore((s) => (s.stationKiosk ? s.groundInput : null));
   const native = ground?.nativeSticks === true;
   const station = ground?.controller ?? null;
   return {
     connected: connected || (native && station !== null),
     name: name ?? station?.name ?? null,
-    standard: standard || mapped || native,
+    standard: standard || native,
     batteryPct: station?.batteryPct ?? null,
     native,
   };

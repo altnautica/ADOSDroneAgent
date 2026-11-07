@@ -1,4 +1,4 @@
-// The skill picker (C5, the Skydio model), bottom-right of the grid. The chip
+// The skill picker , bottom-right of the grid. The chip
 // shows the active skill and its state, or "Skills". Opening it shows a sheet
 // with Behaviors / Camera / Navigation / Utility tabs; each plugin's skills sit
 // under its name (one plugin, many entries). Selecting a skill gives its Tweak
@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, Minus, Plus, Puzzle } from "lucide-react";
 
 import { Sheet } from "@/components/ui/sheet";
-import { useSkillContext } from "@/hooks/use-skill-context";
+import { skillContextNow, useSkillContext } from "@/hooks/use-skill-context";
 import { useSkillParam } from "@/hooks/use-skill-setting";
 import { putPluginConfig } from "@/lib/api";
 import { registerCockpitActions } from "@/lib/cockpit-actions";
@@ -207,7 +207,7 @@ export function SkillPicker() {
 
   const choose = (s: Skill) => {
     // A camera one-shot fires directly; everything else opens its Tweak panel.
-    if (s.category === "camera" && !s.extension?.toggle) requestSkill(s, ctx);
+    if (s.category === "camera" && !s.extension?.toggle) requestSkill(s, skillContextNow());
     else {
       setSelected(s.id);
       setParamFocus(0);
@@ -267,7 +267,7 @@ export function SkillPicker() {
             if (p !== "press") return;
             const cur = live.current;
             if (!cur.open) return;
-            if (cur.sel) requestSkill(cur.sel, ctx);
+            if (cur.sel) requestSkill(cur.sel, skillContextNow());
             else if (cur.inTab[cur.focus]) choose(cur.inTab[cur.focus]);
           },
         },
@@ -286,7 +286,6 @@ export function SkillPicker() {
           },
         },
       ]),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [],
   );
 

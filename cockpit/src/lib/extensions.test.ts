@@ -50,7 +50,7 @@ function skill(id: string, over: Record<string, unknown> = {}) {
   };
 }
 
-describe("parseExtensionSkill (C5 strict schema)", () => {
+describe("parseExtensionSkill (strict skill schema)", () => {
   const ctx = { pluginName: "SIYI pod" };
 
   it("accepts a valid skill with its category, motion and binding fields", () => {

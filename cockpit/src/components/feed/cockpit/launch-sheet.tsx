@@ -14,6 +14,7 @@ import { getParam } from "@/lib/api";
 import { ALT_MAX_M, ALT_MIN_M, COPTER_TAKEOFF_ALT_M, launchArgs, type LaunchAfter, type WhenDone } from "@/lib/cockpit-flow";
 import { BUILTIN_BY_ID } from "@/lib/cockpit-spec";
 import { sendPilotAction } from "@/lib/pilot-link";
+import { skillVisibleFor } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
@@ -96,7 +97,7 @@ export function LaunchSheet() {
   const [gotoN, setGotoN] = useState(20);
   const [gotoE, setGotoE] = useState(0);
   const [whenDone, setWhenDone] = useState<WhenDone>("none");
-  const [result, setResult] = useState<string | null>(null);
+  const result = useCockpitUiStore((s) => s.launchRefusal);
 
   // A plane takes off to its own TKOFF_ALT.
   useEffect(() => {
@@ -112,10 +113,10 @@ export function LaunchSheet() {
     () =>
       extensions.flatMap((e) =>
         e.skills
-          .filter((s) => s.category === "behavior" && s.extension?.toggle)
+          .filter((s) => s.category === "behavior" && s.extension?.toggle && skillVisibleFor(s, pilot?.vehicleClass))
           .map((s) => ({ id: s.id, label: s.label, plugin: e.name, pluginId: e.pluginId, skillId: s.id.slice(e.pluginId.length + 1) })),
       ),
-    [extensions],
+    [extensions, pilot?.vehicleClass],
   );
   const missionLoaded = pilot?.mission?.state === "loaded";
   const sequenceRunning = pilot?.sequence != null && pilot.sequence.step !== "done" && !pilot.sequence.error;
@@ -139,7 +140,9 @@ export function LaunchSheet() {
         goto: after === "goto" ? { n: gotoN, e: gotoE, altM } : null,
         whenDone,
       });
-      void sendPilotAction("launch", args).then((r) => setResult(r.ok ? null : `Launch refused: ${r.err ?? "unknown"}`));
+      const { setLaunchRefusal } = useCockpitUiStore.getState();
+      setLaunchRefusal(null);
+      void sendPilotAction("launch", args).then((r) => setLaunchRefusal(r.ok ? null : `Launch refused: ${r.err ?? "unknown"}`));
     });
 
   return (

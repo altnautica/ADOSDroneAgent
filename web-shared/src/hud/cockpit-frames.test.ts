@@ -44,7 +44,7 @@ describe("parseArFrame on the golden fixture", () => {
     expect(cam.items[9]).toMatchObject({ t: "edge", of: "home", ang: 2.6, distM: 35 });
   });
 
-  it("carries the C8 mission copy", () => {
+  it("carries the mission copy", () => {
     expect(f!.mission).toMatchObject({ state: "active", seq: 4, total: 6, itemReached: 3, source: "mission_state", landingSeq: false });
   });
 
@@ -66,7 +66,7 @@ describe("parseArFrame on the golden fixture", () => {
 describe("parsePilotState on the golden fixture", () => {
   const p = parsePilotState(fixture("pilot-frame.json"));
 
-  it("parses the C3 fields and the flow additions", () => {
+  it("parses the pilot fields and the flow additions", () => {
     expect(p).not.toBeNull();
     expect(p!.owner).toBe("skill");
     expect(p!.skill).toEqual({ pluginId: "com.example.follow", skillId: "follow-me", label: "Follow" });

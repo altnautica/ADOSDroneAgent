@@ -101,8 +101,11 @@ fn pilot_lines(core: &Core, p: Option<&Pilot>) -> Vec<Line<'static>> {
         .or_else(|| p.owner.clone())
         .unwrap_or_else(|| "–".into());
     if p.owner.as_deref() == Some("skill") {
+        // The pilot's owner label usually names the skill already.
         if let Some(label) = &p.skill_label {
-            owner.push_str(&format!(" · {label}"));
+            if !owner.to_lowercase().contains(&label.to_lowercase()) {
+                owner.push_str(&format!(" · {label}"));
+            }
         }
     }
     owner.push_str(stale_suffix(p.stale));

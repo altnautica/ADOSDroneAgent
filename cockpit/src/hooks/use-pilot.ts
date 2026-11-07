@@ -29,11 +29,6 @@ export function sticksElsewhere(p: PilotState | null): { label: string } | null 
   return { label: s.label || s.src };
 }
 
-function distance3(a: readonly number[] | null, b: readonly number[] | null): number | null {
-  if (!a || !b) return null;
-  return Math.hypot(a[0] - b[0], a[1] - b[1]);
-}
-
 /** Facts for the chip rules from one pilot state. Exported for tests. */
 export function chipFacts(
   p: PilotState,
@@ -49,7 +44,10 @@ export function chipFacts(
     profile: p.profile,
     skillLabel: p.skill?.label ?? null,
     modeDetail: extra.modeDetail,
-    distM: distance3(p.goalNed, p.setpointNed),
+    // The pilot state carries no vehicle position, and its setpoint equals
+    // the goal on a clear path, so goal-to-setpoint would read "0 m". With no
+    // true distance the chip shows "—" rather than a known-false value.
+    distM: null,
     homeDistM: extra.homeDistM,
     setupStep: null,
     missionState: p.mission?.state ?? null,

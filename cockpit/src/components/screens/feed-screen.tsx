@@ -1,4 +1,4 @@
-// The Feed / HUD screen (the default): the cockpit in the DJI grid (cockpit
+// The Feed / HUD screen (the default): the cockpit in the cockpit grid (cockpit
 // spec `layout.json`) for the view on screen (`views.json`): video (L0),
 // extension video overlays (L1), the host target layer, the data layers
 // (AR, obstacles, depth, surfaces), the instrument HUD (L2), the top bar with
@@ -116,7 +116,7 @@ export function FeedScreen() {
   useNavStream(flightNavCapable || localVisionCapable);
   const video = useFeedStore((s) => s.video);
 
-  // The operator link to the pilot and the stick stream (C1, C4), only on a
+  // The operator link to the pilot and the stick stream , only on a
   // node that flies; the actions every binding fires through.
   useEffect(() => (flightNavCapable ? connectPilotLink(isKiosk() && groundStation ? "kiosk" : "cockpit") : undefined), [
     flightNavCapable,

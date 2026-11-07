@@ -1,10 +1,11 @@
-// The binding model behind Settings › Controls (C11): conflict detection, the
+// The binding model behind Settings › Controls: conflict detection, the
 // locked-binding rule, the editor's operations and the export/import file.
 // The export file is `ds4.json`'s `export_format`: the COMPLETE effective
 // binding list plus the stick mode and deadzone (the ground station's native
 // input applies the same file through `PUT /api/v1/ground-station/input/bindings`).
 
 import {
+  BUTTON_CONTROLS,
   DEADZONE_DEFAULT,
   DEADZONE_MAX,
   DEADZONE_MIN,
@@ -132,11 +133,31 @@ export function conflictedControls(rows: readonly PadBinding[], conflicts: reado
 
 // ── locked bindings ──────────────────────────────────────────────────────────
 
+const isPressable = (c: ControlId) => BUTTON_CONTROLS.includes(c);
+
+/** The default row a locked action ships with: its hold time and `when` gate
+ *  are part of the safety rule (arm 2 s with the left stick centred, kill
+ *  3 s), so a moved row must keep them. */
+function lockedDefault(l: LockedAction): PadBinding | undefined {
+  return DEFAULT_BINDINGS.find((b) => b.locked && b.action === l.action && b.gesture === l.gesture);
+}
+
+/** Whether a row still delivers a locked action: on pressable controls only
+ *  (never a stick or the lightbar, which fire nothing), with its default
+ *  `when` and at least its default hold time. */
+export function satisfiesLocked(b: PadBinding, l: LockedAction): boolean {
+  if (b.action !== l.action || b.gesture !== l.gesture) return false;
+  if (l.combo && b.with.length === 0) return false;
+  if (!isPressable(b.control) || !b.with.every(isPressable)) return false;
+  const def = lockedDefault(l);
+  if (!def) return true;
+  if (b.when !== def.when) return false;
+  return def.hold_ms == null || (b.hold_ms != null && b.hold_ms >= def.hold_ms);
+}
+
 /** The `locked_actions` entries no row satisfies. */
 export function missingLocked(rows: readonly PadBinding[]): LockedAction[] {
-  return LOCKED_ACTIONS.filter(
-    (l) => !rows.some((b) => b.action === l.action && b.gesture === l.gesture && (!l.combo || b.with.length > 0)),
-  );
+  return LOCKED_ACTIONS.filter((l) => !rows.some((b) => satisfiesLocked(b, l)));
 }
 
 export function lockedLabel(l: LockedAction): string {
@@ -190,6 +211,10 @@ export function removeRow(rows: readonly PadBinding[], index: number): EditResul
 export function moveRow(rows: readonly PadBinding[], index: number, control: ControlId): EditResult {
   const row = rows[index];
   if (!row) return { ok: false, error: "No such binding." };
+  if (row.locked && !isPressable(control)) {
+    const label = SPEC_ACTION_BY_ID[row.action]?.label ?? row.action;
+    return { ok: false, error: `${label} is locked: it can only move to a button.` };
+  }
   const next = cloneBindings(rows);
   next[index] = { ...next[index], control, with: row.with.filter((w) => w !== control) };
   return { ok: true, rows: next };

@@ -1,5 +1,5 @@
 // One plugin parameter of a skill, written from the cockpit and settled by the
-// plugin's echo (C5): the write shows pending until the skill's state topic
+// plugin's echo: the write shows pending until the skill's state topic
 // echoes the key with the requested value; with no echo in 3 s the control
 // reverts and warns "<skill> did not respond". Used by the quick-setting
 // toggles, the follow rail and the skill picker's Tweak panel alike.

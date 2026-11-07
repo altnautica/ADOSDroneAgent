@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { activateExclusive, buildBindings, echoOutcome, ECHO_TIMEOUT_MS, runningMotionSkills } from "@/lib/skill-gates";
-import { armGateReason, BUILTIN_SKILL_BY_ID, BUILTIN_SKILLS, resolveSkillState, skillVisibleFor, type Skill, type SkillContext } from "@/lib/skills";
+import { armGateReason, BUILTIN_SKILL_BY_ID, builtinRoute, BUILTIN_SKILLS, resolveSkillState, skillVisibleFor, type Skill, type SkillContext } from "@/lib/skills";
 
 const pilot = { armed: true, landed: false, vehicleClass: "multirotor" as const, fresh: true };
 const flying: SkillContext = { fcConnected: true, live: true, armed: true, pilot, pilotLinkOpen: true };
@@ -59,13 +59,22 @@ describe("arm gates", () => {
 });
 
 describe("stale link rules", () => {
-  const stale: SkillContext = { ...flying, pilot: { ...pilot, fresh: false } };
+  // Pilot stalled and the FC link down too: nothing else can carry RTH.
+  const stale: SkillContext = { ...flying, fcConnected: false, live: false, pilot: { ...pilot, fresh: false } };
   it("sends pause and kill blind, disables rth with a reason", () => {
     expect(resolveSkillState(BUILTIN_SKILL_BY_ID.pause, stale).enabled).toBe(true);
     expect(resolveSkillState(BUILTIN_SKILL_BY_ID.kill, stale).enabled).toBe(true);
     const rth = resolveSkillState(BUILTIN_SKILL_BY_ID.rth, stale);
     expect(rth.enabled).toBe(false);
     expect(rth.reason).toBeTruthy();
+  });
+
+  it("falls back to /api/command when the pilot stalls but the FC link is live", () => {
+    const stalled: SkillContext = { ...flying, pilot: { ...pilot, fresh: false } };
+    expect(builtinRoute(BUILTIN_SKILL_BY_ID.rth, stalled)).toBe("command");
+    expect(builtinRoute(BUILTIN_SKILL_BY_ID.land, stalled)).toBe("command");
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.rth, stalled).enabled).toBe(true);
+    expect(builtinRoute(BUILTIN_SKILL_BY_ID.rth, flying)).toBe("pilot");
   });
 
   it("disables take_control when no pilot runs", () => {
@@ -84,6 +93,12 @@ describe("plugin skill freshness and link loss", () => {
   it("hides a skill whose vehicle classes exclude the vehicle", () => {
     expect(skillVisibleFor(plugin("x", { vehicleClasses: ["multirotor", "vtol"] }), "fixedwing")).toBe(false);
     expect(skillVisibleFor(plugin("x", { vehicleClasses: ["multirotor", "vtol"] }), null)).toBe(true);
+  });
+
+  it("never fires a skill for another vehicle class (keys, bindings, Launch)", () => {
+    const plane: SkillContext = { ...flying, pilot: { ...pilot, vehicleClass: "fixedwing" } };
+    const st = resolveSkillState(plugin("x", { vehicleClasses: ["multirotor", "vtol"] }), plane);
+    expect(st).toMatchObject({ enabled: false, reason: "Not available for this aircraft" });
   });
 });
 

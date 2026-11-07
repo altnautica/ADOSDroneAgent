@@ -14,6 +14,10 @@ interface CockpitUiState {
   card: BottomLeftCard;
   /** The shutter's mode: a still photo or a video recording. */
   shutterMode: "photo" | "video";
+  /** The pilot's refusal of the last launch, kept here so it survives the
+   *  Launch sheet unmounting behind the pre-flight checklist. */
+  launchRefusal: string | null;
+  setLaunchRefusal: (text: string | null) => void;
   openSheet: (sheet: CockpitSheet) => void;
   closeSheet: () => void;
   nextCard: (dir?: 1 | -1) => void;
@@ -24,6 +28,8 @@ export const useCockpitUiStore = create<CockpitUiState>((set, get) => ({
   sheet: null,
   card: "map",
   shutterMode: "video",
+  launchRefusal: null,
+  setLaunchRefusal: (launchRefusal) => set({ launchRefusal }),
   openSheet: (sheet) => set({ sheet }),
   closeSheet: () => set({ sheet: null }),
   nextCard: (dir = 1) => {

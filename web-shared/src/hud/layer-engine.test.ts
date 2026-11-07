@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { parseArFrame, parseObstaclesFrame } from "./cockpit-frames";
+import { parseArFrame, parseObstaclesFrame, type DepthFrame } from "./cockpit-frames";
 import { LayerEngine, LayerFrameStore, type LayerConfig } from "./layer-engine";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
@@ -111,7 +111,7 @@ describe("LayerEngine", () => {
     store.putAr(ar, clock);
     frame();
     clock += 50;
-    store.putAr(ar, clock);
+    store.putAr({ ...ar, tsMs: ar.tsMs + 50 }, clock);
     const before = calls.clears;
     for (let i = 0; i < 3; i++) frame(16);
     expect(calls.clears - before).toBe(3);
@@ -161,6 +161,48 @@ describe("LayerEngine", () => {
     frame();
     engine.stop();
     expect(rafQueue).toHaveLength(0);
+  });
+
+  it("treats a repeated ts_ms as a keep-alive: fresh, no re-interpolation", () => {
+    const { store, calls } = setup({ layers: new Set(["ar_route"]) });
+    store.putAr(ar, clock);
+    frame();
+    // Keep-alives once a second for 5 s: the route never hides.
+    for (let i = 0; i < 5; i++) {
+      for (let j = 0; j < 60; j++) frame(16.7);
+      store.putAr(ar, clock);
+      const v = store.ar.version;
+      frame();
+      expect(store.ar.version).toBe(v);
+    }
+    calls.texts.length = 0;
+    store.putAr(ar, clock);
+    frame();
+    expect(calls.texts).toContain("WP4 · 120 m · 0:42");
+    expect(calls.texts).not.toContain("AR unavailable");
+    // The previous frame is still the original, not the keep-alive.
+    expect(store.arPrev.data).toBeNull();
+  });
+
+  it("dims and hides each cell layer on its own clock", () => {
+    const depth: DepthFrame = { tsMs: 1, scaleSource: "lidar", cameras: obstacles.cameras };
+    const { store, calls } = setup({ layers: new Set(["obstacles", "depth"]) });
+    store.putObstacles(obstacles, clock);
+    frame();
+    const obstacleTexts = calls.texts.filter((t) => !t.endsWith("unavailable"));
+    expect(obstacleTexts.length).toBeGreaterThan(0);
+    expect(calls.texts).toContain("Depth unavailable");
+    // Depth keeps arriving; obstacles go silent past the hide threshold.
+    for (let i = 0; i < 25; i++) {
+      store.putDepth({ ...depth, tsMs: 100 + i }, clock);
+      frame(100);
+    }
+    calls.texts.length = 0;
+    store.putDepth({ ...depth, tsMs: 999 }, clock);
+    frame();
+    expect(calls.texts).toContain("Obstacles unavailable");
+    expect(calls.texts).not.toContain("Depth unavailable");
+    for (const t of obstacleTexts) expect(calls.texts).not.toContain(t);
   });
 
   it("records paint timings", () => {

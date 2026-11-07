@@ -1,4 +1,4 @@
-// The flow overlays over the video (C10): the 3 s handover banner, the
+// The flow overlays over the video: the 3 s handover banner, the
 // "Centre sticks to take control" gate ring, "Sticks are with <surface>" with
 // its hold-to-take-over, the link-loss countdown, and the cancellable
 // low-battery RTH countdown. Voice prompts speak handovers, RTH, low battery

@@ -3,7 +3,8 @@
 // the vehicle it shows (this drone, or a ground station's paired drone); the
 // stored choice for that vehicle loads then. Readers: the Feed layout (view),
 // the layer stack (effective layers), the top-bar layer button, the D-pad and
-// the `V` / `O` keys.
+// the `V` / `O` keys. The depth layer's options (`layers.json` `options.depth`:
+// range Off / 2 m / 5 m, Solid / Outline) persist with them.
 
 import { create } from "zustand";
 
@@ -21,13 +22,20 @@ export { effectiveLayers } from "@/lib/cockpit-view";
 
 const KEY_PREFIX = "ados-cockpit-view:";
 
+export type DepthRangeM = 0 | 2 | 5;
+export type DepthStyle = "solid" | "outline";
+export const DEPTH_RANGES: readonly DepthRangeM[] = [0, 2, 5];
+export const DEPTH_STYLES: readonly DepthStyle[] = ["solid", "outline"];
+
 interface Persisted {
   view: CockpitView;
   level: LayerLevel;
   layers: Record<string, boolean>;
+  depthRangeM: DepthRangeM;
+  depthStyle: DepthStyle;
 }
 
-const DEFAULTS: Persisted = { view: "pilot", level: "full", layers: {} };
+const DEFAULTS: Persisted = { view: "pilot", level: "full", layers: {}, depthRangeM: 5, depthStyle: "solid" };
 
 function load(vehicle: string, defaultLevel: LayerLevel = DEFAULTS.level): Persisted {
   const fresh = (): Persisted => ({ ...DEFAULTS, level: defaultLevel, layers: {} });
@@ -44,6 +52,8 @@ function load(vehicle: string, defaultLevel: LayerLevel = DEFAULTS.level): Persi
       view: COCKPIT_VIEWS.includes(p.view as CockpitView) ? (p.view as CockpitView) : DEFAULTS.view,
       level: LAYER_LEVELS.includes(p.level as LayerLevel) ? (p.level as LayerLevel) : defaultLevel,
       layers,
+      depthRangeM: DEPTH_RANGES.includes(p.depthRangeM as DepthRangeM) ? (p.depthRangeM as DepthRangeM) : DEFAULTS.depthRangeM,
+      depthStyle: DEPTH_STYLES.includes(p.depthStyle as DepthStyle) ? (p.depthStyle as DepthStyle) : DEFAULTS.depthStyle,
     };
   } catch {
     return fresh();
@@ -69,13 +79,15 @@ export interface CockpitViewState extends Persisted {
   setLevel: (level: LayerLevel) => void;
   cycleLevel: () => void;
   toggleLayer: (id: string, on?: boolean) => void;
+  setDepthRange: (m: DepthRangeM) => void;
+  setDepthStyle: (style: DepthStyle) => void;
 }
 
 export const useCockpitViewStore = create<CockpitViewState>((set, get) => {
   const update = (patch: Partial<Persisted>) => {
     set(patch);
     const s = get();
-    save(s.vehicle, { view: s.view, level: s.level, layers: s.layers });
+    save(s.vehicle, { view: s.view, level: s.level, layers: s.layers, depthRangeM: s.depthRangeM, depthStyle: s.depthStyle });
   };
   return {
     vehicle: "",
@@ -92,5 +104,7 @@ export const useCockpitViewStore = create<CockpitViewState>((set, get) => {
       const cur = effectiveLayers("full", get().layers, "pilot", [id]).has(id);
       update({ layers: { ...get().layers, [id]: on ?? !cur } });
     },
+    setDepthRange: (depthRangeM) => update({ depthRangeM }),
+    setDepthStyle: (depthStyle) => update({ depthStyle }),
   };
 });

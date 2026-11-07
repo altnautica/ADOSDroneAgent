@@ -3,16 +3,26 @@
 // layer toggles (that view forces them on; the toggles keep their flags for
 // the other views), the vision engine's health, and the detector model
 // picker. Selecting a model writes `PUT /api/vision/detector`, which restarts
-// the engine, so it asks for a second tap first.
+// the engine, so it asks for a second tap within 3 s first, lists detection
+// models only (never the depth model), and is disabled while armed.
 
 import { useEffect, useMemo, useState } from "react";
 
 import { apiFetch } from "@/shared/api-fetch";
 import { isDemoMode } from "@/lib/utils";
-import { useCockpitViewStore } from "@/stores/cockpit-view-store";
+import { useFlightStore } from "@/stores/flight-store";
+import { DEPTH_RANGES, DEPTH_STYLES, useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { DETECTION_STALE_MS, useDetectionsStore } from "@/stores/detections-store";
 
 const STATUS_POLL_MS = 2000;
+/** The second tap that restarts the engine must come within this window. */
+const CONFIRM_WINDOW_MS = 3000;
+
+/** A detector candidate: a detection model (an older agent without `task`
+ *  lists detection models only). */
+function isDetectionModel(m: { task?: string }): boolean {
+  return m.task === undefined || m.task.toLowerCase() === "detection";
+}
 
 interface EngineModel {
   id: string;
@@ -67,6 +77,12 @@ function ModelPicker() {
   const [armed, setArmed] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const flying = useFlightStore((s) => s.telemetry?.armed === true);
+  useEffect(() => {
+    if (armed === null) return;
+    const t = setTimeout(() => setArmed(null), CONFIRM_WINDOW_MS);
+    return () => clearTimeout(t);
+  }, [armed]);
   useEffect(() => {
     if (isDemoMode()) return;
     const ac = new AbortController();
@@ -74,7 +90,9 @@ function ModelPicker() {
     return () => ac.abort();
   }, []);
   if (!list) return null;
+  const models = list.installed.filter(isDetectionModel);
   const choose = (id: string) => {
+    if (flying) return;
     if (armed !== id) {
       setArmed(id);
       return;
@@ -96,12 +114,13 @@ function ModelPicker() {
   return (
     <section className="space-y-1">
       <h3 className="text-xs uppercase tracking-wider text-white/60">Detector model</h3>
-      {list.installed.length === 0 ? <p className="text-xs text-white/60">No models installed</p> : null}
-      {list.installed.map((m) => (
+      {models.length === 0 ? <p className="text-xs text-white/60">No detection models installed</p> : null}
+      {flying ? <p className="text-xs text-white/60">Disarm to switch the detector: it restarts the vision engine.</p> : null}
+      {models.map((m) => (
         <button
           key={m.id}
           type="button"
-          disabled={busy || m.id === list.active}
+          disabled={busy || flying || m.id === list.active}
           onClick={() => choose(m.id)}
           className="flex min-h-12 w-full items-center justify-between rounded-md bg-white/5 px-3 text-left text-sm disabled:opacity-60"
         >
@@ -113,6 +132,36 @@ function ModelPicker() {
       ))}
       {err ? <p className="text-xs text-red-400">{err}</p> : null}
     </section>
+  );
+}
+
+const RANGE_LABELS: Record<number, string> = { 0: "Off", 2: "2 m", 5: "5 m" };
+
+/** The depth layer's range (Off / 2 m / 5 m) and style (Solid / Outline). */
+function DepthOptions() {
+  const range = useCockpitViewStore((s) => s.depthRangeM);
+  const style = useCockpitViewStore((s) => s.depthStyle);
+  const setRange = useCockpitViewStore((s) => s.setDepthRange);
+  const setStyle = useCockpitViewStore((s) => s.setDepthStyle);
+  const seg = (on: boolean) =>
+    `min-h-12 flex-1 rounded-md px-2 text-sm ${on ? "bg-white/25 font-semibold" : "bg-white/5"}`;
+  return (
+    <div className="space-y-1 pt-1">
+      <div role="radiogroup" aria-label="Depth range" className="flex gap-1">
+        {DEPTH_RANGES.map((m) => (
+          <button key={m} type="button" role="radio" aria-checked={range === m} onClick={() => setRange(m)} className={seg(range === m)}>
+            {RANGE_LABELS[m]}
+          </button>
+        ))}
+      </div>
+      <div role="radiogroup" aria-label="Depth style" className="flex gap-1">
+        {DEPTH_STYLES.map((st) => (
+          <button key={st} type="button" role="radio" aria-checked={style === st} onClick={() => setStyle(st)} className={seg(style === st)}>
+            {st === "solid" ? "Solid" : "Outline"}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -143,6 +192,7 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
           </label>
         ))}
         <p className="text-xs text-white/50">On while this view is open; the switches keep them on in other views.</p>
+        <DepthOptions />
       </section>
 
       <section className="space-y-1">

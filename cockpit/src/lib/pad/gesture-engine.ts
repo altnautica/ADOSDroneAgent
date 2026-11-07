@@ -12,6 +12,9 @@
 // - Otherwise its tap fires on release: at once, or after the double-tap
 //   window when a double-tap row applies, so a hold (Triangle 1.5 s, PS 2 s)
 //   and a combo (L1+R1) never also fire the tap.
+// - A `press` row fires (press, then release) the moment its control or combo
+//   goes down, and the episode keeps timing: a hold row on the same control
+//   still fires on top (PS: brake at once, RTH after 2 s held).
 // - A hold fires its `hold` phase once it has been held `hold_ms` and its
 //   `release` on the way up. `stick_l_centered` restarts the hold whenever the
 //   left stick leaves the centre.
@@ -266,6 +269,7 @@ export class GestureEngine {
         }
         const ep: Episode = { start: frame.t, fired: null, done: false, lastPulse: frame.t };
         this.comboEp.set(g.key, ep);
+        this.fireTap(this.applicable(g.rows, "press", ctx, frame), out);
         const hasHold = g.rows.some((b) => b.gesture === "hold");
         if (!hasHold) {
           const tap = this.applicable(g.rows, "tap", ctx, frame);
@@ -283,6 +287,7 @@ export class GestureEngine {
     if (!rows || rows.length === 0) return;
     const ep: Episode = { start: frame.t, fired: null, done: false, lastPulse: frame.t };
     this.singleEp.set(c, ep);
+    this.fireTap(this.applicable(rows, "press", ctx, frame), out);
     const immediate = !this.comboMembers.has(c) && rows.every((b) => b.gesture === "tap");
     if (immediate) {
       const tap = this.applicable(rows, "tap", ctx, frame);

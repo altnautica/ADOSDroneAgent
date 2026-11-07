@@ -1,4 +1,4 @@
-// Settings › Controls state (C11), persisted in localStorage
+// Settings › Controls state, persisted in localStorage
 // `ados-cockpit-controls`: the saved binding list, the stick mode, the
 // deadzone, per-pad calibration, the on-screen sticks toggle and whether the
 // first-connect tour ran. The editor works on `draft`; Save commits it (and,
@@ -19,6 +19,7 @@ import {
   cloneBindings,
   defaultBindings,
   findConflicts,
+  lockedLabel,
   missingLocked,
   parseControlsDoc,
   type ControlsDoc,
@@ -232,8 +233,23 @@ export const useControlsStore = create<ControlsState>((set, get) => {
     importText: (text) => {
       const r = parseControlsDoc(text);
       if (!r.ok) return r.errors;
-      set({ draft: r.doc.bindings, stickMode: r.doc.stick_mode, deadzone: r.doc.deadzone });
+      // All or nothing: a file the editor could not save is refused whole,
+      // so stick mode and deadzone never go live ahead of its bindings.
+      const conflicts = findConflicts(r.doc.bindings).length;
+      const missing = missingLocked(r.doc.bindings).map(lockedLabel);
+      const errors = [
+        ...(conflicts > 0 ? [`${conflicts} binding conflict(s)`] : []),
+        ...missing.map((m) => `Missing locked binding: ${m}`),
+      ];
+      if (errors.length > 0) return errors;
+      set({
+        draft: cloneBindings(r.doc.bindings),
+        bindings: cloneBindings(r.doc.bindings),
+        stickMode: r.doc.stick_mode,
+        deadzone: r.doc.deadzone,
+      });
       commit();
+      void pushToStation();
       return [];
     },
     exportDoc: () => {

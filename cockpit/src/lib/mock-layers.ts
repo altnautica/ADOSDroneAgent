@@ -21,7 +21,7 @@ function b64(bytes: Uint8Array): string {
   return btoa(s);
 }
 
-/** Grid code for a distance (inverse of the C3 log scale). */
+/** Grid code for a distance (inverse of the grid's log distance scale). */
 function code(m: number): number {
   return Math.max(1, Math.min(255, Math.round(1 + (Math.log(m / 0.2) * 254) / Math.log(300))));
 }

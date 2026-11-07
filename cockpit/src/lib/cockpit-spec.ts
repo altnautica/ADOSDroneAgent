@@ -29,7 +29,7 @@ export interface BuiltinSpec {
   /** Keyboard chord (`shift+a`, `space`), or null. */
   keyboard: string | null;
   armsFirst: boolean;
-  /** The pilot action name (C1 `action`). */
+  /** The pilot action name (pilot.v1 `action`). */
   pilotAction: string;
 }
 

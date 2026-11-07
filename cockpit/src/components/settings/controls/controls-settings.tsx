@@ -1,4 +1,4 @@
-// Settings › Controls (C11): the controller drawn from the cockpit spec's art
+// Settings › Controls: the controller drawn from the cockpit spec's art
 // (`ds4-art.json`, or the generic pad), leader-line labels from every hotspot
 // to its bound action, live input (pressed controls fill, stick dots move in
 // their rings with the deadzone ring, L2/R2 fill bars), and the editor: pick a
@@ -28,6 +28,7 @@ import {
 } from "@/lib/pad/bindings";
 import { calibrationComplete, foldCalibration, type PadCalibration } from "@/lib/pad/conditioning";
 import {
+  BUTTON_CONTROLS,
   BUTTON_INDEX,
   CONTROL_IDS,
   CONTROL_LABELS,
@@ -46,7 +47,7 @@ import { useControlsStore } from "@/stores/controls-store";
 import { useInputStore, type PadSample } from "@/stores/input-store";
 import { useVoiceStore, voiceSupported } from "@/stores/voice-store";
 
-const GESTURES: readonly Gesture[] = ["tap", "hold", "double_tap"];
+const GESTURES: readonly Gesture[] = ["press", "tap", "hold", "double_tap"];
 const GROUP_LABEL: Record<string, string> = {
   flight: "Flight",
   skills: "Skills",
@@ -267,7 +268,7 @@ function ControlEditor({ control, registry }: { control: ControlId; registry: Re
                       onChange={(e) => apply(moveRow(draft, i, e.target.value as ControlId))}
                       className="min-h-[44px] rounded-lg border border-border bg-surface px-[0.3rem] text-[0.8rem]"
                     >
-                      {CONTROL_IDS.map((c) => (
+                      {BUTTON_CONTROLS.map((c) => (
                         <option key={c} value={c}>
                           {CONTROL_LABELS[c]}
                         </option>

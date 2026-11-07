@@ -59,7 +59,7 @@ describe("flight-state chip (flight-state.json rules)", () => {
     });
   });
 
-  it("follows the C8 mission states", () => {
+  it("follows the mission states", () => {
     const m = { ...base, owner: "mission_fc", seq: 3, total: 9 };
     expect(flightStateChip({ ...m, missionState: "active" }).text).toBe("MISSION · WP 3/9");
     expect(flightStateChip({ ...m, missionState: "active", landingSeq: true }).text).toBe("MISSION · WP 3/9 · LANDING");

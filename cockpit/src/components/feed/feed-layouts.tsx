@@ -1,4 +1,4 @@
-// The Feed in the DJI grid (cockpit spec `layout.json`), per view (`views.json`):
+// The Feed in the cockpit grid (cockpit spec `layout.json`), per view (`views.json`):
 //   pilot  — video main; the grid floats over it
 //   map    — map main, the video as a picture-in-picture
 //   split  — video and map side by side behind a draggable divider

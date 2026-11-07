@@ -6,6 +6,26 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.17] - 2026-11-07
+
+### Fixed
+
+- Cockpit: the controller stick stream judges a pad live by the poller reading it, not by `Gamepad.timestamp`. Browsers advance that timestamp only when a value changes, so a stick held still (centred, or pinned at full) read as lost after 150 ms, sent `release` and re-armed the centre-sticks gate. The stream also releases while another screen or the quick menu holds the controller, so menu navigation on the left stick never reaches the throttle.
+- Cockpit: Pause and Emergency stop are never held behind another command still waiting for its acknowledgement (Land then Pause brakes at once), on the left column, Space, PS and the follow rail.
+- Cockpit: PS brakes the moment it goes down; held 2 s it escalates to RTH. Options + Circle, the fallback where the system swallows PS, brakes on press and reaches RTH after a 2 s hold. The controller spec gains the `press` gesture for these rows.
+- Cockpit: a locked controller binding can move only to a button (never a stick or the lightbar), and a binding file counts a locked action only with its default hold time and condition (arm: 2 s with the left stick centred; kill: 3 s). An import is applied whole or refused, so its stick mode and deadzone never go live ahead of its bindings.
+- Cockpit: a pad the browser does not report in the standard layout drives nothing: the top bar shows "PAD · NOT STANDARD". The unused non-standard axis-map helpers are removed; such pads are not supported.
+- Cockpit: F1–F3 select the Cine, Normal and Sport profiles again.
+- Cockpit: the skill picker's GO checks the arm, link and freshness state of the moment, not the state when the picker opened.
+- Cockpit: a stalled pilot (state older than 2 s) hands RTH, Land and Kill to `POST /api/command` while the FC link is live.
+- Cockpit: passing the pre-flight checklist from the Launch sheet returns to the Launch sheet, so its step strip, Abort and any refusal stay in view.
+- Cockpit: a plugin skill for another vehicle class never fires from a key, a controller binding or the Launch sheet.
+- Cockpit: the GOTO chip shows "—" for the distance; the pilot state carries no vehicle position and the old value read "0 m" on every clear path.
+- Cockpit: the Vision view's detector picker lists detection models only, is disabled while armed (switching restarts the vision engine), and its second-tap confirm expires after 3 s. The depth layer's range (Off, 2 m, 5 m) and style (Solid, Outline) are set there and persist per vehicle.
+- Cockpit and dashboard: each data layer (depth, landing zones, obstacles) dims and hides on its own clock, so a dead depth stream never rides on fresh obstacles, nor stale obstacle cells on fresh depth. A repeated frame (the agent's keep-alive on a still scene) refreshes only the layer's freshness, so the dashboard's route no longer hides after 2 s on a still scene and items never snap back once a second. Items new after a still period fade in instead of popping.
+- On a ground-station kiosk whose input status is not known yet, the browser leaves arm, kill, pause and RTH to the native input.
+- TUI: the Owner row no longer repeats the skill name.
+
 ## [0.108.16] - 2026-11-07
 
 ### Added
@@ -26,7 +46,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Cockpit: the Feed is laid out in the DJI grid from the cockpit spec (`layout.json`), with the spec's breakpoints (compact < 600, medium 600–839, expanded 840–1599, tv ≥ 1600 or the kiosk). Across the top is the top bar: flight-state chip, status pill, battery with time to reserve and the RTL-reserve marker, link, navigation source, controller, layer level, settings and the Emergency stop. The left column holds Take off / Land, Return home and Pause; the right column holds the shutter, photo/video switch, zoom, gimbal recentre and camera settings. The bottom-left card switches between map, attitude with radar, and the obstacle radar (from the pilot's 72 clearance sectors). The telemetry row (D, H, H.S, V.S, AGL) is at the bottom and the skill picker at the bottom right. Triangle or `V` cycles the views (Pilot, Map, Split, Vision). Portrait stacks the video and top bar over the controls. A television or the kiosk scales the chrome by 1.33 and always shows the focus ring.
+- Cockpit: the Feed is laid out in the cockpit grid from the cockpit spec (`layout.json`), with the spec's breakpoints (compact < 600, medium 600–839, expanded 840–1599, tv ≥ 1600 or the kiosk). Across the top is the top bar: flight-state chip, status pill, battery with time to reserve and the RTL-reserve marker, link, navigation source, controller, layer level, settings and the Emergency stop. The left column holds Take off / Land, Return home and Pause; the right column holds the shutter, photo/video switch, zoom, gimbal recentre and camera settings. The bottom-left card switches between map, attitude with radar, and the obstacle radar (from the pilot's 72 clearance sectors). The telemetry row (D, H, H.S, V.S, AGL) is at the bottom and the skill picker at the bottom right. Triangle or `V` cycles the views (Pilot, Map, Split, Vision). Portrait stacks the video and top bar over the controls. A television or the kiosk scales the chrome by 1.33 and always shows the focus ring.
 - Cockpit: the flight-state chip evaluates the spec's `flight-state.json` rules on the pilot state: READY / NOT READY with a "Set up aircraft" link, PILOT · profile, the skill and its detail, GOTO, MISSION · WP n/N, MISSION PAUSED with Resume, RTH, LANDING, and FC · mode with Take control. A second line shows the hold reason, AVOIDING / BLOCKED and the control mode. The chip dims to LINK when the pilot state is older than 2 s, and tapping it opens the Mode sheet. The Mode sheet holds the profile, the control mode (hold to switch; ELRS only on a ground-station link), avoidance (Off needs a hold), hand to the FC in Loiter, PosHold or AltHold, take control, the VTOL transition, and every FC mode. Any change there stops a running motion skill.
 - Cockpit: the Launch sheet sets the take-off altitude (TKOFF_ALT on a plane), what to do after take-off (hold, a behaviour skill, start the loaded mission, or go to a point) and an optional land / return when done. Holding Launch sends the pilot's `launch` action, and a step strip shows checks, arm, take off and after. Abort brakes to a hold.
 - Cockpit: a pre-flight checklist gates the first arm, take-off or launch of a session. It lists the pilot's readiness items, the link, GNSS, battery, home, the controller (when ADOS Pilot flies the sticks) and on-board storage.

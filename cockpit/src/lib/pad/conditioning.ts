@@ -1,4 +1,4 @@
-// Stick conditioning, the same on every surface (C4): per-pad calibration
+// Stick conditioning, the same on every surface: per-pad calibration
 // (centre and extents of each raw axis, plus the axis map a non-standard pad
 // needs), a radial deadzone, and the stick mode that turns two sticks into the
 // pilot's `[roll, pitch, thr, yaw]`. The pilot applies the expo, so nothing
@@ -87,7 +87,7 @@ export function conditionSticks(
 
 /** Sticks → the pilot's `[roll, pitch, thr, yaw]` per the stick mode. Mode 2
  *  puts throttle and yaw on the left stick; mode 1 swaps the two Y axes. The
- *  signs follow C1: pitch + forward, thr + climb, yaw + clockwise, roll +
+ *  signs follow pilot.v1: pitch + forward, thr + climb, yaw + clockwise, roll +
  *  right (stick Y up is negative on the wire, hence the spec's `invert`). */
 export function pilotAxes(sticks: Sticks, mode: StickMode): [number, number, number, number] {
   const spec = STICK_MODES[mode];
@@ -127,11 +127,6 @@ export function foldCalibration(cal: PadCalibration | null, axes: readonly numbe
   };
 }
 
-/** Re-centre a recorded calibration on the released sample. */
-export function recentre(cal: PadCalibration, axes: readonly number[]): PadCalibration {
-  return { ...cal, centre: [...axes] };
-}
-
 /** Whether a recording swept far enough to use: every mapped axis moved at
  *  least half its travel each way. */
 export function calibrationComplete(cal: PadCalibration): boolean {
@@ -140,20 +135,4 @@ export function calibrationComplete(cal: PadCalibration): boolean {
     const c = cal.centre[i] ?? 0;
     return (cal.max[i] ?? c) - c >= 0.5 && c - (cal.min[i] ?? c) >= 0.5;
   });
-}
-
-/** For a non-standard pad: the raw axis that moved furthest from its centre
- *  (the operator is asked to push one stick one way at a time). */
-export function dominantAxis(axes: readonly number[], centre: readonly number[], exclude: readonly number[]): number | null {
-  let best: number | null = null;
-  let bestDelta = 0.5;
-  axes.forEach((v, i) => {
-    if (exclude.includes(i)) return;
-    const d = Math.abs(v - (centre[i] ?? 0));
-    if (d > bestDelta) {
-      bestDelta = d;
-      best = i;
-    }
-  });
-  return best;
 }

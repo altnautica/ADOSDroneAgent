@@ -11,7 +11,7 @@
 // running). Kill never waits behind another command.
 //
 // Plugin skills write their activation key. A motion skill's GO first stops
-// the running motion skill (C5 preemption); a toggle write is pending until
+// the running motion skill (preemption); a toggle write is pending until
 // the plugin echoes it; a stop that fails because the link is down is queued
 // and sent when the link returns.
 
@@ -162,10 +162,15 @@ async function runExtension(skill: Skill, active: boolean): Promise<void> {
   report({ text: `${skill.label}: sent`, kind: "ok" });
 }
 
+/** Pause and kill (the built-ins sent blind on a stale link) never wait behind
+ *  another command's acknowledgement and never hold the others off: "Land,
+ *  then Pause to abort" must brake at once. */
+export function bypassesBusy(skill: Skill): boolean {
+  return skill.builtin?.staleLink === "send_blind";
+}
+
 async function run(skill: Skill, opts: { altitudeM?: number; active?: boolean }): Promise<void> {
-  // Kill never waits behind another command's acknowledgement, and never
-  // holds the others off while it is in flight.
-  const exempt = skill.id === "kill";
+  const exempt = bypassesBusy(skill);
   const store = useConfirmStore.getState();
   if (store.busy && !exempt) return;
   if (!exempt) store.setBusy(true);
@@ -199,7 +204,7 @@ export async function executeSkill(skill: Skill, opts: { altitudeM?: number; act
 export function requestSkill(skill: Skill, ctx: SkillContext, gamepadButton: number | null = null): boolean {
   const state = resolveSkillState(skill, ctx);
   const store = useConfirmStore.getState();
-  if (!state.enabled || (store.busy && skill.id !== "kill")) return false;
+  if (!state.enabled || (store.busy && !bypassesBusy(skill))) return false;
   if (skill.confirm.kind === "tap" || (skill.extension?.toggle && state.active)) {
     void executeSkill(skill, { active: state.active });
     return true;

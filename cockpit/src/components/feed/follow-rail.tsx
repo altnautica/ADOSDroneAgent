@@ -17,7 +17,7 @@ import { useSkillContext } from "@/hooks/use-skill-context";
 import { startNodeRecording, startRecording, stopNodeRecording, stopRecording } from "@/lib/api";
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { avoidChip, followButton, railButtonPx, railLayout, RAIL_GAP_PX, type RailButton } from "@/lib/follow-rail";
-import { executeSkill, requestSkill } from "@/lib/skill-runner";
+import { bypassesBusy, executeSkill, requestSkill } from "@/lib/skill-runner";
 import { BUILTIN_SKILL_BY_ID, resolveSkillState } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
@@ -213,7 +213,7 @@ export function FollowRail({
             icon={m.icon}
             word={m.word}
             label={st.enabled ? skill.label : `${skill.label}: ${st.reason ?? "unavailable"}`}
-            disabled={!st.enabled || busy}
+            disabled={!st.enabled || (busy && !bypassesBusy(skill))}
             onPress={() => requestSkill(skill, ctx)}
           />
         );

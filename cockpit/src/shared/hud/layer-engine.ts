@@ -8,8 +8,14 @@
  * interpolated between the two newest `ar` frames over the measured
  * inter-frame interval, so 10–20 Hz data moves smoothly at display refresh.
  *
- * Staleness (cockpit-spec layers.json): a layer older than 500 ms dims, older
- * than 2 s it hides and an "<layer> unavailable" chip shows.
+ * Staleness (cockpit-spec layers.json), per layer: a layer whose last receipt
+ * is older than 500 ms dims, older than 2 s it hides and an "<layer>
+ * unavailable" chip shows. Each layer has its own draw buffer and alpha, so a
+ * dead depth stream never rides on fresh obstacles, nor the reverse.
+ *
+ * A keep-alive (the same `ts_ms` again, sent by the agent about once a second
+ * while a scene is unchanged) refreshes only the receipt time: it neither
+ * restarts interpolation nor replaces the previous frame.
  *
  * `fpsCap` limits paints (30 on the kiosk / TV class). `stats()` reports the
  * paint durations for the overlay budget checks.
@@ -46,15 +52,24 @@ export const HIDE_AFTER_MS = 2000;
 const MIN_INTERVAL_MS = 30;
 const MAX_INTERVAL_MS = 250;
 const FADE_MS = 120;
+const OBSTACLE_GRID = { maxM: 5, nearM: 2, mode: "solid" } as const;
 
 interface Slot<T> {
   data: T | null;
+  /** When this frame (a new `ts_ms`) arrived: the interpolation clock. */
   at: number;
+  /** When this frame or its keep-alive last arrived: the staleness clock. */
+  seen: number;
   version: number;
 }
 
 function slot<T>(): Slot<T> {
-  return { data: null, at: 0, version: 0 };
+  return { data: null, at: 0, seen: 0, version: 0 };
+}
+
+/** A repeat of the held frame: the agent's keep-alive. */
+function isKeepAlive<T extends { tsMs: number }>(s: Slot<T>, f: T): boolean {
+  return s.data !== null && f.tsMs !== 0 && f.tsMs === s.data.tsMs;
 }
 
 /**
@@ -71,35 +86,41 @@ export class LayerFrameStore {
   version = 0;
 
   putAr(f: ArFrame, at = performance.now()): void {
+    if (this.keepAlive(this.ar, f, at)) return;
     this.arPrev.data = this.ar.data;
     this.arPrev.at = this.ar.at;
-    this.ar.data = f;
-    this.ar.at = at;
-    this.ar.version++;
-    this.version++;
+    this.arPrev.seen = this.ar.seen;
+    this.put(this.ar, f, at);
   }
   putObstacles(f: ObstaclesFrame, at = performance.now()): void {
-    this.obstacles.data = f;
-    this.obstacles.at = at;
-    this.obstacles.version++;
-    this.version++;
+    if (!this.keepAlive(this.obstacles, f, at)) this.put(this.obstacles, f, at);
   }
   putDepth(f: DepthFrame, at = performance.now()): void {
-    this.depth.data = f;
-    this.depth.at = at;
-    this.depth.version++;
-    this.version++;
+    if (!this.keepAlive(this.depth, f, at)) this.put(this.depth, f, at);
   }
   putSurfaces(f: SurfacesFrame, at = performance.now()): void {
-    this.surfaces.data = f;
-    this.surfaces.at = at;
-    this.surfaces.version++;
+    if (!this.keepAlive(this.surfaces, f, at)) this.put(this.surfaces, f, at);
+  }
+  private put<T>(s: Slot<T>, f: T, at: number): void {
+    s.data = f;
+    s.at = at;
+    s.seen = at;
+    s.version++;
     this.version++;
+  }
+  private keepAlive<T extends { tsMs: number }>(s: Slot<T>, f: T, at: number): boolean {
+    if (!isKeepAlive(s, f)) return false;
+    // Only the staleness clock moves; the loop wakes in case a dimmed layer
+    // turns fresh again.
+    if (at > s.seen) s.seen = at;
+    this.version++;
+    return true;
   }
   clear(): void {
     for (const s of [this.ar, this.arPrev, this.obstacles, this.depth, this.surfaces]) {
       s.data = null;
       s.at = 0;
+      s.seen = 0;
       s.version++;
     }
     this.version++;
@@ -155,13 +176,17 @@ export class LayerEngine {
   private lastPaint = 0;
   private lastVis = "";
   private arLaidVersion = -1;
-  private cellLaidKey = "";
+  private depthLaid = -1;
+  private surfLaid = -1;
+  private obstLaid = -1;
   private interpUntil = 0;
 
   private arPrevOps = new DrawOpBuffer();
   private arNextOps = new DrawOpBuffer();
   private arOut = new DrawOpBuffer();
-  private cellOps = new DrawOpBuffer();
+  private depthOps = new DrawOpBuffer();
+  private surfOps = new DrawOpBuffer();
+  private obstOps = new DrawOpBuffer();
   private chipOps = new DrawOpBuffer();
   private nearBuf = new Uint8Array(0);
   private measBuf = new Uint8Array(0);
@@ -184,7 +209,7 @@ export class LayerEngine {
   configure(patch: Partial<LayerConfig>): void {
     this.cfg = { ...this.cfg, ...patch };
     this.arLaidVersion = -1;
-    this.cellLaidKey = "";
+    this.relayCells();
     this.invalidate();
   }
 
@@ -199,8 +224,14 @@ export class LayerEngine {
       this.canvas.height = Math.max(1, Math.round(cssH * dpr));
     }
     this.arLaidVersion = -1;
-    this.cellLaidKey = "";
+    this.relayCells();
     this.invalidate();
+  }
+
+  private relayCells(): void {
+    this.depthLaid = -1;
+    this.surfLaid = -1;
+    this.obstLaid = -1;
   }
 
   invalidate(): void {
@@ -258,10 +289,10 @@ export class LayerEngine {
   private visKey(now: number): string {
     const s = this.store;
     return (
-      visibility(s.ar.at, s.ar.data !== null, now)[0] +
-      visibility(s.obstacles.at, s.obstacles.data !== null, now)[0] +
-      visibility(s.depth.at, s.depth.data !== null, now)[0] +
-      visibility(s.surfaces.at, s.surfaces.data !== null, now)[0]
+      visibility(s.ar.seen, s.ar.data !== null, now)[0] +
+      visibility(s.obstacles.seen, s.obstacles.data !== null, now)[0] +
+      visibility(s.depth.seen, s.depth.data !== null, now)[0] +
+      visibility(s.surfaces.seen, s.surfaces.data !== null, now)[0]
     );
   }
 
@@ -291,35 +322,44 @@ export class LayerEngine {
       chipY += 24;
     };
 
-    // Grids and zones (depth z10, surfaces z20, obstacles z30) — re-laid out
-    // only when their frame, the camera, the size or the config changed.
-    const cellKey = `${s.depth.version}/${s.surfaces.version}/${s.obstacles.version}/${cam}`;
-    const depthVis = visibility(s.depth.at, s.depth.data !== null, now);
-    const surfVis = visibility(s.surfaces.at, s.surfaces.data !== null, now);
-    const obstVis = visibility(s.obstacles.at, s.obstacles.data !== null, now);
-    if (cellKey !== this.cellLaidKey) {
-      this.cellLaidKey = cellKey;
-      this.cellOps.clear();
-      if (cam !== null && L.has("depth") && s.depth.data && this.cfg.depthRangeM > 0) {
-        const g = s.depth.data.cameras[cam];
-        if (g) {
-          this.layoutGrid(g.near, g.measured, g.cols, g.rows, {
-            maxM: this.cfg.depthRangeM,
-            nearM: 2,
-            mode: this.cfg.depthMode,
-            unscaled: (g.scaleSource ?? s.depth.data.scaleSource) === "none",
-          });
-        }
-      }
-      if (cam !== null && L.has("surfaces") && s.surfaces.data && s.surfaces.data.cameraId === cam) {
-        layoutZones(s.surfaces.data.zones, this.videoRect(0, 0), this.cellOps);
-      }
-      if (L.has("obstacles") && s.obstacles.data) {
-        const g = cam !== null ? s.obstacles.data.cameras[cam] : undefined;
-        if (g) this.layoutGrid(g.near, g.measured, g.cols, g.rows, { maxM: 5, nearM: 2, mode: "solid" });
-        layoutSectorArc(s.obstacles.data.sectorsM, this.videoRect(0, 0), { maxM: 5, nearM: 2 }, this.cellOps);
+    // Grids and zones (depth z10, surfaces z20, obstacles z30), each in its
+    // own buffer, re-laid out only when its own frame changed (configure and
+    // resize re-lay all three), and painted with its own staleness.
+    const depthVis = visibility(s.depth.seen, s.depth.data !== null, now);
+    const surfVis = visibility(s.surfaces.seen, s.surfaces.data !== null, now);
+    const obstVis = visibility(s.obstacles.seen, s.obstacles.data !== null, now);
+    if (this.depthLaid !== s.depth.version) {
+      this.depthLaid = s.depth.version;
+      this.depthOps.clear();
+      const g = cam !== null && s.depth.data && this.cfg.depthRangeM > 0 ? s.depth.data.cameras[cam] : undefined;
+      if (g && s.depth.data) {
+        this.layoutGrid(this.depthOps, g.near, g.measured, g.cols, g.rows, {
+          maxM: this.cfg.depthRangeM,
+          nearM: 2,
+          mode: this.cfg.depthMode,
+          unscaled: (g.scaleSource ?? s.depth.data.scaleSource) === "none",
+        });
       }
     }
+    if (this.surfLaid !== s.surfaces.version) {
+      this.surfLaid = s.surfaces.version;
+      this.surfOps.clear();
+      if (cam !== null && s.surfaces.data && s.surfaces.data.cameraId === cam) {
+        layoutZones(s.surfaces.data.zones, this.videoRect(0, 0), this.surfOps);
+      }
+    }
+    if (this.obstLaid !== s.obstacles.version) {
+      this.obstLaid = s.obstacles.version;
+      this.obstOps.clear();
+      if (s.obstacles.data) {
+        const g = cam !== null ? s.obstacles.data.cameras[cam] : undefined;
+        if (g) this.layoutGrid(this.obstOps, g.near, g.measured, g.cols, g.rows, OBSTACLE_GRID);
+        layoutSectorArc(s.obstacles.data.sectorsM, this.videoRect(0, 0), OBSTACLE_GRID, this.obstOps);
+      }
+    }
+    this.paintLayer(ctx, L.has("depth"), depthVis, this.depthOps);
+    this.paintLayer(ctx, L.has("surfaces"), surfVis, this.surfOps);
+    this.paintLayer(ctx, L.has("obstacles"), obstVis, this.obstOps);
     if (L.has("depth") && depthVis === "hidden") chip("Depth unavailable");
     else if (L.has("depth") && cam !== null && s.depth.data) {
       const g = s.depth.data.cameras[cam];
@@ -327,20 +367,11 @@ export class LayerEngine {
     }
     if (L.has("surfaces") && surfVis === "hidden") chip("Surfaces unavailable");
     if (L.has("obstacles") && obstVis === "hidden") chip("Obstacles unavailable");
-    // One staleness alpha for the cell group: the freshest visible source.
-    const cellHidden =
-      (depthVis === "hidden" || !L.has("depth")) &&
-      (surfVis === "hidden" || !L.has("surfaces")) &&
-      (obstVis === "hidden" || !L.has("obstacles"));
-    if (!cellHidden && this.cellOps.n > 0) {
-      const dim = depthVis !== "fresh" && surfVis !== "fresh" && obstVis !== "fresh";
-      paintOps(ctx, this.cellOps, dim ? 0.5 : 1);
-    }
 
     // AR (route z50, motion z60).
     const wantAr = L.has("ar_route") || L.has("ar_motion");
     if (wantAr && cam !== null) {
-      const arVis = visibility(s.ar.at, s.ar.data !== null, now);
+      const arVis = visibility(s.ar.seen, s.ar.data !== null, now);
       const frame = s.ar.data;
       const arCam = frame ? (frame.cameras[cam] ?? null) : null;
       const status = arStatusChip(frame, arCam, arVis === "hidden");
@@ -366,7 +397,9 @@ export class LayerEngine {
         }
         const since = now - s.ar.at;
         const t = this.interval > 0 ? since / this.interval : 1;
-        lerpOps(this.arPrevOps, this.arNextOps, t, this.interval > 0 ? since / FADE_MS : 1, this.arOut);
+        // Items new in this frame fade in over FADE_MS even after a still
+        // period (no interval to interpolate over): they never pop.
+        lerpOps(this.arPrevOps, this.arNextOps, t, since / FADE_MS, this.arOut);
         paintOps(ctx, this.arOut, arVis === "dim" ? 0.5 : 1);
       }
     }
@@ -376,7 +409,13 @@ export class LayerEngine {
 
   private interval = 0;
 
+  private paintLayer(ctx: CanvasRenderingContext2D, on: boolean, vis: Visibility, ops: DrawOpBuffer): void {
+    if (!on || vis === "hidden" || ops.n === 0) return;
+    paintOps(ctx, ops, vis === "dim" ? 0.5 : 1);
+  }
+
   private layoutGrid(
+    out: DrawOpBuffer,
     near: string,
     measured: string | null,
     cols: number,
@@ -391,6 +430,6 @@ export class LayerEngine {
     if (got < cells) return;
     const hasMeas = measured !== null && decodeBase64Into(measured, this.measBuf) >= mbytes;
     const rect = this.videoRect(0, 0);
-    layoutCells(this.nearBuf, hasMeas ? this.measBuf : null, cols, rows, rect, opts, this.cellOps);
+    layoutCells(this.nearBuf, hasMeas ? this.measBuf : null, cols, rows, rect, opts, out);
   }
 }

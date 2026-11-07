@@ -89,7 +89,7 @@ function StatusPill() {
 
 function ControllerItem() {
   const pad = usePadStatus();
-  const label = !pad.connected ? "NO PAD" : pad.native ? "PAD · NATIVE" : pad.standard ? "PAD" : "PAD · CALIBRATE";
+  const label = !pad.connected ? "NO PAD" : pad.native ? "PAD · NATIVE" : pad.standard ? "PAD" : "PAD · NOT STANDARD";
   const tone = !pad.connected ? "text-hud-ink-2" : pad.standard || pad.native ? "text-ok" : "text-warn";
   return (
     <Item icon={Gamepad2} tone={tone} label={pad.name ? `Controller ${pad.name}` : "Controller"}>

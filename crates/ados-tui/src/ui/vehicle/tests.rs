@@ -210,12 +210,14 @@ fn the_autonomy_block_shows_who_flies_and_how() {
     );
     let text = draw(&mut app, 120, 40);
     for want in [
-        "Owner     FOLLOW · ORBIT 8 m · Follow",
+        "Owner     FOLLOW · ORBIT 8 m",
         "Mode      ADOS PILOT · NORMAL",
         "Avoid     brake · detour 2.4 m",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
+    // The owner label already names the skill: it is not repeated.
+    assert!(!text.contains("ORBIT 8 m · Follow"), "{text}");
     assert!(!text.contains("(stale)"), "{text}");
 }
 

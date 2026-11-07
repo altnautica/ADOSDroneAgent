@@ -172,7 +172,7 @@ export interface PendingWrite {
   at: number;
 }
 
-/** What the gate needs from the drone's pilot state (C3 `pilot`). */
+/** What the gate needs from the drone's pilot state (the `pilot` nav kind). */
 export interface PilotView {
   armed: boolean;
   landed: boolean;
@@ -228,8 +228,12 @@ export const STATE_FRESH_MS = 3000;
 export function builtinRoute(skill: Skill, ctx: SkillContext): "pilot" | "command" | null {
   const b = skill.builtin;
   if (!b) return null;
-  if (ctx.pilot && ctx.pilotLinkOpen) return "pilot";
-  if (b.command && ctx.fcConnected) return "command";
+  const commandOk = b.command !== null && ctx.fcConnected;
+  // A stalled pilot (state older than its freshness window) loses the route
+  // to `POST /api/command` while the FC link is live: RTH, Land and Kill must
+  // not depend on a pilot that stopped answering.
+  if (ctx.pilot && ctx.pilotLinkOpen && (ctx.pilot.fresh || !commandOk)) return "pilot";
+  if (commandOk) return "command";
   return null;
 }
 
@@ -312,12 +316,17 @@ function resolveExtension(skill: Skill, ctx: SkillContext): SkillState {
 /** Whether a skill can be driven right now, and if not, why. */
 export function resolveSkillState(skill: Skill, ctx: SkillContext): SkillState {
   if (skill.builtin) return resolveBuiltin(skill, skill.builtin, ctx);
-  if (skill.extension) return resolveExtension(skill, ctx);
+  if (skill.extension) {
+    // Keys, controller bindings and the Launch sheet reach a skill without the
+    // picker's filter: a skill for another vehicle class never fires.
+    if (!skillVisibleFor(skill, ctx.pilot?.vehicleClass)) return disabled("Not available for this aircraft");
+    return resolveExtension(skill, ctx);
+  }
   return disabled("Unavailable");
 }
 
-/** A skill is shown only for the vehicle classes it declares (C5); with no
- *  class reported every skill shows. */
+/** A skill is shown only for the vehicle classes it declares; with no class
+ *  reported every skill shows. */
 export function skillVisibleFor(skill: Skill, vehicleClass: VehicleClass | null | undefined): boolean {
   if (!skill.extension || !vehicleClass) return true;
   return skill.extension.vehicleClasses.includes(vehicleClass);

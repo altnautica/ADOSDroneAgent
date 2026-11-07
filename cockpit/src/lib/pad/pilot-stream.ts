@@ -1,13 +1,15 @@
-// The stick stream's start/stop rules (C4), shared by the controller stream
-// and the on-screen sticks: stream `input` at 50 Hz while the drone flies in
-// `ados` control mode and a live source is in hand; the moment the pad
-// disconnects, the tab is hidden or the pad's timestamp goes stale for more
-// than 150 ms, stop and send one `release` so the pilot brakes to a hold.
+// The stick stream's start/stop rules, shared by the controller stream and the
+// on-screen sticks: stream `input` at 50 Hz while the drone flies in `ados`
+// control mode and a live source is in hand; the moment the pad disconnects,
+// the tab is hidden, the cockpit stops being the input target, or the source
+// goes unread for more than 150 ms, stop and send one `release` so the pilot
+// brakes to a hold. "Unread" is the poll clock: a pad held perfectly still
+// (centred or pinned at full) keeps streaming.
 
 import { STALE_SAMPLE_MS } from "@/lib/pad/ds4-map";
 import type { PilotAxes } from "@/lib/pilot-link";
 
-export type StopReason = "disabled" | "disconnected" | "hidden" | "stale";
+export type StopReason = "disabled" | "disconnected" | "hidden" | "away" | "stale";
 
 export interface StreamTick {
   /** Same clock as the sample timestamp (`performance.now()`). */
@@ -16,7 +18,11 @@ export interface StreamTick {
   enabled: boolean;
   connected: boolean;
   hidden: boolean;
-  /** The source's last report time, or null when none yet. */
+  /** The Feed holds the controller (no other screen or menu reads it). */
+  target: boolean;
+  /** When the source was last read while connected (`performance.now()`),
+   *  or null when none yet. Not `Gamepad.timestamp`, which freezes while the
+   *  sticks are still. */
   sampleAt: number | null;
   axes: PilotAxes;
   buttons: number;
@@ -26,6 +32,7 @@ export function stopReason(t: StreamTick): StopReason | null {
   if (!t.enabled) return "disabled";
   if (!t.connected) return "disconnected";
   if (t.hidden) return "hidden";
+  if (!t.target) return "away";
   if (t.sampleAt === null || t.now - t.sampleAt > STALE_SAMPLE_MS) return "stale";
   return null;
 }

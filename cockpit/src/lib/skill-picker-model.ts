@@ -1,4 +1,4 @@
-// The skill picker's pure model (C5): its tabs, the per-plugin grouping, the
+// The skill picker's pure model: its tabs, the per-plugin grouping, the
 // Tweak panel's visible parameters and the D-pad step of one parameter.
 
 import type { ParamValue, PluginSkillCategory, Skill, SkillParam } from "@/lib/skills";

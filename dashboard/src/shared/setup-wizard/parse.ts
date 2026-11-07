@@ -1,4 +1,4 @@
-// Parsers for the FC setup wire: the C9 step schema, the wizard objects and
+// Parsers for the FC setup wire: the setup step schema, the wizard objects and
 // the `GET /api/v1/fc-setup` body, plus the stream frame reducer. Strict where
 // a wrong guess is unsafe: an action with an unknown confirm kind or style is
 // dropped rather than drawn as a plain tap, and a step without its identity or
@@ -110,7 +110,7 @@ function parseInputs(raw: unknown): StepInput[] {
   return out;
 }
 
-/** One C9 step, or null when it lacks its identity or carries an unknown state. */
+/** One setup step, or null when it lacks its identity or carries an unknown state. */
 export function parseStep(raw: unknown): SetupStep | null {
   if (!isObj(raw)) return null;
   const wizard = str(raw.wizard);

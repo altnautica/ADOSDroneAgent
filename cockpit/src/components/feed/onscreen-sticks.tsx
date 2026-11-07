@@ -56,6 +56,8 @@ function ThumbPads() {
         enabled: useNavStreamStore.getState().pilot?.data.controlMode === "ados",
         connected: l !== null || r !== null,
         hidden: document.visibilityState === "hidden",
+        // The thumb pads exist only on the Feed.
+        target: true,
         // A thumb on the glass is a live source whether or not it moves.
         sampleAt: now,
         axes: pilotAxes(sticks, controls.stickMode),

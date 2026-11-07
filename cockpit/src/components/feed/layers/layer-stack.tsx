@@ -98,6 +98,8 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
   const level = useCockpitViewStore((s) => s.level);
   const flags = useCockpitViewStore((s) => s.layers);
   const cycleLevel = useCockpitViewStore((s) => s.cycleLevel);
+  const depthRangeM = useCockpitViewStore((s) => s.depthRangeM);
+  const depthMode = useCockpitViewStore((s) => s.depthStyle);
   const layers = useMemo(() => effectiveLayers(level, flags, view), [level, flags, view]);
   const layerKey = useMemo(() => [...layers].sort().join(","), [layers]);
 
@@ -126,8 +128,8 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
       mission: null,
       avoid: null,
       showLoaded: true,
-      depthRangeM: 5,
-      depthMode: "solid",
+      depthRangeM,
+      depthMode,
       fpsCap,
     });
   }
@@ -161,11 +163,13 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
       mission,
       avoid,
       showLoaded,
+      depthRangeM,
+      depthMode,
       fpsCap,
     });
     // `layerKey` stands for `layers` (a fresh Set each render).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cameraId, layerKey, level, videoWidth, videoHeight, missionState, avoid, showLoaded, fpsCap]);
+  }, [cameraId, layerKey, level, videoWidth, videoHeight, missionState, avoid, showLoaded, depthRangeM, depthMode, fpsCap]);
 
   // Loop runs only while something is watched.
   useEffect(() => {

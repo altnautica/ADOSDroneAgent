@@ -21,7 +21,7 @@ const accel = {
   result: null,
 };
 
-describe("setup step parser (C9 schema)", () => {
+describe("setup step parser ", () => {
   it("parses a step, clamps progress, drops malformed actions and blockers", () => {
     const s = parseStep(accel);
     expect(s).not.toBeNull();

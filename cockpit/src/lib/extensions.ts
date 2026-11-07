@@ -2,7 +2,7 @@
 // `GET /api/plugins`, each with its detail (`GET /api/plugins/{id}`: the GCS
 // half's entrypoint and contributions, and the granted capabilities) and its
 // locale strings, plus the parsers that turn those contributions into plugin
-// skills (strictly validated against the manifest skill schema, C5), their
+// skills (strictly validated against the manifest skill schema), their
 // Tweak parameters and quick settings, target actions for the Feed's target
 // menu, and mountable panels.
 
@@ -116,7 +116,7 @@ export type SkillParseResult = { ok: true; skill: Skill } | { ok: false; rejecte
 
 /**
  * Validate one `contributes.skills[]` entry against the manifest skill schema
- * (C5) and build the skill. Required: `id` (kebab case), `label`, `icon`,
+ * and build the skill. Required: `id` (kebab case), `label`, `icon`,
  * `category` ∈ behavior|camera|navigation|utility, `toggle` and `confirm`
  * booleans, `arm_requirement` ∈ any|armed|disarmed, `activation {via:
  * "config", config_key}` and `state {via: "event", topic}`. The optional

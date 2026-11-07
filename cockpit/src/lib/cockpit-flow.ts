@@ -1,4 +1,4 @@
-// Pure rules of the cockpit's flight flows (C10): the handover banner's
+// Pure rules of the cockpit's flight flows: the handover banner's
 // visibility and its voice prompts, the Launch action's args, the pre-flight
 // checklist's pass rule, and the obstacle radar's ring scale. The components
 // in components/feed/cockpit render them.
@@ -59,7 +59,7 @@ export interface LaunchPlan {
   whenDone: WhenDone;
 }
 
-/** The `launch` action args for a plan (C1/C10). NED down is negative up. */
+/** The `launch` action args for a plan (pilot.v1 `launch`). NED down is negative up. */
 export function launchArgs(p: LaunchPlan): Record<string, unknown> {
   const args: Record<string, unknown> = { after: p.after, alt_m: p.altM, when_done: p.whenDone === "none" ? null : p.whenDone };
   if (p.after === "skill" && p.skill) args.skill = { plugin_id: p.skill.pluginId, skill_id: p.skill.skillId };
