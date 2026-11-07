@@ -140,6 +140,7 @@ pub const LOGD_SOCK: &str = "logd.sock";
 pub const LOGD_QUERY_SOCK: &str = "logd-query.sock";
 pub const MAVLINK_SOCK: &str = "mavlink.sock";
 pub const MAVLINK_INGEST_SOCK: &str = "mavlink-ingest.sock";
+pub const PILOT_SOCK: &str = "pilot.sock";
 pub const MSP_SOCK: &str = "msp.sock";
 pub const GNSS_CMD_SOCK: &str = "gnss-cmd.sock";
 pub const PAIRING_SOCK: &str = "pairing.sock";
@@ -231,6 +232,7 @@ pub const SOCKETS: &[SocketPath] = &[
     SocketPath { id: "logd-query", path: "/run/ados/logd-query.sock", owner: "ados-logd" },
     SocketPath { id: "mavlink", path: "/run/ados/mavlink.sock", owner: "ados-mavlink-router" },
     SocketPath { id: "mavlink-ingest", path: "/run/ados/mavlink-ingest.sock", owner: "ados-mavlink-router" },
+    SocketPath { id: "pilot", path: "/run/ados/pilot.sock", owner: "ados-pilot" },
     SocketPath { id: "msp", path: "/run/ados/msp.sock", owner: "ados-mavlink-router" },
     SocketPath { id: "gnss-cmd", path: "/run/ados/gnss-cmd.sock", owner: "ados-gnss" },
     SocketPath { id: "pairing", path: "/run/ados/pairing.sock", owner: "ados-groundlink" },

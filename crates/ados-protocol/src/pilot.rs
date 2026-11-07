@@ -1,0 +1,154 @@
+//! `pilot.v1`: the command-authority socket served by `ados-pilot`.
+//!
+//! Every message is a msgpack map keyed by `op`, carried in a 4-byte
+//! big-endian length frame (the same primitive as `state.v2` and the plugin
+//! RPC). [`Request`] is what clients send; [`PilotState`] and
+//! [`ObstaclesFrame`] are what the pilot publishes, and they are also the
+//! bodies of the nav-stream `pilot` and `obstacles` kinds, serialised as JSON
+//! with the same field names.
+//!
+//! Signs on `axes` (`[roll, pitch, thr, yaw]`, each in `[-1, 1]` with the
+//! surface's mode mapping and deadzone already applied): pitch + is forward,
+//! thr + is climb, yaw + is clockwise, roll + is right.
+
+mod state;
+mod wire;
+
+pub use state::*;
+pub use wire::*;
+
+use serde::{Deserialize, Serialize};
+
+/// Registry version of the `pilot.v1` contract.
+pub const PILOT_V1_VERSION: u16 = match crate::contracts::contract_version("pilot.v1") {
+    Some(v) => v,
+    None => panic!("pilot.v1 is registered in contracts.toml"),
+};
+
+/// Largest accepted message body. A `state` message with a full plan, every
+/// readiness item and a banner stays far below this.
+pub const PILOT_MAX_FRAME: usize = 256 * 1024;
+
+/// One goal from a skill holding the motion lease (C1 `goal`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Goal {
+    /// `follow`, `orbit` or `position`.
+    pub kind: GoalKind,
+    pub n: f32,
+    pub e: f32,
+    pub d: f32,
+    #[serde(default)]
+    pub vn: f32,
+    #[serde(default)]
+    pub ve: f32,
+    #[serde(default)]
+    pub vd: f32,
+    /// Absolute yaw in radians, or `None` to leave heading to the pilot.
+    #[serde(default)]
+    pub yaw: Option<f32>,
+    /// Yaw rate in rad/s, used when `yaw` is `None`.
+    #[serde(default)]
+    pub yaw_rate: Option<f32>,
+    /// The subject the skill keeps in view, `[n, e]`.
+    #[serde(default)]
+    pub subject_ne: Option<[f32; 2]>,
+    pub max_speed_mps: f32,
+    /// Ring of acceptable detour goals around the subject.
+    #[serde(default)]
+    pub candidates: Option<Candidates>,
+    /// The skill's own obstacle margin; `None` uses `pilot.obstacle_margin_m`.
+    #[serde(default)]
+    pub margin_m: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalKind {
+    Follow,
+    Orbit,
+    Position,
+}
+
+/// Where the planner may look for a detour goal (C1 `candidates`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Candidates {
+    pub ring_center_ne: [f32; 2],
+    pub radius_m: f32,
+    pub angle_deg: f32,
+    pub angle_span_deg: f32,
+}
+
+/// The holder of a motion lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Holder {
+    pub plugin_id: String,
+    pub skill_id: String,
+}
+
+/// A client request. Unknown ops (and the `setup.*` family, which the pilot
+/// routes to its setup engine) arrive as [`Request::Other`] with the raw map.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Request {
+    Input(Input),
+    Release { src: String, session: u32 },
+    SessionTake { src: String, session: u32 },
+    Hb { src: String },
+    Action(ActionReq),
+    LeaseAcquire { holder: Holder, kind: String },
+    LeaseRelease { lease_id: u64 },
+    Goal { lease_id: u64, goal: Goal },
+    Goto { n: f32, e: f32, d: f32, yaw: Option<f32> },
+    /// A velocity goal from the router's swarm loop (owner `swarm`).
+    SwarmGoal { vn: f32, ve: f32, vd: f32, yaw: Option<f32> },
+    Subscribe,
+    ViewDemand(ViewDemand),
+    Feed { topic: String, payload: rmpv::Value },
+    Other { op: String, body: rmpv::Value },
+}
+
+/// The union of live view leases (C7), forwarded by the control front.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ViewDemand {
+    /// Served camera id → requested layer ids.
+    #[serde(default)]
+    pub cameras: std::collections::BTreeMap<String, Vec<String>>,
+    /// Served camera id → its projection model.
+    #[serde(default)]
+    pub models: std::collections::BTreeMap<String, CameraModel>,
+}
+
+/// A served camera's projection model, as the AR builder computes it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CameraModel {
+    pub frame_w: u32,
+    pub frame_h: u32,
+    pub hfov_deg: f32,
+    pub vfov_deg: f32,
+    /// Positive = looking down (mount plus gimbal).
+    pub tilt_down_deg: f32,
+    /// Camera yaw relative to the body, degrees clockwise.
+    pub yaw_deg: f32,
+}
+
+/// One stick frame from a surface (C1 `input`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Input {
+    pub src: String,
+    pub session: u32,
+    pub seq: u32,
+    pub t_ms: u64,
+    pub axes: [f32; 4],
+    #[serde(default)]
+    pub buttons: u32,
+}
+
+/// A named action (C1 `action`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActionReq {
+    pub name: String,
+    pub src: String,
+    #[serde(default)]
+    pub args: Option<serde_json::Value>,
+    #[serde(default)]
+    pub id: Option<String>,
+}

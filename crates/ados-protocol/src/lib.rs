@@ -48,6 +48,7 @@ pub mod pairing_posture;
 pub mod panel_ui;
 pub mod param_codec;
 pub mod paths;
+pub mod pilot;
 pub mod plugin;
 pub mod plugin_loopback_guard;
 pub mod plugin_mdns;

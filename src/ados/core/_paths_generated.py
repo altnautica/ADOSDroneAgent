@@ -106,6 +106,7 @@ LOGD_SOCK = "logd.sock"
 LOGD_QUERY_SOCK = "logd-query.sock"
 MAVLINK_SOCK = "mavlink.sock"
 MAVLINK_INGEST_SOCK = "mavlink-ingest.sock"
+PILOT_SOCK = "pilot.sock"
 MSP_SOCK = "msp.sock"
 GNSS_CMD_SOCK = "gnss-cmd.sock"
 PAIRING_SOCK = "pairing.sock"
@@ -193,6 +194,7 @@ SOCKET_PATHS: dict[str, dict[str, str]] = {
     "logd-query": {"path": "/run/ados/logd-query.sock", "owner": "ados-logd"},
     "mavlink": {"path": "/run/ados/mavlink.sock", "owner": "ados-mavlink-router"},
     "mavlink-ingest": {"path": "/run/ados/mavlink-ingest.sock", "owner": "ados-mavlink-router"},
+    "pilot": {"path": "/run/ados/pilot.sock", "owner": "ados-pilot"},
     "msp": {"path": "/run/ados/msp.sock", "owner": "ados-mavlink-router"},
     "gnss-cmd": {"path": "/run/ados/gnss-cmd.sock", "owner": "ados-gnss"},
     "pairing": {"path": "/run/ados/pairing.sock", "owner": "ados-groundlink"},
