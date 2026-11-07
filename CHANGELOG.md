@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.9] - 2026-11-08
+
+### Fixed
+
+- Follow never locked on a designated subject when the detector missed it on the next frame. An operator designation seeded the engine tracker's track as tentative, like an automatic seed, so one detection frame without the subject (at the 3 Hz detector rate, often the next one) dropped it without a `lost` report, and the following detection seeded an automatic track that never carries a lock state: a follow behaviour waited for a lock that could not come. The designation is now the confirmation: the designated track is confirmed at once, a miss coasts it (`uncertain`), and it ends with an explicit `lost` after the coast budget.
+- A coasting track's box no longer shrinks to 1 px. The tracker's box filter learned a size velocity from one smaller detection box and extrapolated it through the coast, which also shrank the association gate (it scales with the box diagonal) so the subject could not be re-associated. The box size is now a random walk that follows its measurements; the center keeps its constant-velocity model.
+
 ## [0.109.8] - 2026-11-08
 
 ### Fixed

@@ -211,6 +211,99 @@ fn single_spurious_blob_never_claims_an_id() {
     assert_eq!(u2.track_id, None);
 }
 
+/// An operator designation is the confirmation: the designated track is held
+/// from the designate call on. A detector that misses the subject on the very
+/// next frame (a low-rate detector on a walking person, a false box elsewhere
+/// in the frame) must coast the designated track, not drop it silently and
+/// auto-seed an undesignated one that never carries a lock state.
+#[test]
+fn designated_track_survives_a_miss_before_its_first_association() {
+    let cfg = TrackerConfig::default();
+    let mut t = SingleObjectTracker::new(cfg);
+    let subject = det(625.0, 311.0, 48.0, 134.0, 0.32, "person");
+    let id = t.designate(&subject).expect("designate seeds a track");
+    assert_eq!(
+        t.current_id(),
+        Some(id),
+        "the designated id is held at once"
+    );
+    assert_eq!(t.state(), TrackState::Confirmed);
+
+    // Next frame: the subject is missed, only a false box far off it.
+    let miss = t.update(&[det(219.0, 26.0, 225.0, 497.0, 0.29, "person")]);
+    assert_eq!(
+        miss.track_id,
+        Some(id),
+        "a miss coasts the designated track"
+    );
+    assert!(miss.operator_designated);
+    let held = miss.detection.expect("the held box stays on the wire");
+    assert_eq!(held.lock_state, Some(LockState::Uncertain));
+
+    // The subject is seen again near where it was designated: the SAME id,
+    // still operator-designated, re-confirms and reports locked.
+    let back = t.update(&[det(637.0, 295.0, 38.0, 114.0, 0.53, "person")]);
+    assert_eq!(back.track_id, Some(id));
+    assert!(back.operator_designated);
+    let relock = t.update(&[det(640.0, 293.0, 40.0, 116.0, 0.6, "person")]);
+    assert_eq!(relock.track_id, Some(id));
+    assert!(relock.operator_designated);
+    assert_eq!(
+        relock.detection.and_then(|d| d.lock_state),
+        Some(LockState::Locked)
+    );
+}
+
+/// A designated track the detector never sees again ends with an explicit
+/// Lost on the wire, after the coast budget, never a silent drop.
+#[test]
+fn designated_track_never_seen_again_reports_lost() {
+    let cfg = TrackerConfig::default();
+    let mut t = SingleObjectTracker::new(cfg);
+    let id = t
+        .designate(&det(639.0, 311.0, 38.0, 105.0, 0.74, "person"))
+        .expect("designate seeds a track");
+    let mut last = None;
+    for _ in 0..=cfg.max_coast_frames {
+        last = Some(t.update(&[]));
+    }
+    let lost = last.expect("frames ran");
+    assert_eq!(lost.state, TrackState::Idle);
+    assert!(lost.operator_designated);
+    let report = lost.detection.expect("the loss is reported");
+    assert_eq!(report.track_id, Some(id));
+    assert_eq!(report.lock_state, Some(LockState::Lost));
+}
+
+/// Coasting predicts where the box goes, not that it shrinks away: one
+/// smaller measured box must not teach the filter a size velocity that a
+/// coast extrapolates down to a 1 px box, which also shrinks the association
+/// gate until the subject can never be re-associated.
+#[test]
+fn coast_keeps_the_box_size() {
+    let cfg = TrackerConfig::default();
+    let mut kf = BoxKalman::new(
+        &det(616.0, 306.0, 66.0, 131.0, 0.6, "person").bbox.unwrap(),
+        &cfg,
+    );
+    kf.predict();
+    kf.update(&det(631.0, 292.0, 38.0, 93.0, 0.3, "person").bbox.unwrap());
+    let measured = kf.bbox();
+    for _ in 0..cfg.max_coast_frames {
+        kf.predict();
+    }
+    let coasted = kf.bbox();
+    assert!(
+        (coasted.width - measured.width).abs() < 1e-3
+            && (coasted.height - measured.height).abs() < 1e-3,
+        "a coast holds the size: {}x{} -> {}x{}",
+        measured.width,
+        measured.height,
+        coasted.width,
+        coasted.height
+    );
+}
+
 // ---- motion-path synthetic scenarios (no distractor) ------------------
 
 #[test]

@@ -199,6 +199,11 @@ impl SingleObjectTracker {
     /// Used by the click-to-follow path so the operator picks the target rather
     /// than the tracker's auto-lock.
     ///
+    /// The designation is the confirmation: the track starts confirmed, so a
+    /// frame that misses the subject right after the click coasts it (reported
+    /// uncertain, then lost after the coast budget) instead of dropping it the
+    /// way an unconfirmed auto-seed is dropped.
+    ///
     /// [`update`]: Self::update
     pub fn designate(&mut self, detection: &Detection) -> Option<u64> {
         self.track = None;
@@ -281,9 +286,11 @@ impl SingleObjectTracker {
                             .expect("eligible candidate carries a bbox"),
                         &self.cfg,
                     ),
-                    // One hit is not yet enough to confirm (default confirm_hits
-                    // is 2), so a single spurious blob never claims an id.
-                    state: if self.cfg.confirm_hits <= 1 {
+                    // One hit is not yet enough to confirm an auto-seed (default
+                    // confirm_hits is 2), so a single spurious blob never claims
+                    // an id. The operator's designation is itself the
+                    // confirmation.
+                    state: if operator_designated || self.cfg.confirm_hits <= 1 {
                         TrackState::Confirmed
                     } else {
                         TrackState::Tentative

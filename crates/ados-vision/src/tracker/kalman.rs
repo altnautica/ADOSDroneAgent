@@ -5,13 +5,24 @@ use ados_protocol::framebus::BoundingBox;
 use super::scoring::center;
 use super::TrackerConfig;
 
-/// A constant-velocity Kalman filter over a bounding box.
+/// The state components with a velocity: the center `cx`, `cy`. The size
+/// components after them are a random walk.
+const CENTER_COMPONENTS: usize = 2;
+
+/// A Kalman filter over a bounding box: constant velocity for the center,
+/// a random walk for the size.
 ///
 /// State is `[cx, cy, w, h, vx, vy, vw, vh]`, the box center, size, and their
 /// per-frame velocities. Each of the four box components is an independent
-/// 1-D constant-velocity sub-filter (position + velocity), which keeps the math
-/// small, allocation-free, and exact without a matrix library while giving the
-/// same predict/update behaviour as the full 8-state form for this layout.
+/// 1-D sub-filter (position + velocity), which keeps the math small,
+/// allocation-free, and exact without a matrix library while giving the same
+/// predict/update behaviour as the full 8-state form for this layout.
+///
+/// The size velocities `vw`/`vh` stay zero: a detector's box size jitters far
+/// more than it trends between detections, so a learned size velocity is
+/// noise, and a coast that extrapolates it shrinks the box to nothing (and the
+/// association gate with it, since the gate scales with the box diagonal).
+/// The size follows its measurements instead.
 #[derive(Debug, Clone)]
 pub(super) struct BoxKalman {
     /// Position estimate per component: cx, cy, w, h.
@@ -33,10 +44,11 @@ impl BoxKalman {
         Self {
             pos: [cx, cy, b.width, b.height],
             vel: [0.0; 4],
-            // Start moderately uncertain in position, very uncertain in velocity
-            // (we have not observed motion yet).
+            // Start moderately uncertain in position, very uncertain in the
+            // center velocity (we have not observed motion yet); the size has
+            // no velocity.
             p_pos: [cfg.measurement_noise; 4],
-            p_vel: [1_000.0; 4],
+            p_vel: [1_000.0, 1_000.0, 0.0, 0.0],
             p_pv: [0.0; 4],
             measurement_noise: cfg.measurement_noise,
             process_noise: cfg.process_noise,
@@ -49,6 +61,11 @@ impl BoxKalman {
     pub(super) fn predict(&mut self) {
         let q = self.process_noise;
         for i in 0..4 {
+            if i >= CENTER_COMPONENTS {
+                // Size: a random walk, no velocity to extrapolate.
+                self.p_pos[i] += q;
+                continue;
+            }
             // x = F x : pos += vel, vel unchanged.
             self.pos[i] += self.vel[i];
             // P = F P F^T + Q for the 2x2 constant-velocity block.
@@ -78,16 +95,21 @@ impl BoxKalman {
         for (i, &m) in meas.iter().enumerate() {
             let s = self.p_pos[i] + r; // innovation covariance
             let k_pos = self.p_pos[i] / s; // Kalman gain, position
-            let k_vel = self.p_pv[i] / s; // Kalman gain, velocity
             let innov = m - self.pos[i];
             self.pos[i] += k_pos * innov;
-            // Clamp the velocity the filter is allowed to learn from one update.
+            let pp = self.p_pos[i];
+            self.p_pos[i] = pp - k_pos * pp;
+            if i >= CENTER_COMPONENTS {
+                // Size: position-only, its velocity stays zero.
+                continue;
+            }
+            // Kalman gain on the velocity, and the velocity it may learn from
+            // one update, clamped.
+            let k_vel = self.p_pv[i] / s;
             let new_vel = (self.vel[i] + k_vel * innov).clamp(-vmax, vmax);
             self.vel[i] = new_vel;
             // P = (I - K H) P
-            let pp = self.p_pos[i];
             let ppv = self.p_pv[i];
-            self.p_pos[i] = pp - k_pos * pp;
             self.p_pv[i] = ppv - k_pos * ppv;
             self.p_vel[i] -= k_vel * ppv;
         }

@@ -510,11 +510,11 @@ async fn operator_designate_locks_a_specific_detection() {
         .designate("cam", &target)
         .await
         .expect("designate seeds a track");
-    // A freshly-seeded track is tentative, so current_track is None until a
-    // measured frame confirms it — but the designated id is fixed.
-    assert_eq!(e.current_track("cam").await, None);
+    // The designation is the confirmation: the designated id is the camera's
+    // current track at once, before any measured frame.
+    assert_eq!(e.current_track("cam").await, Some(id));
 
-    // Feed the designated box: it confirms under the SAME id, not a new one.
+    // Feed the designated box: it stays under the SAME id, not a new one.
     e.apply_tracker("cam", vec![target.clone()], &[], 0, 0, FrameFormat::Rgb24)
         .await;
     let confirmed = e
@@ -526,6 +526,41 @@ async fn operator_designate_locks_a_specific_detection() {
     // reset_track drops the lock entirely.
     e.reset_track("cam").await;
     assert_eq!(e.current_track("cam").await, None);
+}
+
+#[tokio::test]
+async fn designated_subject_missed_on_the_next_frame_stays_published() {
+    // A low-rate detector misses the subject on the frame after the click.
+    // The designated track must stay on the stream (uncertain) and re-lock
+    // when the subject is seen again, never be replaced by an auto-seed that
+    // carries no lock state.
+    let e = VisionEngine::with_tracker(Box::new(MockBackend), 4, true, TrackerConfig::default());
+    let subject = det(200.0, 50.0, 0.4, "person");
+    let id = e
+        .designate("cam", &subject)
+        .await
+        .expect("designate seeds a track");
+    let missed = e
+        .apply_tracker("cam", vec![], &[], 0, 0, FrameFormat::Rgb24)
+        .await;
+    assert!(
+        missed
+            .iter()
+            .any(|d| d.track_id == Some(id) && d.lock_state == Some(LockState::Uncertain)),
+        "the designated subject coasts on the stream: {missed:?}"
+    );
+    let mut relocked = Vec::new();
+    for _ in 0..2 {
+        relocked = e
+            .apply_tracker("cam", vec![subject.clone()], &[], 0, 0, FrameFormat::Rgb24)
+            .await;
+    }
+    assert!(
+        relocked
+            .iter()
+            .any(|d| d.track_id == Some(id) && d.lock_state == Some(LockState::Locked)),
+        "the designated subject re-locks under its id: {relocked:?}"
+    );
 }
 
 #[tokio::test]

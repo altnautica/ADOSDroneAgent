@@ -319,13 +319,13 @@ async fn operator_designate_overrides_the_auto_lock() {
     let script: Script = Arc::new(Mutex::new(VecDeque::new()));
     let engine = build_engine(false, script).await;
     let chosen = det(200.0, 50.0, 0.4);
-    engine
+    let id = engine
         .designate("cam", &chosen)
         .await
         .expect("designate seeds a track");
-    // A freshly-seeded track is tentative, so current_track is None until a
-    // measured frame confirms it — the designate succeeded via the public API.
-    assert_eq!(engine.current_track("cam").await, None);
+    // The designation is the confirmation: the chosen box's track is the
+    // camera's current track at once, through the public API.
+    assert_eq!(engine.current_track("cam").await, Some(id));
 }
 
 /// Run the SAME appearance-vs-motion crossing through the public path with the
