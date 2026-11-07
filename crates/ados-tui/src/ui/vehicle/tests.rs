@@ -189,6 +189,67 @@ fn the_autonomy_block_says_when_nothing_publishes() {
     assert!(text.contains("no autonomy plugin is publishing"), "{text}");
 }
 
+fn pilot_frame() -> Value {
+    serde_json::from_str(include_str!(
+        "../../../../ados-control/tests/fixtures/pilot-frame.json"
+    ))
+    .expect("pilot frame fixture is JSON")
+}
+
+fn pilot_status(data: Value, age_ms: u64) -> Value {
+    json!({"pilot": {"ts_ms": 1, "age_ms": age_ms, "data": data}})
+}
+
+#[test]
+fn the_autonomy_block_shows_who_flies_and_how() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(pilot_frame(), 100),
+    );
+    let text = draw(&mut app, 120, 40);
+    for want in [
+        "Owner     FOLLOW · ORBIT 8 m · Follow",
+        "Mode      ADOS PILOT · NORMAL",
+        "Avoid     brake · detour 2.4 m",
+    ] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+    assert!(!text.contains("(stale)"), "{text}");
+}
+
+#[test]
+fn an_old_pilot_kind_is_marked_stale_and_avoid_off_reads_off() {
+    let mut app = live_app();
+    let mut frame = pilot_frame();
+    frame["owner"] = json!("pilot");
+    frame["owner_label"] = json!("ADOS PILOT");
+    frame["skill"] = Value::Null;
+    frame["control_mode"] = json!("fc_manual");
+    frame["profile"] = json!("sport");
+    frame["avoid"] = json!("off");
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 9000));
+    let text = draw(&mut app, 120, 40);
+    for want in [
+        "Owner     ADOS PILOT (stale)",
+        "Mode      FC MANUAL · SPORT",
+        "Avoid     OFF",
+    ] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+}
+
+#[test]
+fn without_a_pilot_kind_the_pilot_rows_read_a_dash() {
+    let mut app = live_app();
+    land(&mut app, ResourceId::NavStatus, nav_status());
+    let text = draw(&mut app, 120, 40);
+    for want in ["Owner     –", "Mode      –", "Avoid     –"] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+}
+
 #[test]
 fn the_vehicle_tab_polls_nav_status_at_two_hertz() {
     let app = live_app();

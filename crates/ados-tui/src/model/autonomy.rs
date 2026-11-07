@@ -1,6 +1,7 @@
-//! The autonomy readings from `GET /api/v1/nav/status`: the follow state, the
-//! navigation source, the lidar and the live map session; and the detector's
-//! per-camera state from `GET /api/vision/status`.
+//! The autonomy readings from `GET /api/v1/nav/status`: who flies the vehicle
+//! (the `pilot` kind), the follow state, the navigation source, the lidar and
+//! the live map session; and the detector's per-camera state from
+//! `GET /api/vision/status`.
 //!
 //! The nav route answers each kind as `{ts_ms, age_ms, data}`, or `null` when
 //! no plugin has published it, so every part here is optional and nothing is
@@ -89,9 +90,37 @@ pub struct MapSession {
     pub stale: bool,
 }
 
+/// The mission progress inside the pilot state.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PilotMission {
+    pub state: Option<String>,
+    pub seq: Option<i64>,
+    pub total: Option<i64>,
+}
+
+/// Who flies the vehicle and how (the `pilot` kind).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Pilot {
+    pub owner: Option<String>,
+    pub owner_label: Option<String>,
+    /// The owning skill's label, when a skill owns.
+    pub skill_label: Option<String>,
+    pub control_mode: Option<String>,
+    pub profile: Option<String>,
+    pub avoid: Option<String>,
+    pub avoid_state: Option<String>,
+    pub hold_reason: Option<String>,
+    pub min_clearance_m: Option<f64>,
+    pub fc_mode_name: Option<String>,
+    pub armed: Option<bool>,
+    pub mission: Option<PilotMission>,
+    pub stale: bool,
+}
+
 /// One `/api/v1/nav/status` reading.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Autonomy {
+    pub pilot: Option<Pilot>,
     pub follow: Option<Follow>,
     pub nav: Option<NavSource>,
     pub lidar: Option<Lidar>,
@@ -100,6 +129,28 @@ pub struct Autonomy {
 
 impl Autonomy {
     pub fn from_value(v: &Value) -> Self {
+        let pilot = kind(v, "pilot").map(|(d, stale)| Pilot {
+            owner: s(d, "owner"),
+            owner_label: s(d, "owner_label"),
+            skill_label: d.get("skill").and_then(|k| s(k, "label")),
+            control_mode: s(d, "control_mode"),
+            profile: s(d, "profile"),
+            avoid: s(d, "avoid"),
+            avoid_state: s(d, "avoid_state"),
+            hold_reason: s(d, "hold_reason"),
+            min_clearance_m: f(d, "min_clearance_m"),
+            fc_mode_name: s(d, "fc_mode_name"),
+            armed: d.get("armed").and_then(Value::as_bool),
+            mission: d
+                .get("mission")
+                .filter(|m| m.is_object())
+                .map(|m| PilotMission {
+                    state: s(m, "state"),
+                    seq: i(m, "seq"),
+                    total: i(m, "total"),
+                }),
+            stale,
+        });
         let follow = kind(v, "follow").map(|(d, stale)| Follow {
             phase: s(d, "phase"),
             track_id: i(d, "track_id"),
@@ -142,6 +193,7 @@ impl Autonomy {
             stale,
         });
         Self {
+            pilot,
             follow,
             nav,
             lidar,
@@ -151,7 +203,11 @@ impl Autonomy {
 
     /// Whether any kind has ever been published.
     pub fn any(&self) -> bool {
-        self.follow.is_some() || self.nav.is_some() || self.lidar.is_some() || self.map.is_some()
+        self.pilot.is_some()
+            || self.follow.is_some()
+            || self.nav.is_some()
+            || self.lidar.is_some()
+            || self.map.is_some()
     }
 }
 
@@ -286,6 +342,52 @@ mod tests {
             &json!({"scan": {"ts_ms": 1, "age_ms": 1, "data": {"ranges_m": [0.0, 0.0]}}}),
         );
         assert_eq!(a.lidar.unwrap().min_range_m, None);
+    }
+
+    /// The shared golden pilot frame, read from the control crate's fixture.
+    pub(crate) fn pilot_frame() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../ados-control/tests/fixtures/pilot-frame.json"
+        ))
+        .expect("pilot frame fixture is JSON")
+    }
+
+    #[test]
+    fn the_pilot_kind_reads_the_golden_frame() {
+        let a = Autonomy::from_value(
+            &json!({"pilot": {"ts_ms": 1, "age_ms": 100, "data": pilot_frame()}}),
+        );
+        assert!(a.any());
+        let p = a.pilot.unwrap();
+        assert_eq!(p.owner.as_deref(), Some("skill"));
+        assert_eq!(p.owner_label.as_deref(), Some("FOLLOW · ORBIT 8 m"));
+        assert_eq!(p.skill_label.as_deref(), Some("Follow"));
+        assert_eq!(p.control_mode.as_deref(), Some("ados"));
+        assert_eq!(p.profile.as_deref(), Some("normal"));
+        assert_eq!(p.avoid.as_deref(), Some("brake"));
+        assert_eq!(p.avoid_state.as_deref(), Some("detour"));
+        assert_eq!(p.hold_reason, None);
+        assert_eq!(p.min_clearance_m, Some(2.4));
+        assert_eq!(p.fc_mode_name.as_deref(), Some("GUIDED"));
+        assert_eq!(p.armed, Some(true));
+        assert_eq!(
+            p.mission,
+            Some(PilotMission {
+                state: Some("none".into()),
+                seq: Some(0),
+                total: Some(0)
+            })
+        );
+        assert!(!p.stale);
+    }
+
+    #[test]
+    fn an_old_pilot_kind_is_stale_and_a_null_one_is_absent() {
+        let old = Autonomy::from_value(
+            &json!({"pilot": {"ts_ms": 1, "age_ms": 4000, "data": pilot_frame()}}),
+        );
+        assert!(old.pilot.unwrap().stale);
+        assert_eq!(Autonomy::from_value(&json!({"pilot": null})).pilot, None);
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! The Autonomy block from `/api/v1/nav/status`: follow phase, lock and range,
+//! The Autonomy block from `/api/v1/nav/status`: who flies the vehicle (owner,
+//! control mode and profile, obstacle avoidance), follow phase, lock and range,
 //! the re-acquire mode, the navigation source, the lidar and the map session;
 //! and, from `/api/vision/status`, the cameras the detector is running on.
 //! Every state is a symbol and a word; colour only repeats what the word says.
@@ -10,7 +11,9 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::Core;
-use crate::model::autonomy::{gps_fix_word, health_tone, phase_tone, Autonomy, Detection, Tone};
+use crate::model::autonomy::{
+    gps_fix_word, health_tone, phase_tone, Autonomy, Detection, Pilot, Tone,
+};
 use crate::ui::widgets::{kv, kv_text, panel};
 
 /// Label column width.
@@ -61,6 +64,66 @@ fn detector_line(core: &Core, d: &Detection) -> Line<'static> {
     kv(&core.theme, "Detector", LABEL, tone_span(core, tone, word))
 }
 
+/// A control mode as the pilot names it.
+fn control_mode_word(mode: &str) -> String {
+    match mode {
+        "ados" => "ADOS PILOT".into(),
+        "fc_manual" => "FC MANUAL".into(),
+        "elrs" => "ELRS".into(),
+        other => other.to_uppercase(),
+    }
+}
+
+/// The Owner, Mode and Avoid rows; `–` throughout when nothing publishes `pilot`.
+fn pilot_lines(core: &Core, p: Option<&Pilot>) -> Vec<Line<'static>> {
+    let t = &core.theme;
+    let Some(p) = p else {
+        return ["Owner", "Mode", "Avoid"]
+            .into_iter()
+            .map(|k| kv_text(t, k, LABEL, "–".to_string()))
+            .collect();
+    };
+    let mut owner = p
+        .owner_label
+        .clone()
+        .or_else(|| p.owner.clone())
+        .unwrap_or_else(|| "–".into());
+    if p.owner.as_deref() == Some("skill") {
+        if let Some(label) = &p.skill_label {
+            owner.push_str(&format!(" · {label}"));
+        }
+    }
+    owner.push_str(stale_suffix(p.stale));
+    let mode = match (p.control_mode.as_deref(), p.profile.as_deref()) {
+        (Some(m), Some(pr)) => format!("{} · {}", control_mode_word(m), pr.to_uppercase()),
+        (Some(m), None) => control_mode_word(m),
+        (None, Some(pr)) => pr.to_uppercase(),
+        (None, None) => "–".into(),
+    };
+    let avoid = if p.avoid.as_deref() == Some("off") {
+        kv(
+            t,
+            "Avoid",
+            LABEL,
+            Span::styled("OFF", Style::default().fg(t.error())),
+        )
+    } else {
+        let mut word = opt(p.avoid.clone(), |a| a);
+        if let Some(state) = &p.avoid_state {
+            word.push_str(&format!(" · {state}"));
+        }
+        if let Some(m) = p.min_clearance_m {
+            word.push_str(&format!(" {m:.1} m"));
+        }
+        kv_text(t, "Avoid", LABEL, word)
+    };
+    vec![
+        kv_text(t, "Owner", LABEL, owner),
+        kv_text(t, "Mode", LABEL, mode),
+        avoid,
+    ]
+}
+
 /// The block's lines for `a` and the detector state `det`.
 pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'static>> {
     let t = &core.theme;
@@ -68,6 +131,7 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
     if let Some(d) = det {
         out.push(detector_line(core, d));
     }
+    out.extend(pilot_lines(core, a.pilot.as_ref()));
     if let Some(follow) = &a.follow {
         let phase = follow.phase.clone().unwrap_or_else(|| "unknown".into());
         let mut word = phase.clone();
