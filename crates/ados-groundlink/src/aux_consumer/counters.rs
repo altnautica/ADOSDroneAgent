@@ -47,6 +47,8 @@ impl AuxCounters {
             app_stream: c.app_stream.load(Ordering::Relaxed),
             app_stream_undelivered: c.app_stream_undelivered.load(Ordering::Relaxed),
             app_command_unexpected: c.app_command_unexpected.load(Ordering::Relaxed),
+            pilot_state: c.pilot_state.load(Ordering::Relaxed),
+            pilot_state_undelivered: c.pilot_state_undelivered.load(Ordering::Relaxed),
             recv_errors: c.recv_errors.load(Ordering::Relaxed),
             bind_failures: c.bind_failures.load(Ordering::Relaxed),
         }
@@ -90,6 +92,7 @@ impl AuxCountersSnapshot {
             + self.decode_overlong
             + self.app_stream
             + self.app_command_unexpected
+            + self.pilot_state
     }
 }
 

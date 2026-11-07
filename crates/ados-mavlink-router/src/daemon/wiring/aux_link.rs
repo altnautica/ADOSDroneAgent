@@ -98,6 +98,14 @@ pub(in crate::daemon) async fn spawn(
         let uplink_egress = Arc::new(ados_protocol::aux_egress::AuxEgress::new(
             std::path::Path::new(&format!("{dir}/radio-aux.sock")),
         ));
+        // The pilot's state rides the same downlink to the ground station.
+        if let Some(link) = crate::pilot_link::global() {
+            let id_fc = fc.clone();
+            link.set_downlink(crate::pilot_link::Downlink {
+                egress: uplink_egress.clone(),
+                fc_sysid: Box::new(move || id_fc.learned_fc_identity().map(|(s, _)| s)),
+            });
+        }
         // Empty only on an unprovisioned box, where every request is accepted:
         // dropping all of them would be the worse failure for a lone drone.
         let uplink_device_id: Arc<str> = Arc::from(cfg.device_id.as_str());

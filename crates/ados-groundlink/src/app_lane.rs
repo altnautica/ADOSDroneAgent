@@ -116,6 +116,7 @@ mod tests {
                 rpc_response: None,
                 config_tunnel: None,
                 app_stream: Some(Arc::new(state)),
+                pilot: None,
                 local_plugins: None,
             },
             AuxCounters::new(),

@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.3] - 2026-11-07
+
+### Added
+
+- `WS /api/v1/pilot/stream` (ticket scope `pilot.control`, flight class, never minted for an MCP token): an operator surface's sticks (`input`), `release`, `session.take`, `hb` and named actions go to the ADOS pilot; the surface receives the pilot state as `{kind:"pilot", ts_ms, data}` at 10 Hz, `{kind:"action_result", name, id, ok, err}` per action and a 1 s keep-alive.
+- The nav stream and `GET /api/v1/nav/status` carry the pilot's `pilot` kind (with the router's mission state) and `obstacles` kind; the nav hub's view demand, with each camera's projection model, goes to the pilot so it projects obstacles only for watched cameras.
+- `POST /api/command` in `ados` control mode routes arm, disarm, takeoff, land, rtl, pauseMission, resumeMission and killSwitch through the pilot's actions and their readiness checks.
+- Aux channel `Pilot` (10): a ground station serves the drone pilot's socket, sends operator traffic up the aux uplink unbatched, and receives the pilot's state about twice a second from the drone; the drone forwards uplinked pilot traffic addressed to its flight controller to its pilot.
+
 ## [0.109.2] - 2026-11-07
 
 ### Added

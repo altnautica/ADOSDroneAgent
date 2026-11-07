@@ -190,6 +190,8 @@ pub fn is_public(path: &str) -> bool {
             | "/api/v1/ground-station/ws/buttons"
             // The nav stream authenticates its own handshake the same way.
             | "/api/v1/nav/stream"
+            // The pilot stream does too, with its own ticket scope.
+            | "/api/v1/pilot/stream"
     )
 }
 

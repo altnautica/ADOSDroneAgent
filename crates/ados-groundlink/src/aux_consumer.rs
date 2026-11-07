@@ -197,6 +197,12 @@ struct AuxCountersInner {
     /// wrong direction or a frame was misrouted. Counted and dropped, never
     /// forwarded.
     app_command_unexpected: AtomicU64,
+    /// Datagrams on the pilot channel (the drone pilot's state), handed to the
+    /// ground station's pilot relay.
+    pilot_state: AtomicU64,
+    /// Pilot-channel datagrams dropped for want of a relay. Sub-tally of
+    /// `pilot_state`.
+    pilot_state_undelivered: AtomicU64,
     recv_errors: AtomicU64,
     bind_failures: AtomicU64,
 }
@@ -301,6 +307,11 @@ pub struct AuxCountersSnapshot {
     /// ground downlink consumer never legitimately receives. Counted and
     /// dropped.
     pub app_command_unexpected: u64,
+    /// Datagrams on the pilot channel, handed to the pilot relay.
+    pub pilot_state: u64,
+    /// Pilot-channel datagrams dropped for want of a relay. Sub-tally of
+    /// `pilot_state`.
+    pub pilot_state_undelivered: u64,
     /// Failed reads on the loopback socket.
     pub recv_errors: u64,
     /// Failed attempts to bind the lane's loopback port. A non-zero value with
@@ -331,6 +342,11 @@ pub trait AppStreamSink: Send + Sync {
     fn deliver(&self, payload: &[u8]);
 }
 
+/// Where the drone pilot's downlinked state goes on a ground station.
+pub trait PilotStateSink: Send + Sync {
+    fn deliver(&self, payload: &[u8]);
+}
+
 /// Where a decoded aux frame goes, chosen by its channel.
 ///
 /// Grouped rather than threaded one by one: every layer of the consumer carries
@@ -341,6 +357,7 @@ pub struct AuxSinks<'a> {
     pub rpc_response: Option<&'a ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
     pub config_tunnel: Option<&'a ados_protocol::config_tunnel_ingest::ConfigTunnelIngest>,
     pub app_stream: Option<&'a dyn AppStreamSink>,
+    pub pilot: Option<&'a dyn PilotStateSink>,
     /// This node's own installed plugins and their contract versions, so the
     /// identity consumer can flag a peer advertising a different version for a
     /// plugin both run. `None` where no comparison is wanted.
@@ -354,6 +371,7 @@ pub struct AuxSinksOwned {
     pub rpc_response: Option<ados_protocol::aux_rpc_proxy::AuxRpcResponseIngest>,
     pub config_tunnel: Option<Arc<ados_protocol::config_tunnel_ingest::ConfigTunnelIngest>>,
     pub app_stream: Option<Arc<dyn AppStreamSink>>,
+    pub pilot: Option<Arc<dyn PilotStateSink>>,
     pub local_plugins: Option<Arc<std::collections::HashMap<String, u16>>>,
 }
 

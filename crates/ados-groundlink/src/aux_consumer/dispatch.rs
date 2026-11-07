@@ -59,6 +59,7 @@ impl<'a> AuxSinks<'a> {
             rpc_response: None,
             config_tunnel: None,
             app_stream: None,
+            pilot: None,
             local_plugins: None,
         }
     }
@@ -71,6 +72,7 @@ impl AuxSinksOwned {
             rpc_response: self.rpc_response.as_ref(),
             config_tunnel: self.config_tunnel.as_deref(),
             app_stream: self.app_stream.as_deref(),
+            pilot: self.pilot.as_deref(),
             local_plugins: self.local_plugins.as_deref(),
         }
     }
@@ -325,6 +327,14 @@ pub(super) async fn dispatch(
         AuxChannel::AppCommand => {
             counters.bump(&c.app_command_unexpected);
             tracing::debug!("ground_aux_unexpected_app_command_channel");
+        }
+        // The drone pilot's state, for the ground station's pilot relay.
+        AuxChannel::Pilot => {
+            counters.bump(&c.pilot_state);
+            match sinks.pilot {
+                Some(p) => p.deliver(payload),
+                None => counters.bump(&c.pilot_state_undelivered),
+            }
         }
     }
 }

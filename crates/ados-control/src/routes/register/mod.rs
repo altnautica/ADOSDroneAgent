@@ -10,6 +10,7 @@ mod mcp;
 mod nav;
 mod network;
 mod pairing;
+mod pilot;
 mod plugins;
 mod security;
 mod sensing;
@@ -36,6 +37,7 @@ pub(super) fn register_all(r: Routes<AppState>, hid_native: bool) -> Routes<AppS
     let r = sensing::register(r);
     let r = lora::register(r);
     let r = nav::register(r);
+    let r = pilot::register(r);
     let r = security::register(r);
     if hid_native {
         hid::register(r)

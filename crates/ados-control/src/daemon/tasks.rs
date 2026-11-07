@@ -122,6 +122,19 @@ where
     // into the cameras a surface is watching (nav kind `ar`).
     let ar_task = crate::ar::spawn(&paths.config_path, state.state.clone(), state.nav.clone());
 
+    // The pilot's state and obstacles into the nav hub (`pilot`, `obstacles`),
+    // with the router's mission state copied into `pilot`, and the hub's view
+    // demand back to the pilot. On a ground station the same socket is the
+    // relay of the linked drone's pilot.
+    let pilot_task = {
+        let snapshot = state.state.clone();
+        tokio::spawn(crate::routes::pilot::ingest::run(
+            crate::routes::pilot::pilot_socket(),
+            state.nav.clone(),
+            Box::new(move || snapshot.snapshot().and_then(|s| s.get("mission").cloned()).filter(|m| m.is_object())),
+        ))
+    };
+
     // Native-vs-residual gate for the PIC / gamepad / Bluetooth writes, resolved
     // once at startup (the profile is fixed for the process). Those are served
     // natively only on the profiles whose unit table runs the daemons binding
@@ -335,6 +348,7 @@ where
     swarm_handle.shutdown().await;
     events_handle.shutdown().await;
     depth_handle.shutdown().await;
+    pilot_task.abort();
     if let Some(task) = ar_task {
         task.abort();
     }

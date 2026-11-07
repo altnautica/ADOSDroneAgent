@@ -159,6 +159,21 @@ pub(super) async fn run_direct(
             crate::app_lane::serve(state, &path, shutdown).await
         })
     });
+    // The drone pilot's socket on this ground station: operator traffic goes up
+    // the aux uplink, the pilot's state comes down through the consumers below.
+    let pilot_relay = crate::pilot_relay::PilotRelay::new(
+        ados_protocol::aux_egress::AuxEgress::connected_to_udp(config.aux_tx_port)
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "pilot_relay_uplink_unavailable"))
+            .ok(),
+    );
+    {
+        let relay = pilot_relay.clone();
+        let shutdown = aux_shutdown.clone();
+        tokio::spawn(async move {
+            crate::pilot_relay::serve(relay, &crate::pilot_relay::socket_path(), shutdown).await
+        });
+    }
     let spawn_aux_consumer = {
         let aux_counters = aux_counters.clone();
         let aux_peers = aux_peers.clone();
@@ -173,6 +188,7 @@ pub(super) async fn run_direct(
             config_tunnel: Some(config_tunnel_ingest.clone()),
             app_stream: app_lane
                 .map(|state| Arc::new(state) as Arc<dyn crate::aux_consumer::AppStreamSink>),
+            pilot: Some(pilot_relay.clone() as Arc<dyn crate::aux_consumer::PilotStateSink>),
             local_plugins: Some(local_plugins.clone()),
         };
         move |slot: u8| -> tokio::task::JoinHandle<()> {

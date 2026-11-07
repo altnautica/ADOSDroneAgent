@@ -108,6 +108,14 @@ pub enum AuxChannel {
     /// the router; carries an explicit application-level ack in its own payload.
     /// Reserved and MUST NOT be renumbered.
     AppCommand = 9,
+    /// The ADOS pilot's operator traffic, both directions. Uplink (ground →
+    /// drone, radio_id 3): one `pilot.v1` request (sticks, release, session
+    /// ops, heartbeats, actions) for the drone's pilot socket, sent unbatched so
+    /// stick frames keep their cadence. Downlink (drone → ground, radio_id 2):
+    /// the pilot's `state` message, about twice a second. The payload's first
+    /// byte is a flight-controller system id: on the uplink the target (0 =
+    /// any), on the downlink the sender. Reserved and MUST NOT be renumbered.
+    Pilot = 10,
 }
 
 impl AuxChannel {
@@ -124,6 +132,7 @@ impl AuxChannel {
             7 => Some(Self::ConfigTunnel),
             8 => Some(Self::AppStream),
             9 => Some(Self::AppCommand),
+            10 => Some(Self::Pilot),
             _ => None,
         }
     }
@@ -425,8 +434,10 @@ mod tests {
         assert_eq!(AuxChannel::from_u8(8), Some(AuxChannel::AppStream));
         assert_eq!(AuxChannel::from_u8(9), Some(AuxChannel::AppCommand));
         assert_eq!(AuxChannel::from_u8(0), None);
-        // 10 is the next free value: an older build must drop a channel it
+        assert_eq!(AuxChannel::Pilot as u8, 10);
+        assert_eq!(AuxChannel::from_u8(10), Some(AuxChannel::Pilot));
+        // 11 is the next free value: an older build must drop a channel it
         // does not know rather than parse it as the highest one it does.
-        assert_eq!(AuxChannel::from_u8(10), None);
+        assert_eq!(AuxChannel::from_u8(11), None);
     }
 }

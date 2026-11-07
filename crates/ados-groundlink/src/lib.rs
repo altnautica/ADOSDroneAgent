@@ -35,6 +35,7 @@ pub mod mesh_events;
 pub mod pair_state;
 pub mod pairing;
 pub mod paths;
+pub mod pilot_relay;
 pub mod presence;
 pub mod receiver;
 pub mod relay;

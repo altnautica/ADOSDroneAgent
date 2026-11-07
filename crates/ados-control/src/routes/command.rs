@@ -351,6 +351,10 @@ pub async fn execute_command(
     }
 
     let cmd = req.cmd.to_lowercase();
+    // In `ados` control mode the flight primitives are pilot actions.
+    if let Some(resp) = crate::routes::pilot::command::via_pilot(&state, &cmd).await {
+        return resp;
+    }
     let fc = state.fc_identity();
 
     // Build the COMMAND_LONG + the success body for the named command. An unknown

@@ -202,6 +202,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/mission` |  |
 | GET | `/api/v1/nav/status` |  |
 | WS | `/api/v1/nav/stream` | unauthenticated by design |
+| WS | `/api/v1/pilot/stream` | unauthenticated by design |
 | DELETE | `/api/v1/network/client` |  |
 | GET | `/api/v1/network/client/configured` |  |
 | DELETE | `/api/v1/network/client/configured/{name}` |  |
@@ -257,7 +258,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-232 native routes.
+233 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

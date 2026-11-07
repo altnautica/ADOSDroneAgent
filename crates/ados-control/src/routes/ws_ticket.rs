@@ -36,7 +36,7 @@ use crate::state::AppState;
 /// The class is what a scoped MCP token must hold to mint the ticket: the
 /// MAVLink WebSocket carries arbitrary commands to the flight controller, so its
 /// ticket is flight-class; the others are read-only event streams.
-const TICKET_SCOPES: [(&str, ScopeClass); 8] = [
+const TICKET_SCOPES: [(&str, ScopeClass); 9] = [
     ("setup.cloudflare_logs", ScopeClass::Read),
     ("gs.pic_events", ScopeClass::Read),
     ("gs.mavlink_ws", ScopeClass::Flight),
@@ -45,6 +45,9 @@ const TICKET_SCOPES: [(&str, ScopeClass); 8] = [
     ("gs.button_events", ScopeClass::Read),
     ("vision.detections", ScopeClass::Read),
     (crate::routes::nav::SCOPE_NAV_STREAM, ScopeClass::Read),
+    // Operator sticks and flight actions. Never minted on an MCP token, whatever
+    // its scopes (see `mint_refused_for_mcp`).
+    (crate::routes::pilot::SCOPE_PILOT_CONTROL, ScopeClass::Flight),
 ];
 
 /// The plugin install-job progress scope is bound to one job:
@@ -109,6 +112,12 @@ pub(crate) fn path_bound_scope(path: &str) -> Option<String> {
     ticket_scope_class(&scope).map(|_| scope)
 }
 
+/// The pilot stick stream flies the aircraft by hand; no automation token may
+/// open it, so a request carrying MCP scopes is refused outright.
+fn mint_refused_for_mcp(headers: &HeaderMap, scope: &str) -> bool {
+    scope == crate::routes::pilot::SCOPE_PILOT_CONTROL && headers.contains_key(MCP_SCOPES_HEADER)
+}
+
 /// Whether the credential that reached this route may hold a ticket of `class`.
 ///
 /// A request admitted on a scoped MCP token carries the token's granted groups
@@ -170,6 +179,10 @@ pub async fn mint_ws_ticket(
         )
             .into_response();
     };
+    if mint_refused_for_mcp(&headers, &req.scope) {
+        tracing::warn!(scope = %req.scope, "ws_ticket_mcp_pilot_denied");
+        return detail(StatusCode::FORBIDDEN, "Manual flight control is not available to MCP tokens.");
+    }
     if !credential_allows(&headers, class) {
         tracing::warn!(scope = %req.scope, "ws_ticket_mcp_scope_denied");
         return detail(
@@ -246,7 +259,11 @@ mod tests {
                 "{scope} must be mintable"
             );
         }
-        assert_eq!(TICKET_SCOPES.len(), 8);
+        assert_eq!(TICKET_SCOPES.len(), 9);
+        assert_eq!(
+            ticket_scope_class(crate::routes::pilot::SCOPE_PILOT_CONTROL),
+            Some(ScopeClass::Flight)
+        );
         assert_eq!(
             ticket_scope_class(crate::routes::nav::SCOPE_NAV_STREAM),
             Some(ScopeClass::Read)

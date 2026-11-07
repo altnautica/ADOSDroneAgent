@@ -72,6 +72,7 @@ pub mod params;
 pub mod params_single;
 pub mod params_write;
 pub mod peer_backfill;
+pub mod pilot;
 pub mod plugins_config;
 pub mod plugins_lifecycle;
 pub mod plugins_proxy;

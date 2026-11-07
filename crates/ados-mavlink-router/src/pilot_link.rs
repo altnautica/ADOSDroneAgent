@@ -33,6 +33,16 @@ pub const PILOT_INJECTOR: &str = "pilot";
 const MSG_MANUAL_CONTROL: u32 = 69;
 const MSG_RC_CHANNELS_OVERRIDE: u32 = 70;
 
+/// The pilot state goes down the aux link this often.
+pub const DOWNLINK_PERIOD_MS: u64 = 500;
+
+/// Who the downlinked state is from, and the lane it leaves on.
+pub struct Downlink {
+    pub egress: std::sync::Arc<ados_protocol::aux_egress::AuxEgress>,
+    /// The flight controller's system id, once learned.
+    pub fc_sysid: Box<dyn Fn() -> Option<u8> + Send + Sync>,
+}
+
 pub struct PilotLink {
     started: Instant,
     /// Milliseconds since `started` of the last pilot `state` (0 = never).
@@ -42,6 +52,10 @@ pub struct PilotLink {
     tx: mpsc::Sender<Vec<u8>>,
     pub dropped: AtomicU64,
     pub redirected: AtomicU64,
+    /// Ground-station frames forwarded to the pilot.
+    pub relayed: AtomicU64,
+    downlink: OnceLock<Downlink>,
+    downlink_ms: AtomicU64,
 }
 
 fn mode_code(m: ControlMode) -> u8 {
@@ -87,6 +101,9 @@ impl PilotLink {
             tx,
             dropped: AtomicU64::new(0),
             redirected: AtomicU64::new(0),
+            relayed: AtomicU64::new(0),
+            downlink: OnceLock::new(),
+            downlink_ms: AtomicU64::new(0),
         }
     }
 
@@ -138,6 +155,38 @@ impl PilotLink {
         }
     }
 
+    /// Forward one `pilot.v1` request body from a ground station.
+    pub fn forward(&self, body: Vec<u8>) {
+        self.relayed.fetch_add(1, Ordering::Relaxed);
+        if self.tx.try_send(body).is_err() {
+            tracing::debug!("pilot_link_queue_full");
+        }
+    }
+
+    /// Send the pilot state down the aux link (drone profile).
+    pub fn set_downlink(&self, d: Downlink) {
+        let _ = self.downlink.set(d);
+    }
+
+    /// The state body to downlink, when one is due.
+    fn downlink_due(
+        &self,
+        body: &rmpv::Value,
+    ) -> Option<(
+        std::sync::Arc<ados_protocol::aux_egress::AuxEgress>,
+        Vec<u8>,
+    )> {
+        let d = self.downlink.get()?;
+        let now = self.now_ms();
+        if now.saturating_sub(self.downlink_ms.load(Ordering::Relaxed)) < DOWNLINK_PERIOD_MS {
+            return None;
+        }
+        self.downlink_ms.store(now, Ordering::Relaxed);
+        let mut payload = vec![(d.fc_sysid)().unwrap_or(0)];
+        payload.extend(downlink_body(body)?);
+        Some((std::sync::Arc::clone(&d.egress), payload))
+    }
+
     pub fn send_goto(&self, ned: [f32; 3], yaw: Option<f32>) {
         self.redirected.fetch_add(1, Ordering::Relaxed);
         self.send(
@@ -171,6 +220,14 @@ async fn run(path: PathBuf, mut rx: mpsc::Receiver<Vec<u8>>) {
                         if let (Ok((op, v)), Some(link)) = (pilot::peek_op(&body), global()) {
                             if op == "state" {
                                 link.on_state(&v);
+                                if let Some((egress, payload)) = link.downlink_due(&v) {
+                                    tokio::spawn(async move {
+                                        let ch = ados_protocol::aux_mux::AuxChannel::Pilot;
+                                        if let Err(e) = egress.send(ch, &payload).await {
+                                            tracing::debug!(error = %e, "pilot_state_downlink_failed");
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
@@ -194,6 +251,58 @@ async fn run(path: PathBuf, mut rx: mpsc::Receiver<Vec<u8>>) {
         while rx.try_recv().is_ok() {}
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+/// The `state` body trimmed to fit one aux frame: the plan polyline goes
+/// first, then the readiness items that pass, then every readiness item.
+pub fn downlink_body(state: &rmpv::Value) -> Option<Vec<u8>> {
+    let max = ados_protocol::aux_mux::AUX_MAX_PAYLOAD - 1;
+    let rmpv::Value::Map(map) = state else {
+        return None;
+    };
+    let encode = |m: &Vec<(rmpv::Value, rmpv::Value)>| {
+        let mut out = Vec::new();
+        rmpv::encode::write_value(&mut out, &rmpv::Value::Map(m.clone()))
+            .ok()
+            .map(|_| out)
+    };
+    let mut m = map.clone();
+    let mut out = encode(&m)?;
+    let set = |m: &mut Vec<(rmpv::Value, rmpv::Value)>,
+               key: &str,
+               f: &dyn Fn(&rmpv::Value) -> rmpv::Value| {
+        for (k, v) in m.iter_mut() {
+            if k.as_str() == Some(key) {
+                *v = f(v);
+            }
+        }
+    };
+    if out.len() > max {
+        set(&mut m, "plan_ned", &|_| rmpv::Value::Array(Vec::new()));
+        out = encode(&m)?;
+    }
+    if out.len() > max {
+        set(&mut m, "readiness", &|v| {
+            let items = v.as_array().cloned().unwrap_or_default();
+            rmpv::Value::Array(
+                items
+                    .into_iter()
+                    .filter(|i| {
+                        i.as_map()
+                            .and_then(|e| e.iter().find(|(k, _)| k.as_str() == Some("ok")))
+                            .and_then(|(_, v)| v.as_bool())
+                            == Some(false)
+                    })
+                    .collect(),
+            )
+        });
+        out = encode(&m)?;
+    }
+    if out.len() > max {
+        set(&mut m, "readiness", &|_| rmpv::Value::Array(Vec::new()));
+        out = encode(&m)?;
+    }
+    (out.len() <= max).then_some(out)
 }
 
 /// The vehicle's current global and local position, to turn a global target
