@@ -192,6 +192,8 @@ pub fn is_public(path: &str) -> bool {
             | "/api/v1/nav/stream"
             // The pilot stream does too, with its own ticket scope.
             | "/api/v1/pilot/stream"
+            // The aircraft-setup step stream: `fc.setup` ticket.
+            | "/api/v1/fc-setup/stream"
     )
 }
 

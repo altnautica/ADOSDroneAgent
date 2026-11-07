@@ -24,6 +24,7 @@ pub mod dashboard_pin;
 pub mod diag_storage;
 pub mod diagnostics;
 pub mod fc_identity;
+pub mod fc_setup;
 pub mod fleet;
 pub mod gs_bluetooth;
 pub mod gs_camera_write;

@@ -270,6 +270,8 @@ fn is_public_is_exactly_the_exempt_paths() {
         "/api/v1/ground-station/ws/mesh",
         "/api/v1/ground-station/ws/buttons",
         "/api/v1/nav/stream",
+        "/api/v1/pilot/stream",
+        "/api/v1/fc-setup/stream",
     ] {
         assert!(is_public(p), "{p} should be public");
     }

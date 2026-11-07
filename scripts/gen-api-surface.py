@@ -91,6 +91,8 @@ UNAUTHENTICATED = {
     ("WS", "/api/v1/ground-station/ws/mesh"),
     ("WS", "/api/v1/ground-station/ws/buttons"),
     ("WS", "/api/v1/nav/stream"),
+    ("WS", "/api/v1/pilot/stream"),
+    ("WS", "/api/v1/fc-setup/stream"),
 }
 
 

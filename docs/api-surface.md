@@ -104,6 +104,13 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/clock` |  |
 | GET | `/api/v1/dashboard/snapshot` |  |
 | GET | `/api/v1/diagnostics` |  |
+| GET | `/api/v1/fc-setup` |  |
+| POST | `/api/v1/fc-setup/revert` |  |
+| WS | `/api/v1/fc-setup/stream` | unauthenticated by design |
+| POST | `/api/v1/fc-setup/{wizard}/abort` |  |
+| POST | `/api/v1/fc-setup/{wizard}/start` |  |
+| POST | `/api/v1/fc-setup/{wizard}/steps/{step}/actions/{action}` |  |
+| POST | `/api/v1/fc-setup/{wizard}/steps/{step}/run` |  |
 | GET | `/api/v1/gnss` |  |
 | PUT | `/api/v1/gnss/base` |  |
 | POST | `/api/v1/gnss/rtcm` |  |
@@ -202,7 +209,6 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/mission` |  |
 | GET | `/api/v1/nav/status` |  |
 | WS | `/api/v1/nav/stream` | unauthenticated by design |
-| WS | `/api/v1/pilot/stream` | unauthenticated by design |
 | DELETE | `/api/v1/network/client` |  |
 | GET | `/api/v1/network/client/configured` |  |
 | DELETE | `/api/v1/network/client/configured/{name}` |  |
@@ -213,6 +219,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/network/mac/adapters` |  |
 | POST | `/api/v1/network/mac/pin` |  |
 | DELETE | `/api/v1/network/mac/{iface}` |  |
+| WS | `/api/v1/pilot/stream` | unauthenticated by design |
 | GET | `/api/v1/plugins/catalog` |  |
 | GET | `/api/v1/radio/adapters` |  |
 | DELETE | `/api/v1/security/api-key` | relay-forbidden |
@@ -258,7 +265,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-233 native routes.
+240 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

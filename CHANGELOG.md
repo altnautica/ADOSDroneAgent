@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.4] - 2026-11-07
+
+### Added
+
+- Aircraft setup routes, served by the pilot's setup engine: `GET /api/v1/fc-setup` (identity, firmware, vehicle class, the running step, both wizards with every step, and the setup report with its parameter snapshots), `POST /api/v1/fc-setup/{wizard}/start`, `POST /api/v1/fc-setup/{wizard}/abort`, `POST /api/v1/fc-setup/{wizard}/steps/{step}/run` (one step on its own), `POST /api/v1/fc-setup/{wizard}/steps/{step}/actions/{action}` (`{"args": {…}}`), `POST /api/v1/fc-setup/revert` (`{"snapshot"}`, default the setup snapshot), and `WS /api/v1/fc-setup/stream` (ticket scope `fc.setup`: step frames at 5 Hz while a wizard runs, wizard frames on change, a keep-alive each second). Engine refusals answer `{"ok": false, "err"}` with 422 (bad request), 409 (state), 404 (no snapshot) or 503 (pilot not running). MCP tokens cannot reach the write routes.
+
 ## [0.109.3] - 2026-11-07
 
 ### Added

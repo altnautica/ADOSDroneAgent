@@ -36,7 +36,7 @@ use crate::state::AppState;
 /// The class is what a scoped MCP token must hold to mint the ticket: the
 /// MAVLink WebSocket carries arbitrary commands to the flight controller, so its
 /// ticket is flight-class; the others are read-only event streams.
-const TICKET_SCOPES: [(&str, ScopeClass); 9] = [
+const TICKET_SCOPES: [(&str, ScopeClass); 10] = [
     ("setup.cloudflare_logs", ScopeClass::Read),
     ("gs.pic_events", ScopeClass::Read),
     ("gs.mavlink_ws", ScopeClass::Flight),
@@ -48,6 +48,8 @@ const TICKET_SCOPES: [(&str, ScopeClass); 9] = [
     // Operator sticks and flight actions. Never minted on an MCP token, whatever
     // its scopes (see `mint_refused_for_mcp`).
     (crate::routes::pilot::SCOPE_PILOT_CONTROL, ScopeClass::Flight),
+    // The aircraft-setup step stream (read-only; the setup actions are REST).
+    (crate::routes::fc_setup::SCOPE_FC_SETUP, ScopeClass::Read),
 ];
 
 /// The plugin install-job progress scope is bound to one job:
@@ -259,7 +261,8 @@ mod tests {
                 "{scope} must be mintable"
             );
         }
-        assert_eq!(TICKET_SCOPES.len(), 9);
+        assert_eq!(TICKET_SCOPES.len(), 10);
+        assert_eq!(ticket_scope_class(crate::routes::fc_setup::SCOPE_FC_SETUP), Some(ScopeClass::Read));
         assert_eq!(
             ticket_scope_class(crate::routes::pilot::SCOPE_PILOT_CONTROL),
             Some(ScopeClass::Flight)
