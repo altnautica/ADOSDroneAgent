@@ -42,6 +42,7 @@ pub mod plugin_events_client;
 pub mod state_client;
 pub mod swarm_client;
 pub mod vision_client;
+pub mod vision_depth_client;
 
 pub use logd_client::LogdQueryClient;
 pub use mavlink_client::{AckStream, FrameRead, MavlinkIpcClient};

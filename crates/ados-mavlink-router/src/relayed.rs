@@ -78,6 +78,9 @@ const STATE_MESSAGE_IDS: &[u32] = &[
     74,  // VFR_HUD
     147, // BATTERY_STATUS
     253, // STATUSTEXT: the firmware banner names the mode table
+    242, // HOME_POSITION
+    265, // MOUNT_ORIENTATION
+    285, // GIMBAL_DEVICE_ATTITUDE_STATUS
 ];
 
 /// Whether a frame carries a message this projection reads.

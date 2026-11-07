@@ -13,6 +13,7 @@
 //! functional but ships dark — no supervisor registration and no systemd unit
 //! enable it yet — until the install layer wires it.
 
+pub mod ar;
 pub mod armed_guard;
 pub mod auth;
 pub mod battery;

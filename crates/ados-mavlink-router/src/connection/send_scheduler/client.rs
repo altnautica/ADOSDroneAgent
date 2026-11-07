@@ -130,6 +130,9 @@ impl FcConnection {
             return false;
         }
         let data: &[u8] = &admitted;
+        if self.client_tap.receiver_count() > 0 {
+            let _ = self.client_tap.send(bytes::Bytes::copy_from_slice(data));
+        }
         let has_writer = { self.writer.lock().await.is_some() };
         if has_writer {
             return match budget {

@@ -149,7 +149,7 @@ pub async fn get_video_cameras() -> Json<Value> {
 /// The config load is the QUIET single-pass [`RosterVideoConfig::load_from`]: it
 /// parses `config.yaml` once and writes no config-status sidecar, so a pollable
 /// roster read never races the `ados-video` service's own status stamping.
-fn load_roster() -> Vec<Value> {
+pub(crate) fn load_roster() -> Vec<Value> {
     let text = std::fs::read_to_string(config_path()).unwrap_or_default();
     let cfg = RosterVideoConfig::from_text(&text);
     // The camera roster is a companion-node concept. A ground station carries no

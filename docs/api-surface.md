@@ -199,6 +199,7 @@ limiter, pairing gate, MCP-scope admission.
 | GET | `/api/v1/lora/beacons` |  |
 | GET | `/api/v1/lora/regions` |  |
 | GET | `/api/v1/map/live` |  |
+| GET | `/api/v1/mission` |  |
 | GET | `/api/v1/nav/status` |  |
 | WS | `/api/v1/nav/stream` | unauthenticated by design |
 | DELETE | `/api/v1/network/client` |  |
@@ -256,7 +257,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-231 native routes.
+232 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

@@ -98,6 +98,8 @@ pub struct VehicleState {
     pub rollspeed: f64,
     pub pitchspeed: f64,
     pub yawspeed: f64,
+    /// ATTITUDE `time_boot_ms` of the sample above.
+    pub attitude_time_boot_ms: u32,
     // SYS_STATUS. Every reading MAVLink lets an autopilot mark "not measured"
     // is an `Option`: the sentinel (UINT16_MAX mV, -1 cA, -1 %) decodes to
     // `None` and is published as `null`, never as a value a surface would show.
@@ -165,6 +167,38 @@ pub struct VehicleState {
     // copy was never serialised into `to_wire`, so it was a second 700-entry map
     // built one allocation per `PARAM_VALUE` frame for no reader.
     pub param_count: i64,
+    /// HOME_POSITION: `(lat_e7, lon_e7, alt_msl_m, [x, y, z])`.
+    pub home: Option<(i32, i32, f64, [f64; 3])>,
+    /// The camera gimbal attitude, from GIMBAL_DEVICE_ATTITUDE_STATUS or,
+    /// when that is absent, MOUNT_ORIENTATION.
+    pub gimbal: Option<Gimbal>,
+    /// When the last GIMBAL_DEVICE_ATTITUDE_STATUS arrived; MOUNT_ORIENTATION
+    /// is used only while this is older than [`GIMBAL_DEVICE_PREFERRED`].
+    pub gimbal_device_at: Option<std::time::Instant>,
+    /// The last 10 s of PreArm/Arm STATUSTEXT, oldest first.
+    pub prearm: std::collections::VecDeque<(std::time::Instant, String)>,
+    /// The mission block the mission mirror computes ([`crate::mission_mirror`]);
+    /// `None` until it has run once.
+    pub mission: Option<Value>,
+}
+
+/// How long GIMBAL_DEVICE_ATTITUDE_STATUS stays preferred over
+/// MOUNT_ORIENTATION after its last frame.
+pub const GIMBAL_DEVICE_PREFERRED: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a PreArm/Arm STATUSTEXT stays in the ring.
+pub const PREARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
+/// Most texts the PreArm ring holds.
+pub const PREARM_MAX: usize = 16;
+
+/// A gimbal attitude reading.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gimbal {
+    /// Degrees, negative looks down.
+    pub pitch_deg: f64,
+    /// Degrees; relative to the vehicle nose unless `earth_frame`.
+    pub yaw_deg: f64,
+    pub earth_frame: bool,
+    pub at: std::time::Instant,
 }
 
 impl Default for VehicleState {
@@ -221,6 +255,12 @@ impl Default for VehicleState {
             local_ned: None,
             local_at: None,
             param_count: 0,
+            attitude_time_boot_ms: 0,
+            home: None,
+            gimbal: None,
+            gimbal_device_at: None,
+            prearm: std::collections::VecDeque::new(),
+            mission: None,
         }
     }
 }
@@ -267,6 +307,11 @@ impl VehicleState {
             MavMessage::STATUSTEXT(m) => {
                 let end = m.text.iter().position(|&b| b == 0).unwrap_or(m.text.len());
                 let text = String::from_utf8_lossy(&m.text[..end]);
+                if text.starts_with("PreArm:") || text.starts_with("Arm:") {
+                    let now = std::time::Instant::now();
+                    self.prearm.push_back((now, text.trim().to_owned()));
+                    self.prune_prearm(now);
+                }
                 if let Some(fw) = ArduPilotFirmware::from_banner(&text) {
                     self.firmware = Some(fw);
                     if !self.last_heartbeat.is_empty() {
@@ -299,6 +344,45 @@ impl VehicleState {
                 self.rollspeed = m.rollspeed as f64;
                 self.pitchspeed = m.pitchspeed as f64;
                 self.yawspeed = m.yawspeed as f64;
+                self.attitude_time_boot_ms = m.time_boot_ms;
+                None
+            }
+            MavMessage::HOME_POSITION(m) => {
+                self.home = Some((
+                    m.latitude,
+                    m.longitude,
+                    m.altitude as f64 / 1000.0,
+                    [m.x as f64, m.y as f64, m.z as f64],
+                ));
+                None
+            }
+            MavMessage::GIMBAL_DEVICE_ATTITUDE_STATUS(m) => {
+                let now = std::time::Instant::now();
+                let (pitch, yaw) = quat_pitch_yaw_deg(m.q);
+                let bits = m.flags.bits();
+                // YAW_IN_EARTH_FRAME (64), or YAW_LOCK (16) without
+                // YAW_IN_VEHICLE_FRAME (32).
+                let earth = bits & 64 != 0 || (bits & 16 != 0 && bits & 32 == 0);
+                self.gimbal = Some(Gimbal { pitch_deg: pitch, yaw_deg: yaw, earth_frame: earth, at: now });
+                self.gimbal_device_at = Some(now);
+                None
+            }
+            // Legacy gimbals still report attitude only through this message.
+            #[allow(deprecated)]
+            MavMessage::MOUNT_ORIENTATION(m) => {
+                let now = std::time::Instant::now();
+                let device_fresh = self
+                    .gimbal_device_at
+                    .is_some_and(|at| now.saturating_duration_since(at) < GIMBAL_DEVICE_PREFERRED);
+                if !device_fresh {
+                    // MOUNT_ORIENTATION's yaw is relative to the vehicle.
+                    self.gimbal = Some(Gimbal {
+                        pitch_deg: m.pitch as f64,
+                        yaw_deg: m.yaw as f64,
+                        earth_frame: false,
+                        at: now,
+                    });
+                }
                 None
             }
             MavMessage::SYS_STATUS(m) => {
@@ -419,6 +503,26 @@ impl VehicleState {
             }),
             _ => Value::Null,
         };
+        let home = match self.home {
+            Some((lat_e7, lon_e7, alt, [x, y, z])) => json!({
+                "lat_e7": lat_e7, "lon_e7": lon_e7, "alt_msl_m": alt, "local_ned": [x, y, z],
+            }),
+            None => Value::Null,
+        };
+        let gimbal = match self.gimbal {
+            Some(g) => json!({
+                "pitch_deg": g.pitch_deg, "yaw_deg": g.yaw_deg,
+                "earth_frame": g.earth_frame, "age_ms": age_ms(g.at),
+            }),
+            None => Value::Null,
+        };
+        let now = std::time::Instant::now();
+        let prearm: Vec<&str> = self
+            .prearm
+            .iter()
+            .filter(|(at, _)| now.saturating_duration_since(*at) < PREARM_WINDOW)
+            .map(|(_, t)| t.as_str())
+            .collect();
         json!({
             "mav_type": self.mav_type,
             "autopilot": self.autopilot,
@@ -447,6 +551,7 @@ impl VehicleState {
                 "roll": self.roll,
                 "pitch": self.pitch,
                 "yaw": self.yaw,
+                "time_boot_ms": self.attitude_time_boot_ms,
             },
             "battery": {
                 "voltage": self.voltage_battery,
@@ -479,7 +584,26 @@ impl VehicleState {
             "position_age_ms": position_age_ms,
             "ekf": ekf,
             "local_position": local_position,
+            "home": home,
+            "gimbal": gimbal,
+            // The mission state and mirror summary, `null` until the mission
+            // mirror has run (see `mission_mirror`).
+            "mission": self.mission.clone().unwrap_or(Value::Null),
+            // PreArm/Arm STATUSTEXT seen in the last 10 s, oldest first.
+            "prearm": prearm,
         })
+    }
+
+    /// Drop PreArm texts older than the window and bound the ring.
+    fn prune_prearm(&mut self, now: std::time::Instant) {
+        while self
+            .prearm
+            .front()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) >= PREARM_WINDOW)
+            || self.prearm.len() > PREARM_MAX
+        {
+            self.prearm.pop_front();
+        }
     }
 
     /// The full state-socket payload: the vehicle snapshot with the service's
@@ -502,6 +626,15 @@ fn age_ms(at: std::time::Instant) -> u64 {
     std::time::Instant::now()
         .saturating_duration_since(at)
         .as_millis() as u64
+}
+
+/// Pitch and yaw in degrees from a `[w, x, y, z]` quaternion (aerospace
+/// ZYX order), as GIMBAL_DEVICE_ATTITUDE_STATUS carries it.
+pub fn quat_pitch_yaw_deg(q: [f32; 4]) -> (f64, f64) {
+    let [w, x, y, z] = q.map(f64::from);
+    let pitch = (2.0 * (w * y - z * x)).clamp(-1.0, 1.0).asin();
+    let yaw = (2.0 * (w * z + x * y)).atan2(1.0 - 2.0 * (y * y + z * z));
+    (pitch.to_degrees(), yaw.to_degrees())
 }
 
 /// Trim the trailing NUL padding from a fixed-width MAVLink `param_id` field,

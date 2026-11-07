@@ -32,7 +32,11 @@ fn base_table_outside_capture() {
 fn drone_table_streams_the_autonomy_inputs() {
     let t = stream_rates("drone", false);
     assert_eq!(t, DRONE_RATES);
-    assert_eq!(rate(t, 32), Some(20.0), "LOCAL_POSITION_NED");
+    assert_eq!(rate(t, 32), Some(50.0), "LOCAL_POSITION_NED");
+    assert_eq!(rate(t, 42), Some(2.0), "MISSION_CURRENT");
+    assert_eq!(rate(t, 242), Some(0.2), "HOME_POSITION");
+    assert_eq!(rate(t, 285), Some(10.0), "GIMBAL_DEVICE_ATTITUDE_STATUS");
+    assert_eq!(rate(t, 245), Some(2.0), "EXTENDED_SYS_STATE");
     assert_eq!(rate(t, 132), Some(20.0), "DISTANCE_SENSOR");
     assert_eq!(rate(t, 30), Some(50.0), "ATTITUDE");
     assert_eq!(rate(t, 24), Some(5.0), "GPS_RAW_INT");
@@ -209,7 +213,7 @@ async fn capture_end_restores_the_default_rate_of_every_capture_only_stream() {
     let restored: Vec<u32> = after.iter().filter(|e| e.1 == 0.0).map(|e| e.0).collect();
     assert_eq!(restored, vec![105, 31, 2, 29], "{after:?}");
     // The drone's own autonomy inputs stay requested at the drone rate.
-    assert!(after.contains(&(32, 50_000.0)), "{after:?}");
+    assert!(after.contains(&(32, 20_000.0)), "{after:?}");
     assert!(after.contains(&(132, 50_000.0)), "{after:?}");
     // Never a stop: -1 would kill ArduPilot's own SRx default streams.
     assert!(!after.iter().any(|e| e.1 < 0.0), "{after:?}");

@@ -1,11 +1,21 @@
 //! The host-owned navigation and live-map surface:
 //!
 //! * `WS /api/v1/nav/stream` (ticket scope [`SCOPE_NAV_STREAM`]): frames
-//!   `{kind: pose|scan|nav|follow|map, ts_ms, data}`, each kind at most 10 Hz,
+//!   `{kind: pose|scan|nav|follow|map|pilot|obstacles|ar|depth|surfaces, ts_ms, data}`,
+//!   each kind at most 20 Hz,
 //!   latest wins, plus `{kind: "follow_event", ts_ms, topic, data}` for
 //!   `follow.reacquired` and `follow.lost`.
-//! * `GET /api/v1/nav/status`: the latest of each kind as
-//!   `{ts_ms, age_ms, data}`, `null` for a kind nothing has published.
+//! * `GET /api/v1/nav/status[?view=<camera_id>:<layer,…>]`: the latest of
+//!   each kind as `{ts_ms, age_ms, data}`, `null` for a kind nothing has
+//!   published, plus `view_demand` (the union of the live view leases).
+//!
+//! Host modules publish the kinds `pilot`, `obstacles`, `ar`, `depth` and
+//! `surfaces` through [`NavHub::ingest_host`]. A stream client sends
+//! `{"type":"view","camera_id","layers":[…]}` to lease the camera and overlay
+//! layers it shows (see [`view`]); it then receives `ar`, `depth`,
+//! `surfaces` and the per-camera part of `obstacles` for that camera only.
+//! * `GET /api/v1/mission`: the router's mission mirror and the live mission
+//!   state (see [`mission`]).
 //! * `GET /api/v1/map/live?since=<seq>`: the live occupancy tiles changed after
 //!   `seq`.
 //!
@@ -17,15 +27,20 @@
 //! is the source payload verbatim.
 
 mod hub;
+mod mission;
 mod stream;
 mod tiles;
+mod view;
 
 #[cfg(test)]
 mod tests;
 
 pub use hub::{
-    route, NavHub, NavKind, Routed, EXPORT_TOPICS, FOLLOW_ME_ID, VISION_NAV_ID, WORLD_ENGINE_ID,
+    route, NavHub, NavKind, Routed, EXPORT_TOPICS, FOLLOW_ME_ID, KIND_COUNT, VISION_NAV_ID,
+    WORLD_ENGINE_ID,
 };
+pub use mission::{get_mission, mission_body};
+pub use view::{ViewDemand, ViewLease, VIEW_LAYERS, VIEW_LEASE_TTL};
 
 use ados_protocol::pairing_posture::CallerClass;
 use axum::extract::ws::WebSocketUpgrade;
@@ -42,9 +57,21 @@ use crate::state::AppState;
 /// The ticket scope a `/api/v1/nav/stream` upgrade must carry.
 pub const SCOPE_NAV_STREAM: &str = "nav.stream";
 
-/// `GET /api/v1/nav/status`.
-pub async fn get_nav_status(State(state): State<AppState>) -> Json<Value> {
-    Json(state.nav.status_body())
+/// The `GET /api/v1/nav/status` query.
+#[derive(Debug, Default, Deserialize)]
+pub struct NavStatusQuery {
+    /// A polling client's view lease, `<camera_id>:<layer,…>`. Each request
+    /// refreshes it; the per-camera kinds are narrowed to it.
+    #[serde(default)]
+    pub view: Option<String>,
+}
+
+/// `GET /api/v1/nav/status[?view=<camera_id>:<layer,…>]`.
+pub async fn get_nav_status(
+    State(state): State<AppState>,
+    Query(query): Query<NavStatusQuery>,
+) -> Json<Value> {
+    Json(state.nav.status_body_for(query.view.as_deref()))
 }
 
 /// The `GET /api/v1/map/live` query.

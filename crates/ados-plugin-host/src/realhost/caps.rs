@@ -24,7 +24,6 @@ impl RealHost {
     /// list is exactly the set of methods that return `not_implemented` from a
     /// freshly-built host, so it cannot silently drift as methods are wired.
     pub const UNIMPLEMENTED_HOST_METHODS: &'static [crate::dispatch::Method] = &[
-        crate::dispatch::Method::MissionRead,
         crate::dispatch::Method::MissionWrite,
         crate::dispatch::Method::RecordingStart,
         crate::dispatch::Method::RecordingStop,

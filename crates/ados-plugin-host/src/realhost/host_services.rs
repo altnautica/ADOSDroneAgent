@@ -3,6 +3,7 @@
 mod aux_stream;
 mod devices;
 mod mavlink;
+mod mission;
 mod setpoints;
 mod streams;
 mod telemetry_config;
@@ -27,6 +28,10 @@ impl HostServices for RealHost {
         granted_caps: &BTreeSet<String>,
     ) -> Result<HostResult, HostError> {
         self.serve_mavlink_send(plugin_id, args, granted_caps)
+    }
+
+    fn mission_read(&self, plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
+        self.serve_mission_read(plugin_id)
     }
 
     fn msp_send(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {

@@ -60,8 +60,12 @@ const DRONE_RATES: &[(u32, f32)] = &[
     (74, 4.0),   // VFR_HUD
     (147, 1.0),  // BATTERY_STATUS
     (65, 4.0),   // RC_CHANNELS
-    (32, 20.0),  // LOCAL_POSITION_NED
+    (32, 50.0),  // LOCAL_POSITION_NED (the pilot's 50 Hz control loop)
     (132, 20.0), // DISTANCE_SENSOR
+    (245, 2.0),  // EXTENDED_SYS_STATE (landed and VTOL state)
+    (242, 0.2),  // HOME_POSITION
+    (285, 10.0), // GIMBAL_DEVICE_ATTITUDE_STATUS (AR camera attitude)
+    (42, 2.0),   // MISSION_CURRENT (mission state)
 ];
 
 /// [`DRONE_RATES`] plus the sensor streams a capture session records: the
@@ -83,6 +87,10 @@ const CAPTURE_RATES: &[(u32, f32)] = &[
     (2, 1.0),     // SYSTEM_TIME
     (29, 10.0),   // SCALED_PRESSURE
     (132, 20.0),  // DISTANCE_SENSOR
+    (245, 2.0),   // EXTENDED_SYS_STATE
+    (242, 0.2),   // HOME_POSITION
+    (285, 10.0),  // GIMBAL_DEVICE_ATTITUDE_STATUS
+    (42, 2.0),    // MISSION_CURRENT
 ];
 
 /// The stream table for a node of `profile`: a visor always records sensor
@@ -385,6 +393,17 @@ impl FcConnection {
             Ok(bytes) => self.send_bytes(&self.agent_signing().sign(bytes)).await,
             Err(_) => false,
         }
+    }
+
+    /// [`Self::send_msg`] for this crate's own background tasks (the mission
+    /// mirror's download).
+    pub(crate) async fn send_own(&self, msg: &MavMessage) -> bool {
+        self.send_msg(msg).await
+    }
+
+    /// This router's own `(system id, component id)`.
+    pub(crate) fn our_ids(&self) -> (u8, u8) {
+        (self.cfg.system_id, self.cfg.component_id)
     }
 
     /// Send the 1 Hz companion heartbeat so the FC registers a valid GCS-class

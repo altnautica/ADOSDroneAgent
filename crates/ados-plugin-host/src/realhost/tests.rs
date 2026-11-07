@@ -130,7 +130,6 @@ fn unimplemented_methods_match_reality() {
     for method in RealHost::UNIMPLEMENTED_HOST_METHODS {
         use crate::dispatch::Method;
         let r = match method {
-            Method::MissionRead => host.mission_read("p", &empty),
             Method::MissionWrite => host.mission_write("p", &empty),
             Method::RecordingStart => host.recording_start("p", &empty),
             Method::RecordingStop => host.recording_stop("p", &empty),
@@ -172,7 +171,6 @@ fn ungrantable_caps_are_the_dead_capabilities() {
     // a wired surface needs.
     let ungrantable = RealHost::ungrantable_caps();
     let expected: BTreeSet<String> = [
-        "mission.read",
         "mission.write",
         "recording.write",
         "sensor.camera.register",
@@ -1671,7 +1669,6 @@ async fn vision_methods_proxy_to_a_wired_engine() {
 fn stubbed_methods_inherit_not_implemented() {
     let host = RealHost::new();
     for (got, name) in [
-        (host.mission_read("p", &Value::Map(vec![])), "mission.read"),
         (
             host.mission_write("p", &Value::Map(vec![])),
             "mission.write",
@@ -3440,3 +3437,21 @@ fn mdns_methods_are_gated_on_the_network_capabilities() {
 }
 
 mod router_link_tests;
+
+#[test]
+fn mission_read_serves_the_router_mirror_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = RealHost::new().with_vehicle_state_socket(dir.path().join("state.sock"));
+    // Nothing mirrored yet: an empty, not-present mission.
+    let m = ok_map(host.mission_read("p", &Value::Map(vec![])));
+    assert_eq!(field(&m, "present").and_then(Value::as_bool), Some(false));
+    std::fs::write(
+        dir.path().join("mission-mirror.json"),
+        r#"{"rev":4,"present":true,"count":1,"home_slot":true,"items":[{"seq":0,"command":16,"x":470000000,"y":85000000,"z":30.0}]}"#,
+    )
+    .unwrap();
+    let m = ok_map(host.mission_read("p", &Value::Map(vec![])));
+    assert_eq!(field(&m, "rev").and_then(Value::as_u64), Some(4));
+    let items = field(&m, "items").and_then(Value::as_array).unwrap();
+    assert_eq!(items.len(), 1);
+}

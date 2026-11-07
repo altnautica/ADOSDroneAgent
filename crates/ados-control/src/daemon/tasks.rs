@@ -110,6 +110,18 @@ where
         state.nav.clone(),
     );
 
+    // The vision engine's depth broadcast feeding the nav kinds `depth` and
+    // `surfaces`. An absent socket (vision off, no depth model) leaves both
+    // `null`.
+    let depth_handle = crate::ipc::vision_depth_client::spawn(
+        crate::ipc::vision_depth_client::default_depth_socket(),
+        state.nav.clone(),
+    );
+
+    // The AR scene producer: projects the mission, home and follow geometry
+    // into the cameras a surface is watching (nav kind `ar`).
+    let ar_task = crate::ar::spawn(&paths.config_path, state.state.clone(), state.nav.clone());
+
     // Native-vs-residual gate for the PIC / gamepad / Bluetooth writes, resolved
     // once at startup (the profile is fixed for the process). Those are served
     // natively only on the profiles whose unit table runs the daemons binding
@@ -322,6 +334,10 @@ where
     battery_handle.shutdown().await;
     swarm_handle.shutdown().await;
     events_handle.shutdown().await;
+    depth_handle.shutdown().await;
+    if let Some(task) = ar_task {
+        task.abort();
+    }
 
     // tmpfs cleanup: a stale socket path confuses a probing reader on restart.
     let _ = std::fs::remove_file(&paths.control_socket);

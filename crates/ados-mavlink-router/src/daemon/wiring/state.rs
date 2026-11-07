@@ -62,6 +62,19 @@ pub(in crate::daemon) fn spawn(
         Some(status)
     };
 
+    // Mission mirror and mission state: reads the FC fan-out and the client
+    // writes, publishes `mission` into the state snapshot and the mirror file.
+    {
+        let fc2 = fc.clone();
+        let client_rx = fc.subscribe_client_writes();
+        let state = state.clone();
+        let dir = dir.to_string();
+        let cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            crate::mission_mirror::run(fc2, state, client_rx, dir, cancel).await
+        }));
+    }
+
     {
         let fc = fc.clone();
         let state = state.clone();

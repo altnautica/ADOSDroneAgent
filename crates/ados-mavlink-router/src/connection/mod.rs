@@ -153,6 +153,10 @@ pub struct FcConnection {
     /// with the number of attached consumers. The bytes are unchanged — a frame
     /// is still forwarded verbatim.
     frame_tx: broadcast::Sender<RxFrame>,
+    /// Every MAVLink write a client sent toward the FC (after the gates), for
+    /// the mission mirror's view of transfers and pause commands it cannot see
+    /// on `frame_tx`. Lossy: a lagging reader drops the oldest.
+    client_tap: broadcast::Sender<Bytes>,
     /// Raw FC->host byte lane. Populated only for an MSP FC (Betaflight/iNav),
     /// whose FC->host bytes are MSP responses, not MAVLink frames, so they never
     /// appear on `frame_tx` (extract_frames yields nothing). Empty for a MAVLink
@@ -324,6 +328,7 @@ impl FcConnection {
     ) -> std::sync::Arc<Self> {
         let (frame_tx, _) = broadcast::channel(FRAME_CHANNEL_CAP);
         let (raw_tx, _) = broadcast::channel(FRAME_CHANNEL_CAP);
+        let (client_tap, _) = broadcast::channel(FRAME_CHANNEL_CAP);
         let gate_feed = std::sync::Arc::new(injector_gate::GateFeed::new());
         let injector_gate = cfg
             .injector_arbitration_active()
@@ -335,6 +340,7 @@ impl FcConnection {
             state,
             params,
             frame_tx,
+            client_tap,
             raw_tx,
             writer: Mutex::new(None),
             reconnect: tokio::sync::watch::channel(None).0,
@@ -386,6 +392,11 @@ impl FcConnection {
     /// Subscribe to the raw inbound frame stream (the MAVLink socket + proxies).
     pub fn subscribe(&self) -> broadcast::Receiver<RxFrame> {
         self.frame_tx.subscribe()
+    }
+
+    /// Subscribe to the client writes toward the FC (see `client_tap`).
+    pub fn subscribe_client_writes(&self) -> broadcast::Receiver<Bytes> {
+        self.client_tap.subscribe()
     }
 
     /// The route-aware forwarding hub.

@@ -6,6 +6,23 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.19] - 2026-11-07
+
+### Added
+
+- Mission state, computed once on the agent. The vehicle-state snapshot (`state.v2` body version 5) carries `mission`: `state` (`none`, `loaded`, `active`, `paused`, `complete` or `returning`), `seq`, `total`, `item_reached`, `id`, `source` (`mission_state` when the flight controller reports it, `fallback` on firmware that does not, such as ArduPilot before 4.5), `age_ms`, `landing_seq` (the AUTO_RTL landing sequence), plus the mirror's `rev`, its navigation items and `uploads_seen` (uploads by any ground station through the router that the flight controller accepted). It is derived from numeric flight modes, MISSION_CURRENT with its extension fields, MISSION_ITEM_REACHED, DO_PAUSE_CONTINUE and its acknowledgement, never from mode names. Copter, Plane and PX4 mode numbers are covered.
+- The router keeps a mirror of the flight controller's main mission. It captures a ground station's download or upload passing through it, and otherwise downloads the mission itself at the first heartbeat, after an upload it could not capture, and when MISSION_CURRENT's `total` disagrees with it. A download starts only after 3 s without another component transferring, stops the moment one starts, retries each reply three times after 1 s and backs off 2 to 30 s after a failure.
+- `GET /api/v1/mission`: the mirrored mission, every MISSION_ITEM_INT field in field order, with the live mission state. The plugin method `mission.read` returns the same mirror; the `mission.read` capability can now be granted.
+- The snapshot also carries `home` (HOME_POSITION in both frames), `gimbal` (gimbal pitch and yaw from GIMBAL_DEVICE_ATTITUDE_STATUS, or MOUNT_ORIENTATION when that is absent, with an earth-frame flag and age), `prearm` (PreArm and Arm messages from the last 10 s) and `attitude.time_boot_ms`.
+- The AR scene: the nav stream kind `ar` projects the mission route (next, after and other waypoints, the active, next and future legs), home, edge arrows for an off-screen next waypoint or home, the flight-path vector and the follow path, goal and orbit into each camera, normalised to the image, every item keyed by `k`. The route shows while a mission is active or paused, and as a preview while loaded on the ground. Configured by `ar.enabled` (default true) and `ar.rate_hz` (default 10).
+- View leases on `WS /api/v1/nav/stream`: a client sends `{"type":"view","camera_id","layers":[…]}` (layers `ar_route`, `ar_motion`, `obstacles`, `depth`, `surfaces`) and re-sends it every 2 s; a polling client passes `?view=<camera_id>:<layer,…>` on `GET /api/v1/nav/status`. Overlays are computed only for leased cameras and layers, once per camera however many surfaces watch it, at 10 Hz rising to 20 Hz while the view moves fast; an unchanged frame is not resent, only a 1 Hz keep-alive. Each client receives only its leased camera. `GET /api/v1/nav/status` reports the union as `view_demand`. The nav stream gains the kinds `pilot`, `obstacles`, `depth` and `surfaces` for host producers.
+- The control plane serves the vision engine's `vision-depth.sock` records as the nav kinds `depth` (`{v, ts_ms, scale_source, cameras:{<id>:{cols, rows, scale_source, near, measured}}}`) and `surfaces` (`{v, ts_ms, camera_id, zones:[{pts, score, slope_deg}]}`).
+
+### Changed
+
+- The drone stream table requests LOCAL_POSITION_NED at 50 Hz, and adds EXTENDED_SYS_STATE (2 Hz), HOME_POSITION (every 5 s), GIMBAL_DEVICE_ATTITUDE_STATUS (10 Hz) and MISSION_CURRENT (2 Hz).
+- The state socket's body version is 5. Every reader in this release reads it; a reader from an older release skips the frames until it is upgraded too.
+
 ## [0.108.18] - 2026-11-07
 
 ### Added
@@ -20,6 +37,7 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 - Ground station CRSF lane: in control modes `ados` and `fc_manual` the operator's pad no longer flies over ELRS. The lane sends a neutral set (sticks and throttle centred, aux channels idle) at its frame rate, so the ELRS link and the receiver stay up as the backup lane and the FC sees no RC failsafe; a live programmatic injection still flies under inject authority. Control mode `elrs` keeps the previous behaviour. With no ground-station input state file the mode defaults to `ados`. The lane reports `channel_source: "neutral"` while it sends the neutral set.
 
+||||||| Stash base
 ## [0.108.17] - 2026-11-07
 
 ### Fixed

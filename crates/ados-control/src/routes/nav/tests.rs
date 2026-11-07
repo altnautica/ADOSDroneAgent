@@ -9,6 +9,7 @@ use super::hub::{
     TOPIC_FOLLOW_LOST, TOPIC_FOLLOW_REACQUIRED, TOPIC_FOLLOW_STATE, TOPIC_MAP_STATUS,
     TOPIC_NAV_STATE, TOPIC_OCCUPANCY, TOPIC_POSE, TOPIC_SCAN,
 };
+use super::hub::{ClientView, KIND_COUNT};
 use super::tiles::MAX_TILES;
 use crate::mcp::route_scope;
 use crate::routes::gs_ws::WsAuth;
@@ -107,7 +108,7 @@ async fn the_status_route_serves_the_hub() {
         7,
         json!({"phase": "coasting"}),
     );
-    let Json(body) = get_nav_status(State(state)).await;
+    let Json(body) = get_nav_status(State(state), Query(NavStatusQuery::default())).await;
     assert_eq!(body["follow"]["data"]["phase"], "coasting");
     assert_eq!(body["scan"], Value::Null);
 }
@@ -117,14 +118,14 @@ async fn the_status_route_serves_the_hub() {
 #[test]
 fn frames_since_sends_only_the_latest_of_each_changed_kind() {
     let hub = NavHub::new();
-    let mut sent = [0u64; 5];
-    assert!(hub.frames_since(&mut sent).is_empty());
+    let mut sent = [0u64; KIND_COUNT];
+    assert!(hub.frames_since(&mut sent, ClientView::All).is_empty());
 
     for n in 0..5 {
         hub.ingest(TOPIC_POSE, WORLD_ENGINE_ID, n, json!({"n": n}));
     }
     hub.ingest(TOPIC_SCAN, WORLD_ENGINE_ID, 9, json!({"ranges_m": []}));
-    let frames = hub.frames_since(&mut sent);
+    let frames = hub.frames_since(&mut sent, ClientView::All);
     assert_eq!(frames.len(), 2, "one frame per changed kind: {frames:?}");
     assert_eq!(frames[0]["kind"], "pose");
     assert_eq!(frames[0]["data"]["n"], 4);
@@ -132,14 +133,14 @@ fn frames_since_sends_only_the_latest_of_each_changed_kind() {
     assert_eq!(frames[1]["kind"], "scan");
 
     // Nothing changed: nothing to send.
-    assert!(hub.frames_since(&mut sent).is_empty());
+    assert!(hub.frames_since(&mut sent, ClientView::All).is_empty());
     hub.ingest(
         TOPIC_MAP_STATUS,
         WORLD_ENGINE_ID,
         10,
         json!({"voxel_m": 0.1}),
     );
-    let frames = hub.frames_since(&mut sent);
+    let frames = hub.frames_since(&mut sent, ClientView::All);
     assert_eq!(frames.len(), 1);
     assert_eq!(frames[0]["kind"], "map");
 }
@@ -358,4 +359,63 @@ fn test_state(dir: &std::path::Path) -> AppState {
             dir.join("mcp-token.json"),
         )),
     )
+}
+
+// -- host kinds and view leases ----------------------------------------------
+
+fn two_camera_frame() -> Value {
+    json!({"v": 1, "ts_ms": 5, "approx": false, "reason": null,
+           "cameras": {"main": {"items": [1]}, "down": {"items": [2]}},
+           "sectors_m": [1.0]})
+}
+
+#[test]
+fn a_client_leasing_main_never_receives_down() {
+    let hub = NavHub::new();
+    hub.ingest_host(NavKind::Ar, 5, two_camera_frame());
+    hub.ingest_host(NavKind::Obstacles, 5, two_camera_frame());
+    hub.ingest_host(NavKind::Pilot, 5, json!({"owner": "pilot"}));
+    let lease = ViewLease::from_query("main:ar_route").unwrap();
+    let mut sent = [0u64; KIND_COUNT];
+    let frames = hub.frames_since(&mut sent, ClientView::Lease(Some(&lease)));
+    let ar = frames.iter().find(|f| f["kind"] == "ar").unwrap();
+    assert!(ar["data"]["cameras"].get("main").is_some());
+    assert!(ar["data"]["cameras"].get("down").is_none());
+    // Obstacles always go (sectors for the radar card) but carry no camera
+    // grid for a layer this client does not draw.
+    let obs = frames.iter().find(|f| f["kind"] == "obstacles").unwrap();
+    assert_eq!(obs["data"]["cameras"], json!({}));
+    assert_eq!(obs["data"]["sectors_m"], json!([1.0]));
+    assert!(frames.iter().any(|f| f["kind"] == "pilot"));
+}
+
+#[test]
+fn a_client_without_a_lease_gets_no_overlay_frames() {
+    let hub = NavHub::new();
+    hub.ingest_host(NavKind::Ar, 5, two_camera_frame());
+    hub.ingest_host(NavKind::Depth, 5, two_camera_frame());
+    hub.ingest_host(NavKind::Surfaces, 5, json!({"camera_id": "main", "zones": []}));
+    let mut sent = [0u64; KIND_COUNT];
+    assert!(hub.frames_since(&mut sent, ClientView::Lease(None)).is_empty());
+    let lease = ViewLease::from_query("main:surfaces").unwrap();
+    let mut sent = [0u64; KIND_COUNT];
+    let frames = hub.frames_since(&mut sent, ClientView::Lease(Some(&lease)));
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0]["kind"], "surfaces");
+}
+
+#[test]
+fn status_view_query_leases_and_reports_the_demand() {
+    let hub = NavHub::new();
+    let mut demand = hub.view_demand();
+    assert!(demand.borrow_and_update().cameras.is_empty());
+    hub.ingest_host(NavKind::Ar, 5, two_camera_frame());
+    let body = hub.status_body_for(Some("down:ar_motion,obstacles"));
+    assert!(body["ar"]["data"]["cameras"].get("main").is_none());
+    assert!(body["ar"]["data"]["cameras"].get("down").is_some());
+    assert_eq!(body["view_demand"], json!({"down": ["ar_motion", "obstacles"]}));
+    assert!(demand.has_changed().unwrap());
+    assert!(demand.borrow().wants("down", "ar_motion"));
+    // Without a view the status is unfiltered.
+    assert!(hub.status_body()["ar"]["data"]["cameras"].get("main").is_some());
 }
