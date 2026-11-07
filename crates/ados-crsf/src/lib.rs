@@ -23,6 +23,7 @@
 
 pub mod cmdsock;
 pub mod config;
+pub mod control_mode;
 pub mod daemon;
 pub mod hid;
 pub mod injector;

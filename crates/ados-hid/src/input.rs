@@ -195,10 +195,7 @@ impl HotplugTracker {
     /// Persist the current primary to the sidecar. Best-effort; the caller logs
     /// an error and continues on failure.
     pub fn save_primary(&self, path: &Path) -> std::io::Result<()> {
-        let blob = GroundStationInput {
-            primary: self.primary.clone(),
-        };
-        blob.save(path)
+        GroundStationInput::save_primary(path, self.primary.clone())
     }
 }
 

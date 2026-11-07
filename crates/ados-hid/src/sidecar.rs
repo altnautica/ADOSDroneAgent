@@ -20,11 +20,15 @@ pub const GS_INPUT_JSON: &str = "/etc/ados/ground-station-input.json";
 
 /// The `ground-station-input.json` payload. A single `primary` field naming
 /// the input device id the ground station treats as the primary controller.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroundStationInput {
     /// Device id of the primary input, or `None` when unset.
     #[serde(default)]
     pub primary: Option<String>,
+    /// The Settings › Controls binding document (`PUT
+    /// /api/v1/ground-station/input/bindings`), `None` for the ADOS default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<crate::pilot_input::bindings::ControlsDoc>,
 }
 
 impl GroundStationInput {
@@ -32,7 +36,25 @@ impl GroundStationInput {
     pub fn new(primary: impl Into<String>) -> Self {
         Self {
             primary: Some(primary.into()),
+            bindings: None,
         }
+    }
+
+    /// Change the primary, keeping the rest of the file.
+    pub fn save_primary(path: &Path, primary: Option<String>) -> std::io::Result<()> {
+        let mut cur = Self::load(path).unwrap_or(Self { primary: None, bindings: None });
+        cur.primary = primary;
+        cur.save(path)
+    }
+
+    /// Change the bindings, keeping the rest of the file.
+    pub fn save_bindings(
+        path: &Path,
+        bindings: crate::pilot_input::bindings::ControlsDoc,
+    ) -> std::io::Result<()> {
+        let mut cur = Self::load(path).unwrap_or(Self { primary: None, bindings: None });
+        cur.bindings = Some(bindings);
+        cur.save(path)
     }
 
     /// Read the selection from `path`. Returns `None` when the file is missing
@@ -83,7 +105,7 @@ mod tests {
     fn unset_primary_serializes_null() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ground-station-input.json");
-        let sel = GroundStationInput { primary: None };
+        let sel = GroundStationInput { primary: None, bindings: None };
         sel.save(&path).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(v["primary"].is_null());

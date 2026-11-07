@@ -123,10 +123,28 @@ async fn serve() -> Result<()> {
     // tracker (the single owner of the live primary) and persists the sidecar in
     // lockstep, rather than touching only the on-disk record. Always served — the
     // primary selection is a ground-station write the GCS Hardware tab drives.
+    // The binding document (Settings › Controls) and the present primary pad,
+    // shared with the native controller loop.
+    let saved = crate::sidecar::GroundStationInput::load(state_path).and_then(|g| g.bindings);
+    let (bindings_tx, bindings_rx) = tokio::sync::watch::channel(
+        saved.unwrap_or_else(crate::pilot_input::bindings::ControlsDoc::ados_default),
+    );
+    let (primary_tx, primary_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+    #[cfg(target_os = "linux")]
+    tokio::spawn(crate::pilot_input::runner::run(crate::pilot_input::runner::RunnerConfig {
+        pilot_sock: crate::paths::pilot_sock(),
+        state_path: crate::paths::gs_input_state_json(),
+        bindings: bindings_rx,
+        primary: primary_rx,
+    }));
+    #[cfg(not(target_os = "linux"))]
+    drop((bindings_rx, primary_rx));
+
     {
         let cmd_state = CmdState {
             tracker: tracker.clone(),
             sidecar_path: state_path.to_path_buf(),
+            bindings: bindings_tx,
         };
         tokio::spawn(async move {
             let sock = hid_cmd_sock();
@@ -151,6 +169,12 @@ async fn serve() -> Result<()> {
                 let snapshot = enumerate();
                 let outcome = {
                     let mut t = tracker.lock().await;
+                    let present = t.primary().filter(|p| snapshot.contains_key(*p)).map(str::to_string);
+                    primary_tx.send_if_modified(|cur| {
+                        let changed = *cur != present;
+                        *cur = present;
+                        changed
+                    });
                     t.poll(snapshot)
                 };
                 handle_outcome(&outcome, state_path).await;
@@ -177,10 +201,9 @@ async fn handle_outcome(outcome: &PollOutcome, state_path: &Path) {
     if let Some(primary) = &outcome.auto_primary {
         tracing::info!(device_id = %primary, "input primary auto-assigned");
         // The tracker already holds the new primary; persist it.
-        let blob = crate::sidecar::GroundStationInput {
-            primary: Some(primary.clone()),
-        };
-        if let Err(e) = blob.save(state_path) {
+        if let Err(e) =
+            crate::sidecar::GroundStationInput::save_primary(state_path, Some(primary.clone()))
+        {
             tracing::error!(error = %e, "failed to persist input primary");
         }
     }

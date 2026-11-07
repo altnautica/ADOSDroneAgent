@@ -3,7 +3,7 @@
 //! they are registered (and native) only then.
 
 use crate::routes::table::Routes;
-use crate::routes::{gs_bluetooth, gs_gamepad_write, gs_pic};
+use crate::routes::{gs_bluetooth, gs_gamepad_write, gs_input_native, gs_pic};
 use crate::state::AppState;
 
 pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
@@ -23,6 +23,10 @@ pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
         .put(
             "/api/v1/ground-station/gamepads/primary",
             gs_gamepad_write::put_gamepad_primary,
+        )
+        .put(
+            "/api/v1/ground-station/input/bindings",
+            gs_input_native::put_bindings,
         )
         .post(
             "/api/v1/ground-station/bluetooth/scan",

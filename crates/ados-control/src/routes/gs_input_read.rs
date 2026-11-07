@@ -164,7 +164,7 @@ fn primary_device_id(path: &Path) -> Value {
 /// override), else sits beside the agent config (`<config-dir>/ground-station-input.json`),
 /// which on a real install is `/etc/ados/ground-station-input.json` — the same
 /// path the Python input service persists the primary selection to.
-fn gs_input_json_path(state: &AppState) -> PathBuf {
+pub(crate) fn gs_input_json_path(state: &AppState) -> PathBuf {
     if let Ok(p) = std::env::var("ADOS_GS_INPUT") {
         if !p.is_empty() {
             return PathBuf::from(p);

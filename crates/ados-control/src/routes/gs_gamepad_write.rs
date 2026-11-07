@@ -52,14 +52,14 @@ use crate::state::AppState;
 /// `current_profile_and_role` (the same source of truth the node advertises on
 /// the wire), so a `profile: auto` node that resolves to a ground station via
 /// `profile.conf` passes the gate, matching the Python `_require_ground_profile`.
-fn is_ground_station(state: &AppState) -> bool {
+pub(crate) fn is_ground_station(state: &AppState) -> bool {
     let cfg = crate::config::PairingConfig::load_from(&state.pairing_paths.config);
     let (profile, _role) = crate::profile::current_profile_and_role(&cfg.agent.profile);
     profile == "ground-station"
 }
 
 /// The `404` profile-mismatch response, byte-identical to the FastAPI gate.
-fn profile_mismatch() -> Response {
+pub(crate) fn profile_mismatch() -> Response {
     (
         StatusCode::NOT_FOUND,
         Json(json!({"detail": {"error": {"code": "E_PROFILE_MISMATCH"}}})),

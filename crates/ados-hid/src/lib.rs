@@ -40,4 +40,5 @@ pub mod paths;
 pub mod pic_ipc;
 pub mod pic_sidecar;
 pub mod pic_view;
+pub mod pilot_input;
 pub mod sidecar;

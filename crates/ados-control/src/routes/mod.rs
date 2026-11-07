@@ -34,6 +34,7 @@ pub mod gs_fleet_enroll;
 pub mod gs_fleet_hero;
 pub mod gs_fleet_slot;
 pub mod gs_gamepad_write;
+pub mod gs_input_native;
 pub mod gs_input_read;
 pub mod gs_mesh;
 pub mod gs_mesh_write;

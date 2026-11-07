@@ -268,6 +268,10 @@ fn ui_and_input(r: Routes<AppState>) -> Routes<AppState> {
             gs_input_read::get_gamepads,
         )
         .get(
+            "/api/v1/ground-station/input",
+            crate::routes::gs_input_native::get_input,
+        )
+        .get(
             "/api/v1/ground-station/bluetooth/paired",
             gs_input_read::get_bluetooth_paired,
         )

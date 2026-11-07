@@ -6,6 +6,20 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.108.18] - 2026-11-07
+
+### Added
+
+- Ground station: native controller flight. `ados-input` reads the primary pad (DualShock 4 over USB or Bluetooth, or any standard pad) at 50 Hz and, in control mode `ados`, streams pilot `input` frames (src `gs-native`, Mode 2 default, radial deadzone 0.08) to the ground station's pilot relay socket `/run/ados/pilot.sock`. A lost pad, a failed poll, a dropped relay or a mode other than `ados` sends `release`. Both DualShock 4 kernel maps are read: `hid-playstation`, and the older `hid-sony` map (right stick on `ABS_Z/RZ`, triggers on `ABS_HAT2*`) for a pad without `ABS_RX`. The map, gestures, colours and patterns come from the cockpit spec `ds4.json`, compiled in.
+- Ground station: the safety buttons run natively in every control mode. PS brakes the moment it goes down; held on for 2 s it returns home (rumble countdown); PS during RTH cancels to a hold; Options + Circle is the PS fallback (same press and hold); L1 + R1 held 2 s with the left stick centred arms; L2 + R2 + Circle held 3 s kills. L2 + R2 + Share held 2 s is the emergency ELRS lane: it sends `control_mode:elrs` to the drone and switches the station's CRSF lane at once, latched until the drone reports `elrs`.
+- Ground station: the DualShock 4 lightbar (multicolour LED class) and rumble (`FF_RUMBLE`) follow the drone's pilot state: disarmed green, armed idle white, pilot blue, skill cyan, mission magenta, RTH amber blinking at 1 Hz, low-battery RTH red pulsing at 0.5 Hz, failsafe or lost link red blinking at 4 Hz; one short rumble on an owner or skill change, two on a warning, three long on a critical. The battery level is read from `ps-controller-battery-*`.
+- `GET /api/v1/ground-station/input`: `native_sticks` (the kiosk cockpit then ignores the sticks and the safety buttons), `pilot_relay`, `streaming`, `control_mode` with `control_mode_source`, `controller {id, name, connection, driver, battery_pct}`, and the effective binding document. Read from the new runtime file `/run/ados/gs-input-state.json`.
+- `PUT /api/v1/ground-station/input/bindings` takes the Settings › Controls document. A document without a locked binding (pause press, RTH hold, arm combo, kill combo; each on pressable buttons, held at least as long as the default and under the default's condition) is refused 422 `E_LOCKED_BINDINGS_MISSING` with the missing list; an accepted one applies at once and is saved in `/etc/ados/ground-station-input.json` next to `primary`.
+
+### Changed
+
+- Ground station CRSF lane: in control modes `ados` and `fc_manual` the operator's pad no longer flies over ELRS. The lane sends a neutral set (sticks and throttle centred, aux channels idle) at its frame rate, so the ELRS link and the receiver stay up as the backup lane and the FC sees no RC failsafe; a live programmatic injection still flies under inject authority. Control mode `elrs` keeps the previous behaviour. With no ground-station input state file the mode defaults to `ados`. The lane reports `channel_source: "neutral"` while it sends the neutral set.
+
 ## [0.108.17] - 2026-11-07
 
 ### Fixed

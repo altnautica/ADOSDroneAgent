@@ -45,6 +45,16 @@ pub fn hid_cmd_sock() -> PathBuf {
     run_dir().join(HID_CMD_SOCK_NAME)
 }
 
+/// The native controller's runtime sidecar under the resolved runtime dir.
+pub fn gs_input_state_json() -> PathBuf {
+    run_dir().join(crate::pilot_input::status::GS_INPUT_STATE)
+}
+
+/// The ground station's pilot relay socket (`pilot.v1`, served by ados-control).
+pub fn pilot_sock() -> PathBuf {
+    run_dir().join("pilot.sock")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

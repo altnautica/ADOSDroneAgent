@@ -21,6 +21,9 @@
 //!     -> {"ok":true,"primary_id":"usb:045e:028e:event3"}   (or null when unset)
 //! {"op":"clear_primary"}
 //!     -> {"ok":true,"primary_id":null}
+//! {"op":"set_bindings","doc":{…the Settings › Controls document…}}
+//!     -> {"ok":true}  |  {"ok":false,"error":"E_LOCKED_BINDINGS_MISSING","missing":[…]}
+//!                     |  {"ok":false,"error":"E_INVALID_BINDINGS","message":"…"}
 //! ```
 //!
 //! `clear_primary` drops the running primary (and persists the cleared sidecar),
@@ -43,6 +46,7 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use crate::input::HotplugTracker;
+use crate::pilot_input::bindings::{ControlsDoc, DocError};
 
 /// Cap on a single request line so a malformed client can't grow the buffer.
 const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -54,6 +58,8 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub struct CmdState {
     pub tracker: Arc<Mutex<HotplugTracker>>,
     pub sidecar_path: PathBuf,
+    /// The live binding document the native controller loop follows.
+    pub bindings: tokio::sync::watch::Sender<ControlsDoc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,6 +67,8 @@ struct Request {
     op: String,
     #[serde(default)]
     device_id: Option<String>,
+    #[serde(default)]
+    doc: Option<Value>,
 }
 
 /// Bind the command socket and serve one-shot requests until the listener errors.
@@ -92,12 +100,13 @@ pub async fn serve(state: CmdState, sock_path: &Path) -> std::io::Result<()> {
 /// The shared `Primary` suffix is deliberate: this socket exists solely to drive
 /// the primary-gamepad selection, so each variant naming the thing it acts on
 /// reads clearer at the call site than a bare `Set` / `Get` / `Clear`.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 enum Command {
     SetPrimary { device_id: String },
     GetPrimary,
     ClearPrimary,
+    SetBindings { doc: Box<ControlsDoc> },
 }
 
 /// The outcome of parsing a request line: an apply-ready [`Command`], or a
@@ -124,7 +133,30 @@ fn parse_command(line: &[u8]) -> Parsed {
         },
         "get_primary" => Parsed::Cmd(Command::GetPrimary),
         "clear_primary" => Parsed::Cmd(Command::ClearPrimary),
+        "set_bindings" => {
+            let doc = req.doc.map(serde_json::from_value::<ControlsDoc>);
+            match doc {
+                Some(Ok(doc)) => match doc.validate() {
+                    Ok(()) => Parsed::Cmd(Command::SetBindings { doc: Box::new(doc) }),
+                    Err(e) => Parsed::Reply(bindings_error(&e)),
+                },
+                Some(Err(e)) => Parsed::Reply(
+                    json!({"ok": false, "error": "E_INVALID_BINDINGS", "message": e.to_string()}),
+                ),
+                None => Parsed::Reply(json!({"ok": false, "error": "E_MISSING_DOC"})),
+            }
+        }
         other => Parsed::Reply(json!({"ok": false, "error": format!("E_UNKNOWN_OP: {other}")})),
+    }
+}
+
+/// The reply for a refused binding document.
+pub fn bindings_error(e: &DocError) -> Value {
+    match e {
+        DocError::MissingLocked(missing) => {
+            json!({"ok": false, "error": "E_LOCKED_BINDINGS_MISSING", "missing": missing})
+        }
+        DocError::Invalid(m) => json!({"ok": false, "error": "E_INVALID_BINDINGS", "message": m}),
     }
 }
 
@@ -176,6 +208,14 @@ async fn apply(cmd: Command, state: &CmdState) -> Value {
                 }),
             }
         }
+        Command::SetBindings { doc } => {
+            // The running loop follows at once; the file is the durable mirror.
+            state.bindings.send_replace((*doc).clone());
+            match crate::sidecar::GroundStationInput::save_bindings(&state.sidecar_path, *doc) {
+                Ok(()) => json!({"ok": true}),
+                Err(e) => json!({"ok": true, "persist_error": e.to_string()}),
+            }
+        }
     }
 }
 
@@ -203,7 +243,35 @@ mod tests {
         CmdState {
             tracker: Arc::new(Mutex::new(HotplugTracker::new(None))),
             sidecar_path: dir.join("ground-station-input.json"),
+            bindings: tokio::sync::watch::channel(ControlsDoc::ados_default()).0,
         }
+    }
+
+    #[tokio::test]
+    async fn set_bindings_validates_applies_and_persists_next_to_the_primary() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = state(dir.path());
+        let mut rx = st.bindings.subscribe();
+        crate::sidecar::GroundStationInput::new("usb:054c:09cc:event5")
+            .save(&st.sidecar_path)
+            .unwrap();
+
+        let mut doc = ControlsDoc::ados_default();
+        doc.bindings.retain(|b| b.action != "kill");
+        let line = serde_json::to_vec(&json!({"op":"set_bindings","doc":doc})).unwrap();
+        let v = dispatch(&line, &st).await;
+        assert_eq!(v["error"], "E_LOCKED_BINDINGS_MISSING");
+        assert_eq!(v["missing"], json!(["kill:hold:combo"]));
+
+        let mut doc = ControlsDoc::ados_default();
+        doc.stick_mode = "mode1".to_string();
+        let line = serde_json::to_vec(&json!({"op":"set_bindings","doc":doc})).unwrap();
+        assert_eq!(dispatch(&line, &st).await, json!({"ok": true}));
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(rx.borrow_and_update().stick_mode, "mode1");
+        let saved = crate::sidecar::GroundStationInput::load(&st.sidecar_path).unwrap();
+        assert_eq!(saved.primary.as_deref(), Some("usb:054c:09cc:event5"));
+        assert_eq!(saved.bindings.unwrap().stick_mode, "mode1");
     }
 
     #[test]

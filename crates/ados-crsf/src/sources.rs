@@ -36,10 +36,21 @@
 //! values are stored but never transmitted — authority never silently falls
 //! through to the other source, because a source that did not win must not
 //! fly the aircraft.
+//!
+//! # Control mode
+//!
+//! The drone's `control.mode` (relayed to the ground station and published in
+//! the ground-station input sidecar) decides whether the operator's gamepad
+//! flies over this lane at all. In `elrs` everything above applies. In `ados`
+//! and `fc_manual` another lane flies: the HID source is off and the lane
+//! sends the [`neutral_channels`] set, which keeps the ELRS link and receiver
+//! alive as the backup lane; a live injection still wins under inject
+//! authority, since the programmatic lane is independent of the operator's pad.
 
 use std::time::{Duration, Instant};
 
 use ados_crsf_codec::bank::{BankError, ChannelBank};
+pub use ados_hid::pilot_input::status::ControlMode;
 use ados_crsf_codec::channels::CHANNEL_COUNT;
 
 // The PIC-verdict authority half lives in `ados-hid::pic_view` (ground-profile,
@@ -86,6 +97,8 @@ pub const HID_STALE_AFTER: Duration = Duration::from_millis(600);
 pub enum ChannelSource {
     Hid,
     Inject,
+    /// The neutral backup set (control mode `ados` / `fc_manual`).
+    Neutral,
 }
 
 impl ChannelSource {
@@ -93,6 +106,7 @@ impl ChannelSource {
         match self {
             Self::Hid => "hid",
             Self::Inject => "inject",
+            Self::Neutral => "neutral",
         }
     }
 }
@@ -138,16 +152,38 @@ pub struct SourceMerge {
     /// genuinely unknown, so a fresh hybrid merge holds SAFE (the injector does
     /// not fly until the arbiter affirmatively reports).
     pic: Option<PicView>,
+    /// The drone's control mode as the ground station knows it.
+    control: ControlMode,
+}
+
+/// The neutral set the lane sends while the drone is not flown over ELRS:
+/// sticks and throttle centred, the aux channels at their idle values.
+pub fn neutral_channels() -> [u16; CHANNEL_COUNT] {
+    let mut v = ChannelBank::default().values();
+    v[..4].fill(ados_crsf_codec::channels::CHANNEL_MID);
+    v
 }
 
 impl SourceMerge {
+    /// A merge in `elrs` control mode (the lane's own sources fly); the daemon
+    /// sets the real mode from the ground-station input sidecar before the
+    /// transmitter starts.
     pub fn new(mode: ChannelSourceMode) -> Self {
         Self {
             mode,
             inject: None,
             hid: None,
             pic: None,
+            control: ControlMode::Elrs,
         }
+    }
+
+    pub fn set_control_mode(&mut self, control: ControlMode) {
+        self.control = control;
+    }
+
+    pub fn control_mode(&self) -> ControlMode {
+        self.control
     }
 
     pub fn mode(&self) -> ChannelSourceMode {
@@ -256,7 +292,15 @@ impl SourceMerge {
     /// controller run their own failsafe. The losing source's values are
     /// never transmitted.
     pub fn current(&self, now: Instant) -> Option<([u16; CHANNEL_COUNT], ChannelSource)> {
-        match self.authority(now) {
+        let authority = self.authority(now);
+        if self.control != ControlMode::Elrs {
+            let injected = (authority == Authority::Inject)
+                .then(|| self.live_inject(now))
+                .flatten()
+                .map(|live| (live.bank.values(), ChannelSource::Inject));
+            return Some(injected.unwrap_or((neutral_channels(), ChannelSource::Neutral)));
+        }
+        match authority {
             Authority::Inject => self
                 .live_inject(now)
                 .map(|live| (live.bank.values(), ChannelSource::Inject)),
@@ -380,6 +424,56 @@ mod tests {
             .inject_all([CHANNEL_MAX; CHANNEL_COUNT], DEFAULT_INJECT_TTL, now, None)
             .unwrap();
         assert_eq!(merge.current(now), None);
+    }
+
+    // ── control mode ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn ados_and_fc_manual_send_neutral_and_ignore_the_pad() {
+        let now = t0();
+        for control in [ControlMode::Ados, ControlMode::FcManual] {
+            let mut merge = SourceMerge::new(ChannelSourceMode::Hid);
+            merge.set_control_mode(control);
+            // Nothing live at all: still neutral frames, never silence.
+            let (v, s) = merge.current(now).unwrap();
+            assert_eq!(s, ChannelSource::Neutral);
+            assert_eq!(v, neutral_channels());
+            // A deflected stick does not fly over this lane.
+            merge.set_hid([CHANNEL_MAX; CHANNEL_COUNT], now).unwrap();
+            assert_eq!(merge.current(now), Some((neutral_channels(), ChannelSource::Neutral)));
+        }
+    }
+
+    #[test]
+    fn neutral_is_aetr_centre_with_aux_idle() {
+        let v = neutral_channels();
+        assert!(v[..4].iter().all(|&c| c == CHANNEL_MID));
+        assert!(v[4..].iter().all(|&c| c == CHANNEL_MIN));
+    }
+
+    #[test]
+    fn elrs_mode_is_todays_lane_and_switches_live() {
+        let now = t0();
+        let mut merge = SourceMerge::new(ChannelSourceMode::Hid);
+        merge.set_control_mode(ControlMode::Elrs);
+        assert_eq!(merge.current(now), None, "no live pad: the receiver failsafes");
+        merge.set_hid([CHANNEL_MAX; CHANNEL_COUNT], now).unwrap();
+        assert_eq!(merge.current(now), Some(([CHANNEL_MAX; CHANNEL_COUNT], ChannelSource::Hid)));
+        merge.set_control_mode(ControlMode::Ados);
+        assert_eq!(merge.current(now).unwrap().1, ChannelSource::Neutral);
+        merge.set_control_mode(ControlMode::Elrs);
+        assert_eq!(merge.current(now).unwrap().1, ChannelSource::Hid);
+    }
+
+    #[test]
+    fn a_live_injection_still_flies_under_inject_authority_in_ados_mode() {
+        let now = t0();
+        let mut merge = SourceMerge::new(ChannelSourceMode::Inject);
+        merge.set_control_mode(ControlMode::Ados);
+        merge
+            .inject_all([CHANNEL_MAX; CHANNEL_COUNT], DEFAULT_INJECT_TTL, now, None)
+            .unwrap();
+        assert_eq!(merge.current(now).unwrap().1, ChannelSource::Inject);
     }
 
     // ── injection TTL ────────────────────────────────────────────────────────

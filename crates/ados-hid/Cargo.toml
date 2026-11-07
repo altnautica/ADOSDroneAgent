@@ -37,6 +37,8 @@ hex = { workspace = true }
 tokio = { workspace = true }
 time = { version = "0.3", features = ["std", "formatting"] }
 serde_norway = { workspace = true }
+# pilot.v1 frames on the ground station's pilot relay socket.
+rmp-serde = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { workspace = true }

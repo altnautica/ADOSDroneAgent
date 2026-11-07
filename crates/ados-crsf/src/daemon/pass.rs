@@ -135,6 +135,14 @@ pub(super) async fn run_service_pass(
     // TX task reads and the latest sidecar body the status verb serves.
     let merge = Arc::new(Mutex::new(SourceMerge::new(cfg.channel_source)));
     let latest_status = Arc::new(Mutex::new(serde_json::Value::Null));
+    // The drone's control mode (from the ground-station input sidecar) decides
+    // whether the pad flies over this lane or the neutral backup set goes out.
+    // Read once before the transmitter can start, then followed.
+    {
+        let path = crate::control_mode::sidecar_path();
+        crate::control_mode::apply(&path, &merge).await;
+        tokio::spawn(crate::control_mode::run(path, merge.clone(), pass_scope.clone()));
+    }
     // Reads the node pairing key to turn a claimed injector name into an
     // attested one. Built once and shared: the read behind it is cached, so the
     // command path does not touch the filesystem per request.

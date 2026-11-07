@@ -121,6 +121,8 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/ground-station/fleet/hero` |  |
 | GET | `/api/v1/ground-station/gamepads` |  |
 | PUT | `/api/v1/ground-station/gamepads/primary` |  |
+| GET | `/api/v1/ground-station/input` |  |
+| PUT | `/api/v1/ground-station/input/bindings` |  |
 | GET | `/api/v1/ground-station/mesh` |  |
 | GET | `/api/v1/ground-station/mesh/config` |  |
 | PUT | `/api/v1/ground-station/mesh/config` |  |
@@ -254,7 +256,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-229 native routes.
+231 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 
