@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.1] - 2026-11-07
+
+### Added
+
+- Aircraft setup on the agent: `ados-pilot` hosts a flight-controller setup and tuning engine with two wizards that every surface renders from one step schema (title and body keys, image, live values, actions with their confirm style, blockers, result). `ground` (stationary, no propellers spinning): `detect` (firmware, version, vehicle class, full parameter table), `frame` (copter and VTOL frame class and type, plane wing type outputs, PX4 airframe; prop size, motor KV, cells), `accel` (six poses through ACCELCAL_VEHICLE_POS, PX4 `[cal]`), `level`, `gyro` (PX4), `compass` (onboard calibration with a fitness limit of 16 mGauss, up to three attempts, known-heading option), `airspeed`, `radio`, `rc_ados_switch` (one flight-mode switch position set to GUIDED and labelled ADOS), `outputs` (motor order and direction one motor at a time behind a propellers-removed hold, a DShot direction fix in `SERVO_BLH_RVMASK`, control-surface directions with `SERVOn_REVERSED`), `battery` (capacity, cells from voltage, voltage multiplier from a multimeter reading), `initial_params` (the initial tune from prop size and cells; plane airspeeds and TECS defaults), `notch_static` (ESC-telemetry harmonic notch), `ados_profile` (the FC failsafe parameters ADOS Pilot depends on, the same table as the pilot's readiness check) and `ados_intro` (choose ADOS Pilot or FC control). `air` (flown by the pilot as owner `tuning`, the operator able to take over at any time): `preflight`, `first_hover` / `first_flight` (vibration, learned hover throttle, attitude tracking, rate oscillation), `notch_air`, `trim_air`, `airspeed_cal`, `tecs_measure`, `autotune` (Copter AUTOTUNE and QAUTOTUNE with the pilot as the RC proxy, roll and pitch then yaw, resumable after a battery swap; Plane AUTOTUNE with generated roll and pitch doublets inside the tuning box; PX4 MAV_CMD_DO_AUTOTUNE_ENABLE) and `verify` (tuned flight against the first flight, with "Revert gains"). Air steps abort to a landing (or a return, fixed-wing) on operator sticks, a pilot action, link loss, battery under 30 %, wind over 8 m/s or drift out of the box. State persists per flight controller under `/var/ados/fc-setup/<uid>/`, with a full parameter snapshot before the first change and a revert.
+- The readiness item `setup_needed` blocks while this aircraft has no completed `ground` wizard or the flight controller reports a calibration PreArm message.
+
 ## [0.109.0] - 2026-11-07
 
 ### Added

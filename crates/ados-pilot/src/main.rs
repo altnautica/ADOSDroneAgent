@@ -25,7 +25,8 @@ async fn main() {
         "pilot_service_starting"
     );
     let daemon = Daemon::new(settings, path);
-    let run = daemon.run(None);
+    let setup = ados_pilot::setup::service::start(&daemon);
+    let run = daemon.run(Some(setup));
     tokio::select! {
         r = run => {
             if let Err(e) = r {

@@ -1,0 +1,519 @@
+//! Setup engine tests against the scripted fake FC.
+
+use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, MavType};
+use serde_json::{json, Map, Value};
+
+use super::doublets::Doublets;
+use super::fake_fc::{ap_copter_params, ap_plane_params, FakeFc, TICK};
+use super::out::Effect;
+use super::schema::{StepState, WizardId, WizardState};
+use super::Engine;
+
+struct Sim {
+    e: Engine,
+    fc: FakeFc,
+    now: u64,
+    _dir: tempfile::TempDir,
+}
+
+impl Sim {
+    fn new(mav_type: MavType, params: std::collections::BTreeMap<String, f32>) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Sim { e: Engine::new(dir.path(), 1_794_268_800_000), fc: FakeFc::new(mav_type, params), now: 0, _dir: dir };
+        // FC identified and parameters loaded.
+        s.until(|s| s.e.uid.is_some() && s.e.params.complete(), 20_000);
+        s
+    }
+
+    fn copter() -> Self {
+        Sim::new(MavType::MAV_TYPE_QUADROTOR, ap_copter_params())
+    }
+
+    fn run(&mut self, ms: u64) {
+        let end = self.now + ms;
+        while self.now < end {
+            self.now += TICK;
+            self.fc.step(&mut self.e, self.now);
+        }
+    }
+
+    fn until(&mut self, cond: impl Fn(&Sim) -> bool, max_ms: u64) {
+        let end = self.now + max_ms;
+        while !cond(self) {
+            assert!(
+                self.now < end,
+                "condition not met in {max_ms} ms; step: {:?}; params idle {} complete {}",
+                self.e.current_view().map(|v| (v.step, v.state, v.blockers, v.body_key, v.live)),
+                self.e.params.idle(),
+                self.e.params.complete()
+            );
+            self.now += TICK;
+            self.fc.step(&mut self.e, self.now);
+        }
+    }
+
+    fn step_id(&self) -> Option<String> {
+        self.e.current_view().map(|v| v.step)
+    }
+
+    fn state(&self) -> Option<StepState> {
+        self.e.current_view().map(|v| v.state)
+    }
+
+    fn wait_step(&mut self, id: &str, state: StepState) {
+        let id = id.to_string();
+        self.until(move |s| s.step_id().as_deref() == Some(id.as_str()) && s.state() == Some(state), 60_000);
+    }
+
+    fn act(&mut self, w: WizardId, step: &str, action: &str, args: Value) -> Value {
+        let args: Map<String, Value> = args.as_object().cloned().unwrap_or_default();
+        let r = self.e.action(w, step, action, &args, self.now);
+        assert_eq!(r["ok"], json!(true), "{step}/{action}: {r}");
+        r
+    }
+
+    fn sent_cmds(&self, cmd: MavCmd) -> Vec<[f32; 7]> {
+        self.fc
+            .sent
+            .iter()
+            .filter_map(|m| match m {
+                MavMessage::COMMAND_LONG(c) if c.command == cmd => {
+                    Some([c.param1, c.param2, c.param3, c.param4, c.param5, c.param6, c.param7])
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn result(&self, w: WizardId, step: &str) -> Value {
+        let v = self.e.view(self.now);
+        let wz = v.wizards.iter().find(|x| x.id == w).unwrap();
+        let s = wz.steps.iter().find(|s| s.step == step).unwrap();
+        serde_json::to_value(&s.result).unwrap()
+    }
+
+    fn step_state(&self, w: WizardId, step: &str) -> StepState {
+        let v = self.e.view(self.now);
+        v.wizards.iter().find(|x| x.id == w).unwrap().steps.iter().find(|s| s.step == step).unwrap().state
+    }
+
+    fn param(&self, n: &str) -> f32 {
+        self.fc.params[n]
+    }
+}
+
+const G: WizardId = WizardId::Ground;
+const A: WizardId = WizardId::Air;
+
+/// Accel through all six poses: the engine shows each pose the FC asks for
+/// and answers with the same pose.
+fn do_accel(s: &mut Sim) {
+    s.wait_step("accel", StepState::WaitingUser);
+    s.act(G, "accel", "start", json!({}));
+    for pose in 1..=6u8 {
+        s.until(move |s| s.e.current_view().is_some_and(|v| v.state == StepState::WaitingUser && v.live.get("pose").is_some()
+            && v.image.as_deref() == Some(["", "accel_level", "accel_left", "accel_right", "accel_nose_down", "accel_nose_up", "accel_back"][pose as usize]))
+            && s.fc_pose() == Some(pose), 5_000);
+        s.act(G, "accel", "next_pose", json!({}));
+    }
+}
+
+impl Sim {
+    fn fc_pose(&self) -> Option<u8> {
+        self.sent_cmds(MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS).len().checked_add(1).map(|n| n as u8)
+    }
+}
+
+#[test]
+fn full_ground_copter_flow() {
+    let mut s = Sim::copter();
+    let r = s.e.start(G, s.now);
+    assert_eq!(r["ok"], json!(true), "{r}");
+    // detect
+    s.wait_step("frame", StepState::WaitingUser);
+    assert_eq!(s.step_state(G, "detect"), StepState::Done);
+    assert_eq!(s.result(G, "detect")["vehicle_class"], json!("multirotor"));
+    // A snapshot exists before the first parameter-changing step.
+    let snaps = s.e.view(s.now).report.snapshots;
+    assert_eq!(snaps.len(), 1);
+    s.act(G, "frame", "apply", json!({"frame_class": 1, "frame_type": 1, "prop_in": 10, "motor_kv": 900, "cells": 4}));
+    do_accel(&mut s);
+    s.wait_step("level", StepState::WaitingUser);
+    assert_eq!(s.step_state(G, "accel"), StepState::Done);
+    s.act(G, "level", "start", json!({}));
+    s.wait_step("compass", StepState::WaitingUser);
+    s.act(G, "compass", "start", json!({}));
+    s.wait_step("outputs", StepState::WaitingUser);
+    assert_eq!(s.fc.reboots, 1, "compass reboots the FC");
+    // No RC lane: radio and the ADOS switch are skipped.
+    assert_eq!(s.step_state(G, "radio"), StepState::Skipped);
+    assert_eq!(s.step_state(G, "rc_ados_switch"), StepState::Skipped);
+    for _ in 0..4 {
+        s.act(G, "outputs", "test", json!({}));
+        s.until(|s| s.e.current_view().unwrap().live.get("question_key") == Some(&json!("setup.question.motor_position")), 5_000);
+        s.act(G, "outputs", "answer_yes", json!({}));
+        s.act(G, "outputs", "answer_yes", json!({}));
+    }
+    let tests = s.sent_cmds(MavCmd::MAV_CMD_DO_MOTOR_TEST);
+    assert_eq!(tests.iter().map(|p| p[0] as u8).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    assert!(tests.iter().all(|p| p[2] == 5.0 && p[3] == 2.0));
+    s.wait_step("battery", StepState::WaitingUser);
+    s.act(G, "battery", "apply", json!({"capacity_mah": 5000, "measured_v": 16.4}));
+    s.wait_step("initial_params", StepState::WaitingUser);
+    assert!((s.param("BATT_VOLT_MULT") - 10.1 * 16.4 / 16.0).abs() < 1e-3);
+    assert_eq!(s.param("BATT_CAPACITY"), 5000.0);
+    s.act(G, "initial_params", "apply", json!({"chemistry": "lipo"}));
+    s.wait_step("ados_profile", StepState::WaitingUser);
+    // 10 in props: Mission Planner's initial-tune formulas.
+    assert_eq!(s.param("INS_GYRO_FILTER"), 42.0);
+    assert_eq!(s.param("ATC_ACCEL_P_MAX"), 116_700.0);
+    assert_eq!(s.param("ATC_ACCEL_Y_MAX"), 27_000.0);
+    assert_eq!(s.param("ATC_RAT_RLL_FLTD"), 21.0);
+    assert_eq!(s.param("MOT_THST_EXPO"), 0.6);
+    assert!((s.param("MOT_BAT_VOLT_MAX") - 16.8).abs() < 1e-4);
+    // No ESC telemetry: the static notch waits for the air wizard.
+    assert_eq!(s.step_state(G, "notch_static"), StepState::Skipped);
+    assert!(s.e.data().notch_deferred);
+    s.act(G, "ados_profile", "apply", json!({}));
+    s.wait_step("ados_intro", StepState::WaitingUser);
+    assert_eq!(s.param("MAV_GCS_SYSID"), 1.0);
+    assert_eq!(s.param("FS_GCS_ENABLE"), 1.0);
+    assert_eq!(s.param("FS_GCS_TIMEOUT"), 3.0);
+    assert_eq!(s.param("BATT_FS_LOW_ACT"), 2.0);
+    assert_eq!(s.result(G, "ados_profile")["absent"], json!(["GUID_TIMEOUT"]));
+    s.act(G, "ados_intro", "use_ados", json!({}));
+    s.run(100);
+    assert_eq!(s.e.wizard_state(G), WizardState::Done);
+    assert!(s.fc.effects.contains(&Effect::SetControlMode("ados")));
+    assert_eq!(s.e.setup_needed(s.now), None);
+    // Persisted: a fresh engine on the same directory sees the completed wizard.
+    let mut e2 = Engine::new(s._dir.path(), 0);
+    let mut fc2 = FakeFc::new(MavType::MAV_TYPE_QUADROTOR, ap_copter_params());
+    let mut t = 0;
+    while e2.uid.is_none() {
+        t += TICK;
+        fc2.step(&mut e2, t);
+    }
+    assert_eq!(e2.wizard_state(G), WizardState::Done);
+}
+
+#[test]
+fn accel_pose_sequence() {
+    let mut s = Sim::copter();
+    assert_eq!(s.e.run_step(G, "accel", s.now)["ok"], json!(true));
+    do_accel(&mut s);
+    s.until(|s| s.e.current_view().is_none(), 5_000);
+    assert_eq!(s.step_state(G, "accel"), StepState::Done);
+    let poses: Vec<u8> = s.sent_cmds(MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS).iter().map(|p| p[0] as u8).collect();
+    assert_eq!(poses, vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(s.sent_cmds(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION)[0][4], 1.0);
+}
+
+#[test]
+fn compass_fitness_retry() {
+    let mut s = Sim::copter();
+    s.fc.script.mag_fitness = vec![30.0, 9.5].into();
+    s.e.run_step(G, "compass", s.now);
+    s.act(G, "compass", "start", json!({}));
+    s.until(|s| s.e.current_view().is_none(), 30_000);
+    assert_eq!(s.step_state(G, "compass"), StepState::Done);
+    assert_eq!(s.sent_cmds(MavCmd::MAV_CMD_DO_START_MAG_CAL).len(), 2);
+    let r = s.result(G, "compass");
+    assert_eq!(r["attempts"], json!(2));
+    assert_eq!(r["fitness_mgauss"]["0"], json!(9.5));
+    // Three bad attempts fail the step.
+    s.fc.script.mag_fitness = vec![40.0, 40.0, 40.0].into();
+    s.e.run_step(G, "compass", s.now);
+    s.act(G, "compass", "start", json!({}));
+    s.until(|s| s.state() == Some(StepState::Failed), 30_000);
+    assert_eq!(s.e.current_view().unwrap().blockers, vec!["setup.blocker.compass_fitness".to_string()]);
+}
+
+#[test]
+fn motor_direction_fix_through_blh_rvmask() {
+    let mut p = ap_copter_params();
+    p.insert("MOT_PWM_TYPE".into(), 6.0);
+    let mut s = Sim::new(MavType::MAV_TYPE_QUADROTOR, p);
+    s.e.run_step(G, "outputs", s.now);
+    for seq in 1..=4 {
+        s.act(G, "outputs", "test", json!({}));
+        s.until(|s| s.e.current_view().unwrap().live.get("question_key") == Some(&json!("setup.question.motor_position")), 5_000);
+        s.act(G, "outputs", "answer_yes", json!({}));
+        // Motor B (sequence 2) is motor 4 on output 4 in the quad X layout.
+        s.act(G, "outputs", if seq == 2 { "answer_no" } else { "answer_yes" }, json!({}));
+    }
+    s.until(|s| s.e.current_view().is_none(), 20_000);
+    assert_eq!(s.step_state(G, "outputs"), StepState::Done);
+    assert_eq!(s.param("SERVO_BLH_RVMASK"), 8.0);
+    assert_eq!(s.param("SERVO_BLH_AUTO"), 1.0);
+    assert_eq!(s.fc.reboots, 1);
+    // Without DShot the same answer asks for two wires swapped.
+    let mut s = Sim::copter();
+    s.e.run_step(G, "outputs", s.now);
+    for seq in 1..=4 {
+        s.act(G, "outputs", "test", json!({}));
+        s.until(|s| s.e.current_view().unwrap().live.get("question_key") == Some(&json!("setup.question.motor_position")), 5_000);
+        s.act(G, "outputs", "answer_yes", json!({}));
+        s.act(G, "outputs", if seq == 3 { "answer_no" } else { "answer_yes" }, json!({}));
+    }
+    s.until(|s| s.state() == Some(StepState::Failed), 5_000);
+    assert_eq!(s.e.current_view().unwrap().blockers, vec!["setup.blocker.swap_motor_wires".to_string()]);
+    assert_eq!(s.param("SERVO_BLH_RVMASK"), 0.0);
+}
+
+#[test]
+fn plane_surface_reversal() {
+    let mut s = Sim::new(MavType::MAV_TYPE_FIXED_WING, ap_plane_params());
+    s.fc.custom_mode = 5;
+    s.run(1100);
+    s.e.run_step(G, "outputs", s.now);
+    // Aileron (1), elevator (2), rudder (4); the elevator moves the wrong way.
+    for ch in [1u8, 2, 4] {
+        assert_eq!(s.e.current_view().unwrap().live["output_index"], json!(ch));
+        s.act(G, "outputs", "test", json!({}));
+        s.until(|s| s.state() == Some(StepState::WaitingUser), 5_000);
+        s.act(G, "outputs", if ch == 2 { "answer_no" } else { "answer_yes" }, json!({}));
+    }
+    s.until(|s| s.e.current_view().is_none(), 5_000);
+    assert_eq!(s.step_state(G, "outputs"), StepState::Done);
+    assert_eq!(s.param("SERVO2_REVERSED"), 1.0);
+    assert_eq!(s.param("SERVO1_REVERSED"), 0.0);
+    assert_eq!(s.param("SERVO_AUTO_TRIM"), 1.0);
+    // The surfaces were driven in MANUAL with a nose-up demand for the elevator.
+    assert_eq!(s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE)[0][1], 0.0);
+    assert!(s.fc.sent.iter().any(|m| matches!(m, MavMessage::MANUAL_CONTROL(c) if c.x == -300 && c.y == 0)));
+    assert!(s.fc.sent.iter().any(|m| matches!(m, MavMessage::MANUAL_CONTROL(c) if c.y == 300)));
+}
+
+#[test]
+fn snapshot_then_revert() {
+    let mut s = Sim::copter();
+    s.e.run_step(G, "frame", s.now);
+    s.act(G, "frame", "apply", json!({"frame_class": 1, "frame_type": 1, "prop_in": 7, "motor_kv": 1800, "cells": 4}));
+    s.until(|s| s.e.current_view().is_none(), 10_000);
+    let snaps = s.e.view(s.now).report.snapshots;
+    assert_eq!(snaps.len(), 1, "snapshot taken before the first parameter-changing step");
+    s.e.run_step(G, "initial_params", s.now);
+    s.act(G, "initial_params", "apply", json!({"chemistry": "lipo"}));
+    s.until(|s| s.e.current_view().is_none(), 10_000);
+    assert_eq!(s.step_state(G, "initial_params"), StepState::Done);
+    assert_eq!(s.param("INS_GYRO_FILTER"), 57.0);
+    assert_eq!(s.param("MOT_HOVER_LEARN"), 2.0);
+    let r = s.e.revert(None, s.now);
+    assert_eq!(r["ok"], json!(true), "{r}");
+    assert!(r["restored"].as_u64().unwrap() >= 10);
+    s.run(3000);
+    assert_eq!(s.param("INS_GYRO_FILTER"), 20.0);
+    assert_eq!(s.param("ATC_ACCEL_P_MAX"), 110_000.0);
+    assert_eq!(s.param("MOT_THST_EXPO"), 0.65);
+    // A snapshot name cannot leave the aircraft's directory.
+    assert_eq!(s.e.revert(Some("../state.json"), s.now)["ok"], json!(false));
+}
+
+/// Ground done, battery full: the air wizard may run.
+fn air_ready() -> Sim {
+    let mut s = Sim::copter();
+    s.e.state.ground.state = WizardState::Done;
+    s.e.state.data.prop_in = Some(10.0);
+    s.e.state.data.motor_kv = Some(900.0);
+    s.e.state.data.cells = Some(4.0);
+    s
+}
+
+#[test]
+fn air_wizard_needs_ground_and_battery() {
+    let mut s = Sim::copter();
+    assert_eq!(s.e.start(A, s.now)["err"], json!("ground_not_done"));
+    let mut s2 = air_ready();
+    s2.fc.battery_pct = 60;
+    s2.run(1500);
+    assert_eq!(s2.e.run_step(A, "first_hover", s2.now)["err"], json!("battery_low"));
+    s.e.state.ground.state = WizardState::Done;
+    assert_eq!(s.e.start(A, s.now)["ok"], json!(true));
+    s.wait_step("preflight", StepState::WaitingUser);
+    s.act(A, "preflight", "confirm_area", json!({}));
+    s.wait_step("first_hover", StepState::WaitingUser);
+    s.run(100);
+    assert!(s.fc.effects.contains(&Effect::EnterTuning));
+}
+
+fn hover(s: &mut Sim) {
+    assert_eq!(s.e.run_step(A, "first_hover", s.now)["ok"], json!(true));
+    s.run(100);
+    s.act(A, "first_hover", "start", json!({}));
+    s.until(|s| s.fc.alt > 2.9, 20_000);
+    s.run(2000);
+}
+
+#[test]
+fn first_hover_measures_and_lands() {
+    let mut s = air_ready();
+    hover(&mut s);
+    s.until(|s| s.e.current_view().is_none(), 80_000);
+    assert_eq!(s.step_state(A, "first_hover"), StepState::Done);
+    let r = s.result(A, "first_hover");
+    assert_eq!(r["vibration_verdict"], json!("pass"));
+    assert_eq!(r["vibration_max"], json!([8.0, 9.0, 12.0]));
+    assert!((r["hover_throttle"].as_f64().unwrap() - 0.35).abs() < 1e-6);
+    assert!(!s.fc.armed);
+    // Landed and disarmed: the tuning owner is handed back.
+    assert!(s.fc.effects.contains(&Effect::ExitTuning { operator: false }));
+}
+
+fn abort_case(inject: impl Fn(&mut Sim), reason: &str, operator: bool) {
+    let mut s = air_ready();
+    hover(&mut s);
+    let lands_before = s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE).iter().filter(|p| p[1] == 9.0).count();
+    inject(&mut s);
+    s.until(|s| s.e.current_view().is_none(), 5_000);
+    assert_eq!(s.step_state(A, "first_hover"), StepState::Failed);
+    let v = s.e.view(s.now);
+    let fh = v.wizards[1].steps.iter().find(|x| x.step == "first_hover").unwrap();
+    let _ = fh;
+    let rec = &s.e.state.air.steps["first_hover"];
+    assert_eq!(rec["state"], json!("failed"), "{reason}");
+    let lands = s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE).iter().filter(|p| p[1] == 9.0).count();
+    if operator {
+        // Sticks: the engine hands back. A pilot action already ended tuning.
+        let exited = s.fc.effects.contains(&Effect::ExitTuning { operator: true });
+        assert_eq!(exited, reason == "operator", "{reason}");
+        assert_eq!(lands, lands_before, "operator takeover: the pilot holds, no landing");
+    } else {
+        s.until(|s| !s.fc.armed, 30_000);
+        let lands = s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE).iter().filter(|p| p[1] == 9.0).count();
+        assert!(lands > lands_before, "{reason}: abort lands; modes {:?}", s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE));
+        s.run(1500);
+        assert!(s.fc.effects.contains(&Effect::ExitTuning { operator: false }), "{reason}");
+    }
+}
+
+#[test]
+fn each_abort_trigger() {
+    abort_case(|s| s.fc.battery_pct = 25, "battery", false);
+    abort_case(|s| s.fc.wind = Some((90.0, 9.0)), "wind", false);
+    abort_case(|s| s.fc.n = 25.0, "drift", false);
+    abort_case(|s| s.fc.inputs.link_lost = true, "link_loss", false);
+    abort_case(|s| s.fc.inputs.axes = [0.0, 0.6, 0.0, 0.0], "operator", true);
+    abort_case(|s| s.e.set_pilot_tuning(false), "operator_revoked", true);
+}
+
+#[test]
+fn abort_blockers_name_the_trigger() {
+    let mut s = air_ready();
+    hover(&mut s);
+    s.fc.battery_pct = 20;
+    s.run(1500);
+    let rec = &s.e.state.air.steps["first_hover"];
+    assert_eq!(rec["state"], json!("failed"));
+    assert_eq!(s.e.wizard_state(A), WizardState::NotStarted, "a single-step run leaves the wizard state alone");
+}
+
+#[test]
+fn autotune_statustext_sequence_saves_gains() {
+    let mut s = air_ready();
+    assert_eq!(s.e.run_step(A, "autotune", s.now)["ok"], json!(true));
+    s.run(100);
+    s.act(A, "autotune", "start", json!({}));
+    s.until(|s| s.e.current_view().is_none(), 180_000);
+    assert_eq!(s.step_state(A, "autotune"), StepState::Done, "{}", s.result(A, "autotune"));
+    let r = s.result(A, "autotune");
+    assert_eq!(r["copter_axes_saved"], json!(["roll", "pitch", "yaw"]));
+    let changed: Vec<String> = serde_json::from_value(r["changed"].clone()).unwrap();
+    for n in ["ATC_RAT_RLL_P", "ATC_ANG_RLL_P", "ATC_RAT_PIT_P", "ATC_RAT_YAW_P"] {
+        assert!(changed.contains(&n.to_string()), "{n} in {changed:?}");
+    }
+    assert!((s.param("AUTOTUNE_AGGR") - 0.075).abs() < 1e-6);
+    // Roll + pitch first, then yaw and yaw D (4.6 firmware).
+    assert_eq!(s.param("AUTOTUNE_AXES"), 12.0);
+    let modes: Vec<f32> = s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE).iter().map(|p| p[1]).collect();
+    assert_eq!(modes.iter().filter(|m| **m == 15.0).count(), 2, "{modes:?}");
+    // Centred sticks during the tune; throttle down to land in AUTOTUNE.
+    assert!(s.fc.sent.iter().any(|m| matches!(m, MavMessage::MANUAL_CONTROL(c) if c.z == 500 && c.x == 0)));
+    assert!(s.fc.sent.iter().any(|m| matches!(m, MavMessage::MANUAL_CONTROL(c) if c.z == 0)));
+}
+
+#[test]
+fn autotune_yaw_waits_for_a_battery_swap() {
+    let mut s = air_ready();
+    s.e.run_step(A, "autotune", s.now);
+    s.run(100);
+    s.act(A, "autotune", "start", json!({}));
+    // Battery sags below 50 % during roll/pitch.
+    s.until(|s| s.fc.alt > 7.5, 20_000);
+    s.fc.battery_pct = 45;
+    s.until(|s| s.e.current_view().is_some_and(|v| v.actions.iter().any(|a| a.id == "resume_yaw")), 60_000);
+    assert!(s.e.data().autotune_yaw_pending);
+    s.fc.battery_pct = 98;
+    s.act(A, "autotune", "resume_yaw", json!({}));
+    s.until(|s| s.e.current_view().is_none(), 120_000);
+    assert_eq!(s.result(A, "autotune")["copter_axes_saved"], json!(["roll", "pitch", "yaw"]));
+    assert!(!s.e.data().autotune_yaw_pending);
+}
+
+#[test]
+fn plane_doublets_stay_in_the_box() {
+    // Point-mass plane at 15 m/s, coordinated turns from the bank demand.
+    let box_m = 400.0;
+    let mut d = Doublets::new(0, 45.0, 20.0, box_m);
+    let (mut n, mut e, mut hdg) = (150.0f32, -120.0f32, 0.7f32);
+    let v = 15.0;
+    let mut bank = 0.0f32;
+    let mut max_d = 0.0f32;
+    let mut t = 0;
+    let mut saw = (false, false);
+    while t < 240_000 {
+        let dm = d.demand(t, [n, e], hdg);
+        saw.0 |= dm.roll.abs() > 0.9;
+        saw.1 |= dm.pitch.abs() > 0.5;
+        // Bank follows the demand with a 0.5 s lag.
+        let target = dm.roll * 45f32.to_radians();
+        bank += (target - bank) * 0.04;
+        hdg += 9.81 * bank.tan() / v * 0.02;
+        n += v * hdg.cos() * 0.02;
+        e += v * hdg.sin() * 0.02;
+        max_d = max_d.max((n * n + e * e).sqrt());
+        t += 20;
+    }
+    assert!(max_d < box_m, "left the tuning box: {max_d}");
+    assert!(saw.0 && saw.1, "both doublet axes flown");
+}
+
+#[test]
+fn setup_needed_from_prearm_text() {
+    let mut s = Sim::copter();
+    assert_eq!(s.e.setup_needed(s.now).as_deref(), Some("Aircraft setup not completed"));
+    s.e.state.ground.state = WizardState::Done;
+    assert_eq!(s.e.setup_needed(s.now), None);
+    let m = MavMessage::STATUSTEXT(ados_protocol::mavlink::ardupilotmega::STATUSTEXT_DATA {
+        text: "PreArm: Compass not calibrated".into(),
+        ..Default::default()
+    });
+    s.e.on_fc(1, 1, &m, s.now);
+    assert_eq!(s.e.setup_needed(s.now).as_deref(), Some("PreArm: Compass not calibrated"));
+    assert_eq!(s.e.setup_needed(s.now + 11_000), None);
+}
+
+#[test]
+fn stream_frames_and_list_shape() {
+    let mut s = Sim::copter();
+    s.e.start(G, s.now);
+    let frames = s.e.frames(s.now);
+    let v: Vec<Value> = frames.iter().map(|f| serde_json::to_value(f).unwrap()).collect();
+    assert!(v.iter().any(|f| f["kind"] == json!("wizard") && f["data"]["id"] == json!("ground")));
+    assert!(v.iter().any(|f| f["kind"] == json!("step") && f["data"]["step"] == json!("detect")));
+    let list = s.e.request("setup.list", &json!({}), s.now);
+    for k in ["v", "uid", "firmware", "firmware_version", "vehicle_class", "running", "wizards", "report"] {
+        assert!(list.get(k).is_some(), "{k}");
+    }
+    assert_eq!(list["uid"], json!("00c0ffee12345678"));
+    assert_eq!(list["running"]["step"], json!("detect"));
+    let step = &list["wizards"][0]["steps"][0];
+    for k in ["wizard", "step", "title_key", "body_key", "args", "image", "state", "progress", "live", "actions", "blockers", "result"] {
+        assert!(step.get(k).is_some(), "{k}");
+    }
+    assert_eq!(step["title_key"], json!("setup.detect.title"));
+    // A second wizard cannot start while one runs.
+    assert_eq!(s.e.request("setup.start", &json!({"wizard": "ground"}), s.now)["err"], json!("wizard_running"));
+    assert_eq!(s.e.request("setup.abort", &json!({"wizard": "ground"}), s.now)["ok"], json!(true));
+    assert_eq!(s.e.wizard_state(G), WizardState::Aborted);
+}

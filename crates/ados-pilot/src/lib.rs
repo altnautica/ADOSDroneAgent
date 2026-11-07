@@ -29,3 +29,4 @@ pub mod obstacles;
 pub mod planner;
 pub mod readiness;
 pub mod runtime;
+pub mod setup;
