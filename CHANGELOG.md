@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.6] - 2026-11-07
+
+### Fixed
+
+- **Aircraft setup wizard text (dashboard and cockpit).** A step body variant
+  the spec does not carry falls back to the step's body, and a bare choice is
+  labelled from the spec's `<input>.<value>` text (for example "LiPo" rather
+  than "lipo"). Cockpit and dashboard bundles rebuilt.
+
 ## [0.109.5] - 2026-11-07
 
 ### Fixed

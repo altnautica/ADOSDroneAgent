@@ -11,7 +11,7 @@ import { AlertTriangle, Gamepad2, Navigation, ShieldCheck } from "lucide-react";
 
 import { FOCUS_RING, HoldButton, ProgressRing, StatePill, WizardButton } from "./controls";
 import { inputArgs, liveRows, outputQuestion } from "./parse";
-import { formatValue, setupImageUrl, setupLabel, setupText } from "./strings";
+import { formatValue, optionText, setupImageUrl, setupLabel, setupText } from "./strings";
 import type { InputOption, SetupAction, SetupStep, SetupValue, StepInput } from "./types";
 
 /** The step id whose actions render as the "Meet ADOS Pilot" screen. */
@@ -232,7 +232,7 @@ function InputField({
       <div className="flex flex-wrap gap-[0.4em]">
         {options.map(({ value: o, label_key }) => {
           const on = o === value;
-          const optionText = label_key ? setupText(label_key) : formatValue(o);
+          const text = optionText(input.label_key, o, label_key);
           return (
             <button
               key={String(o)}
@@ -241,7 +241,7 @@ function InputField({
               onClick={() => onChange(o)}
               className={`${control} ${FOCUS_RING} ${on ? "border-primary bg-primary/15 text-primary" : "hover:bg-muted"}`}
             >
-              {optionText}
+              {text}
             </button>
           );
         })}
