@@ -259,7 +259,7 @@ export function LandscapeGrid({ slots, m, view }: { slots: FeedSlots; m: GridMea
   );
 }
 
-export function PortraitGrid({ slots, m }: { slots: FeedSlots; m: GridMeasures }) {
+export function PortraitGrid({ slots }: { slots: FeedSlots }) {
   return (
     <div className={regionClass(slots.menuCollapsed)}>
       <div className="pointer-events-auto relative aspect-video w-full shrink-0 overflow-hidden rounded-lg">

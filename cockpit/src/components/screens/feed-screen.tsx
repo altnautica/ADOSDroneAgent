@@ -222,7 +222,7 @@ export function FeedScreen() {
 
   return (
     <div className="absolute inset-0" style={style} data-focus-rings={m.focusRingsAlways ? "always" : undefined} data-width-class={widthClass}>
-      {portrait ? <PortraitGrid slots={slots} m={m} /> : <LandscapeGrid slots={slots} m={m} view={view} />}
+      {portrait ? <PortraitGrid slots={slots} /> : <LandscapeGrid slots={slots} m={m} view={view} />}
       <SkillConfirmSheet />
       <CockpitSheets />
     </div>
