@@ -133,12 +133,15 @@ impl Outputs {
                 self.core.set_live("output_index", def.seq);
                 self.core.set_live("motor_number", def.num);
                 self.core.set_live("expected_dir", if def.cw { "cw" } else { "ccw" });
+                // The motor questions read "motor {n}": the number on the motor-order image.
+                self.core.args.insert("n".into(), json!(def.num));
             }
             Some(Item::Surface { channel, function }) => {
                 self.core.set_live("output_kind", "surface");
                 self.core.set_live("output_index", channel);
                 self.core.live.remove("motor_number");
                 self.core.live.remove("expected_dir");
+                self.core.args.insert("n".into(), json!(channel));
                 if let Some((q, _)) = ardupilot_plane::surface_test(function) {
                     self.core.set_live("question_key", q);
                 }

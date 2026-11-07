@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.7] - 2026-11-07
+
+### Fixed
+
+- Aircraft setup: every placeholder in a step's text now has its value in the step's `args`, so no surface shows a literal `{n}`. The motor questions carry `n` (the motor number on the layout image; a surface question carries its output channel), plane `level` carries `deg` (the cruise nose-up attitude, 3° when `PTCH_TRIM_DEG` is unset), and `preflight` carries `radius` (the open space to keep clear) and `pct` (the minimum battery).
+
 ## [0.109.6] - 2026-11-07
 
 ### Fixed

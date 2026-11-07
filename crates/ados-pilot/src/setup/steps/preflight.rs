@@ -43,6 +43,9 @@ impl Step for Preflight {
     fn begin(&mut self, cx: &mut Cx) {
         self.core = StepCore::default();
         self.core.args.insert("open_area_m".into(), json!(open_area_m(cx.adapter.class)));
+        // Interpolated by the body ("nothing within {radius} m") and the battery blocker ("below {pct} %").
+        self.core.args.insert("radius".into(), json!(open_area_m(cx.adapter.class)));
+        self.core.args.insert("pct".into(), json!(MIN_BATTERY_PCT));
         self.core.body_variant = (cx.adapter.class == Class::Fixedwing).then_some("plane");
         self.refresh(cx);
     }

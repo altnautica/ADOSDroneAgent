@@ -34,6 +34,7 @@ impl Sim {
         while self.now < end {
             self.now += TICK;
             self.fc.step(&mut self.e, self.now);
+            self.check_placeholders();
         }
     }
 
@@ -49,9 +50,61 @@ impl Sim {
             );
             self.now += TICK;
             self.fc.step(&mut self.e, self.now);
+            self.check_placeholders();
         }
     }
 
+    /// Every `{arg}` in a string the running step names (title, body with the
+    /// spec's fallback to `setup.<step>.body`, the live question, blockers) is
+    /// in the step's `args`, so no surface ever shows a literal `{n}`.
+    fn check_placeholders(&self) {
+        let Some(v) = self.e.current_view() else { return };
+        let strings = &SETUP_STRINGS["strings"];
+        let mut keys = vec![v.title_key.clone(), v.body_key.clone()];
+        if strings.get(&v.body_key).is_none() {
+            keys.push(format!("setup.{}.body", v.step));
+        }
+        if let Some(q) = v.live.get("question_key").and_then(Value::as_str) {
+            keys.push(q.to_string());
+        }
+        keys.extend(v.blockers.iter().cloned());
+        for k in keys {
+            let Some(text) = strings.get(&k).and_then(Value::as_str) else { continue };
+            for ph in placeholders(text) {
+                assert!(
+                    v.args.contains_key(&ph),
+                    "step {} state {:?}: `{k}` = {text:?} interpolates {{{ph}}} but args are {:?}",
+                    v.step,
+                    v.state,
+                    v.args.keys().collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+}
+
+static SETUP_STRINGS: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../../../web-shared/src/cockpit-spec/setup-strings.json"))
+        .expect("setup-strings.json parses")
+});
+
+/// The `{name}` placeholders of a spec string.
+fn placeholders(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find('}') else { break };
+        let name = &after[..close];
+        if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            out.push(name.to_string());
+        }
+        rest = &after[close + 1..];
+    }
+    out
+}
+
+impl Sim {
     fn step_id(&self) -> Option<String> {
         self.e.current_view().map(|v| v.step)
     }
@@ -516,4 +569,40 @@ fn stream_frames_and_list_shape() {
     assert_eq!(s.e.request("setup.start", &json!({"wizard": "ground"}), s.now)["err"], json!("wizard_running"));
     assert_eq!(s.e.request("setup.abort", &json!({"wizard": "ground"}), s.now)["ok"], json!(true));
     assert_eq!(s.e.wizard_state(G), WizardState::Aborted);
+}
+
+#[test]
+fn question_and_body_args_fill_every_placeholder() {
+    // Motors: each question names the motor number on the layout image.
+    let mut s = Sim::copter();
+    s.e.run_step(G, "outputs", s.now);
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        seen.push(s.e.current_view().unwrap().args["n"].clone());
+        s.act(G, "outputs", "test", json!({}));
+        s.until(|s| s.e.current_view().unwrap().live.get("question_key") == Some(&json!("setup.question.motor_position")), 5_000);
+        s.check_placeholders();
+        s.act(G, "outputs", "answer_yes", json!({}));
+        s.check_placeholders();
+        s.act(G, "outputs", "answer_yes", json!({}));
+    }
+    // Quad X in test order A..D is motors 1, 4, 2, 3.
+    assert_eq!(seen, vec![json!(1), json!(4), json!(2), json!(3)]);
+    // Plane level: "nose up about {deg}°".
+    let mut p = Sim::new(MavType::MAV_TYPE_FIXED_WING, ap_plane_params());
+    p.e.run_step(G, "level", p.now);
+    p.check_placeholders();
+    assert_eq!(p.e.current_view().unwrap().args["deg"], json!(3.0));
+    // Preflight with a low battery: "nothing within {radius} m", "below {pct} %".
+    let mut a = Sim::copter();
+    a.e.state.ground.state = WizardState::Done;
+    a.fc.battery_pct = 60;
+    a.run(1500);
+    assert_eq!(a.e.start(A, a.now)["ok"], json!(true));
+    a.run(200);
+    let v = a.e.current_view().unwrap();
+    assert!(v.blockers.contains(&"setup.blocker.battery_low".to_string()), "{:?}", v.blockers);
+    a.check_placeholders();
+    assert_eq!(v.args["radius"], json!(30));
+    assert_eq!(v.args["pct"], json!(80));
 }

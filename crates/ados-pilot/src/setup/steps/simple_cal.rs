@@ -93,6 +93,9 @@ impl Step for SimpleCal {
                     self.core.image = Some("level_plane".into());
                     let trim = cx.params.get("PTCH_TRIM_DEG").unwrap_or(0.0);
                     self.core.args.insert("pitch_trim_deg".into(), json!(trim));
+                    // "nose up about {deg}°": the trim the plane cruises at, 3° when unset.
+                    let deg = if trim > 0.0 { trim } else { 3.0 };
+                    self.core.args.insert("deg".into(), json!(deg));
                 } else {
                     self.core.image = Some("accel_level".into());
                 }
