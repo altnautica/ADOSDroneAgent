@@ -44,6 +44,7 @@ import {
   NodeScreen,
   MspScreen,
   ParamsScreen,
+  AircraftSetupScreen,
   PairScreen,
   SettingsScreen,
   SourcesScreen,
@@ -196,6 +197,15 @@ const SCREENS: ScreenSpec[] = [
     // Opened from the System screen with `open-detail`.
     kind: "detail",
     render: () => <PeripheralsScreen />,
+  },
+  {
+    id: "aircraft-setup",
+    title: "Aircraft setup",
+    icon: Wrench,
+    // Opened from Settings and from the flight-state chip's "Set up aircraft".
+    kind: "detail",
+    profiles: ["drone", "ground_station"],
+    render: () => <AircraftSetupScreen />,
   },
   {
     id: "logs",

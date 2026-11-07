@@ -30,7 +30,19 @@ const ext = parseExtensionDetail(FOLLOW, {
   manifest: {
     gcs: {
       contributes: {
-        skills: [{ id: "follow", toggle: true, confirm: true, activation: { config_key: "active" }, state: { topic: "follow.state" } }],
+        skills: [
+          {
+            id: "follow",
+            label: "Follow",
+            icon: "crosshair",
+            category: "behavior",
+            toggle: true,
+            confirm: true,
+            arm_requirement: "any",
+            activation: { via: "config", config_key: "active" },
+            state: { via: "event", topic: "follow.state" },
+          },
+        ],
         target_actions: [
           { id: "follow", label: "Follow", designate: true, config_key: "active", config_value: true },
           { id: "stop", label: "Stop", config_key: "active", config_value: false },

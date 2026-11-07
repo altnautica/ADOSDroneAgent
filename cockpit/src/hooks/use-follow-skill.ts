@@ -1,8 +1,10 @@
-// The follow skill as the Feed's chrome sees it: the toggle skill an installed
-// plugin turns on from a designating target action (follow-me's `active`),
-// with its gate state. Null when no follow-type plugin is running.
+// The follow-type skill the Feed's follow chrome drives (the toggle skill a
+// designating target action switches on), and the chip detail of whichever
+// motion skill owns the aircraft now.
 
+import { usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
+import { skillDetail } from "@/lib/follow-rail";
 import { resolveSkillState, type Skill, type SkillContext, type SkillState } from "@/lib/skills";
 import { useExtensionsStore } from "@/stores/extensions-store";
 
@@ -23,4 +25,12 @@ export function useFollowSkill(): FollowSkill | null {
     }
   }
   return null;
+}
+
+/** The flight-state chip's detail for the skill the pilot reports as owner
+ *  (`ORBIT 8 m`), from that skill's echoed parameters; null when unknown. */
+export function useActiveSkillDetail(): string | null {
+  const owner = usePilot()?.data.skill ?? null;
+  const echo = useExtensionsStore((s) => (owner ? s.reported[`${owner.pluginId}:${owner.skillId}`]?.echo : undefined));
+  return skillDetail(echo);
 }

@@ -18,10 +18,10 @@
 
 import { Suspense, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronLeft, ChevronRight, Gamepad2, Layers, Palette, Settings as SettingsIcon } from "lucide-react";
+import { ChevronLeft, ChevronRight, Gamepad2, Layers, Palette, Settings as SettingsIcon, Wrench } from "lucide-react";
 
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
-import { GamepadBindings } from "@/components/settings/gamepad-bindings";
+import { ControlsSettings } from "@/components/settings/controls/controls-settings";
 import { SECTION_ICONS, SECTION_PAGES } from "@/components/settings/sections/registry";
 import {
   SETTINGS_SECTIONS,
@@ -82,7 +82,7 @@ export function SettingsScreen({
   if (mode === "!" && isSettingsSectionId(rest)) {
     body = <SectionBody id={rest} identity={identity} />;
   } else if (mode === "!") {
-    body = rest === "appearance" ? <AppearanceSettings /> : <GamepadBindings />;
+    body = rest === "appearance" ? <AppearanceSettings /> : <ControlsSettings />;
   } else if (config == null) {
     body = <EmptyNote>{ready ? error ?? "Configuration is unavailable." : "Reading configuration…"}</EmptyNote>;
   } else if (mode === "@") {
@@ -93,7 +93,12 @@ export function SettingsScreen({
         config={config}
         onGroup={(id) => dispatch({ kind: "open-detail", id: `settings:~${id}` })}
         onAll={() => drill("")}
-        onGamepad={() => dispatch({ kind: "open-detail", id: "settings:!gamepad" })}
+        onControls={() => dispatch({ kind: "open-detail", id: "settings:!controls" })}
+        onAircraftSetup={
+          identity.profile === "drone" || identity.profile === "ground_station"
+            ? () => dispatch({ kind: "open-detail", id: "aircraft-setup" })
+            : null
+        }
         onAppearance={() => dispatch({ kind: "open-detail", id: "settings:!appearance" })}
         sections={visibleSections(identity.profile, identity.role).map((s) => s.id)}
         onSection={(id) => dispatch({ kind: "open-detail", id: `settings:!${id}` })}
@@ -146,7 +151,8 @@ function CuratedRoot({
   config,
   onGroup,
   onAll,
-  onGamepad,
+  onControls,
+  onAircraftSetup,
   onAppearance,
   sections,
   onSection,
@@ -156,7 +162,8 @@ function CuratedRoot({
   config: AgentConfig;
   onGroup: (id: string) => void;
   onAll: () => void;
-  onGamepad: () => void;
+  onControls: () => void;
+  onAircraftSetup: (() => void) | null;
   onAppearance: () => void;
   sections: SettingsSectionId[];
   onSection: (id: SettingsSectionId) => void;
@@ -215,18 +222,32 @@ function CuratedRoot({
       </button>
       <button
         type="button"
-        onClick={onGamepad}
+        onClick={onControls}
         className="touch-target flex w-full items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.45rem] text-left hover:bg-muted active:bg-muted"
       >
         <Gamepad2 className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1">
-          <div className="truncate text-[0.95rem] text-surface-foreground">Gamepad skill buttons</div>
+          <div className="truncate text-[0.95rem] text-surface-foreground">Controls</div>
           <div className="truncate text-[0.75rem] text-muted-foreground">
-            Which controller button fires each skill on the Feed
+            Controller map, sticks, calibration, on-screen sticks and voice prompts
           </div>
         </div>
         <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
       </button>
+      {onAircraftSetup ? (
+        <button
+          type="button"
+          onClick={onAircraftSetup}
+          className="touch-target flex w-full items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.45rem] text-left hover:bg-muted active:bg-muted"
+        >
+          <Wrench className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[0.95rem] text-surface-foreground">Aircraft setup</div>
+            <div className="truncate text-[0.75rem] text-muted-foreground">Calibrate, configure and tune the flight controller</div>
+          </div>
+          <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
+        </button>
+      ) : null}
 
       {sections.length ? (
         <h2 className="px-[0.2rem] pt-[0.6rem] text-[0.75rem] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -371,7 +392,7 @@ function headerFor(
   if (mode === "~" && rest === "") return { title: "Settings" };
   if (mode === "!" && isSettingsSectionId(rest)) return sectionHeader(rest);
   if (mode === "!" && rest === "appearance") return { title: "Appearance", hint: "Settings" };
-  if (mode === "!") return { title: "Gamepad skill buttons", hint: "Settings" };
+  if (mode === "!") return { title: "Controls", hint: "Settings" };
   if (mode === "~") {
     const g = curatedGroupById(rest);
     return { title: g?.label ?? "Settings", hint: g?.description };

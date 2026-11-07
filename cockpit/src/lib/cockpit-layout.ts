@@ -1,47 +1,60 @@
 // Width classes and named cockpit layout measures, so each clearance is
-// defined once. Mirrors the Android cockpit (`CockpitLayout.kt` and the
-// Skill Bar's width classes): the same breakpoints, clearances and inset
-// sizing, so a pilot moving between the apps sees the same arrangement.
+// defined once. The breakpoints are the cockpit spec's (`layout.json`), the
+// same on every surface: compact < 600, medium 600–839, expanded 840–1599,
+// tv ≥ 1600 or the kiosk. The agent cockpit measures the viewport.
+
+import { LAYOUT_CLASSES, TOUCH_TARGET, WIDTH_CLASSES, type LayoutClassSpec } from "@/lib/cockpit-spec";
 
 /** The window width class. `tv` is a large panel or the HDMI kiosk. */
 export type WidthClass = "compact" | "medium" | "expanded" | "tv";
 
-export const MEDIUM_MIN_PX = 600;
-export const EXPANDED_MIN_PX = 1024;
-export const TV_MIN_PX = 1600;
-
 /** The width class for a viewport `widthPx` wide; the kiosk is always `tv`. */
 export function widthClassFor(widthPx: number, kiosk: boolean): WidthClass {
-  if (kiosk || widthPx >= TV_MIN_PX) return "tv";
-  if (widthPx >= EXPANDED_MIN_PX) return "expanded";
-  if (widthPx >= MEDIUM_MIN_PX) return "medium";
-  return "compact";
+  if (kiosk) return "tv";
+  const w = Math.floor(widthPx);
+  return WIDTH_CLASSES.find((c) => w >= c.min && (c.max === null || w <= c.max))?.id ?? "compact";
 }
 
-/** The Feed arrangement: `compact` keeps the video full-bleed with a minimap
- *  inset, `split` puts video and map side by side behind a draggable divider,
- *  `portrait` stacks a 16:9 video over the map. */
-export type FeedLayout = "compact" | "split" | "portrait";
-
-/** Which Feed layout a window gets. Without a map to show (a node that does
- *  not fly), a landscape window keeps the full-bleed video. */
-export function feedLayoutFor(width: WidthClass, portrait: boolean, hasMap: boolean): FeedLayout {
-  if (portrait) return "portrait";
-  if (width === "compact" || !hasMap) return "compact";
-  return "split";
-}
-
-/** Space kept free above the bottom edge for the Skill Bar. */
+/** Space kept free above the bottom edge for the bottom row and the skill
+ *  picker. */
 export const SKILL_BAR_CLEARANCE_PX = 112;
-/** Space kept free below the safety band for the inset row (minimap, tabs). */
+/** Space kept free below the top bar for widget zones. */
 export const ZONE_TOP_CLEARANCE_PX = 140;
 
-/** The minimap inset's width on the compact layout: 26 % of the Feed's width,
- *  kept between 160 and 280 px. A CSS length, so the browser resolves the
- *  percentage against the stage as it resizes. */
-export const INSET_WIDTH = "clamp(160px, 26%, 280px)";
-/** The minimap inset's width-to-height ratio. */
-export const INSET_ASPECT = 16 / 10;
+/** The grid's measures for a width class (`layout.json` `classes`): the
+ *  column button edge, the shutter edge, the bottom-left card and the chrome
+ *  scale (×1.33 on a television). Glove mode grows the touch targets. */
+export interface GridMeasures {
+  colPx: number;
+  shutterPx: number;
+  scale: number;
+  card: { kind: "chip"; sizePx: number } | { kind: "card"; widthPx: number; heightPx: number };
+  distanceOnly: boolean;
+  defaultLevel: "full" | "route" | "off";
+  focusRingsAlways: boolean;
+  overlayFpsCap: number | null;
+}
+
+export function gridMeasures(width: WidthClass, glove: boolean): GridMeasures {
+  const c = LAYOUT_CLASSES[width];
+  const touch = glove ? GLOVE_TOUCH_SCALE : 1;
+  const shutter = Math.max(TOUCH_TARGET.shutter, c.column_width);
+  const blc = c.bottom_left_card;
+  const extra = c as LayoutClassSpec & { focus_rings?: string; overlay_fps_cap?: number };
+  return {
+    colPx: Math.round(c.column_width * touch),
+    shutterPx: Math.round(shutter * touch),
+    scale: c.scale,
+    card:
+      blc.kind === "chip"
+        ? { kind: "chip", sizePx: blc.size ?? 96 }
+        : { kind: "card", widthPx: blc.width ?? 280, heightPx: blc.height ?? 180 },
+    distanceOnly: c.labels === "distance_only",
+    defaultLevel: c.default_layer_level,
+    focusRingsAlways: extra.focus_rings === "always",
+    overlayFpsCap: typeof extra.overlay_fps_cap === "number" ? extra.overlay_fps_cap : null,
+  };
+}
 
 /** The video share of a split, and its bounds. */
 export const SPLIT_MIN = 0.2;
@@ -55,12 +68,6 @@ export function clampSplit(ratio: number): number {
 
 /** Touch targets grow by this factor in glove mode. */
 export const GLOVE_TOUCH_SCALE = 1.25;
-
-/** A Skill Bar slot's edge in px for a width class, scaled up in glove mode. */
-export function skillSlotPx(width: WidthClass, glove: boolean): number {
-  const base = width === "compact" ? 64 : width === "medium" ? 72 : 88;
-  return glove ? base * GLOVE_TOUCH_SCALE : base;
-}
 
 /** The floating shell chrome's sizes, as Tailwind classes over the CSS
  *  variables declared once in styles/globals.css (`--chrome-*`). The chrome

@@ -35,3 +35,4 @@ export const CaptureScreen = lazy(() =>
 export const SensorsScreen = lazy(() =>
   import("@/components/screens/sensors-screen").then((m) => ({ default: m.SensorsScreen })),
 );
+export const AircraftSetupScreen = lazy(() => import("@/components/screens/aircraft-setup-screen").then((m) => ({ default: m.AircraftSetupScreen })));

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseExtensionDetail, parseSkillSettings, parseTargetActions, reportedStatesFor } from "@/lib/extensions";
+import { parseExtensionDetail, parseExtensionSkill, parseTargetActions } from "@/lib/extensions";
 
 const FOLLOW = "com.altnautica.follow-me";
 
@@ -33,60 +33,50 @@ describe("parseTargetActions", () => {
   });
 });
 
-describe("parseSkillSettings", () => {
-  it("keeps plugin.config params with exactly two enum strings", () => {
-    expect(
-      parseSkillSettings([
-        { key: "reacquire_mode", binding: "plugin.config", schema: { enum: ["strict", "smart"], default: "smart" } },
-        { key: "speed", binding: "plugin.config", schema: { enum: ["a", "b", "c"] } },
-        { key: "other", binding: "fc.param", schema: { enum: ["a", "b"] } },
-      ]),
-    ).toEqual([{ key: "reacquire_mode", values: ["strict", "smart"], defaultValue: "smart" }]);
-  });
-});
+const SIYI = "com.altnautica.siyi-pod";
 
-describe("parseExtensionDetail", () => {
-  const detail = {
-    granted_capabilities: ["ui.slot.video-overlay", 4],
-    manifest: {
-      name: "Follow Me",
-      gcs: {
-        entrypoint: "gcs/index.js",
-        contributes: {
-          panels: [{ id: "reticle", slot: "video.overlay" }, { id: "bad" }],
-          skills: [
-            { id: "follow", label: "Follow", toggle: true, confirm: true, activation: { config_key: "active" }, state: { topic: "follow.state" } },
-            { id: "pulse", activation: { via: "rpc", config_key: "x" } },
-          ],
-          parameters: [{ key: "reacquire_mode", binding: "plugin.config", schema: { enum: ["strict", "smart"] } }],
-          target_actions: [{ id: "follow", designate: true, config_key: "active", config_value: true }],
-        },
-      },
-    },
+function skill(id: string, over: Record<string, unknown> = {}) {
+  return {
+    id,
+    label: `skill.${id}`,
+    icon: "camera",
+    category: "camera",
+    toggle: false,
+    confirm: false,
+    arm_requirement: "any",
+    activation: { via: "config", config_key: id.replace(/-/g, "_") },
+    state: { via: "event", topic: "siyi.pod.state" },
+    ...over,
   };
+}
 
-  it("builds skills with settings, panels and target actions", () => {
-    const ext = parseExtensionDetail(FOLLOW, detail);
-    expect(ext.name).toBe("Follow Me");
-    expect(ext.grantedCapabilities).toEqual(["ui.slot.video-overlay"]);
-    expect(ext.panels).toEqual([{ id: "reticle", slot: "video.overlay", title: "reticle", zone: null }]);
-    expect(ext.skills).toHaveLength(1);
-    expect(ext.skills[0]).toMatchObject({
-      id: `${FOLLOW}:follow`,
-      gesture: "hold",
-      extension: { pluginId: FOLLOW, configKey: "active", toggle: true, stateTopic: "follow.state" },
-      settings: [{ key: "reacquire_mode", values: ["strict", "smart"], defaultValue: null }],
-    });
-    expect(ext.targetActions).toHaveLength(1);
-    expect(ext.targetActions[0]).toMatchObject({ pluginId: FOLLOW, designate: true, configKey: "active" });
+describe("parseExtensionSkill (C5 strict schema)", () => {
+  const ctx = { pluginName: "SIYI pod" };
+
+  it("accepts a valid skill with its category, motion and binding fields", () => {
+    const r = parseExtensionSkill(FOLLOW, skill("follow-me", { category: "behavior", toggle: true, confirm: true, arm_requirement: "armed", motion: true, nudge: true, vehicle_classes: ["multirotor", "vtol"], default_binding: { key: "shift+f" } }), { pluginName: "Follow" });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.skill.category).toBe("behavior");
+    expect(r.skill.extension).toMatchObject({ motion: true, nudge: true, vehicleClasses: ["multirotor", "vtol"], toggle: true });
+    expect(r.skill.confirm.kind).toBe("hold");
   });
 
-  it("reads the echoed setting value back from the state topic", () => {
-    const ext = parseExtensionDetail(FOLLOW, detail);
-    const states = reportedStatesFor(ext, {
-      "follow.state": { payload: { active: true, commanding: true, reacquire_mode: "strict" }, ts_ms: 1 },
-    });
-    expect(states[`${FOLLOW}:follow`]).toEqual({ state: "active", echo: { reacquire_mode: "strict" } });
-    expect(reportedStatesFor(ext, {})[`${FOLLOW}:follow`]).toEqual({ state: "idle" });
+  it("rejects a skill with no state.via, an unknown category or a non-config activation", () => {
+    const { state: _s, ...noState } = skill("photo");
+    void _s;
+    for (const bad of [noState, skill("photo", { state: { topic: "t" } }), skill("photo", { category: "flight" }), skill("photo", { activation: { via: "method", config_key: "x" } }), skill("Photo_Bad")]) {
+      expect(parseExtensionSkill(SIYI, bad, ctx).ok).toBe(false);
+    }
+  });
+
+  it("keeps all eight skills of a plugin that declares eight", () => {
+    const ids = ["siyi-record", "cycle-palette", "fire-lrf", "center", "nadir", "zoom-in", "zoom-out", "photo"];
+    const detail = { manifest: { name: "SIYI pod", gcs: { contributes: { skills: ids.map((id) => skill(id, { toggle: id === "siyi-record" })) } } } };
+    const ext = parseExtensionDetail(SIYI, detail);
+    expect(ext.skills.map((s) => s.id)).toEqual(ids.map((id) => `${SIYI}:${id}`));
+    expect(ext.rejected).toEqual([]);
+    // i18n-key labels never render raw.
+    expect(ext.skills.every((s) => !s.label.startsWith("skill."))).toBe(true);
   });
 });

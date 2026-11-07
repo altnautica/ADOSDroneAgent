@@ -1,21 +1,16 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  clampSplit,
-  feedLayoutFor,
-  skillSlotPx,
-  SPLIT_DEFAULT,
-  widthClassFor,
-} from "@/lib/cockpit-layout";
+import { clampSplit, gridMeasures, SPLIT_DEFAULT, widthClassFor } from "@/lib/cockpit-layout";
 
-describe("width classes", () => {
-  it("splits at 600, 1024 and 1600 px", () => {
+describe("width classes (cockpit spec layout.json)", () => {
+  it("splits at 600, 840 and 1600 px", () => {
     expect(widthClassFor(599, false)).toBe("compact");
     expect(widthClassFor(600, false)).toBe("medium");
-    expect(widthClassFor(1023, false)).toBe("medium");
-    expect(widthClassFor(1024, false)).toBe("expanded");
+    expect(widthClassFor(839, false)).toBe("medium");
+    expect(widthClassFor(840, false)).toBe("expanded");
     expect(widthClassFor(1599, false)).toBe("expanded");
     expect(widthClassFor(1600, false)).toBe("tv");
+    expect(widthClassFor(3840, false)).toBe("tv");
   });
 
   it("treats the kiosk as a tv at any width", () => {
@@ -23,40 +18,35 @@ describe("width classes", () => {
   });
 });
 
-describe("feed layouts", () => {
-  it("stacks in portrait whatever the width", () => {
-    expect(feedLayoutFor("tv", true, true)).toBe("portrait");
-    expect(feedLayoutFor("compact", true, false)).toBe("portrait");
+describe("grid measures", () => {
+  it("shrinks the columns to 48 and shows the card as a 96 px chip on compact", () => {
+    const m = gridMeasures("compact", false);
+    expect(m.colPx).toBe(48);
+    expect(m.card).toEqual({ kind: "chip", sizePx: 96 });
+    expect(m.distanceOnly).toBe(true);
+    expect(m.defaultLevel).toBe("route");
   });
 
-  it("keeps the full-bleed video on a compact window", () => {
-    expect(feedLayoutFor("compact", false, true)).toBe("compact");
+  it("keeps the shutter at 56 even where columns shrink", () => {
+    expect(gridMeasures("compact", false).shutterPx).toBe(56);
   });
 
-  it("splits video and map from medium up", () => {
-    expect(feedLayoutFor("medium", false, true)).toBe("split");
-    expect(feedLayoutFor("expanded", false, true)).toBe("split");
-    expect(feedLayoutFor("tv", false, true)).toBe("split");
+  it("scales a tv by 1.33 with focus rings always on and a 30 fps overlay cap", () => {
+    const m = gridMeasures("tv", false);
+    expect(m.scale).toBe(1.33);
+    expect(m.focusRingsAlways).toBe(true);
+    expect(m.overlayFpsCap).toBe(30);
+    expect(gridMeasures("expanded", false).focusRingsAlways).toBe(false);
   });
 
-  it("never splits off an empty map pane", () => {
-    expect(feedLayoutFor("expanded", false, false)).toBe("compact");
+  it("grows touch targets in glove mode", () => {
+    expect(gridMeasures("medium", true).colPx).toBe(70);
   });
-});
 
-describe("layout measures", () => {
   it("keeps the split between 0.2 and 0.8", () => {
     expect(clampSplit(0.05)).toBe(0.2);
     expect(clampSplit(0.95)).toBe(0.8);
     expect(clampSplit(0.5)).toBe(0.5);
     expect(clampSplit(Number.NaN)).toBe(SPLIT_DEFAULT);
-  });
-
-  it("sizes Skill Bar slots by width class and glove mode", () => {
-    expect(skillSlotPx("compact", false)).toBe(64);
-    expect(skillSlotPx("medium", false)).toBe(72);
-    expect(skillSlotPx("expanded", false)).toBe(88);
-    expect(skillSlotPx("tv", false)).toBe(88);
-    expect(skillSlotPx("medium", true)).toBe(90);
   });
 });

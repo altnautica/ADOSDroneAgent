@@ -1,105 +1,125 @@
 import { describe, expect, it } from "vitest";
 
-import { AUTOPILOT_PX4, CORE_BY_ID, CORE_SKILLS, modePresetsFor, resolveSkillState } from "@/lib/skills";
-import { parseExtensionSkill } from "@/lib/extensions";
+import { activateExclusive, buildBindings, echoOutcome, ECHO_TIMEOUT_MS, runningMotionSkills } from "@/lib/skill-gates";
+import { armGateReason, BUILTIN_SKILL_BY_ID, BUILTIN_SKILLS, resolveSkillState, skillVisibleFor, type Skill, type SkillContext } from "@/lib/skills";
 
-const live = { fcConnected: true, live: true };
+const pilot = { armed: true, landed: false, vehicleClass: "multirotor" as const, fresh: true };
+const flying: SkillContext = { fcConnected: true, live: true, armed: true, pilot, pilotLinkOpen: true };
 
-describe("command skills need a commandable FC link with live telemetry", () => {
-  it("disables every built-in without an FC link", () => {
-    for (const s of CORE_SKILLS) {
-      expect(resolveSkillState(s, { fcConnected: false, live: true, armed: true })).toEqual({
-        enabled: false,
-        reason: "No flight controller link",
-      });
-    }
+function plugin(id: string, over: Partial<NonNullable<Skill["extension"]>> = {}): Skill {
+  return {
+    id: `p:${id}`,
+    label: id,
+    category: "behavior",
+    confirm: { kind: "tap", ms: 0 },
+    armRequirement: "any",
+    extension: {
+      pluginId: "p",
+      pluginName: "P",
+      localId: id,
+      configKey: "active",
+      toggle: true,
+      stateTopic: "p.state",
+      motion: true,
+      nudge: false,
+      oneShot: false,
+      vehicleClasses: ["multirotor", "fixedwing", "vtol"],
+      defaultBinding: null,
+      ...over,
+    },
+  };
+}
+
+describe("built-ins come from builtins.json", () => {
+  it("has exactly the spec ids, no abort, rth not rtl", () => {
+    expect(BUILTIN_SKILLS.map((s) => s.id)).toEqual(["arm", "disarm", "takeoff", "land", "rth", "pause", "resume", "take_control", "kill"]);
   });
 
-  it("disables every built-in when the link answers but telemetry is not live", () => {
-    // A relayed reading that has gone stale, or a link with no vehicle state.
-    for (const s of CORE_SKILLS) {
-      expect(resolveSkillState(s, { fcConnected: true, live: false, armed: true }).enabled).toBe(false);
-    }
-  });
-
-  it("enables commands on a live link", () => {
-    expect(resolveSkillState(CORE_BY_ID.arm, { ...live, armed: false }).enabled).toBe(true);
-    for (const id of ["disarm", "takeoff", "land", "rtl", "pause", "resume", "kill"]) {
-      expect(resolveSkillState(CORE_BY_ID[id], { ...live, armed: true }).enabled).toBe(true);
-    }
-  });
-
-  it("applies the arm requirement", () => {
-    expect(resolveSkillState(CORE_BY_ID.arm, { ...live, armed: true }).reason).toBe("Already armed");
-    expect(resolveSkillState(CORE_BY_ID.land, { ...live, armed: false }).reason).toBe("Not armed");
-  });
-});
-
-describe("confirm tiers", () => {
-  it("maps the built-ins to their gestures", () => {
-    expect(CORE_BY_ID.arm.gesture).toBe("slide");
-    expect(CORE_BY_ID.kill.gesture).toBe("guarded");
-    expect(CORE_BY_ID.pause.gesture).toBe("tap");
-    for (const id of ["disarm", "takeoff", "land", "rtl", "resume"]) {
-      expect(CORE_BY_ID[id].gesture).toBe("hold");
-    }
-    expect(CORE_BY_ID.takeoff.takesAltitude).toBe(true);
-    expect(CORE_BY_ID.kill.command?.cmd).toBe("killswitch");
-  });
-
-  it("taps recovery modes and holds the rest", () => {
-    const byName = Object.fromEntries(modePresetsFor(null).map((s) => [s.command?.args[0], s.gesture]));
-    expect(byName.LOITER).toBe("tap");
-    expect(byName.ALT_HOLD).toBe("tap");
-    expect(byName.GUIDED).toBe("hold");
-    expect(modePresetsFor(AUTOPILOT_PX4).map((s) => s.command?.args[0])).toEqual([
-      "ALTITUDE",
-      "POSITION",
-      "LOITER",
-      "MISSION",
-    ]);
+  it("uses the spec confirm tiers", () => {
+    expect(BUILTIN_SKILL_BY_ID.arm.confirm).toEqual({ kind: "hold", ms: 800 });
+    expect(BUILTIN_SKILL_BY_ID.rth.confirm).toEqual({ kind: "hold", ms: 1500 });
+    expect(BUILTIN_SKILL_BY_ID.pause.confirm.kind).toBe("tap");
+    expect(BUILTIN_SKILL_BY_ID.kill.confirm).toEqual({ kind: "hold_confirm", ms: 3000 });
   });
 });
 
-describe("extension skills", () => {
-  const follow = parseExtensionSkill("com.example.follow", {
-    id: "follow",
-    label: "Follow",
-    toggle: true,
-    confirm: true,
-    arm_requirement: "armed",
-    activation: { via: "config", config_key: "active" },
-    state: { via: "event", topic: "follow.state" },
-  })!;
-
-  it("parses a config-activated skill", () => {
-    expect(follow).toMatchObject({
-      id: "com.example.follow:follow",
-      gesture: "hold",
-      armRequirement: "armed",
-      extension: { pluginId: "com.example.follow", configKey: "active", toggle: true, stateTopic: "follow.state" },
-    });
+describe("arm gates", () => {
+  it("evaluates armed_landed and disarmed_or_landed", () => {
+    expect(armGateReason("armed_landed", true, true)).toBeNull();
+    expect(armGateReason("armed_landed", true, false)).toBe("Airborne");
+    expect(armGateReason("disarmed_or_landed", false, null)).toBeNull();
+    expect(armGateReason("disarmed_or_landed", true, null)).toBe("Landed state unknown");
   });
 
-  it("follows the plugin's reported state", () => {
-    const ctx = { ...live, armed: true };
-    expect(
-      resolveSkillState(follow, { ...ctx, reported: { [follow.id]: { state: "disabled", reason: "No target" } } }),
-    ).toEqual({ enabled: false, reason: "No target" });
-    expect(resolveSkillState(follow, { ...ctx, reported: { [follow.id]: { state: "active" } } })).toMatchObject({
-      enabled: true,
-      active: true,
-    });
+  it("gates takeoff off while airborne and disarm off while flying", () => {
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.takeoff, flying).enabled).toBe(false);
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.disarm, flying).enabled).toBe(false);
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.land, flying).enabled).toBe(true);
   });
 });
 
-describe("relaying ground station", () => {
-  it("names why commands are unavailable when only a relayed aircraft is heard", () => {
-    const ctx = { fcConnected: false, live: true, armed: true, linkReason: "Commands go through the drone's link" };
-    expect(resolveSkillState(CORE_BY_ID.land, ctx)).toEqual({
-      enabled: false,
-      reason: "Commands go through the drone's link",
+describe("stale link rules", () => {
+  const stale: SkillContext = { ...flying, pilot: { ...pilot, fresh: false } };
+  it("sends pause and kill blind, disables rth with a reason", () => {
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.pause, stale).enabled).toBe(true);
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.kill, stale).enabled).toBe(true);
+    const rth = resolveSkillState(BUILTIN_SKILL_BY_ID.rth, stale);
+    expect(rth.enabled).toBe(false);
+    expect(rth.reason).toBeTruthy();
+  });
+
+  it("disables take_control when no pilot runs", () => {
+    const noPilot: SkillContext = { fcConnected: true, live: true, armed: true, pilot: null };
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.take_control, noPilot)).toMatchObject({ enabled: false, reason: "Pilot not running" });
+  });
+});
+
+describe("plugin skill freshness and link loss", () => {
+  const follow = plugin("follow");
+  it("dims state older than 3 s and keeps an active skill stoppable", () => {
+    const ctx: SkillContext = { ...flying, now: 10_000, reported: { [follow.id]: { state: "active", at: 5_000 } } };
+    expect(resolveSkillState(follow, ctx)).toMatchObject({ enabled: true, active: true, stale: true, lastSeenS: 5 });
+  });
+
+  it("hides a skill whose vehicle classes exclude the vehicle", () => {
+    expect(skillVisibleFor(plugin("x", { vehicleClasses: ["multirotor", "vtol"] }), "fixedwing")).toBe(false);
+    expect(skillVisibleFor(plugin("x", { vehicleClasses: ["multirotor", "vtol"] }), null)).toBe(true);
+  });
+});
+
+describe("echo and preemption", () => {
+  const a = plugin("a");
+  const b = plugin("b");
+  it("settles a write on a later echo, expires after 3 s", () => {
+    const w = { want: true, at: 1000 };
+    expect(echoOutcome(w, { state: "active", at: 1500 }, 1600)).toBe("confirmed");
+    expect(echoOutcome(w, { state: "active", at: 900 }, 1600)).toBe("pending");
+    expect(echoOutcome(w, undefined, 1000 + ECHO_TIMEOUT_MS + 1)).toBe("expired");
+  });
+
+  it("stops the running motion skill and waits before activating the next", async () => {
+    const log: string[] = [];
+    const running = runningMotionSkills([a, b], { [a.id]: { state: "active" } }, {});
+    expect(running.map((s) => s.id)).toEqual([a.id]);
+    await activateExclusive(b, running, {
+      write: async (s, v) => void log.push(`${s.id}=${v}`),
+      waitIdle: async (s) => void log.push(`wait ${s.id}`),
     });
-    expect(resolveSkillState(modePresetsFor(null)[0], ctx).reason).toBe("Commands go through the drone's link");
+    expect(log).toEqual([`${a.id}=false`, `wait ${a.id}`, `${b.id}=true`]);
+  });
+});
+
+describe("keyboard bindings", () => {
+  it("gives the later skill no key on a collision and lists it", () => {
+    const first = plugin("one", { defaultBinding: { key: "shift+f", gamepadButton: null } });
+    const second = plugin("two", { defaultBinding: { key: "shift+f", gamepadButton: null } });
+    const t = buildBindings([first, second]);
+    expect(Object.entries(t.keys).filter(([, id]) => id === `skill:${first.id}` || id === `skill:${second.id}`)).toHaveLength(1);
+    expect(t.conflicts.some((c) => c.actionId.endsWith(second.id))).toBe(true);
+  });
+
+  it("binds space to pause and shift+x to kill", () => {
+    const t = buildBindings([]);
+    expect(Object.values(t.keys)).toEqual(expect.arrayContaining(["pause", "kill"]));
   });
 });

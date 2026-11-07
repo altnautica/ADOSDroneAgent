@@ -6,6 +6,7 @@ import { useNodeIdentity } from "@/hooks/use-node-identity";
 import { useSnapshot } from "@/hooks/use-snapshot";
 import { buildBanners } from "@/shared/api/banners";
 import { cn } from "@/lib/utils";
+import { SetupNeededBanner } from "@/components/layout/setup-needed-banner";
 
 /** The FC-link banner reads the snapshot, so it polls (every 3 s) only on the
  *  drone Home page; every other page shows just the agent-offline banner. */
@@ -25,10 +26,9 @@ export function BannerHost() {
     fcReachable: heartbeat.data?.fcReachable,
   });
 
-  if (banners.length === 0) return null;
-
   return (
-    <div className="px-4 lg:px-6 pt-3 space-y-2">
+    <div className="px-4 lg:px-6 pt-3 space-y-2 empty:hidden">
+      <SetupNeededBanner />
       {banners.map((b) => {
         const Icon = b.severity === "err" ? AlertCircle : AlertTriangle;
         return (

@@ -42,7 +42,8 @@
     "gnss": "GNSS",
     "lora": "LoRa",
     "capture": "Capture",
-    "sensors": "Sensors"
+    "sensors": "Sensors",
+    "aircraftSetup": "Aircraft setup"
   },
   "layout": {
     "settings": {
@@ -70,7 +71,8 @@
       "title": "Settings",
       "intro": "Live agent configuration. Risky changes (passwords, profile switches, board override) require explicit Save and a confirm prompt.",
       "captureBlurb": "Capture storage and camera exposure.",
-      "sensorsBlurb": "Sensor hub, rig file and clock sources."
+      "sensorsBlurb": "Sensor hub, rig file and clock sources.",
+      "aircraftSetupBlurb": "Calibrate, configure and tune the flight controller."
     },
     "header": {
       "copyHost": "copy {{host}}",
@@ -87,7 +89,8 @@
     },
     "banners": {
       "agentOffline": "Agent is unreachable. Reconnecting…",
-      "fcDisconnected": "Flight controller is disconnected."
+      "fcDisconnected": "Flight controller is disconnected.",
+      "setupNeededDismiss": "Dismiss"
     },
     "theme": {
       "dark": "dark theme",
@@ -1652,6 +1655,37 @@
       "other": "Capture refused: {{code}}"
     },
     "storage": "About {{remaining}} of recording space left."
+  },
+  "setupWizard": {
+    "noFc": "No flight controller identified yet. Connect the flight controller to start setup.",
+    "loadError": "Could not read the setup state: {{error}}",
+    "loading": "Reading the setup state…",
+    "vehicleClass": {
+      "multirotor": "Multirotor",
+      "fixedwing": "Fixed wing",
+      "vtol": "VTOL"
+    },
+    "wizardState": {
+      "not_started": "Not started",
+      "running": "Running",
+      "done": "Complete",
+      "failed": "Failed",
+      "aborted": "Aborted"
+    },
+    "rerun": "Re-run",
+    "steps": "Steps",
+    "live": "Live values",
+    "result": "Result",
+    "holdTo": "Hold · {{action}}",
+    "reverted": "Restored {{count}} parameters.",
+    "report": {
+      "date": "Date",
+      "firmware": "Firmware",
+      "vehicle": "Vehicle",
+      "snapshots": "Parameter snapshots",
+      "noSteps": "No step has stored a result yet.",
+      "noSnapshots": "No snapshot yet."
+    }
   },
   "cockpit": {
     "video": {

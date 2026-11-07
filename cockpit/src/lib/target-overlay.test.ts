@@ -123,6 +123,8 @@ describe("targetMenuEntries", () => {
     grantedCapabilities: [],
     panels: [],
     skills: [],
+    rejected: [],
+    locales: [],
     targetActions: actions,
   });
 

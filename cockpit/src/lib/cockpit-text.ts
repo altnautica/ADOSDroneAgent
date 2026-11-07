@@ -1,0 +1,30 @@
+// Cockpit text from the spec's string table (`setup-strings.json`): the
+// pilot's banners (`pilot.banner.fc_control {mode}`), the flow screens
+// (`flow.*`) and the voice prompts (`voice.*`), with single-brace `{arg}`
+// interpolation. Enumerated arg values resolve through their own keys
+// (`pilot.banner.source.rc`, `pilot.link_loss_action.rth`).
+
+import stringsJson from "@/shared/cockpit-spec/setup-strings.json";
+
+const STRINGS: Readonly<Record<string, string>> = stringsJson.strings as Record<string, string>;
+
+/** Arg names whose values are keys of their own. */
+const ARG_KEYS: Readonly<Record<string, string>> = {
+  source: "pilot.banner.source.",
+  action: "pilot.link_loss_action.",
+};
+
+/** A string by key with `{arg}` filled; an unknown key reads as itself. */
+export function cockpitText(key: string, args: Readonly<Record<string, unknown>> = {}): string {
+  const template = STRINGS[key];
+  if (template === undefined) return key;
+  return template.replace(/\{([a-z_]+)\}/g, (_, name: string) => {
+    const v = args[name];
+    if (v === null || v === undefined) return "";
+    const s = String(v);
+    const prefix = ARG_KEYS[name];
+    if (prefix && STRINGS[prefix + s] !== undefined) return STRINGS[prefix + s];
+    if (name === "profile" || name === "mode") return s.toUpperCase();
+    return s;
+  });
+}

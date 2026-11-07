@@ -1,17 +1,22 @@
 // The open skill confirmation, shared by every input path: the touch sheet,
-// a held gamepad button, a held Enter key, and a long-press of the panel's
-// activate button all drive the same hold here, so a sheet opened from any
-// source can be completed from any other.
+// a held controller button or keyboard chord (through the cockpit action's
+// press/release), a held Enter key, and a long-press of the panel's activate
+// button all drive the same hold here, so a sheet opened from any source can
+// be completed from any other. A `hold_confirm` skill (kill) moves from its
+// hold stage to an explicit confirm stage once the hold completes.
 
 import { create } from "zustand";
 
-import { DEFAULT_TAKEOFF_ALT_M, GUARD_WINDOW_MS, type Skill } from "@/lib/skills";
+import { DEFAULT_TAKEOFF_ALT_M, type Skill } from "@/lib/skills";
 
 export interface PendingConfirm {
   skill: Skill;
   altitudeM: number;
   /** The gamepad button that opened the sheet; holding it satisfies the hold. */
   gamepadButton: number | null;
+  /** `hold`: the hold is running or awaited; `confirm`: the hold of a
+   *  `hold_confirm` skill completed and an explicit confirm is due. */
+  stage: "hold" | "confirm";
 }
 
 export type AckKind = "ok" | "warn" | "err";
@@ -22,21 +27,20 @@ export interface AckLine {
 
 interface ConfirmState {
   pending: PendingConfirm | null;
-  /** Kill guard: armed until this `performance.now()` time, else null. */
-  guardUntil: number | null;
-  /** When a non-pointer hold (gamepad, Enter) began, else null. */
+  /** When a non-pointer hold (controller, chord, Enter) began, else null. */
   heldSince: number | null;
-  /** Bumped by a panel long-press, which completes a hold in one gesture. */
+  /** Bumped by a panel long-press or a controller-timed hold, which complete
+   *  the hold (or the confirm) in one gesture. */
   panelConfirmNonce: number;
-  /** A command is in flight; every skill is held off until it settles. */
+  /** A command is in flight; every skill but kill is held off until it settles. */
   busy: boolean;
-  /** The last command outcome, shown above the Skill Bar. */
+  /** The last command outcome. */
   ack: AckLine | null;
 
-  open: (skill: Skill, gamepadButton?: number | null) => void;
+  open: (skill: Skill, gamepadButton?: number | null, stage?: "hold" | "confirm") => void;
   cancel: () => void;
   setAltitude: (m: number) => void;
-  armGuard: () => void;
+  toConfirmStage: () => void;
   setHeld: (down: boolean) => void;
   panelConfirm: () => void;
   setBusy: (busy: boolean) => void;
@@ -45,22 +49,17 @@ interface ConfirmState {
 
 export const useConfirmStore = create<ConfirmState>((set, get) => ({
   pending: null,
-  guardUntil: null,
   heldSince: null,
   panelConfirmNonce: 0,
   busy: false,
   ack: null,
 
-  open: (skill, gamepadButton = null) =>
-    set({
-      pending: { skill, altitudeM: DEFAULT_TAKEOFF_ALT_M, gamepadButton },
-      heldSince: null,
-      guardUntil: null,
-    }),
-  cancel: () => set({ pending: null, heldSince: null, guardUntil: null }),
-  setAltitude: (m) =>
-    set((s) => (s.pending ? { pending: { ...s.pending, altitudeM: m } } : s)),
-  armGuard: () => set({ guardUntil: performance.now() + GUARD_WINDOW_MS, heldSince: null }),
+  open: (skill, gamepadButton = null, stage = "hold") =>
+    set({ pending: { skill, altitudeM: DEFAULT_TAKEOFF_ALT_M, gamepadButton, stage }, heldSince: null }),
+  cancel: () => set({ pending: null, heldSince: null }),
+  setAltitude: (m) => set((s) => (s.pending ? { pending: { ...s.pending, altitudeM: m } } : s)),
+  toConfirmStage: () =>
+    set((s) => (s.pending ? { pending: { ...s.pending, stage: "confirm" }, heldSince: null } : s)),
   setHeld: (down) => {
     const { heldSince, pending } = get();
     if (!pending) return;

@@ -82,6 +82,14 @@
     outline-offset: -0.15rem;
     border-radius: var(--radius);
   }
+
+  /* TV / kiosk class (cockpit spec layout.json `focus_rings: always`): every
+   * focused control in the Feed draws the ring, whatever moved the focus, so
+   * D-pad navigation on a television is always visible. */
+  [data-focus-rings="always"] :focus {
+    outline: 0.2rem solid hsl(var(--ring));
+    outline-offset: 0.1rem;
+  }
 }
 
 @layer components {

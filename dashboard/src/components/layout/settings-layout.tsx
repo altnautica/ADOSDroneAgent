@@ -1,5 +1,6 @@
 import {
   BatteryMedium,
+  Wrench,
   Boxes,
   Cloud,
   Cpu,
@@ -195,6 +196,15 @@ const SECTIONS: SectionLink[] = [
     // The operating region governs the RF radio; only the radio profiles have
     // a regulatory domain to set.
     allow: ["drone", "ground_station"],
+  },
+  {
+    to: "/settings/aircraft-setup",
+    labelKey: "nav.aircraftSetup",
+    icon: Wrench,
+    blurbKey: "layout.settings.aircraftSetupBlurb",
+    group: "System & safety",
+    // The setup wizard drives the flight controller attached to this drone.
+    allow: ["drone"],
   },
   {
     to: "/settings/battery",

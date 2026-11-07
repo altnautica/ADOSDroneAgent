@@ -12,12 +12,13 @@ import type { LucideIcon } from "lucide-react";
 import { SettingToggle } from "@/components/feed/reacquire-toggle";
 import { Menu, type MenuItem } from "@/components/ui/menu";
 import type { FollowSkill } from "@/hooks/use-follow-skill";
+import { usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { startNodeRecording, startRecording, stopNodeRecording, stopRecording } from "@/lib/api";
 import type { WidthClass } from "@/lib/cockpit-layout";
-import { followButton, railButtonPx, railLayout, RAIL_GAP_PX, type RailButton } from "@/lib/follow-rail";
+import { avoidChip, followButton, railButtonPx, railLayout, RAIL_GAP_PX, type RailButton } from "@/lib/follow-rail";
 import { executeSkill, requestSkill } from "@/lib/skill-runner";
-import { CORE_BY_ID, resolveSkillState } from "@/lib/skills";
+import { BUILTIN_SKILL_BY_ID, resolveSkillState } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
 import type { FollowPhase } from "@/shared/hud/nav-types";
@@ -29,7 +30,7 @@ import { useStatusStore } from "@/stores/status-store";
 
 const MIRROR: Partial<Record<RailButton, { skillId: string; icon: LucideIcon; word: string }>> = {
   hold: { skillId: "pause", icon: Pause, word: "HOLD" },
-  rtl: { skillId: "rtl", icon: House, word: "RTL" },
+  rth: { skillId: "rth", icon: House, word: "RTH" },
   land: { skillId: "land", icon: PlaneLanding, word: "LAND" },
 };
 
@@ -101,9 +102,12 @@ export function FollowRail({
   const [foldAnchor, setFoldAnchor] = useState<DOMRect | null>(null);
 
   const modeSetting = follow?.skill.settings?.find((s) => s.key === "reacquire_mode") ?? null;
+  const patternSetting = follow?.skill.settings?.find((s) => s.key === "follow_mode") ?? null;
+  const avoid = avoidChip(usePilot()?.data.avoidState ?? null);
   const layout = railLayout({
     width: widthClass,
     followInstalled: follow !== null,
+    hasPattern: patternSetting !== null,
     hasModeSetting: modeSetting !== null,
     canSwap: swapLabel !== null,
     safeHeightPx,
@@ -163,6 +167,23 @@ export function FollowRail({
         return follow && modeSetting ? (
           <SettingToggle key={b} skill={follow.skill} setting={modeSetting} vertical className="bg-hud-glass" />
         ) : null;
+      case "pattern":
+        return follow && patternSetting ? (
+          <div key={b} className="flex flex-col items-stretch gap-[0.2rem]">
+            <SettingToggle skill={follow.skill} setting={patternSetting} vertical className="bg-hud-glass" />
+            {avoid ? (
+              <span
+                data-testid="avoid-chip"
+                className={cn(
+                  "rounded border px-[0.25rem] text-center font-mono text-[0.68rem]",
+                  avoid.tone === "ok" ? "border-ok/60 text-ok" : avoid.tone === "warn" ? "border-warn text-warn" : "border-err text-err",
+                )}
+              >
+                {avoid.text}
+              </span>
+            ) : null}
+          </div>
+        ) : null;
       case "camSwap":
         return (
           <RailSlot key={b} size={size} icon={ArrowLeftRight} word={swapLabel ?? ""} label={`Swap cameras ${swapLabel ?? ""}`} onPress={swapPip} />
@@ -182,7 +203,7 @@ export function FollowRail({
         );
       default: {
         const m = MIRROR[b];
-        const skill = m ? CORE_BY_ID[m.skillId] : undefined;
+        const skill = m ? BUILTIN_SKILL_BY_ID[m.skillId] : undefined;
         if (!m || !skill) return null;
         const st = resolveSkillState(skill, ctx);
         return (

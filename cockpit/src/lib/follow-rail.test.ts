@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { SKILL_BAR_CLEARANCE_PX } from "@/lib/cockpit-layout";
 import {
+  avoidChip,
   followButton,
   RADAR_PX,
   railBottomPx,
@@ -10,10 +11,10 @@ import {
   reacquiredToastText,
   SETTING_ECHO_TIMEOUT_MS,
   settingDisplay,
-  settingNotAppliedText,
+  skillDetail,
 } from "@/lib/follow-rail";
 
-const rail = { followInstalled: true, hasModeSetting: true, canSwap: true, safeHeightPx: 600 };
+const rail = { followInstalled: true, hasPattern: false, hasModeSetting: true, canSwap: true, safeHeightPx: 600 };
 
 describe("railLayout", () => {
   it("shows buttons 1–4 at compact and medium", () => {
@@ -22,9 +23,9 @@ describe("railLayout", () => {
     }
   });
 
-  it("adds the HOLD / RTL / LAND mirrors behind a divider above", () => {
+  it("adds the HOLD / RTH / LAND mirrors behind a divider above", () => {
     expect(railLayout({ ...rail, width: "expanded" })).toEqual({
-      buttons: ["follow", "mode", "camSwap", "rec", "hold", "rtl", "land"],
+      buttons: ["follow", "mode", "camSwap", "rec", "hold", "rth", "land"],
       folded: [],
       divider: true,
     });
@@ -84,10 +85,21 @@ describe("settingDisplay", () => {
     const req = { ...base, requested: "strict", requestedAt: 10_000 - SETTING_ECHO_TIMEOUT_MS - 1 };
     expect(settingDisplay(req)).toEqual({ value: "smart", pending: false, expired: true, confirmed: false });
   });
+});
 
-  it("words the not-applied warning", () => {
-    expect(settingNotAppliedText("reacquire_mode")).toBe("Re-acquire mode not applied");
-    expect(settingNotAppliedText("x")).toBe("x not applied");
+describe("skillDetail", () => {
+  it("names the follow pattern with its distance or radius", () => {
+    expect(skillDetail({ follow_mode: "orbit", orbit_radius_m: 8 })).toBe("ORBIT 8 m");
+    expect(skillDetail({ follow_mode: "follow", follow_distance_m: 6 })).toBe("FOLLOW 6 m");
+    expect(skillDetail(undefined)).toBeNull();
+  });
+});
+
+describe("avoidChip", () => {
+  it("maps the pilot's avoidance state", () => {
+    expect(avoidChip("detour")).toEqual({ text: "AVOIDING", tone: "warn" });
+    expect(avoidChip("blocked")?.tone).toBe("crit");
+    expect(avoidChip(null)).toBeNull();
   });
 });
 

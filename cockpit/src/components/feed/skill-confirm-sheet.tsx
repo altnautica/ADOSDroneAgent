@@ -1,19 +1,17 @@
 // The confirm sheet for every non-tap skill, on the shared sheet. One sheet,
-// four input paths: press-and-hold (touch/pointer), slide-to-confirm
-// (touch/pointer, slide tier), a held gamepad button or Enter (any tier), and
-// a long-press of the panel's activate button. A guarded skill (kill) shows
-// its armed guard and closes when the guard window lapses without a completed
-// hold.
+// several input paths: press-and-hold (touch/pointer), a held controller
+// button or Enter, and a long-press of the panel's activate button. The hold
+// time is the spec's (`builtins.json` `confirm.ms`); a `hold_confirm` skill
+// (Emergency stop) asks for an explicit confirm once its hold completes.
 
 import { useEffect, useRef, useState } from "react";
 import { ShieldAlert } from "lucide-react";
 
 import { NumberSettingRow } from "@/components/ui/number-setting-row";
 import { Sheet } from "@/components/ui/sheet";
-import { SlideToConfirm } from "@/components/ui/slide-to-confirm";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { executeSkill } from "@/lib/skill-runner";
-import { holdMsFor, resolveSkillState } from "@/lib/skills";
+import { resolveSkillState } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { useConfirmStore } from "@/stores/confirm-store";
 
@@ -28,7 +26,7 @@ export function SkillConfirmSheet() {
 
 function ConfirmSheet() {
   const pending = useConfirmStore((s) => s.pending)!;
-  const guardUntil = useConfirmStore((s) => s.guardUntil);
+  const toConfirmStage = useConfirmStore((s) => s.toConfirmStage);
   const heldSince = useConfirmStore((s) => s.heldSince);
   const panelNonce = useConfirmStore((s) => s.panelConfirmNonce);
   const cancel = useConfirmStore((s) => s.cancel);
@@ -36,8 +34,8 @@ function ConfirmSheet() {
   const setHeld = useConfirmStore((s) => s.setHeld);
   const ctx = useSkillContext();
 
-  const { skill, altitudeM } = pending;
-  const holdMs = holdMsFor(skill.gesture);
+  const { skill, altitudeM, stage } = pending;
+  const holdMs = skill.confirm.ms;
   const state = resolveSkillState(skill, ctx);
   const [pointerSince, setPointerSince] = useState<number | null>(null);
   const [progress, setProgress] = useState(0);
@@ -45,12 +43,21 @@ function ConfirmSheet() {
   const initialNonce = useRef(panelNonce);
   const confirmRef = useRef<HTMLDivElement>(null);
 
-  const fire = () => {
-    if (firedRef.current) return;
-    firedRef.current = true;
+  const execute = () => {
     const current = useConfirmStore.getState().pending;
     cancel();
     if (current) void executeSkill(current.skill, { altitudeM: current.altitudeM, active: state.active });
+  };
+  const fire = () => {
+    if (firedRef.current) return;
+    firedRef.current = true;
+    if (skill.confirm.kind === "hold_confirm" && stage === "hold") {
+      toConfirmStage();
+      firedRef.current = false;
+      setPointerSince(null);
+      return;
+    }
+    execute();
   };
 
   // The skill stopped being drivable while the sheet was up: close it.
@@ -58,14 +65,6 @@ function ConfirmSheet() {
     if (!state.enabled) cancel();
   }, [state.enabled, cancel]);
 
-  // A guard that lapses without a completed hold disarms the sheet.
-  useEffect(() => {
-    if (guardUntil === null) return;
-    const id = setTimeout(() => {
-      if (useConfirmStore.getState().heldSince === null) cancel();
-    }, Math.max(0, guardUntil - performance.now()));
-    return () => clearTimeout(id);
-  }, [guardUntil, cancel]);
 
   // A panel long-press is a completed hold in one gesture.
   useEffect(() => {
@@ -114,13 +113,18 @@ function ConfirmSheet() {
   }, [since, holdMs]);
 
   const shownProgress = since === null ? 0 : progress;
-  const danger = skill.gesture === "guarded";
+  const danger = skill.confirm.kind === "hold_confirm";
 
   const confirmControl =
-    skill.gesture === "slide" ? (
-      // Gamepad, keyboard and panel holds still complete the slide tier; the
-      // sheet times them, so the track only shows their progress.
-      <SlideToConfirm label={`Slide to ${skill.label.toLowerCase()}`} onConfirmed={fire} externalProgress={shownProgress} />
+    stage === "confirm" ? (
+      <button
+        type="button"
+        onClick={execute}
+        data-testid="confirm-final"
+        className="flex min-h-[3.4rem] w-full items-center justify-center rounded-lg bg-err/70 text-[0.95rem] font-semibold text-on-status"
+      >
+        {`Confirm: ${skill.label}`}
+      </button>
     ) : (
       <button
         type="button"
@@ -172,7 +176,7 @@ function ConfirmSheet() {
     >
       {danger ? (
         <p className="mb-[0.6rem] text-[0.8rem] text-err">
-          Guard armed. Motors stop immediately and an airborne vehicle falls.
+          Motors stop immediately and an airborne vehicle falls.
         </p>
       ) : null}
       {skill.takesAltitude ? (

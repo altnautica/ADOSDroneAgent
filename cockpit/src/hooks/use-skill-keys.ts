@@ -1,72 +1,74 @@
-// Keyboard chords and gamepad bindings for the Skill Bar, active while the
-// Feed is mounted. Both route through `requestSkill`, so the gates and the
-// confirm tier match a tap on the bar; the button that opened a sheet also
-// completes its hold.
-//
-// Keyboard: Shift+A arm/disarm, Shift+T takeoff, Shift+L land, Shift+R RTL,
-// Shift+P pause, Shift+X kill. Gamepad: the per-skill buttons from settings.
+// The skills as cockpit actions, and their keyboard chords, while the Feed is
+// mounted. Every built-in registers under its spec id (`arm`, `rth`, `kill`,
+// …) and every installed plugin skill as `skill:<pluginId>:<skillId>`, so a
+// controller binding names an action and fires through `runSkillAction`, the
+// same gate and confirm tier as a tap. Keyboard chords come from the spec's
+// built-in keys and the plugin skills' `default_binding` (collisions resolved
+// in the extensions store); a held chord holds the confirm sheet, and its
+// key-up ends the hold.
 
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 
-import { useSkillContext } from "@/hooks/use-skill-context";
-import { onGamepadButtons, risingEdges } from "@/lib/gamepad-bus";
-import { requestSkill } from "@/lib/skill-runner";
-import { CORE_BY_ID, type Skill, type SkillContext } from "@/lib/skills";
+import { skillContextNow } from "@/hooks/use-skill-context";
+import { registerCockpitActions, type CockpitAction } from "@/lib/cockpit-actions";
+import { chordFromEvent } from "@/lib/skill-gates";
+import { runSkillAction } from "@/lib/skill-runner";
+import { BUILTIN_SKILLS, skillActionId, type Skill } from "@/lib/skills";
 import { useConfirmStore } from "@/stores/confirm-store";
-import { useExtensionsStore } from "@/stores/extensions-store";
-import { useSettingsStore } from "@/stores/settings-store";
+import { pluginSkills, useExtensionsStore } from "@/stores/extensions-store";
 
-const KEY_CHORDS: Record<string, string> = {
-  A: "arm",
-  T: "takeoff",
-  L: "land",
-  R: "rtl",
-  P: "pause",
-  X: "kill",
-};
+/** The skill a cockpit action id names, or null. */
+export function skillForAction(actionId: string): Skill | null {
+  return [...BUILTIN_SKILLS, ...pluginSkills()].find((s) => skillActionId(s) === actionId) ?? null;
+}
 
-/** The skill a binding id resolves to now: `arm` follows the arm state. */
-export function skillForBinding(id: string, ctx: SkillContext, extensionSkills: Skill[]): Skill | null {
-  if (id === "arm") return CORE_BY_ID[ctx.armed ? "disarm" : "arm"];
-  return CORE_BY_ID[id] ?? extensionSkills.find((s) => s.id === id) ?? null;
+function typingTarget(t: EventTarget | null, key: string): boolean {
+  if (!(t instanceof HTMLElement)) return false;
+  if (t.isContentEditable || t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT") return true;
+  // Space on a focused button presses that button.
+  return key === " " && t.tagName === "BUTTON";
 }
 
 export function useSkillKeys(): void {
-  const ctx = useSkillContext();
-  const ctxRef = useRef(ctx);
-  useEffect(() => {
-    ctxRef.current = ctx;
-  }, [ctx]);
+  const extensions = useExtensionsStore((s) => s.extensions);
 
   useEffect(() => {
-    const extensionSkills = () => useExtensionsStore.getState().extensions.flatMap((e) => e.skills);
+    const actions: CockpitAction[] = [...BUILTIN_SKILLS, ...extensions.flatMap((e) => e.skills)].map((skill) => ({
+      id: skillActionId(skill),
+      label: skill.extension ? `${skill.extension.pluginName}: ${skill.label}` : skill.label,
+      group: skill.builtin ? "flight" : skill.category === "camera" ? "camera" : "skills",
+      run: (phase) => runSkillAction(skill, phase, skillContextNow()),
+    }));
+    return registerCockpitActions(actions);
+  }, [extensions]);
 
-    const onKey = (e: KeyboardEvent) => {
-      if (!e.shiftKey || e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
-      if (useConfirmStore.getState().pending) return;
-      const target = e.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
-      const id = KEY_CHORDS[e.key.toUpperCase()];
-      if (!id) return;
-      const skill = skillForBinding(id, ctxRef.current, extensionSkills());
-      if (skill && requestSkill(skill, ctxRef.current)) e.preventDefault();
+  useEffect(() => {
+    // The chord's key that is down, and the skill it holds.
+    let held: { key: string; skill: Skill } | null = null;
+
+    const onDown = (e: KeyboardEvent) => {
+      if (e.repeat || typingTarget(e.target, e.key)) return;
+      const chord = chordFromEvent(e);
+      const actionId = chord ? useExtensionsStore.getState().keys[chord] : undefined;
+      const skill = actionId ? skillForAction(actionId) : null;
+      if (!skill) return;
+      const open = useConfirmStore.getState().pending;
+      if (open && open.skill.id !== skill.id) return;
+      e.preventDefault();
+      held = { key: e.key.toLowerCase(), skill };
+      runSkillAction(skill, "press", skillContextNow(), true);
+    };
+    const onUp = (e: KeyboardEvent) => {
+      if (!held || e.key.toLowerCase() !== held.key) return;
+      runSkillAction(held.skill, "release", skillContextNow());
+      held = null;
     };
 
-    const offPad = onGamepadButtons((pressed, prev) => {
-      if (useConfirmStore.getState().pending) return;
-      const bindings = useSettingsStore.getState().skillButtons;
-      for (const button of risingEdges(pressed, prev)) {
-        const id = Object.keys(bindings).find((k) => bindings[k] === button);
-        if (!id) continue;
-        const skill = skillForBinding(id, ctxRef.current, extensionSkills());
-        if (skill) requestSkill(skill, ctxRef.current, button);
-      }
-    });
-
-    window.addEventListener("keydown", onKey);
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
     return () => {
-      window.removeEventListener("keydown", onKey);
-      offPad();
+      window.removeEventListener("keydown", onDown);
+      window.removeEventListener("keyup", onUp);
     };
   }, []);
 }

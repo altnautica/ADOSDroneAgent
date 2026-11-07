@@ -3,7 +3,6 @@
 // apart from the screen so the rules are testable without a DOM.
 
 import type { Tone } from "@/lib/tone";
-import type { ConfirmGesture } from "@/lib/skills";
 
 export interface ServiceEntry {
   name: string;
@@ -76,6 +75,9 @@ export function maxTemp(temps: Record<string, number> | null | undefined): numbe
 /** Box-level operations and the confirm gesture each requires (CS-6). Both
  *  take the node, or a part of it, down, so neither is ever a plain tap. */
 export type SystemAction = "reboot" | "restart-service";
+
+/** The confirm tiers the system screen uses (CS-6). */
+export type ConfirmGesture = "tap" | "hold" | "guarded";
 
 export const SYSTEM_ACTION_GESTURE: Record<SystemAction, ConfirmGesture> = {
   reboot: "guarded",

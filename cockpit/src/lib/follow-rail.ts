@@ -1,19 +1,24 @@
 // The following-mode chrome's pure rules (13-hud-v2 §8.2, §8.4, §11): which
 // right-rail buttons a width class shows and how big they are, the follow
-// button's word, a quick setting's pending/echo state (STRICT | SMART), the
-// rail's bottom clearance over the radar, and the re-acquired toast text.
-// DOM-free, so every rule is unit-tested.
+// button's word, a plugin setting's pending/echo state (STRICT | SMART,
+// FOLLOW | ORBIT, a slider value), the pilot's avoidance chip, the active
+// skill's chip detail (`ORBIT 8 m`), the rail's bottom clearance over the
+// radar, and the re-acquired toast text. DOM-free, so every rule is
+// unit-tested.
 
 import { GLOVE_TOUCH_SCALE, SKILL_BAR_CLEARANCE_PX, type WidthClass } from "@/lib/cockpit-layout";
+import { cockpitText } from "@/lib/cockpit-text";
+import type { ParamValue } from "@/lib/skills";
+import type { AvoidState } from "@/shared/hud/cockpit-frames";
 import type { FollowEvent, FollowPhase } from "@/shared/hud/nav-types";
 
-export type RailButton = "follow" | "mode" | "camSwap" | "rec" | "hold" | "rtl" | "land";
+export type RailButton = "follow" | "pattern" | "mode" | "camSwap" | "rec" | "hold" | "rth" | "land";
 
 /** A setting write with no echo after this reverts with a warning (§8.2 #2). */
 export const SETTING_ECHO_TIMEOUT_MS = 3000;
 /** How long the re-acquired toast stays (advisory). */
 export const REACQUIRED_TOAST_MS = 4000;
-/** Below this safe height the compact rail folds buttons 3–4 into `⋯`. */
+/** Below this safe height the compact rail folds the camera buttons into `⋯`. */
 export const RAIL_FOLD_HEIGHT_PX = 360;
 /** Gap between rail buttons. */
 export const RAIL_GAP_PX = 6;
@@ -31,6 +36,8 @@ export interface RailInput {
   width: WidthClass;
   /** A follow-type toggle skill is installed. */
   followInstalled: boolean;
+  /** The follow skill carries the FOLLOW | ORBIT pattern (`follow_mode`). */
+  hasPattern: boolean;
   /** The follow skill carries the re-acquire setting. */
   hasModeSetting: boolean;
   /** A second concurrent leg is in the PiP to swap with. */
@@ -48,10 +55,12 @@ export interface RailLayout {
   divider: boolean;
 }
 
-/** The rail for a width class: 1–4 on compact and medium, 1–7 above. */
+/** The rail for a width class: the follow group and the camera buttons on
+ *  compact and medium, plus the HOLD / RTH / LAND mirrors above. */
 export function railLayout(i: RailInput): RailLayout {
   const top: RailButton[] = [];
   if (i.followInstalled) top.push("follow");
+  if (i.followInstalled && i.hasPattern) top.push("pattern");
   if (i.followInstalled && i.hasModeSetting) top.push("mode");
   const extra: RailButton[] = [];
   if (i.canSwap) extra.push("camSwap");
@@ -59,15 +68,15 @@ export function railLayout(i: RailInput): RailLayout {
   const wide = i.width === "expanded" || i.width === "tv";
   const fold = i.width === "compact" && i.safeHeightPx < RAIL_FOLD_HEIGHT_PX;
   return {
-    buttons: [...top, ...(fold ? [] : extra), ...(wide ? (["hold", "rtl", "land"] as RailButton[]) : [])],
+    buttons: [...top, ...(fold ? [] : extra), ...(wide ? (["hold", "rth", "land"] as RailButton[]) : [])],
     folded: fold ? extra : [],
     divider: wide,
   };
 }
 
-/** The rail's bottom clearance: above the Skill Bar, and above the radar where
- *  the radar sits in the bottom-right corner (compact, medium). At expanded
- *  and tv the radar sits left of the rail, so only the Skill Bar counts. */
+/** The rail's bottom clearance: above the skill picker, and above the radar
+ *  where the radar sits in the bottom-right corner (compact, medium). At
+ *  expanded and tv the radar sits left of the rail, so only the picker counts. */
 export function railBottomPx(width: WidthClass, hasRadar: boolean): number {
   const radar = hasRadar && (width === "compact" || width === "medium") ? RADAR_PX[width] + 8 : 0;
   return SKILL_BAR_CLEARANCE_PX + radar;
@@ -86,17 +95,17 @@ export function followButton(
 
 export interface SettingDisplayInput {
   /** The value the plugin echoes it runs with, or null. */
-  echo: string | null;
-  /** The manifest default, shown before any echo. */
-  fallback: string | null;
+  echo: ParamValue | null;
+  /** The configured value or the manifest default, shown before any echo. */
+  fallback: ParamValue | null;
   /** The value this cockpit last wrote, while unconfirmed. */
-  requested: string | null;
+  requested: ParamValue | null;
   requestedAt: number | null;
   now: number;
 }
 
 export interface SettingDisplay {
-  value: string | null;
+  value: ParamValue | null;
   /** Written, not yet echoed: drawn with a dashed outline. */
   pending: boolean;
   /** Written and never echoed within the timeout: revert and warn. */
@@ -105,8 +114,8 @@ export interface SettingDisplay {
   confirmed: boolean;
 }
 
-/** A quick setting's shown value: the request while pending, the echo once it
- *  matches, and the echo (or default) again when no echo came in 3 s. */
+/** A setting's shown value: the request while pending, the echo once it
+ *  matches, and the echo (or fallback) again when no echo came in 3 s. */
 export function settingDisplay(i: SettingDisplayInput): SettingDisplay {
   const applied = i.echo ?? i.fallback;
   if (i.requested === null) return { value: applied, pending: false, expired: false, confirmed: false };
@@ -117,9 +126,30 @@ export function settingDisplay(i: SettingDisplayInput): SettingDisplay {
   return { value: i.requested, pending: true, expired: false, confirmed: false };
 }
 
-/** The warning raised when a setting write was never echoed. */
-export function settingNotAppliedText(key: string): string {
-  return key === "reacquire_mode" ? "Re-acquire mode not applied" : `${key} not applied`;
+/** The pilot's avoidance state as the follow controls' chip. */
+export function avoidChip(state: AvoidState | null): { text: string; tone: "ok" | "warn" | "crit" } | null {
+  switch (state) {
+    case "clear":
+      return { text: "CLEAR", tone: "ok" };
+    case "detour":
+      return { text: "AVOIDING", tone: "warn" };
+    case "blocked":
+      return { text: "BLOCKED", tone: "crit" };
+    case "off":
+      return { text: cockpitText("pilot.avoid.off"), tone: "crit" };
+    default:
+      return null;
+  }
+}
+
+/** The chip's mode detail for a running skill from its echoed parameters:
+ *  follow-me's `ORBIT 8 m` / `FOLLOW 6 m`; null when nothing is known. */
+export function skillDetail(echo: Readonly<Record<string, ParamValue>> | undefined): string | null {
+  if (!echo) return null;
+  const metres = (v: ParamValue | undefined) => (typeof v === "number" ? ` ${Math.round(v * 10) / 10} m` : "");
+  if (echo.follow_mode === "orbit") return `ORBIT${metres(echo.orbit_radius_m)}`;
+  if (echo.follow_mode === "follow") return `FOLLOW${metres(echo.follow_distance_m)}`;
+  return null;
 }
 
 /** `Re-acquired #15 · 0.86 · 1.8 s gap` for a `follow.reacquired` event. */

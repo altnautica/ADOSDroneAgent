@@ -40,6 +40,7 @@ export type RouteKey =
   | "settings-profile"
   | "settings-region"
   | "settings-battery"
+  | "settings-aircraft-setup"
   | "settings-network"
   | "settings-cellular"
   | "settings-mac-pin"
@@ -111,6 +112,11 @@ const VideoRoute = lazy(() =>
 const AdvancedSettings = lazy(() =>
   import("@/routes/settings/advanced-settings").then((m) => ({
     default: m.AdvancedSettings,
+  })),
+);
+const AircraftSetupSettings = lazy(() =>
+  import("@/routes/settings/aircraft-setup-settings").then((m) => ({
+    default: m.AircraftSetupSettings,
   })),
 );
 const BatterySettings = lazy(() =>
@@ -221,6 +227,7 @@ export const ROUTE_COMPONENTS: Record<RouteKey, ComponentType> = {
   "settings-profile": ProfileSettings,
   "settings-region": RegionSettings,
   "settings-battery": BatterySettings,
+  "settings-aircraft-setup": AircraftSetupSettings,
   "settings-network": NetworkSettings,
   "settings-cellular": CellularSettings,
   "settings-mac-pin": MacPinSettings,
