@@ -1046,3 +1046,45 @@ fn tuning_box_is_not_persisted() {
     assert_eq!((back.data.box_center, back.data.box_latlon), (None, None));
     assert_eq!(back.data.hover_throttle, Some(0.3));
 }
+
+#[test]
+fn vtol_air_wizard_flies_every_step() {
+    // The tailsitter's whole air wizard: hover, transitions, the fixed-wing steps, QAUTOTUNE
+    // and the wing's AUTOTUNE, verify. Every VTOL step after the first transition hovers
+    // somewhere on the fixed-wing loiter, so none may abort on the hover's 20 m box.
+    let mut p = ritz_params();
+    for (k, v) in [
+        ("Q_GUIDED_MODE", 1.0),
+        ("Q_M_THST_HOVER", 0.3),
+        ("THR_MAX", 100.0),
+        ("TRIM_THROTTLE", 45.0),
+        ("AIRSPEED_MIN", 12.0),
+        ("AIRSPEED_MAX", 25.0),
+        ("AIRSPEED_CRUISE", 18.0),
+        ("TECS_CLMB_MAX", 5.0),
+        ("TECS_SINK_MAX", 5.0),
+        ("TECS_SINK_MIN", 2.0),
+        ("SERVO1_TRIM", 1500.0),
+        ("SERVO2_TRIM", 1500.0),
+        ("Q_AUTOTUNE_AXES", 7.0),
+        ("Q_AUTOTUNE_AGGR", 0.1),
+        ("Q_A_ANG_RLL_P", 4.5),
+        ("Q_A_ANG_PIT_P", 4.5),
+        ("Q_A_RAT_RLL_P", 0.25),
+        ("Q_A_RAT_PIT_P", 0.25),
+        ("Q_A_RAT_YAW_P", 0.2),
+        ("AUTOTUNE_LEVEL", 6.0),
+    ] {
+        p.insert(k.into(), v);
+    }
+    let mut s = Sim::new(MavType::MAV_TYPE_VTOL_TAILSITTER_DUOROTOR, p);
+    s.e.state.ground.state = WizardState::Done;
+    assert_eq!(s.e.start(A, s.now)["ok"], json!(true));
+    drive_air(&mut s, |s| s.e.wizard_state(A) == WizardState::Done, 1_200_000);
+    for (id, rec) in &s.e.state.air.steps {
+        assert!(matches!(rec["state"].as_str(), Some("done" | "skipped")), "{id}: {rec}");
+    }
+    assert!(s.result(A, "autotune")["changed"].as_array().unwrap().contains(&json!("Q_A_ANG_RLL_P")));
+    assert_eq!(s.result(A, "first_hover")["transition_mc"], json!(true));
+    assert!(!s.fc.armed);
+}

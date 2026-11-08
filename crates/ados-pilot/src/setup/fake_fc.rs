@@ -475,20 +475,22 @@ impl FakeFc {
                     }
                 } else if self.alt < 0.2 || c.param2 == 21196.0 {
                     if self.custom_mode == self.mode_autotune() && self.autotune_success {
-                        let axes = self.params.get("AUTOTUNE_AXES").copied().unwrap_or(3.0) as u32;
+                        let (axes_p, atc) = if self.is_vtol() { ("Q_AUTOTUNE_AXES", "Q_A") } else { ("AUTOTUNE_AXES", "ATC") };
+                        let axes = self.params.get(axes_p).copied().unwrap_or(3.0) as u32;
                         let mut names = Vec::new();
+                        let mut scale = |n: &str, k: f32| *self.params.get_mut(&format!("{atc}_{n}")).unwrap() *= k;
                         if axes & 1 != 0 {
                             names.push("Roll");
-                            *self.params.get_mut("ATC_RAT_RLL_P").unwrap() *= 1.4;
-                            *self.params.get_mut("ATC_ANG_RLL_P").unwrap() *= 1.2;
+                            scale("RAT_RLL_P", 1.4);
+                            scale("ANG_RLL_P", 1.2);
                         }
                         if axes & 2 != 0 {
                             names.push("Pitch");
-                            *self.params.get_mut("ATC_RAT_PIT_P").unwrap() *= 1.3;
+                            scale("RAT_PIT_P", 1.3);
                         }
                         if axes & 4 != 0 {
                             names.push("Yaw");
-                            *self.params.get_mut("ATC_RAT_YAW_P").unwrap() *= 1.5;
+                            scale("RAT_YAW_P", 1.5);
                         }
                         self.queue.push_back(text(&format!("AutoTune: Saved gains for {}", names.join(" "))));
                     }

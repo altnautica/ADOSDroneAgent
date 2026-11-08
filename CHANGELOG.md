@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.26] - 2026-11-08
+
+### Changed
+
+- Aircraft setup tests: the scripted flight controller now models QuadPlane transitions, the fixed-wing loiter around the GUIDED point and QAUTOTUNE gain saves, and a test flies a tailsitter's whole air wizard to the end. No change to the agent's behaviour.
+
 ## [0.109.25] - 2026-11-08
 
 ### Fixed
