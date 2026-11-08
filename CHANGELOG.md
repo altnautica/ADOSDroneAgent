@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.23] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup on ArduPilot VTOLs: `first_hover` hovered at 3 m indefinitely instead of climbing to 30 m for its transition, because the climb was a local position setpoint, which ArduPlane does not take. The climb now sets the GUIDED target height (DO_REPOSITION plus GUIDED_CHANGE_ALTITUDE; with `Q_GUIDED_MODE` 1 GUIDED is a VTOL hover), re-sends it every 5 s, and lands with `setup.blocker.timeout` if the height is not reached in 60 s.
+
 ## [0.109.22] - 2026-11-08
 
 ### Fixed

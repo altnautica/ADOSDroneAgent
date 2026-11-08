@@ -5,7 +5,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::setup::flight::{Hop, Leg, Transition};
+use crate::setup::flight::{height, plane_loiter, Hop, Leg, Transition};
 use crate::setup::fcstate::{Class, Fw};
 use crate::setup::measure::{band_rms, vibe_verdict, Acc, ATT_ERR_PASS_DEG, OSC_RMS_RAD_S};
 use crate::setup::schema::{obj, Action};
@@ -19,13 +19,17 @@ pub const MAX_START_WIND: f32 = 6.0;
 const VTOL_TRANSITION_ALT_M: f32 = 30.0;
 /// Time in forward flight before transitioning back.
 const VTOL_FW_MS: u64 = 15_000;
+/// Give up on the VTOL climb (and land) after this long.
+const VTOL_CLIMB_TIMEOUT_MS: u64 = 60_000;
+/// Re-send the climb target this often while it is not reached.
+const VTOL_CLIMB_RESEND_MS: u64 = 5000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Phase {
     Idle,
     Flying,
     Hover { since: u64 },
-    Climb,
+    Climb { since: u64, sent: u64 },
     Fw(Transition),
     FwHold { since: u64 },
     Mc(Transition),
@@ -133,21 +137,25 @@ impl Step for FirstHover {
                 if el >= HOVER_MS {
                     self.result = self.measure_result(cx);
                     if cx.adapter.class == Class::Vtol && cx.adapter.fw == Fw::ArduPilot {
-                        if let Some((l, _)) = cx.fc.local {
-                            let yaw = cx.fc.attitude.map(|(a, _)| a[2]).unwrap_or(0.0);
-                            self.hop.set_hold(l[0], l[1], -VTOL_TRANSITION_ALT_M, yaw);
-                        }
-                        self.phase = Phase::Climb;
+                        // ArduPlane takes no local position setpoints: the VTOL climbs to its
+                        // GUIDED (Q_GUIDED_MODE 1, a VTOL hover) target height instead.
+                        plane_loiter(cx, VTOL_TRANSITION_ALT_M);
+                        self.phase = Phase::Climb { since: cx.now, sent: cx.now };
                     } else {
                         self.land(cx, None);
                     }
                 }
             }
-            Phase::Climb => {
-                if crate::setup::flight::height(cx).is_some_and(|h| h > VTOL_TRANSITION_ALT_M - 2.0) {
+            Phase::Climb { since, sent } => {
+                if height(cx).is_some_and(|h| h > VTOL_TRANSITION_ALT_M - 2.0) {
                     // The hold leg stops sending once fixed-wing flight starts.
                     self.hop.leg = Leg::Idle;
                     self.phase = Phase::Fw(Transition::to_fw(cx));
+                } else if cx.now.saturating_sub(since) > VTOL_CLIMB_TIMEOUT_MS {
+                    self.land(cx, Some("timeout"));
+                } else if cx.now.saturating_sub(sent) > VTOL_CLIMB_RESEND_MS {
+                    plane_loiter(cx, VTOL_TRANSITION_ALT_M);
+                    self.phase = Phase::Climb { since, sent: cx.now };
                 }
             }
             Phase::Fw(mut t) => {

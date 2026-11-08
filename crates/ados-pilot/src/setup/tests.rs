@@ -968,3 +968,19 @@ fn plane_tecs_stays_above_its_floor_and_autotune_reaches_the_loiter() {
     drive_air(&mut s, |s| s.fc.custom_mode == 8, 90_000);
     assert!(s.fc.alt > 70.0, "autotune at {} m", s.fc.alt);
 }
+
+#[test]
+fn vtol_first_hover_climbs_to_the_transition_height() {
+    // ArduPlane ignores local position setpoints (the fake does too): after the 45 s
+    // hover the tailsitter must climb through its GUIDED target height (it10 held 3 m
+    // for 650 s waiting for a climb that local setpoints never started).
+    let mut p = ritz_params();
+    p.insert("Q_GUIDED_MODE".into(), 1.0);
+    let mut s = Sim::new(MavType::MAV_TYPE_VTOL_TAILSITTER_DUOROTOR, p);
+    s.e.state.ground.state = WizardState::Done;
+    assert_eq!(s.e.run_step(A, "first_hover", s.now)["ok"], json!(true));
+    s.run(100);
+    s.act(A, "first_hover", "start", json!({}));
+    s.until(|s| s.fc.alt > 2.9, 20_000);
+    s.until(|s| s.fc.alt > 28.0, 75_000);
+}
