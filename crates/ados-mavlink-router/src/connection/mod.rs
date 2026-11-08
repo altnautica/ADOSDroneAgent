@@ -495,8 +495,6 @@ impl FcConnection {
 
 mod discovery;
 mod reader;
-#[cfg(test)]
-use discovery::*;
 mod status;
 
 #[cfg(test)]

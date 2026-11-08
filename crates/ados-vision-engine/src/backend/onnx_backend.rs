@@ -62,15 +62,21 @@ impl VisionBackend for OnnxBackend {
             .ok_or_else(|| anyhow::anyhow!("onnx model has no model_path"))?;
         let builder = ort::session::Session::builder()?;
         let intra = self.intra_threads_for(meta.kind);
-        // `BuilderResult` errors carry the builder back and are not `Send`
-        // under every feature set, so each is flattened to a message.
+        // `BuilderResult` errors carry the builder back (large, and not `Send`
+        // under every feature set), so each is flattened to a message at once.
+        let threads = |e: ort::Error<ort::session::builder::SessionBuilder>| {
+            anyhow!("configure onnx session threads: {e}")
+        };
         #[allow(unused_mut)]
         let mut builder = builder
             .with_intra_threads(intra)
-            .and_then(|b| b.with_inter_threads(1))
-            .and_then(|b| b.with_intra_op_spinning(false))
-            .and_then(|b| b.with_inter_op_spinning(false))
-            .map_err(|e| anyhow!("configure onnx session threads: {e}"))?;
+            .map_err(threads)?
+            .with_inter_threads(1)
+            .map_err(threads)?
+            .with_intra_op_spinning(false)
+            .map_err(threads)?
+            .with_inter_op_spinning(false)
+            .map_err(threads)?;
         // On the macOS workstation, register the CoreML execution provider so
         // inference runs on the Apple GPU/ANE instead of the CPU. Best-effort:
         // ORT falls back to CPU if CoreML cannot take a node. Only compiled in

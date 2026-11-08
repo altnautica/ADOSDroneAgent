@@ -91,7 +91,7 @@ pub use errors::{
     SupervisorError,
 };
 pub use handlers::{Event, EventBus};
-pub use host::{HostResult, HostServices, NoopHost};
+pub use host::{FlightServices, HostResult, HostServices, NoopHost};
 pub use invoke::{InvokeRegistry, InvokeRequest, DEFAULT_INVOKE_TIMEOUT};
 pub use manifest::{AgentRuntime, PluginManifest};
 pub use reconcile::{PluginReconciler, ReconcileReport};

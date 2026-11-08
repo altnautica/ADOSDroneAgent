@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ados_plugin_host::host::HostServices;
+use ados_plugin_host::host::{FlightServices, HostServices};
 use ados_plugin_host::{EventBus, PluginIpcServer};
 use ados_protocol::framebus::{FrameDescriptor, FrameFormat, FRAMEBUS_DESCRIPTOR_VERSION};
 use ados_protocol::plugin::TokenIssuer;
@@ -34,6 +34,8 @@ fn caps(items: &[&str]) -> BTreeSet<String> {
 struct VisionStreamHost {
     frames: broadcast::Sender<Vec<u8>>,
 }
+
+impl FlightServices for VisionStreamHost {}
 
 impl HostServices for VisionStreamHost {
     fn vision_subscribe_stream(

@@ -30,7 +30,11 @@ pub struct WizardRecord {
 
 impl Default for WizardRecord {
     fn default() -> Self {
-        WizardRecord { state: WizardState::NotStarted, completed_at: None, steps: Map::new() }
+        WizardRecord {
+            state: WizardState::NotStarted,
+            completed_at: None,
+            steps: Map::new(),
+        }
     }
 }
 
@@ -67,14 +71,20 @@ impl Store {
         std::fs::read(&p)
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_else(|| AircraftState { v: 1, ..Default::default() })
+            .unwrap_or_else(|| AircraftState {
+                v: 1,
+                ..Default::default()
+            })
     }
 
     pub fn save(&self, uid: &str, s: &AircraftState) -> std::io::Result<()> {
         let d = self.uid_dir(uid);
         std::fs::create_dir_all(&d)?;
         let tmp = d.join("state.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(s).map_err(std::io::Error::other)?)?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec_pretty(s).map_err(std::io::Error::other)?,
+        )?;
         std::fs::rename(tmp, d.join("state.json"))
     }
 
@@ -102,7 +112,10 @@ impl Store {
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
                 let stem = name.strip_suffix(".param")?;
-                Some(SnapshotRef { ts: stem.to_string(), file: name })
+                Some(SnapshotRef {
+                    ts: stem.to_string(),
+                    file: name,
+                })
             })
             .collect();
         v.sort_by(|a, b| a.file.cmp(&b.file));
@@ -130,7 +143,12 @@ pub fn iso_utc(epoch_ms: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
-    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, (rem % 3600) / 60, rem % 60)
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
 }
 
 #[cfg(test)]
@@ -148,7 +166,9 @@ mod tests {
     fn snapshot_names_cannot_escape() {
         let dir = tempfile::tempdir().unwrap();
         let s = Store::new(dir.path());
-        let name = s.write_snapshot("ab", "2026-11-07T10:00:00Z", "X,1\n").unwrap();
+        let name = s
+            .write_snapshot("ab", "2026-11-07T10:00:00Z", "X,1\n")
+            .unwrap();
         assert_eq!(name, "2026-11-07T10-00-00Z.param");
         assert_eq!(s.read_snapshot("ab", &name).as_deref(), Some("X,1\n"));
         assert!(s.read_snapshot("ab", "../state.json").is_none());

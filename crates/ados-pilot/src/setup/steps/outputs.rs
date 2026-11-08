@@ -23,6 +23,9 @@ use crate::setup::fcstate::{Class, Fw};
 use crate::setup::schema::{obj, Action, ActionStyle, Confirm};
 use crate::setup::step::{step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore};
 
+mod items;
+use items::*;
+
 /// Motor test throttle (%) and duration (s).
 pub const MOTOR_PCT: f32 = 5.0;
 pub const MOTOR_S: f32 = 2.0;
@@ -38,8 +41,15 @@ const PX4_MOTOR1: f32 = 101.0;
 #[derive(Debug, Clone, PartialEq)]
 enum Item {
     /// `dir`: the frame prescribes a spin direction to check.
-    Motor { def: MotorDef, px4: bool, dir: bool },
-    Surface { channel: u8, function: u8 },
+    Motor {
+        def: MotorDef,
+        px4: bool,
+        dir: bool,
+    },
+    Surface {
+        channel: u8,
+        function: u8,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,7 +57,9 @@ enum Ask {
     /// Waiting for the operator to run the test.
     Ready,
     /// The output is moving.
-    Moving { until: u64 },
+    Moving {
+        until: u64,
+    },
     Position,
     Direction,
     Surface,
@@ -91,47 +103,6 @@ impl Default for Outputs {
     }
 }
 
-/// The output channel (1-based) carrying output function `f`.
-fn channel_of(cx: &Cx, f: u8) -> Option<u8> {
-    (1..=32u8).find(|k| cx.params.get(&format!("SERVO{k}_FUNCTION")).is_some_and(|v| v as u8 == f))
-}
-
-fn surfaces(cx: &Cx) -> Vec<Item> {
-    let mut v = Vec::new();
-    for k in 1..=16u8 {
-        if let Some(f) = cx.params.get(&format!("SERVO{k}_FUNCTION")) {
-            let f = f as u8;
-            if ardupilot_plane::surface_test(f).is_some() {
-                v.push(Item::Surface { channel: k, function: f });
-            }
-        }
-    }
-    v
-}
-
-fn motors(cx: &Cx) -> Result<(Option<&'static str>, Vec<Item>), ActErr> {
-    if cx.adapter.fw == Fw::Px4 {
-        let n = cx.params.get("CA_ROTOR_COUNT").unwrap_or(4.0) as u8;
-        let v = (1..=n).map(|i| Item::Motor { def: MotorDef { num: i, angle: 0, cw: false, seq: i }, px4: true, dir: true }).collect();
-        return Ok((None, v));
-    }
-    let (c, t) = if cx.adapter.class == Class::Vtol { ("Q_FRAME_CLASS", "Q_FRAME_TYPE") } else { ("FRAME_CLASS", "FRAME_TYPE") };
-    let fc = cx.params.get(c).unwrap_or(1.0) as u8;
-    let ft = cx.params.get(t).unwrap_or(1.0) as u8;
-    if cx.adapter.class == Class::Vtol && fc == ardupilot_plane::FRAME_CLASS_TAILSITTER {
-        // Tailsitter throttles: position only, ArduPilot sets no spin direction for them.
-        let v = ardupilot_plane::TAILSITTER_MOTORS
-            .iter()
-            .map(|&(num, seq)| Item::Motor { def: MotorDef { num, angle: 0, cw: false, seq }, px4: false, dir: false })
-            .collect();
-        return Ok((None, v));
-    }
-    let (img, layout) = ardupilot_copter::layout(fc, ft).ok_or("unsupported_frame")?;
-    let mut defs: Vec<MotorDef> = layout.to_vec();
-    defs.sort_by_key(|d| d.seq);
-    Ok((Some(img), defs.into_iter().map(|def| Item::Motor { def, px4: false, dir: true }).collect()))
-}
-
 impl Outputs {
     fn show_current(&mut self, cx: &Cx) {
         let total = self.items.len();
@@ -142,7 +113,8 @@ impl Outputs {
                 self.core.set_live("output_index", def.seq);
                 self.core.set_live("motor_number", def.num);
                 if dir {
-                    self.core.set_live("expected_dir", if def.cw { "cw" } else { "ccw" });
+                    self.core
+                        .set_live("expected_dir", if def.cw { "cw" } else { "ccw" });
                 } else {
                     self.core.live.remove("expected_dir");
                 }
@@ -168,7 +140,9 @@ impl Outputs {
 
     fn test_action(&self) -> Action {
         match self.items.get(self.idx) {
-            Some(Item::Motor { .. }) => Action::new("test", ActionStyle::Primary, Confirm::HoldPropsOff),
+            Some(Item::Motor { .. }) => {
+                Action::new("test", ActionStyle::Primary, Confirm::HoldPropsOff)
+            }
             _ => Action::primary("test"),
         }
     }
@@ -177,13 +151,17 @@ impl Outputs {
         self.ask = Ask::Ready;
         self.core.live.remove("question_key");
         self.show_current(cx);
-        self.core.wait_user(vec![self.test_action(), Action::secondary("cancel")]);
+        self.core
+            .wait_user(vec![self.test_action(), Action::secondary("cancel")]);
     }
 
     fn yes_no(&mut self, ask: Ask, question: &str) {
         self.ask = ask;
         self.core.set_live("question_key", question);
-        self.core.wait_user(vec![Action::primary("answer_yes"), Action::secondary("answer_no")]);
+        self.core.wait_user(vec![
+            Action::primary("answer_yes"),
+            Action::secondary("answer_no"),
+        ]);
     }
 
     fn next(&mut self, cx: &mut Cx) {
@@ -196,7 +174,9 @@ impl Outputs {
     }
 
     fn finish(&mut self, cx: &mut Cx) {
-        if cx.adapter.fw == Fw::ArduPilot && self.items.iter().any(|i| matches!(i, Item::Surface { .. })) {
+        if cx.adapter.fw == Fw::ArduPilot
+            && self.items.iter().any(|i| matches!(i, Item::Surface { .. }))
+        {
             cx.params.set("SERVO_AUTO_TRIM", 1.0);
         }
         self.final_result = obj([
@@ -217,16 +197,31 @@ impl Outputs {
                 if px4 {
                     cx.out.cmd(
                         MavCmd::MAV_CMD_ACTUATOR_TEST,
-                        [MOTOR_PCT / 100.0, MOTOR_S, 0.0, 0.0, PX4_MOTOR1 + (def.num - 1) as f32, 0.0, 0.0],
+                        [
+                            MOTOR_PCT / 100.0,
+                            MOTOR_S,
+                            0.0,
+                            0.0,
+                            PX4_MOTOR1 + (def.num - 1) as f32,
+                            0.0,
+                            0.0,
+                        ],
                     );
                 } else {
                     // Instance in test-sequence order, throttle in percent.
-                    cx.out.cmd(MavCmd::MAV_CMD_DO_MOTOR_TEST, [def.seq as f32, 0.0, MOTOR_PCT, MOTOR_S, 0.0, 0.0, 0.0]);
+                    cx.out.cmd(
+                        MavCmd::MAV_CMD_DO_MOTOR_TEST,
+                        [def.seq as f32, 0.0, MOTOR_PCT, MOTOR_S, 0.0, 0.0, 0.0],
+                    );
                 }
-                self.ask = Ask::Moving { until: cx.now + (MOTOR_S * 1000.0) as u64 };
+                self.ask = Ask::Moving {
+                    until: cx.now + (MOTOR_S * 1000.0) as u64,
+                };
             }
             Some(Item::Surface { .. }) => {
-                self.ask = Ask::Moving { until: cx.now + SURFACE_HOLD_MS };
+                self.ask = Ask::Moving {
+                    until: cx.now + SURFACE_HOLD_MS,
+                };
                 self.last_manual = 0;
             }
             None => {}
@@ -252,7 +247,11 @@ impl Step for Outputs {
         let mut items = Vec::new();
         if cx.adapter.class != Class::Multirotor && cx.adapter.fw == Fw::ArduPilot {
             items.extend(surfaces(cx));
-            self.core.body_variant = Some(if cx.adapter.class == Class::Vtol { "vtol" } else { "plane" });
+            self.core.body_variant = Some(if cx.adapter.class == Class::Vtol {
+                "vtol"
+            } else {
+                "plane"
+            });
         }
         if cx.adapter.class != Class::Fixedwing || cx.adapter.fw == Fw::Px4 {
             match motors(cx) {
@@ -319,9 +318,13 @@ impl Step for Outputs {
             }
             if cx.now >= until {
                 match item {
-                    Some(Item::Motor { .. }) => self.yes_no(Ask::Position, "setup.question.motor_position"),
+                    Some(Item::Motor { .. }) => {
+                        self.yes_no(Ask::Position, "setup.question.motor_position")
+                    }
                     Some(Item::Surface { function, .. }) => {
-                        let q = ardupilot_plane::surface_test(function).map(|(q, _)| q).unwrap_or("");
+                        let q = ardupilot_plane::surface_test(function)
+                            .map(|(q, _)| q)
+                            .unwrap_or("");
                         self.yes_no(Ask::Surface, q);
                     }
                     None => {}
@@ -330,7 +333,13 @@ impl Step for Outputs {
                 // Ask while the surface is still deflected.
                 let q = item
                     .as_ref()
-                    .and_then(|i| if let Item::Surface { function, .. } = i { ardupilot_plane::surface_test(*function) } else { None })
+                    .and_then(|i| {
+                        if let Item::Surface { function, .. } = i {
+                            ardupilot_plane::surface_test(*function)
+                        } else {
+                            None
+                        }
+                    })
                     .map(|(q, _)| q)
                     .unwrap_or("");
                 self.core.set_live("question_key", q);
@@ -344,7 +353,9 @@ impl Step for Outputs {
         }
         match (id, self.ask) {
             ("test", Ask::Ready) => {
-                if matches!(self.items.get(self.idx), Some(Item::Surface { .. })) && !cx.adapter.in_mode(cx.fc.custom_mode, Mode::Manual) {
+                if matches!(self.items.get(self.idx), Some(Item::Surface { .. }))
+                    && !cx.adapter.in_mode(cx.fc.custom_mode, Mode::Manual)
+                {
                     if let Some((m, s)) = cx.adapter.mode(Mode::Manual) {
                         cx.out.set_mode(m, s);
                     }
@@ -353,7 +364,10 @@ impl Step for Outputs {
                 Ok(())
             }
             ("answer_yes", Ask::Position) => {
-                if matches!(self.items.get(self.idx), Some(Item::Motor { dir: false, .. })) {
+                if matches!(
+                    self.items.get(self.idx),
+                    Some(Item::Motor { dir: false, .. })
+                ) {
                     self.next(cx);
                 } else {
                     self.yes_no(Ask::Direction, "setup.question.motor_direction");
@@ -372,15 +386,23 @@ impl Step for Outputs {
                 Ok(())
             }
             ("answer_no", Ask::Direction) => {
-                let Some(Item::Motor { def, px4, .. }) = self.items.get(self.idx).cloned() else { return Err("bad_state") };
-                let pwm_type = cx.params.get(&format!("{}_PWM_TYPE", cx.adapter.mot())).unwrap_or(0.0);
+                let Some(Item::Motor { def, px4, .. }) = self.items.get(self.idx).cloned() else {
+                    return Err("bad_state");
+                };
+                let pwm_type = cx
+                    .params
+                    .get(&format!("{}_PWM_TYPE", cx.adapter.mot()))
+                    .unwrap_or(0.0);
                 let ch = channel_of(cx, 32 + def.num);
                 match (px4, pwm_type >= 4.0, ch) {
                     (false, true, Some(ch)) => {
                         let mask = cx.params.get("SERVO_BLH_RVMASK").unwrap_or(0.0) as u32;
-                        cx.params.set("SERVO_BLH_RVMASK", (mask ^ (1 << (ch - 1))) as f32);
+                        cx.params
+                            .set("SERVO_BLH_RVMASK", (mask ^ (1 << (ch - 1))) as f32);
                         if cx.params.get("SERVO_BLH_AUTO").is_some_and(|v| v == 0.0)
-                            && cx.params.get("SERVO_BLH_MASK").unwrap_or(0.0) as u32 & (1 << (ch - 1)) == 0
+                            && cx.params.get("SERVO_BLH_MASK").unwrap_or(0.0) as u32
+                                & (1 << (ch - 1))
+                                == 0
                         {
                             cx.params.set("SERVO_BLH_AUTO", 1.0);
                         }
@@ -393,7 +415,9 @@ impl Step for Outputs {
                 Ok(())
             }
             ("answer_no", Ask::Surface) => {
-                let Some(Item::Surface { channel, .. }) = self.items.get(self.idx).cloned() else { return Err("bad_state") };
+                let Some(Item::Surface { channel, .. }) = self.items.get(self.idx).cloned() else {
+                    return Err("bad_state");
+                };
                 let name = format!("SERVO{channel}_REVERSED");
                 let cur = cx.params.get(&name).unwrap_or(0.0);
                 cx.params.set(&name, if cur == 0.0 { 1.0 } else { 0.0 });

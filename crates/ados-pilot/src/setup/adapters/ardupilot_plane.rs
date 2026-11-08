@@ -3,19 +3,57 @@
 use super::Mode;
 
 pub const GROUND: &[&str] = &[
-    "detect", "frame", "accel", "level", "compass", "airspeed", "radio", "rc_ados_switch", "outputs",
-    "battery", "initial_params", "ados_profile", "ados_intro",
+    "detect",
+    "frame",
+    "accel",
+    "level",
+    "compass",
+    "airspeed",
+    "radio",
+    "rc_ados_switch",
+    "outputs",
+    "battery",
+    "initial_params",
+    "ados_profile",
+    "ados_intro",
 ];
 
 pub const GROUND_VTOL: &[&str] = &[
-    "detect", "frame", "accel", "level", "compass", "airspeed", "radio", "rc_ados_switch", "outputs",
-    "battery", "initial_params", "notch_static", "ados_profile", "ados_intro",
+    "detect",
+    "frame",
+    "accel",
+    "level",
+    "compass",
+    "airspeed",
+    "radio",
+    "rc_ados_switch",
+    "outputs",
+    "battery",
+    "initial_params",
+    "notch_static",
+    "ados_profile",
+    "ados_intro",
 ];
 
-pub const AIR: &[&str] = &["preflight", "first_flight", "trim_air", "airspeed_cal", "tecs_measure", "autotune", "verify"];
+pub const AIR: &[&str] = &[
+    "preflight",
+    "first_flight",
+    "trim_air",
+    "airspeed_cal",
+    "tecs_measure",
+    "autotune",
+    "verify",
+];
 
 pub const AIR_VTOL: &[&str] = &[
-    "preflight", "first_hover", "notch_air", "trim_air", "airspeed_cal", "tecs_measure", "autotune", "verify",
+    "preflight",
+    "first_hover",
+    "notch_air",
+    "trim_air",
+    "airspeed_cal",
+    "tecs_measure",
+    "autotune",
+    "verify",
 ];
 
 pub fn mode(m: Mode) -> Option<u32> {
@@ -49,9 +87,19 @@ pub const FN_VTAIL_RIGHT: u8 = 80;
 /// Output presets per wing type, on SERVO1..4.
 pub fn wing_preset(wing: &str) -> Option<&'static [(u8, u8)]> {
     Some(match wing {
-        "normal" => &[(1, FN_AILERON), (2, FN_ELEVATOR), (3, FN_THROTTLE), (4, FN_RUDDER)],
+        "normal" => &[
+            (1, FN_AILERON),
+            (2, FN_ELEVATOR),
+            (3, FN_THROTTLE),
+            (4, FN_RUDDER),
+        ],
         "elevon" => &[(1, FN_ELEVON_LEFT), (2, FN_ELEVON_RIGHT), (3, FN_THROTTLE)],
-        "vtail" => &[(1, FN_AILERON), (2, FN_VTAIL_LEFT), (3, FN_THROTTLE), (4, FN_VTAIL_RIGHT)],
+        "vtail" => &[
+            (1, FN_AILERON),
+            (2, FN_VTAIL_LEFT),
+            (3, FN_THROTTLE),
+            (4, FN_VTAIL_RIGHT),
+        ],
         _ => return None,
     })
 }

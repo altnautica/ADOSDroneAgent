@@ -13,7 +13,11 @@ use crate::setup::schema::{input_enum, input_number, obj, Action};
 use crate::setup::step::{arg_f32, arg_str, step_core, writes_settled, ActErr, Cx, Step, StepCore};
 
 /// TECS defaults before the `air` wizard measures them.
-pub const TECS_DEFAULTS: &[(&str, f32)] = &[("TECS_CLMB_MAX", 5.0), ("TECS_SINK_MAX", 5.0), ("TECS_SINK_MIN", 2.0)];
+pub const TECS_DEFAULTS: &[(&str, f32)] = &[
+    ("TECS_CLMB_MAX", 5.0),
+    ("TECS_SINK_MAX", 5.0),
+    ("TECS_SINK_MIN", 2.0),
+];
 
 #[derive(Default)]
 pub struct InitialParams {
@@ -44,25 +48,69 @@ impl Step for InitialParams {
         if copter_part(cx) {
             inputs.insert(
                 "chemistry".into(),
-                input_enum(Value::from(cx.data.chemistry.clone().unwrap_or_else(|| "lipo".into())), vec!["lipo".into(), "lihv".into(), "liion".into()], "setup.input.chemistry"),
+                input_enum(
+                    Value::from(cx.data.chemistry.clone().unwrap_or_else(|| "lipo".into())),
+                    vec!["lipo".into(), "lihv".into(), "liion".into()],
+                    "setup.input.chemistry",
+                ),
             );
         }
         if plane_part(cx) {
-            let get = |names: &[&str], d: f32| names.iter().find_map(|n| cx.params.get(n)).unwrap_or(d);
+            let get =
+                |names: &[&str], d: f32| names.iter().find_map(|n| cx.params.get(n)).unwrap_or(d);
             let cruise = match cx.params.first_present(ardupilot_plane::AIRSPEED_CRUISE) {
                 Some("TRIM_ARSPD_CM") => cx.params.get("TRIM_ARSPD_CM").unwrap_or(1500.0) / 100.0,
                 Some(n) => cx.params.get(n).unwrap_or(15.0),
                 None => 15.0,
             };
-            inputs.insert("airspeed_min".into(), input_number(get(ardupilot_plane::AIRSPEED_MIN, 10.0) as f64, 5.0, 50.0, 0.5, "m/s", "setup.input.airspeed_min"));
-            inputs.insert("airspeed_max".into(), input_number(get(ardupilot_plane::AIRSPEED_MAX, 22.0) as f64, 8.0, 80.0, 0.5, "m/s", "setup.input.airspeed_max"));
-            inputs.insert("airspeed_cruise".into(), input_number(cruise as f64, 6.0, 70.0, 0.5, "m/s", "setup.input.airspeed_cruise"));
+            inputs.insert(
+                "airspeed_min".into(),
+                input_number(
+                    get(ardupilot_plane::AIRSPEED_MIN, 10.0) as f64,
+                    5.0,
+                    50.0,
+                    0.5,
+                    "m/s",
+                    "setup.input.airspeed_min",
+                ),
+            );
+            inputs.insert(
+                "airspeed_max".into(),
+                input_number(
+                    get(ardupilot_plane::AIRSPEED_MAX, 22.0) as f64,
+                    8.0,
+                    80.0,
+                    0.5,
+                    "m/s",
+                    "setup.input.airspeed_max",
+                ),
+            );
+            inputs.insert(
+                "airspeed_cruise".into(),
+                input_number(
+                    cruise as f64,
+                    6.0,
+                    70.0,
+                    0.5,
+                    "m/s",
+                    "setup.input.airspeed_cruise",
+                ),
+            );
             inputs.insert(
                 "trim_throttle".into(),
-                input_number(cx.params.get("TRIM_THROTTLE").unwrap_or(45.0) as f64, 10.0, 90.0, 1.0, "%", "setup.input.trim_throttle"),
+                input_number(
+                    cx.params.get("TRIM_THROTTLE").unwrap_or(45.0) as f64,
+                    10.0,
+                    90.0,
+                    1.0,
+                    "%",
+                    "setup.input.trim_throttle",
+                ),
             );
         }
-        self.core.args.insert("inputs".into(), Value::Object(inputs));
+        self.core
+            .args
+            .insert("inputs".into(), Value::Object(inputs));
         if let (Some(p), Some(c)) = (cx.data.prop_in, cx.data.cells) {
             self.core.args.insert("prop_in".into(), json!(p));
             self.core.args.insert("cells".into(), json!(c));
@@ -111,7 +159,14 @@ impl Step for InitialParams {
             cx.data.chemistry = Some(chem.to_string());
             let atc = cx.adapter.atc();
             let new_names = cx.params.has(&format!("{atc}_ACCEL_P_MAX"));
-            for (name, v) in ardupilot_copter::initial_params(prop, cells, chem, atc, cx.adapter.mot(), new_names) {
+            for (name, v) in ardupilot_copter::initial_params(
+                prop,
+                cells,
+                chem,
+                atc,
+                cx.adapter.mot(),
+                new_names,
+            ) {
                 // A name this firmware does not have (e.g. ACRO_YAW_P on Plane) is left out.
                 if cx.params.has(&name) {
                     written.push((name, v));

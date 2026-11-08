@@ -203,8 +203,20 @@ mod tests {
                 assert!(evdev_code(name).is_some(), "unmapped evdev name {name}");
             }
         }
-        for state in ["disarmed", "armed_idle", "pilot", "skill", "mission", "rth", "low_battery", "failsafe"] {
-            assert!(s.lightbar.states.contains_key(state), "lightbar state {state}");
+        for state in [
+            "disarmed",
+            "armed_idle",
+            "pilot",
+            "skill",
+            "mission",
+            "rth",
+            "low_battery",
+            "failsafe",
+        ] {
+            assert!(
+                s.lightbar.states.contains_key(state),
+                "lightbar state {state}"
+            );
         }
         assert!(!s.locked_actions.is_empty());
     }

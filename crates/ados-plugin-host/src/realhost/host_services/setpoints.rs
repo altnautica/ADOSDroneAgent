@@ -150,8 +150,16 @@ fn legacy_goal(sp: &ados_protocol::mavlink::GuidedSetpoint) -> Option<Value> {
         return None;
     }
     let speed = (sp.vx * sp.vx + sp.vy * sp.vy + sp.vz * sp.vz).sqrt();
-    let max_speed = if sp.type_mask & 0b111_000 == 0 && speed > 0.0 { speed.max(1.0) } else { 5.0 };
-    let yaw = if sp.type_mask & (1 << 10) == 0 { Value::F32(sp.yaw) } else { Value::Nil };
+    let max_speed = if sp.type_mask & 0b111_000 == 0 && speed > 0.0 {
+        speed.max(1.0)
+    } else {
+        5.0
+    };
+    let yaw = if sp.type_mask & (1 << 10) == 0 {
+        Value::F32(sp.yaw)
+    } else {
+        Value::Nil
+    };
     let f = |v: f64| Value::F32(v as f32);
     Some(Value::Map(vec![
         (Value::from("kind"), Value::from("position")),

@@ -479,9 +479,9 @@ mod crop_tests;
 #[cfg(test)]
 mod demand_tests;
 #[cfg(test)]
-mod embeddings_tests;
-#[cfg(test)]
 mod depth_tests;
+#[cfg(test)]
+mod embeddings_tests;
 #[cfg(test)]
 mod ring_tests;
 #[cfg(test)]

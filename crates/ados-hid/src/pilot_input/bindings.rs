@@ -74,7 +74,8 @@ impl ControlsDoc {
             return bad(format!("deadzone must be within {lo}..{hi}"));
         }
         for (i, b) in self.bindings.iter().enumerate() {
-            let control_ok = |c: &str| super::pad::bit(c).is_some() || matches!(c, "stick_l" | "stick_r");
+            let control_ok =
+                |c: &str| super::pad::bit(c).is_some() || matches!(c, "stick_l" | "stick_r");
             if !control_ok(&b.control) || !b.with.iter().all(|c| control_ok(c)) {
                 return bad(format!("bindings[{i}]: unknown control"));
             }
@@ -95,7 +96,10 @@ impl ControlsDoc {
             .iter()
             .filter(|l| {
                 let default = s.bindings.iter().find(|d| {
-                    d.locked && d.action == l.action && d.gesture == l.gesture && d.with.is_empty() != l.combo
+                    d.locked
+                        && d.action == l.action
+                        && d.gesture == l.gesture
+                        && d.with.is_empty() != l.combo
                 });
                 !self.bindings.iter().any(|b| {
                     b.action == l.action
@@ -158,10 +162,16 @@ mod tests {
     #[test]
     fn removing_pause_is_refused_with_its_name() {
         let mut doc = ControlsDoc::ados_default();
-        doc.bindings.retain(|b| !(b.action == "pause" && b.with.is_empty()));
+        doc.bindings
+            .retain(|b| !(b.action == "pause" && b.with.is_empty()));
         // Options + Circle still binds pause, but it is a combo; the locked
         // pause must stay a single control.
-        let gesture = &ds4().locked_actions.iter().find(|l| l.action == "pause").unwrap().gesture;
+        let gesture = &ds4()
+            .locked_actions
+            .iter()
+            .find(|l| l.action == "pause")
+            .unwrap()
+            .gesture;
         match doc.validate() {
             Err(DocError::MissingLocked(m)) => assert_eq!(m, vec![format!("pause:{gesture}")]),
             other => panic!("expected missing pause, got {other:?}"),
@@ -175,7 +185,11 @@ mod tests {
             b.control = "cross".to_string();
         }
         assert_eq!(doc.validate(), Ok(()));
-        let kill = doc.native_bindings().into_iter().find(|b| b.action == "kill").unwrap();
+        let kill = doc
+            .native_bindings()
+            .into_iter()
+            .find(|b| b.action == "kill")
+            .unwrap();
         assert_eq!(kill.control, "cross");
     }
 
@@ -183,7 +197,10 @@ mod tests {
     fn weakened_locked_rows_count_as_missing() {
         let weaken = |f: &dyn Fn(&mut Binding)| {
             let mut doc = ControlsDoc::ados_default();
-            doc.bindings.iter_mut().filter(|b| b.action == "arm").for_each(f);
+            doc.bindings
+                .iter_mut()
+                .filter(|b| b.action == "arm")
+                .for_each(f);
             match doc.validate() {
                 Err(DocError::MissingLocked(m)) => m,
                 other => panic!("expected refusal, got {other:?}"),
@@ -191,12 +208,27 @@ mod tests {
         };
         let arm = vec!["arm:hold:combo".to_string()];
         assert_eq!(weaken(&|b| b.hold_ms = Some(500)), arm, "shorter hold");
-        assert_eq!(weaken(&|b| b.when = None), arm, "centred-stick guard dropped");
-        assert_eq!(weaken(&|b| b.control = "stick_l".into()), arm, "not a button");
-        assert_eq!(weaken(&|b| b.with = vec!["stick_r".into()]), arm, "not a button");
+        assert_eq!(
+            weaken(&|b| b.when = None),
+            arm,
+            "centred-stick guard dropped"
+        );
+        assert_eq!(
+            weaken(&|b| b.control = "stick_l".into()),
+            arm,
+            "not a button"
+        );
+        assert_eq!(
+            weaken(&|b| b.with = vec!["stick_r".into()]),
+            arm,
+            "not a button"
+        );
         // A longer hold is fine.
         let mut doc = ControlsDoc::ados_default();
-        doc.bindings.iter_mut().filter(|b| b.action == "arm").for_each(|b| b.hold_ms = Some(3000));
+        doc.bindings
+            .iter_mut()
+            .filter(|b| b.action == "arm")
+            .for_each(|b| b.hold_ms = Some(3000));
         assert_eq!(doc.validate(), Ok(()));
     }
 
@@ -213,8 +245,10 @@ mod tests {
     #[test]
     fn native_subset_is_the_safety_set_plus_the_elrs_switch() {
         let rows = ControlsDoc::ados_default().native_bindings();
-        assert!(rows.iter().all(|b| NATIVE_ACTIONS.contains(&b.action.as_str())
-            || b.action == ELRS_EMERGENCY_ACTION));
+        assert!(rows
+            .iter()
+            .all(|b| NATIVE_ACTIONS.contains(&b.action.as_str())
+                || b.action == ELRS_EMERGENCY_ACTION));
         for a in ["pause", "rth", "arm", "kill", ELRS_EMERGENCY_ACTION] {
             assert!(rows.iter().any(|b| b.action == a), "{a}");
         }

@@ -424,6 +424,7 @@ struct Connection<H: HostServices> {
 mod delivery;
 mod dispatch;
 mod handshake;
+mod revoke;
 mod serve;
 mod subscribe;
 mod wire;

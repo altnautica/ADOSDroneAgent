@@ -10,7 +10,9 @@ use serde_json::{json, Map, Value};
 use crate::setup::adapters::{ardupilot_copter, ardupilot_plane};
 use crate::setup::fcstate::{Class, Fw};
 use crate::setup::schema::{input_enum, input_number, obj, Action};
-use crate::setup::step::{arg_f32, arg_str, step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore};
+use crate::setup::step::{
+    arg_f32, arg_str, step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore,
+};
 
 #[derive(Default)]
 pub struct Frame {
@@ -22,21 +24,27 @@ pub struct Frame {
 }
 
 fn class_names(cx: &Cx) -> (&'static str, &'static str) {
-    if cx.adapter.class == Class::Vtol { ("Q_FRAME_CLASS", "Q_FRAME_TYPE") } else { ("FRAME_CLASS", "FRAME_TYPE") }
+    if cx.adapter.class == Class::Vtol {
+        ("Q_FRAME_CLASS", "Q_FRAME_TYPE")
+    } else {
+        ("FRAME_CLASS", "FRAME_TYPE")
+    }
 }
 
 /// An ArduPlane tailsitter.
 pub fn tailsitter(cx: &Cx) -> bool {
-    cx.adapter.class == Class::Vtol && cx.adapter.fw == Fw::ArduPilot && cx.params.get("Q_TAILSIT_ENABLE").unwrap_or(0.0) > 0.0
+    cx.adapter.class == Class::Vtol
+        && cx.adapter.fw == Fw::ArduPilot
+        && cx.params.get("Q_TAILSIT_ENABLE").unwrap_or(0.0) > 0.0
 }
 
 /// The wing type to show: the one chosen earlier, else what the outputs are
 /// set up as now.
 fn wing(cx: &Cx) -> String {
-    cx.data
-        .wing
-        .clone()
-        .unwrap_or_else(|| ardupilot_plane::wing_from_outputs(|k| cx.params.get(&format!("SERVO{k}_FUNCTION"))).to_string())
+    cx.data.wing.clone().unwrap_or_else(|| {
+        ardupilot_plane::wing_from_outputs(|k| cx.params.get(&format!("SERVO{k}_FUNCTION")))
+            .to_string()
+    })
 }
 
 fn frame_classes(cx: &Cx) -> Vec<Value> {
@@ -55,37 +63,110 @@ impl Frame {
             (Fw::Px4, _) => {
                 inputs.insert(
                     "sys_autostart".into(),
-                    input_number(p("SYS_AUTOSTART", 4001.0), 0.0, 99_999.0, 1.0, "", "setup.input.sys_autostart"),
+                    input_number(
+                        p("SYS_AUTOSTART", 4001.0),
+                        0.0,
+                        99_999.0,
+                        1.0,
+                        "",
+                        "setup.input.sys_autostart",
+                    ),
                 );
             }
             (_, Class::Fixedwing) => {
                 inputs.insert(
                     "wing".into(),
-                    input_enum(Value::from(wing(cx)), vec!["normal".into(), "elevon".into(), "vtail".into()], "setup.input.wing"),
+                    input_enum(
+                        Value::from(wing(cx)),
+                        vec!["normal".into(), "elevon".into(), "vtail".into()],
+                        "setup.input.wing",
+                    ),
                 );
             }
             (_, Class::Vtol) => {
                 let (c, t) = class_names(cx);
-                inputs.insert("frame_class".into(), input_enum(Value::from(p(c, 1.0)), frame_classes(cx), "setup.input.frame_class"));
-                inputs.insert("frame_type".into(), input_enum(Value::from(p(t, 1.0)), vec![0.into(), 1.into(), 3.into()], "setup.input.frame_type"));
+                inputs.insert(
+                    "frame_class".into(),
+                    input_enum(
+                        Value::from(p(c, 1.0)),
+                        frame_classes(cx),
+                        "setup.input.frame_class",
+                    ),
+                );
+                inputs.insert(
+                    "frame_type".into(),
+                    input_enum(
+                        Value::from(p(t, 1.0)),
+                        vec![0.into(), 1.into(), 3.into()],
+                        "setup.input.frame_type",
+                    ),
+                );
                 if !tailsitter(cx) {
                     inputs.insert(
                         "wing".into(),
-                        input_enum(Value::from(wing(cx)), vec!["normal".into(), "elevon".into(), "vtail".into()], "setup.input.wing"),
+                        input_enum(
+                            Value::from(wing(cx)),
+                            vec!["normal".into(), "elevon".into(), "vtail".into()],
+                            "setup.input.wing",
+                        ),
                     );
                 }
             }
             (_, Class::Multirotor) => {
                 let (c, t) = class_names(cx);
-                inputs.insert("frame_class".into(), input_enum(Value::from(p(c, 1.0)), frame_classes(cx), "setup.input.frame_class"));
-                inputs.insert("frame_type".into(), input_enum(Value::from(p(t, 1.0)), vec![0.into(), 1.into(), 3.into()], "setup.input.frame_type"));
+                inputs.insert(
+                    "frame_class".into(),
+                    input_enum(
+                        Value::from(p(c, 1.0)),
+                        frame_classes(cx),
+                        "setup.input.frame_class",
+                    ),
+                );
+                inputs.insert(
+                    "frame_type".into(),
+                    input_enum(
+                        Value::from(p(t, 1.0)),
+                        vec![0.into(), 1.into(), 3.into()],
+                        "setup.input.frame_type",
+                    ),
+                );
             }
         }
         if cx.adapter.copter_like() || cx.adapter.fw == Fw::Px4 {
-            inputs.insert("prop_in".into(), input_number(cx.data.prop_in.unwrap_or(10.0) as f64, 2.0, 40.0, 0.5, "in", "setup.input.prop_in"));
-            inputs.insert("motor_kv".into(), input_number(cx.data.motor_kv.unwrap_or(900.0) as f64, 50.0, 5000.0, 10.0, "rpm/V", "setup.input.motor_kv"));
+            inputs.insert(
+                "prop_in".into(),
+                input_number(
+                    cx.data.prop_in.unwrap_or(10.0) as f64,
+                    2.0,
+                    40.0,
+                    0.5,
+                    "in",
+                    "setup.input.prop_in",
+                ),
+            );
+            inputs.insert(
+                "motor_kv".into(),
+                input_number(
+                    cx.data.motor_kv.unwrap_or(900.0) as f64,
+                    50.0,
+                    5000.0,
+                    10.0,
+                    "rpm/V",
+                    "setup.input.motor_kv",
+                ),
+            );
         }
-        inputs.insert("cells".into(), input_number(cx.data.cells.unwrap_or(4.0) as f64, 1.0, 14.0, 1.0, "S", "setup.input.cells"));
+        inputs.insert(
+            "cells".into(),
+            input_number(
+                cx.data.cells.unwrap_or(4.0) as f64,
+                1.0,
+                14.0,
+                1.0,
+                "S",
+                "setup.input.cells",
+            ),
+        );
         inputs
     }
 }
@@ -104,7 +185,9 @@ impl Step for Frame {
             _ => None,
         };
         let inputs = self.inputs(cx);
-        self.core.args.insert("inputs".into(), Value::Object(inputs));
+        self.core
+            .args
+            .insert("inputs".into(), Value::Object(inputs));
         if cx.adapter.copter_like() && cx.adapter.fw == Fw::ArduPilot {
             let (c, t) = class_names(cx);
             let fc = cx.params.get(c).unwrap_or(1.0) as u8;
@@ -156,12 +239,18 @@ impl Step for Frame {
         if cx.fc.armed {
             return Err("armed");
         }
-        let cells = arg_f32(args, "cells").filter(|c| (1.0..=14.0).contains(c)).ok_or("bad_args")?;
+        let cells = arg_f32(args, "cells")
+            .filter(|c| (1.0..=14.0).contains(c))
+            .ok_or("bad_args")?;
         cx.data.cells = Some(cells.round());
         let mut result = obj([("cells", json!(cells.round()))]);
         if cx.adapter.copter_like() || cx.adapter.fw == Fw::Px4 {
-            let prop = arg_f32(args, "prop_in").filter(|v| (2.0..=40.0).contains(v)).ok_or("bad_args")?;
-            let kv = arg_f32(args, "motor_kv").filter(|v| (50.0..=5000.0).contains(v)).ok_or("bad_args")?;
+            let prop = arg_f32(args, "prop_in")
+                .filter(|v| (2.0..=40.0).contains(v))
+                .ok_or("bad_args")?;
+            let kv = arg_f32(args, "motor_kv")
+                .filter(|v| (50.0..=5000.0).contains(v))
+                .ok_or("bad_args")?;
             cx.data.prop_in = Some(prop);
             cx.data.motor_kv = Some(kv);
             result.insert("prop_in".into(), json!(prop));
@@ -180,7 +269,8 @@ impl Step for Frame {
                 if class != Class::Fixedwing {
                     let fc = arg_f32(args, "frame_class").ok_or("bad_args")?.round();
                     let ft = arg_f32(args, "frame_type").ok_or("bad_args")?.round();
-                    let own_class = tailsitter(cx) && fc as u8 == ardupilot_plane::FRAME_CLASS_TAILSITTER;
+                    let own_class =
+                        tailsitter(cx) && fc as u8 == ardupilot_plane::FRAME_CLASS_TAILSITTER;
                     if !own_class && ardupilot_copter::layout(fc as u8, ft as u8).is_none() {
                         return Err("unsupported_frame");
                     }
@@ -199,7 +289,9 @@ impl Step for Frame {
                     let wing = arg_str(args, "wing").ok_or("bad_args")?;
                     let preset = ardupilot_plane::wing_preset(wing).ok_or("bad_args")?;
                     // The outputs already describe this wing: keep their exact assignment.
-                    let current = ardupilot_plane::wing_from_outputs(|k| cx.params.get(&format!("SERVO{k}_FUNCTION")));
+                    let current = ardupilot_plane::wing_from_outputs(|k| {
+                        cx.params.get(&format!("SERVO{k}_FUNCTION"))
+                    });
                     if wing != current {
                         for (out, f) in preset {
                             cx.params.set(&format!("SERVO{out}_FUNCTION"), *f as f32);

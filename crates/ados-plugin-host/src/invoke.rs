@@ -264,11 +264,9 @@ mod tests {
             let mut seen = Vec::new();
             while let Some(req) = rx.recv().await {
                 seen.push((req.tool.clone(), req.arguments.clone()));
-                let _ = req.reply.send(
-                    answer
-                        .map(Value::from)
-                        .map_err(|e| e.to_string()),
-                );
+                let _ = req
+                    .reply
+                    .send(answer.map(Value::from).map_err(|e| e.to_string()));
             }
             seen
         });
@@ -284,7 +282,12 @@ mod tests {
         let (service_tx, service) = session(&reg, Err(TOOL_HANDLER_MISSING));
         let args = Value::Map(vec![(Value::from("site"), Value::from("bay"))]);
         let out = reg
-            .invoke("com.x.p", "capture_start", args.clone(), DEFAULT_INVOKE_TIMEOUT)
+            .invoke(
+                "com.x.p",
+                "capture_start",
+                args.clone(),
+                DEFAULT_INVOKE_TIMEOUT,
+            )
             .await
             .expect("the main process answers");
         assert_eq!(out, Value::from("started"));
@@ -357,7 +360,6 @@ mod tests {
         assert_eq!(out, Value::from("live"));
         drop(live_tx);
     }
-
 
     #[tokio::test]
     async fn invoke_returns_busy_when_the_connection_never_drains() {

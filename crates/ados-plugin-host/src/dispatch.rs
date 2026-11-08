@@ -509,7 +509,10 @@ mod tests {
                 gate(name, false, &caps(&["flight.guided_setpoint"])),
                 Gate::CapabilityDenied("capability_denied: flight.motion".to_string())
             );
-            assert_eq!(gate(name, false, &caps(&["flight.motion"])), Gate::Allow(method));
+            assert_eq!(
+                gate(name, false, &caps(&["flight.motion"])),
+                Gate::Allow(method)
+            );
         }
     }
 

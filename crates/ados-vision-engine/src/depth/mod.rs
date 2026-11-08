@@ -252,10 +252,9 @@ mod tests {
             scan: Scan,
             map: Vec<Option<f32>>,
         }
-        let f: Fixture = serde_json::from_str(include_str!(
-            "../../tests/fixtures/depth-forest-frame.json"
-        ))
-        .unwrap();
+        let f: Fixture =
+            serde_json::from_str(include_str!("../../tests/fixtures/depth-forest-frame.json"))
+                .unwrap();
         let data = f.map.iter().map(|v| v.unwrap_or(f32::NAN)).collect();
         Recorded {
             map: DenseMap::new(f.width, f.height, data).unwrap(),

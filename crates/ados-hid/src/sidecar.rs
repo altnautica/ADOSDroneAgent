@@ -42,7 +42,10 @@ impl GroundStationInput {
 
     /// Change the primary, keeping the rest of the file.
     pub fn save_primary(path: &Path, primary: Option<String>) -> std::io::Result<()> {
-        let mut cur = Self::load(path).unwrap_or(Self { primary: None, bindings: None });
+        let mut cur = Self::load(path).unwrap_or(Self {
+            primary: None,
+            bindings: None,
+        });
         cur.primary = primary;
         cur.save(path)
     }
@@ -52,7 +55,10 @@ impl GroundStationInput {
         path: &Path,
         bindings: crate::pilot_input::bindings::ControlsDoc,
     ) -> std::io::Result<()> {
-        let mut cur = Self::load(path).unwrap_or(Self { primary: None, bindings: None });
+        let mut cur = Self::load(path).unwrap_or(Self {
+            primary: None,
+            bindings: None,
+        });
         cur.bindings = Some(bindings);
         cur.save(path)
     }
@@ -105,7 +111,10 @@ mod tests {
     fn unset_primary_serializes_null() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ground-station-input.json");
-        let sel = GroundStationInput { primary: None, bindings: None };
+        let sel = GroundStationInput {
+            primary: None,
+            bindings: None,
+        };
         sel.save(&path).unwrap();
         let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert!(v["primary"].is_null());

@@ -6,6 +6,7 @@ use ados_protocol::mavlink::ardupilotmega::{
     SYS_STATUS_DATA, VFR_HUD_DATA,
 };
 use ados_protocol::mavlink::MavMessage;
+use serde_json::Map;
 
 const TS: &str = "2026-05-28T15:28:23.880948+00:00";
 

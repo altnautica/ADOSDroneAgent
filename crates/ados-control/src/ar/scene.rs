@@ -122,7 +122,12 @@ pub fn camera_model(
             yaw: 0.0,
         },
     };
-    Some(Camera { w: f64::from(frame_w.max(1)), h: f64::from(frame_h.max(1)), hfov, aim })
+    Some(Camera {
+        w: f64::from(frame_w.max(1)),
+        h: f64::from(frame_h.max(1)),
+        hfov,
+        aim,
+    })
 }
 
 fn r3(v: f64) -> f64 {
@@ -146,7 +151,11 @@ fn route_visible(scene: &SceneIn, state: &str) -> bool {
     match state {
         "active" | "paused" => true,
         "loaded" => {
-            !scene.armed || scene.owner.as_deref().is_none_or(|o| o == "pilot" || o == "fc_mode")
+            !scene.armed
+                || scene
+                    .owner
+                    .as_deref()
+                    .is_none_or(|o| o == "pilot" || o == "fc_mode")
         }
         _ => false,
     }
@@ -189,11 +198,22 @@ impl Marker<'_> {
 }
 
 /// The items for one camera.
-fn camera_items(scene: &SceneIn, pose: &Pose, cam: &Camera, layers: &BTreeSet<String>, approx: &mut bool) -> Vec<Value> {
+fn camera_items(
+    scene: &SceneIn,
+    pose: &Pose,
+    cam: &Camera,
+    layers: &BTreeSet<String>,
+    approx: &mut bool,
+) -> Vec<Value> {
     let view = View::new(cam, pose);
     let mut items = Vec::new();
     let ground_d = scene.home.map_or(pose.ned[2] + 10.0, |h| h.ned[2]);
-    let marker = Marker { view: &view, from: pose.ned, groundspeed: scene.groundspeed, ground_d };
+    let marker = Marker {
+        view: &view,
+        from: pose.ned,
+        groundspeed: scene.groundspeed,
+        ground_d,
+    };
 
     if layers.contains("ar_route") {
         if let (Some(home), Some(mission)) = (scene.home, scene.mission.as_ref()) {
@@ -309,7 +329,11 @@ fn follow_items(pose: &Pose, follow: &FollowIn, view: &View, items: &mut Vec<Val
             }
         }
         if pts.len() >= 2 {
-            let state = if follow.avoid_state.is_empty() { "clear" } else { follow.avoid_state.as_str() };
+            let state = if follow.avoid_state.is_empty() {
+                "clear"
+            } else {
+                follow.avoid_state.as_str()
+            };
             items.push(json!({"t": "fpath", "k": "fpath", "state": state, "pts": pts}));
         }
     }
@@ -320,7 +344,11 @@ fn follow_items(pose: &Pose, follow: &FollowIn, view: &View, items: &mut Vec<Val
         let ring: Vec<Value> = (0..=ORBIT_POINTS)
             .filter_map(|i| {
                 let a = std::f64::consts::TAU * i as f64 / ORBIT_POINTS as f64;
-                view.project([o.center_ne[0] + o.radius_m * a.cos(), o.center_ne[1] + o.radius_m * a.sin(), d])
+                view.project([
+                    o.center_ne[0] + o.radius_m * a.cos(),
+                    o.center_ne[1] + o.radius_m * a.sin(),
+                    d,
+                ])
             })
             .map(pt)
             .collect();
@@ -337,7 +365,11 @@ fn follow_items(pose: &Pose, follow: &FollowIn, view: &View, items: &mut Vec<Val
 /// Build the `ar` frame for the demanded cameras and layers. `demand` maps a
 /// served camera id to its requested layers; cameras absent from it are not
 /// computed.
-pub fn build(scene: &SceneIn, cameras: &[CameraIn], demand: &std::collections::BTreeMap<String, BTreeSet<String>>) -> Value {
+pub fn build(
+    scene: &SceneIn,
+    cameras: &[CameraIn],
+    demand: &std::collections::BTreeMap<String, BTreeSet<String>>,
+) -> Value {
     let mut approx = false;
     let mut reason: Option<&str> = None;
     if scene.pose.is_none() {
@@ -347,7 +379,9 @@ pub fn build(scene: &SceneIn, cameras: &[CameraIn], demand: &std::collections::B
     }
     let mut out = serde_json::Map::new();
     for cam in cameras {
-        let Some(layers) = demand.get(&cam.id) else { continue };
+        let Some(layers) = demand.get(&cam.id) else {
+            continue;
+        };
         if !layers.contains("ar_route") && !layers.contains("ar_motion") {
             continue;
         }
@@ -385,7 +419,9 @@ pub fn same_scene(a: &Value, b: &Value, tol: f64) -> bool {
         }
     }
     fn eq(a: &Value, b: &Value, tol: f64, key: &str) -> bool {
-        let Some(t) = tol_for(key, tol) else { return true };
+        let Some(t) = tol_for(key, tol) else {
+            return true;
+        };
         match (a, b) {
             (Value::Number(x), Value::Number(y)) => {
                 (x.as_f64().unwrap_or(f64::NAN) - y.as_f64().unwrap_or(f64::NAN)).abs() <= t
@@ -395,7 +431,9 @@ pub fn same_scene(a: &Value, b: &Value, tol: f64) -> bool {
                 x.len() == y.len() && x.iter().zip(y).all(|(p, q)| eq(p, q, tol, key))
             }
             (Value::Object(x), Value::Object(y)) => {
-                x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| eq(v, w, tol, k)))
+                x.len() == y.len()
+                    && x.iter()
+                        .all(|(k, v)| y.get(k).is_some_and(|w| eq(v, w, tol, k)))
             }
             _ => a == b,
         }

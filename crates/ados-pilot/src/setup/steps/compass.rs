@@ -72,10 +72,16 @@ impl Compass {
         self.mask = 0;
         self.text_cursor = cx.fc.text_seq;
         if cx.adapter.fw == Fw::Px4 {
-            cx.out.cmd(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION, [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+            cx.out.cmd(
+                MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION,
+                [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            );
         } else {
             // mask 0 = every compass, no FC-side retry, autosave, no delay, no autoreboot.
-            cx.out.cmd(MavCmd::MAV_CMD_DO_START_MAG_CAL, [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+            cx.out.cmd(
+                MavCmd::MAV_CMD_DO_START_MAG_CAL,
+                [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+            );
         }
         self.core.running();
         self.core.phase_key = None;
@@ -100,23 +106,38 @@ impl Compass {
 
     fn evaluate(&mut self, cx: &mut Cx) {
         // Every compass in the mask has reported.
-        if self.mask == 0 || (0..8).any(|i| self.mask & (1 << i) != 0 && !self.reports.contains_key(&i)) {
+        if self.mask == 0
+            || (0..8).any(|i| self.mask & (1 << i) != 0 && !self.reports.contains_key(&i))
+        {
             return;
         }
         let ok = self
             .reports
             .values()
             .all(|(s, fit)| *s == MagCalStatus::MAG_CAL_SUCCESS && *fit <= MAX_FITNESS);
-        let fitness: Map<String, Value> =
-            self.reports.iter().map(|(id, (_, f))| (id.to_string(), json!((f * 100.0).round() / 100.0))).collect();
+        let fitness: Map<String, Value> = self
+            .reports
+            .iter()
+            .map(|(id, (_, f))| (id.to_string(), json!((f * 100.0).round() / 100.0)))
+            .collect();
         if ok {
-            self.succeeded(cx, obj([("fitness_mgauss", Value::Object(fitness)), ("attempts", json!(self.attempt))]));
+            self.succeeded(
+                cx,
+                obj([
+                    ("fitness_mgauss", Value::Object(fitness)),
+                    ("attempts", json!(self.attempt)),
+                ]),
+            );
         } else if self.attempt < MAX_ATTEMPTS {
-            self.core.set_live("last_fitness_mgauss", Value::Object(fitness));
+            self.core
+                .set_live("last_fitness_mgauss", Value::Object(fitness));
             self.start(cx);
         } else {
             self.phase = Phase::Idle;
-            self.core.result = Some(obj([("fitness_mgauss", Value::Object(fitness)), ("attempts", json!(self.attempt))]));
+            self.core.result = Some(obj([
+                ("fitness_mgauss", Value::Object(fitness)),
+                ("attempts", json!(self.attempt)),
+            ]));
             self.core.fail("setup.blocker.compass_fitness");
         }
     }
@@ -140,8 +161,13 @@ impl Step for Compass {
         let mut actions = vec![Action::primary("start")];
         if cx.adapter.fw == Fw::ArduPilot {
             let mut inputs = Map::new();
-            inputs.insert("heading_deg".into(), input_number(0.0, 0.0, 359.0, 1.0, "deg", "setup.input.heading_deg"));
-            self.core.args.insert("inputs".into(), Value::Object(inputs));
+            inputs.insert(
+                "heading_deg".into(),
+                input_number(0.0, 0.0, 359.0, 1.0, "deg", "setup.input.heading_deg"),
+            );
+            self.core
+                .args
+                .insert("inputs".into(), Value::Object(inputs));
             actions.push(Action::secondary("known_heading"));
         }
         actions.push(Action::secondary("skip"));
@@ -195,14 +221,26 @@ impl Step for Compass {
             }
             Phase::Running => {
                 if !self.progress.is_empty() {
-                    let mean = self.progress.values().map(|v| *v as f32).sum::<f32>() / self.progress.len() as f32;
+                    let mean = self.progress.values().map(|v| *v as f32).sum::<f32>()
+                        / self.progress.len() as f32;
                     self.core.progress = Some(mean / 100.0);
-                    let per: Map<String, Value> = self.progress.iter().map(|(k, v)| (k.to_string(), json!(v))).collect();
+                    let per: Map<String, Value> = self
+                        .progress
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), json!(v)))
+                        .collect();
                     self.core.set_live("compass_pct", Value::Object(per));
                 }
-                let cmd = if cx.adapter.fw == Fw::Px4 { CMD_241 } else { CMD_START };
+                let cmd = if cx.adapter.fw == Fw::Px4 {
+                    CMD_241
+                } else {
+                    CMD_START
+                };
                 if cx.fc.ack_since(cmd, self.started_ms).is_some_and(|r| {
-                    !matches!(r, MavResult::MAV_RESULT_ACCEPTED | MavResult::MAV_RESULT_IN_PROGRESS)
+                    !matches!(
+                        r,
+                        MavResult::MAV_RESULT_ACCEPTED | MavResult::MAV_RESULT_IN_PROGRESS
+                    )
                 }) {
                     self.phase = Phase::Idle;
                     self.core.fail("setup.blocker.calibration_refused");
@@ -213,7 +251,9 @@ impl Step for Compass {
                     self.text_cursor = cursor;
                     for t in texts {
                         match parse_cal(&t) {
-                            Some(CalEvent::Progress(p)) => self.core.progress = Some(p as f32 / 100.0),
+                            Some(CalEvent::Progress(p)) => {
+                                self.core.progress = Some(p as f32 / 100.0)
+                            }
                             Some(CalEvent::Done) => {
                                 let res = obj([("attempts", json!(self.attempt))]);
                                 self.succeeded(cx, res);
@@ -234,7 +274,9 @@ impl Step for Compass {
                 } else {
                     self.evaluate(cx);
                 }
-                if self.phase == Phase::Running && cx.now.saturating_sub(self.started_ms) > TIMEOUT_MS {
+                if self.phase == Phase::Running
+                    && cx.now.saturating_sub(self.started_ms) > TIMEOUT_MS
+                {
                     self.cancel_fc(cx);
                     self.phase = Phase::Idle;
                     self.core.fail("setup.blocker.timeout");
@@ -257,8 +299,13 @@ impl Step for Compass {
                 if cx.adapter.fw != Fw::ArduPilot {
                     return Err("unsupported");
                 }
-                let yaw = arg_f32(args, "heading_deg").filter(|y| (0.0..360.0).contains(y)).ok_or("bad_args")?;
-                cx.out.cmd(MavCmd::MAV_CMD_FIXED_MAG_CAL_YAW, [yaw, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+                let yaw = arg_f32(args, "heading_deg")
+                    .filter(|y| (0.0..360.0).contains(y))
+                    .ok_or("bad_args")?;
+                cx.out.cmd(
+                    MavCmd::MAV_CMD_FIXED_MAG_CAL_YAW,
+                    [yaw, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                );
                 self.phase = Phase::KnownHeading;
                 self.started_ms = cx.now;
                 self.core.running();

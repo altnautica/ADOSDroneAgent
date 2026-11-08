@@ -334,7 +334,9 @@ pub(super) async fn dispatch(
         // A ground station's pilot traffic: sticks and actions for this
         // drone's pilot, when addressed to its flight controller (0 = any).
         AuxChannel::Pilot => {
-            let Some((&target, body)) = inner.split_first() else { return };
+            let Some((&target, body)) = inner.split_first() else {
+                return;
+            };
             let own = deps.fc.learned_fc_identity().map(|(s, _)| s);
             let addressed = target == 0 || own == Some(target);
             match crate::pilot_link::global() {

@@ -81,9 +81,13 @@ impl Radio {
         require_radiotap(Path::new(SYS_CLASS_NET), iface)?;
         let tx = open_tx(ifindex)?;
         let rx = open_rx(ifindex, fleet_id)?;
+        // SAFETY: `rx` is an `OwnedFd` moved into the `AsyncFd`: the descriptor
+        // is open, stays open until the `AsyncFd` drops it, and `as_raw_fd`
+        // always returns that same descriptor.
+        let rx = unsafe { AsyncFd::register(rx) }?;
         Ok(Self {
             tx,
-            rx: AsyncFd::new(rx)?,
+            rx,
             iface: iface.to_string(),
         })
     }

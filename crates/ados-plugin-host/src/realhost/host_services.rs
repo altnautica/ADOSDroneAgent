@@ -211,34 +211,6 @@ impl HostServices for RealHost {
         self.serve_release_plugin(plugin_id).await
     }
 
-    fn guided_setpoint_send(
-        &self,
-        _plugin_id: &str,
-        args: &Value,
-    ) -> Result<HostResult, HostError> {
-        self.serve_guided_setpoint_send(_plugin_id, args)
-    }
-
-    fn rate_setpoint_send(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
-        self.serve_rate_setpoint_send(_plugin_id, args)
-    }
-
-    async fn flight_lease_acquire(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
-        self.serve_flight_lease_acquire(plugin_id, args).await
-    }
-
-    fn flight_lease_release(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
-        self.serve_flight_lease_release(plugin_id, args)
-    }
-
-    fn flight_goal_send(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
-        self.serve_flight_goal_send(plugin_id, args)
-    }
-
-    fn flight_sticks_subscribe(&self, plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        self.serve_flight_sticks_subscribe(plugin_id)
-    }
-
     fn begin_session(&self, _plugin_id: &str) -> u64 {
         self.session_seq.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -336,5 +308,43 @@ impl HostServices for RealHost {
         args: &Value,
     ) -> Result<HostResult, HostError> {
         self.relay_camera_control(args).await
+    }
+}
+
+impl FlightServices for RealHost {
+    fn guided_setpoint_send(
+        &self,
+        _plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.serve_guided_setpoint_send(_plugin_id, args)
+    }
+
+    fn rate_setpoint_send(&self, _plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.serve_rate_setpoint_send(_plugin_id, args)
+    }
+
+    async fn flight_lease_acquire(
+        &self,
+        plugin_id: &str,
+        args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.serve_flight_lease_acquire(plugin_id, args).await
+    }
+
+    fn flight_lease_release(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.serve_flight_lease_release(plugin_id, args)
+    }
+
+    fn flight_goal_send(&self, plugin_id: &str, args: &Value) -> Result<HostResult, HostError> {
+        self.serve_flight_goal_send(plugin_id, args)
+    }
+
+    fn flight_sticks_subscribe(
+        &self,
+        plugin_id: &str,
+        _args: &Value,
+    ) -> Result<HostResult, HostError> {
+        self.serve_flight_sticks_subscribe(plugin_id)
     }
 }

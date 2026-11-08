@@ -17,11 +17,19 @@ const BTN_MODE: u16 = 0x13C;
 const BTN_TL: u16 = 0x136;
 
 fn ax(value: i32) -> AbsAxis {
-    AbsAxis { value, min: 0, max: 255 }
+    AbsAxis {
+        value,
+        min: 0,
+        max: 255,
+    }
 }
 
 fn hat(value: i32) -> AbsAxis {
-    AbsAxis { value, min: -1, max: 1 }
+    AbsAxis {
+        value,
+        min: -1,
+        max: 1,
+    }
 }
 
 /// `hid-playstation` DS4: sticks 0..255, triggers ABS_Z/RZ 0..255, D-pad on HAT0.
@@ -93,7 +101,10 @@ fn legacy_fixture_reads_right_stick_on_z_rz_and_triggers_on_hat2() {
     let map = PadMap::for_driver(Driver::HidSonyLegacy);
     let st = map.read(&legacy_fixture(), 0.5);
     let axes = pilot_axes(&st, mode2(), 0.08);
-    assert!((axes[1] - 1.0).abs() < 0.01, "right stick forward = pitch +1: {axes:?}");
+    assert!(
+        (axes[1] - 1.0).abs() < 0.01,
+        "right stick forward = pitch +1: {axes:?}"
+    );
     assert!(axes[2].abs() < 0.01, "left stick centred: {axes:?}");
     assert!((st.l2 - 1.0).abs() < 1e-6);
     assert!(st.r2 < 1e-6);

@@ -128,7 +128,12 @@ async fn a_tool_invoke_reaches_the_process_serving_tools_beside_a_service() {
 
         let out = h
             .invoke
-            .invoke(PLUGIN_ID, "capture_start", args.clone(), Duration::from_secs(2))
+            .invoke(
+                PLUGIN_ID,
+                "capture_start",
+                args.clone(),
+                Duration::from_secs(2),
+            )
             .await
             .unwrap_or_else(|e| panic!("service_last={service_last}: {e}"));
         assert_eq!(
@@ -146,7 +151,12 @@ async fn a_tool_invoke_reaches_the_process_serving_tools_beside_a_service() {
         for _ in 0..50 {
             err = h
                 .invoke
-                .invoke(PLUGIN_ID, "capture_start", args.clone(), Duration::from_secs(2))
+                .invoke(
+                    PLUGIN_ID,
+                    "capture_start",
+                    args.clone(),
+                    Duration::from_secs(2),
+                )
                 .await
                 .expect_err("no process serves the tools");
             if err == TOOL_HANDLER_MISSING {

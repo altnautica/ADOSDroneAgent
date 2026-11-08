@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.28] - 2026-11-08
+
+### Security
+
+- Dependencies: tokio 1.54.1 (`AsyncFd` constructors that broke I/O safety), zstd 0.13.4 with zstd-safe 7.4.0 and zstd-sys 2.1.2 (data from an abandoned stream leaking into the next one on a reused context, `Seekable::decompress` past the end, uninitialized memory on a failed legacy-frame decompress, the WebAssembly allocator shim), and ctutils 0.4.8 (non-constant-time mask generation). The swarm radio registers its receive socket through `AsyncFd::register`. The zip `ZipArchive::extract` symlink advisory is recorded as not applicable: nothing calls the extract APIs, and the plugin archive reader rejects symlink entries before reading any payload.
+
+### Changed
+
+- Plugin host: the flight-control host methods (guided and attitude setpoints, the motion lease, goals and the shaped sticks) are on a `FlightServices` supertrait of `HostServices`. A host implementation adds `impl FlightServices for MyHost {}` and overrides those methods there.
+- Source files past the size limit are split into submodules, and the workspace is formatted with the current rustfmt. No change to the agent's behaviour.
+- The ONNX backend flattens each session-builder error as it happens instead of carrying the builder through the chain.
+
 ## [0.109.27] - 2026-11-08
 
 ### Fixed

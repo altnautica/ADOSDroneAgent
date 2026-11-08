@@ -6,14 +6,15 @@
 mod actions;
 mod control;
 mod events;
+mod operator;
 mod state;
 
 use std::collections::HashMap;
 
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
 use ados_protocol::pilot::{
-    ActionResult, Banner, ControlMode, Holder, LeaseReply, LeaseRevoked, Mission, Owner, Request,
-    Sticks, ViewDemand,
+    ActionResult, Banner, Holder, LeaseReply, LeaseRevoked, Mission, Owner, Request, Sticks,
+    ViewDemand,
 };
 
 use crate::authority::Authority;
@@ -444,80 +445,6 @@ impl Pilot {
             .unwrap_or([0.0, 0.0]);
         self.mr.engage(v);
         self.hold_reason = reason.map(str::to_owned);
-    }
-
-    /// Every readiness item, including the setup engine's.
-    pub fn readiness(&self, now_ms: u64) -> Vec<ados_protocol::pilot::Readiness> {
-        let mut items = crate::readiness::items(
-            &self.fc,
-            self.control_mode(),
-            self.sessions.owner.is_some(),
-            now_ms,
-        );
-        if let Some(v) = &self.setup_needed {
-            items.push(ados_protocol::pilot::Readiness {
-                id: "setup_needed".into(),
-                ok: v.is_none(),
-                severity: ados_protocol::pilot::Severity::Block,
-                msg: v
-                    .clone()
-                    .unwrap_or_else(|| "Aircraft setup complete".into()),
-            });
-        }
-        items
-    }
-
-    pub fn set_rc_ados_position(&mut self, slot: u8) {
-        self.settings.control.rc_ados_position = slot;
-        self.out.push(Out::Persist {
-            section: "control",
-            key: "rc_ados_position",
-            value: slot.to_string(),
-        });
-    }
-
-    /// Leave the setup engine's `tuning` owner. Airborne: fly as `pilot` from a
-    /// hold here (back in GUIDED); on the ground: idle or whatever came before.
-    pub fn exit_tuning(&mut self, now_ms: u64) {
-        if self.owner() != Owner::Tuning {
-            return;
-        }
-        self.auth.exit_tuning();
-        let fam = self.family();
-        let mode = self.fc.custom_mode;
-        let returning = fam.is_rtl(mode)
-            || fam.is_land(mode)
-            || mode == crate::modes::copter::LAND && fam == crate::modes::Family::Copter
-            || fam == crate::modes::Family::Plane
-                && matches!(
-                    mode,
-                    crate::modes::plane::LOITER | crate::modes::plane::QLAND
-                );
-        if self.fc.armed && !self.fc.landed() && returning {
-            self.set_owner(Owner::FcMode, "tuning-end");
-        } else if self.fc.armed && !self.fc.landed() {
-            if !self.in_guided() {
-                let g = self.family().guided();
-                self.set_mode(g, now_ms);
-            }
-            self.set_owner(Owner::Pilot, "tuning-end");
-            self.engage_pilot(now_ms);
-        } else if !self.fc.armed {
-            self.set_owner(Owner::Idle, "tuning-end");
-        }
-    }
-
-    /// No operator surface heard from for `pilot.link_loss_s`.
-    pub fn link_lost(&self, now_ms: u64) -> bool {
-        let window = u64::from(self.settings.pilot.link_loss_s) * 1000;
-        self.failsafe
-            .surface_silence_ms(now_ms)
-            .is_some_and(|s| s >= window)
-    }
-
-    /// The control mode now in force.
-    pub fn control_mode(&self) -> ControlMode {
-        self.settings.control.mode
     }
 }
 

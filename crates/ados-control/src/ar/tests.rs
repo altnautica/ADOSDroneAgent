@@ -37,7 +37,10 @@ fn demand(views: &[&str]) -> ViewDemand {
     let mut d = ViewDemand::default();
     for v in views {
         let l = ViewLease::from_query(v).unwrap();
-        d.cameras.entry(l.camera_id.clone()).or_default().extend(l.layers.iter().cloned());
+        d.cameras
+            .entry(l.camera_id.clone())
+            .or_default()
+            .extend(l.layers.iter().cloned());
     }
     d
 }
@@ -65,7 +68,10 @@ fn camera_models_follow_the_roster_and_the_gimbal() {
     let (_, models) = cameras_from(&roster(), Some((-30.0, 90.0, true)), 60.0);
     assert!((models["main"].tilt_down_deg - 30.0).abs() < 1e-9);
     assert!((models["main"].yaw_deg - 30.0).abs() < 1e-9);
-    assert!((models["down"].tilt_down_deg - 90.0).abs() < 1e-9, "gimbal is the primary's only");
+    assert!(
+        (models["down"].tilt_down_deg - 90.0).abs() < 1e-9,
+        "gimbal is the primary's only"
+    );
 }
 
 #[test]
@@ -99,7 +105,9 @@ fn follow_geometry_comes_from_the_pilot_while_a_skill_flies() {
     assert!(!o.cw && o.radius_m == 8.0);
     // The pilot flying sticks: no follow items.
     let idle = json!({"owner": "pilot"});
-    assert!(scene_from(&snapshot(), 7, Some(&idle), Some(&follow)).follow.is_none());
+    assert!(scene_from(&snapshot(), 7, Some(&idle), Some(&follow))
+        .follow
+        .is_none());
 }
 
 #[test]
@@ -109,11 +117,25 @@ fn empty_demand_builds_nothing() {
     let scene = scene_from(&snapshot(), 1, None, None);
     let t0 = Instant::now();
     for i in 0..50 {
-        let out = b.step(t0 + Duration::from_millis(50 * i), &ViewDemand::default(), &scene, &cams, None);
+        let out = b.step(
+            t0 + Duration::from_millis(50 * i),
+            &ViewDemand::default(),
+            &scene,
+            &cams,
+            None,
+        );
         assert!(out.is_none());
     }
     // A demand without an AR layer is no demand for this builder either.
-    assert!(b.step(t0 + Duration::from_secs(5), &demand(&["main:obstacles"]), &scene, &cams, None).is_none());
+    assert!(b
+        .step(
+            t0 + Duration::from_secs(5),
+            &demand(&["main:obstacles"]),
+            &scene,
+            &cams,
+            None
+        )
+        .is_none());
     assert_eq!(b.frames_built, 0);
 }
 
@@ -127,12 +149,21 @@ fn two_clients_on_one_camera_cost_one_computation() {
         let mut scene = scene_from(&snapshot(), i64::from(i), None, None);
         // Move a little each tick so every frame differs.
         scene.pose.as_mut().unwrap().yaw = f64::from(i) * 0.01;
-        b.step(t0 + Duration::from_millis(100 * u64::from(i)), &both, &scene, &cams, None);
+        b.step(
+            t0 + Duration::from_millis(100 * u64::from(i)),
+            &both,
+            &scene,
+            &cams,
+            None,
+        );
     }
     assert_eq!(b.frames_built, 10, "one frame per tick, not one per client");
     let frame = b.prev.clone().unwrap();
     assert!(frame["cameras"].get("main").is_some());
-    assert!(frame["cameras"].get("down").is_none(), "an unwatched camera is not computed");
+    assert!(
+        frame["cameras"].get("down").is_none(),
+        "an unwatched camera is not computed"
+    );
 }
 
 #[test]
@@ -151,8 +182,15 @@ fn an_unchanged_scene_sends_only_keepalives() {
     }
     assert_eq!(b.frames_built, 30);
     let ticks: Vec<u64> = published.iter().map(|(i, _)| *i).collect();
-    assert_eq!(ticks, vec![0, 10, 20], "first frame then one keep-alive a second");
-    assert!(published.iter().all(|(_, f)| f["ts_ms"] == 42), "keep-alives keep the ts_ms");
+    assert_eq!(
+        ticks,
+        vec![0, 10, 20],
+        "first frame then one keep-alive a second"
+    );
+    assert!(
+        published.iter().all(|(_, f)| f["ts_ms"] == 42),
+        "keep-alives keep the ts_ms"
+    );
 }
 
 #[test]

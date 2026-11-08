@@ -272,7 +272,9 @@ impl Reboot {
     }
 
     pub fn tick(&mut self, cx: &mut Cx) -> Rebooted {
-        let Some(sent) = self.sent_ms else { return Rebooted::Back };
+        let Some(sent) = self.sent_ms else {
+            return Rebooted::Back;
+        };
         if cx.now.saturating_sub(sent) > REBOOT_TIMEOUT_MS {
             self.sent_ms = None;
             return Rebooted::Lost;
@@ -305,5 +307,9 @@ pub fn writes_settled(cx: &mut Cx) -> Option<Result<(), Vec<String>>> {
         return None;
     }
     let failed = cx.params.take_failed();
-    Some(if failed.is_empty() { Ok(()) } else { Err(failed) })
+    Some(if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed)
+    })
 }

@@ -76,7 +76,8 @@ impl Step for Accel {
             self.core.body_variant = Some("px4");
         }
         self.core.image = Some("accel_level".into());
-        self.core.wait_user(vec![Action::primary("start"), Action::secondary("skip")]);
+        self.core
+            .wait_user(vec![Action::primary("start"), Action::secondary("skip")]);
     }
 
     fn on_msg(&mut self, msg: &MavMessage, _cx: &mut Cx) {
@@ -100,7 +101,10 @@ impl Step for Accel {
                         self.core.image = Some(format!("accel_{k}"));
                         self.core.set_live("pose", k);
                         self.core.progress = Some(self.poses_done as f32 / 6.0);
-                        self.core.wait_user(vec![Action::primary("next_pose"), Action::secondary("cancel")]);
+                        self.core.wait_user(vec![
+                            Action::primary("next_pose"),
+                            Action::secondary("cancel"),
+                        ]);
                     }
                 }
             }
@@ -108,12 +112,21 @@ impl Step for Accel {
     }
 
     fn tick(&mut self, cx: &mut Cx) {
-        let Some(started) = self.started_ms else { return };
+        let Some(started) = self.started_ms else {
+            return;
+        };
         if self.core.state.is_terminal() {
             return;
         }
-        if cx.fc.ack_since(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION as u32, started)
-            .is_some_and(|r| !matches!(r, MavResult::MAV_RESULT_ACCEPTED | MavResult::MAV_RESULT_IN_PROGRESS))
+        if cx
+            .fc
+            .ack_since(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION as u32, started)
+            .is_some_and(|r| {
+                !matches!(
+                    r,
+                    MavResult::MAV_RESULT_ACCEPTED | MavResult::MAV_RESULT_IN_PROGRESS
+                )
+            })
         {
             self.core.fail("setup.blocker.calibration_refused");
             return;
@@ -158,14 +171,20 @@ impl Step for Accel {
                 }
                 self.started_ms = Some(cx.now);
                 self.text_cursor = cx.fc.text_seq;
-                cx.out.cmd(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION, [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+                cx.out.cmd(
+                    MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION,
+                    [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                );
                 self.core.running();
                 self.core.actions = vec![Action::secondary("cancel")];
                 Ok(())
             }
             "next_pose" => {
                 let pose = self.pose.ok_or("no_pose")?;
-                cx.out.cmd(MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS, [pose as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+                cx.out.cmd(
+                    MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS,
+                    [pose as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                );
                 self.core.running();
                 self.core.actions = vec![Action::secondary("cancel")];
                 Ok(())

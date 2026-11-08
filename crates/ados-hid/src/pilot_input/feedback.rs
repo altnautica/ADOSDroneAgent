@@ -56,7 +56,10 @@ impl PilotView {
             return "failsafe";
         };
         if !s["link_loss_in_s"].is_null()
-            || matches!(s["hold_reason"].as_str(), Some("controller-lost" | "input-stale"))
+            || matches!(
+                s["hold_reason"].as_str(),
+                Some("controller-lost" | "input-stale")
+            )
         {
             return "failsafe";
         }
@@ -103,7 +106,11 @@ pub fn lightbar_rgb(state: &str, now_ms: u64) -> [u8; 3] {
 
 fn parse_hex(s: &str) -> [u8; 3] {
     let h = s.trim_start_matches('#');
-    let byte = |i: usize| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok()).unwrap_or(0);
+    let byte = |i: usize| {
+        h.get(i..i + 2)
+            .and_then(|x| u8::from_str_radix(x, 16).ok())
+            .unwrap_or(0)
+    };
     [byte(0), byte(2), byte(4)]
 }
 
@@ -118,7 +125,12 @@ pub enum Alert {
 /// Compare two consecutive views: a lightbar escalation into failsafe or low
 /// battery is critical; a new hold reason or a blocked plan is a warning; an
 /// owner or skill change is a mode change.
-pub fn transition_alert(prev: Option<&Value>, next: Option<&Value>, prev_bar: &str, next_bar: &str) -> Option<Alert> {
+pub fn transition_alert(
+    prev: Option<&Value>,
+    next: Option<&Value>,
+    prev_bar: &str,
+    next_bar: &str,
+) -> Option<Alert> {
     if prev_bar != next_bar && matches!(next_bar, "failsafe" | "low_battery") {
         return Some(Alert::Critical);
     }
@@ -153,7 +165,12 @@ impl RumbleQueue {
     fn pattern(&mut self, p: &super::spec::Pulses, now_ms: u64) {
         let mut at = now_ms;
         for &len in &p.pulses_ms {
-            self.pending.push(Pulse { at_ms: at, strong: p.strong, weak: p.weak, length_ms: len });
+            self.pending.push(Pulse {
+                at_ms: at,
+                strong: p.strong,
+                weak: p.weak,
+                length_ms: len,
+            });
             at += u64::from(len) + u64::from(p.gap_ms);
         }
     }
@@ -200,7 +217,10 @@ mod tests {
     use serde_json::json;
 
     fn view(s: Value) -> PilotView {
-        PilotView { state: Some((s, 1000)), relay_up: true }
+        PilotView {
+            state: Some((s, 1000)),
+            relay_up: true,
+        }
     }
 
     #[test]
@@ -211,17 +231,35 @@ mod tests {
             (json!({"owner":"pilot","armed":true}), "pilot"),
             (json!({"owner":"skill","armed":true}), "skill"),
             (json!({"owner":"mission_fc","armed":true}), "mission"),
-            (json!({"owner":"fc_mode","fc_mode":6,"vehicle_class":"multirotor","armed":true}), "rth"),
-            (json!({"owner":"fc_mode","fc_mode":11,"vehicle_class":"fixedwing","armed":true}), "rth"),
-            (json!({"owner":"fc_mode","fc_mode":5,"vehicle_class":"multirotor","armed":true}), "armed_idle"),
-            (json!({"owner":"pilot","armed":true,"rth_countdown_s":7}), "low_battery"),
-            (json!({"owner":"pilot","armed":true,"link_loss_in_s":4}), "failsafe"),
+            (
+                json!({"owner":"fc_mode","fc_mode":6,"vehicle_class":"multirotor","armed":true}),
+                "rth",
+            ),
+            (
+                json!({"owner":"fc_mode","fc_mode":11,"vehicle_class":"fixedwing","armed":true}),
+                "rth",
+            ),
+            (
+                json!({"owner":"fc_mode","fc_mode":5,"vehicle_class":"multirotor","armed":true}),
+                "armed_idle",
+            ),
+            (
+                json!({"owner":"pilot","armed":true,"rth_countdown_s":7}),
+                "low_battery",
+            ),
+            (
+                json!({"owner":"pilot","armed":true,"link_loss_in_s":4}),
+                "failsafe",
+            ),
         ];
         for (s, want) in cases {
             assert_eq!(view(s.clone()).lightbar_state(1500), want, "{s}");
         }
         // Stale state or a down relay reads as a lost link.
-        assert_eq!(view(json!({"owner":"pilot"})).lightbar_state(1000 + STATE_STALE_MS + 1), "failsafe");
+        assert_eq!(
+            view(json!({"owner":"pilot"})).lightbar_state(1000 + STATE_STALE_MS + 1),
+            "failsafe"
+        );
         assert_eq!(PilotView::default().lightbar_state(0), "failsafe");
     }
 
@@ -243,10 +281,19 @@ mod tests {
     fn transitions_rumble_by_class() {
         let a = json!({"owner":"pilot","skill":null,"hold_reason":null});
         let b = json!({"owner":"skill","skill":{"skill_id":"follow"},"hold_reason":null});
-        assert_eq!(transition_alert(Some(&a), Some(&b), "pilot", "skill"), Some(Alert::ModeChange));
+        assert_eq!(
+            transition_alert(Some(&a), Some(&b), "pilot", "skill"),
+            Some(Alert::ModeChange)
+        );
         let c = json!({"owner":"pilot","skill":null,"hold_reason":"obstacle-close"});
-        assert_eq!(transition_alert(Some(&a), Some(&c), "pilot", "pilot"), Some(Alert::Warning));
-        assert_eq!(transition_alert(Some(&a), None, "pilot", "failsafe"), Some(Alert::Critical));
+        assert_eq!(
+            transition_alert(Some(&a), Some(&c), "pilot", "pilot"),
+            Some(Alert::Warning)
+        );
+        assert_eq!(
+            transition_alert(Some(&a), None, "pilot", "failsafe"),
+            Some(Alert::Critical)
+        );
         assert_eq!(transition_alert(Some(&a), Some(&a), "pilot", "pilot"), None);
     }
 

@@ -28,6 +28,9 @@ use crate::setup::step::{step_core, ActErr, Cx, Step, StepCore};
 
 use super::plane_air::ToLoiter;
 
+mod helpers;
+mod phases;
+
 pub const TUNE_ALT_M: f32 = 8.0;
 pub const AGGR: f32 = 0.075;
 pub const AXES_ROLL_PITCH: f32 = 3.0;
@@ -60,18 +63,28 @@ enum Stage {
 enum Phase {
     Idle,
     TakeOff,
-    Settle { since: u64 },
+    Settle {
+        since: u64,
+    },
     Params,
-    Prestream { since: u64 },
+    Prestream {
+        since: u64,
+    },
     /// ArduPilot copter-style: in the hold mode the tune mode is entered from.
-    Hold { since: u64 },
-    Tuning { since: u64 },
+    Hold {
+        since: u64,
+    },
+    Tuning {
+        since: u64,
+    },
     LandSave,
     Saved,
     /// Waiting for the operator: battery swap before yaw.
     YawWait,
     PlanePosition,
-    PlaneTuning { since: u64 },
+    PlaneTuning {
+        since: u64,
+    },
     PlaneExit,
     ReadGains,
 }
@@ -122,113 +135,6 @@ pub fn blended(axes: [f32; 4]) -> (f32, f32, f32, f32) {
     let b = |v: f32| if v.abs() > BLEND { v } else { 0.0 };
     let [roll, pitch, thr, yaw] = axes;
     (b(pitch), b(roll), 0.5 + 0.5 * b(thr), b(yaw))
-}
-
-impl Autotune {
-    fn tune_mode(&self, cx: &Cx) -> Mode {
-        match (cx.adapter.fw, cx.adapter.class, self.stage) {
-            (Fw::Px4, _, _) => Mode::Posctl,
-            (_, Class::Vtol, Stage::Copter) => Mode::Qautotune,
-            _ => Mode::Autotune,
-        }
-    }
-
-    /// The position-hold mode an ArduPilot copter-style tune is entered from.
-    /// ArduCopter refuses AUTOTUNE from GUIDED ("init failed": only modes
-    /// with `allows_autotune`, i.e. STABILIZE, ALT_HOLD, LOITER, POSHOLD),
-    /// and from LOITER it keeps position between twitches; QAUTOTUNE holds
-    /// position when entered from QLOITER.
-    fn hold_mode(&self, cx: &Cx) -> Option<Mode> {
-        match (cx.adapter.fw, cx.adapter.class) {
-            (Fw::ArduPilot, Class::Multirotor) => Some(Mode::Loiter),
-            (Fw::ArduPilot, Class::Vtol) => Some(Mode::Qloiter),
-            _ => None,
-        }
-    }
-
-    /// The FC would not take the tune mode: land and say so.
-    fn refused(&mut self, cx: &mut Cx) {
-        self.hop.land(cx);
-        self.phase = Phase::Idle;
-        self.core.fail("setup.blocker.tuning_refused");
-    }
-
-    fn axes_param(&self, cx: &Cx) -> String {
-        format!("{}_AXES", cx.adapter.autotune_prefix())
-    }
-
-    fn manual(&mut self, cx: &mut Cx, x: f32, y: f32, z: f32, r: f32) {
-        if cx.now.saturating_sub(self.last_manual) >= MANUAL_MS {
-            self.last_manual = cx.now;
-            cx.out.manual(x, y, z, r);
-        }
-    }
-
-    fn snapshot_gains(&mut self, cx: &Cx) {
-        self.before = cx
-            .adapter
-            .report_gains()
-            .into_iter()
-            .filter_map(|n| cx.params.get(&n).map(|v| (n, json!(v))))
-            .collect();
-    }
-
-    fn start_copter_round(&mut self, cx: &mut Cx) {
-        self.stage = Stage::Copter;
-        self.hop.start(cx, TUNE_ALT_M);
-        self.phase = Phase::TakeOff;
-        self.core.phase_key = Some(if self.yaw_round { "yaw" } else { "roll_pitch" }.into());
-    }
-
-    fn start_plane(&mut self, cx: &mut Cx) {
-        self.stage = Stage::Plane;
-        self.to.start(cx);
-        self.phase = Phase::PlanePosition;
-        self.core.phase_key = Some("plane".into());
-    }
-
-    fn after_copter(&mut self, cx: &mut Cx) {
-        if !self.yaw_round && cx.adapter.fw == Fw::ArduPilot {
-            if cx.fc.battery_pct.is_some_and(|p| p >= YAW_MIN_BATTERY) {
-                self.yaw_round = true;
-                self.start_copter_round(cx);
-            } else {
-                cx.data.autotune_yaw_pending = true;
-                self.phase = Phase::YawWait;
-                self.core.phase_key = Some("battery_swap".into());
-                self.core.wait_user(vec![Action::primary("resume_yaw"), Action::secondary("skip_yaw")]);
-            }
-            return;
-        }
-        cx.data.autotune_yaw_pending = false;
-        if cx.adapter.class == Class::Vtol {
-            self.start_plane(cx);
-        } else {
-            self.read_gains(cx);
-        }
-    }
-
-    fn read_gains(&mut self, cx: &mut Cx) {
-        for n in cx.adapter.report_gains() {
-            if cx.params.has(&n) {
-                cx.params.read(&n);
-            }
-        }
-        self.phase = Phase::ReadGains;
-    }
-
-    fn tick_texts(&mut self, cx: &mut Cx) -> Vec<TuneEvent> {
-        let (texts, cursor) = cx.fc.texts_after(self.text_cursor);
-        self.text_cursor = cursor;
-        let mut ev = Vec::new();
-        for t in texts {
-            if let Some(e) = parse_tune(&t) {
-                self.core.set_live("last_text", t.clone());
-                ev.push(e);
-            }
-        }
-        ev
-    }
 }
 
 impl Step for Autotune {
@@ -347,7 +253,11 @@ impl Step for Autotune {
                     // The FC left the tune mode on its own (a failsafe, "AutoTune:
                     // Stopped"): it is flying now; never force the mode back over it.
                     self.phase = Phase::Idle;
-                    self.core.fail(if cx.fc.armed { "setup.blocker.autotune_failed" } else { "setup.blocker.disarmed" });
+                    self.core.fail(if cx.fc.armed {
+                        "setup.blocker.autotune_failed"
+                    } else {
+                        "setup.blocker.disarmed"
+                    });
                     return;
                 } else if el > TUNE_ENTER_MS {
                     // Refused (STATUSTEXT "Mode change to … failed"): stop rather than ask forever.
@@ -359,7 +269,10 @@ impl Step for Autotune {
                 if cx.adapter.fw == Fw::Px4 {
                     if cx.now.saturating_sub(self.last_poll) >= POLL_MS {
                         self.last_poll = cx.now;
-                        cx.out.cmd(MavCmd::MAV_CMD_DO_AUTOTUNE_ENABLE, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+                        cx.out.cmd(
+                            MavCmd::MAV_CMD_DO_AUTOTUNE_ENABLE,
+                            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                        );
                     }
                     match cx.fc.ack_since(212, since) {
                         Some(MavResult::MAV_RESULT_ACCEPTED) if el > 3000 => {
@@ -437,100 +350,10 @@ impl Step for Autotune {
                     self.after_copter(cx);
                 }
             }
-            Phase::PlanePosition => {
-                self.to.tick(cx);
-                if let Some(w) = self.to.failed {
-                    self.phase = Phase::Idle;
-                    self.core.fail(&format!("setup.blocker.{w}"));
-                } else if self.to.ready {
-                    cx.params.set("AUTOTUNE_LEVEL", PLANE_LEVEL);
-                    self.text_cursor = cx.fc.text_seq;
-                    let roll_lim = cx.params.get("ROLL_LIMIT_DEG").or_else(|| cx.params.get("LIM_ROLL_CD").map(|v| v / 100.0)).unwrap_or(45.0);
-                    let pitch_lim = cx.params.get("PTCH_LIM_MAX_DEG").or_else(|| cx.params.get("LIM_PITCH_MAX").map(|v| v / 100.0)).unwrap_or(20.0);
-                    self.doublets = Some(Doublets::new(cx.now, roll_lim, pitch_lim, cx.adapter.tuning_box_m(true)));
-                    flight::set_mode(cx, Mode::Autotune);
-                    self.phase = Phase::PlaneTuning { since: cx.now };
-                }
-            }
-            Phase::PlaneTuning { since } => {
-                let thr = cx.data.cruise_throttle.or_else(|| cx.params.get("TRIM_THROTTLE")).unwrap_or(45.0) / 100.0;
-                let off = match (cx.fc.local, cx.data.box_center) {
-                    (Some((l, _)), Some(c)) => [l[0] - c[0], l[1] - c[1]],
-                    _ => [0.0, 0.0],
-                };
-                let heading = cx.fc.attitude.map(|(a, _)| a[2]).unwrap_or(0.0);
-                let operator = axes.iter().any(|a| a.abs() > BLEND);
-                let (x, y, r) = if operator {
-                    let (x, y, _, r) = blended(axes);
-                    (x, y, r)
-                } else if let Some(d) = self.doublets.as_mut() {
-                    let alt_err = height(cx).map_or(0.0, |h| PLANE_LOITER_ALT_M - h);
-                    let dm = d.demand(cx.now, off, heading, alt_err);
-                    // MANUAL_CONTROL x > 0 is nose down.
-                    (-dm.pitch, dm.roll, 0.0)
-                } else {
-                    (0.0, 0.0, 0.0)
-                };
-                self.manual(cx, x, y, thr, r);
-                let el = cx.now.saturating_sub(since);
-                if el > 3000 && !flight::in_mode(cx, Mode::Autotune) && el % 2000 < MANUAL_MS {
-                    flight::set_mode(cx, Mode::Autotune);
-                }
-                for e in self.tick_texts(cx) {
-                    if let TuneEvent::AxisDone(a) = e {
-                        if !self.plane_done.contains(&a) {
-                            self.plane_done.push(a);
-                        }
-                    }
-                }
-                self.core.progress = Some(0.5 + 0.5 * (el as f32 / PLANE_MAX_MS as f32).min(1.0));
-                let both = self.plane_done.contains(&Axis::Roll) && self.plane_done.contains(&Axis::Pitch);
-                if both || el >= PLANE_MAX_MS {
-                    if !both {
-                        self.notes.push(json!({"plane": "time_limit", "axes_done": format!("{:?}", self.plane_done)}));
-                    }
-                    plane_loiter(cx, PLANE_LOITER_ALT_M);
-                    self.last_poll = cx.now;
-                    self.phase = Phase::PlaneExit;
-                }
-            }
-            Phase::PlaneExit => {
-                if flight::in_mode(cx, Mode::Guided) {
-                    self.read_gains(cx);
-                } else if cx.now.saturating_sub(self.last_poll) > 3000 {
-                    self.last_poll = cx.now;
-                    plane_loiter(cx, PLANE_LOITER_ALT_M);
-                }
-            }
-            Phase::ReadGains => {
-                if !cx.params.idle() {
-                    return;
-                }
-                let after: Map<String, Value> = cx
-                    .adapter
-                    .report_gains()
-                    .into_iter()
-                    .filter_map(|n| cx.params.get(&n).map(|v| (n, json!(v))))
-                    .collect();
-                let changed: Vec<String> = after
-                    .iter()
-                    .filter(|(k, v)| self.before.get(*k).is_some_and(|b| b != *v))
-                    .map(|(k, _)| k.clone())
-                    .collect();
-                let copter_axes: Vec<String> = self.copter_done.iter().map(|a| format!("{a:?}").to_lowercase()).collect();
-                let plane_axes: Vec<String> = self.plane_done.iter().map(|a| format!("{a:?}").to_lowercase()).collect();
-                self.phase = Phase::Idle;
-                self.core.phase_key = None;
-                self.core.done(obj([
-                    ("gains_before", Value::Object(std::mem::take(&mut self.before))),
-                    ("gains_after", Value::Object(after)),
-                    ("changed", json!(changed)),
-                    ("copter_axes_saved", json!(copter_axes)),
-                    ("plane_axes_done", json!(plane_axes)),
-                    ("yaw_pending", json!(cx.data.autotune_yaw_pending)),
-                    ("notes", Value::Array(std::mem::take(&mut self.notes))),
-                ]));
-            }
+            Phase::PlanePosition => self.plane_position(cx),
+            Phase::PlaneTuning { since } => self.plane_tuning(cx, since, axes),
+            Phase::PlaneExit => self.plane_exit(cx),
+            Phase::ReadGains => self.report_gains(cx),
         }
     }
 

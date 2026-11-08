@@ -19,6 +19,7 @@
 //! matches how the Python supervisor wires the `EventBus` directly rather than
 //! behind a host-service hook.
 
+mod flight;
 mod noop;
 mod types;
 
@@ -27,6 +28,7 @@ use std::sync::Arc;
 
 use rmpv::Value;
 
+pub use flight::FlightServices;
 pub use noop::NoopHost;
 pub use types::{not_implemented, AuxDatagramRx, HostError, HostResult};
 
@@ -37,7 +39,9 @@ pub use types::{not_implemented, AuxDatagramRx, HostError, HostResult};
 /// [`not_implemented`] for the matching method, mirroring the Python stub
 /// bodies; a real host implements the methods as the agent's service surfaces
 /// stabilize. The event surface is not on this trait — it is served in-process
-/// by the host's own event bus (see [`crate::handlers`]).
+/// by the host's own event bus (see [`crate::handlers`]). The flight-control
+/// methods (setpoints and the pilot's motion lease) are on the
+/// [`FlightServices`] supertrait.
 ///
 /// Three methods (`mavlink_send`, `mavlink_register_component`,
 /// `peripheral_register_driver`) additionally take the caller's
@@ -47,7 +51,7 @@ pub use types::{not_implemented, AuxDatagramRx, HostError, HostResult};
 /// after argument validation, exactly where the Python handlers apply it. The
 /// other 14 methods are fully gated at the dispatch level and do not see the
 /// caps. The asymmetry documents which methods gate on payload.
-pub trait HostServices: Send + Sync + 'static {
+pub trait HostServices: FlightServices + Send + Sync + 'static {
     /// A receiver for the vehicle-state snapshot fanout, when this host has a
     /// state reader. The server obtains one per `telemetry.subscribe` and
     /// pushes each snapshot, paced to at most
@@ -232,66 +236,6 @@ pub trait HostServices: Send + Sync + 'static {
         _args: &Value,
     ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
         std::future::ready(Ok(not_implemented("gpio.buzzer.beep")))
-    }
-
-    /// Send one guided-mode position/velocity setpoint to the flight controller.
-    /// A real host validates the request (finite numbers on every active axis, a
-    /// sane type mask, a coordinate frame valid for the message kind), builds the
-    /// single `SET_POSITION_TARGET` MAVLink frame, and writes it to the MAVLink
-    /// socket the router forwards to the FC. Fully gated at the dispatch level on
-    /// the guided-setpoint capability, so it does not see the caller's caps.
-    ///
-    /// This is a single-shot send: the host does not own any flight mode or
-    /// schedule. To hold a commanded velocity the caller must re-send well above
-    /// the autopilot's setpoint-timeout rate (the autopilot brakes a few seconds
-    /// after the last setpoint), and must itself have placed the vehicle in its
-    /// guided mode. The default returns `not_implemented` so [`NoopHost`] stays
-    /// inert.
-    fn guided_setpoint_send(
-        &self,
-        _plugin_id: &str,
-        _args: &Value,
-    ) -> Result<HostResult, HostError> {
-        Ok(not_implemented("flight.guided_setpoint.send"))
-    }
-
-    /// Send one `SET_ATTITUDE_TARGET` setpoint (an attitude quaternion and/or
-    /// body rates, plus collective thrust) to the flight controller via the
-    /// scoped attitude sender. Like [`Host::guided_setpoint_send`] this is a
-    /// single-shot send: the host owns no flight mode or schedule, so the caller
-    /// must re-send above the autopilot's setpoint-timeout rate and must itself
-    /// have placed the vehicle in a mode that accepts offboard attitude (e.g.
-    /// GUIDED). The default returns `not_implemented` so [`NoopHost`] stays inert.
-    fn rate_setpoint_send(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        Ok(not_implemented("flight.rate_setpoint.send"))
-    }
-
-    /// Ask the pilot for its single motion lease (`{kind, skill_id}`); the host
-    /// stamps the caller as the holder. Gated on `flight.motion`. The default
-    /// returns `not_implemented`.
-    fn flight_lease_acquire(
-        &self,
-        _plugin_id: &str,
-        _args: &Value,
-    ) -> impl Future<Output = Result<HostResult, HostError>> + Send {
-        std::future::ready(Ok(not_implemented("flight.lease.acquire")))
-    }
-
-    /// Give the motion lease back (`{lease_id}`). Gated on `flight.motion`.
-    fn flight_lease_release(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        Ok(not_implemented("flight.lease.release"))
-    }
-
-    /// Send the pilot one goal under the caller's lease (`{lease_id, goal}`).
-    /// Gated on `flight.motion`.
-    fn flight_goal_send(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        Ok(not_implemented("flight.goal.send"))
-    }
-
-    /// Ask for the operator's shaped sticks as `flight.sticks` events while the
-    /// caller holds the lease. Gated on `flight.motion`.
-    fn flight_sticks_subscribe(&self, _plugin_id: &str, _args: &Value) -> Result<HostResult, HostError> {
-        Ok(not_implemented("flight.sticks.subscribe"))
     }
 
     /// Open an additive auxiliary application stream on the radio link. A real

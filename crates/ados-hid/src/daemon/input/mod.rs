@@ -131,12 +131,14 @@ async fn serve() -> Result<()> {
     );
     let (primary_tx, primary_rx) = tokio::sync::watch::channel::<Option<String>>(None);
     #[cfg(target_os = "linux")]
-    tokio::spawn(crate::pilot_input::runner::run(crate::pilot_input::runner::RunnerConfig {
-        pilot_sock: crate::paths::pilot_sock(),
-        state_path: crate::paths::gs_input_state_json(),
-        bindings: bindings_rx,
-        primary: primary_rx,
-    }));
+    tokio::spawn(crate::pilot_input::runner::run(
+        crate::pilot_input::runner::RunnerConfig {
+            pilot_sock: crate::paths::pilot_sock(),
+            state_path: crate::paths::gs_input_state_json(),
+            bindings: bindings_rx,
+            primary: primary_rx,
+        },
+    ));
     #[cfg(not(target_os = "linux"))]
     drop((bindings_rx, primary_rx));
 

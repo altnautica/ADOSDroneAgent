@@ -56,7 +56,11 @@ pub enum Aim {
     Body { tilt_down: f64, yaw: f64 },
     /// A stabilised gimbal: pitch held against the horizon (`tilt_down`, +
     /// looks down); `yaw` is from the nose, or from north when `earth`.
-    Gimbal { tilt_down: f64, yaw: f64, earth: bool },
+    Gimbal {
+        tilt_down: f64,
+        yaw: f64,
+        earth: bool,
+    },
 }
 
 /// One camera's image model.
@@ -94,21 +98,39 @@ impl View {
                 let body = mul(&mul(&rz(pose.yaw), &ry(pose.pitch)), &rx(pose.roll));
                 mul(&mul(&body, &rz(yaw)), &ry(-tilt_down))
             }
-            Aim::Gimbal { tilt_down, yaw, earth } => {
+            Aim::Gimbal {
+                tilt_down,
+                yaw,
+                earth,
+            } => {
                 let heading = if earth { yaw } else { pose.yaw + yaw };
                 mul(&rz(heading), &ry(-tilt_down))
             }
         };
         let f = (cam.w / 2.0) / (cam.hfov / 2.0).tan();
-        Self { origin: pose.ned, r, w: cam.w, h: cam.h, f }
+        Self {
+            origin: pose.ned,
+            r,
+            w: cam.w,
+            h: cam.h,
+            f,
+        }
     }
 
     /// `p` (local NED) in the camera frame.
     pub fn to_cam(&self, p: [f64; 3]) -> CamPoint {
-        let d = [p[0] - self.origin[0], p[1] - self.origin[1], p[2] - self.origin[2]];
+        let d = [
+            p[0] - self.origin[0],
+            p[1] - self.origin[1],
+            p[2] - self.origin[2],
+        ];
         // R^T · d
         let c = |j: usize| (0..3).map(|i| self.r[i][j] * d[i]).sum::<f64>();
-        CamPoint { x: c(0), y: c(1), z: c(2) }
+        CamPoint {
+            x: c(0),
+            y: c(1),
+            z: c(2),
+        }
     }
 
     /// Normalised image coordinates (0..1, y down) of a camera-frame point in
@@ -136,7 +158,11 @@ impl View {
         }
         let clip = |p: CamPoint, q: CamPoint| {
             let t = (NEAR_M - p.x) / (q.x - p.x);
-            CamPoint { x: NEAR_M, y: p.y + t * (q.y - p.y), z: p.z + t * (q.z - p.z) }
+            CamPoint {
+                x: NEAR_M,
+                y: p.y + t * (q.y - p.y),
+                z: p.z + t * (q.z - p.z),
+            }
         };
         if ca.x < NEAR_M {
             ca = clip(ca, cb);
@@ -168,20 +194,36 @@ mod tests {
     use std::f64::consts::FRAC_PI_2;
 
     fn level() -> Pose {
-        Pose { ned: [0.0, 0.0, -10.0], roll: 0.0, pitch: 0.0, yaw: 0.0 }
+        Pose {
+            ned: [0.0, 0.0, -10.0],
+            roll: 0.0,
+            pitch: 0.0,
+            yaw: 0.0,
+        }
     }
 
     fn cam(hfov_deg: f64, aim: Aim) -> Camera {
-        Camera { w: 1280.0, h: 720.0, hfov: hfov_deg.to_radians(), aim }
+        Camera {
+            w: 1280.0,
+            h: 720.0,
+            hfov: hfov_deg.to_radians(),
+            aim,
+        }
     }
 
-    const FORWARD: Aim = Aim::Body { tilt_down: 0.0, yaw: 0.0 };
+    const FORWARD: Aim = Aim::Body {
+        tilt_down: 0.0,
+        yaw: 0.0,
+    };
 
     #[test]
     fn ten_metres_ahead_level_is_the_centre() {
         let v = View::new(&cam(90.0, FORWARD), &level());
         let p = v.project([10.0, 0.0, -10.0]).unwrap();
-        assert!((p[0] - 0.5).abs() < 1e-9 && (p[1] - 0.5).abs() < 1e-9, "{p:?}");
+        assert!(
+            (p[0] - 0.5).abs() < 1e-9 && (p[1] - 0.5).abs() < 1e-9,
+            "{p:?}"
+        );
     }
 
     #[test]
@@ -201,9 +243,21 @@ mod tests {
 
     #[test]
     fn a_belly_camera_looks_down() {
-        let v = View::new(&cam(90.0, Aim::Body { tilt_down: FRAC_PI_2, yaw: 0.0 }), &level());
+        let v = View::new(
+            &cam(
+                90.0,
+                Aim::Body {
+                    tilt_down: FRAC_PI_2,
+                    yaw: 0.0,
+                },
+            ),
+            &level(),
+        );
         let p = v.project([0.0, 0.0, 0.0]).unwrap();
-        assert!((p[0] - 0.5).abs() < 1e-9 && (p[1] - 0.5).abs() < 1e-9, "{p:?}");
+        assert!(
+            (p[0] - 0.5).abs() < 1e-9 && (p[1] - 0.5).abs() < 1e-9,
+            "{p:?}"
+        );
         // North of the drone is the top of a belly image.
         let north = v.project([2.0, 0.0, 0.0]).unwrap();
         assert!(north[1] < 0.5);
@@ -211,12 +265,25 @@ mod tests {
 
     #[test]
     fn yaw_turns_the_view() {
-        let pose = Pose { yaw: FRAC_PI_2, ..level() };
+        let pose = Pose {
+            yaw: FRAC_PI_2,
+            ..level()
+        };
         let v = View::new(&cam(90.0, FORWARD), &pose);
         let p = v.project([0.0, 10.0, -10.0]).unwrap();
         assert!((p[0] - 0.5).abs() < 1e-9);
         // An earth-frame gimbal ignores the vehicle yaw.
-        let g = View::new(&cam(90.0, Aim::Gimbal { tilt_down: 0.0, yaw: 0.0, earth: true }), &pose);
+        let g = View::new(
+            &cam(
+                90.0,
+                Aim::Gimbal {
+                    tilt_down: 0.0,
+                    yaw: 0.0,
+                    earth: true,
+                },
+            ),
+            &pose,
+        );
         assert!((g.project([10.0, 0.0, -10.0]).unwrap()[0] - 0.5).abs() < 1e-9);
     }
 
@@ -230,7 +297,11 @@ mod tests {
 
     #[test]
     fn screen_angle_is_clockwise_from_plus_x() {
-        let down = View::screen_angle(CamPoint { x: -1.0, y: 0.0, z: 1.0 });
+        let down = View::screen_angle(CamPoint {
+            x: -1.0,
+            y: 0.0,
+            z: 1.0,
+        });
         assert!((down - FRAC_PI_2).abs() < 1e-9);
     }
 }

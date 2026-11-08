@@ -3,11 +3,28 @@
 use super::Mode;
 
 pub const GROUND: &[&str] = &[
-    "detect", "frame", "accel", "level", "compass", "radio", "rc_ados_switch", "outputs", "battery",
-    "initial_params", "notch_static", "ados_profile", "ados_intro",
+    "detect",
+    "frame",
+    "accel",
+    "level",
+    "compass",
+    "radio",
+    "rc_ados_switch",
+    "outputs",
+    "battery",
+    "initial_params",
+    "notch_static",
+    "ados_profile",
+    "ados_intro",
 ];
 
-pub const AIR: &[&str] = &["preflight", "first_hover", "notch_air", "autotune", "verify"];
+pub const AIR: &[&str] = &[
+    "preflight",
+    "first_hover",
+    "notch_air",
+    "autotune",
+    "verify",
+];
 
 pub fn mode(m: Mode) -> Option<u32> {
     Some(match m {
@@ -33,27 +50,69 @@ pub struct MotorDef {
 }
 
 const fn m(num: u8, angle: i16, cw: bool, seq: u8) -> MotorDef {
-    MotorDef { num, angle, cw, seq }
+    MotorDef {
+        num,
+        angle,
+        cw,
+        seq,
+    }
 }
 
 // Layouts ported from ArduPilot `libraries/AP_Motors/AP_MotorsMatrix.cpp`
 // (motor order = `add_motor` order; the third field is the testing order).
-const QUAD_PLUS: &[MotorDef] = &[m(1, 90, false, 2), m(2, -90, false, 4), m(3, 0, true, 1), m(4, 180, true, 3)];
-const QUAD_X: &[MotorDef] = &[m(1, 45, false, 1), m(2, -135, false, 3), m(3, -45, true, 4), m(4, 135, true, 2)];
-const QUAD_H: &[MotorDef] = &[m(1, 45, true, 1), m(2, -135, true, 3), m(3, -45, false, 4), m(4, 135, false, 2)];
+const QUAD_PLUS: &[MotorDef] = &[
+    m(1, 90, false, 2),
+    m(2, -90, false, 4),
+    m(3, 0, true, 1),
+    m(4, 180, true, 3),
+];
+const QUAD_X: &[MotorDef] = &[
+    m(1, 45, false, 1),
+    m(2, -135, false, 3),
+    m(3, -45, true, 4),
+    m(4, 135, true, 2),
+];
+const QUAD_H: &[MotorDef] = &[
+    m(1, 45, true, 1),
+    m(2, -135, true, 3),
+    m(3, -45, false, 4),
+    m(4, 135, false, 2),
+];
 const HEXA_PLUS: &[MotorDef] = &[
-    m(1, 0, true, 1), m(2, 180, false, 4), m(3, -120, true, 5), m(4, 60, false, 2), m(5, -60, false, 6), m(6, 120, true, 3),
+    m(1, 0, true, 1),
+    m(2, 180, false, 4),
+    m(3, -120, true, 5),
+    m(4, 60, false, 2),
+    m(5, -60, false, 6),
+    m(6, 120, true, 3),
 ];
 const HEXA_X: &[MotorDef] = &[
-    m(1, 90, true, 2), m(2, -90, false, 5), m(3, -30, true, 6), m(4, 150, false, 3), m(5, 30, false, 1), m(6, -150, true, 4),
+    m(1, 90, true, 2),
+    m(2, -90, false, 5),
+    m(3, -30, true, 6),
+    m(4, 150, false, 3),
+    m(5, 30, false, 1),
+    m(6, -150, true, 4),
 ];
 const OCTA_PLUS: &[MotorDef] = &[
-    m(1, 0, true, 1), m(2, 180, true, 5), m(3, 45, false, 2), m(4, 135, false, 4),
-    m(5, -45, false, 8), m(6, -135, false, 6), m(7, -90, true, 7), m(8, 90, true, 3),
+    m(1, 0, true, 1),
+    m(2, 180, true, 5),
+    m(3, 45, false, 2),
+    m(4, 135, false, 4),
+    m(5, -45, false, 8),
+    m(6, -135, false, 6),
+    m(7, -90, true, 7),
+    m(8, 90, true, 3),
 ];
 const OCTA_X: &[MotorDef] = &[
-    m(1, 22, true, 1), m(2, -158, true, 5), m(3, 68, false, 2), m(4, 158, false, 4),
-    m(5, -22, false, 8), m(6, -112, false, 6), m(7, -68, true, 7), m(8, 112, true, 3),
+    m(1, 22, true, 1),
+    m(2, -158, true, 5),
+    m(3, 68, false, 2),
+    m(4, 158, false, 4),
+    m(5, -22, false, 8),
+    m(6, -112, false, 6),
+    m(7, -68, true, 7),
+    m(8, 112, true, 3),
 ];
 
 /// Image key and motor layout for `FRAME_CLASS` / `FRAME_TYPE`.
@@ -143,7 +202,10 @@ pub fn initial_params(
     v.push(("INS_GYRO_FILTER".into(), gyro_filter));
     v.push((format!("{mot}_THST_EXPO"), thst_expo));
     v.push((format!("{mot}_THST_HOVER"), 0.2));
-    v.push(("BATT_ARM_VOLT".into(), (cells - 1.0) * 0.1 + (cell_min + 0.3) * cells));
+    v.push((
+        "BATT_ARM_VOLT".into(),
+        (cells - 1.0) * 0.1 + (cell_min + 0.3) * cells,
+    ));
     v.push(("BATT_CRT_VOLT".into(), (cell_min + 0.2) * cells));
     v.push(("BATT_LOW_VOLT".into(), (cell_min + 0.3) * cells));
     v.push((format!("{mot}_BAT_VOLT_MAX"), cell_max * cells));

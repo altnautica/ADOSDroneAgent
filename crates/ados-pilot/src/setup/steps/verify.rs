@@ -40,14 +40,29 @@ const LEGS: [(f32, f32); 4] = [(1.0, 0.0), (-1.0, 0.0), (0.0, -1.0), (0.0, 1.0)]
 enum Phase {
     Idle,
     TakeOff,
-    Hover { since: u64 },
-    Leg { i: usize, since: u64 },
-    Brake { i: usize, since: u64 },
+    Hover {
+        since: u64,
+    },
+    Leg {
+        i: usize,
+        since: u64,
+    },
+    Brake {
+        i: usize,
+        since: u64,
+    },
     Land,
     PlanePosition,
-    Bank { i: usize, since: u64 },
+    Bank {
+        i: usize,
+        since: u64,
+    },
     /// Climb step `i` (0 up, 1 down); `sent` once its target is commanded.
-    Climb { i: usize, since: u64, sent: bool },
+    Climb {
+        i: usize,
+        since: u64,
+        sent: bool,
+    },
     ToMc(Transition),
     Decide,
     Reverting,
@@ -107,10 +122,12 @@ impl Verify {
 
     fn after_plane(&mut self, cx: &mut Cx) {
         let err = self.plane_acc.att_err_rms();
-        self.result.insert("plane_track_err_rms_deg".into(), json!(err));
+        self.result
+            .insert("plane_track_err_rms_deg".into(), json!(err));
         if let (Some(e), Some(b)) = (err, cx.data.baseline_track_err_deg) {
             let c = compare(e, b);
-            self.result.insert("plane_worse".into(), json!([c[0].2, c[1].2]));
+            self.result
+                .insert("plane_worse".into(), json!([c[0].2, c[1].2]));
         }
         if cx.adapter.class == Class::Vtol {
             self.phase = Phase::ToMc(Transition::to_mc(cx));
@@ -133,7 +150,10 @@ impl Verify {
         if worse && cx.snapshot.is_some() {
             self.core.phase_key = Some("worse".into());
             self.core.result = Some(self.result.clone());
-            self.core.wait_user(vec![Action::danger("revert_gains"), Action::secondary("keep_gains")]);
+            self.core.wait_user(vec![
+                Action::danger("revert_gains"),
+                Action::secondary("keep_gains"),
+            ]);
         } else {
             self.core.done(std::mem::take(&mut self.result));
         }
@@ -162,7 +182,8 @@ impl Step for Verify {
             Class::Vtol => Some("vtol"),
             Class::Multirotor => None,
         };
-        self.core.wait_user(vec![Action::primary("start"), Action::danger("abort")]);
+        self.core
+            .wait_user(vec![Action::primary("start"), Action::danger("abort")]);
     }
 
     fn tick(&mut self, cx: &mut Cx) {
@@ -187,7 +208,10 @@ impl Step for Verify {
                 if cx.now.saturating_sub(since) >= HOVER_MS {
                     self.leg_yaw = cx.fc.attitude.map(|(a, _)| a[2]).unwrap_or(0.0);
                     self.hop.leg = Leg::Idle;
-                    self.phase = Phase::Leg { i: 0, since: cx.now };
+                    self.phase = Phase::Leg {
+                        i: 0,
+                        since: cx.now,
+                    };
                 }
             }
             Phase::Leg { i, since } => {
@@ -217,18 +241,29 @@ impl Step for Verify {
                 }
                 if cx.now.saturating_sub(since) >= BOX_BRAKE_MS {
                     if i + 1 < LEGS.len() {
-                        self.phase = Phase::Leg { i: i + 1, since: cx.now };
+                        self.phase = Phase::Leg {
+                            i: i + 1,
+                            since: cx.now,
+                        };
                     } else {
                         let hover = self.hover.att_err_rms();
                         let boxe = self.box_acc.att_err_rms();
-                        let os: Vec<f32> = self.peaks.iter().map(|p| (overshoot(*p, BOX_SPEED) * 100.0).round() / 100.0).collect();
-                        self.result.insert("hover_att_err_rms_deg".into(), json!(hover));
-                        self.result.insert("box_att_err_rms_deg".into(), json!(boxe));
+                        let os: Vec<f32> = self
+                            .peaks
+                            .iter()
+                            .map(|p| (overshoot(*p, BOX_SPEED) * 100.0).round() / 100.0)
+                            .collect();
+                        self.result
+                            .insert("hover_att_err_rms_deg".into(), json!(hover));
+                        self.result
+                            .insert("box_att_err_rms_deg".into(), json!(boxe));
                         self.result.insert("box_overshoot".into(), json!(os));
                         if let (Some(h), Some(b)) = (hover, cx.data.baseline_att_err_deg) {
                             let c = compare(h, b);
-                            self.result.insert("copter_worse".into(), json!([c[0].2, c[1].2]));
-                            self.result.insert("baseline_att_err_rms_deg".into(), json!(b));
+                            self.result
+                                .insert("copter_worse".into(), json!([c[0].2, c[1].2]));
+                            self.result
+                                .insert("baseline_att_err_rms_deg".into(), json!(b));
                         }
                         self.hop.land(cx);
                         self.phase = Phase::Land;
@@ -248,26 +283,45 @@ impl Step for Verify {
                     self.core.fail(&format!("setup.blocker.{w}"));
                 } else if self.to.ready {
                     flight::set_mode(cx, Mode::Fbwa);
-                    self.phase = Phase::Bank { i: 0, since: cx.now };
+                    self.phase = Phase::Bank {
+                        i: 0,
+                        since: cx.now,
+                    };
                 }
             }
             Phase::Bank { i, since } => {
-                let lim = cx.params.get("ROLL_LIMIT_DEG").or_else(|| cx.params.get("LIM_ROLL_CD").map(|v| v / 100.0)).unwrap_or(45.0);
+                let lim = cx
+                    .params
+                    .get("ROLL_LIMIT_DEG")
+                    .or_else(|| cx.params.get("LIM_ROLL_CD").map(|v| v / 100.0))
+                    .unwrap_or(45.0);
                 let sign = match i {
                     0 => 1.0,
                     1 => -1.0,
                     _ => 0.0,
                 };
-                let thr = cx.data.cruise_throttle.or_else(|| cx.params.get("TRIM_THROTTLE")).unwrap_or(45.0) / 100.0;
+                let thr = cx
+                    .data
+                    .cruise_throttle
+                    .or_else(|| cx.params.get("TRIM_THROTTLE"))
+                    .unwrap_or(45.0)
+                    / 100.0;
                 self.manual(cx, 0.0, (sign * BANK_DEG / lim).clamp(-1.0, 1.0), thr);
                 self.plane_acc.sample(cx.fc, cx.now);
                 self.core.progress = Some(0.1 * i as f32);
                 if cx.now.saturating_sub(since) >= BANK_MS {
                     if i < 2 {
-                        self.phase = Phase::Bank { i: i + 1, since: cx.now };
+                        self.phase = Phase::Bank {
+                            i: i + 1,
+                            since: cx.now,
+                        };
                     } else {
                         plane_loiter(cx, PLANE_LOITER_ALT_M);
-                        self.phase = Phase::Climb { i: 0, since: cx.now, sent: false };
+                        self.phase = Phase::Climb {
+                            i: 0,
+                            since: cx.now,
+                            sent: false,
+                        };
                     }
                 }
             }
@@ -276,9 +330,17 @@ impl Step for Verify {
                     // Command the step once the GUIDED loiter is back.
                     if flight::in_mode(cx, Mode::Guided) {
                         let h = height(cx).unwrap_or(PLANE_LOITER_ALT_M);
-                        let target = if i == 0 { h + CLIMB_DELTA_M } else { h - CLIMB_DELTA_M };
+                        let target = if i == 0 {
+                            h + CLIMB_DELTA_M
+                        } else {
+                            h - CLIMB_DELTA_M
+                        };
                         flight::change_alt(cx, target, CLIMB_RATE);
-                        self.phase = Phase::Climb { i, since: cx.now, sent: true };
+                        self.phase = Phase::Climb {
+                            i,
+                            since: cx.now,
+                            sent: true,
+                        };
                     } else if cx.now.saturating_sub(since) > 10_000 {
                         self.phase = Phase::Idle;
                         self.core.fail("setup.blocker.loiter_timeout");
@@ -288,7 +350,11 @@ impl Step for Verify {
                 self.plane_acc.sample(cx.fc, cx.now);
                 if cx.now.saturating_sub(since) >= CLIMB_MS {
                     if i == 0 {
-                        self.phase = Phase::Climb { i: 1, since: cx.now, sent: false };
+                        self.phase = Phase::Climb {
+                            i: 1,
+                            since: cx.now,
+                            sent: false,
+                        };
                     } else {
                         self.after_plane(cx);
                     }
@@ -325,7 +391,10 @@ impl Step for Verify {
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
         match id {
             "start" => {
-                *self = Verify { core: std::mem::take(&mut self.core), ..Verify::default() };
+                *self = Verify {
+                    core: std::mem::take(&mut self.core),
+                    ..Verify::default()
+                };
                 self.core.blockers.clear();
                 self.core.phase_key = None;
                 self.core.running();

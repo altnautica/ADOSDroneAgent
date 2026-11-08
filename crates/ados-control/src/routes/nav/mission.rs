@@ -22,11 +22,16 @@ pub fn mission_body(mirror: Option<&str>, snapshot: Option<&Value>) -> Value {
     let mut body = mirror
         .and_then(|t| serde_json::from_str::<Value>(t).ok())
         .filter(Value::is_object)
-        .unwrap_or_else(|| {
-            json!({"rev": 0, "present": false, "count": 0, "home_slot": null, "items": []})
-        });
-    let mission = snapshot.and_then(|s| s.get("mission")).filter(|m| m.is_object());
-    let uploads = mission.and_then(|m| m.get("uploads_seen")).cloned().unwrap_or(json!(0));
+        .unwrap_or_else(
+            || json!({"rev": 0, "present": false, "count": 0, "home_slot": null, "items": []}),
+        );
+    let mission = snapshot
+        .and_then(|s| s.get("mission"))
+        .filter(|m| m.is_object());
+    let uploads = mission
+        .and_then(|m| m.get("uploads_seen"))
+        .cloned()
+        .unwrap_or(json!(0));
     let wire = mission.map(|m| {
         let mut w = m.clone();
         if let Value::Object(o) = &mut w {

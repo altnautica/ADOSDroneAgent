@@ -1,3 +1,4 @@
+use super::discovery::*;
 use super::*;
 use crate::param_cache::ParamCache;
 use crate::state::VehicleState;

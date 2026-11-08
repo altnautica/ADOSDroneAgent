@@ -42,7 +42,13 @@ pub struct Notch {
 
 impl Notch {
     pub fn new(air: bool) -> Self {
-        Notch { core: StepCore::default(), air, phase: Phase::Idle, reboot: Reboot::default(), result: Map::new() }
+        Notch {
+            core: StepCore::default(),
+            air,
+            phase: Phase::Idle,
+            reboot: Reboot::default(),
+            result: Map::new(),
+        }
     }
 
     fn hover(&self, cx: &Cx) -> f32 {
@@ -63,7 +69,8 @@ impl Notch {
         let freq = notch_freq(kv, cells, hover);
         let mode = if self.air { MODE_THROTTLE } else { MODE_ESC };
         cx.params.set("INS_HNTCH_MODE", mode);
-        cx.params.set("INS_HNTCH_REF", if self.air { hover } else { 1.0 });
+        cx.params
+            .set("INS_HNTCH_REF", if self.air { hover } else { 1.0 });
         cx.params.set("INS_HNTCH_FREQ", freq.round());
         cx.params.set("INS_HNTCH_BW", (freq / 2.0).round());
         self.result = obj([
@@ -79,7 +86,11 @@ impl Notch {
 
 impl Step for Notch {
     fn id(&self) -> &'static str {
-        if self.air { "notch_air" } else { "notch_static" }
+        if self.air {
+            "notch_air"
+        } else {
+            "notch_static"
+        }
     }
 
     fn core(&self) -> &StepCore {
@@ -124,8 +135,17 @@ impl Step for Notch {
             return;
         }
         let hover = self.hover(cx);
-        self.core.args.insert("freq_hz".into(), json!(notch_freq(cx.data.motor_kv.unwrap_or(0.0), cx.data.cells.unwrap_or(0.0), hover).round()));
-        self.core.wait_user(vec![Action::primary("apply"), Action::secondary("skip")]);
+        self.core.args.insert(
+            "freq_hz".into(),
+            json!(notch_freq(
+                cx.data.motor_kv.unwrap_or(0.0),
+                cx.data.cells.unwrap_or(0.0),
+                hover
+            )
+            .round()),
+        );
+        self.core
+            .wait_user(vec![Action::primary("apply"), Action::secondary("skip")]);
     }
 
     fn tick(&mut self, cx: &mut Cx) {
@@ -179,7 +199,9 @@ impl Step for Notch {
                 if cx.fc.armed {
                     return Err("armed");
                 }
-                if cx.params.get("INS_HNTCH_ENABLE").unwrap_or(0.0) == 1.0 && cx.params.has("INS_HNTCH_FREQ") {
+                if cx.params.get("INS_HNTCH_ENABLE").unwrap_or(0.0) == 1.0
+                    && cx.params.has("INS_HNTCH_FREQ")
+                {
                     self.write_rest(cx);
                 } else {
                     cx.params.set("INS_HNTCH_ENABLE", 1.0);

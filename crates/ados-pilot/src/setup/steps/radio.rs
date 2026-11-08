@@ -45,7 +45,9 @@ impl Radio {
     }
 
     fn moved(&self) -> Vec<usize> {
-        (0..self.min.len()).filter(|i| self.max[*i] > self.min[*i] && self.max[*i] - self.min[*i] >= MIN_TRAVEL_US).collect()
+        (0..self.min.len())
+            .filter(|i| self.max[*i] > self.min[*i] && self.max[*i] - self.min[*i] >= MIN_TRAVEL_US)
+            .collect()
     }
 }
 
@@ -66,7 +68,8 @@ impl Step for Radio {
         self.min.clear();
         self.max.clear();
         self.trim.clear();
-        self.core.wait_user(vec![Action::primary("start"), Action::secondary("skip")]);
+        self.core
+            .wait_user(vec![Action::primary("start"), Action::secondary("skip")]);
     }
 
     fn tick(&mut self, cx: &mut Cx) {
@@ -108,7 +111,8 @@ impl Step for Radio {
                 self.phase = Some(Phase::Capturing);
                 self.core.running();
                 self.core.phase_key = Some("move".into());
-                self.core.wait_user(vec![Action::primary("center"), Action::secondary("cancel")]);
+                self.core
+                    .wait_user(vec![Action::primary("center"), Action::secondary("cancel")]);
                 Ok(())
             }
             "center" => {
@@ -124,11 +128,18 @@ impl Step for Radio {
                 let mut channels = Vec::new();
                 for i in moved {
                     let n = i + 1;
-                    let trim = self.trim.get(i).copied().unwrap_or(1500).clamp(self.min[i], self.max[i]);
+                    let trim = self
+                        .trim
+                        .get(i)
+                        .copied()
+                        .unwrap_or(1500)
+                        .clamp(self.min[i], self.max[i]);
                     cx.params.set(&format!("RC{n}_MIN"), self.min[i] as f32);
                     cx.params.set(&format!("RC{n}_MAX"), self.max[i] as f32);
                     cx.params.set(&format!("RC{n}_TRIM"), trim as f32);
-                    channels.push(json!({"ch": n, "min": self.min[i], "max": self.max[i], "trim": trim}));
+                    channels.push(
+                        json!({"ch": n, "min": self.min[i], "max": self.max[i], "trim": trim}),
+                    );
                 }
                 self.result = obj([("channels", Value::Array(channels))]);
                 self.phase = Some(Phase::Writing);
@@ -191,7 +202,8 @@ impl Step for RcAdosSwitch {
         self.writing = None;
         let ch = cx.params.get("FLTMODE_CH").unwrap_or(5.0) as u8;
         self.core.args.insert("mode_channel".into(), json!(ch));
-        self.core.wait_user(vec![Action::primary("capture"), Action::secondary("skip")]);
+        self.core
+            .wait_user(vec![Action::primary("capture"), Action::secondary("skip")]);
     }
 
     fn tick(&mut self, cx: &mut Cx) {
@@ -205,8 +217,10 @@ impl Step for RcAdosSwitch {
             None => {}
             Some(Ok(())) => {
                 self.writing = None;
-                cx.out.effect(crate::setup::out::Effect::SetRcAdosPosition(slot));
-                self.core.done(obj([("position", json!(slot)), ("channel", json!(ch))]));
+                cx.out
+                    .effect(crate::setup::out::Effect::SetRcAdosPosition(slot));
+                self.core
+                    .done(obj([("position", json!(slot)), ("channel", json!(ch))]));
             }
             Some(Err(_)) => {
                 self.writing = None;

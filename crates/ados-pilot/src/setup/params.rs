@@ -34,14 +34,23 @@ struct PendingRead {
 /// Parameters that a snapshot never writes back: identities, counters and
 /// calibration-time sensor IDs the FC owns.
 fn never_restore(name: &str) -> bool {
-    const EXACT: &[&str] = &["FORMAT_VERSION", "SYSID_SW_MREV", "SYSID_SW_TYPE", "GND_ABS_PRESS", "GND_ABS_PRESS2", "GND_ABS_PRESS3"];
+    const EXACT: &[&str] = &[
+        "FORMAT_VERSION",
+        "SYSID_SW_MREV",
+        "SYSID_SW_TYPE",
+        "GND_ABS_PRESS",
+        "GND_ABS_PRESS2",
+        "GND_ABS_PRESS3",
+    ];
     const PREFIX: &[&str] = &["STAT_", "STATS_", "SYS_PARAM_VER", "LND_FLIGHT_T_"];
     EXACT.contains(&name)
         || PREFIX.iter().any(|p| name.starts_with(p))
         || name.ends_with("_DEVID")
         || name.ends_with("_DEV_ID")
         || name.contains("_ID")
-            && (name.starts_with("INS_") || name.starts_with("COMPASS_") || name.starts_with("CAL_"))
+            && (name.starts_with("INS_")
+                || name.starts_with("COMPASS_")
+                || name.starts_with("CAL_"))
 }
 
 #[derive(Debug, Default, Clone)]
@@ -61,12 +70,18 @@ pub struct ParamStore {
 }
 
 fn is_int(t: MavParamType) -> bool {
-    !matches!(t, MavParamType::MAV_PARAM_TYPE_REAL32 | MavParamType::MAV_PARAM_TYPE_REAL64)
+    !matches!(
+        t,
+        MavParamType::MAV_PARAM_TYPE_REAL32 | MavParamType::MAV_PARAM_TYPE_REAL64
+    )
 }
 
 impl ParamStore {
     pub fn new() -> Self {
-        ParamStore { target: (1, 1), ..Default::default() }
+        ParamStore {
+            target: (1, 1),
+            ..Default::default()
+        }
     }
 
     pub fn set_target(&mut self, sysid: u8, compid: u8, bytewise: bool) {
@@ -97,7 +112,8 @@ impl ParamStore {
 
     /// The whole table arrived.
     pub fn complete(&self) -> bool {
-        self.total.is_some_and(|t| t > 0 && self.by_index.len() >= t as usize)
+        self.total
+            .is_some_and(|t| t > 0 && self.by_index.len() >= t as usize)
     }
 
     pub fn download_progress(&self) -> f32 {
@@ -121,7 +137,10 @@ impl ParamStore {
 
     /// Queues a read of `name`.
     pub fn read(&mut self, name: &str) {
-        self.reads.entry(name.to_string()).or_insert(PendingRead { sent_ms: 0, tries: 0 });
+        self.reads.entry(name.to_string()).or_insert(PendingRead {
+            sent_ms: 0,
+            tries: 0,
+        });
     }
 
     /// Queues a write. A value already equal is not written.
@@ -130,7 +149,14 @@ impl ParamStore {
             return;
         }
         self.failed.retain(|n| n != name);
-        self.writes.insert(name.to_string(), PendingWrite { value, sent_ms: 0, tries: 0 });
+        self.writes.insert(
+            name.to_string(),
+            PendingWrite {
+                value,
+                sent_ms: 0,
+                tries: 0,
+            },
+        );
     }
 
     /// No write or read in flight.
@@ -160,8 +186,15 @@ impl ParamStore {
     }
 
     pub fn on_msg(&mut self, msg: &MavMessage, now_ms: u64) {
-        let MavMessage::PARAM_VALUE(p) = msg else { return };
-        let name = p.param_id.to_str().unwrap_or("").trim_end_matches('\0').to_string();
+        let MavMessage::PARAM_VALUE(p) = msg else {
+            return;
+        };
+        let name = p
+            .param_id
+            .to_str()
+            .unwrap_or("")
+            .trim_end_matches('\0')
+            .to_string();
         if name.is_empty() {
             return;
         }
@@ -292,7 +325,10 @@ impl ParamStore {
 
     /// Test and engine hook: seed a value as if the FC had sent it.
     pub fn seed(&mut self, name: &str, value: f32) {
-        self.values.insert(name.to_string(), (value, MavParamType::MAV_PARAM_TYPE_REAL32));
+        self.values.insert(
+            name.to_string(),
+            (value, MavParamType::MAV_PARAM_TYPE_REAL32),
+        );
     }
 }
 
@@ -324,7 +360,6 @@ pub fn parse_param_file(body: &str) -> Vec<(String, f32)> {
         })
         .collect()
 }
-
 
 /// PX4 carries integer parameters bytewise in PARAM_SET's float field.
 fn encode(bytewise: bool, value: f32, t: MavParamType) -> f32 {

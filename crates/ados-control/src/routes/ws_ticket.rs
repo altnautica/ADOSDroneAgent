@@ -47,7 +47,10 @@ const TICKET_SCOPES: [(&str, ScopeClass); 10] = [
     (crate::routes::nav::SCOPE_NAV_STREAM, ScopeClass::Read),
     // Operator sticks and flight actions. Never minted on an MCP token, whatever
     // its scopes (see `mint_refused_for_mcp`).
-    (crate::routes::pilot::SCOPE_PILOT_CONTROL, ScopeClass::Flight),
+    (
+        crate::routes::pilot::SCOPE_PILOT_CONTROL,
+        ScopeClass::Flight,
+    ),
     // The aircraft-setup step stream (read-only; the setup actions are REST).
     (crate::routes::fc_setup::SCOPE_FC_SETUP, ScopeClass::Read),
 ];
@@ -183,7 +186,10 @@ pub async fn mint_ws_ticket(
     };
     if mint_refused_for_mcp(&headers, &req.scope) {
         tracing::warn!(scope = %req.scope, "ws_ticket_mcp_pilot_denied");
-        return detail(StatusCode::FORBIDDEN, "Manual flight control is not available to MCP tokens.");
+        return detail(
+            StatusCode::FORBIDDEN,
+            "Manual flight control is not available to MCP tokens.",
+        );
     }
     if !credential_allows(&headers, class) {
         tracing::warn!(scope = %req.scope, "ws_ticket_mcp_scope_denied");
@@ -262,7 +268,10 @@ mod tests {
             );
         }
         assert_eq!(TICKET_SCOPES.len(), 10);
-        assert_eq!(ticket_scope_class(crate::routes::fc_setup::SCOPE_FC_SETUP), Some(ScopeClass::Read));
+        assert_eq!(
+            ticket_scope_class(crate::routes::fc_setup::SCOPE_FC_SETUP),
+            Some(ScopeClass::Read)
+        );
         assert_eq!(
             ticket_scope_class(crate::routes::pilot::SCOPE_PILOT_CONTROL),
             Some(ScopeClass::Flight)

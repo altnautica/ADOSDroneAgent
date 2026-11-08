@@ -9,7 +9,13 @@ pub(super) fn register(r: Routes<AppState>) -> Routes<AppState> {
         .post("/api/v1/fc-setup/revert", fc_setup::post_revert)
         .post("/api/v1/fc-setup/{wizard}/start", fc_setup::post_start)
         .post("/api/v1/fc-setup/{wizard}/abort", fc_setup::post_abort)
-        .post("/api/v1/fc-setup/{wizard}/steps/{step}/run", fc_setup::post_run_step)
-        .post("/api/v1/fc-setup/{wizard}/steps/{step}/actions/{action}", fc_setup::post_action)
+        .post(
+            "/api/v1/fc-setup/{wizard}/steps/{step}/run",
+            fc_setup::post_run_step,
+        )
+        .post(
+            "/api/v1/fc-setup/{wizard}/steps/{step}/actions/{action}",
+            fc_setup::post_action,
+        )
         .ws("/api/v1/fc-setup/stream", fc_setup::ws_fc_setup_stream)
 }

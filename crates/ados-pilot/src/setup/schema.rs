@@ -48,7 +48,10 @@ pub enum StepState {
 impl StepState {
     /// A finished step: the wizard moves past it.
     pub fn is_terminal(self) -> bool {
-        matches!(self, StepState::Done | StepState::Skipped | StepState::Failed)
+        matches!(
+            self,
+            StepState::Done | StepState::Skipped | StepState::Failed
+        )
     }
 }
 
@@ -197,7 +200,14 @@ where
 }
 
 /// An editable input a step offers (`args.inputs.<name>`).
-pub fn input_number(value: f64, min: f64, max: f64, step: f64, unit: &str, label_key: &str) -> Value {
+pub fn input_number(
+    value: f64,
+    min: f64,
+    max: f64,
+    step: f64,
+    unit: &str,
+    label_key: &str,
+) -> Value {
     serde_json::json!({
         "value": value, "kind": "number", "min": min, "max": max, "step": step,
         "unit": unit, "label_key": label_key,

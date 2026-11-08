@@ -44,7 +44,7 @@ use tokio::sync::broadcast;
 use ados_protocol::offload_link::OFFLOAD_LINK_SIDECAR;
 
 use crate::frame_link::{FrameLink, SendError};
-use crate::host::{not_implemented, HostError, HostResult, HostServices};
+use crate::host::{not_implemented, FlightServices, HostError, HostResult, HostServices};
 use crate::vehicle_events::FcIdentity;
 use crate::vision_client::VisionClient;
 

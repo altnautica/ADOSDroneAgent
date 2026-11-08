@@ -59,7 +59,9 @@ pub async fn get_input(State(state): State<AppState>) -> Response {
     if !is_ground_station(&state) {
         return profile_mismatch();
     }
-    let side = state.run_dir.join(ados_hid::pilot_input::status::GS_INPUT_STATE);
+    let side = state
+        .run_dir
+        .join(ados_hid::pilot_input::status::GS_INPUT_STATE);
     let gs_input = crate::routes::gs_input_read::gs_input_json_path(&state);
     Json(input_body(&side, &gs_input, wall_ms())).into_response()
 }
@@ -74,7 +76,11 @@ pub(crate) fn refused(e: &DocError) -> Response {
         }}),
         DocError::Invalid(m) => json!({"error": {"code": "E_INVALID_BINDINGS", "message": m}}),
     };
-    (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({"detail": detail}))).into_response()
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(json!({"detail": detail})),
+    )
+        .into_response()
 }
 
 /// `PUT /api/v1/ground-station/input/bindings`.

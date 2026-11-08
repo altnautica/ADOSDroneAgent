@@ -234,7 +234,12 @@ impl MissionTracker {
 
     /// Apply the rules. `mirror_items` is the mirrored wire item count (with
     /// ArduPilot's home slot), `None` before any mirror exists.
-    pub fn compute(&mut self, v: Vehicle, mirror_items: Option<usize>, now: Instant) -> MissionStatus {
+    pub fn compute(
+        &mut self,
+        v: Vehicle,
+        mirror_items: Option<usize>,
+        now: Instant,
+    ) -> MissionStatus {
         if let Some(prev) = self.last_vehicle {
             if prev.armed && !v.armed {
                 self.latched = false;
@@ -274,9 +279,7 @@ impl MissionTracker {
         let last_seq = match total.filter(|t| *t != 0 && *t != u16::MAX) {
             Some(t) if v.table.home_slot() => Some(t),
             Some(t) => Some(t - 1),
-            None => mirror_items
-                .filter(|n| *n > 0)
-                .map(|n| (n - 1) as u16),
+            None => mirror_items.filter(|n| *n > 0).map(|n| (n - 1) as u16),
         };
 
         let in_auto = v.table.in_auto(cm);

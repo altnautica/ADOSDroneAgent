@@ -37,7 +37,13 @@ pub struct SimpleCal {
 
 impl SimpleCal {
     pub fn new(kind: Kind) -> Self {
-        SimpleCal { core: StepCore::default(), kind, started_ms: None, text_cursor: 0, in_progress: false }
+        SimpleCal {
+            core: StepCore::default(),
+            kind,
+            started_ms: None,
+            text_cursor: 0,
+            in_progress: false,
+        }
     }
 
     fn params(&self, fw: Fw) -> [f32; 7] {
@@ -85,10 +91,9 @@ impl Step for SimpleCal {
                     cx.params.get("ARSPD_TYPE").unwrap_or(0.0) != 0.0
                 };
                 // SYS_STATUS is the FC's own word on what is fitted.
-                let reported = cx
-                    .fc
-                    .sensors_present
-                    .is_none_or(|s| s.contains(MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_DIFFERENTIAL_PRESSURE));
+                let reported = cx.fc.sensors_present.is_none_or(|s| {
+                    s.contains(MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_DIFFERENTIAL_PRESSURE)
+                });
                 (!(configured && reported)).then_some("no_airspeed_sensor")
             }
             _ => None,
@@ -116,11 +121,14 @@ impl Step for SimpleCal {
             Kind::Airspeed => self.core.image = Some("airspeed_cover".into()),
             Kind::Gyro => {}
         }
-        self.core.wait_user(vec![Action::primary("start"), Action::secondary("skip")]);
+        self.core
+            .wait_user(vec![Action::primary("start"), Action::secondary("skip")]);
     }
 
     fn tick(&mut self, cx: &mut Cx) {
-        let Some(started) = self.started_ms else { return };
+        let Some(started) = self.started_ms else {
+            return;
+        };
         if self.core.state.is_terminal() {
             return;
         }

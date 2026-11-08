@@ -134,7 +134,11 @@ impl FcConnection {
         // dropped and client gotos fly through the pilot instead.
         let gated;
         let data: &[u8] = match crate::pilot_link::global() {
-            Some(link) if link.gating() && !injector.is_some_and(|c| c.client_id == crate::pilot_link::PILOT_INJECTOR) => {
+            Some(link)
+                if link.gating()
+                    && !injector
+                        .is_some_and(|c| c.client_id == crate::pilot_link::PILOT_INJECTOR) =>
+            {
                 let geo = self.pilot_georef().await;
                 let (kept, gotos, dropped) = crate::pilot_link::filter(data, geo);
                 if dropped > 0 {

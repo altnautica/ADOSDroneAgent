@@ -11,7 +11,11 @@ use crate::setup::step::{step_core, ActErr, Cx, Step, StepCore};
 pub const MIN_BATTERY_PCT: i8 = 80;
 /// Clear radius the operator confirms (m).
 pub fn open_area_m(class: Class) -> u32 {
-    if class == Class::Fixedwing { 300 } else { 30 }
+    if class == Class::Fixedwing {
+        300
+    } else {
+        30
+    }
 }
 
 #[derive(Default)]
@@ -42,9 +46,13 @@ impl Step for Preflight {
 
     fn begin(&mut self, cx: &mut Cx) {
         self.core = StepCore::default();
-        self.core.args.insert("open_area_m".into(), json!(open_area_m(cx.adapter.class)));
+        self.core
+            .args
+            .insert("open_area_m".into(), json!(open_area_m(cx.adapter.class)));
         // Interpolated by the body ("nothing within {radius} m") and the battery blocker ("below {pct} %").
-        self.core.args.insert("radius".into(), json!(open_area_m(cx.adapter.class)));
+        self.core
+            .args
+            .insert("radius".into(), json!(open_area_m(cx.adapter.class)));
         self.core.args.insert("pct".into(), json!(MIN_BATTERY_PCT));
         self.core.body_variant = (cx.adapter.class == Class::Fixedwing).then_some("plane");
         self.refresh(cx);
@@ -80,6 +88,10 @@ impl Preflight {
             self.core.set_live("battery_pct", p);
         }
         let confirm = Action::new("confirm_area", ActionStyle::Primary, Confirm::Hold);
-        self.core.wait_user(if self.core.blockers.is_empty() { vec![confirm] } else { Vec::new() });
+        self.core.wait_user(if self.core.blockers.is_empty() {
+            vec![confirm]
+        } else {
+            Vec::new()
+        });
     }
 }

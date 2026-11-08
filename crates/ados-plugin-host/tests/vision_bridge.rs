@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ados_plugin_host::host::{HostError, HostResult, HostServices};
+use ados_plugin_host::host::{FlightServices, HostError, HostResult, HostServices};
 use ados_plugin_host::{EventBus, PluginIpcServer};
 use ados_protocol::frame::{decode_len, HEADER_SIZE, PLUGIN_MAX_FRAME};
 use ados_protocol::framebus::{
@@ -58,6 +58,8 @@ impl VisionTestHost {
         let _ = self.detections.send(batch.to_msgpack().unwrap());
     }
 }
+
+impl FlightServices for VisionTestHost {}
 
 impl HostServices for VisionTestHost {
     fn vision_subscribe_stream(

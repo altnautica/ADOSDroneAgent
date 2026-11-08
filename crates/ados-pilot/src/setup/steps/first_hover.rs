@@ -5,8 +5,8 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::setup::flight::{height, vtol_climb_here, Hop, Leg, Transition};
 use crate::setup::fcstate::{Class, Fw};
+use crate::setup::flight::{height, vtol_climb_here, Hop, Leg, Transition};
 use crate::setup::measure::{band_rms, vibe_verdict, Acc, ATT_ERR_PASS_DEG, OSC_RMS_RAD_S};
 use crate::setup::schema::{obj, Action};
 use crate::setup::step::{step_core, ActErr, Cx, Step, StepCore};
@@ -47,7 +47,13 @@ pub struct FirstHover {
 
 impl Default for FirstHover {
     fn default() -> Self {
-        FirstHover { core: StepCore::default(), hop: Hop::default(), phase: Phase::Idle, acc: Acc::default(), result: Map::new() }
+        FirstHover {
+            core: StepCore::default(),
+            hop: Hop::default(),
+            phase: Phase::Idle,
+            acc: Acc::default(),
+            result: Map::new(),
+        }
     }
 }
 
@@ -64,7 +70,10 @@ impl FirstHover {
             ("vibration_max", json!(self.acc.vibe_max)),
             ("vibration", json!(vibe_verdict(peak))),
             ("att_err_rms_deg", json!(err)),
-            ("att_err_pass", json!(err.is_some_and(|e| e[0] < ATT_ERR_PASS_DEG && e[1] < ATT_ERR_PASS_DEG))),
+            (
+                "att_err_pass",
+                json!(err.is_some_and(|e| e[0] < ATT_ERR_PASS_DEG && e[1] < ATT_ERR_PASS_DEG)),
+            ),
         ]);
         if let Some((_, s, _)) = cx.fc.wind {
             r.insert("wind_mps".into(), json!(s));
@@ -83,7 +92,8 @@ impl Step for FirstHover {
     fn begin(&mut self, cx: &mut Cx) {
         *self = FirstHover::default();
         self.core.body_variant = (cx.adapter.class == Class::Vtol).then_some("vtol");
-        self.core.wait_user(vec![Action::primary("start"), Action::danger("abort")]);
+        self.core
+            .wait_user(vec![Action::primary("start"), Action::danger("abort")]);
     }
 
     fn tick(&mut self, cx: &mut Cx) {
@@ -115,7 +125,8 @@ impl Step for FirstHover {
                 self.acc.sample(cx.fc, cx.now);
                 let el = cx.now.saturating_sub(since);
                 self.core.progress = Some((el as f32 / HOVER_MS as f32).min(1.0) * 0.8);
-                self.core.set_live("vibration_max", json!(self.acc.vibe_max));
+                self.core
+                    .set_live("vibration_max", json!(self.acc.vibe_max));
                 if let Some(e) = self.acc.att_err_rms() {
                     self.core.set_live("att_err_rms_deg", json!(e));
                 }
@@ -124,11 +135,19 @@ impl Step for FirstHover {
                         self.core.set_live("osc_rms", json!(rms));
                         if rms[0] > OSC_RMS_RAD_S || rms[1] > OSC_RMS_RAD_S {
                             let p = cx.adapter.atc();
-                            let halve: Vec<Value> = [format!("{p}_RAT_RLL_P"), format!("{p}_RAT_PIT_P")]
-                                .iter()
-                                .filter_map(|n| cx.params.get(n).map(|v| json!({"name": n, "now": v, "suggest": v / 2.0})))
-                                .collect();
-                            self.result = obj([("oscillation_rms", json!(rms)), ("suggest", Value::Array(halve))]);
+                            let halve: Vec<Value> =
+                                [format!("{p}_RAT_RLL_P"), format!("{p}_RAT_PIT_P")]
+                                    .iter()
+                                    .filter_map(|n| {
+                                        cx.params.get(n).map(
+                                            |v| json!({"name": n, "now": v, "suggest": v / 2.0}),
+                                        )
+                                    })
+                                    .collect();
+                            self.result = obj([
+                                ("oscillation_rms", json!(rms)),
+                                ("suggest", Value::Array(halve)),
+                            ]);
                             self.land(cx, Some("oscillation"));
                             return;
                         }
@@ -140,7 +159,10 @@ impl Step for FirstHover {
                         // ArduPlane takes no local position setpoints: the VTOL climbs to its
                         // GUIDED (Q_GUIDED_MODE 1, a VTOL hover) target height instead.
                         vtol_climb_here(cx, VTOL_TRANSITION_ALT_M);
-                        self.phase = Phase::Climb { since: cx.now, sent: cx.now };
+                        self.phase = Phase::Climb {
+                            since: cx.now,
+                            sent: cx.now,
+                        };
                     } else {
                         self.land(cx, None);
                     }
@@ -155,7 +177,10 @@ impl Step for FirstHover {
                     self.land(cx, Some("timeout"));
                 } else if cx.now.saturating_sub(sent) > VTOL_CLIMB_RESEND_MS {
                     vtol_climb_here(cx, VTOL_TRANSITION_ALT_M);
-                    self.phase = Phase::Climb { since, sent: cx.now };
+                    self.phase = Phase::Climb {
+                        since,
+                        sent: cx.now,
+                    };
                 }
             }
             Phase::Fw(mut t) => {
@@ -186,7 +211,9 @@ impl Step for FirstHover {
                     Transition::Failed => {
                         self.result.insert("transition_mc".into(), json!(false));
                         self.hop.land(cx);
-                        Phase::Landing { reason: Some("transition_failed") }
+                        Phase::Landing {
+                            reason: Some("transition_failed"),
+                        }
                     }
                     other => Phase::Mc(other),
                 };

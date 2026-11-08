@@ -65,7 +65,15 @@ pub fn collect(map: &DenseMap, proj: &Projector, ranging: &Ranging) -> Reference
         add([0.0, 0.0, d]);
     }
     if let (Some(d), Some((roll, pitch))) = (down, ranging.attitude) {
-        add_ground(&mut out.pairs, map, proj, ranging.scan.as_ref(), d, roll, pitch);
+        add_ground(
+            &mut out.pairs,
+            map,
+            proj,
+            ranging.scan.as_ref(),
+            d,
+            roll,
+            pitch,
+        );
     }
     out.cells.sort_unstable();
     out.cells.dedup();

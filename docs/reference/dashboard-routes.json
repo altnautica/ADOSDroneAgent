@@ -179,6 +179,15 @@
       "roles": null
     },
     {
+      "key": "settings-aircraft-setup",
+      "label": "Aircraft setup",
+      "path": "/settings/aircraft-setup",
+      "profiles": [
+        "drone"
+      ],
+      "roles": null
+    },
+    {
       "key": "settings-network",
       "label": "Network",
       "path": "/settings/network",

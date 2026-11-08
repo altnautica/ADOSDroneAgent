@@ -5,7 +5,9 @@ use serde_json::{json, Map, Value};
 
 use crate::setup::fcstate::Fw;
 use crate::setup::schema::{input_number, obj, Action};
-use crate::setup::step::{arg_f32, step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore};
+use crate::setup::step::{
+    arg_f32, step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore,
+};
 
 /// Nominal LiPo cell voltage used to guess the cell count from a reading.
 const NOMINAL_CELL_V: f32 = 3.85;
@@ -46,9 +48,31 @@ impl Step for Battery {
         let capacity = cx.params.get(cap).unwrap_or(5000.0);
         let reported = cx.fc.battery_v.unwrap_or(0.0);
         let mut inputs = Map::new();
-        inputs.insert("capacity_mah".into(), input_number(capacity as f64, 100.0, 100_000.0, 50.0, "mAh", "setup.input.capacity_mah"));
-        inputs.insert("measured_v".into(), input_number(reported as f64, 0.0, 70.0, 0.01, "V", "setup.input.measured_v"));
-        self.core.args.insert("inputs".into(), Value::Object(inputs));
+        inputs.insert(
+            "capacity_mah".into(),
+            input_number(
+                capacity as f64,
+                100.0,
+                100_000.0,
+                50.0,
+                "mAh",
+                "setup.input.capacity_mah",
+            ),
+        );
+        inputs.insert(
+            "measured_v".into(),
+            input_number(
+                reported as f64,
+                0.0,
+                70.0,
+                0.01,
+                "V",
+                "setup.input.measured_v",
+            ),
+        );
+        self.core
+            .args
+            .insert("inputs".into(), Value::Object(inputs));
         if cx.adapter.fw == Fw::Px4 {
             self.core.body_variant = Some("px4");
         }
@@ -57,7 +81,8 @@ impl Step for Battery {
 
     fn tick(&mut self, cx: &mut Cx) {
         if let Some(v) = cx.fc.battery_v {
-            self.core.set_live("reported_v", (v * 100.0).round() / 100.0);
+            self.core
+                .set_live("reported_v", (v * 100.0).round() / 100.0);
             self.core.set_live("cells_detected", cells_from_voltage(v));
         }
         if self.reboot.active() {
@@ -99,8 +124,12 @@ impl Step for Battery {
         if id != "apply" {
             return Err("unknown_action");
         }
-        let capacity = arg_f32(args, "capacity_mah").filter(|c| *c >= 100.0).ok_or("bad_args")?;
-        let measured = arg_f32(args, "measured_v").filter(|v| *v >= 0.0).ok_or("bad_args")?;
+        let capacity = arg_f32(args, "capacity_mah")
+            .filter(|c| *c >= 100.0)
+            .ok_or("bad_args")?;
+        let measured = arg_f32(args, "measured_v")
+            .filter(|v| *v >= 0.0)
+            .ok_or("bad_args")?;
         let (cap_name, mult_name) = Self::names(cx.adapter.fw);
         let mut result = obj([("capacity_mah", json!(capacity))]);
         if cx.adapter.fw == Fw::ArduPilot && cx.params.get("BATT_MONITOR").unwrap_or(0.0) == 0.0 {

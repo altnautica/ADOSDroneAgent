@@ -50,7 +50,12 @@ impl Acc {
         if let Some((v, t)) = fc.vibration {
             if t > self.last_vibe_ms {
                 self.last_vibe_ms = t;
-                for ((max, sum), x) in self.vibe_max.iter_mut().zip(self.vibe_sum.iter_mut()).zip(v) {
+                for ((max, sum), x) in self
+                    .vibe_max
+                    .iter_mut()
+                    .zip(self.vibe_sum.iter_mut())
+                    .zip(v)
+                {
                     *max = max.max(x);
                     *sum += x;
                 }
@@ -93,7 +98,10 @@ impl Acc {
 
     pub fn att_err_rms(&self) -> Option<[f32; 2]> {
         (self.err_n > 0).then(|| {
-            [(self.err_sq[0] / self.err_n as f32).sqrt(), (self.err_sq[1] / self.err_n as f32).sqrt()]
+            [
+                (self.err_sq[0] / self.err_n as f32).sqrt(),
+                (self.err_sq[1] / self.err_n as f32).sqrt(),
+            ]
         })
     }
 
@@ -118,7 +126,10 @@ impl Acc {
 /// from a DFT over the samples in the last [`OSC_WINDOW_MS`]. `None` when
 /// the stream is too slow to see the band (< 32 Hz).
 pub fn band_rms(rates: &std::collections::VecDeque<RateSample>, now_ms: u64) -> Option<[f32; 2]> {
-    let win: Vec<&RateSample> = rates.iter().filter(|s| now_ms.saturating_sub(s.t_ms) <= OSC_WINDOW_MS).collect();
+    let win: Vec<&RateSample> = rates
+        .iter()
+        .filter(|s| now_ms.saturating_sub(s.t_ms) <= OSC_WINDOW_MS)
+        .collect();
     if win.len() < 16 {
         return None;
     }
@@ -133,7 +144,10 @@ pub fn band_rms(rates: &std::collections::VecDeque<RateSample>, now_ms: u64) -> 
     let n = win.len();
     let mut out = [0.0f32; 2];
     for (axis, slot) in out.iter_mut().enumerate() {
-        let x: Vec<f32> = win.iter().map(|s| if axis == 0 { s.roll } else { s.pitch }).collect();
+        let x: Vec<f32> = win
+            .iter()
+            .map(|s| if axis == 0 { s.roll } else { s.pitch })
+            .collect();
         let mean = x.iter().sum::<f32>() / n as f32;
         let mut power = 0.0f32;
         let k_lo = (3.0 * n as f32 / fs).ceil() as usize;
@@ -156,5 +170,9 @@ pub fn band_rms(rates: &std::collections::VecDeque<RateSample>, now_ms: u64) -> 
 /// Overshoot of a velocity step: peak along the step direction over the
 /// commanded speed, minus one (0 = none).
 pub fn overshoot(peak: f32, commanded: f32) -> f32 {
-    if commanded <= 0.0 { 0.0 } else { (peak / commanded - 1.0).max(0.0) }
+    if commanded <= 0.0 {
+        0.0
+    } else {
+        (peak / commanded - 1.0).max(0.0)
+    }
 }

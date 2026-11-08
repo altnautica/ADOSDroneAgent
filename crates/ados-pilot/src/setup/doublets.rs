@@ -81,7 +81,13 @@ impl Doublets {
     /// The demand at `now_ms`. `offset_ne` is the position relative to the
     /// box centre, `heading_rad` the current heading, `alt_err_m` the loiter
     /// height minus the current height.
-    pub fn demand(&mut self, now_ms: u64, offset_ne: [f32; 2], heading_rad: f32, alt_err_m: f32) -> Demand {
+    pub fn demand(
+        &mut self,
+        now_ms: u64,
+        offset_ne: [f32; 2],
+        heading_rad: f32,
+        alt_err_m: f32,
+    ) -> Demand {
         let dist = (offset_ne[0].powi(2) + offset_ne[1].powi(2)).sqrt();
         // Bearing to the centre against heading.
         let to_center = (-offset_ne[1]).atan2(-offset_ne[0]);
@@ -93,7 +99,8 @@ impl Doublets {
             err += 2.0 * std::f32::consts::PI;
         }
         let away = err.abs() > std::f32::consts::FRAC_PI_2;
-        let go_home = dist > RETURN_FRACTION * self.box_m || (away && dist > AWAY_FRACTION * self.box_m);
+        let go_home =
+            dist > RETURN_FRACTION * self.box_m || (away && dist > AWAY_FRACTION * self.box_m);
         if now_ms.saturating_sub(self.seg_start) >= Self::seg_len(self.seg) {
             self.seg_start = now_ms;
             self.seg = match self.seg {
@@ -101,7 +108,9 @@ impl Doublets {
                 Seg::PitchUp => Seg::PitchDown,
                 Seg::RollNeg | Seg::PitchDown => Seg::Gap,
                 // A return lasts until the nose points at the centre.
-                Seg::Return if err.abs() > RETURN_DONE_RAD && dist > AWAY_FRACTION * self.box_m => Seg::Return,
+                Seg::Return if err.abs() > RETURN_DONE_RAD && dist > AWAY_FRACTION * self.box_m => {
+                    Seg::Return
+                }
                 Seg::Gap | Seg::Return => {
                     if go_home {
                         Seg::Return
@@ -119,14 +128,36 @@ impl Doublets {
         let pitch_k = PITCH_DEG / self.pitch_limit_deg;
         let hold = (alt_err_m * ALT_GAIN).clamp(-ALT_PITCH_MAX, ALT_PITCH_MAX);
         match self.seg {
-            Seg::RollPos => Demand { roll: roll_k.min(1.0), pitch: hold },
-            Seg::RollNeg => Demand { roll: -roll_k.min(1.0), pitch: hold },
-            Seg::PitchUp => Demand { roll: 0.0, pitch: pitch_k.min(1.0) },
-            Seg::PitchDown => Demand { roll: 0.0, pitch: -pitch_k.min(1.0) },
-            Seg::Gap => Demand { roll: 0.0, pitch: hold },
+            Seg::RollPos => Demand {
+                roll: roll_k.min(1.0),
+                pitch: hold,
+            },
+            Seg::RollNeg => Demand {
+                roll: -roll_k.min(1.0),
+                pitch: hold,
+            },
+            Seg::PitchUp => Demand {
+                roll: 0.0,
+                pitch: pitch_k.min(1.0),
+            },
+            Seg::PitchDown => Demand {
+                roll: 0.0,
+                pitch: -pitch_k.min(1.0),
+            },
+            Seg::Gap => Demand {
+                roll: 0.0,
+                pitch: hold,
+            },
             Seg::Return => {
-                let bank = if err.abs() < 0.2 { 0.0 } else { RETURN_BANK_DEG * err.signum() };
-                Demand { roll: (bank / self.roll_limit_deg).clamp(-1.0, 1.0), pitch: hold }
+                let bank = if err.abs() < 0.2 {
+                    0.0
+                } else {
+                    RETURN_BANK_DEG * err.signum()
+                };
+                Demand {
+                    roll: (bank / self.roll_limit_deg).clamp(-1.0, 1.0),
+                    pitch: hold,
+                }
             }
         }
     }

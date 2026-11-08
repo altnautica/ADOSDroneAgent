@@ -23,4 +23,7 @@ ignore = [
     { id = "RUSTSEC-2026-0367", reason = "zip extract APIs are never called; the plugin archive reader walks entries with by_index, validates every path and sets file modes itself" },
     { id = "RUSTSEC-2026-0368", reason = "zip extract APIs are never called; the plugin archive reader walks entries with by_index, validates every path and sets file modes itself" },
     { id = "RUSTSEC-2026-0369", reason = "zip extract APIs are never called; the plugin archive reader walks entries with by_index, validates every path and sets file modes itself" },
+    # The symlink-entry abort is also inside ZipArchive::extract; the archive
+    # reader and unpacker both reject symlink entries before reading payload.
+    { id = "RUSTSEC-2026-0429", reason = "zip extract APIs are never called; the plugin archive reader walks entries with by_index, rejects symlink entries and sets file modes itself" },
 ]

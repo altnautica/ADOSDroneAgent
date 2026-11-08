@@ -4,8 +4,9 @@ use super::*;
 fn registry_has_expected_shape() {
     let specs = build_specs();
     // ados-discovery and ados-health were removed; ados-vision-hailo and
-    // ados-lora added; the sensor plane (clock, sensor hub, GNSS) added.
-    assert_eq!(specs.len(), 32, "service count drifted from the catalog");
+    // ados-lora added; the sensor plane (clock, sensor hub, GNSS) added; the
+    // pilot (the on-board command authority) added.
+    assert_eq!(specs.len(), 33, "service count drifted from the catalog");
     // The sensor plane is Hardware tier, gated to the profiles that carry it.
     for (name, gate) in [
         ("ados-clock", "drone|ground_station|visor"),
@@ -30,6 +31,7 @@ fn registry_has_expected_shape() {
         core,
         vec![
             "ados-mavlink",
+            "ados-pilot",
             "ados-swarmbus",
             "ados-api",
             "ados-cloud",
@@ -115,6 +117,7 @@ fn headless_keep_set_is_exactly_the_lean_core() {
         kept,
         vec![
             "ados-mavlink",
+            "ados-pilot",
             "ados-swarmbus",
             "ados-logd",
             "ados-video",

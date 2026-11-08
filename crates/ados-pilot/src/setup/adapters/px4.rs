@@ -3,7 +3,17 @@
 use super::Mode;
 
 pub const GROUND: &[&str] = &[
-    "detect", "frame", "accel", "level", "gyro", "compass", "radio", "outputs", "battery", "ados_profile", "ados_intro",
+    "detect",
+    "frame",
+    "accel",
+    "level",
+    "gyro",
+    "compass",
+    "radio",
+    "outputs",
+    "battery",
+    "ados_profile",
+    "ados_intro",
 ];
 
 pub const AIR: &[&str] = &["preflight", "first_hover", "autotune", "verify"];
@@ -65,10 +75,17 @@ pub fn parse_cal(text: &str) -> Option<CalEvent> {
         return Some(CalEvent::Failed(t.to_string()));
     }
     if let Some(rest) = lower.strip_prefix("pending:") {
-        return Some(CalEvent::Pending(rest.split_whitespace().map(str::to_string).collect()));
+        return Some(CalEvent::Pending(
+            rest.split_whitespace().map(str::to_string).collect(),
+        ));
     }
     if let Some(rest) = lower.strip_prefix("progress ") {
-        return rest.trim_end_matches('%').trim().parse::<u8>().ok().map(CalEvent::Progress);
+        return rest
+            .trim_end_matches('%')
+            .trim()
+            .parse::<u8>()
+            .ok()
+            .map(CalEvent::Progress);
     }
     if let Some(side) = lower.strip_suffix(" orientation detected") {
         return Some(CalEvent::Detected(side.to_string()));

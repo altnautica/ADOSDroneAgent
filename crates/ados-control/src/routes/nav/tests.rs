@@ -5,11 +5,11 @@ use ados_protocol::ws_ticket::WsTicketIssuer;
 use axum::http::{HeaderValue, Method};
 use serde_json::json;
 
+use super::hub::{ClientView, KIND_COUNT};
 use super::hub::{
     TOPIC_FOLLOW_LOST, TOPIC_FOLLOW_REACQUIRED, TOPIC_FOLLOW_STATE, TOPIC_MAP_STATUS,
     TOPIC_NAV_STATE, TOPIC_OCCUPANCY, TOPIC_POSE, TOPIC_SCAN,
 };
-use super::hub::{ClientView, KIND_COUNT};
 use super::tiles::MAX_TILES;
 use crate::mcp::route_scope;
 use crate::routes::gs_ws::WsAuth;
@@ -543,9 +543,15 @@ fn a_client_without_a_lease_gets_no_overlay_frames() {
     let hub = NavHub::new();
     hub.ingest_host(NavKind::Ar, 5, two_camera_frame());
     hub.ingest_host(NavKind::Depth, 5, two_camera_frame());
-    hub.ingest_host(NavKind::Surfaces, 5, json!({"camera_id": "main", "zones": []}));
+    hub.ingest_host(
+        NavKind::Surfaces,
+        5,
+        json!({"camera_id": "main", "zones": []}),
+    );
     let mut sent = [0u64; KIND_COUNT];
-    assert!(hub.frames_since(&mut sent, ClientView::Lease(None)).is_empty());
+    assert!(hub
+        .frames_since(&mut sent, ClientView::Lease(None))
+        .is_empty());
     let lease = ViewLease::from_query("main:surfaces").unwrap();
     let mut sent = [0u64; KIND_COUNT];
     let frames = hub.frames_since(&mut sent, ClientView::Lease(Some(&lease)));
@@ -562,9 +568,14 @@ fn status_view_query_leases_and_reports_the_demand() {
     let body = hub.status_body_for(Some("down:ar_motion,obstacles"));
     assert!(body["ar"]["data"]["cameras"].get("main").is_none());
     assert!(body["ar"]["data"]["cameras"].get("down").is_some());
-    assert_eq!(body["view_demand"], json!({"down": ["ar_motion", "obstacles"]}));
+    assert_eq!(
+        body["view_demand"],
+        json!({"down": ["ar_motion", "obstacles"]})
+    );
     assert!(demand.has_changed().unwrap());
     assert!(demand.borrow().wants("down", "ar_motion"));
     // Without a view the status is unfiltered.
-    assert!(hub.status_body()["ar"]["data"]["cameras"].get("main").is_some());
+    assert!(hub.status_body()["ar"]["data"]["cameras"]
+        .get("main")
+        .is_some());
 }

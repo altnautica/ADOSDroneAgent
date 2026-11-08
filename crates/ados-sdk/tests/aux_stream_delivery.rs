@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ados_plugin_host::host::{AuxDatagramRx, HostError, HostServices};
+use ados_plugin_host::host::{AuxDatagramRx, FlightServices, HostError, HostServices};
 use ados_plugin_host::{EventBus, PluginIpcServer};
 use ados_protocol::plugin::TokenIssuer;
 use ados_sdk::PluginIpcClient;
@@ -36,6 +36,8 @@ fn caps(items: &[&str]) -> BTreeSet<String> {
 struct AuxStreamHost {
     app: broadcast::Sender<(u8, Vec<u8>)>,
 }
+
+impl FlightServices for AuxStreamHost {}
 
 impl HostServices for AuxStreamHost {
     fn radio_aux_stream_subscribe_stream(

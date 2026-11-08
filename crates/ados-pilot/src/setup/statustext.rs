@@ -55,7 +55,10 @@ pub fn parse_tune(text: &str) -> Option<TuneEvent> {
     };
     Some(if rest.starts_with("started") {
         TuneEvent::Started
-    } else if rest.starts_with("success") || rest.starts_with("completed") || rest.starts_with("done") {
+    } else if rest.starts_with("success")
+        || rest.starts_with("completed")
+        || rest.starts_with("done")
+    {
         TuneEvent::Success
     } else if rest.starts_with("failed") {
         TuneEvent::Failed

@@ -2,6 +2,7 @@
 //! the shared [`Routes`] builder, which records every one in the native table.
 
 mod config;
+mod fc_setup;
 mod ground_station;
 mod hid;
 mod logs;
@@ -10,7 +11,6 @@ mod mcp;
 mod nav;
 mod network;
 mod pairing;
-mod fc_setup;
 mod pilot;
 mod plugins;
 mod security;

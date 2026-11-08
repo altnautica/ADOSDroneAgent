@@ -50,8 +50,8 @@
 use std::time::{Duration, Instant};
 
 use ados_crsf_codec::bank::{BankError, ChannelBank};
-pub use ados_hid::pilot_input::status::ControlMode;
 use ados_crsf_codec::channels::CHANNEL_COUNT;
+pub use ados_hid::pilot_input::status::ControlMode;
 
 // The PIC-verdict authority half lives in `ados-hid::pic_view` (ground-profile,
 // so the same verdict propagates over every bearer). Re-exported here so this
@@ -440,7 +440,10 @@ mod tests {
             assert_eq!(v, neutral_channels());
             // A deflected stick does not fly over this lane.
             merge.set_hid([CHANNEL_MAX; CHANNEL_COUNT], now).unwrap();
-            assert_eq!(merge.current(now), Some((neutral_channels(), ChannelSource::Neutral)));
+            assert_eq!(
+                merge.current(now),
+                Some((neutral_channels(), ChannelSource::Neutral))
+            );
         }
     }
 
@@ -456,9 +459,16 @@ mod tests {
         let now = t0();
         let mut merge = SourceMerge::new(ChannelSourceMode::Hid);
         merge.set_control_mode(ControlMode::Elrs);
-        assert_eq!(merge.current(now), None, "no live pad: the receiver failsafes");
+        assert_eq!(
+            merge.current(now),
+            None,
+            "no live pad: the receiver failsafes"
+        );
         merge.set_hid([CHANNEL_MAX; CHANNEL_COUNT], now).unwrap();
-        assert_eq!(merge.current(now), Some(([CHANNEL_MAX; CHANNEL_COUNT], ChannelSource::Hid)));
+        assert_eq!(
+            merge.current(now),
+            Some(([CHANNEL_MAX; CHANNEL_COUNT], ChannelSource::Hid))
+        );
         merge.set_control_mode(ControlMode::Ados);
         assert_eq!(merge.current(now).unwrap().1, ChannelSource::Neutral);
         merge.set_control_mode(ControlMode::Elrs);

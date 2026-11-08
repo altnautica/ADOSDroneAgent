@@ -141,7 +141,11 @@ pub(super) async fn run_service_pass(
     {
         let path = crate::control_mode::sidecar_path();
         crate::control_mode::apply(&path, &merge).await;
-        tokio::spawn(crate::control_mode::run(path, merge.clone(), pass_scope.clone()));
+        tokio::spawn(crate::control_mode::run(
+            path,
+            merge.clone(),
+            pass_scope.clone(),
+        ));
     }
     // Reads the node pairing key to turn a claimed injector name into an
     // attested one. Built once and shared: the read behind it is cached, so the

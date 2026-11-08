@@ -18,7 +18,9 @@ pub const POLL: Duration = Duration::from_millis(100);
 
 /// The sidecar path under the resolved runtime dir.
 pub fn sidecar_path() -> PathBuf {
-    PathBuf::from(crate::paths::run_path(ados_hid::pilot_input::status::GS_INPUT_STATE))
+    PathBuf::from(crate::paths::run_path(
+        ados_hid::pilot_input::status::GS_INPUT_STATE,
+    ))
 }
 
 /// Apply the sidecar's mode to the merge, logging a change. Returns the mode.
@@ -26,7 +28,11 @@ pub async fn apply(path: &Path, merge: &Mutex<SourceMerge>) -> ControlMode {
     let mode = ados_hid::pilot_input::status::read_control_mode(path);
     let mut m = merge.lock().await;
     if m.control_mode() != mode {
-        tracing::info!(from = m.control_mode().as_str(), to = mode.as_str(), "crsf_control_mode");
+        tracing::info!(
+            from = m.control_mode().as_str(),
+            to = mode.as_str(),
+            "crsf_control_mode"
+        );
         m.set_control_mode(mode);
     }
     mode
@@ -47,8 +53,8 @@ pub async fn run(path: PathBuf, merge: Arc<Mutex<SourceMerge>>, mut scope: watch
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ados_hid::pilot_input::status::{GsInputState, ModeSource};
     use crate::sources::{ChannelSource, ChannelSourceMode};
+    use ados_hid::pilot_input::status::{GsInputState, ModeSource};
 
     #[tokio::test]
     async fn the_sidecar_mode_selects_the_lane_source() {
@@ -58,7 +64,10 @@ mod tests {
         // No sidecar: the schema default `ados`, so the lane sends neutral.
         assert_eq!(apply(&path, &merge).await, ControlMode::Ados);
         let now = std::time::Instant::now();
-        assert_eq!(merge.lock().await.current(now).unwrap().1, ChannelSource::Neutral);
+        assert_eq!(
+            merge.lock().await.current(now).unwrap().1,
+            ChannelSource::Neutral
+        );
 
         let mut s = GsInputState {
             v: 1,
@@ -72,11 +81,18 @@ mod tests {
         };
         s.save(&path).unwrap();
         assert_eq!(apply(&path, &merge).await, ControlMode::Elrs);
-        assert_eq!(merge.lock().await.current(now), None, "elrs with no live pad: silence");
+        assert_eq!(
+            merge.lock().await.current(now),
+            None,
+            "elrs with no live pad: silence"
+        );
 
         s.control_mode = ControlMode::FcManual;
         s.save(&path).unwrap();
         assert_eq!(apply(&path, &merge).await, ControlMode::FcManual);
-        assert_eq!(merge.lock().await.current(now).unwrap().1, ChannelSource::Neutral);
+        assert_eq!(
+            merge.lock().await.current(now).unwrap().1,
+            ChannelSource::Neutral
+        );
     }
 }

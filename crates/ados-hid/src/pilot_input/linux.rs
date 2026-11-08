@@ -3,7 +3,9 @@
 
 use std::path::{Path, PathBuf};
 
-use evdev::{AbsoluteAxisType, Device, FFEffectData, FFEffectKind, FFEffectType, FFReplay, FFTrigger};
+use evdev::{
+    AbsoluteAxisType, Device, FFEffectData, FFEffectKind, FFEffectType, FFReplay, FFTrigger,
+};
 
 use super::feedback::Pulse;
 use super::pad::{AbsAxis, Driver, RawPad};
@@ -29,7 +31,12 @@ pub struct OpenPad {
 /// (`/sys/class/input/eventN/device/device`), where `leds/` and `power_supply/` live.
 fn hid_dir(node: &Path) -> Option<PathBuf> {
     let base = node.file_name()?;
-    std::fs::canonicalize(Path::new("/sys/class/input").join(base).join("device/device")).ok()
+    std::fs::canonicalize(
+        Path::new("/sys/class/input")
+            .join(base)
+            .join("device/device"),
+    )
+    .ok()
 }
 
 fn find_led(hid: &Path) -> Option<PathBuf> {
@@ -89,7 +96,11 @@ impl OpenPad {
                 let info = abs[axis.0 as usize];
                 raw.abs.insert(
                     axis.0,
-                    AbsAxis { value: info.value, min: info.minimum, max: info.maximum },
+                    AbsAxis {
+                        value: info.value,
+                        min: info.minimum,
+                        max: info.maximum,
+                    },
                 );
             }
         }
@@ -123,8 +134,11 @@ impl OpenPad {
             return;
         }
         let Some(led) = &self.led else { return };
-        let ok = std::fs::write(led.join("multi_intensity"), format!("{} {} {}", rgb[0], rgb[1], rgb[2]))
-            .and_then(|_| std::fs::write(led.join("brightness"), self.led_max.to_string()));
+        let ok = std::fs::write(
+            led.join("multi_intensity"),
+            format!("{} {} {}", rgb[0], rgb[1], rgb[2]),
+        )
+        .and_then(|_| std::fs::write(led.join("brightness"), self.led_max.to_string()));
         match ok {
             Ok(()) => self.last_rgb = Some(rgb),
             Err(e) => tracing::debug!(error = %e, "lightbar write failed"),
@@ -140,8 +154,14 @@ impl OpenPad {
         let data = FFEffectData {
             direction: 0,
             trigger: FFTrigger::default(),
-            replay: FFReplay { length: p.length_ms, delay: 0 },
-            kind: FFEffectKind::Rumble { strong_magnitude: mag(p.strong), weak_magnitude: mag(p.weak) },
+            replay: FFReplay {
+                length: p.length_ms,
+                delay: 0,
+            },
+            kind: FFEffectKind::Rumble {
+                strong_magnitude: mag(p.strong),
+                weak_magnitude: mag(p.weak),
+            },
         };
         self.playing = None;
         match self.dev.upload_ff_effect(data) {

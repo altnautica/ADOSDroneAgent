@@ -98,14 +98,21 @@ impl Gestures {
             })
             .collect();
         let holds = vec![HoldState::default(); rows.len()];
-        Self { rows, holds, prev: 0, episode: 0 }
+        Self {
+            rows,
+            holds,
+            prev: 0,
+            episode: 0,
+        }
     }
 
     /// Forget every press (pad reconnect).
     pub fn reset(&mut self) {
         self.prev = 0;
         self.episode = 0;
-        self.holds.iter_mut().for_each(|h| *h = HoldState::default());
+        self.holds
+            .iter_mut()
+            .for_each(|h| *h = HoldState::default());
     }
 
     /// Advance one tick at `now_ms`.
@@ -180,7 +187,9 @@ impl Gestures {
                 continue;
             }
             match row.binding.rumble.as_deref() {
-                Some("ramp") if now_ms.saturating_sub(hold.last_cue_ms) >= cfg.rumble.ramp.tick_ms => {
+                Some("ramp")
+                    if now_ms.saturating_sub(hold.last_cue_ms) >= cfg.rumble.ramp.tick_ms =>
+                {
                     hold.last_cue_ms = now_ms;
                     let p = elapsed as f32 / need.max(1) as f32;
                     let r = &cfg.rumble.ramp;
@@ -188,7 +197,8 @@ impl Gestures {
                 }
                 Some("countdown")
                     if elapsed > 0
-                        && now_ms.saturating_sub(hold.last_cue_ms) >= cfg.rumble.countdown.every_ms =>
+                        && now_ms.saturating_sub(hold.last_cue_ms)
+                            >= cfg.rumble.countdown.every_ms =>
                 {
                     hold.last_cue_ms = now_ms;
                     out.cues.push(Cue::Countdown);
@@ -219,7 +229,14 @@ mod tests {
         Gestures::new(&ControlsDoc::ados_default().native_bindings())
     }
 
-    fn row(control: &str, with: &[&str], gesture: &str, hold_ms: Option<u64>, when: Option<&str>, action: &str) -> Binding {
+    fn row(
+        control: &str,
+        with: &[&str],
+        gesture: &str,
+        hold_ms: Option<u64>,
+        when: Option<&str>,
+        action: &str,
+    ) -> Binding {
         Binding {
             control: control.into(),
             with: with.iter().map(|s| s.to_string()).collect(),
@@ -269,7 +286,10 @@ mod tests {
         ];
         let ctx = Context::default();
         let mut g = Gestures::new(&rows);
-        assert!(g.tick(&st(&["triangle"]), &ctx, 0).actions.is_empty(), "nothing at down");
+        assert!(
+            g.tick(&st(&["triangle"]), &ctx, 0).actions.is_empty(),
+            "nothing at down"
+        );
         assert_eq!(g.tick(&st(&[]), &ctx, 100).actions, vec!["view_next"]);
         let mut g = Gestures::new(&rows);
         assert_eq!(press_for(&mut g, &ctx, &["triangle"], 1600), vec!["land"]);
@@ -278,13 +298,19 @@ mod tests {
     #[test]
     fn the_spec_ps_pauses_once_on_a_short_press() {
         let mut g = engine();
-        assert_eq!(press_for(&mut g, &Context::default(), &["ps"], 100), vec!["pause"]);
+        assert_eq!(
+            press_for(&mut g, &Context::default(), &["ps"], 100),
+            vec!["pause"]
+        );
     }
 
     #[test]
     fn ps_during_rth_cancels_to_hold() {
         let mut g = engine();
-        let ctx = Context { rth_active: true, ..Default::default() };
+        let ctx = Context {
+            rth_active: true,
+            ..Default::default()
+        };
         assert_eq!(press_for(&mut g, &ctx, &["ps"], 100), vec!["rth_cancel"]);
     }
 
@@ -301,7 +327,10 @@ mod tests {
 
     #[test]
     fn arm_needs_the_left_stick_centred_for_the_whole_hold() {
-        let ctx = Context { landed: true, ..Default::default() };
+        let ctx = Context {
+            landed: true,
+            ..Default::default()
+        };
         let mut g = engine();
         let mut fired = Vec::new();
         for ms in (0..=2100).step_by(20) {
@@ -318,7 +347,10 @@ mod tests {
             }
             fired.extend(g.tick(&s, &ctx, ms).actions);
         }
-        assert!(fired.is_empty(), "a deflection restarts the hold: {fired:?}");
+        assert!(
+            fired.is_empty(),
+            "a deflection restarts the hold: {fired:?}"
+        );
     }
 
     #[test]

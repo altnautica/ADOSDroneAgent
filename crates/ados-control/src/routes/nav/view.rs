@@ -74,7 +74,9 @@ impl ViewMsg {
             return Some(ViewMsg::Release { camera_id: None });
         }
         if empty_layers {
-            return Some(ViewMsg::Release { camera_id: Some(camera.to_owned()) });
+            return Some(ViewMsg::Release {
+                camera_id: Some(camera.to_owned()),
+            });
         }
         ViewLease::from_frame(frame).map(ViewMsg::Lease)
     }
@@ -185,8 +187,7 @@ impl ViewLeases {
             .retain(|_, (_, at)| now.saturating_duration_since(*at) < VIEW_LEASE_TTL);
         let mut demand = ViewDemand::default();
         for (lease, _) in self.leases.values() {
-            if !demand.cameras.contains_key(&lease.camera_id)
-                && demand.cameras.len() >= MAX_CAMERAS
+            if !demand.cameras.contains_key(&lease.camera_id) && demand.cameras.len() >= MAX_CAMERAS
             {
                 continue;
             }
@@ -214,14 +215,22 @@ mod tests {
         assert_eq!(lease.camera_id, "main");
         assert!(lease.has("ar_route") && lease.has("depth") && !lease.has("bogus"));
         assert!(ViewLease::from_frame(&json!({"type": "other"})).is_none());
-        assert!(ViewLease::from_frame(&json!({"type": "view", "camera_id": "a b", "layers": []})).is_none());
+        assert!(
+            ViewLease::from_frame(&json!({"type": "view", "camera_id": "a b", "layers": []}))
+                .is_none()
+        );
     }
 
     #[test]
     fn empty_camera_releases_everything_empty_layers_release_that_camera() {
         let mut held = None;
-        let lease = |c: &str| ViewMsg::from_frame(&json!({"type": "view", "camera_id": c, "layers": ["ar_route"]})).unwrap();
-        let release = |c: &str| ViewMsg::from_frame(&json!({"type": "view", "camera_id": c, "layers": []})).unwrap();
+        let lease = |c: &str| {
+            ViewMsg::from_frame(&json!({"type": "view", "camera_id": c, "layers": ["ar_route"]}))
+                .unwrap()
+        };
+        let release = |c: &str| {
+            ViewMsg::from_frame(&json!({"type": "view", "camera_id": c, "layers": []})).unwrap()
+        };
         assert!(lease("main").apply(&mut held));
         // A camera switch: lease the new one, then release the old one.
         assert!(lease("down").apply(&mut held));
@@ -247,15 +256,25 @@ mod tests {
     fn demand_is_the_union_and_leases_expire() {
         let mut leases = ViewLeases::default();
         let t0 = Instant::now();
-        leases.put(LeaseHolder::Stream(1), ViewLease::from_query("main:ar_route").unwrap(), t0);
-        leases.put(LeaseHolder::Stream(2), ViewLease::from_query("main:obstacles").unwrap(), t0);
+        leases.put(
+            LeaseHolder::Stream(1),
+            ViewLease::from_query("main:ar_route").unwrap(),
+            t0,
+        );
+        leases.put(
+            LeaseHolder::Stream(2),
+            ViewLease::from_query("main:obstacles").unwrap(),
+            t0,
+        );
         leases.put(
             LeaseHolder::Poll("down:depth".into()),
             ViewLease::from_query("down:depth").unwrap(),
             t0 + Duration::from_secs(4),
         );
         let d = leases.demand(t0 + Duration::from_secs(1));
-        assert!(d.wants("main", "ar_route") && d.wants("main", "obstacles") && d.wants("down", "depth"));
+        assert!(
+            d.wants("main", "ar_route") && d.wants("main", "obstacles") && d.wants("down", "depth")
+        );
         let d = leases.demand(t0 + Duration::from_secs(7));
         assert!(!d.cameras.contains_key("main"));
         assert!(d.wants("down", "depth"));

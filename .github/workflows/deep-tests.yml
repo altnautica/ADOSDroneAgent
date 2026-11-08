@@ -109,7 +109,39 @@ jobs:
           fi
           echo "configured=yes" >> "$GITHUB_OUTPUT"
 
-      - name: Run the model-gated ignored tests
+      - name: Fetch the MiDaS depth model when a source is configured
+        id: midas
+        working-directory: .
+        env:
+          # A repository variable, not a secret: a URL to the public MiDaS v2.1
+          # small ONNX export (model-small.onnx, 256x256 input).
+          MIDAS_URL: ${{ vars.ADOS_TEST_MIDAS_ONNX_URL }}
+        run: |
+          set -uo pipefail
+          if [ -z "${MIDAS_URL:-}" ]; then
+            {
+              echo "### Depth-model test: NOT RUN"
+              echo
+              echo "\`ADOS_TEST_MIDAS_ONNX_URL\` is not set on this repository, so"
+              echo "\`ados-vision-engine/tests/onnx_midas_infer.rs\` did not execute."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=no" >> "$GITHUB_OUTPUT"
+            echo "NOTICE: ADOS_TEST_MIDAS_ONNX_URL is unset; the depth-model test did not run."
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/models"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/models/midas-small.onnx" "$MIDAS_URL"
+          size="$(wc -c < "$RUNNER_TEMP/models/midas-small.onnx")"
+          if [ "$size" -lt 1000000 ]; then
+            echo "FAIL: downloaded model is $size bytes, which is too small to be a MiDaS small export."
+            exit 1
+          fi
+          echo "model=$RUNNER_TEMP/models/midas-small.onnx" >> "$GITHUB_OUTPUT"
+          echo "configured=yes" >> "$GITHUB_OUTPUT"
+
+      # Each model-gated test target runs only when its model was fetched, so
+      # one configured model never runs the other's test against a missing file.
+      - name: Run the COCO model-gated ignored tests
         if: steps.model.outputs.configured == 'yes'
         env:
           ADOS_TEST_COCO_ONNX: ${{ steps.model.outputs.model }}
@@ -117,7 +149,15 @@ jobs:
         run: |
           set -uo pipefail
           # --ignored runs ONLY the ignored tests.
-          cargo test --features onnx -p ados-vision-engine -- --ignored --nocapture
+          cargo test --features onnx -p ados-vision-engine --test onnx_coco_infer -- --ignored --nocapture
+
+      - name: Run the depth model-gated ignored test
+        if: steps.midas.outputs.configured == 'yes'
+        env:
+          ADOS_TEST_MIDAS_ONNX: ${{ steps.midas.outputs.model }}
+        run: |
+          set -uo pipefail
+          cargo test --features onnx -p ados-vision-engine --test onnx_midas_infer -- --ignored --nocapture
 
       - name: Record the outcome
         if: always()
@@ -126,4 +166,7 @@ jobs:
           set -uo pipefail
           if [ "${{ steps.model.outputs.configured }}" = "yes" ]; then
             echo "### Real-model tests: RAN" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "${{ steps.midas.outputs.configured }}" = "yes" ]; then
+            echo "### Depth-model test: RAN" >> "$GITHUB_STEP_SUMMARY"
           fi

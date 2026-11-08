@@ -109,9 +109,16 @@ impl Capture {
 enum Download {
     Idle,
     /// Waiting for MISSION_COUNT.
-    List { sent: Instant, tries: u8 },
+    List {
+        sent: Instant,
+        tries: u8,
+    },
     /// Waiting for item `seq`.
-    Item { seq: u16, sent: Instant, tries: u8 },
+    Item {
+        seq: u16,
+        sent: Instant,
+        tries: u8,
+    },
 }
 
 /// The synchronous mirror and mission-state core.
@@ -179,7 +186,10 @@ impl MirrorCore {
         }
         // A multirotor type with no banner yet is taken as Copter here: this
         // only labels the mission state, it never encodes a mode command.
-        match self.firmware.or(ArduPilotFirmware::from_mav_type(i64::from(self.mav_type))) {
+        match self
+            .firmware
+            .or(ArduPilotFirmware::from_mav_type(i64::from(self.mav_type)))
+        {
             Some(ArduPilotFirmware::Copter) => ModeTable::Copter,
             Some(ArduPilotFirmware::Plane) => ModeTable::Plane,
             _ => ModeTable::Other,
@@ -378,7 +388,11 @@ impl MirrorCore {
             // The run completed (adoption happens on the last item).
             return self.finish_download();
         }
-        self.download = Download::Item { seq, sent: now, tries };
+        self.download = Download::Item {
+            seq,
+            sent: now,
+            tries,
+        };
         let (ts, tc) = self.fc_target();
         vec![MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
             seq,
@@ -420,15 +434,22 @@ impl MirrorCore {
         }
         let (ts, tc) = self.fc_target();
         match self.download {
-            Download::List { sent, tries } if now.saturating_duration_since(sent) >= ITEM_TIMEOUT => {
+            Download::List { sent, tries }
+                if now.saturating_duration_since(sent) >= ITEM_TIMEOUT =>
+            {
                 if tries >= RETRIES {
                     self.fail_download(now);
                 } else {
-                    self.download = Download::List { sent: now, tries: tries + 1 };
+                    self.download = Download::List {
+                        sent: now,
+                        tries: tries + 1,
+                    };
                     return vec![request_list(ts, tc)];
                 }
             }
-            Download::Item { seq, sent, tries } if now.saturating_duration_since(sent) >= ITEM_TIMEOUT => {
+            Download::Item { seq, sent, tries }
+                if now.saturating_duration_since(sent) >= ITEM_TIMEOUT =>
+            {
                 if tries >= RETRIES {
                     self.fail_download(now);
                 } else {
@@ -448,7 +469,10 @@ impl MirrorCore {
         {
             self.want_download = false;
             self.not_before = None;
-            self.download = Download::List { sent: now, tries: 0 };
+            self.download = Download::List {
+                sent: now,
+                tries: 0,
+            };
             return vec![request_list(ts, tc)];
         }
         Vec::new()

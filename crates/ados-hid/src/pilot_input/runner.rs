@@ -45,7 +45,12 @@ fn node_for(id: &str) -> PathBuf {
 
 /// The relay link: connect, subscribe, fold `state` messages into the shared
 /// view, and write whatever the pad loop queues. Reconnects every second.
-async fn relay_link(sock: PathBuf, shared: Arc<Mutex<Shared>>, epoch: Instant, mut rx: mpsc::Receiver<Value>) {
+async fn relay_link(
+    sock: PathBuf,
+    shared: Arc<Mutex<Shared>>,
+    epoch: Instant,
+    mut rx: mpsc::Receiver<Value>,
+) {
     loop {
         let stream = match UnixStream::connect(&sock).await {
             Ok(s) => s,
@@ -77,7 +82,8 @@ async fn relay_link(sock: PathBuf, shared: Arc<Mutex<Shared>>, epoch: Instant, m
                     Ok(Some(m)) if m["op"] == "state" => {
                         let now = epoch.elapsed().as_millis() as u64;
                         let mut s = reader_shared.lock().unwrap();
-                        if let Some(mode) = m["control_mode"].as_str().and_then(ControlMode::parse) {
+                        if let Some(mode) = m["control_mode"].as_str().and_then(ControlMode::parse)
+                        {
                             s.modes.report(mode);
                         }
                         s.view.state = Some((m, now));
@@ -117,7 +123,12 @@ pub async fn run(mut cfg: RunnerConfig) {
     let epoch = Instant::now();
     let shared = Arc::new(Mutex::new(Shared::default()));
     let (tx, rx) = mpsc::channel::<Value>(64);
-    tokio::spawn(relay_link(cfg.pilot_sock.clone(), shared.clone(), epoch, rx));
+    tokio::spawn(relay_link(
+        cfg.pilot_sock.clone(),
+        shared.clone(),
+        epoch,
+        rx,
+    ));
 
     let spec = ds4();
     let mut doc = cfg.bindings.borrow().clone();
@@ -200,12 +211,19 @@ pub async fn run(mut cfg: RunnerConfig) {
             }
         }
         // The emergency switch may have just changed the mode.
-        let (mode, mode_src) = if state.is_some() { shared.lock().unwrap().modes.effective() } else { (mode, mode_src) };
+        let (mode, mode_src) = if state.is_some() {
+            shared.lock().unwrap().modes.effective()
+        } else {
+            (mode, mode_src)
+        };
 
         let should_stream = state.is_some() && view.relay_up && mode == ControlMode::Ados;
         if should_stream {
             let st = state.as_ref().unwrap();
-            let sm = spec.stick_modes.get(&doc.stick_mode).unwrap_or(&spec.stick_modes[&spec.default_mode]);
+            let sm = spec
+                .stick_modes
+                .get(&doc.stick_mode)
+                .unwrap_or(&spec.stick_modes[&spec.default_mode]);
             let axes = pilot_axes(st, sm, doc.deadzone);
             seq = seq.wrapping_add(1);
             let _ = tx.try_send(wire::input(session, seq, now, axes, st.buttons));

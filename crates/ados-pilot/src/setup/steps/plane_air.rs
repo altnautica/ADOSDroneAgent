@@ -7,7 +7,9 @@ use serde_json::{json, Map, Value};
 
 use crate::setup::adapters::{ardupilot_plane, Mode};
 use crate::setup::fcstate::Class;
-use crate::setup::flight::{self, airborne, height, plane_loiter, Hop, Leg, Transition, PLANE_LOITER_ALT_M};
+use crate::setup::flight::{
+    self, airborne, height, plane_loiter, Hop, Leg, Transition, PLANE_LOITER_ALT_M,
+};
 use crate::setup::measure::Acc;
 use crate::setup::schema::{obj, Action};
 use crate::setup::step::{writes_settled, ActErr, Cx, Step, StepCore};
@@ -40,13 +42,20 @@ pub struct ToLoiter {
 
 impl Default for ToLoiter {
     fn default() -> Self {
-        ToLoiter { hop: Hop::default(), trans: Transition::Idle, sent_ms: 0, ready: false, failed: None }
+        ToLoiter {
+            hop: Hop::default(),
+            trans: Transition::Idle,
+            sent_ms: 0,
+            ready: false,
+            failed: None,
+        }
     }
 }
 
 fn fixedwing_flight(cx: &Cx) -> bool {
     cx.adapter.class == Class::Fixedwing
-        || cx.fc.vtol_state == Some(ados_protocol::mavlink::ardupilotmega::MavVtolState::MAV_VTOL_STATE_FW)
+        || cx.fc.vtol_state
+            == Some(ados_protocol::mavlink::ardupilotmega::MavVtolState::MAV_VTOL_STATE_FW)
 }
 
 impl ToLoiter {
@@ -65,7 +74,10 @@ impl ToLoiter {
             let alt = if cx.adapter.class == Class::Vtol {
                 VTOL_CLIMB_M
             } else {
-                cx.params.get("TKOFF_ALT").filter(|a| *a > 5.0).unwrap_or(50.0)
+                cx.params
+                    .get("TKOFF_ALT")
+                    .filter(|a| *a > 5.0)
+                    .unwrap_or(50.0)
             };
             self.hop.start(cx, alt);
         }
@@ -232,7 +244,10 @@ impl PlaneAir {
             }
             _ => {}
         }
-        self.phase = Phase::Tecs { stage, since: cx.now };
+        self.phase = Phase::Tecs {
+            stage,
+            since: cx.now,
+        };
     }
 
     fn end_tecs(&mut self, cx: &mut Cx) {
@@ -240,7 +255,10 @@ impl PlaneAir {
             cx.params.set(&n, v);
         }
         if let Some(n) = cx.params.first_present(ardupilot_plane::AIRSPEED_CRUISE) {
-            let cruise = cx.params.get(n).map(|c| if n == "TRIM_ARSPD_CM" { c / 100.0 } else { c });
+            let cruise = cx
+                .params
+                .get(n)
+                .map(|c| if n == "TRIM_ARSPD_CM" { c / 100.0 } else { c });
             if let Some(c) = cruise {
                 flight::change_speed(cx, c);
             }
@@ -261,7 +279,10 @@ impl PlaneAir {
                 self.result = obj([
                     ("trim_throttle", json!(thr.map(|t| t.round()))),
                     ("track_err_rms_deg", json!(err)),
-                    ("airspeed_excess_mps", json!(self.acc.airspeed_excess_mean())),
+                    (
+                        "airspeed_excess_mps",
+                        json!(self.acc.airspeed_excess_mean()),
+                    ),
                     ("vibration_max", json!(self.acc.vibe_max)),
                 ]);
                 self.phase = Phase::ReadBack;
@@ -290,7 +311,11 @@ impl PlaneAir {
             Kind::TrimAir => {
                 let trims: Map<String, Value> = Self::surface_channels(cx)
                     .into_iter()
-                    .filter_map(|k| cx.params.get(&format!("SERVO{k}_TRIM")).map(|v| (format!("SERVO{k}_TRIM"), json!(v))))
+                    .filter_map(|k| {
+                        cx.params
+                            .get(&format!("SERVO{k}_TRIM"))
+                            .map(|v| (format!("SERVO{k}_TRIM"), json!(v)))
+                    })
                     .collect();
                 self.result = obj([("trims", Value::Object(trims))]);
             }
@@ -336,7 +361,9 @@ impl Step for PlaneAir {
 
     fn skip_reason(&self, cx: &Cx) -> Option<&'static str> {
         match self.kind {
-            Kind::AirspeedCal if cx.params.get("ARSPD_TYPE").unwrap_or(0.0) == 0.0 => Some("no_airspeed_sensor"),
+            Kind::AirspeedCal if cx.params.get("ARSPD_TYPE").unwrap_or(0.0) == 0.0 => {
+                Some("no_airspeed_sensor")
+            }
             Kind::AirspeedCal if !cx.params.has("ARSPD_AUTOCAL") => Some("not_applicable"),
             _ => None,
         }
@@ -345,7 +372,8 @@ impl Step for PlaneAir {
     fn begin(&mut self, cx: &mut Cx) {
         *self = PlaneAir::new(self.kind);
         self.core.body_variant = (cx.adapter.class == Class::Vtol).then_some("vtol");
-        self.core.wait_user(vec![Action::primary("start"), Action::danger("abort")]);
+        self.core
+            .wait_user(vec![Action::primary("start"), Action::danger("abort")]);
     }
 
     fn tick(&mut self, cx: &mut Cx) {
@@ -390,7 +418,8 @@ impl Step for PlaneAir {
                         self.climb.push(c);
                     }
                 }
-                self.core.progress = Some((stage as f32 + (el as f32 / TECS_PHASE_MS as f32).min(1.0)) / 3.0);
+                self.core.progress =
+                    Some((stage as f32 + (el as f32 / TECS_PHASE_MS as f32).min(1.0)) / 3.0);
                 // A sinking stage ends the moment it reaches the floor: waiting out the
                 // settle time there let an idle dive carry on toward the ground.
                 let low = stage > 0 && height(cx).is_some_and(|h| h < TECS_FLOOR_M);
@@ -419,7 +448,8 @@ impl Step for PlaneAir {
                         _ => {
                             if let Some(m) = m.filter(|m| *m < -0.5) {
                                 let v = (TECS_MARGIN * (-m) * 10.0).round() / 10.0;
-                                self.result.insert("sink_max_measured_mps".into(), json!(-m));
+                                self.result
+                                    .insert("sink_max_measured_mps".into(), json!(-m));
                                 self.result.insert("TECS_SINK_MAX".into(), json!(v));
                                 self.restore.retain(|(n, _)| n != "TECS_SINK_MAX");
                                 cx.params.set("TECS_SINK_MAX", v);

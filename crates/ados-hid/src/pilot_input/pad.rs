@@ -163,8 +163,8 @@ fn unit(a: AbsAxis) -> f32 {
     if a.max <= a.min {
         return 0.0;
     }
-    (((f64::from(a.value) - f64::from(a.min)) / (f64::from(a.max) - f64::from(a.min))).clamp(0.0, 1.0))
-        as f32
+    (((f64::from(a.value) - f64::from(a.min)) / (f64::from(a.max) - f64::from(a.min)))
+        .clamp(0.0, 1.0)) as f32
 }
 
 /// Radial deadzone with rescale: inside `dz` reads zero, the rim stays 1.

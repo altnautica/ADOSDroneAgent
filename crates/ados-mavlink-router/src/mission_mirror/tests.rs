@@ -132,7 +132,10 @@ fn active_download_retries_a_dropped_item() {
     l.heartbeat(2, 0, false);
     l.adv(200);
     let sent = l.take_sent();
-    assert!(matches!(sent.as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+    assert!(matches!(
+        sent.as_slice(),
+        [MavMessage::MISSION_REQUEST_LIST(_)]
+    ));
     l.fc(wire::MSG_MISSION_COUNT, &count_payload(3, US));
     assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_INT(r)] if r.seq == 0));
     l.fc(wire::MSG_MISSION_ITEM_INT, &item_payload(0, US, 16));
@@ -143,7 +146,10 @@ fn active_download_retries_a_dropped_item() {
     l.fc(wire::MSG_MISSION_ITEM_INT, &item_payload(1, US, 16));
     l.take_sent();
     l.fc(wire::MSG_MISSION_ITEM_INT, &item_payload(2, US, 16));
-    assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_ACK(_)]));
+    assert!(matches!(
+        l.take_sent().as_slice(),
+        [MavMessage::MISSION_ACK(_)]
+    ));
     assert_eq!(l.core.mirror.items.len(), 3);
     assert_eq!(l.core.downloads_ok, 1);
 }
@@ -156,7 +162,10 @@ fn a_download_that_never_answers_fails_and_backs_off() {
     l.take_sent();
     for _ in 0..3 {
         l.adv(1000);
-        assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+        assert!(matches!(
+            l.take_sent().as_slice(),
+            [MavMessage::MISSION_REQUEST_LIST(_)]
+        ));
     }
     l.adv(1000);
     assert_eq!(l.core.downloads_failed, 1);
@@ -164,7 +173,10 @@ fn a_download_that_never_answers_fails_and_backs_off() {
     l.adv(1000);
     assert!(l.take_sent().is_empty(), "inside the 2 s backoff");
     l.adv(1100);
-    assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+    assert!(matches!(
+        l.take_sent().as_slice(),
+        [MavMessage::MISSION_REQUEST_LIST(_)]
+    ));
 }
 
 #[test]
@@ -178,9 +190,15 @@ fn a_gcs_transfer_aborts_the_download_and_waits_for_quiet() {
     // A ground station starts its own download.
     l.client(wire::MSG_MISSION_REQUEST_LIST, &[FC.0, FC.1, 0]);
     l.adv(1500);
-    assert!(l.take_sent().is_empty(), "aborted, no retry while the GCS transfers");
+    assert!(
+        l.take_sent().is_empty(),
+        "aborted, no retry while the GCS transfers"
+    );
     l.adv(2000);
-    assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+    assert!(matches!(
+        l.take_sent().as_slice(),
+        [MavMessage::MISSION_REQUEST_LIST(_)]
+    ));
 }
 
 #[test]
@@ -321,7 +339,10 @@ fn total_mismatch_triggers_a_download() {
     l.take_sent();
     l.current(1, 7, 2);
     l.adv(200);
-    assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+    assert!(matches!(
+        l.take_sent().as_slice(),
+        [MavMessage::MISSION_REQUEST_LIST(_)]
+    ));
 }
 
 #[test]
@@ -337,7 +358,10 @@ fn an_upload_the_router_never_saw_is_fetched_without_total() {
     // Entering AUTO with nothing mirrored asks for the plan.
     l.heartbeat(2, 3, true);
     l.adv(200);
-    assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+    assert!(matches!(
+        l.take_sent().as_slice(),
+        [MavMessage::MISSION_REQUEST_LIST(_)]
+    ));
 }
 
 #[test]
@@ -347,7 +371,10 @@ fn a_seq_past_the_mirror_triggers_one_download() {
     l.take_sent();
     l.current(9, 0, 0);
     l.adv(200);
-    assert!(matches!(l.take_sent().as_slice(), [MavMessage::MISSION_REQUEST_LIST(_)]));
+    assert!(matches!(
+        l.take_sent().as_slice(),
+        [MavMessage::MISSION_REQUEST_LIST(_)]
+    ));
     // The same seq again does not ask twice.
     l.fc(wire::MSG_MISSION_COUNT, &count_payload(5, US));
     for seq in 0..5 {

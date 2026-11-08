@@ -46,14 +46,23 @@ pub fn ne_from_home(home: &Home, lat_e7: i32, lon_e7: i32) -> (f64, f64) {
 }
 
 /// A waypoint in local NED, and whether its height is approximate.
-pub fn waypoint_ned(home: &Home, lat_e7: i32, lon_e7: i32, alt_m: f64, frame: u8) -> ([f64; 3], bool) {
+pub fn waypoint_ned(
+    home: &Home,
+    lat_e7: i32,
+    lon_e7: i32,
+    alt_m: f64,
+    frame: u8,
+) -> ([f64; 3], bool) {
     let (dn, de) = ne_from_home(home, lat_e7, lon_e7);
     let alt_ref = AltRef::from_frame(frame);
     let d = match alt_ref {
         AltRef::Msl => home.ned[2] - (alt_m - home.alt_msl_m),
         AltRef::Relative | AltRef::Terrain => home.ned[2] - alt_m,
     };
-    ([home.ned[0] + dn, home.ned[1] + de, d], alt_ref == AltRef::Terrain)
+    (
+        [home.ned[0] + dn, home.ned[1] + de, d],
+        alt_ref == AltRef::Terrain,
+    )
 }
 
 #[cfg(test)]
@@ -61,7 +70,12 @@ mod tests {
     use super::*;
 
     fn home() -> Home {
-        Home { lat_e7: 470_000_000, lon_e7: 85_000_000, alt_msl_m: 400.0, ned: [2.0, -1.0, 0.5] }
+        Home {
+            lat_e7: 470_000_000,
+            lon_e7: 85_000_000,
+            alt_msl_m: 400.0,
+            ned: [2.0, -1.0, 0.5],
+        }
     }
 
     #[test]

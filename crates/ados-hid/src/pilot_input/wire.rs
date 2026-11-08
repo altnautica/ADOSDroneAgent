@@ -15,7 +15,10 @@ pub fn encode(msg: &Value) -> Result<Vec<u8>, PilotWireError> {
     rmp_serde::to_vec_named(msg).map_err(|e| PilotWireError::Encode(e.to_string()))
 }
 
-pub async fn write_msg<W: AsyncWriteExt + Unpin>(w: &mut W, msg: &Value) -> Result<(), PilotWireError> {
+pub async fn write_msg<W: AsyncWriteExt + Unpin>(
+    w: &mut W,
+    msg: &Value,
+) -> Result<(), PilotWireError> {
     ados_protocol::pilot::write_msg(w, &encode(msg)?).await
 }
 
@@ -27,7 +30,10 @@ pub async fn read_msg<R: AsyncReadExt + Unpin>(r: &mut R) -> Result<Option<Value
     };
     rmp_serde::from_slice(&body)
         .map(Some)
-        .map_err(|e| PilotWireError::Malformed { op: "?".into(), err: e.to_string() })
+        .map_err(|e| PilotWireError::Malformed {
+            op: "?".into(),
+            err: e.to_string(),
+        })
 }
 
 pub fn input(session: u32, seq: u32, t_ms: u64, axes: [f32; 4], buttons: u32) -> Value {
@@ -42,7 +48,11 @@ pub fn release(session: u32) -> Value {
 /// binding (PS during RTH) cancels to a hold, which is the pilot's `pause`;
 /// the pilot's own `rth_cancel` only cancels a low-battery countdown.
 pub fn action(binding_action: &str) -> Value {
-    let name = if binding_action == "rth_cancel" { "pause" } else { binding_action };
+    let name = if binding_action == "rth_cancel" {
+        "pause"
+    } else {
+        binding_action
+    };
     json!({"op":"action","name":name,"src":SRC})
 }
 

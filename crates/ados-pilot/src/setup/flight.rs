@@ -44,7 +44,13 @@ pub struct Hop {
 
 impl Default for Hop {
     fn default() -> Self {
-        Hop { leg: Leg::Idle, leg_ms: 0, sent_ms: 0, alt_m: 0.0, hold: None }
+        Hop {
+            leg: Leg::Idle,
+            leg_ms: 0,
+            sent_ms: 0,
+            alt_m: 0.0,
+            hold: None,
+        }
     }
 }
 
@@ -84,7 +90,11 @@ impl Hop {
         self.hold = None;
         self.leg_ms = cx.now;
         self.sent_ms = 0;
-        self.leg = if airborne(cx) { Leg::Holding } else { Leg::Arming };
+        self.leg = if airborne(cx) {
+            Leg::Holding
+        } else {
+            Leg::Arming
+        };
         if self.leg == Leg::Holding {
             self.capture_hold(cx);
         }
@@ -184,7 +194,9 @@ impl Hop {
                     self.leg = Leg::Failed("disarmed");
                     return;
                 }
-                if (cx.adapter.copter_like() || cx.adapter.fw == Fw::Px4) && cx.now.saturating_sub(self.sent_ms) >= HOLD_MS {
+                if (cx.adapter.copter_like() || cx.adapter.fw == Fw::Px4)
+                    && cx.now.saturating_sub(self.sent_ms) >= HOLD_MS
+                {
                     self.sent_ms = cx.now;
                     if let Some((p, yaw)) = self.hold {
                         cx.out.hold_position(p[0], p[1], p[2], yaw);
@@ -266,12 +278,26 @@ fn reposition(cx: &mut Cx, (lat, lon): (i32, i32), alt_m: f32) {
 
 /// Fixed-wing GUIDED: new target height (m, relative) at `rate` m/s (0 = FC default).
 pub fn change_alt(cx: &mut Cx, alt_m: f32, rate: f32) {
-    cx.out.cmd_int(MavCmd::MAV_CMD_GUIDED_CHANGE_ALTITUDE, MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT, [0.0, 0.0, rate, 0.0], 0, 0, alt_m);
+    cx.out.cmd_int(
+        MavCmd::MAV_CMD_GUIDED_CHANGE_ALTITUDE,
+        MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,
+        [0.0, 0.0, rate, 0.0],
+        0,
+        0,
+        alt_m,
+    );
 }
 
 /// Fixed-wing GUIDED: new target airspeed (m/s).
 pub fn change_speed(cx: &mut Cx, airspeed: f32) {
-    cx.out.cmd_int(MavCmd::MAV_CMD_GUIDED_CHANGE_SPEED, MavFrame::MAV_FRAME_GLOBAL, [0.0, airspeed, 0.0, 0.0], 0, 0, 0.0);
+    cx.out.cmd_int(
+        MavCmd::MAV_CMD_GUIDED_CHANGE_SPEED,
+        MavFrame::MAV_FRAME_GLOBAL,
+        [0.0, airspeed, 0.0, 0.0],
+        0,
+        0,
+        0.0,
+    );
 }
 
 /// VTOL transitions by mode switch: ArduPlane refuses
@@ -292,11 +318,17 @@ const TRANSITION_TIMEOUT_MS: u64 = 40_000;
 impl Transition {
     pub fn to_fw(cx: &mut Cx) -> Self {
         cx.params.set("Q_GUIDED_MODE", 0.0);
-        Transition::ToFw { since: cx.now, sent: 0 }
+        Transition::ToFw {
+            since: cx.now,
+            sent: 0,
+        }
     }
 
     pub fn to_mc(cx: &mut Cx) -> Self {
-        Transition::ToMc { since: cx.now, sent: 0 }
+        Transition::ToMc {
+            since: cx.now,
+            sent: 0,
+        }
     }
 
     pub fn tick(&mut self, cx: &mut Cx) {
@@ -308,7 +340,10 @@ impl Transition {
                     *self = Transition::Failed;
                 } else if cx.params.idle() && cx.now.saturating_sub(sent) > 3000 {
                     plane_loiter(cx, PLANE_LOITER_ALT_M);
-                    *self = Transition::ToFw { since, sent: cx.now };
+                    *self = Transition::ToFw {
+                        since,
+                        sent: cx.now,
+                    };
                 }
             }
             Transition::ToMc { since, sent } => {
@@ -319,7 +354,10 @@ impl Transition {
                     *self = Transition::Failed;
                 } else if cx.now.saturating_sub(sent) > 3000 {
                     set_mode(cx, Mode::Qloiter);
-                    *self = Transition::ToMc { since, sent: cx.now };
+                    *self = Transition::ToMc {
+                        since,
+                        sent: cx.now,
+                    };
                 }
             }
             _ => {}

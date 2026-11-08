@@ -1,6 +1,6 @@
 //! The inert default host.
 
-use super::HostServices;
+use super::{FlightServices, HostServices};
 
 /// The default host: every host-coupled method returns `not_implemented`.
 ///
@@ -11,4 +11,5 @@ use super::HostServices;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopHost;
 
+impl FlightServices for NoopHost {}
 impl HostServices for NoopHost {}

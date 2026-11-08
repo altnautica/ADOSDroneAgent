@@ -146,9 +146,10 @@ pub fn fit(pairs: &[(f32, f32)], norm: &Normaliser) -> Option<ScaleShift> {
         .iter()
         .zip(&errors)
         .filter(|(_, e)| **e <= MAX_MEDIAN_REL_ERROR)
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), ((x, _), _)| {
-            (lo.min(*x), hi.max(*x))
-        });
+        .fold(
+            (f32::INFINITY, f32::NEG_INFINITY),
+            |(lo, hi), ((x, _), _)| (lo.min(*x), hi.max(*x)),
+        );
     let err = median(&mut errors)?;
     (err <= MAX_MEDIAN_REL_ERROR && hi - lo >= MIN_SUPPORT).then_some(fitted)
 }

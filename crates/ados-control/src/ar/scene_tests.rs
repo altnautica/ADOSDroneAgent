@@ -7,7 +7,12 @@ use super::*;
 use crate::ar::geo::Home;
 use crate::ar::project::Pose;
 
-const HOME: Home = Home { lat_e7: 470_000_000, lon_e7: 85_000_000, alt_msl_m: 400.0, ned: [0.0, 0.0, 0.0] };
+const HOME: Home = Home {
+    lat_e7: 470_000_000,
+    lon_e7: 85_000_000,
+    alt_msl_m: 400.0,
+    ned: [0.0, 0.0, 0.0],
+};
 
 /// `n` metres north of home, `alt` above home.
 fn wp(seq: u16, n: f64, alt: f64, frame: u8) -> MissionItem {
@@ -21,14 +26,24 @@ fn wp(seq: u16, n: f64, alt: f64, frame: u8) -> MissionItem {
 }
 
 fn mission(state: &str, seq: u16, items: Vec<MissionItem>) -> MissionIn {
-    MissionIn { state: state.into(), seq: Some(seq), items, wire: json!({"state": state, "seq": seq}) }
+    MissionIn {
+        state: state.into(),
+        seq: Some(seq),
+        items,
+        wire: json!({"state": state, "seq": seq}),
+    }
 }
 
 /// Hovering 10 m up at home, nose north.
 fn scene(m: MissionIn) -> SceneIn {
     SceneIn {
         ts_ms: 1,
-        pose: Some(Pose { ned: [0.0, 0.0, -10.0], roll: 0.0, pitch: 0.0, yaw: 0.0 }),
+        pose: Some(Pose {
+            ned: [0.0, 0.0, -10.0],
+            roll: 0.0,
+            pitch: 0.0,
+            yaw: 0.0,
+        }),
         armed: true,
         owner: Some("mission_fc".into()),
         home: Some(HOME),
@@ -47,22 +62,41 @@ fn main_cam() -> Vec<CameraIn> {
 }
 
 fn demand(layers: &[&str]) -> BTreeMap<String, BTreeSet<String>> {
-    BTreeMap::from([("main".to_owned(), layers.iter().map(|s| s.to_string()).collect())])
+    BTreeMap::from([(
+        "main".to_owned(),
+        layers.iter().map(|s| s.to_string()).collect(),
+    )])
 }
 
 fn items(frame: &Value) -> Vec<Value> {
-    frame["cameras"]["main"]["items"].as_array().cloned().unwrap_or_default()
+    frame["cameras"]["main"]["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn route() -> Vec<MissionItem> {
-    vec![wp(1, 40.0, 10.0, 3), wp(2, 80.0, 10.0, 3), wp(3, 120.0, 10.0, 3), wp(4, 160.0, 10.0, 3)]
+    vec![
+        wp(1, 40.0, 10.0, 3),
+        wp(2, 80.0, 10.0, 3),
+        wp(3, 120.0, 10.0, 3),
+        wp(4, 160.0, 10.0, 3),
+    ]
 }
 
 #[test]
 fn next_and_after_roles_follow_the_current_seq() {
-    let f = build(&scene(mission("active", 2, route())), &main_cam(), &demand(&["ar_route"]));
+    let f = build(
+        &scene(mission("active", 2, route())),
+        &main_cam(),
+        &demand(&["ar_route"]),
+    );
     let wps: Vec<_> = items(&f).into_iter().filter(|i| i["t"] == "wp").collect();
-    let role = |seq: u64| wps.iter().find(|i| i["seq"] == seq).map(|i| i["role"].clone());
+    let role = |seq: u64| {
+        wps.iter()
+            .find(|i| i["seq"] == seq)
+            .map(|i| i["role"].clone())
+    };
     assert_eq!(role(2), Some(json!("next")));
     assert_eq!(role(3), Some(json!("after")));
     assert_eq!(role(4), Some(json!("other")));
@@ -72,12 +106,22 @@ fn next_and_after_roles_follow_the_current_seq() {
 
 #[test]
 fn active_mission_draws_the_active_leg_others_are_future() {
-    let f = build(&scene(mission("active", 2, route())), &main_cam(), &demand(&["ar_route"]));
+    let f = build(
+        &scene(mission("active", 2, route())),
+        &main_cam(),
+        &demand(&["ar_route"]),
+    );
     let legs: Vec<_> = items(&f).into_iter().filter(|i| i["t"] == "leg").collect();
-    assert!(legs.iter().any(|l| l["role"] == "active" && l["k"] == "leg:active"));
+    assert!(legs
+        .iter()
+        .any(|l| l["role"] == "active" && l["k"] == "leg:active"));
     assert!(legs.iter().any(|l| l["role"] == "next"));
 
-    let f = build(&scene(mission("paused", 2, route())), &main_cam(), &demand(&["ar_route"]));
+    let f = build(
+        &scene(mission("paused", 2, route())),
+        &main_cam(),
+        &demand(&["ar_route"]),
+    );
     let legs: Vec<_> = items(&f).into_iter().filter(|i| i["t"] == "leg").collect();
     assert!(!legs.is_empty());
     assert!(legs.iter().all(|l| l["role"] == "future"), "{legs:?}");
@@ -86,8 +130,15 @@ fn active_mission_draws_the_active_leg_others_are_future() {
 #[test]
 fn returning_and_complete_hide_the_route_loaded_previews_on_the_ground() {
     for state in ["returning", "complete", "none"] {
-        let f = build(&scene(mission(state, 2, route())), &main_cam(), &demand(&["ar_route"]));
-        assert!(items(&f).iter().all(|i| i["t"] != "wp" && i["t"] != "leg"), "{state}");
+        let f = build(
+            &scene(mission(state, 2, route())),
+            &main_cam(),
+            &demand(&["ar_route"]),
+        );
+        assert!(
+            items(&f).iter().all(|i| i["t"] != "wp" && i["t"] != "leg"),
+            "{state}"
+        );
     }
     let mut s = scene(mission("loaded", 1, route()));
     s.armed = false;
@@ -103,25 +154,43 @@ fn returning_and_complete_hide_the_route_loaded_previews_on_the_ground() {
 fn a_next_waypoint_behind_the_camera_is_an_edge_and_home_too() {
     // Next waypoint 40 m south, behind a north-facing camera; home is below.
     let f = build(
-        &scene(mission("active", 1, vec![wp(1, -40.0, 10.0, 3), wp(2, 80.0, 10.0, 3)])),
+        &scene(mission(
+            "active",
+            1,
+            vec![wp(1, -40.0, 10.0, 3), wp(2, 80.0, 10.0, 3)],
+        )),
         &main_cam(),
         &demand(&["ar_route"]),
     );
     let it = items(&f);
-    let edge = it.iter().find(|i| i["t"] == "edge" && i["of"] == "wp").expect("edge for next");
+    let edge = it
+        .iter()
+        .find(|i| i["t"] == "edge" && i["of"] == "wp")
+        .expect("edge for next");
     assert_eq!(edge["seq"], 1);
     assert_eq!(edge["k"], "edge:wp:1");
     assert!(it.iter().all(|i| !(i["t"] == "wp" && i["seq"] == 1)));
-    let home = it.iter().find(|i| i["k"] == "edge:home").expect("home is under the drone");
+    let home = it
+        .iter()
+        .find(|i| i["k"] == "edge:home")
+        .expect("home is under the drone");
     assert_eq!(home["of"], "home");
 }
 
 #[test]
 fn terrain_frame_marks_the_frame_approximate() {
-    let f = build(&scene(mission("active", 1, route())), &main_cam(), &demand(&["ar_route"]));
+    let f = build(
+        &scene(mission("active", 1, route())),
+        &main_cam(),
+        &demand(&["ar_route"]),
+    );
     assert_eq!(f["approx"], false);
     let f = build(
-        &scene(mission("active", 1, vec![wp(1, 40.0, 10.0, 10), wp(2, 80.0, 10.0, 3)])),
+        &scene(mission(
+            "active",
+            1,
+            vec![wp(1, 40.0, 10.0, 10), wp(2, 80.0, 10.0, 3)],
+        )),
         &main_cam(),
         &demand(&["ar_route"]),
     );
@@ -151,14 +220,21 @@ fn motion_items_fpv_fpath_fgoal_orbit() {
         goal: Some([20.0, 0.0, -10.0]),
         setpoint_d: Some(-10.0),
         avoid_state: "detour".into(),
-        orbit: Some(Orbit { center_ne: [30.0, 0.0], radius_m: 8.0, cw: true }),
+        orbit: Some(Orbit {
+            center_ne: [30.0, 0.0],
+            radius_m: 8.0,
+            cw: true,
+        }),
     });
     let f = build(&s, &main_cam(), &demand(&["ar_motion"]));
     let it = items(&f);
     for t in ["fpv", "fpath", "fgoal", "orbit"] {
         assert!(it.iter().any(|i| i["t"] == t && i["k"] == t), "{t}: {it:?}");
     }
-    assert_eq!(it.iter().find(|i| i["t"] == "fpath").unwrap()["state"], "detour");
+    assert_eq!(
+        it.iter().find(|i| i["t"] == "fpath").unwrap()["state"],
+        "detour"
+    );
     assert_eq!(it.iter().find(|i| i["t"] == "orbit").unwrap()["dir"], "cw");
 }
 
@@ -177,10 +253,16 @@ fn same_scene_tolerates_jitter_not_changes() {
     let a = build(&s, &main_cam(), &demand(&["ar_route"]));
     let mut s2 = s.clone();
     s2.ts_ms = 99;
-    s2.pose = Some(Pose { ned: [0.001, 0.0, -10.0], ..s.pose.unwrap() });
+    s2.pose = Some(Pose {
+        ned: [0.001, 0.0, -10.0],
+        ..s.pose.unwrap()
+    });
     let b = build(&s2, &main_cam(), &demand(&["ar_route"]));
     assert!(same_scene(&a, &b, 0.002));
-    s2.pose = Some(Pose { yaw: 0.2, ..s.pose.unwrap() });
+    s2.pose = Some(Pose {
+        yaw: 0.2,
+        ..s.pose.unwrap()
+    });
     let c = build(&s2, &main_cam(), &demand(&["ar_route"]));
     assert!(!same_scene(&a, &c, 0.002));
 }
@@ -210,14 +292,60 @@ struct ArCamera {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase", deny_unknown_fields)]
 enum ArItem {
-    Wp { k: String, seq: u16, role: String, x: f64, y: f64, gx: Option<f64>, gy: Option<f64>, dist_m: f64, eta_s: Option<f64>, size: f64 },
-    Leg { k: String, role: String, pts: Vec<[f64; 2]> },
-    Home { k: String, x: f64, y: f64, gx: Option<f64>, gy: Option<f64>, dist_m: f64 },
-    Fpv { k: String, x: f64, y: f64 },
-    Fpath { k: String, state: String, pts: Vec<[f64; 2]> },
-    Fgoal { k: String, x: f64, y: f64 },
-    Orbit { k: String, dir: String, cx: Option<f64>, cy: Option<f64>, pts: Vec<[f64; 2]> },
-    Edge { k: String, of: String, seq: Option<u16>, ang: f64, dist_m: f64 },
+    Wp {
+        k: String,
+        seq: u16,
+        role: String,
+        x: f64,
+        y: f64,
+        gx: Option<f64>,
+        gy: Option<f64>,
+        dist_m: f64,
+        eta_s: Option<f64>,
+        size: f64,
+    },
+    Leg {
+        k: String,
+        role: String,
+        pts: Vec<[f64; 2]>,
+    },
+    Home {
+        k: String,
+        x: f64,
+        y: f64,
+        gx: Option<f64>,
+        gy: Option<f64>,
+        dist_m: f64,
+    },
+    Fpv {
+        k: String,
+        x: f64,
+        y: f64,
+    },
+    Fpath {
+        k: String,
+        state: String,
+        pts: Vec<[f64; 2]>,
+    },
+    Fgoal {
+        k: String,
+        x: f64,
+        y: f64,
+    },
+    Orbit {
+        k: String,
+        dir: String,
+        cx: Option<f64>,
+        cy: Option<f64>,
+        pts: Vec<[f64; 2]>,
+    },
+    Edge {
+        k: String,
+        of: String,
+        seq: Option<u16>,
+        ang: f64,
+        dist_m: f64,
+    },
 }
 
 const GOLDEN: &str = include_str!("../../tests/fixtures/ar-frame.json");
@@ -230,9 +358,16 @@ fn the_golden_frame_round_trips() {
     let kinds: BTreeSet<_> = typed.cameras["main"]
         .items
         .iter()
-        .map(|i| serde_json::to_value(i).unwrap()["t"].as_str().unwrap().to_owned())
+        .map(|i| {
+            serde_json::to_value(i).unwrap()["t"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
         .collect();
-    for t in ["wp", "leg", "home", "fpv", "fpath", "fgoal", "orbit", "edge"] {
+    for t in [
+        "wp", "leg", "home", "fpv", "fpath", "fgoal", "orbit", "edge",
+    ] {
         assert!(kinds.contains(t), "golden frame lacks {t}");
     }
 }
@@ -247,7 +382,11 @@ fn a_built_frame_parses_as_the_golden_schema() {
         goal: Some([20.0, 0.0, -10.0]),
         setpoint_d: None,
         avoid_state: "clear".into(),
-        orbit: Some(Orbit { center_ne: [30.0, 0.0], radius_m: 8.0, cw: false }),
+        orbit: Some(Orbit {
+            center_ne: [30.0, 0.0],
+            radius_m: 8.0,
+            cw: false,
+        }),
     });
     let f = build(&s, &main_cam(), &demand(&["ar_route", "ar_motion"]));
     let typed: ArFrame = serde_json::from_value(f).unwrap();

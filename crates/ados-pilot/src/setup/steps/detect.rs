@@ -47,14 +47,35 @@ impl Step for Detect {
         if ready {
             self.core.done(obj([
                 ("firmware", Value::from(cx.adapter.fw.as_str())),
-                ("firmware_version", cx.fc.version_string().map(Value::from).unwrap_or(Value::Null)),
+                (
+                    "firmware_version",
+                    cx.fc
+                        .version_string()
+                        .map(Value::from)
+                        .unwrap_or(Value::Null),
+                ),
                 ("vehicle_class", Value::from(cx.adapter.class.as_str())),
-                ("uid", cx.fc.identity().map(|(u, _)| Value::from(u)).unwrap_or(Value::Null)),
-                ("uid_source", cx.fc.identity().map(|(_, s)| serde_json::json!(s)).unwrap_or(Value::Null)),
+                (
+                    "uid",
+                    cx.fc
+                        .identity()
+                        .map(|(u, _)| Value::from(u))
+                        .unwrap_or(Value::Null),
+                ),
+                (
+                    "uid_source",
+                    cx.fc
+                        .identity()
+                        .map(|(_, s)| serde_json::json!(s))
+                        .unwrap_or(Value::Null),
+                ),
                 ("params", Value::from(cx.params.count())),
                 (
                     "mission_state_inferred",
-                    Value::from(cx.adapter.fw == Fw::ArduPilot && cx.fc.version().is_some_and(|v| v < (4, 5))),
+                    Value::from(
+                        cx.adapter.fw == Fw::ArduPilot
+                            && cx.fc.version().is_some_and(|v| v < (4, 5)),
+                    ),
                 ),
             ]));
         } else if cx.now.saturating_sub(self.started_ms) > TIMEOUT_MS {
@@ -62,7 +83,12 @@ impl Step for Detect {
         }
     }
 
-    fn action(&mut self, _id: &str, _args: &Map<String, Value>, _cx: &mut Cx) -> Result<(), ActErr> {
+    fn action(
+        &mut self,
+        _id: &str,
+        _args: &Map<String, Value>,
+        _cx: &mut Cx,
+    ) -> Result<(), ActErr> {
         Err("unknown_action")
     }
 }

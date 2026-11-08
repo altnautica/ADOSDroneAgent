@@ -429,6 +429,23 @@
     },
     {
       "api_restartable": true,
+      "category": "core",
+      "condition_paths": [
+        "/opt/ados/bin/ados-pilot"
+      ],
+      "description": "ADOS Pilot (on-board command authority)",
+      "drops_link": false,
+      "install": "none",
+      "memory_max": "80M",
+      "name": "ados-pilot",
+      "profiles": [
+        "drone"
+      ],
+      "roles": [],
+      "start_on_install": false
+    },
+    {
+      "api_restartable": true,
       "category": null,
       "condition_paths": [
         "/opt/ados/bin/ados-plugin-host"

@@ -39,7 +39,10 @@ pub struct SetupService {
 }
 
 fn epoch_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Start the engine task on the daemon's FC link and return the `setup.*`
@@ -138,7 +141,11 @@ async fn apply(inner: &Arc<Inner>, handle: &PilotHandle, eff: Effect) {
         Effect::EnterTuning => {
             let ok = handle.enter_tuning().await;
             let now = inner.now();
-            inner.engine.lock().expect("engine lock").tuning_result(ok, now);
+            inner
+                .engine
+                .lock()
+                .expect("engine lock")
+                .tuning_result(ok, now);
             if !ok {
                 tracing::warn!("fc_setup_tuning_refused");
             }
@@ -166,12 +173,21 @@ impl SetupHandler for SetupService {
         let inner = self.inner.clone();
         Box::pin(async move {
             if op == "setup.subscribe" {
-                inner.subscribers.lock().expect("subscribers lock").push(sink);
+                inner
+                    .subscribers
+                    .lock()
+                    .expect("subscribers lock")
+                    .push(sink);
                 return rmpv::Value::Map(vec![(rmpv::Value::from("ok"), rmpv::Value::from(true))]);
             }
-            let json: serde_json::Value = rmpv::ext::from_value(body).unwrap_or(serde_json::Value::Null);
+            let json: serde_json::Value =
+                rmpv::ext::from_value(body).unwrap_or(serde_json::Value::Null);
             let now = inner.now();
-            let reply = inner.engine.lock().expect("engine lock").request(&op, &json, now);
+            let reply = inner
+                .engine
+                .lock()
+                .expect("engine lock")
+                .request(&op, &json, now);
             rmpv::ext::to_value(&reply).unwrap_or(rmpv::Value::Nil)
         })
     }

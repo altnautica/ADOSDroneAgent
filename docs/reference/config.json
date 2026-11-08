@@ -566,6 +566,30 @@
       "type": "integer|null"
     },
     {
+      "default": "ados",
+      "description": "Mode",
+      "enum": [
+        "ados",
+        "fc_manual",
+        "elrs"
+      ],
+      "key": "control.mode",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 0,
+      "description": "Rc Ados Position",
+      "enum": null,
+      "key": "control.rc_ados_position",
+      "maximum": 6,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
       "default": true,
       "description": "Mdns Enabled",
       "enum": null,
@@ -2020,6 +2044,111 @@
       "description": "State Path",
       "enum": null,
       "key": "pairing.state_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "brake",
+      "description": "Avoid",
+      "enum": [
+        "brake",
+        "bypass",
+        "off"
+      ],
+      "key": "pilot.avoid",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "agl",
+      "description": "Height Ref",
+      "enum": [
+        "agl",
+        "ekf"
+      ],
+      "key": "pilot.height_ref",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": "rth",
+      "description": "Link Loss Action",
+      "enum": [
+        "rth",
+        "hold",
+        "land"
+      ],
+      "key": "pilot.link_loss_action",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": 10,
+      "description": "Link Loss S",
+      "enum": null,
+      "key": "pilot.link_loss_s",
+      "maximum": 120,
+      "minimum": 3,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 120.0,
+      "description": "Max Alt Agl M",
+      "enum": null,
+      "key": "pilot.max_alt_agl_m",
+      "maximum": 500.0,
+      "minimum": 5.0,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 500.0,
+      "description": "Max Dist M",
+      "enum": null,
+      "key": "pilot.max_dist_m",
+      "maximum": 10000.0,
+      "minimum": 20.0,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 30.0,
+      "description": "Min Agl Fw M",
+      "enum": null,
+      "key": "pilot.min_agl_fw_m",
+      "maximum": 300.0,
+      "minimum": 10.0,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": 1.5,
+      "description": "Obstacle Margin M",
+      "enum": null,
+      "key": "pilot.obstacle_margin_m",
+      "maximum": 5.0,
+      "minimum": 0.5,
+      "secret": false,
+      "type": "number"
+    },
+    {
+      "default": "normal",
+      "description": "Profile",
+      "enum": [
+        "cine",
+        "normal",
+        "sport"
+      ],
+      "key": "pilot.profile",
       "maximum": null,
       "minimum": null,
       "secret": false,
@@ -3976,6 +4105,76 @@
       "description": "Decode Threads",
       "enum": null,
       "key": "vision.decode_threads",
+      "maximum": 4294967295,
+      "minimum": 1,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": true,
+      "description": "Enabled",
+      "enum": null,
+      "key": "vision.depth.enabled",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "boolean"
+    },
+    {
+      "default": 256,
+      "description": "Input Height",
+      "enum": null,
+      "key": "vision.depth.input_height",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": 256,
+      "description": "Input Width",
+      "enum": null,
+      "key": "vision.depth.input_width",
+      "maximum": 4294967295,
+      "minimum": 0,
+      "secret": false,
+      "type": "integer"
+    },
+    {
+      "default": "depth_midas_v21_small",
+      "description": "Model Id",
+      "enum": null,
+      "key": "vision.depth.model_id",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string"
+    },
+    {
+      "default": null,
+      "description": "Model Path",
+      "enum": null,
+      "key": "vision.depth.model_path",
+      "maximum": null,
+      "minimum": null,
+      "secret": false,
+      "type": "string|null"
+    },
+    {
+      "default": null,
+      "description": "Rate Hz",
+      "enum": null,
+      "key": "vision.depth.rate_hz",
+      "maximum": null,
+      "minimum": 0,
+      "secret": false,
+      "type": "number|null"
+    },
+    {
+      "default": 2,
+      "description": "Threads",
+      "enum": null,
+      "key": "vision.depth.threads",
       "maximum": 4294967295,
       "minimum": 1,
       "secret": false,

@@ -4,7 +4,8 @@
 use std::collections::{HashMap, VecDeque};
 
 use ados_protocol::mavlink::ardupilotmega::{
-    MavAutopilot, MavLandedState, MavMessage, MavModeFlag, MavResult, MavSysStatusSensor, MavType, MavVtolState,
+    MavAutopilot, MavLandedState, MavMessage, MavModeFlag, MavResult, MavSysStatusSensor, MavType,
+    MavVtolState,
 };
 use ados_protocol::mavlink::MavHeader;
 use serde::{Deserialize, Serialize};
@@ -131,7 +132,12 @@ impl FcState {
     /// `"4.5.7"` from AUTOPILOT_VERSION's packed `flight_sw_version`.
     pub fn version_string(&self) -> Option<String> {
         let v = self.flight_sw_version?;
-        Some(format!("{}.{}.{}", (v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff))
+        Some(format!(
+            "{}.{}.{}",
+            (v >> 24) & 0xff,
+            (v >> 16) & 0xff,
+            (v >> 8) & 0xff
+        ))
     }
 
     /// `(major, minor)` of the firmware.
@@ -172,7 +178,8 @@ impl FcState {
     }
 
     pub fn link_alive(&self, now_ms: u64) -> bool {
-        self.heartbeat_ms.is_some_and(|t| now_ms.saturating_sub(t) < 3000)
+        self.heartbeat_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) < 3000)
     }
 
     /// An RC or ELRS lane is feeding the FC: RC_CHANNELS with at least four
@@ -190,26 +197,40 @@ impl FcState {
 
     pub fn rc_channel(&self, ch: usize) -> Option<u16> {
         let (v, _) = self.rc.as_ref()?;
-        v.get(ch.checked_sub(1)?).copied().filter(|p| *p != 0 && *p != u16::MAX)
+        v.get(ch.checked_sub(1)?)
+            .copied()
+            .filter(|p| *p != 0 && *p != u16::MAX)
     }
 
     pub fn esc_telemetry(&self, now_ms: u64) -> bool {
-        self.esc_telemetry_ms.is_some_and(|t| now_ms.saturating_sub(t) < 5000)
+        self.esc_telemetry_ms
+            .is_some_and(|t| now_ms.saturating_sub(t) < 5000)
     }
 
     /// The ACK for `cmd` that arrived at or after `since_ms`.
     pub fn ack_since(&self, cmd: u32, since_ms: u64) -> Option<MavResult> {
-        self.acks.get(&cmd).filter(|(_, t)| *t >= since_ms).map(|(r, _)| *r)
+        self.acks
+            .get(&cmd)
+            .filter(|(_, t)| *t >= since_ms)
+            .map(|(r, _)| *r)
     }
 
     /// STATUSTEXTs received at or after `since_ms`, oldest first.
     pub fn texts_since(&self, since_ms: u64) -> impl Iterator<Item = &str> {
-        self.texts.iter().filter(move |(_, t, _)| *t >= since_ms).map(|(_, _, s)| s.as_str())
+        self.texts
+            .iter()
+            .filter(move |(_, t, _)| *t >= since_ms)
+            .map(|(_, _, s)| s.as_str())
     }
 
     /// Texts with a sequence above `cursor`; returns them and the new cursor.
     pub fn texts_after(&self, cursor: u64) -> (Vec<String>, u64) {
-        let v: Vec<String> = self.texts.iter().filter(|(s, _, _)| *s > cursor).map(|(_, _, t)| t.clone()).collect();
+        let v: Vec<String> = self
+            .texts
+            .iter()
+            .filter(|(s, _, _)| *s > cursor)
+            .map(|(_, _, t)| t.clone())
+            .collect();
         (v, self.text_seq.max(cursor))
     }
 
@@ -227,7 +248,9 @@ impl FcState {
                 // Only the autopilot's own heartbeat (not a GCS, camera, ...).
                 if matches!(
                     h.mavtype,
-                    MavType::MAV_TYPE_GCS | MavType::MAV_TYPE_ONBOARD_CONTROLLER | MavType::MAV_TYPE_CAMERA
+                    MavType::MAV_TYPE_GCS
+                        | MavType::MAV_TYPE_ONBOARD_CONTROLLER
+                        | MavType::MAV_TYPE_CAMERA
                 ) || h.autopilot == MavAutopilot::MAV_AUTOPILOT_INVALID
                 {
                     return;
@@ -238,7 +261,9 @@ impl FcState {
                 self.autopilot = Some(h.autopilot);
                 self.mav_type = Some(h.mavtype);
                 self.custom_mode = h.custom_mode;
-                self.armed = h.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
+                self.armed = h
+                    .base_mode
+                    .contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
             }
             MavMessage::AUTOPILOT_VERSION(v) => {
                 self.uid = Some(v.uid);
@@ -250,8 +275,16 @@ impl FcState {
             }
             MavMessage::ATTITUDE(a) => {
                 self.attitude = Some(([a.roll, a.pitch, a.yaw], now_ms));
-                self.rates.push_back(RateSample { t_ms: now_ms, roll: a.rollspeed, pitch: a.pitchspeed });
-                while self.rates.front().is_some_and(|s| now_ms.saturating_sub(s.t_ms) > 4000) {
+                self.rates.push_back(RateSample {
+                    t_ms: now_ms,
+                    roll: a.rollspeed,
+                    pitch: a.pitchspeed,
+                });
+                while self
+                    .rates
+                    .front()
+                    .is_some_and(|s| now_ms.saturating_sub(s.t_ms) > 4000)
+                {
                     self.rates.pop_front();
                 }
             }
@@ -263,9 +296,12 @@ impl FcState {
             }
             MavMessage::NAV_CONTROLLER_OUTPUT(n) => {
                 // Only when no ATTITUDE_TARGET stream is fresh.
-                let fresh = self.att_target.is_some_and(|(_, t)| now_ms.saturating_sub(t) < 300);
+                let fresh = self
+                    .att_target
+                    .is_some_and(|(_, t)| now_ms.saturating_sub(t) < 300);
                 if !fresh {
-                    self.att_target = Some(([n.nav_roll.to_radians(), n.nav_pitch.to_radians()], now_ms));
+                    self.att_target =
+                        Some(([n.nav_roll.to_radians(), n.nav_pitch.to_radians()], now_ms));
                 }
             }
             MavMessage::VIBRATION(v) => {
@@ -307,9 +343,24 @@ impl FcState {
             }
             MavMessage::RC_CHANNELS(r) => {
                 let all = [
-                    r.chan1_raw, r.chan2_raw, r.chan3_raw, r.chan4_raw, r.chan5_raw, r.chan6_raw,
-                    r.chan7_raw, r.chan8_raw, r.chan9_raw, r.chan10_raw, r.chan11_raw, r.chan12_raw,
-                    r.chan13_raw, r.chan14_raw, r.chan15_raw, r.chan16_raw, r.chan17_raw, r.chan18_raw,
+                    r.chan1_raw,
+                    r.chan2_raw,
+                    r.chan3_raw,
+                    r.chan4_raw,
+                    r.chan5_raw,
+                    r.chan6_raw,
+                    r.chan7_raw,
+                    r.chan8_raw,
+                    r.chan9_raw,
+                    r.chan10_raw,
+                    r.chan11_raw,
+                    r.chan12_raw,
+                    r.chan13_raw,
+                    r.chan14_raw,
+                    r.chan15_raw,
+                    r.chan16_raw,
+                    r.chan17_raw,
+                    r.chan18_raw,
                 ];
                 let n = (r.chancount as usize).min(all.len());
                 self.rc = Some((all[..n].to_vec(), now_ms));
@@ -323,7 +374,12 @@ impl FcState {
                 self.acks.insert(a.command as u32, (a.result, now_ms));
             }
             MavMessage::STATUSTEXT(s) => {
-                let text = s.text.to_str().unwrap_or("").trim_end_matches('\0').to_string();
+                let text = s
+                    .text
+                    .to_str()
+                    .unwrap_or("")
+                    .trim_end_matches('\0')
+                    .to_string();
                 self.text_seq += 1;
                 self.texts.push_back((self.text_seq, now_ms, text));
                 while self.texts.len() > TEXT_RING {

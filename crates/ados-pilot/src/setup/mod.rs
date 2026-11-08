@@ -40,7 +40,8 @@ use fcstate::{Class, FcState, Fw, IdSource};
 use out::{Effect, Outbox};
 use params::ParamStore;
 use schema::{
-    Action, Report, Running, SetupView, StepState, StepView, StreamFrame, WizardId, WizardState, WizardView,
+    Action, Report, Running, SetupView, StepState, StepView, StreamFrame, WizardId, WizardState,
+    WizardView,
 };
 use step::{Cx, PilotInputs, Step, WizardData};
 use store::{iso_utc, AircraftState, Store};
@@ -155,7 +156,10 @@ impl Engine {
             inputs: PilotInputs::default(),
             uid: None,
             uid_source: None,
-            state: AircraftState { v: 1, ..Default::default() },
+            state: AircraftState {
+                v: 1,
+                ..Default::default()
+            },
             snapshot_body: None,
             run: None,
             tuning: Tuning::None,
@@ -198,18 +202,36 @@ impl Engine {
     // ---------------------------------------------------------------- FC in
 
     pub fn on_fc(&mut self, sysid: u8, compid: u8, msg: &MavMessage, now: u64) {
-        let header = MavHeader { system_id: sysid, component_id: compid, sequence: 0 };
+        let header = MavHeader {
+            system_id: sysid,
+            component_id: compid,
+            sequence: 0,
+        };
         let was_linked = self.fc.heartbeat_ms.is_some();
         self.fc.ingest(&header, msg, now);
         if !was_linked && self.fc.heartbeat_ms.is_some() {
             self.out.target = (self.fc.sysid, self.fc.compid);
-            self.params.set_target(self.fc.sysid, self.fc.compid, self.fc.firmware() == Some(Fw::Px4));
+            self.params.set_target(
+                self.fc.sysid,
+                self.fc.compid,
+                self.fc.firmware() == Some(Fw::Px4),
+            );
         }
         self.params.on_msg(msg, now);
-        let Some(adapter) = self.adapter() else { return };
+        let Some(adapter) = self.adapter() else {
+            return;
+        };
         if let Some(run) = self.run.as_mut() {
             let ground_done = self.state.ground.state == WizardState::Done;
-            let Engine { fc, params, out, state, inputs, snapshot_body, .. } = self;
+            let Engine {
+                fc,
+                params,
+                out,
+                state,
+                inputs,
+                snapshot_body,
+                ..
+            } = self;
             let mut cx = Cx {
                 now,
                 wizard: run.wizard,
@@ -242,10 +264,16 @@ impl Engine {
         if self.uid.is_some() {
             return;
         }
-        if self.fc.version_ms.is_none_or(|t| now.saturating_sub(t) < IDENTITY_SETTLE_MS) {
+        if self
+            .fc
+            .version_ms
+            .is_none_or(|t| now.saturating_sub(t) < IDENTITY_SETTLE_MS)
+        {
             return;
         }
-        let Some((uid, source)) = self.fc.identity() else { return };
+        let Some((uid, source)) = self.fc.identity() else {
+            return;
+        };
         self.state = self.store.load(&uid);
         self.state.uid_source = Some(source);
         self.snapshot_body = self
@@ -304,9 +332,20 @@ impl Engine {
     }
 
     fn tick_abort_flight(&mut self, now: u64) {
-        let Some(adapter) = self.adapter() else { return };
-        let Some(af) = self.abort_flight.as_mut() else { return };
-        let Engine { fc, params, out, state, inputs, .. } = self;
+        let Some(adapter) = self.adapter() else {
+            return;
+        };
+        let Some(af) = self.abort_flight.as_mut() else {
+            return;
+        };
+        let Engine {
+            fc,
+            params,
+            out,
+            state,
+            inputs,
+            ..
+        } = self;
         let mut cx = Cx {
             now,
             wizard: WizardId::Air,
@@ -343,7 +382,9 @@ impl Engine {
     }
 
     fn tick_run(&mut self, now: u64) {
-        let Some(adapter) = self.adapter() else { return };
+        let Some(adapter) = self.adapter() else {
+            return;
+        };
         let ground_done = self.state.ground.state == WizardState::Done;
         let mut abort: Option<&'static str> = None;
         let mut takeover = false;
@@ -351,7 +392,17 @@ impl Engine {
         let mut enter_tuning = false;
         {
             let Some(run) = self.run.as_mut() else { return };
-            let Engine { fc, params, out, state, inputs, snapshot_body, tuning, pilot_tuning, .. } = self;
+            let Engine {
+                fc,
+                params,
+                out,
+                state,
+                inputs,
+                snapshot_body,
+                tuning,
+                pilot_tuning,
+                ..
+            } = self;
             let mut cx = Cx {
                 now,
                 wizard: run.wizard,
@@ -364,7 +415,9 @@ impl Engine {
                 ground_done,
                 snapshot: snapshot_body.as_deref(),
             };
-            let Some(step) = run.steps.get_mut(run.idx) else { return };
+            let Some(step) = run.steps.get_mut(run.idx) else {
+                return;
+            };
             if step.flight() && *tuning == Tuning::None && run.wizard == WizardId::Air {
                 enter_tuning = true;
             }
@@ -373,7 +426,8 @@ impl Engine {
             // Air abort monitor.
             if step.flight() && *tuning == Tuning::Held && cx.fc.armed {
                 // An operator action ended `tuning`, or the sticks moved.
-                let sticks = !step.blends_sticks() && cx.inputs.axes.iter().any(|a| a.abs() > TAKEOVER_AXIS);
+                let sticks =
+                    !step.blends_sticks() && cx.inputs.axes.iter().any(|a| a.abs() > TAKEOVER_AXIS);
                 if !*pilot_tuning || sticks {
                     abort = Some("operator");
                     takeover = true;
@@ -387,7 +441,11 @@ impl Engine {
                     use ados_protocol::mavlink::ardupilotmega::MavVtolState as V;
                     run.fw_flown |= matches!(
                         cx.fc.vtol_state,
-                        Some(V::MAV_VTOL_STATE_FW | V::MAV_VTOL_STATE_TRANSITION_TO_FW | V::MAV_VTOL_STATE_TRANSITION_TO_MC)
+                        Some(
+                            V::MAV_VTOL_STATE_FW
+                                | V::MAV_VTOL_STATE_TRANSITION_TO_FW
+                                | V::MAV_VTOL_STATE_TRANSITION_TO_MC
+                        )
                     );
                     let d = ((l[0] - c[0]).powi(2) + (l[1] - c[1]).powi(2)).sqrt();
                     if d > adapter.tuning_box_m(run.fw_flown) {
@@ -421,7 +479,9 @@ impl Engine {
     /// wizard still shows why a step failed (an air abort's trigger).
     fn record_current(&mut self, now: u64) {
         let Some(run) = self.run.as_ref() else { return };
-        let Some(step) = run.steps.get(run.idx) else { return };
+        let Some(step) = run.steps.get(run.idx) else {
+            return;
+        };
         let core = step.core();
         let rec = json!({"state": core.state, "blockers": core.blockers, "result": core.result, "at": self.iso(now)});
         let wr = match run.wizard {
@@ -429,7 +489,8 @@ impl Engine {
             WizardId::Air => &mut self.state.air,
         };
         if wr.steps.get(step.id()) != Some(&rec) {
-            let changed_state = wr.steps.get(step.id()).and_then(|r| r.get("state")) != rec.get("state");
+            let changed_state =
+                wr.steps.get(step.id()).and_then(|r| r.get("state")) != rec.get("state");
             wr.steps.insert(step.id().to_string(), rec);
             if changed_state {
                 self.persist(now);
@@ -459,7 +520,9 @@ impl Engine {
         if !self.params.complete() {
             return;
         }
-        let body = self.params.to_param_file(&format!("ADOS FC setup snapshot {}", self.iso(now)));
+        let body = self
+            .params
+            .to_param_file(&format!("ADOS FC setup snapshot {}", self.iso(now)));
         match self.store.write_snapshot(&uid, &self.iso(now), &body) {
             Ok(name) => {
                 self.state.data.snapshot = Some(name);
@@ -472,7 +535,9 @@ impl Engine {
 
     /// Begin the step at `run.idx`, skipping inapplicable ones.
     fn begin_current(&mut self, now: u64) {
-        let Some(adapter) = self.adapter() else { return };
+        let Some(adapter) = self.adapter() else {
+            return;
+        };
         loop {
             let needs_snapshot = self
                 .run
@@ -485,7 +550,15 @@ impl Engine {
             let ground_done = self.state.ground.state == WizardState::Done;
             let Some(run) = self.run.as_mut() else { return };
             let single = run.single;
-            let Engine { fc, params, out, state, inputs, snapshot_body, .. } = self;
+            let Engine {
+                fc,
+                params,
+                out,
+                state,
+                inputs,
+                snapshot_body,
+                ..
+            } = self;
             let mut cx = Cx {
                 now,
                 wizard: run.wizard,
@@ -498,7 +571,9 @@ impl Engine {
                 ground_done,
                 snapshot: snapshot_body.as_deref(),
             };
-            let Some(step) = run.steps.get_mut(run.idx) else { return };
+            let Some(step) = run.steps.get_mut(run.idx) else {
+                return;
+            };
             if let Some(reason) = step.skip_reason(&cx) {
                 step.on_skipped(reason, &mut cx);
                 step.core_mut().skip(reason);
@@ -538,12 +613,19 @@ impl Engine {
     fn finish_run(&mut self, now: u64) {
         let Some(run) = self.run.take() else { return };
         if !run.single {
-            let failed = run.steps.iter().any(|s| s.core().state == StepState::Failed);
+            let failed = run
+                .steps
+                .iter()
+                .any(|s| s.core().state == StepState::Failed);
             let wr = match run.wizard {
                 WizardId::Ground => &mut self.state.ground,
                 WizardId::Air => &mut self.state.air,
             };
-            wr.state = if failed { WizardState::Failed } else { WizardState::Done };
+            wr.state = if failed {
+                WizardState::Failed
+            } else {
+                WizardState::Done
+            };
             if !failed {
                 wr.completed_at = Some(iso_utc(self.epoch_offset_ms + now));
             }
@@ -555,7 +637,10 @@ impl Engine {
                     let plane = a.class == Class::Fixedwing
                         || (a.class == Class::Vtol
                             && self.fc.vtol_state == Some(ados_protocol::mavlink::ardupilotmega::MavVtolState::MAV_VTOL_STATE_FW));
-                    self.abort_flight = Some(AbortFlight { hop: flight::Hop::default(), plane });
+                    self.abort_flight = Some(AbortFlight {
+                        hop: flight::Hop::default(),
+                        plane,
+                    });
                 } else {
                     self.release_tuning();
                 }
@@ -577,11 +662,21 @@ impl Engine {
     }
 
     fn abort_air(&mut self, reason: &'static str, takeover: bool, now: u64) {
-        let Some(adapter) = self.adapter() else { return };
+        let Some(adapter) = self.adapter() else {
+            return;
+        };
         tracing::warn!(reason, takeover, "fc_setup_air_abort");
         let ground_done = self.state.ground.state == WizardState::Done;
         if let Some(run) = self.run.as_mut() {
-            let Engine { fc, params, out, state, inputs, snapshot_body, .. } = self;
+            let Engine {
+                fc,
+                params,
+                out,
+                state,
+                inputs,
+                snapshot_body,
+                ..
+            } = self;
             let mut cx = Cx {
                 now,
                 wizard: run.wizard,
@@ -596,7 +691,8 @@ impl Engine {
             };
             if let Some(s) = run.steps.get_mut(run.idx) {
                 s.abort(&mut cx);
-                s.core_mut().fail(&format!("setup.blocker.aborted_{reason}"));
+                s.core_mut()
+                    .fail(&format!("setup.blocker.aborted_{reason}"));
             }
         }
         self.record_current(now);
@@ -617,8 +713,12 @@ impl Engine {
             }
         } else if self.fc.armed && !self.fc.on_ground() {
             let plane = adapter.class == Class::Fixedwing
-                || self.fc.vtol_state == Some(ados_protocol::mavlink::ardupilotmega::MavVtolState::MAV_VTOL_STATE_FW);
-            self.abort_flight = Some(AbortFlight { hop: flight::Hop::default(), plane });
+                || self.fc.vtol_state
+                    == Some(ados_protocol::mavlink::ardupilotmega::MavVtolState::MAV_VTOL_STATE_FW);
+            self.abort_flight = Some(AbortFlight {
+                hop: flight::Hop::default(),
+                plane,
+            });
         } else {
             self.release_tuning();
         }
@@ -654,7 +754,13 @@ impl Engine {
     fn new_run(&self, w: WizardId) -> Option<Run> {
         let a = self.adapter()?;
         let steps = a.steps(w).iter().filter_map(|id| steps::make(id)).collect();
-        Some(Run { wizard: w, steps, idx: 0, single: false, fw_flown: false })
+        Some(Run {
+            wizard: w,
+            steps,
+            idx: 0,
+            single: false,
+            fw_flown: false,
+        })
     }
 
     pub fn start(&mut self, w: WizardId, now: u64) -> Value {
@@ -662,7 +768,9 @@ impl Engine {
         if let Some(first) = b.first() {
             return reply_err(first.trim_start_matches("setup.blocker."));
         }
-        let Some(run) = self.new_run(w) else { return reply_err("detecting") };
+        let Some(run) = self.new_run(w) else {
+            return reply_err("detecting");
+        };
         self.run = Some(run);
         if w == WizardId::Air {
             self.forget_tuning_box();
@@ -690,18 +798,29 @@ impl Engine {
 
     pub fn run_step(&mut self, w: WizardId, step: &str, now: u64) -> Value {
         let mut b = self.wizard_blockers(w, now);
-        b.retain(|x| x != "setup.blocker.ground_not_done" || w == WizardId::Air && step != "preflight");
+        b.retain(|x| {
+            x != "setup.blocker.ground_not_done" || w == WizardId::Air && step != "preflight"
+        });
         if let Some(first) = b.first() {
             return reply_err(first.trim_start_matches("setup.blocker."));
         }
-        let Some(a) = self.adapter() else { return reply_err("detecting") };
+        let Some(a) = self.adapter() else {
+            return reply_err("detecting");
+        };
         if !a.steps(w).contains(&step) {
             return reply_err("unknown_step");
         }
         if w == WizardId::Air && step != "preflight" {
             // A lone air step still needs the preflight conditions.
             let pf = {
-                let Engine { fc, params, out, state, inputs, .. } = self;
+                let Engine {
+                    fc,
+                    params,
+                    out,
+                    state,
+                    inputs,
+                    ..
+                } = self;
                 let cx = Cx {
                     now,
                     wizard: w,
@@ -720,23 +839,43 @@ impl Engine {
                 return reply_err(first.trim_start_matches("setup.blocker."));
             }
         }
-        let Some(s) = steps::make(step) else { return reply_err("unknown_step") };
+        let Some(s) = steps::make(step) else {
+            return reply_err("unknown_step");
+        };
         if w == WizardId::Air {
             self.forget_tuning_box();
         }
-        self.run = Some(Run { wizard: w, steps: vec![s], idx: 0, single: true, fw_flown: false });
+        self.run = Some(Run {
+            wizard: w,
+            steps: vec![s],
+            idx: 0,
+            single: true,
+            fw_flown: false,
+        });
         self.begin_current(now);
         let view = self.current_view();
         json!({"ok": true, "step": view})
     }
 
-    pub fn action(&mut self, w: WizardId, step: &str, action: &str, args: &Map<String, Value>, now: u64) -> Value {
-        let Some(adapter) = self.adapter() else { return reply_err("detecting") };
+    pub fn action(
+        &mut self,
+        w: WizardId,
+        step: &str,
+        action: &str,
+        args: &Map<String, Value>,
+        now: u64,
+    ) -> Value {
+        let Some(adapter) = self.adapter() else {
+            return reply_err("detecting");
+        };
         if action == "abort" {
             return self.abort(w, now);
         }
         if action == "revert" {
-            let name = args.get("snapshot").and_then(Value::as_str).map(str::to_string);
+            let name = args
+                .get("snapshot")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             return self.revert(name.as_deref(), now);
         }
         // Every other action but skip and retry drives the FC: with no FC
@@ -748,11 +887,15 @@ impl Engine {
         let ground_done = self.state.ground.state == WizardState::Done;
         let tuning = self.tuning;
         let res = {
-            let Some(run) = self.run.as_mut() else { return reply_err("not_running") };
+            let Some(run) = self.run.as_mut() else {
+                return reply_err("not_running");
+            };
             if run.wizard != w {
                 return reply_err("not_running");
             }
-            let Some(s) = run.steps.get_mut(run.idx) else { return reply_err("not_running") };
+            let Some(s) = run.steps.get_mut(run.idx) else {
+                return reply_err("not_running");
+            };
             if s.id() != step {
                 return reply_err("not_current_step");
             }
@@ -764,10 +907,21 @@ impl Engine {
                 Ok(())
             } else if action == "retry" && s.core().state != StepState::Failed {
                 Err("not_failed")
-            } else if s.flight() && tuning != Tuning::Held && (action == "start" || action == "resume_yaw") {
+            } else if s.flight()
+                && tuning != Tuning::Held
+                && (action == "start" || action == "resume_yaw")
+            {
                 Err("tuning_pending")
             } else {
-                let Engine { fc, params, out, state, inputs, snapshot_body, .. } = self;
+                let Engine {
+                    fc,
+                    params,
+                    out,
+                    state,
+                    inputs,
+                    snapshot_body,
+                    ..
+                } = self;
                 let mut cx = Cx {
                     now,
                     wizard: w,
@@ -796,7 +950,9 @@ impl Engine {
                 self.wizard_dirty = true;
                 self.record_current(now);
                 let view = self.current_view();
-                let done = view.as_ref().is_some_and(|v| matches!(v.state, StepState::Done | StepState::Skipped));
+                let done = view
+                    .as_ref()
+                    .is_some_and(|v| matches!(v.state, StepState::Done | StepState::Skipped));
                 if done {
                     self.advance(now);
                 }
@@ -813,9 +969,18 @@ impl Engine {
         if w == WizardId::Air && self.fc.armed {
             self.abort_air("operator_abort", false, now);
         } else {
-            let Some(adapter) = self.adapter() else { return reply_err("detecting") };
+            let Some(adapter) = self.adapter() else {
+                return reply_err("detecting");
+            };
             if let Some(mut run) = self.run.take() {
-                let Engine { fc, params, out, state, inputs, .. } = self;
+                let Engine {
+                    fc,
+                    params,
+                    out,
+                    state,
+                    inputs,
+                    ..
+                } = self;
                 let mut cx = Cx {
                     now,
                     wizard: w,
@@ -857,20 +1022,37 @@ impl Engine {
         if self.fc.armed {
             return reply_err("armed");
         }
-        if self.run.as_ref().is_some_and(|r| !r.single || r.wizard == WizardId::Air) && self.fc.armed {
+        if self
+            .run
+            .as_ref()
+            .is_some_and(|r| !r.single || r.wizard == WizardId::Air)
+            && self.fc.armed
+        {
             return reply_err("wizard_running");
         }
-        let Some(uid) = self.uid.clone() else { return reply_err("detecting") };
-        let name = name.map(str::to_string).or_else(|| self.state.data.snapshot.clone());
-        let Some(name) = name else { return reply_err("no_snapshot") };
-        let Some(body) = self.store.read_snapshot(&uid, &name) else { return reply_err("no_snapshot") };
+        let Some(uid) = self.uid.clone() else {
+            return reply_err("detecting");
+        };
+        let name = name
+            .map(str::to_string)
+            .or_else(|| self.state.data.snapshot.clone());
+        let Some(name) = name else {
+            return reply_err("no_snapshot");
+        };
+        let Some(body) = self.store.read_snapshot(&uid, &name) else {
+            return reply_err("no_snapshot");
+        };
         let n = self.params.restore(&body, |_| true);
         let _ = now;
         json!({"ok": true, "restored": n, "snapshot": name})
     }
 
     pub fn request(&mut self, op: &str, body: &Value, now: u64) -> Value {
-        let wiz = || body.get("wizard").and_then(Value::as_str).and_then(WizardId::parse);
+        let wiz = || {
+            body.get("wizard")
+                .and_then(Value::as_str)
+                .and_then(WizardId::parse)
+        };
         let empty = Map::new();
         match op {
             "setup.list" => serde_json::to_value(self.view(now)).unwrap_or(Value::Null),
@@ -883,12 +1065,18 @@ impl Engine {
                 _ => reply_err("bad_args"),
             },
             "setup.action" => {
-                let (Some(w), Some(s), Some(a)) =
-                    (wiz(), body.get("step").and_then(Value::as_str), body.get("action").and_then(Value::as_str))
-                else {
+                let (Some(w), Some(s), Some(a)) = (
+                    wiz(),
+                    body.get("step").and_then(Value::as_str),
+                    body.get("action").and_then(Value::as_str),
+                ) else {
                     return reply_err("bad_args");
                 };
-                let args = body.get("args").and_then(Value::as_object).unwrap_or(&empty).clone();
+                let args = body
+                    .get("args")
+                    .and_then(Value::as_object)
+                    .unwrap_or(&empty)
+                    .clone();
                 self.action(w, s, a, &args, now)
             }
             "setup.abort" => match wiz() {
@@ -917,30 +1105,45 @@ impl Engine {
             WizardId::Ground => &self.state.ground,
             WizardId::Air => &self.state.air,
         };
-        let ids: Vec<&str> = self.adapter().map(|a| a.steps(w).to_vec()).unwrap_or_default();
+        let ids: Vec<&str> = self
+            .adapter()
+            .map(|a| a.steps(w).to_vec())
+            .unwrap_or_default();
         let live = self.run.as_ref().filter(|r| r.wizard == w);
         let steps = ids
             .iter()
             .map(|id| {
                 if let Some(s) = live.and_then(|r| r.steps.iter().find(|s| s.id() == *id)) {
-                    if s.core().state != StepState::Pending || live.is_some_and(|r| r.steps.get(r.idx).is_some_and(|c| c.id() == *id)) {
+                    if s.core().state != StepState::Pending
+                        || live.is_some_and(|r| r.steps.get(r.idx).is_some_and(|c| c.id() == *id))
+                    {
                         return s.core().view(w, id);
                     }
                 }
                 let mut v = step::StepCore::default().view(w, id);
                 if let Some(rec) = wr.steps.get(*id) {
-                    if let Some(st) = rec.get("state").and_then(|s| serde_json::from_value(s.clone()).ok()) {
+                    if let Some(st) = rec
+                        .get("state")
+                        .and_then(|s| serde_json::from_value(s.clone()).ok())
+                    {
                         v.state = st;
                     }
                     v.result = rec.get("result").and_then(Value::as_object).cloned();
-                    if let Some(b) = rec.get("blockers").and_then(|b| serde_json::from_value(b.clone()).ok()) {
+                    if let Some(b) = rec
+                        .get("blockers")
+                        .and_then(|b| serde_json::from_value(b.clone()).ok())
+                    {
                         v.blockers = b;
                     }
                 }
                 v
             })
             .collect();
-        let blockers = if wr.state == WizardState::Running { Vec::new() } else { self.wizard_blockers(w, now) };
+        let blockers = if wr.state == WizardState::Running {
+            Vec::new()
+        } else {
+            self.wizard_blockers(w, now)
+        };
         WizardView {
             id: w,
             state: wr.state,
@@ -969,16 +1172,31 @@ impl Engine {
             firmware_version: self.fc.version_string(),
             vehicle_class: a.map(|a| a.class.as_str().to_string()),
             running: self.run.as_ref().and_then(|r| {
-                r.steps.get(r.idx).map(|s| Running { wizard: r.wizard, step: s.id().to_string() })
+                r.steps.get(r.idx).map(|s| Running {
+                    wizard: r.wizard,
+                    step: s.id().to_string(),
+                })
             }),
-            wizards: vec![self.wizard_view(WizardId::Ground, now), self.wizard_view(WizardId::Air, now)],
+            wizards: vec![
+                self.wizard_view(WizardId::Ground, now),
+                self.wizard_view(WizardId::Air, now),
+            ],
             report: Report {
-                date: self.state.ground.completed_at.clone().or(self.state.updated_at.clone()),
+                date: self
+                    .state
+                    .ground
+                    .completed_at
+                    .clone()
+                    .or(self.state.updated_at.clone()),
                 firmware: a.map(|a| a.fw.as_str().to_string()),
                 firmware_version: self.fc.version_string(),
                 vehicle_class: a.map(|a| a.class.as_str().to_string()),
                 steps: report_steps,
-                snapshots: self.uid.as_deref().map(|u| self.store.snapshots(u)).unwrap_or_default(),
+                snapshots: self
+                    .uid
+                    .as_deref()
+                    .map(|u| self.store.snapshots(u))
+                    .unwrap_or_default(),
             },
         }
     }
@@ -992,14 +1210,20 @@ impl Engine {
             let w = self.run.as_ref().map(|r| r.wizard);
             for id in [WizardId::Ground, WizardId::Air] {
                 if w.is_none() || w == Some(id) {
-                    out.push(StreamFrame::Wizard { ts_ms: self.epoch_offset_ms + now, data: self.wizard_view(id, now) });
+                    out.push(StreamFrame::Wizard {
+                        ts_ms: self.epoch_offset_ms + now,
+                        data: self.wizard_view(id, now),
+                    });
                 }
             }
         }
         if now.saturating_sub(self.last_stream_ms) >= STREAM_PERIOD_MS {
             if let Some(v) = self.current_view() {
                 self.last_stream_ms = now;
-                out.push(StreamFrame::Step { ts_ms: self.epoch_offset_ms + now, data: v });
+                out.push(StreamFrame::Step {
+                    ts_ms: self.epoch_offset_ms + now,
+                    data: v,
+                });
             }
         }
         out
@@ -1019,7 +1243,8 @@ impl Engine {
             return Some(t.clone());
         }
         self.uid.as_ref()?;
-        (self.state.ground.state != WizardState::Done).then(|| "Aircraft setup not completed".to_string())
+        (self.state.ground.state != WizardState::Done)
+            .then(|| "Aircraft setup not completed".to_string())
     }
 
     pub fn wizard_state(&self, w: WizardId) -> WizardState {

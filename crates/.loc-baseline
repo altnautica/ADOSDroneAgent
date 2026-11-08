@@ -1,4 +1,4 @@
 # Rust files over the size limit, with their line count before the first
 # #[cfg(test)]. A listed file may shrink but never grow; an unlisted file
 # must stay at or under 500 lines. Maintained by scripts/check-rust-size.py.
-672 ados-plugin-host/src/host.rs
+658 ados-plugin-host/src/host.rs

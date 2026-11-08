@@ -83,7 +83,9 @@ impl Step for AdosProfile {
         self.applied.clear();
         self.absent.clear();
         for row in fc_profile(fw, vehicle_class(cx.adapter.class)) {
-            let name = std::iter::once(row.name).chain(row.alt_names.iter().copied()).find(|n| cx.params.has(n));
+            let name = std::iter::once(row.name)
+                .chain(row.alt_names.iter().copied())
+                .find(|n| cx.params.has(n));
             match name {
                 Some(n) => {
                     cx.params.set(n, row.value);
@@ -108,9 +110,18 @@ impl Step for AdosIntro {
 
     fn begin(&mut self, cx: &mut Cx) {
         self.core = StepCore::default();
-        let fallback = if cx.fc.rc_present(cx.now) { "elrs" } else { "fc_manual" };
-        self.core.args.insert("fallback_mode".into(), json!(fallback));
-        self.core.wait_user(vec![Action::primary("use_ados"), Action::secondary("keep_fc")]);
+        let fallback = if cx.fc.rc_present(cx.now) {
+            "elrs"
+        } else {
+            "fc_manual"
+        };
+        self.core
+            .args
+            .insert("fallback_mode".into(), json!(fallback));
+        self.core.wait_user(vec![
+            Action::primary("use_ados"),
+            Action::secondary("keep_fc"),
+        ]);
     }
 
     fn tick(&mut self, _cx: &mut Cx) {}

@@ -795,6 +795,69 @@
     {
       "method": "GET",
       "notes": null,
+      "path": "/api/v1/fc-setup",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/fc-setup/revert",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "WS",
+      "notes": "unauthenticated by design",
+      "path": "/api/v1/fc-setup/stream",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": true
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/fc-setup/{wizard}/abort",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/fc-setup/{wizard}/start",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/fc-setup/{wizard}/steps/{step}/actions/{action}",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/fc-setup/{wizard}/steps/{step}/run",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
       "path": "/api/v1/gnss",
       "public": false,
       "relay_forbidden": false,
@@ -940,6 +1003,24 @@
       "method": "PUT",
       "notes": null,
       "path": "/api/v1/ground-station/gamepads/primary",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
+      "path": "/api/v1/ground-station/input",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "PUT",
+      "notes": null,
+      "path": "/api/v1/ground-station/input/bindings",
       "public": false,
       "relay_forbidden": false,
       "served_by": "native",
@@ -1632,6 +1713,15 @@
     {
       "method": "GET",
       "notes": null,
+      "path": "/api/v1/mission",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
       "path": "/api/v1/nav/status",
       "public": false,
       "relay_forbidden": false,
@@ -1772,6 +1862,15 @@
       "relay_forbidden": false,
       "served_by": "residual",
       "websocket": false
+    },
+    {
+      "method": "WS",
+      "notes": "unauthenticated by design",
+      "path": "/api/v1/pilot/stream",
+      "public": true,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": true
     },
     {
       "method": "GET",
