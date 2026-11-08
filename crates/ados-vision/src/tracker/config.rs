@@ -21,6 +21,22 @@ pub struct TrackerConfig {
     /// units of standard deviations of the position estimate added to the base
     /// gate. Zero reproduces a fixed gate.
     pub gate_sigma: f32,
+    /// How much the center-distance gate widens per missed frame of a coast,
+    /// as a multiple of the predicted box's diagonal, up to
+    /// [`Self::max_coast_gate_diag`]. A camera on a moving vehicle shifts the
+    /// whole image by a pitch or yaw step between batches, and a coast that
+    /// holds near the last measurement must still reach a subject the step
+    /// moved. Zero keeps the gate fixed through a coast.
+    pub coast_gate_growth: f32,
+    /// Ceiling on the coast-widened gate (base plus growth), as a multiple of
+    /// the predicted box's diagonal.
+    pub max_coast_gate_diag: f32,
+    /// Largest height ratio, either way, between a candidate and the predicted
+    /// box for the candidate to be the same object. One subject does not halve
+    /// or double in height between detector batches; a fragment of it (a head
+    /// box), a speck or a whole tree does, and a widened gate must not let those
+    /// in.
+    pub max_size_ratio: f32,
     /// Detections below this confidence are ignored entirely.
     pub min_confidence: f32,
     /// Consecutive associated frames before a tentative track is confirmed.
@@ -104,6 +120,9 @@ impl Default for TrackerConfig {
             max_center_dist_diag: 1.5,
             gate_sigma: 3.0,
             min_confidence: 0.0,
+            coast_gate_growth: 0.5,
+            max_coast_gate_diag: 3.0,
+            max_size_ratio: 2.0,
             confirm_hits: 2,
             max_coast_frames: 8,
             measurement_noise: 4.0,

@@ -954,3 +954,125 @@ fn coast_damps_the_velocity() {
         "the coast's drift is bounded: {total}"
     );
 }
+
+/// The detector batches after a designation from a drone that pitches and
+/// yaws to follow: the walker (114 px shrinking to 59 px) is detected in most
+/// batches, but camera steps move it 100–220 px between batches, partial boxes
+/// (a 41x48 upper body) and specks (6x11) come and go around it, and from the
+/// 1276 batch on the walker drifts right across the frame while the track
+/// coasts. A fixed gate leaves the coast holding at x 440 while the walker's
+/// detections pass 200–300 px away, and the lock is lost. A gate that widens
+/// through the coast, and refuses boxes of a very different height, re-locks
+/// the walker.
+#[test]
+fn a_widening_coast_gate_relocks_a_walker_the_camera_moved() {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    let id = t
+        .designate(&person([631.0, 298.0, 54.0, 95.0], 0.31))
+        .unwrap();
+    let batches: Vec<Vec<Detection>> = vec![
+        vec![person([631.0, 273.0, 54.0, 114.0], 0.82)],
+        vec![person([642.0, 291.0, 37.0, 84.0], 0.71)],
+        vec![
+            person([626.0, 253.0, 49.0, 103.0], 0.78),
+            person([584.0, 237.0, 13.0, 13.0], 0.27),
+        ],
+        vec![
+            person([598.0, 115.0, 46.0, 89.0], 0.66),
+            person([597.0, 96.0, 29.0, 52.0], 0.37),
+        ],
+        vec![
+            person([549.0, 278.0, 39.0, 87.0], 0.74),
+            person([543.0, 267.0, 41.0, 48.0], 0.4),
+        ],
+        vec![
+            person([460.0, 419.0, 43.0, 82.0], 0.52),
+            person([406.0, 406.0, 16.0, 15.0], 0.25),
+            person([377.0, 391.0, 9.0, 20.0], 0.57),
+            person([409.0, 408.0, 6.0, 12.0], 0.46),
+        ],
+        vec![person([411.0, 246.0, 48.0, 84.0], 0.4)],
+        vec![],
+        vec![
+            person([439.0, 194.0, 40.0, 76.0], 0.66),
+            person([415.0, 153.0, 7.0, 17.0], 0.44),
+        ],
+        vec![
+            person([462.0, 380.0, 41.0, 77.0], 0.47),
+            person([419.0, 386.0, 7.0, 11.0], 0.49),
+        ],
+        vec![
+            person([437.0, 303.0, 43.0, 85.0], 0.86),
+            person([342.0, 296.0, 7.0, 18.0], 0.6),
+        ],
+        vec![],
+        vec![person([631.0, 191.0, 31.0, 78.0], 0.65)],
+        vec![
+            person([657.0, 390.0, 37.0, 68.0], 0.34),
+            person([570.0, 383.0, 6.0, 14.0], 0.28),
+        ],
+        vec![
+            person([683.0, 284.0, 34.0, 67.0], 0.27),
+            person([594.0, 279.0, 7.0, 17.0], 0.33),
+        ],
+        vec![],
+        vec![],
+        vec![person([734.0, 229.0, 38.0, 67.0], 0.35)],
+        vec![person([745.0, 229.0, 31.0, 62.0], 0.71)],
+        vec![person([752.0, 230.0, 36.0, 59.0], 0.3)],
+    ];
+    let mut last = None;
+    for (i, b) in batches.iter().enumerate() {
+        let u = t.update(b);
+        assert_eq!(
+            u.track_id,
+            Some(id),
+            "batch {i}: the designated lock is held"
+        );
+        let d = u.detection.as_ref().unwrap();
+        let h = d.bbox.unwrap().height;
+        assert!(
+            h > 50.0,
+            "batch {i}: the track never takes a fragment: {d:?}"
+        );
+        last = u.detection;
+    }
+    let d = last.unwrap();
+    assert_eq!(d.lock_state, Some(LockState::Locked));
+    let (cx, _) = center(&d.bbox.unwrap());
+    assert!(cx > 700.0, "locked on the walker at the right: {d:?}");
+}
+
+#[test]
+fn the_gate_refuses_a_box_of_a_very_different_height() {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    let id = t
+        .designate(&person([600.0, 300.0, 50.0, 100.0], 0.8))
+        .unwrap();
+    // A head-sized box dead on the prediction and a whole-tree box around it
+    // are not the subject: the track coasts.
+    let u = t.update(&[
+        person([610.0, 300.0, 30.0, 40.0], 0.9),
+        person([520.0, 150.0, 200.0, 400.0], 0.9),
+    ]);
+    assert_eq!(u.track_id, Some(id));
+    assert!(!u.measured);
+    assert_eq!(u.detection.unwrap().lock_state, Some(LockState::Uncertain));
+}
+
+#[test]
+fn a_miss_after_a_reconfirm_frame_owes_a_new_one() {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    t.designate(&obj(100.0, 100.0));
+    t.update(&[obj(102.0, 100.0)]);
+    t.update(&[]);
+    // Out of the coast: the re-confirm frame.
+    let u = t.update(&[obj(104.0, 100.0)]);
+    assert_eq!(u.detection.unwrap().lock_state, Some(LockState::Uncertain));
+    // Missed again before the re-confirm completed, then seen: still owed.
+    t.update(&[]);
+    let u = t.update(&[obj(106.0, 100.0)]);
+    assert_eq!(u.detection.unwrap().lock_state, Some(LockState::Uncertain));
+    let u = t.update(&[obj(108.0, 100.0)]);
+    assert_eq!(u.detection.unwrap().lock_state, Some(LockState::Locked));
+}

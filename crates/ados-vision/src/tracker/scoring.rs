@@ -6,14 +6,16 @@ use super::{Appearance, Candidate, SingleObjectTracker, Track, TrackState};
 
 impl SingleObjectTracker {
     /// The live association gate distance: the base center-distance gate widened
-    /// by the filter's position uncertainty. During a coast the covariance
-    /// grows, so the gate grows with it; a confidently-tracked object has a
-    /// tight gate.
+    /// by the filter's position uncertainty and, through a coast, by
+    /// `coast_gate_growth` diagonals per missed frame (capped at
+    /// `max_coast_gate_diag`). A confidently-tracked object has a tight gate.
     pub(super) fn max_gate_dist(&self, track: &Track, predicted: &BoundingBox) -> f32 {
         let diag = (predicted.width * predicted.width + predicted.height * predicted.height).sqrt();
-        let base = diag * self.cfg.max_center_dist_diag;
+        let base = self.cfg.max_center_dist_diag;
+        let grown = (base + self.cfg.coast_gate_growth * track.misses as f32)
+            .min(self.cfg.max_coast_gate_diag.max(base));
         let sigma = self.cfg.gate_sigma * track.kf.center_pos_std();
-        base + sigma
+        diag * grown + sigma
     }
 
     /// Score every in-gate candidate against the track. Eligibility is the
@@ -43,7 +45,7 @@ impl SingleObjectTracker {
             let (dcx, dcy) = center(det_bbox);
             let dist = ((dcx - pcx).powi(2) + (dcy - pcy).powi(2)).sqrt();
             let in_gate = geo_iou >= self.cfg.min_iou || dist <= gate;
-            if !in_gate {
+            if !in_gate || !similar_height(predicted, det_bbox, self.cfg.max_size_ratio) {
                 continue;
             }
             // Motion fit: 1.0 dead-on the prediction, decaying with distance
@@ -285,6 +287,16 @@ pub(super) fn reported(track: &Track, bbox: BoundingBox, lock: LockState, assoc:
         depth: None,
         world_pos: None,
     }
+}
+
+/// Whether `b`'s height is within `max_ratio` of `a`'s, either way. A
+/// non-positive or non-finite ratio disables the check.
+pub(super) fn similar_height(a: &BoundingBox, b: &BoundingBox, max_ratio: f32) -> bool {
+    if !(max_ratio.is_finite() && max_ratio > 0.0) {
+        return true;
+    }
+    let (ha, hb) = (a.height.max(1.0), b.height.max(1.0));
+    ha.max(hb) / ha.min(hb) <= max_ratio.max(1.0)
 }
 
 /// Box center in pixel space.

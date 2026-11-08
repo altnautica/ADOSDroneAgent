@@ -175,6 +175,13 @@ impl SingleObjectTracker {
         self.track.as_ref().map_or(TrackState::Idle, |t| t.state)
     }
 
+    /// Consecutive frames the current track has gone without a measurement
+    /// (0 when it was measured on the last frame, or there is no track). The
+    /// box size of a coasting track is that many frames old.
+    pub fn misses(&self) -> u32 {
+        self.track.as_ref().map_or(0, |t| t.misses)
+    }
+
     /// Where the operator-designated track is expected on the next frame, and
     /// its class label: the box the next [`Self::update`] gates on. `None` when
     /// there is no track, the track was seeded automatically, or it is not live

@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.16] - 2026-11-08
+
+### Fixed
+
+- A designated subject the follow camera moved was not re-acquired. Between 3 Hz detector batches a pitch or yaw step moves the whole image by 100–220 px, so a coasting track holding near its last measurement could not reach the subject's next detections through a gate of 1.5 box diagonals. The gate now widens through a coast by `TrackerConfig::coast_gate_growth` (0.5 diagonals per missed frame, up to `max_coast_gate_diag`, 3.0), and every candidate must be within `max_size_ratio` (2.0) of the predicted box's height, so a widened gate takes neither a fragment (a head box, a speck) nor a whole tree.
+- A re-confirm frame followed by a miss no longer counts as the re-confirm: the next re-association out of that coast reports `uncertain` for a frame again, as every re-association out of a miss-coast does.
+- The crop pass never ran for a subject designated large that then receded. A coasting track holds its last measured box size, and a crop scaled for that size would not magnify past the whole frame, so the crop was skipped for the whole coast while the walking subject shrank below what the whole-frame pass finds. The crop now scales for a subject 5 % smaller per missed frame.
+
 ## [0.109.15] - 2026-11-08
 
 ### Fixed

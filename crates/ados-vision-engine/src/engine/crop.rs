@@ -38,13 +38,24 @@ pub(super) const CROP_DUPLICATE_IOU: f32 = 0.4;
 /// edge inside the frame is a subject cut by the window, not a whole one.
 const CROP_EDGE_MARGIN: f32 = 2.0;
 
+/// The size a coasting track's subject is assumed to keep per missed frame.
+/// A coast holds the last measured box size, but a followed subject the
+/// vehicle has stopped following (it holds while the lock is unsure) walks
+/// away and shrinks: at 9 m and 1.4 m/s, about 5 % per 3 Hz detector batch.
+/// Scaling the crop for the shrunken size keeps it magnifying the subject the
+/// whole-frame pass has lost, and a subject that did not shrink only lands
+/// larger in the model's input.
+pub(super) const CROP_COAST_SHRINK: f32 = 0.95;
+
 /// The frame window the crop pass runs on: the model's input aspect, centred on
 /// the predicted box, scaled so the box is `CROP_SUBJECT_MODEL_HEIGHT` tall in
-/// the model's input (within `CROP_MAX_UPSCALE`), and moved inside the frame.
-/// `None` when the window would not magnify the subject beyond the whole-frame
-/// pass (the subject is already large) or the inputs are degenerate.
+/// the model's input (within `CROP_MAX_UPSCALE`) after `misses` frames of
+/// `CROP_COAST_SHRINK`, and moved inside the frame. `None` when the window
+/// would not magnify the subject beyond the whole-frame pass (the subject is
+/// large and measured) or the inputs are degenerate.
 pub(super) fn crop_window(
     predicted: &BoundingBox,
+    misses: u32,
     frame_w: u32,
     frame_h: u32,
     input_w: u32,
@@ -63,7 +74,8 @@ pub(super) fn crop_window(
     // whole-frame pass's own vertical scale.
     let fit = (iw / fw).max(ih / fh);
     let whole_frame = ih / fh;
-    let scale = (CROP_SUBJECT_MODEL_HEIGHT / predicted.height)
+    let expected_height = predicted.height * CROP_COAST_SHRINK.powi(misses.min(64) as i32);
+    let scale = (CROP_SUBJECT_MODEL_HEIGHT / expected_height)
         .min(CROP_MAX_UPSCALE)
         .max(fit);
     if scale <= whole_frame * 1.05 {
@@ -159,13 +171,15 @@ impl VisionEngine {
         if !self.tracker_enabled || desc.format != FrameFormat::Rgb24 {
             return Ok(Vec::new());
         }
-        let Some((predicted, class)) = self
+        let Some((predicted, class, misses)) = self
             .trackers
             .lock()
             .await
             .get(&desc.camera_id)
-            .and_then(|t| t.designated_prediction())
-            .map(|(b, c)| (b, c.to_string()))
+            .and_then(|t| {
+                t.designated_prediction()
+                    .map(|(b, c)| (b, c.to_string(), t.misses()))
+            })
         else {
             return Ok(Vec::new());
         };
@@ -178,7 +192,7 @@ impl VisionEngine {
         else {
             return Ok(Vec::new());
         };
-        let Some(window) = crop_window(&predicted, desc.width, desc.height, iw, ih) else {
+        let Some(window) = crop_window(&predicted, misses, desc.width, desc.height, iw, ih) else {
             return Ok(Vec::new());
         };
         let Some(crop) =

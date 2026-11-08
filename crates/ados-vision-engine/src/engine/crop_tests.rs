@@ -238,18 +238,21 @@ fn iou(a: &BoundingBox, b: &BoundingBox) -> f32 {
     super::tracking::bbox_iou(a, b)
 }
 
-/// Designate the walker on the first frame, as the operator does from the
-/// published batch, and replay the walk. Returns the designated id and, per
-/// later frame, the designated detection's lock state and box.
-async fn replay(e: &VisionEngine) -> (u64, Vec<(Option<LockState>, BoundingBox)>) {
+/// Designate the walker on the first frame of `walk`, as the operator does
+/// from the published batch, and replay the rest. Returns the designated id
+/// and, per later frame, the designated detection's lock state and box.
+async fn replay(
+    e: &VisionEngine,
+    walk: &[[f32; 4]],
+) -> (u64, Vec<(Option<LockState>, BoundingBox)>) {
     let first = e
-        .infer_and_publish("det", &desc(0), &frame_with(&bbox(WALK_AWAY[0])))
+        .infer_and_publish("det", &desc(0), &frame_with(&bbox(walk[0])))
         .await
         .unwrap();
     let clicked = first.detections[0].clone();
     let id = e.designate("main", &clicked).await.expect("designated");
     let mut out = Vec::new();
-    for (i, b) in WALK_AWAY.iter().enumerate().skip(1) {
+    for (i, b) in walk.iter().enumerate().skip(1) {
         let batch = e
             .infer_and_publish("det", &desc(i as u64), &frame_with(&bbox(*b)))
             .await
@@ -306,7 +309,7 @@ async fn whole_frame_detection_loses_the_small_walker() {
 #[tokio::test]
 async fn crop_pass_keeps_the_small_walker_locked() {
     let (e, _) = follow_engine().await;
-    let (id, frames) = replay(&e).await;
+    let (id, frames) = replay(&e, &WALK_AWAY).await;
     assert_eq!(frames.len(), WALK_AWAY.len() - 1);
     let mut locked = 0;
     for (i, (state, b)) in frames.iter().enumerate() {
@@ -328,6 +331,40 @@ async fn crop_pass_keeps_the_small_walker_locked() {
     assert_eq!(locked, 12, "locked on {locked} of {} batches", frames.len());
     // The smallest walker (88 px, well below the 124 px cliff) is still locked.
     assert_eq!(frames[13].0, Some(LockState::Locked));
+}
+
+/// The walker is designated at 142 px, where the whole-frame pass still sees
+/// it, and at the next batch is already below the whole-frame cliff. The
+/// coasting track holds the 142 px box, and a crop scaled for 142 px would not
+/// magnify past the whole frame, so the crop must assume the unmeasured
+/// subject is shrinking or it never runs and the lock is lost.
+#[tokio::test]
+async fn crop_pass_finds_a_receding_walker_the_coast_holds_too_large() {
+    let walk = [
+        [607.0, 245.0, 65.0, 142.0],
+        [608.0, 253.0, 59.0, 118.0],
+        [608.0, 235.0, 56.0, 116.0],
+        [610.0, 229.0, 54.0, 109.0],
+        [613.0, 232.0, 52.0, 107.0],
+        [617.0, 214.0, 50.0, 102.0],
+        [618.0, 222.0, 49.0, 99.0],
+        [616.0, 212.0, 47.0, 97.0],
+        [619.0, 221.0, 46.0, 93.0],
+        [619.0, 181.0, 44.0, 93.0],
+        [618.0, 223.0, 43.0, 86.0],
+    ];
+    let (e, _) = follow_engine().await;
+    let (id, frames) = replay(&e, &walk).await;
+    for (i, (state, _)) in frames.iter().enumerate() {
+        assert!(
+            matches!(state, Some(LockState::Locked | LockState::Uncertain)),
+            "frame {}: designated track {id} is {state:?}",
+            i + 1
+        );
+    }
+    let (state, b) = frames.last().unwrap();
+    assert_eq!(*state, Some(LockState::Locked));
+    assert!(iou(b, &bbox(walk[10])) > 0.5, "on the walker: {b:?}");
 }
 
 /// The crop pass costs a second inference only while a designated track is
@@ -380,7 +417,15 @@ fn crop_window_scales_the_subject_to_the_target_height() {
     use super::crop::{crop_window, CROP_SUBJECT_MODEL_HEIGHT};
     // An 80 px subject: a 400 px square window puts it 128 px tall in a 640
     // input, centred on the box.
-    let w = crop_window(&bbox([600.0, 300.0, 40.0, 80.0]), W, H, MODEL_IN, MODEL_IN).unwrap();
+    let w = crop_window(
+        &bbox([600.0, 300.0, 40.0, 80.0]),
+        0,
+        W,
+        H,
+        MODEL_IN,
+        MODEL_IN,
+    )
+    .unwrap();
     assert!(
         (w.width - 400.0).abs() < 0.01 && (w.height - 400.0).abs() < 0.01,
         "{w:?}"
@@ -389,17 +434,24 @@ fn crop_window_scales_the_subject_to_the_target_height() {
     assert_eq!((w.x, w.y), (420.0, 140.0));
 
     // Near a corner the window moves inside the frame instead of shrinking.
-    let w = crop_window(&bbox([2.0, 650.0, 30.0, 60.0]), W, H, MODEL_IN, MODEL_IN).unwrap();
+    let w = crop_window(&bbox([2.0, 650.0, 30.0, 60.0]), 0, W, H, MODEL_IN, MODEL_IN).unwrap();
     assert_eq!((w.x, w.y + w.height), (0.0, H as f32));
 
     // A tiny subject is magnified at most CROP_MAX_UPSCALE.
-    let w = crop_window(&bbox([600.0, 300.0, 4.0, 8.0]), W, H, MODEL_IN, MODEL_IN).unwrap();
+    let w = crop_window(&bbox([600.0, 300.0, 4.0, 8.0]), 0, W, H, MODEL_IN, MODEL_IN).unwrap();
     assert!((w.height - MODEL_IN as f32 / super::crop::CROP_MAX_UPSCALE).abs() < 0.01);
 
-    // A subject the whole-frame pass already sees at the target size: no crop.
-    assert!(crop_window(&bbox([600.0, 300.0, 70.0, 150.0]), W, H, MODEL_IN, MODEL_IN).is_none());
+    // A measured subject the whole-frame pass already sees at the target size:
+    // no crop.
+    let large = bbox([600.0, 300.0, 70.0, 150.0]);
+    assert!(crop_window(&large, 0, W, H, MODEL_IN, MODEL_IN).is_none());
+    // The same box after two missed batches is a stale size for a subject
+    // that is receding: the crop runs, scaled for the shrunken subject.
+    let w = crop_window(&large, 2, W, H, MODEL_IN, MODEL_IN).unwrap();
+    let expected = 150.0 * super::crop::CROP_COAST_SHRINK.powi(2);
+    assert!((expected * MODEL_IN as f32 / w.height - CROP_SUBJECT_MODEL_HEIGHT).abs() < 0.01);
     // A non-square input keeps its aspect.
-    let w = crop_window(&bbox([600.0, 300.0, 40.0, 80.0]), W, H, 640, 384).unwrap();
+    let w = crop_window(&bbox([600.0, 300.0, 40.0, 80.0]), 0, W, H, 640, 384).unwrap();
     assert!((w.width / w.height - 640.0 / 384.0).abs() < 0.01);
 }
 

@@ -197,6 +197,9 @@ impl SingleObjectTracker {
         // Remember whether this coast is an ambiguity hold or a genuine miss, so
         // the re-association out of it knows whether it owes a re-confirm frame.
         track.coast_ambiguous = ambiguous;
+        // A re-confirm frame followed by a miss proved nothing: the next
+        // re-association out of this coast owes its own re-confirm frame.
+        track.reconfirming = false;
         // Association confidence decays with the coast length so a long hold
         // reads as a weak identity claim on the wire.
         let assoc = (prev_assoc / (1.0 + track.misses as f32)).clamp(0.0, 1.0);
