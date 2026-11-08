@@ -88,8 +88,13 @@ export interface GsStatus {
    *  a drone or visor; null or absent while not identified. */
   fc_family?: "mavlink" | "msp" | null;
   /** Where detections come from (`local` / `offload` / `hybrid`), or `none`
-   *  when the node has no working vision path; absent when not reported. */
+   *  when the board declares no vision path; absent when not reported. */
   perception_tier?: string | null;
+  /** Whether this node's vision engine (`ados-vision`) is running, from the
+   *  `/api/status/full` services list: it detects on a board whose profile
+   *  declares no vision path when the operator configured a backend. Null when
+   *  not reported (a ground station, an older agent). */
+  vision_engine?: boolean | null;
   /** Seconds since the FC's last heartbeat (a drone's own link). */
   heartbeat_age_s?: number | null;
   paired_drone: PairedDrone;

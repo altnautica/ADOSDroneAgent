@@ -45,7 +45,7 @@ import { useNavStream } from "@/hooks/use-nav-stream";
 import { usePilotInput } from "@/hooks/use-pilot-input";
 import { useRoster } from "@/hooks/use-roster";
 import { useSkillKeys } from "@/hooks/use-skill-keys";
-import { useVisionDetections } from "@/hooks/use-vision-detections";
+import { hasLocalVision, useVisionDetections } from "@/hooks/use-vision-detections";
 import { useWidthClass } from "@/hooks/use-width-class";
 import { registerCameraActions } from "@/lib/camera-actions";
 import { registerFeedActions } from "@/lib/feed-actions";
@@ -107,8 +107,8 @@ export function FeedScreen() {
   // A companion node runs a local vision engine; a ground station receives the
   // linked drone's detections over the relay instead. Both feed one overlay.
   const perceptionTier = useStatusStore((s) => s.status?.perception_tier ?? null);
-  const cameraVision = ownsCameras && perceptionTier !== null && perceptionTier !== "none";
-  const localVisionCapable = cameraVision || profile === "workstation" || profile === "compute";
+  const visionEngine = useStatusStore((s) => s.status?.vision_engine ?? null);
+  const localVisionCapable = hasLocalVision({ ownsCameras, perceptionTier, visionEngine, profile });
   const visionCapable = localVisionCapable || groundStation;
   useVisionDetections(localVisionCapable);
   useGroundDetectionPoll();

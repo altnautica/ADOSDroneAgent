@@ -2,8 +2,10 @@
 //! per-camera depth grid and the landing-zone candidates.
 //!
 //! Per frame: the model's relative inverse depth ([`crate::backend::DenseMap`])
-//! is pooled to the grid ([`grid`]); the ranging hits that land in the image
-//! ([`refs`], fed by [`feed`]) give a scale-and-shift fit ([`fit`]); with a fit
+//! is pooled to the grid ([`grid`]); the ranging references in the image (LiDAR
+//! hits, the rangefinder spot and the level ground the rangefinder ranges;
+//! [`refs`], fed by [`feed`]) give a scale-and-shift fit on the frame's
+//! normalised values ([`fit`]); with a fit
 //! the grid is in metres, without one it is relative bands. While surfaces are
 //! wanted, the scaled map is searched for flat ground ([`surfaces`]). The
 //! camera's mount and field of view come from [`geometry`].
@@ -50,6 +52,8 @@ struct CameraState {
 pub struct DepthProcessor {
     geometries: HashMap<String, CameraGeometry>,
     cameras: HashMap<String, CameraState>,
+    /// Reused for each frame's value spread.
+    scratch: Vec<f32>,
 }
 
 /// One camera's counters for the status sidecar.
@@ -66,6 +70,7 @@ impl DepthProcessor {
         Self {
             geometries,
             cameras: HashMap::new(),
+            scratch: Vec::new(),
         }
     }
 
@@ -87,8 +92,14 @@ impl DepthProcessor {
         let proj = geometry.projector(aspect);
         let state = self.cameras.entry(camera_id.to_string()).or_default();
         let pooled = grid::pool(map);
+        let norm = fit::Normaliser::of(&pooled.median, &mut self.scratch);
         let refs = refs::collect(map, &proj, ranging);
-        let scale = state.filter.update(fit::fit(&refs.pairs), now_ms);
+        let fresh = norm.and_then(|n| fit::fit(&refs.pairs, &n));
+        let scale = state
+            .filter
+            .update(fresh, now_ms)
+            .zip(norm)
+            .map(|(f, n)| n.to_raw(f));
         let (near, scale_source) = match scale {
             Some(f) => (grid::encode_scaled(&pooled, f, &proj), ScaleSource::Lidar),
             None => (grid::encode_unscaled(&pooled), ScaleSource::None),
@@ -214,5 +225,109 @@ mod tests {
         );
         assert!(later.surfaces.is_some());
         assert_eq!(p.counters("main").scale_source, Some(ScaleSource::None));
+    }
+
+    /// A recorded forest frame: the depth model's real output for the front
+    /// camera 3.99 m above level ground (HUD overlays of the screenshot it
+    /// was taken from are `null`), with the planar scan and rangefinder of
+    /// the same moment.
+    struct Recorded {
+        map: DenseMap,
+        geometry: CameraGeometry,
+        aspect: f32,
+        ranging: Ranging,
+    }
+
+    fn recorded_forest() -> Recorded {
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            width: u32,
+            height: u32,
+            aspect: f32,
+            hfov_deg: f32,
+            pitch_down_deg: f32,
+            down_m: f32,
+            roll_rad: f32,
+            pitch_rad: f32,
+            scan: Scan,
+            map: Vec<Option<f32>>,
+        }
+        let f: Fixture = serde_json::from_str(include_str!(
+            "../../tests/fixtures/depth-forest-frame.json"
+        ))
+        .unwrap();
+        let data = f.map.iter().map(|v| v.unwrap_or(f32::NAN)).collect();
+        Recorded {
+            map: DenseMap::new(f.width, f.height, data).unwrap(),
+            geometry: CameraGeometry {
+                hfov_deg: f.hfov_deg,
+                pitch_down_deg: f.pitch_down_deg,
+            },
+            aspect: f.aspect,
+            ranging: Ranging {
+                scan: Some(f.scan),
+                down_m: Some(f.down_m),
+                attitude: Some((f.roll_rad, f.pitch_rad)),
+            },
+        }
+    }
+
+    /// The range to level ground `height` below along cell `i`'s ray, metres.
+    fn ground_range(proj: &geometry::Projector, i: usize, height: f32) -> Option<f32> {
+        let (u, v) = grid::cell_centre(i);
+        let ray = proj.ray(u, v);
+        (ray[2] > 0.05).then(|| height / ray[2] * (ray[0].hypot(ray[1]).hypot(ray[2])))
+    }
+
+    #[test]
+    fn a_recorded_forest_frame_reads_the_ground_at_its_range() {
+        let rec = recorded_forest();
+        let mut p = DepthProcessor::new(HashMap::from([("main".to_string(), rec.geometry)]));
+        let out = p.process("main", &rec.map, rec.aspect, 1, 0, &rec.ranging, false);
+        assert_eq!(out.grid.scale_source, ScaleSource::Lidar);
+        let proj = rec.geometry.projector(rec.aspect);
+        let height = rec.ranging.down_m.unwrap();
+        // Nothing in this frame is within 5 m of the camera (the nearest
+        // ground is 5.3 m down the bottom row, the nearest trunk 6.6 m).
+        let mut within_2m = 0;
+        // Row by row below the horizon, the cells read the ground's range
+        // (the bottom row lay under the screenshot's readout bar).
+        for r in 9..GRID_ROWS - 1 {
+            let mut errors: Vec<f32> = (r * GRID_COLS..(r + 1) * GRID_COLS)
+                .filter_map(|i| {
+                    let got = decode_range_code(out.grid.near[i])?;
+                    within_2m += usize::from(got <= 2.0);
+                    let truth = ground_range(&proj, i, height)?;
+                    // Cells the screenshot's overlays hid have no model value.
+                    let (u, v) = grid::cell_centre(i);
+                    rec.map
+                        .at(u, v)
+                        .is_finite()
+                        .then_some((got / truth - 1.0).abs())
+                })
+                .collect();
+            assert!(errors.len() >= 8, "row {r}: {} cells", errors.len());
+            errors.sort_unstable_by(f32::total_cmp);
+            let median = errors[errors.len() / 2];
+            assert!(median <= 0.25, "row {r}: median relative error {median}");
+        }
+        assert_eq!(within_2m, 0);
+    }
+
+    #[test]
+    fn a_recorded_forest_frame_with_only_its_scan_row_stays_unscaled() {
+        // Without the rangefinder the references are the scan's trunk hits
+        // on one image row, which the model reads alike from 6.6 to 10.3 m:
+        // no metres can be read off that for the rest of the frame.
+        let rec = recorded_forest();
+        let mut p = DepthProcessor::new(HashMap::from([("main".to_string(), rec.geometry)]));
+        let scan_only = Ranging {
+            down_m: None,
+            ..rec.ranging
+        };
+        let out = p.process("main", &rec.map, rec.aspect, 1, 0, &scan_only, false);
+        assert_eq!(out.grid.scale_source, ScaleSource::None);
+        // The trunk hits are still marked as measured cells.
+        assert!(out.grid.measured.iter().any(|b| *b != 0));
     }
 }

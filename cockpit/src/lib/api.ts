@@ -57,6 +57,18 @@ export async function getLinkDiagnosis(signal?: AbortSignal): Promise<LinkDiagno
   };
 }
 
+/** The vision engine's systemd unit, as the status services list names it. */
+const VISION_UNIT = "ados-vision";
+
+/** Whether the services list shows the vision engine running; null when the
+ *  list is absent or does not carry the unit. */
+export function visionEngineRunning(services: unknown): boolean | null {
+  if (!Array.isArray(services)) return null;
+  const unit = services.map(asRecord).find((s) => s.name === VISION_UNIT);
+  if (unit === undefined) return null;
+  return unit.state === "active" && unit.sub_state === "running";
+}
+
 /**
  * Map a drone's consolidated `/api/status/full` body (plus the last radio
  * diagnosis) onto the `GsStatus` shape the shell reads, so the status strip
@@ -95,6 +107,7 @@ export function droneStatusFromFull(full: StatusFull, diag: LinkDiagnosis | null
     fc_connected: full.fc_connected === true,
     fc_family: fcFamilyOf(str(full.fcFirmware), str(full.fcVariant)),
     perception_tier: str(full.perceptionTier),
+    vision_engine: visionEngineRunning(full.services),
     heartbeat_age_s: num(full.heartbeatAgeS),
     paired_drone: {
       device_id: radioPaired ? str(radio.pairedWithDeviceId) : null,

@@ -283,10 +283,12 @@ impl RangeFeed {
                 self.push_attitude(u64::from(a.time_boot_ms), attitude, at_ms);
                 true
             }
+            // A reading at the sensor's maximum is its "no return" (the
+            // autopilot reports an out-of-range sensor there), not a range.
             MavMessage::DISTANCE_SENSOR(d)
                 if d.orientation == MavSensorOrientation::MAV_SENSOR_ROTATION_PITCH_270
                     && d.current_distance >= d.min_distance
-                    && d.current_distance <= d.max_distance
+                    && d.current_distance < d.max_distance
                     && d.current_distance > 0 =>
             {
                 self.set_down(f32::from(d.current_distance) / 100.0, at_ms);
@@ -453,6 +455,14 @@ mod tests {
             &frame(&down(
                 MavSensorOrientation::MAV_SENSOR_ROTATION_PITCH_270,
                 5_000
+            )),
+            0
+        ));
+        // The flight's rangefinder 12.4 m up reported 1200 cm of 1200: no return.
+        assert!(!feed.apply_mavlink(
+            &frame(&down(
+                MavSensorOrientation::MAV_SENSOR_ROTATION_PITCH_270,
+                1_200
             )),
             0
         ));

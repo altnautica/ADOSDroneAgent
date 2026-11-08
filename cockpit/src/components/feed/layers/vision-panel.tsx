@@ -1,7 +1,8 @@
 // The side panel of the cockpit's `vision` view (cockpit-spec views.json):
 // the live detection list for the on-screen camera, the depth and surfaces
-// layer toggles (that view forces them on; the toggles keep their flags for
-// the other views), the vision engine's health, and the detector model
+// layer switches (that view forces them on, so they read on and disabled with
+// the reason; a second switch keeps each one's flag for the other views), the
+// vision engine's health, and the detector model
 // picker. Selecting a model writes `PUT /api/vision/detector`, which restarts
 // the engine, so it asks for a second tap within 3 s first, lists detection
 // models only (never the depth model), and is disabled while armed.
@@ -9,6 +10,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { apiFetch } from "@/shared/api-fetch";
+import { forcingView } from "@/lib/cockpit-view";
 import { isDemoMode } from "@/lib/utils";
 import { useFlightStore } from "@/stores/flight-store";
 import { DEPTH_RANGES, DEPTH_STYLES, useCockpitViewStore } from "@/stores/cockpit-view-store";
@@ -165,8 +167,62 @@ function DepthOptions() {
   );
 }
 
+/** The vision panel's leased layers, with their switch labels. */
+const PANEL_LAYERS = [
+  { id: "depth", label: "Depth" },
+  { id: "surfaces", label: "Surfaces" },
+] as const;
+
+/**
+ * One layer's switches. While the open view forces the layer on (views.json
+ * `forced_layers`, `forcedBy` names that view), its switch reads on and is
+ * disabled with the reason; the stored flag, which keeps it on in the other
+ * views, stays settable below it.
+ */
+export function LayerSwitch({
+  id,
+  label,
+  forcedBy,
+  stored,
+  onToggle,
+}: {
+  id: string;
+  label: string;
+  forcedBy: string | null;
+  stored: boolean;
+  onToggle: (id: string, on: boolean) => void;
+}) {
+  const reasonId = `layer-${id}-forced`;
+  return (
+    <div className="rounded-md bg-white/5 px-3 text-sm">
+      <label className="flex min-h-12 items-center justify-between">
+        <span>{label}</span>
+        <input
+          type="checkbox"
+          checked={forcedBy !== null || stored}
+          disabled={forcedBy !== null}
+          aria-describedby={forcedBy !== null ? reasonId : undefined}
+          onChange={(e) => onToggle(id, e.target.checked)}
+        />
+      </label>
+      {forcedBy !== null ? (
+        <>
+          <p id={reasonId} className="text-xs text-white/60">
+            On while the {forcedBy} view is open
+          </p>
+          <label className="flex min-h-12 items-center justify-between text-xs text-white/70">
+            <span>Keep on in other views</span>
+            <input type="checkbox" checked={stored} onChange={(e) => onToggle(id, e.target.checked)} />
+          </label>
+        </>
+      ) : null}
+    </div>
+  );
+}
+
 export function VisionPanel({ cameraId }: { cameraId: string | null }) {
   const batch = useDetectionsStore((s) => (cameraId !== null ? (s.byCamera[cameraId] ?? s.latest) : s.latest));
+  const view = useCockpitViewStore((s) => s.view);
   const flags = useCockpitViewStore((s) => s.layers);
   const toggleLayer = useCockpitViewStore((s) => s.toggleLayer);
   const { status, error } = useEngineStatus();
@@ -185,13 +241,16 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
     <aside className="flex h-full w-full flex-col gap-4 overflow-y-auto bg-black/70 p-3 text-white" aria-label="Vision">
       <section className="space-y-1">
         <h3 className="text-xs uppercase tracking-wider text-white/60">Layers</h3>
-        {(["depth", "surfaces"] as const).map((id) => (
-          <label key={id} className="flex min-h-12 items-center justify-between rounded-md bg-white/5 px-3 text-sm">
-            <span>{id === "depth" ? "Depth" : "Surfaces"}</span>
-            <input type="checkbox" checked={flags[id] === true} onChange={(e) => toggleLayer(id, e.target.checked)} />
-          </label>
+        {PANEL_LAYERS.map(({ id, label }) => (
+          <LayerSwitch
+            key={id}
+            id={id}
+            label={label}
+            forcedBy={forcingView(view, id)}
+            stored={flags[id] === true}
+            onToggle={toggleLayer}
+          />
         ))}
-        <p className="text-xs text-white/50">On while this view is open; the switches keep them on in other views.</p>
         <DepthOptions />
       </section>
 

@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.22] - 2026-11-08
+
+### Fixed
+
+- The depth layer's metres were wrong or missing while flying in a forest. Its scale fit took its references only from the planar LiDAR, whose returns all lie on one image row, mostly on thin trunks the depth model barely resolves: the model read 6.6 m and 10.3 m trunks alike, so the fit either failed (`scale_source: none` for minutes while hovering) or was a guess for the rest of the frame that put most of the ground within 2 m. The downward rangefinder only ever gave one point, below a forward camera's view. The fit now also takes the level ground the rangefinder ranges, with the vehicle's roll and pitch, as references down the lower image (leaving out rays that graze the ground or meet it beyond a LiDAR return on their bearing), and refuses a fit whose agreeing references cover less than a quarter of the frame's value spread rather than extrapolating it. On a recorded forest frame 4 m up the ground cells now read within 1-16 % of their range, row by row.
+- A fit carried over to the next frames (the smoothing and the 2 s hold) was applied to that frame's raw model values, although the model rescales its output from frame to frame. The fit is now made on each frame's values normalised by the frame's own spread, so a held or smoothed fit means the same thing in the next frame.
+- A downward rangefinder reading at its maximum range (the autopilot's "no return", e.g. 1200 cm of 1200 above 12 m) was taken as a range.
+- Cockpit: on a board whose profile declares no vision path but whose vision engine runs (`perception_tier: none` with a configured backend), the Feed never opened the detections stream, so the Vision panel read "No current detections" and no boxes were drawn while the detector ran. The Feed now also opens it when the status services list shows `ados-vision` running.
+- Cockpit: the Vision panel's Depth and Surfaces switches read off while the Vision view forced both layers on. While a view forces a layer, its switch now reads on and is disabled with the reason ("On while the Vision view is open"); a second switch keeps the layer's flag for the other views.
+
 ## [0.109.21] - 2026-11-08
 
 ### Fixed

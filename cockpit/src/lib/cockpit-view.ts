@@ -80,6 +80,12 @@ export function effectiveLayers(
   return out;
 }
 
+/** The label of `view` when it forces layer `id` on while open (views.json
+ *  `forced_layers`), else null. */
+export function forcingView(view: CockpitView, id: string): string | null {
+  return (VIEW_FORCED_LAYERS[view] ?? []).includes(id) ? (VIEW_LABELS[view] ?? view) : null;
+}
+
 export function nextView(view: CockpitView): CockpitView {
   return VIEW_CYCLE[(VIEW_CYCLE.indexOf(view) + 1) % VIEW_CYCLE.length];
 }
