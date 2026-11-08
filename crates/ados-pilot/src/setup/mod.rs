@@ -714,6 +714,12 @@ impl Engine {
             let name = args.get("snapshot").and_then(Value::as_str).map(str::to_string);
             return self.revert(name.as_deref(), now);
         }
+        // Every other action but skip and retry drives the FC: with no FC
+        // heard from (one that did not come back from a reboot, say) it
+        // would "complete" against the cached parameters or time out later.
+        if !matches!(action, "skip" | "retry") && !self.fc.link_alive(now) {
+            return reply_err("no_fc");
+        }
         let ground_done = self.state.ground.state == WizardState::Done;
         let tuning = self.tuning;
         let res = {

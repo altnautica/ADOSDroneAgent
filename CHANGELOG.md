@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.14] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup kept going after the flight controller stopped answering. When a step's reboot ended in a timeout, the next steps "completed" against the cached parameters (a battery apply with nothing to change) or failed later with unrelated blockers (parameter writes that never echo, an autotune take-off that never arms). Every step action except `skip` and `retry` now answers `no_fc` while no heartbeat has come from the flight controller for 3 s.
+
 ## [0.109.13] - 2026-11-08
 
 ### Fixed

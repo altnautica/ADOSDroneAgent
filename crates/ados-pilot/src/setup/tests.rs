@@ -833,4 +833,10 @@ fn frame_reboot_that_never_returns_fails_with_timeout() {
     let v = s.e.current_view().unwrap();
     assert_eq!(v.blockers, vec!["setup.blocker.timeout".to_string()]);
     assert_eq!(action_ids(&s), ["retry"], "frame is required: no skip");
+    // The FC is gone: retry returns to the first screen, but nothing that
+    // drives the FC "completes" against the cached parameters.
+    s.act(G, "frame", "retry", json!({}));
+    let args: Map<String, Value> =
+        json!({"frame_class": 2, "frame_type": 1, "prop_in": 10, "motor_kv": 900, "cells": 4}).as_object().cloned().unwrap();
+    assert_eq!(s.e.action(G, "frame", "apply", &args, s.now)["err"], json!("no_fc"));
 }
