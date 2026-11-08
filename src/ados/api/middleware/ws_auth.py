@@ -73,12 +73,14 @@ async def authenticate_websocket(
     """Validate either the ``X-ADOS-Key`` header or a one-shot ticket.
 
     Returns the subprotocol the route should echo back in
-    ``websocket.accept(subprotocol=...)`` when the ticket path is
-    taken (so the browser handshake completes per RFC 6455), or an
-    empty string when the header path is taken (no subprotocol to
-    echo), or ``None`` on rejection. The helper closes the socket
-    with code ``4401`` before returning ``None`` so the route only
-    has to bail out on a falsy result.
+    ``websocket.accept(subprotocol=...)``: the ``ados-ws-ticket`` marker
+    whenever the client offered it, whichever credential admitted it
+    (a browser that offered subprotocols fails a handshake that selects
+    none, and a ticket dial may also carry a valid key header or come
+    from the on-box operator), else an empty string; ``None`` on
+    rejection. The helper closes the socket with code ``4401`` before
+    returning ``None`` so the route only has to bail out on a falsy
+    result.
 
     ``scope`` ties the ticket to one logical route. The same string
     must be passed to the ticket-mint endpoint and to this helper.
@@ -89,12 +91,14 @@ async def authenticate_websocket(
 
     app = get_agent_app()
     pm = getattr(app, "pairing_manager", None)
+    offered = _extract_subprotocols(websocket)
+    echo = WS_TICKET_PROTOCOL if WS_TICKET_PROTOCOL in offered else ""
 
     # The native front strips any client-supplied ``X-ADOS-Onbox`` and sets
     # it to ``1`` only for an on-box caller (loopback with no forwarding
     # header, or the operator Unix socket), so the header is trustworthy here.
     if websocket.headers.get(ONBOX_HEADER) == "1":
-        return ""
+        return echo
 
     configured_key: str | None = None
     try:
@@ -105,9 +109,9 @@ async def authenticate_websocket(
     api_key = websocket.headers.get("X-ADOS-Key")
     if api_key:
         if configured_key and hmac.compare_digest(api_key, configured_key):
-            return ""
+            return echo
         if pm is not None and getattr(pm, "is_paired", False) and pm.validate_key(api_key):
-            return ""
+            return echo
         # Bad header: still try the ticket path before rejecting, in
         # case a buggy intermediary stuck a junk value on the wire.
 
@@ -119,7 +123,6 @@ async def authenticate_websocket(
     # The unified ``ados-ws-ticket`` marker carries a self-contained
     # HMAC ticket minted by the native control surface and keyed off
     # the same pairing key, so it verifies with no shared store.
-    offered = _extract_subprotocols(websocket)
     if len(offered) >= 2:
         marker, ticket_value = offered[0], offered[1]
         if marker == WS_TICKET_PROTOCOL:

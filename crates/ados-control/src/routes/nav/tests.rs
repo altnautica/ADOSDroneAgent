@@ -318,6 +318,155 @@ fn the_stream_admits_a_nav_ticket_and_refuses_another_scope() {
     assert!(matches!(decide(&HeaderMap::new()), WsAuth::Reject));
 }
 
+/// A depth frame recorded from a live rendered run (`scale_source: lidar`).
+fn recorded_depth_frame() -> Value {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/depth-frame-recorded-lidar.json"
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// Read the HTTP head of a handshake response.
+async fn read_head(conn: &mut tokio::net::TcpStream) -> String {
+    use tokio::io::AsyncReadExt;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if conn.read(&mut byte).await.unwrap() == 0 {
+            break;
+        }
+        head.push(byte[0]);
+    }
+    String::from_utf8(head).unwrap()
+}
+
+/// Read one unmasked server frame: `(opcode, payload)`.
+async fn read_frame(conn: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+    let mut hdr = [0u8; 2];
+    conn.read_exact(&mut hdr).await.unwrap();
+    let mut len = u64::from(hdr[1] & 0x7f);
+    if len == 126 {
+        let mut ext = [0u8; 2];
+        conn.read_exact(&mut ext).await.unwrap();
+        len = u64::from(u16::from_be_bytes(ext));
+    }
+    let mut payload = vec![0u8; usize::try_from(len).unwrap()];
+    conn.read_exact(&mut payload).await.unwrap();
+    (hdr[0] & 0x0f, payload)
+}
+
+/// A masked client text frame (zero mask key, so the payload goes as is).
+fn client_text(payload: &str) -> Vec<u8> {
+    let len = u8::try_from(payload.len()).expect("short frame");
+    assert!(len < 126);
+    let mut out = vec![0x81, 0x80 | len, 0, 0, 0, 0];
+    out.extend_from_slice(payload.as_bytes());
+    out
+}
+
+/// A browser dialling with a ticket can also carry a valid `X-ADOS-Key` (a
+/// header-injecting proxy, a headless harness's extra headers). The `101` must
+/// still select the `ados-ws-ticket` marker it offered, or the browser fails
+/// the handshake and the layers never get a frame; then a view lease on the
+/// served camera delivers the depth grid.
+#[tokio::test]
+async fn a_ticket_dial_carrying_the_key_header_is_answered_with_the_marker() {
+    use tokio::io::AsyncWriteExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pairing.json"),
+        r#"{"paired": true, "api_key": "k"}"#,
+    )
+    .unwrap();
+    let state = test_state(dir.path());
+    let frame = recorded_depth_frame();
+    let ts = frame["ts_ms"].as_i64().unwrap();
+    state.nav.ingest_host(NavKind::Depth, ts, frame.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = crate::routes::build_router(state.clone(), false);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    let token = WsTicketIssuer::from_api_key("k")
+        .mint(SCOPE_NAV_STREAM, 30)
+        .unwrap()
+        .token;
+    let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+    conn.write_all(
+        format!(
+            "GET /api/v1/nav/stream HTTP/1.1\r\nHost: node\r\nConnection: Upgrade\r\n\
+             Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nX-ADOS-Key: k\r\n\
+             Sec-WebSocket-Protocol: ados-ws-ticket, {token}\r\n\r\n"
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let response = read_head(&mut conn).await.to_ascii_lowercase();
+    assert!(response.starts_with("http/1.1 101"), "{response}");
+    assert!(
+        response.contains("sec-websocket-protocol: ados-ws-ticket\r\n"),
+        "the offered marker must be selected: {response}"
+    );
+
+    conn.write_all(&client_text(
+        r#"{"type":"view","camera_id":"main","layers":["depth"]}"#,
+    ))
+    .await
+    .unwrap();
+    let got = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let (opcode, payload) = read_frame(&mut conn).await;
+            if opcode != 0x1 {
+                continue;
+            }
+            let v: Value = serde_json::from_slice(&payload).unwrap();
+            if v["kind"] == "depth" {
+                return v;
+            }
+        }
+    })
+    .await
+    .expect("a depth frame after the view lease");
+    assert_eq!(got["ts_ms"], json!(ts));
+    assert_eq!(got["data"]["cameras"]["main"], frame["cameras"]["main"]);
+}
+
+/// A plain dial offering no subprotocol is answered with none.
+#[tokio::test]
+async fn a_header_dial_offering_no_subprotocol_gets_none() {
+    use tokio::io::AsyncWriteExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("pairing.json"),
+        r#"{"paired": true, "api_key": "k"}"#,
+    )
+    .unwrap();
+    let state = test_state(dir.path());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = crate::routes::build_router(state, false);
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    let mut conn = tokio::net::TcpStream::connect(addr).await.unwrap();
+    conn.write_all(
+        b"GET /api/v1/nav/stream HTTP/1.1\r\nHost: node\r\nConnection: Upgrade\r\n\
+          Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nX-ADOS-Key: k\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    let response = read_head(&mut conn).await.to_ascii_lowercase();
+    assert!(response.starts_with("http/1.1 101"), "{response}");
+    assert!(!response.contains("sec-websocket-protocol"), "{response}");
+}
+
 #[test]
 fn a_read_token_reaches_every_nav_route() {
     for path in [

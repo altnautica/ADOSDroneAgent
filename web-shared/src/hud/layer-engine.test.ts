@@ -2,12 +2,15 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { parseArFrame, parseObstaclesFrame, type DepthFrame } from "./cockpit-frames";
+import { parseArFrame, parseDepthFrame, parseObstaclesFrame, type DepthFrame } from "./cockpit-frames";
 import { LayerEngine, LayerFrameStore, type LayerConfig } from "./layer-engine";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
 const ar = parseArFrame(JSON.parse(readFileSync(path.join(FIXTURES, "ar-frame.json"), "utf8")))!;
 const obstacles = parseObstaclesFrame(JSON.parse(readFileSync(path.join(FIXTURES, "obstacles-frame.json"), "utf8")))!;
+/** Depth frames recorded from a live rendered run, one per scale source. */
+const recordedDepth = (source: "lidar" | "none") =>
+  parseDepthFrame(JSON.parse(readFileSync(path.join(FIXTURES, `depth-frame-recorded-${source}.json`), "utf8")))!;
 
 /** A 2D context that counts paints (clearRect per paint) and records text. */
 function fakeCanvas() {
@@ -203,6 +206,26 @@ describe("LayerEngine", () => {
     expect(calls.texts).toContain("Obstacles unavailable");
     expect(calls.texts).not.toContain("Depth unavailable");
     for (const t of obstacleTexts) expect(calls.texts).not.toContain(t);
+  });
+
+  it.each(["lidar", "none"] as const)("draws a recorded %s-scaled depth frame on the served camera", (source) => {
+    const depth = recordedDepth(source);
+    expect(depth.scaleSource).toBe(source);
+    expect(depth.cameras.main?.scaleSource).toBe(source);
+    const { store, calls } = setup({ layers: new Set(["depth"]) });
+    store.putDepth(depth, clock);
+    frame();
+    expect(calls.strokes).toBeGreaterThan(0);
+    expect(calls.texts).not.toContain("Depth unavailable");
+    if (source === "none") expect(calls.texts).toContain("Depth unscaled");
+    else expect(calls.texts).not.toContain("Depth unscaled");
+  });
+
+  it("draws no depth cells with the range Off", () => {
+    const { store, calls } = setup({ layers: new Set(["depth"]), depthRangeM: 0 });
+    store.putDepth(recordedDepth("lidar"), clock);
+    frame();
+    expect(calls.strokes).toBe(0);
   });
 
   it("records paint timings", () => {

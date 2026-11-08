@@ -206,11 +206,9 @@ async fn close_profile_mismatch(socket: &mut WebSocket) {
 
 /// The outcome of the WebSocket handshake auth decision.
 pub(crate) enum WsAuth {
-    /// Admit, echoing no subprotocol (the unpaired path or the `X-ADOS-Key`
-    /// header path; there is nothing to echo).
+    /// Admit on the unpaired path or the `X-ADOS-Key` header path.
     AcceptPlain,
-    /// Admit, echoing the `ados-ws-ticket` marker (the browser ticket path; per
-    /// RFC 6455 the server must select an offered subprotocol).
+    /// Admit on a valid `ados-ws-ticket` (the browser ticket path).
     AcceptTicket,
     /// Reject: paired, off-box-credential-less, with no valid key or ticket.
     Reject,
@@ -319,20 +317,20 @@ pub(crate) fn caller_of(caller: Option<Extension<CallerClass>>) -> CallerClass {
     caller.map_or(CallerClass::OnBox, |Extension(c)| c)
 }
 
-/// Resolve the `on_upgrade` subprotocol selection from the auth outcome: the
-/// ticket path echoes the marker (RFC 6455 requires selecting an offered
-/// subprotocol), the plain path echoes nothing.
+/// Resolve the `on_upgrade` subprotocol selection from the auth outcome. Every
+/// admitted handshake that offered the `ados-ws-ticket` marker gets it echoed,
+/// whichever credential admitted it: a browser that offered subprotocols fails
+/// a `101` that selects none (RFC 6455 §4.1), and a browser dialling with a
+/// ticket may also carry a valid `X-ADOS-Key` (a header-injecting proxy or a
+/// test harness) or be the unpaired on-box operator. A dial that offered no
+/// subprotocol gets none.
 pub(crate) fn upgrade_with(
     ws: WebSocketUpgrade,
     auth: WsAuth,
 ) -> Option<(WebSocketUpgrade, WsAuth)> {
     match auth {
         WsAuth::Reject => None,
-        WsAuth::AcceptTicket => {
-            let ws = ws.protocols([WS_TICKET_SUBPROTOCOL]);
-            Some((ws, WsAuth::AcceptTicket))
-        }
-        WsAuth::AcceptPlain => Some((ws, WsAuth::AcceptPlain)),
+        auth => Some((ws.protocols([WS_TICKET_SUBPROTOCOL]), auth)),
     }
 }
 

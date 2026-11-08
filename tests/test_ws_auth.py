@@ -80,3 +80,14 @@ def test_keys_are_compared_with_compare_digest(monkeypatch) -> None:
 def test_only_the_exact_onbox_value_is_trusted(monkeypatch, value: str) -> None:
     _app(monkeypatch, _Pairing(True, "k"))
     assert _run(_Socket({"x-ados-onbox": value})) is None
+
+
+def test_a_ticket_dial_admitted_by_key_or_onbox_gets_the_marker_echoed(monkeypatch) -> None:
+    # A browser that offered the ticket subprotocol fails a 101 selecting none,
+    # even when a key header (a header-injecting proxy, a headless harness) or
+    # the on-box stamp is what admitted it.
+    _app(monkeypatch, _Pairing(True, "pair"))
+    offer = {"sec-websocket-protocol": "ados-ws-ticket, v1|vision.detections|1|2|ff"}
+    assert _run(_Socket({**offer, "X-ADOS-Key": "pair"})) == "ados-ws-ticket"
+    assert _run(_Socket({**offer, "x-ados-onbox": "1"})) == "ados-ws-ticket"
+    assert _run(_Socket({"X-ADOS-Key": "pair"})) == ""

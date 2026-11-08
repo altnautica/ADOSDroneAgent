@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.20] - 2026-11-08
+
+### Fixed
+
+- A browser dial of a ticket WebSocket (`/api/v1/nav/stream`, the pilot, aircraft-setup and ground-station streams, `/api/vision/detections/ws`, the Cloudflare log stream) failed its handshake whenever something other than the ticket admitted it: a valid `X-ADOS-Key` on the same request (a header-injecting proxy, a headless browser with extra headers) or the on-box operator. The `101` named no subprotocol although the browser had offered `ados-ws-ticket`, and Chromium drops such a handshake, so the cockpit's data layers read "Depth / Surfaces / Obstacles / AR unavailable" and its detections stayed empty while the agent was producing them. Every admitted handshake that offered the marker now gets it back, whichever credential admitted it; a dial that offered none still gets none.
+
 ## [0.109.19] - 2026-11-08
 
 ### Fixed
