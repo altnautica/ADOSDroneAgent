@@ -21,7 +21,7 @@ use serde_json::{json, Map, Value};
 use crate::setup::adapters::Mode;
 use crate::setup::doublets::Doublets;
 use crate::setup::fcstate::{Class, Fw};
-use crate::setup::flight::{self, plane_loiter, Hop, Leg, PLANE_LOITER_ALT_M};
+use crate::setup::flight::{self, height, plane_loiter, Hop, Leg, PLANE_LOITER_ALT_M};
 use crate::setup::schema::{obj, Action};
 use crate::setup::statustext::{parse_tune, Axis, TuneEvent};
 use crate::setup::step::{step_core, ActErr, Cx, Step, StepCore};
@@ -42,6 +42,10 @@ pub const BLEND: f32 = 0.3;
 const MANUAL_MS: u64 = 20;
 const SETTLE_MS: u64 = 5000;
 const PRESTREAM_MS: u64 = 1000;
+/// Time in the hold mode before switching to the tune mode.
+const HOLD_MS: u64 = 1000;
+/// The FC has refused the tune (or hold) mode when it is not in it by now.
+const TUNE_ENTER_MS: u64 = 10_000;
 const POLL_MS: u64 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +63,8 @@ enum Phase {
     Settle { since: u64 },
     Params,
     Prestream { since: u64 },
+    /// ArduPilot copter-style: in the hold mode the tune mode is entered from.
+    Hold { since: u64 },
     Tuning { since: u64 },
     LandSave,
     Saved,
@@ -85,6 +91,8 @@ pub struct Autotune {
     text_cursor: u64,
     before: Map<String, Value>,
     notes: Vec<Value>,
+    /// The FC took the tune mode at least once this round.
+    entered: bool,
 }
 
 impl Default for Autotune {
@@ -104,6 +112,7 @@ impl Default for Autotune {
             text_cursor: 0,
             before: Map::new(),
             notes: Vec::new(),
+            entered: false,
         }
     }
 }
@@ -122,6 +131,26 @@ impl Autotune {
             (_, Class::Vtol, Stage::Copter) => Mode::Qautotune,
             _ => Mode::Autotune,
         }
+    }
+
+    /// The position-hold mode an ArduPilot copter-style tune is entered from.
+    /// ArduCopter refuses AUTOTUNE from GUIDED ("init failed": only modes
+    /// with `allows_autotune`, i.e. STABILIZE, ALT_HOLD, LOITER, POSHOLD),
+    /// and from LOITER it keeps position between twitches; QAUTOTUNE holds
+    /// position when entered from QLOITER.
+    fn hold_mode(&self, cx: &Cx) -> Option<Mode> {
+        match (cx.adapter.fw, cx.adapter.class) {
+            (Fw::ArduPilot, Class::Multirotor) => Some(Mode::Loiter),
+            (Fw::ArduPilot, Class::Vtol) => Some(Mode::Qloiter),
+            _ => None,
+        }
+    }
+
+    /// The FC would not take the tune mode: land and say so.
+    fn refused(&mut self, cx: &mut Cx) {
+        self.hop.land(cx);
+        self.phase = Phase::Idle;
+        self.core.fail("setup.blocker.tuning_refused");
     }
 
     fn axes_param(&self, cx: &Cx) -> String {
@@ -277,23 +306,48 @@ impl Step for Autotune {
                         return;
                     }
                     self.phase = Phase::Prestream { since: cx.now };
+                    self.entered = false;
                     self.text_cursor = cx.fc.text_seq;
                 }
             }
             Phase::Prestream { since } => {
                 self.manual(cx, 0.0, 0.0, 0.5, 0.0);
                 if cx.now.saturating_sub(since) >= PRESTREAM_MS {
-                    // The tune mode takes over from the hold setpoints.
+                    // The FC's own hold (or the tune mode) takes over from the hold setpoints.
                     self.hop.leg = Leg::Idle;
+                    if let Some(h) = self.hold_mode(cx) {
+                        flight::set_mode(cx, h);
+                        self.phase = Phase::Hold { since: cx.now };
+                    } else {
+                        flight::set_mode(cx, self.tune_mode(cx));
+                        self.phase = Phase::Tuning { since: cx.now };
+                    }
+                }
+            }
+            Phase::Hold { since } => {
+                self.manual(cx, 0.0, 0.0, 0.5, 0.0);
+                let el = cx.now.saturating_sub(since);
+                let hold = self.hold_mode(cx).unwrap_or(Mode::Loiter);
+                if flight::in_mode(cx, hold) && el >= HOLD_MS {
                     flight::set_mode(cx, self.tune_mode(cx));
                     self.phase = Phase::Tuning { since: cx.now };
+                } else if el > TUNE_ENTER_MS {
+                    self.refused(cx);
+                } else if !flight::in_mode(cx, hold) && el > 2000 && el % 2000 < MANUAL_MS {
+                    flight::set_mode(cx, hold);
                 }
             }
             Phase::Tuning { since } => {
                 let (x, y, z, r) = blended(axes);
                 self.manual(cx, x, y, z, r);
                 let el = cx.now.saturating_sub(since);
-                if !flight::in_mode(cx, self.tune_mode(cx)) && el > 2000 && el % 2000 < MANUAL_MS {
+                if flight::in_mode(cx, self.tune_mode(cx)) {
+                    self.entered = true;
+                } else if !self.entered && el > TUNE_ENTER_MS {
+                    // Refused (STATUSTEXT "Mode change to … failed"): stop rather than ask forever.
+                    self.refused(cx);
+                    return;
+                } else if el > 2000 && el % 2000 < MANUAL_MS {
                     flight::set_mode(cx, self.tune_mode(cx));
                 }
                 if cx.adapter.fw == Fw::Px4 {
@@ -404,7 +458,8 @@ impl Step for Autotune {
                     let (x, y, _, r) = blended(axes);
                     (x, y, r)
                 } else if let Some(d) = self.doublets.as_mut() {
-                    let dm = d.demand(cx.now, off, heading);
+                    let alt_err = height(cx).map_or(0.0, |h| PLANE_LOITER_ALT_M - h);
+                    let dm = d.demand(cx.now, off, heading, alt_err);
                     // MANUAL_CONTROL x > 0 is nose down.
                     (-dm.pitch, dm.roll, 0.0)
                 } else {

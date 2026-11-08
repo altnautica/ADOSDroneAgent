@@ -509,29 +509,35 @@ fn autotune_yaw_waits_for_a_battery_swap() {
 
 #[test]
 fn plane_doublets_stay_in_the_box() {
-    // Point-mass plane at 15 m/s, coordinated turns from the bank demand.
+    // Point-mass plane at 18 m/s in a 3 m/s westerly (it8: the skywalker
+    // left the 400 m box downwind in 20 s), entering heading east, with a
+    // sluggish bank (1 s lag, at most 35°) and a 1.5 m/s sink at neutral
+    // pitch, as ArduPlane's FBWA-like AUTOTUNE flies at a fixed throttle.
     let box_m = 400.0;
     let mut d = Doublets::new(0, 45.0, 20.0, box_m);
-    let (mut n, mut e, mut hdg) = (150.0f32, -120.0f32, 0.7f32);
-    let v = 15.0;
+    let (mut n, mut e, mut hdg, mut h) = (48.0f32, -47.0f32, 1.5f32, 80.0f32);
+    let v = 18.0;
     let mut bank = 0.0f32;
-    let mut max_d = 0.0f32;
+    let (mut max_d, mut h_lo, mut h_hi) = (0.0f32, f32::MAX, f32::MIN);
     let mut t = 0;
     let mut saw = (false, false);
     while t < 240_000 {
-        let dm = d.demand(t, [n, e], hdg);
+        let dm = d.demand(t, [n, e], hdg, 80.0 - h);
         saw.0 |= dm.roll.abs() > 0.9;
         saw.1 |= dm.pitch.abs() > 0.5;
-        // Bank follows the demand with a 0.5 s lag.
-        let target = dm.roll * 45f32.to_radians();
-        bank += (target - bank) * 0.04;
+        let target = (dm.roll * 45f32).clamp(-35.0, 35.0).to_radians();
+        bank += (target - bank) * 0.02;
         hdg += 9.81 * bank.tan() / v * 0.02;
         n += v * hdg.cos() * 0.02;
-        e += v * hdg.sin() * 0.02;
+        e += (v * hdg.sin() + 3.0) * 0.02;
+        h += (v * (dm.pitch * 20f32).to_radians().sin() - 1.5) * 0.02;
         max_d = max_d.max((n * n + e * e).sqrt());
+        h_lo = h_lo.min(h);
+        h_hi = h_hi.max(h);
         t += 20;
     }
-    assert!(max_d < box_m, "left the tuning box: {max_d}");
+    assert!(max_d < 0.8 * box_m, "left the inner tuning box: {max_d}");
+    assert!(h_lo > 50.0 && h_hi < 110.0, "height {h_lo}..{h_hi} m around the 80 m loiter");
     assert!(saw.0 && saw.1, "both doublet axes flown");
 }
 
@@ -881,9 +887,26 @@ fn air_wizard_flies_first_hover_then_autotune() {
     drive_air(&mut s, |s| s.step_id().as_deref() == Some("autotune"), 150_000);
     assert_eq!(s.step_state(A, "first_hover"), StepState::Done);
     drive_air(&mut s, |s| s.fc.armed && s.fc.alt > 5.0, 30_000);
+    // ArduCopter only enters AUTOTUNE from a hold mode (LOITER here), not GUIDED.
+    drive_air(&mut s, |s| s.fc.custom_mode == 15, 20_000);
+    let modes: Vec<f32> = s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE).iter().map(|p| p[1]).collect();
+    let at = modes.iter().position(|m| *m == 15.0).unwrap();
+    assert_eq!(modes[..at].last(), Some(&5.0), "LOITER before AUTOTUNE: {modes:?}");
     s.run(3000);
     assert_eq!(s.e.wizard_state(A), WizardState::Running, "{:?}", s.e.state.air.steps.get("autotune"));
     assert_eq!(s.step_id().as_deref(), Some("autotune"));
+}
+
+#[test]
+fn refused_autotune_mode_fails_fast_and_lands() {
+    let mut s = air_ready();
+    s.fc.script.refuse_autotune = true;
+    assert_eq!(s.e.run_step(A, "autotune", s.now)["ok"], json!(true));
+    s.run(100);
+    s.act(A, "autotune", "start", json!({}));
+    s.until(|s| s.state() == Some(StepState::Failed), 60_000);
+    assert_eq!(s.e.current_view().unwrap().blockers, vec!["setup.blocker.tuning_refused".to_string()]);
+    s.until(|s| !s.fc.armed, 30_000);
 }
 
 #[test]

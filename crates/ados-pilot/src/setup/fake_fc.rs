@@ -20,6 +20,8 @@ pub struct Script {
     pub autotune_s: u64,
     /// The airspeed zero calibration concludes ACCEPTED (else FAILED).
     pub airspeed_cal_ok: bool,
+    /// Refuse the AUTOTUNE mode whatever the current mode.
+    pub refuse_autotune: bool,
     /// The FC comes back after a reboot (a SITL that is not restarted
     /// stays silent).
     pub reboot_returns: bool,
@@ -33,6 +35,7 @@ impl Default for Script {
             mag_fitness: VecDeque::from(vec![8.0]),
             autotune_s: 3,
             airspeed_cal_ok: true,
+            refuse_autotune: false,
             reboot_returns: true,
             sensors_present: None,
         }
@@ -389,10 +392,19 @@ impl FakeFc {
                 self.rebooting_until = Some(if self.script.reboot_returns { now + 3500 } else { u64::MAX });
             }
             MAV_CMD_DO_SET_MODE => {
-                self.custom_mode = c.param2 as u32;
-                if self.custom_mode == self.mode_autotune() && self.armed {
-                    self.autotune_since = Some(now);
-                    self.autotune_success = false;
+                let want = c.param2 as u32;
+                // ArduCopter enters AUTOTUNE only from a mode that allows it
+                // (STABILIZE 0, ALT_HOLD 2, LOITER 5, POSHOLD 16).
+                let allowed = matches!(self.custom_mode, 0 | 2 | 5 | 16) && !self.script.refuse_autotune;
+                if self.is_copter() && want == self.mode_autotune() && !allowed {
+                    self.queue.push_back(text("Mode change to Autotune failed: init failed"));
+                    result = MavResult::MAV_RESULT_FAILED;
+                } else {
+                    self.custom_mode = want;
+                    if self.custom_mode == self.mode_autotune() && self.armed {
+                        self.autotune_since = Some(now);
+                        self.autotune_success = false;
+                    }
                 }
             }
             MAV_CMD_COMPONENT_ARM_DISARM => {

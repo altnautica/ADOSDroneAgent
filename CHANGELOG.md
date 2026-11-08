@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.18] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup on ArduPilot copters: `autotune` never started. ArduCopter enters AUTOTUNE only from a mode that allows it (STABILIZE, ALT_HOLD, LOITER, POSHOLD) and answered every switch from GUIDED with "Mode change to Autotune failed: init failed", so the step asked again every 2 s for ten minutes. The step now hands the hover to LOITER (QLOITER on a QuadPlane, where QAUTOTUNE then holds position) and enters the tune mode from there; when the flight controller has not taken the hold or tune mode within 10 s the step lands and fails with `setup.blocker.tuning_refused` instead of waiting.
+- Aircraft setup on ArduPilot planes: `autotune` was aborted for drifting out of the tuning area about 20 s after it started. ArduPlane's AUTOTUNE flies like FBWA, holding neither height nor position, and the input generator only turned back once 240 m out, so a downwind leg crossed the 400 m area while the plane sank 30 m. The generator now turns back toward the centre whenever it is heading away beyond a quarter of the area (or beyond 40 % in any direction), keeps the turn until the nose points at the centre, and pitches toward the 80 m loiter height outside the pitch doublets.
+
 ## [0.109.17] - 2026-11-08
 
 ### Fixed
