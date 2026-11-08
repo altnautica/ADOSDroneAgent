@@ -57,6 +57,9 @@ pub fn expo(x: f32, e: f32) -> f32 {
 
 /// Below this speed a centred stick captures a hold point.
 pub const HOLD_CAPTURE_MPS: f32 = 0.2;
+/// A centred stick holds after this long even if the vehicle never slows
+/// below [`HOLD_CAPTURE_MPS`].
+pub const HOLD_SETTLE_S: f32 = 3.0;
 
 /// A 2-D velocity shaper: acceleration magnitude ≤ `a_h`, change of
 /// acceleration ≤ `jerk`·dt.
@@ -126,6 +129,9 @@ pub struct Multirotor {
     pub hold_ne: Option<V2>,
     pub hold_d: Option<f32>,
     pub hold_yaw: Option<f32>,
+    /// Seconds the sticks have been centred with the shaper stopped while the
+    /// vehicle still moved faster than [`HOLD_CAPTURE_MPS`].
+    pub settle_s: f32,
 }
 
 impl Multirotor {
@@ -135,6 +141,7 @@ impl Multirotor {
         self.hold_ne = None;
         self.hold_d = None;
         self.hold_yaw = None;
+        self.settle_s = 0.0;
     }
 
     /// Capture a full hold at the current state.
@@ -143,6 +150,7 @@ impl Multirotor {
         self.hold_ne = Some([pos[0], pos[1]]);
         self.hold_d = Some(pos[2]);
         self.hold_yaw = Some(yaw);
+        self.settle_s = 0.0;
     }
 
     /// The horizontal velocity the sticks ask for, in NED, before shaping.
@@ -159,7 +167,7 @@ impl Multirotor {
         &mut self,
         inp: &StickIn,
         lim: &Limits,
-        limit: impl Fn(V2) -> V2,
+        mut limit: impl FnMut(V2) -> V2,
         vz_bounds: (f32, f32),
     ) -> Command {
         let [_, _, thr, yaw_in] = inp.axes;
@@ -172,14 +180,30 @@ impl Multirotor {
         };
         if !horiz_centred {
             self.hold_ne = None;
+            self.settle_s = 0.0;
         }
         let shaped = self.shaper.step(target, lim, inp.dt);
         let v_ne = limit(shaped);
         if geo::norm(v_ne) < geo::norm(shaped) {
-            // The limiter cut speed: keep the shaper consistent with what flies.
+            // The limiter cut speed: keep the shaper consistent with what
+            // flies, and drop the acceleration it was building, so a stick
+            // reversed away from an obstacle is not first spent unwinding it.
             self.shaper.v = v_ne;
+            self.shaper.a = [0.0, 0.0];
         }
-        if horiz_centred && self.hold_ne.is_none() && geo::norm(self.shaper.v) < HOLD_CAPTURE_MPS {
+        // The hold point is captured once the vehicle itself is slow: a point
+        // taken while it still coasts is overshot and flown back to. The
+        // commanded zero velocity brakes it meanwhile; a vehicle that never
+        // settles (gusts) is held after `HOLD_SETTLE_S` anyway.
+        let coasting = geo::norm([inp.vel[0], inp.vel[1]]) >= HOLD_CAPTURE_MPS;
+        if horiz_centred && self.hold_ne.is_none() && coasting {
+            self.settle_s += inp.dt;
+        }
+        if horiz_centred
+            && self.hold_ne.is_none()
+            && geo::norm(self.shaper.v) < HOLD_CAPTURE_MPS
+            && (!coasting || self.settle_s >= HOLD_SETTLE_S)
+        {
             self.hold_ne = Some([inp.pos[0], inp.pos[1]]);
             self.shaper.reset([0.0, 0.0]);
         }

@@ -14,9 +14,9 @@ StartLimitIntervalSec=0
 Slice=ados.slice
 Type=simple
 # The only producer of motion setpoints while control.mode is "ados". If it
-# dies the router keeps its own heartbeat suppressed only while the pilot is
-# alive, so the FC's GCS failsafe sees the pilot heartbeat stop and returns
-# home; Restart=always brings the pilot back as the "fc_mode" owner.
+# dies while flying, the router sees its state stop for 1 s and sets the FC
+# mode for pilot.link_loss_action (default RTL); Restart=always brings the
+# pilot back as the "fc_mode" owner.
 ExecStart=/opt/ados/bin/ados-pilot
 Restart=always
 RestartSec=3

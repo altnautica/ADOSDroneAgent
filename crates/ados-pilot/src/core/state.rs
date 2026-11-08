@@ -58,6 +58,8 @@ impl Pilot {
             AvoidState::Off
         } else if matches!(owner, Owner::Skill | Owner::Goto) {
             self.plan.state
+        } else if owner == Owner::Pilot {
+            self.stick_avoid
         } else {
             AvoidState::Clear
         };

@@ -236,6 +236,9 @@ pub struct Launch {
     pub when_done: Option<String>,
     pub error: Option<String>,
     pub step_ms: u64,
+    /// The arming step's last command: `(true, t)` arm, `(false, t)` the
+    /// launch mode, so each is re-sent at most once a second.
+    pub cmd: Option<(bool, u64)>,
 }
 
 #[cfg(test)]

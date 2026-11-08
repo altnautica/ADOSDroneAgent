@@ -419,6 +419,24 @@ impl FcConnection {
         });
         self.send_msg(&msg).await;
     }
+
+    /// `MAV_CMD_DO_SET_MODE` to ArduPilot custom mode `mode`, as the router.
+    pub async fn send_set_mode(&self, mode: u32) {
+        let cmd = MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            target_system: self.target_system.load(Ordering::Relaxed),
+            target_component: self.target_component.load(Ordering::Relaxed),
+            command: MavCmd::MAV_CMD_DO_SET_MODE,
+            confirmation: 0,
+            param1: MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED.bits() as f32,
+            param2: mode as f32,
+            param3: 0.0,
+            param4: 0.0,
+            param5: 0.0,
+            param6: 0.0,
+            param7: 0.0,
+        });
+        self.send_msg(&cmd).await;
+    }
 }
 
 mod client;

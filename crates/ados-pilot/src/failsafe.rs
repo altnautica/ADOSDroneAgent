@@ -1,5 +1,6 @@
 //! Pilot failsafes (C2): controller staleness, surface link loss and the
-//! heartbeat cadence the FC's GCS failsafe watches.
+//! pilot's own 2 Hz heartbeat (its liveness for the FC and ground stations;
+//! the router, not the FC's GCS failsafe, acts on the pilot's death).
 
 /// No `input` for this long while a session is live: brake and hold.
 pub const INPUT_STALE_MS: u64 = 300;

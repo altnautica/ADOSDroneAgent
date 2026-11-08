@@ -7,16 +7,19 @@
 //! * client gotos (`DO_REPOSITION` as COMMAND_LONG/INT, and position
 //!   `SET_POSITION_TARGET_LOCAL_NED` / `_GLOBAL_INT`) are redirected to the
 //!   pilot as `goto`, so they fly through its planner and limits;
-//! * the router's own 1 Hz heartbeat stops, because the pilot sends the
-//!   heartbeat the FC's GCS failsafe watches: if the pilot dies, that heartbeat
-//!   stops and the FC fails safe;
+//! * pilot death fails safe here: when the pilot's state stops for
+//!   [`DEATH_MS`] while it was flying the vehicle, the router sets the FC
+//!   mode for `pilot.link_loss_action` ([`PilotLink::death_mode`]). The
+//!   FC's GCS failsafe cannot do it: any sysid-1 heartbeat counts for it (the
+//!   router's own, a VIO component's), so the pilot's heartbeat stopping
+//!   never trips it;
 //! * the swarm loop submits its velocities as `swarm.goal`.
 //!
 //! The pilot's own MAVLink connection (injector `pilot`) is exempt. With the
 //! pilot down, or in `fc_manual` / `elrs`, everything passes as before.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -27,6 +30,9 @@ use tokio::sync::mpsc;
 
 /// The pilot counts as alive while its state arrived within this window.
 pub const ALIVE_MS: u64 = 1500;
+/// No pilot state for this long while it flew the vehicle: the router fails
+/// safe on its behalf.
+pub const DEATH_MS: u64 = 1000;
 /// The injector client id the pilot daemon declares on `mavlink.sock`.
 pub const PILOT_INJECTOR: &str = "pilot";
 
@@ -56,6 +62,52 @@ pub struct PilotLink {
     pub relayed: AtomicU64,
     downlink: OnceLock<Downlink>,
     downlink_ms: AtomicU64,
+    /// What the last state said the pilot was flying: 0 nothing (not in
+    /// `ados`, disarmed, landed, or the FC owns motion), else the vehicle
+    /// class ([`CLASS_MULTIROTOR`], [`CLASS_FIXEDWING`], [`CLASS_VTOL`]).
+    flying: AtomicU8,
+    /// The death failsafe already fired for this silence.
+    fired: AtomicBool,
+}
+
+const CLASS_MULTIROTOR: u8 = 1;
+const CLASS_FIXEDWING: u8 = 2;
+const CLASS_VTOL: u8 = 3;
+
+/// `pilot.link_loss_action`: what the vehicle does when the pilot is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LossAction {
+    #[default]
+    Rth,
+    Hold,
+    Land,
+}
+
+impl LossAction {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "rth" => Some(Self::Rth),
+            "hold" => Some(Self::Hold),
+            "land" => Some(Self::Land),
+            _ => None,
+        }
+    }
+}
+
+/// The ArduPilot custom mode for `action` on a vehicle of `class`: RTL; a
+/// position hold (Copter LOITER, Plane LOITER, QuadPlane QLOITER); a landing
+/// (Copter LAND, QuadPlane QLAND, and RTL for a plane, as the pilot's own
+/// `land` does).
+fn loss_mode(class: u8, action: LossAction) -> u32 {
+    match (class, action) {
+        (CLASS_FIXEDWING, LossAction::Rth | LossAction::Land) | (CLASS_VTOL, LossAction::Rth) => 11,
+        (CLASS_FIXEDWING, LossAction::Hold) => 12,
+        (CLASS_VTOL, LossAction::Hold) => 19,
+        (CLASS_VTOL, LossAction::Land) => 20,
+        (_, LossAction::Rth) => 6,
+        (_, LossAction::Hold) => 5,
+        (_, LossAction::Land) => 9,
+    }
 }
 
 fn mode_code(m: ControlMode) -> u8 {
@@ -104,6 +156,8 @@ impl PilotLink {
             relayed: AtomicU64::new(0),
             downlink: OnceLock::new(),
             downlink_ms: AtomicU64::new(0),
+            flying: AtomicU8::new(0),
+            fired: AtomicBool::new(false),
         }
     }
 
@@ -131,17 +185,52 @@ impl PilotLink {
     /// Record a `state` body from the pilot.
     pub fn on_state(&self, body: &rmpv::Value) {
         self.alive_ms.store(self.now_ms(), Ordering::Relaxed);
-        let mode = match body {
+        self.fired.store(false, Ordering::Relaxed);
+        let field = |name: &str| match body {
             rmpv::Value::Map(m) => m
                 .iter()
-                .find(|(k, _)| k.as_str() == Some("control_mode"))
-                .and_then(|(_, v)| v.as_str())
-                .and_then(ControlMode::parse),
+                .find(|(k, _)| k.as_str() == Some(name))
+                .map(|(_, v)| v),
             _ => None,
         };
+        let mode = field("control_mode")
+            .and_then(rmpv::Value::as_str)
+            .and_then(ControlMode::parse);
         if let Some(m) = mode {
             self.live_mode.store(mode_code(m), Ordering::Relaxed);
         }
+        let flag = |name: &str| field(name).and_then(rmpv::Value::as_bool) == Some(true);
+        let motion = matches!(
+            field("owner").and_then(rmpv::Value::as_str),
+            Some("pilot" | "skill" | "goto" | "swarm")
+        );
+        let class = match field("vehicle_class").and_then(rmpv::Value::as_str) {
+            Some("fixedwing") => CLASS_FIXEDWING,
+            Some("vtol") => CLASS_VTOL,
+            _ => CLASS_MULTIROTOR,
+        };
+        let flying = mode == Some(ControlMode::Ados) && flag("armed") && !flag("landed") && motion;
+        self.flying
+            .store(if flying { class } else { 0 }, Ordering::Relaxed);
+    }
+
+    /// The FC mode to set because the pilot died while flying: its state
+    /// stopped for [`DEATH_MS`] after one that had it flying the vehicle.
+    /// Fires once per silence; `action` (read from config) only then.
+    pub fn death_mode(&self, action: impl FnOnce() -> LossAction) -> Option<u32> {
+        self.death_mode_at(self.now_ms(), action)
+    }
+
+    fn death_mode_at(&self, now_ms: u64, action: impl FnOnce() -> LossAction) -> Option<u32> {
+        let t = self.alive_ms.load(Ordering::Relaxed);
+        let class = self.flying.load(Ordering::Relaxed);
+        if t == 0 || class == 0 || now_ms.saturating_sub(t) < DEATH_MS {
+            return None;
+        }
+        if self.fired.swap(true, Ordering::Relaxed) {
+            return None;
+        }
+        Some(loss_mode(class, action()))
     }
 
     fn send(&self, op: &str, body: serde_json::Value) {
@@ -201,11 +290,6 @@ impl PilotLink {
             serde_json::json!({"vn": vel[0], "ve": vel[1], "vd": vel[2], "yaw": yaw}),
         );
     }
-}
-
-/// True when the router should skip its own heartbeat.
-pub fn suppress_router_heartbeat() -> bool {
-    global().is_some_and(PilotLink::gating)
 }
 
 async fn run(path: PathBuf, mut rx: mpsc::Receiver<Vec<u8>>) {

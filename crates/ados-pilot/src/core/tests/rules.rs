@@ -298,28 +298,6 @@ fn goto_flies_and_arrives_into_hold() {
 }
 
 #[test]
-fn brake_limit_caps_speed_before_a_wall() {
-    use crate::obstacles::Obstacles;
-    let mut o = Obstacles::new();
-    o.grid.reset([0.0, 0.0]);
-    for k in -40..=40 {
-        o.grid.mark([3.0, k as f32 * 0.1]);
-    }
-    o.grid.transform();
-    let v = crate::core::control::brake_limit(&o, [0.0, 0.0], [8.0, 0.0], 3.0, 1.5, 0);
-    // Wall detected at the first occupied cell (~3 m).
-    let cap = (2.0f32 * 3.0 * 1.5).sqrt();
-    assert!(
-        (v[0] - cap).abs() < 0.35,
-        "capped to {} (expected ≈{cap})",
-        v[0]
-    );
-    // Sliding along the wall is kept.
-    let s = crate::core::control::brake_limit(&o, [0.0, 0.0], [0.0, 5.0], 3.0, 1.5, 0);
-    assert!((s[1] - 5.0).abs() < 1e-3);
-}
-
-#[test]
 fn geofence_clamps_outward_velocity() {
     let v = crate::core::control::geofence([500.0, 0.0], [0.0, 0.0], 500.0, [3.0, 2.0]);
     assert_eq!(v, [0.0, 2.0]);

@@ -29,6 +29,22 @@ const SWARM_STALE_MS: u64 = 500;
 const GOTO_ARRIVE_M: f32 = 1.0;
 /// Low-battery RTH countdown.
 const LOW_BATT_COUNTDOWN_MS: u64 = 10_000;
+/// The FC's velocity-loop response time the stick brake plans for (SITL
+/// x500: the measured velocity trails a cut setpoint by about 0.5 s).
+pub const BRAKE_LAG_S: f32 = 0.5;
+/// Obstacles further than this never limit stick flight.
+const BRAKE_RANGE_M: f32 = 20.0;
+/// Hard stop: an obstacle closer than this fraction of the margin forces a
+/// hold (only motion away from it is left).
+pub const HARD_STOP_FRAC: f32 = 0.6;
+/// `hold_reason` while the hard stop holds.
+pub const HOLD_OBSTACLE_CLOSE: &str = "obstacle-close";
+/// A braked velocity under this counts as stopped (`avoid_state` blocked).
+const STOPPED_MPS: f32 = 0.1;
+/// Bearing sectors (5°) the stick brake keeps one constraint per.
+const BRAKE_SECTORS: usize = 72;
+/// Dykstra iterations for the nearest velocity within every cap.
+const DYKSTRA_ITERS: usize = 30;
 
 fn max_abs(a: [f32; 4]) -> f32 {
     a.iter().fold(0.0f32, |m, v| m.max(v.abs()))
@@ -266,6 +282,7 @@ impl Pilot {
     /// Produce this tick's command for the owner.
     fn fly(&mut self, axes: [f32; 4], dt: f32, now_ms: u64) {
         self.setpoint = None;
+        self.stick_avoid = AvoidState::Clear;
         if !self.fc.armed || !self.in_guided() {
             return;
         }
@@ -344,10 +361,14 @@ impl Pilot {
                 vz.0 = 0.0;
             }
         }
+        let vel = self
+            .fc
+            .fresh_local(now_ms)
+            .map_or([0.0; 3], |l| [l.vn, l.ve, l.vd]);
         let inp = StickIn {
             axes,
             pos,
-            vel: [0.0; 3],
+            vel,
             yaw,
             dt,
         };
@@ -358,15 +379,29 @@ impl Pilot {
         let obstacles = &self.obstacles;
         let a_h = lim.a_h;
         let margin = self.settings.pilot.obstacle_margin_m;
+        let mut braked: Option<Braked> = None;
         let limit = |v: V2| {
             let v = if brake {
-                brake_limit(obstacles, pos_ne, v, a_h, margin, now_ms)
+                let b = brake_limit(obstacles, pos_ne, [vel[0], vel[1]], v, a_h, margin, now_ms);
+                braked = Some(b);
+                b.v
             } else {
                 v
             };
             geofence(pos_ne, home, max_dist, v)
         };
         let cmd = self.mr.step(&inp, &lim, limit, vz);
+        self.stick_avoid = match braked {
+            Some(b) if b.close || (b.cut && geo::norm(b.v) < STOPPED_MPS) => AvoidState::Blocked,
+            Some(b) if b.cut => AvoidState::Detour,
+            _ => AvoidState::Clear,
+        };
+        let close = braked.is_some_and(|b| b.close);
+        if close {
+            self.hold_reason = Some(HOLD_OBSTACLE_CLOSE.into());
+        } else if self.hold_reason.as_deref() == Some(HOLD_OBSTACLE_CLOSE) {
+            self.hold_reason = None;
+        }
         let tx = self.tx();
         let m = match cmd {
             Command::Hold { pos, yaw } => {
@@ -385,14 +420,20 @@ impl Pilot {
             return v;
         }
         let lim = limits(self.settings.pilot.profile);
+        let vel = self
+            .fc
+            .fresh_local(now_ms)
+            .map_or([0.0; 2], |l| [l.vn, l.ve]);
         brake_limit(
             &self.obstacles,
             [pos[0], pos[1]],
+            vel,
             v,
             lim.a_h,
             self.margin(),
             now_ms,
         )
+        .v
     }
 
     fn fly_plan(&mut self, pos: [f32; 3], yaw: f32, now_ms: u64) {
@@ -401,7 +442,7 @@ impl Pilot {
         let close = self
             .obstacles
             .min_raw_m(now_ms)
-            .is_some_and(|d| d < 0.6 * margin)
+            .is_some_and(|d| d < HARD_STOP_FRAC * margin)
             && self.settings.pilot.avoid != AvoidMode::Off;
         let (goal, max_speed, goal_d, goal_yaw, subject) = match self.owner() {
             Owner::Skill => match self.auth.lease().and_then(|l| l.goal.clone()) {
@@ -431,7 +472,14 @@ impl Pilot {
         }
         let target = if close { None } else { self.plan.target };
         let Some(target) = target else {
-            self.hold_reason = Some(if close { "obstacle-close" } else { "blocked" }.into());
+            self.hold_reason = Some(
+                if close {
+                    HOLD_OBSTACLE_CLOSE
+                } else {
+                    "blocked"
+                }
+                .into(),
+            );
             let hold = *self.plan_hold.get_or_insert(pos);
             self.setpoint = Some(hold);
             let m = self
@@ -466,48 +514,120 @@ impl Pilot {
     }
 }
 
+/// What the stick brake did to one velocity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Braked {
+    /// The velocity to fly.
+    pub v: V2,
+    /// The brake reduced the speed.
+    pub cut: bool,
+    /// An obstacle is inside the hard-stop distance (`HARD_STOP_FRAC`·margin):
+    /// only motion away from it is left.
+    pub close: bool,
+}
+
 /// Cap speed toward obstacles at `sqrt(2·a·max(0, d − margin))`, keeping the
-/// component along them so the vehicle slides. The nearest return in a ±90°
-/// fan around the motion stands in for the obstacle's normal; the motion
-/// direction itself is then checked too.
+/// component along them so the vehicle slides.
+///
+/// Every obstacle point near the vehicle (occupied grid cell or scan hit)
+/// caps the velocity component toward it, so a narrow column cannot slip
+/// between sample rays; per 5° bearing sector the most restrictive point is
+/// kept. `d` is measured from where the vehicle's current velocity `vel`
+/// carries it in [`BRAKE_LAG_S`], the FC's velocity response, so the
+/// commanded stop still ends outside the margin. The result is the velocity
+/// nearest to `v` that meets every cap (Dykstra's projection), so a cap adds
+/// no sideways motion of its own. Inside the hard-stop distance nothing but
+/// motion away from the obstacle is kept.
 pub fn brake_limit(
     obs: &crate::obstacles::Obstacles,
     pos: V2,
+    vel: V2,
     v: V2,
     a_h: f32,
     margin: f32,
     now_ms: u64,
-) -> V2 {
-    if geo::norm(v) < 1e-3 {
-        return v;
+) -> Braked {
+    let speed = geo::norm(v).max(geo::norm(vel));
+    let reach = (margin + speed * speed / (2.0 * a_h) + speed * BRAKE_LAG_S + 1.0)
+        .clamp(margin, BRAKE_RANGE_M);
+    let stop_at = HARD_STOP_FRAC * margin;
+    // Per sector: (unit direction toward the point, cap on speed along it).
+    let mut caps: [Option<(V2, f32)>; BRAKE_SECTORS] = [None; BRAKE_SECTORS];
+    let mut away = [0.0, 0.0];
+    let mut close = false;
+    for p in obs.points_near(pos, reach, now_ms) {
+        let rel = geo::sub(p, pos);
+        let r = geo::norm(rel);
+        if r < 1e-3 {
+            continue;
+        }
+        let dir = geo::scale(rel, 1.0 / r);
+        // Distance to the cell's near face (conservative for a scan hit).
+        let d = (r - crate::obstacles::CELL_M / 2.0).max(0.0);
+        if d < stop_at {
+            close = true;
+            away = geo::sub(away, dir);
+        }
+        let closing = geo::dot(vel, dir).max(0.0);
+        let d_eff = d - closing * BRAKE_LAG_S;
+        let cap = (2.0 * a_h * (d_eff - margin).max(0.0)).sqrt();
+        let sector = (geo::bearing_of(dir).rem_euclid(std::f32::consts::TAU)
+            / std::f32::consts::TAU
+            * BRAKE_SECTORS as f32) as usize
+            % BRAKE_SECTORS;
+        if caps[sector].is_none_or(|(_, c)| cap < c) {
+            caps[sector] = Some((dir, cap));
+        }
     }
-    let base = geo::bearing_of(v);
-    let nearest = (-6..=6)
-        .filter_map(|k| {
-            let dir = geo::bearing_unit(base + (k as f32 * 15.0).to_radians());
-            obs.ray_distance(pos, dir, 20.0, now_ms).map(|d| (d, dir))
-        })
-        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let cap_along = |v: V2, d: f32, dir: V2| {
-        let cap = (2.0 * a_h * (d - margin).max(0.0)).sqrt();
-        let toward = geo::dot(v, dir);
-        if toward > cap {
-            geo::sub(v, geo::scale(dir, toward - cap))
+    let out = if close {
+        let n = geo::norm(away);
+        if n > 1e-3 {
+            let e = geo::scale(away, 1.0 / n);
+            geo::scale(e, geo::dot(v, e).max(0.0))
         } else {
-            v
+            [0.0, 0.0]
+        }
+    } else {
+        nearest_within(v, &caps)
+    };
+    Braked {
+        v: out,
+        cut: geo::norm(out) < geo::norm(v) - 1e-3,
+        close,
+    }
+}
+
+/// The point nearest to `v` inside every half-plane `dir·x ≤ cap`
+/// (Dykstra's alternating projection; the origin is always inside), with a
+/// final pass that enforces each cap.
+fn nearest_within(v: V2, caps: &[Option<(V2, f32)>; BRAKE_SECTORS]) -> V2 {
+    let project = |x: V2, (dir, cap): (V2, f32)| {
+        let over = geo::dot(dir, x) - cap;
+        if over > 0.0 {
+            geo::sub(x, geo::scale(dir, over))
+        } else {
+            x
         }
     };
-    let mut out = v;
-    if let Some((d, dir)) = nearest {
-        out = cap_along(out, d, dir);
+    if caps
+        .iter()
+        .flatten()
+        .all(|&(dir, cap)| geo::dot(dir, v) <= cap)
+    {
+        return v;
     }
-    if geo::norm(out) > 1e-3 {
-        let dir = geo::scale(out, 1.0 / geo::norm(out));
-        if let Some(d) = obs.ray_distance(pos, dir, 20.0, now_ms) {
-            out = cap_along(out, d, dir);
+    let mut x = v;
+    let mut corr = [[0.0f32; 2]; BRAKE_SECTORS];
+    for _ in 0..DYKSTRA_ITERS {
+        for (k, c) in caps.iter().enumerate() {
+            let Some(c) = *c else { continue };
+            let y = geo::add(x, corr[k]);
+            let xn = project(y, c);
+            corr[k] = geo::sub(y, xn);
+            x = xn;
         }
     }
-    out
+    caps.iter().flatten().fold(x, |x, &c| project(x, c))
 }
 
 /// Clamp the outward component at the `max_dist` boundary from home.

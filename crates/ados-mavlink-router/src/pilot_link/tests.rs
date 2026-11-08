@@ -145,6 +145,103 @@ fn gating_needs_ados_mode_and_a_live_pilot() {
     assert!(!link.gating(), "fc_manual passes sticks through");
 }
 
+fn pilot_state(owner: &str, armed: bool, landed: bool, class: &str) -> rmpv::Value {
+    rmpv::Value::Map(
+        [
+            ("control_mode", rmpv::Value::from("ados")),
+            ("owner", rmpv::Value::from(owner)),
+            ("armed", rmpv::Value::from(armed)),
+            ("landed", rmpv::Value::from(landed)),
+            ("vehicle_class", rmpv::Value::from(class)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (rmpv::Value::from(k), v))
+        .collect(),
+    )
+}
+
+#[test]
+fn pilot_death_while_flying_sets_the_loss_mode_once() {
+    let (tx, _rx) = mpsc::channel(4);
+    let link = PilotLink::new(ControlMode::Ados, tx);
+    assert_eq!(
+        link.death_mode_at(10_000, || LossAction::Rth),
+        None,
+        "never heard"
+    );
+    link.on_state(&pilot_state("pilot", true, false, "multirotor"));
+    let t = link.alive_ms.load(Ordering::Relaxed);
+    assert_eq!(
+        link.death_mode_at(t + DEATH_MS - 1, || LossAction::Rth),
+        None
+    );
+    assert_eq!(
+        link.death_mode_at(t + DEATH_MS, || LossAction::Rth),
+        Some(6),
+        "copter RTL"
+    );
+    assert_eq!(
+        link.death_mode_at(t + DEATH_MS + 500, || LossAction::Rth),
+        None,
+        "fires once"
+    );
+    // The pilot back and flying again re-arms it; the configured action decides the mode.
+    link.on_state(&pilot_state("skill", true, false, "multirotor"));
+    let t = link.alive_ms.load(Ordering::Relaxed);
+    assert_eq!(
+        link.death_mode_at(t + DEATH_MS, || LossAction::Land),
+        Some(9)
+    );
+    link.on_state(&pilot_state("goto", true, false, "fixedwing"));
+    let t = link.alive_ms.load(Ordering::Relaxed);
+    assert_eq!(
+        link.death_mode_at(t + DEATH_MS, || LossAction::Hold),
+        Some(12)
+    );
+    link.on_state(&pilot_state("pilot", true, false, "vtol"));
+    let t = link.alive_ms.load(Ordering::Relaxed);
+    assert_eq!(
+        link.death_mode_at(t + DEATH_MS, || LossAction::Land),
+        Some(20)
+    );
+}
+
+#[test]
+fn pilot_death_needs_the_pilot_flying() {
+    let (tx, _rx) = mpsc::channel(4);
+    let link = PilotLink::new(ControlMode::Ados, tx);
+    for s in [
+        pilot_state("fc_mode", true, false, "multirotor"),
+        pilot_state("mission_fc", true, false, "multirotor"),
+        pilot_state("pilot", false, true, "multirotor"),
+        pilot_state("pilot", true, true, "multirotor"),
+    ] {
+        link.on_state(&s);
+        let t = link.alive_ms.load(Ordering::Relaxed);
+        assert_eq!(
+            link.death_mode_at(t + 5 * DEATH_MS, || LossAction::Rth),
+            None,
+            "{s}"
+        );
+    }
+    let manual = rmpv::Value::Map(vec![
+        (
+            rmpv::Value::from("control_mode"),
+            rmpv::Value::from("fc_manual"),
+        ),
+        (rmpv::Value::from("owner"), rmpv::Value::from("pilot")),
+        (rmpv::Value::from("armed"), rmpv::Value::from(true)),
+        (rmpv::Value::from("landed"), rmpv::Value::from(false)),
+    ]);
+    link.on_state(&manual);
+    let t = link.alive_ms.load(Ordering::Relaxed);
+    assert_eq!(
+        link.death_mode_at(t + 5 * DEATH_MS, || LossAction::Rth),
+        None,
+        "fc_manual"
+    );
+}
+
 #[tokio::test]
 async fn gotos_and_swarm_goals_reach_the_pilot_socket() {
     let (tx, mut rx) = mpsc::channel(4);

@@ -23,7 +23,29 @@ pub(super) fn spawn_core(
     // The command-authority link (drone only): the pilot daemon owns motion
     // while control.mode is `ados` and it is alive.
     if cfg.is_drone() {
-        crate::pilot_link::start(control_mode(), std::path::Path::new(dir).join(ados_protocol::paths::PILOT_SOCK));
+        crate::pilot_link::start(
+            control_mode(),
+            std::path::Path::new(dir).join(ados_protocol::paths::PILOT_SOCK),
+        );
+        // Pilot death while it flies: the router sets the FC mode for
+        // `pilot.link_loss_action` within DEATH_MS plus one check period.
+        let fc = fc.clone();
+        let cancel = cancel.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        let Some(link) = crate::pilot_link::global() else { continue };
+                        if let Some(mode) = link.death_mode(link_loss_action) {
+                            tracing::warn!(custom_mode = mode, "pilot_death_failsafe");
+                            fc.send_set_mode(mode).await;
+                        }
+                    }
+                    _ = cancel.wait() => break,
+                }
+            }
+        }));
     }
     // FC connect + read loop. In demo mode a synthetic source feeds the same
     // fan-out, state, and proxy paths a serial FC would; the serial path is
@@ -177,12 +199,7 @@ pub(super) fn spawn_core(
             loop {
                 tokio::select! {
                     _ = tick.tick() => {
-                        // The pilot sends the heartbeat the FC's GCS failsafe
-                        // watches while it owns motion; if it dies, that
-                        // heartbeat stops and the FC fails safe.
-                        if !crate::pilot_link::suppress_router_heartbeat() {
-                            fc.send_heartbeat().await;
-                        }
+                        fc.send_heartbeat().await;
                         fc.tick_tx_watchdog().await;
                     }
                     _ = cancel.wait() => break,
@@ -227,9 +244,25 @@ pub(super) fn spawn_gate_feed(fc: &Arc<FcConnection>, cancel: &Shutdown, tasks: 
 
 /// `control.mode` from the agent config (schema default `ados`).
 fn control_mode() -> ados_protocol::pilot::ControlMode {
-    let path = std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
+    let path =
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
     ados_config::schema::load_slice::<String>(std::path::Path::new(&path), "/control/mode")
         .ok()
         .and_then(|m| ados_protocol::pilot::ControlMode::parse(&m))
         .unwrap_or_default()
+}
+
+/// `pilot.link_loss_action` from the agent config (schema default `rth`),
+/// read when the pilot dies so an operator's change applies without a
+/// router restart.
+fn link_loss_action() -> crate::pilot_link::LossAction {
+    let path =
+        std::env::var("ADOS_CONFIG").unwrap_or_else(|_| crate::config::CONFIG_YAML.to_string());
+    ados_config::schema::load_slice::<String>(
+        std::path::Path::new(&path),
+        "/pilot/link_loss_action",
+    )
+    .ok()
+    .and_then(|a| crate::pilot_link::LossAction::parse(&a))
+    .unwrap_or_default()
 }

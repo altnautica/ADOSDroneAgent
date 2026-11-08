@@ -209,6 +209,18 @@ impl Obstacles {
         self.hits(now_ms).iter().map(|h| h.range_m).reduce(f32::min)
     }
 
+    /// Obstacle points within `r` of `pos`: occupied grid cell centres and
+    /// current scan hits. The stick brake limits motion against every one of
+    /// them, so a narrow obstacle cannot fall between sample rays.
+    pub fn points_near(&self, pos: V2, r: f32, now_ms: u64) -> impl Iterator<Item = V2> + '_ {
+        self.grid.occupied_near(pos, r).chain(
+            self.hits(now_ms)
+                .iter()
+                .map(|h| h.ne)
+                .filter(move |p| geo::dist(*p, pos) <= r),
+        )
+    }
+
     /// The 72 body sectors of 5° (yaw 0 = nose, clockwise): nearest return,
     /// from the scan and the grid.
     pub fn sectors(&self, pos: V2, yaw: f32, now_ms: u64) -> Vec<Option<f32>> {

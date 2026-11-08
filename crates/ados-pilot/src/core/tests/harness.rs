@@ -20,6 +20,10 @@ pub struct World {
     pub landed: bool,
     pub sent: Vec<MavMessage>,
     pub revoked: Vec<(u64, String)>,
+    /// HEARTBEAT `type` the scripted FC reports.
+    pub mavtype: MavType,
+    /// Modes the scripted FC refuses to arm in.
+    pub unarmable: Vec<u32>,
 }
 
 impl World {
@@ -48,6 +52,8 @@ impl World {
             landed: true,
             sent: Vec::new(),
             revoked: Vec::new(),
+            mavtype: MavType::MAV_TYPE_QUADROTOR,
+            unarmable: Vec::new(),
         };
         w.feed();
         w
@@ -60,7 +66,7 @@ impl World {
         }
         MavMessage::HEARTBEAT(HEARTBEAT_DATA {
             custom_mode: self.mode,
-            mavtype: MavType::MAV_TYPE_QUADROTOR,
+            mavtype: self.mavtype,
             autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
             base_mode: base,
             system_status: MavState::MAV_STATE_ACTIVE,
@@ -146,7 +152,11 @@ impl World {
         if let MavMessage::COMMAND_LONG(c) = m {
             match c.command {
                 MavCmd::MAV_CMD_DO_SET_MODE => self.mode = c.param2 as u32,
-                MavCmd::MAV_CMD_COMPONENT_ARM_DISARM => self.armed = c.param1 > 0.5,
+                MavCmd::MAV_CMD_COMPONENT_ARM_DISARM => {
+                    if c.param1 < 0.5 || !self.unarmable.contains(&self.mode) {
+                        self.armed = c.param1 > 0.5;
+                    }
+                }
                 MavCmd::MAV_CMD_NAV_TAKEOFF => {
                     self.pos[2] = -c.param7;
                     self.agl = Some(c.param7);

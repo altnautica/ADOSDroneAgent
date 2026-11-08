@@ -69,6 +69,7 @@ impl Pilot {
                     when_done: None,
                     error: None,
                     step_ms: now_ms,
+                    cmd: None,
                 },
                 now_ms,
             ),
@@ -246,6 +247,7 @@ impl Pilot {
                 when_done,
                 error: None,
                 step_ms: now_ms,
+                cmd: None,
             },
             now_ms,
         )
@@ -255,22 +257,50 @@ impl Pilot {
         if self.fc.armed && !self.fc.landed() {
             return Err("airborne".into());
         }
-        if l.step == LaunchStep::Checks {
+        if l.step == LaunchStep::Checks || !self.fc.armed {
             self.ready_to_arm(now_ms)?;
         }
-        self.launch = Some(Launch {
+        let mut l = Launch {
             step: LaunchStep::Arm,
             step_ms: now_ms,
+            cmd: None,
             ..l
-        });
-        if !self.fc.armed {
-            if l.step != LaunchStep::Checks {
-                self.ready_to_arm(now_ms)?;
-            }
+        };
+        self.arm_for_launch(&mut l, now_ms);
+        self.launch = Some(l);
+        Ok(())
+    }
+
+    /// The mode a launch arms and climbs in: Plane TAKEOFF for fixed-wing,
+    /// GUIDED otherwise. The FC refuses to arm in some modes (RTL, where a
+    /// plane boots), so this mode is selected before arming.
+    fn launch_mode(&self) -> u32 {
+        if self.fc.vehicle_class() == VehicleClass::Fixedwing {
+            plane::TAKEOFF
+        } else {
+            self.family().guided()
+        }
+    }
+
+    /// While disarmed: select the launch mode, then arm once the FC reports
+    /// it; each command re-sent at most once a second.
+    fn arm_for_launch(&mut self, l: &mut Launch, now_ms: u64) {
+        if self.fc.armed {
+            return;
+        }
+        let arm = self.fc.custom_mode == self.launch_mode();
+        if l.cmd
+            .is_some_and(|(a, t)| a == arm && now_ms.saturating_sub(t) < 1000)
+        {
+            return;
+        }
+        l.cmd = Some((arm, now_ms));
+        if arm {
             let m = self.tx().arm(true, false);
             self.mav(m);
+        } else {
+            self.set_mode(self.launch_mode(), now_ms);
         }
-        Ok(())
     }
 
     /// Advance a running launch sequence (called every tick).
@@ -278,7 +308,6 @@ impl Pilot {
         let Some(mut l) = self.launch.take() else {
             return;
         };
-        let fam = self.family();
         let class = self.fc.vehicle_class();
         let elapsed = now_ms.saturating_sub(l.step_ms);
         match l.step {
@@ -288,16 +317,20 @@ impl Pilot {
             }
             LaunchStep::Arm => {
                 if self.fc.armed {
-                    let mode = if class == VehicleClass::Fixedwing {
-                        plane::TAKEOFF
-                    } else {
-                        fam.guided()
-                    };
-                    self.set_mode(mode, now_ms);
+                    let mode = self.launch_mode();
+                    if self.fc.custom_mode != mode {
+                        self.set_mode(mode, now_ms);
+                    }
                     l.step = LaunchStep::Takeoff;
                     l.step_ms = now_ms;
-                } else if elapsed > STEP_TIMEOUT_MS {
-                    l.error = Some("arm_refused".into());
+                } else if elapsed > 2 * STEP_TIMEOUT_MS {
+                    l.error = Some(if self.fc.custom_mode == self.launch_mode() {
+                        "arm_refused".into()
+                    } else {
+                        "mode_refused".into()
+                    });
+                } else {
+                    self.arm_for_launch(&mut l, now_ms);
                 }
             }
             LaunchStep::Takeoff => {

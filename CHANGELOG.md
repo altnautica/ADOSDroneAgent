@@ -6,6 +6,20 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.12] - 2026-11-08
+
+### Fixed
+
+- Stopping the pilot in flight now fails safe. ArduPilot's GCS failsafe accepts a heartbeat from any component of the GCS system id, and two kept arriving after the pilot died: the router resumed its own heartbeat 1.5 s later, and a vision-navigation component sends one at 1 Hz throughout. A killed pilot therefore left the flight controller in GUIDED. The router now watches the pilot's state stream. If the stream stops for 1 s while the pilot was flying the vehicle (owner `pilot`, `skill`, `goto` or `swarm`, armed, airborne, `ados` mode), the router sets the flight-controller mode for `pilot.link_loss_action`. `rth` sets RTL. `hold` sets Copter or Plane LOITER, or QLOITER on a VTOL. `land` sets Copter LAND, QLAND on a VTOL, or RTL on a plane. The pilot now sends as MAVLink component 196 instead of sharing the router's 191, and the router always sends its own heartbeat.
+- The stick-flight obstacle brake missed narrow obstacles and stopped too late:
+  - It sampled 13 rays 15° apart, so a 0.6 m column between two rays went unseen. Every occupied cell and scan hit near the vehicle now caps the speed toward it. The commanded velocity is the one nearest the stick's that respects every cap, so braking adds no sideways motion of its own.
+  - Distances were measured from the vehicle's current position, while the flight controller's velocity trails a reduced setpoint by about 0.5 s, so the vehicle stopped inside the margin. Distances are now measured from where the current velocity carries the vehicle in 0.5 s.
+  - Within 0.6 × the margin, only motion away from the obstacle is kept, and `hold_reason` reads `obstacle-close`.
+  - `avoid_state` now reports the brake in stick flight: `detour` while it limits the speed, `blocked` when it stops the vehicle. It previously read `clear` throughout.
+  - A stick reversed away from an obstacle responds at once. The brake used to leave the stick shaper's built-up acceleration in place, and it had to unwind first.
+- Centred sticks now capture the hold point once the vehicle itself is below 0.2 m/s, commanding a stop until then (for at most 3 s). Previously the point was captured when the commanded speed fell below 0.2 m/s, so a stop from speed overshot the hold point and flew back to it.
+- Launch now selects its flight mode before arming: Plane TAKEOFF on a fixed-wing, GUIDED otherwise. It arms once the flight controller reports that mode, and re-sends each command at most once a second. A plane that boots in RTL, where ArduPlane refuses to arm ("RTL mode not armable"), now launches. After 10 s without arming, `sequence.error` reads `mode_refused` or `arm_refused`.
+
 ## [0.109.11] - 2026-11-08
 
 ### Fixed

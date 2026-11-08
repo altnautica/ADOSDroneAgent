@@ -69,6 +69,19 @@ impl Grid {
         self.occ[i * GRID_N + j]
     }
 
+    /// Centres of the occupied cells within `r` of `c`.
+    pub fn occupied_near(&self, c: V2, r: f32) -> impl Iterator<Item = V2> + '_ {
+        let last = (GRID_N - 1) as f32;
+        let idx = |v: f32, o: f32| ((v - o) / CELL_M).floor().clamp(0.0, last) as usize;
+        let (i0, i1) = (idx(c[0] - r, self.origin[0]), idx(c[0] + r, self.origin[0]));
+        let (j0, j1) = (idx(c[1] - r, self.origin[1]), idx(c[1] + r, self.origin[1]));
+        (i0..=i1)
+            .flat_map(move |i| (j0..=j1).map(move |j| (i, j)))
+            .filter(|&(i, j)| self.occupied(i, j))
+            .map(|(i, j)| self.center_of(i, j))
+            .filter(move |p| (p[0] - c[0]).hypot(p[1] - c[1]) <= r)
+    }
+
     /// Two-pass chamfer 3-4 distance transform.
     pub fn transform(&mut self) {
         let n = GRID_N;

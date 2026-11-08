@@ -15,10 +15,12 @@ use crate::config::{self, Settings};
 use crate::core::{Out, Pilot};
 use crate::ipc::{CoreReq, SetupHandler, Shared};
 
-/// The pilot's MAVLink identity (the router's, so the FC's GCS failsafe,
-/// `MAV_GCS_SYSID` = 1, counts its heartbeat).
+/// The pilot's MAVLink identity: the companion's system id (the FC's
+/// `MAV_GCS_SYSID` = 1) and its own component, apart from the router's 191.
+/// Its death is caught by the router (`pilot_link` death failsafe), not by
+/// the FC's GCS failsafe, which any other sysid-1 heartbeat satisfies.
 pub const SYSID: u8 = 1;
-pub const COMPID: u8 = 191;
+pub const COMPID: u8 = 196;
 /// State publish period (10 Hz).
 const STATE_PERIOD_MS: u64 = 100;
 
@@ -112,7 +114,11 @@ impl Daemon {
         let (owner_tx, owner_rx) = watch::channel(ados_protocol::pilot::Owner::Idle);
         let (status_tx, status_rx) = watch::channel(SetupView::default());
         Self {
-            fc_link: FcLink { tx: fc_tx, frames, version_frames },
+            fc_link: FcLink {
+                tx: fc_tx,
+                frames,
+                version_frames,
+            },
             handle: PilotHandle {
                 cmd: cmd_tx,
                 tuning_axes: axes_rx,
