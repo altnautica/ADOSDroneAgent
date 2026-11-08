@@ -996,9 +996,53 @@ fn vtol_first_hover_climbs_to_the_transition_height() {
     });
     assert_eq!(climb_at, Some(474_000_000), "climb in place");
     // Forward flight: the tailsitter circles the plane's box, not the hover's 20 m.
-    s.fc.vtol_state = ados_protocol::mavlink::ardupilotmega::MavVtolState::MAV_VTOL_STATE_FW;
+    s.fc.vtol_fw = true;
     s.fc.n = 150.0;
     s.run(3000);
     assert_eq!(s.step_id().as_deref(), Some("first_hover"), "{:?}", s.e.state.air.steps);
     assert_eq!(s.state(), Some(StepState::Running), "no drift abort in forward flight");
+}
+
+#[test]
+fn vtol_first_hover_hovers_in_place_then_flies_the_transition() {
+    // A tuning box another run left in the aircraft record (8 m south: on the bench every
+    // SITL airframe shares one uid) drew the tailsitter's climb toward it, and the
+    // transition's fixed-wing loiter tripped the 20 m copter drift box 2 s after
+    // "Transition FW done".
+    let mut p = ritz_params();
+    p.insert("Q_GUIDED_MODE".into(), 1.0);
+    p.insert("Q_M_THST_HOVER".into(), 0.3);
+    let mut s = Sim::new(MavType::MAV_TYPE_VTOL_TAILSITTER_DUOROTOR, p);
+    s.e.state.ground.state = WizardState::Done;
+    s.e.state.data.box_center = Some([-8.0, 0.0]);
+    s.e.state.data.box_latlon = Some((474_000_000 - 719, 85_000_000));
+    assert_eq!(s.e.run_step(A, "first_hover", s.now)["ok"], json!(true));
+    s.run(100);
+    s.act(A, "first_hover", "start", json!({}));
+    s.until(|s| s.fc.alt > 2.9, 20_000);
+    let end = s.now + 90_000;
+    let mut off = 0.0f32;
+    while s.fc.alt < 27.0 {
+        assert!(s.now < end && s.state() == Some(StepState::Running), "climb: {:?} at {} m", s.e.state.air.steps, s.fc.alt);
+        s.run(100);
+        off = off.max(s.fc.n.hypot(s.fc.e));
+    }
+    assert!(off < 1.0, "left the take-off point by {off} m while hovering and climbing");
+    s.until(|s| s.e.current_view().is_none(), 200_000);
+    assert_eq!(s.step_state(A, "first_hover"), StepState::Done, "{:?}", s.e.state.air.steps);
+    let r = s.result(A, "first_hover");
+    assert_eq!(r["transition_fw"], json!(true));
+    assert_eq!(r["transition_mc"], json!(true));
+    assert!(!s.fc.armed);
+}
+
+#[test]
+fn tuning_box_is_not_persisted() {
+    let mut st = super::store::AircraftState::default();
+    st.data.box_center = Some([3.0, 4.0]);
+    st.data.box_latlon = Some((1, 2));
+    st.data.hover_throttle = Some(0.3);
+    let back: super::store::AircraftState = serde_json::from_slice(&serde_json::to_vec(&st).unwrap()).unwrap();
+    assert_eq!((back.data.box_center, back.data.box_latlon), (None, None));
+    assert_eq!(back.data.hover_throttle, Some(0.3));
 }

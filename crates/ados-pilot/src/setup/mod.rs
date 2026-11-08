@@ -66,6 +66,10 @@ struct Run {
     idx: usize,
     /// Only `idx` runs (Settings › Aircraft setup re-run).
     single: bool,
+    /// A VTOL has flown (or begun) a transition in this run. It comes back
+    /// to a hover anywhere on its fixed-wing loiter, so from then on its
+    /// drift limit stays the plane's box, in the hover too.
+    fw_flown: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -381,12 +385,12 @@ impl Engine {
                     abort = Some("wind");
                 } else if let (Some((l, _)), Some(c)) = (cx.fc.local, cx.data.box_center) {
                     use ados_protocol::mavlink::ardupilotmega::MavVtolState as V;
-                    let fw_flight = matches!(
+                    run.fw_flown |= matches!(
                         cx.fc.vtol_state,
                         Some(V::MAV_VTOL_STATE_FW | V::MAV_VTOL_STATE_TRANSITION_TO_FW | V::MAV_VTOL_STATE_TRANSITION_TO_MC)
                     );
                     let d = ((l[0] - c[0]).powi(2) + (l[1] - c[1]).powi(2)).sqrt();
-                    if d > adapter.tuning_box_m(fw_flight) {
+                    if d > adapter.tuning_box_m(run.fw_flown) {
                         abort = Some("drift");
                     }
                 }
@@ -650,7 +654,7 @@ impl Engine {
     fn new_run(&self, w: WizardId) -> Option<Run> {
         let a = self.adapter()?;
         let steps = a.steps(w).iter().filter_map(|id| steps::make(id)).collect();
-        Some(Run { wizard: w, steps, idx: 0, single: false })
+        Some(Run { wizard: w, steps, idx: 0, single: false, fw_flown: false })
     }
 
     pub fn start(&mut self, w: WizardId, now: u64) -> Value {
@@ -720,7 +724,7 @@ impl Engine {
         if w == WizardId::Air {
             self.forget_tuning_box();
         }
-        self.run = Some(Run { wizard: w, steps: vec![s], idx: 0, single: true });
+        self.run = Some(Run { wizard: w, steps: vec![s], idx: 0, single: true, fw_flown: false });
         self.begin_current(now);
         let view = self.current_view();
         json!({"ok": true, "step": view})

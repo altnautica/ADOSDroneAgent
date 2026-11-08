@@ -88,12 +88,7 @@ impl Hop {
         if self.leg == Leg::Holding {
             self.capture_hold(cx);
         }
-        if cx.data.box_center.is_none() {
-            cx.data.box_center = cx.fc.local.map(|(l, _)| [l[0], l[1]]);
-        }
-        if cx.data.box_latlon.is_none() {
-            cx.data.box_latlon = cx.fc.latlon;
-        }
+        anchor_box(cx);
     }
 
     pub fn land(&mut self, cx: &mut Cx) {
@@ -215,6 +210,16 @@ impl Hop {
                 }
             }
         }
+    }
+}
+
+/// The run's tuning box is centred where its first flight starts.
+pub fn anchor_box(cx: &mut Cx) {
+    if cx.data.box_center.is_none() {
+        cx.data.box_center = cx.fc.local.map(|(l, _)| [l[0], l[1]]);
+    }
+    if cx.data.box_latlon.is_none() {
+        cx.data.box_latlon = cx.fc.latlon;
     }
 }
 

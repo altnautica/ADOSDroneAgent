@@ -50,8 +50,6 @@ pub struct FakeFc {
     pub alt: f32,
     pub n: f32,
     pub e: f32,
-    /// EXTENDED_SYS_STATE `vtol_state`.
-    pub vtol_state: MavVtolState,
     pub battery_pct: i8,
     pub battery_v: f32,
     pub wind: Option<(f32, f32)>,
@@ -78,6 +76,12 @@ pub struct FakeFc {
     /// ArduPlane GUIDED's offboard height from GUIDED_CHANGE_ALTITUDE: once
     /// set it wins over a DO_REPOSITION's height.
     offboard_alt: Option<f32>,
+    /// QuadPlane in fixed-wing flight (EXTENDED_SYS_STATE `vtol_state` FW),
+    /// and a transition under way `(since, to_fw)`.
+    pub vtol_fw: bool,
+    vtol_trans: Option<(u64, bool)>,
+    /// GUIDED target point `(n, e)`: hovered over (VTOL) or loitered round (fixed-wing).
+    target_ne: Option<(f32, f32)>,
     pub reboots: u32,
     /// AUTOPILOT_VERSION `uid` and `uid2` (the extension, sent as a raw frame).
     pub uid: u64,
@@ -190,6 +194,21 @@ pub fn ap_plane_params() -> BTreeMap<String, f32> {
     p
 }
 
+/// Where the fake FC's local origin is, degE7.
+const LAT0: i32 = 474_000_000;
+const LON0: i32 = 85_000_000;
+/// Metres per degE7 of latitude, and the longitude scale at LAT0.
+const M_PER_E7: f32 = 0.011_131_95;
+const COS_LAT0: f32 = 0.676_9;
+
+fn latlon_of(n: f32, e: f32) -> (i32, i32) {
+    (LAT0 + (n / M_PER_E7).round() as i32, LON0 + (e / (M_PER_E7 * COS_LAT0)).round() as i32)
+}
+
+fn ne_of(lat: i32, lon: i32) -> (f32, f32) {
+    ((lat - LAT0) as f32 * M_PER_E7, (lon - LON0) as f32 * M_PER_E7 * COS_LAT0)
+}
+
 fn text(s: &str) -> MavMessage {
     MavMessage::STATUSTEXT(STATUSTEXT_DATA { severity: MavSeverity::MAV_SEVERITY_INFO, text: s.into() })
 }
@@ -227,7 +246,6 @@ impl FakeFc {
             battery_v: 16.0,
             wind: Some((90.0, 2.0)),
             rc: None,
-            vtol_state: MavVtolState::MAV_VTOL_STATE_UNDEFINED,
             script: Script::default(),
             sent: Vec::new(),
             effects: Vec::new(),
@@ -245,6 +263,9 @@ impl FakeFc {
             manual_z: 0.5,
             airspeed_cal_until: None,
             offboard_alt: None,
+            vtol_fw: false,
+            vtol_trans: None,
+            target_ne: None,
             reboots: 0,
             uid: 0x00C0_FFEE_1234_5678,
             uid2: None,
@@ -256,11 +277,27 @@ impl FakeFc {
     }
 
     fn mode_land(&self) -> u32 {
-        if self.is_copter() { 9 } else { 11 }
+        if self.is_vtol() {
+            20
+        } else if self.is_copter() {
+            9
+        } else {
+            11
+        }
+    }
+
+    fn is_vtol(&self) -> bool {
+        self.params.get("Q_ENABLE").is_some_and(|q| *q > 0.0)
     }
 
     fn mode_autotune(&self) -> u32 {
-        if self.is_copter() { 15 } else { 8 }
+        if self.is_vtol() {
+            22
+        } else if self.is_copter() {
+            15
+        } else {
+            8
+        }
     }
 
     fn param_value(&self, name: &str, idx: u16) -> MavMessage {
@@ -315,6 +352,17 @@ impl FakeFc {
                 if c.command == MavCmd::MAV_CMD_DO_REPOSITION {
                     self.custom_mode = 15;
                     self.takeoff_alt = Some(self.offboard_alt.unwrap_or(c.z));
+                    self.target_ne = Some(if c.x == 0 && c.y == 0 { (self.n, self.e) } else { ne_of(c.x, c.y) });
+                    // ArduPlane: a GUIDED point restarts navigation as fixed-wing;
+                    // with Q_GUIDED_MODE 0 nothing hands it back to the VTOL
+                    // controller, so a hovering QuadPlane transitions.
+                    if self.is_vtol() && self.alt > 1.0 && !self.vtol_fw && self.vtol_trans.is_none() && self.params.get("Q_GUIDED_MODE") == Some(&0.0) {
+                        self.vtol_trans = Some((now, true));
+                    }
+                }
+                if c.command == MavCmd::MAV_CMD_DO_CHANGE_ALTITUDE {
+                    // The GUIDED target's height only (relative frame): the point stays.
+                    self.takeoff_alt = Some(c.param1);
                 }
                 if c.command == MavCmd::MAV_CMD_GUIDED_CHANGE_ALTITUDE {
                     self.offboard_alt = Some(c.z);
@@ -399,11 +447,20 @@ impl FakeFc {
                 // ArduCopter enters AUTOTUNE only from a mode that allows it
                 // (STABILIZE 0, ALT_HOLD 2, LOITER 5, POSHOLD 16).
                 let allowed = matches!(self.custom_mode, 0 | 2 | 5 | 16) && !self.script.refuse_autotune;
-                if self.is_copter() && want == self.mode_autotune() && !allowed {
+                if self.is_copter() && !self.is_vtol() && want == self.mode_autotune() && !allowed {
                     self.queue.push_back(text("Mode change to Autotune failed: init failed"));
                     result = MavResult::MAV_RESULT_FAILED;
                 } else {
                     self.custom_mode = want;
+                    if self.is_vtol() {
+                        if (17..=22).contains(&want) && (self.vtol_fw || self.vtol_trans.is_some_and(|(_, fw)| fw)) {
+                            // A Q mode from fixed-wing flight transitions back and hovers where it is.
+                            self.vtol_trans = Some((now, false));
+                            self.target_ne = None;
+                        } else if want == 15 {
+                            self.target_ne = Some((self.n, self.e));
+                        }
+                    }
                     if self.custom_mode == self.mode_autotune() && self.armed {
                         self.autotune_since = Some(now);
                         self.autotune_success = false;
@@ -437,6 +494,9 @@ impl FakeFc {
                     }
                     self.armed = false;
                     self.autotune_since = None;
+                    self.vtol_fw = false;
+                    self.vtol_trans = None;
+                    self.target_ne = None;
                 } else {
                     result = MavResult::MAV_RESULT_DENIED;
                 }
@@ -495,14 +555,19 @@ impl FakeFc {
         if now.saturating_sub(self.last_tel) >= 100 {
             self.last_tel = now;
             let landed = if self.alt < 0.1 { MavLandedState::MAV_LANDED_STATE_ON_GROUND } else { MavLandedState::MAV_LANDED_STATE_IN_AIR };
-            self.queue.push_back(MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
-                vtol_state: self.vtol_state,
-                landed_state: landed,
-            }));
+            let vtol_state = match (self.is_vtol(), self.vtol_trans, self.vtol_fw) {
+                (false, _, _) => MavVtolState::MAV_VTOL_STATE_UNDEFINED,
+                (true, Some((_, true)), _) => MavVtolState::MAV_VTOL_STATE_TRANSITION_TO_FW,
+                (true, Some((_, false)), _) => MavVtolState::MAV_VTOL_STATE_TRANSITION_TO_MC,
+                (true, None, true) => MavVtolState::MAV_VTOL_STATE_FW,
+                (true, None, false) => MavVtolState::MAV_VTOL_STATE_MC,
+            };
+            self.queue.push_back(MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA { vtol_state, landed_state: landed }));
+            let (lat, lon) = latlon_of(self.n, self.e);
             self.queue.push_back(MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
                 relative_alt: (self.alt * 1000.0) as i32,
-                lat: 474_000_000,
-                lon: 85_000_000,
+                lat,
+                lon,
                 ..Default::default()
             }));
             self.queue.push_back(MavMessage::LOCAL_POSITION_NED(LOCAL_POSITION_NED_DATA {
@@ -531,7 +596,9 @@ impl FakeFc {
             self.alt = 0.0;
             return;
         }
-        let land = self.custom_mode == self.mode_land();
+        self.vtol_physics(now, dt);
+        // A QuadPlane lands in QLAND once it hovers again.
+        let land = self.custom_mode == self.mode_land() && !self.vtol_fw && self.vtol_trans.is_none();
         let autotune = self.custom_mode == self.mode_autotune();
         if land || (autotune && self.is_copter() && self.manual_z < 0.3) {
             self.alt = (self.alt - 1.5 * dt).max(0.0);
@@ -555,6 +622,43 @@ impl FakeFc {
             if el >= self.script.autotune_s * 1000 && !self.autotune_success {
                 self.autotune_success = true;
                 self.queue.push_back(text("AutoTune: Success"));
+            }
+        }
+    }
+
+    /// QuadPlane transitions (2 s) and horizontal flight: fixed-wing circles
+    /// the GUIDED point (or where it went fixed-wing) at 60 m and 15 m/s; a
+    /// VTOL in GUIDED with Q_GUIDED_MODE 1 flies to its point at 1 m/s.
+    fn vtol_physics(&mut self, now: u64, dt: f32) {
+        if !self.is_vtol() || self.alt < 0.5 {
+            return;
+        }
+        if let Some((since, to_fw)) = self.vtol_trans {
+            if now.saturating_sub(since) >= 2000 {
+                self.vtol_trans = None;
+                self.vtol_fw = to_fw;
+            }
+            return;
+        }
+        if self.vtol_fw {
+            let (tn, te) = *self.target_ne.get_or_insert((self.n, self.e));
+            let (dn, de) = (self.n - tn, self.e - te);
+            let d = (dn * dn + de * de).sqrt();
+            let (un, ue) = if d > 0.1 { (dn / d, de / d) } else { (1.0, 0.0) };
+            // Tangent plus a pull onto the 60 m circle.
+            let (vn, ve) = (-ue + (60.0 - d) / 20.0 * un, un + (60.0 - d) / 20.0 * ue);
+            let v = (vn * vn + ve * ve).sqrt().max(1e-3);
+            self.n += 15.0 * vn / v * dt;
+            self.e += 15.0 * ve / v * dt;
+        } else if self.custom_mode == 15 && self.params.get("Q_GUIDED_MODE") == Some(&1.0) {
+            if let Some((tn, te)) = self.target_ne {
+                let (dn, de) = (tn - self.n, te - self.e);
+                let d = (dn * dn + de * de).sqrt();
+                if d > 0.01 {
+                    let step = (1.0 * dt).min(d);
+                    self.n += dn / d * step;
+                    self.e += de / d * step;
+                }
             }
         }
     }

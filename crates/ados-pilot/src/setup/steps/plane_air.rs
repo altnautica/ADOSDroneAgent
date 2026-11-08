@@ -52,6 +52,8 @@ fn fixedwing_flight(cx: &Cx) -> bool {
 impl ToLoiter {
     pub fn start(&mut self, cx: &mut Cx) {
         *self = ToLoiter::default();
+        // A lone step started in flight has no take-off to centre the box on.
+        flight::anchor_box(cx);
         if airborne(cx) {
             if fixedwing_flight(cx) {
                 plane_loiter(cx, PLANE_LOITER_ALT_M);

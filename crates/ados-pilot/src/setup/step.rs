@@ -43,10 +43,16 @@ pub struct WizardData {
     pub baseline_track_err_deg: Option<[f32; 2]>,
     pub snapshot: Option<String>,
     pub area_confirmed: bool,
-    /// Tuning-box centre `(n, e)` in LOCAL_NED.
+    /// Tuning-box centre `(n, e)` in LOCAL_NED. Set at the run's first
+    /// take-off and never persisted: a box from another flight (another
+    /// field, or a local origin from another boot) would aim the loiters at
+    /// that place and measure drift from it.
+    #[serde(skip)]
     pub box_center: Option<[f32; 2]>,
     pub autotune_yaw_pending: bool,
-    /// Tuning-box centre as `(lat, lon)` degE7, for fixed-wing loiters.
+    /// Tuning-box centre as `(lat, lon)` degE7, for fixed-wing loiters. Per
+    /// run, like `box_center`.
+    #[serde(skip)]
     pub box_latlon: Option<(i32, i32)>,
     /// Measured cruise throttle (%), first flight.
     pub cruise_throttle: Option<f32>,

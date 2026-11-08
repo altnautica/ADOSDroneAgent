@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.25] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup on VTOLs: after its transition back to a hover, a VTOL is anywhere on its fixed-wing loiter, tens of metres from where it took off, and the drift check went back to the hover's 20 m box there, so `first_hover` aborted for drift on the way down. Once a VTOL has flown or begun a transition in an air run, the run keeps the plane's 400 m box.
+- Aircraft setup: the tuning box is no longer written to the per-aircraft state file, so a box from an earlier session never comes back after a restart; an air step started in flight takes its box from where it starts.
+
 ## [0.109.24] - 2026-11-08
 
 ### Fixed
