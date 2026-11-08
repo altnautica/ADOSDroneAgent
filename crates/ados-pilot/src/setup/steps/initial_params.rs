@@ -94,10 +94,6 @@ impl Step for InitialParams {
     }
 
     fn action(&mut self, id: &str, args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
-        if id == "retry" {
-            self.begin(cx);
-            return Ok(());
-        }
         if id != "apply" {
             return Err("unknown_action");
         }

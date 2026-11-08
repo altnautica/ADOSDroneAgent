@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 
 use crate::setup::fcstate::Fw;
 use crate::setup::schema::{input_number, obj, Action};
-use crate::setup::step::{arg_f32, step_core, writes_settled, ActErr, Cx, Reboot, Step, StepCore};
+use crate::setup::step::{arg_f32, step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore};
 
 /// Nominal LiPo cell voltage used to guess the cell count from a reading.
 const NOMINAL_CELL_V: f32 = 3.85;
@@ -61,9 +61,16 @@ impl Step for Battery {
             self.core.set_live("cells_detected", cells_from_voltage(v));
         }
         if self.reboot.active() {
-            if self.reboot.tick(cx) {
-                self.core.phase_key = None;
-                self.core.done(std::mem::take(&mut self.result));
+            match self.reboot.tick(cx) {
+                Rebooted::Waiting => {}
+                Rebooted::Back => {
+                    self.core.phase_key = None;
+                    self.core.done(std::mem::take(&mut self.result));
+                }
+                Rebooted::Lost => {
+                    self.core.phase_key = None;
+                    self.core.fail("setup.blocker.timeout");
+                }
             }
             return;
         }
@@ -89,12 +96,8 @@ impl Step for Battery {
     }
 
     fn action(&mut self, id: &str, args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
-        if id != "apply" && id != "retry" {
+        if id != "apply" {
             return Err("unknown_action");
-        }
-        if id == "retry" {
-            self.begin(cx);
-            return Ok(());
         }
         let capacity = arg_f32(args, "capacity_mah").filter(|c| *c >= 100.0).ok_or("bad_args")?;
         let measured = arg_f32(args, "measured_v").filter(|v| *v >= 0.0).ok_or("bad_args")?;

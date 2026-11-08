@@ -1,9 +1,13 @@
 //! `level`, `gyro` and `airspeed`: one PREFLIGHT_CALIBRATION each.
 //!
-//! ArduPilot runs these synchronously and answers with the final ACK; PX4
-//! acknowledges at once and reports through `[cal]` STATUSTEXT.
+//! ArduPilot runs level and gyro synchronously and answers with the final
+//! ACK. Its airspeed zero runs with the ground-pressure calibration (p3 = 1,
+//! `GCS_MAVLINK::_handle_command_preflight_calibration_baro`): IN_PROGRESS
+//! ACKs while the offset is sampled, then ACCEPTED or FAILED; p6 is not an
+//! airspeed calibration there and answers UNSUPPORTED. PX4 acknowledges at
+//! once and reports through `[cal]` STATUSTEXT.
 
-use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavResult};
+use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavResult, MavSysStatusSensor};
 use serde_json::{json, Map, Value};
 
 use crate::setup::adapters::px4::{parse_cal, CalEvent};
@@ -26,19 +30,22 @@ pub struct SimpleCal {
     kind: Kind,
     started_ms: Option<u64>,
     text_cursor: u64,
+    /// The FC answered IN_PROGRESS: a later FAILED is the calibration
+    /// failing, not a refusal.
+    in_progress: bool,
 }
 
 impl SimpleCal {
     pub fn new(kind: Kind) -> Self {
-        SimpleCal { core: StepCore::default(), kind, started_ms: None, text_cursor: 0 }
+        SimpleCal { core: StepCore::default(), kind, started_ms: None, text_cursor: 0, in_progress: false }
     }
 
-    fn params(&self) -> [f32; 7] {
-        match self.kind {
-            Kind::Level => [0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
-            Kind::Gyro => [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            // ArduPilot: p6 = 2 is airspeed; PX4 reads p6 = 1.
-            Kind::Airspeed => [0.0; 7],
+    fn params(&self, fw: Fw) -> [f32; 7] {
+        match (self.kind, fw) {
+            (Kind::Level, _) => [0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0],
+            (Kind::Gyro, _) => [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            (Kind::Airspeed, Fw::Px4) => [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            (Kind::Airspeed, _) => [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -70,14 +77,19 @@ impl Step for SimpleCal {
                 if cx.adapter.class == Class::Multirotor {
                     return Some("not_applicable");
                 }
-                let present = if cx.adapter.fw == Fw::Px4 {
+                let configured = if cx.adapter.fw == Fw::Px4 {
                     cx.params.get("SENS_EN_SDP3X").unwrap_or(0.0) != 0.0
                         || cx.params.get("SENS_EN_MS4525DO").unwrap_or(0.0) != 0.0
                         || cx.params.get("SENS_EN_MS5525DS").unwrap_or(0.0) != 0.0
                 } else {
                     cx.params.get("ARSPD_TYPE").unwrap_or(0.0) != 0.0
                 };
-                (!present).then_some("no_airspeed_sensor")
+                // SYS_STATUS is the FC's own word on what is fitted.
+                let reported = cx
+                    .fc
+                    .sensors_present
+                    .is_none_or(|s| s.contains(MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_DIFFERENTIAL_PRESSURE));
+                (!(configured && reported)).then_some("no_airspeed_sensor")
             }
             _ => None,
         }
@@ -86,6 +98,7 @@ impl Step for SimpleCal {
     fn begin(&mut self, cx: &mut Cx) {
         self.core = StepCore::default();
         self.started_ms = None;
+        self.in_progress = false;
         match self.kind {
             Kind::Level => {
                 if cx.adapter.class == Class::Fixedwing {
@@ -117,7 +130,12 @@ impl Step for SimpleCal {
                     self.core.done(obj([("ack", json!("accepted"))]));
                     return;
                 }
-                MavResult::MAV_RESULT_ACCEPTED | MavResult::MAV_RESULT_IN_PROGRESS => {}
+                MavResult::MAV_RESULT_IN_PROGRESS => self.in_progress = true,
+                MavResult::MAV_RESULT_ACCEPTED => {}
+                _ if self.in_progress => {
+                    self.core.fail("setup.blocker.calibration_failed");
+                    return;
+                }
                 _ => {
                     self.core.fail("setup.blocker.calibration_refused");
                     return;
@@ -152,13 +170,11 @@ impl Step for SimpleCal {
         if cx.fc.armed {
             return Err("armed");
         }
-        let mut p = self.params();
-        if self.kind == Kind::Airspeed {
-            p[5] = if cx.adapter.fw == Fw::Px4 { 1.0 } else { 2.0 };
-        }
+        let p = self.params(cx.adapter.fw);
         cx.out.cmd(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION, p);
         self.started_ms = Some(cx.now);
         self.text_cursor = cx.fc.text_seq;
+        self.in_progress = false;
         self.core.running();
         Ok(())
     }

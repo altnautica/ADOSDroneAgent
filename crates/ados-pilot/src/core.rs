@@ -265,7 +265,9 @@ impl Pilot {
                 Reply::None
             }
             Request::Action(a) => {
-                if a.src != "plugin-host" && a.src != "router" {
+                // Agent-internal sources are not an operator surface: they
+                // must not start the operator link-loss timer.
+                if !matches!(a.src.as_str(), "plugin-host" | "router" | "setup") {
                     self.failsafe.on_surface(now_ms);
                 }
                 let res = self.action(&a.name, a.args.as_ref(), now_ms);

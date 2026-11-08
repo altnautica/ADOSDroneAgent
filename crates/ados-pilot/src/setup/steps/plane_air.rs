@@ -438,7 +438,7 @@ impl Step for PlaneAir {
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
         match id {
-            "start" | "retry" => {
+            "start" => {
                 self.acc = Acc::default();
                 self.result.clear();
                 self.to.start(cx);

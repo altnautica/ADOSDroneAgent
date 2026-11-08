@@ -18,11 +18,24 @@ pub struct Script {
     pub mag_fitness: VecDeque<f32>,
     /// Seconds into AUTOTUNE before "Success".
     pub autotune_s: u64,
+    /// The airspeed zero calibration concludes ACCEPTED (else FAILED).
+    pub airspeed_cal_ok: bool,
+    /// The FC comes back after a reboot (a SITL that is not restarted
+    /// stays silent).
+    pub reboot_returns: bool,
+    /// SYS_STATUS sensors present, when not derived from the parameters.
+    pub sensors_present: Option<MavSysStatusSensor>,
 }
 
 impl Default for Script {
     fn default() -> Self {
-        Script { mag_fitness: VecDeque::from(vec![8.0]), autotune_s: 3 }
+        Script {
+            mag_fitness: VecDeque::from(vec![8.0]),
+            autotune_s: 3,
+            airspeed_cal_ok: true,
+            reboot_returns: true,
+            sensors_present: None,
+        }
     }
 }
 
@@ -55,6 +68,8 @@ pub struct FakeFc {
     last_hb: u64,
     last_tel: u64,
     manual_z: f32,
+    /// The airspeed zero calibration concludes at this time.
+    airspeed_cal_until: Option<u64>,
     pub reboots: u32,
     /// AUTOPILOT_VERSION `uid` and `uid2` (the extension, sent as a raw frame).
     pub uid: u64,
@@ -219,6 +234,7 @@ impl FakeFc {
             last_hb: 0,
             last_tel: 0,
             manual_z: 0.5,
+            airspeed_cal_until: None,
             reboots: 0,
             uid: 0x00C0_FFEE_1234_5678,
             uid2: None,
@@ -319,6 +335,16 @@ impl FakeFc {
                         param1: 1.0,
                         ..Default::default()
                     }));
+                } else if c.param3 == 1.0 {
+                    // ArduPilot: ground pressure, then the airspeed zero as an
+                    // in-progress task when a sensor is enabled.
+                    if self.params.get("ARSPD_TYPE").is_some_and(|t| *t != 0.0) {
+                        self.airspeed_cal_until = Some(now + 2000);
+                        result = MavResult::MAV_RESULT_IN_PROGRESS;
+                    }
+                } else if c.param6 != 0.0 {
+                    // ArduPilot handles no p6 calibration (compass-motor or airspeed).
+                    result = MavResult::MAV_RESULT_UNSUPPORTED;
                 }
             }
             MAV_CMD_ACCELCAL_VEHICLE_POS => {
@@ -352,7 +378,7 @@ impl FakeFc {
             MAV_CMD_DO_CANCEL_MAG_CAL => self.mag = None,
             MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN => {
                 self.reboots += 1;
-                self.rebooting_until = Some(now + 3500);
+                self.rebooting_until = Some(if self.script.reboot_returns { now + 3500 } else { u64::MAX });
             }
             MAV_CMD_DO_SET_MODE => {
                 self.custom_mode = c.param2 as u32;
@@ -416,7 +442,14 @@ impl FakeFc {
                 system_status: MavState::MAV_STATE_STANDBY,
                 mavlink_version: 3,
             }));
+            // ArduPlane reports the differential-pressure sensor present when one is enabled.
+            let derived = if self.params.get("ARSPD_TYPE").is_some_and(|t| *t != 0.0) {
+                MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_DIFFERENTIAL_PRESSURE
+            } else {
+                MavSysStatusSensor::empty()
+            };
             self.queue.push_back(MavMessage::SYS_STATUS(SYS_STATUS_DATA {
+                onboard_control_sensors_present: self.script.sensors_present.unwrap_or(derived),
                 voltage_battery: (self.battery_v * 1000.0) as u16,
                 battery_remaining: self.battery_pct,
                 ..Default::default()
@@ -463,6 +496,13 @@ impl FakeFc {
 
     fn physics(&mut self, now: u64) {
         self.mag_tick(now);
+        if self.airspeed_cal_until.is_some_and(|t| now >= t) {
+            self.airspeed_cal_until = None;
+            let r = if self.script.airspeed_cal_ok { MavResult::MAV_RESULT_ACCEPTED } else { MavResult::MAV_RESULT_FAILED };
+            self.queue.push_back(ack(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION, r));
+        } else if self.airspeed_cal_until.is_some() && now % 1000 < TICK {
+            self.queue.push_back(ack(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION, MavResult::MAV_RESULT_IN_PROGRESS));
+        }
         let dt = TICK as f32 / 1000.0;
         if !self.armed {
             self.alt = 0.0;

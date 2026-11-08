@@ -475,7 +475,7 @@ impl Step for Autotune {
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
         match id {
-            "start" | "retry" => {
+            "start" => {
                 self.snapshot_gains(cx);
                 self.core.blockers.clear();
                 self.core.running();

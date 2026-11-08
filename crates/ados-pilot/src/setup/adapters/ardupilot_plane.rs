@@ -56,6 +56,28 @@ pub fn wing_preset(wing: &str) -> Option<&'static [(u8, u8)]> {
     })
 }
 
+/// The wing type the current outputs describe (elevon or V-tail functions
+/// on any output, else a normal tail), so confirming the default keeps them.
+pub fn wing_from_outputs(function: impl Fn(u8) -> Option<f32>) -> &'static str {
+    let any = |fs: &[u8]| (1..=16u8).any(|k| function(k).is_some_and(|f| fs.contains(&(f as u8))));
+    if any(&[FN_ELEVON_LEFT, FN_ELEVON_RIGHT]) {
+        "elevon"
+    } else if any(&[FN_VTAIL_LEFT, FN_VTAIL_RIGHT]) {
+        "vtail"
+    } else {
+        "normal"
+    }
+}
+
+/// `Q_FRAME_CLASS` of a tailsitter without copter-style motors (dual or
+/// single motor; `AP_MotorsTailsitter`).
+pub const FRAME_CLASS_TAILSITTER: u8 = 10;
+
+/// Tailsitter throttle outputs in `DO_MOTOR_TEST` order
+/// (`AP_MotorsTailsitter::_output_test_seq`): 1 is the right throttle, 3 the
+/// left; 2 and 4 are the tilt servos. Motor numbers: 1 right, 2 left.
+pub const TAILSITTER_MOTORS: &[(u8, u8)] = &[(1, 1), (2, 3)];
+
 /// The surface test for an output function: the question key the operator
 /// answers, and the sign of the scaled output that the tested demand
 /// produces on a non-reversed servo. ArduPlane's mixer

@@ -73,7 +73,7 @@ impl Step for AdosProfile {
     }
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
-        if id != "apply" && id != "retry" {
+        if id != "apply" {
             return Err("unknown_action");
         }
         if cx.fc.armed {

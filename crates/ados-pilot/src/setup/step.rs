@@ -195,6 +195,12 @@ pub trait Step: Send {
     fn tick(&mut self, cx: &mut Cx);
     fn action(&mut self, id: &str, args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr>;
 
+    /// `retry` on a failed step: back to the step's first screen, so the
+    /// operator sees the instructions again and starts it from there.
+    fn retry(&mut self, cx: &mut Cx) {
+        self.begin(cx);
+    }
+
     /// Stop whatever the step is doing (the engine handles landing).
     fn abort(&mut self, _cx: &mut Cx) {}
 
@@ -227,6 +233,20 @@ macro_rules! step_core {
 }
 pub(crate) use step_core;
 
+/// Give up on a rebooting FC after this long (reboot plus a full parameter
+/// download).
+const REBOOT_TIMEOUT_MS: u64 = 120_000;
+
+/// What a reboot wait reports each tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rebooted {
+    Waiting,
+    /// The FC is back with its parameter table.
+    Back,
+    /// The FC did not come back in time.
+    Lost,
+}
+
 /// Reboots the FC and waits for it to come back with its parameter table.
 #[derive(Debug, Clone, Default)]
 pub struct Reboot {
@@ -245,27 +265,30 @@ impl Reboot {
         self.sent_ms.is_some()
     }
 
-    /// `true` once the FC is back and its parameters are downloaded again.
-    pub fn tick(&mut self, cx: &mut Cx) -> bool {
-        let Some(sent) = self.sent_ms else { return true };
+    pub fn tick(&mut self, cx: &mut Cx) -> Rebooted {
+        let Some(sent) = self.sent_ms else { return Rebooted::Back };
+        if cx.now.saturating_sub(sent) > REBOOT_TIMEOUT_MS {
+            self.sent_ms = None;
+            return Rebooted::Lost;
+        }
         // A heartbeat after a 3 s quiet period is the rebooted FC.
         let back = cx.now.saturating_sub(sent) > 3000
             && cx.fc.heartbeat_ms.is_some_and(|t| t > sent + 3000);
         if !back {
-            return false;
+            return Rebooted::Waiting;
         }
         if !self.requested_params {
             self.requested_params = true;
             let mut msgs = Vec::new();
             cx.params.request_all(&mut msgs, cx.now);
             cx.out.msgs.extend(msgs);
-            return false;
+            return Rebooted::Waiting;
         }
         if cx.params.complete() {
             self.sent_ms = None;
-            return true;
+            return Rebooted::Back;
         }
-        false
+        Rebooted::Waiting
     }
 }
 

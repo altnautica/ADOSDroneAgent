@@ -21,7 +21,7 @@ use crate::setup::adapters::ardupilot_copter::{self, MotorDef};
 use crate::setup::adapters::{ardupilot_plane, Mode};
 use crate::setup::fcstate::{Class, Fw};
 use crate::setup::schema::{obj, Action, ActionStyle, Confirm};
-use crate::setup::step::{step_core, writes_settled, ActErr, Cx, Reboot, Step, StepCore};
+use crate::setup::step::{step_core, writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore};
 
 /// Motor test throttle (%) and duration (s).
 pub const MOTOR_PCT: f32 = 5.0;
@@ -37,7 +37,8 @@ const PX4_MOTOR1: f32 = 101.0;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Item {
-    Motor { def: MotorDef, px4: bool },
+    /// `dir`: the frame prescribes a spin direction to check.
+    Motor { def: MotorDef, px4: bool, dir: bool },
     Surface { channel: u8, function: u8 },
 }
 
@@ -111,16 +112,24 @@ fn surfaces(cx: &Cx) -> Vec<Item> {
 fn motors(cx: &Cx) -> Result<(Option<&'static str>, Vec<Item>), ActErr> {
     if cx.adapter.fw == Fw::Px4 {
         let n = cx.params.get("CA_ROTOR_COUNT").unwrap_or(4.0) as u8;
-        let v = (1..=n).map(|i| Item::Motor { def: MotorDef { num: i, angle: 0, cw: false, seq: i }, px4: true }).collect();
+        let v = (1..=n).map(|i| Item::Motor { def: MotorDef { num: i, angle: 0, cw: false, seq: i }, px4: true, dir: true }).collect();
         return Ok((None, v));
     }
     let (c, t) = if cx.adapter.class == Class::Vtol { ("Q_FRAME_CLASS", "Q_FRAME_TYPE") } else { ("FRAME_CLASS", "FRAME_TYPE") };
     let fc = cx.params.get(c).unwrap_or(1.0) as u8;
     let ft = cx.params.get(t).unwrap_or(1.0) as u8;
+    if cx.adapter.class == Class::Vtol && fc == ardupilot_plane::FRAME_CLASS_TAILSITTER {
+        // Tailsitter throttles: position only, ArduPilot sets no spin direction for them.
+        let v = ardupilot_plane::TAILSITTER_MOTORS
+            .iter()
+            .map(|&(num, seq)| Item::Motor { def: MotorDef { num, angle: 0, cw: false, seq }, px4: false, dir: false })
+            .collect();
+        return Ok((None, v));
+    }
     let (img, layout) = ardupilot_copter::layout(fc, ft).ok_or("unsupported_frame")?;
     let mut defs: Vec<MotorDef> = layout.to_vec();
     defs.sort_by_key(|d| d.seq);
-    Ok((Some(img), defs.into_iter().map(|def| Item::Motor { def, px4: false }).collect()))
+    Ok((Some(img), defs.into_iter().map(|def| Item::Motor { def, px4: false, dir: true }).collect()))
 }
 
 impl Outputs {
@@ -128,11 +137,15 @@ impl Outputs {
         let total = self.items.len();
         self.core.progress = Some(self.idx as f32 / total.max(1) as f32);
         match self.items.get(self.idx).cloned() {
-            Some(Item::Motor { def, .. }) => {
+            Some(Item::Motor { def, dir, .. }) => {
                 self.core.set_live("output_kind", "motor");
                 self.core.set_live("output_index", def.seq);
                 self.core.set_live("motor_number", def.num);
-                self.core.set_live("expected_dir", if def.cw { "cw" } else { "ccw" });
+                if dir {
+                    self.core.set_live("expected_dir", if def.cw { "cw" } else { "ccw" });
+                } else {
+                    self.core.live.remove("expected_dir");
+                }
                 // The motor questions read "motor {n}": the number on the motor-order image.
                 self.core.args.insert("n".into(), json!(def.num));
             }
@@ -200,7 +213,7 @@ impl Outputs {
 
     fn spin(&mut self, cx: &mut Cx) {
         match self.items.get(self.idx).cloned() {
-            Some(Item::Motor { def, px4 }) => {
+            Some(Item::Motor { def, px4, .. }) => {
                 if px4 {
                     cx.out.cmd(
                         MavCmd::MAV_CMD_ACTUATOR_TEST,
@@ -263,9 +276,16 @@ impl Step for Outputs {
 
     fn tick(&mut self, cx: &mut Cx) {
         if self.reboot.active() {
-            if self.reboot.tick(cx) {
-                self.core.phase_key = None;
-                self.complete();
+            match self.reboot.tick(cx) {
+                Rebooted::Waiting => {}
+                Rebooted::Back => {
+                    self.core.phase_key = None;
+                    self.complete();
+                }
+                Rebooted::Lost => {
+                    self.core.phase_key = None;
+                    self.core.fail("setup.blocker.timeout");
+                }
             }
             return;
         }
@@ -323,11 +343,7 @@ impl Step for Outputs {
             return Err("armed");
         }
         match (id, self.ask) {
-            ("test", Ask::Ready) | ("retry", _) => {
-                if id == "retry" {
-                    self.begin(cx);
-                    return Ok(());
-                }
+            ("test", Ask::Ready) => {
                 if matches!(self.items.get(self.idx), Some(Item::Surface { .. })) && !cx.adapter.in_mode(cx.fc.custom_mode, Mode::Manual) {
                     if let Some((m, s)) = cx.adapter.mode(Mode::Manual) {
                         cx.out.set_mode(m, s);
@@ -337,7 +353,11 @@ impl Step for Outputs {
                 Ok(())
             }
             ("answer_yes", Ask::Position) => {
-                self.yes_no(Ask::Direction, "setup.question.motor_direction");
+                if matches!(self.items.get(self.idx), Some(Item::Motor { dir: false, .. })) {
+                    self.next(cx);
+                } else {
+                    self.yes_no(Ask::Direction, "setup.question.motor_direction");
+                }
                 Ok(())
             }
             ("answer_no", Ask::Position) => {
@@ -352,7 +372,7 @@ impl Step for Outputs {
                 Ok(())
             }
             ("answer_no", Ask::Direction) => {
-                let Some(Item::Motor { def, px4 }) = self.items.get(self.idx).cloned() else { return Err("bad_state") };
+                let Some(Item::Motor { def, px4, .. }) = self.items.get(self.idx).cloned() else { return Err("bad_state") };
                 let pwm_type = cx.params.get(&format!("{}_PWM_TYPE", cx.adapter.mot())).unwrap_or(0.0);
                 let ch = channel_of(cx, 32 + def.num);
                 match (px4, pwm_type >= 4.0, ch) {

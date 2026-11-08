@@ -130,6 +130,17 @@ fn reply_err(err: &str) -> Value {
     json!({"ok": false, "err": err})
 }
 
+/// An optional step offers `skip` beside its first action (`fresh`: just
+/// begun or retried) and beside `retry` once it has failed, so a failure
+/// never strands the wizard on a step the aircraft does not need.
+fn offer_skip(step: &mut dyn Step, fresh: bool) {
+    let state = step.core().state;
+    let wants = state == StepState::Failed || fresh && state == StepState::WaitingUser;
+    if wants && step.optional() && !step.core().actions.iter().any(|a| a.id == "skip") {
+        step.core_mut().actions.push(Action::secondary("skip"));
+    }
+}
+
 impl Engine {
     pub fn new(dir: impl Into<PathBuf>, epoch_offset_ms: u64) -> Self {
         Engine {
@@ -354,6 +365,7 @@ impl Engine {
                 enter_tuning = true;
             }
             step.tick(&mut cx);
+            offer_skip(step.as_mut(), false);
             // Air abort monitor.
             if step.flight() && *tuning == Tuning::Held && cx.fc.armed {
                 // An operator action ended `tuning`, or the sticks moved.
@@ -396,12 +408,13 @@ impl Engine {
         // Effects some steps raise directly are already in the outbox.
     }
 
-    /// Persists the current step's state and result.
+    /// Persists the current step's state, blockers and result: an ended
+    /// wizard still shows why a step failed (an air abort's trigger).
     fn record_current(&mut self, now: u64) {
         let Some(run) = self.run.as_ref() else { return };
         let Some(step) = run.steps.get(run.idx) else { return };
         let core = step.core();
-        let rec = json!({"state": core.state, "result": core.result, "at": self.iso(now)});
+        let rec = json!({"state": core.state, "blockers": core.blockers, "result": core.result, "at": self.iso(now)});
         let wr = match run.wizard {
             WizardId::Ground => &mut self.state.ground,
             WizardId::Air => &mut self.state.air,
@@ -496,9 +509,7 @@ impl Engine {
                 continue;
             }
             step.begin(&mut cx);
-            if step.optional() && !step.core().actions.iter().any(|a| a.id == "skip") && step.core().state == StepState::WaitingUser {
-                step.core_mut().actions.push(Action::secondary("skip"));
-            }
+            offer_skip(step.as_mut(), true);
             self.wizard_dirty = true;
             self.record_current(now);
             return;
@@ -549,6 +560,7 @@ impl Engine {
         if let Some(run) = self.run.as_mut() {
             if let Some(s) = run.steps.get_mut(run.idx) {
                 s.core_mut().fail(blocker);
+                offer_skip(s.as_mut(), false);
             }
         }
         self.record_current(now);
@@ -557,6 +569,7 @@ impl Engine {
 
     fn abort_air(&mut self, reason: &'static str, takeover: bool, now: u64) {
         let Some(adapter) = self.adapter() else { return };
+        tracing::warn!(reason, takeover, "fc_setup_air_abort");
         let ground_done = self.state.ground.state == WizardState::Done;
         if let Some(run) = self.run.as_mut() {
             let Engine { fc, params, out, state, inputs, snapshot_body, .. } = self;
@@ -718,7 +731,9 @@ impl Engine {
                 }
                 s.core_mut().skip("operator");
                 Ok(())
-            } else if s.flight() && tuning != Tuning::Held && (action == "start" || action == "retry" || action == "resume_yaw") {
+            } else if action == "retry" && s.core().state != StepState::Failed {
+                Err("not_failed")
+            } else if s.flight() && tuning != Tuning::Held && (action == "start" || action == "resume_yaw") {
                 Err("tuning_pending")
             } else {
                 let Engine { fc, params, out, state, inputs, snapshot_body, .. } = self;
@@ -734,7 +749,14 @@ impl Engine {
                     ground_done,
                     snapshot: snapshot_body.as_deref(),
                 };
-                s.action(action, args, &mut cx)
+                let r = if action == "retry" {
+                    s.retry(&mut cx);
+                    Ok(())
+                } else {
+                    s.action(action, args, &mut cx)
+                };
+                offer_skip(s.as_mut(), action == "retry");
+                r
             }
         };
         match res {
@@ -880,6 +902,9 @@ impl Engine {
                         v.state = st;
                     }
                     v.result = rec.get("result").and_then(Value::as_object).cloned();
+                    if let Some(b) = rec.get("blockers").and_then(|b| serde_json::from_value(b.clone()).ok()) {
+                        v.blockers = b;
+                    }
                 }
                 v
             })

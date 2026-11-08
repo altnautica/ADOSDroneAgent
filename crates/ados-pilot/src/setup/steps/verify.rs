@@ -324,7 +324,7 @@ impl Step for Verify {
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
         match id {
-            "start" | "retry" => {
+            "start" => {
                 *self = Verify { core: std::mem::take(&mut self.core), ..Verify::default() };
                 self.core.blockers.clear();
                 self.core.phase_key = None;

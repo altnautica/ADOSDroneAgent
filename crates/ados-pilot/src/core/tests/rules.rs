@@ -139,6 +139,21 @@ fn link_loss_triggers_rtl_after_ten_seconds() {
 }
 
 #[test]
+fn setup_engine_actions_do_not_arm_the_link_loss_timer() {
+    // The setup wizard's "Use ADOS Pilot" sets the control mode through an
+    // action from `setup`; no operator surface spoke, so no link can be lost.
+    let mut w = World::new();
+    w.req(Request::Action(ados_protocol::pilot::ActionReq {
+        name: "control_mode:ados".into(),
+        src: "setup".into(),
+        args: None,
+        id: None,
+    }));
+    w.run(11_000);
+    assert!(!w.p.link_lost(w.now));
+}
+
+#[test]
 fn lease_grant_goal_and_revocations() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);

@@ -99,7 +99,7 @@ impl Step for Radio {
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
         match id {
-            "start" | "retry" => {
+            "start" => {
                 if !cx.fc.rc_present(cx.now) {
                     return Err("no_rc");
                 }
@@ -216,7 +216,7 @@ impl Step for RcAdosSwitch {
     }
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
-        if id != "capture" && id != "retry" {
+        if id != "capture" {
             return Err("unknown_action");
         }
         let ch = cx.params.get("FLTMODE_CH").unwrap_or(5.0) as usize;

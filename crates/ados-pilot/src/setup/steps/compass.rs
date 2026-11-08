@@ -14,7 +14,7 @@ use serde_json::{json, Map, Value};
 use crate::setup::adapters::px4::{parse_cal, CalEvent};
 use crate::setup::fcstate::Fw;
 use crate::setup::schema::{input_number, obj, Action};
-use crate::setup::step::{arg_f32, step_core, ActErr, Cx, Reboot, Step, StepCore};
+use crate::setup::step::{arg_f32, step_core, ActErr, Cx, Reboot, Rebooted, Step, StepCore};
 
 /// Largest accepted fitness (mGauss).
 pub const MAX_FITNESS: f32 = 16.0;
@@ -169,13 +169,19 @@ impl Step for Compass {
     fn tick(&mut self, cx: &mut Cx) {
         match self.phase {
             Phase::Idle => {}
-            Phase::Rebooting => {
-                if self.reboot.tick(cx) {
+            Phase::Rebooting => match self.reboot.tick(cx) {
+                Rebooted::Waiting => {}
+                Rebooted::Back => {
                     self.phase = Phase::Idle;
                     self.core.phase_key = None;
                     self.core.done(std::mem::take(&mut self.result));
                 }
-            }
+                Rebooted::Lost => {
+                    self.phase = Phase::Idle;
+                    self.core.phase_key = None;
+                    self.core.fail("setup.blocker.timeout");
+                }
+            },
             Phase::KnownHeading => {
                 if let Some(r) = cx.fc.ack_since(CMD_FIXED_YAW, self.started_ms) {
                     if r == MavResult::MAV_RESULT_ACCEPTED {
@@ -239,7 +245,7 @@ impl Step for Compass {
 
     fn action(&mut self, id: &str, args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
         match id {
-            "start" | "retry" => {
+            "start" => {
                 if cx.fc.armed {
                     return Err("armed");
                 }

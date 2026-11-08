@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.11] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup: the `air` wizard aborted itself about 10 s after the `ground` wizard ended, as soon as the aircraft armed for its first hover. "Use ADOS Pilot" sets the control mode through a pilot action, and that action counted as an operator surface speaking, so the pilot's operator link-loss timer started and the wizard's link-loss abort fired with no surface ever connected. Actions from the setup engine, like those from the plugin host and the router, no longer start the link-loss timer.
+- Aircraft setup: a step's blockers are now stored with its state, so `GET /api/v1/fc-setup` still shows why a step failed after its wizard ended (an air abort's trigger read `blockers: []` before), and the engine logs `fc_setup_air_abort` with the trigger.
+- Aircraft setup: a failed optional step (airspeed, level, compass, radio and the other skippable steps) now offers `skip` beside `retry`, both plain buttons with no hold-confirm. `retry` is handled by the engine for every step and returns a failed step to its first screen (its instructions and start action, plus `skip` when optional); it was advertised on every failed step but several steps answered it `unknown_action`. `retry` on a step that has not failed answers `not_failed`.
+- Aircraft setup on ArduPilot planes: airspeed calibration was always refused. ArduPilot zeroes the airspeed sensor in the ground-pressure calibration (`MAV_CMD_PREFLIGHT_CALIBRATION` p3 = 1, answered IN_PROGRESS then ACCEPTED or FAILED); the p6 = 2 the step sent is not handled there and answered UNSUPPORTED. The step now sends p3 = 1 on ArduPilot (PX4 keeps p6 = 1), reports a FAILED after IN_PROGRESS as a failed calibration rather than a refusal, and is skipped with `no_airspeed_sensor` when the flight controller's SYS_STATUS reports no differential-pressure sensor.
+- Aircraft setup on tailsitters: the `frame` step offered only quad, hexa and octa classes and wrote a wing preset over the tailsitter's elevon and throttle outputs, so confirming it changed `Q_FRAME_CLASS` 10 and waited forever for the reboot that change needs. A tailsitter (`Q_TAILSIT_ENABLE`) now keeps its own frame class (10 is offered and accepted) and its outputs (no wing input, no preset written). The `outputs` step tests a dual-motor tailsitter's throttles in ArduPilot's motor-test order (right 1, left 3) with the position question only, since ArduPilot prescribes no spin direction for them.
+- Aircraft setup: every step that reboots the flight controller (frame, outputs, battery, compass, filters) gives up after 120 s with `setup.blocker.timeout` instead of waiting forever for a controller that does not come back.
+- Aircraft setup on planes: the `frame` step's wing type defaults to the one the outputs already describe (elevon or V-tail functions on any output), and confirming that wing keeps the existing output assignment instead of rewriting it to the preset.
+
 ## [0.109.10] - 2026-11-08
 
 ### Fixed

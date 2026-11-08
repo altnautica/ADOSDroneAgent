@@ -6,7 +6,7 @@ use serde_json::{json, Map, Value};
 use crate::setup::adapters::ardupilot_copter::rotor_hz;
 use crate::setup::fcstate::Fw;
 use crate::setup::schema::{obj, Action};
-use crate::setup::step::{writes_settled, ActErr, Cx, Reboot, Step, StepCore};
+use crate::setup::step::{writes_settled, ActErr, Cx, Reboot, Rebooted, Step, StepCore};
 
 /// Notch reference when no learned hover throttle exists.
 pub const DEFAULT_HOVER_THROTTLE: f32 = 0.35;
@@ -144,12 +144,18 @@ impl Step for Notch {
                     self.reboot.start(cx);
                 }
             },
-            Phase::Rebooting => {
-                if self.reboot.tick(cx) {
+            Phase::Rebooting => match self.reboot.tick(cx) {
+                Rebooted::Waiting => {}
+                Rebooted::Back => {
                     self.core.phase_key = None;
                     self.write_rest(cx);
                 }
-            }
+                Rebooted::Lost => {
+                    self.phase = Phase::Idle;
+                    self.core.phase_key = None;
+                    self.core.fail("setup.blocker.timeout");
+                }
+            },
             Phase::Writing => match writes_settled(cx) {
                 None => {}
                 Some(Err(_)) => {
@@ -169,7 +175,7 @@ impl Step for Notch {
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
         match id {
-            "apply" | "retry" => {
+            "apply" => {
                 if cx.fc.armed {
                     return Err("armed");
                 }

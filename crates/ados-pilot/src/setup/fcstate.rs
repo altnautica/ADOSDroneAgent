@@ -4,7 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use ados_protocol::mavlink::ardupilotmega::{
-    MavAutopilot, MavLandedState, MavMessage, MavModeFlag, MavResult, MavType, MavVtolState,
+    MavAutopilot, MavLandedState, MavMessage, MavModeFlag, MavResult, MavSysStatusSensor, MavType, MavVtolState,
 };
 use ados_protocol::mavlink::MavHeader;
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,9 @@ pub struct FcState {
     pub vtol_state: Option<MavVtolState>,
     pub battery_pct: Option<i8>,
     pub battery_v: Option<f32>,
+    /// SYS_STATUS `onboard_control_sensors_present`: the sensors the FC
+    /// reports fitted.
+    pub sensors_present: Option<MavSysStatusSensor>,
     pub rc: Option<(Vec<u16>, u64)>,
     pub esc_telemetry_ms: Option<u64>,
     /// ACKs by command id: result and arrival time.
@@ -289,6 +292,7 @@ impl FcState {
                 self.vtol_state = Some(e.vtol_state);
             }
             MavMessage::SYS_STATUS(s) => {
+                self.sensors_present = Some(s.onboard_control_sensors_present);
                 if s.battery_remaining >= 0 {
                     self.battery_pct = Some(s.battery_remaining);
                 }

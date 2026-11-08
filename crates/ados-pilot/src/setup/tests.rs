@@ -458,6 +458,10 @@ fn abort_blockers_name_the_trigger() {
     s.run(1500);
     let rec = &s.e.state.air.steps["first_hover"];
     assert_eq!(rec["state"], json!("failed"));
+    assert_eq!(rec["blockers"], json!(["setup.blocker.aborted_battery"]), "the trigger is persisted");
+    let v = s.e.view(s.now);
+    let fh = v.wizards.iter().find(|w| w.id == A).unwrap().steps.iter().find(|x| x.step == "first_hover").unwrap();
+    assert_eq!(fh.blockers, vec!["setup.blocker.aborted_battery".to_string()], "and listed after the run ended");
     assert_eq!(s.e.wizard_state(A), WizardState::NotStarted, "a single-step run leaves the wizard state alone");
 }
 
@@ -684,4 +688,149 @@ fn uid2_parses_from_trimmed_and_full_frames() {
     let mut h = f.clone();
     h[7] = 0;
     assert_eq!(uid2_from_frame(&h), None);
+}
+
+fn plane_with_airspeed() -> Sim {
+    let mut p = ap_plane_params();
+    p.insert("ARSPD_TYPE".into(), 100.0);
+    let mut s = Sim::new(MavType::MAV_TYPE_FIXED_WING, p);
+    s.run(1100);
+    s
+}
+
+fn action_ids(s: &Sim) -> Vec<String> {
+    s.e.current_view().map(|v| v.actions.iter().map(|a| a.id.clone()).collect()).unwrap_or_default()
+}
+
+#[test]
+fn airspeed_cal_runs_with_the_ground_pressure_command() {
+    // ArduPilot zeroes the airspeed sensor in PREFLIGHT_CALIBRATION p3 = 1
+    // (IN_PROGRESS, then ACCEPTED); p6 = 2 is UNSUPPORTED there.
+    let mut s = plane_with_airspeed();
+    assert_eq!(s.e.run_step(G, "airspeed", s.now)["ok"], json!(true));
+    s.wait_step("airspeed", StepState::WaitingUser);
+    s.act(G, "airspeed", "start", json!({}));
+    s.until(|s| s.e.current_view().is_none(), 10_000);
+    assert_eq!(s.step_state(G, "airspeed"), StepState::Done);
+    let sent = s.sent_cmds(MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION);
+    assert_eq!(sent.last().map(|p| (p[2], p[5])), Some((1.0, 0.0)));
+}
+
+#[test]
+fn airspeed_skipped_when_the_fc_reports_no_sensor() {
+    let mut s = plane_with_airspeed();
+    s.fc.script.sensors_present = Some(ados_protocol::mavlink::ardupilotmega::MavSysStatusSensor::empty());
+    s.run(1100);
+    s.e.run_step(G, "airspeed", s.now);
+    s.until(|s| s.e.current_view().is_none(), 1_000);
+    assert_eq!(s.step_state(G, "airspeed"), StepState::Skipped);
+    assert_eq!(s.result(G, "airspeed")["reason"], json!("no_airspeed_sensor"));
+}
+
+#[test]
+fn failed_optional_step_offers_retry_and_skip() {
+    let mut s = plane_with_airspeed();
+    s.fc.script.airspeed_cal_ok = false;
+    s.e.run_step(G, "airspeed", s.now);
+    s.wait_step("airspeed", StepState::WaitingUser);
+    s.act(G, "airspeed", "start", json!({}));
+    s.wait_step("airspeed", StepState::Failed);
+    assert_eq!(s.e.current_view().unwrap().blockers, vec!["setup.blocker.calibration_failed".to_string()]);
+    assert_eq!(action_ids(&s), ["retry", "skip"]);
+    let skip = s.e.current_view().unwrap().actions.into_iter().find(|a| a.id == "skip").unwrap();
+    assert_eq!((skip.style, skip.confirm), (super::schema::ActionStyle::Secondary, super::schema::Confirm::None));
+    // Retry: back to the step's first screen, which still offers skip.
+    s.act(G, "airspeed", "retry", json!({}));
+    assert_eq!(s.state(), Some(StepState::WaitingUser));
+    assert_eq!(action_ids(&s), ["start", "skip"]);
+    s.act(G, "airspeed", "start", json!({}));
+    s.wait_step("airspeed", StepState::Failed);
+    s.act(G, "airspeed", "skip", json!({}));
+    s.until(|s| s.e.current_view().is_none(), 1_000);
+    assert_eq!(s.step_state(G, "airspeed"), StepState::Skipped);
+    // A required step offers retry only, and retry is refused before a failure.
+    let mut c = Sim::copter();
+    c.e.run_step(G, "frame", c.now);
+    assert_eq!(c.e.action(G, "frame", "retry", &Map::new(), c.now)["err"], json!("not_failed"));
+}
+
+fn ritz_params() -> std::collections::BTreeMap<String, f32> {
+    let mut p = ap_plane_params();
+    for (k, v) in [
+        ("Q_ENABLE", 1.0),
+        ("Q_TAILSIT_ENABLE", 1.0),
+        ("Q_FRAME_CLASS", 10.0),
+        ("Q_FRAME_TYPE", 1.0),
+        ("SERVO1_FUNCTION", 77.0),
+        ("SERVO2_FUNCTION", 78.0),
+        ("SERVO3_FUNCTION", 73.0),
+        ("SERVO4_FUNCTION", 74.0),
+        ("SERVO5_FUNCTION", 75.0),
+        ("SERVO6_FUNCTION", 76.0),
+        ("SERVO2_REVERSED", 0.0),
+    ] {
+        p.insert(k.to_string(), v);
+    }
+    p
+}
+
+#[test]
+fn tailsitter_frame_keeps_its_class_and_outputs() {
+    let mut s = Sim::new(MavType::MAV_TYPE_VTOL_TAILSITTER_DUOROTOR, ritz_params());
+    s.e.run_step(G, "frame", s.now);
+    let inputs = s.e.current_view().unwrap().args["inputs"].clone();
+    assert_eq!(inputs["frame_class"]["value"], json!(10.0));
+    assert!(inputs["frame_class"]["options"].as_array().unwrap().contains(&json!(10)));
+    assert!(inputs.get("wing").is_none(), "a tailsitter's outputs belong to its mixer");
+    s.act(G, "frame", "apply", json!({"frame_class": 10, "frame_type": 1, "prop_in": 9, "motor_kv": 1000, "cells": 4}));
+    s.until(|s| s.e.current_view().is_none(), 10_000);
+    assert_eq!(s.step_state(G, "frame"), StepState::Done);
+    assert_eq!(s.fc.reboots, 0, "nothing changed, nothing to reboot for");
+    assert_eq!((s.param("Q_FRAME_CLASS"), s.param("SERVO3_FUNCTION")), (10.0, 73.0));
+
+    // Outputs: both elevons, then the right and left throttles (test order 1 and 3), position only.
+    s.e.run_step(G, "outputs", s.now);
+    let mut questions = 0;
+    while s.e.current_view().is_some() {
+        s.until(|s| s.state() == Some(StepState::WaitingUser) || s.e.current_view().is_none(), 10_000);
+        let ids = action_ids(&s);
+        if ids.iter().any(|a| a == "test") {
+            s.act(G, "outputs", "test", json!({}));
+        } else if ids.iter().any(|a| a == "answer_yes") {
+            questions += 1;
+            s.act(G, "outputs", "answer_yes", json!({}));
+        } else if s.e.current_view().is_some() {
+            panic!("outputs waits with {ids:?}");
+        }
+    }
+    assert_eq!(s.step_state(G, "outputs"), StepState::Done);
+    assert_eq!(questions, 4, "two surfaces, two motors without a direction question");
+    let seqs: Vec<f32> = s.sent_cmds(MavCmd::MAV_CMD_DO_MOTOR_TEST).iter().map(|p| p[0]).collect();
+    assert_eq!(seqs, [1.0, 3.0]);
+}
+
+#[test]
+fn plane_frame_defaults_to_the_wing_its_outputs_describe() {
+    let mut p = ap_plane_params();
+    p.insert("SERVO1_FUNCTION".into(), 78.0);
+    p.insert("SERVO2_FUNCTION".into(), 77.0);
+    let mut s = Sim::new(MavType::MAV_TYPE_FIXED_WING, p);
+    s.e.run_step(G, "frame", s.now);
+    assert_eq!(s.e.current_view().unwrap().args["inputs"]["wing"]["value"], json!("elevon"));
+    s.act(G, "frame", "apply", json!({"wing": "elevon", "cells": 4}));
+    s.until(|s| s.e.current_view().is_none(), 10_000);
+    // Confirming the wing the outputs already describe keeps their assignment.
+    assert_eq!((s.param("SERVO1_FUNCTION"), s.param("SERVO2_FUNCTION")), (78.0, 77.0));
+}
+
+#[test]
+fn frame_reboot_that_never_returns_fails_with_timeout() {
+    let mut s = Sim::copter();
+    s.fc.script.reboot_returns = false;
+    s.e.run_step(G, "frame", s.now);
+    s.act(G, "frame", "apply", json!({"frame_class": 2, "frame_type": 1, "prop_in": 10, "motor_kv": 900, "cells": 4}));
+    s.until(|s| s.state() == Some(StepState::Failed), 130_000);
+    let v = s.e.current_view().unwrap();
+    assert_eq!(v.blockers, vec!["setup.blocker.timeout".to_string()]);
+    assert_eq!(action_ids(&s), ["retry"], "frame is required: no skip");
 }

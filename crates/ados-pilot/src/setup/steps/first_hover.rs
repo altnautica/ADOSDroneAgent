@@ -222,7 +222,7 @@ impl Step for FirstHover {
 
     fn action(&mut self, id: &str, _args: &Map<String, Value>, cx: &mut Cx) -> Result<(), ActErr> {
         match id {
-            "start" | "retry" => {
+            "start" => {
                 self.acc = Acc::default();
                 self.result.clear();
                 self.hop.start(cx, HOVER_ALT_M);
