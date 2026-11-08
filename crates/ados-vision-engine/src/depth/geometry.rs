@@ -12,6 +12,8 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use super::feed::Attitude;
+
 /// The horizontal field of view a camera without `fov_deg` is taken to have.
 pub const DEFAULT_HFOV_DEG: f32 = 70.0;
 
@@ -91,6 +93,40 @@ impl Projector {
             self.fwd[2] + x * self.right[2] + y * self.down[2],
         ]
     }
+
+    /// Where the line of sight through image point `(u, v)` at vehicle
+    /// attitude `from` lands in the image at attitude `to`: the image shift
+    /// of a pure turn of the vehicle (and the camera fixed to it). The
+    /// vehicle's own travel between the two is left out, which holds for a
+    /// subject several metres away seen across a few hundred milliseconds.
+    /// `None` when the line of sight ends up behind the camera.
+    pub fn turned(&self, u: f32, v: f32, from: &Attitude, to: &Attitude) -> Option<(f32, f32)> {
+        let world = mat_vec(&body_to_ned(from), self.ray(u, v));
+        let body = mat_t_vec(&body_to_ned(to), world);
+        self.project(body).map(|(_, u, v)| (u, v))
+    }
+}
+
+/// The rotation taking body (FRD) vectors into the local NED frame, for a
+/// MAVLink attitude (yaw, then pitch, then roll).
+fn body_to_ned(a: &Attitude) -> [[f32; 3]; 3] {
+    let (sr, cr) = a.roll.sin_cos();
+    let (sp, cp) = a.pitch.sin_cos();
+    let (sy, cy) = a.yaw.sin_cos();
+    [
+        [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
+        [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
+        [-sp, sr * cp, cr * cp],
+    ]
+}
+
+fn mat_vec(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    [dot(m[0], v), dot(m[1], v), dot(m[2], v)]
+}
+
+fn mat_t_vec(m: &[[f32; 3]; 3], v: [f32; 3]) -> [f32; 3] {
+    let col = |j: usize| [m[0][j], m[1][j], m[2][j]];
+    [dot(col(0), v), dot(col(1), v), dot(col(2), v)]
 }
 
 /// Every camera's geometry, by id, from the agent config's `cameras[]`
@@ -195,5 +231,46 @@ mod tests {
         assert_eq!(g["belly"].pitch_down_deg, 90.0);
         assert_eq!(g["main"], g["front"]);
         assert!(geometries_from_config(": not yaml [").is_empty());
+    }
+
+    fn att(roll: f32, pitch: f32, yaw: f32) -> Attitude {
+        Attitude { roll, pitch, yaw }
+    }
+
+    #[test]
+    fn a_turn_moves_the_line_of_sight_across_the_image() {
+        let g = CameraGeometry {
+            hfov_deg: 87.0,
+            pitch_down_deg: 15.0,
+        };
+        let p = g.projector(16.0 / 9.0);
+        let level = att(0.0, 0.0, 1.0);
+        // The nose pitches 0.2 rad down: what was at the centre is now above
+        // it by the focal length times tan(0.2).
+        let (u, v) = p.turned(0.5, 0.5, &level, &att(0.0, -0.2, 1.0)).unwrap();
+        let fy = 0.5 / 43.5f32.to_radians().tan() * 16.0 / 9.0;
+        assert!((u - 0.5).abs() < 1e-5);
+        assert!((v - (0.5 - fy * 0.2f32.tan())).abs() < 1e-4, "{v}");
+        // A level camera yawing right sees the scene go left.
+        let p0 = CameraGeometry {
+            hfov_deg: 87.0,
+            pitch_down_deg: 0.0,
+        }
+        .projector(16.0 / 9.0);
+        let (u, v) = p0.turned(0.5, 0.5, &level, &att(0.0, 0.0, 1.1)).unwrap();
+        let fx = 0.5 / 43.5f32.to_radians().tan();
+        assert!((u - (0.5 - fx * 0.1f32.tan())).abs() < 1e-4 && (v - 0.5).abs() < 1e-5);
+        // No turn, no move; and there and back again is where it started.
+        let a = att(0.05, -0.1, 2.0);
+        let b = att(-0.08, 0.15, 2.3);
+        let (u, v) = p.turned(0.3, 0.7, &a, &a).unwrap();
+        assert!((u - 0.3).abs() < 1e-5 && (v - 0.7).abs() < 1e-5);
+        let (u1, v1) = p.turned(0.3, 0.7, &a, &b).unwrap();
+        let (u, v) = p.turned(u1, v1, &b, &a).unwrap();
+        assert!((u - 0.3).abs() < 1e-4 && (v - 0.7).abs() < 1e-4);
+        // Turned all the way round, the line of sight is behind the camera.
+        assert!(p
+            .turned(0.5, 0.5, &level, &att(0.0, 0.0, 1.0 + 3.0))
+            .is_none());
     }
 }

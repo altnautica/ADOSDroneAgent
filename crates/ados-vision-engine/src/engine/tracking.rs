@@ -11,23 +11,27 @@ impl VisionEngine {
     }
 
     /// Convenience for the engine-run flow: infer then publish, building the
-    /// batch from the frame descriptor and the model's id. While the camera's
-    /// tracker holds an operator-designated track, the model also runs on a
-    /// crop around the track's predicted box (see [`super::crop`]) and those
-    /// detections join the whole frame's, so a subject too small for the
-    /// whole-frame pass stays detected. Boxes larger than the policy's
-    /// `max_box_area_frac` of the frame are dropped first, whatever the
-    /// backend. When the tracker is enabled, the detections pass through the
-    /// camera's single-object tracker so the locked object carries a stable
-    /// `track_id` + `lock_state`. Embeddings are extracted once per frame, when
-    /// the re-id tracker or a subscriber needs them, and put on the detections
-    /// only for a subscriber.
+    /// batch from the frame descriptor and the model's id. First the camera's
+    /// track is moved by the vehicle's turn since the previous batch's frame
+    /// (see [`super::camera_motion`]), so everything below predicts from where
+    /// the subject now appears. While the camera's tracker holds an
+    /// operator-designated track, the model also runs on a crop around the
+    /// track's predicted box (see [`super::crop`]) and those detections join
+    /// the whole frame's, so a subject too small for the whole-frame pass
+    /// stays detected. Boxes larger than the policy's `max_box_area_frac` of
+    /// the frame are dropped first, whatever the backend. When the tracker is
+    /// enabled, the detections pass through the camera's single-object
+    /// tracker so the locked object carries a stable `track_id` +
+    /// `lock_state`. Embeddings are extracted once per frame, when the re-id
+    /// tracker or a subscriber needs them, and put on the detections only for
+    /// a subscriber.
     pub async fn infer_and_publish(
         &self,
         model_id: &str,
         desc: &FrameDescriptor,
         frame: &[u8],
     ) -> Result<DetectionBatch> {
+        self.move_track_with_camera(desc).await;
         let mut detections = self
             .infer(model_id, frame, desc.width, desc.height, desc.format)
             .await?;

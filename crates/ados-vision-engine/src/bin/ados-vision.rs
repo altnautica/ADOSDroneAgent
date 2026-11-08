@@ -28,7 +28,7 @@ use ados_vision_engine::daemon_support::{
 use ados_vision_engine::depth::feed;
 use ados_vision_engine::depth_bus;
 use ados_vision_engine::detection_bus;
-use ados_vision_engine::engine::{DepthSetup, VisionEngine};
+use ados_vision_engine::engine::{CameraMotionSetup, DepthSetup, VisionEngine};
 use ados_vision_engine::frame_bus;
 use ados_vision_engine::perception_scheduler::PerceptionScheduler;
 use ados_vision_engine::source::{AnySource, FrameSource, SimClock};
@@ -219,6 +219,13 @@ async fn main() {
         });
         interval_ms
     };
+    // The tracker moves each configured camera's track with the vehicle's
+    // turn between batches. Under simulation the autopilot runs on the
+    // simulator's clock, the one the simulated cameras stamp exposures with.
+    engine.configure_camera_motion(CameraMotionSetup {
+        geometries: config.camera_geometry.clone(),
+        fc_on_sim_clock: config.simulation,
+    });
 
     // Build the per-camera schedule input: every registered engine-run detection
     // model, each with a target rate + priority so the perception scheduler paces
@@ -375,9 +382,8 @@ async fn main() {
         }));
     }
 
-    // The depth layer: its broadcast, and the ranging its scale fit reads
-    // (the planar scan off the plugin event export, attitude and the downward
-    // rangefinder off the MAVLink socket). Only when a depth model runs.
+    // The depth layer: its broadcast, and the planar scan its scale fit reads
+    // off the plugin event export. Only when a depth model runs.
     if depth_interval_ms > 0 {
         let engine_bus = engine.clone();
         let cancel_bus = cancel.clone();
@@ -392,6 +398,11 @@ async fn main() {
             engine.range_feed(),
             cancel.clone(),
         )));
+    }
+    // The attitude and the downward rangefinder off the MAVLink socket: the
+    // depth fit reads them, and the tracker reads the attitude history to
+    // take the camera's own turn out of a track's motion.
+    if depth_interval_ms > 0 || config.tracker_enabled {
         tasks.push(tokio::spawn(feed::run_mavlink_reader(
             config.mavlink_socket_path().into(),
             engine.range_feed(),

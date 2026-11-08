@@ -1076,3 +1076,45 @@ fn a_miss_after_a_reconfirm_frame_owes_a_new_one() {
     let u = t.update(&[obj(108.0, 100.0)]);
     assert_eq!(u.detection.unwrap().lock_state, Some(LockState::Locked));
 }
+
+/// A walker standing still while the camera pitches: the camera's turn throws
+/// the walker 220 px down the image in one batch, well past the gate. Told
+/// where the turn moved the line of sight, the track stays locked on the
+/// walker; left alone it coasts (uncertain) on the old position.
+#[test]
+fn a_track_moved_with_the_camera_stays_locked_through_a_pitch_step() {
+    let walker = |y: f32| person([575.0, y, 52.0, 110.0], 0.9);
+    let step = |moved: bool| {
+        let mut t = SingleObjectTracker::new(TrackerConfig::default());
+        let id = t.designate(&walker(105.0)).unwrap();
+        for _ in 0..3 {
+            t.update(&[walker(105.0)]);
+        }
+        if moved {
+            let shift = t.move_with_camera(|x, y| Some((x, y + 220.0)));
+            assert_eq!(shift, Some((0.0, 220.0)));
+        }
+        let u = t.update(&[walker(325.0)]);
+        assert_eq!(u.track_id, Some(id));
+        u.detection.unwrap().lock_state
+    };
+    assert_eq!(step(false), Some(LockState::Uncertain));
+    assert_eq!(step(true), Some(LockState::Locked));
+}
+
+#[test]
+fn moving_with_the_camera_needs_a_track_and_a_finite_mapping() {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    assert_eq!(t.move_with_camera(|x, y| Some((x, y))), None);
+    t.designate(&obj(100.0, 100.0));
+    assert_eq!(t.move_with_camera(|_, _| None), None);
+    assert_eq!(t.move_with_camera(|_, _| Some((f32::NAN, 0.0))), None);
+    let (b, _) = t.designated_prediction().unwrap();
+    assert_eq!((b.x, b.y), (100.0, 100.0));
+    assert_eq!(
+        t.move_with_camera(|x, y| Some((x - 30.0, y + 10.0))),
+        Some((-30.0, 10.0))
+    );
+    let (b, _) = t.designated_prediction().unwrap();
+    assert_eq!((b.x, b.y), (70.0, 110.0));
+}

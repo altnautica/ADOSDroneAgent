@@ -199,6 +199,26 @@ impl SingleObjectTracker {
         Some((kf.bbox(), track.class_label.as_str()))
     }
 
+    /// The camera turned between the frame the track was last advanced on and
+    /// the frame about to be: `to_new_frame` takes a pixel position in the
+    /// old frame to where the same line of sight lands in the new one (`None`
+    /// when it leaves the image plane). The track's center estimate is moved
+    /// there, so the next prediction, gate and [`Self::designated_prediction`]
+    /// sit where the subject now appears rather than where the camera's own
+    /// turn threw it. The velocity is left alone: it stays the subject's own
+    /// image motion. Returns the applied shift `(dx, dy)` in pixels, `None`
+    /// when there is no track or the mapping gave nothing.
+    pub fn move_with_camera(
+        &mut self,
+        to_new_frame: impl FnOnce(f32, f32) -> Option<(f32, f32)>,
+    ) -> Option<(f32, f32)> {
+        let track = self.track.as_mut()?;
+        let (cx, cy) = track.kf.center();
+        let (nx, ny) = to_new_frame(cx, cy).filter(|(x, y)| x.is_finite() && y.is_finite())?;
+        track.kf.move_center(nx, ny);
+        Some((nx - cx, ny - cy))
+    }
+
     /// True while the tracker is asking the operator to re-designate the target
     /// because the identity could not be resolved safely (two appearance-
     /// ambiguous candidates). Composes with an operator re-acknowledge step:

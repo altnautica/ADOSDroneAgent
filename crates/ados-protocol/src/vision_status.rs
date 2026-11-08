@@ -89,6 +89,11 @@ pub struct CameraDemandStatus {
     /// track's class.
     #[serde(default)]
     pub crop_hits: u64,
+    /// Detector batches on which the engine moved the camera's track by the
+    /// camera's own turn since the previous batch (the flight controller's
+    /// attitude at the two frames' exposures), since the engine started.
+    #[serde(default)]
+    pub turn_moves: u64,
 }
 
 /// One consumer's live lease on a camera.
@@ -187,6 +192,7 @@ mod tests {
                         }],
                         crop_runs: 9,
                         crop_hits: 7,
+                        turn_moves: 5,
                     },
                 )]),
             }),

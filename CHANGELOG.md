@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.21] - 2026-11-08
+
+### Fixed
+
+- A followed subject's lock dropped to `uncertain` after every pitch or yaw swing of the following vehicle, and follow-me held on each. The camera is fixed to the vehicle, so a 12° pitch swing between two 3 Hz detector batches moves the whole image by up to 220 px while the subject itself moves a few tens: the subject's next box landed outside the tracker's gate, the lock coasted and owed a re-confirm frame, and once the subject left the detections the coast held where it had been, so the crop pass looked in the wrong place and the lock was lost. Before each batch the vision engine now moves the camera's track by the vehicle's turn between the previous batch's frame and this one: it keeps four seconds of the autopilot's `ATTITUDE` on the autopilot's clock, reads the attitude at each frame's exposure (by the frame's simulation stamp when the autopilot runs on the simulator's clock, otherwise by the engine's clock through the quickest-arriving sample), and maps the track's centre through the camera's `cameras[]` field of view and mount pitch. Prediction, gate and crop window then sit where the subject now appears. On a recorded follow flight the lock no longer leaves `locked` on any batch the walker was detected on (it did on four), and while the walker was in view but undetected the moved prediction stayed within 50 px of it instead of drifting 190–360 px away. The engine reads the MAVLink socket whenever the tracker is on, not only with a depth model; cameras without a `cameras[]` entry are tracked as before.
+- The vision status sidecar's `detection.cameras.<id>` reports `turn_moves`: the detector batches on which the camera's track was moved by the vehicle's turn.
+
 ## [0.109.20] - 2026-11-08
 
 ### Fixed

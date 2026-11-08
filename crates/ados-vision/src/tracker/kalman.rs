@@ -125,6 +125,20 @@ impl BoxKalman {
         }
     }
 
+    /// Move the center estimate to `(cx, cy)` without touching its velocity
+    /// or covariance: the camera turned, so the same subject now sits
+    /// elsewhere in the image, and nothing about the subject's own motion or
+    /// the estimate's certainty changed.
+    pub(super) fn move_center(&mut self, cx: f32, cy: f32) {
+        self.pos[0] = cx;
+        self.pos[1] = cy;
+    }
+
+    /// The center estimate.
+    pub(super) fn center(&self) -> (f32, f32) {
+        (self.pos[0], self.pos[1])
+    }
+
     /// Position standard deviation of the center (mean of cx, cy components).
     /// Used to widen the association gate as the estimate gets less certain
     /// (during a coast the covariance grows, so the gate should too).

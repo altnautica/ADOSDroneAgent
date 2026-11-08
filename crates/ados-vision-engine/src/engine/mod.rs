@@ -29,6 +29,7 @@ use tokio::sync::{broadcast, Mutex, Semaphore};
 use crate::backend::{BackendState, LoadedModel, VisionBackend};
 use crate::camera_control::CameraControls;
 use crate::ring::{FrameTiming, RingWriter};
+mod camera_motion;
 mod crop;
 mod demand;
 mod depth;
@@ -36,6 +37,7 @@ mod embeddings;
 mod models;
 mod tracking;
 
+pub use camera_motion::CameraMotionSetup;
 pub use demand::{DetectionDemandMode, DetectionPolicy, DESIGNATE_OWNER};
 pub use depth::{DepthModelState, DepthSetup, DEPTH_PERMIT_WAIT};
 pub use embeddings::{
@@ -182,6 +184,8 @@ pub struct VisionEngine {
     /// Per camera, the designated-track crop passes run and those that found a
     /// box of the track's class, for the status sidecar.
     crop_counts: std::sync::Mutex<HashMap<String, crop::CropCounts>>,
+    /// Moving each camera's track with the camera's own turn.
+    camera_motion: std::sync::Mutex<camera_motion::CameraMotion>,
 }
 
 /// How a camera ring is sized.
@@ -288,6 +292,7 @@ impl VisionEngine {
             range_feed: Arc::new(crate::depth::feed::RangeFeed::default()),
             depth_tx: broadcast::channel(BROADCAST_DEPTH).0,
             crop_counts: std::sync::Mutex::new(HashMap::new()),
+            camera_motion: std::sync::Mutex::new(camera_motion::CameraMotion::default()),
         })
     }
 
@@ -467,6 +472,8 @@ impl VisionEngine {
     }
 }
 
+#[cfg(test)]
+mod camera_motion_tests;
 #[cfg(test)]
 mod crop_tests;
 #[cfg(test)]

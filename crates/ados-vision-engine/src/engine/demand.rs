@@ -269,6 +269,7 @@ impl VisionEngine {
                     leases: held,
                     crop_runs: crop.runs,
                     crop_hits: crop.hits,
+                    turn_moves: self.turn_moves(&id),
                 };
                 (id, status)
             })

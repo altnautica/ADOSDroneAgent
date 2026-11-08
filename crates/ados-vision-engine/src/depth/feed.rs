@@ -9,11 +9,16 @@
 //!   (`MAV_SENSOR_ROTATION_PITCH_270`), and the attitude its `ATTITUDE`, both
 //!   read off the MAVLink broadcast socket.
 //!
-//! Each reader keeps only the latest value with its arrival time on the
-//! engine's monotonic clock; [`RangeFeed::snapshot`] hands out what is fresh.
-//! A missing socket is normal (no plugin host, no flight controller yet): the
-//! reader retries quietly and the depth layer runs unscaled.
+//! The scan and the rangefinder keep only the latest value with its arrival
+//! time on the engine's monotonic clock; [`RangeFeed::snapshot`] hands out
+//! what is fresh. The attitude keeps a few seconds of samples on the flight
+//! controller's own clock (`time_boot_ms`), so the tracker can ask how the
+//! vehicle was turned when a given frame was exposed
+//! ([`RangeFeed::attitude_at`]). A missing socket is normal (no plugin host,
+//! no flight controller yet): the reader retries quietly, the depth layer
+//! runs unscaled and the tracker does without the camera's turn.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -32,6 +37,19 @@ pub const SCAN_PUBLISHER: &str = "com.altnautica.world-engine";
 
 /// A value older than this is not used, milliseconds.
 pub const MAX_AGE_MS: u64 = 500;
+
+/// How far back the attitude history reaches, on the flight controller's
+/// clock, ms. A detector batch is a few hundred ms behind its frame.
+pub const ATTITUDE_HISTORY_MS: u64 = 4_000;
+
+/// The longest gap between two attitude samples interpolated across, ms
+/// (the stream runs at 10 Hz or faster); and the longest a frame may be
+/// newer than the newest sample and still take it, ms.
+const ATTITUDE_MAX_GAP_MS: f64 = 250.0;
+const ATTITUDE_MAX_HOLD_MS: f64 = 100.0;
+
+/// `MAV_COMP_ID_AUTOPILOT1`.
+const AUTOPILOT_COMPONENT: u8 = 1;
 
 /// Longest export line taken (a 360-bin scan is a few KiB of JSON).
 const MAX_LINE: usize = 512 * 1024;
@@ -59,11 +77,41 @@ pub struct Ranging {
     pub attitude: Option<(f32, f32)>,
 }
 
+/// The vehicle's attitude, radians: MAVLink `ATTITUDE`, the body frame (FRD)
+/// in the local NED frame, yaw then pitch then roll.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Attitude {
+    pub roll: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+}
+
+/// When a frame was exposed, on one of the two clocks the history can read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FrameTime {
+    /// The engine's monotonic clock, ms. The history maps it onto the flight
+    /// controller's clock with the smallest arrival delay it has seen.
+    Host(f64),
+    /// The flight controller's own clock (`time_boot_ms`), ms: a simulated
+    /// frame stamped with simulation time, when the flight controller runs
+    /// on that clock too.
+    FlightController(f64),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AttitudeSample {
+    /// `time_boot_ms`.
+    fc_ms: u64,
+    /// Arrival on the engine's monotonic clock.
+    rx_ms: u64,
+    attitude: Attitude,
+}
+
 #[derive(Debug, Default)]
 struct Latest {
     scan: Option<(Arc<Scan>, u64)>,
     down: Option<(f32, u64)>,
-    attitude: Option<((f32, f32), u64)>,
+    attitudes: VecDeque<AttitudeSample>,
 }
 
 /// The latest ranging, shared by the readers and the depth runs.
@@ -89,8 +137,77 @@ impl RangeFeed {
         self.with(|l| l.down = Some((metres, at_ms)));
     }
 
-    pub fn set_attitude(&self, roll: f32, pitch: f32, at_ms: u64) {
-        self.with(|l| l.attitude = Some(((roll, pitch), at_ms)));
+    /// One `ATTITUDE` sample: the flight controller's `time_boot_ms`, and its
+    /// arrival on the engine's clock. A repeated sample is skipped; one older
+    /// than the newest means the flight controller restarted, and the
+    /// history starts over.
+    pub fn push_attitude(&self, fc_ms: u64, attitude: Attitude, rx_ms: u64) {
+        self.with(|l| {
+            match l.attitudes.back() {
+                Some(last) if last.fc_ms == fc_ms => return,
+                Some(last) if last.fc_ms > fc_ms => l.attitudes.clear(),
+                _ => {}
+            }
+            l.attitudes.push_back(AttitudeSample {
+                fc_ms,
+                rx_ms,
+                attitude,
+            });
+            while l
+                .attitudes
+                .front()
+                .is_some_and(|s| s.fc_ms + ATTITUDE_HISTORY_MS < fc_ms)
+            {
+                l.attitudes.pop_front();
+            }
+        });
+    }
+
+    /// The attitude when a frame was exposed at `at`, interpolated between
+    /// the two samples around it. `None` when the history does not cover
+    /// that instant: older than its first sample, newer than its last by
+    /// more than [`ATTITUDE_MAX_HOLD_MS`], or inside a gap of more than
+    /// [`ATTITUDE_MAX_GAP_MS`].
+    pub fn attitude_at(&self, at: FrameTime) -> Option<Attitude> {
+        self.with(|l| {
+            let s = &l.attitudes;
+            let fc = match at {
+                FrameTime::FlightController(ms) => ms,
+                // The sample that arrived soonest after its stamp fixes the
+                // offset between the clocks; later arrivals only queued.
+                FrameTime::Host(ms) => {
+                    let offset = s
+                        .iter()
+                        .map(|x| x.rx_ms as f64 - x.fc_ms as f64)
+                        .min_by(f64::total_cmp)?;
+                    ms - offset
+                }
+            };
+            let first = s.front()?;
+            let last = s.back()?;
+            if fc < first.fc_ms as f64 || fc > last.fc_ms as f64 + ATTITUDE_MAX_HOLD_MS {
+                return None;
+            }
+            if fc >= last.fc_ms as f64 {
+                return Some(last.attitude);
+            }
+            let i = s.partition_point(|x| (x.fc_ms as f64) <= fc);
+            let (a, b) = (s[i - 1], s[i]);
+            let span = (b.fc_ms - a.fc_ms) as f64;
+            if span > ATTITUDE_MAX_GAP_MS {
+                return None;
+            }
+            let f = ((fc - a.fc_ms as f64) / span) as f32;
+            let lerp = |x: f32, y: f32| x + f * (y - x);
+            let dyaw = (b.attitude.yaw - a.attitude.yaw + std::f32::consts::PI)
+                .rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            Some(Attitude {
+                roll: lerp(a.attitude.roll, b.attitude.roll),
+                pitch: lerp(a.attitude.pitch, b.attitude.pitch),
+                yaw: a.attitude.yaw + f * dyaw,
+            })
+        })
     }
 
     /// What is at most [`MAX_AGE_MS`] old at `now_ms`.
@@ -103,7 +220,11 @@ impl RangeFeed {
                 .filter(|(_, at)| fresh(*at))
                 .map(|(s, _)| Scan::clone(s)),
             down_m: l.down.filter(|(_, at)| fresh(*at)).map(|(d, _)| d),
-            attitude: l.attitude.filter(|(_, at)| fresh(*at)).map(|(a, _)| a),
+            attitude: l
+                .attitudes
+                .back()
+                .filter(|a| fresh(a.rx_ms))
+                .map(|a| (a.attitude.roll, a.attitude.pitch)),
         })
     }
 
@@ -138,14 +259,28 @@ impl RangeFeed {
         }
     }
 
-    /// Apply one raw MAVLink frame. Returns whether it updated the feed.
+    /// Apply one raw MAVLink frame. Returns whether it updated the feed. The
+    /// attitude is taken from the autopilot component only: another
+    /// component's `ATTITUDE` (a gimbal, a companion estimator) runs on its
+    /// own clock and describes something else.
     pub fn apply_mavlink(&self, frame: &[u8], at_ms: u64) -> bool {
-        let Ok((_, msg)) = parse_any(frame) else {
+        let Ok((header, msg)) = parse_any(frame) else {
             return false;
         };
         match msg {
-            MavMessage::ATTITUDE(a) => {
-                self.set_attitude(a.roll, a.pitch, at_ms);
+            MavMessage::ATTITUDE(a) if header.component_id == AUTOPILOT_COMPONENT => {
+                let attitude = Attitude {
+                    roll: a.roll,
+                    pitch: a.pitch,
+                    yaw: a.yaw,
+                };
+                if !(attitude.roll.is_finite()
+                    && attitude.pitch.is_finite()
+                    && attitude.yaw.is_finite())
+                {
+                    return false;
+                }
+                self.push_attitude(u64::from(a.time_boot_ms), attitude, at_ms);
                 true
             }
             MavMessage::DISTANCE_SENSOR(d)
@@ -340,5 +475,99 @@ mod tests {
         assert_eq!(s.down_m, Some(4.12));
         assert_eq!(s.attitude, Some((0.1, -0.2)));
         assert!(!feed.apply_mavlink(b"garbage", 0));
+    }
+
+    fn att(roll: f32, pitch: f32, yaw: f32) -> Attitude {
+        Attitude { roll, pitch, yaw }
+    }
+
+    fn close(a: Option<Attitude>, b: Attitude) -> bool {
+        a.is_some_and(|a| {
+            (a.roll - b.roll).abs() < 1e-5
+                && (a.pitch - b.pitch).abs() < 1e-5
+                && (a.yaw - b.yaw).abs() < 1e-5
+        })
+    }
+
+    #[test]
+    fn the_attitude_history_interpolates_on_the_flight_controller_clock() {
+        let feed = RangeFeed::default();
+        assert_eq!(feed.attitude_at(FrameTime::FlightController(0.0)), None);
+        // 20 Hz, arriving 30 ms after the stamp, one sample queued 40 ms more.
+        feed.push_attitude(1_000, att(0.0, -0.1, 3.10), 5_030);
+        feed.push_attitude(1_050, att(0.1, -0.2, -3.12), 5_120);
+        feed.push_attitude(1_050, att(9.0, 9.0, 9.0), 5_121);
+        feed.push_attitude(1_100, att(0.2, -0.2, -3.08), 5_130);
+        // Between samples, yaw across the ±π seam the short way.
+        let mid = feed
+            .attitude_at(FrameTime::FlightController(1_025.0))
+            .unwrap();
+        assert!((mid.roll - 0.05).abs() < 1e-5 && (mid.pitch + 0.15).abs() < 1e-5);
+        let seam = 3.10 + 0.5 * (std::f32::consts::TAU - 6.22);
+        assert!((mid.yaw - seam).abs() < 1e-4, "{}", mid.yaw);
+        // The engine's clock maps through the quickest arrival (30 ms).
+        assert!(close(
+            feed.attitude_at(FrameTime::Host(5_105.0)),
+            att(0.15, -0.2, -3.10)
+        ));
+        // Held a little past the newest sample, never before the oldest.
+        assert!(close(
+            feed.attitude_at(FrameTime::FlightController(1_180.0)),
+            att(0.2, -0.2, -3.08)
+        ));
+        assert_eq!(feed.attitude_at(FrameTime::FlightController(1_250.0)), None);
+        assert_eq!(feed.attitude_at(FrameTime::FlightController(990.0)), None);
+    }
+
+    #[test]
+    fn the_attitude_history_forgets_gaps_old_samples_and_a_restart() {
+        let feed = RangeFeed::default();
+        feed.push_attitude(1_000, att(0.0, 0.0, 0.0), 1_000);
+        feed.push_attitude(1_400, att(0.4, 0.0, 0.0), 1_400);
+        assert_eq!(feed.attitude_at(FrameTime::FlightController(1_200.0)), None);
+        feed.push_attitude(1_000 + ATTITUDE_HISTORY_MS + 100, att(0.5, 0.0, 0.0), 6_000);
+        assert_eq!(feed.attitude_at(FrameTime::FlightController(1_000.0)), None);
+        assert!(feed
+            .attitude_at(FrameTime::FlightController(5_100.0))
+            .is_some());
+        // The flight controller restarted: its clock went back.
+        feed.push_attitude(20, att(0.7, 0.0, 0.0), 7_000);
+        assert_eq!(feed.attitude_at(FrameTime::FlightController(1_400.0)), None);
+        assert!(close(
+            feed.attitude_at(FrameTime::FlightController(20.0)),
+            att(0.7, 0.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn only_the_autopilot_attitude_is_taken() {
+        let feed = RangeFeed::default();
+        let gimbal = serialize_v2(
+            MavHeader {
+                system_id: 1,
+                component_id: 154,
+                sequence: 0,
+            },
+            &MavMessage::ATTITUDE(ATTITUDE_DATA {
+                time_boot_ms: 10,
+                pitch: -1.0,
+                ..ATTITUDE_DATA::default()
+            }),
+        )
+        .unwrap();
+        assert!(!feed.apply_mavlink(&gimbal, 10));
+        assert_eq!(feed.attitude_at(FrameTime::FlightController(10.0)), None);
+        assert!(feed.apply_mavlink(
+            &frame(&MavMessage::ATTITUDE(ATTITUDE_DATA {
+                time_boot_ms: 10,
+                yaw: 1.5,
+                ..ATTITUDE_DATA::default()
+            })),
+            12
+        ));
+        assert!(close(
+            feed.attitude_at(FrameTime::FlightController(10.0)),
+            att(0.0, 0.0, 1.5)
+        ));
     }
 }
