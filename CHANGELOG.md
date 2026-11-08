@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.17] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup: the copter `autotune` step aborted itself as an operator takeover about a second after arming. The landing that ends `first_hover` disarms the flight controller, and the pilot moved its owner from `tuning` to idle on every disarm, so when `autotune` armed again the setup engine saw it had lost `tuning` and took that for the operator taking control. The pilot now keeps the `tuning` owner through a disarm; the setup engine still hands it back when its wizard ends, and an operator safety action (pause, return, land, kill, take control) still ends it at once.
+- Aircraft setup on ArduPilot planes: `autotune` never reached its 80 m loiter after `tecs_measure` (`loiter_timeout`). The TECS stages set heights with GUIDED_CHANGE_ALTITUDE, and ArduPlane's GUIDED keeps flying that offboard height and ignores a later DO_REPOSITION's, so the plane stayed at the last stage's 30 m target. The loiter now sends the height as GUIDED_CHANGE_ALTITUDE too.
+- Aircraft setup on planes: the TECS idle-glide and dive stages now end the moment the plane sinks below the 50 m floor. They used to run until the settle time had passed, and a dive carried on toward the ground (3 m above it in SITL).
+
 ## [0.109.16] - 2026-11-08
 
 ### Fixed

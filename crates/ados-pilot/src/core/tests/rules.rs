@@ -154,6 +154,25 @@ fn setup_engine_actions_do_not_arm_the_link_loss_timer() {
 }
 
 #[test]
+fn tuning_owner_survives_the_landing_between_setup_flight_steps() {
+    // first_hover lands and disarms, then autotune arms again: the setup
+    // engine still holds `tuning`, so the pilot must not idle it on disarm.
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.p.auth.enter_tuning().unwrap();
+    w.run(200);
+    assert_eq!(w.p.owner(), Owner::Tuning);
+    w.armed = false;
+    w.run(1500);
+    assert_eq!(w.p.owner(), Owner::Tuning);
+    // An operator safety action still ends it (and the next disarm idles).
+    w.armed = true;
+    w.run(1500);
+    w.action("land");
+    assert_ne!(w.p.owner(), Owner::Tuning);
+}
+
+#[test]
 fn lease_grant_goal_and_revocations() {
     let mut w = World::new();
     w.airborne(copter::GUIDED);

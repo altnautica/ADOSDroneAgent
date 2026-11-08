@@ -65,7 +65,11 @@ impl Pilot {
     }
 
     fn on_disarmed(&mut self) {
-        self.set_owner(Owner::Idle, "disarmed");
+        // The setup engine holds `tuning` across the whole air wizard, landings
+        // between its flight steps included, and hands it back itself.
+        if self.owner() != Owner::Tuning {
+            self.set_owner(Owner::Idle, "disarmed");
+        }
         self.failsafe.reset_link();
         self.landing = false;
         self.goto = None;

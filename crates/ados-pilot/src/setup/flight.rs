@@ -231,7 +231,10 @@ pub fn land_mode(cx: &Cx) -> Mode {
 pub const PLANE_LOITER_ALT_M: f32 = 80.0;
 
 /// Fixed-wing: loiter at the tuning-box centre at `alt_m` (DO_REPOSITION,
-/// which also switches to GUIDED).
+/// which also switches to GUIDED). The height is sent again as
+/// GUIDED_CHANGE_ALTITUDE: once a step has set one (the TECS stages),
+/// ArduPlane's GUIDED keeps flying that offboard height and ignores the
+/// reposition's (`ModeGuided::update_target_altitude`).
 pub fn plane_loiter(cx: &mut Cx, alt_m: f32) {
     let (lat, lon) = cx.data.box_latlon.or(cx.fc.latlon).unwrap_or((0, 0));
     cx.out.cmd_int(
@@ -242,6 +245,7 @@ pub fn plane_loiter(cx: &mut Cx, alt_m: f32) {
         lon,
         alt_m,
     );
+    change_alt(cx, alt_m, 0.0);
 }
 
 /// Fixed-wing GUIDED: new target height (m, relative) at `rate` m/s (0 = FC default).

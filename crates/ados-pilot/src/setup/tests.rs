@@ -840,3 +840,85 @@ fn frame_reboot_that_never_returns_fails_with_timeout() {
         json!({"frame_class": 2, "frame_type": 1, "prop_in": 10, "motor_kv": 900, "cells": 4}).as_object().cloned().unwrap();
     assert_eq!(s.e.action(G, "frame", "apply", &args, s.now)["err"], json!("no_fc"));
 }
+
+/// Answer the waiting step the way the bench driver does, retrying while
+/// the engine is still taking `tuning`.
+fn answer(s: &mut Sim, w: WizardId) {
+    let Some(v) = s.e.current_view() else { return };
+    if v.state != StepState::WaitingUser {
+        return;
+    }
+    let ids: Vec<String> = v.actions.iter().map(|a| a.id.clone()).collect();
+    let Some(a) = ["confirm_area", "apply", "start"].iter().find(|a| ids.iter().any(|i| i == *a)) else {
+        panic!("{} waits with {ids:?}", v.step);
+    };
+    let r = s.e.action(w, &v.step, a, &Map::new(), s.now);
+    assert!(r["ok"] == json!(true) || r["err"] == json!("tuning_pending"), "{}/{a}: {r}", v.step);
+}
+
+/// Drive the air wizard until `cond`, answering every waiting step.
+fn drive_air(s: &mut Sim, cond: impl Fn(&Sim) -> bool, max_ms: u64) {
+    let end = s.now + max_ms;
+    while !cond(s) {
+        assert!(
+            s.now < end && s.e.wizard_state(A) == WizardState::Running,
+            "air wizard {:?} at {:?}; air steps {:?}",
+            s.e.wizard_state(A),
+            s.e.current_view().map(|v| (v.step, v.state, v.blockers)),
+            s.e.state.air.steps
+        );
+        answer(s, A);
+        s.run(100);
+    }
+}
+
+#[test]
+fn air_wizard_flies_first_hover_then_autotune() {
+    // first_hover lands and disarms; autotune arms again under the same
+    // `tuning` owner and runs (no operator-takeover abort).
+    let mut s = air_ready();
+    assert_eq!(s.e.start(A, s.now)["ok"], json!(true));
+    drive_air(&mut s, |s| s.step_id().as_deref() == Some("autotune"), 150_000);
+    assert_eq!(s.step_state(A, "first_hover"), StepState::Done);
+    drive_air(&mut s, |s| s.fc.armed && s.fc.alt > 5.0, 30_000);
+    s.run(3000);
+    assert_eq!(s.e.wizard_state(A), WizardState::Running, "{:?}", s.e.state.air.steps.get("autotune"));
+    assert_eq!(s.step_id().as_deref(), Some("autotune"));
+}
+
+#[test]
+fn plane_tecs_stays_above_its_floor_and_autotune_reaches_the_loiter() {
+    let mut p = ap_plane_params();
+    for (k, v) in [
+        ("THR_MAX", 100.0),
+        ("TKOFF_ALT", 50.0),
+        ("TRIM_THROTTLE", 45.0),
+        ("AIRSPEED_MIN", 12.0),
+        ("AIRSPEED_MAX", 25.0),
+        ("AIRSPEED_CRUISE", 18.0),
+        ("TECS_CLMB_MAX", 5.0),
+        ("TECS_SINK_MAX", 5.0),
+        ("TECS_SINK_MIN", 2.0),
+        ("SERVO1_TRIM", 1500.0),
+        ("SERVO2_TRIM", 1500.0),
+        ("SERVO4_TRIM", 1500.0),
+    ] {
+        p.insert(k.into(), v);
+    }
+    let mut s = Sim::new(MavType::MAV_TYPE_FIXED_WING, p);
+    s.e.state.ground.state = WizardState::Done;
+    assert_eq!(s.e.start(A, s.now)["ok"], json!(true));
+    drive_air(&mut s, |s| s.step_id().as_deref() == Some("tecs_measure") && s.state() == Some(StepState::Running), 600_000);
+    // The sink stages end at the 50 m floor; the idle dive is not carried on below it.
+    let mut min_alt = f32::MAX;
+    while s.step_id().as_deref() == Some("tecs_measure") {
+        assert!(s.e.wizard_state(A) == WizardState::Running, "{:?}", s.e.state.air.steps);
+        answer(&mut s, A);
+        s.run(100);
+        min_alt = min_alt.min(s.fc.alt);
+    }
+    assert!(min_alt > 40.0, "tecs_measure sank to {min_alt} m");
+    // The TECS stages left an offboard GUIDED height; the autotune loiter overrides it.
+    drive_air(&mut s, |s| s.fc.custom_mode == 8, 90_000);
+    assert!(s.fc.alt > 70.0, "autotune at {} m", s.fc.alt);
+}

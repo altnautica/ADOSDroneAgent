@@ -389,8 +389,10 @@ impl Step for PlaneAir {
                     }
                 }
                 self.core.progress = Some((stage as f32 + (el as f32 / TECS_PHASE_MS as f32).min(1.0)) / 3.0);
+                // A sinking stage ends the moment it reaches the floor: waiting out the
+                // settle time there let an idle dive carry on toward the ground.
                 let low = stage > 0 && height(cx).is_some_and(|h| h < TECS_FLOOR_M);
-                if el >= TECS_PHASE_MS || (low && el > TECS_SETTLE_MS + 5000) {
+                if el >= TECS_PHASE_MS || low {
                     let m = mean(&self.climb);
                     match stage {
                         0 => {

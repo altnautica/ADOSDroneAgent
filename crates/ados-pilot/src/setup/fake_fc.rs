@@ -70,6 +70,9 @@ pub struct FakeFc {
     manual_z: f32,
     /// The airspeed zero calibration concludes at this time.
     airspeed_cal_until: Option<u64>,
+    /// ArduPlane GUIDED's offboard height from GUIDED_CHANGE_ALTITUDE: once
+    /// set it wins over a DO_REPOSITION's height.
+    offboard_alt: Option<f32>,
     pub reboots: u32,
     /// AUTOPILOT_VERSION `uid` and `uid2` (the extension, sent as a raw frame).
     pub uid: u64,
@@ -235,6 +238,7 @@ impl FakeFc {
             last_tel: 0,
             manual_z: 0.5,
             airspeed_cal_until: None,
+            offboard_alt: None,
             reboots: 0,
             uid: 0x00C0_FFEE_1234_5678,
             uid2: None,
@@ -304,6 +308,10 @@ impl FakeFc {
                 self.queue.push_back(ack(c.command, MavResult::MAV_RESULT_ACCEPTED));
                 if c.command == MavCmd::MAV_CMD_DO_REPOSITION {
                     self.custom_mode = 15;
+                    self.takeoff_alt = Some(self.offboard_alt.unwrap_or(c.z));
+                }
+                if c.command == MavCmd::MAV_CMD_GUIDED_CHANGE_ALTITUDE {
+                    self.offboard_alt = Some(c.z);
                     self.takeoff_alt = Some(c.z);
                 }
             }
@@ -516,7 +524,9 @@ impl FakeFc {
             if self.alt < t {
                 self.alt = (self.alt + 2.0 * dt).min(t);
             } else if !autotune {
-                self.alt = (self.alt - 2.0 * dt).max(t);
+                // An idle-throttle plane (THR_MAX 0, the TECS sink stages) sinks fast.
+                let sink = if self.params.get("THR_MAX").is_some_and(|t| *t == 0.0) { 5.0 } else { 2.0 };
+                self.alt = (self.alt - sink * dt).max(t);
             }
         }
         if let Some(since) = self.autotune_since {
