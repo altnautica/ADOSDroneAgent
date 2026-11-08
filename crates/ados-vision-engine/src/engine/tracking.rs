@@ -11,8 +11,12 @@ impl VisionEngine {
     }
 
     /// Convenience for the engine-run flow: infer then publish, building the
-    /// batch from the frame descriptor and the model's id. Boxes larger than the
-    /// policy's `max_box_area_frac` of the frame are dropped first, whatever the
+    /// batch from the frame descriptor and the model's id. While the camera's
+    /// tracker holds an operator-designated track, the model also runs on a
+    /// crop around the track's predicted box (see [`super::crop`]) and those
+    /// detections join the whole frame's, so a subject too small for the
+    /// whole-frame pass stays detected. Boxes larger than the policy's
+    /// `max_box_area_frac` of the frame are dropped first, whatever the
     /// backend. When the tracker is enabled, the detections pass through the
     /// camera's single-object tracker so the locked object carries a stable
     /// `track_id` + `lock_state`. Embeddings are extracted once per frame, when
@@ -27,6 +31,14 @@ impl VisionEngine {
         let mut detections = self
             .infer(model_id, frame, desc.width, desc.height, desc.format)
             .await?;
+        // A failed crop pass costs only the crop: the whole frame's detections
+        // still publish.
+        match self.designated_crop_detections(model_id, desc, frame).await {
+            Ok(crop) => super::crop::merge_crop(&mut detections, crop),
+            Err(e) => {
+                tracing::warn!(model = model_id, camera = %desc.camera_id, error = %e, "designated_crop_infer_failed");
+            }
+        }
         super::demand::drop_oversized_boxes(
             &mut detections,
             desc.width,
@@ -240,7 +252,7 @@ fn best_overlap_index(
 }
 
 /// Intersection-over-union of two corner-form boxes.
-fn bbox_iou(
+pub(super) fn bbox_iou(
     a: &ados_protocol::framebus::BoundingBox,
     b: &ados_protocol::framebus::BoundingBox,
 ) -> f32 {

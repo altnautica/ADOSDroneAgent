@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.10] - 2026-11-08
+
+### Fixed
+
+- Follow lost a designated person within seconds as they walked away. The person detector runs on the whole frame squeezed into its input, and a person under about 120 px tall in a 720 px frame falls below the size it finds reliably: at the follow standoff a walking subject crosses that size within a second or two of the designation, so the lock coasted and was lost while the subject was in plain view. While an operator-designated track is live, the vision engine now also runs the detector on a crop around the track's predicted box, sized so the subject is about 128 px tall in the model's input (at most 4x magnification), maps those detections back to frame pixels (keeping only whole subjects of the track's class, one box per subject) and feeds them to the tracker with the whole-frame detections. The crop pass runs only while a designated track is live and only when it magnifies the subject beyond the whole frame's own scale, under the same accelerator lease and priority as the detector; it is not counted in the model's reported rate. It needs rgb24 frames, as the re-id crops do.
+
 ## [0.109.9] - 2026-11-08
 
 ### Fixed

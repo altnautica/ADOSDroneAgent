@@ -29,6 +29,7 @@ use tokio::sync::{broadcast, Mutex, Semaphore};
 use crate::backend::{BackendState, LoadedModel, VisionBackend};
 use crate::camera_control::CameraControls;
 use crate::ring::{FrameTiming, RingWriter};
+mod crop;
 mod demand;
 mod depth;
 mod embeddings;
@@ -462,6 +463,8 @@ impl VisionEngine {
     }
 }
 
+#[cfg(test)]
+mod crop_tests;
 #[cfg(test)]
 mod demand_tests;
 #[cfg(test)]

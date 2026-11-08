@@ -792,3 +792,38 @@ fn class_change_is_not_silently_adopted() {
         "class change must not be silently adopted"
     );
 }
+
+#[test]
+fn designated_prediction_is_the_designated_tracks_next_gate_box() {
+    let cfg = TrackerConfig::default();
+    let mut t = SingleObjectTracker::new(cfg);
+    // An automatic lock gives no designated prediction.
+    t.update(&[obj(0.0, 0.0)]);
+    t.update(&[obj(10.0, 0.0)]);
+    assert!(t.designated_prediction().is_none());
+
+    t.designate(&obj(100.0, 50.0));
+    let (seed, class) = t
+        .designated_prediction()
+        .expect("a designated track predicts");
+    assert_eq!(class, "object");
+    assert_eq!(
+        (seed.x, seed.y, seed.width, seed.height),
+        (100.0, 50.0, 40.0, 40.0)
+    );
+
+    // Moving right: the prediction leads the last measurement, and it is the
+    // box the next update reports while it coasts.
+    t.update(&[obj(110.0, 50.0)]);
+    let (ahead, _) = t.designated_prediction().unwrap();
+    assert!(ahead.x > 105.0, "prediction follows the motion: {ahead:?}");
+    let coast = t.update(&[]).detection.expect("a miss coasts");
+    let b = coast.bbox.unwrap();
+    assert_eq!((b.x, b.y), (ahead.x, ahead.y));
+
+    // Lost: nothing to look for.
+    for _ in 0..cfg.max_coast_frames + 1 {
+        t.update(&[]);
+    }
+    assert!(t.designated_prediction().is_none());
+}

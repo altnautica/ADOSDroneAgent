@@ -74,7 +74,7 @@ mod scoring;
 pub use appearance::{Appearance, AppearanceModel, Candidate, HistogramAppearance, APPEARANCE_DIM};
 pub use config::{ScoreWeights, TrackState, TrackUpdate, TrackerConfig};
 
-use ados_protocol::framebus::{Detection, LockState};
+use ados_protocol::framebus::{BoundingBox, Detection, LockState};
 use kalman::BoxKalman;
 use scoring::{reported, total_cmp};
 
@@ -173,6 +173,23 @@ impl SingleObjectTracker {
     /// The lifecycle state.
     pub fn state(&self) -> TrackState {
         self.track.as_ref().map_or(TrackState::Idle, |t| t.state)
+    }
+
+    /// Where the operator-designated track is expected on the next frame, and
+    /// its class label: the box the next [`Self::update`] gates on. `None` when
+    /// there is no track, the track was seeded automatically, or it is not live
+    /// (tentative). A caller uses this to look for the designated subject more
+    /// closely (a detector pass on a crop around it) before the next update.
+    pub fn designated_prediction(&self) -> Option<(BoundingBox, &str)> {
+        let track = self.track.as_ref()?;
+        if !track.operator_designated
+            || !matches!(track.state, TrackState::Confirmed | TrackState::Coasting)
+        {
+            return None;
+        }
+        let mut kf = track.kf.clone();
+        kf.predict();
+        Some((kf.bbox(), track.class_label.as_str()))
     }
 
     /// True while the tracker is asking the operator to re-designate the target

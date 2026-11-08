@@ -228,6 +228,44 @@ impl VisionEngine {
         height: u32,
         format: FrameFormat,
     ) -> Result<Vec<Detection>> {
+        let (key, latency_ms, result) = self
+            .run_model_core(caller, model_id, frame, width, height, format)
+            .await?;
+        if result.is_ok() {
+            let now_ms = (ados_protocol::framebus::mono_ns() / 1_000_000) as i64;
+            self.record_timing(&key, latency_ms, now_ms).await;
+        }
+        result
+    }
+
+    /// [`Self::infer`] without a timing record, for an extra pass inside one
+    /// batch (the designated-track crop): the model's reported rate stays the
+    /// rate of published batches.
+    pub(super) async fn run_model_untimed(
+        &self,
+        model_id: &str,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+    ) -> Result<Vec<Detection>> {
+        self.run_model_core(None, model_id, frame, width, height, format)
+            .await?
+            .2
+    }
+
+    /// Run the model under the accelerator lease. Returns the registry key it
+    /// ran under, the call's latency and the inference result; the outer error
+    /// is a refusal (unknown, plugin-side or unloaded model, closed lease).
+    async fn run_model_core(
+        &self,
+        caller: Option<&str>,
+        model_id: &str,
+        frame: &[u8],
+        width: u32,
+        height: u32,
+        format: FrameFormat,
+    ) -> Result<(String, f32, Result<Vec<Detection>>)> {
         // Acquire the accelerator lease for the duration of the inference so two
         // models never contend for the shared NPU. The permit is held across the
         // blocking call below. While queued, this call is counted as a priority
@@ -277,11 +315,6 @@ impl VisionEngine {
         };
         let t0 = std::time::Instant::now();
         let result = run_blocking(|| loaded.infer(frame, width, height, format));
-        let latency_ms = t0.elapsed().as_secs_f32() * 1000.0;
-        if result.is_ok() {
-            let now_ms = (ados_protocol::framebus::mono_ns() / 1_000_000) as i64;
-            self.record_timing(&key, latency_ms, now_ms).await;
-        }
-        result
+        Ok((key, t0.elapsed().as_secs_f32() * 1000.0, result))
     }
 }
