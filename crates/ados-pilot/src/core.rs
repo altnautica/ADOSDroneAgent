@@ -77,8 +77,8 @@ pub struct Pilot {
     pub obstacles: Obstacles,
     mr: Multirotor,
     fw: Fixedwing,
-    /// The stick brake's verdict this tick (owner `pilot`).
-    stick_avoid: ados_protocol::pilot::AvoidState,
+    /// The brake's verdict this tick (stick flight, or a braked goal).
+    brake_avoid: ados_protocol::pilot::AvoidState,
     plan: Plan,
     plan_ms: u64,
     sessions: Sessions,
@@ -130,7 +130,7 @@ impl Pilot {
             sessions: Sessions::default(),
             failsafe: Failsafe::default(),
             takeover: HoldDetector::default(),
-            stick_avoid: ados_protocol::pilot::AvoidState::Clear,
+            brake_avoid: ados_protocol::pilot::AvoidState::Clear,
             mission_preempt: HoldDetector::default(),
             land_protect: HoldDetector::default(),
             launch: None,

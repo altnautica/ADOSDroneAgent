@@ -57,9 +57,14 @@ impl Pilot {
         let avoid_state = if self.settings.pilot.avoid == AvoidMode::Off {
             AvoidState::Off
         } else if matches!(owner, Owner::Skill | Owner::Goto) {
-            self.plan.state
+            // The worse of the planner's verdict and the goal brake's.
+            match (self.plan.state, self.brake_avoid) {
+                (AvoidState::Clear, b) => b,
+                (AvoidState::Detour, AvoidState::Blocked) => AvoidState::Blocked,
+                (p, _) => p,
+            }
         } else if owner == Owner::Pilot {
-            self.stick_avoid
+            self.brake_avoid
         } else {
             AvoidState::Clear
         };

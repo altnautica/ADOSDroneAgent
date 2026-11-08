@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.27] - 2026-11-08
+
+### Fixed
+
+- Pilot: skill and goto goals now get the stick brake's speed limit. A goal the planner judged clear could still be flown faster than the vehicle can stop: the flight controller flies a position setpoint at the feed-forward plus its pull toward the target, and the planner checks the goal and the way to it, not the stopping distance at the current speed. A follow goal flown at 4.3 m/s toward a tree reached the hard stop at 0.9 m with no room left to stop. What a goal setpoint will ask, and what the vehicle flies now, are held to the same caps as stick flight (obstacles and the space the lidar has seen free, with the flight controller's response time). When either breaks one, the pilot flies the braked velocity from where the vehicle is and reports `detour`, or `blocked` once stopped. As with stick flight, a 12 m lidar keeps goal flight near 6 m/s in open space on the normal profile.
+
 ## [0.109.26] - 2026-11-08
 
 ### Changed

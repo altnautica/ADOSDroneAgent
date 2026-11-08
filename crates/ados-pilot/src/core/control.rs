@@ -45,6 +45,10 @@ pub const HOLD_OBSTACLE_CLOSE: &str = "obstacle-close";
 const STOPPED_MPS: f32 = 0.1;
 /// Bearing sectors (5°) the stick brake keeps one constraint per.
 const BRAKE_SECTORS: usize = 72;
+/// The FC's horizontal position-loop gain (ArduPilot `PSC_POSXY_P` default):
+/// with a position setpoint it asks for the feed-forward plus this times
+/// the distance to the target.
+const FC_POS_GAIN: f32 = 1.0;
 
 fn max_abs(a: [f32; 4]) -> f32 {
     a.iter().fold(0.0f32, |m, v| m.max(v.abs()))
@@ -282,7 +286,7 @@ impl Pilot {
     /// Produce this tick's command for the owner.
     fn fly(&mut self, axes: [f32; 4], dt: f32, now_ms: u64) {
         self.setpoint = None;
-        self.stick_avoid = AvoidState::Clear;
+        self.brake_avoid = AvoidState::Clear;
         if !self.fc.armed || !self.in_guided() {
             return;
         }
@@ -391,7 +395,7 @@ impl Pilot {
             geofence(pos_ne, home, max_dist, v)
         };
         let cmd = self.mr.step(&inp, &lim, limit, vz);
-        self.stick_avoid = match braked {
+        self.brake_avoid = match braked {
             Some(b) if b.close || (b.cut && geo::norm(b.v) < STOPPED_MPS) => AvoidState::Blocked,
             Some(b) if b.cut => AvoidState::Detour,
             _ => AvoidState::Clear,
@@ -434,6 +438,38 @@ impl Pilot {
             now_ms,
         )
         .v
+    }
+
+    /// The brake for a goal setpoint (skill or goto). With a position
+    /// setpoint the FC flies the feed-forward plus its position loop's pull
+    /// toward the target (`ask`), which the planner's `clear` never bounds by
+    /// the stopping distance. So `ask`, and the velocity the vehicle flies
+    /// now, are held to the stick brake's caps ([`brake_limit`]: seen space,
+    /// obstacles, FC lag). When either breaks one, the braked `ask` within
+    /// `v_cap` is returned, to fly from where the vehicle is; `None` leaves
+    /// the planned setpoint.
+    fn goal_brake(&mut self, pos: V2, ask: V2, v_cap: f32, now_ms: u64) -> Option<V2> {
+        if self.settings.pilot.avoid == AvoidMode::Off {
+            return None;
+        }
+        let a_h = limits(self.settings.pilot.profile).a_h;
+        let margin = self.margin();
+        let vel = self
+            .fc
+            .fresh_local(now_ms)
+            .map_or([0.0; 2], |l| [l.vn, l.ve]);
+        let asked = brake_limit(&self.obstacles, pos, vel, ask, a_h, margin, now_ms);
+        let flying = brake_limit(&self.obstacles, pos, vel, vel, a_h, margin, now_ms);
+        if !asked.cut && !flying.cut {
+            return None;
+        }
+        let v = geo::clamp_len(asked.v, v_cap);
+        self.brake_avoid = if geo::norm(v) < STOPPED_MPS {
+            AvoidState::Blocked
+        } else {
+            AvoidState::Detour
+        };
+        Some(v)
     }
 
     fn fly_plan(&mut self, pos: [f32; 3], yaw: f32, now_ms: u64) {
@@ -504,7 +540,14 @@ impl Pilot {
             None if geo::norm(to) > 1.0 => geo::bearing_of(to),
             None => yaw,
         });
-        let sp = [target[0], target[1], goal_d];
+        let ask = geo::add(vel, geo::scale(to, FC_POS_GAIN));
+        let (sp_ne, vel) = match self.goal_brake(pos_ne, ask, v_cap, now_ms) {
+            // At the vehicle's own position the FC's position loop adds
+            // nothing: it flies the braked velocity.
+            Some(v) => (pos_ne, v),
+            None => (target, vel),
+        };
+        let sp = [sp_ne[0], sp_ne[1], goal_d];
         self.setpoint = Some(sp);
         let vd = goal.as_ref().map_or(0.0, |g| g.vd);
         let m = self

@@ -1,10 +1,10 @@
-//! Stick-flight safety: the obstacle brake, its reported state, hold capture
-//! and the launch's arming mode.
+//! Flight safety: the obstacle brake on sticks and on skill goals, its
+//! reported state, hold capture and the launch's arming mode.
 
 use std::f32::consts::TAU;
 
 use ados_protocol::mavlink::ardupilotmega::MavType;
-use ados_protocol::pilot::AvoidState;
+use ados_protocol::pilot::{AvoidState, Goal, GoalKind, Request};
 use serde_json::{json, Value};
 
 use super::harness::World;
@@ -13,7 +13,7 @@ use crate::core::Reply;
 use crate::fc::{MASK_POS_VEL_YAW, MASK_VELOCITY};
 use crate::geo;
 use crate::modes::{copter, plane};
-use crate::obstacles::Obstacles;
+use crate::obstacles::{level_hit, Level, Obstacles};
 
 /// Mark a square block of cells centred on `c` with half-width `half`.
 fn block(o: &mut Obstacles, c: [f32; 2], half: [f32; 2]) {
@@ -259,6 +259,139 @@ fn centred_sticks_hold_after_settling_even_in_a_drift() {
         w.last_setpoint().unwrap().type_mask.bits(),
         MASK_POS_VEL_YAW
     );
+}
+
+/// A follow skill's position goal with its feed-forward.
+fn follow_goal(ned: [f32; 3], vel_ne: [f32; 2]) -> Goal {
+    Goal {
+        kind: GoalKind::Position,
+        n: ned[0],
+        e: ned[1],
+        d: ned[2],
+        vn: vel_ne[0],
+        ve: vel_ne[1],
+        vd: 0.0,
+        yaw: None,
+        yaw_rate: None,
+        subject_ne: None,
+        max_speed_mps: 6.0,
+        candidates: None,
+        margin_m: None,
+    }
+}
+
+/// What the FC asks of its velocity loop for a setpoint, at `pos`: the
+/// feed-forward, plus its position loop's pull (gain 1, `PSC_POSXY_P`) when
+/// the setpoint carries a position.
+fn fc_ask(w: &World, pos: [f32; 2]) -> [f32; 2] {
+    let sp = w.last_setpoint().unwrap();
+    let ff = [sp.vx, sp.vy];
+    if sp.type_mask.bits() == MASK_POS_VEL_YAW {
+        geo::add(ff, geo::sub([sp.x, sp.y], pos))
+    } else {
+        ff
+    }
+}
+
+fn f32s(v: &Value) -> Vec<f32> {
+    v.as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_f64().unwrap() as f32)
+        .collect()
+}
+
+/// The recorded approach of a follow skill on a tree: its goals jumped
+/// metres per batch, the planner judged goal and segment `clear`, and the
+/// vehicle flew at 3.4-4.4 m/s from 3.2 m down to the hard stop, which came
+/// too late to keep the margin. Replay each scan with the attitude,
+/// rangefinder, EKF state and skill goal of its moment: what the FC is asked
+/// to fly toward every obstacle the scan shows must let it stop 1 m short of
+/// it after its response time (3 m/s²).
+#[test]
+fn replayed_follow_approach_never_asks_more_than_it_can_stop_from() {
+    let fx: Value = serde_json::from_str(include_str!("fixtures/goal_approach.json")).unwrap();
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    for f in fx["frames"].as_array().unwrap() {
+        let num = |k: &str| f[k].as_f64().unwrap() as f32;
+        let (pos, vel, goal) = (
+            f32s(&f["pos_ned"]),
+            f32s(&f["vel_ned"]),
+            f32s(&f["goal_ned"]),
+        );
+        let gv = f32s(&f["goal_vel_ne"]);
+        w.pos = [pos[0], pos[1], pos[2]];
+        w.vel = [vel[0], vel[1], vel[2]];
+        (w.roll, w.pitch, w.yaw) = (num("roll"), num("pitch"), num("yaw"));
+        w.agl = Some(num("rangefinder_m"));
+        w.feed();
+        let scan = json!({"frame": "body_frd", "angle_start_rad": 0.0,
+                          "angle_increment_rad": TAU / 360.0, "ranges_m": f["ranges_m"]});
+        w.p.on_feed("plugin.world-engine.scan", &scan, w.now);
+        w.req(Request::Goal {
+            lease_id: id,
+            goal: follow_goal([goal[0], goal[1], goal[2]], [gv[0], gv[1]]),
+        });
+        w.run(100);
+        let here = [pos[0], pos[1]];
+        let ask = fc_ask(&w, here);
+        let level = Level {
+            roll: w.roll,
+            pitch: w.pitch,
+            yaw: w.yaw,
+            agl: w.agl,
+        };
+        let ranges = f32s(&f["ranges_m"]);
+        for (i, r) in ranges.iter().enumerate().filter(|(_, r)| **r > 0.0) {
+            let Some(hit) = level_hit(*r, i as f32 * TAU / 360.0, level, here) else {
+                continue;
+            };
+            let rel = geo::sub(hit.ne, here);
+            let d = geo::norm(rel);
+            let toward = geo::dot(ask, geo::scale(rel, 1.0 / d));
+            let safe = stop_cap(d, 0.0, 3.0, 1.0);
+            assert!(
+                toward <= safe + 0.1,
+                "t {}: asks {toward:.2} m/s toward an obstacle {d:.2} m away (can stop from {safe:.2})",
+                num("t_s")
+            );
+        }
+    }
+}
+
+#[test]
+fn goal_brake_keeps_open_goals_and_caps_them_to_seen_space() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let id = w.lease();
+    // Nothing seen yet: a near goal is flown as planned.
+    w.req(Request::Goal {
+        lease_id: id,
+        goal: follow_goal([3.0, 0.0, -5.0], [0.0, 0.0]),
+    });
+    w.run(300);
+    let sp = w.last_setpoint().unwrap();
+    assert_eq!((sp.x, sp.y), (3.0, 0.0), "planned setpoint kept");
+    assert_eq!(w.p.state(w.now).avoid_state, AvoidState::Clear);
+    // A scan with no return: free space to the lidar's range only. A goal
+    // 30 m out asks more than the vehicle can stop from inside it.
+    let empty = json!({"frame": "body_frd", "angle_start_rad": 0.0,
+                       "angle_increment_rad": TAU / 360.0, "ranges_m": vec![0.0f32; 360]});
+    w.p.on_feed("plugin.world-engine.scan", &empty, w.now);
+    w.req(Request::Goal {
+        lease_id: id,
+        goal: follow_goal([30.0, 0.0, -5.0], [0.0, 0.0]),
+    });
+    w.run(300);
+    let ask = fc_ask(&w, [0.0, 0.0]);
+    let seen = stop_cap(crate::obstacles::SCAN_HORIZON_M, 0.0, 3.0, 1.5);
+    assert!(
+        ask[0] > 1.0 && ask[0] <= seen + 0.05,
+        "flies {ask:?}, seen space allows {seen:.2}"
+    );
+    assert_eq!(w.p.state(w.now).avoid_state, AvoidState::Detour);
 }
 
 #[test]
