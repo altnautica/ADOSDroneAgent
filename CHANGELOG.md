@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.24] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup on VTOLs: the air wizard aborted for drift two seconds after the transition to forward flight. The drift check used the hover's 20 m box whatever the VTOL was doing; it now uses the plane's 400 m box while the flight controller reports forward flight or a transition, and the VTOL's fixed-wing autotune sizes its doublets for that box too.
+- Aircraft setup: the tuning box was kept in the per-aircraft state from one session to the next, so an air wizard flown at another field (or after a GPS fix taken before it settled) drift-checked against, and looped around, the old point. Each air run that starts on the ground now takes its box from that take-off.
+- Aircraft setup on VTOLs: the `first_hover` climb to the transition height targeted the box centre, and a tailsitter 8 m from it turned around to fly there. The climb now holds the current position.
+
 ## [0.109.23] - 2026-11-08
 
 ### Fixed

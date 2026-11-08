@@ -5,7 +5,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::setup::flight::{height, plane_loiter, Hop, Leg, Transition};
+use crate::setup::flight::{height, vtol_climb_here, Hop, Leg, Transition};
 use crate::setup::fcstate::{Class, Fw};
 use crate::setup::measure::{band_rms, vibe_verdict, Acc, ATT_ERR_PASS_DEG, OSC_RMS_RAD_S};
 use crate::setup::schema::{obj, Action};
@@ -139,7 +139,7 @@ impl Step for FirstHover {
                     if cx.adapter.class == Class::Vtol && cx.adapter.fw == Fw::ArduPilot {
                         // ArduPlane takes no local position setpoints: the VTOL climbs to its
                         // GUIDED (Q_GUIDED_MODE 1, a VTOL hover) target height instead.
-                        plane_loiter(cx, VTOL_TRANSITION_ALT_M);
+                        vtol_climb_here(cx, VTOL_TRANSITION_ALT_M);
                         self.phase = Phase::Climb { since: cx.now, sent: cx.now };
                     } else {
                         self.land(cx, None);
@@ -154,7 +154,7 @@ impl Step for FirstHover {
                 } else if cx.now.saturating_sub(since) > VTOL_CLIMB_TIMEOUT_MS {
                     self.land(cx, Some("timeout"));
                 } else if cx.now.saturating_sub(sent) > VTOL_CLIMB_RESEND_MS {
-                    plane_loiter(cx, VTOL_TRANSITION_ALT_M);
+                    vtol_climb_here(cx, VTOL_TRANSITION_ALT_M);
                     self.phase = Phase::Climb { since, sent: cx.now };
                 }
             }

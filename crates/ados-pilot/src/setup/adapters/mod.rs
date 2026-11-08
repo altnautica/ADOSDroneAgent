@@ -100,9 +100,10 @@ impl Adapter {
         if self.class == Class::Vtol { "Q_AUTOTUNE" } else { "AUTOTUNE" }
     }
 
-    /// Size of the air-wizard tuning box (m from the start point).
-    pub fn tuning_box_m(&self) -> f32 {
-        if self.class == Class::Fixedwing { 400.0 } else { 20.0 }
+    /// Size of the air-wizard tuning box (m from the start point): a plane's,
+    /// or a VTOL's while it flies (or transitions) as one, else a hover's.
+    pub fn tuning_box_m(&self, fw_flight: bool) -> f32 {
+        if self.class == Class::Fixedwing || fw_flight { 400.0 } else { 20.0 }
     }
 
     /// The gains the setup report shows before and after tuning.

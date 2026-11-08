@@ -447,7 +447,7 @@ impl Step for Autotune {
                     self.text_cursor = cx.fc.text_seq;
                     let roll_lim = cx.params.get("ROLL_LIMIT_DEG").or_else(|| cx.params.get("LIM_ROLL_CD").map(|v| v / 100.0)).unwrap_or(45.0);
                     let pitch_lim = cx.params.get("PTCH_LIM_MAX_DEG").or_else(|| cx.params.get("LIM_PITCH_MAX").map(|v| v / 100.0)).unwrap_or(20.0);
-                    self.doublets = Some(Doublets::new(cx.now, roll_lim, pitch_lim, cx.adapter.tuning_box_m()));
+                    self.doublets = Some(Doublets::new(cx.now, roll_lim, pitch_lim, cx.adapter.tuning_box_m(true)));
                     flight::set_mode(cx, Mode::Autotune);
                     self.phase = Phase::PlaneTuning { since: cx.now };
                 }

@@ -380,8 +380,13 @@ impl Engine {
                 } else if cx.fc.wind.is_some_and(|(_, s, _)| s > ABORT_WIND_MPS) {
                     abort = Some("wind");
                 } else if let (Some((l, _)), Some(c)) = (cx.fc.local, cx.data.box_center) {
+                    use ados_protocol::mavlink::ardupilotmega::MavVtolState as V;
+                    let fw_flight = matches!(
+                        cx.fc.vtol_state,
+                        Some(V::MAV_VTOL_STATE_FW | V::MAV_VTOL_STATE_TRANSITION_TO_FW | V::MAV_VTOL_STATE_TRANSITION_TO_MC)
+                    );
                     let d = ((l[0] - c[0]).powi(2) + (l[1] - c[1]).powi(2)).sqrt();
-                    if d > adapter.tuning_box_m() {
+                    if d > adapter.tuning_box_m(fw_flight) {
                         abort = Some("drift");
                     }
                 }
@@ -655,6 +660,9 @@ impl Engine {
         }
         let Some(run) = self.new_run(w) else { return reply_err("detecting") };
         self.run = Some(run);
+        if w == WizardId::Air {
+            self.forget_tuning_box();
+        }
         let wr = match w {
             WizardId::Ground => &mut self.state.ground,
             WizardId::Air => &mut self.state.air,
@@ -664,6 +672,16 @@ impl Engine {
         self.begin_current(now);
         self.persist(now);
         json!({"ok": true, "wizard": self.wizard_view(w, now)})
+    }
+
+    /// An air run that starts on the ground takes its tuning box from where
+    /// it takes off this time, never a box kept from an earlier session
+    /// (another field, or a GPS fix taken before it settled).
+    fn forget_tuning_box(&mut self) {
+        if !self.fc.armed {
+            self.state.data.box_center = None;
+            self.state.data.box_latlon = None;
+        }
     }
 
     pub fn run_step(&mut self, w: WizardId, step: &str, now: u64) -> Value {
@@ -699,6 +717,9 @@ impl Engine {
             }
         }
         let Some(s) = steps::make(step) else { return reply_err("unknown_step") };
+        if w == WizardId::Air {
+            self.forget_tuning_box();
+        }
         self.run = Some(Run { wizard: w, steps: vec![s], idx: 0, single: true });
         self.begin_current(now);
         let view = self.current_view();

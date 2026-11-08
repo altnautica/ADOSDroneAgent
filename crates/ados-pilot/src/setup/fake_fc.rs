@@ -50,6 +50,8 @@ pub struct FakeFc {
     pub alt: f32,
     pub n: f32,
     pub e: f32,
+    /// EXTENDED_SYS_STATE `vtol_state`.
+    pub vtol_state: MavVtolState,
     pub battery_pct: i8,
     pub battery_v: f32,
     pub wind: Option<(f32, f32)>,
@@ -225,6 +227,7 @@ impl FakeFc {
             battery_v: 16.0,
             wind: Some((90.0, 2.0)),
             rc: None,
+            vtol_state: MavVtolState::MAV_VTOL_STATE_UNDEFINED,
             script: Script::default(),
             sent: Vec::new(),
             effects: Vec::new(),
@@ -493,7 +496,7 @@ impl FakeFc {
             self.last_tel = now;
             let landed = if self.alt < 0.1 { MavLandedState::MAV_LANDED_STATE_ON_GROUND } else { MavLandedState::MAV_LANDED_STATE_IN_AIR };
             self.queue.push_back(MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
-                vtol_state: MavVtolState::MAV_VTOL_STATE_UNDEFINED,
+                vtol_state: self.vtol_state,
                 landed_state: landed,
             }));
             self.queue.push_back(MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {

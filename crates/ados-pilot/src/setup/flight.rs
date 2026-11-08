@@ -236,7 +236,18 @@ pub const PLANE_LOITER_ALT_M: f32 = 80.0;
 /// ArduPlane's GUIDED keeps flying that offboard height and ignores the
 /// reposition's (`ModeGuided::update_target_altitude`).
 pub fn plane_loiter(cx: &mut Cx, alt_m: f32) {
-    let (lat, lon) = cx.data.box_latlon.or(cx.fc.latlon).unwrap_or((0, 0));
+    let at = cx.data.box_latlon.or(cx.fc.latlon).unwrap_or((0, 0));
+    reposition(cx, at, alt_m);
+}
+
+/// VTOL hover (GUIDED with `Q_GUIDED_MODE` 1): climb or descend where it is.
+/// A target even a few metres off makes a tailsitter turn and fly to it.
+pub fn vtol_climb_here(cx: &mut Cx, alt_m: f32) {
+    let at = cx.fc.latlon.or(cx.data.box_latlon).unwrap_or((0, 0));
+    reposition(cx, at, alt_m);
+}
+
+fn reposition(cx: &mut Cx, (lat, lon): (i32, i32), alt_m: f32) {
     cx.out.cmd_int(
         MavCmd::MAV_CMD_DO_REPOSITION,
         MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,

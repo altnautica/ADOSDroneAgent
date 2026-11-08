@@ -978,9 +978,27 @@ fn vtol_first_hover_climbs_to_the_transition_height() {
     p.insert("Q_GUIDED_MODE".into(), 1.0);
     let mut s = Sim::new(MavType::MAV_TYPE_VTOL_TAILSITTER_DUOROTOR, p);
     s.e.state.ground.state = WizardState::Done;
+    // A box kept from an earlier session, far away: this run starts its own.
+    s.e.state.data.box_center = Some([500.0, 500.0]);
+    s.e.state.data.box_latlon = Some((474_100_000, 85_100_000));
     assert_eq!(s.e.run_step(A, "first_hover", s.now)["ok"], json!(true));
     s.run(100);
     s.act(A, "first_hover", "start", json!({}));
     s.until(|s| s.fc.alt > 2.9, 20_000);
+    assert_eq!(s.e.state.data.box_center, Some([0.0, 0.0]), "the box is this take-off's");
+    // The box centre was fixed before the GPS settled, 9 m off (it11: "VTOL Position1 d=8.0"):
+    // the climb holds the current position rather than flying the tailsitter there.
+    s.e.state.data.box_latlon = Some((474_000_800, 85_000_000));
     s.until(|s| s.fc.alt > 28.0, 75_000);
+    let climb_at = s.fc.sent.iter().rev().find_map(|m| match m {
+        MavMessage::COMMAND_INT(c) if c.command == MavCmd::MAV_CMD_DO_REPOSITION => Some(c.x),
+        _ => None,
+    });
+    assert_eq!(climb_at, Some(474_000_000), "climb in place");
+    // Forward flight: the tailsitter circles the plane's box, not the hover's 20 m.
+    s.fc.vtol_state = ados_protocol::mavlink::ardupilotmega::MavVtolState::MAV_VTOL_STATE_FW;
+    s.fc.n = 150.0;
+    s.run(3000);
+    assert_eq!(s.step_id().as_deref(), Some("first_hover"), "{:?}", s.e.state.air.steps);
+    assert_eq!(s.state(), Some(StepState::Running), "no drift abort in forward flight");
 }
