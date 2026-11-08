@@ -29,9 +29,11 @@ const SWARM_STALE_MS: u64 = 500;
 const GOTO_ARRIVE_M: f32 = 1.0;
 /// Low-battery RTH countdown.
 const LOW_BATT_COUNTDOWN_MS: u64 = 10_000;
-/// The FC's velocity-loop response time the stick brake plans for (SITL
-/// x500: the measured velocity trails a cut setpoint by about 0.5 s).
-pub const BRAKE_LAG_S: f32 = 0.5;
+/// The FC's response time the stick brake plans for. In the SITL x500 traces
+/// the measured velocity trails a cut setpoint by about 0.5 s at cruise and
+/// keeps rising for 0.6 s when the cut comes mid-acceleration (the FC first
+/// unwinds its acceleration at its jerk limit), so 0.8 s.
+pub const BRAKE_LAG_S: f32 = 0.8;
 /// Obstacles further than this never limit stick flight.
 const BRAKE_RANGE_M: f32 = 20.0;
 /// Hard stop: an obstacle closer than this fraction of the margin forces a
@@ -43,8 +45,6 @@ pub const HOLD_OBSTACLE_CLOSE: &str = "obstacle-close";
 const STOPPED_MPS: f32 = 0.1;
 /// Bearing sectors (5°) the stick brake keeps one constraint per.
 const BRAKE_SECTORS: usize = 72;
-/// Dykstra iterations for the nearest velocity within every cap.
-const DYKSTRA_ITERS: usize = 30;
 
 fn max_abs(a: [f32; 4]) -> f32 {
     a.iter().fold(0.0f32, |m, v| m.max(v.abs()))
@@ -532,12 +532,14 @@ pub struct Braked {
 /// Every obstacle point near the vehicle (occupied grid cell or scan hit)
 /// caps the velocity component toward it, so a narrow column cannot slip
 /// between sample rays; per 5° bearing sector the most restrictive point is
-/// kept. `d` is measured from where the vehicle's current velocity `vel`
-/// carries it in [`BRAKE_LAG_S`], the FC's velocity response, so the
+/// kept. So does the scan's horizon (where each beam stops seeing: the floor
+/// a pitched beam meets, or the lidar's range): the vehicle never goes
+/// faster than it can stop within the space it has seen free. Each cap
+/// allows for [`BRAKE_LAG_S`], the FC's response ([`stop_cap`]), so the
 /// commanded stop still ends outside the margin. The result is the velocity
-/// nearest to `v` that meets every cap (Dykstra's projection), so a cap adds
-/// no sideways motion of its own. Inside the hard-stop distance nothing but
-/// motion away from the obstacle is kept.
+/// nearest to `v` that meets every cap ([`nearest_within`]), so a cap adds
+/// no sideways motion of its own. Inside the
+/// hard-stop distance of an obstacle nothing but motion away from it is kept.
 pub fn brake_limit(
     obs: &crate::obstacles::Obstacles,
     pos: V2,
@@ -555,22 +557,22 @@ pub fn brake_limit(
     let mut caps: [Option<(V2, f32)>; BRAKE_SECTORS] = [None; BRAKE_SECTORS];
     let mut away = [0.0, 0.0];
     let mut close = false;
-    for p in obs.points_near(pos, reach, now_ms) {
+    let obstacles = obs.points_near(pos, reach, now_ms).map(|p| (p, true));
+    let horizon = obs.horizon_near(pos, reach, now_ms).map(|p| (p, false));
+    for (p, obstacle) in obstacles.chain(horizon) {
         let rel = geo::sub(p, pos);
         let r = geo::norm(rel);
         if r < 1e-3 {
             continue;
         }
         let dir = geo::scale(rel, 1.0 / r);
-        // Distance to the cell's near face (conservative for a scan hit).
+        // Distance to the cell's near face (conservative for a scan point).
         let d = (r - crate::obstacles::CELL_M / 2.0).max(0.0);
-        if d < stop_at {
+        if obstacle && d < stop_at {
             close = true;
             away = geo::sub(away, dir);
         }
-        let closing = geo::dot(vel, dir).max(0.0);
-        let d_eff = d - closing * BRAKE_LAG_S;
-        let cap = (2.0 * a_h * (d_eff - margin).max(0.0)).sqrt();
+        let cap = stop_cap(d, geo::dot(vel, dir).max(0.0), a_h, margin);
         let sector = (geo::bearing_of(dir).rem_euclid(std::f32::consts::TAU)
             / std::f32::consts::TAU
             * BRAKE_SECTORS as f32) as usize
@@ -597,37 +599,60 @@ pub fn brake_limit(
     }
 }
 
-/// The point nearest to `v` inside every half-plane `dir·x ≤ cap`
-/// (Dykstra's alternating projection; the origin is always inside), with a
-/// final pass that enforces each cap.
+/// The speed toward a point `d` away (beyond `margin`) that still stops in
+/// time when the FC answers a cut after [`BRAKE_LAG_S`]: the vehicle covers
+/// `v·T` before braking at `a`, so `v·T + v²/2a ≤ d − margin`; and while it
+/// still closes at `closing` (measured) it covers `closing·T` first.
+pub fn stop_cap(d: f32, closing: f32, a: f32, margin: f32) -> f32 {
+    let t = BRAKE_LAG_S;
+    let room = (d - margin).max(0.0);
+    let reacting = -a * t + ((a * t).powi(2) + 2.0 * a * room).sqrt();
+    let coasting = (2.0 * a * (room - closing * t).max(0.0)).sqrt();
+    reacting.min(coasting)
+}
+
+/// The point nearest to `v` inside every half-plane `dir·x ≤ cap` (the
+/// origin is always inside). In 2-D the answer is `v` itself, its projection
+/// onto one constraint line, or a vertex of two; at the answer some
+/// constraint `v` violates is active (KKT), so only lines `v` crosses are
+/// projected onto and paired with the rest.
 fn nearest_within(v: V2, caps: &[Option<(V2, f32)>; BRAKE_SECTORS]) -> V2 {
-    let project = |x: V2, (dir, cap): (V2, f32)| {
-        let over = geo::dot(dir, x) - cap;
-        if over > 0.0 {
-            geo::sub(x, geo::scale(dir, over))
-        } else {
-            x
-        }
+    const TOL: f32 = 1e-4;
+    let feasible = |x: V2| {
+        caps.iter()
+            .flatten()
+            .all(|&(dir, cap)| geo::dot(dir, x) <= cap + TOL)
     };
-    if caps
-        .iter()
-        .flatten()
-        .all(|&(dir, cap)| geo::dot(dir, v) <= cap)
-    {
+    if feasible(v) {
         return v;
     }
-    let mut x = v;
-    let mut corr = [[0.0f32; 2]; BRAKE_SECTORS];
-    for _ in 0..DYKSTRA_ITERS {
-        for (k, c) in caps.iter().enumerate() {
-            let Some(c) = *c else { continue };
-            let y = geo::add(x, corr[k]);
-            let xn = project(y, c);
-            corr[k] = geo::sub(y, xn);
-            x = xn;
+    let mut best = [0.0, 0.0];
+    let mut best_d = geo::norm(v);
+    let mut offer = |x: V2| {
+        let d = geo::dist(x, v);
+        if d < best_d && feasible(x) {
+            best = x;
+            best_d = d;
+        }
+    };
+    for &(di, ci) in caps.iter().flatten() {
+        let over = geo::dot(di, v) - ci;
+        if over <= 0.0 {
+            continue;
+        }
+        offer(geo::sub(v, geo::scale(di, over)));
+        for &(dj, cj) in caps.iter().flatten() {
+            let det = di[0] * dj[1] - di[1] * dj[0];
+            if det.abs() < 1e-6 {
+                continue;
+            }
+            offer([
+                (ci * dj[1] - cj * di[1]) / det,
+                (di[0] * cj - dj[0] * ci) / det,
+            ]);
         }
     }
-    caps.iter().flatten().fold(x, |x, &c| project(x, c))
+    best
 }
 
 /// Clamp the outward component at the `max_dist` boundary from home.

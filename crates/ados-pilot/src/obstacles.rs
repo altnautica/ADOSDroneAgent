@@ -24,6 +24,9 @@ use crate::geo::{self, V2};
 pub const GROUND_REJECT_M: f32 = 0.4;
 /// Scans older than this are not used.
 pub const SCAN_MAX_AGE_MS: u64 = 500;
+/// How far the planar scan sees along a bin without a return (the 12 m
+/// planar lidar; the sector display marches the grid as far).
+pub const SCAN_HORIZON_M: f32 = 12.0;
 
 /// One non-ground scan return.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -45,6 +48,11 @@ pub struct Obstacles {
     /// `local − map` horizontal offset.
     offset: Option<V2>,
     hits: Vec<Hit>,
+    /// Where each bin of the current scan stops seeing without an obstacle:
+    /// the floor where a tilted beam meets it, or [`SCAN_HORIZON_M`] when it
+    /// returns nothing. Nothing beyond is known free, so the stick brake
+    /// treats these points as possible obstacles.
+    horizon: Vec<V2>,
     scan_ms: u64,
     pub grid: Grid,
 }
@@ -135,17 +143,34 @@ impl Obstacles {
             return;
         };
         self.hits.clear();
+        self.horizon.clear();
         for (i, r) in ranges.iter().enumerate() {
             let r = r.as_f64().unwrap_or(0.0) as f32;
+            let theta = start + inc as f32 * i as f32;
             if r <= 0.05 || !r.is_finite() {
+                let far = geo::body_to_ned(
+                    SCAN_HORIZON_M * theta.cos(),
+                    SCAN_HORIZON_M * theta.sin(),
+                    level.yaw,
+                );
+                self.horizon.push(geo::add(pos_ne, far));
                 continue;
             }
-            let theta = start + inc as f32 * i as f32;
-            if let Some(hit) = level_hit(r, theta, level, pos_ne) {
-                self.hits.push(hit);
+            match level_return(r, theta, level, pos_ne) {
+                (hit, false) => self.hits.push(hit),
+                (floor, true) => self.horizon.push(floor.ne),
             }
         }
         self.scan_ms = now_ms;
+    }
+
+    /// Current (fresh) scan horizon points within `r` of `pos`.
+    pub fn horizon_near(&self, pos: V2, r: f32, now_ms: u64) -> impl Iterator<Item = V2> + '_ {
+        let fresh = now_ms.saturating_sub(self.scan_ms) <= SCAN_MAX_AGE_MS;
+        self.horizon
+            .iter()
+            .copied()
+            .filter(move |p| fresh && geo::dist(*p, pos) <= r)
     }
 
     /// Current (fresh) non-ground scan hits.
@@ -252,6 +277,15 @@ impl Obstacles {
 
 /// Level one return and drop it when it is ground.
 pub fn level_hit(range: f32, theta: f32, l: Level, pos_ne: V2) -> Option<Hit> {
+    match level_return(range, theta, l, pos_ne) {
+        (hit, false) => Some(hit),
+        (_, true) => None,
+    }
+}
+
+/// Level one return: its horizontal position, and whether it is the ground
+/// (closer to it than [`GROUND_REJECT_M`] after levelling).
+fn level_return(range: f32, theta: f32, l: Level, pos_ne: V2) -> (Hit, bool) {
     // Body FRD point, then rotate by roll (about x) and pitch (about y).
     let (bx, by) = (range * theta.cos(), range * theta.sin());
     let (sr, cr) = l.roll.sin_cos();
@@ -261,19 +295,13 @@ pub fn level_hit(range: f32, theta: f32, l: Level, pos_ne: V2) -> Option<Hit> {
     // Ry(pitch): x'' = x·cp + z'·sp, z'' = −x·sp + z'·cp
     let x2 = bx * cp + z1 * sp;
     let z2 = -bx * sp + z1 * cp;
-    if let Some(agl) = l.agl {
-        if agl - z2 < GROUND_REJECT_M {
-            return None;
-        }
-    }
-    let horiz = x2.hypot(y1);
-    let body_bearing = y1.atan2(x2);
-    let ne = geo::add(pos_ne, geo::body_to_ned(x2, y1, l.yaw));
-    Some(Hit {
-        body_bearing,
-        range_m: horiz,
-        ne,
-    })
+    let ground = l.agl.is_some_and(|agl| agl - z2 < GROUND_REJECT_M);
+    let hit = Hit {
+        body_bearing: y1.atan2(x2),
+        range_m: x2.hypot(y1),
+        ne: geo::add(pos_ne, geo::body_to_ned(x2, y1, l.yaw)),
+    };
+    (hit, ground)
 }
 
 #[cfg(test)]

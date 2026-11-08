@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.15] - 2026-11-08
+
+### Fixed
+
+- The stick-flight brake let the vehicle reach a column it could not yet see. Pushing full forward pitches a multirotor nose down by about 20°, and a planar lidar 2.5 m up then meets the floor 7–9 m ahead. That return is correctly dropped as ground, but nothing beyond it had been seen, and the brake treated it as free. The column ahead showed in no return until 6 m out, when the vehicle already did 7 m/s, and the drone hit it.
+  - The brake now treats the scan's horizon as a possible obstacle: the floor point of each ground-rejected beam, and the lidar's 12 m range for beams that return nothing. The vehicle never goes faster than it can stop within the space it has seen free.
+  - Each cap allows for the flight controller's response time, now 0.8 s: the vehicle covers `v·0.8 s` before braking at the profile's acceleration. The SITL traces show the speed still rising for 0.6 s when a cut comes mid-acceleration.
+  - The velocity flown is now computed exactly as the one nearest the stick's within every cap, so braking adds no sideways motion.
+  - With a 12 m lidar and nothing in sight, stick flight in `brake` mode tops out near 6 m/s (normal profile); `avoid: off` lifts it.
+
 ## [0.109.14] - 2026-11-08
 
 ### Fixed
