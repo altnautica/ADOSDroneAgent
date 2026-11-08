@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.29] - 2026-11-08
+
+### Changed
+
+- Shared HUD code: the cockpit layer painter (`paintOps`) moves out of `hud/layer-layout.ts` into its own `hud/layer-paint.ts`, so both files stay within the source size limit and match Mission Control's copies byte for byte. Cockpit and dashboard bundles rebuilt.
+
 ## [0.109.28] - 2026-11-08
 
 ### Security

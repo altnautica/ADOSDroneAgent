@@ -42,9 +42,9 @@ import {
   layoutSectorArc,
   layoutZones,
   lerpOps,
-  paintOps,
   type Rect,
 } from "./layer-layout";
+import { paintOps } from "./layer-paint";
 
 export const DIM_AFTER_MS = 500;
 export const HIDE_AFTER_MS = 2000;
