@@ -115,6 +115,16 @@ impl BoxKalman {
         }
     }
 
+    /// Scale the center velocity by `factor` (a missed frame of a coast), so
+    /// the next predictions lean on the last measured position rather than
+    /// on a velocity no measurement is confirming.
+    pub(super) fn damp_center_velocity(&mut self, factor: f32) {
+        let f = factor.clamp(0.0, 1.0);
+        for v in &mut self.vel[..CENTER_COMPONENTS] {
+            *v *= f;
+        }
+    }
+
     /// Position standard deviation of the center (mean of cx, cy components).
     /// Used to widen the association gate as the estimate gets less certain
     /// (during a coast the covariance grows, so the gate should too).

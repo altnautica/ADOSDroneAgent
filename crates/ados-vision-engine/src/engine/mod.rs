@@ -179,6 +179,9 @@ pub struct VisionEngine {
     range_feed: Arc<crate::depth::feed::RangeFeed>,
     /// Every published depth grid and landing-zone frame.
     depth_tx: broadcast::Sender<ados_protocol::vision_depth::DepthRecord>,
+    /// Per camera, the designated-track crop passes run and those that found a
+    /// box of the track's class, for the status sidecar.
+    crop_counts: std::sync::Mutex<HashMap<String, crop::CropCounts>>,
 }
 
 /// How a camera ring is sized.
@@ -284,6 +287,7 @@ impl VisionEngine {
             depth: std::sync::Mutex::new(depth::DepthRuntime::default()),
             range_feed: Arc::new(crate::depth::feed::RangeFeed::default()),
             depth_tx: broadcast::channel(BROADCAST_DEPTH).0,
+            crop_counts: std::sync::Mutex::new(HashMap::new()),
         })
     }
 

@@ -190,6 +190,10 @@ impl SingleObjectTracker {
             };
         }
         track.state = TrackState::Coasting;
+        // Nothing confirms the velocity this frame: damp it, so a coast holds
+        // near the last measurement instead of running on (see
+        // `TrackerConfig::coast_velocity_decay`).
+        track.kf.damp_center_velocity(self.cfg.coast_velocity_decay);
         // Remember whether this coast is an ambiguity hold or a genuine miss, so
         // the re-association out of it knows whether it owes a re-confirm frame.
         track.coast_ambiguous = ambiguous;

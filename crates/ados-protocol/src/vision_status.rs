@@ -81,6 +81,14 @@ pub struct CameraDemandStatus {
     pub detecting: bool,
     #[serde(default)]
     pub leases: Vec<DemandLeaseStatus>,
+    /// Detector batches on which the engine also ran the detector on a crop
+    /// around the designated track (since the engine started).
+    #[serde(default)]
+    pub crop_runs: u64,
+    /// Of those, the batches on which the crop found a box of the designated
+    /// track's class.
+    #[serde(default)]
+    pub crop_hits: u64,
 }
 
 /// One consumer's live lease on a camera.
@@ -177,6 +185,8 @@ mod tests {
                             owner: "operator".into(),
                             remaining_ms: 4_000,
                         }],
+                        crop_runs: 9,
+                        crop_hits: 7,
                     },
                 )]),
             }),

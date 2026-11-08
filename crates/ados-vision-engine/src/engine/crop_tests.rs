@@ -368,6 +368,11 @@ async fn crop_pass_runs_only_while_designated() {
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 6, "large subject: no crop");
+
+    // The status sidecar counts the one crop pass, which found the walker.
+    let status = e.detection_status(&["main".to_string()], 0);
+    let main = &status.cameras["main"];
+    assert_eq!((main.crop_runs, main.crop_hits), (1, 1));
 }
 
 #[test]

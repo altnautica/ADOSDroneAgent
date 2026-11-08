@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.13] - 2026-11-08
+
+### Fixed
+
+- A designated subject was lost for good after the camera pitched. A follow drone's pitch steps throw every box up to 200 px between detector batches, and the tracker learned each step as the subject's velocity; while it coasted through the following misses it kept extrapolating that velocity, so the prediction ran 40 px a batch away from the subject and the subject's returning detections fell outside the association gate. A coast now damps the center velocity on every missed frame (`TrackerConfig::coast_velocity_decay`, default 0.5), so the prediction holds near the last measurement.
+- The tracker could hand a lock to a false box farther from the prediction than the subject. Its motion cue scored an overlapping box by IoU alone and a disjoint box by its distance across the gate, so a narrow subject box overlapping the prediction a little scored below a small false box well off it. The cue is now the larger of the two, so nearer always scores at least as well.
+
+### Added
+
+- The vision status sidecar's `detection.cameras.<id>` reports `crop_runs` and `crop_hits`: the detector batches that also ran on a crop around the designated track, and those on which the crop found a box of the track's class.
+
 ## [0.109.12] - 2026-11-08
 
 ### Fixed

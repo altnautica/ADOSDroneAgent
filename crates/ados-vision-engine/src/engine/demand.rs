@@ -248,8 +248,8 @@ impl VisionEngine {
     }
 
     /// The status sidecar's `detection` block: the mode and, for each of
-    /// `cameras` plus any other leased camera, whether detection runs on it
-    /// and its live leases.
+    /// `cameras` plus any other leased camera, whether detection runs on it,
+    /// its live leases and its designated-track crop counters.
     pub fn detection_status(&self, cameras: &[String], now_ms: u64) -> DetectionDemandStatus {
         let mut leases = self.leases();
         let mut ids: Vec<String> = cameras.to_vec();
@@ -263,9 +263,12 @@ impl VisionEngine {
             .into_iter()
             .map(|id| {
                 let held = leases.leases(DemandKind::Detection, &id, now_ms);
+                let crop = self.crop_counts(&id);
                 let status = CameraDemandStatus {
                     detecting: always || !held.is_empty(),
                     leases: held,
+                    crop_runs: crop.runs,
+                    crop_hits: crop.hits,
                 };
                 (id, status)
             })

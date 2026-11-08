@@ -248,18 +248,15 @@ pub(super) enum Decision {
     None,
 }
 
-/// Motion-fit cue in `0..=1`: IoU when the boxes overlap, otherwise a linear
-/// falloff of center distance across the gate. A candidate dead-on the
-/// prediction scores ~1.0; one at the gate edge scores ~0.
+/// Motion-fit cue in `0..=1`: the larger of the IoU with the prediction and a
+/// linear falloff of center distance across the gate. A candidate dead-on the
+/// prediction scores ~1.0; one at the gate edge scores ~0. Taking the larger
+/// keeps the cue monotone: a box that overlaps the prediction a little (a
+/// narrow or offset box near it) never scores below a disjoint box farther off,
+/// which IoU alone for every overlapping box did.
 pub(super) fn motion_fit(geo_iou: f32, dist: f32, gate: f32) -> f32 {
-    if geo_iou > 0.0 {
-        // Overlapping: IoU is the sharper motion signal.
-        geo_iou.clamp(0.0, 1.0)
-    } else if gate > 0.0 {
-        (1.0 - (dist / gate)).clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
+    let falloff = if gate > 0.0 { 1.0 - dist / gate } else { 0.0 };
+    geo_iou.max(falloff).clamp(0.0, 1.0)
 }
 
 /// Build the reported detection for the locked object, with its id, lock state,

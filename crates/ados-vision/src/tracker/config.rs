@@ -42,6 +42,15 @@ pub struct TrackerConfig {
     /// next prediction and shake the lock loose). Clamping the per-update
     /// velocity change keeps a half-box-width jitter from poisoning the model.
     pub max_velocity: f32,
+    /// Factor (in `0..=1`) the center velocity is multiplied by on every
+    /// missed frame of a coast. A camera on a moving vehicle adds its own
+    /// motion to every box, and one jumped box (a pitch step) teaches the
+    /// filter a velocity the subject never had: undamped, a coast carries the
+    /// prediction away at that velocity frame after frame, past the subject's
+    /// return and out of the gate. Damped, a coast's total drift is bounded by
+    /// `v / (1 - decay)` and the prediction stays near the last measurement.
+    /// `1.0` reproduces the undamped constant-velocity coast.
+    pub coast_velocity_decay: f32,
     /// Minimum appearance similarity for a candidate to be eligible as the
     /// locked object. A candidate that looks too unlike the template is rejected
     /// even if it sits dead-center in the motion gate (the shadowing-distractor
@@ -100,6 +109,7 @@ impl Default for TrackerConfig {
             measurement_noise: 4.0,
             process_noise: 1.0,
             max_velocity: 40.0,
+            coast_velocity_decay: 0.5,
             min_appearance: 0.5,
             ambiguous_margin: 0.08,
             template_lr: 0.1,

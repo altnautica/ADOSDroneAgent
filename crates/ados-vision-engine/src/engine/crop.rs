@@ -191,14 +191,35 @@ impl VisionEngine {
         let found = self
             .run_model_untimed(model_id, &crop, iw, ih, FrameFormat::Rgb24)
             .await?;
-        Ok(crop_to_frame(
-            found,
-            &window,
-            desc.width,
-            desc.height,
-            iw,
-            ih,
-            &class,
-        ))
+        let found = crop_to_frame(found, &window, desc.width, desc.height, iw, ih, &class);
+        {
+            let mut counts = self
+                .crop_counts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let c = counts.entry(desc.camera_id.clone()).or_default();
+            c.runs += 1;
+            c.hits += u64::from(!found.is_empty());
+        }
+        Ok(found)
     }
+
+    /// The crop passes `camera_id` has run and found its subject on.
+    pub(super) fn crop_counts(&self, camera_id: &str) -> CropCounts {
+        self.crop_counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(camera_id)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+/// One camera's crop-pass counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct CropCounts {
+    /// Batches the crop pass ran on.
+    pub(super) runs: u64,
+    /// Of those, batches it found a box of the designated track's class on.
+    pub(super) hits: u64,
 }

@@ -827,3 +827,130 @@ fn designated_prediction_is_the_designated_tracks_next_gate_box() {
     }
     assert!(t.designated_prediction().is_none());
 }
+
+fn person(b: [f32; 4], conf: f32) -> Detection {
+    det(b[0], b[1], b[2], b[3], conf, "person")
+}
+
+/// A walker followed from a drone that pitches to follow: the detector
+/// batches (about 3 Hz) of a walker shrinking from 130 px to 75 px tall while
+/// each pitch step throws every box up to 170 px up or down. After the last
+/// step the walker sits still near (500, 230) and is detected again. An
+/// undamped coast keeps the velocity the last step taught it and runs the
+/// prediction 40 px a batch away from the walker, so the returning detections
+/// fall outside the gate and the lock is lost. A damped coast holds near the
+/// last measurement and re-locks on the walker.
+#[test]
+fn a_coast_after_a_pitch_step_relocks_the_walker() {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    let id = t
+        .designate(&person([603.0, 237.0, 79.0, 163.0], 0.84))
+        .unwrap();
+    let batches: Vec<Vec<Detection>> = vec![
+        vec![person([619.0, 250.0, 59.0, 130.0], 0.57)],
+        vec![person([620.0, 232.0, 55.0, 134.0], 0.76)],
+        vec![person([615.0, 216.0, 49.0, 129.0], 0.34)],
+        vec![person([593.0, 286.0, 60.0, 124.0], 0.92)],
+        vec![person([571.0, 221.0, 56.0, 114.0], 0.89)],
+        vec![person([568.0, 48.0, 56.0, 126.0], 0.91)],
+        vec![
+            person([505.0, 197.0, 56.0, 111.0], 0.78),
+            person([506.0, 211.0, 25.0, 97.0], 0.32),
+        ],
+        vec![
+            person([454.0, 364.0, 55.0, 117.0], 0.84),
+            person([453.0, 394.0, 24.0, 82.0], 0.28),
+        ],
+        vec![person([486.0, 339.0, 49.0, 107.0], 0.84)],
+        vec![],
+        vec![person([912.0, 148.0, 117.0, 87.0], 0.73)],
+        vec![],
+        vec![person([424.0, 7.0, 296.0, 317.0], 0.48)],
+        vec![person([496.0, 220.0, 42.0, 70.0], 0.46)],
+        vec![person([487.0, 160.0, 57.0, 135.0], 0.58)],
+        vec![person([484.0, 158.0, 65.0, 130.0], 0.32)],
+        vec![person([482.0, 159.0, 52.0, 125.0], 0.43)],
+        vec![
+            person([419.0, 5.0, 248.0, 296.0], 0.38),
+            person([478.0, 216.0, 28.0, 75.0], 0.86),
+        ],
+    ];
+    let mut last = None;
+    for (i, b) in batches.iter().enumerate() {
+        let u = t.update(b);
+        assert_eq!(
+            u.track_id,
+            Some(id),
+            "batch {i}: the designated lock is held"
+        );
+        last = u.detection;
+    }
+    let d = last.expect("a report on the last batch");
+    assert_eq!(d.lock_state, Some(LockState::Locked));
+    let b = d.bbox.unwrap();
+    let (cx, cy) = center(&b);
+    assert!(
+        (cx - 492.0).abs() < 40.0 && (cy - 250.0).abs() < 60.0,
+        "locked on the walker, not the coast: {b:?}"
+    );
+}
+
+/// The motion cue must not prefer a box farther from the prediction. A
+/// designated track coasts one batch, then the walker comes back as a
+/// narrow box overlapping the prediction a little, next to a small false
+/// box well off it. Scoring overlap by IoU alone gave the overlapping walker
+/// 0.12 and the disjoint false box 0.29 (its distance falloff), so the lock
+/// went to the false box.
+#[test]
+fn motion_cue_prefers_the_box_nearer_the_prediction() {
+    let mut t = SingleObjectTracker::new(TrackerConfig::default());
+    let id = t
+        .designate(&person([618.0, 294.0, 58.0, 126.0], 0.75))
+        .unwrap();
+    t.update(&[]);
+    let u = t.update(&[
+        person([641.0, 248.0, 25.0, 85.0], 0.75),
+        person([496.0, 371.0, 12.0, 26.0], 0.39),
+    ]);
+    assert_eq!(u.track_id, Some(id));
+    let b = u.detection.unwrap().bbox.unwrap();
+    assert!(
+        b.x > 600.0,
+        "associated the walker, not the false box: {b:?}"
+    );
+
+    assert!(scoring::motion_fit(0.12, 67.0, 208.0) > scoring::motion_fit(0.0, 147.0, 208.0));
+}
+
+#[test]
+fn coast_damps_the_velocity() {
+    let cfg = TrackerConfig::default();
+    let mut t = SingleObjectTracker::new(cfg);
+    t.designate(&obj(100.0, 300.0));
+    // A 70 px step up (inside the gate) teaches the filter the largest
+    // velocity it may learn.
+    let measured = t
+        .update(&[obj(100.0, 230.0)])
+        .detection
+        .unwrap()
+        .bbox
+        .unwrap();
+    let mut prev = measured.y;
+    let mut step = f32::MAX;
+    for i in 0..4 {
+        let b = t.update(&[]).detection.unwrap().bbox.unwrap();
+        let s = (b.y - prev).abs();
+        assert!(
+            s < step,
+            "coast step {i} is smaller than the last: {s} after {step}"
+        );
+        step = s;
+        prev = b.y;
+    }
+    // The default decay of 0.5 bounds the whole coast at twice one step.
+    let total = (prev - measured.y).abs();
+    assert!(
+        total <= 2.0 * cfg.max_velocity,
+        "the coast's drift is bounded: {total}"
+    );
+}
