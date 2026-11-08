@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.19] - 2026-11-08
+
+### Fixed
+
+- Aircraft setup on copters: after a completed roll and pitch autotune, "Tune yaw now" started the yaw round on the pack that had just flown roll and pitch. That pack ran into the flight controller's battery failsafe, and the step then kept asking for AUTOTUNE over the failsafe's landing for ten minutes. "Tune yaw now" is now refused (`battery_low`) until the battery is back to 50 % or more, i.e. after a battery swap. Once the flight controller has entered the tune mode and leaves it on its own (a failsafe, a stopped tune), the step fails with `setup.blocker.autotune_failed` (`setup.blocker.disarmed` when it has landed) and no longer commands the tune mode over the flight controller.
+
 ## [0.109.18] - 2026-11-08
 
 ### Fixed

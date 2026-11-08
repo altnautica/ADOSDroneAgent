@@ -500,7 +500,11 @@ fn autotune_yaw_waits_for_a_battery_swap() {
     s.fc.battery_pct = 45;
     s.until(|s| s.e.current_view().is_some_and(|v| v.actions.iter().any(|a| a.id == "resume_yaw")), 60_000);
     assert!(s.e.data().autotune_yaw_pending);
+    // "Tune yaw now" on the pack that flew roll and pitch is refused (it9: the
+    // yaw round flew into the FC's battery failsafe).
+    assert_eq!(s.e.action(A, "autotune", "resume_yaw", &Map::new(), s.now)["err"], json!("battery_low"));
     s.fc.battery_pct = 98;
+    s.run(1100);
     s.act(A, "autotune", "resume_yaw", json!({}));
     s.until(|s| s.e.current_view().is_none(), 120_000);
     assert_eq!(s.result(A, "autotune")["copter_axes_saved"], json!(["roll", "pitch", "yaw"]));
@@ -907,6 +911,25 @@ fn refused_autotune_mode_fails_fast_and_lands() {
     s.until(|s| s.state() == Some(StepState::Failed), 60_000);
     assert_eq!(s.e.current_view().unwrap().blockers, vec!["setup.blocker.tuning_refused".to_string()]);
     s.until(|s| !s.fc.armed, 30_000);
+}
+
+#[test]
+fn autotune_stops_when_the_fc_leaves_the_tune_mode() {
+    // A failsafe takes the FC out of AUTOTUNE: the step fails and never sends AUTOTUNE again.
+    let mut s = air_ready();
+    s.fc.script.autotune_s = 600;
+    assert_eq!(s.e.run_step(A, "autotune", s.now)["ok"], json!(true));
+    s.run(100);
+    s.act(A, "autotune", "start", json!({}));
+    s.until(|s| s.fc.custom_mode == 15, 30_000);
+    s.run(2000);
+    s.fc.custom_mode = 6; // RTL
+    s.until(|s| s.state() == Some(StepState::Failed), 5_000);
+    assert_eq!(s.e.current_view().unwrap().blockers, vec!["setup.blocker.autotune_failed".to_string()]);
+    let sent = s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE).len();
+    s.run(10_000);
+    assert_eq!(s.fc.custom_mode, 6, "the FC keeps its own mode");
+    assert_eq!(s.sent_cmds(MavCmd::MAV_CMD_DO_SET_MODE).len(), sent, "no mode forced over the FC");
 }
 
 #[test]

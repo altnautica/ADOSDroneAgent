@@ -343,7 +343,13 @@ impl Step for Autotune {
                 let el = cx.now.saturating_sub(since);
                 if flight::in_mode(cx, self.tune_mode(cx)) {
                     self.entered = true;
-                } else if !self.entered && el > TUNE_ENTER_MS {
+                } else if self.entered {
+                    // The FC left the tune mode on its own (a failsafe, "AutoTune:
+                    // Stopped"): it is flying now; never force the mode back over it.
+                    self.phase = Phase::Idle;
+                    self.core.fail(if cx.fc.armed { "setup.blocker.autotune_failed" } else { "setup.blocker.disarmed" });
+                    return;
+                } else if el > TUNE_ENTER_MS {
                     // Refused (STATUSTEXT "Mode change to … failed"): stop rather than ask forever.
                     self.refused(cx);
                     return;
@@ -546,6 +552,11 @@ impl Step for Autotune {
             "resume_yaw" => {
                 if cx.fc.armed && !matches!(self.phase, Phase::YawWait) {
                     return Err("bad_state");
+                }
+                // "Tune yaw now" is for after a battery swap: a yaw round started on the
+                // pack that just flew roll and pitch runs into the FC's battery failsafe.
+                if cx.fc.battery_pct.is_none_or(|p| p < YAW_MIN_BATTERY) {
+                    return Err("battery_low");
                 }
                 if self.before.is_empty() {
                     self.snapshot_gains(cx);
