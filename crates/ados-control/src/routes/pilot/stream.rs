@@ -55,6 +55,19 @@ fn action_error(frame: &Value, err: &str) -> Option<Value> {
 /// to on-box services, not to an operator socket.
 const SURFACE_OPS: &[&str] = &["input", "release", "session.take", "hb", "action"];
 
+/// A surface's JSON frame as the decoded request and the `pilot.v1` body sent
+/// to the pilot, or the error a surface is answered with.
+fn decode_surface_frame(frame: &Value) -> Result<(pilot::Request, Vec<u8>), &'static str> {
+    let op = frame.get("op").and_then(Value::as_str).unwrap_or("");
+    if !SURFACE_OPS.contains(&op) {
+        return Err("unknown_op");
+    }
+    pilot::json_to_request_body(frame).map_err(|e| {
+        tracing::info!(error = %e, op, "pilot_stream_frame_rejected");
+        "malformed"
+    })
+}
+
 pub(super) async fn pilot_stream_loop(mut socket: WebSocket, path: PathBuf) {
     let stream = match UnixStream::connect(&path).await {
         Ok(s) => s,
@@ -104,22 +117,14 @@ pub(super) async fn pilot_stream_loop(mut socket: WebSocket, path: PathBuf) {
                 }
                 let Some(Ok(Message::Text(text))) = incoming else { continue };
                 let Ok(frame) = serde_json::from_str::<Value>(&text) else { continue };
-                let op = frame.get("op").and_then(Value::as_str).unwrap_or("");
-                if !SURFACE_OPS.contains(&op) {
-                    if let Some(e) = action_error(&frame, "unknown_op") {
-                        let _ = send_json(&mut socket, &e).await;
-                    }
-                    continue;
-                }
-                match pilot::json_to_request_body(&frame) {
+                match decode_surface_frame(&frame) {
                     Ok((_, body)) => {
                         if to_pilot.send(body).await.is_err() {
                             break;
                         }
                     }
-                    Err(e) => {
-                        tracing::info!(error = %e, op, "pilot_stream_frame_rejected");
-                        if let Some(r) = action_error(&frame, "malformed") {
+                    Err(err) => {
+                        if let Some(r) = action_error(&frame, err) {
                             if !send_json(&mut socket, &r).await { break; }
                         }
                     }
@@ -180,5 +185,69 @@ mod tests {
             "malformed"
         );
         assert!(action_error(&json!({"op": "input"}), "malformed").is_none());
+    }
+
+    /// The shared client-frame fixture every surface's encoder is checked
+    /// against decodes, through the stream's own path, to the request it names.
+    #[test]
+    fn the_shared_client_frames_decode_to_their_requests() {
+        let doc: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/pilot-requests.json"))
+                .unwrap();
+        let decode = |key: &str| {
+            let (req, body) =
+                decode_surface_frame(&doc[key]).unwrap_or_else(|e| panic!("{key} refused: {e}"));
+            assert_eq!(pilot::decode_request(&body).unwrap(), req, "{key} body");
+            req
+        };
+        assert_eq!(
+            decode("input"),
+            pilot::Request::Input(pilot::Input {
+                src: "android".into(),
+                session: 7,
+                seq: 12,
+                t_ms: 3400,
+                axes: [0.25, -1.0, 0.0, 0.5],
+                buttons: 65537,
+            })
+        );
+        assert_eq!(
+            decode("release"),
+            pilot::Request::Release {
+                src: "android".into(),
+                session: 7
+            }
+        );
+        assert_eq!(
+            decode("session_take"),
+            pilot::Request::SessionTake {
+                src: "android".into(),
+                session: 8
+            }
+        );
+        assert_eq!(
+            decode("hb"),
+            pilot::Request::Hb {
+                src: "android".into()
+            }
+        );
+        assert_eq!(
+            decode("action"),
+            pilot::Request::Action(pilot::ActionReq {
+                name: "hand_to_fc".into(),
+                src: "android".into(),
+                args: Some(json!({"mode": "loiter"})),
+                id: Some("3".into()),
+            })
+        );
+        assert_eq!(doc.as_object().unwrap().len(), 5, "every entry is checked");
+    }
+
+    #[test]
+    fn frames_outside_the_surface_ops_are_refused() {
+        let frame = json!({"op": "lease.acquire", "holder": {"plugin_id": "p", "skill_id": "s"}});
+        assert_eq!(decode_surface_frame(&frame).unwrap_err(), "unknown_op");
+        let frame = json!({"op": "input", "src": "mc"});
+        assert_eq!(decode_surface_frame(&frame).unwrap_err(), "malformed");
     }
 }
