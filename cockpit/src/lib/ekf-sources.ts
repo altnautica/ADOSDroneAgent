@@ -1,9 +1,9 @@
 // The EKF source sets as the nav-source chip and the minimap read them: the
 // nine `EK3_SRC{1,2,3}_{POSXY,VELXY,YAW}` parameters, read once per FC link
-// through `GET /api/params/{name}`, decoded to words, and the chip's input
+// from the parameter cache in one `GET /api/params`, decoded to words, and the chip's input
 // assembled from the FC telemetry and the companion's `nav.state`.
 
-import { getParam } from "@/lib/api";
+import { getParams } from "@/lib/fc-config";
 import type { VehicleState } from "@/lib/types";
 import { EKF_FLAG, type NavSourceInput } from "@/shared/hud/nav-source";
 import type { NavState } from "@/shared/hud/nav-types";
@@ -56,15 +56,14 @@ export function ekfFlagWords(flags: number | null): string {
   return words.length > 0 ? words.join(" · ") : "none";
 }
 
-/** Read the nine parameters into the store. A parameter the FC has not
- *  reported is left out, so the chip falls back to the flag rules. */
+/** Read the nine parameters into the store from one `GET /api/params`. A
+ *  parameter the FC has not reported (or a failed read) is left out, so the
+ *  chip falls back to the flag rules. */
 export async function loadEkfSourceParams(signal?: AbortSignal): Promise<void> {
-  const values = await Promise.allSettled(EKF_SOURCE_PARAMS.map((n) => getParam(n, signal)));
+  const all = await getParams(signal).then((r) => r.params ?? {}).catch(() => ({}) as Record<string, number>);
   if (signal?.aborted) return;
   const out: Record<string, number> = {};
-  values.forEach((r, i) => {
-    if (r.status === "fulfilled" && r.value !== null) out[EKF_SOURCE_PARAMS[i]] = r.value;
-  });
+  for (const name of EKF_SOURCE_PARAMS) if (typeof all[name] === "number") out[name] = all[name];
   useNavStreamStore.getState().setEkfParams(out);
 }
 

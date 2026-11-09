@@ -9,7 +9,7 @@ import { useEffect, useRef, useState } from "react";
 import { HoldButton } from "@/components/ui/hold-button";
 import { sticksElsewhere, usePilot } from "@/hooks/use-pilot";
 import { useNow } from "@/hooks/use-now";
-import { visibleBanner, voicePrompt } from "@/lib/cockpit-flow";
+import { linkLossLine, visibleBanner, voicePrompt } from "@/lib/cockpit-flow";
 import { cockpitText } from "@/lib/cockpit-text";
 import { sendPilotAction, takePilotSession } from "@/lib/pilot-link";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
@@ -87,7 +87,7 @@ export function FlightOverlays() {
       ) : null}
       {pilot.linkLossInS !== null ? (
         <div role="alert" className="rounded-lg border border-warn bg-warn/85 px-[0.9rem] py-[0.4rem] text-[0.95rem] font-semibold text-on-status">
-          {cockpitText("flow.link_loss.countdown", { action: "rth", in_s: Math.ceil(pilot.linkLossInS) })}
+          {linkLossLine(pilot)}
         </div>
       ) : null}
       {banner ? (

@@ -40,11 +40,15 @@ import {
 } from "@/lib/minimap-geometry";
 import { useTrackStore } from "@/stores/track-store";
 import { cn } from "@/lib/utils";
+import { useMissionRoute } from "@/lib/mission-route";
+import { setupText } from "@/shared/setup-wizard/strings";
+import tokens from "@/shared/cockpit-spec/tokens.json";
 
 const VIEW = 100;
 const PAD = 12;
 /** Minimum window (m) so a stationary vehicle shows a sensible area. */
 const MIN_SPAN_M = 40;
+const MISSION_COLOR = tokens.state.mission;
 
 /** A heading value that is a real compass bearing (guards the MAVLink 65535
  *  "unknown" sentinel that divides to 655.35). */
@@ -183,7 +187,9 @@ function GlobalMiniMap() {
   const startEN: EN | null =
     ref && start ? latLonToEN(start.lat, start.lon, ref.lat, ref.lon) : null;
 
-  const fitPoints: EN[] = [...trailEN, ...(droneEN ? [droneEN] : [])];
+  const route = useMissionRoute();
+  const routeEN: EN[] = ref ? route.map((p) => latLonToEN(p.lat, p.lon, ref.lat, ref.lon)) : [];
+  const fitPoints: EN[] = [...trailEN, ...routeEN, ...(droneEN ? [droneEN] : [])];
   const view = computeMapView(fitPoints, VIEW, PAD, MIN_SPAN_M);
 
   const empty = view == null;
@@ -234,6 +240,28 @@ function GlobalMiniMap() {
                   strokeLinejoin="round"
                   strokeLinecap="round"
                 />
+              ) : null}
+
+              {/* the mission on the drone (the router's mirror) */}
+              {view && routeEN.length > 0 ? (
+                <g stroke={MISSION_COLOR} fill={MISSION_COLOR}>
+                  <title>{setupText("map.mission")}</title>
+                  {routeEN.length >= 2 ? (
+                    <polyline
+                      points={routeEN.map((p) => {
+                        const s = projectEN(p.e, p.n, view);
+                        return `${s.x.toFixed(1)},${s.y.toFixed(1)}`;
+                      }).join(" ")}
+                      fill="none"
+                      strokeWidth={1}
+                      strokeDasharray="3 2"
+                    />
+                  ) : null}
+                  {routeEN.map((p, i) => {
+                    const s = projectEN(p.e, p.n, view);
+                    return <circle key={route[i].seq} cx={s.x} cy={s.y} r={1.6} stroke="none" />;
+                  })}
+                </g>
               ) : null}
 
               {/* start marker (session first fix — launch proxy, not FC home) */}

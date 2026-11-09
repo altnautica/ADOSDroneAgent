@@ -20,6 +20,15 @@ export function visibleBanner(
   return cockpitText(banner.textKey, banner.args);
 }
 
+/** The link-loss countdown line naming the action the pilot takes, or null
+ *  with no countdown running. An agent that does not report the action gets
+ *  the countdown without one rather than a guessed "Return home". */
+export function linkLossLine(p: PilotState): string | null {
+  if (p.linkLossInS === null) return null;
+  const action = p.linkLossAction ? cockpitText(`pilot.link_loss_action.${p.linkLossAction}`) : "—";
+  return cockpitText("flow.link_loss.countdown", { action, in_s: Math.ceil(p.linkLossInS) });
+}
+
 /** The voice prompt for a change between two pilot states, or null. */
 export function voicePrompt(prev: PilotState | null, next: PilotState): string | null {
   if (next.banner && next.banner.textKey !== prev?.banner?.textKey) {

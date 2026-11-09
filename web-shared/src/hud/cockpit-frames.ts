@@ -131,6 +131,11 @@ export interface PilotState {
   setpointNed: [number, number, number] | null;
   readiness: ReadinessItem[];
   linkLossInS: number | null;
+  /** What the pilot does when the countdown ends; null from an agent that
+   *  does not report it. */
+  linkLossAction: "rth" | "hold" | "land" | null;
+  /** The FC is flying a VTOL transition (either direction). */
+  vtolTransitioning: boolean;
   mission: MissionState | null;
   inputSession: { src: string; label: string; session: number | null } | null;
   gate: { pending: boolean; progress: number } | null;
@@ -193,6 +198,8 @@ export function parsePilotState(raw: unknown): PilotState | null {
     setpointNed: pt3(p.setpoint_ned),
     readiness,
     linkLossInS: num(p.link_loss_in_s),
+    linkLossAction: oneOf(p.link_loss_action, ["rth", "hold", "land"] as const),
+    vtolTransitioning: p.vtol_transitioning === true,
     mission: parseMission(p.mission),
     inputSession: is && str(is.src) !== null ? { src: is.src as string, label: str(is.label) ?? (is.src as string), session: num(is.session) } : null,
     gate: gate ? { pending: gate.pending === true, progress: Math.min(1, Math.max(0, num(gate.progress) ?? 0)) } : null,

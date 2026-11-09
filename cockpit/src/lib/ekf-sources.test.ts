@@ -1,18 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/api", () => ({ getParam: vi.fn() }));
+vi.mock("@/lib/fc-config", () => ({ getParams: vi.fn() }));
 
-import { getParam } from "@/lib/api";
+import { getParams, type ParamsResponse } from "@/lib/fc-config";
 import { EKF_SOURCE_PARAMS, ekfFlagWords, loadEkfSourceParams, navSourceInput, sourceWord } from "@/lib/ekf-sources";
 import type { VehicleState } from "@/lib/types";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 const telemetry = (t: Record<string, unknown>) => t as unknown as VehicleState;
+const cache = (params: Record<string, number>): ParamsResponse => ({ params, count: 3, cached: 3 });
 
 describe("ekf-sources", () => {
   beforeEach(() => {
     useNavStreamStore.getState().clear();
-    vi.mocked(getParam).mockReset();
+    vi.mocked(getParams).mockReset();
   });
 
   it("lists the nine parameters set-major", () => {
@@ -51,19 +52,21 @@ describe("ekf-sources", () => {
     expect(navSourceInput(telemetry({ gps: { fix_type: null } }), true, null, null, null).gps).toBeNull();
   });
 
-  it("stores only the parameters the FC reported", async () => {
-    vi.mocked(getParam).mockImplementation(async (name: string) => {
-      if (name === "EK3_SRC1_POSXY") return 3;
-      if (name === "EK3_SRC2_POSXY") return 6;
-      if (name === "EK3_SRC1_VELXY") throw new Error("404");
-      return null;
-    });
+  it("reads the nine parameters in one call and keeps the ones the FC reported", async () => {
+    vi.mocked(getParams).mockResolvedValue(cache({ EK3_SRC1_POSXY: 3, EK3_SRC2_POSXY: 6, FRAME_CLASS: 1 }));
     await loadEkfSourceParams();
+    expect(getParams).toHaveBeenCalledTimes(1);
     expect(useNavStreamStore.getState().ekfParams).toEqual({ EK3_SRC1_POSXY: 3, EK3_SRC2_POSXY: 6 });
   });
 
+  it("a failed read leaves every parameter out", async () => {
+    vi.mocked(getParams).mockRejectedValue(new Error("503"));
+    await loadEkfSourceParams();
+    expect(useNavStreamStore.getState().ekfParams).toEqual({});
+  });
+
   it("writes nothing after an abort", async () => {
-    vi.mocked(getParam).mockResolvedValue(3);
+    vi.mocked(getParams).mockResolvedValue(cache({ EK3_SRC1_POSXY: 3 }));
     const ac = new AbortController();
     const p = loadEkfSourceParams(ac.signal);
     ac.abort();

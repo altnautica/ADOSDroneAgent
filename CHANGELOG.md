@@ -6,6 +6,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.33] - 2026-11-10
+
+### Fixed
+
+- Cockpit flight-state chip: the mission ETA comes from the next waypoint of the newest AR frame (while it is at most 2 s old), and the GOTO distance is measured from the FC's local position to the pilot goal; both read "—" rather than a made-up value when their inputs are missing.
+- Cockpit link-loss countdown names the action the pilot will take (Return home, Hold or Land, from the pilot kind's `link_loss_action`), and the TRANSITION chip follows `vtol_transitioning`.
+- Cockpit nav-source chip reads the nine EKF source parameters from one `GET /api/params` instead of nine requests at load.
+
+### Added
+
+- Cockpit minimap draws the mission on the drone (the router's mirror from `GET /api/v1/mission`) while the FC reports a mission, refetched when its id or item count changes.
+- Cockpit test: the pilot client frames (input, release, session take, heartbeat, action) match the agent's shared pilot request fixture.
+
 ## [0.109.32] - 2026-11-10
 
 ### Added
