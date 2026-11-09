@@ -436,6 +436,15 @@ impl Pilot {
         if self.owner() == Owner::Tuning {
             return Err("tuning".into());
         }
+        // A take-off still climbing would replace the goto with its own
+        // after-takeoff action at the top of the climb, so it waits.
+        if self
+            .launch
+            .as_ref()
+            .is_some_and(|l| l.step != LaunchStep::Done)
+        {
+            return Err("launching".into());
+        }
         let (Some([hlat, hlon]), Some(home)) = (self.fc.home_global, self.fc.home_local) else {
             return Err("no_home".into());
         };

@@ -6,6 +6,8 @@
 // Mode sheet, and the VTOL transition goes to whichever flight the aircraft is
 // not in.
 
+import type { NavCommand } from "@/nav/navigator";
+import { useNavStore } from "@/stores/nav-store";
 import { PROFILE_KEYS } from "@/lib/cockpit-spec";
 import { registerCockpitActions, runCockpitAction, type CockpitAction } from "@/lib/cockpit-actions";
 import { prevLevel } from "@/lib/cockpit-view";
@@ -106,4 +108,20 @@ export function registerFeedActions(): () => void {
  *  (`profile:cine`), so they pass through unprefixed. */
 export function profileActionForKey(key: string): string | null {
   return PROFILE_KEYS[key.toLowerCase()] ?? null;
+}
+
+/** The Feed's answer to the panel buttons and encoder (registered on the
+ *  command stack while the Feed is mounted). The Feed draws no menu rail, so
+ *  stepping its focus would move a ring nobody sees and the next push would
+ *  leave the flight screen unannounced: prev/next are taken and do nothing,
+ *  and activate opens the Menu, where the focus is drawn. Overlays opened over
+ *  the Feed (the Menu, sheets) sit above this on the stack and take the
+ *  commands first. */
+export function feedNavCommand(cmd: NavCommand): boolean {
+  if (cmd === "prev" || cmd === "next") return true;
+  if (cmd === "activate") {
+    useNavStore.setState({ quickMenuOpen: true });
+    return true;
+  }
+  return false;
 }

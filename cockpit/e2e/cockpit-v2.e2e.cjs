@@ -7,7 +7,9 @@
 //   NODE_PATH=<dir containing playwright-core> CHROME=<chromium path> \
 //     SHOTS=<screenshot dir> node e2e/cockpit-v2.e2e.cjs
 //
-// Cases: controller config (hotspot highlight, rebind persists, conflict
+// Cases: STOP reachability (the first press on STOP lands on STOP with the
+// status-pill list open and closed, the list drawn on top, at every width
+// class and the kiosk), controller config (hotspot highlight, rebind persists, conflict
 // blocks Save, a safety binding cannot be removed), the pilot stick stream
 // (50 Hz input frames, release on a hidden tab), and screenshots of every
 // width class, the kiosk/TV, the Mode sheet, the skill picker and the
@@ -121,6 +123,7 @@ async function mockAgent(page, { profile = "drone" } = {}) {
     if (/^\/api\/plugins\/[^/]+\/state$/.test(p)) return json({});
     if (p === "/api/telemetry")
       return json({ armed: false, mode: "LOITER", autopilot: 3, attitude: { roll: 0.05, pitch: -0.03, yaw: 1.2 }, position: { alt_rel: 0, heading: 70 }, velocity: { groundspeed: 0, climb: 0 }, last_update: new Date().toISOString() });
+    if (p === "/api/v1/gimbal/rate" && route.request().method() === "GET") return json({ available: true, reason: null });
     return json({ detail: "not mocked" }, 404);
   });
 }
@@ -318,10 +321,84 @@ async function shots(browser) {
   console.log(`screenshots in ${SHOTS}`);
 }
 
+/** Where a press at the centre of `selector` lands: true when the topmost
+ *  element there is (inside) `selector`. Real hit-testing in the page. */
+function hits(page, selector) {
+  return page.$eval(selector, (el) => {
+    const r = el.getBoundingClientRect();
+    const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return top !== null && el.contains(top);
+  });
+}
+
+/** STOP takes the first press with the status-pill list open and closed, at
+ *  every width class, and the list is drawn (in the window, on top). */
+async function stopCases(browser) {
+  for (const vp of [...VIEWPORTS, { name: "kiosk-tv", width: 1920, height: 1080, query: "?kiosk=1&demo=1" }]) {
+    const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+    const page = await ctx.newPage();
+    await page.addInitScript(PAD_INIT);
+    await mockAgent(page);
+    await page.goto(`${BASE}${vp.query ?? "?demo=1"}`);
+    await page.waitForSelector('[data-testid="top-bar-stop"]', { timeout: 8000 });
+    await page.waitForTimeout(1500);
+    const skip = page.getByRole("button", { name: "Skip" });
+    if (await skip.count()) await skip.first().click();
+    const stop = '[data-testid="top-bar-stop"]';
+    const pill = '[data-zone="status_pill"]';
+    const list = '[data-testid="status-pill-list"]';
+    assert.equal(await hits(page, stop), true, `${vp.name}: STOP reachable with the list closed`);
+    await page.click(pill);
+    await page.waitForSelector(list, { state: "visible", timeout: 2000 });
+    const box = await page.locator(list).boundingBox();
+    assert.ok(box && box.width > 0 && box.height > 0, `${vp.name}: the list has a size`);
+    assert.ok(box.y >= 0 && box.y + Math.min(box.height, 24) <= vp.height, `${vp.name}: the list is inside the window`);
+    assert.equal(await hits(page, list), true, `${vp.name}: the list is drawn on top`);
+    assert.equal(await hits(page, stop), true, `${vp.name}: STOP reachable with the list open`);
+    await page.screenshot({ path: path.join(SHOTS, `pill-open-${vp.name}.png`) });
+    // One real press on STOP with the list open reaches STOP, and closes the list.
+    await page.$eval(stop, (el) => {
+      window.__stopDowns = 0;
+      el.addEventListener("pointerdown", () => (window.__stopDowns += 1));
+    });
+    const s = await page.locator(stop).boundingBox();
+    await page.mouse.move(s.x + s.width / 2, s.y + s.height / 2);
+    await page.mouse.down();
+    await page.mouse.up();
+    assert.equal(await page.evaluate(() => window.__stopDowns), 1, `${vp.name}: STOP took the first press`);
+    await page.waitForSelector(list, { state: "detached", timeout: 2000 });
+    await ctx.close();
+  }
+  console.log("STOP reachable with the status list open and closed at every width class");
+}
+
+/** A mouse click on the gimbal pad's recentre button reaches the button (the
+ *  pad does not capture the pointer until it is dragged). */
+async function recentreCase(browser) {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  await mockAgent(page);
+  await page.goto(`${BASE}?demo=1`);
+  const knob = page.getByRole("button", { name: "Recentre gimbal" });
+  await knob.waitFor({ state: "visible", timeout: 8000 });
+  await page.$eval('[data-zone="gimbal_pad"] button', (el) => {
+    window.__knobClicks = 0;
+    el.disabled = false;
+    el.addEventListener("click", () => (window.__knobClicks += 1));
+  });
+  const b = await knob.boundingBox();
+  await page.mouse.click(b.x + b.width / 2, b.y + b.height / 2);
+  assert.equal(await page.evaluate(() => window.__knobClicks), 1, "the recentre button took the mouse click");
+  await ctx.close();
+  console.log("recentre button takes a mouse click");
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME });
   const only = process.argv[2];
   try {
+    if (!only || only === "stop") await stopCases(browser);
+    if (!only || only === "recentre") await recentreCase(browser);
     if (!only || only === "controls") await controlsCases(browser);
     if (!only || only === "stream") await pilotStreamCase(browser);
     if (!only || only === "shots") await shots(browser);

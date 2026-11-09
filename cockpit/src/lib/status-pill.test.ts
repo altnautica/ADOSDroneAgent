@@ -86,4 +86,31 @@ describe("status pill FC status text", () => {
       ["fc_status_text", "warning", "EKF3 lane switch 1"],
     ]);
   });
+
+  it("counts a repeated FC warning once, at the worst severity it was sent with", () => {
+    const a = pillAlerts({
+      ...none,
+      fcStatus: [
+        { severity: 4, text: "Vibration compensation ON", ageMs: 0 },
+        { severity: 4, text: "Vibration compensation ON", ageMs: 2000 },
+        { severity: 2, text: "Vibration compensation ON", ageMs: 4000 },
+      ],
+    });
+    expect(a.map((x) => [x.id, x.severity])).toEqual([["fcst:Vibration compensation ON", "critical"]]);
+    expect(pillSummary(a, new Set()).count).toBe(1);
+  });
+
+  it("shows a blocking readiness item as critical and a warning item as a warning", () => {
+    const a = pillAlerts({
+      ...none,
+      readiness: [
+        { id: "gps", ok: false, severity: "block", msg: "No GNSS fix" },
+        { id: "no_agl", ok: false, severity: "warn", msg: "No height source" },
+      ],
+    });
+    expect(a.map((x) => [x.id, x.severity])).toEqual([
+      ["pilot:gps", "critical"],
+      ["pilot:no_agl", "warning"],
+    ]);
+  });
 });

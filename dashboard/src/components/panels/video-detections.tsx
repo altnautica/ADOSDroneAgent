@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/shared/api-fetch";
-import { layoutVideoBoxes, parseLatestDetections, type DetectionFrame } from "@/lib/video-detections";
+import { holdDetectionLease, layoutVideoBoxes, parseLatestDetections, type DetectionFrame } from "@/lib/video-detections";
 
 const POLL_MS = 200;
 const LEASE_RENEW_MS = 2000;
@@ -57,19 +57,16 @@ export function VideoDetections({
           if (inFlight === ac) inFlight = null;
         });
     };
-    const renew = () => void demand(LEASE_HOLD_S).catch(() => undefined);
-    renew();
+    const releaseLease = holdDetectionLease((holdS) => void demand(holdS).catch(() => undefined), document, LEASE_HOLD_S, LEASE_RENEW_MS);
     poll();
     const pollTimer = setInterval(poll, POLL_MS);
-    const leaseTimer = setInterval(renew, LEASE_RENEW_MS);
     return () => {
       clearInterval(pollTimer);
-      clearInterval(leaseTimer);
       inFlight?.abort();
       ro.disconnect();
       setFrame(null);
       // Best effort: an unanswered release still lapses after the hold.
-      void demand(0).catch(() => undefined);
+      releaseLease();
     };
   }, [active, videoRef]);
 

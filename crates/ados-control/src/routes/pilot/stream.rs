@@ -240,7 +240,16 @@ mod tests {
                 id: Some("3".into()),
             })
         );
-        assert_eq!(doc.as_object().unwrap().len(), 5, "every entry is checked");
+        assert_eq!(
+            decode("goto"),
+            pilot::Request::Action(pilot::ActionReq {
+                name: "goto".into(),
+                src: "android".into(),
+                args: Some(json!({"lat": 12.9716, "lon": 77.5946, "alt_m": 25.5})),
+                id: Some("4".into()),
+            })
+        );
+        assert_eq!(doc.as_object().unwrap().len(), 6, "every entry is checked");
     }
 
     #[test]

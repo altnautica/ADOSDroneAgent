@@ -418,6 +418,43 @@ fn surface_goto_without_home_is_refused() {
 }
 
 #[test]
+fn surface_goto_waits_for_a_climbing_takeoff() {
+    let mut w = World::new();
+    home_at(&mut w, 12.0, 77.0);
+    let r = w.action_args(
+        "launch",
+        serde_json::json!({"after": "hold", "alt_m": 10.0}),
+    );
+    assert!(matches!(&r, Reply::Action(a) if a.ok), "{r:?}");
+    let mut waited = 0;
+    while w.landed && waited < 5000 {
+        w.run(20);
+        waited += 20;
+    }
+    assert!(!w.landed, "the take-off command went out");
+    // Mid-climb: in the air, well short of the take-off height.
+    w.pos[2] = -3.0;
+    w.agl = Some(3.0);
+    w.run(200);
+    assert_eq!(w.p.state(w.now).sequence.unwrap().step, "takeoff");
+    let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 10.0});
+    let r = w.action_args("goto", args.clone());
+    assert!(
+        matches!(&r, Reply::Action(a) if a.err.as_deref() == Some("launching")),
+        "{r:?}"
+    );
+    assert_ne!(w.p.owner(), Owner::Goto);
+    // At the top of the climb the launch hands over and a goto is taken.
+    w.pos[2] = -10.0;
+    w.agl = Some(10.0);
+    w.run(1000);
+    assert_eq!(w.p.state(w.now).sequence.unwrap().step, "done");
+    assert!(matches!(w.action_args("goto", args), Reply::Action(a) if a.ok));
+    w.run(300);
+    assert_eq!(w.p.owner(), Owner::Goto);
+}
+
+#[test]
 fn agl_reports_its_source() {
     let mut w = World::new();
     w.agl = Some(3.0);

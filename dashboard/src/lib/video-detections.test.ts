@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { layoutVideoBoxes, parseLatestDetections } from "@/lib/video-detections";
+import { holdDetectionLease, layoutVideoBoxes, parseLatestDetections, type VisibilitySource } from "@/lib/video-detections";
 
 const reply = (extra: Record<string, unknown> = {}) => ({
   available: true,
@@ -39,5 +39,36 @@ describe("layoutVideoBoxes", () => {
     expect(b.label).toBe("person 90% #12");
     expect(b.path.startsWith("M")).toBe(true);
     expect(b.locked).toBe(true);
+  });
+});
+
+describe("detection lease while the page is hidden", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it("renews only while visible, releases on hide and takes it again on show", () => {
+    const listeners = new Set<() => void>();
+    const doc = {
+      visibilityState: "visible" as DocumentVisibilityState,
+      addEventListener: (_: "visibilitychange", fn: () => void) => void listeners.add(fn),
+      removeEventListener: (_: "visibilitychange", fn: () => void) => void listeners.delete(fn),
+    } satisfies VisibilitySource;
+    const flip = (s: DocumentVisibilityState) => {
+      doc.visibilityState = s;
+      for (const fn of listeners) fn();
+    };
+    const calls: number[] = [];
+    const stop = holdDetectionLease((h) => calls.push(h), doc, 6, 2000);
+    vi.advanceTimersByTime(4000);
+    expect(calls).toEqual([6, 6, 6]);
+    flip("hidden");
+    expect(calls).toEqual([6, 6, 6, 0]);
+    vi.advanceTimersByTime(60_000);
+    expect(calls).toEqual([6, 6, 6, 0]);
+    flip("visible");
+    expect(calls).toEqual([6, 6, 6, 0, 6]);
+    stop();
+    expect(calls).toEqual([6, 6, 6, 0, 6, 0]);
+    expect(listeners.size).toBe(0);
   });
 });

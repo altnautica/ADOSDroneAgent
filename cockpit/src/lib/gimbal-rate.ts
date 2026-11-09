@@ -15,6 +15,9 @@ export interface GimbalRateAvailability {
 export const GIMBAL_MAX_DPS = 60;
 export const GIMBAL_HOLD_MS = 500;
 export const GIMBAL_RESEND_MS = GIMBAL_HOLD_MS / 2 - 50;
+/** At most one rate request per this many ms while the rate changes, so a
+ *  drag on the pad stays far inside the agent's per-caller request budget. */
+export const GIMBAL_SEND_INTERVAL_MS = 100;
 
 /** Whether the pad can show. An agent without the route (404) cannot take
  *  rates. */
@@ -34,4 +37,57 @@ export function sendGimbalRate(pitchDps: number, yawDps: number): Promise<unknow
     method: "POST",
     body: { pitch_dps: clamp(pitchDps), yaw_dps: clamp(yawDps), hold_ms: GIMBAL_HOLD_MS },
   });
+}
+
+export interface GimbalRateSender {
+  /** The rate wanted now; zero stops the gimbal with one request at once. */
+  set(pitchDps: number, yawDps: number): void;
+  /** Stop sending; a held rate is ended with a zero. */
+  dispose(): void;
+}
+
+/** Paces gimbal rate requests: the first non-zero rate goes at once, changes
+ *  after it are coalesced to one request per `GIMBAL_SEND_INTERVAL_MS`
+ *  carrying the newest rate, an unchanged held rate is resent every
+ *  `GIMBAL_RESEND_MS` before the agent's hold runs out, and the return to
+ *  zero sends one zero rate immediately. */
+export function createGimbalRateSender(send: (pitchDps: number, yawDps: number) => void): GimbalRateSender {
+  let pitch = 0;
+  let yaw = 0;
+  let dirty = false;
+  let lastSentAt = 0;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const emit = () => {
+    dirty = false;
+    lastSentAt = Date.now();
+    send(pitch, yaw);
+  };
+  const stop = () => {
+    if (timer === null) return;
+    clearInterval(timer);
+    timer = null;
+    pitch = 0;
+    yaw = 0;
+    emit();
+  };
+  return {
+    set(p, y) {
+      if (p === 0 && y === 0) {
+        stop();
+        return;
+      }
+      if (p === pitch && y === yaw) return;
+      pitch = p;
+      yaw = y;
+      if (timer !== null) {
+        dirty = true;
+        return;
+      }
+      emit();
+      timer = setInterval(() => {
+        if (dirty || Date.now() - lastSentAt >= GIMBAL_RESEND_MS) emit();
+      }, GIMBAL_SEND_INTERVAL_MS);
+    },
+    dispose: stop,
+  };
 }

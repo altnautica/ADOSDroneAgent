@@ -1,24 +1,32 @@
-// The controller tour on the first controller connect, on whichever screen is
-// up: three cards (sticks, safety buttons, skills) in a sheet, shown once per
-// cockpit (`tourSeen`). While the browser has announced a controller it has
-// not yet reported (the Gamepad API waits for a button press), the sheet asks
-// for a button press first.
+// The controller tour on the first controller connect: three cards (sticks,
+// safety buttons, skills) in a sheet, shown once per cockpit (`tourSeen`).
+// While the browser has announced a controller it has not yet reported (the
+// Gamepad API waits for a button press), the sheet asks for a button press
+// first. On the flight screen with the vehicle armed or flying it waits, so
+// the sheet never covers STOP or the left column in flight.
 
 import { useState } from "react";
 
 import { Sheet } from "@/components/ui/sheet";
+import { usePilot } from "@/hooks/use-pilot";
 import { cockpitText } from "@/lib/cockpit-text";
-import { TOUR_CARDS, tourStage } from "@/lib/controller-tour";
+import { TOUR_CARDS, tourDeferred, tourStage } from "@/lib/controller-tour";
+import { getScreen } from "@/nav/registry";
 import { useControlsStore } from "@/stores/controls-store";
+import { useFlightStore } from "@/stores/flight-store";
 import { useInputStore } from "@/stores/input-store";
+import { activeScreenId, useNavStore } from "@/stores/nav-store";
 
 export function ControllerTour() {
   const pad = useInputStore((s) => s.pad);
   const announced = useInputStore((s) => s.padAnnounced);
   const seen = useControlsStore((s) => s.tourSeen);
   const markSeen = useControlsStore((s) => s.markTourSeen);
+  const onFlightScreen = useNavStore((s) => Boolean(getScreen(activeScreenId(s)).fullBleed) && s.detailStack.length === 0);
+  const pilot = usePilot()?.data ?? null;
+  const telemetryArmed = useFlightStore((s) => s.telemetry?.armed ?? null);
   const [card, setCard] = useState(0);
-  const stage = tourStage(pad !== null, announced, seen);
+  const stage = tourStage(pad !== null, announced, seen, tourDeferred(onFlightScreen, pilot, telemetryArmed));
   if (stage === "none") return null;
   const id = TOUR_CARDS[card];
   const last = card === TOUR_CARDS.length - 1;

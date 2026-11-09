@@ -6,6 +6,23 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.39] - 2026-11-10
+
+### Fixed
+
+- Cockpit status pill: the alert list is drawn over the whole window instead of inside the blurred top bar, where it was clipped out of sight and its invisible close layer covered STOP, Menu and the layer button. A press outside the list closes it and still reaches what it hit, so STOP takes the first press with the list open. Opening the list acknowledges only what it shows.
+- Cockpit controller tour no longer opens over the flight screen while the vehicle is armed or in the air; it waits until the vehicle is on the ground or another screen is up.
+- Cockpit bottom-row AGL marks a height that is not measured above the ground: `HOME` in the warning colour when the pilot kind's value is the EKF height above home, `BARO` when the follow kind's is barometric.
+- Cockpit gimbal pad sends at most one rate request per 100 ms while the rate changes (the newest rate, coalesced), resends a held rate before the agent's hold runs out, and sends one zero rate at once on release; a drag no longer posts one request per pointer move.
+- Cockpit "Fly here" refuses while the cockpit has no height reading and says why, instead of sending 3 m above home.
+- Pilot `goto` is refused with `launching` while an automatic take-off is still climbing, so the take-off's own after-climb action can no longer replace an accepted goto; the cockpit names the refusal.
+- Cockpit flight-state chip ages the AR frame's ETA on the monotonic clock only, so a wall-clock step after page load cannot hide or freeze it.
+- Cockpit panel buttons and encoder no longer move the hidden menu focus on the flight screen: previous and next do nothing there, and activate opens the Menu.
+- Cockpit gimbal pad's recentre button responds to a mouse click: the pad captures the pointer only once a drag leaves the dead zone.
+- Cockpit status pill counts a repeated FC warning once, at the worst severity it was sent with, and shows a blocking readiness item as critical.
+- Dashboard video panel releases its detection lease while the page is hidden and takes it again when the page shows.
+- Pilot obstacle grid casts one ray per half-degree bearing instead of one per cell: rays of one bearing share a march, about 3.5 times less work per camera frame.
+
 ## [0.109.38] - 2026-11-10
 
 ### Fixed

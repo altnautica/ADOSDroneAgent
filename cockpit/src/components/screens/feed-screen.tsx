@@ -55,7 +55,8 @@ import { useSkillKeys } from "@/hooks/use-skill-keys";
 import { hasLocalVision, useVisionDetections } from "@/hooks/use-vision-detections";
 import { useWidthClass } from "@/hooks/use-width-class";
 import { registerCameraActions } from "@/lib/camera-actions";
-import { registerFeedActions } from "@/lib/feed-actions";
+import { pushCommandHandler } from "@/lib/command-stack";
+import { feedNavCommand, registerFeedActions } from "@/lib/feed-actions";
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { gridMeasures } from "@/lib/cockpit-layout";
 import { effectiveLayers, pluginLayerId } from "@/lib/cockpit-view";
@@ -140,6 +141,7 @@ export function FeedScreen() {
   usePilotInput();
   useEffect(() => registerCameraActions(groundStation), [groundStation]);
   useEffect(() => registerFeedActions(), []);
+  useEffect(() => pushCommandHandler(feedNavCommand), []);
   const gimbal = useGimbalAvailable(flightNavCapable);
   useGimbalDriver(gimbal);
 

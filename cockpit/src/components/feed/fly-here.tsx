@@ -18,6 +18,7 @@ import {
   unprojectEN,
 } from "@/lib/fly-here";
 import { distanceMeters, latLonToEN, projectEN, type LatLon, type MapView } from "@/lib/minimap-geometry";
+import { cockpitText } from "@/lib/cockpit-text";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { useFlightStore } from "@/stores/flight-store";
 
@@ -61,11 +62,12 @@ export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView
   const marker = target ? latLonToEN(target.lat, target.lon, refPoint.lat, refPoint.lon) : null;
   const pt = marker ? projectEN(marker.e, marker.n, view) : null;
   const dist = target && drone ? distanceMeters(drone, target) : null;
+  const args = target ? flyHereArgs(target, altRel) : null;
 
   const fly = () => {
-    if (!target) return;
+    if (!args) return;
     setSending(true);
-    void sendPilotAction("goto", flyHereArgs(target, altRel)).then((r) => {
+    void sendPilotAction("goto", args).then((r) => {
       setSending(false);
       if (r.ok) setTarget(null);
       else setResult(flyHereRefusal(r.err));
@@ -100,7 +102,7 @@ export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView
           title="Fly here"
           onDismiss={() => setTarget(null)}
           footer={
-            <HoldButton onFired={fly} disabled={sending} className="w-full" label="Hold to fly here">
+            <HoldButton onFired={fly} disabled={sending || !args} className="w-full" label="Hold to fly here">
               Hold to fly here
             </HoldButton>
           }
@@ -113,8 +115,9 @@ export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView
             <dt className="text-muted-foreground">Distance</dt>
             <dd className="font-mono">{dist === null ? "—" : `${Math.round(dist)} m`}</dd>
             <dt className="text-muted-foreground">Height</dt>
-            <dd className="font-mono">{flyHereArgs(target, altRel).alt_m} m above home</dd>
+            <dd className="font-mono">{args ? `${args.alt_m} m above home` : "—"}</dd>
           </dl>
+          {!args ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-warn">{cockpitText("map.fly_here.needs_position")}</p> : null}
           {result ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-crit">{result}</p> : null}
         </Sheet>
       ) : null}

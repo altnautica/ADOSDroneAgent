@@ -1,12 +1,13 @@
 // The gimbal rate driver: whether the vehicle takes gimbal rates (polled while
 // the Feed is up), and the one sender for the rates the gimbal pad and the
-// controller's L2/R2 ask for. While a rate is held it is resent before the
-// agent's hold runs out; on release one zero rate stops the gimbal at once.
+// controller's L2/R2 ask for. Requests are paced by `createGimbalRateSender`:
+// at most one per 100 ms while the rate changes, a resend before the agent's
+// hold runs out while it is held, and one zero rate on release.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { create } from "zustand";
 
-import { GIMBAL_RESEND_MS, gimbalRateAvailability, sendGimbalRate } from "@/lib/gimbal-rate";
+import { createGimbalRateSender, gimbalRateAvailability, sendGimbalRate, type GimbalRateSender } from "@/lib/gimbal-rate";
 import { useInputStore } from "@/stores/input-store";
 
 const AVAILABILITY_POLL_MS = 5000;
@@ -50,25 +51,22 @@ export function useGimbalDriver(available: boolean): void {
   const padPitch = useGimbalPadStore((s) => s.pitch);
   const padYaw = useGimbalPadStore((s) => s.yaw);
   const triggerPitch = useInputStore((s) => s.gimbalRateDps);
-  const pitch = padPitch !== 0 || padYaw !== 0 ? padPitch : triggerPitch;
-  const yaw = padPitch !== 0 || padYaw !== 0 ? padYaw : 0;
-  const moving = available && (pitch !== 0 || yaw !== 0);
+  const pad = padPitch !== 0 || padYaw !== 0;
+  const pitch = pad ? padPitch : triggerPitch;
+  const yaw = pad ? padYaw : 0;
+  const sender = useRef<GimbalRateSender | null>(null);
 
   useEffect(() => {
-    if (!moving) return;
-    const send = () => void sendGimbalRate(pitch, yaw).catch(() => undefined);
-    send();
-    const id = setInterval(send, GIMBAL_RESEND_MS);
+    if (!available) return;
+    const s = createGimbalRateSender((p, y) => void sendGimbalRate(p, y).catch(() => undefined));
+    sender.current = s;
     return () => {
-      clearInterval(id);
+      sender.current = null;
+      s.dispose();
     };
-  }, [moving, pitch, yaw]);
+  }, [available]);
 
-  // One zero rate when a held rate ends.
   useEffect(() => {
-    if (!moving) return;
-    return () => {
-      void sendGimbalRate(0, 0).catch(() => undefined);
-    };
-  }, [moving]);
+    sender.current?.set(pitch, yaw);
+  }, [available, pitch, yaw]);
 }

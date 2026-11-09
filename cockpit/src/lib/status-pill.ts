@@ -48,16 +48,27 @@ export function pillAlerts(i: PillInputs): PillAlert[] {
   }
   for (const r of i.readiness) {
     if (r.ok) continue;
-    out.push({ id: `pilot:${r.id}`, source: "pilot_readiness", severity: "warning", text: r.msg || r.id });
+    // A blocking item refuses take-off: critical, as the pre-flight sheet fails it.
+    out.push({ id: `pilot:${r.id}`, source: "pilot_readiness", severity: r.severity === "block" ? "critical" : "warning", text: r.msg || r.id });
   }
   if (i.prearm && i.prearm.length > 0) {
     const text = i.prearm[i.prearm.length - 1].replace(/^(PreArm|Arm):\s*/, "");
     out.push({ id: `fc:${text}`, source: "fc_prearm", severity: "warning", text: cockpitText("flow.preflight.fc_prearm.failing", { text }) });
   }
+  // The FC repeats a warning while its condition lasts: one alert per text,
+  // at the worst severity it was sent with.
+  const fcAt = new Map<string, number>();
   for (const s of i.fcStatus ?? []) {
     // PreArm/Arm lines already reach the pill through `prearm`.
     if (/^(PreArm|Arm):/.test(s.text)) continue;
-    out.push({ id: `fcst:${s.text}`, source: "fc_status_text", severity: s.severity <= 2 ? "critical" : "warning", text: s.text });
+    const severity = s.severity <= 2 ? "critical" : "warning";
+    const at = fcAt.get(s.text);
+    if (at === undefined) {
+      fcAt.set(s.text, out.length);
+      out.push({ id: `fcst:${s.text}`, source: "fc_status_text", severity, text: s.text });
+    } else if (severity === "critical") {
+      out[at].severity = "critical";
+    }
   }
   if (i.storagePct !== null && i.storagePct >= STORAGE_WARN_PCT) {
     out.push({

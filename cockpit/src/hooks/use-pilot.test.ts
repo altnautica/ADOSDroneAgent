@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { bottomRowAgl, goalDistanceM, nextWaypointEtaS } from "@/hooks/use-pilot";
+import { bottomRowAgl, currentArEtaS, goalDistanceM, nextWaypointEtaS } from "@/hooks/use-pilot";
+import { layerFrames } from "@/lib/layer-frames";
 import { parseArFrame, parsePilotState } from "@/shared/hud/cockpit-frames";
 import { linkLossLine } from "@/lib/cockpit-flow";
 import { chipFacts, flightStateChip } from "@/shared/hud/flight-state";
@@ -69,8 +70,34 @@ describe("link-loss countdown and VTOL transition", () => {
 
 describe("bottom row AGL", () => {
   it("reads the pilot kind's agl_m, falling back to the follow kind", () => {
-    expect(bottomRowAgl(pilot, 9)).toBe(4.2);
-    expect(bottomRowAgl({ ...pilot, aglM: null }, 9)).toBe(9);
-    expect(bottomRowAgl(null, null)).toBeNull();
+    const rng = { ...pilot, aglM: 4.2, aglSource: "rangefinder" as const };
+    expect(bottomRowAgl(rng, { aglM: 9, aglSource: "rng" })).toEqual({ m: 4.2, mark: null });
+    expect(bottomRowAgl({ ...pilot, aglM: null }, { aglM: 9, aglSource: "rng" })).toEqual({ m: 9, mark: null });
+    expect(bottomRowAgl(null, null)).toEqual({ m: null, mark: null });
+  });
+
+  it("marks a height above home as HOME and a barometric one as BARO, never as a measured AGL", () => {
+    // Above the rangefinder's 8 m the pilot kind switches to the EKF height
+    // above home: the same value, now marked.
+    const below = bottomRowAgl({ ...pilot, aglM: 7.9, aglSource: "rangefinder" }, null);
+    const above = bottomRowAgl({ ...pilot, aglM: 8.4, aglSource: "home" }, null);
+    expect(below).toEqual({ m: 7.9, mark: null });
+    expect(above).toEqual({ m: 8.4, mark: "HOME" });
+    expect(bottomRowAgl({ ...pilot, aglM: null }, { aglM: 12, aglSource: "baro" })).toEqual({ m: 12, mark: "BARO" });
+  });
+});
+
+describe("chip ETA clock", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("ages the ar frame on the monotonic clock, whatever the wall clock does", () => {
+    layerFrames.putAr(ar);
+    // The ground station sets its wall clock an hour forward after the page loaded.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 3_600_000);
+    expect(currentArEtaS()).toBe(42);
+    // And backwards: a frame 3 s old on the monotonic clock still expires.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() - 3_600_000);
+    layerFrames.ar.seen = performance.now() - 3000;
+    expect(currentArEtaS()).toBeNull();
   });
 });

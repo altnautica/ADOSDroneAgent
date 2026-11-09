@@ -33,12 +33,18 @@ describe("fly here", () => {
 
   it("sends the current height above home, never below the floor", () => {
     expect(flyHereArgs({ lat: 1, lon: 2 }, 12.34)).toEqual({ lat: 1, lon: 2, alt_m: 12.3 });
-    expect(flyHereArgs({ lat: 1, lon: 2 }, 0.5).alt_m).toBe(3);
-    expect(flyHereArgs({ lat: 1, lon: 2 }, null).alt_m).toBe(3);
+    expect(flyHereArgs({ lat: 1, lon: 2 }, 0.5)?.alt_m).toBe(3);
+  });
+
+  it("refuses without a height reading rather than falling back to the floor", () => {
+    expect(flyHereArgs({ lat: 1, lon: 2 }, null)).toBeNull();
+    expect(flyHereArgs({ lat: 1, lon: 2 }, undefined)).toBeNull();
+    expect(flyHereArgs({ lat: 1, lon: 2 }, Number.NaN)).toBeNull();
   });
 
   it("names a refusal", () => {
     expect(flyHereRefusal("no_home")).toMatch(/home/);
     expect(flyHereRefusal("no response")).toBe("No answer from the drone");
+    expect(flyHereRefusal("launching")).toMatch(/climb/);
   });
 });

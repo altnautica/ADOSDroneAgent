@@ -189,7 +189,7 @@ function GimbalPad() {
   const pitch = useGimbalPadStore((s) => s.pitch);
   const yaw = useGimbalPadStore((s) => s.yaw);
   const recenter = useCameraAction("recenter");
-  const origin = useRef<{ x: number; y: number; r: number } | null>(null);
+  const origin = useRef<{ x: number; y: number; r: number; captured: boolean } | null>(null);
   const size = FLIGHT_PX.gimbal;
   const knob = 36;
   const travel = (size - knob) / 2;
@@ -209,8 +209,10 @@ function GimbalPad() {
       data-zone="gimbal_pad"
       onPointerDown={(e) => {
         const r = e.currentTarget.getBoundingClientRect();
-        e.currentTarget.setPointerCapture?.(e.pointerId);
-        origin.current = { x: r.left + r.width / 2, y: r.top + r.height / 2, r: r.width / 2 };
+        // The pointer is captured only once it leaves the dead zone (below):
+        // capturing on the press retargets a mouse click on the recentre
+        // button to the pad, so the button never ran.
+        origin.current = { x: r.left + r.width / 2, y: r.top + r.height / 2, r: r.width / 2, captured: false };
       }}
       onPointerMove={(e) => {
         const o = origin.current;
@@ -219,7 +221,13 @@ function GimbalPad() {
         const dy = Math.max(-1, Math.min(1, (e.clientY - o.y) / o.r));
         // A small dead zone round the centre so a tap does not nudge.
         const shape = (v: number) => (Math.abs(v) < 0.15 ? 0 : Math.sign(v) * ((Math.abs(v) - 0.15) / 0.85) ** 1.5);
-        setRate(-shape(dy) * GIMBAL_MAX_DPS, shape(dx) * GIMBAL_MAX_DPS);
+        const ratePitch = -shape(dy) * GIMBAL_MAX_DPS;
+        const rateYaw = shape(dx) * GIMBAL_MAX_DPS;
+        if (!o.captured && (ratePitch !== 0 || rateYaw !== 0)) {
+          o.captured = true;
+          e.currentTarget.setPointerCapture?.(e.pointerId);
+        }
+        setRate(ratePitch, rateYaw);
       }}
       onPointerUp={release}
       onPointerCancel={release}
@@ -309,10 +317,15 @@ export function RightColumn({ items }: { items: readonly RightItem[] }) {
   );
 }
 
-function Readout({ label, value, unit }: { label: string; value: number | null; unit: string }) {
+/** One bottom-row value. `mark` names a source that is not what the label
+ *  says (an AGL that is the height above home), in the warning colour. */
+function Readout({ label, value, unit, mark = null }: { label: string; value: number | null; unit: string; mark?: string | null }) {
   return (
-    <span className="flex flex-col items-center leading-none" aria-label={label}>
-      <span className="chrome-label mb-[3px] tracking-wide">{label}</span>
+    <span className="flex flex-col items-center leading-none" aria-label={mark ? `${label} ${mark}` : label} data-mark={mark ?? undefined}>
+      <span className="chrome-label mb-[3px] tracking-wide">
+        {label}
+        {mark ? <span className="ml-[3px] text-hud-warn">{mark}</span> : null}
+      </span>
       <span className="chrome-value whitespace-nowrap">
         {value === null || !Number.isFinite(value) ? "—" : value.toFixed(Math.abs(value) < 10 ? 1 : 0)}
         <span className="chrome-label ml-[2px] font-normal">{unit}</span>
@@ -341,7 +354,7 @@ export function BottomRow({ short = false }: { short?: boolean }) {
         <>
           <Readout label="H.S" value={t?.velocity?.groundspeed ?? null} unit="m/s" />
           <Readout label="V.S" value={t?.velocity?.climb ?? null} unit="m/s" />
-          <Readout label="AGL" value={agl} unit="m" />
+          <Readout label="AGL" value={agl.m} unit="m" mark={agl.mark} />
         </>
       ) : null}
     </div>

@@ -91,3 +91,41 @@ export function layoutVideoBoxes(
     };
   });
 }
+
+/** The page-visibility surface the lease keeper reads (the `document`). */
+export interface VisibilitySource {
+  readonly visibilityState: DocumentVisibilityState;
+  addEventListener(type: "visibilitychange", fn: () => void): void;
+  removeEventListener(type: "visibilitychange", fn: () => void): void;
+}
+
+/** Hold a detection lease while the page is visible: `demand(holdS)` at once
+ *  and every `renewMs`, released with `demand(0)` as soon as the page is
+ *  hidden (a background tab must not keep the drone's detector running) and
+ *  taken again when it shows. Returns the stop, which releases too. */
+export function holdDetectionLease(
+  demand: (holdS: number) => void,
+  doc: VisibilitySource,
+  holdS: number,
+  renewMs: number,
+): () => void {
+  let timer: ReturnType<typeof setInterval> | null = null;
+  const take = () => {
+    if (timer !== null) return;
+    demand(holdS);
+    timer = setInterval(() => demand(holdS), renewMs);
+  };
+  const release = () => {
+    if (timer === null) return;
+    clearInterval(timer);
+    timer = null;
+    demand(0);
+  };
+  const onVisibility = () => (doc.visibilityState === "hidden" ? release() : take());
+  doc.addEventListener("visibilitychange", onVisibility);
+  onVisibility();
+  return () => {
+    doc.removeEventListener("visibilitychange", onVisibility);
+    release();
+  };
+}

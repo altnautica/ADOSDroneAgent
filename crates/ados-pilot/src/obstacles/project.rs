@@ -23,12 +23,22 @@ const OBSTACLE_TOP_ABOVE_M: f32 = 3.0;
 const MAX_RANGE_M: f32 = 30.0;
 /// A ray steeper than this (horizontal part per metre) meets no wall.
 const MIN_HORIZONTAL: f32 = 1e-3;
+/// Cell rays are cast along their horizontal bearing snapped to this step, and
+/// rays on one bearing share one march: rows of a column, and neighbouring
+/// columns, mostly look along the same bearing. Half a degree moves a ray at
+/// most 13 cm sideways at the 30 m range, about the grid's own step, against a
+/// cell 2.5° wide.
+const BEARING_STEP_RAD: f32 = 0.5 * std::f32::consts::PI / 180.0;
+const BEARING_BINS: usize = 720;
 
 /// Reusable buffers for one camera's grid.
 #[derive(Debug, Default)]
 pub struct Scratch {
     near: Vec<u8>,
     measured: Vec<u8>,
+    /// Per bearing bin: the frame it was cast in and its distance.
+    rays: Vec<(u32, Option<f32>)>,
+    frame: u32,
 }
 
 /// Vehicle attitude in radians (pitch + nose up, roll + right wing down, yaw
@@ -94,6 +104,12 @@ pub fn project_camera(
     scratch.near.resize(GRID_COLS * GRID_ROWS, 0);
     scratch.measured.clear();
     scratch.measured.resize(GRID_COLS * GRID_ROWS / 8, 0);
+    scratch.rays.resize(BEARING_BINS, (0, None));
+    // A new frame stamp invalidates every cached bearing without clearing.
+    scratch.frame = scratch.frame.wrapping_add(1).max(1);
+    if scratch.frame == 1 {
+        scratch.rays.fill((0, None));
+    }
     let r = camera_to_ned(cam, att);
     let tan_h = (cam.hfov_deg.to_radians() / 2.0).tan();
     let tan_v = (cam.vfov_deg.to_radians() / 2.0).tan();
@@ -111,8 +127,17 @@ pub fn project_camera(
             if horizontal < MIN_HORIZONTAL {
                 continue;
             }
-            let dir = [d[0] / horizontal, d[1] / horizontal];
-            let Some(dh) = obs.ray_distance(pos, dir, MAX_RANGE_M, now_ms) else {
+            let bin = ((d[1].atan2(d[0]) / BEARING_STEP_RAD).round() as i32)
+                .rem_euclid(BEARING_BINS as i32) as usize;
+            let slot = &mut scratch.rays[bin];
+            if slot.0 != scratch.frame {
+                let (s, co) = (bin as f32 * BEARING_STEP_RAD).sin_cos();
+                *slot = (
+                    scratch.frame,
+                    obs.ray_distance(pos, [co, s], MAX_RANGE_M, now_ms),
+                );
+            }
+            let Some(dh) = slot.1 else {
                 continue;
             };
             // Height of the ray above ground at the obstacle's distance.

@@ -266,3 +266,39 @@ fn a_rolled_airframe_tilts_the_wall_edge_across_the_frame() {
     );
     assert!(left > right, "left {left} right {right}");
 }
+
+/// The cost of one camera's grid on the pilot task, against the control tick.
+/// Run in release to record it:
+/// `cargo test --release -p ados-pilot obstacle_grid_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "timing measurement, run by hand in release"]
+fn obstacle_grid_cost_per_camera_frame() {
+    let o = wall_ahead_at_10_m();
+    let cam = ados_protocol::pilot::CameraModel {
+        frame_w: 1280,
+        frame_h: 720,
+        hfov_deg: 80.0,
+        vfov_deg: 50.0,
+        tilt_down_deg: 10.0,
+        yaw_deg: 0.0,
+        stabilised: false,
+    };
+    let att = Attitude {
+        roll: 0.05,
+        pitch: -0.03,
+        yaw: 0.4,
+    };
+    let mut scratch = Scratch::default();
+    let n = 2000u32;
+    let t = std::time::Instant::now();
+    for i in 0..n {
+        let g = project_camera(&o, &cam, [0.0, 0.0], att, 3.0, u64::from(i), &mut scratch);
+        std::hint::black_box(g);
+    }
+    let per = t.elapsed() / n;
+    let tick = std::time::Duration::from_millis(crate::core::TICK_MS);
+    println!(
+        "obstacle grid: {per:?} per camera frame, {:.2} % of the {tick:?} tick",
+        per.as_secs_f64() / tick.as_secs_f64() * 100.0
+    );
+}

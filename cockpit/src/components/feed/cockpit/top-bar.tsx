@@ -6,6 +6,7 @@
 // (`TOP_BAR_OVERFLOW`); the chip, the pill, battery, Menu and STOP stay.
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { AlertTriangle, CheckCircle2, Gamepad2, Layers, Menu, OctagonX, Radio, XCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -22,7 +23,8 @@ import { TOP_BAR_OVERFLOW, type TopBarOverflowItem } from "@/lib/flight-layout";
 import { fmtClock, linkLabel } from "@/lib/safety-band";
 import { requestSkill } from "@/lib/skill-runner";
 import { BUILTIN_SKILL_BY_ID, resolveSkillState } from "@/lib/skills";
-import { pillAlerts, pillSummary, type PillSeverity } from "@/lib/status-pill";
+import { Z } from "@/lib/cockpit-layout";
+import { pillAlerts, pillSummary, type PillAlert, type PillSeverity } from "@/lib/status-pill";
 import { cn } from "@/lib/utils";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useFlightStore } from "@/stores/flight-store";
@@ -102,22 +104,16 @@ function StatusPill({ compact }: { compact: boolean }) {
   const ack = useStatusPillStore((s) => s.ack);
   // The list's anchor, read when the pill is pressed; null while closed.
   const [rect, setRect] = useState<DOMRect | null>(null);
+  const pillRef = useRef<HTMLButtonElement>(null);
   const open = rect !== null;
   const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus }), acked);
   const color = severityColor(summary.severity);
   const Icon = SEVERITY_ICON[summary.severity];
-  const ids = summary.alerts.map((a) => a.id);
-
-  // Opening the list acknowledges what it shows; an alert arriving while it
-  // is open is acknowledged too, since the pilot is looking at it.
-  const idKey = ids.join("|");
-  useEffect(() => {
-    if (open) ack(idKey ? idKey.split("|") : []);
-  }, [open, idKey, ack]);
 
   return (
     <>
       <button
+        ref={pillRef}
         type="button"
         onClick={(e) => setRect(open ? null : e.currentTarget.getBoundingClientRect())}
         aria-label={`${cockpitText("cockpit.menu.status")}: ${summary.text}`}
@@ -138,42 +134,85 @@ function StatusPill({ compact }: { compact: boolean }) {
           <span className="truncate">{summary.text}</span>
         )}
       </button>
-      {rect ? (
-        <>
-          <button type="button" aria-label="Close" className="fixed inset-0 z-50 cursor-default" onClick={() => setRect(null)} />
-          <div
-            role="dialog"
-            aria-label={cockpitText("cockpit.alerts.title")}
-            className="chrome-panel fixed z-50 flex max-h-[60vh] w-[min(360px,90vw)] flex-col gap-[4px] overflow-y-auto p-[8px]"
-            style={{ left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)), top: rect.bottom + 8 }}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") setRect(null);
-            }}
-          >
-            <div className="chrome-label px-[4px] uppercase tracking-wide">{cockpitText("cockpit.alerts.title")}</div>
-            {summary.alerts.length === 0 ? (
-              <div className="flex items-center gap-[8px] px-[4px] py-[6px]" style={{ color: severityColor("ok") }}>
-                <CheckCircle2 className="chrome-icon" aria-hidden />
-                {cockpitText("cockpit.status.ok")}
-              </div>
-            ) : (
-              summary.alerts.map((a) => {
-                const AIcon = SEVERITY_ICON[a.severity];
-                return (
-                  <div key={a.id} className="flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]">
-                    <AIcon className="chrome-icon mt-[1px] shrink-0" style={{ color: severityColor(a.severity) }} aria-hidden />
-                    <div className="min-w-0">
-                      <div className="chrome-label">{cockpitText(`cockpit.status.source.${a.source}`)}</div>
-                      <div>{a.text}</div>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </>
-      ) : null}
+      {rect ? <AlertList rect={rect} pill={pillRef} alerts={summary.alerts} ack={ack} onClose={() => setRect(null)} /> : null}
     </>
+  );
+}
+
+/** The pill's alert list, drawn over the whole window (a portal, so the top
+ *  bar's blur and clipping cannot trap or hide it) below the pill. There is no
+ *  scrim: a press anywhere outside closes it and still reaches what it hit, so
+ *  STOP takes the first press with the list open. Mounting it is showing it,
+ *  so it acknowledges what it lists, and an alert arriving while it is open. */
+function AlertList({
+  rect,
+  pill,
+  alerts,
+  ack,
+  onClose,
+}: {
+  rect: DOMRect;
+  pill: React.RefObject<HTMLButtonElement>;
+  alerts: readonly PillAlert[];
+  ack: (ids: string[]) => void;
+  onClose: () => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef(onClose);
+  useEffect(() => {
+    closeRef.current = onClose;
+  });
+  const idKey = alerts.map((a) => a.id).join("|");
+  useEffect(() => {
+    ack(idKey ? idKey.split("|") : []);
+  }, [idKey, ack]);
+  useEffect(() => {
+    const outside = (e: Event) => {
+      const t = e.target as Node | null;
+      if (t && (listRef.current?.contains(t) || pill.current?.contains(t))) return;
+      closeRef.current();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeRef.current();
+    };
+    document.addEventListener("pointerdown", outside, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", outside, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [pill]);
+  return createPortal(
+    <div
+      ref={listRef}
+      role="dialog"
+      aria-label={cockpitText("cockpit.alerts.title")}
+      data-testid="status-pill-list"
+      className={cn("chrome-panel chrome-bar-text fixed flex max-h-[60vh] w-[min(360px,90vw)] flex-col gap-[4px] overflow-y-auto p-[8px]", Z.sheets)}
+      style={{ ...chromeStyle(), left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)), top: rect.bottom + 8 }}
+    >
+      <div className="chrome-label px-[4px] uppercase tracking-wide">{cockpitText("cockpit.alerts.title")}</div>
+      {alerts.length === 0 ? (
+        <div className="flex items-center gap-[8px] px-[4px] py-[6px]" style={{ color: severityColor("ok") }}>
+          <CheckCircle2 className="chrome-icon" aria-hidden />
+          {cockpitText("cockpit.status.ok")}
+        </div>
+      ) : (
+        alerts.map((a) => {
+          const AIcon = SEVERITY_ICON[a.severity];
+          return (
+            <div key={a.id} className="flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]">
+              <AIcon className="chrome-icon mt-[1px] shrink-0" style={{ color: severityColor(a.severity) }} aria-hidden />
+              <div className="min-w-0">
+                <div className="chrome-label">{cockpitText(`cockpit.status.source.${a.source}`)}</div>
+                <div>{a.text}</div>
+              </div>
+            </div>
+          );
+        })
+      )}
+    </div>,
+    document.body,
   );
 }
 

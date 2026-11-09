@@ -10,7 +10,7 @@ import type { LatLon, MapView } from "@/lib/minimap-geometry";
 export const FLY_HERE_PRESS_MS = 600;
 /** A press that moves farther than this (CSS px) is not a long-press. */
 export const FLY_HERE_SLOP_PX = 8;
-/** Altitude used when the drone reports none (metres above home). */
+/** The lowest height a "Fly here" sends (metres above home). */
 export const FLY_HERE_MIN_ALT_M = 3;
 
 const EARTH_R = 6378137;
@@ -37,15 +37,18 @@ export function enToLatLon(e: number, n: number, ref: LatLon): LatLon {
 }
 
 /** The `goto` arguments: the picked point at the drone's current height above
- *  home (never below the floor). */
-export function flyHereArgs(target: LatLon, altRelM: number | null | undefined): { lat: number; lon: number; alt_m: number } {
-  const alt = typeof altRelM === "number" && Number.isFinite(altRelM) ? altRelM : FLY_HERE_MIN_ALT_M;
-  return { lat: target.lat, lon: target.lon, alt_m: Math.max(FLY_HERE_MIN_ALT_M, Math.round(alt * 10) / 10) };
+ *  home (never below the floor). Null while the cockpit has no height reading:
+ *  a guessed height could send the drone down to the floor, so it refuses. */
+export function flyHereArgs(target: LatLon, altRelM: number | null | undefined): { lat: number; lon: number; alt_m: number } | null {
+  if (typeof altRelM !== "number" || !Number.isFinite(altRelM)) return null;
+  return { lat: target.lat, lon: target.lon, alt_m: Math.max(FLY_HERE_MIN_ALT_M, Math.round(altRelM * 10) / 10) };
 }
 
 /** Operator text for a refused `goto`. */
 export function flyHereRefusal(err: string | undefined): string {
   switch (err) {
+    case "launching":
+      return "Taking off: wait for the climb to finish";
     case "not_armed":
       return "Not armed";
     case "landed":
