@@ -3,7 +3,7 @@ resolver = "2"
 members = ["ados-protocol", "ados-config", "ados-capabilities-codegen", "ados-tui", "ados-supervisor", "ados-mavlink-router", "ados-radio", "ados-crsf", "ados-config-tunnel", "ados-video", "ados-plugin-host", "ados-sdk", "ados-cloud", "ados-groundlink", "ados-net", "ados-hid", "ados-gpio", "ados-display", "ados-vision-engine", "ados-hal-probe", "ados-macpin", "ados-installer", "ados-logd", "ados-control", "ados-offload", "ados-swarmbus", "ados-sensorhub-service", "ados-sensorbus", "ados-gnss", "ados-clock-service", "ados-sensorhub", "ados-lora-service", "ados-vision", "ados-lora", "ados-crsf-codec", "ados-positioning", "ados-rtcm", "ados-clock", "ados-swarm", "ados-mavlink-tunnel", "ados-display-driver", "ados-hmi", "ados-proc", "ados-term", "ados-pilot"]
 
 [workspace.package]
-version = "0.109.30"
+version = "0.109.31"
 edition = "2021"
 # Minimum supported Rust. `slice::as_chunks` / `as_chunks_mut`, which the
 # protocol decode, the display blitter and the vision crop use to state a
@@ -30,10 +30,10 @@ homepage = "https://altnautica.com"
 # Published crates (crates.io). Every in-tree consumer reaches them through these
 # entries so the path and the registry version stay together. The lockstep
 # pins must equal the workspace version (scripts/check-version-sync.sh).
-ados-protocol = { path = "ados-protocol", version = "=0.109.30" }
-ados-vision = { path = "ados-vision", version = "=0.109.30" }
-ados-gpio = { path = "ados-gpio", version = "=0.109.30" }
-ados-hal-probe = { path = "ados-hal-probe", version = "=0.109.30" }
+ados-protocol = { path = "ados-protocol", version = "=0.109.31" }
+ados-vision = { path = "ados-vision", version = "=0.109.31" }
+ados-gpio = { path = "ados-gpio", version = "=0.109.31" }
+ados-hal-probe = { path = "ados-hal-probe", version = "=0.109.31" }
 ados-sensorhub = { path = "ados-sensorhub", version = "0.1.0" }
 ados-offload = { path = "ados-offload", version = "0.1.0" }
 ados-macpin = { path = "ados-macpin", version = "0.1.2" }
@@ -145,7 +145,7 @@ png = "0.17"
 # binary cross-builds for the musl SBC target as a self-contained file. This is
 # the first database dependency in the workspace; only the logging daemon opens
 # it read-write, every other reader connects read-only.
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # Native HTTP framework for the local query API. Pure Rust over tokio/hyper;
 # the same listener Router is served on a unix socket and a TCP port.
 axum = "0.8"

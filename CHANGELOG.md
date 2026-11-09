@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.31] - 2026-11-10
+
+### Security
+
+- `ados-logd` builds against `rusqlite` 0.41, whose bundled SQLite 3.54 fixes CVE-2026-119375 (uninitialised page-cache memory returned when a database is opened with a sibling `-wal` file of a different page size).
+
 ## [0.109.30] - 2026-11-10
 
 ### Changed

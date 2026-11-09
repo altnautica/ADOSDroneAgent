@@ -26,7 +26,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "ados-capabilities-codegen"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "hex",
  "serde",
@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "ados-clock-service"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "ados-cloud"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-macpin",
@@ -101,7 +101,7 @@ dependencies = [
 
 [[package]]
 name = "ados-config"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-macpin",
  "ados-protocol",
@@ -116,7 +116,7 @@ dependencies = [
 
 [[package]]
 name = "ados-config-tunnel"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-mavlink-tunnel",
@@ -135,7 +135,7 @@ dependencies = [
 
 [[package]]
 name = "ados-control"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-groundlink",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "ados-crsf"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-crsf-codec",
@@ -224,7 +224,7 @@ version = "0.1.1"
 
 [[package]]
 name = "ados-display"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ab_glyph",
  "ados-config",
@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "ados-gnss"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-positioning",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "ados-gpio"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -303,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "ados-groundlink"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-plugin-host",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hal-probe"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "ados-hid"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-hmi",
@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "ados-installer"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "ados-logd"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "ados-lora-service"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-gpio",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "ados-mavlink-router"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -537,7 +537,7 @@ version = "0.1.0"
 
 [[package]]
 name = "ados-net"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-proc",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "ados-pilot"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "ados-plugin-host"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "ados-proc"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "nix 0.29.0",
  "tempfile",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "ados-protocol"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -671,7 +671,7 @@ dependencies = [
 
 [[package]]
 name = "ados-radio"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-proc",
@@ -701,7 +701,7 @@ version = "0.1.0"
 
 [[package]]
 name = "ados-sdk"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-plugin-host",
  "ados-protocol",
@@ -724,7 +724,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorbus"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-protocol",
  "hex",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "ados-sensorhub-service"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-clock",
  "ados-config",
@@ -775,7 +775,7 @@ dependencies = [
 
 [[package]]
 name = "ados-supervisor"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "ados-swarmbus"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-protocol",
  "ados-radio",
@@ -845,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "ados-tui"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-protocol",
  "anyhow",
@@ -862,7 +862,7 @@ dependencies = [
 
 [[package]]
 name = "ados-video"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-hal-probe",
@@ -885,14 +885,14 @@ dependencies = [
 
 [[package]]
 name = "ados-vision"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-protocol",
 ]
 
 [[package]]
 name = "ados-vision-engine"
-version = "0.109.30"
+version = "0.109.31"
 dependencies = [
  "ados-config",
  "ados-protocol",
@@ -2040,7 +2040,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2451,15 +2451,6 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.14.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
-dependencies = [
- "ahash",
-]
-
-[[package]]
-name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
@@ -2491,11 +2482,11 @@ dependencies = [
 
 [[package]]
 name = "hashlink"
-version = "0.9.1"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
- "hashbrown 0.14.5",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -2982,9 +2973,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.28.0"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c10584274047cb335c23d3e61bcef8e323adae7c5c8c760540f73610177fc3f"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -3455,7 +3446,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4569,6 +4560,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rsqlite-vfs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "rumqttc-core-next"
 version = "0.33.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4622,9 +4622,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.31.0"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b838eba278d213a8beaf485bd313fd580ca4505a00d5871caeb1457c55322cae"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -4632,6 +4632,7 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+ "sqlite-wasm-rs",
 ]
 
 [[package]]
@@ -4653,7 +4654,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5106,6 +5107,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlite-wasm-rs"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36bd8e29bf08189a005b2df1df99823aa0861cabe9044e5f31ed54ca292ee618"
+dependencies = [
+ "cc",
+ "rsqlite-vfs",
+]
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5248,7 +5259,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
