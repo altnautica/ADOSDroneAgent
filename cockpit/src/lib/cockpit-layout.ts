@@ -69,10 +69,9 @@ export function clampSplit(ratio: number): number {
 /** Touch targets grow by this factor in glove mode. */
 export const GLOVE_TOUCH_SCALE = 1.25;
 
-/** The floating shell chrome's sizes, as Tailwind classes over the CSS
- *  variables declared once in styles/globals.css (`--chrome-*`). The chrome
- *  takes exactly these sizes and the Feed keeps clear of exactly these, so
- *  the two can never disagree. */
+/** The framed screens' shell chrome sizes, as Tailwind classes over the CSS
+ *  variables declared once in styles/globals.css (`--chrome-*`). The Feed
+ *  draws none of it. */
 export const CHROME = {
   /** The status strip's height. */
   stripHeight: "h-[var(--chrome-top)]",
@@ -80,12 +79,6 @@ export const CHROME = {
   barHeight: "h-[var(--chrome-bottom)]",
   /** The menu: a rail in landscape, a strip in portrait. */
   menuSize: "landscape:w-[var(--chrome-rail)] portrait:h-[var(--chrome-strip)]",
-  /** The Feed region inside the chrome. */
-  regionTop: "top-[var(--chrome-top)]",
-  regionBottom: "bottom-[var(--chrome-bottom)] portrait:bottom-[calc(var(--chrome-bottom)+var(--chrome-strip))]",
-  regionRight: "right-[var(--chrome-gap)]",
-  regionLeftCollapsed: "left-[var(--chrome-gap)]",
-  regionLeftBesideRail: "left-[var(--chrome-gap)] landscape:left-[calc(var(--chrome-rail)+var(--chrome-gap))]",
 } as const;
 
 /** The flight screen's z-ladder, as Tailwind classes (literal here so the

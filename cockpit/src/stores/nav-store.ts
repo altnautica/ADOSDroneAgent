@@ -59,8 +59,6 @@ interface NavState {
   menuFocusIndex: number;
   /** Whether the quick menu overlay is open. */
   quickMenuOpen: boolean;
-  /** Whether the menu chrome is collapsed to give the feed the whole panel. */
-  menuCollapsed: boolean;
   /** The tabs actually shown for this node's profile, in menu order.
    *
    *  Navigation walks THIS, never the full registry order. A drone hides the
@@ -85,7 +83,6 @@ interface NavState {
    *  resolves. An unchosen active tab, or one the profile hides, moves to the
    *  home tab. */
   setVisibleTabs: (ids: string[], home?: string | null) => void;
-  toggleMenuCollapsed: () => void;
   closeQuickMenu: () => void;
 }
 
@@ -95,7 +92,6 @@ export const useNavStore = create<NavState>((set, get) => ({
   tabChosen: PERSISTED_TAB !== null,
   menuFocusIndex: tabIndex(PERSISTED_TAB ?? DEFAULT_TAB_ID),
   quickMenuOpen: false,
-  menuCollapsed: false,
   // Until the profile resolves, every tab is assumed visible — the historical
   // shape, and the safe direction: a tab that turns out to be hidden is removed
   // on the next update rather than being unreachable in the meantime.
@@ -229,8 +225,6 @@ export const useNavStore = create<NavState>((set, get) => ({
         detailStack: relocate ? [] : s.detailStack,
       };
     }),
-
-  toggleMenuCollapsed: () => set((s) => ({ menuCollapsed: !s.menuCollapsed })),
 
   closeQuickMenu: () => set({ quickMenuOpen: false }),
 }));

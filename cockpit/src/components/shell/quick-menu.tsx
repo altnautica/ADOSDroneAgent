@@ -1,28 +1,35 @@
-// The quick menu, on the shared sheet: a card for every tab this node shows,
-// the running extensions' cockpit panels, and the way back to the node
-// dashboard. Opened by the quick-menu command (panel long-press, gamepad
-// Start, the Menu button); closed by back, Escape or a tap outside, with the
-// controller moving between its cards. The exit is hidden on the kiosk
-// (`?kiosk=1`), where the cockpit is the whole display.
+// The quick menu, the flight screen's Menu, on the shared sheet: over the
+// Feed, the top-bar items a narrow bar moves here (link, navigation source,
+// controller, layer level); a card for every tab this node shows; the
+// running extensions' cockpit panels; and the way back to the node
+// dashboard. Opened by the quick-menu command (the top bar's Menu, panel
+// long-press, gamepad Options); closed by back, Escape or a tap outside, with
+// the controller moving between its cards and its button hints shown while a
+// gamepad is connected. The exit is hidden on the kiosk (`?kiosk=1`), where
+// the cockpit is the whole display.
 
 import { useState } from "react";
 import { ArrowLeft, LayoutDashboard } from "lucide-react";
 
+import { FlightMenuSection } from "@/components/feed/cockpit/top-bar";
 import { PluginFrameHost } from "@/components/plugins/plugin-overlay-host";
 import { Card } from "@/components/ui/card";
 import { Sheet } from "@/components/ui/sheet";
+import { usePadStatus } from "@/hooks/use-gamepad";
 import { mountablePanels } from "@/lib/extensions";
 import { isKiosk } from "@/lib/kiosk";
-import { tabScreens } from "@/nav/registry";
+import { activeScreenId, useNavStore } from "@/stores/nav-store";
+import { getScreen, tabScreens } from "@/nav/registry";
 import { useNodeIdentity } from "@/shared/use-profile";
 import { useExtensionsStore } from "@/stores/extensions-store";
-import { useNavStore } from "@/stores/nav-store";
 import { useStatusStore } from "@/stores/status-store";
 
 export function QuickMenu() {
   const goTab = useNavStore((s) => s.goTab);
   const closeQuickMenu = useNavStore((s) => s.closeQuickMenu);
   const activeTabId = useNavStore((s) => s.activeTabId);
+  const onFeed = useNavStore((s) => Boolean(getScreen(activeScreenId(s)).fullBleed) && s.detailStack.length === 0);
+  const padConnected = usePadStatus().connected;
   const { profile, role } = useNodeIdentity();
   const fcFamily = useStatusStore((s) => s.status?.fc_family ?? null);
   const tabs = tabScreens(profile, role, fcFamily);
@@ -55,6 +62,11 @@ export function QuickMenu() {
         <PluginFrameHost ext={shown.ext} title={shown.p.title} className="h-[22rem] w-full rounded-lg" />
       ) : (
         <>
+          {onFeed ? (
+            <div className="mb-[0.8rem]">
+              <FlightMenuSection />
+            </div>
+          ) : null}
           <div className="grid grid-cols-2 gap-[0.5rem]">
             {tabs.map((tab) =>
               tab.icon ? (
@@ -98,6 +110,14 @@ export function QuickMenu() {
               <LayoutDashboard className="h-[1.2rem] w-[1.2rem]" aria-hidden />
               Exit to dashboard
             </button>
+          ) : null}
+          {padConnected ? (
+            <div className="mt-[0.8rem] flex justify-center gap-[1rem] font-mono text-[0.75rem] text-muted-foreground" data-testid="pad-hints">
+              <span>✕ select</span>
+              <span>○ back</span>
+              <span>D-pad move</span>
+              <span>Options close</span>
+            </div>
           ) : null}
         </>
       )}

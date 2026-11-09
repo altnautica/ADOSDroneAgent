@@ -1,31 +1,30 @@
-// The following-mode chrome over the main video (13-hud-v2 §8, §11): the
-// what's-locked chip top-centre (L3), the range panel above the bottom
-// chrome (L2, read-only) and the follow controls (L3). Following mode holds while
-// follow-me reports a non-idle phase, or while a target is designated with the
-// follow skill installed; outside it the panel and rail step aside. The chip
-// shows whenever a target is designated. The re-acquired toast fires from the
+// The following-mode chrome (13-hud-v2 §8, §11), docked in the follow strip
+// under the top bar, between the columns, so it never covers the centre or a
+// column: the what's-locked chip, the range line (tap for the full range
+// panel, which drops from the strip) and the follow controls. Following mode
+// holds while follow-me reports a non-idle phase, or while a target is
+// designated with the follow skill installed; outside it only the chip shows,
+// and only while a target is designated. The re-acquired toast fires from the
 // nav stream's `follow.reacquired` events whatever the mode.
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
 
 import { FollowRail } from "@/components/feed/follow-rail";
 import { FollowRangePanel } from "@/components/feed/follow-range-panel";
 import { WhatsLockedChip } from "@/components/feed/whats-locked-chip";
-import { useElementSize } from "@/hooks/use-element-size";
 import { useFollowSkill } from "@/hooks/use-follow-skill";
 import { useNow } from "@/hooks/use-now";
-import { Z, type WidthClass } from "@/lib/cockpit-layout";
+import type { WidthClass } from "@/lib/cockpit-layout";
 import { cameraLabel } from "@/lib/feed-legs";
-import { railBottomPx, reacquiredToastText } from "@/lib/follow-rail";
+import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
+import { reacquiredToastText } from "@/lib/follow-rail";
 import type { RosterCamera } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { toast } from "@/shared/api/toast";
 import { isFollowingMode } from "@/shared/hud/follow-chrome";
 import { useFeedStore } from "@/stores/feed-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
-
-/** Range panel width per class (§11): content width at compact and medium. */
-const PANEL_WIDTH: Partial<Record<WidthClass, number>> = { expanded: 320, tv: 400 };
 
 /** Toast each `follow.reacquired` once, as it arrives. */
 function useReacquiredToast(): void {
@@ -39,71 +38,91 @@ function useReacquiredToast(): void {
   }, [event]);
 }
 
-export function FollowChrome({
+export interface FollowStripState {
+  designated: boolean;
+  following: boolean;
+}
+
+/** Whether the follow strip is up, and in following mode. */
+export function useFollowStripState(): FollowStripState {
+  useReacquiredToast();
+  const follow = useNavStreamStore((s) => s.follow);
+  const designated = useNavStreamStore((s) => s.designated) !== null;
+  const followSkill = useFollowSkill();
+  const now = useNow(follow ? 1000 : null);
+  const following = isFollowingMode({
+    phase: follow?.data.phase ?? null,
+    ageMs: follow ? now - follow.at : Infinity,
+    installed: followSkill !== null,
+    designated,
+  });
+  return { designated, following };
+}
+
+export function FollowStrip({
   widthClass,
   cameras,
   multiStream,
-  hasRadar,
-  skillClearance,
+  following,
+  designated,
+  bandHeightPx,
 }: {
   widthClass: WidthClass;
   cameras: readonly RosterCamera[];
   multiStream: boolean;
-  hasRadar: boolean;
-  /** CSS length the range panel's bottom edge keeps above (the bottom
-   *  chrome's top plus 12 px, or 12 px where it sits below the video). */
-  skillClearance: string;
+  following: boolean;
+  designated: boolean;
+  /** The height between the top bar and the bottom zones; the rail folds its
+   *  extras on a short compact panel. */
+  bandHeightPx: number;
 }) {
-  useReacquiredToast();
-  const ref = useRef<HTMLDivElement>(null);
-  const size = useElementSize(ref);
   const follow = useNavStreamStore((s) => s.follow);
-  const designated = useNavStreamStore((s) => s.designated);
   const mainCameraId = useFeedStore((s) => s.mainCameraId);
   const pipCameraId = useFeedStore((s) => s.pipCameraId);
   const followSkill = useFollowSkill();
   const now = useNow(follow ? 1000 : null);
+  const [panelOpen, setPanelOpen] = useState(false);
 
   const followAgeMs = follow ? now - follow.at : Infinity;
-  const following = isFollowingMode({
-    phase: follow?.data.phase ?? null,
-    ageMs: followAgeMs,
-    installed: followSkill !== null,
-    designated: designated !== null,
-  });
-
   const main = cameras.find((c) => c.id === mainCameraId) ?? cameras[0] ?? null;
   const pip = pipCameraId ? (cameras.find((c) => c.id === pipCameraId) ?? null) : null;
   const swapLabel = main && pip ? `${cameraLabel(main).toUpperCase()} ⇄ ${cameraLabel(pip).toUpperCase()}` : null;
+  const m = followPanelModel(follow?.data ?? null, followAgeMs);
 
   return (
-    <div ref={ref} className="pointer-events-none absolute inset-0">
+    <div className="pointer-events-none relative flex h-full w-full items-center justify-center gap-[8px]" data-zone="follow_strip">
       {designated ? (
-        <div className={cn("absolute inset-x-0 top-0 flex justify-center", Z.zones)}>
+        <div className="pointer-events-auto min-w-0 shrink">
           <WhatsLockedChip multiStream={multiStream} mainCameraId={main?.id ?? null} />
         </div>
       ) : null}
       {following ? (
-        <>
-          <div className={cn("absolute inset-x-0 flex justify-center", Z.hud)} style={{ bottom: skillClearance }}>
-            <div style={{ width: PANEL_WIDTH[widthClass] }}>
-              <FollowRangePanel follow={follow?.data ?? null} ageMs={followAgeMs} widthClass={widthClass} />
-            </div>
-          </div>
-          <div
-            className={cn("absolute right-0 top-0 flex items-center", Z.zones)}
-            style={{ bottom: railBottomPx(widthClass, hasRadar) }}
+        <div className="chrome-panel chrome-bar-text pointer-events-auto flex h-full min-w-0 items-center gap-[8px] px-[6px]">
+          <button
+            type="button"
+            onClick={() => setPanelOpen((o) => !o)}
+            aria-expanded={panelOpen}
+            aria-label="Follow range"
+            data-zone="follow_range"
+            className={cn("flex h-[44px] min-w-0 shrink items-center gap-[6px] rounded-[var(--fs-radius-sm)] px-[8px] font-mono hover:bg-white/10", m.stale && "opacity-50")}
           >
-            <FollowRail
-              widthClass={widthClass}
-              safeHeightPx={size.h}
-              follow={followSkill}
-              phase={follow?.data.phase ?? null}
-              designated={designated !== null}
-              swapLabel={swapLabel}
-            />
-          </div>
-        </>
+            <span className="truncate">{compactFollowLine(m)}</span>
+            <ChevronDown className={cn("h-[14px] w-[14px] shrink-0 transition-transform duration-150", panelOpen && "rotate-180")} aria-hidden />
+          </button>
+          <FollowRail
+            widthClass={widthClass}
+            safeHeightPx={bandHeightPx}
+            follow={followSkill}
+            phase={follow?.data.phase ?? null}
+            designated={designated}
+            swapLabel={swapLabel}
+          />
+        </div>
+      ) : null}
+      {following && panelOpen ? (
+        <div className="pointer-events-auto absolute left-1/2 top-[calc(100%+8px)] -translate-x-1/2">
+          <FollowRangePanel follow={follow?.data ?? null} ageMs={followAgeMs} widthClass={widthClass === "compact" ? "medium" : widthClass} />
+        </div>
       ) : null}
     </div>
   );

@@ -1,11 +1,13 @@
-// The Feed / HUD screen (the default): the cockpit in the cockpit grid (cockpit
-// spec `layout.json`) for the view on screen (`views.json`): video (L0),
-// extension video overlays (L1), the host target layer, the data layers
-// (AR, obstacles, depth, surfaces), the instrument HUD (L2), the top bar with
-// the flight-state chip, the left and right columns, the bottom-left card, the
-// telemetry row, the skill picker, the flow overlays and the cockpit sheets.
-// The flight-telemetry poll, the extension-state poll, the pilot link and the
-// stick stream run only while the Feed is mounted.
+// The Feed / HUD screen (the default), the whole viewport: the cockpit in the
+// cockpit grid (cockpit spec `layout.json`) for the view on screen
+// (`views.json`): video (L0), extension video overlays (L1), the host target
+// layer, the data layers (AR, obstacles, depth, surfaces), the centre marks
+// and instruments (L2), the top bar with the flight-state chip and STOP, the
+// left and right columns, the bottom-left card, the telemetry row, the skill
+// picker, the follow strip, the flow overlays and the cockpit sheets. No shell
+// chrome is drawn around it; every other screen is behind the top bar's Menu.
+// The flight-telemetry poll, the extension-state poll, the pilot link, the
+// stick stream and the gimbal driver run only while the Feed is mounted.
 //
 // Feed request budget with no extensions enabled (drone): /api/telemetry 5/s,
 // /api/status/full 1/s (shell), /api/v1/battery 0.2/s (shell), /api/wfb 0.1/s
@@ -13,7 +15,7 @@
 // the pilot link (`WS /api/v1/pilot/stream`) and the nav stream. A node with a
 // vision path adds POST /api/vision/demand 0.5/s per shown target overlay.
 
-import { useEffect, useMemo, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 
 import { AlertStack } from "@/components/feed/alert-stack";
 import { BottomRow, LeftColumn, RightColumn } from "@/components/feed/cockpit/cockpit-zones";
@@ -24,7 +26,7 @@ import { PreflightSheet } from "@/components/feed/cockpit/preflight-sheet";
 import { AttitudeRadarCard, ObstacleRadarCard } from "@/components/feed/cockpit/radar-cards";
 import { TopBar } from "@/components/feed/cockpit/top-bar";
 import { LandscapeGrid, PortraitGrid, type FeedSlots } from "@/components/feed/feed-layouts";
-import { FollowChrome } from "@/components/feed/follow-chrome";
+import { FollowStrip, useFollowStripState } from "@/components/feed/follow-chrome";
 import { HudCanvas } from "@/components/feed/hud-canvas";
 import { LayerStack } from "@/components/feed/layers/layer-stack";
 import { VisionPanel } from "@/components/feed/layers/vision-panel";
@@ -37,9 +39,13 @@ import { StreamTabs } from "@/components/feed/stream-tabs";
 import { TargetLayer } from "@/components/feed/target-layer";
 import { ExtensionVideoOverlays } from "@/components/plugins/extension-feed-mounts";
 import { VideoLayer } from "@/components/shell/video-layer";
+import { BannerHost } from "@/components/shell/banner-host";
+import { ReachNotice } from "@/components/shell/reach-notice";
+import { RebootBanner } from "@/components/shell/reboot-banner";
 import { useExtensionStatePoll } from "@/hooks/use-extension-state-poll";
-import { useFollowSkill } from "@/hooks/use-follow-skill";
+import { useElementSize } from "@/hooks/use-element-size";
 import { useFlightTelemetryPoll } from "@/hooks/use-flight-telemetry";
+import { useGimbalAvailable, useGimbalDriver } from "@/hooks/use-gimbal-rate";
 import { useGroundDetectionPoll } from "@/hooks/use-ground-detection-poll";
 import { useNavStream } from "@/hooks/use-nav-stream";
 import { usePilotInput } from "@/hooks/use-pilot-input";
@@ -49,6 +55,7 @@ import { hasLocalVision, useVisionDetections } from "@/hooks/use-vision-detectio
 import { useWidthClass } from "@/hooks/use-width-class";
 import { registerCameraActions } from "@/lib/camera-actions";
 import { registerFeedActions } from "@/lib/feed-actions";
+import { chromeStyle } from "@/lib/chrome-tokens";
 import { gridMeasures } from "@/lib/cockpit-layout";
 import { effectiveLayers, pluginLayerId } from "@/lib/cockpit-view";
 import { mountablePanels } from "@/lib/extensions";
@@ -61,7 +68,6 @@ import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useFeedStore } from "@/stores/feed-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
-import { useNavStore } from "@/stores/nav-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useStatusStore } from "@/stores/status-store";
 
@@ -87,7 +93,8 @@ export function FeedScreen() {
   const setActiveStreamLabel = useFeedStore((s) => s.setActiveStreamLabel);
   const pipCameraId = useFeedStore((s) => s.pipCameraId);
   const syncLegs = useFeedStore((s) => s.syncLegs);
-  const menuCollapsed = useNavStore((s) => s.menuCollapsed);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const size = useElementSize(rootRef);
   const glove = useSettingsStore((s) => s.glove);
   const { widthClass, portrait } = useWidthClass();
   const m = gridMeasures(widthClass, glove);
@@ -96,7 +103,7 @@ export function FeedScreen() {
   const view = useCockpitViewStore((s) => s.view);
   const level = useCockpitViewStore((s) => s.level);
   const layerFlags = useCockpitViewStore((s) => s.layers);
-  const followSkill = useFollowSkill();
+  const strip = useFollowStripState();
   const extensions = useExtensionsStore((s) => s.extensions);
   const pluginOverlayIds = useMemo(
     () => extensions.flatMap((ext) => mountablePanels(ext, "video.overlay").map((p) => pluginLayerId(ext.pluginId, p.id))),
@@ -132,6 +139,8 @@ export function FeedScreen() {
   usePilotInput();
   useEffect(() => registerCameraActions(groundStation), [groundStation]);
   useEffect(() => registerFeedActions(), []);
+  const gimbal = useGimbalAvailable(flightNavCapable);
+  useGimbalDriver(gimbal);
 
   const { whepUrl, hlsUrl, reconnectKey, activeLabel, mainId, pipCamera } = useMemo(() => {
     const active = cameras.find((c) => c.id === activeCameraId) ?? cameras[0] ?? null;
@@ -183,20 +192,31 @@ export function FeedScreen() {
         <LayerStack cameraId={cameraId} videoWidth={video.width} videoHeight={video.height} videoState={video.state} fpsCap={m.overlayFpsCap ?? 0} />
       </>
     ),
-    hud: (
+    hud: layers.has("centre_marks") ? <HudCanvas instruments={layers.has("instruments")} /> : null,
+    followStrip:
+      strip.designated || strip.following
+        ? (bandHeightPx) => (
+            <FollowStrip
+              widthClass={widthClass}
+              cameras={cameras}
+              multiStream={cameras.length > 1}
+              following={strip.following}
+              designated={strip.designated}
+              bandHeightPx={bandHeightPx}
+            />
+          )
+        : null,
+    topBar: <TopBar compact={widthClass === "compact"} />,
+    alerts: (
       <>
-        {layers.has("centre_marks") ? <HudCanvas instruments={layers.has("instruments")} /> : null}
-        <FollowChrome
-          widthClass={widthClass}
-          cameras={cameras}
-          multiStream={cameras.length > 1}
-          hasRadar={false}
-          skillClearance={portrait ? "12px" : "calc(var(--cockpit-col) + 3.5rem)"}
-        />
+        <div className="pointer-events-auto flex w-full max-w-[560px] flex-col overflow-hidden rounded-[var(--fs-radius-sm)] empty:hidden">
+          <ReachNotice />
+          <BannerHost fullBleed />
+          <RebootBanner floating />
+        </div>
+        <AlertStack />
       </>
     ),
-    topBar: <TopBar compact={widthClass === "compact"} />,
-    alerts: <AlertStack />,
     overlays: <FlightOverlays />,
     tabs: cameras.length > 1 ? <StreamTabs cameras={cameras} /> : null,
     map: flightNavCapable ? (className) => <MiniMap className={className} /> : null,
@@ -218,24 +238,47 @@ export function FeedScreen() {
       />
     ) : null,
     leftColumn: (row) => (flightNavCapable ? <LeftColumn row={row} /> : null),
-    rightColumn: <RightColumn compact={widthClass === "compact"} />,
-    bottomRow: flightNavCapable ? <BottomRow distanceOnly={m.distanceOnly} /> : null,
+    rightColumn: (items) => <RightColumn items={items} />,
+    bottomRow: flightNavCapable ? (short) => <BottomRow short={short} /> : null,
     skillPicker: <SkillPicker />,
     ack: <SkillAckLine />,
     visionPanel: <VisionPanel cameraId={cameraId} />,
     onscreenSticks: <OnscreenSticks />,
-    railPresent: followSkill !== null,
-    menuCollapsed,
   };
 
   const style = {
+    ...chromeStyle(),
     "--cockpit-col": `${m.colPx}px`,
     "--cockpit-shutter": `${m.shutterPx}px`,
   } as CSSProperties;
 
   return (
-    <div className="absolute inset-0" style={style} data-focus-rings={m.focusRingsAlways ? "always" : undefined} data-width-class={widthClass}>
-      {portrait ? <PortraitGrid slots={slots} /> : <LandscapeGrid slots={slots} m={m} view={view} />}
+    <div
+      ref={rootRef}
+      className="absolute inset-0 overflow-hidden bg-black"
+      style={style}
+      data-focus-rings={m.focusRingsAlways ? "always" : undefined}
+      data-width-class={widthClass}
+      data-layer-level={level}
+    >
+      {portrait ? (
+        <PortraitGrid slots={slots} />
+      ) : size.w > 0 ? (
+        <LandscapeGrid
+          slots={slots}
+          m={m}
+          input={{
+            width: size.w,
+            height: size.h,
+            m,
+            widthClass,
+            view,
+            flies: flightNavCapable,
+            strip: slots.followStrip !== null,
+            gimbal,
+          }}
+        />
+      ) : null}
       <SkillConfirmSheet />
       <CockpitSheets />
     </div>

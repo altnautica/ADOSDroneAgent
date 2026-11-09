@@ -180,7 +180,7 @@ function BoxZone({ status, stale }: { status: GsStatus | null; stale: boolean })
   );
 }
 
-export function StatusStrip({ floating = false }: { floating?: boolean }) {
+export function StatusStrip() {
   const status = useStatusStore((s) => s.status);
   const stale = useStatusStore((s) => s.stale);
 
@@ -189,9 +189,7 @@ export function StatusStrip({ floating = false }: { floating?: boolean }) {
       className={cn(
         "flex shrink-0 items-center gap-[0.9rem] overflow-hidden px-[0.75rem]",
         CHROME.stripHeight,
-        floating
-          ? "pointer-events-auto bg-background/60 backdrop-blur-sm"
-          : "border-b border-border bg-surface/70",
+        "border-b border-border bg-surface/70",
         stale && "opacity-70",
       )}
     >

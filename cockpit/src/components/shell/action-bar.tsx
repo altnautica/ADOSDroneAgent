@@ -1,7 +1,7 @@
-// L3 — the persistent bottom action bar. Global quick actions (collapse the
-// menu, UI-scale, quick menu), a compact input-hint legend, and live input
-// indicators (button stream / gamepad / wake lock). Buttons are >=48px touch
-// targets. When `floating` (over the Feed video) it is translucent.
+// L3 — the persistent bottom action bar of the framed screens (the Feed
+// draws none). Global quick actions (UI-scale, quick menu), a compact
+// input-hint legend, and live input indicators (button stream / gamepad /
+// wake lock). Buttons are >=48px touch targets.
 
 import {
   Gamepad2,
@@ -9,8 +9,6 @@ import {
   Minus,
   Monitor,
   MonitorOff,
-  PanelLeftClose,
-  PanelLeftOpen,
   Plus,
   Radio,
 } from "lucide-react";
@@ -66,39 +64,13 @@ function Indicator({
   );
 }
 
-export function ActionBar({
-  floating = false,
-  input,
-}: {
-  floating?: boolean;
-  input: InputStatus;
-}) {
-  const menuCollapsed = useNavStore((s) => s.menuCollapsed);
-  const toggleMenuCollapsed = useNavStore((s) => s.toggleMenuCollapsed);
+export function ActionBar({ input }: { input: InputStatus }) {
   const command = useNavStore((s) => s.command);
   const uiScale = useSettingsStore((s) => s.uiScale);
   const nudgeUiScale = useSettingsStore((s) => s.nudgeUiScale);
 
   return (
-    <div
-      className={cn(
-        "flex shrink-0 items-center gap-[0.4rem] px-[0.4rem]",
-        CHROME.barHeight,
-        floating
-          ? "pointer-events-auto bg-background/60 backdrop-blur-sm"
-          : "border-t border-border bg-surface/70",
-      )}
-    >
-      <BarButton
-        onClick={toggleMenuCollapsed}
-        label={menuCollapsed ? "Show menu" : "Hide menu"}
-      >
-        {menuCollapsed ? (
-          <PanelLeftOpen className="h-[1.2rem] w-[1.2rem]" />
-        ) : (
-          <PanelLeftClose className="h-[1.2rem] w-[1.2rem]" />
-        )}
-      </BarButton>
+    <div className={cn("flex shrink-0 items-center gap-[0.4rem] border-t border-border bg-surface/70 px-[0.4rem]", CHROME.barHeight)}>
       <BarButton onClick={() => command("quick-menu")} label="Quick menu">
         <MenuIcon className="h-[1.2rem] w-[1.2rem]" />
       </BarButton>

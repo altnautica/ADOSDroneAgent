@@ -17,6 +17,7 @@ import { skillContextNow, useSkillContext } from "@/hooks/use-skill-context";
 import { useSkillParam } from "@/hooks/use-skill-setting";
 import { putPluginConfig } from "@/lib/api";
 import { registerCockpitActions } from "@/lib/cockpit-actions";
+import { STATE_COLORS } from "@/lib/cockpit-spec";
 import { requestSkill, stopMotionSkills, stopSkill } from "@/lib/skill-runner";
 import {
   resolveSkillState,
@@ -297,16 +298,16 @@ export function SkillPicker() {
         data-testid="skill-picker-chip"
         aria-haspopup="dialog"
         className={cn(
-          "pointer-events-auto flex min-h-[48px] items-center gap-[0.4rem] rounded-full border px-[0.8rem] backdrop-blur-hud",
-          active ? "border-[#22D3EE] bg-[#22D3EE]/20 text-hud-ink" : "border-hud-hair bg-hud-glass text-hud-ink",
+          "chrome-panel chrome-bar-text pointer-events-auto flex h-[48px] max-w-full items-center gap-[8px] !rounded-full px-[14px] transition-transform duration-150 ease-out active:scale-[0.97]",
           activeState?.stale && "opacity-60",
           activeState?.pending && "outline-dashed outline-2 outline-primary",
         )}
+        style={active ? { borderColor: STATE_COLORS.skill, background: `color-mix(in srgb, ${STATE_COLORS.skill} 20%, transparent)` } : undefined}
       >
-        <Puzzle className="h-[1.1rem] w-[1.1rem]" aria-hidden />
-        <span className="text-[0.85rem] font-semibold">{active ? active.label : "Skills"}</span>
+        <Puzzle className="chrome-icon shrink-0" aria-hidden />
+        <span className="truncate font-semibold">{active ? active.label : "Skills"}</span>
         {active ? (
-          <span className="font-mono text-[0.7rem] text-hud-ink-2">
+          <span className="chrome-label shrink-0 font-mono">
             {activeState?.stale ? `ACTIVE (stale ${activeState.lastSeenS ?? "?"} s)` : (activeState?.badge ?? "ACTIVE")}
           </span>
         ) : null}

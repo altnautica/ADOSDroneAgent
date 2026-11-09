@@ -13,7 +13,6 @@ function reset(tabs: string[] = [...TAB_ORDER], active = tabs[0], chosen = false
     tabChosen: chosen,
     menuFocusIndex: 0,
     quickMenuOpen: false,
-    menuCollapsed: false,
     visibleTabs: tabs,
   });
 }

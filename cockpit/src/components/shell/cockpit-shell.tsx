@@ -1,15 +1,11 @@
-// The cockpit shell — the full-bleed layer stack plus the persistent chrome.
+// The cockpit shell. The active screen is resolved from the navigator (top of
+// the detail stack, or the active tab).
 //
-// Layers, back to front:
-//   L0 video   — the Feed screen's edge-to-edge WHEP feed (full-bleed screens)
-//   L1 content — a framed screen body (non-full-bleed screens)
-//   L2 HUD     — the Feed screen's telemetry overlay
-//   L3 chrome  — the status strip (top), menu (rail/strip), action bar (bottom)
-//
-// The active screen is resolved from the navigator (top of the detail stack, or
-// the active tab). A full-bleed screen paints its own L0/L2 and the chrome
-// floats translucently on top; a framed screen renders in the content region
-// with solid chrome. The menu can collapse to give the feed the whole panel.
+// The Feed (the full-bleed flight screen) takes the whole viewport and draws
+// its own grid; the shell adds no chrome around it, only the reach and
+// offline notices under its top bar and the Menu (quick menu) its top bar
+// opens. Every other screen renders framed: the status strip on top, the
+// menu rail (a strip in portrait) beside it and the action bar below.
 
 import { Suspense, lazy, useEffect } from "react";
 
@@ -38,7 +34,6 @@ const QuickMenu = lazy(() => import("@/components/shell/quick-menu").then((m) =>
 export function CockpitShell({ input }: { input: InputStatus }) {
   const activeTabId = useNavStore((s) => s.activeTabId);
   const detailStack = useNavStore((s) => s.detailStack);
-  const menuCollapsed = useNavStore((s) => s.menuCollapsed);
   const quickMenuOpen = useNavStore((s) => s.quickMenuOpen);
   const dispatch = useNavStore((s) => s.dispatch);
   const setVisibleTabs = useNavStore((s) => s.setVisibleTabs);
@@ -86,18 +81,26 @@ export function CockpitShell({ input }: { input: InputStatus }) {
   const ctx: ScreenContext = { dispatch };
   const body = <Suspense fallback={null}>{screen.render(ctx)}</Suspense>;
 
-  const menuStrip = (
-    <div className="flex min-h-0 flex-1 landscape:flex-row portrait:flex-col-reverse">
-      {!menuCollapsed || !fullBleed ? (
-        <MenuRail floating={fullBleed} />
-      ) : null}
-      {fullBleed ? (
-        <div className="flex-1" />
-      ) : (
-        <main className="relative min-h-0 min-w-0 flex-1 p-[0.4rem]">{body}</main>
-      )}
-    </div>
-  );
+  if (fullBleed) {
+    // The Feed is the whole viewport: no status strip, menu rail or action
+    // bar (cockpit spec `legacy_chrome: "none"`). Navigation is behind the
+    // top bar's Menu; the Feed shows the reach and offline notices in its
+    // alert column.
+    return (
+      <div
+        className={`relative h-full w-full overflow-hidden bg-black text-foreground ${renderProfileClass(renderProfile())}`}
+        data-shell="flight"
+      >
+        {body}
+        {quickMenuOpen ? (
+          <Suspense fallback={null}>
+            <QuickMenu />
+          </Suspense>
+        ) : null}
+        <DirtyGuardDialog />
+      </div>
+    );
+  }
 
   return (
     <>
@@ -105,21 +108,18 @@ export function CockpitShell({ input }: { input: InputStatus }) {
         className={`relative h-full w-full overflow-hidden bg-background text-foreground ${renderProfileClass(
           renderProfile(),
         )}`}
+        data-shell="framed"
       >
-        {fullBleed ? body : null}
-        <div
-          className={
-            fullBleed
-              ? "pointer-events-none absolute inset-0 flex flex-col"
-              : "flex h-full w-full flex-col"
-          }
-        >
-          <StatusStrip floating={fullBleed} />
+        <div className="flex h-full w-full flex-col">
+          <StatusStrip />
           <ReachNotice />
-          <BannerHost fullBleed={fullBleed} />
-          <RebootBanner floating={fullBleed} />
-          {menuStrip}
-          <ActionBar floating={fullBleed} input={input} />
+          <BannerHost />
+          <RebootBanner />
+          <div className="flex min-h-0 flex-1 landscape:flex-row portrait:flex-col-reverse">
+            <MenuRail />
+            <main className="relative min-h-0 min-w-0 flex-1 p-[0.4rem]">{body}</main>
+          </div>
+          <ActionBar input={input} />
         </div>
         {quickMenuOpen ? (
           <Suspense fallback={null}>

@@ -1,0 +1,272 @@
+// The flight screen's zones as rectangles (cockpit spec `layout.json` zones)
+// for one viewport: the top bar across the top with STOP at its right end,
+// the left and right columns vertically centred in the band between the top
+// bar and the bottom zones, the bottom-left card, the telemetry row and the
+// skill picker along the bottom, the follow strip docked under the top bar
+// between the columns, and the vision panel or the map pane beside the video.
+// Every zone is placed from this one model, so a test can prove that no two
+// zones overlap and that STOP is inside the viewport at every class. Sizes
+// are CSS px from the chrome tokens; a television multiplies them by its
+// class scale.
+
+import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import type { GridMeasures } from "@/lib/cockpit-layout";
+import type { CockpitView } from "@/lib/cockpit-view";
+
+export interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** The right column's items, top to bottom (`layout.json` `right_column`). */
+export type RightItem = "shutter" | "mode" | "zoom" | "gimbal" | "settings";
+
+/** The top bar's items that move into the Menu when the row runs out of
+ *  room, lowest priority first (`top_bar.overflow.to_menu_order`, then the
+ *  link icon and the layer button on the narrowest bars). The flight-state
+ *  chip, the status pill, battery, Menu and STOP never move. */
+export const TOP_BAR_OVERFLOW = ["controller", "nav_source", "link_detail", "link", "layer_button"] as const;
+export type TopBarOverflowItem = (typeof TOP_BAR_OVERFLOW)[number];
+
+/** Unscaled CSS px. */
+export const FLIGHT_PX = {
+  edge: CHROME_TOKENS.edge_inset_px,
+  barH: 48,
+  barPad: 4,
+  stopW: 84,
+  /** The narrowest the never-moving top-bar items get: the chip without its
+   *  secondary line, the pill as a dot and count, battery percent only, Menu
+   *  and STOP, with the gaps between them. */
+  barMinW: 112 + 44 + 64 + 44 + 84 + 5 * 6 + 2 * 4,
+  colGap: 10,
+  colGapMin: 4,
+  touchMin: 48,
+  modeH: 36,
+  zoomH: 96,
+  gimbal: 108,
+  rowH: 44,
+  rowFullW: 368,
+  rowShortW: 168,
+  skillH: 48,
+  skillW: { compact: 120, medium: 150, expanded: 180, tv: 180 },
+  stripH: 56,
+  divider: 12,
+  vision: { min: 240, max: 380, share: 0.28 },
+} as const;
+
+export interface FlightLayoutInput {
+  width: number;
+  height: number;
+  m: Pick<GridMeasures, "colPx" | "shutterPx" | "scale" | "card" | "distanceOnly">;
+  /** The skill picker's width bucket. */
+  widthClass: keyof typeof FLIGHT_PX.skillW;
+  view: CockpitView;
+  /** A node that flies: the left column, the bottom-left card and the
+   *  telemetry row. */
+  flies: boolean;
+  /** The follow strip is up (a target designated, or following). */
+  strip: boolean;
+  /** The vehicle takes gimbal rates, so the pad can show. */
+  gimbal: boolean;
+  /** The video's share of a split. */
+  splitRatio: number;
+}
+
+export interface FlightLayout {
+  /** The surface the video (or, in the map view, the map) fills. */
+  stage: Rect;
+  /** The map pane of a split, right of the divider. */
+  mapPane: Rect | null;
+  divider: Rect | null;
+  visionPanel: Rect | null;
+  topBar: Rect;
+  stop: Rect;
+  strip: Rect | null;
+  /** Where alerts and flow overlays stack, top-centre. */
+  alerts: Rect;
+  leftColumn: Rect | null;
+  rightColumn: Rect;
+  rightItems: RightItem[];
+  card: Rect | null;
+  bottomRow: Rect | null;
+  /** The telemetry row shows distance and height only. */
+  bottomRowShort: boolean;
+  skillPicker: Rect;
+  /** The instruments' area: centred on the stage, clear of every zone. */
+  hud: Rect;
+  /** The height the columns centre in, between the top bar and the bottom
+   *  zones. */
+  bandHeight: number;
+  /** The left column's button edge and gap, unscaled. */
+  leftButtonPx: number;
+  leftGapPx: number;
+}
+
+const right = (r: Rect) => r.x + r.w;
+const bottom = (r: Rect) => r.y + r.h;
+
+function rightItemHeight(item: RightItem, i: FlightLayoutInput): number {
+  switch (item) {
+    case "shutter":
+      return i.m.shutterPx;
+    case "mode":
+      return FLIGHT_PX.modeH;
+    case "zoom":
+      return FLIGHT_PX.zoomH;
+    case "gimbal":
+      return FLIGHT_PX.gimbal;
+    case "settings":
+      return i.m.colPx;
+  }
+}
+
+function columnHeight(items: readonly RightItem[], i: FlightLayoutInput): number {
+  return items.reduce((h, it) => h + rightItemHeight(it, i), 0) + FLIGHT_PX.colGap * Math.max(0, items.length - 1);
+}
+
+export function flightLayout(i: FlightLayoutInput): FlightLayout {
+  const s = i.m.scale;
+  const W = i.width;
+  const H = i.height;
+  const E = FLIGHT_PX.edge * s;
+
+  // The video stage, and the panes beside it.
+  let stage: Rect = { x: 0, y: 0, w: W, h: H };
+  let mapPane: Rect | null = null;
+  let divider: Rect | null = null;
+  let visionPanel: Rect | null = null;
+  const topBar: Rect = { x: E, y: E, w: W - 2 * E, h: FLIGHT_PX.barH * s };
+  const y0 = bottom(topBar) + E;
+  if (i.view === "split") {
+    const videoW = Math.round(i.splitRatio * (W - FLIGHT_PX.divider));
+    stage = { x: 0, y: 0, w: videoW, h: H };
+    divider = { x: videoW, y: y0, w: FLIGHT_PX.divider, h: H - y0 };
+    mapPane = { x: videoW + FLIGHT_PX.divider, y: 0, w: W - videoW - FLIGHT_PX.divider, h: H };
+  } else if (i.view === "vision") {
+    const panelW = Math.round(Math.min(FLIGHT_PX.vision.max, Math.max(FLIGHT_PX.vision.min, W * FLIGHT_PX.vision.share)));
+    visionPanel = { x: W - E - panelW, y: y0, w: panelW, h: H - E - y0 };
+    stage = { x: 0, y: 0, w: visionPanel.x, h: H };
+  }
+
+  const stopH = topBar.h - 2 * FLIGHT_PX.barPad * s;
+  const stop: Rect = {
+    x: right(topBar) - FLIGHT_PX.barPad * s - FLIGHT_PX.stopW * s,
+    y: topBar.y + FLIGHT_PX.barPad * s,
+    w: FLIGHT_PX.stopW * s,
+    h: stopH,
+  };
+
+  // The bottom zones: the card bottom-left (pilot and vision views; the map
+  // is already on screen in the others), the skill picker bottom-right, and
+  // the telemetry row between them, or raised above them where it does not
+  // fit between.
+  const showCard = i.flies && (i.view === "pilot" || i.view === "vision");
+  const cardW = (i.m.card.kind === "chip" ? i.m.card.sizePx : i.m.card.widthPx) * s;
+  const cardH = (i.m.card.kind === "chip" ? i.m.card.sizePx : i.m.card.heightPx) * s;
+  const card: Rect | null = showCard ? { x: stage.x + E, y: H - E - cardH, w: cardW, h: cardH } : null;
+  const skillW = FLIGHT_PX.skillW[i.widthClass] * s;
+  const skillPicker: Rect = { x: right(stage) - E - skillW, y: H - E - FLIGHT_PX.skillH * s, w: skillW, h: FLIGHT_PX.skillH * s };
+
+  let bottomRow: Rect | null = null;
+  let bottomRowShort = i.m.distanceOnly;
+  const rowH = FLIGHT_PX.rowH * s;
+  if (i.flies) {
+    const lo = (card ? right(card) : stage.x) + E;
+    const hi = skillPicker.x - E;
+    const fullW = FLIGHT_PX.rowFullW * s;
+    const shortW = FLIGHT_PX.rowShortW * s;
+    const centred = (w: number, from: number, to: number) => Math.min(Math.max(stage.x + stage.w / 2 - w / 2, from), to - w);
+    if (!bottomRowShort && hi - lo >= fullW) {
+      bottomRow = { x: centred(fullW, lo, hi), y: H - E - rowH, w: fullW, h: rowH };
+    } else if (hi - lo >= shortW && (bottomRowShort || stage.w - 2 * E < fullW)) {
+      bottomRowShort = true;
+      bottomRow = { x: centred(shortW, lo, hi), y: H - E - rowH, w: shortW, h: rowH };
+    } else {
+      // Raised above the bottom zones, centred on the stage.
+      const w = !bottomRowShort && stage.w - 2 * E >= fullW ? fullW : shortW;
+      bottomRowShort = w === shortW;
+      const top = Math.min(card ? card.y : H, skillPicker.y) - E - rowH;
+      bottomRow = { x: centred(w, stage.x + E, right(stage) - E), y: top, w, h: rowH };
+    }
+  }
+
+  // The band the columns centre in.
+  const bandTop = y0;
+  const bandBottom = Math.min(card ? card.y : H, skillPicker.y, bottomRow ? bottomRow.y : H) - E;
+  const bandH = Math.max(0, bandBottom - bandTop);
+
+  // Left column: its buttons shrink (never under the 48 px touch floor) where
+  // a short band cannot hold three glove-size buttons and their gaps.
+  let leftColumn: Rect | null = null;
+  let leftButtonPx = i.m.colPx;
+  let leftGapPx: number = FLIGHT_PX.colGap;
+  if (i.flies) {
+    const fit = bandH / s;
+    if (3 * leftButtonPx + 2 * leftGapPx > fit) leftGapPx = FLIGHT_PX.colGapMin;
+    if (3 * leftButtonPx + 2 * leftGapPx > fit) leftButtonPx = Math.max(FLIGHT_PX.touchMin, Math.floor((fit - 2 * leftGapPx) / 3));
+    const w = leftButtonPx * s;
+    const h = (3 * leftButtonPx + 2 * leftGapPx) * s;
+    leftColumn = { x: stage.x + E, y: bandTop + Math.max(0, (bandH - h) / 2), w, h };
+  }
+
+  // Right column items, dropping the gimbal pad and then zoom where the band
+  // is too short for them.
+  const rightItems: RightItem[] =
+    i.widthClass === "compact"
+      ? ["shutter", "mode", "settings"]
+      : (["shutter", "mode", "zoom", ...(i.gimbal ? (["gimbal"] as const) : []), "settings"] as RightItem[]);
+  for (const drop of ["gimbal", "zoom"] as const) {
+    if (columnHeight(rightItems, i) * s <= bandH) break;
+    const at = rightItems.indexOf(drop);
+    if (at >= 0) rightItems.splice(at, 1);
+  }
+  const rightW = Math.max(i.m.shutterPx, i.m.colPx, rightItems.includes("gimbal") ? FLIGHT_PX.gimbal : 0) * s;
+  const rightH = columnHeight(rightItems, i) * s;
+  const rightColumn: Rect = { x: right(stage) - E - rightW, y: bandTop + Math.max(0, (bandH - rightH) / 2), w: rightW, h: rightH };
+
+  // Between the columns: the follow strip, then the alerts.
+  const midX = (leftColumn ? right(leftColumn) : stage.x) + E;
+  const midW = rightColumn.x - E - midX;
+  const strip: Rect | null = i.strip ? { x: midX, y: y0, w: midW, h: FLIGHT_PX.stripH * s } : null;
+  const alerts: Rect = { x: midX, y: (strip ? bottom(strip) : bandTop) + E, w: midW, h: 0 };
+
+  // The instruments keep clear of every zone and stay centred on the stage,
+  // so the centre marks sit on the video's centre.
+  const insetX = Math.max((leftColumn ? right(leftColumn) : stage.x) - stage.x, right(stage) - rightColumn.x) + E;
+  const insetY = Math.max(strip ? bottom(strip) + E : y0, H - bandBottom);
+  const hud: Rect = { x: stage.x + insetX, y: insetY, w: Math.max(0, stage.w - 2 * insetX), h: Math.max(0, H - 2 * insetY) };
+
+  return {
+    stage,
+    mapPane,
+    divider,
+    visionPanel,
+    topBar,
+    stop,
+    strip,
+    alerts,
+    leftColumn,
+    rightColumn,
+    rightItems,
+    card,
+    bottomRow,
+    bottomRowShort,
+    skillPicker,
+    hud,
+    bandHeight: bandH,
+    leftButtonPx,
+    leftGapPx,
+  };
+}
+
+/** Whether two rectangles share any area. */
+export function intersects(a: Rect, b: Rect): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/** CSS for a zone placed at a rectangle. */
+export function rectStyle(r: Rect): { left: number; top: number; width: number; height: number } {
+  return { left: r.x, top: r.y, width: r.w, height: r.h };
+}

@@ -22,19 +22,14 @@
     --ui-scale: 1;
     /* Glove mode (persisted): every touch target grows by this factor. */
     --touch-scale: 1;
-    /* The space the floating shell chrome takes over a full-bleed screen:
-     * the status strip above, the utility bar below, the menu rail to the
-     * left in landscape and the menu strip above the utility bar in portrait.
-     * Named once here: the chrome takes these sizes (lib/cockpit-layout
-     * CHROME) and the Feed's layouts keep clear of them. The bars holding
-     * touch targets grow with glove mode. */
+    /* The framed screens' shell chrome: the status strip above, the utility
+     * bar below, the menu rail to the left in landscape and the menu strip
+     * above the utility bar in portrait (lib/cockpit-layout CHROME). The Feed
+     * draws none of it. The bars holding touch targets grow with glove mode. */
     --chrome-top: 3.1rem;
     --chrome-bottom: calc(3rem * var(--touch-scale));
     --chrome-rail: 6.6rem;
     --chrome-strip: calc(3.6rem * var(--touch-scale));
-    --chrome-gap: 0.4rem;
-    /* A Skill Bar slot's edge; the Feed sets it per width class. */
-    --skill-slot: 4.4rem;
   }
 
   html {
@@ -159,6 +154,71 @@
     .alert-flash-critical,
     .alert-pulse-warning {
       animation: none;
+    }
+  }
+}
+
+/* The flight screen's panels (cockpit spec tokens.json `chrome`; the Feed
+ * sets the --fs-* properties from the spec, lib/chrome-tokens.ts). A
+ * translucent dark panel with a backdrop blur, or the opaque fallback where
+ * the engine cannot blur. Sizes are CSS px: the flight screen keeps one type
+ * scale whatever the fluid root size, and a television scales it as a whole. */
+@layer components {
+  .chrome-panel {
+    background: var(--fs-panel-bg-solid);
+    border: var(--fs-border-w) solid var(--fs-border);
+    border-radius: var(--fs-radius);
+    color: var(--fs-text);
+  }
+  @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .chrome-panel {
+      background: var(--fs-panel-bg);
+      -webkit-backdrop-filter: blur(var(--fs-blur));
+      backdrop-filter: blur(var(--fs-blur));
+    }
+  }
+  .chrome-bar-text {
+    font-size: var(--fs-type-bar);
+    line-height: var(--fs-type-bar-line);
+    font-variant-numeric: tabular-nums;
+  }
+  .chrome-value {
+    font-size: var(--fs-type-value);
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+  }
+  .chrome-label {
+    font-size: var(--fs-type-label);
+    color: var(--fs-text-dim);
+  }
+  .chrome-chip-text {
+    font-size: var(--fs-type-chip);
+    font-weight: var(--fs-chip-weight);
+  }
+  .chrome-dim {
+    color: var(--fs-text-dim);
+  }
+  .chrome-icon {
+    width: var(--fs-icon);
+    height: var(--fs-icon);
+  }
+  .chrome-stop {
+    background: var(--fs-stop-bg);
+    color: var(--fs-stop-text);
+    border-radius: var(--fs-radius-sm);
+  }
+  .chrome-pill-flash {
+    animation: chrome-pill-flash 1s ease-in-out infinite;
+  }
+  @keyframes chrome-pill-flash {
+    50% {
+      background-color: color-mix(in srgb, currentColor 28%, transparent);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .chrome-pill-flash {
+      animation: none;
+      background-color: color-mix(in srgb, currentColor 22%, transparent);
     }
   }
 }

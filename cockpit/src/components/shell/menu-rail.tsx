@@ -11,7 +11,7 @@ import { tabScreens } from "@/nav/registry";
 import { CHROME } from "@/lib/cockpit-layout";
 import { cn } from "@/lib/utils";
 
-export function MenuRail({ floating = false }: { floating?: boolean }) {
+export function MenuRail() {
   const activeTabId = useNavStore((s) => s.activeTabId);
   const menuFocusIndex = useNavStore((s) => s.menuFocusIndex);
   const goTab = useNavStore((s) => s.goTab);
@@ -27,9 +27,7 @@ export function MenuRail({ floating = false }: { floating?: boolean }) {
         // rail (landscape) vs strip (portrait)
         "landscape:flex-col portrait:w-full portrait:flex-row",
         CHROME.menuSize,
-        floating
-          ? "pointer-events-auto landscape:bg-background/45 portrait:bg-background/60 backdrop-blur-sm"
-          : "landscape:border-r landscape:border-border portrait:border-t portrait:border-border bg-surface/50",
+        "landscape:border-r landscape:border-border portrait:border-t portrait:border-border bg-surface/50",
       )}
       aria-label="Cockpit menu"
     >

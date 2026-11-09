@@ -6,6 +6,22 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.35] - 2026-11-10
+
+### Changed
+
+- Cockpit and HDMI kiosk flight screen: the Feed takes the whole viewport. The status strip, the menu rail and the bottom action/hint bar are no longer drawn around it; every other screen is behind the top bar's Menu, and controller button hints show only inside the Menu while a gamepad is connected. Other screens keep their framed shell.
+- Cockpit top bar is one row that never scrolls: flight-state chip, status pill, battery (percent, time left, RTL-reserve marker), link, navigation source, controller, layer level, Menu and STOP. When the row runs out of room the controller, navigation source, link text, link icon and layer button move into the Menu in that order; the chip, the pill, battery, Menu and STOP stay, and STOP is fully on screen at every width.
+- Cockpit status pill reads "All systems OK", the one active warning or "<n> warnings" from the cockpit alerts, pilot readiness, FC pre-arm texts and storage; a new warning flashes it until its list is opened.
+- Cockpit grid zones are placed from one layout model (`lib/flight-layout.ts`): the left and right columns centre between the top bar and the bottom zones, the telemetry row sits between the bottom-left card and the skill picker (raised above them, or distance and height only, where it does not fit), and the instruments draw in the area clear of every zone, centred on the video. No zone overlaps another at any width, glove mode included.
+- Cockpit follow controls and the follow range line dock in a strip under the top bar between the columns; the full range panel drops from it on a tap instead of covering the centre.
+- Cockpit flight-screen panels use the spec's chrome tokens: translucent blurred panels with a hairline border, a px type scale with tabular numerals, scaled as a whole on a television (kiosk focus rings and the 30 fps overlay cap unchanged). The skill picker chip takes its active colour from the spec's state tokens.
+
+### Added
+
+- Cockpit right column: a zoom pill and a gimbal pad. Dragging the pad sends gimbal rates through `POST /api/v1/gimbal/rate` (resent while held, a zero rate on release), the controller's L2/R2 pitch rate goes through the same sender, and the pad shows only while `GET /api/v1/gimbal/rate` reports the vehicle takes rates. The column drops the pad, then zoom, where the height is short.
+- Cockpit test: the flight-screen layout at 1920×1080 (kiosk and browser), 1280×800, 900×600, 760×480 and 580×360, every view, with and without the follow strip, gimbal and glove mode: zones never intersect and stay on screen, STOP stays inside the viewport and the top bar, the instruments stay clear of every zone and draw only at the Instruments level, and the shell draws no legacy chrome around the Feed.
+
 ## [0.109.34] - 2026-11-10
 
 ### Fixed
