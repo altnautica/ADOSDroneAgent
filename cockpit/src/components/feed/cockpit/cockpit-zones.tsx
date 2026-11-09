@@ -209,14 +209,21 @@ function GimbalPad() {
       data-zone="gimbal_pad"
       onPointerDown={(e) => {
         const r = e.currentTarget.getBoundingClientRect();
-        // The pointer is captured only once it leaves the dead zone (below):
-        // capturing on the press retargets a mouse click on the recentre
-        // button to the pad, so the button never ran.
-        origin.current = { x: r.left + r.width / 2, y: r.top + r.height / 2, r: r.width / 2, captured: false };
+        // A press on the recentre button is not captured: capture retargets
+        // the mouse click to the pad and the button would never run. Any
+        // other press captures at once, so the release always reaches the pad.
+        const onKnob = (e.target as Element).closest("button") !== null;
+        if (!onKnob) e.currentTarget.setPointerCapture?.(e.pointerId);
+        origin.current = { x: r.left + r.width / 2, y: r.top + r.height / 2, r: r.width / 2, captured: !onKnob };
       }}
       onPointerMove={(e) => {
         const o = origin.current;
         if (!o) return;
+        // No button down: the release happened elsewhere, so the drag is over.
+        if (e.buttons === 0) {
+          release();
+          return;
+        }
         const dx = Math.max(-1, Math.min(1, (e.clientX - o.x) / o.r));
         const dy = Math.max(-1, Math.min(1, (e.clientY - o.y) / o.r));
         // A small dead zone round the centre so a tap does not nudge.
@@ -231,6 +238,7 @@ function GimbalPad() {
       }}
       onPointerUp={release}
       onPointerCancel={release}
+      onLostPointerCapture={release}
     >
       {[0, 90, 180, 270].map((deg) => (
         <span

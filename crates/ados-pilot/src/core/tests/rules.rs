@@ -418,6 +418,62 @@ fn surface_goto_without_home_is_refused() {
 }
 
 #[test]
+fn surface_goto_refused_while_armed_on_the_ground() {
+    let mut w = World::new();
+    home_at(&mut w, 12.0, 77.0);
+    w.armed = true;
+    w.run(200);
+    let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0});
+    let r = w.action_args("goto", args);
+    assert!(
+        matches!(&r, Reply::Action(a) if a.err.as_deref() == Some("landed")),
+        "{r:?}"
+    );
+    assert_ne!(w.p.owner(), Owner::Goto);
+}
+
+#[test]
+fn surface_goto_refused_while_tuning() {
+    let mut w = World::new();
+    home_at(&mut w, 12.0, 77.0);
+    w.airborne(copter::GUIDED);
+    w.p.auth.enter_tuning().unwrap();
+    w.run(200);
+    let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0});
+    let r = w.action_args("goto", args);
+    assert!(
+        matches!(&r, Reply::Action(a) if a.err.as_deref() == Some("tuning")),
+        "{r:?}"
+    );
+    assert_eq!(w.p.owner(), Owner::Tuning);
+}
+
+#[test]
+fn surface_goto_offsets_from_a_home_away_from_the_local_origin() {
+    let mut w = World::new();
+    let m = MavMessage::HOME_POSITION(HOME_POSITION_DATA {
+        latitude: 120_000_000,
+        longitude: 770_000_000,
+        x: 5.0,
+        y: -3.0,
+        z: -2.0,
+        ..Default::default()
+    });
+    w.p.on_fc(FC_SYS, FC_COMP, &m, w.now);
+    w.airborne(copter::GUIDED);
+    let args = serde_json::json!({"lat": 12.0009, "lon": 77.0009, "alt_m": 6.0});
+    let r = w.action_args("goto", args);
+    assert!(matches!(&r, Reply::Action(a) if a.ok), "{r:?}");
+    w.run(300);
+    assert_eq!(w.p.owner(), Owner::Goto);
+    let g = w.p.state(w.now).goal_ned.unwrap();
+    let east = 100.2 * 12.0_f64.to_radians().cos();
+    assert!((g[0] - (5.0 + 100.2)).abs() < 0.5, "{g:?}");
+    assert!((g[1] - (-3.0 + east)).abs() < 0.5, "{g:?}");
+    assert!((g[2] - (-2.0 - 6.0)).abs() < 0.01, "{g:?}");
+}
+
+#[test]
 fn surface_goto_waits_for_a_climbing_takeoff() {
     let mut w = World::new();
     home_at(&mut w, 12.0, 77.0);

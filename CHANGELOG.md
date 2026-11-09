@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.41] - 2026-11-10
+
+### Fixed
+
+- Cockpit gimbal pad takes the pointer on press again (except a press on the recentre button), ends a drag when no button is held, and releases on lost capture, so a fast mouse flick off the pad no longer leaves a rate command repeating on a later hover.
+
+### Added
+
+- Cockpit CI runs the browser checks for the first STOP press, the recentre click and the gimbal pad flick-off.
+- Pilot tests for the map-point goto refusals while armed on the ground and while tuning, and for a home away from the local origin.
+
 ## [0.109.40] - 2026-11-10
 
 ### Fixed

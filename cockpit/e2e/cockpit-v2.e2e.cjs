@@ -9,7 +9,8 @@
 //
 // Cases: STOP reachability (the first press on STOP lands on STOP with the
 // status-pill list open and closed, the list drawn on top, at every width
-// class and the kiosk), controller config (hotspot highlight, rebind persists, conflict
+// class and the kiosk), the gimbal pad (the recentre button takes a mouse
+// click; a flick off the pad leaves no rate running), controller config (hotspot highlight, rebind persists, conflict
 // blocks Save, a safety binding cannot be removed), the pilot stick stream
 // (50 Hz input frames, release on a hidden tab), and screenshots of every
 // width class, the kiosk/TV, the Mode sheet, the skill picker and the
@@ -393,12 +394,51 @@ async function recentreCase(browser) {
   console.log("recentre button takes a mouse click");
 }
 
+/** A fast mouse flick off the gimbal pad, released elsewhere, leaves no drag
+ *  behind: a later hover with no button held sends no rate, and nothing is
+ *  sent once the pointer has left. Run from the knob (centre) and from the
+ *  pad ring. */
+async function gimbalFlickCase(browser) {
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await ctx.newPage();
+  await mockAgent(page);
+  const posts = [];
+  page.on("request", (r) => {
+    if (r.method() === "POST" && new URL(r.url()).pathname === "/api/v1/gimbal/rate") posts.push({ t: Date.now(), body: r.postDataJSON() });
+  });
+  await page.goto(`${BASE}?demo=1`);
+  const pad = page.locator('[data-zone="gimbal_pad"]');
+  await pad.waitFor({ state: "visible", timeout: 8000 });
+  const b = await pad.boundingBox();
+  const cx = b.x + b.width / 2;
+  const cy = b.y + b.height / 2;
+  const r = b.width / 2;
+  for (const start of [0, 0.1]) {
+    await page.mouse.move(cx + start * r, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx + 2 * b.width, cy, { steps: 1 });
+    await page.mouse.up();
+    await page.waitForTimeout(400);
+    await page.mouse.move(cx + 0.85 * r, cy, { steps: 1 });
+    await page.waitForTimeout(400);
+    await page.mouse.move(10, 10, { steps: 1 });
+    const left = Date.now();
+    await page.waitForTimeout(1500);
+    const moving = posts.filter((p) => p.t >= left && (p.body.pitch_dps !== 0 || p.body.yaw_dps !== 0));
+    assert.equal(moving.length, 0, `no gimbal rate after the pointer left with no button held (press at ${start} r): ${JSON.stringify(moving)}`);
+    posts.length = 0;
+  }
+  await ctx.close();
+  console.log("gimbal pad sends no rate after a flick off and a hover with no button held");
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME });
   const only = process.argv[2];
   try {
     if (!only || only === "stop") await stopCases(browser);
     if (!only || only === "recentre") await recentreCase(browser);
+    if (!only || only === "gimbal-flick") await gimbalFlickCase(browser);
     if (!only || only === "controls") await controlsCases(browser);
     if (!only || only === "stream") await pilotStreamCase(browser);
     if (!only || only === "shots") await shots(browser);

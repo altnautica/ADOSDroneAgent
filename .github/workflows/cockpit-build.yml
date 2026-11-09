@@ -70,6 +70,20 @@ jobs:
         working-directory: cockpit
         run: npm run build
 
+      # Pointer and hit-test checks against the built bundle in headless
+      # Chromium: the first press on STOP lands on STOP, the gimbal recentre
+      # button takes a mouse click, and a flick off the gimbal pad leaves no
+      # rate command running. The controls, stream and shots cases stay manual.
+      - name: Browser checks (STOP, gimbal pad)
+        working-directory: cockpit
+        run: |
+          set -euo pipefail
+          npm install --no-save --no-audit --no-fund playwright-core@1.62.0
+          npx playwright-core install --with-deps --only-shell chromium
+          npx vite preview --port 4273 --strictPort >/tmp/preview.log 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4273/cockpit/ >/dev/null && break; sleep 1; done
+          for c in stop recentre gimbal-flick; do SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/cockpit-v2.e2e.cjs "$c"; done
+
       - name: Verify dist
         run: |
           test -f cockpit/dist/index.html
