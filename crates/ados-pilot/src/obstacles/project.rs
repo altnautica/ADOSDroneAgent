@@ -41,6 +41,14 @@ pub struct Scratch {
     frame: u32,
 }
 
+impl Scratch {
+    /// Rays marched for the last projected frame.
+    #[cfg(test)]
+    pub(super) fn rays_cast(&self) -> usize {
+        self.rays.iter().filter(|r| r.0 == self.frame).count()
+    }
+}
+
 /// Vehicle attitude in radians (pitch + nose up, roll + right wing down, yaw
 /// clockwise from north).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

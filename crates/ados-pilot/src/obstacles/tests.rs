@@ -267,12 +267,13 @@ fn a_rolled_airframe_tilts_the_wall_edge_across_the_frame() {
     assert!(left > right, "left {left} right {right}");
 }
 
-/// The cost of one camera's grid on the pilot task, against the control tick.
-/// Run in release to record it:
-/// `cargo test --release -p ados-pilot obstacle_grid_cost -- --ignored --nocapture`.
+/// One camera's grid on the pilot task marches one ray per half-degree
+/// bearing, not one per cell: a tilted, rolled 80° camera casts about 170
+/// rays for its 576 cells. (Measured in release on an x86 laptop: 375 µs per
+/// camera frame with a ray per cell, 106 µs shared per bearing, against the
+/// 20 ms control tick.)
 #[test]
-#[ignore = "timing measurement, run by hand in release"]
-fn obstacle_grid_cost_per_camera_frame() {
+fn obstacle_grid_shares_one_ray_per_bearing() {
     let o = wall_ahead_at_10_m();
     let cam = ados_protocol::pilot::CameraModel {
         frame_w: 1280,
@@ -289,16 +290,10 @@ fn obstacle_grid_cost_per_camera_frame() {
         yaw: 0.4,
     };
     let mut scratch = Scratch::default();
-    let n = 2000u32;
-    let t = std::time::Instant::now();
-    for i in 0..n {
-        let g = project_camera(&o, &cam, [0.0, 0.0], att, 3.0, u64::from(i), &mut scratch);
-        std::hint::black_box(g);
+    for frame in 0..3 {
+        let g = project_camera(&o, &cam, [0.0, 0.0], att, 3.0, frame, &mut scratch);
+        let cast = scratch.rays_cast();
+        assert!(cast > 0 && cast <= 576 / 3, "{cast} rays for 576 cells");
+        assert!(!g.near.is_empty());
     }
-    let per = t.elapsed() / n;
-    let tick = std::time::Duration::from_millis(crate::core::TICK_MS);
-    println!(
-        "obstacle grid: {per:?} per camera frame, {:.2} % of the {tick:?} tick",
-        per.as_secs_f64() / tick.as_secs_f64() * 100.0
-    );
 }

@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.40] - 2026-11-10
+
+### Fixed
+
+- Pilot obstacle-grid cost check runs in the normal test suite: it asserts rays are shared per bearing (at most a third of the cells) instead of an ignored timing test.
+
 ## [0.109.39] - 2026-11-10
 
 ### Fixed
