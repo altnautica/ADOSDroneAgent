@@ -7,7 +7,7 @@
 // and only while a target is designated. The re-acquired toast fires from the
 // nav stream's `follow.reacquired` events whatever the mode.
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 
 import { FollowRail } from "@/components/feed/follow-rail";
@@ -18,46 +18,10 @@ import { useNow } from "@/hooks/use-now";
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { cameraLabel } from "@/lib/feed-legs";
 import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
-import { reacquiredToastText } from "@/lib/follow-rail";
 import type { RosterCamera } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { toast } from "@/shared/api/toast";
-import { isFollowingMode } from "@/shared/hud/follow-chrome";
 import { useFeedStore } from "@/stores/feed-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
-
-/** Toast each `follow.reacquired` once, as it arrives. */
-function useReacquiredToast(): void {
-  const event = useNavStreamStore((s) => s.event);
-  const shown = useRef<number | null>(null);
-  useEffect(() => {
-    if (!event || shown.current === event.at) return;
-    shown.current = event.at;
-    const text = reacquiredToastText(event.data);
-    if (text) toast.info(text);
-  }, [event]);
-}
-
-export interface FollowStripState {
-  designated: boolean;
-  following: boolean;
-}
-
-/** Whether the follow strip is up, and in following mode. */
-export function useFollowStripState(): FollowStripState {
-  useReacquiredToast();
-  const follow = useNavStreamStore((s) => s.follow);
-  const designated = useNavStreamStore((s) => s.designated) !== null;
-  const followSkill = useFollowSkill();
-  const now = useNow(follow ? 1000 : null);
-  const following = isFollowingMode({
-    phase: follow?.data.phase ?? null,
-    ageMs: follow ? now - follow.at : Infinity,
-    installed: followSkill !== null,
-    designated,
-  });
-  return { designated, following };
-}
 
 export function FollowStrip({
   widthClass,

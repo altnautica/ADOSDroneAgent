@@ -98,8 +98,9 @@ function StatusPill({ compact }: { compact: boolean }) {
   const storagePct = useStatusStore((s) => s.status?.system?.disk_pct ?? null);
   const acked = useStatusPillStore((s) => s.acked);
   const ack = useStatusPillStore((s) => s.ack);
-  const [open, setOpen] = useState(false);
-  const anchor = useRef<HTMLButtonElement>(null);
+  // The list's anchor, read when the pill is pressed; null while closed.
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const open = rect !== null;
   const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct }), acked);
   const color = severityColor(summary.severity);
   const Icon = SEVERITY_ICON[summary.severity];
@@ -112,13 +113,11 @@ function StatusPill({ compact }: { compact: boolean }) {
     if (open) ack(idKey ? idKey.split("|") : []);
   }, [open, idKey, ack]);
 
-  const rect = open ? anchor.current?.getBoundingClientRect() : undefined;
   return (
     <>
       <button
-        ref={anchor}
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={(e) => setRect(open ? null : e.currentTarget.getBoundingClientRect())}
         aria-label={`${cockpitText("cockpit.menu.status")}: ${summary.text}`}
         aria-expanded={open}
         data-zone="status_pill"
@@ -137,16 +136,16 @@ function StatusPill({ compact }: { compact: boolean }) {
           <span className="truncate">{summary.text}</span>
         )}
       </button>
-      {open && rect ? (
+      {rect ? (
         <>
-          <button type="button" aria-label="Close" className="fixed inset-0 z-50 cursor-default" onClick={() => setOpen(false)} />
+          <button type="button" aria-label="Close" className="fixed inset-0 z-50 cursor-default" onClick={() => setRect(null)} />
           <div
             role="dialog"
             aria-label={cockpitText("cockpit.alerts.title")}
             className="chrome-panel fixed z-50 flex max-h-[60vh] w-[min(360px,90vw)] flex-col gap-[4px] overflow-y-auto p-[8px]"
             style={{ left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)), top: rect.bottom + 8 }}
             onKeyDown={(e) => {
-              if (e.key === "Escape") setOpen(false);
+              if (e.key === "Escape") setRect(null);
             }}
           >
             <div className="chrome-label px-[4px] uppercase tracking-wide">{cockpitText("cockpit.alerts.title")}</div>
@@ -230,25 +229,48 @@ function LayerButton({ withLabel = true }: { withLabel?: boolean }) {
 }
 
 /** How many of `TOP_BAR_OVERFLOW` are moved out of the row: one more each
- *  time the row overflows, back to none when the bar is resized. */
+ *  frame the row overflows, back to none when the bar is resized. The row is
+ *  re-checked once a second as its values change width. */
 function useOverflowCount(row: React.RefObject<HTMLDivElement>): number {
   const [hidden, setHidden] = useState(0);
   useLayoutEffect(() => {
-    const el = row.current?.parentElement;
-    if (!el) return;
-    let width = el.clientWidth;
-    const ro = new ResizeObserver(() => {
-      if (el.clientWidth === width) return;
-      width = el.clientWidth;
-      setHidden(0);
-    });
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [row]);
-  useLayoutEffect(() => {
     const el = row.current;
-    if (el && hidden < TOP_BAR_OVERFLOW.length && el.scrollWidth > el.clientWidth + 1) setHidden(hidden + 1);
-  });
+    const bar = el?.parentElement;
+    if (!el || !bar) return;
+    let count = 0;
+    let width = -1;
+    let raf = 0;
+    const check = () => {
+      raf = 0;
+      if (count >= TOP_BAR_OVERFLOW.length || el.scrollWidth <= el.clientWidth + 1) return;
+      count += 1;
+      setHidden(count);
+      // Re-measure after React has drawn the shorter row.
+      raf = requestAnimationFrame(() => {
+        raf = requestAnimationFrame(check);
+      });
+    };
+    const schedule = () => {
+      if (!raf) raf = requestAnimationFrame(check);
+    };
+    const ro = new ResizeObserver(() => {
+      if (bar.clientWidth !== width) {
+        width = bar.clientWidth;
+        count = 0;
+        setHidden(0);
+      }
+      cancelAnimationFrame(raf);
+      raf = 0;
+      schedule();
+    });
+    ro.observe(bar);
+    const tick = setInterval(schedule, 1000);
+    return () => {
+      ro.disconnect();
+      clearInterval(tick);
+      cancelAnimationFrame(raf);
+    };
+  }, [row]);
   return hidden;
 }
 

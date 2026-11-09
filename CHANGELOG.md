@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.36] - 2026-11-10
+
+### Fixed
+
+- Cockpit top bar measures its overflow in a frame callback (no state set during an effect or ref read during render), the gimbal pad availability no longer resets state inside an effect, and the follow-strip state hook lives in its own module; the cockpit lint passes with no warnings.
+
 ## [0.109.35] - 2026-11-10
 
 ### Changed

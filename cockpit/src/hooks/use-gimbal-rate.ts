@@ -28,10 +28,7 @@ export const useGimbalPadStore = create<GimbalPadState>((set) => ({
 export function useGimbalAvailable(enabled: boolean): boolean {
   const [available, setAvailable] = useState(false);
   useEffect(() => {
-    if (!enabled) {
-      setAvailable(false);
-      return;
-    }
+    if (!enabled) return;
     const ac = new AbortController();
     const poll = () =>
       gimbalRateAvailability(ac.signal).then(
@@ -45,7 +42,7 @@ export function useGimbalAvailable(enabled: boolean): boolean {
       ac.abort();
     };
   }, [enabled]);
-  return available;
+  return enabled && available;
 }
 
 /** Sends the held rate (pad, else L2/R2 pitch) while `available`. */
