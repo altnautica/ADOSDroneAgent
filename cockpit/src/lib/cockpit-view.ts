@@ -1,16 +1,21 @@
 // The cockpit view and its data layers (cockpit spec `views.json` and
-// `layers.json`): which view is on screen, the layer level (Full / Route /
-// Off), and the per-layer flags, resolved to the set of layers drawn now.
+// `layers.json`): which view is on screen, the layer level (Instruments /
+// Full / Route / Off), and the per-layer flags, resolved to the set of layers
+// drawn now.
 
 import layersJson from "@/shared/cockpit-spec/layers.json";
 import viewsJson from "@/shared/cockpit-spec/views.json";
+import type { LayerLevel } from "@/shared/hud/ar-layout";
+
+export type { LayerLevel };
 
 /** The cockpit views, in the order Triangle (or `V`) cycles them. */
 export const COCKPIT_VIEWS = ["pilot", "map", "split", "vision"] as const;
 export type CockpitView = (typeof COCKPIT_VIEWS)[number];
 
-export const LAYER_LEVELS = ["full", "route", "off"] as const;
-export type LayerLevel = (typeof LAYER_LEVELS)[number];
+/** The levels in the spec's order (`levels.order`), most to least drawn; the
+ *  level button, `O` and the D-pad step through all of them and wrap. */
+export const LAYER_LEVELS: readonly LayerLevel[] = layersJson.levels.order as LayerLevel[];
 
 const VIEW_CYCLE: readonly CockpitView[] = (viewsJson.cycle as string[]).filter((v): v is CockpitView =>
   (COCKPIT_VIEWS as readonly string[]).includes(v),
@@ -29,6 +34,9 @@ export const OFF_LAYERS: readonly string[] = layersJson.levels.off.layers;
 /** Leased layers (depth, surfaces) are toggled on their own; the level never
  *  turns them on or off. */
 export const LEASED_LAYERS: readonly string[] = layersJson.layers.filter((l) => l.lease).map((l) => l.id);
+/** Layers drawn only at the listed levels (`levels.only_at_levels`): the
+ *  flight instruments draw only at the Instruments level. */
+export const ONLY_AT_LEVELS: Readonly<Record<string, readonly string[]>> = layersJson.levels.only_at_levels;
 
 /** Layers a view forces on while it is open. */
 export const VIEW_FORCED_LAYERS: Readonly<Record<string, readonly string[]>> = Object.fromEntries(
@@ -52,10 +60,11 @@ export function layerFlag(layers: Readonly<Record<string, boolean>>, id: string)
 
 /**
  * The layers drawn now. Full draws every layer whose flag is on; Route draws
- * the route set of those; Off draws the Off set. Leased layers (depth,
- * surfaces) follow their own flag at every level. A view's forced layers are
- * added on top. `known` lists plugin layer ids present on this vehicle so Full
- * can include them.
+ * the route set of those; Off draws the Off set. A layer listed in
+ * `only_at_levels` (the flight instruments) draws only at those levels.
+ * Leased layers (depth, surfaces) follow their own flag at every level. A
+ * view's forced layers are added on top. `known` lists plugin layer ids
+ * present on this vehicle so Full can include them.
  */
 export function effectiveLayers(
   level: LayerLevel,
@@ -71,6 +80,8 @@ export function effectiveLayers(
       out.add(id);
       continue;
     }
+    const only = ONLY_AT_LEVELS[id];
+    if (only && !only.includes(level)) continue;
     if (level === "route" && !ROUTE_LAYERS.includes(id)) continue;
     if (level === "off" && !OFF_LAYERS.includes(id)) continue;
     out.add(id);
@@ -92,4 +103,8 @@ export function nextView(view: CockpitView): CockpitView {
 
 export function nextLevel(level: LayerLevel): LayerLevel {
   return LAYER_LEVELS[(LAYER_LEVELS.indexOf(level) + 1) % LAYER_LEVELS.length];
+}
+
+export function prevLevel(level: LayerLevel): LayerLevel {
+  return LAYER_LEVELS[(LAYER_LEVELS.indexOf(level) + LAYER_LEVELS.length - 1) % LAYER_LEVELS.length];
 }

@@ -14,6 +14,7 @@ import { NavSourceChip } from "@/components/feed/nav-source-chip";
 import { usePadStatus } from "@/hooks/use-gamepad";
 import { useNow } from "@/hooks/use-now";
 import { useSkillContext } from "@/hooks/use-skill-context";
+import { cockpitText } from "@/lib/cockpit-text";
 import { batteryReading } from "@/lib/alerts";
 import { isKiosk } from "@/lib/kiosk";
 import { armLabel, fmtClock, linkLabel } from "@/lib/safety-band";
@@ -25,7 +26,7 @@ import { useFlightStore } from "@/stores/flight-store";
 import { useNavStore } from "@/stores/nav-store";
 import { useStatusStore } from "@/stores/status-store";
 
-const LEVEL_LABEL = { full: "FULL", route: "ROUTE", off: "OFF" } as const;
+const levelLabel = (level: string) => cockpitText(`cockpit.level.${level}`).toUpperCase();
 
 function Item({ icon: Icon, tone, label, children }: { icon?: LucideIcon; tone?: string; label: string; children: ReactNode }) {
   return (
@@ -142,11 +143,11 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
       <button
         type="button"
         onClick={cycleLevel}
-        aria-label={`Layers ${LEVEL_LABEL[level]}. Next level`}
+        aria-label={`Layers ${levelLabel(level)}. Next level`}
         className="flex min-h-[48px] shrink-0 items-center gap-[0.25rem] rounded-md px-[0.4rem] font-mono text-[0.72rem] text-hud-ink hover:bg-hud-hair"
       >
         <Layers className="h-[0.95rem] w-[0.95rem]" aria-hidden />
-        {LEVEL_LABEL[level]}
+        {levelLabel(level)}
       </button>
       <button
         type="button"

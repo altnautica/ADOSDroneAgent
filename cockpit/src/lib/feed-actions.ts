@@ -8,7 +8,7 @@
 
 import { PROFILE_KEYS } from "@/lib/cockpit-spec";
 import { registerCockpitActions, runCockpitAction, type CockpitAction } from "@/lib/cockpit-actions";
-import { nextLevel } from "@/lib/cockpit-view";
+import { prevLevel } from "@/lib/cockpit-view";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
@@ -41,7 +41,7 @@ export function registerFeedActions(): () => void {
       id: "layer.level.prev",
       label: "Layer level (back)",
       group: "view",
-      run: press(() => view().setLevel(nextLevel(nextLevel(view().level)))),
+      run: press(() => view().setLevel(prevLevel(view().level))),
     },
     { id: "quick_settings", label: "Quick settings", group: "view", run: press(() => useCockpitUiStore.getState().openSheet("mode")) },
     ...PROFILES.map(

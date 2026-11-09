@@ -66,6 +66,7 @@ describe("layoutAr on the golden frame", () => {
     expect(keys({}, c)).toContain("circle:wp:9");
     expect(keys({}, c)).toContain("line:leg:future#1");
     expect(keys({ level: "route" }, c).some((k) => k.includes("wp:9") || k.includes("leg:future"))).toBe(false);
+    expect(keys({ level: "instruments" }, c)).toEqual(keys({ level: "full" }, c));
   });
 
   it("follows the mission state rules", () => {

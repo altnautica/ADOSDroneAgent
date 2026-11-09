@@ -172,7 +172,7 @@ export function FeedScreen() {
     ),
     hud: (
       <>
-        {layers.has("hud") ? <HudCanvas /> : null}
+        {layers.has("centre_marks") ? <HudCanvas instruments={layers.has("instruments")} /> : null}
         <FollowChrome
           widthClass={widthClass}
           cameras={cameras}

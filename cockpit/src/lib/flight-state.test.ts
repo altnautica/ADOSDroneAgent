@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { effectiveLayers, nextView } from "@/lib/cockpit-view";
+import { effectiveLayers, LAYER_LEVELS, nextLevel, nextView, prevLevel } from "@/lib/cockpit-view";
 import { cockpitText } from "@/lib/cockpit-text";
 import { stepProfile } from "@/lib/feed-actions";
 import { flightStateChip, type ChipFacts } from "@/lib/flight-state";
@@ -87,13 +87,29 @@ describe("views and layers", () => {
   });
 
   it("applies the levels, keeps leased layers on their own flag, forces vision layers", () => {
-    expect([...effectiveLayers("off", {}, "pilot")]).toEqual(["hud"]);
+    expect([...effectiveLayers("off", {}, "pilot")]).toEqual(["centre_marks"]);
     expect(effectiveLayers("route", {}, "pilot").has("ar_route")).toBe(true);
     expect(effectiveLayers("full", { depth: true }, "pilot").has("depth")).toBe(true);
     expect(effectiveLayers("off", { depth: true }, "pilot").has("depth")).toBe(true);
     const vision = effectiveLayers("off", {}, "vision");
     expect(vision.has("targets") && vision.has("depth") && vision.has("surfaces")).toBe(true);
     expect(effectiveLayers("full", {}, "pilot", ["plugin:x:y"]).has("plugin:x:y")).toBe(true);
+  });
+
+  it("draws the flight instruments only at the Instruments level; the centre marks at every level", () => {
+    for (const level of LAYER_LEVELS) {
+      const on = effectiveLayers(level, {}, "pilot");
+      expect(on.has("centre_marks")).toBe(true);
+      expect(on.has("instruments")).toBe(level === "instruments");
+    }
+    expect(effectiveLayers("instruments", { instruments: false }, "pilot").has("instruments")).toBe(false);
+    expect(effectiveLayers("full", { instruments: true }, "pilot").has("instruments")).toBe(false);
+  });
+
+  it("steps through all four levels both ways and wraps", () => {
+    expect(LAYER_LEVELS).toEqual(["instruments", "full", "route", "off"]);
+    expect(LAYER_LEVELS.map(nextLevel)).toEqual(["full", "route", "off", "instruments"]);
+    expect(LAYER_LEVELS.map(prevLevel)).toEqual(["off", "instruments", "full", "route"]);
   });
 });
 

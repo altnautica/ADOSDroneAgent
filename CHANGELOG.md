@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.30] - 2026-11-10
+
+### Changed
+
+- Cockpit spec: a fourth layer level, Instruments, above Full (`levels.order` is Instruments, Full, Route, Off). The HUD layer is split into `centre_marks` (the reticle, a short horizon mark and a small heading readout, drawn at every level) and `instruments` (pitch ladder, roll arc, flight-path marker, speed, altitude and heading tapes, drawn only at Instruments), so the default centre is a clean camera view. The level button, `O` and the D-pad step through all four levels and wrap; the back step now goes to the previous level instead of two forward.
+- Cockpit spec `layout.json`: the top bar carries STOP, never scrolls and moves the controller, navigation source and link text into the Menu when it runs out of room (the chip, the status pill, battery and STOP never move); a `status_pill` (sources, severity colours, flash until acknowledged); `orientation_lock` for the Android flight screen; `legacy_chrome: "none"` (no status band, telemetry strip, navigation rail or hint bar on the flight screen).
+- Cockpit spec `tokens.json`: a `chrome` group for the flight-screen panels (translucent background, backdrop blur with an opaque fallback, hairline border, radius, type scale, icon size and spacing, severity and STOP colours). New strings for the status pill, alerts, levels, battery, Menu, STOP, gimbal pad, map fly-here, the mission on the map and the layer chips.
+
 ## [0.109.29] - 2026-11-08
 
 ### Changed

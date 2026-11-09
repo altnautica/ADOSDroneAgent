@@ -1,14 +1,19 @@
-// L2 — the instrument HUD, drawn on one canvas over the video. It reads the
-// flight store once per animation frame (and repaints only when the sample,
-// the staleness or the size changed), so telemetry never re-renders React.
+// L2: the HUD, drawn on one canvas over the video. It reads the flight store
+// once per animation frame (and repaints only when the sample, the staleness,
+// the size or the level changed), so telemetry never re-renders React.
 //
-// Instruments: horizon and pitch ladder (rungs every 5°, labels every 10°),
-// roll arc with ±10/20/30/45/60° ticks, flight-path marker from the velocity
-// vector, heading tape with a home-bearing caret, scrolling speed tape
-// (groundspeed; airspeed on a fixed-wing when it reads > 0), scrolling
-// altitude tape (REL/MSL, persisted) with a vertical-speed bar, and a centre
-// crosshair. The agent's telemetry carries no wind, so no wind arrow is
-// drawn. Anything whose source is older than 2 s dims and reads a dash.
+// Two parts (cockpit spec `layers.json`):
+// - centre marks, at every level: the centre reticle, a short horizon mark
+//   that follows roll and pitch, and a small heading readout above the
+//   reticle. The centre stays a clean camera view.
+// - instruments, only at the Instruments level: horizon and pitch ladder
+//   (rungs every 5°, labels every 10°), roll arc with ±10/20/30/45/60° ticks,
+//   flight-path marker from the velocity vector, heading tape with a
+//   home-bearing caret, scrolling speed tape (groundspeed; airspeed on a
+//   fixed-wing when it reads > 0), scrolling altitude tape (REL/MSL,
+//   persisted) with a vertical-speed bar.
+// The agent's telemetry carries no wind, so no wind arrow is drawn. Anything
+// whose source is older than 2 s dims and reads a dash.
 
 import { useEffect, useRef } from "react";
 
@@ -41,6 +46,60 @@ function finite(v: number | null | undefined): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }
 
+/** The centre reticle: two open brackets and a centre dot. */
+function drawReticle(ctx: CanvasRenderingContext2D, cx: number, cy: number, u: number, p: Palette) {
+  ctx.strokeStyle = p.ink;
+  ctx.lineWidth = Math.max(1.5, u * 0.08);
+  ctx.beginPath();
+  ctx.moveTo(cx - u * 1.6, cy);
+  ctx.lineTo(cx - u * 0.6, cy);
+  ctx.lineTo(cx - u * 0.6, cy + u * 0.4);
+  ctx.moveTo(cx + u * 1.6, cy);
+  ctx.lineTo(cx + u * 0.6, cy);
+  ctx.lineTo(cx + u * 0.6, cy + u * 0.4);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(cx, cy, u * 0.12, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+/** The clean centre: the reticle, a short horizon mark either side of it
+ *  that follows roll and pitch (clamped near the centre), and the heading as
+ *  a small readout above the reticle. Nothing else crosses the picture. */
+function drawCentreMarks(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  u: number,
+  p: Palette,
+  roll: number | null,
+  pitch: number | null,
+  heading: number | null,
+  font: (scale: number) => string,
+) {
+  drawReticle(ctx, cx, cy, u, p);
+  if (roll !== null && pitch !== null) {
+    const off = Math.max(-u * 4, Math.min(u * 4, pitch * u * 0.25));
+    ctx.save();
+    ctx.translate(cx, cy + off);
+    ctx.rotate((-roll * Math.PI) / 180);
+    ctx.strokeStyle = p.ink;
+    ctx.lineWidth = Math.max(1.5, u * 0.08);
+    ctx.beginPath();
+    ctx.moveTo(-u * 4.2, 0);
+    ctx.lineTo(-u * 2.4, 0);
+    ctx.moveTo(u * 2.4, 0);
+    ctx.lineTo(u * 4.2, 0);
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.fillStyle = p.ink;
+  ctx.font = font(0.75);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(heading !== null ? `${String(Math.round(heading) % 360).padStart(3, "0")}°` : DASH, cx, cy - u * 1.6);
+}
+
 function draw(
   ctx: CanvasRenderingContext2D,
   w: number,
@@ -51,6 +110,7 @@ function draw(
   stale: boolean,
   home: HomePoint | null,
   altRef: AltRef,
+  instruments: boolean,
 ) {
   ctx.clearRect(0, 0, w, h);
   const cx = w / 2;
@@ -66,6 +126,12 @@ function draw(
   const roll = !stale && finite(t?.attitude?.roll) ? t!.attitude!.roll! * RAD : null;
   const pitch = !stale && finite(t?.attitude?.pitch) ? t!.attitude!.pitch! * RAD : null;
   const heading = !stale && finite(t?.position?.heading) && t!.position!.heading! <= 360 ? t!.position!.heading! : null;
+
+  if (!instruments) {
+    drawCentreMarks(ctx, cx, cy, u, p, roll, pitch, heading, font);
+    ctx.globalAlpha = 1;
+    return;
+  }
 
   // Horizon + ladder, clipped to the attitude window.
   if (roll !== null && pitch !== null) {
@@ -155,20 +221,7 @@ function draw(
     ctx.restore();
   }
 
-  // Centre crosshair.
-  ctx.strokeStyle = p.ink;
-  ctx.lineWidth = Math.max(1.5, u * 0.08);
-  ctx.beginPath();
-  ctx.moveTo(cx - u * 1.6, cy);
-  ctx.lineTo(cx - u * 0.6, cy);
-  ctx.lineTo(cx - u * 0.6, cy + u * 0.4);
-  ctx.moveTo(cx + u * 1.6, cy);
-  ctx.lineTo(cx + u * 0.6, cy);
-  ctx.lineTo(cx + u * 0.6, cy + u * 0.4);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.arc(cx, cy, u * 0.12, 0, Math.PI * 2);
-  ctx.stroke();
+  drawReticle(ctx, cx, cy, u, p);
 
   // Flight-path marker.
   const fp = stale ? null : flightPath(t?.velocity?.vx, t?.velocity?.vy, t?.velocity?.vz, heading);
@@ -311,15 +364,17 @@ function draw(
   ctx.globalAlpha = 1;
 }
 
-export function HudCanvas() {
+export function HudCanvas({ instruments }: { instruments: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const altRef = useSettingsStore((s) => s.altRef);
   const setAltRef = useSettingsStore((s) => s.setAltRef);
   const altRefRef = useRef(altRef);
+  const instrumentsRef = useRef(instruments);
 
   useEffect(() => {
     altRefRef.current = altRef;
-  }, [altRef]);
+    instrumentsRef.current = instruments;
+  }, [altRef, instruments]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -353,15 +408,35 @@ export function HudCanvas() {
     resize();
 
     let raf = 0;
-    let painted: unknown[] = [];
+    let paintedTelemetry: unknown = undefined;
+    let paintedStale = false;
+    let paintedHome: unknown = undefined;
+    let paintedAlt: AltRef | null = null;
+    let paintedSized = -1;
+    let paintedInstruments = false;
     const frame = () => {
       raf = requestAnimationFrame(frame);
       const s = useFlightStore.getState();
       const stale = isInstrumentStale(performance.now(), s.lastLiveAt, s.live);
-      const key = [s.telemetry, stale, s.home, altRefRef.current, sized];
-      if (key.every((x, i) => x === painted[i])) return;
-      painted = key;
-      draw(ctx, w, h, u, palette, s.telemetry, stale, s.home, altRefRef.current);
+      const alt = altRefRef.current;
+      const inst = instrumentsRef.current;
+      if (
+        s.telemetry === paintedTelemetry &&
+        stale === paintedStale &&
+        s.home === paintedHome &&
+        alt === paintedAlt &&
+        sized === paintedSized &&
+        inst === paintedInstruments
+      ) {
+        return;
+      }
+      paintedTelemetry = s.telemetry;
+      paintedStale = stale;
+      paintedHome = s.home;
+      paintedAlt = alt;
+      paintedSized = sized;
+      paintedInstruments = inst;
+      draw(ctx, w, h, u, palette, s.telemetry, stale, s.home, alt, inst);
     };
     raf = requestAnimationFrame(frame);
     return () => {
@@ -371,16 +446,18 @@ export function HudCanvas() {
   }, []);
 
   return (
-    <div className="pointer-events-none absolute inset-0 z-[15]">
+    <div className="pointer-events-none absolute inset-0 z-[15]" data-testid="hud" data-hud-instruments={instruments ? "on" : "off"}>
       <canvas ref={canvasRef} className="h-full w-full" aria-hidden />
-      <button
-        type="button"
-        onClick={() => setAltRef(altRef === "rel" ? "msl" : "rel")}
-        aria-label={`Altitude reference ${altRef === "rel" ? "home-relative" : "mean sea level"}; switch`}
-        className="pointer-events-auto absolute right-0 top-1/2 min-h-[40px] -translate-y-[calc(50%+6rem)] rounded-md border border-hud-hair bg-hud-glass px-[0.4rem] font-mono text-[0.75rem] text-hud-ink"
-      >
-        {altRef === "rel" ? "REL" : "MSL"}
-      </button>
+      {instruments ? (
+        <button
+          type="button"
+          onClick={() => setAltRef(altRef === "rel" ? "msl" : "rel")}
+          aria-label={`Altitude reference ${altRef === "rel" ? "home-relative" : "mean sea level"}; switch`}
+          className="pointer-events-auto absolute right-0 top-1/2 min-h-[40px] -translate-y-[calc(50%+6rem)] rounded-md border border-hud-hair bg-hud-glass px-[0.4rem] font-mono text-[0.75rem] text-hud-ink"
+        >
+          {altRef === "rel" ? "REL" : "MSL"}
+        </button>
+      ) : null}
     </div>
   );
 }
