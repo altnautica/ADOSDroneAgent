@@ -858,6 +858,24 @@
     {
       "method": "GET",
       "notes": null,
+      "path": "/api/v1/gimbal/rate",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "POST",
+      "notes": null,
+      "path": "/api/v1/gimbal/rate",
+      "public": false,
+      "relay_forbidden": false,
+      "served_by": "native",
+      "websocket": false
+    },
+    {
+      "method": "GET",
+      "notes": null,
       "path": "/api/v1/gnss",
       "public": false,
       "relay_forbidden": false,

@@ -186,6 +186,9 @@ pub struct VisionEngine {
     crop_counts: std::sync::Mutex<HashMap<String, crop::CropCounts>>,
     /// Moving each camera's track with the camera's own turn.
     camera_motion: std::sync::Mutex<camera_motion::CameraMotion>,
+    /// The cameras this engine is configured to capture, known before their
+    /// first frame opens a ring.
+    capture_ids: std::sync::Mutex<Vec<String>>,
 }
 
 /// How a camera ring is sized.
@@ -293,6 +296,7 @@ impl VisionEngine {
             depth_tx: broadcast::channel(BROADCAST_DEPTH).0,
             crop_counts: std::sync::Mutex::new(HashMap::new()),
             camera_motion: std::sync::Mutex::new(camera_motion::CameraMotion::default()),
+            capture_ids: std::sync::Mutex::new(Vec::new()),
         })
     }
 
@@ -469,6 +473,28 @@ impl VisionEngine {
     /// Whether `camera_id` has a frame ring, i.e. the engine captures it.
     pub async fn has_ring(&self, camera_id: &str) -> bool {
         self.cameras.lock().await.contains_key(camera_id)
+    }
+
+    /// Record the cameras this engine is configured to capture, so a lease on
+    /// one is taken before its source delivers (after a restart, or while its
+    /// stream is down and reopening).
+    pub fn set_capture_cameras(&self, ids: &[String]) {
+        *self
+            .capture_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ids.to_vec();
+    }
+
+    /// Whether the engine captures `camera_id`: it has a ring, or it is
+    /// configured and has not delivered a frame yet.
+    pub async fn captures(&self, camera_id: &str) -> bool {
+        let configured = self
+            .capture_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|id| id == camera_id);
+        configured || self.has_ring(camera_id).await
     }
 }
 

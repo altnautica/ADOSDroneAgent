@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 pub use grid::{Grid, CELL_M, GRID_N};
-pub use project::{project_camera, Scratch};
+pub use project::{project_camera, Attitude, Scratch};
 
 use crate::geo::{self, V2};
 

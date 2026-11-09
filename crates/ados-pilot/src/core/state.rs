@@ -106,6 +106,7 @@ impl Pilot {
             fc_mode_name,
             armed: self.fc.armed,
             landed: self.fc.landed(),
+            vtol_transitioning: self.fc.linked(now_ms) && self.fc.vtol_transitioning(),
             input_src: self.sessions.owner.as_ref().map(|o| o.src.clone()),
             input_age_ms: self
                 .sessions
@@ -128,6 +129,7 @@ impl Pilot {
             setpoint_ned: self.setpoint.map(|p| p.map(wire)),
             readiness,
             link_loss_in_s,
+            link_loss_action: self.settings.pilot.link_loss_action.as_str().to_owned(),
             mission: self.mission.clone(),
             input_session: self.sessions.owner.clone(),
             gate: self.sessions.gate(now_ms),
@@ -151,6 +153,16 @@ impl Pilot {
     pub fn obstacles_frame(&mut self, now_ms: u64) -> Option<ObstaclesFrame> {
         let pos = self.pos_ne(now_ms)?;
         let yaw = self.yaw(now_ms);
+        // A stale attitude levels the camera, as the yaw above falls to 0.
+        let att = self
+            .fc
+            .fresh_attitude(now_ms)
+            .map(|a| crate::obstacles::Attitude {
+                roll: a.roll,
+                pitch: a.pitch,
+                yaw: a.yaw,
+            })
+            .unwrap_or_default();
         let agl = self.agl(now_ms).unwrap_or(0.0);
         let sectors_m = self
             .obstacles
@@ -171,7 +183,7 @@ impl Pilot {
                 &self.obstacles,
                 model,
                 pos,
-                yaw,
+                att,
                 agl,
                 now_ms,
                 scratch,

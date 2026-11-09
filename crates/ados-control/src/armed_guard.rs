@@ -97,6 +97,10 @@ const GUARDED_EXACT: &[(&str, &str)] = &[
     ("POST", "/api/plugins/install"),
     ("POST", "/api/plugins/install_from_url"),
     ("POST", "/api/plugins/install_builtin"),
+    // A detector change or reset restarts the vision service, dropping the
+    // detections, depth and follow lock the flight may rely on.
+    ("PUT", "/api/vision/detector"),
+    ("DELETE", "/api/vision/detector"),
 ];
 
 /// Whether restarting `unit` drops the command, telemetry, video, RC, mesh,

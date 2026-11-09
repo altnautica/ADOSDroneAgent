@@ -160,6 +160,11 @@ pub struct CameraModel {
     pub tilt_down_deg: f32,
     /// Camera yaw relative to the body, degrees clockwise.
     pub yaw_deg: f32,
+    /// A stabilised gimbal: the tilt holds against the horizon, so vehicle
+    /// roll and pitch do not turn the view. A body-mounted camera (`false`,
+    /// the default) turns with the airframe.
+    #[serde(default)]
+    pub stabilised: bool,
 }
 
 /// One stick frame from a surface.

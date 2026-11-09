@@ -425,6 +425,21 @@ async fn plugin_disable_is_refused_while_armed_and_force_passes() {
     assert_eq!(hits, 1);
 }
 
+#[tokio::test]
+async fn a_detector_change_or_reset_is_refused_while_armed_and_force_passes() {
+    for method in ["PUT", "DELETE"] {
+        let uri = "/api/vision/detector";
+        let body = r#"{"model_id":"yolo"}"#;
+        let (status, hits) = send_armed(method, uri, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{method}");
+        assert_eq!(hits, 0, "{method}");
+        let (status, hits) = send_armed(method, &format!("{uri}?force=1"), body).await;
+        assert_eq!(status, StatusCode::OK, "{method}");
+        assert_eq!(hits, 1, "{method}");
+    }
+    assert!(!is_guarded("GET", "/api/vision/detector"));
+}
+
 #[test]
 fn setup_reset_is_not_guarded() {
     assert!(!is_guarded("POST", "/api/v1/setup/reset"));

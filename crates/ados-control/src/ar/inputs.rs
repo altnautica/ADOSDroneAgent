@@ -198,15 +198,15 @@ pub fn cameras_from(
         let g = if r.primary { gimbal } else { None };
         let camera = scene::camera_model(r.width, r.height, r.fov_deg, r.mount_pitch_deg, g);
         if let Some(c) = camera {
-            let (tilt, yaw) = match c.aim {
-                Aim::Body { tilt_down, yaw } => (tilt_down, yaw.to_degrees()),
+            let (tilt, yaw, stabilised) = match c.aim {
+                Aim::Body { tilt_down, yaw } => (tilt_down, yaw.to_degrees(), false),
                 Aim::Gimbal {
                     tilt_down,
                     yaw,
                     earth,
                 } => {
                     let y = yaw.to_degrees();
-                    (tilt_down, if earth { y - vehicle_yaw_deg } else { y })
+                    (tilt_down, if earth { y - vehicle_yaw_deg } else { y }, true)
                 }
             };
             let hfov = c.hfov;
@@ -220,6 +220,7 @@ pub fn cameras_from(
                     vfov_deg: vfov.to_degrees(),
                     tilt_down_deg: tilt.to_degrees(),
                     yaw_deg: yaw,
+                    stabilised,
                 },
             );
         }

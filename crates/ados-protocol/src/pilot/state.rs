@@ -168,6 +168,9 @@ pub struct PilotState {
     pub fc_mode_name: String,
     pub armed: bool,
     pub landed: bool,
+    /// A VTOL between hover and forward flight (the FC's EXTENDED_SYS_STATE
+    /// says it is transitioning either way).
+    pub vtol_transitioning: bool,
     pub input_src: Option<String>,
     pub input_age_ms: Option<u64>,
     pub hold_reason: Option<String>,
@@ -178,6 +181,9 @@ pub struct PilotState {
     pub setpoint_ned: Option<[f64; 3]>,
     pub readiness: Vec<Readiness>,
     pub link_loss_in_s: Option<f64>,
+    /// What the pilot does when the control link stays lost: `rth`, `hold`
+    /// or `land` (the configured `pilot.link_loss_action`).
+    pub link_loss_action: String,
     pub mission: Option<Mission>,
     pub input_session: Option<InputSession>,
     pub gate: Option<Gate>,

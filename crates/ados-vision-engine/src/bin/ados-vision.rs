@@ -266,6 +266,7 @@ async fn main() {
     // and, when the video pipeline taps its flight camera, that tap.
     let cameras = camera_specs(&config);
     let camera_ids: Vec<String> = cameras.iter().map(|c| c.id().to_string()).collect();
+    engine.set_capture_cameras(&camera_ids);
     tracing::info!(count = cameras.len(), "vision cameras resolved");
 
     let mut tasks = Vec::new();

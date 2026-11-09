@@ -298,3 +298,47 @@ async fn only_keyed_tile_reads_skip_the_request_budget() {
         );
     }
 }
+
+/// The operator UI's static files never draw on the caller's request budget:
+/// with the data budget spent (a cockpit open on the same laptop), the
+/// dashboard's lazily loaded chunks, fonts and icons still load, data reads
+/// stay refused, and a write to an asset path is still charged.
+#[tokio::test]
+async fn operator_ui_files_do_not_draw_on_the_request_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut edge = live_edge(dir.path(), "agent:\n  name: test\n");
+    edge.rate = Arc::new(RateLimiter::new(2, Duration::from_secs(60)));
+    let app = app(edge);
+    let get = |uri: &str| lan_request("GET", uri).body(Body::empty()).unwrap();
+    for _ in 0..2 {
+        assert_eq!(status_of(&app, get("/api/status")).await, StatusCode::OK);
+    }
+    assert_eq!(
+        status_of(&app, get("/api/status")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    for uri in [
+        "/assets/video-route-1a2b.js",
+        "/assets/inter-latin.woff2",
+        "/brand.svg",
+        "/",
+        "/cockpit/",
+        "/cockpit/assets/index-3c4d.js",
+    ] {
+        for _ in 0..3 {
+            assert_ne!(
+                status_of(&app, get(uri)).await,
+                StatusCode::TOO_MANY_REQUESTS,
+                "{uri}"
+            );
+        }
+    }
+    assert_eq!(
+        status_of(&app, get("/api/status")).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    let post = lan_request("POST", "/assets/x.js")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(status_of(&app, post).await, StatusCode::TOO_MANY_REQUESTS);
+}

@@ -13,6 +13,32 @@ fn ok(r: &Reply) -> bool {
     matches!(r, Reply::Action(a) if a.ok)
 }
 
+/// The `mission_inferred` readiness item, when present.
+fn inferred(w: &World) -> Option<ados_protocol::pilot::Readiness> {
+    w.p.state(w.now)
+        .readiness
+        .into_iter()
+        .find(|r| r.id == "mission_inferred")
+}
+
+#[test]
+fn an_inferred_mission_state_is_named_in_readiness() {
+    let mut w = World::new();
+    w.run(500);
+    // MISSION_CURRENT carries the mission state (ArduPilot 4.5 and later).
+    w.mission("loaded", 0, 4);
+    assert_eq!(inferred(&w), None);
+    // An older FC: the router infers the state from the sequence alone.
+    w.mission_from("fallback", "active", 2, 4);
+    let item = inferred(&w).expect("no mission_inferred readiness item");
+    assert!(!item.ok);
+    assert_eq!(item.severity, ados_protocol::pilot::Severity::Warn);
+    assert_eq!(item.msg, "FC firmware < 4.5: mission state is inferred");
+    // No mission on the FC: nothing to infer.
+    w.mission_from("fallback", "none", 0, 0);
+    assert_eq!(inferred(&w), None);
+}
+
 /// Launch into the mission (`after: mission`) with `when_done`, up to the
 /// point the FC flies it in AUTO.
 fn launched_into_mission(when_done: Option<&str>) -> World {

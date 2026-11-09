@@ -210,10 +210,16 @@ impl World {
     /// The router's state snapshot carrying mission state `state` at `seq`,
     /// through the same path the state socket reader takes.
     pub fn mission(&mut self, state: &str, seq: u32, total: u32) {
+        self.mission_from("mission_state", state, seq, total);
+    }
+
+    /// [`Self::mission`] with the router's `source`: `mission_state`, or
+    /// `fallback` when the FC sends no MISSION_CURRENT mission state.
+    pub fn mission_from(&mut self, source: &str, state: &str, seq: u32, total: u32) {
         let snapshot = serde_json::json!({
             "armed": self.armed,
             "mission": {"state": state, "seq": seq, "total": total, "item_reached": seq.checked_sub(1),
-                        "id": null, "source": "mission_state", "age_ms": 100, "landing_seq": false,
+                        "id": null, "source": source, "age_ms": 100, "landing_seq": false,
                         "rev": 1, "uploads_seen": 0, "items": [{"seq": 1, "cmd": 16}]},
         });
         let m = crate::router_state::mission_of(snapshot);

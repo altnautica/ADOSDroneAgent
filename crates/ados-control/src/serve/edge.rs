@@ -315,14 +315,22 @@ pub(super) async fn tcp_edge(
     // public path a guesser would loop on. Field tile reads that present a
     // valid key are exempt too, since a single map pan fetches dozens of
     // tiles; a keyless or wrong-key tile read is charged like any request.
+    // The operator UI's own static files (bundle chunks, fonts, icons, the
+    // entry pages) are exempt as well: they carry no data, are served from
+    // disk, and a cockpit and a dashboard open on one laptop share a budget,
+    // so a lazily loaded chunk drew a 429 and the page failed to load.
     let tile_read_authed = auth::is_tile_read(&path)
         && request
             .headers()
             .get("X-ADOS-Key")
             .and_then(|v| v.to_str().ok())
             .is_some_and(|k| edge.pairing.authorize(&path, Some(k)));
-    let exempt_from_budget =
-        on_box || (auth::is_public(&path) && !auth::is_pin_login(&path)) || tile_read_authed;
+    let operator_ui_read = matches!(*request.method(), http::Method::GET | http::Method::HEAD)
+        && auth::is_operator_ui(&path);
+    let exempt_from_budget = on_box
+        || (auth::is_public(&path) && !auth::is_pin_login(&path))
+        || tile_read_authed
+        || operator_ui_read;
     if !exempt_from_budget && !edge.rate.check(peer_key) {
         return detail(
             StatusCode::TOO_MANY_REQUESTS,

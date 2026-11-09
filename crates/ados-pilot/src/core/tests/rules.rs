@@ -139,6 +139,31 @@ fn link_loss_triggers_rtl_after_ten_seconds() {
 }
 
 #[test]
+fn the_pilot_kind_names_the_link_loss_action_and_a_vtol_transition() {
+    use ados_protocol::mavlink::ardupilotmega::{
+        MavLandedState, MavMessage, MavVtolState, EXTENDED_SYS_STATE_DATA,
+    };
+    let mut w = World::new();
+    assert_eq!(w.p.state(w.now).link_loss_action, "rth");
+    w.p.settings.pilot.link_loss_action = crate::config::LinkLossAction::Land;
+    assert_eq!(w.p.state(w.now).link_loss_action, "land");
+    w.p.settings.pilot.link_loss_action = crate::config::LinkLossAction::Hold;
+    assert_eq!(w.p.state(w.now).link_loss_action, "hold");
+    assert!(!w.p.state(w.now).vtol_transitioning);
+    let transition = MavMessage::EXTENDED_SYS_STATE(EXTENDED_SYS_STATE_DATA {
+        vtol_state: MavVtolState::MAV_VTOL_STATE_TRANSITION_TO_FW,
+        landed_state: MavLandedState::MAV_LANDED_STATE_IN_AIR,
+    });
+    w.p.on_fc(
+        super::harness::FC_SYS,
+        super::harness::FC_COMP,
+        &transition,
+        w.now,
+    );
+    assert!(w.p.state(w.now).vtol_transitioning);
+}
+
+#[test]
 fn setup_engine_actions_do_not_arm_the_link_loss_timer() {
     // The setup wizard's "Use ADOS Pilot" sets the control mode through an
     // action from `setup`; no operator surface spoke, so no link can be lost.

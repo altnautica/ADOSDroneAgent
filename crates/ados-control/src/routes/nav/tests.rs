@@ -579,3 +579,71 @@ fn status_view_query_leases_and_reports_the_demand() {
         .get("main")
         .is_some());
 }
+
+// -- per-camera depth and surfaces --------------------------------------------
+
+/// Store one camera's depth grid (captured now) through the producer's path;
+/// returns its `ts_ms`.
+fn feed_depth(hub: &NavHub, camera: &str) -> i64 {
+    use ados_protocol::vision_depth::{
+        DepthGrid, DepthRecord, ScaleSource, GRID_CELLS, GRID_COLS, GRID_MASK_BYTES, GRID_ROWS,
+    };
+    let record = DepthRecord::Depth(DepthGrid {
+        camera_id: camera.into(),
+        mono_ns: ados_protocol::framebus::mono_ns(),
+        scale_source: ScaleSource::None,
+        cols: GRID_COLS as u16,
+        rows: GRID_ROWS as u16,
+        near: vec![7; GRID_CELLS],
+        measured: vec![1; GRID_MASK_BYTES],
+    });
+    let (kind, ts_ms, data) = crate::ipc::vision_depth_client::record_value(&record);
+    hub.ingest_host(kind, ts_ms, data);
+    ts_ms
+}
+
+#[test]
+fn a_stalled_cameras_grid_is_not_resent_as_fresh_when_another_camera_produces() {
+    let hub = NavHub::new();
+    let main_ts = feed_depth(&hub, "main");
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let lease = ViewLease::from_query("main:depth").unwrap();
+    let mut sent = [0u64; KIND_COUNT];
+    let frames = hub.frames_since(&mut sent, ClientView::Lease(Some(&lease)));
+    let depth = frames.iter().find(|f| f["kind"] == "depth").unwrap();
+    assert_eq!(depth["ts_ms"], main_ts);
+    // `main` stops; `belly` keeps producing.
+    for _ in 0..3 {
+        feed_depth(&hub, "belly");
+    }
+    let frames = hub.frames_since(&mut sent, ClientView::Lease(Some(&lease)));
+    assert!(
+        frames.iter().all(|f| f["kind"] != "depth"),
+        "main's grid re-sent: {frames:?}"
+    );
+    // A poller leasing `main` reads main's own capture time and grid only.
+    let body = hub.status_body_for(Some("main:depth"));
+    assert_eq!(body["depth"]["ts_ms"], main_ts);
+    assert_eq!(body["depth"]["data"]["ts_ms"], main_ts);
+    assert!(body["depth"]["data"]["cameras"].get("main").is_some());
+    assert!(body["depth"]["data"]["cameras"].get("belly").is_none());
+}
+
+#[test]
+fn a_poller_reads_its_own_cameras_surfaces_whichever_camera_produced_last() {
+    let hub = NavHub::new();
+    for (i, cam) in ["main", "belly", "main", "belly"].iter().enumerate() {
+        hub.ingest_host(
+            NavKind::Surfaces,
+            i as i64,
+            json!({"v": 1, "ts_ms": i, "camera_id": cam, "zones": []}),
+        );
+    }
+    let body = hub.status_body_for(Some("main:surfaces"));
+    assert_eq!(body["surfaces"]["data"]["camera_id"], "main");
+    assert_eq!(body["surfaces"]["ts_ms"], 2);
+    let body = hub.status_body_for(Some("belly:surfaces"));
+    assert_eq!(body["surfaces"]["data"]["camera_id"], "belly");
+    // Unfiltered, the latest of any camera.
+    assert_eq!(hub.status_body()["surfaces"]["data"]["camera_id"], "belly");
+}

@@ -36,8 +36,8 @@ mod view;
 mod tests;
 
 pub use hub::{
-    route, NavHub, NavKind, Routed, EXPORT_TOPICS, FOLLOW_ME_ID, KIND_COUNT, VISION_NAV_ID,
-    WORLD_ENGINE_ID,
+    route, NavHub, NavKind, Routed, DEPTH_CAMERA_STALE_MS, EXPORT_TOPICS, FOLLOW_ME_ID, KIND_COUNT,
+    VISION_NAV_ID, WORLD_ENGINE_ID,
 };
 pub use mission::{get_mission, mission_body};
 pub use view::{ViewDemand, ViewLease, VIEW_LAYERS, VIEW_LEASE_TTL};

@@ -137,13 +137,132 @@ fn camera_projection_marks_cells_on_the_obstacle() {
         vfov_deg: 50.0,
         tilt_down_deg: 0.0,
         yaw_deg: 0.0,
+        stabilised: false,
     };
     let mut scratch = Scratch::default();
-    let g = project_camera(&o, &cam, [0.0, 0.0], 0.0, 3.0, 0, &mut scratch);
+    let g = project_camera(
+        &o,
+        &cam,
+        [0.0, 0.0],
+        Attitude::default(),
+        3.0,
+        0,
+        &mut scratch,
+    );
     let near = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, g.near).unwrap();
     // Centre cell (row 9, col 16) sees the wall at ~4 m.
     let d = ados_protocol::pilot::decode_distance(near[9 * 32 + 16]).unwrap();
     assert!((d - 4.0).abs() < 0.4, "{d}");
     // Far left column (az -40°) misses the ±20° wall.
     assert_eq!(near[9 * 32], 0);
+}
+
+/// A wall 10 m ahead across ±20°, seen from 3 m up.
+fn wall_ahead_at_10_m() -> Obstacles {
+    let mut o = Obstacles::new();
+    let mut ranges = vec![0.0f64; 360];
+    for (i, r) in ranges.iter_mut().enumerate() {
+        if !(20..340).contains(&i) {
+            *r = 10.0;
+        }
+    }
+    let scan = json!({"frame": "body_frd", "angle_increment_rad": std::f64::consts::TAU / 360.0, "ranges_m": ranges});
+    o.ingest_scan(
+        &scan,
+        Level {
+            roll: 0.0,
+            pitch: 0.0,
+            yaw: 0.0,
+            agl: Some(3.0),
+        },
+        [0.0, 0.0],
+        0,
+    );
+    o.rebuild([0.0, 0.0], 0);
+    o
+}
+
+/// The topmost grid row marked in column `c`.
+fn first_row(near: &[u8], c: usize) -> Option<usize> {
+    (0..18).find(|r| near[r * 32 + c] != 0)
+}
+
+fn project(o: &Obstacles, cam: &ados_protocol::pilot::CameraModel, att: Attitude) -> Vec<u8> {
+    let mut scratch = Scratch::default();
+    let g = project_camera(o, cam, [0.0, 0.0], att, 3.0, 0, &mut scratch);
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, g.near).unwrap()
+}
+
+#[test]
+fn camera_cells_follow_the_pinhole_and_the_airframe_pitch() {
+    let o = wall_ahead_at_10_m();
+    let body = ados_protocol::pilot::CameraModel {
+        frame_w: 1280,
+        frame_h: 720,
+        hfov_deg: 80.0,
+        vfov_deg: 50.0,
+        tilt_down_deg: 0.0,
+        yaw_deg: 0.0,
+        stabilised: false,
+    };
+    // The wall top (3 m above the camera, 10 m out) sits 16.7° above the
+    // axis: through the pinhole at v = 0.5 - tan(16.7°)/tan(25°)/2 = 0.178,
+    // so row 3 is the first whose centre is below it.
+    let level = project(&o, &body, Attitude::default());
+    assert_eq!(first_row(&level, 16), Some(3));
+    // The wall's returns span -20°..+19° (a hit counts within 0.35 m of a
+    // ray, 2° at 10 m). Through the pinhole column 22's centre looks 18.8°
+    // right and column 23's 21.5°, column 9's 18.8° left and column 7's 24°:
+    // the wall covers 22 and 9 but not 23 or 7. Uniform angle steps would put
+    // 18.75° in column 23 and 21.25° in column 7, both on the wall.
+    for (c, on) in [(7, false), (9, true), (22, true), (23, false)] {
+        assert_eq!(level[12 * 32 + c] != 0, on, "column {c}");
+    }
+    // Nose up 10°: the wall top is 6.7° above the axis, v = 0.374, row 7.
+    let nose_up = Attitude {
+        pitch: 10f32.to_radians(),
+        ..Attitude::default()
+    };
+    assert_eq!(first_row(&project(&o, &body, nose_up), 16), Some(7));
+    // A stabilised gimbal holds the horizon whatever the airframe pitch.
+    let gimbal = ados_protocol::pilot::CameraModel {
+        stabilised: true,
+        ..body
+    };
+    assert_eq!(first_row(&project(&o, &gimbal, nose_up), 16), Some(3));
+}
+
+#[test]
+fn a_rolled_airframe_tilts_the_wall_edge_across_the_frame() {
+    let o = wall_ahead_at_10_m();
+    let body = ados_protocol::pilot::CameraModel {
+        frame_w: 1280,
+        frame_h: 720,
+        hfov_deg: 80.0,
+        vfov_deg: 50.0,
+        tilt_down_deg: 0.0,
+        yaw_deg: 0.0,
+        stabilised: false,
+    };
+    // Columns 12 and 19 look 10.4° left and right of the nose, well inside
+    // the wall's -20°..+19° span, so a roll that also swings the upper rays
+    // sideways keeps both on the wall.
+    let (l, r) = (12, 19);
+    let level = project(&o, &body, Attitude::default());
+    assert_eq!(first_row(&level, l), first_row(&level, r));
+    // Right wing down 15°: the horizon turns in the image, so the wall's top
+    // edge sits lower on the left of the frame than on the right.
+    let rolled = project(
+        &o,
+        &body,
+        Attitude {
+            roll: 15f32.to_radians(),
+            ..Attitude::default()
+        },
+    );
+    let (left, right) = (
+        first_row(&rolled, l).unwrap(),
+        first_row(&rolled, r).unwrap(),
+    );
+    assert!(left > right, "left {left} right {right}");
 }

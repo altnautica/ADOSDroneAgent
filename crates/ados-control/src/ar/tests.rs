@@ -72,6 +72,12 @@ fn camera_models_follow_the_roster_and_the_gimbal() {
         (models["down"].tilt_down_deg - 90.0).abs() < 1e-9,
         "gimbal is the primary's only"
     );
+    // The gimbal-driven primary holds against the horizon; the body-fixed
+    // belly camera turns with the airframe.
+    assert!(models["main"].stabilised);
+    assert!(!models["down"].stabilised);
+    let (_, models) = cameras_from(&roster(), None, 0.0);
+    assert!(!models["main"].stabilised);
 }
 
 #[test]
@@ -214,6 +220,52 @@ fn fast_motion_raises_the_rate_to_20_hz() {
         b.step(t0 + Duration::from_millis(50 * i), &d, &scene, &cams, None);
     }
     assert_eq!(b.frames_built, 20, "20 Hz while yawing");
+}
+
+/// The 50 ms tick as it really wakes: a few milliseconds early or late.
+fn jittered(t0: Instant, i: u64) -> Instant {
+    const JITTER_MS: [i64; 10] = [0, 2, -3, 1, -2, 3, 1, -1, -3, 2];
+    let ms = 50 * i as i64 + JITTER_MS[(i % 10) as usize];
+    t0 + Duration::from_millis(ms as u64)
+}
+
+#[test]
+fn the_rate_holds_under_tick_jitter() {
+    let (cams, _) = cameras_from(&roster(), None, 0.0);
+    let d = demand(&["main:ar_route"]);
+    let t0 = Instant::now();
+    let mut b = Builder::new(10.0);
+    for i in 0..40u64 {
+        let scene = scene_from(&snapshot(), i as i64, None, None);
+        b.step(jittered(t0, i), &d, &scene, &cams, None);
+    }
+    assert_eq!(b.frames_built, 20, "10 Hz over 2 s while still");
+    let mut b = Builder::new(10.0);
+    for i in 0..40u64 {
+        let mut scene = scene_from(&snapshot(), i as i64, None, None);
+        scene.pose.as_mut().unwrap().yaw = (3.0 * i as f64).to_radians();
+        b.step(jittered(t0, i), &d, &scene, &cams, None);
+    }
+    assert_eq!(b.frames_built, 40, "20 Hz over 2 s while yawing");
+}
+
+#[tokio::test]
+async fn the_build_counter_is_logged_every_10_s_without_vehicle_state() {
+    let t0 = Instant::now();
+    let mut r = Runner::new(
+        &ArConfig::default(),
+        StateIpcClient::disconnected(),
+        NavHub::new(),
+        t0,
+    );
+    assert_eq!(r.tick(t0).await, None);
+    let log = r
+        .tick(t0 + Duration::from_secs(10))
+        .await
+        .expect("no counter record without vehicle state");
+    assert_eq!((log.built, log.built_last_10s), (0, 0));
+    assert_eq!(r.tick(t0 + Duration::from_secs(15)).await, None);
+    assert!(r.tick(t0 + Duration::from_secs(20)).await.is_some());
 }
 
 #[test]

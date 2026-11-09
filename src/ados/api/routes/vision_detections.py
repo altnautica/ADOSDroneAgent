@@ -25,7 +25,8 @@ as JSON with the same field names the contract uses:
     }
 
 The socket is a last-state broadcast, so a browser that connects after a
-detection immediately receives the most recent batch.
+detection immediately receives the most recent batch, while it is under a
+second old; an older replay (detection stopped) is not sent as current.
 
 Auth: native clients pass ``X-ADOS-Key`` on the handshake; browsers
 exchange the pairing key for a one-shot ticket via ``POST /api/_ws/ticket``
@@ -126,7 +127,9 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
     Connects to the engine's ``vision-detections.sock`` broadcast,
     decodes each length-prefixed msgpack ``DetectionBatch``, and forwards
     it to the WebSocket as JSON. The socket's last-state replay means a
-    fresh subscriber gets the most recent batch right away.
+    fresh subscriber gets the most recent batch right away, but only while
+    it is current: a batch older than ``_LATEST_MAX_AGE_MS`` (the replay of a
+    camera that stopped detecting) is dropped, never presented as current.
 
     The connection is downlink-only (engine → browser): client frames are
     read only to notice a disconnect, which ends the stream and releases the
@@ -182,7 +185,7 @@ async def ws_vision_detections(websocket: WebSocket) -> None:
                     return
                 body = await engine.readexactly(length)
                 batch = _msgpack_loads(body)
-                if batch is None:
+                if batch is None or not _is_fresh(batch):
                     continue
                 await websocket.send_json(batch)
 
@@ -217,14 +220,18 @@ def _remember(batch: dict) -> None:
         _latest_by_camera[camera] = batch
 
 
+def _is_fresh(batch: dict) -> bool:
+    """Whether ``batch`` was captured within ``_LATEST_MAX_AGE_MS``."""
+    ts_ms = batch.get("ts_ms")
+    return (
+        isinstance(ts_ms, int)
+        and time.monotonic_ns() // 1_000_000 - ts_ms <= _LATEST_MAX_AGE_MS
+    )
+
+
 def _current(batch: dict | None) -> dict:
     """The reply for ``batch``: it, if fresh, else the stale empty shape."""
-    ts_ms = None if batch is None else batch.get("ts_ms")
-    if (
-        batch is None
-        or not isinstance(ts_ms, int)
-        or time.monotonic_ns() // 1_000_000 - ts_ms > _LATEST_MAX_AGE_MS
-    ):
+    if batch is None or not _is_fresh(batch):
         return {"detections": [], "stale": True, "available": True}
     return {**batch, "available": True}
 

@@ -111,6 +111,8 @@ limiter, pairing gate, MCP-scope admission.
 | POST | `/api/v1/fc-setup/{wizard}/start` |  |
 | POST | `/api/v1/fc-setup/{wizard}/steps/{step}/actions/{action}` |  |
 | POST | `/api/v1/fc-setup/{wizard}/steps/{step}/run` |  |
+| GET | `/api/v1/gimbal/rate` |  |
+| POST | `/api/v1/gimbal/rate` |  |
 | GET | `/api/v1/gnss` |  |
 | PUT | `/api/v1/gnss/base` |  |
 | POST | `/api/v1/gnss/rtcm` |  |
@@ -265,7 +267,7 @@ limiter, pairing gate, MCP-scope admission.
 | DELETE | `/whep/{session_id}` |  |
 | PATCH | `/whep/{session_id}` |  |
 
-240 native routes.
+242 native routes.
 
 ## Residual — FastAPI behind the front's proxy, same :8080
 

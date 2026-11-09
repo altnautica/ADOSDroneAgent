@@ -337,11 +337,12 @@ async fn handle_designate_track(engine: &Arc<VisionEngine>, args: &Value) -> Res
 /// Handle `vision.request_detection`: take, renew (`hold_ms > 0`) or release
 /// (`hold_ms == 0`) the caller's detection lease on a captured camera. The
 /// owner is the plugin the host stamped, or the name a control-plane caller
-/// gave. Any camera the engine does not capture is refused, so the lease map
-/// only ever names real cameras.
+/// gave. A camera the engine is configured to capture is leased even before
+/// its first frame (the work starts when frames arrive); any other camera is
+/// refused, so the lease map only ever names real cameras.
 async fn handle_request_detection(engine: &Arc<VisionEngine>, args: &Value) -> Result<Value> {
     let req = vision_rpc::decode_request_detection(args)?;
-    if !engine.has_ring(&req.camera_id).await {
+    if !engine.captures(&req.camera_id).await {
         return Err(anyhow!("no camera {} on this node", req.camera_id));
     }
     let reply = engine.request_demand(
@@ -933,6 +934,31 @@ mod tests {
         );
         let (_resp, err) = dispatch(&e, &req_env(methods::REQUEST_DETECTION, too_long)).await;
         assert!(err.unwrap().contains("hold_ms"));
+    }
+
+    #[tokio::test]
+    async fn a_configured_camera_is_leased_before_its_first_frame() {
+        let e = engine();
+        e.set_capture_cameras(&["belly".to_owned()]);
+        // No frame yet: the source is still opening (or reopening).
+        assert!(!e.has_ring("belly").await);
+        let lease = vision_rpc::with_owner(
+            &vision_rpc::request_detection_args("belly", 6_000),
+            "operator",
+        );
+        let (resp, err) = dispatch(&e, &req_env(methods::REQUEST_DETECTION, lease)).await;
+        assert!(err.is_none(), "a configured camera was refused: {err:?}");
+        let reply = vision_rpc::decode_request_detection_reply(&resp).unwrap();
+        assert!(reply.detecting);
+        let now = ados_protocol::framebus::mono_ns() / 1_000_000;
+        assert!(e.detection_wanted("belly", now));
+        // A camera the configuration does not name is still refused.
+        let ghost = vision_rpc::with_owner(
+            &vision_rpc::request_detection_args("ghost-cam", 1_000),
+            "operator",
+        );
+        let (_resp, err) = dispatch(&e, &req_env(methods::REQUEST_DETECTION, ghost)).await;
+        assert!(err.unwrap().contains("no camera"));
     }
 
     fn as_map(v: &Value) -> Vec<(Value, Value)> {

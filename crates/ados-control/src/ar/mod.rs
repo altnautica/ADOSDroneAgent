@@ -24,9 +24,9 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::watch;
 
 use crate::ipc::state_client::StateIpcClient;
 use crate::routes::nav::{NavHub, NavKind, ViewDemand};
@@ -52,6 +52,12 @@ const ROSTER_EVERY: Duration = Duration::from_secs(5);
 const LOG_EVERY: Duration = Duration::from_secs(10);
 /// The base tick.
 const TICK: Duration = Duration::from_millis(50);
+/// A tick this close before a build is due counts as on time, so wake-up
+/// jitter on the 50 ms tick never pushes a build to the following tick.
+const DUE_SLACK: Duration = Duration::from_millis(25);
+/// A camera model angle change smaller than this (degrees) is not news to the
+/// pilot: well under one obstacle cell.
+const MODEL_ANGLE_TOL_DEG: f64 = 0.1;
 /// Data older than this does not drive the scene.
 const FRESH_MS: u64 = 1500;
 
@@ -105,15 +111,56 @@ pub struct CameraModel {
     /// Degrees of camera yaw from the vehicle nose (an earth-frame gimbal yaw
     /// is converted with the current vehicle heading).
     pub yaw_deg: f64,
+    /// A stabilised gimbal: its tilt is held against the horizon, so vehicle
+    /// roll and pitch do not turn it. A body-mounted camera turns with them.
+    pub stabilised: bool,
 }
 
-static MODELS: LazyLock<Mutex<BTreeMap<String, CameraModel>>> =
-    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+impl CameraModel {
+    /// Whether `other` draws the same within [`MODEL_ANGLE_TOL_DEG`].
+    fn same_as(&self, other: &Self) -> bool {
+        let close = |a: f64, b: f64| (a - b).abs() < MODEL_ANGLE_TOL_DEG;
+        self.frame_w == other.frame_w
+            && self.frame_h == other.frame_h
+            && self.stabilised == other.stabilised
+            && close(self.hfov_deg, other.hfov_deg)
+            && close(self.vfov_deg, other.vfov_deg)
+            && close(self.tilt_down_deg, other.tilt_down_deg)
+            && close(self.yaw_deg, other.yaw_deg)
+    }
+}
+
+type Models = BTreeMap<String, CameraModel>;
+
+static MODELS: LazyLock<watch::Sender<Models>> = LazyLock::new(|| watch::channel(Models::new()).0);
 
 /// The latest camera models by served camera id (`main` for the primary leg).
 /// Empty before the builder's first tick; cameras with no `fov_deg` are absent.
-pub fn camera_models() -> BTreeMap<String, CameraModel> {
-    MODELS.lock().clone()
+pub fn camera_models() -> Models {
+    MODELS.borrow().clone()
+}
+
+/// Publish the builder's camera models. Subscribers of [`model_changes`] wake
+/// only when a camera appears, goes, or moves by more than
+/// [`MODEL_ANGLE_TOL_DEG`].
+pub fn publish_models(models: Models) {
+    MODELS.send_if_modified(|cur| {
+        let same = cur.len() == models.len()
+            && cur
+                .iter()
+                .zip(models.iter())
+                .all(|((a, ma), (b, mb))| a == b && ma.same_as(mb));
+        if !same {
+            *cur = models;
+        }
+        !same
+    });
+}
+
+/// A receiver that wakes when the camera models change, so the pilot's
+/// obstacle grid follows a gimbal move at once.
+pub fn model_changes() -> watch::Receiver<Models> {
+    MODELS.subscribe()
 }
 
 /// One roster row, reduced to what the scene needs.
@@ -169,7 +216,11 @@ type YawSample = (Instant, f64, Option<(f64, f64)>);
 #[derive(Debug)]
 pub struct Builder {
     period: Duration,
-    last_build: Option<Instant>,
+    /// The scheduled time of the last build. The next one is due a period
+    /// later, at the period of the tick that checks it (so a switch to the
+    /// fast rate takes effect at once), and the rate holds whatever the tick
+    /// jitter because each slot follows the last slot, not the late tick.
+    last_slot: Option<Instant>,
     last_sent: Option<Instant>,
     prev: Option<Value>,
     prev_yaw: Option<YawSample>,
@@ -183,7 +234,7 @@ impl Builder {
     pub fn new(rate_hz: f64) -> Self {
         Self {
             period: Duration::from_secs_f64(1.0 / rate_hz),
-            last_build: None,
+            last_slot: None,
             last_sent: None,
             prev: None,
             prev_yaw: None,
@@ -214,6 +265,19 @@ impl Builder {
         fast
     }
 
+    /// Whether a build is due at `now` at this `period`, recording its slot
+    /// when it is. A builder more than a period behind (a stall, or a return
+    /// from no demand) restarts its schedule from `now`.
+    fn due(&mut self, now: Instant, period: Duration) -> bool {
+        let base = match self.last_slot.map(|slot| slot + period) {
+            Some(due) if now + DUE_SLACK < due => return false,
+            Some(due) if now.saturating_duration_since(due) < period => due,
+            _ => now,
+        };
+        self.last_slot = Some(base);
+        true
+    }
+
     /// One tick. Returns the frame to publish, if any.
     pub fn step(
         &mut self,
@@ -236,13 +300,9 @@ impl Builder {
         } else {
             self.period
         };
-        if self
-            .last_build
-            .is_some_and(|t| now.saturating_duration_since(t) < period)
-        {
+        if !self.due(now, period) {
             return None;
         }
-        self.last_build = Some(now);
         let frame = scene::build(scene, cameras, &wanted);
         self.frames_built += 1;
         let unchanged = self
@@ -289,70 +349,124 @@ pub fn spawn(
     Some(tokio::spawn(run(cfg, state, hub)))
 }
 
-async fn run(cfg: ArConfig, state: StateIpcClient, hub: NavHub) {
-    let mut builder = Builder::new(cfg.rate_hz);
-    let mut tick = tokio::time::interval(TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut roster: Vec<RosterCam> = Vec::new();
-    let mut roster_at: Option<Instant> = None;
-    let mut log_at = Instant::now();
-    let mut logged_built = 0u64;
-    loop {
-        tick.tick().await;
-        let now = Instant::now();
-        if roster_at.is_none_or(|t| now.saturating_duration_since(t) >= ROSTER_EVERY) {
-            roster_at = Some(now);
+/// The 10 s build counter record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildLog {
+    pub built: u64,
+    pub published: u64,
+    pub built_last_10s: u64,
+    pub cameras: Vec<String>,
+}
+
+/// The builder loop's state between ticks.
+struct Runner {
+    state: StateIpcClient,
+    hub: NavHub,
+    builder: Builder,
+    roster: Vec<RosterCam>,
+    roster_at: Option<Instant>,
+    log_at: Instant,
+    logged_built: u64,
+}
+
+impl Runner {
+    fn new(cfg: &ArConfig, state: StateIpcClient, hub: NavHub, now: Instant) -> Self {
+        Self {
+            state,
+            hub,
+            builder: Builder::new(cfg.rate_hz),
+            roster: Vec::new(),
+            roster_at: None,
+            log_at: now,
+            logged_built: 0,
+        }
+    }
+
+    /// One tick: refresh the roster, build for the current demand when the
+    /// vehicle state is fresh, and return the counter record every
+    /// [`LOG_EVERY`] whether or not there was state to build from.
+    async fn tick(&mut self, now: Instant) -> Option<BuildLog> {
+        if self
+            .roster_at
+            .is_none_or(|t| now.saturating_duration_since(t) >= ROSTER_EVERY)
+        {
+            self.roster_at = Some(now);
             if let Ok(rows) =
                 tokio::task::spawn_blocking(crate::routes::camera_config::load_roster).await
             {
-                roster = roster_cams(&rows);
+                self.roster = roster_cams(&rows);
             }
         }
-        let demand = hub.prune_views();
-        let Some((at, snapshot)) = state.snapshot_at() else {
-            continue;
+        let demand = self.hub.prune_views();
+        if let Some((at, snapshot)) = self.state.snapshot_at() {
+            self.build(now, &demand, at, &snapshot);
+        }
+        if now.saturating_duration_since(self.log_at) < LOG_EVERY {
+            return None;
+        }
+        self.log_at = now;
+        let built = self.builder.frames_built;
+        let log = BuildLog {
+            built,
+            published: self.builder.frames_published,
+            built_last_10s: built - self.logged_built,
+            cameras: demand.cameras.keys().cloned().collect(),
         };
-        let gimbal = gimbal_of(&snapshot);
+        self.logged_built = built;
+        Some(log)
+    }
+
+    fn build(&mut self, now: Instant, demand: &ViewDemand, at: Instant, snapshot: &Value) {
+        let gimbal = gimbal_of(snapshot);
         let yaw_deg = snapshot
             .get("attitude")
             .and_then(|a| f(a, "yaw"))
             .unwrap_or(0.0)
             .to_degrees();
-        let (cams, models) = cameras_from(&roster, gimbal, yaw_deg);
-        *MODELS.lock() = models;
+        let (cams, models) = cameras_from(&self.roster, gimbal, yaw_deg);
+        publish_models(models);
         if !demand
             .cameras
             .values()
             .any(|l| l.contains("ar_route") || l.contains("ar_motion"))
         {
-            builder.step(now, &demand, &SceneIn::default(), &cams, None);
-        } else {
-            let fresh = |k| {
-                hub.latest(k)
-                    .filter(|(_, age)| *age <= FRESH_MS)
-                    .map(|(v, _)| v)
-            };
-            let pilot = fresh(NavKind::Pilot);
-            let follow = fresh(NavKind::Follow);
-            let scene = scene_from(&snapshot, unix_ms_of(at), pilot.as_ref(), follow.as_ref());
-            if let Some(frame) = builder.step(now, &demand, &scene, &cams, gimbal) {
-                let ts = frame
-                    .get("ts_ms")
-                    .and_then(Value::as_i64)
-                    .unwrap_or(scene.ts_ms);
-                hub.ingest_host(NavKind::Ar, ts, frame);
-            }
+            self.builder
+                .step(now, demand, &SceneIn::default(), &cams, None);
+            return;
         }
-        if now.saturating_duration_since(log_at) >= LOG_EVERY {
-            log_at = now;
+        let fresh = |k| {
+            self.hub
+                .latest(k)
+                .filter(|(_, age)| *age <= FRESH_MS)
+                .map(|(v, _)| v)
+        };
+        let pilot = fresh(NavKind::Pilot);
+        let follow = fresh(NavKind::Follow);
+        let scene = scene_from(snapshot, unix_ms_of(at), pilot.as_ref(), follow.as_ref());
+        if let Some(frame) = self.builder.step(now, demand, &scene, &cams, gimbal) {
+            let ts = frame
+                .get("ts_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(scene.ts_ms);
+            self.hub.ingest_host(NavKind::Ar, ts, frame);
+        }
+    }
+}
+
+async fn run(cfg: ArConfig, state: StateIpcClient, hub: NavHub) {
+    let mut runner = Runner::new(&cfg, state, hub, Instant::now());
+    let mut tick = tokio::time::interval(TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        if let Some(log) = runner.tick(Instant::now()).await {
             tracing::info!(
-                ar_frames_built = builder.frames_built,
-                ar_frames_published = builder.frames_published,
-                built_last_10s = builder.frames_built - logged_built,
-                cameras = ?demand.cameras.keys().collect::<Vec<_>>(),
+                ar_frames_built = log.built,
+                ar_frames_published = log.published,
+                built_last_10s = log.built_last_10s,
+                cameras = ?log.cameras,
                 "ar_builder"
             );
-            logged_built = builder.frames_built;
         }
     }
 }

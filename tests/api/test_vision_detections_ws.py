@@ -185,6 +185,22 @@ def test_forwards_multiple_batches_in_order(unpaired_client):
         engine.stop()
 
 
+def test_a_stale_replayed_batch_is_not_forwarded_as_current(unpaired_client):
+    """The engine replays its last batch forever; an old one is dropped."""
+    client, sock_path = unpaired_client
+    now_ms = time.monotonic_ns() // 1_000_000
+    stale = dict(SAMPLE_BATCH, frame_id=1, ts_ms=now_ms - 5_000)
+    fresh = dict(SAMPLE_BATCH, frame_id=2, ts_ms=now_ms)
+    engine = _FakeEngineSocket(sock_path, [_frame(stale), _frame(fresh)])
+    engine.start()
+    try:
+        with client.websocket_connect("/api/vision/detections/ws", headers=_ONBOX) as ws:
+            got = ws.receive_json()
+        assert got["frame_id"] == 2
+    finally:
+        engine.stop()
+
+
 def test_closes_cleanly_when_socket_absent(unpaired_client):
     """No engine socket present → the route closes rather than hangs."""
     from starlette.websockets import WebSocketDisconnect as _WSDisconnect

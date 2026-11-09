@@ -2,6 +2,7 @@
 //! occupancy tiles, and the follow events, fed by the plugin event-bus export
 //! reader and read by the nav routes.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -67,6 +68,10 @@ pub enum NavKind {
 /// How many latest-value kinds the hub holds.
 pub const KIND_COUNT: usize = 10;
 
+/// In the all-camera `depth` value, a camera whose grid is this much older
+/// than the newest camera's has stopped producing and is left out.
+pub const DEPTH_CAMERA_STALE_MS: i64 = 2_000;
+
 /// Per-kind seq a stream has already sent.
 pub(crate) type Sent = [u64; KIND_COUNT];
 
@@ -101,6 +106,13 @@ impl NavKind {
 
     fn index(self) -> usize {
         self as usize
+    }
+
+    /// The kinds also kept per camera: a client leasing a camera reads that
+    /// camera's own latest frame, with its own `ts_ms`, so one camera
+    /// producing never re-sends another's grid as fresh.
+    fn per_camera(self) -> bool {
+        matches!(self, NavKind::Depth | NavKind::Surfaces)
     }
 }
 
@@ -190,9 +202,82 @@ struct Latest {
 #[derive(Debug, Default)]
 struct Inner {
     latest: [Option<Latest>; KIND_COUNT],
+    /// Per camera id, the latest frame of each per-camera kind.
+    cameras: [BTreeMap<String, Latest>; KIND_COUNT],
     seq: u64,
     tiles: TileStore,
     views: ViewLeases,
+}
+
+impl Inner {
+    /// The stored value `view` reads for `kind`: under a lease, a per-camera
+    /// kind is that camera's own latest frame.
+    fn source(&self, kind: NavKind, view: ClientView<'_>) -> Option<&Latest> {
+        match view {
+            ClientView::Lease(Some(lease)) if kind.per_camera() => {
+                self.cameras[kind.index()].get(lease.camera_id.as_str())
+            }
+            _ => self.latest[kind.index()].as_ref(),
+        }
+    }
+
+    /// File a per-camera kind's frame under each camera it carries. `surfaces`
+    /// names its camera (`camera_id`); its all-camera value stays the latest
+    /// frame of any camera (`None`). `depth` carries its cameras under
+    /// `cameras`; the returned all-camera value merges every camera still
+    /// producing, each entry keeping its own `ts_ms`.
+    fn store_cameras(&mut self, kind: NavKind, l: &Latest) -> Option<Value> {
+        let slots = &mut self.cameras[kind.index()];
+        let slot = |data: Value| Latest {
+            data,
+            ts_ms: l.ts_ms,
+            received: l.received,
+            seq: l.seq,
+        };
+        if kind == NavKind::Surfaces {
+            if let Some(id) = l.data.get("camera_id").and_then(Value::as_str) {
+                slots.insert(id.to_owned(), slot(l.data.clone()));
+            }
+            return None;
+        }
+        if let Some(Value::Object(cams)) = l.data.get("cameras") {
+            for (id, entry) in cams {
+                let mut own: Map<String, Value> = l
+                    .data
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .filter(|(k, _)| k.as_str() != "cameras")
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if let Some(scale) = entry.get("scale_source") {
+                    own.insert("scale_source".into(), scale.clone());
+                }
+                let mut one = Map::new();
+                one.insert(id.clone(), entry.clone());
+                own.insert("cameras".into(), Value::Object(one));
+                slots.insert(id.clone(), slot(Value::Object(own)));
+            }
+        }
+        let newest = slots.values().map(|s| s.ts_ms).max().unwrap_or(l.ts_ms);
+        let mut cameras = Map::new();
+        let mut all_lidar = true;
+        for (id, s) in slots.iter() {
+            if s.ts_ms < newest - DEPTH_CAMERA_STALE_MS {
+                continue;
+            }
+            if let Some(entry) = s.data.get("cameras").and_then(|c| c.get(id)) {
+                all_lidar &= entry.get("scale_source").and_then(Value::as_str) == Some("lidar");
+                cameras.insert(id.clone(), entry.clone());
+            }
+        }
+        Some(json!({
+            "v": 1,
+            "ts_ms": newest,
+            "scale_source": if all_lidar && !cameras.is_empty() { "lidar" } else { "none" },
+            "cameras": cameras,
+        }))
+    }
 }
 
 /// The shared hub. Cheap to clone; every clone reads the same state.
@@ -226,7 +311,8 @@ impl NavHub {
 
     /// Store the latest value of a kind a host module produces (the pilot
     /// state, obstacles, the AR scene, depth, surfaces). No publisher pinning:
-    /// only in-process producers reach this.
+    /// only in-process producers reach this. `depth` and `surfaces` are also
+    /// filed per camera (see [`Inner::store_cameras`]).
     pub fn ingest_host(&self, kind: NavKind, ts_ms: i64, data: Value) {
         self.store_latest(kind, ts_ms, data);
     }
@@ -236,12 +322,19 @@ impl NavHub {
             let mut inner = self.inner.lock();
             inner.seq += 1;
             let seq = inner.seq;
-            inner.latest[kind.index()] = Some(Latest {
+            let mut latest = Latest {
                 data,
                 ts_ms,
                 received: Instant::now(),
                 seq,
-            });
+            };
+            if kind.per_camera() {
+                if let Some(all) = inner.store_cameras(kind, &latest) {
+                    latest.ts_ms = all.get("ts_ms").and_then(Value::as_i64).unwrap_or(ts_ms);
+                    latest.data = all;
+                }
+            }
+            inner.latest[kind.index()] = Some(latest);
             seq
         };
         self.changed.send_replace(seq);
@@ -331,7 +424,7 @@ impl NavHub {
         let inner = self.inner.lock();
         let mut body = Map::new();
         for kind in NavKind::ALL {
-            let entry = match &inner.latest[kind.index()] {
+            let entry = match inner.source(kind, filter) {
                 Some(l) => match filter.project(kind, &l.data) {
                     Some(data) => json!({
                         "ts_ms": l.ts_ms,
@@ -360,7 +453,7 @@ impl NavHub {
         let inner = self.inner.lock();
         let mut frames = Vec::new();
         for kind in NavKind::ALL {
-            let Some(l) = &inner.latest[kind.index()] else {
+            let Some(l) = inner.source(kind, view) else {
                 continue;
             };
             if l.seq > sent[kind.index()] {

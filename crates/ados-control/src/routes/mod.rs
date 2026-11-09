@@ -26,6 +26,7 @@ pub mod diagnostics;
 pub mod fc_identity;
 pub mod fc_setup;
 pub mod fleet;
+pub mod gimbal_rate;
 pub mod gs_bluetooth;
 pub mod gs_camera_write;
 pub mod gs_cmd;

@@ -65,12 +65,16 @@ pub fn board_soc() -> String {
     "generic".to_string()
 }
 
-/// A short backoff that also wakes on shutdown. Returns `true` when shutdown
-/// fired during the wait (the caller should stop), `false` when the full
-/// backoff elapsed (the caller should reopen its source).
+/// The fixed pause before a failed frame source is reopened: a dead stream is
+/// redialled every 2 s, forever, never faster and never given up on.
+pub const SOURCE_RETRY: Duration = Duration::from_secs(2);
+
+/// The reopen pause ([`SOURCE_RETRY`]), waking early on shutdown. Returns
+/// `true` when shutdown fired during the wait (the caller should stop),
+/// `false` when the full pause elapsed (the caller should reopen its source).
 pub async fn backoff(cancel: &ados_protocol::shutdown::Shutdown) -> bool {
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_millis(500)) => false,
+        _ = tokio::time::sleep(SOURCE_RETRY) => false,
         _ = cancel.wait() => true,
     }
 }
@@ -90,5 +94,22 @@ pub async fn wait_for_shutdown() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_source_is_reopened_after_two_seconds() {
+        let cancel = ados_protocol::shutdown::Shutdown::new();
+        let start = tokio::time::Instant::now();
+        assert!(!backoff(&cancel).await);
+        let waited = start.elapsed();
+        assert!(
+            waited >= Duration::from_secs(2) && waited <= Duration::from_secs(5),
+            "reopen pause {waited:?}"
+        );
     }
 }

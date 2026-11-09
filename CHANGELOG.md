@@ -6,6 +6,28 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.32] - 2026-11-10
+
+### Added
+
+- Pilot nav kind: `link_loss_action` (`rth`, `hold` or `land`, the configured `pilot.link_loss_action`), so a surface's link-loss countdown names the action that will run, and `vtol_transitioning`, true while a VTOL reports a transition to forward or hover flight.
+- Readiness: on an ArduPilot older than 4.5, whose MISSION_CURRENT carries no mission state, the pilot adds the warning `mission_inferred` ("FC firmware < 4.5: mission state is inferred") while a mission is on the FC.
+- A shared pilot client-frame fixture (`crates/ados-control/tests/fixtures/pilot-requests.json`: input, release, session.take, hb, action) that the pilot stream decodes through its own client path; the operator surfaces check their encoders against it.
+- Gimbal rate control for an operator's hold-to-move pad: `POST /api/v1/gimbal/rate {pitch_dps, yaw_dps, hold_ms}` sends `MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW` with no angle target and the two rates, and sends a zero rate itself when a rate is not renewed within `hold_ms` (100-2000 ms, default 500), so a surface that drops mid-move never leaves the gimbal turning. `GET /api/v1/gimbal/rate` answers `{available, reason}` (a MAVLink flight controller and a fresh gimbal attitude) so a surface shows the pad only where it works.
+
+### Fixed
+
+- Obstacle grid per camera: each cell's ray now goes through the same pinhole and the same vehicle attitude chain as the AR layer (roll and pitch for a body-mounted camera, level for a stabilised gimbal), so obstacle cells sit on the obstacle in the video instead of drifting off it toward the frame edges and when the airframe pitches or rolls.
+- Camera model changes (a gimbal tilt or pan) reach the pilot's obstacle projection when they happen instead of up to 2 s later.
+- The control front reads the pilot socket from its own task, so a pilot frame half read when the view demand changes is no longer dropped and the pilot and obstacle kinds no longer stall on a misframed stream. The pilot socket is redialled every 2 s.
+- Depth and landing-zone frames are kept per camera: a surface leasing one camera gets only that camera's frames, each with its own capture time, so a camera that stops producing is no longer re-sent as fresh whenever another camera produces, and a `?view=` poller always reads its own camera's landing zones. Each depth camera entry carries its own `ts_ms`.
+- The detections WebSocket no longer replays a batch older than one second as current when a client connects after detection stopped.
+- A detection, depth or landing-zone request for a configured camera that has not delivered its first frame yet (after a vision restart, or while its stream reopens) is held and starts with the first frame, instead of being refused as a camera the node does not capture.
+- Changing or resetting the detector (`PUT`/`DELETE /api/vision/detector`) restarts the vision service, so it is refused while the vehicle is armed (`409 E_ARMED`, `force` overrides).
+- A vision camera whose stream fails is reopened every 2 s instead of every 500 ms.
+- The AR scene holds its 10 Hz (20 Hz while the view moves fast) rate against tick jitter instead of slipping to 7-8 Hz, switches to the fast rate on the first fast tick, and its 10 s build counter is logged even while no vehicle state arrives.
+- The operator UI's own static files (bundle chunks, fonts, icons, entry pages) no longer draw on a caller's request budget, so a dashboard opened beside a cockpit on the same laptop no longer fails to load a lazily loaded page on a 429. Data calls stay charged.
+
 ## [0.109.31] - 2026-11-10
 
 ### Security

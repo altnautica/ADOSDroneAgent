@@ -24,7 +24,26 @@ impl Pilot {
                     .unwrap_or_else(|| "Aircraft setup complete".into()),
             });
         }
+        if let Some(item) = self.mission_inferred() {
+            items.push(item);
+        }
         items
+    }
+
+    /// The warning that the mission state is inferred: an ArduPilot older
+    /// than 4.5 sends no mission state in MISSION_CURRENT, so the router
+    /// works it out from the sequence alone (`source: "fallback"`).
+    fn mission_inferred(&self) -> Option<ados_protocol::pilot::Readiness> {
+        let m = self.mission.as_ref()?;
+        (m.source == "fallback"
+            && m.state != "none"
+            && self.fc.firmware == Some(crate::fc_profile::Firmware::Ardupilot))
+        .then(|| ados_protocol::pilot::Readiness {
+            id: "mission_inferred".into(),
+            ok: false,
+            severity: ados_protocol::pilot::Severity::Warn,
+            msg: "FC firmware < 4.5: mission state is inferred".into(),
+        })
     }
 
     pub fn set_rc_ados_position(&mut self, slot: u8) {
