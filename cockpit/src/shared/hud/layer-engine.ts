@@ -37,13 +37,14 @@ import {
 } from "./cockpit-frames";
 import {
   DrawOpBuffer,
-  containRect,
   layoutCells,
   layoutSectorArc,
   layoutZones,
   lerpOps,
   type Rect,
 } from "./layer-layout";
+import tokensJson from "../cockpit-spec/tokens.json";
+import { setupText } from "../setup-wizard/strings";
 import { paintOps } from "./layer-paint";
 
 export const DIM_AFTER_MS = 500;
@@ -162,6 +163,21 @@ function visibility(at: number, has: boolean, now: number): Visibility {
   return age > HIDE_AFTER_MS ? "hidden" : age > DIM_AFTER_MS ? "dim" : "fresh";
 }
 
+const VIS_CODE: Readonly<Record<Visibility, number>> = { fresh: 0, dim: 1, hidden: 2 };
+
+/** The status chip colour (tokens.json `layer.unavailable_chip`). */
+export const UNAVAILABLE_CHIP: string = tokensJson.layer.unavailable_chip;
+
+/** Status chip texts from the spec strings, resolved once. */
+export const CHIP_TEXT = {
+  depth: setupText("layer.unavailable", { layer: "Depth" }),
+  depthUnscaled: setupText("layer.depth_unscaled"),
+  surfaces: setupText("layer.unavailable", { layer: "Surfaces" }),
+  obstacles: setupText("layer.unavailable", { layer: "Obstacles" }),
+  ar: setupText("layer.unavailable", { layer: "AR" }),
+  arApprox: setupText("layer.ar_approx"),
+} as const;
+
 export class LayerEngine {
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
@@ -174,7 +190,7 @@ export class LayerEngine {
   private cssH = 0;
   private dpr = 1;
   private lastPaint = 0;
-  private lastVis = "";
+  private lastVis = -1;
   private arLaidVersion = -1;
   private depthLaid = -1;
   private surfLaid = -1;
@@ -188,6 +204,13 @@ export class LayerEngine {
   private surfOps = new DrawOpBuffer();
   private obstOps = new DrawOpBuffer();
   private chipOps = new DrawOpBuffer();
+  /** Next chip position (CSS px), reset per paint. */
+  private chipX = 0;
+  private chipY = 0;
+  /** Reused video rects: the default frame (chips, zones, sectors) and one
+   *  per AR frame size while laying out. */
+  private rectMain: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private rectFrame: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private nearBuf = new Uint8Array(0);
   private measBuf = new Uint8Array(0);
   private paintMs = new Float64Array(STAT_RING);
@@ -285,19 +308,48 @@ export class LayerEngine {
     this.paintN++;
   };
 
-  /** A string that changes exactly when some layer crosses a staleness step. */
-  private visKey(now: number): string {
+  /** A number that changes exactly when some layer crosses a staleness step
+   *  (two bits per layer), so an idle tick allocates nothing. */
+  private visKey(now: number): number {
     const s = this.store;
     return (
-      visibility(s.ar.seen, s.ar.data !== null, now)[0] +
-      visibility(s.obstacles.seen, s.obstacles.data !== null, now)[0] +
-      visibility(s.depth.seen, s.depth.data !== null, now)[0] +
-      visibility(s.surfaces.seen, s.surfaces.data !== null, now)[0]
+      VIS_CODE[visibility(s.ar.seen, s.ar.data !== null, now)] |
+      (VIS_CODE[visibility(s.obstacles.seen, s.obstacles.data !== null, now)] << 2) |
+      (VIS_CODE[visibility(s.depth.seen, s.depth.data !== null, now)] << 4) |
+      (VIS_CODE[visibility(s.surfaces.seen, s.surfaces.data !== null, now)] << 6)
     );
   }
 
-  private videoRect(fw: number, fh: number): Rect {
-    return containRect(this.cssW, this.cssH, fw || this.cfg.videoW, fh || this.cfg.videoH);
+  /** The letterboxed video rect of a `fw`×`fh` frame (0 = the configured
+   *  size), written into `out`. */
+  private videoRect(out: Rect, fw: number, fh: number): Rect {
+    const bw = this.cssW;
+    const bh = this.cssH;
+    const w0 = fw || this.cfg.videoW;
+    const h0 = fh || this.cfg.videoH;
+    if (w0 <= 0 || h0 <= 0 || bw <= 0 || bh <= 0) {
+      out.x = 0;
+      out.y = 0;
+      out.w = bw;
+      out.h = bh;
+      return out;
+    }
+    const k = Math.min(bw / w0, bh / h0);
+    out.w = w0 * k;
+    out.h = h0 * k;
+    out.x = (bw - out.w) / 2;
+    out.y = (bh - out.h) / 2;
+    return out;
+  }
+
+  /** Stack one status chip centred under the top chrome. */
+  private chip(text: string): void {
+    const op = this.chipOps.push("", "chip");
+    op.x = this.chipX;
+    op.y = this.chipY;
+    op.text = text;
+    op.color = UNAVAILABLE_CHIP;
+    this.chipY += 24;
   }
 
   private paint(now: number): void {
@@ -310,17 +362,10 @@ export class LayerEngine {
     const L = this.cfg.layers;
     const s = this.store;
     this.chipOps.clear();
-    const chipRect = this.videoRect(0, 0);
+    const main = this.videoRect(this.rectMain, 0, 0);
     // Status chips stack centred under the top chrome (a fifth down the rect).
-    let chipY = chipRect.y + chipRect.h * 0.2;
-    const chip = (text: string) => {
-      const op = this.chipOps.push("", "chip");
-      op.x = chipRect.x + chipRect.w / 2;
-      op.y = chipY;
-      op.text = text;
-      op.color = "#909090";
-      chipY += 24;
-    };
+    this.chipX = main.x + main.w / 2;
+    this.chipY = main.y + main.h * 0.2;
 
     // Grids and zones (depth z10, surfaces z20, obstacles z30), each in its
     // own buffer, re-laid out only when its own frame changed (configure and
@@ -345,7 +390,7 @@ export class LayerEngine {
       this.surfLaid = s.surfaces.version;
       this.surfOps.clear();
       if (cam !== null && s.surfaces.data && s.surfaces.data.cameraId === cam) {
-        layoutZones(s.surfaces.data.zones, this.videoRect(0, 0), this.surfOps);
+        layoutZones(s.surfaces.data.zones, this.videoRect(this.rectMain, 0, 0), this.surfOps);
       }
     }
     if (this.obstLaid !== s.obstacles.version) {
@@ -354,19 +399,19 @@ export class LayerEngine {
       if (s.obstacles.data) {
         const g = cam !== null ? s.obstacles.data.cameras[cam] : undefined;
         if (g) this.layoutGrid(this.obstOps, g.near, g.measured, g.cols, g.rows, OBSTACLE_GRID);
-        layoutSectorArc(s.obstacles.data.sectorsM, this.videoRect(0, 0), OBSTACLE_GRID, this.obstOps);
+        layoutSectorArc(s.obstacles.data.sectorsM, this.videoRect(this.rectMain, 0, 0), OBSTACLE_GRID, this.obstOps);
       }
     }
     this.paintLayer(ctx, L.has("depth"), depthVis, this.depthOps);
     this.paintLayer(ctx, L.has("surfaces"), surfVis, this.surfOps);
     this.paintLayer(ctx, L.has("obstacles"), obstVis, this.obstOps);
-    if (L.has("depth") && depthVis === "hidden") chip("Depth unavailable");
+    if (L.has("depth") && depthVis === "hidden") this.chip(CHIP_TEXT.depth);
     else if (L.has("depth") && cam !== null && s.depth.data) {
       const g = s.depth.data.cameras[cam];
-      if (g && (g.scaleSource ?? s.depth.data.scaleSource) === "none") chip("Depth unscaled");
+      if (g && (g.scaleSource ?? s.depth.data.scaleSource) === "none") this.chip(CHIP_TEXT.depthUnscaled);
     }
-    if (L.has("surfaces") && surfVis === "hidden") chip("Surfaces unavailable");
-    if (L.has("obstacles") && obstVis === "hidden") chip("Obstacles unavailable");
+    if (L.has("surfaces") && surfVis === "hidden") this.chip(CHIP_TEXT.surfaces);
+    if (L.has("obstacles") && obstVis === "hidden") this.chip(CHIP_TEXT.obstacles);
 
     // AR (route z50, motion z60).
     const wantAr = L.has("ar_route") || L.has("ar_motion");
@@ -375,7 +420,7 @@ export class LayerEngine {
       const frame = s.ar.data;
       const arCam = frame ? (frame.cameras[cam] ?? null) : null;
       const status = arStatusChip(frame, arCam, arVis === "hidden");
-      if (status) chip(status);
+      if (status) this.chip(status === "AR ≈" ? CHIP_TEXT.arApprox : CHIP_TEXT.ar);
       if (arVis !== "hidden" && arCam) {
         if (this.arLaidVersion !== s.ar.version) {
           this.arLaidVersion = s.ar.version;
@@ -387,10 +432,10 @@ export class LayerEngine {
             showLoaded: this.cfg.showLoaded,
           };
           this.arNextOps.clear();
-          layoutAr(arCam, this.videoRect(arCam.frameW, arCam.frameH), opts, this.arNextOps);
+          layoutAr(arCam, this.videoRect(this.rectFrame, arCam.frameW, arCam.frameH), opts, this.arNextOps);
           this.arPrevOps.clear();
           const prevCam = s.arPrev.data?.cameras[cam];
-          if (prevCam) layoutAr(prevCam, this.videoRect(prevCam.frameW, prevCam.frameH), opts, this.arPrevOps);
+          if (prevCam) layoutAr(prevCam, this.videoRect(this.rectFrame, prevCam.frameW, prevCam.frameH), opts, this.arPrevOps);
           const interval = s.ar.at - s.arPrev.at;
           this.interval = interval >= MIN_INTERVAL_MS && interval <= MAX_INTERVAL_MS && prevCam ? interval : 0;
           this.interpUntil = s.ar.at + Math.max(this.interval, FADE_MS);
@@ -429,7 +474,7 @@ export class LayerEngine {
     const got = decodeBase64Into(near, this.nearBuf);
     if (got < cells) return;
     const hasMeas = measured !== null && decodeBase64Into(measured, this.measBuf) >= mbytes;
-    const rect = this.videoRect(0, 0);
+    const rect = this.videoRect(this.rectMain, 0, 0);
     layoutCells(this.nearBuf, hasMeas ? this.measBuf : null, cols, rows, rect, opts, out);
   }
 }

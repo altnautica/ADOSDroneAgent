@@ -344,35 +344,6 @@ function CalibrationCard() {
   );
 }
 
-const TOUR = ["sticks", "safety", "skills"] as const;
-
-function Tour() {
-  const pad = useInputStore((s) => s.pad);
-  const seen = useControlsStore((s) => s.tourSeen);
-  const markSeen = useControlsStore((s) => s.markTourSeen);
-  const [card, setCard] = useState(0);
-  if (!pad || seen) return null;
-  const id = TOUR[card];
-  return (
-    <div role="dialog" aria-label="Controller tour" data-testid="controls-tour" className="rounded-xl border border-primary bg-primary/10 p-[0.8rem]">
-      <h3 className="text-[1rem] font-semibold">{cockpitText(`controls.tour.${id}.title`)}</h3>
-      <p className="text-[0.85rem]">{cockpitText(`controls.tour.${id}.body`)}</p>
-      <div className="flex gap-[0.4rem] pt-[0.4rem]">
-        <button type="button" onClick={markSeen} className="min-h-[44px] rounded-lg border border-border px-[0.7rem] text-[0.8rem]">
-          Skip
-        </button>
-        <button
-          type="button"
-          onClick={() => (card < TOUR.length - 1 ? setCard(card + 1) : markSeen())}
-          className="min-h-[44px] rounded-lg border border-primary bg-primary/25 px-[0.7rem] text-[0.8rem]"
-        >
-          {card < TOUR.length - 1 ? "Next" : "Done"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export function ControlsSettings() {
   const registry = useRegistry();
   const pad = useInputStore((s) => s.pad);
@@ -438,7 +409,6 @@ export function ControlsSettings() {
         </span>
       </header>
       {!pad ? <p className="text-[0.85rem] text-muted-foreground">{cockpitText("controls.press_any_button")}</p> : null}
-      <Tour />
       <div className="flex flex-wrap items-start gap-[0.6rem]">
         <div className="min-w-[320px] flex-[2_1_480px]">
           <PadDrawingView rows={s.draft} selected={selected} onSelect={setSelected} conflicted={conflicted} deadzone={s.deadzone} registry={registry} />

@@ -168,3 +168,10 @@ describe("banners and voice", () => {
     expect(voicePrompt(p, q)).toBe("Mission started");
   });
 });
+
+describe("hold reason after a skill's lease ends", () => {
+  it("names the skill stop rather than the raw reason code", () => {
+    const c = flightStateChip({ ...base, owner: "pilot", holdReason: "lease-revoked" });
+    expect(c.secondary.map((l) => l.text)).toContain("Skill stopped");
+  });
+});

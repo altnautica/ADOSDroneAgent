@@ -9,6 +9,7 @@ import { ErrorBoundary } from "@/shared/error-boundary";
 import { useButtons } from "@/hooks/use-buttons";
 import { useGamepad } from "@/hooks/use-gamepad";
 import { useAppearance } from "@/hooks/use-appearance";
+import { ControllerTour } from "@/components/controls/controller-tour";
 import { ToastHost } from "@/components/ui/toast";
 import { useInputSourceTracking } from "@/stores/input-store";
 import { useWakeLock } from "@/shared/wake-lock";
@@ -33,6 +34,7 @@ function CockpitRoot() {
   return (
     <>
       <CockpitShell input={{ buttonsConnected, gamepadConnected, wakeHeld }} />
+      <ControllerTour />
       <ToastHost />
     </>
   );

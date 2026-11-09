@@ -6,6 +6,18 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.38] - 2026-11-10
+
+### Fixed
+
+- Shared layer painter and engine paint without per-frame allocation: dash patterns reused, the staleness check is a bit-packed number, video rects written into reused objects, and status chips pushed by a method instead of a per-paint closure.
+- Layer status chips take their colour from the spec tokens (`layer.unavailable_chip`) and their text from the spec strings (`layer.unavailable`, `layer.depth_unscaled`, `layer.ar_approx`).
+- Flight-state chip names a hold after a skill's lease ended "Skill stopped" instead of the raw reason code.
+
+### Changed
+
+- Cockpit controller tour opens as a sheet on the first controller connect on any screen (with a "press any button" step while the browser has announced but not reported the pad), not only inside Settings › Controls.
+
 ## [0.109.37] - 2026-11-10
 
 ### Added
