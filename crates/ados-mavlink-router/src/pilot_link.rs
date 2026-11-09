@@ -6,7 +6,9 @@
 //! * client `MANUAL_CONTROL` (69) and `RC_CHANNELS_OVERRIDE` (70) are dropped;
 //! * client gotos (`DO_REPOSITION` as COMMAND_LONG/INT, and position
 //!   `SET_POSITION_TARGET_LOCAL_NED` / `_GLOBAL_INT`) are redirected to the
-//!   pilot as `goto`, so they fly through its planner and limits;
+//!   pilot as `goto`, so they fly through its planner and limits; the FC
+//!   never sees a redirected `DO_REPOSITION`, so the router answers its
+//!   sender with the `COMMAND_ACK` ([`PilotLink::reposition_ack`]);
 //! * pilot death fails safe here: when the pilot's state stops for
 //!   [`DEATH_MS`] while it was flying the vehicle, the router sets the FC
 //!   mode for `pilot.link_loss_action` ([`PilotLink::death_mode`]). The
@@ -70,6 +72,9 @@ pub struct PilotLink {
     flying: AtomicU8,
     /// The death failsafe already fired for this silence.
     fired: AtomicBool,
+    /// The last state lets the pilot start a goto: armed, in the air, not
+    /// tuning (the conditions of its `goto` handler).
+    goto_ok: AtomicBool,
 }
 
 const CLASS_MULTIROTOR: u8 = 1;
@@ -160,6 +165,7 @@ impl PilotLink {
             downlink_ms: AtomicU64::new(0),
             flying: AtomicU8::new(0),
             fired: AtomicBool::new(false),
+            goto_ok: AtomicBool::new(false),
         }
     }
 
@@ -214,6 +220,9 @@ impl PilotLink {
         let flying = mode == Some(ControlMode::Ados) && flag("armed") && !flag("landed") && motion;
         self.flying
             .store(if flying { class } else { 0 }, Ordering::Relaxed);
+        let tuning = field("owner").and_then(rmpv::Value::as_str) == Some("tuning");
+        self.goto_ok
+            .store(flag("armed") && !flag("landed") && !tuning, Ordering::Relaxed);
     }
 
     /// The FC mode to set because the pilot died while flying: its state
@@ -284,6 +293,33 @@ impl PilotLink {
             "goto",
             serde_json::json!({"n": ned[0], "e": ned[1], "d": ned[2], "yaw": yaw}),
         );
+    }
+
+    /// The `COMMAND_ACK` for a client `DO_REPOSITION` the filter took off the
+    /// FC stream, as from the flight controller (`fc_sysid`, component 1), so
+    /// the sender learns the outcome instead of retrying into a timeout:
+    /// accepted when it went to a pilot that will fly it, temporarily
+    /// rejected when the pilot cannot (disarmed, landed, tuning), failed when
+    /// the target could not be placed.
+    pub fn reposition_ack(&self, r: Reposition, fc_sysid: u8) -> Option<Vec<u8>> {
+        use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, MavResult, COMMAND_ACK_DATA};
+        let result = if !r.redirected {
+            MavResult::MAV_RESULT_FAILED
+        } else if self.goto_ok.load(Ordering::Relaxed) {
+            MavResult::MAV_RESULT_ACCEPTED
+        } else {
+            MavResult::MAV_RESULT_TEMPORARILY_REJECTED
+        };
+        let header = ados_protocol::mavlink::MavHeader {
+            system_id: fc_sysid,
+            component_id: 1,
+            sequence: 0,
+        };
+        let ack = MavMessage::COMMAND_ACK(COMMAND_ACK_DATA {
+            command: MavCmd::MAV_CMD_DO_REPOSITION,
+            result,
+        });
+        ados_protocol::mavlink::serialize_v2(header, &ack).ok()
     }
 
     pub fn send_swarm(&self, vel: [f32; 3], yaw: Option<f32>) {

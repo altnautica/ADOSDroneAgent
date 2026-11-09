@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.42] - 2026-11-10
+
+### Fixed
+
+- Router answers a ground station's `DO_REPOSITION` that it hands to the pilot under ADOS control with a `COMMAND_ACK` from the flight controller's id: accepted when the pilot will fly it, temporarily rejected while disarmed, landed or tuning, failed when the point cannot be placed. Surfaces no longer retry into "no answer" while the aircraft flies to the point.
+- Pilot no longer takes over a ground station's GUIDED in `fc_manual` or `elrs` control: the flight controller keeps flying the reposition instead of the pilot holding the vehicle where it was.
+- Pilot offers and flies a surface map-point goto only under ADOS control; elsewhere it refuses with `control_mode` and lists no `goto` in `surface_ops`.
+- Cockpit Fly here is offered only under ADOS control, and its hold sheet says it takes over from any running mission or skill.
+
 ## [0.109.41] - 2026-11-10
 
 ### Fixed

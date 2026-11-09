@@ -16,11 +16,15 @@ export const FLY_HERE_MIN_ALT_M = 3;
 const EARTH_R = 6378137;
 const DEG = Math.PI / 180;
 
-/** Whether the pilot accepts a surface `goto` now: it lists the action and the
- *  drone is armed and flying. */
+/** Whether the pilot accepts a surface `goto` now: the control mode is `ados`,
+ *  it lists the action, and the drone is armed and flying. Whatever runs (a
+ *  mission, a skill, an FC mode), the goto takes over after the hold. */
 export function flyHereOffered(p: PilotState | null): boolean {
-  return p !== null && p.surfaceOps.includes("goto") && p.armed && !p.landed;
+  return p !== null && p.controlMode === "ados" && p.surfaceOps.includes("goto") && p.armed && !p.landed;
 }
+
+/** The confirm sheet's warning: the hold replaces what the drone is doing. */
+export const FLY_HERE_TAKES_OVER = "Takes over from any running mission or skill.";
 
 /** The world point (metres east/north of the view's reference) under an SVG
  *  point: the inverse of `projectEN`. */
@@ -49,6 +53,8 @@ export function flyHereRefusal(err: string | undefined): string {
   switch (err) {
     case "launching":
       return "Taking off: wait for the climb to finish";
+    case "control_mode":
+      return "The flight controller has control";
     case "not_armed":
       return "Not armed";
     case "landed":

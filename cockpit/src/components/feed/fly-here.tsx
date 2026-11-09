@@ -9,6 +9,7 @@ import { Sheet } from "@/components/ui/sheet";
 import { HoldButton } from "@/components/ui/hold-button";
 import { usePilot } from "@/hooks/use-pilot";
 import {
+  FLY_HERE_TAKES_OVER,
   FLY_HERE_PRESS_MS,
   FLY_HERE_SLOP_PX,
   enToLatLon,
@@ -117,6 +118,7 @@ export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView
             <dt className="text-muted-foreground">Height</dt>
             <dd className="font-mono">{args ? `${args.alt_m} m above home` : "—"}</dd>
           </dl>
+          <p className="mt-[0.6rem] text-[0.85rem] text-hud-warn">{FLY_HERE_TAKES_OVER}</p>
           {!args ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-warn">{cockpitText("map.fly_here.needs_position")}</p> : null}
           {result ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-crit">{result}</p> : null}
         </Sheet>

@@ -151,10 +151,16 @@ impl Pilot {
             rth_countdown_s: self
                 .rth_deadline_ms
                 .map(|d| d.saturating_sub(now_ms) as f64 / 1000.0),
-            surface_ops: super::actions::SURFACE_OPS
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+            // The pilot flies a surface's point only while it owns motion; in
+            // `fc_manual` / `elrs` a surface uses the FC's reposition instead.
+            surface_ops: if self.control_mode() == ados_protocol::pilot::ControlMode::Ados {
+                super::actions::SURFACE_OPS
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect()
+            } else {
+                Vec::new()
+            },
             agl_m: agl.map(|(m, _)| wire(m)),
             agl_source: agl.map(|(_, s)| s.to_owned()),
             statustext: self

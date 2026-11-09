@@ -131,7 +131,8 @@ impl FcConnection {
         }
         let data: &[u8] = &admitted;
         // Command authority: while the pilot owns motion, client sticks are
-        // dropped and client gotos fly through the pilot instead.
+        // dropped and client gotos fly through the pilot instead. A
+        // `DO_REPOSITION` taken off the FC stream is answered here.
         let gated;
         let data: &[u8] = match crate::pilot_link::global() {
             Some(link)
@@ -140,18 +141,27 @@ impl FcConnection {
                         .is_some_and(|c| c.client_id == crate::pilot_link::PILOT_INJECTOR) =>
             {
                 let geo = self.pilot_georef().await;
-                let (kept, gotos, dropped) = crate::pilot_link::filter(data, geo);
-                if dropped > 0 {
-                    link.dropped.fetch_add(dropped, Ordering::Relaxed);
-                    tracing::debug!(dropped, "client_motion_frames_dropped_pilot_owns");
+                let out = crate::pilot_link::filter(data, geo);
+                if out.dropped > 0 {
+                    link.dropped.fetch_add(out.dropped, Ordering::Relaxed);
+                    tracing::debug!(
+                        dropped = out.dropped,
+                        "client_motion_frames_dropped_pilot_owns"
+                    );
                 }
-                for (ned, yaw) in gotos {
+                for (ned, yaw) in out.gotos {
                     link.send_goto(ned, yaw);
                 }
-                if kept.is_empty() {
+                let fc_sysid = self.target_system.load(Ordering::Relaxed);
+                for r in out.repositions {
+                    if let Some(ack) = link.reposition_ack(r, fc_sysid) {
+                        self.inject_frame(ack.into());
+                    }
+                }
+                if out.kept.is_empty() {
                     return true;
                 }
-                gated = kept;
+                gated = out.kept;
                 &gated
             }
             _ => data,

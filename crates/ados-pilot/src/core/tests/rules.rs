@@ -61,6 +61,24 @@ fn external_guided_is_adopted_with_a_gcs_banner() {
     assert_eq!(b.args["source"], "gcs");
 }
 
+/// In `fc_manual` and `elrs` a ground station's reposition (the FC goes to
+/// GUIDED and flies to the point) stays the FC's: the pilot never takes it
+/// over and holds the vehicle where it is.
+#[test]
+fn external_guided_outside_ados_stays_with_the_fc() {
+    for mode in ["fc_manual", "elrs"] {
+        let mut w = World::new();
+        w.airborne(copter::LOITER);
+        assert!(matches!(w.action(&format!("control_mode:{mode}")), Reply::Action(a) if a.ok));
+        w.run(40);
+        w.mode = copter::GUIDED;
+        w.run(400);
+        assert_eq!(w.p.owner(), Owner::FcMode, "{mode}");
+        assert_eq!(w.mode, copter::GUIDED, "{mode}");
+        assert!(w.last_setpoint().is_none(), "{mode}: the pilot sent a setpoint");
+    }
+}
+
 #[test]
 fn stick_flight_moves_and_centred_sticks_hold() {
     let mut w = World::new();
@@ -415,6 +433,27 @@ fn surface_goto_without_home_is_refused() {
     assert!(
         matches!(w.action_args("goto", args), Reply::Action(a) if a.err.as_deref() == Some("no_home"))
     );
+}
+
+/// Outside `ados` the pilot neither offers nor flies a surface's map point:
+/// the surface repositions the FC itself.
+#[test]
+fn surface_goto_is_only_offered_under_ados() {
+    for mode in ["fc_manual", "elrs"] {
+        let mut w = World::new();
+        home_at(&mut w, 12.0, 77.0);
+        w.airborne(copter::LOITER);
+        assert!(matches!(w.action(&format!("control_mode:{mode}")), Reply::Action(a) if a.ok));
+        assert!(w.p.state(w.now).surface_ops.is_empty(), "{mode}");
+        let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0});
+        assert!(
+            matches!(w.action_args("goto", args), Reply::Action(a) if a.err.as_deref() == Some("control_mode")),
+            "{mode}"
+        );
+        w.run(200);
+        assert_eq!(w.p.owner(), Owner::FcMode, "{mode}");
+        assert_eq!(w.mode, copter::LOITER, "{mode}");
+    }
 }
 
 #[test]

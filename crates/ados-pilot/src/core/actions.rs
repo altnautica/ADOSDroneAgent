@@ -436,6 +436,10 @@ impl Pilot {
         if self.owner() == Owner::Tuning {
             return Err("tuning".into());
         }
+        // Outside `ados` the FC flies: a surface repositions it directly.
+        if self.control_mode() != ControlMode::Ados {
+            return Err("control_mode".into());
+        }
         // A take-off still climbing would replace the goto with its own
         // after-takeoff action at the top of the climb, so it waits.
         if self

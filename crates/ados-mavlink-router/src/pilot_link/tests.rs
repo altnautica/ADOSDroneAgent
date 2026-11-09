@@ -47,10 +47,11 @@ const GEO: GeoRef = GeoRef {
 fn sticks_are_dropped_and_other_frames_kept() {
     let mut data = frame(&manual_control());
     data.extend(frame(&heartbeat()));
-    let (kept, gotos, dropped) = filter(&data, None);
-    assert_eq!(dropped, 1);
-    assert!(gotos.is_empty());
-    assert_eq!(kept, frame(&heartbeat()));
+    let out = filter(&data, None);
+    assert_eq!(out.dropped, 1);
+    assert!(out.gotos.is_empty());
+    assert!(out.repositions.is_empty());
+    assert_eq!(out.kept, frame(&heartbeat()));
 }
 
 #[test]
@@ -70,9 +71,17 @@ fn reposition_becomes_a_local_goto() {
         current: 0,
         autocontinue: 0,
     });
-    let (kept, gotos, _) = filter(&frame(&cmd), Some(GEO));
-    assert!(kept.is_empty());
-    let (p, yaw) = gotos[0];
+    let out = filter(&frame(&cmd), Some(GEO));
+    assert!(out.kept.is_empty());
+    assert_eq!(
+        out.repositions,
+        vec![Reposition {
+            sys: 255,
+            comp: 190,
+            redirected: true
+        }]
+    );
+    let (p, yaw) = out.gotos[0];
     assert!((p[0] - (10.0 + 11.13)).abs() < 0.05, "north {}", p[0]);
     assert!((p[1] - 20.0).abs() < 0.01);
     assert!((p[2] - -15.0).abs() < 0.01);
@@ -267,5 +276,67 @@ async fn gotos_and_swarm_goals_reach_the_pilot_socket() {
             vd: 0.0,
             yaw: Some(1.0)
         }
+    );
+}
+
+fn reposition_long() -> MavMessage {
+    MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+        param1: -1.0,
+        param2: 0.0,
+        param3: 0.0,
+        param4: f32::NAN,
+        param5: 47.0001,
+        param6: 8.0,
+        param7: 10.0,
+        command: MavCmd::MAV_CMD_DO_REPOSITION,
+        target_system: 1,
+        target_component: 1,
+        confirmation: 0,
+    })
+}
+
+fn ack_of(link: &PilotLink, r: Reposition) -> (MavHeader, MavResult) {
+    let bytes = link.reposition_ack(r, 1).unwrap();
+    match ados_protocol::mavlink::parse_any(&bytes).unwrap() {
+        (h, MavMessage::COMMAND_ACK(a)) => {
+            assert_eq!(a.command, MavCmd::MAV_CMD_DO_REPOSITION);
+            (h, a.result)
+        }
+        other => panic!("not an ack: {other:?}"),
+    }
+}
+
+/// A reposition the router takes off the FC stream gets an answer with its
+/// real outcome, so the sender never times out while the aircraft moves.
+#[test]
+fn an_intercepted_reposition_is_answered_with_its_outcome() {
+    let (tx, _rx) = mpsc::channel(4);
+    let link = PilotLink::new(ControlMode::Ados, tx);
+    let out = filter(&frame(&reposition_long()), Some(GEO));
+    assert_eq!(out.gotos.len(), 1);
+    let r = out.repositions[0];
+
+    // The pilot is flying a mission: the goto takes over, accepted.
+    link.on_state(&pilot_state("mission_fc", true, false, "multirotor"));
+    let (h, res) = ack_of(&link, r);
+    assert_eq!((h.system_id, h.component_id), (1, 1), "from the FC");
+    assert_eq!(res, MavResult::MAV_RESULT_ACCEPTED);
+    link.on_state(&pilot_state("skill", true, false, "multirotor"));
+    assert_eq!(ack_of(&link, r).1, MavResult::MAV_RESULT_ACCEPTED);
+
+    // On the ground or tuning the pilot ignores a goto: say so.
+    link.on_state(&pilot_state("idle", true, true, "multirotor"));
+    assert_eq!(ack_of(&link, r).1, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+    link.on_state(&pilot_state("tuning", true, false, "multirotor"));
+    assert_eq!(ack_of(&link, r).1, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+
+    // No position to place the target: dropped, and the ack says it failed.
+    let out = filter(&frame(&reposition_long()), None);
+    assert!(out.gotos.is_empty() && out.kept.is_empty());
+    assert!(!out.repositions[0].redirected);
+    link.on_state(&pilot_state("pilot", true, false, "multirotor"));
+    assert_eq!(
+        ack_of(&link, out.repositions[0]).1,
+        MavResult::MAV_RESULT_FAILED
     );
 }

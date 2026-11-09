@@ -115,32 +115,75 @@ pub(super) fn frame_id(f: &[u8]) -> u32 {
     }
 }
 
-/// Filter a client write: the bytes to forward, and the gotos to redirect.
-/// Bytes that are not whole frames pass through untouched.
 /// A redirected goto: local NED and optional yaw (radians).
 pub type Redirect = ([f32; 3], Option<f32>);
 
-pub fn filter(data: &[u8], geo: Option<GeoRef>) -> (Vec<u8>, Vec<Redirect>, u64) {
-    let mut kept = Vec::with_capacity(data.len());
-    let mut gotos = Vec::new();
-    let mut dropped = 0;
+/// A client `DO_REPOSITION` the filter took off the FC stream. The FC never
+/// sees it, so the router owes its sender the `COMMAND_ACK`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reposition {
+    /// The sender's system and component id.
+    pub sys: u8,
+    pub comp: u8,
+    /// Sent to the pilot as a goto; `false` when the target could not be
+    /// placed (no position yet, or not a finite point) and it was dropped.
+    pub redirected: bool,
+}
+
+/// What [`filter`] made of one client write.
+#[derive(Debug, Default, PartialEq)]
+pub struct Filtered {
+    /// The bytes to forward to the FC.
+    pub kept: Vec<u8>,
+    /// The gotos to send the pilot.
+    pub gotos: Vec<Redirect>,
+    /// The motion frames dropped.
+    pub dropped: u64,
+    /// The repositions to answer.
+    pub repositions: Vec<Reposition>,
+}
+
+/// Filter a client write: the bytes to forward, and the gotos to redirect.
+/// Bytes that are not whole frames pass through untouched.
+pub fn filter(data: &[u8], geo: Option<GeoRef>) -> Filtered {
+    let mut out = Filtered {
+        kept: Vec::with_capacity(data.len()),
+        ..Filtered::default()
+    };
     let mut i = 0;
     while i < data.len() {
         let rest = &data[i..];
         let Some(n) = frame_len(rest).filter(|&n| n <= rest.len() && n >= 8) else {
-            kept.extend_from_slice(rest);
+            out.kept.extend_from_slice(rest);
             break;
         };
         let frame = &rest[..n];
-        let decoded = ados_protocol::mavlink::parse_any(frame)
-            .ok()
-            .map(|(_, m)| m);
-        match classify(frame_id(frame), decoded.as_ref(), geo) {
-            Verdict::Pass => kept.extend_from_slice(frame),
-            Verdict::Drop => dropped += 1,
-            Verdict::Goto(p, yaw) => gotos.push((p, yaw)),
+        let decoded = ados_protocol::mavlink::parse_any(frame).ok();
+        let msg = decoded.as_ref().map(|(_, m)| m);
+        let verdict = classify(frame_id(frame), msg, geo);
+        if let Some((h, m)) = &decoded {
+            if is_reposition(m) {
+                out.repositions.push(Reposition {
+                    sys: h.system_id,
+                    comp: h.component_id,
+                    redirected: matches!(verdict, Verdict::Goto(..)),
+                });
+            }
+        }
+        match verdict {
+            Verdict::Pass => out.kept.extend_from_slice(frame),
+            Verdict::Drop => out.dropped += 1,
+            Verdict::Goto(p, yaw) => out.gotos.push((p, yaw)),
         }
         i += n;
     }
-    (kept, gotos, dropped)
+    out
+}
+
+fn is_reposition(m: &MavMessage) -> bool {
+    match m {
+        MavMessage::COMMAND_LONG(c) => c.command == MavCmd::MAV_CMD_DO_REPOSITION,
+        MavMessage::COMMAND_INT(c) => c.command == MavCmd::MAV_CMD_DO_REPOSITION,
+        _ => false,
+    }
 }

@@ -1,7 +1,7 @@
 //! FC frames: arm/disarm, FC mode changes, adoption of an external GUIDED.
 
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
-use ados_protocol::pilot::Owner;
+use ados_protocol::pilot::{ControlMode, Owner};
 use serde_json::json;
 
 use super::Pilot;
@@ -98,6 +98,15 @@ impl Pilot {
         }
         if mode == fam.guided() {
             let ours = self.mode_is_ours(mode, now_ms);
+            if !ours && self.control_mode() != ControlMode::Ados {
+                // `fc_manual` / `elrs`: a ground station's GUIDED (a reposition,
+                // a guided goto) is the FC's to fly. Adopting it would hold the
+                // vehicle where it is instead of flying to the point.
+                if self.fc.armed && self.owner() != Owner::FcMode {
+                    self.set_owner(Owner::FcMode, "fc-mode");
+                }
+                return;
+            }
             if self.fc.armed
                 && !ours
                 && matches!(self.owner(), Owner::FcMode | Owner::Idle | Owner::MissionFc)
