@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { droneStatusFromFull, visionEngineRunning } from "@/lib/api";
 import type { StatusFull } from "@/shared/agent-api.generated";
@@ -47,5 +47,15 @@ describe("the Feed's local vision gate", () => {
   it("reads the engine only from a services list that names it", () => {
     expect(visionEngineRunning(undefined)).toBeNull();
     expect(visionEngineRunning([{ name: "ados-vision-rknn", state: "active", sub_state: "running" }])).toBeNull();
+  });
+
+  it("a demo camera node runs the synthetic detector with no status to read", () => {
+    vi.stubGlobal("window", { location: { search: "?demo=1" } });
+    try {
+      expect(hasLocalVision({ ownsCameras: true, perceptionTier: null, visionEngine: null, profile: "drone" })).toBe(true);
+      expect(hasLocalVision({ ownsCameras: false, perceptionTier: null, visionEngine: null, profile: "ground_station" })).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

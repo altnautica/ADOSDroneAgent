@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.34] - 2026-11-10
+
+### Fixed
+
+- Cockpit detection boxes ease between batches by writing a transform onto the drawn glyphs each frame instead of a React state update per frame, so a moving box re-renders nothing while it eases.
+- Cockpit demo mode on a camera node runs the synthetic detector and draws its boxes with no agent status to read.
+
+### Added
+
+- Dashboard video draws the vision engine's detection boxes for the primary camera in the cockpit's corner-bracket style (newest batch at 5 Hz under a detection lease, letterboxed with the video; a stale batch draws nothing).
+
 ## [0.109.33] - 2026-11-10
 
 ### Fixed

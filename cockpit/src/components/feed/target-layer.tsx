@@ -22,7 +22,7 @@
 // detection only on cameras someone is watching, and says so when the
 // detector is idle or unavailable rather than showing an empty frame.
 
-import { memo, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Crosshair, Lock, LockOpen, Puzzle } from "lucide-react";
 
 import { Menu, type MenuItem } from "@/components/ui/menu";
@@ -46,7 +46,8 @@ import {
   targetMenuEntries,
 } from "@/lib/target-overlay";
 import { cn, isDemoMode } from "@/lib/utils";
-import { advanceBoxes, smoothingAlpha, type SmoothBox } from "@/shared/hud/box-smoothing";
+import { BoxEaser } from "@/lib/box-easer";
+import type { SmoothBox } from "@/shared/hud/box-smoothing";
 import { cycleFocus, dragAccepted, dragFrameBox, dragScreenRect, dragStarted, DOUBLE_CLICK_MS, focusOrder } from "@/shared/hud/target-interaction";
 import { layoutTargets, tagFontPx, type GhostSample, type GlyphLayout, type Point } from "@/shared/hud/target-layout";
 import {
@@ -113,8 +114,8 @@ const OUTLINE = "var(--hud-target-outline-color)";
 function Outlined({ d, color, width, dash }: { d: string; color: string; width: number; dash?: string }) {
   return (
     <>
-      <path d={d} stroke={OUTLINE} strokeWidth={width + 2} strokeDasharray={dash} fill="none" strokeLinecap="butt" strokeLinejoin="miter" />
-      <path d={d} stroke={color} strokeWidth={width} strokeDasharray={dash} fill="none" strokeLinecap="butt" strokeLinejoin="miter" />
+      <path d={d} stroke={OUTLINE} strokeWidth={width + 2} strokeDasharray={dash} fill="none" strokeLinecap="butt" strokeLinejoin="miter" vectorEffect="non-scaling-stroke" />
+      <path d={d} stroke={color} strokeWidth={width} strokeDasharray={dash} fill="none" strokeLinecap="butt" strokeLinejoin="miter" vectorEffect="non-scaling-stroke" />
     </>
   );
 }
@@ -133,7 +134,7 @@ const GlyphMarks = memo(function GlyphMarks({ g, minimal }: { g: GlyphLayout; mi
   const fade = g.kind === "LOST" ? 1 - (g.item.lostProgress ?? 0) : 1;
   const box = g.box;
   return (
-    <g opacity={fade}>
+    <g opacity={fade} data-ease-key={g.key}>
       {g.kind === "CANDIDATE" && box ? (
         <g opacity={0.7}>
           <rect x={box.x} y={box.y} width={box.w} height={box.h} stroke={OUTLINE} strokeWidth={3} fill="none" />
@@ -200,7 +201,7 @@ function GlyphTags({ g }: { g: GlyphLayout }) {
   const fade = g.kind === "LOST" ? 1 - (g.item.lostProgress ?? 0) : 1;
   const tags = [...(g.topTag ? [g.topTag] : []), ...g.bottomTags];
   return (
-    <>
+    <div data-ease-key={g.key} className="absolute inset-0">
       {tags.map((t, i) => (
         <span
           key={i}
@@ -221,7 +222,7 @@ function GlyphTags({ g }: { g: GlyphLayout }) {
           {t.text}
         </span>
       ))}
-    </>
+    </div>
   );
 }
 
@@ -320,34 +321,10 @@ export function TargetLayer({
     });
   }
 
-  // Box smoothing: ease the shown boxes toward each batch, frame by frame,
-  // only until they converge.
+  // Box smoothing: the glyphs are laid out on each batch's boxes, and the
+  // easer moves them from where they were shown by writing a transform onto
+  // their elements each frame, so a moving box renders no React frame.
   const reduced = useReducedMotion();
-  const targets = useMemo(() => {
-    const m = new Map<string, SmoothBox>();
-    for (const it of resolved.items) {
-      if (it.rect && SMOOTHED[it.kind]) m.set(it.key, { x: it.rect.x, y: it.rect.y, width: it.rect.w, height: it.rect.h });
-    }
-    return m;
-  }, [resolved]);
-  const [shown, setShown] = useState<Map<string, SmoothBox>>(() => new Map());
-  const shownRef = useRef(shown);
-  useEffect(() => {
-    if (reduced) return;
-    let raf = 0;
-    let last = performance.now();
-    const step = (t: number) => {
-      const r = advanceBoxes(shownRef.current, targets, smoothingAlpha(t - last, SMOOTH_TAU_MS), SMOOTH_EPS_PX);
-      last = t;
-      if (r.next !== shownRef.current) {
-        shownRef.current = r.next;
-        setShown(r.next);
-      }
-      if (!r.settled) raf = requestAnimationFrame(step);
-    };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [targets, reduced]);
 
   const srcW = videoWidth ?? resolved.frameW;
   const srcH = videoHeight ?? resolved.frameH;
@@ -361,16 +338,45 @@ export function TargetLayer({
         widthClass,
         revealKeys: focusKey ? new Set([focusKey]) : undefined,
         ghost: minimal ? undefined : memory.ghost,
-        displayRect: (item) => {
-          if (reduced || !SMOOTHED[item.kind]) return item.rect;
-          const b = shown.get(item.key);
-          return b ? { x: b.x, y: b.y, w: b.width, h: b.height } : item.rect;
-        },
       }),
     // `rendered` is a fresh object each render; its four numbers are the deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [resolved, rendered.left, rendered.top, rendered.width, rendered.height, widthClass, pip, focusKey, minimal, memory.ghost, reduced, shown],
+    [resolved, rendered.left, rendered.top, rendered.width, rendered.height, widthClass, pip, focusKey, minimal, memory.ghost],
   );
+  const easerRef = useRef<BoxEaser | null>(null);
+  // The laid-out boxes and the glyph elements of the latest commit.
+  const easeRef = useRef({ targets: new Map<string, SmoothBox>(), marks: new Map<string, Element>(), tags: new Map<string, HTMLElement>() });
+  useLayoutEffect(() => {
+    const root = containerRef.current;
+    if (!root) return;
+    const e = { targets: new Map<string, SmoothBox>(), marks: new Map<string, Element>(), tags: new Map<string, HTMLElement>() };
+    for (const g of layouts) {
+      if (g.box && SMOOTHED[g.kind]) e.targets.set(g.key, { x: g.box.x, y: g.box.y, width: g.box.w, height: g.box.h });
+    }
+    for (const el of root.querySelectorAll<HTMLElement | SVGGElement>("[data-ease-key]")) {
+      const key = el.dataset.easeKey!;
+      if (el instanceof HTMLElement) e.tags.set(key, el);
+      else e.marks.set(key, el);
+      // A glyph that stopped easing (its kind changed) drops its last transform.
+      if (!e.targets.has(key)) {
+        if (el instanceof HTMLElement) el.style.transform = "";
+        else el.removeAttribute("transform");
+      }
+    }
+    easeRef.current = e;
+    easerRef.current ??= new BoxEaser((key, t) => {
+      const { targets, marks, tags } = easeRef.current;
+      const target = targets.get(key);
+      marks.get(key)?.setAttribute("transform", `matrix(${t.sx} 0 0 ${t.sy} ${t.tx} ${t.ty})`);
+      // Tags follow the box's corner without scaling, so their type stays crisp.
+      const tag = tags.get(key);
+      if (tag && target) {
+        tag.style.transform = `translate(${t.tx + (t.sx - 1) * target.x}px, ${t.ty + (t.sy - 1) * target.y}px)`;
+      }
+    }, SMOOTH_TAU_MS, SMOOTH_EPS_PX);
+    easerRef.current.setTargets(e.targets, reduced);
+  }, [layouts, reduced]);
+  useEffect(() => () => easerRef.current?.stop(), []);
 
   // ── interaction ──
   const [menu, setMenu] = useState<MenuState | null>(null);

@@ -24,15 +24,16 @@ export interface LocalVisionInputs {
 }
 
 /**
- * Whether this node runs a local vision engine whose detections the Feed
- * should stream: a camera node whose board declares a vision path, or whose
- * engine is running anyway (a board without a declared path where a backend
- * was configured; its tier still reads `none`), and a workstation or compute
- * node.
+ * Whether this node has a vision engine whose detections the Feed should
+ * stream: a camera node whose board declares a vision path, or whose engine is
+ * running anyway (a board without a declared path where a backend was
+ * configured; its tier still reads `none`), and a workstation or compute node.
+ * A camera node in demo mode runs the synthetic detector, so the demo draws
+ * its boxes with no agent status to read.
  */
 export function hasLocalVision({ ownsCameras, perceptionTier, visionEngine, profile }: LocalVisionInputs): boolean {
   const declared = perceptionTier !== null && perceptionTier !== "none";
-  return (ownsCameras && (declared || visionEngine === true)) || profile === "workstation" || profile === "compute";
+  return (ownsCameras && (declared || visionEngine === true || isDemoMode())) || profile === "workstation" || profile === "compute";
 }
 
 /**
