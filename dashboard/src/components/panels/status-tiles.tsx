@@ -1,3 +1,6 @@
+import { useTranslation } from "react-i18next";
+
+import { useFlightChip } from "@/hooks/use-flight-chip";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
 import { usePairingInfo } from "@/hooks/use-pairing";
 import { useSnapshot } from "@/hooks/use-snapshot";
@@ -32,6 +35,28 @@ function StatusTile({ tile, isLoading }: { tile: Tile; isLoading: boolean }) {
   );
 }
 
+/** Who flies the aircraft now, read-only (the cockpit's flight-state chip). */
+function FlightChip() {
+  const { t } = useTranslation();
+  const chip = useFlightChip();
+  if (!chip) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs" aria-label={t("home.flightState")}>
+      <span
+        className={cn("rounded-full border px-2.5 py-0.5 font-mono font-semibold", chip.dim && "opacity-60")}
+        style={{ color: chip.color, borderColor: chip.color }}
+      >
+        {chip.text}
+      </span>
+      {chip.secondary.map((l) => (
+        <span key={l.text} className="font-mono" style={{ color: l.color }}>
+          {l.text}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 export function StatusTiles() {
   const snap = useSnapshot();
   const status = useStatus();
@@ -47,10 +72,13 @@ export function StatusTiles() {
   });
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-      {ts.map((t) => (
-        <StatusTile key={t.label} tile={t} isLoading={isLoading} />
-      ))}
+    <div className="flex flex-col gap-3">
+      <FlightChip />
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+        {ts.map((t) => (
+          <StatusTile key={t.label} tile={t} isLoading={isLoading} />
+        ))}
+      </div>
     </div>
   );
 }

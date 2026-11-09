@@ -50,7 +50,7 @@
     {
       "id": "bottom_left_card",
       "cards": ["map", "attitude_radar", "obstacle_radar"],
-      "switch": ["swipe", "l3"]
+      "switch": ["swipe", "dots"]
     },
     {
       "id": "bottom_row",

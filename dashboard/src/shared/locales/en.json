@@ -169,6 +169,7 @@
   },
   "home": {
     "title": "Home",
+    "flightState": "Flight state",
     "droneSubtitle": "Live status, video, flight controller, and 60s telemetry.",
     "groundSubtitle": {
       "receiver": "Aggregating relays into one stream. Live receive metrics, mesh state, and per-source FEC.",

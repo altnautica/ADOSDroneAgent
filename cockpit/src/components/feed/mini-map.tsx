@@ -21,6 +21,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Layers } from "lucide-react";
 
+import { FlyHereLayer } from "@/components/feed/fly-here";
 import { LocalMiniMap } from "@/components/feed/local-mini-map";
 import { useNow } from "@/hooks/use-now";
 import { minimapFrame, nextMinimapPin } from "@/lib/local-minimap";
@@ -312,6 +313,7 @@ function GlobalMiniMap() {
                 </text>
               </g>
             </svg>
+            {view && ref ? <FlyHereLayer view={view} refPoint={ref} drone={droneFix} viewBox={VIEW} /> : null}
 
             {/* scale + stale readout */}
             <div className="absolute bottom-[0.1rem] left-0 right-0 flex items-center justify-between px-[0.3rem]">

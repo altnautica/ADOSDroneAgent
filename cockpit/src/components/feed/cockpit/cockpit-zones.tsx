@@ -24,7 +24,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 
 import { useGimbalPadStore } from "@/hooks/use-gimbal-rate";
-import { usePilot } from "@/hooks/use-pilot";
+import { useBottomRowAgl, usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { cameraSkillFor, type CameraAction } from "@/lib/camera-actions";
 import { runCockpitAction } from "@/lib/cockpit-actions";
@@ -37,7 +37,6 @@ import { cn } from "@/lib/utils";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { useFlightStore } from "@/stores/flight-store";
-import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { useNavStore } from "@/stores/nav-store";
 import { useStatusStore } from "@/stores/status-store";
 
@@ -327,7 +326,7 @@ function Readout({ label, value, unit }: { label: string; value: number | null; 
  *  row is short. A missing source reads a dash. */
 export function BottomRow({ short = false }: { short?: boolean }) {
   const t = useFlightStore((s) => s.telemetry);
-  const agl = useNavStreamStore((s) => s.follow?.data.aglM ?? null);
+  const agl = useBottomRowAgl();
   return (
     <div
       className="chrome-panel pointer-events-auto flex h-full w-full items-center justify-evenly px-[10px]"

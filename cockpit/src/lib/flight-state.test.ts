@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { effectiveLayers, LAYER_LEVELS, nextLevel, nextView, pluginLayerId, prevLevel } from "@/lib/cockpit-view";
 import { cockpitText } from "@/lib/cockpit-text";
 import { stepProfile } from "@/lib/feed-actions";
-import { flightStateChip, type ChipFacts } from "@/lib/flight-state";
+import { flightStateChip, type ChipFacts } from "@/shared/hud/flight-state";
 import { checklistPassable, launchArgs, visibleBanner, voicePrompt } from "@/lib/cockpit-flow";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 

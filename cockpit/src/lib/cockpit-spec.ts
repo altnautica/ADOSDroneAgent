@@ -66,31 +66,8 @@ export const BUILTIN_BY_ID: Readonly<Record<string, BuiltinSpec>> = Object.fromE
 /** Profile keys (`f1` → `cine`, …). */
 export const PROFILE_KEYS: Readonly<Record<string, string>> = builtinsJson.profile_keys as Record<string, string>;
 
-// ---- flight-state chip -------------------------------------------------------
+// ---- flight-state chip (rules in `@/shared/hud/flight-state`) -----------------
 
-export interface ChipRule {
-  id: string;
-  match: Record<string, string | number | boolean>;
-  text: string;
-  color: string;
-  dim?: boolean;
-  button: string | null;
-  suffix_if_landing_seq?: string;
-}
-
-export const CHIP_RULES: readonly ChipRule[] = flightStateJson.rules as unknown as ChipRule[];
-export const CHIP_STALE_AFTER_MS: number = flightStateJson.stale_after_ms;
-export const FC_MODE_CLASSES = flightStateJson.fc_mode_classes as unknown as Record<
-  "rtl" | "land",
-  Record<"copter" | "plane", number[]>
->;
-export const HOLD_REASON_LABELS: Readonly<Record<string, string>> = flightStateJson.hold_reason_labels;
-export const CHIP_SECONDARY = flightStateJson.secondary as {
-  order: string[];
-  avoid_state: Record<string, { text: string; color: string } | null>;
-  hold_reason: { text: string; color: string };
-  control_mode: Record<string, string>;
-};
 export const MODE_SHEET = flightStateJson.mode_sheet;
 
 /** A state colour name (`pilot`, `mission`, …) as a CSS colour. */

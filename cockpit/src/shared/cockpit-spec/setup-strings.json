@@ -43,7 +43,7 @@
     "controls.locked": "Safety binding: it can be moved, not removed",
     "controls.mode1": "Mode 1",
     "controls.mode2": "Mode 2",
-    "controls.not_standard": "Controller layout not standard: calibrate",
+    "controls.not_standard": "Controller layout not supported",
     "controls.press_a_control": "Press a control",
     "controls.press_any_button": "Press any button on the controller",
     "controls.profile.ados_default": "ADOS default",

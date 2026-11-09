@@ -154,6 +154,15 @@ pub struct Banner {
     pub until_ms: u64,
 }
 
+/// One FC STATUSTEXT at WARNING or worse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FcStatusText {
+    /// MAVLink severity: 0 emergency … 4 warning.
+    pub severity: u8,
+    pub text: String,
+    pub age_ms: u64,
+}
+
 /// The nav-stream `pilot` kind with the handover, launch and banner fields.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PilotState {
@@ -190,6 +199,16 @@ pub struct PilotState {
     pub sequence: Option<Sequence>,
     pub banner: Option<Banner>,
     pub rth_countdown_s: Option<f64>,
+    /// Pilot actions a ground surface may send on the pilot stream beyond
+    /// the safety set (e.g. `goto`).
+    pub surface_ops: Vec<String>,
+    /// Height above ground in metres, `None` without a source.
+    pub agl_m: Option<f64>,
+    /// `rangefinder` (fresh downward reading) or `home` (EKF height above
+    /// the take-off point).
+    pub agl_source: Option<String>,
+    /// FC STATUSTEXT at WARNING or worse from the last 30 s, newest first.
+    pub statustext: Vec<FcStatusText>,
 }
 
 /// One camera's obstacle (or depth) grid: 32×18 cells, row-major, row 0 at

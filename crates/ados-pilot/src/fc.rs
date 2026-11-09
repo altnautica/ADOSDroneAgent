@@ -1,7 +1,7 @@
 //! The flight controller as the pilot sees it: telemetry state decoded from
 //! the MAVLink socket, and the frames the pilot sends back.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use ados_protocol::mavlink::ardupilotmega::{
     MavAutopilot, MavCmd, MavFrame, MavLandedState, MavMessage, MavModeFlag, MavParamType,
@@ -22,6 +22,12 @@ pub const MASK_POS_VEL_YAW: u16 = 2496;
 pub const FRESH_MS: u64 = 1000;
 /// Downward rangefinder readings are trusted below this.
 pub const AGL_RANGEFINDER_MAX_M: f32 = 8.0;
+/// FC STATUSTEXT kept for surfaces: MAV_SEVERITY_WARNING (4) or worse.
+pub const STATUSTEXT_MIN_SEVERITY: u8 = 4;
+/// How many such lines the ring keeps.
+pub const STATUSTEXT_RING: usize = 8;
+/// How long a line stays on the pilot kind.
+pub const STATUSTEXT_MAX_AGE_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Stamped<T> {
@@ -64,6 +70,10 @@ pub struct FcState {
     pub landed_state: Option<MavLandedState>,
     pub vtol_state: Option<MavVtolState>,
     pub home_local: Option<[f32; 3]>,
+    /// Home latitude and longitude in degrees (HOME_POSITION).
+    pub home_global: Option<[f64; 2]>,
+    /// The newest FC STATUSTEXT at WARNING or worse, oldest first.
+    pub statustext: VecDeque<Stamped<(u8, String)>>,
     pub battery_pct: Option<f32>,
     pub params: HashMap<String, f32>,
     pub rc: Option<Stamped<[u16; 18]>>,
@@ -137,7 +147,24 @@ impl FcState {
                 self.landed_state = Some(x.landed_state);
                 self.vtol_state = Some(x.vtol_state);
             }
-            MavMessage::HOME_POSITION(h) => self.home_local = Some([h.x, h.y, h.z]),
+            MavMessage::HOME_POSITION(h) => {
+                self.home_local = Some([h.x, h.y, h.z]);
+                self.home_global =
+                    Some([f64::from(h.latitude) / 1e7, f64::from(h.longitude) / 1e7]);
+            }
+            MavMessage::STATUSTEXT(s) if (s.severity as u8) <= STATUSTEXT_MIN_SEVERITY => {
+                let end = s.text.iter().position(|&b| b == 0).unwrap_or(s.text.len());
+                let text = String::from_utf8_lossy(&s.text[..end]).trim().to_owned();
+                if !text.is_empty() {
+                    if self.statustext.len() == STATUSTEXT_RING {
+                        self.statustext.pop_front();
+                    }
+                    self.statustext.push_back(Stamped {
+                        v: (s.severity as u8, text),
+                        at_ms: now_ms,
+                    });
+                }
+            }
             MavMessage::SYS_STATUS(s) if s.battery_remaining >= 0 => {
                 self.battery_pct = Some(f32::from(s.battery_remaining));
             }

@@ -1,0 +1,65 @@
+// "Fly here" from the minimap: a long-press on the map picks a point, a hold
+// confirms it, and the cockpit sends the pilot's `goto` action with
+// `{lat, lon, alt_m}` (altitude above home). The agent advertises the action in
+// the pilot kind's `surface_ops`; without it the map offers nothing.
+
+import type { PilotState } from "@/shared/hud/cockpit-frames";
+import type { LatLon, MapView } from "@/lib/minimap-geometry";
+
+/** Press this long on the map, without moving, to pick a point. */
+export const FLY_HERE_PRESS_MS = 600;
+/** A press that moves farther than this (CSS px) is not a long-press. */
+export const FLY_HERE_SLOP_PX = 8;
+/** Altitude used when the drone reports none (metres above home). */
+export const FLY_HERE_MIN_ALT_M = 3;
+
+const EARTH_R = 6378137;
+const DEG = Math.PI / 180;
+
+/** Whether the pilot accepts a surface `goto` now: it lists the action and the
+ *  drone is armed and flying. */
+export function flyHereOffered(p: PilotState | null): boolean {
+  return p !== null && p.surfaceOps.includes("goto") && p.armed && !p.landed;
+}
+
+/** The world point (metres east/north of the view's reference) under an SVG
+ *  point: the inverse of `projectEN`. */
+export function unprojectEN(x: number, y: number, v: MapView): { e: number; n: number } {
+  return { e: v.centerE + (x - v.cx) / v.scale, n: v.centerN - (y - v.cy) / v.scale };
+}
+
+/** The lat/lon `e`, `n` metres from `ref` (inverse of `latLonToEN`). */
+export function enToLatLon(e: number, n: number, ref: LatLon): LatLon {
+  return {
+    lat: ref.lat + n / EARTH_R / DEG,
+    lon: ref.lon + e / (EARTH_R * Math.cos(ref.lat * DEG)) / DEG,
+  };
+}
+
+/** The `goto` arguments: the picked point at the drone's current height above
+ *  home (never below the floor). */
+export function flyHereArgs(target: LatLon, altRelM: number | null | undefined): { lat: number; lon: number; alt_m: number } {
+  const alt = typeof altRelM === "number" && Number.isFinite(altRelM) ? altRelM : FLY_HERE_MIN_ALT_M;
+  return { lat: target.lat, lon: target.lon, alt_m: Math.max(FLY_HERE_MIN_ALT_M, Math.round(alt * 10) / 10) };
+}
+
+/** Operator text for a refused `goto`. */
+export function flyHereRefusal(err: string | undefined): string {
+  switch (err) {
+    case "not_armed":
+      return "Not armed";
+    case "landed":
+      return "On the ground";
+    case "tuning":
+      return "Tuning flight in progress";
+    case "no_home":
+      return "No home position from the flight controller";
+    case "bad_args":
+      return "Point out of range";
+    case "no response":
+    case "no pilot link":
+      return "No answer from the drone";
+    default:
+      return err ? `Refused: ${err}` : "Refused";
+  }
+}

@@ -3,10 +3,10 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { chipFacts, goalDistanceM, nextWaypointEtaS } from "@/hooks/use-pilot";
+import { bottomRowAgl, goalDistanceM, nextWaypointEtaS } from "@/hooks/use-pilot";
 import { parseArFrame, parsePilotState } from "@/shared/hud/cockpit-frames";
 import { linkLossLine } from "@/lib/cockpit-flow";
-import { flightStateChip } from "@/lib/flight-state";
+import { chipFacts, flightStateChip } from "@/shared/hud/flight-state";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
 const fixture = (name: string): unknown => JSON.parse(readFileSync(path.join(FIXTURES, name), "utf8"));
@@ -64,5 +64,13 @@ describe("link-loss countdown and VTOL transition", () => {
     expect(chipFacts(p, 0, base).vtolTransitioning).toBe(true);
     expect(flightStateChip(chipFacts(p, 0, base))?.text).toBe("TRANSITION");
     expect(chipFacts(withWire({}), 0, base).vtolTransitioning).toBe(false);
+  });
+});
+
+describe("bottom row AGL", () => {
+  it("reads the pilot kind's agl_m, falling back to the follow kind", () => {
+    expect(bottomRowAgl(pilot, 9)).toBe(4.2);
+    expect(bottomRowAgl({ ...pilot, aglM: null }, 9)).toBe(9);
+    expect(bottomRowAgl(null, null)).toBeNull();
   });
 });

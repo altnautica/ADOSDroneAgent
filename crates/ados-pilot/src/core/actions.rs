@@ -20,6 +20,11 @@ type ActionRes = Result<(), String>;
 
 mod launch;
 
+/// Pilot actions a ground surface may send beyond the safety set.
+pub const SURFACE_OPS: &[&str] = &["goto"];
+/// Metres per degree of latitude (spherical earth).
+const M_PER_DEG: f64 = 111_319.49;
+
 impl Pilot {
     pub(super) fn action(&mut self, name: &str, args: Option<&Value>, now_ms: u64) -> ActionRes {
         if !self.fc.linked(now_ms)
@@ -78,6 +83,7 @@ impl Pilot {
             "launch" => self.launch_from_args(args, now_ms),
             "land" => self.do_land(now_ms),
             "rth" => self.do_rth(now_ms),
+            "goto" => self.surface_goto(args, now_ms),
             "pause" => {
                 self.rth_deadline_ms = None;
                 self.low_batt_cancelled = self.fc.armed;
@@ -409,5 +415,41 @@ impl Pilot {
         self.fw.engage(yaw.to_degrees(), alt, lim.airspeed_cruise);
         self.hold_reason = None;
         self.landing = false;
+    }
+
+    /// A surface's "fly here": `{lat, lon, alt_m}` with the altitude above
+    /// home, converted to local NED from the FC's home position.
+    fn surface_goto(&mut self, args: Option<&Value>, now_ms: u64) -> ActionRes {
+        let num = |k: &str| args.and_then(|a| a.get(k)).and_then(Value::as_f64);
+        let (Some(lat), Some(lon), Some(alt)) = (num("lat"), num("lon"), num("alt_m")) else {
+            return Err("bad_args".into());
+        };
+        if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) || !alt.is_finite() {
+            return Err("bad_args".into());
+        }
+        if !self.fc.armed {
+            return Err("not_armed".into());
+        }
+        if self.fc.landed() {
+            return Err("landed".into());
+        }
+        if self.owner() == Owner::Tuning {
+            return Err("tuning".into());
+        }
+        let (Some([hlat, hlon]), Some(home)) = (self.fc.home_global, self.fc.home_local) else {
+            return Err("no_home".into());
+        };
+        let mut dlon = lon - hlon;
+        if dlon > 180.0 {
+            dlon -= 360.0;
+        } else if dlon < -180.0 {
+            dlon += 360.0;
+        }
+        let n = (lat - hlat) * M_PER_DEG;
+        let e = dlon * M_PER_DEG * hlat.to_radians().cos();
+        let alt = alt.clamp(1.0, 120.0);
+        let target = [home[0] + n as f32, home[1] + e as f32, home[2] - alt as f32];
+        self.start_goto(target, now_ms);
+        Ok(())
     }
 }

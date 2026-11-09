@@ -70,3 +70,20 @@ describe("pre-flight checklist: flight controller checks and storage", () => {
     expect(storageItem(95).state).toBe("fail");
   });
 });
+
+describe("status pill FC status text", () => {
+  it("raises FC warnings from the pilot kind, critical at ERROR or worse, skipping PreArm lines", () => {
+    const a = pillAlerts({
+      ...none,
+      fcStatus: [
+        { severity: 2, text: "Crash: Disarming", ageMs: 0 },
+        { severity: 4, text: "PreArm: Compass not calibrated", ageMs: 100 },
+        { severity: 4, text: "EKF3 lane switch 1", ageMs: 900 },
+      ],
+    });
+    expect(a.map((x) => [x.source, x.severity, x.text])).toEqual([
+      ["fc_status_text", "critical", "Crash: Disarming"],
+      ["fc_status_text", "warning", "EKF3 lane switch 1"],
+    ]);
+  });
+});

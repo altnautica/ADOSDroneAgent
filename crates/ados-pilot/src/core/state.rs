@@ -1,7 +1,8 @@
 //! The published `pilot` and `obstacles` kinds.
 
 use ados_protocol::pilot::{
-    wire, AvoidMode, AvoidState, ObstaclesFrame, Owner, PilotState, Profile, Sequence, SkillRef,
+    wire, AvoidMode, AvoidState, FcStatusText, ObstaclesFrame, Owner, PilotState, Profile,
+    Sequence, SkillRef,
 };
 
 use super::Pilot;
@@ -94,6 +95,11 @@ impl Pilot {
         } else {
             None
         };
+        let agl = self
+            .fc
+            .rangefinder_agl(now_ms)
+            .map(|m| (m, "rangefinder"))
+            .or_else(|| self.fc.ekf_height(now_ms).map(|m| (m, "home")));
         PilotState {
             owner,
             owner_label,
@@ -145,6 +151,25 @@ impl Pilot {
             rth_countdown_s: self
                 .rth_deadline_ms
                 .map(|d| d.saturating_sub(now_ms) as f64 / 1000.0),
+            surface_ops: super::actions::SURFACE_OPS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            agl_m: agl.map(|(m, _)| wire(m)),
+            agl_source: agl.map(|(_, s)| s.to_owned()),
+            statustext: self
+                .fc
+                .statustext
+                .iter()
+                .rev()
+                .map(|s| (s, now_ms.saturating_sub(s.at_ms)))
+                .take_while(|(_, age)| *age <= crate::fc::STATUSTEXT_MAX_AGE_MS)
+                .map(|(s, age_ms)| FcStatusText {
+                    severity: s.v.0,
+                    text: s.v.1.clone(),
+                    age_ms,
+                })
+                .collect(),
         }
     }
 

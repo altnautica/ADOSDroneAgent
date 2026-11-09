@@ -93,7 +93,9 @@ function BatteryItem({ compact }: { compact: boolean }) {
  *  flashing on a new alert until the list is opened. */
 function StatusPill({ compact }: { compact: boolean }) {
   const alerts = useCockpitAlerts();
-  const readiness = usePilot()?.data.readiness ?? [];
+  const pilot = usePilot()?.data;
+  const readiness = pilot?.readiness ?? [];
+  const fcStatus = pilot?.statustext;
   const prearm = useFlightStore((s) => s.telemetry?.prearm);
   const storagePct = useStatusStore((s) => s.status?.system?.disk_pct ?? null);
   const acked = useStatusPillStore((s) => s.acked);
@@ -101,7 +103,7 @@ function StatusPill({ compact }: { compact: boolean }) {
   // The list's anchor, read when the pill is pressed; null while closed.
   const [rect, setRect] = useState<DOMRect | null>(null);
   const open = rect !== null;
-  const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct }), acked);
+  const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus }), acked);
   const color = severityColor(summary.severity);
   const Icon = SEVERITY_ICON[summary.severity];
   const ids = summary.alerts.map((a) => a.id);

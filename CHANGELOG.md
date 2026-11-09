@@ -6,6 +6,22 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.37] - 2026-11-10
+
+### Added
+
+- Pilot `goto` action for ground surfaces: `{lat, lon, alt_m}` with the altitude above home, converted to the local frame from the FC's home position and flown as a pilot goto. Refused with `bad_args`, `not_armed`, `landed`, `tuning` or `no_home`.
+- Pilot kind: `surface_ops` (the pilot actions a surface may offer, `goto` today), `agl_m` with `agl_source` (`rangefinder` while a fresh downward reading is under 8 m, else `home` from the EKF), and `statustext`, the FC's STATUSTEXT at WARNING or worse from the last 30 s, newest first, at most eight.
+- Cockpit "Fly here": a long-press on the map picks a point, a sheet shows its distance and height, and a hold sends the pilot's `goto`; offered only while the pilot lists `goto` in `surface_ops` and the drone is flying.
+- Dashboard status card shows the read-only flight-state chip from the `/api/v1/nav/status` pilot entry, through the cockpit's chip rules (now shared in `web-shared/src/hud/flight-state.ts`).
+
+### Changed
+
+- Cockpit status pill includes the FC's warnings from the pilot kind's `statustext` (critical at ERROR or worse; PreArm lines stay under the pre-arm item).
+- Cockpit bottom-row AGL reads the pilot kind's `agl_m`, with the follow kind's height behind it.
+- Cockpit spec: the bottom-left card switches by swipe and its page dots; L3 keeps swapping video and map.
+- Cockpit controller warning for a non-standard pad reads "Controller layout not supported".
+
 ## [0.109.36] - 2026-11-10
 
 ### Fixed

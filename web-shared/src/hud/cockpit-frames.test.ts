@@ -87,6 +87,9 @@ describe("parsePilotState on the golden fixture", () => {
     expect(p!.banner).toEqual({ textKey: "pilot.banner.ados_engaged", args: { source: "GCS" }, untilMs: 1793960003000 });
     expect(p!.gate).toBeNull();
     expect(p!.sequence).toBeNull();
+    expect(p!.surfaceOps).toEqual(["goto"]);
+    expect([p!.aglM, p!.aglSource]).toEqual([4.2, "rangefinder"]);
+    expect(p!.statustext).toEqual([{ severity: 4, text: "PreArm: Compass not calibrated", ageMs: 1200 }]);
   });
 
   it("rejects an unknown owner", () => {

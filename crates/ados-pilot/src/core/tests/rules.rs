@@ -1,6 +1,10 @@
 use ados_protocol::pilot::{Owner, Request};
 
-use super::harness::World;
+use ados_protocol::mavlink::ardupilotmega::{
+    MavMessage, MavSeverity, HOME_POSITION_DATA, STATUSTEXT_DATA,
+};
+
+use super::harness::{World, FC_COMP, FC_SYS};
 use crate::core::Reply;
 use crate::fc::{MASK_POS_VEL_YAW, MASK_VELOCITY};
 use crate::modes::copter;
@@ -370,4 +374,124 @@ fn golden_pilot_fixture_round_trips() {
     let v: serde_json::Value = serde_json::from_str(text).unwrap();
     let o: ados_protocol::pilot::ObstaclesFrame = serde_json::from_value(v.clone()).unwrap();
     assert_eq!(serde_json::to_value(&o).unwrap(), v);
+}
+
+fn home_at(w: &mut World, lat: f64, lon: f64) {
+    let m = MavMessage::HOME_POSITION(HOME_POSITION_DATA {
+        latitude: (lat * 1e7) as i32,
+        longitude: (lon * 1e7) as i32,
+        ..Default::default()
+    });
+    w.p.on_fc(FC_SYS, FC_COMP, &m, w.now);
+}
+
+#[test]
+fn surface_goto_flies_to_a_map_point_relative_to_home() {
+    let mut w = World::new();
+    assert_eq!(w.p.state(w.now).surface_ops, vec!["goto".to_owned()]);
+    let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0});
+    home_at(&mut w, 12.0, 77.0);
+    assert!(
+        matches!(w.action_args("goto", args.clone()), Reply::Action(a) if a.err.as_deref() == Some("not_armed"))
+    );
+    w.airborne(copter::GUIDED);
+    let bad = serde_json::json!({"lat": 12.0});
+    assert!(
+        matches!(w.action_args("goto", bad), Reply::Action(a) if a.err.as_deref() == Some("bad_args"))
+    );
+    assert!(matches!(w.action_args("goto", args), Reply::Action(a) if a.ok));
+    w.run(300);
+    assert_eq!(w.p.owner(), Owner::Goto);
+    let g = w.p.state(w.now).goal_ned.unwrap();
+    assert!((g[0] - 100.2).abs() < 0.5, "{g:?}");
+    assert!(g[1].abs() < 0.1 && (g[2] + 6.0).abs() < 0.01, "{g:?}");
+}
+
+#[test]
+fn surface_goto_without_home_is_refused() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let args = serde_json::json!({"lat": 12.0, "lon": 77.0, "alt_m": 6.0});
+    assert!(
+        matches!(w.action_args("goto", args), Reply::Action(a) if a.err.as_deref() == Some("no_home"))
+    );
+}
+
+#[test]
+fn agl_reports_its_source() {
+    let mut w = World::new();
+    w.agl = Some(3.0);
+    w.run(40);
+    let s = w.p.state(w.now);
+    assert_eq!(
+        (s.agl_m, s.agl_source.as_deref()),
+        (Some(3.0), Some("rangefinder"))
+    );
+    w.agl = None;
+    w.pos = [0.0, 0.0, -12.0];
+    w.run(600);
+    let s = w.p.state(w.now);
+    assert_eq!(
+        (s.agl_m, s.agl_source.as_deref()),
+        (Some(12.0), Some("home"))
+    );
+}
+
+#[test]
+fn fc_warnings_reach_the_pilot_kind_newest_first_and_age_out() {
+    let mut w = World::new();
+    let text = |sev: MavSeverity, t: &str| {
+        MavMessage::STATUSTEXT(STATUSTEXT_DATA {
+            severity: sev,
+            text: t.into(),
+        })
+    };
+    w.p.on_fc(
+        FC_SYS,
+        FC_COMP,
+        &text(MavSeverity::MAV_SEVERITY_INFO, "EKF3 IMU0 is using GPS"),
+        w.now,
+    );
+    w.p.on_fc(
+        FC_SYS,
+        FC_COMP,
+        &text(
+            MavSeverity::MAV_SEVERITY_WARNING,
+            "PreArm: Compass not calibrated",
+        ),
+        w.now,
+    );
+    w.run(1000);
+    w.p.on_fc(
+        FC_SYS,
+        FC_COMP,
+        &text(MavSeverity::MAV_SEVERITY_CRITICAL, "Crash: Disarming"),
+        w.now,
+    );
+    let s = w.p.state(w.now);
+    let got: Vec<_> = s
+        .statustext
+        .iter()
+        .map(|t| (t.severity, t.text.as_str(), t.age_ms))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            (2, "Crash: Disarming", 0),
+            (4, "PreArm: Compass not calibrated", 1000)
+        ]
+    );
+    w.run(29_500);
+    assert_eq!(w.p.state(w.now).statustext.len(), 1);
+    for i in 0..20 {
+        w.p.on_fc(
+            FC_SYS,
+            FC_COMP,
+            &text(MavSeverity::MAV_SEVERITY_ERROR, &format!("e{i}")),
+            w.now,
+        );
+    }
+    let s = w.p.state(w.now);
+    assert_eq!(s.statustext.len(), crate::fc::STATUSTEXT_RING);
+    assert_eq!(s.statustext[0].text, "e19");
 }

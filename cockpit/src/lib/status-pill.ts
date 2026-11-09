@@ -9,9 +9,9 @@
 import type { CockpitAlert } from "@/lib/alerts";
 import { STORAGE_BLOCK_PCT, STORAGE_WARN_PCT } from "@/lib/cockpit-flow";
 import { cockpitText } from "@/lib/cockpit-text";
-import type { ReadinessItem } from "@/shared/hud/cockpit-frames";
+import type { FcStatusText, ReadinessItem } from "@/shared/hud/cockpit-frames";
 
-export type PillSource = "pilot_readiness" | "fc_prearm" | "battery" | "link" | "nav_source" | "storage" | "video";
+export type PillSource = "pilot_readiness" | "fc_prearm" | "fc_status_text" | "battery" | "link" | "nav_source" | "storage" | "video";
 export type PillSeverity = "ok" | "warning" | "critical";
 
 export interface PillAlert {
@@ -27,6 +27,8 @@ export interface PillInputs {
   /** The FC's PreArm/Arm texts from the last 10 s; undefined while unknown. */
   prearm: readonly string[] | undefined;
   storagePct: number | null;
+  /** The pilot kind's FC STATUSTEXT at WARNING or worse (last 30 s). */
+  fcStatus?: readonly FcStatusText[];
 }
 
 function alertSource(id: string): PillSource {
@@ -51,6 +53,11 @@ export function pillAlerts(i: PillInputs): PillAlert[] {
   if (i.prearm && i.prearm.length > 0) {
     const text = i.prearm[i.prearm.length - 1].replace(/^(PreArm|Arm):\s*/, "");
     out.push({ id: `fc:${text}`, source: "fc_prearm", severity: "warning", text: cockpitText("flow.preflight.fc_prearm.failing", { text }) });
+  }
+  for (const s of i.fcStatus ?? []) {
+    // PreArm/Arm lines already reach the pill through `prearm`.
+    if (/^(PreArm|Arm):/.test(s.text)) continue;
+    out.push({ id: `fcst:${s.text}`, source: "fc_status_text", severity: s.severity <= 2 ? "critical" : "warning", text: s.text });
   }
   if (i.storagePct !== null && i.storagePct >= STORAGE_WARN_PCT) {
     out.push({

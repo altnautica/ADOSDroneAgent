@@ -6,7 +6,7 @@ import { useState } from "react";
 
 import { useActiveSkillDetail } from "@/hooks/use-follow-skill";
 import { useNow } from "@/hooks/use-now";
-import { flightStateChip, type ChipFacts, type ChipView } from "@/lib/flight-state";
+import { chipFacts, flightStateChip, type ChipView } from "@/shared/hud/flight-state";
 import { layerFrames } from "@/lib/layer-frames";
 import { PILOT_SESSION } from "@/lib/pilot-link";
 import type { ArFrame, PilotState } from "@/shared/hud/cockpit-frames";
@@ -17,9 +17,17 @@ export function usePilot(): Stamped<PilotState> | null {
   return useNavStreamStore((s) => s.pilot);
 }
 
-/** The first blocking readiness message, or null. */
-export function firstBlock(p: PilotState | null): string | null {
-  return p?.readiness.find((r) => !r.ok && r.severity === "block")?.msg ?? null;
+/** Height above ground for the bottom row: the pilot kind's `agl_m` (a fresh
+ *  rangefinder, else the EKF height above home), else the follow kind's. */
+export function bottomRowAgl(pilot: PilotState | null, followAglM: number | null): number | null {
+  return pilot?.aglM ?? followAglM;
+}
+
+/** The bottom row's AGL, from the pilot kind with the follow kind behind it. */
+export function useBottomRowAgl(): number | null {
+  const pilot = useNavStreamStore((s) => s.pilot?.data ?? null);
+  const follow = useNavStreamStore((s) => s.follow?.data.aglM ?? null);
+  return bottomRowAgl(pilot, follow);
 }
 
 /** Whether the stick session belongs to another surface. */
@@ -53,47 +61,6 @@ export function goalDistanceM(
 ): number | null {
   if (!lp || !goal) return null;
   return Math.hypot(goal[0] - lp.x, goal[1] - lp.y);
-}
-
-/** Facts for the chip rules from one pilot state. Exported for tests. */
-export function chipFacts(
-  p: PilotState,
-  ageMs: number,
-  extra: {
-    homeDistM: number | null;
-    modeDetail: string | null;
-    completeAgeMs: number | null;
-    distM?: number | null;
-    etaS?: number | null;
-  },
-): ChipFacts {
-  const block = firstBlock(p);
-  return {
-    owner: p.owner,
-    ready: block === null,
-    firstBlockMsg: block,
-    setupNeeded: p.readiness.some((r) => r.id === "setup_needed" && !r.ok),
-    profile: p.profile,
-    skillLabel: p.skill?.label ?? null,
-    modeDetail: extra.modeDetail,
-    distM: extra.distM ?? null,
-    homeDistM: extra.homeDistM,
-    setupStep: null,
-    missionState: p.mission?.state ?? null,
-    seq: p.mission?.seq ?? null,
-    total: p.mission?.total ?? null,
-    etaS: extra.etaS ?? null,
-    landingSeq: p.mission?.landingSeq ?? false,
-    completeAgeMs: extra.completeAgeMs,
-    vtolTransitioning: p.vtolTransitioning,
-    fcMode: p.fcMode,
-    fcModeName: p.fcModeName,
-    family: p.vehicleClass === "fixedwing" || p.vehicleClass === "vtol" ? "plane" : "copter",
-    controlMode: p.controlMode,
-    holdReason: p.holdReason,
-    avoidState: p.avoidState,
-    ageMs,
-  };
 }
 
 /** The chip for the current pilot state, re-evaluated twice a second so it
