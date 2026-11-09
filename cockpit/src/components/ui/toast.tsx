@@ -1,5 +1,5 @@
 // The one toast host. Draws the shared toast bus (`shared/api/toast`) as a
-// short stack at the bottom centre, clear of the Skill Bar and above the
+// short stack at the bottom centre, clear of the bottom chrome and above the
 // sheets, so the result of an action taken in a sheet stays readable. Each
 // toast carries an icon and its text, never colour alone; errors announce
 // assertively and stay longer.
@@ -7,7 +7,7 @@
 import { useEffect, useState } from "react";
 import { CircleCheck, CircleX, Info } from "lucide-react";
 
-import { SKILL_BAR_CLEARANCE_PX } from "@/lib/cockpit-layout";
+import { BOTTOM_CHROME_CLEARANCE_PX } from "@/lib/cockpit-layout";
 import { cn } from "@/lib/utils";
 import { onToast, type ToastMessage } from "@/shared/api/toast";
 
@@ -43,7 +43,7 @@ export function ToastHost() {
   return (
     <div
       className="pointer-events-none fixed inset-x-0 z-[51] flex flex-col items-center gap-[0.4rem] px-[1rem]"
-      style={{ bottom: SKILL_BAR_CLEARANCE_PX }}
+      style={{ bottom: BOTTOM_CHROME_CLEARANCE_PX }}
     >
       {toasts.map((t) => {
         const Icon = ICON[t.kind];

@@ -1,5 +1,5 @@
 // The range panel (13-hud-v2 §8.1, L2, read-only): bottom-centre over the
-// video, above the Skill Bar, shown in following mode. Range and phase,
+// video, above the bottom chrome, shown in following mode. Range and phase,
 // the ±2σ interval bar, height and its source, the target geometry, and the
 // range cues with the pipeline latency and the re-acquire mode. Rows by width
 // class: one merged line at compact, three rows at medium, five above.

@@ -1910,7 +1910,7 @@
       "unavailable": "Extensions are unavailable: {{error}}",
       "noneRunning": "No extensions are running on this node.",
       "noTab": "{{name}} has no node tab to show here.",
-      "surfaces": "{{skills}} Skill Bar skills · {{panels}} surfaces",
+      "surfaces": "{{skills}} cockpit skills · {{panels}} surfaces",
       "disableGuard": "Hold to disable",
       "remove": "Remove",
       "removeGuard": "Hold to remove",

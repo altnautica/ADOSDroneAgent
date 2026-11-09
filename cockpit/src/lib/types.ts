@@ -57,6 +57,8 @@ export interface SystemView {
   temp_c: number | null;
   uptime_seconds: number | null;
   agent_version: string | null;
+  /** On-board storage used, percent; null when the node does not report it. */
+  disk_pct?: number | null;
 }
 
 /** The identity of the paired drone, when one is paired. */
@@ -279,6 +281,12 @@ export interface VehicleState {
     vz: number;
     age_ms: number;
   } | null;
+  /** The flight controller's PreArm/Arm STATUSTEXT from the last 10 s,
+   *  oldest first; empty when none. Absent while the FC link is down. */
+  prearm?: string[];
+  /** The mission state and the mirror summary (`state`, `seq`, `total`,
+   *  `id`), null until the mission mirror has run. */
+  mission?: Record<string, unknown> | null;
 }
 
 /** One entry of the `GET /api/video/roster` reconciled camera list. Only the

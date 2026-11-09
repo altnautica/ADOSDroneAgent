@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { SKILL_BAR_CLEARANCE_PX } from "@/lib/cockpit-layout";
+import { BOTTOM_CHROME_CLEARANCE_PX } from "@/lib/cockpit-layout";
 import {
   avoidChip,
   followButton,
@@ -17,18 +17,17 @@ import {
 const rail = { followInstalled: true, hasPattern: false, hasModeSetting: true, canSwap: true, safeHeightPx: 600 };
 
 describe("railLayout", () => {
-  it("shows buttons 1–4 at compact and medium", () => {
-    for (const width of ["compact", "medium"] as const) {
-      expect(railLayout({ ...rail, width })).toEqual({ buttons: ["follow", "mode", "camSwap", "rec"], folded: [], divider: false });
+  it("shows the follow group and the camera buttons at every class", () => {
+    for (const width of ["compact", "medium", "expanded", "tv"] as const) {
+      expect(railLayout({ ...rail, width })).toEqual({ buttons: ["follow", "mode", "camSwap", "rec"], folded: [] });
     }
   });
 
-  it("adds the HOLD / RTH / LAND mirrors behind a divider above", () => {
-    expect(railLayout({ ...rail, width: "expanded" })).toEqual({
-      buttons: ["follow", "mode", "camSwap", "rec", "hold", "rth", "land"],
-      folded: [],
-      divider: true,
-    });
+  it("never repeats the left column's hold, return home or land", () => {
+    for (const width of ["compact", "medium", "expanded", "tv"] as const) {
+      const b = railLayout({ ...rail, width }).buttons as string[];
+      expect(b.some((x) => x === "hold" || x === "rth" || x === "land")).toBe(false);
+    }
   });
 
   it("folds 3–4 on a short compact panel", () => {
@@ -52,9 +51,9 @@ describe("rail sizes", () => {
   });
 
   it("keeps clear of a corner radar at compact and medium only", () => {
-    expect(railBottomPx("compact", true)).toBe(SKILL_BAR_CLEARANCE_PX + RADAR_PX.compact + 8);
-    expect(railBottomPx("medium", false)).toBe(SKILL_BAR_CLEARANCE_PX);
-    expect(railBottomPx("tv", true)).toBe(SKILL_BAR_CLEARANCE_PX);
+    expect(railBottomPx("compact", true)).toBe(BOTTOM_CHROME_CLEARANCE_PX + RADAR_PX.compact + 8);
+    expect(railBottomPx("medium", false)).toBe(BOTTOM_CHROME_CLEARANCE_PX);
+    expect(railBottomPx("tv", true)).toBe(BOTTOM_CHROME_CLEARANCE_PX);
   });
 });
 

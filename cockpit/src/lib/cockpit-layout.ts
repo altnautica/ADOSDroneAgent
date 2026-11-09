@@ -15,9 +15,9 @@ export function widthClassFor(widthPx: number, kiosk: boolean): WidthClass {
   return WIDTH_CLASSES.find((c) => w >= c.min && (c.max === null || w <= c.max))?.id ?? "compact";
 }
 
-/** Space kept free above the bottom edge for the bottom row and the skill
- *  picker. */
-export const SKILL_BAR_CLEARANCE_PX = 112;
+/** Space kept free above the bottom edge for the bottom row, the
+ *  bottom-left card's chip and the skill picker. */
+export const BOTTOM_CHROME_CLEARANCE_PX = 112;
 /** Space kept free below the top bar for widget zones. */
 export const ZONE_TOP_CLEARANCE_PX = 140;
 
@@ -88,9 +88,9 @@ export const CHROME = {
   regionLeftBesideRail: "left-[var(--chrome-gap)] landscape:left-[calc(var(--chrome-rail)+var(--chrome-gap))]",
 } as const;
 
-/** The CS-1 z-ladder, as Tailwind classes (literal here so the class scanner
- *  sees them). Readouts sit above the video and below everything the pilot
- *  touches; sheets and dialogs sit over all of it. */
+/** The flight screen's z-ladder, as Tailwind classes (literal here so the
+ *  class scanner sees them). Readouts sit above the video and below
+ *  everything the pilot touches; sheets and dialogs sit over all of it. */
 export const Z = {
   video: "z-0",
   extOverlay: "z-10",
@@ -98,8 +98,8 @@ export const Z = {
   hud: "z-[15]",
   zones: "z-20",
   pip: "z-[25]",
-  skillBar: "z-30",
-  band: "z-40",
+  zoneChrome: "z-30",
+  topBar: "z-40",
   alerts: "z-[45]",
   sheets: "z-50",
 } as const;

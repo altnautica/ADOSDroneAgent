@@ -14,6 +14,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 - Cockpit spec `layout.json`: the top bar carries STOP, never scrolls and moves the controller, navigation source and link text into the Menu when it runs out of room (the chip, the status pill, battery and STOP never move); a `status_pill` (sources, severity colours, flash until acknowledged); `orientation_lock` for the Android flight screen; `legacy_chrome: "none"` (no status band, telemetry strip, navigation rail or hint bar on the flight screen).
 - Cockpit spec `tokens.json`: a `chrome` group for the flight-screen panels (translucent background, backdrop blur with an opaque fallback, hairline border, radius, type scale, icon size and spacing, severity and STOP colours). New strings for the status pill, alerts, levels, battery, Menu, STOP, gimbal pad, map fly-here, the mission on the map and the layer chips.
 
+### Fixed
+
+- Cockpit pre-flight checklist: a "Flight controller checks" item fails while the flight controller reported a PreArm/Arm text in the last 10 s (from the telemetry's `prearm` list) and names the newest one.
+- Cockpit: a status-pill model (cockpit alerts, pilot readiness, FC pre-arm texts and storage; "All systems OK", the one alert, or "<n> warnings"; flashing until the list is opened) and on-board storage from `/api/status/full` `health.disk_percent`.
+- Cockpit: the follow controls no longer repeat the left column's Hold, Return home and Land.
+- Cockpit: depth, surfaces and detection demand leases name a per-window owner, so closing one cockpit window no longer drops another window's lease.
+- Cockpit: the kiosk paint cap comes from the spec's `overlay_fps_cap` instead of a second constant; plugin video overlays are layers `plugin:<plugin>:<overlay>` and draw only at Full and Instruments while their flag is on.
+- Cockpit: leftover names of the removed skill bar renamed (`Z.zoneChrome`, `Z.topBar`, `BOTTOM_CHROME_CLEARANCE_PX`) and the extensions count string reworded.
+
 ## [0.109.29] - 2026-11-08
 
 ### Changed

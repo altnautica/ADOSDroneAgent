@@ -6,13 +6,13 @@
 // radar, and the re-acquired toast text. DOM-free, so every rule is
 // unit-tested.
 
-import { GLOVE_TOUCH_SCALE, SKILL_BAR_CLEARANCE_PX, type WidthClass } from "@/lib/cockpit-layout";
+import { BOTTOM_CHROME_CLEARANCE_PX, GLOVE_TOUCH_SCALE, type WidthClass } from "@/lib/cockpit-layout";
 import { cockpitText } from "@/lib/cockpit-text";
 import type { ParamValue } from "@/lib/skills";
 import type { AvoidState } from "@/shared/hud/cockpit-frames";
 import type { FollowEvent, FollowPhase } from "@/shared/hud/nav-types";
 
-export type RailButton = "follow" | "pattern" | "mode" | "camSwap" | "rec" | "hold" | "rth" | "land";
+export type RailButton = "follow" | "pattern" | "mode" | "camSwap" | "rec";
 
 /** A setting write with no echo after this reverts with a warning (§8.2 #2). */
 export const SETTING_ECHO_TIMEOUT_MS = 3000;
@@ -51,12 +51,11 @@ export interface RailLayout {
   buttons: RailButton[];
   /** Buttons behind the `⋯` button (compact, short panels). */
   folded: RailButton[];
-  /** A divider before the flight mirrors (expanded, tv). */
-  divider: boolean;
 }
 
-/** The rail for a width class: the follow group and the camera buttons on
- *  compact and medium, plus the HOLD / RTH / LAND mirrors above. */
+/** The rail for a width class: the follow group and the camera buttons.
+ *  Hold, return home and land live in the left column only; the rail never
+ *  repeats them. */
 export function railLayout(i: RailInput): RailLayout {
   const top: RailButton[] = [];
   if (i.followInstalled) top.push("follow");
@@ -65,12 +64,10 @@ export function railLayout(i: RailInput): RailLayout {
   const extra: RailButton[] = [];
   if (i.canSwap) extra.push("camSwap");
   extra.push("rec");
-  const wide = i.width === "expanded" || i.width === "tv";
   const fold = i.width === "compact" && i.safeHeightPx < RAIL_FOLD_HEIGHT_PX;
   return {
-    buttons: [...top, ...(fold ? [] : extra), ...(wide ? (["hold", "rth", "land"] as RailButton[]) : [])],
+    buttons: [...top, ...(fold ? [] : extra)],
     folded: fold ? extra : [],
-    divider: wide,
   };
 }
 
@@ -79,7 +76,7 @@ export function railLayout(i: RailInput): RailLayout {
  *  expanded and tv the radar sits left of the rail, so only the picker counts. */
 export function railBottomPx(width: WidthClass, hasRadar: boolean): number {
   const radar = hasRadar && (width === "compact" || width === "medium") ? RADAR_PX[width] + 8 : 0;
-  return SKILL_BAR_CLEARANCE_PX + radar;
+  return BOTTOM_CHROME_CLEARANCE_PX + radar;
 }
 
 /** The follow button: `FOLLOW` while idle with a target designated, `TRACKING`

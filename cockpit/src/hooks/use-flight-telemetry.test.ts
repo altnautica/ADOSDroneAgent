@@ -2,7 +2,7 @@
 //
 // These were untested while being the single gate on whether the HUD draws
 // anything at all: `live` false blanks the horizon, dashes both tapes and
-// disables the skill bar, so a wrong answer here is indistinguishable from a
+// disables the flight actions, so a wrong answer here is indistinguishable from a
 // dead aircraft. The specific bug that motivated the suite is the clock-skew
 // one — the old rule compared the agent's timestamp against the browser's
 // `Date.now()`, so a viewer whose clock disagreed with the agent's by more than

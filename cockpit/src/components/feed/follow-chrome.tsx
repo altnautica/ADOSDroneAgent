@@ -1,6 +1,6 @@
 // The following-mode chrome over the main video (13-hud-v2 §8, §11): the
-// what's-locked chip top-centre (L3), the range panel bottom-centre above the
-// Skill Bar (L2, read-only) and the right rail (L3). Following mode holds while
+// what's-locked chip top-centre (L3), the range panel above the bottom
+// chrome (L2, read-only) and the follow controls (L3). Following mode holds while
 // follow-me reports a non-idle phase, or while a target is designated with the
 // follow skill installed; outside it the panel and rail step aside. The chip
 // shows whenever a target is designated. The re-acquired toast fires from the
@@ -50,8 +50,8 @@ export function FollowChrome({
   cameras: readonly RosterCamera[];
   multiStream: boolean;
   hasRadar: boolean;
-  /** CSS length the range panel's bottom edge keeps above (the Skill Bar top
-   *  plus 12 px, or 12 px where the Skill Bar sits below the video). */
+  /** CSS length the range panel's bottom edge keeps above (the bottom
+   *  chrome's top plus 12 px, or 12 px where it sits below the video). */
   skillClearance: string;
 }) {
   useReacquiredToast();

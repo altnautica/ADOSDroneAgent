@@ -108,3 +108,9 @@ export function nextLevel(level: LayerLevel): LayerLevel {
 export function prevLevel(level: LayerLevel): LayerLevel {
   return LAYER_LEVELS[(LAYER_LEVELS.indexOf(level) + LAYER_LEVELS.length - 1) % LAYER_LEVELS.length];
 }
+
+/** The data-layer id of a plugin's video overlay (`layers.json`
+ *  `plugin_layer.id_pattern`). */
+export function pluginLayerId(pluginId: string, overlayId: string): string {
+  return `plugin:${pluginId}:${overlayId}`;
+}

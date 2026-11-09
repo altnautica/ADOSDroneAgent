@@ -8,7 +8,7 @@
 //                    frame time, attitude and the fresh detection batch.
 //   cockpit.widget — a small frame in its declared corner of the widget zone
 //                    (z 20): the stage area below the inset row and above the
-//                    Skill Bar, so a widget never covers either.
+//                    bottom chrome, so a widget never covers either.
 // `cockpit.panel` frames open from the quick menu instead.
 
 import { useMemo, useRef } from "react";
@@ -16,7 +16,8 @@ import { useMemo, useRef } from "react";
 import { PluginFrameHost, type HostEvent } from "@/components/plugins/plugin-overlay-host";
 import { useElementSize } from "@/hooks/use-element-size";
 import { useNow } from "@/hooks/use-now";
-import { SKILL_BAR_CLEARANCE_PX, Z, ZONE_TOP_CLEARANCE_PX } from "@/lib/cockpit-layout";
+import { BOTTOM_CHROME_CLEARANCE_PX, Z, ZONE_TOP_CLEARANCE_PX } from "@/lib/cockpit-layout";
+import { pluginLayerId } from "@/lib/cockpit-view";
 import { mountablePanels, type ExtensionPanel, type InstalledExtension } from "@/lib/extensions";
 import { computeRenderedRect, pickActiveBatch } from "@/lib/overlay-geometry";
 import { cn } from "@/lib/utils";
@@ -78,20 +79,29 @@ function useVideoOverlayEvent(
   );
 }
 
-/** The extensions' video overlays, filling the video they sit over. */
+/** The extensions' video overlays, filling the video they sit over. Each is
+ *  the data layer `plugin:<plugin_id>:<overlay_id>` and draws only while that
+ *  layer is in `layers` (its flag and the level: Full and Instruments draw
+ *  them, Route and Off do not). */
 export function ExtensionVideoOverlays({
   cameraId,
   multiStream,
   videoWidth,
   videoHeight,
+  layers,
 }: {
   cameraId: string | null;
   multiStream: boolean;
   videoWidth: number | null;
   videoHeight: number | null;
+  layers: ReadonlySet<string>;
 }) {
   const extensions = useExtensionsStore((s) => s.extensions);
-  const overlays = extensions.flatMap((ext) => mountablePanels(ext, "video.overlay").map((p) => ({ ext, p })));
+  const overlays = extensions.flatMap((ext) =>
+    mountablePanels(ext, "video.overlay")
+      .filter((p) => layers.has(pluginLayerId(ext.pluginId, p.id)))
+      .map((p) => ({ ext, p })),
+  );
   if (overlays.length === 0) return null;
   return (
     <VideoOverlayStack
@@ -141,7 +151,7 @@ export function ExtensionWidgetZones({ topClearancePx = ZONE_TOP_CLEARANCE_PX }:
   return (
     <div
       className={cn("pointer-events-none absolute inset-x-0", Z.zones)}
-      style={{ top: topClearancePx, bottom: SKILL_BAR_CLEARANCE_PX }}
+      style={{ top: topClearancePx, bottom: BOTTOM_CHROME_CLEARANCE_PX }}
     >
       {widgets.map(({ ext, p }) => (
         <div

@@ -19,7 +19,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { WidthClass } from "@/lib/cockpit-layout";
+import { LEASE_OWNER } from "@/lib/lease-owner";
 import { effectiveLayers } from "@/lib/cockpit-view";
 import { layerFrames } from "@/lib/layer-frames";
 import { setViewLease } from "@/lib/nav-stream";
@@ -39,8 +39,6 @@ const DEMAND_HOLD_S = 6;
 const DEMAND_RENEW_MS = 2000;
 /** The primary video leg's served id: the camera when no roster names one. */
 const PRIMARY_CAMERA_ID = "main";
-/** Paint cap on the TV / kiosk class. */
-const KIOSK_FPS = 30;
 
 declare global {
   interface Window {
@@ -55,7 +53,9 @@ export interface LayerStackProps {
   videoWidth: number | null;
   videoHeight: number | null;
   videoState: VideoFeedState;
-  widthClass: WidthClass;
+  /** Paint cap in frames per second (the spec's `overlay_fps_cap` for the
+   *  width class: 30 on a television or the kiosk); 0 = every display frame. */
+  fpsCap: number;
 }
 
 /** True while the page is visible. */
@@ -76,7 +76,7 @@ function useVisionDemand(kind: "depth" | "surfaces", cameraId: string | null, ac
     const send = (holdS: number) =>
       apiFetch("/api/vision/demand", {
         method: "POST",
-        body: { kind, camera_id: cameraId, hold_s: holdS, owner: "cockpit" },
+        body: { kind, camera_id: cameraId, hold_s: holdS, owner: LEASE_OWNER },
       }).catch(() => undefined);
     void send(DEMAND_HOLD_S);
     const timer = setInterval(() => void send(DEMAND_HOLD_S), DEMAND_RENEW_MS);
@@ -88,7 +88,7 @@ function useVisionDemand(kind: "depth" | "surfaces", cameraId: string | null, ac
   }, [kind, cameraId, active]);
 }
 
-export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, videoState, widthClass }: LayerStackProps) {
+export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, videoState, fpsCap }: LayerStackProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<LayerEngine | null>(null);
@@ -115,7 +115,6 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
   const visible = usePageVisible();
   const lost = isVideoLost(videoState, isDemoMode());
   const live = visible && !lost && view !== "map";
-  const fpsCap = widthClass === "tv" ? KIOSK_FPS : 0;
 
   // Engine lifetime.
   if (engineRef.current === null) {

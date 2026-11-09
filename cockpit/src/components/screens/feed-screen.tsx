@@ -50,7 +50,8 @@ import { useWidthClass } from "@/hooks/use-width-class";
 import { registerCameraActions } from "@/lib/camera-actions";
 import { registerFeedActions } from "@/lib/feed-actions";
 import { gridMeasures } from "@/lib/cockpit-layout";
-import { effectiveLayers } from "@/lib/cockpit-view";
+import { effectiveLayers, pluginLayerId } from "@/lib/cockpit-view";
+import { mountablePanels } from "@/lib/extensions";
 import { cameraLabel, feedCameras, pickPipCamera, resolveLegVideoUrls } from "@/lib/feed-legs";
 import { isKiosk } from "@/lib/kiosk";
 import { resolveActiveCameraId } from "@/lib/overlay-geometry";
@@ -59,6 +60,7 @@ import { useProfile } from "@/shared/use-profile";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useFeedStore } from "@/stores/feed-store";
+import { useExtensionsStore } from "@/stores/extensions-store";
 import { useNavStore } from "@/stores/nav-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useStatusStore } from "@/stores/status-store";
@@ -95,6 +97,11 @@ export function FeedScreen() {
   const level = useCockpitViewStore((s) => s.level);
   const layerFlags = useCockpitViewStore((s) => s.layers);
   const followSkill = useFollowSkill();
+  const extensions = useExtensionsStore((s) => s.extensions);
+  const pluginOverlayIds = useMemo(
+    () => extensions.flatMap((ext) => mountablePanels(ext, "video.overlay").map((p) => pluginLayerId(ext.pluginId, p.id))),
+    [extensions],
+  );
 
   useEffect(() => {
     bindVehicle(vehicleId, m.defaultLevel);
@@ -148,13 +155,19 @@ export function FeedScreen() {
   useEffect(() => () => syncLegs(null, null), [syncLegs]);
 
   const cameraId = resolveActiveCameraId(activeCameraId, cameras);
-  const layers = effectiveLayers(level, layerFlags, view);
+  const layers = effectiveLayers(level, layerFlags, view, pluginOverlayIds);
 
   const slots: FeedSlots = {
     video: (
       <>
         <VideoLayer whepUrl={whepUrl} hlsUrl={hlsUrl} reconnectKey={reconnectKey} />
-        <ExtensionVideoOverlays cameraId={cameraId} multiStream={cameras.length > 1} videoWidth={video.width} videoHeight={video.height} />
+        <ExtensionVideoOverlays
+          cameraId={cameraId}
+          multiStream={cameras.length > 1}
+          videoWidth={video.width}
+          videoHeight={video.height}
+          layers={layers}
+        />
         {visionCapable && layers.has("targets") ? (
           <TargetLayer
             cameraId={cameraId}
@@ -167,7 +180,7 @@ export function FeedScreen() {
             holdDetection={localVisionCapable}
           />
         ) : null}
-        <LayerStack cameraId={cameraId} videoWidth={video.width} videoHeight={video.height} videoState={video.state} widthClass={widthClass} />
+        <LayerStack cameraId={cameraId} videoWidth={video.width} videoHeight={video.height} videoState={video.state} fpsCap={m.overlayFpsCap ?? 0} />
       </>
     ),
     hud: (

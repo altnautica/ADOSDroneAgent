@@ -2,7 +2,7 @@
 // agent), Release (drop the host designation and stop a running follow), and
 // manifest-declared plugin target actions (designate, then write the plugin
 // key). A plugin action that turns a toggle skill on goes through that skill's
-// own gate and confirm tier (`requestSkill`), exactly like a Skill Bar tap;
+// own gate and confirm tier (`requestSkill`), exactly like a skill picker tap;
 // turning one off is a tap, because stopping makes the vehicle hold.
 
 import { designateTarget, putPluginConfig } from "@/lib/api";

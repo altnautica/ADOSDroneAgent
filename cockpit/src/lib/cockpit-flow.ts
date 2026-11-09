@@ -83,6 +83,27 @@ export function checklistPassable(items: readonly ChecklistItem[]): boolean {
   return items.every((i) => i.state !== "fail");
 }
 
+/** The flight controller's own pre-arm checks: failing while it reported a
+ *  PreArm/Arm text in the last 10 s (the newest is shown), passing when it
+ *  reported none. Null while the telemetry carries no list (the FC link is
+ *  down, which the link item already fails). */
+export function fcPrearmItem(prearm: readonly string[] | undefined): ChecklistItem | null {
+  if (!Array.isArray(prearm)) return null;
+  if (prearm.length === 0) return { id: "fc_prearm", label: cockpitText("flow.preflight.fc_prearm"), state: "pass" };
+  const text = prearm[prearm.length - 1].replace(/^(PreArm|Arm):\s*/, "");
+  return { id: "fc_prearm", label: cockpitText("flow.preflight.fc_prearm.failing", { text }), state: "fail" };
+}
+
+/** On-board storage: fails at or above 95 % used, warns at 85 %, warns when
+ *  the node does not report it. */
+export function storageItem(pct: number | null): ChecklistItem {
+  return {
+    id: "storage",
+    label: pct === null ? "On-board storage (not reported)" : `On-board storage ${Math.round(pct)}% used`,
+    state: pct === null ? "warn" : pct >= STORAGE_BLOCK_PCT ? "fail" : pct >= STORAGE_WARN_PCT ? "warn" : "pass",
+  };
+}
+
 
 export const RADAR_STALE_MS = 2000;
 export const RADAR_RANGE_M = 10;

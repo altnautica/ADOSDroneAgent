@@ -131,14 +131,14 @@ function GridChrome({ slots, m, view, showCard }: { slots: FeedSlots; m: GridMea
       {view !== "map" ? <ExtensionWidgetZones /> : null}
       <Scaled
         m={m}
-        className={cn("absolute left-[0.4rem] -translate-y-1/2", Z.skillBar)}
+        className={cn("absolute left-[0.4rem] -translate-y-1/2", Z.zoneChrome)}
         style={{ top: `calc((100% - ${cardPx + 16}px) / 2)` }}
       >
         {slots.leftColumn(false)}
       </Scaled>
       <Scaled
         m={m}
-        className={cn("absolute top-1/2 -translate-y-1/2", Z.skillBar)}
+        className={cn("absolute top-1/2 -translate-y-1/2", Z.zoneChrome)}
         style={{ right: slots.railPresent ? "calc(var(--cockpit-col) + 1.4rem)" : "0.4rem" }}
       >
         {slots.rightColumn}
@@ -147,10 +147,10 @@ function GridChrome({ slots, m, view, showCard }: { slots: FeedSlots; m: GridMea
         {slots.ack}
         {showCard ? <BottomLeftCardView slots={slots} m={m} /> : null}
       </Scaled>
-      <Scaled m={m} className={cn("absolute bottom-[0.4rem] left-1/2 -translate-x-1/2", Z.skillBar)}>
+      <Scaled m={m} className={cn("absolute bottom-[0.4rem] left-1/2 -translate-x-1/2", Z.zoneChrome)}>
         {slots.bottomRow}
       </Scaled>
-      <Scaled m={m} className={cn("absolute bottom-[0.4rem] right-[0.4rem]", Z.skillBar)}>
+      <Scaled m={m} className={cn("absolute bottom-[0.4rem] right-[0.4rem]", Z.zoneChrome)}>
         {slots.skillPicker}
       </Scaled>
       {slots.onscreenSticks}
@@ -219,7 +219,7 @@ export function LandscapeGrid({ slots, m, view }: { slots: FeedSlots; m: GridMea
 
   return (
     <div className={regionClass(slots.menuCollapsed)}>
-      <Scaled m={m} className={cn("relative shrink-0", Z.band)}>
+      <Scaled m={m} className={cn("relative shrink-0", Z.topBar)}>
         {slots.topBar}
       </Scaled>
       <div ref={rowRef} className="flex min-h-0 flex-1 gap-0">
@@ -265,7 +265,7 @@ export function PortraitGrid({ slots }: { slots: FeedSlots }) {
       <div className="pointer-events-auto relative aspect-video w-full shrink-0 overflow-hidden rounded-lg">
         {slots.video}
         {slots.hud}
-        <div className={cn("absolute inset-x-[0.3rem] top-[0.3rem]", Z.band)}>{slots.topBar}</div>
+        <div className={cn("absolute inset-x-[0.3rem] top-[0.3rem]", Z.topBar)}>{slots.topBar}</div>
         <div className={cn("pointer-events-none absolute inset-x-0 top-[3.4rem] flex flex-col items-center gap-[0.3rem]", Z.alerts)}>
           {slots.overlays}
         </div>
@@ -273,7 +273,7 @@ export function PortraitGrid({ slots }: { slots: FeedSlots }) {
       </div>
       {slots.tabs ? <div className="pointer-events-auto shrink-0">{slots.tabs}</div> : null}
       <div className="flex shrink-0 flex-col items-center gap-[0.3rem]">{slots.alerts}</div>
-      <div className={cn("flex shrink-0 items-center justify-between gap-[0.4rem]", Z.skillBar)}>
+      <div className={cn("flex shrink-0 items-center justify-between gap-[0.4rem]", Z.zoneChrome)}>
         {slots.leftColumn(true)}
         {slots.skillPicker}
       </div>

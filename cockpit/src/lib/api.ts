@@ -3,6 +3,7 @@
 
 import type { StatusFull } from "@/shared/agent-api.generated";
 import { apiFetch } from "@/shared/api-fetch";
+import { LEASE_OWNER } from "@/lib/lease-owner";
 import { fcFamilyOf } from "@/nav/navigator";
 import type {
   AgentConfig,
@@ -132,6 +133,7 @@ export function droneStatusFromFull(full: StatusFull, diag: LinkDiagnosis | null
       temp_c: num(health.temperature) ?? num(resources.temperature),
       uptime_seconds: num(full.uptime_seconds),
       agent_version: str(full.version),
+      disk_pct: num(health.disk_percent),
     },
     recording: video.recording === true,
     video: {
@@ -278,11 +280,13 @@ export interface DetectionDemandResponse {
 
 /** Ask the vision engine to run detection on `cameraId` for `holdS` seconds
  *  (0 releases this owner's lease). Repeat before it expires to keep it.
+ *  The owner defaults to this window's own id, so another cockpit window's
+ *  release never drops this one's lease.
  *  Throws `ApiError` on a 400 (camera not captured) or 503 (no vision engine). */
 export function requestDetection(
   cameraId: string,
   holdS: number,
-  owner = "cockpit",
+  owner: string = LEASE_OWNER,
   signal?: AbortSignal,
 ): Promise<DetectionDemandResponse> {
   return apiFetch<DetectionDemandResponse>("/api/vision/demand", {

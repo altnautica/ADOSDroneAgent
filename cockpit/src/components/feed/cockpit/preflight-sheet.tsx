@@ -1,8 +1,9 @@
 // The pre-flight checklist, which gates the first arm of a session: the
-// pilot's readiness items, the vehicle link, GNSS, battery and home from the
-// telemetry, the controller (when ADOS Pilot flies the sticks) and on-board
-// storage. A failing blocker keeps "Checks done" disabled; warnings are shown
-// and accepted by passing.
+// pilot's readiness items, the flight controller's own pre-arm checks (its
+// PreArm/Arm texts from the last 10 s), the vehicle link, GNSS, battery and
+// home from the telemetry, the controller (when ADOS Pilot flies the sticks)
+// and on-board storage. A failing blocker keeps "Checks done" disabled;
+// warnings are shown and accepted by passing.
 
 import { useEffect, useState } from "react";
 import { CircleAlert, CircleCheck, CircleX } from "lucide-react";
@@ -10,7 +11,7 @@ import { CircleAlert, CircleCheck, CircleX } from "lucide-react";
 import { Sheet } from "@/components/ui/sheet";
 import { usePadStatus } from "@/hooks/use-gamepad";
 import { usePilot } from "@/hooks/use-pilot";
-import { checklistPassable, STORAGE_BLOCK_PCT, STORAGE_WARN_PCT, type ChecklistItem } from "@/lib/cockpit-flow";
+import { checklistPassable, fcPrearmItem, storageItem, type ChecklistItem } from "@/lib/cockpit-flow";
 import { preflightChecks } from "@/lib/safety-band";
 import { apiFetch } from "@/shared/api-fetch";
 import type { AgentHeartbeat } from "@/shared/api/types";
@@ -45,6 +46,8 @@ export function PreflightSheet() {
   for (const r of pilot?.readiness ?? []) {
     items.push({ id: `pilot:${r.id}`, label: r.msg || r.id, state: r.ok ? "pass" : r.severity === "block" ? "fail" : "warn" });
   }
+  const prearm = fcPrearmItem(telemetry?.prearm);
+  if (prearm) items.push(prearm);
   for (const c of preflightChecks({ telemetry, battery, live, home })) {
     items.push({ id: c.id, label: c.label, state: c.ok ? "pass" : c.id === "link" || c.id === "battery" ? "fail" : "warn" });
   }
@@ -55,11 +58,7 @@ export function PreflightSheet() {
       state: pad.connected ? "pass" : "warn",
     });
   }
-  items.push({
-    id: "storage",
-    label: storage === null ? "On-board storage (not reported)" : `On-board storage ${Math.round(storage)}% used`,
-    state: storage === null ? "warn" : storage >= STORAGE_BLOCK_PCT ? "fail" : storage >= STORAGE_WARN_PCT ? "warn" : "pass",
-  });
+  items.push(storageItem(storage));
 
   const ok = checklistPassable(items);
   return (

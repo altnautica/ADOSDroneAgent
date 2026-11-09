@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { effectiveLayers, LAYER_LEVELS, nextLevel, nextView, prevLevel } from "@/lib/cockpit-view";
+import { effectiveLayers, LAYER_LEVELS, nextLevel, nextView, pluginLayerId, prevLevel } from "@/lib/cockpit-view";
 import { cockpitText } from "@/lib/cockpit-text";
 import { stepProfile } from "@/lib/feed-actions";
 import { flightStateChip, type ChipFacts } from "@/lib/flight-state";
@@ -110,6 +110,15 @@ describe("views and layers", () => {
     expect(LAYER_LEVELS).toEqual(["instruments", "full", "route", "off"]);
     expect(LAYER_LEVELS.map(nextLevel)).toEqual(["full", "route", "off", "instruments"]);
     expect(LAYER_LEVELS.map(prevLevel)).toEqual(["off", "instruments", "full", "route"]);
+  });
+
+  it("draws a plugin overlay layer only at Full and Instruments, and only while its flag is on", () => {
+    const id = pluginLayerId("com.example.pod", "reticle");
+    expect(id).toBe("plugin:com.example.pod:reticle");
+    const at = (level: (typeof LAYER_LEVELS)[number], flags: Record<string, boolean> = {}) =>
+      effectiveLayers(level, flags, "pilot", [id]).has(id);
+    expect([at("instruments"), at("full"), at("route"), at("off")]).toEqual([true, true, false, false]);
+    expect(at("full", { [id]: false })).toBe(false);
   });
 });
 
