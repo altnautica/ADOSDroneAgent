@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.72] - 2026-11-10
+
+### Changed
+
+- Pilot state names the cause of a flight controller failsafe; a mission paused by a stick takeover reads paused; an unknown RC RSSI reads unknown.
+
 ## [0.109.71] - 2026-11-10
 
 ### Changed

@@ -244,3 +244,26 @@ fn nothing_to_resume_once_the_mission_is_done_or_unknown() {
     assert!(matches!(r, Reply::Action(a) if a.err.as_deref() == Some("nothing_paused")));
     assert_eq!(w.mode, copter::LOITER);
 }
+
+/// A mission paused by a stick takeover reads `paused` on the pilot kind
+/// (the router reports it `loaded` in GUIDED), with its seq and total, and
+/// the router's state again once `resume` hands it back to the FC.
+#[test]
+fn a_mission_paused_by_a_stick_takeover_reads_paused() {
+    let mut w = World::new();
+    w.airborne(copter::AUTO);
+    w.run(40);
+    w.mission("active", 2, 4);
+    assert_eq!(w.p.state(w.now).mission.unwrap().state, "active");
+    w.stick([0.0, 0.5, 0.0, 0.0], 400);
+    assert_eq!(w.p.owner(), Owner::Pilot);
+    w.mission("loaded", 2, 4);
+    let m = w.p.state(w.now).mission.unwrap();
+    assert_eq!(m.state, "paused");
+    assert_eq!((m.seq, m.total), (Some(2), Some(4)));
+    w.stick([0.0; 4], 600);
+    assert!(ok(&w.action("resume")));
+    w.run(40);
+    w.mission("active", 2, 4);
+    assert_eq!(w.p.state(w.now).mission.unwrap().state, "active");
+}

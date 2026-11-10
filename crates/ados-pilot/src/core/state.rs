@@ -136,7 +136,14 @@ impl Pilot {
             readiness,
             link_loss_in_s,
             link_loss_action: self.settings.pilot.link_loss_action.as_str().to_owned(),
-            mission: self.mission.clone(),
+            // A mission the pilot paused (a stick takeover, Pause) reads
+            // `paused`; the router sees GUIDED and reports it `loaded`.
+            mission: self.mission.clone().map(|mut m| {
+                if self.mission_paused && !matches!(m.state.as_str(), "complete" | "none") {
+                    m.state = "paused".to_owned();
+                }
+                m
+            }),
             input_session: self.sessions.owner.clone(),
             gate: self.sessions.gate(now_ms),
             sequence: self.launch.as_ref().map(|l| Sequence {
@@ -177,6 +184,7 @@ impl Pilot {
                 })
                 .collect(),
             fc_failsafe: self.fc_failsafe,
+            failsafe_cause: self.failsafe_cause.map(str::to_owned),
             setup_step: if owner == Owner::Tuning {
                 self.setup_step.map(str::to_owned)
             } else {

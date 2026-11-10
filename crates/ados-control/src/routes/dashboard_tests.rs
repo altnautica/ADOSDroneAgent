@@ -186,3 +186,23 @@ fn a_rewound_counter_is_not_a_rate() {
     assert_eq!(measured_kbps((t0, 1_000), (t1, 10)), None);
     assert_eq!(measured_kbps((t0, 0), (t0, 1_000)), None);
 }
+
+#[test]
+fn rc_rssi_255_is_unknown_and_the_byte_scales_to_percent() {
+    assert_eq!(rc_rssi_percent(255.0), None);
+    assert_eq!(rc_rssi_percent(254.0), Some(100));
+    assert_eq!(rc_rssi_percent(127.0), Some(50));
+    assert_eq!(rc_rssi_percent(50.0), Some(50));
+    assert_eq!(rc_rssi_percent(0.0), Some(0));
+}
+
+#[test]
+fn an_unknown_rc_rssi_reads_null() {
+    let client = StateIpcClient::disconnected();
+    let mut snap = flying();
+    snap["rc"]["rssi"] = json!(255);
+    client.set_aged_snapshot_for_test(snap, Duration::from_millis(100));
+    let fc = fc_slice(client.snapshot().as_ref());
+    assert!(fc.as_object().unwrap().contains_key("rc"));
+    assert_eq!(fc["rc"], Value::Null);
+}

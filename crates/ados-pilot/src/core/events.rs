@@ -116,6 +116,7 @@ impl Pilot {
         self.low_batt_cancelled = false;
         self.hold_reason = None;
         self.fc_failsafe = false;
+        self.failsafe_cause = None;
         if self
             .launch
             .as_ref()
@@ -167,10 +168,22 @@ impl Pilot {
         })
     }
 
+    /// The stable code for who changed the FC's mode when no operator did
+    /// (`pilot.banner.cause.<code>`): `rc_or_failsafe` while the FC reports
+    /// RC input, `fc` otherwise.
+    fn fc_mode_cause(&self) -> &'static str {
+        if self.fc.rc.is_some() {
+            "rc_or_failsafe"
+        } else {
+            "fc"
+        }
+    }
+
     fn on_mode_change(&mut self, prev: u32, now_ms: u64) {
         let fam = self.family();
         let mode = self.fc.custom_mode;
         self.fc_failsafe = false;
+        self.failsafe_cause = None;
         if self.owner() == Owner::Tuning {
             return;
         }
@@ -214,6 +227,7 @@ impl Pilot {
         // An RTL or land nobody commanded: an RC switch or an FC failsafe
         // (radio, battery, EKF).
         self.fc_failsafe = !operator && (fam.is_rtl(mode) || fam.is_land(mode));
+        self.failsafe_cause = self.fc_failsafe.then(|| self.fc_mode_cause());
         if self.owner() != Owner::FcMode {
             self.set_owner(Owner::FcMode, "fc-mode");
         }
@@ -224,11 +238,7 @@ impl Pilot {
         }
         if !operator && prev != mode {
             let name = fam.mode_name(mode);
-            let cause = if self.fc.rc.is_some() {
-                "rc_or_failsafe"
-            } else {
-                "fc"
-            };
+            let cause = self.fc_mode_cause();
             self.banner = Some(banner(
                 "pilot.banner.fc_mode_change",
                 &[("mode", json!(name)), ("cause", json!(cause))],

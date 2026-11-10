@@ -2,7 +2,7 @@
 //! an operator's RTL or land against a failsafe, and Pause over either.
 
 use ados_protocol::mavlink::ardupilotmega::{
-    MavCmd, MavMessage, MavResult, COMMAND_ACK_DATA, HOME_POSITION_DATA,
+    MavCmd, MavMessage, MavResult, COMMAND_ACK_DATA, HOME_POSITION_DATA, RC_CHANNELS_DATA,
 };
 use ados_protocol::pilot::{Owner, Request, CLIENT_MODE_TOPIC};
 use serde_json::{json, Value};
@@ -212,20 +212,43 @@ fn the_pilot_kind_names_an_fc_failsafe() {
     w.run(100);
     let s = w.p.state(w.now);
     assert!(!s.fc_failsafe);
-    assert!(serde_json::to_value(&s)
-        .unwrap()
-        .get("fc_failsafe")
-        .is_none());
+    let v = serde_json::to_value(&s).unwrap();
+    assert!(v.get("fc_failsafe").is_none());
+    assert_eq!(v["failsafe_cause"], Value::Null);
     w.mode = copter::RTL;
     w.run(100);
     let s = w.p.state(w.now);
     assert!(s.fc_failsafe);
-    assert_eq!(serde_json::to_value(&s).unwrap()["fc_failsafe"], true);
+    let v = serde_json::to_value(&s).unwrap();
+    assert_eq!(v["fc_failsafe"], true);
+    // No RC input reported: the FC changed mode by itself.
+    assert_eq!(v["failsafe_cause"], "fc");
     assert!(ok(&w.action("take_control")));
     w.run(100);
     assert!(
         !w.p.state(w.now).fc_failsafe,
         "an operator's mode change ends it"
+    );
+    assert_eq!(w.p.state(w.now).failsafe_cause, None);
+
+    // With RC input the same change may be an RC switch: the banner's cause.
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    let rc = MavMessage::RC_CHANNELS(RC_CHANNELS_DATA {
+        chancount: 8,
+        chan1_raw: 1500,
+        ..Default::default()
+    });
+    w.p.on_fc(FC_SYS, FC_COMP, &rc, w.now);
+    w.run(100);
+    w.mode = copter::RTL;
+    w.run(100);
+    let s = w.p.state(w.now);
+    assert!(s.fc_failsafe);
+    assert_eq!(s.failsafe_cause.as_deref(), Some("rc_or_failsafe"));
+    assert_eq!(
+        s.banner.as_ref().and_then(|b| b.args.get("cause")),
+        Some(&json!("rc_or_failsafe"))
     );
 
     let mut w = World::new();
@@ -235,6 +258,7 @@ fn the_pilot_kind_names_an_fc_failsafe() {
     w.mode = copter::RTL;
     w.run(100);
     assert!(!w.p.state(w.now).fc_failsafe, "a ground station's RTL");
+    assert_eq!(w.p.state(w.now).failsafe_cause, None);
 }
 
 /// An RTL or land a ground station asked for (Mode sheet, RTH, land) is

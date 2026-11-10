@@ -215,6 +215,11 @@ pub struct PilotState {
     /// mode. Omitted while false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fc_failsafe: bool,
+    /// Why the FC flies `fc_failsafe`, as the `pilot.banner.cause.<code>`
+    /// code: `rc_or_failsafe` (the FC reports RC input) or `fc`. `None`
+    /// unless `fc_failsafe`.
+    #[serde(default)]
+    pub failsafe_cause: Option<String>,
     /// The FC setup engine's active step id (`autotune`, `first_hover`, …)
     /// while the owner is `tuning`; `None` otherwise.
     #[serde(default)]

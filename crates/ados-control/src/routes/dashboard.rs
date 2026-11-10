@@ -244,7 +244,7 @@ fn fc_slice(snapshot: Option<&Value>) -> Value {
         "rc": block("rc")
             .and_then(|m| m.get("rssi"))
             .and_then(Value::as_f64)
-            .map(rc_rssi_percent),
+            .and_then(rc_rssi_percent),
         "fc_port": fc_port,
         "fc_baud": fc_baud,
         "connected": connected,
@@ -284,17 +284,21 @@ fn hdop(eph: &Value) -> Option<f64> {
     eph.as_f64().filter(|e| *e > 0.0 && *e < HDOP_UNKNOWN)
 }
 
-/// Normalize a raw MAVLink RC RSSI to 0-100 %. Some firmware sends a percent
-/// already (0-100, passed through); ArduPilot fills the 0-254 byte where 254 is
-/// full signal (scaled by 100/254). Clamped to 0-100.
-fn rc_rssi_percent(raw: f64) -> i64 {
+/// Normalize a raw MAVLink RC RSSI to 0-100 %, `None` when unknown (255, the
+/// MAVLink "invalid/unknown" value). Some firmware sends a percent already
+/// (0-100, passed through); ArduPilot fills the 0-254 byte where 254 is full
+/// signal (scaled by 100/254). Clamped to 0-100.
+fn rc_rssi_percent(raw: f64) -> Option<i64> {
+    if raw >= 255.0 {
+        return None;
+    }
     if raw <= 0.0 {
-        return 0;
+        return Some(0);
     }
     if raw <= 100.0 {
-        return raw.round_ties_even() as i64;
+        return Some(raw.round_ties_even() as i64);
     }
-    ((raw * 100.0 / 254.0).round_ties_even() as i64).clamp(0, 100)
+    Some(((raw * 100.0 / 254.0).round_ties_even() as i64).clamp(0, 100))
 }
 
 /// MAVLink `MAV_AUTOPILOT` → firmware label.

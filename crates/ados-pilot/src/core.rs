@@ -109,6 +109,9 @@ pub struct Pilot {
     /// The FC switched itself (or an RC switch or failsafe did) to an RTL or
     /// land mode: a surface goto waits until the operator changes mode.
     fc_failsafe: bool,
+    /// Why the FC flies `fc_failsafe`: the `fc_mode_cause` code at the mode
+    /// change. `None` while `fc_failsafe` is false.
+    failsafe_cause: Option<&'static str>,
     rth_deadline_ms: Option<u64>,
     low_batt_cancelled: bool,
     view: ViewDemand,
@@ -161,6 +164,7 @@ impl Pilot {
             landing: false,
             fc_hold: None,
             fc_failsafe: false,
+            failsafe_cause: None,
             rth_deadline_ms: None,
             low_batt_cancelled: false,
             view: ViewDemand::default(),
