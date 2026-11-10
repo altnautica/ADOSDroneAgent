@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.87] - 2026-11-10
+
+### Changed
+
+- Cockpit spec: shared words for the follow rail, PiP swap, vision panel, proximity radar, re-acquire toggle, map status rows and the nav-source acknowledgement toast.
+
 ## [0.109.86] - 2026-11-10
 
 ### Changed
