@@ -228,6 +228,14 @@ describe("the top bar's controls", () => {
     expect(BUILTIN_LAYERS.map((l) => l.id)).toEqual(layersJson.layers.map((l) => l.id));
     expect(BUILTIN_LAYERS.every((l) => l.label.length > 0)).toBe(true);
   });
+
+  it("open the alert list and the layer menu on the shared overlay frame", () => {
+    // One overlay at a time; Escape, controller back and a press outside close the newest.
+    expect(bar).not.toContain("createPortal");
+    expect(bar).not.toContain("useDismiss");
+    expect(bar.match(/<Overlay\b/g)?.length).toBe(2);
+    expect(bar).toContain('data-testid="status-pill-list"');
+  });
 });
 
 describe("the no-picture note", () => {
