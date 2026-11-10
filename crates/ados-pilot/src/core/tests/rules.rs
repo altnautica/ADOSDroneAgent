@@ -75,7 +75,10 @@ fn external_guided_outside_ados_stays_with_the_fc() {
         w.run(400);
         assert_eq!(w.p.owner(), Owner::FcMode, "{mode}");
         assert_eq!(w.mode, copter::GUIDED, "{mode}");
-        assert!(w.last_setpoint().is_none(), "{mode}: the pilot sent a setpoint");
+        assert!(
+            w.last_setpoint().is_none(),
+            "{mode}: the pilot sent a setpoint"
+        );
     }
 }
 

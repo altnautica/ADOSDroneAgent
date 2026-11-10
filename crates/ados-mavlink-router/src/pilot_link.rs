@@ -221,8 +221,10 @@ impl PilotLink {
         self.flying
             .store(if flying { class } else { 0 }, Ordering::Relaxed);
         let tuning = field("owner").and_then(rmpv::Value::as_str) == Some("tuning");
-        self.goto_ok
-            .store(flag("armed") && !flag("landed") && !tuning, Ordering::Relaxed);
+        self.goto_ok.store(
+            flag("armed") && !flag("landed") && !tuning,
+            Ordering::Relaxed,
+        );
     }
 
     /// The FC mode to set because the pilot died while flying: its state
@@ -302,7 +304,9 @@ impl PilotLink {
     /// rejected when the pilot cannot (disarmed, landed, tuning), failed when
     /// the target could not be placed.
     pub fn reposition_ack(&self, r: Reposition, fc_sysid: u8) -> Option<Vec<u8>> {
-        use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, MavResult, COMMAND_ACK_DATA};
+        use ados_protocol::mavlink::ardupilotmega::{
+            MavCmd, MavMessage, MavResult, COMMAND_ACK_DATA,
+        };
         let result = if !r.redirected {
             MavResult::MAV_RESULT_FAILED
         } else if self.goto_ok.load(Ordering::Relaxed) {

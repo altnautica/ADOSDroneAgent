@@ -326,9 +326,15 @@ fn an_intercepted_reposition_is_answered_with_its_outcome() {
 
     // On the ground or tuning the pilot ignores a goto: say so.
     link.on_state(&pilot_state("idle", true, true, "multirotor"));
-    assert_eq!(ack_of(&link, r).1, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+    assert_eq!(
+        ack_of(&link, r).1,
+        MavResult::MAV_RESULT_TEMPORARILY_REJECTED
+    );
     link.on_state(&pilot_state("tuning", true, false, "multirotor"));
-    assert_eq!(ack_of(&link, r).1, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+    assert_eq!(
+        ack_of(&link, r).1,
+        MavResult::MAV_RESULT_TEMPORARILY_REJECTED
+    );
 
     // No position to place the target: dropped, and the ack says it failed.
     let out = filter(&frame(&reposition_long()), None);
