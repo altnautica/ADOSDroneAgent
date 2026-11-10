@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.43] - 2026-11-10
+
+### Fixed
+
+- Router and pilot reposition-ACK and goto tests formatted to the workspace rustfmt style.
+
 ## [0.109.42] - 2026-11-10
 
 ### Fixed
