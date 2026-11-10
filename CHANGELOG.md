@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.82] - 2026-11-10
+
+### Changed
+
+- Cockpit photo and zoom now use the vehicle's own camera over MAVLink when no camera extension takes them: photo goes to a camera that lists image capture, zoom to one that lists basic zoom, and only then to the browser frame grab or digital zoom. A refusal shows "Photo failed" or "Zoom failed" with the vehicle's reason.
+- The camera settings sheet has a stream quality choice. Auto keeps the profile the ground station assigned; High holds full-rate video for this window.
+- Bottom-row readouts use the shared formatters, so they never show "-0.0", and the distance switches to km from 1000 m.
+- The left column shows each action's short label at medium, expanded and TV widths. The full label stays the accessible name.
+- The video card in the map view has a button that swaps the video and the map. The follow controls, the follow range panel and the on-screen sticks take their wording from the shared string table.
+
 ## [0.109.81] - 2026-11-10
 
 ### Changed
