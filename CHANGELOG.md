@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.75] - 2026-11-10
+
+### Changed
+
+- The dashboard flight-state chip keeps the last pilot frame when a read fails and turns LINK once it ages, instead of disappearing. It now carries the waypoint ETA, goal and home distance and the skill detail.
+- The dashboard Home status card shows the status pill with an expandable alert list, the link-loss action, AGL with its source, who holds the sticks and the time to reserve. Values from a failed or old read show a dash.
+- The dashboard polls the pilot state once, 5 times a second while video is shown and once a second otherwise. The video panel adds Depth and Surfaces layer toggles (off by default), a gimbal availability badge, and realigns layers when the stream size arrives.
+- Telemetry › Sensors hides the unknown HDOP value. The Enter Cockpit Launch label reads clearly in the light theme.
+
 ## [0.109.74] - 2026-11-10
 
 ### Changed

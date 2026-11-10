@@ -11,7 +11,8 @@ import { fmtBitrate, fmtNum } from "@/shared/format";
 import { capturedLabel, fetchSnapshot } from "@/shared/api/snapshot";
 import { cn } from "@/lib/utils";
 import { VideoDetections } from "@/components/panels/video-detections";
-import { VideoLayers } from "@/components/panels/video-layers";
+import { GimbalBadge, LayerToggles, VideoLayers } from "@/components/panels/video-layers";
+import { defaultLeasedLayers } from "@/lib/video-layer-lease";
 import { useProfile } from "@/shared/use-profile";
 import { useVideoTransport } from "@/shared/use-video-transport";
 import type { TransportKind } from "@/shared/video-transport";
@@ -56,6 +57,7 @@ export function VideoPanel() {
   const panelRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [retryToken, setRetryToken] = useState(0);
+  const [layerToggles, setLayerToggles] = useState(defaultLeasedLayers);
   // Object URL of a still frame grabbed from the live stream, fetched with the
   // credential when every live transport failed, and when the agent took it.
   const [snapshotUrl, setSnapshotUrl] = useState<string | null>(null);
@@ -202,6 +204,16 @@ export function VideoPanel() {
           />
         )}
 
+        {!isGround && (
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <LayerToggles
+              toggles={layerToggles}
+              onChange={(id, on) => setLayerToggles((s) => ({ ...s, [id]: on }))}
+            />
+            <GimbalBadge />
+          </div>
+        )}
+
         <div className="relative aspect-video w-full rounded-md border border-border bg-letterbox overflow-hidden">
           <video
             ref={videoRef}
@@ -210,7 +222,7 @@ export function VideoPanel() {
             autoPlay
             playsInline
           />
-          {!isGround && <VideoLayers active={state === "live"} videoRef={videoRef} />}
+          {!isGround && <VideoLayers active={state === "live"} videoRef={videoRef} toggles={layerToggles} />}
           {!isGround && <VideoDetections active={state === "live"} videoRef={videoRef} />}
           {showSnapshot && snapshotUrl && (
             <img

@@ -8,7 +8,10 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
-import { useSnapshot } from "@/hooks/use-snapshot";
+import { useNow } from "@/hooks/use-now";
+import { SNAPSHOT_POLL_MS, useSnapshot } from "@/hooks/use-snapshot";
+import { isLive } from "@/lib/freshness";
+import { cn } from "@/lib/utils";
 import { mspVariant, mspVariantLabel } from "@/shared/api/fc-firmware";
 import { fmtNum, fmtPct, fmtVoltage } from "@/shared/format";
 
@@ -34,6 +37,10 @@ export function FcPanel() {
   const snap = useSnapshot();
   const hb = useHeartbeat();
   const fc = snap.data?.fc;
+  const now = useNow(1_000);
+  // A failed or late read dashes the live values (mode, arm state, GPS,
+  // battery, RC) and dims the card; identity rows stay.
+  const live = isLive(snap, SNAPSHOT_POLL_MS, now);
 
   if (!snap.data) {
     return (
@@ -111,7 +118,7 @@ export function FcPanel() {
           {t("panels.fc.title")}
         </CardTitle>
       </CardHeader>
-      <CardContent className="space-y-0">
+      <CardContent className={cn("space-y-0", !live && "opacity-60")} data-live={live}>
         {!heartbeatLanded && (
           <p className="text-xs text-warn pb-2">
             {t("panels.fc.waitingTelemetry")}
@@ -122,7 +129,7 @@ export function FcPanel() {
         <Row
           label={t("panels.fc.mode")}
           value={
-            <span className="uppercase">
+            !live ? "—" : <span className="uppercase">
               {fc.mode || "—"}
               {fc.armed === true ? (
                 <span className="ml-2 text-warn">{t("panels.fc.armed")}</span>
@@ -138,7 +145,7 @@ export function FcPanel() {
         <Row
           label={t("panels.fc.gps")}
           value={
-            fc.gps.satellites_visible != null
+            live && fc.gps.satellites_visible != null
               ? t("panels.fc.gpsValue", { sats: fc.gps.satellites_visible, hdop: fmtNum(fc.gps.hdop, 1) })
               : "—"
           }
@@ -146,12 +153,12 @@ export function FcPanel() {
         <Row
           label={t("panels.fc.battery")}
           value={
-            fc.battery.voltage != null
+            live && fc.battery.voltage != null
               ? `${fmtVoltage(fc.battery.voltage)} · ${fmtPct(fc.battery.remaining)}`
               : "—"
           }
         />
-        <Row label={t("panels.fc.rc")} value={fmtPct(fc.rc)} />
+        <Row label={t("panels.fc.rc")} value={live ? fmtPct(fc.rc) : "—"} />
         <Row label={t("panels.fc.port")} value={fc.fc_port ? `${fc.fc_port} @ ${fc.fc_baud ?? "—"}` : "—"} />
       </CardContent>
     </Card>

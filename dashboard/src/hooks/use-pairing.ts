@@ -21,11 +21,13 @@ export interface PairingInfo {
   mdns_host?: string | null;
 }
 
+export const PAIRING_POLL_MS = 5_000;
+
 export function usePairingInfo() {
   return useQuery<PairingInfo>({
     queryKey: ["pairing-info"],
     queryFn: ({ signal }) => apiFetch<PairingInfo>("/api/pairing/info", { signal }),
-    refetchInterval: 5_000,
+    refetchInterval: PAIRING_POLL_MS,
   });
 }
 

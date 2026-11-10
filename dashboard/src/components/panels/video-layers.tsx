@@ -1,43 +1,59 @@
 // The dashboard's read-only data layers over its video: the cockpit's shared
 // layer engine at the Route level (AR route and motion items, obstacles),
-// fed by polling `GET /api/v1/nav/status?view=main:<layers>` at 5 Hz while the
-// panel shows live video and the page is visible. The `view` query is the
-// polling client's view lease: each request renews it, so the agent computes
-// these layers for the primary camera only while this panel is watching.
+// plus the depth and surfaces layers when their toggle is on (off by
+// default, as `layers.json` defaults them). Frames come from the shared
+// nav-status poll (5 Hz while this panel is mounted). While the panel shows
+// live video the poll carries the view lease `?view=main:<layers>`, so the
+// agent computes these layers for the primary camera only while this panel
+// watches; a toggled-on depth or surfaces layer joins the same lease.
 //
-// No controls here: the dashboard is the setup surface; the cockpit is the
-// flight surface where the layer level, views and toggles live.
+// The dashboard is the setup surface: the layer level and views live in the
+// cockpit. The two leased toggles are here because they cost the agent work.
 
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
+import { useNavLease, useNavStatus, useNavVideoPanel } from "@/hooks/use-nav-status";
+import { CAMERA_ID, LEASED_LAYERS, layersViewQuery } from "@/lib/video-layer-lease";
+import { cn } from "@/lib/utils";
 import { apiFetch } from "@/shared/api-fetch";
-import { parseArFrame, parseObstaclesFrame, parsePilotState } from "@/shared/hud/cockpit-frames";
+import {
+  parseArFrame,
+  parseDepthFrame,
+  parseObstaclesFrame,
+  parsePilotState,
+  parseSurfacesFrame,
+} from "@/shared/hud/cockpit-frames";
 import { LayerEngine, LayerFrameStore } from "@/shared/hud/layer-engine";
+import { specText } from "@/shared/hud/spec-text";
 
-const POLL_MS = 200;
-/** The primary camera's served id. */
-const CAMERA_ID = "main";
-const LAYERS = ["ar_route", "ar_motion", "obstacles"] as const;
-const VIEW_QUERY = `${CAMERA_ID}:${LAYERS.join(",")}`;
+const LAYERS_LABEL = specText("cockpit.layers.flags");
+const GIMBAL_TEXT = specText("cockpit.gimbal_pad");
+const GIMBAL_OFF_TEXT = `${GIMBAL_TEXT} · ${specText("cockpit.unavailable")}`;
 
-interface StatusEntry {
-  ts_ms: number;
-  age_ms: number;
-  data: unknown;
+/** The engine's video size: the element's intrinsic size once known. */
+function videoSize(v: HTMLVideoElement | null): { videoW: number; videoH: number } | null {
+  return v && v.videoWidth > 0 && v.videoHeight > 0 ? { videoW: v.videoWidth, videoH: v.videoHeight } : null;
 }
-
-type NavStatus = Partial<Record<"ar" | "obstacles" | "pilot", StatusEntry | null>>;
 
 export function VideoLayers({
   active,
   videoRef,
+  toggles,
 }: {
   /** True while the panel shows live video. */
   active: boolean;
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /** Leased layer id → on. */
+  toggles: Readonly<Record<string, boolean>>;
 }) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const engineRef = useRef<{ engine: LayerEngine; store: LayerFrameStore; mission: string } | null>(null);
+  const view = layersViewQuery(toggles);
+  useNavVideoPanel();
+  useNavLease(active ? view : null);
+  const nav = useNavStatus();
 
   useEffect(() => {
     const box = boxRef.current;
@@ -46,7 +62,7 @@ export function VideoLayers({
     const store = new LayerFrameStore();
     const engine = new LayerEngine(store, {
       cameraId: CAMERA_ID,
-      layers: new Set(LAYERS),
+      layers: new Set(view.slice(CAMERA_ID.length + 1).split(",")),
       level: "route",
       videoW: 1280,
       videoH: 720,
@@ -58,67 +74,128 @@ export function VideoLayers({
       fpsCap: 0,
     });
     engine.attach(canvas);
+    engineRef.current = { engine, store, mission: "" };
+    // The letterbox follows the shown video: on a box resize, and when the
+    // stream's metadata (or its size) arrives after the first layout.
+    const fit = () => {
+      const size = videoSize(videoRef.current);
+      if (size) engine.configure(size);
+    };
     const ro = new ResizeObserver(() => {
       const r = box.getBoundingClientRect();
       engine.resize(r.width, r.height, window.devicePixelRatio || 1);
-      const v = videoRef.current;
-      if (v && v.videoWidth > 0) engine.configure({ videoW: v.videoWidth, videoH: v.videoHeight });
+      fit();
     });
     ro.observe(box);
+    const video = videoRef.current;
+    video?.addEventListener("loadedmetadata", fit);
+    video?.addEventListener("resize", fit);
+    fit();
 
-    let lastMission = "";
-    let inFlight: AbortController | null = null;
-    const poll = () => {
-      if (inFlight || document.visibilityState === "hidden") return;
-      const ac = new AbortController();
-      inFlight = ac;
-      apiFetch<NavStatus>(`/api/v1/nav/status?view=${encodeURIComponent(VIEW_QUERY)}`, { signal: ac.signal })
-        .then((body) => {
-          const at = performance.now();
-          const pilot = body.pilot ? parsePilotState(body.pilot.data) : null;
-          const missionKey = `${pilot?.mission?.state ?? ""}|${pilot?.avoidState ?? ""}|${pilot?.armed ?? ""}|${pilot?.owner ?? ""}`;
-          if (missionKey !== lastMission) {
-            lastMission = missionKey;
-            engine.configure({
-              mission: pilot?.mission ?? null,
-              avoid: pilot?.avoidState ?? null,
-              showLoaded: !pilot || !pilot.armed || pilot.owner === "pilot" || pilot.owner === "fc_mode",
-            });
-          }
-          // Every poll goes to the store: a repeated `ts_ms` is the agent's
-          // keep-alive, which refreshes only the receipt time (at - age_ms)
-          // so a still scene's route stays up without re-interpolating.
-          if (body.ar) {
-            const f = parseArFrame(body.ar.data);
-            if (f) store.putAr(f, at - body.ar.age_ms);
-          }
-          if (body.obstacles) {
-            const f = parseObstaclesFrame(body.obstacles.data);
-            if (f) store.putObstacles(f, at - body.obstacles.age_ms);
-          }
-        })
-        .catch(() => undefined)
-        .finally(() => {
-          if (inFlight === ac) inFlight = null;
-        });
-    };
-    poll();
-    const timer = setInterval(poll, POLL_MS);
     const onVis = () => (document.visibilityState === "hidden" ? engine.stop() : engine.start());
     document.addEventListener("visibilitychange", onVis);
     engine.start();
     return () => {
-      clearInterval(timer);
-      inFlight?.abort();
       document.removeEventListener("visibilitychange", onVis);
+      video?.removeEventListener("loadedmetadata", fit);
+      video?.removeEventListener("resize", fit);
       ro.disconnect();
       engine.stop();
+      engineRef.current = null;
     };
-  }, [active, videoRef]);
+  }, [active, videoRef, view]);
+
+  // Every poll goes to the store: a repeated `ts_ms` is the agent's
+  // keep-alive, which refreshes only the receipt time (at - age_ms) so a
+  // still scene's route stays up without re-interpolating.
+  useEffect(() => {
+    const cur = engineRef.current;
+    const body = nav.data;
+    if (!cur || !body || nav.isError) return;
+    const { engine, store } = cur;
+    const at = performance.now() - Math.max(0, Date.now() - nav.dataUpdatedAt);
+    const pilot = body.pilot ? parsePilotState(body.pilot.data) : null;
+    const missionKey = `${pilot?.mission?.state ?? ""}|${pilot?.avoidState ?? ""}|${pilot?.armed ?? ""}|${pilot?.owner ?? ""}`;
+    if (missionKey !== cur.mission) {
+      cur.mission = missionKey;
+      engine.configure({
+        mission: pilot?.mission ?? null,
+        avoid: pilot?.avoidState ?? null,
+        showLoaded: !pilot || !pilot.armed || pilot.owner === "pilot" || pilot.owner === "fc_mode",
+      });
+    }
+    const age = (e: { age_ms?: number }) => at - (e.age_ms ?? 0);
+    if (body.ar) {
+      const f = parseArFrame(body.ar.data);
+      if (f) store.putAr(f, age(body.ar));
+    }
+    if (body.obstacles) {
+      const f = parseObstaclesFrame(body.obstacles.data);
+      if (f) store.putObstacles(f, age(body.obstacles));
+    }
+    if (body.depth && toggles.depth) {
+      const f = parseDepthFrame(body.depth.data);
+      if (f) store.putDepth(f, age(body.depth));
+    }
+    if (body.surfaces && toggles.surfaces) {
+      const f = parseSurfacesFrame(body.surfaces.data);
+      if (f) store.putSurfaces(f, age(body.surfaces));
+    }
+  }, [nav.data, nav.dataUpdatedAt, nav.isError, toggles]);
 
   return (
     <div ref={boxRef} className="pointer-events-none absolute inset-0" aria-hidden>
       <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
     </div>
+  );
+}
+
+/** The depth and surfaces toggles (off by default). */
+export function LayerToggles({
+  toggles,
+  onChange,
+}: {
+  toggles: Readonly<Record<string, boolean>>;
+  onChange: (id: string, on: boolean) => void;
+}) {
+  return (
+    <div role="group" aria-label={LAYERS_LABEL} className="flex items-center gap-3 text-xs">
+      {LEASED_LAYERS.map((l) => (
+        <label key={l.id} className="inline-flex cursor-pointer items-center gap-1.5">
+          <input
+            type="checkbox"
+            className="h-3.5 w-3.5 accent-primary"
+            checked={toggles[l.id] === true}
+            onChange={(e) => onChange(l.id, e.target.checked)}
+            data-layer={l.id}
+          />
+          {l.label}
+        </label>
+      ))}
+    </div>
+  );
+}
+
+/** Whether the gimbal answers rate commands (`GET /api/v1/gimbal/rate`). */
+export function GimbalBadge() {
+  const q = useQuery<{ available?: boolean }>({
+    queryKey: ["gimbal-rate"],
+    queryFn: ({ signal }) => apiFetch<{ available?: boolean }>("/api/v1/gimbal/rate", { signal }),
+    refetchInterval: 10_000,
+    retry: false,
+  });
+  const available = !q.isError && q.data?.available === true;
+  if (q.data === undefined && !q.isError) return null;
+  return (
+    <span
+      className={cn(
+        "rounded border px-1.5 py-0.5 text-[11px] uppercase tracking-wider",
+        available ? "border-ok/40 text-ok" : "border-border text-muted-foreground",
+      )}
+      data-testid="gimbal-badge"
+      data-available={available}
+    >
+      {available ? GIMBAL_TEXT : GIMBAL_OFF_TEXT}
+    </span>
   );
 }

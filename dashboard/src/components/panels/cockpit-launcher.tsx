@@ -33,19 +33,19 @@ export function CockpitLauncher() {
       )}
     >
       <div className="flex items-center gap-4">
-        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/30">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-amber-500/15 text-warn ring-1 ring-amber-500/30">
           <Fullscreen className="h-5 w-5" />
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-base font-semibold tracking-tight text-foreground">
             {t("panels.cockpit.enter")}
-            <ArrowRight className="h-4 w-4 text-amber-300 transition-transform group-hover:translate-x-0.5" />
+            <ArrowRight className="h-4 w-4 text-warn transition-transform group-hover:translate-x-0.5" />
           </div>
           <p className="mt-0.5 text-sm text-muted-foreground">
             {t("panels.cockpit.description")}
           </p>
         </div>
-        <span className="hidden shrink-0 items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-amber-200 sm:inline-flex">
+        <span className="hidden shrink-0 items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-medium text-foreground sm:inline-flex">
           {t("panels.cockpit.launch")}
         </span>
       </div>

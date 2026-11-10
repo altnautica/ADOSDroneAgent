@@ -4,8 +4,8 @@ import { Link } from "react-router-dom";
 import { MspSensorsView } from "@/components/fc/msp-sensors-view";
 import { Card, CardContent } from "@/components/ui/card";
 import { useHeartbeat } from "@/hooks/use-heartbeat";
-import { useResource } from "@/hooks/use-resource";
 import { useSnapshot } from "@/hooks/use-snapshot";
+import { hdopOrNull, useVehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
 import { resolveFirmwareType } from "@/shared/api/fc-firmware";
 import { fmtNum, fmtPct, fmtVoltage } from "@/shared/format";
 
@@ -23,18 +23,6 @@ export function SensorsTab() {
   return <MavlinkSensors />;
 }
 
-// GET /api/telemetry — the router's live vehicle snapshot (attitude in
-// radians, battery, GPS, position). Every field is absent or null until the FC
-// reports it; nothing here is defaulted.
-interface VehicleTelemetry {
-  armed?: boolean | null;
-  mode?: string | null;
-  attitude?: { roll?: number | null; pitch?: number | null; yaw?: number | null };
-  battery?: { voltage?: number | null; current?: number | null; remaining?: number | null };
-  gps?: { fix_type?: number | null; satellites?: number | null; eph?: number | null };
-  position?: { lat?: number | null; lon?: number | null; alt_rel?: number | null };
-}
-
 function SensorField({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline justify-between border-b border-border/50 py-1.5 last:border-b-0">
@@ -46,7 +34,7 @@ function SensorField({ label, value }: { label: string; value: string }) {
 
 export function MavlinkSensors() {
   const { t } = useTranslation();
-  const tel = useResource<VehicleTelemetry>("vehicle-telemetry", "/api/telemetry", 1_000);
+  const tel = useVehicleTelemetry();
   const v = tel.data;
   const deg = (rad: number | null | undefined) =>
     rad == null ? "—" : `${fmtNum((rad * 180) / Math.PI, 1)}°`;
@@ -88,7 +76,7 @@ export function MavlinkSensors() {
           <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground mb-1.5">{t("telemetry.sensors.gps")}</div>
           <SensorField label={t("telemetry.sensors.fixType")} value={v?.gps?.fix_type != null ? String(v.gps.fix_type) : "—"} />
           <SensorField label={t("telemetry.sensors.sats")} value={v?.gps?.satellites != null ? String(v.gps.satellites) : "—"} />
-          <SensorField label={t("telemetry.sensors.hdop")} value={fmtNum(v?.gps?.eph ?? null, 2)} />
+          <SensorField label={t("telemetry.sensors.hdop")} value={fmtNum(hdopOrNull(v?.gps?.eph), 2)} />
           <SensorField
             label={t("telemetry.sensors.position")}
             value={hasPosition ? `${fmtNum(v!.position!.lat!, 5)}, ${fmtNum(v!.position!.lon!, 5)}` : "—"}

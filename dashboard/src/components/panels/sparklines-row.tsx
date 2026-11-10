@@ -2,8 +2,10 @@ import { lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Card, CardContent } from "@/components/ui/card";
-import { useHeartbeat } from "@/hooks/use-heartbeat";
-import { useSnapshot } from "@/hooks/use-snapshot";
+import { HEARTBEAT_POLL_MS, useHeartbeat } from "@/hooks/use-heartbeat";
+import { useNow } from "@/hooks/use-now";
+import { SNAPSHOT_POLL_MS, useSnapshot } from "@/hooks/use-snapshot";
+import { liveData } from "@/lib/freshness";
 import { useTimeSeries } from "@/hooks/use-time-series";
 
 // The chart library is the heaviest dependency on Home; load it in its own
@@ -49,6 +51,10 @@ export function SparklinesRow() {
   const { t } = useTranslation();
   const snap = useSnapshot();
   const heartbeat = useHeartbeat();
+  const now = useNow(1_000);
+  // A failed or late read dashes the headline instead of keeping the last value.
+  const snapLive = liveData(snap, SNAPSHOT_POLL_MS, now);
+  const hbLive = liveData(heartbeat, HEARTBEAT_POLL_MS, now);
 
   const battery = useTimeSeries(snap.data?.fc?.battery?.voltage, (v) =>
     typeof v === "number" ? v : null,
@@ -67,10 +73,10 @@ export function SparklinesRow() {
   // away; the ring only feeds the chart, so a dropped FC or stream never leaves
   // its last reading on screen as if it were live.
   const current = (v: number | null | undefined) => (typeof v === "number" ? v : null);
-  const lastBat = current(snap.data?.fc?.battery?.voltage);
-  const lastRc = current(snap.data?.fc?.rc);
-  const lastBitrate = current(snap.data?.video?.bitrate_kbps);
-  const lastCpu = current(heartbeat.data?.health?.cpu_percent);
+  const lastBat = current(snapLive?.fc?.battery?.voltage);
+  const lastRc = current(snapLive?.fc?.rc);
+  const lastBitrate = current(snapLive?.video?.bitrate_kbps);
+  const lastCpu = current(hbLive?.health?.cpu_percent);
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">

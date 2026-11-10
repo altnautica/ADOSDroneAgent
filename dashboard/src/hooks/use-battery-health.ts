@@ -47,6 +47,8 @@ export interface BatteryHistoryEvent {
 
 export interface BatteryPack {
   id: number;
+  /** No fresh sample for this pack (the engine's per-pack staleness). */
+  stale: boolean;
   cells_plausible: boolean;
   cell_voltages_v: number[];
   weakest_cell_index: number | null;
@@ -82,12 +84,14 @@ export interface BatteryHealth {
   packs: BatteryPack[];
 }
 
+export const BATTERY_POLL_MS = 2_000;
+
 export function useBatteryHealth(enabled = true) {
   return useQuery<BatteryHealth>({
     queryKey: ["battery-health"],
     queryFn: ({ signal }) =>
       apiFetch<BatteryHealth>("/api/v1/battery", { signal }),
-    refetchInterval: 2_000,
+    refetchInterval: BATTERY_POLL_MS,
     retry: false,
     enabled,
   });

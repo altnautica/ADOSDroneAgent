@@ -1,37 +1,94 @@
 // The read-only flight-state chip for the dashboard's status card: the pilot
-// entry of `GET /api/v1/nav/status` through the cockpit's chip rules. Null on
-// a node with no pilot (the request fails or carries no `pilot` entry).
+// entry of the shared nav-status poll through the cockpit's chip rules
+// (`chipInputs`). A failed or late read keeps the last pilot frame and its
+// receipt time, so the chip ages into LINK instead of vanishing. Null only
+// before any pilot frame was received.
 
 import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
 
+import { useNavStatus, type NavStatusBody } from "@/hooks/use-nav-status";
+import { useNow } from "@/hooks/use-now";
+import { useVehicleTelemetry, type VehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
+import { skillDetailFromState, skillStateTopic } from "@/lib/skill-detail";
 import { apiFetch } from "@/shared/api-fetch";
 import { chipInputs } from "@/shared/hud/chip-inputs";
-import { parsePilotState } from "@/shared/hud/cockpit-frames";
+import { parseArFrame, parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { flightStateChip, type ChipView } from "@/shared/hud/flight-state";
 
-interface NavStatusPilot {
-  pilot?: { age_ms: number; data: unknown } | null;
+export interface ChipSources {
+  /** The last nav-status body received (kept across failed reads). */
+  body: NavStatusBody | undefined;
+  /** Wall-clock ms the body was received. */
+  receivedAtMs: number;
+  nowMs: number;
+  telemetry: Pick<VehicleTelemetry, "home_distance" | "local_position"> | null | undefined;
+  modeDetail: string | null;
+  completeAgeMs: number | null;
 }
 
-/** The chip for one nav-status body, or null without a pilot entry. */
-export function navStatusChip(body: NavStatusPilot | undefined): ChipView | null {
-  const entry = body?.pilot;
-  if (!entry) return null;
-  const p = parsePilotState(entry.data);
-  if (!p) return null;
-  // The status body carries the pilot's age; the dashboard has no local
-  // position, `ar` frame or skill detail.
+/** The pilot state of a nav-status body, or null without one. */
+export function navPilot(body: NavStatusBody | undefined): PilotState | null {
+  return body?.pilot ? parsePilotState(body.pilot.data) : null;
+}
+
+/** The chip for the last received body read at `nowMs`: the pilot's age is
+ *  its age at the agent plus the time since receipt. */
+export function navStatusChip(s: ChipSources): ChipView | null {
+  const entry = s.body?.pilot;
+  const pilot = navPilot(s.body);
+  if (!entry || !pilot) return null;
+  const ar = s.body?.ar;
   return flightStateChip(
-    chipInputs(p, entry.age_ms, 0, { homeDistM: null, localPos: null, arFrame: null, arAgeMs: 0, modeDetail: null, completeAgeMs: null }),
+    chipInputs(pilot, s.nowMs, s.receivedAtMs - (entry.age_ms ?? 0), {
+      homeDistM: s.telemetry?.home_distance ?? null,
+      localPos: s.telemetry?.local_position ?? null,
+      arFrame: ar ? parseArFrame(ar.data) : null,
+      arAgeMs: ar ? s.nowMs - s.receivedAtMs + (ar.age_ms ?? 0) : 0,
+      modeDetail: s.modeDetail,
+      completeAgeMs: s.completeAgeMs,
+    }),
   );
 }
 
-export function useFlightChip(): ChipView | null {
-  const q = useQuery<NavStatusPilot>({
-    queryKey: ["nav-status-pilot"],
-    queryFn: ({ signal }) => apiFetch<NavStatusPilot>("/api/v1/nav/status", { signal }),
+/** The owning skill's chip detail, polled only while a skill owns. */
+function useSkillDetail(pilot: PilotState | null): string | null {
+  const skill = pilot?.owner === "skill" ? pilot.skill : null;
+  const pluginPath = skill ? `/api/plugins/${encodeURIComponent(skill.pluginId)}` : "";
+  const detail = useQuery<unknown>({
+    queryKey: ["plugin-detail", pluginPath],
+    queryFn: ({ signal }) => apiFetch<unknown>(pluginPath, { signal }),
+    enabled: skill !== null,
+    staleTime: 60_000,
+    retry: false,
+  });
+  const topic = skill ? skillStateTopic(detail.data, skill.skillId) : null;
+  const state = useQuery<unknown>({
+    queryKey: ["plugin-state", pluginPath],
+    queryFn: ({ signal }) => apiFetch<unknown>(`${pluginPath}/state`, { signal }),
+    enabled: topic !== null,
     refetchInterval: 1_000,
     retry: false,
   });
-  return q.isError ? null : navStatusChip(q.data);
+  return topic ? skillDetailFromState(state.data, topic) : null;
+}
+
+export function useFlightChip(): ChipView | null {
+  const nav = useNavStatus();
+  const tel = useVehicleTelemetry();
+  const now = useNow(500);
+  const pilot = useMemo(() => navPilot(nav.data), [nav.data]);
+  const modeDetail = useSkillDetail(pilot);
+  const [completeAt, setCompleteAt] = useState<number | null>(null);
+  const complete = pilot?.mission?.state === "complete";
+  // When the mission turned complete, adjusted while rendering.
+  if (complete !== (completeAt !== null)) setCompleteAt(complete ? now : null);
+  return navStatusChip({
+    body: nav.data,
+    receivedAtMs: nav.dataUpdatedAt,
+    nowMs: now,
+    telemetry: tel.data,
+    modeDetail,
+    completeAgeMs: completeAt === null ? null : now - completeAt,
+  });
 }

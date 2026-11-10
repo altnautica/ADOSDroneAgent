@@ -3,22 +3,49 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { navStatusChip } from "@/hooks/use-flight-chip";
+import { navStatusChip, type ChipSources } from "@/hooks/use-flight-chip";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
-const pilot = JSON.parse(readFileSync(path.join(FIXTURES, "pilot-frame.json"), "utf8")) as unknown;
+const pilot = JSON.parse(readFileSync(path.join(FIXTURES, "pilot-frame.json"), "utf8")) as Record<string, unknown>;
+
+const base: ChipSources = {
+  body: { pilot: { age_ms: 100, data: pilot } },
+  receivedAtMs: 10_000,
+  nowMs: 10_000,
+  telemetry: null,
+  modeDetail: null,
+  completeAgeMs: null,
+};
 
 describe("dashboard flight-state chip", () => {
   it("reads the nav-status pilot entry through the cockpit chip rules", () => {
-    const chip = navStatusChip({ pilot: { age_ms: 100, data: pilot } });
+    const chip = navStatusChip(base);
     expect(chip).not.toBeNull();
     expect(chip!.text).toContain("FOLLOW");
     expect(chip!.dim).toBe(false);
   });
 
   it("dims a stale pilot entry and is absent without one", () => {
-    expect(navStatusChip({ pilot: { age_ms: 60_000, data: pilot } })!.ruleId).toBe("link_stale");
-    expect(navStatusChip({})).toBeNull();
-    expect(navStatusChip(undefined)).toBeNull();
+    expect(navStatusChip({ ...base, body: { pilot: { age_ms: 60_000, data: pilot } } })!.ruleId).toBe("link_stale");
+    expect(navStatusChip({ ...base, body: {} })).toBeNull();
+    expect(navStatusChip({ ...base, body: undefined })).toBeNull();
+  });
+
+  it("ages the last frame after a failed read so the chip turns LINK, never null", () => {
+    // The body is the last one received; reads failed for 5 s since.
+    const chip = navStatusChip({ ...base, nowMs: base.receivedAtMs + 5_000 });
+    expect(chip).not.toBeNull();
+    expect(chip!.ruleId).toBe("link_stale");
+  });
+
+  it("feeds the home distance and the skill detail through chipInputs", () => {
+    const skillPilot = { ...pilot, owner: "skill" };
+    const chip = navStatusChip({
+      ...base,
+      body: { pilot: { age_ms: 100, data: skillPilot } },
+      telemetry: { home_distance: 120, local_position: null },
+      modeDetail: "ORBIT 8 m",
+    });
+    expect(JSON.stringify(chip)).toContain("ORBIT 8 m");
   });
 });
