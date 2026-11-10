@@ -7,8 +7,10 @@
 // the engine, so it asks for a second tap within 3 s first, lists detection
 // models only (never the depth model), and is disabled while armed.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useMapChrome } from "@/hooks/use-map-chrome";
+import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import { apiFetch } from "@/shared/api-fetch";
 import { forcingView } from "@/lib/cockpit-view";
 import { isDemoMode } from "@/lib/utils";
@@ -114,25 +116,25 @@ function ModelPicker() {
     );
   };
   return (
-    <section className="space-y-1">
-      <h3 className="text-xs uppercase tracking-wider text-white/60">Detector model</h3>
-      {models.length === 0 ? <p className="text-xs text-white/60">No detection models installed</p> : null}
-      {flying ? <p className="text-xs text-white/60">Disarm to switch the detector: it restarts the vision engine.</p> : null}
+    <section className="space-y-[4px]">
+      <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">Detector model</h3>
+      {models.length === 0 ? <p className="text-[0.85em] text-white/60">No detection models installed</p> : null}
+      {flying ? <p className="text-[0.85em] text-white/60">Disarm to switch the detector: it restarts the vision engine.</p> : null}
       {models.map((m) => (
         <button
           key={m.id}
           type="button"
           disabled={busy || flying || m.id === list.active}
           onClick={() => choose(m.id)}
-          className="flex min-h-12 w-full items-center justify-between rounded-md bg-white/5 px-3 text-left text-sm disabled:opacity-60"
+          className="flex min-h-[48px] w-full items-center justify-between rounded-md bg-white/5 px-[12px] text-left text-[1em] disabled:opacity-60"
         >
           <span className="truncate">{m.id}</span>
-          <span className="text-xs text-white/60">
+          <span className="text-[0.85em] text-white/60">
             {m.id === list.active ? "Active" : armed === m.id ? "Tap again to restart engine" : ""}
           </span>
         </button>
       ))}
-      {err ? <p className="text-xs text-red-400">{err}</p> : null}
+      {err ? <p className="text-[0.85em] text-red-400">{err}</p> : null}
     </section>
   );
 }
@@ -146,17 +148,17 @@ function DepthOptions() {
   const setRange = useCockpitViewStore((s) => s.setDepthRange);
   const setStyle = useCockpitViewStore((s) => s.setDepthStyle);
   const seg = (on: boolean) =>
-    `min-h-12 flex-1 rounded-md px-2 text-sm ${on ? "bg-white/25 font-semibold" : "bg-white/5"}`;
+    `min-h-[48px] flex-1 rounded-md px-[8px] text-[1em] ${on ? "bg-white/25 font-semibold" : "bg-white/5"}`;
   return (
-    <div className="space-y-1 pt-1">
-      <div role="radiogroup" aria-label="Depth range" className="flex gap-1">
+    <div className="space-y-[4px] pt-[4px]">
+      <div role="radiogroup" aria-label="Depth range" className="flex gap-[4px]">
         {DEPTH_RANGES.map((m) => (
           <button key={m} type="button" role="radio" aria-checked={range === m} onClick={() => setRange(m)} className={seg(range === m)}>
             {RANGE_LABELS[m]}
           </button>
         ))}
       </div>
-      <div role="radiogroup" aria-label="Depth style" className="flex gap-1">
+      <div role="radiogroup" aria-label="Depth style" className="flex gap-[4px]">
         {DEPTH_STYLES.map((st) => (
           <button key={st} type="button" role="radio" aria-checked={style === st} onClick={() => setStyle(st)} className={seg(style === st)}>
             {st === "solid" ? "Solid" : "Outline"}
@@ -194,8 +196,8 @@ export function LayerSwitch({
 }) {
   const reasonId = `layer-${id}-forced`;
   return (
-    <div className="rounded-md bg-white/5 px-3 text-sm">
-      <label className="flex min-h-12 items-center justify-between">
+    <div className="rounded-md bg-white/5 px-[12px] text-[1em]">
+      <label className="flex min-h-[48px] items-center justify-between">
         <span>{label}</span>
         <input
           type="checkbox"
@@ -207,10 +209,10 @@ export function LayerSwitch({
       </label>
       {forcedBy !== null ? (
         <>
-          <p id={reasonId} className="text-xs text-white/60">
+          <p id={reasonId} className="text-[0.85em] text-white/60">
             On while the {forcedBy} view is open
           </p>
-          <label className="flex min-h-12 items-center justify-between text-xs text-white/70">
+          <label className="flex min-h-[48px] items-center justify-between text-[0.85em] text-white/70">
             <span>Keep on in other views</span>
             <input type="checkbox" checked={stored} onChange={(e) => onToggle(id, e.target.checked)} />
           </label>
@@ -226,6 +228,8 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
   const flags = useCockpitViewStore((s) => s.layers);
   const toggleLayer = useCockpitViewStore((s) => s.toggleLayer);
   const { status, error } = useEngineStatus();
+  const rootRef = useRef<HTMLElement>(null);
+  const { scale } = useMapChrome(rootRef);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
@@ -237,10 +241,17 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
     [batch, fresh],
   );
 
+  // Text in chrome px times the class scale; the rows size in em from it.
   return (
-    <aside className="flex h-full w-full flex-col gap-4 overflow-y-auto bg-black/70 p-3 text-white" aria-label="Vision">
-      <section className="space-y-1">
-        <h3 className="text-xs uppercase tracking-wider text-white/60">Layers</h3>
+    <aside
+      ref={rootRef}
+      className="flex h-full w-full flex-col gap-[16px] overflow-y-auto bg-black/70 p-[12px] text-white"
+      style={{ fontSize: CHROME_TOKENS.type.chip_px * scale }}
+      aria-label="Vision"
+      data-testid="vision-panel"
+    >
+      <section className="space-y-[4px]">
+        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">Layers</h3>
         {PANEL_LAYERS.map(({ id, label }) => (
           <LayerSwitch
             key={id}
@@ -254,10 +265,10 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
         <DepthOptions />
       </section>
 
-      <section className="space-y-1">
-        <h3 className="text-xs uppercase tracking-wider text-white/60">Detections</h3>
-        {!fresh ? <p className="text-xs text-white/60">No current detections</p> : null}
-        <ul className="space-y-0.5 font-mono text-xs">
+      <section className="space-y-[4px]">
+        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">Detections</h3>
+        {!fresh ? <p className="text-[0.85em] text-white/60">No current detections</p> : null}
+        <ul className="space-y-[2px] font-mono text-[0.85em]">
           {rows.map((d, i) => (
             <li key={d.trackId ?? `i${i}`} className="flex justify-between">
               <span>
@@ -270,11 +281,11 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
         </ul>
       </section>
 
-      <section className="space-y-1">
-        <h3 className="text-xs uppercase tracking-wider text-white/60">Engine</h3>
-        {error && !status ? <p className="text-xs text-red-400">Vision engine unreachable</p> : null}
+      <section className="space-y-[4px]">
+        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">Engine</h3>
+        {error && !status ? <p className="text-[0.85em] text-red-400">Vision engine unreachable</p> : null}
         {status ? (
-          <div className="space-y-0.5 text-xs">
+          <div className="space-y-[2px] text-[0.85em]">
             <div>
               {status.backend ?? "no backend"} · {status.backend_state}
             </div>

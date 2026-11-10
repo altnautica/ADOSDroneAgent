@@ -32,7 +32,8 @@ import { useElementSize } from "@/hooks/use-element-size";
 import { useDetectionLease } from "@/hooks/use-detection-lease";
 import { useNow } from "@/hooks/use-now";
 import { useSkillContext } from "@/hooks/use-skill-context";
-import { Z, type WidthClass } from "@/lib/cockpit-layout";
+import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import { gridMeasures, Z, type WidthClass } from "@/lib/cockpit-layout";
 import { computeRenderedRect, pickActiveBatch } from "@/lib/overlay-geometry";
 import { detectorNotice } from "@/lib/detection-lease";
 import { renderProfile } from "@/lib/render-profile";
@@ -573,8 +574,9 @@ export function TargetLayer({
           role="status"
           className={cn(
             "pointer-events-none absolute left-1/2 -translate-x-1/2 whitespace-nowrap rounded-[4px] bg-hud-glass font-mono font-semibold uppercase tracking-hud-tag text-hud-muted backdrop-blur-hud",
-            pip ? "bottom-[0.25rem] px-[0.3rem] text-[9px]" : "bottom-[0.75rem] px-[0.5rem] text-[0.7rem]",
+            pip ? "bottom-[4px] px-[5px] text-[9px]" : "bottom-[12px] px-[8px]",
           )}
+          style={pip ? undefined : { fontSize: CHROME_TOKENS.type.label_px * gridMeasures(widthClass, false).scale }}
         >
           {notice}
         </span>

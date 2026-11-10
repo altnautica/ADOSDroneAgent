@@ -20,15 +20,19 @@
 // LOCAL or MAP from the header (persisted). The header also opens the Map
 // panel while a mapping session reports.
 
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Layers } from "lucide-react";
 
 import { FlyHereLayer } from "@/components/feed/fly-here";
 import { flyHerePosition } from "@/lib/fly-here";
 import { LocalMiniMap } from "@/components/feed/local-mini-map";
+import { useElementSize } from "@/hooks/use-element-size";
+import { useMapChrome } from "@/hooks/use-map-chrome";
 import { useNow } from "@/hooks/use-now";
+import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import { minimapFrame, nextMinimapPin } from "@/lib/local-minimap";
 import { nextNoFixSince } from "@/shared/hud/minimap-mode";
+import { MiniMapReadoutRow, type MiniMapReadout } from "@/components/feed/minimap-readout";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useFlightStore } from "@/stores/flight-store";
@@ -37,6 +41,7 @@ import {
   computeMapView,
   latLonToEN,
   projectEN,
+  svgTextUnits,
   viewSpanMeters,
   type EN,
   type LatLon,
@@ -44,6 +49,7 @@ import {
 import { useTrackStore } from "@/stores/track-store";
 import { cn } from "@/lib/utils";
 import { useMissionRoute } from "@/lib/mission-route";
+import { specText } from "@/shared/hud/spec-text";
 import { setupText } from "@/shared/setup-wizard/strings";
 import tokens from "@/shared/cockpit-spec/tokens.json";
 
@@ -88,41 +94,52 @@ export function MiniMap({ className }: { className?: string } = {}) {
     activeSet: nav?.data.activeSet ?? lastCommandedSet,
   });
   const local = frame === "local";
+  const rootRef = useRef<HTMLDivElement>(null);
+  const { scale, insetTop, zoned } = useMapChrome(rootRef);
+  const labelPx = CHROME_TOKENS.type.label_px * scale;
 
   return (
-    <div className={cn("relative h-[5.6rem] w-[5.6rem] shrink-0", className)}>
+    <div ref={rootRef} className={cn("relative h-[96px] w-[96px] shrink-0", className)} data-testid="minimap" data-inset-top={insetTop}>
       <div
         className={cn(
           "relative h-full w-full overflow-hidden rounded-lg border border-surface-foreground/15 bg-background/55 backdrop-blur-sm",
           !live && "opacity-70",
         )}
       >
-        {local ? <LocalMiniMap /> : <GlobalMiniMap />}
-        <div className="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start justify-between gap-[0.2rem] px-[0.25rem]">
-          <span className="pt-[0.1rem] text-[0.75rem] uppercase tracking-wide text-muted-foreground">
-            {local ? (reason === "pinned" ? "Local" : "Local · no GPS") : "Map"}
-          </span>
-          <span className="flex gap-[0.15rem]">
-            {hasMapStatus ? (
+        <div className="absolute inset-x-0 bottom-0" style={{ top: insetTop }}>
+          {local ? <LocalMiniMap scale={scale} inCard={zoned} /> : <GlobalMiniMap scale={scale} inCard={zoned} />}
+          <div
+            // The card's frame draws its title top-left; a full map keeps
+            // the top-right free for the video PiP.
+            className={cn("pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start gap-[4px] px-[4px]", zoned ? "justify-end" : "justify-start")}
+            style={{ fontSize: labelPx }}
+            data-testid="minimap-header"
+          >
+            <span className="pt-[2px] uppercase tracking-wide text-muted-foreground">
+              {local ? (reason === "pinned" ? "Local" : "Local · no GPS") : specText("cockpit.card.map")}
+            </span>
+            <span className="flex gap-[2px]">
+              {hasMapStatus ? (
+                <button
+                  type="button"
+                  onClick={() => setPanelOpen(true)}
+                  aria-haspopup="dialog"
+                  aria-label="Mapping status"
+                  className="pointer-events-auto flex min-h-[24px] items-center rounded px-[4px] text-hud-ink hover:bg-hud-hair"
+                >
+                  <Layers style={{ width: labelPx * 1.2, height: labelPx * 1.2 }} aria-hidden />
+                </button>
+              ) : null}
               <button
                 type="button"
-                onClick={() => setPanelOpen(true)}
-                aria-haspopup="dialog"
-                aria-label="Mapping status"
-                className="pointer-events-auto flex min-h-[24px] items-center rounded px-[0.25rem] text-hud-ink hover:bg-hud-hair"
+                onClick={() => setPin(nextMinimapPin(pin))}
+                aria-label={`Minimap frame ${PIN_WORD[pin]}; change`}
+                className="pointer-events-auto min-h-[24px] rounded px-[4px] font-mono text-surface-foreground/80 hover:bg-hud-hair"
               >
-                <Layers className="h-[0.8rem] w-[0.8rem]" aria-hidden />
+                {PIN_WORD[pin]}
               </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => setPin(nextMinimapPin(pin))}
-              aria-label={`Minimap frame ${PIN_WORD[pin]}; change`}
-              className="pointer-events-auto min-h-[24px] rounded px-[0.25rem] font-mono text-[0.65rem] text-surface-foreground/80 hover:bg-hud-hair"
-            >
-              {PIN_WORD[pin]}
-            </button>
-          </span>
+            </span>
+          </div>
         </div>
       </div>
       {panelOpen ? (
@@ -134,7 +151,9 @@ export function MiniMap({ className }: { className?: string } = {}) {
   );
 }
 
-function GlobalMiniMap() {
+function GlobalMiniMap({ scale, inCard }: { scale: number; inCard: boolean }) {
+  const boxRef = useRef<HTMLDivElement>(null);
+  const box = useElementSize(boxRef);
   const telemetry = useFlightStore((s) => s.telemetry);
   const live = useFlightStore((s) => s.live);
   const status = useStatusStore((s) => s.status);
@@ -202,12 +221,20 @@ function GlobalMiniMap() {
   const startPt = view && startEN ? projectEN(startEN.e, startEN.n, view) : null;
   const dronePt = view && droneEN ? projectEN(droneEN.e, droneEN.n, view) : null;
 
-  return (
-    <div className="pointer-events-none relative h-full w-full" aria-hidden>
-      <div className="relative h-full w-full">
+  // Map text keeps its chrome size whatever the map's size.
+  const textUnits = svgTextUnits(CHROME_TOKENS.type.label_px * scale, Math.min(box.w, box.h), VIEW);
+  const readout: MiniMapReadout | null = empty
+    ? null
+    : { scale: spanM >= 1000 ? `~${(spanM / 1000).toFixed(1)} km` : `~${Math.round(spanM)} m`, warn: hasFix ? null : specText("alert.gps_no_3d.no_fix") };
 
+  return (
+    <div ref={boxRef} className="pointer-events-none relative h-full w-full" aria-hidden>
+      <div className="relative h-full w-full">
         {empty ? (
-          <div className="flex h-full w-full items-center justify-center px-[0.3rem] text-center text-[0.75rem] text-muted-foreground">
+          <div
+            className="flex h-full w-full items-center justify-center px-[4px] text-center text-muted-foreground"
+            style={{ fontSize: CHROME_TOKENS.type.label_px * scale }}
+          >
             No GPS fix
           </div>
         ) : (
@@ -267,9 +294,9 @@ function GlobalMiniMap() {
                 >
                   <circle cx={startPt.x} cy={startPt.y} r={2.4} />
                   <text
-                    x={startPt.x + 3.5}
-                    y={startPt.y + 2.5}
-                    fontSize={6}
+                    x={startPt.x + textUnits * 0.6}
+                    y={startPt.y + textUnits * 0.4}
+                    fontSize={textUnits}
                     fontFamily="monospace"
                   >
                     S
@@ -296,31 +323,21 @@ function GlobalMiniMap() {
               <g className="text-muted-foreground">
                 <text
                   x={VIEW / 2}
-                  y={8}
+                  y={textUnits * 1.2}
                   textAnchor="middle"
-                  fontSize={6}
+                  fontSize={textUnits}
                   fill="currentColor"
                   fontFamily="monospace"
+                  data-testid="minimap-north"
                 >
                   N
                 </text>
               </g>
             </svg>
             {view && ref && dronePos ? <FlyHereLayer view={view} refPoint={ref} drone={dronePos} viewBox={VIEW} /> : null}
-
-            {/* scale + stale readout */}
-            <div className="absolute bottom-[0.1rem] left-0 right-0 flex items-center justify-between px-[0.3rem]">
-              <span className="font-mono text-[0.75rem] text-muted-foreground">
-                {spanM >= 1000
-                  ? `~${(spanM / 1000).toFixed(1)} km`
-                  : `~${Math.round(spanM)} m`}
-              </span>
-              {!hasFix ? (
-                <span className="font-mono text-[0.75rem] text-warn">no fix</span>
-              ) : null}
-            </div>
           </>
         )}
+        <MiniMapReadoutRow readout={readout} scale={scale} inCard={inCard} />
       </div>
     </div>
   );

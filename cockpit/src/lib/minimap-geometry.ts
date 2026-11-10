@@ -114,3 +114,23 @@ export function projectEN(e: number, n: number, v: MapView): MapPoint {
 export function viewSpanMeters(v: MapView, view: number): number {
   return view / v.scale;
 }
+
+/** The inset (CSS px) that keeps a full-size map's frame labels and north
+ *  mark clear of the top bar: how far the bar's bottom edge, plus `gapPx`,
+ *  reaches into the map's top. Zero when the bar does not cover the map
+ *  (the bottom-left card, the portrait map below the video). */
+export function topBarInset(
+  map: { top: number; left: number; right: number },
+  bar: { bottom: number; left: number; right: number } | null,
+  gapPx: number,
+): number {
+  if (!bar || bar.right <= map.left || map.right <= bar.left || bar.bottom <= map.top) return 0;
+  return Math.ceil(bar.bottom - map.top + gapPx);
+}
+
+/** A text size in SVG user units for `px` CSS px on an SVG `boxPx` CSS px
+ *  across (its smaller side; the viewBox is square and fitted with `meet`),
+ *  so map text keeps its chrome size whatever the map's size. */
+export function svgTextUnits(px: number, boxPx: number, view: number): number {
+  return boxPx > 0 ? (px * view) / boxPx : px;
+}

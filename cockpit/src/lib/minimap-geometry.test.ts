@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   computeMapView,
+  svgTextUnits,
+  topBarInset,
   distanceMeters,
   isValidFix,
   latLonToEN,
@@ -105,5 +107,24 @@ describe("viewSpanMeters", () => {
     const v = computeMapView([{ e: 0, n: 0 }], 100, 10, 40)!;
     // scale 2 svg/m → 100 svg units span 50 m.
     expect(viewSpanMeters(v, 100)).toBeCloseTo(50, 6);
+  });
+});
+
+describe("minimap chrome", () => {
+  it("insets a full-size map below the top bar, and a card not at all", () => {
+    const bar = { bottom: 56, left: 8, right: 1272 };
+    // The map view: the map fills the stage under the bar.
+    expect(topBarInset({ top: 0, left: 0, right: 1280 }, bar, 8)).toBe(64);
+    // The split pane's map, right of the divider, still under the bar.
+    expect(topBarInset({ top: 0, left: 780, right: 1280 }, bar, 8)).toBe(64);
+    // The bottom-left card sits below the bar.
+    expect(topBarInset({ top: 612, left: 8, right: 288 }, bar, 8)).toBe(0);
+    expect(topBarInset({ top: 0, left: 0, right: 1280 }, null, 8)).toBe(0);
+  });
+
+  it("keeps map text at its chrome size whatever the map's size", () => {
+    // 11 px on a 140 px card map and on a 736 px full map.
+    expect(svgTextUnits(11, 140, 100) * (140 / 100)).toBeCloseTo(11, 9);
+    expect(svgTextUnits(11, 736, 100) * (736 / 100)).toBeCloseTo(11, 9);
   });
 });

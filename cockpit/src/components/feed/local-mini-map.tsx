@@ -5,22 +5,33 @@
 // the scan in the map frame, the origin, the follow target (dashed while
 // coasting or searching, with a 1 s velocity tick) and the drone from the
 // FC's LOCAL_POSITION_NED. Drag pans (the view recentres on the drone 10 s
-// later), the wheel and the +/− buttons zoom.
+// later), the wheel and the +/− buttons zoom. A long-press or a right-click
+// picks a point for Fly Here, converted to lat/lon through the FC's EKF
+// origin (its global position less its local position), or, on the ground,
+// for the Launch sheet's go-to.
 
 import { useEffect, useRef, useState } from "react";
 import { Minus, Plus } from "lucide-react";
 
+import { FlyHereMarker } from "@/components/feed/fly-here";
+import { useFlyHere } from "@/hooks/use-fly-here";
+import { MiniMapReadoutRow } from "@/components/feed/minimap-readout";
 import { useElementSize } from "@/hooks/use-element-size";
 import { useNow } from "@/hooks/use-now";
 import { useOccupancyImages } from "@/hooks/use-occupancy-images";
-import { localDrone, localSceneInput, localTarget, panBy } from "@/lib/local-minimap";
+import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import { fcOrigin, flyHerePosition, localToLatLon } from "@/lib/fly-here";
+import { freshLocalPosition, localDrone, localSceneInput, localTarget, panBy, screenToLocal } from "@/lib/local-minimap";
+import { latLonToEN } from "@/lib/minimap-geometry";
 import { cn } from "@/lib/utils";
+import { mapToScreen } from "@/shared/hud/local-frame";
 import { buildLocalScene, DEFAULT_LOCAL_ZOOM, stepZoom, viewCentre, wheelZoom } from "@/shared/hud/local-scene";
+import { specText } from "@/shared/hud/spec-text";
 import { useFlightStore } from "@/stores/flight-store";
 import { ageOf, useNavStreamStore } from "@/stores/nav-stream-store";
 import { useSettingsStore } from "@/stores/settings-store";
 
-export function LocalMiniMap({ className }: { className?: string }) {
+export function LocalMiniMap({ className, scale = 1, inCard = false }: { className?: string; scale?: number; inCard?: boolean }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const inkRef = useRef<HTMLSpanElement | null>(null);
   const { w, h } = useElementSize(ref);
@@ -48,25 +59,44 @@ export function LocalMiniMap({ className }: { className?: string }) {
 
   const poseIn = pose ? { data: pose.data, ageMs: ageOf(pose, now) } : null;
   const drone = localDrone(telemetry, live, poseIn);
-  const scene =
+  const sceneInput =
     w > 0 && h > 0
-      ? buildLocalScene(
-          localSceneInput({
-            width: w,
-            height: h,
-            pxPerM,
-            pan,
-            now,
-            drone,
-            target: localTarget(follow ? { data: follow.data, ageMs: ageOf(follow, now) } : null),
-            pose: poseIn,
-            scan: scan ? { data: scan.data, ageMs: ageOf(scan, now) } : null,
-            occupancy,
-            occupancyAt,
-            trail,
-          }),
-        )
+      ? localSceneInput({
+          width: w,
+          height: h,
+          pxPerM,
+          pan,
+          now,
+          drone,
+          target: localTarget(follow ? { data: follow.data, ageMs: ageOf(follow, now) } : null),
+          pose: poseIn,
+          scan: scan ? { data: scan.data, ageMs: ageOf(scan, now) } : null,
+          occupancy,
+          occupancyAt,
+          trail,
+        })
       : null;
+  const scene = sceneInput ? buildLocalScene(sceneInput) : null;
+  const view = sceneInput?.view ?? null;
+
+  // Fly Here: the FC's global position (through its EKF origin, as the
+  // global map places the drone) less its local position is the origin.
+  const droneLL = flyHerePosition(telemetry?.position, telemetry?.gps?.fix_type ?? null, live).drone;
+  const lp = freshLocalPosition(telemetry, live);
+  const origin = droneLL && lp ? fcOrigin(droneLL, lp) : null;
+  const fly = useFlyHere((clientX, clientY) => {
+    const el = ref.current;
+    if (!el || !view) return null;
+    const r = el.getBoundingClientRect();
+    const p = screenToLocal(view, clientX - r.left, clientY - r.top);
+    return {
+      ll: origin ? localToLatLon(p.north, p.east, origin) : null,
+      fromDrone: drone ? { n: p.north - drone.north, e: p.east - drone.east } : null,
+    };
+  }, droneLL);
+  const targetEN = fly.target && origin ? latLonToEN(fly.target.lat, fly.target.lon, origin.lat, origin.lon) : null;
+  const marker = targetEN && view ? mapToScreen(view, targetEN.n, targetEN.e) : null;
+  const textPx = CHROME_TOKENS.type.label_px * scale;
 
   // Wheel zoom needs a non-passive listener to keep the page from scrolling.
   useEffect(() => {
@@ -81,14 +111,17 @@ export function LocalMiniMap({ className }: { className?: string }) {
   }, []);
 
   return (
+    <>
     <div
       ref={ref}
       className={cn("pointer-events-auto relative h-full w-full touch-none overflow-hidden", className)}
       onPointerDown={(e) => {
+        fly.handlers?.onPointerDown(e);
         e.currentTarget.setPointerCapture?.(e.pointerId);
         drag.current = { x: e.clientX, y: e.clientY, centre: viewCentre(pan, drone, now) };
       }}
       onPointerMove={(e) => {
+        fly.handlers?.onPointerMove(e);
         const d = drag.current;
         if (!d) return;
         // The event's epoch time: the pan ages against `useNow`'s clock.
@@ -96,11 +129,16 @@ export function LocalMiniMap({ className }: { className?: string }) {
         setPan(panBy(d.centre, e.clientX - d.x, e.clientY - d.y, pxPerM, at));
       }}
       onPointerUp={() => {
+        fly.handlers?.onPointerUp();
         drag.current = null;
       }}
       onPointerCancel={() => {
+        fly.handlers?.onPointerCancel();
         drag.current = null;
       }}
+      onContextMenu={(e) => (fly.handlers ? fly.handlers.onContextMenu(e) : e.preventDefault())}
+      aria-label={fly.handlers ? specText("map.fly_here.long_press") : undefined}
+      data-testid="local-minimap"
     >
       <span ref={inkRef} className="hidden text-hud-ink" aria-hidden />
       {scene ? (
@@ -171,44 +209,43 @@ export function LocalMiniMap({ className }: { className?: string }) {
               />
             </g>
           ) : null}
+          {marker ? <FlyHereMarker x={marker.sx} y={marker.sy} r={6} /> : null}
         </svg>
       ) : null}
 
       {!scene?.drone ? (
-        <div className="absolute inset-0 flex items-center justify-center px-[0.3rem] text-center text-[0.75rem] text-muted-foreground">
+        <div className="absolute inset-0 flex items-center justify-center px-[4px] text-center text-muted-foreground" style={{ fontSize: textPx }}>
           No local position
         </div>
       ) : null}
 
-      <div className="absolute bottom-[0.1rem] left-[0.3rem] flex items-end gap-[0.3rem] font-mono text-[0.7rem] text-muted-foreground">
-        {scene ? (
-          <span className="flex flex-col items-start">
-            <span className="block h-[2px] bg-current" style={{ width: scene.scaleBar.px }} aria-hidden />
-            {scene.scaleBar.m} m
-          </span>
-        ) : null}
-        {scene?.dim && Object.keys(occupancy.tiles).length > 0 ? <span className="text-hud-warn">MAP STALE</span> : null}
-      </div>
-      <div className="absolute bottom-[0.15rem] right-[0.15rem] flex gap-[0.2rem]">
+      <MiniMapReadoutRow
+        readout={scene ? { scale: `${scene.scaleBar.m} m`, warn: scene.dim && Object.keys(occupancy.tiles).length > 0 ? "MAP STALE" : null } : null}
+        scale={scale}
+        inCard={inCard}
+      />
+      <div className="absolute right-[4px] top-1/2 flex -translate-y-1/2 flex-col gap-[4px]">
         <button
           type="button"
-          aria-label="Zoom out"
+          aria-label={specText("cockpit.zoom.out")}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={() => setPxPerM((z) => stepZoom(z, -1))}
           className="flex h-[28px] w-[28px] items-center justify-center rounded bg-hud-glass text-hud-ink"
         >
-          <Minus className="h-[0.8rem] w-[0.8rem]" aria-hidden />
+          <Minus className="h-[14px] w-[14px]" aria-hidden />
         </button>
         <button
           type="button"
-          aria-label="Zoom in"
+          aria-label={specText("cockpit.zoom.in")}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={() => setPxPerM((z) => stepZoom(z, 1))}
           className="flex h-[28px] w-[28px] items-center justify-center rounded bg-hud-glass text-hud-ink"
         >
-          <Plus className="h-[0.8rem] w-[0.8rem]" aria-hidden />
+          <Plus className="h-[14px] w-[14px]" aria-hidden />
         </button>
       </div>
     </div>
+    {fly.sheet}
+    </>
   );
 }

@@ -111,7 +111,7 @@ export function ProximityRadar({ className }: { className?: string } = {}) {
 
   return (
     <div
-      className={cn("pointer-events-none relative h-[5.6rem] w-[5.6rem] shrink-0", className)}
+      className={cn("pointer-events-none relative h-[96px] w-[96px] shrink-0", className)}
     >
       <div
         className={cn(
@@ -120,7 +120,7 @@ export function ProximityRadar({ className }: { className?: string } = {}) {
         )}
       >
         <span
-          className="absolute left-[0.25rem] top-[0.1rem] z-10 text-[0.75rem] uppercase tracking-wide text-muted-foreground"
+          className="absolute left-[4px] top-[2px] z-10 text-[11px] uppercase tracking-wide text-muted-foreground"
           aria-hidden
         >
           Radar
@@ -129,7 +129,7 @@ export function ProximityRadar({ className }: { className?: string } = {}) {
           type="button"
           onClick={() => setSetting(cycleRadarScale(setting))}
           aria-label={`Radar range ${view.scaleLabel}; change range`}
-          className="pointer-events-auto absolute right-[0.15rem] top-0 z-10 min-h-[24px] rounded px-[0.2rem] font-mono text-[0.65rem] text-surface-foreground/80"
+          className="pointer-events-auto absolute right-[2px] top-0 z-10 min-h-[24px] rounded px-[4px] font-mono text-[11px] text-surface-foreground/80"
         >
           {view.scaleLabel}
         </button>
@@ -212,8 +212,8 @@ export function ProximityRadar({ className }: { className?: string } = {}) {
         </svg>
 
         {/* bottom readout: nearest obstacle / heading / honest empty state */}
-        <div className="absolute bottom-[0.1rem] left-0 right-0 text-center" role="status">
-          <span className={cn("font-mono text-[0.75rem]", bottom.cls)}>
+        <div className="absolute bottom-[2px] left-0 right-0 text-center" role="status">
+          <span className={cn("font-mono text-[11px]", bottom.cls)}>
             {bottom.text}
           </span>
         </div>

@@ -17,6 +17,11 @@
 
 import { useEffect, useRef } from "react";
 
+import { useElementSize } from "@/hooks/use-element-size";
+import { useMapChrome } from "@/hooks/use-map-chrome";
+import { CHROME_TOKENS } from "@/lib/chrome-tokens";
+import { ALT_REF_BUTTON_H, HUD_UNIT_PX, altRefButtonPos, hudTapes } from "@/lib/hud-chrome";
+
 import {
   ROLL_TICKS,
   angleDelta,
@@ -115,7 +120,7 @@ function draw(
   ctx.clearRect(0, 0, w, h);
   const cx = w / 2;
   const cy = h / 2;
-  const R = Math.max(40, Math.min(w * 0.26, h * 0.4));
+  const { R, tapeH, tapeTop, speedX, altX } = hudTapes(w, h, u);
   const k = R / 25;
   const font = (scale: number) => `${Math.round(scale * u)}px "JetBrains Mono", ui-monospace, monospace`;
   ctx.lineCap = "round";
@@ -298,8 +303,6 @@ function draw(
   const speed = stale ? null : useAir ? (air as number) : (t?.velocity?.groundspeed ?? null);
   const altRaw = altRef === "msl" ? t?.position?.alt_msl : t?.position?.alt_rel;
   const alt = stale || !finite(altRaw) ? null : altRaw;
-  const tapeH = R * 1.8;
-  const tapeTop = cy - tapeH / 2;
   const tape = (x: number, value: number | null, halfSpan: number, step: number, labelEvery: number, side: "l" | "r", title: string) => {
     const pxPer = tapeH / (halfSpan * 2);
     ctx.strokeStyle = p.ink;
@@ -336,8 +339,7 @@ function draw(
     ctx.textAlign = "center";
     ctx.fillText(value !== null ? value.toFixed(value < 100 && value > -100 ? 1 : 0) : DASH, bx + bw / 2, cy);
   };
-  tape(u * 3.4, speed, 10, 1, 5, "l", useAir ? "AS m/s" : "GS m/s");
-  const altX = w - u * 3.4;
+  tape(speedX, speed, 10, 1, 5, "l", useAir ? "AS m/s" : "GS m/s");
   tape(altX, alt, 30, 5, 10, "r", altRef === "msl" ? "ALT MSL" : "ALT REL");
 
   // Vertical-speed bar beside the altitude tape (±5 m/s full scale).
@@ -366,6 +368,12 @@ function draw(
 
 export function HudCanvas({ instruments }: { instruments: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const size = useElementSize(rootRef);
+  const { scale } = useMapChrome(rootRef);
+  // The instruments' unit: chrome px times the class scale, not the root font.
+  const u = HUD_UNIT_PX * scale;
+  const unitRef = useRef(u);
   const altRef = useSettingsStore((s) => s.altRef);
   const setAltRef = useSettingsStore((s) => s.setAltRef);
   const altRefRef = useRef(altRef);
@@ -375,6 +383,12 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
     altRefRef.current = altRef;
     instrumentsRef.current = instruments;
   }, [altRef, instruments]);
+
+  useEffect(() => {
+    unitRef.current = u;
+    // A new unit repaints through the resize path.
+    canvasRef.current?.dispatchEvent(new Event("hud-unit"));
+  }, [u]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -397,7 +411,7 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
       const dpr = window.devicePixelRatio || 1;
       w = rect.width;
       h = rect.height;
-      u = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+      u = unitRef.current;
       canvas.width = Math.round(w * dpr);
       canvas.height = Math.round(h * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -405,6 +419,7 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
     };
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
+    canvas.addEventListener("hud-unit", resize);
     resize();
 
     let raf = 0;
@@ -442,18 +457,22 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
+      canvas.removeEventListener("hud-unit", resize);
     };
   }, []);
 
+  const pos = altRefButtonPos(size.w, size.h, u);
   return (
-    <div className="pointer-events-none absolute inset-0 z-[15]" data-testid="hud" data-hud-instruments={instruments ? "on" : "off"}>
+    <div ref={rootRef} className="pointer-events-none absolute inset-0 z-[15]" data-testid="hud" data-hud-instruments={instruments ? "on" : "off"}>
       <canvas ref={canvasRef} className="h-full w-full" aria-hidden />
-      {instruments ? (
+      {instruments && size.w > 0 ? (
         <button
           type="button"
           onClick={() => setAltRef(altRef === "rel" ? "msl" : "rel")}
           aria-label={`Altitude reference ${altRef === "rel" ? "home-relative" : "mean sea level"}; switch`}
-          className="pointer-events-auto absolute right-0 top-1/2 min-h-[40px] -translate-y-[calc(50%+6rem)] rounded-md border border-hud-hair bg-hud-glass px-[0.4rem] font-mono text-[0.75rem] text-hud-ink"
+          className="pointer-events-auto absolute rounded-md border border-hud-hair bg-hud-glass font-mono text-hud-ink"
+          style={{ left: pos.x, top: pos.y, height: ALT_REF_BUTTON_H, padding: `0 ${6 * scale}px`, fontSize: CHROME_TOKENS.type.label_px * scale }}
+          data-testid="alt-ref-toggle"
         >
           {altRef === "rel" ? "REL" : "MSL"}
         </button>

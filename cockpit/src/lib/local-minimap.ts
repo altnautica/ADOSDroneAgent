@@ -142,3 +142,16 @@ export function panBy(
 ): { north: number; east: number; at: number } {
   return { north: centre.north + dyPx / pxPerM, east: centre.east - dxPx / pxPerM, at };
 }
+
+/** The local-frame point (metres north/east of the origin) under a screen
+ *  pixel: the inverse of `mapToScreen`. */
+export function screenToLocal(view: LocalView, sx: number, sy: number): { north: number; east: number } {
+  return { north: view.centreX - (sy - view.cy) / view.pxPerM, east: view.centreY + (sx - view.cx) / view.pxPerM };
+}
+
+/** The FC's LOCAL_POSITION_NED north/east while fresh, else null: the frame
+ *  the local map converts to lat/lon through the EKF origin. */
+export function freshLocalPosition(telemetry: VehicleState | null, live: boolean): { north: number; east: number } | null {
+  const lp = live ? telemetry?.local_position : null;
+  return lp && lp.age_ms <= LOCAL_POSITION_FRESH_MS && Number.isFinite(lp.x) && Number.isFinite(lp.y) ? { north: lp.x, east: lp.y } : null;
+}

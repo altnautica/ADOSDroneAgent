@@ -56,11 +56,11 @@ export function WhatsLockedChip({ multiStream, mainCameraId }: { multiStream: bo
       role="status"
       aria-label={`Target ${chip.who}: ${chip.word}`}
       className={cn(
-        "pointer-events-auto flex items-center gap-[0.5rem] rounded-lg border bg-hud-glass-strong py-[0.2rem] pl-[0.5rem] pr-[0.2rem] font-mono text-[0.75rem] backdrop-blur-hud",
+        "pointer-events-auto flex items-center gap-[8px] rounded-lg border bg-hud-glass-strong py-[3px] pl-[8px] pr-[3px] font-mono text-[13px] backdrop-blur-hud",
         chip.tone === "track" ? "border-hud-track" : "border-hud-hair",
       )}
     >
-      <Crosshair className={cn("h-[0.9rem] w-[0.9rem] shrink-0", TONE[chip.tone])} aria-hidden />
+      <Crosshair className={cn("h-[16px] w-[16px] shrink-0", TONE[chip.tone])} aria-hidden />
       <div className="flex min-w-0 flex-col leading-tight">
         <span className="truncate text-hud-ink">{chip.who}</span>
         <span className={cn("truncate font-semibold", TONE[chip.tone])}>{chip.word}</span>
@@ -72,7 +72,7 @@ export function WhatsLockedChip({ multiStream, mainCameraId }: { multiStream: bo
         aria-label="Release target"
         className="flex h-[32px] w-[32px] items-center justify-center rounded-md text-hud-ink hover:bg-hud-hair"
       >
-        <X className="h-[0.9rem] w-[0.9rem]" aria-hidden />
+        <X className="h-[16px] w-[16px]" aria-hidden />
       </button>
     </div>
   );

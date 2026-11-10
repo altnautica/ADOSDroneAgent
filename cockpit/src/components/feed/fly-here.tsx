@@ -1,124 +1,59 @@
-// "Fly here" on the global minimap: a long-press picks a point, a sheet shows
-// it with its distance, and a hold sends the pilot's `goto`. Rendered only
-// while the pilot lists `goto` in `surface_ops` and the drone is flying; the
-// layer shares the minimap's viewBox so the picked marker sits where pressed.
+// "Fly here" on every map (the bottom-left card, the full map view, the split
+// pane, the local frame): a long-press (`layout.json` `map_long_press_ms`)
+// or a right-click picks a point. In the air, while the pilot accepts a
+// surface `goto`, a sheet shows the point with its distance and a hold
+// (`holds_ms.fly_here`) sends it; on the ground the same gesture opens the
+// Launch sheet with the point as its go-to. Each map says how its points map
+// to the world through `locate`.
 
-import { useRef, useState, type PointerEvent } from "react";
+import { useRef } from "react";
 
-import { Sheet } from "@/components/ui/sheet";
-import { HoldButton } from "@/components/ui/hold-button";
-import { useNow } from "@/hooks/use-now";
-import { usePilot } from "@/hooks/use-pilot";
-import { FLY_HERE_TAKES_OVER, FLY_HERE_PRESS_MS, FLY_HERE_SLOP_PX, enToLatLon, flyHereArgs, unprojectEN } from "@/lib/fly-here";
-import { distanceMeters, latLonToEN, projectEN, type LatLon, type MapView } from "@/lib/minimap-geometry";
-import { flyHereOffered } from "@/shared/hud/fly-here-offer";
-import { refusalText } from "@/shared/hud/refusal";
+import { useFlyHere } from "@/hooks/use-fly-here";
+import { enToLatLon, offsetFromDrone, unprojectEN } from "@/lib/fly-here";
+import { latLonToEN, projectEN, type LatLon, type MapView } from "@/lib/minimap-geometry";
 import { specText } from "@/shared/hud/spec-text";
-import { sendPilotAction } from "@/lib/pilot-link";
-import { useFlightStore } from "@/stores/flight-store";
 
+/** The global minimap's Fly Here layer: an SVG over the map sharing its
+ *  viewBox, so the picked marker sits where pressed. */
 export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView; refPoint: LatLon; drone: LatLon | null; viewBox: number }) {
-  const pilot = usePilot();
-  // Re-read twice a second so the layer goes away once the pilot state is stale.
-  const now = useNow(500);
-  const altRel = useFlightStore((s) => s.telemetry?.position?.alt_rel ?? null);
   const svgRef = useRef<SVGSVGElement>(null);
-  const press = useRef<{ x: number; y: number; timer: number } | null>(null);
-  const [target, setTarget] = useState<LatLon | null>(null);
-  const [result, setResult] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
+  const fly = useFlyHere((clientX, clientY) => {
+    const ctm = svgRef.current?.getScreenCTM();
+    if (!ctm) return null;
+    const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+    const en = unprojectEN(p.x, p.y, view);
+    const ll = enToLatLon(en.e, en.n, refPoint);
+    return { ll, fromDrone: offsetFromDrone(ll, drone) };
+  }, drone);
+  if (!fly.handlers && !fly.sheet) return null;
 
-  if (!pilot || !flyHereOffered(pilot.data, now - pilot.at)) return null;
-
-  const cancel = () => {
-    if (press.current) window.clearTimeout(press.current.timer);
-    press.current = null;
-  };
-  const onDown = (e: PointerEvent<SVGSVGElement>) => {
-    cancel();
-    const { clientX, clientY } = e;
-    press.current = {
-      x: clientX,
-      y: clientY,
-      timer: window.setTimeout(() => {
-        press.current = null;
-        const ctm = svgRef.current?.getScreenCTM();
-        if (!ctm) return;
-        const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
-        const en = unprojectEN(p.x, p.y, view);
-        setResult(null);
-        setTarget(enToLatLon(en.e, en.n, refPoint));
-      }, FLY_HERE_PRESS_MS),
-    };
-  };
-  const onMove = (e: PointerEvent<SVGSVGElement>) => {
-    const p = press.current;
-    if (p && Math.hypot(e.clientX - p.x, e.clientY - p.y) > FLY_HERE_SLOP_PX) cancel();
-  };
-
-  const marker = target ? latLonToEN(target.lat, target.lon, refPoint.lat, refPoint.lon) : null;
+  const marker = fly.target ? latLonToEN(fly.target.lat, fly.target.lon, refPoint.lat, refPoint.lon) : null;
   const pt = marker ? projectEN(marker.e, marker.n, view) : null;
-  const dist = target && drone ? distanceMeters(drone, target) : null;
-  const args = target ? flyHereArgs(target, altRel) : null;
-
-  const fly = () => {
-    if (!args) return;
-    setSending(true);
-    void sendPilotAction("goto", args).then((r) => {
-      setSending(false);
-      if (r.ok) setTarget(null);
-      else setResult(refusalText(r.err));
-    });
-  };
-
   return (
     <>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${viewBox} ${viewBox}`}
         className="pointer-events-auto absolute inset-0 h-full w-full touch-none select-none"
-        aria-label="Long-press the map to fly there"
+        aria-label={specText("map.fly_here.long_press")}
         role="img"
-        onPointerDown={onDown}
-        onPointerMove={onMove}
-        onPointerUp={cancel}
-        onPointerCancel={cancel}
-        onPointerLeave={cancel}
-        onContextMenu={(e) => e.preventDefault()}
+        data-testid="fly-here-layer"
+        {...fly.handlers}
       >
-        {pt ? (
-          <g className="text-hud-warn" stroke="currentColor" fill="none" strokeWidth={1.2}>
-            <circle cx={pt.x} cy={pt.y} r={3.2} />
-            <line x1={pt.x - 5} y1={pt.y} x2={pt.x + 5} y2={pt.y} />
-            <line x1={pt.x} y1={pt.y - 5} x2={pt.x} y2={pt.y + 5} />
-          </g>
-        ) : null}
+        {pt ? <FlyHereMarker x={pt.x} y={pt.y} r={3.2} /> : null}
       </svg>
-      {target ? (
-        <Sheet
-          title="Fly here"
-          onDismiss={() => setTarget(null)}
-          footer={
-            <HoldButton onFired={fly} disabled={sending || !args} className="w-full" label="Hold to fly here">
-              Hold to fly here
-            </HoldButton>
-          }
-        >
-          <dl className="grid grid-cols-[auto_1fr] gap-x-[1rem] gap-y-[0.45rem] text-[0.85rem]">
-            <dt className="text-muted-foreground">Point</dt>
-            <dd className="font-mono">
-              {target.lat.toFixed(6)}, {target.lon.toFixed(6)}
-            </dd>
-            <dt className="text-muted-foreground">Distance</dt>
-            <dd className="font-mono">{dist === null ? "—" : `${Math.round(dist)} m`}</dd>
-            <dt className="text-muted-foreground">Height</dt>
-            <dd className="font-mono">{args ? `${args.alt_m} m above home` : "—"}</dd>
-          </dl>
-          <p className="mt-[0.6rem] text-[0.85rem] text-hud-warn">{FLY_HERE_TAKES_OVER}</p>
-          {!args ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-warn">{specText("map.fly_here.needs_position")}</p> : null}
-          {result ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-crit">{result}</p> : null}
-        </Sheet>
-      ) : null}
+      {fly.sheet}
     </>
+  );
+}
+
+/** The picked point: a ring and a cross. */
+export function FlyHereMarker({ x, y, r }: { x: number; y: number; r: number }) {
+  return (
+    <g className="text-hud-warn" stroke="currentColor" fill="none" strokeWidth={r * 0.375}>
+      <circle cx={x} cy={y} r={r} />
+      <line x1={x - r * 1.6} y1={y} x2={x + r * 1.6} y2={y} />
+      <line x1={x} y1={y - r * 1.6} x2={x} y2={y + r * 1.6} />
+    </g>
   );
 }
