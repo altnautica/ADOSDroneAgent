@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { vehicleLiveness } from "@/hooks/use-vehicle-liveness";
 import { freshNavFrames, homePill, homeStatusLines, type HomeStatusInputs } from "@/lib/home-status";
 import { parsePilotState } from "@/shared/hud/cockpit-frames";
+import storageCases from "@/shared/hud/fixtures/storage-cases.json";
 import { INITIAL_LIVENESS, nextLiveness } from "@/shared/hud/vehicle-live";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
@@ -154,4 +155,15 @@ describe("home status card", () => {
     const pilot = parsePilotState({ ...raw, readiness: [], statustext: [], hold_reason: "controller-lost", armed: true, landed: false });
     expect(homePill({ ...base, pilot }).alerts.map((a) => a.id)).toContain("controller_lost");
   });
+
+  // The cockpit runs the same golden frames (`cockpit/src/lib/storage-pill.test.ts`):
+  // a drone reports storage as `health.disk_percent`, a ground station as
+  // `system.disk_pct`, and both surfaces list the same items.
+  for (const c of storageCases) {
+    it(`storage item: ${c.name}`, () => {
+      const pilot = parsePilotState({ ...raw, readiness: [], statustext: [] });
+      const pill = homePill({ ...base, pilot, status: c.input.full });
+      expect(pill.alerts.map((a) => ({ source: a.source, severity: a.severity }))).toEqual(c.expected);
+    });
+  }
 });

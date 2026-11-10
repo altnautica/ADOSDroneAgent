@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.103] - 2026-11-10
+
+### Fixed
+
+- Dashboard Home status pill: a drone's storage use now raises the storage warning and critical items. The pill reads storage from the same source as the cockpit (`health.disk_percent`), falling back to `system.disk_pct` on a ground station.
+
 ## [0.109.102] - 2026-11-10
 
 ### Fixed

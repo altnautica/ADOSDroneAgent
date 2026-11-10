@@ -1,0 +1,7 @@
+[
+  { "name": "drone, storage 98 % used: critical", "input": { "profile": "drone", "full": { "health": { "disk_percent": 98 } } }, "expected": [{ "source": "storage", "severity": "critical" }] },
+  { "name": "drone, storage 92 % used: warning", "input": { "profile": "drone", "full": { "health": { "disk_percent": 92 } } }, "expected": [{ "source": "storage", "severity": "warning" }] },
+  { "name": "drone, storage 40 % used: no item", "input": { "profile": "drone", "full": { "health": { "disk_percent": 40 } } }, "expected": [] },
+  { "name": "drone, no storage reported: no item", "input": { "profile": "drone", "full": { "health": {} } }, "expected": [] },
+  { "name": "ground station, storage 97 % used: critical", "input": { "profile": "ground_station", "full": { "system": { "disk_pct": 97 } } }, "expected": [{ "source": "storage", "severity": "critical" }] }
+]

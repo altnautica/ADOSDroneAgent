@@ -18,14 +18,15 @@ import { parseFollowState } from "@/shared/hud/nav-types";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { preflightChecks, preflightFailing } from "@/shared/hud/preflight";
 import { specText } from "@/shared/hud/spec-text";
+import { storagePct, type StorageStatusFull } from "@/shared/hud/storage";
 import { baseAlerts, controllerLost, pillAlerts, pillSummary, pilotFailsafe, type PillSummary } from "@/shared/hud/status-pill";
 
 import type { VehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
 
-/** The part of `GET /api/status/full` the pill reads (uplink and storage). */
-export interface StatusFull {
+/** The part of `GET /api/status/full` the pill reads (uplink and storage:
+ *  `health.disk_percent` on a drone, `system.disk_pct` on a ground station). */
+export interface StatusFull extends StorageStatusFull {
   network?: { uplink_type?: string | null; uplink_reachable?: boolean | null } | null;
-  system?: { disk_pct?: number | null } | null;
 }
 
 export interface HomeStatusInputs {
@@ -64,7 +65,7 @@ export function homePill(i: HomeStatusInputs): PillSummary {
       alerts,
       readiness: i.pilot?.readiness ?? [],
       prearm: i.telemetry?.prearm,
-      storagePct: i.status?.system?.disk_pct ?? null,
+      storagePct: storagePct(i.status),
       fcStatus: i.pilot?.statustext,
       pilotAgeMs: i.pilotAgeMs,
       agentReachable: i.agentReachable,
