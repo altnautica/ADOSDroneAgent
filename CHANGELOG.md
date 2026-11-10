@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.70] - 2026-11-10
+
+### Changed
+
+- Cockpit CI now runs the pad overlay-close, controller editor, pilot stick stream and map gesture browser checks.
+
 ## [0.109.69] - 2026-11-10
 
 ### Changed
