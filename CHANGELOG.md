@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.60] - 2026-11-10
+
+### Changed
+
+- Cockpit: every map (bottom-left card, full map, split pane, local-frame map) opens Fly Here from a long-press or a right-click; the hold reads its duration from the cockpit spec.
+- Cockpit: on the ground the same map gesture opens the Launch sheet with the picked point as its go-to.
+- Cockpit: the local-frame map (no GNSS) offers Fly Here, converting the picked point to latitude/longitude through the flight controller's EKF origin.
+- Cockpit: the full map's frame label and north mark sit below the top bar; the minimap scale and warning read as one row; map, instrument, vision panel, target chip and re-acquire toggle text are sized in px times the display class scale instead of growing with the viewport; the altitude reference toggle no longer covers the ALT tape title.
+
 ## [0.109.59] - 2026-11-10
 
 ### Changed
