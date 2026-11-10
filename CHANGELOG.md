@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.53] - 2026-11-10
+
+### Changed
+
+- Cockpit: when the live navigation stream has been down for 5 s (for example over a radio relay that carries only HTTP), the Feed keeps its flight state, follow and map values current by reading the navigation status twice a second, and marks the reduced update rate.
+
 ## [0.109.52] - 2026-11-10
 
 ### Changed
