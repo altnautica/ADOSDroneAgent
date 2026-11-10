@@ -122,8 +122,9 @@ export function classScale(widthClass: keyof typeof layoutJson.classes): number 
  *  never below the class's `label_min_px` (a television reads from across
  *  the room). */
 export function labelPx(base: number, widthClass: keyof typeof layoutJson.classes): number {
-  const cls: { label_min_px?: number } = layoutJson.classes[widthClass] ?? {};
-  return Math.max(base * classScale(widthClass), cls.label_min_px ?? 0);
+  const cls = layoutJson.classes[widthClass];
+  const min = cls && "label_min_px" in cls && typeof cls.label_min_px === "number" ? cls.label_min_px : 0;
+  return Math.max(base * classScale(widthClass), min);
 }
 
 /** The no-picture note in the spec's words (`video.state.*`), and whether it
