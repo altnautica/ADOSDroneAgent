@@ -15,6 +15,7 @@
 import type { FlightCommand } from "@/lib/api";
 import { BUILTINS, type BuiltinConfirm } from "@/lib/cockpit-spec";
 import type { VehicleClass } from "@/shared/hud/cockpit-frames";
+import { refusalText } from "@/shared/hud/refusal";
 
 export type SkillCategory = "flight" | "behavior" | "camera" | "navigation" | "utility";
 export type PluginSkillCategory = Exclude<SkillCategory, "flight">;
@@ -248,17 +249,17 @@ export function armGateReason(req: ArmRequirement, armed: boolean, landed: boole
     case "any":
       return null;
     case "armed":
-      return armed ? null : "Not armed";
+      return armed ? null : refusalText("not_armed");
     case "disarmed":
-      return armed ? "Already armed" : null;
+      return armed ? refusalText("armed") : null;
     case "armed_landed":
-      if (!armed) return "Not armed";
+      if (!armed) return refusalText("not_armed");
       if (landed === null) return "Landed state unknown";
-      return landed ? null : "Airborne";
+      return landed ? null : refusalText("not_landed");
     case "disarmed_or_landed":
       if (!armed) return null;
       if (landed === null) return "Landed state unknown";
-      return landed ? null : "Airborne";
+      return landed ? null : refusalText("not_landed");
   }
 }
 
@@ -267,15 +268,15 @@ function resolveBuiltin(skill: Skill, b: BuiltinBinding, ctx: SkillContext): Ski
   // and a send with no route says so when it fails.
   if (skill.id === "kill") return { enabled: true };
   const pilot = ctx.pilot ?? null;
-  const noLink = ctx.linkReason ?? "No flight controller link";
+  const noLink = ctx.linkReason ?? refusalText("no_fc");
   const route = builtinRoute(skill, ctx);
   if (route === null) {
-    if (!pilot && b.command === null) return disabled("Pilot not running");
-    if (b.command === null) return disabled("No pilot link");
+    if (!pilot && b.command === null) return disabled(refusalText("pilot_unavailable"));
+    if (b.command === null) return disabled(refusalText("no_pilot_link"));
     return disabled(noLink);
   }
   const fresh = route === "pilot" ? pilot!.fresh : ctx.live;
-  if (!fresh && b.staleLink === "disable") return disabled(route === "pilot" ? "Pilot link stale" : noLink);
+  if (!fresh && b.staleLink === "disable") return disabled(route === "pilot" ? refusalText("no_pilot_link") : noLink);
   // The arm state: the pilot's own (with landed), else telemetry, where a
   // disarmed vehicle counts as landed and an armed one's landed state is
   // unknown. A blind send on a stale link reads the last known state.
@@ -308,11 +309,11 @@ function resolveExtension(skill: Skill, ctx: SkillContext): SkillState {
   if (skill.armRequirement !== "any") {
     const pilot = ctx.pilot ?? null;
     const known = pilot ? pilot.fresh : ctx.fcConnected && ctx.live;
-    if (!known) return disabled(ctx.linkReason ?? "No flight controller link");
+    if (!known) return disabled(ctx.linkReason ?? refusalText("no_fc"));
     const why = armGateReason(skill.armRequirement, pilot ? pilot.armed : ctx.armed, pilot ? pilot.landed : null);
     if (why) return disabled(why);
   }
-  if (reported?.state === "disabled" && !stale) return disabled(reported.reason ?? "Unavailable");
+  if (reported?.state === "disabled" && !stale) return disabled(reported.reason ?? refusalText("bad_state"));
   return { enabled: true, active: false, badge: reported?.badge, pending: pending || undefined, ...fresh };
 }
 
@@ -322,10 +323,10 @@ export function resolveSkillState(skill: Skill, ctx: SkillContext): SkillState {
   if (skill.extension) {
     // Keys, controller bindings and the Launch sheet reach a skill without the
     // picker's filter: a skill for another vehicle class never fires.
-    if (!skillVisibleFor(skill, ctx.pilot?.vehicleClass)) return disabled("Not available for this aircraft");
+    if (!skillVisibleFor(skill, ctx.pilot?.vehicleClass)) return disabled(refusalText("vehicle_class"));
     return resolveExtension(skill, ctx);
   }
-  return disabled("Unavailable");
+  return disabled(refusalText("bad_state"));
 }
 
 /** A skill is shown only for the vehicle classes it declares; with no class

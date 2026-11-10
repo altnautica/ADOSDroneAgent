@@ -94,13 +94,13 @@ describe("arm and disarm gates on every route", () => {
   it("a press of Arm while airborne opens nothing and says why", () => {
     expect(requestSkill(B.arm!, pilotCtx)).toBe(false);
     expect(useConfirmStore.getState().pending).toBeNull();
-    expect(toasts).toEqual(["Arm: Already armed"]);
+    expect(toasts).toEqual(["Arm: Armed; disarm first"]);
   });
 
   it("a Disarm confirmed after take-off is not sent", async () => {
     await executeSkill(B.disarm!);
     expect(actions).toHaveLength(0);
-    expect(toasts).toEqual(["Disarm: Airborne"]);
+    expect(toasts).toEqual(["Disarm: Still flying; land first"]);
   });
 
   it("a Disarm on the ground while armed is sent", async () => {

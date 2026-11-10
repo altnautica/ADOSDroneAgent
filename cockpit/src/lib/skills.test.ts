@@ -46,7 +46,7 @@ describe("built-ins come from builtins.json", () => {
 describe("arm gates", () => {
   it("evaluates armed_landed and disarmed_or_landed", () => {
     expect(armGateReason("armed_landed", true, true)).toBeNull();
-    expect(armGateReason("armed_landed", true, false)).toBe("Airborne");
+    expect(armGateReason("armed_landed", true, false)).toBe("Still flying; land first");
     expect(armGateReason("disarmed_or_landed", false, null)).toBeNull();
     expect(armGateReason("disarmed_or_landed", true, null)).toBe("Landed state unknown");
   });
@@ -79,7 +79,7 @@ describe("stale link rules", () => {
 
   it("disables take_control when no pilot runs", () => {
     const noPilot: SkillContext = { fcConnected: true, live: true, armed: true, pilot: null };
-    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.take_control, noPilot)).toMatchObject({ enabled: false, reason: "Pilot not running" });
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.take_control, noPilot)).toMatchObject({ enabled: false, reason: "ADOS Pilot is not running" });
   });
 
   it("kill is enabled while disarmed and with no link", () => {
@@ -105,7 +105,7 @@ describe("plugin skill freshness and link loss", () => {
   it("never fires a skill for another vehicle class (keys, bindings, Launch)", () => {
     const plane: SkillContext = { ...flying, pilot: { ...pilot, vehicleClass: "fixedwing" } };
     const st = resolveSkillState(plugin("x", { vehicleClasses: ["multirotor", "vtol"] }), plane);
-    expect(st).toMatchObject({ enabled: false, reason: "Not available for this aircraft" });
+    expect(st).toMatchObject({ enabled: false, reason: "Not available for this vehicle" });
   });
 });
 

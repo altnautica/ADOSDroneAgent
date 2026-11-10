@@ -29,6 +29,7 @@ import { CommandTimeoutError, sendCommand } from "@/lib/api";
 import type { ActionPhase } from "@/lib/cockpit-actions";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { refusalText } from "@/shared/hud/refusal";
+import { hasSpecText, specText } from "@/shared/hud/spec-text";
 import { activateExclusive, runningMotionSkills } from "@/lib/skill-gates";
 import { builtinRoute, resolveSkillState, type BuiltinBinding, type Skill, type SkillContext } from "@/lib/skills";
 import { ApiError, errorDetail } from "@/shared/api-fetch";
@@ -48,7 +49,14 @@ function report(ack: AckLine): void {
 
 function failureText(e: unknown): string {
   if (e instanceof CommandTimeoutError) return refusalText(e.code);
-  return e instanceof ApiError ? errorDetail(e.body, e.message) : refusalText("no response");
+  if (!(e instanceof ApiError)) return refusalText("no response");
+  const code = e.code;
+  return code && hasSpecText(`refusal.${code}`) ? refusalText(code) : errorDetail(e.body, e.message);
+}
+
+/** A `COMMAND_ACK` result name in the spec's words (`mav_result.*`). */
+function mavResultText(name: string | undefined): string {
+  return name && hasSpecText(`mav_result.${name}`) ? specText(`mav_result.${name}`) : refusalText(null);
 }
 
 /** The request never reached the agent, or the agent's upstream is down: a
@@ -61,7 +69,7 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
   const route = builtinRoute(skill, skillContextNow());
   if (route === "pilot") {
     const r = await sendPilotAction(b.pilotAction);
-    report(r.ok ? { text: `${skill.label}: accepted`, kind: "ok" } : { text: `${skill.label}: ${refusalText(r.err)}`, kind: "err" });
+    report(r.ok ? { text: `${skill.label}: ${mavResultText("ACCEPTED")}`, kind: "ok" } : { text: `${skill.label}: ${refusalText(r.err)}`, kind: "err" });
     return;
   }
   if (route !== "command" || !b.command) {
@@ -69,15 +77,26 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
     return;
   }
   const args = skill.takesAltitude && altitudeM != null ? [altitudeM] : [];
-  const res = await sendCommand(b.command, args);
+  let res;
+  try {
+    res = await sendCommand(b.command, args);
+  } catch (e) {
+    // The command route refuses with a status, not a code: 503 is no flight
+    // controller link, 400 a value it does not take.
+    if (e instanceof ApiError && (e.status === 503 || e.status === 400)) {
+      report({ text: `${skill.label}: ${refusalText(e.status === 503 ? "no_fc" : "bad_args")}`, kind: "err" });
+      return;
+    }
+    throw e;
+  }
   const a = res.ack;
   if (!a?.observed) {
-    report({ text: `${skill.label}: sent, no acknowledgement`, kind: "warn" });
+    report({ text: specText("skill.did_not_respond", { skill: skill.label }), kind: "warn" });
   } else if (a.accepted) {
-    report({ text: `${skill.label}: accepted`, kind: "ok" });
+    report({ text: `${skill.label}: ${mavResultText("ACCEPTED")}`, kind: "ok" });
   } else {
     const why = a.statustext ? ` — ${a.statustext}` : "";
-    report({ text: `${skill.label}: ${a.result_name ?? "rejected"}${why}`, kind: "err" });
+    report({ text: `${skill.label}: ${mavResultText(a.result_name)}${why}`, kind: "err" });
   }
 }
 
@@ -93,7 +112,7 @@ async function writeActivation(skill: Skill, value: boolean): Promise<void> {
   } catch (err) {
     if (e.toggle && !value && isLinkFailure(err)) {
       store.queueStop(skill.id);
-      report({ text: `${skill.label}: stop queued until the link returns`, kind: "warn" });
+      report({ text: specText("skill.stop_queued_link", { skill: skill.label }), kind: "warn" });
       return;
     }
     if (e.toggle) store.clearPending(skill.id);
@@ -171,7 +190,7 @@ async function runExtension(skill: Skill, active: boolean): Promise<void> {
   } else {
     await writeActivation(skill, true);
   }
-  report({ text: `${skill.label}: sent`, kind: "ok" });
+  report({ text: `${skill.label}: ${mavResultText("ACCEPTED")}`, kind: "ok" });
 }
 
 /** Return home, Land, Pause and Emergency stop (the built-ins that stop motion)
