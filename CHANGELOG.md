@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.64] - 2026-11-10
+
+### Changed
+
+- Cockpit: every sheet, dialog and menu on the flight screen starts below the top bar and its scrim leaves the top bar clear, so STOP takes the first press with any sheet open; the close button sits inside the sheet header.
+- Cockpit: one sheet at a time; Escape or a press outside closes the open sheet before anything else acts, and a press on STOP always reaches STOP.
+- Cockpit: the low-battery and link-loss countdowns, the gate ring, the handover banner and "Sticks are with …" clear once the pilot state is older than 2 s.
+- Cockpit: a running launch shows its step and an Abort button in the flight overlays, with or without a sheet open.
+- Cockpit: a pick in the Mode sheet turns pending at once and its row waits for the answer; results and flight-controller answers read in words; take control, hand to FC and the VTOL transition use the spec's hold times; the fixed-wing avoidance note comes from the spec.
+- Cockpit: the Launch sheet takes its altitude range and default from the spec, has no default go-to point, opens prefilled from a map long-press and keeps it across the pre-flight checklist; Launch, Mode and pre-flight words come from the spec.
+
 ## [0.109.63] - 2026-11-10
 
 ### Changed

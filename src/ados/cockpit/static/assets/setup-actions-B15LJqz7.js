@@ -1,0 +1,1 @@
+import{n as e}from"./api-fetch-TRbTS-73.js";function t(t){return e(`/api/v1/setup/apply`,{method:`POST`,body:{regulatory:t}})}function n(){return e(`/api/v1/setup/hardware-check/refresh`,{method:`POST`})}function r(){return e(`/api/v1/setup/reboot`,{method:`POST`})}export{r as n,n as r,t};
