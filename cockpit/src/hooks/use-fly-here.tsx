@@ -1,10 +1,11 @@
 // Picking a point on any map (the bottom-left card, the full map view, the
 // split pane, the local frame): a long-press (`layout.json`
-// `map_long_press_ms`) or a right-click. In the air, while the pilot accepts
-// a surface `goto`, the confirm sheet shows the point with its distance and a
-// hold (`holds_ms.fly_here`) sends it; on the ground the same gesture opens
-// the Launch sheet with the point as its go-to. Each map says how its points
-// map to the world through `locate`.
+// `map_long_press_ms`) or a right-click. In the air the confirm sheet shows
+// the point with its distance and a hold (`holds_ms.fly_here`) sends it:
+// the pilot's `goto` while the pilot accepts a surface goto, else a
+// reposition to a flight controller in GUIDED (`flyHereOffered`). On the
+// ground the same gesture opens the Launch sheet with the point as its go-to.
+// Each map says how its points map to the world through `locate`.
 
 import { useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 
@@ -17,10 +18,13 @@ import {
   FLY_HERE_PRESS_MS,
   FLY_HERE_SLOP_PX,
   flyHereArgs,
+  flyHereFc,
   launchGoto,
   mapPickAction,
+  sendFcReposition,
 } from "@/lib/fly-here";
 import { distanceMeters, type LatLon } from "@/lib/minimap-geometry";
+import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
 import { sendPilotAction } from "@/lib/pilot-link";
@@ -62,17 +66,21 @@ export function useFlyHere(locate: (clientX: number, clientY: number) => MapPick
   // Re-read twice a second so the gesture goes away once the pilot state is stale.
   const now = useNow(pilot ? 500 : null);
   const altRel = useFlightStore((s) => s.telemetry?.position?.alt_rel ?? null);
+  const telemetry = useFlightStore((s) => s.telemetry);
+  const live = useFlightStore((s) => s.live);
   const press = useRef<{ x: number; y: number; timer: number } | null>(null);
   const [target, setTarget] = useState<LatLon | null>(null);
   const [result, setResult] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
-  const action = mapPickAction(pilot?.data ?? null, pilot ? now - pilot.at : Infinity);
+  const freshPilot = pilot !== null && pilotFresh(pilot.at, now) ? pilot.data : null;
+  const action = mapPickAction(pilot?.data ?? null, pilot ? now - pilot.at : Infinity, flyHereFc(telemetry ?? null, live, freshPilot));
+  const flying = action === "pilot" || action === "fc";
 
   const pick = (clientX: number, clientY: number) => {
     const p = locate(clientX, clientY);
     if (!p) return;
-    if (action === "fly_here" && p.ll) {
+    if (flying && p.ll) {
       setResult(null);
       setTarget(p.ll);
     } else if (action === "launch" && p.fromDrone) {
@@ -116,16 +124,18 @@ export function useFlyHere(locate: (clientX: number, clientY: number) => MapPick
           },
         };
 
-  const shown = action === "fly_here" ? target : null;
+  const shown = flying ? target : null;
   const dist = shown && drone ? distanceMeters(drone, shown) : null;
   const args = shown ? flyHereArgs(shown, altRel) : null;
   const fly = () => {
     if (!args) return;
     setSending(true);
-    void sendPilotAction("goto", args).then((r) => {
+    const sent =
+      action === "fc" ? sendFcReposition(args) : sendPilotAction("goto", args).then((r) => (r.ok ? null : refusalText(r.err)));
+    void sent.then((refused) => {
       setSending(false);
-      if (r.ok) setTarget(null);
-      else setResult(refusalText(r.err));
+      if (refused === null) setTarget(null);
+      else setResult(refused);
     });
   };
   const line = "mt-[8px] text-[13px]";

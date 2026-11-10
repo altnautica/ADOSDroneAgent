@@ -209,7 +209,8 @@ export type FlightCommand =
   | "killswitch"
   | "pausemission"
   | "resumemission"
-  | "ekfsourceset";
+  | "ekfsourceset"
+  | "reposition";
 
 /** A flight command with no answer after this long is reported as unanswered,
  *  the same window a pilot action gets. */

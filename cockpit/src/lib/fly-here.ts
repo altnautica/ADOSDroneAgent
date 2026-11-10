@@ -1,15 +1,22 @@
 // "Fly here" from a map: a long-press (or a right-click) on the map picks a
-// point, a hold confirms it, and the cockpit sends the pilot's `goto` action
-// with `{lat, lon, alt_m}` (altitude above home). The agent advertises the
-// action in the pilot kind's `surface_ops`; without it the map offers nothing
-// in the air. On the ground the same gesture opens the Launch sheet with the
+// point, a hold confirms it, and the cockpit sends it by one of two routes
+// (shared `flyHereOffered`): the pilot's `goto` action with `{lat, lon,
+// alt_m}` (altitude above home) while the pilot accepts a surface goto, else
+// a reposition straight to a flight controller in GUIDED that is armed and
+// flying. On the ground the same gesture opens the Launch sheet with the
 // point as its go-to.
 
 import layoutJson from "@/shared/cockpit-spec/layout.json";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
-import { flyHereOffered } from "@/shared/hud/fly-here-offer";
+import { flyHereOffered, type FlyHereFc } from "@/shared/hud/fly-here-offer";
 import { CHIP_STALE_AFTER_MS } from "@/shared/hud/flight-state";
 import { isValidFix, latLonToEN, type LatLon, type MapView } from "@/lib/minimap-geometry";
+import type { VehicleState } from "@/lib/types";
+import { ackText } from "@/lib/mav-result";
+import { sendCommand, type CommandResponse } from "@/lib/api";
+import { ApiError } from "@/shared/api-fetch";
+import { refusalText } from "@/shared/hud/refusal";
+import { specText } from "@/shared/hud/spec-text";
 
 /** Press this long on a map, without moving, to pick a point
  *  (`layout.json` `map_long_press_ms`). */
@@ -24,15 +31,29 @@ export const FLY_HERE_MIN_ALT_M = 3;
 const EARTH_R = 6378137;
 const DEG = Math.PI / 180;
 
-/** What a picked map point does: the Fly Here confirm in the air, the Launch
- *  sheet with a go-to on the ground, or nothing (a stale pilot state, or a
- *  pilot that refuses a surface goto now). */
-export type MapPickAction = "fly_here" | "launch" | null;
+/** What a picked map point does: the Fly Here confirm in the air, sent
+ *  through the pilot (`pilot`) or straight to the flight controller (`fc`),
+ *  the Launch sheet with a go-to on the ground, or nothing (a stale pilot
+ *  state, or neither route takes a point now). */
+export type MapPickAction = "pilot" | "fc" | "launch" | null;
 
-export function mapPickAction(p: PilotState | null, pilotAgeMs: number): MapPickAction {
-  if (flyHereOffered(p, pilotAgeMs).route === "pilot") return "fly_here";
+export function mapPickAction(p: PilotState | null, pilotAgeMs: number, fc: FlyHereFc | null): MapPickAction {
+  const { route } = flyHereOffered(p, pilotAgeMs, fc);
+  if (route !== null) return route;
   if (p !== null && pilotAgeMs < CHIP_STALE_AFTER_MS && (p.landed || !p.armed)) return "launch";
   return null;
+}
+
+/** The flight controller's facts for the FC route: its mode is GUIDED (the
+ *  pilot's report of the FC mode, else the vehicle snapshot's), it is armed,
+ *  and whether it has landed. Only the pilot reports landed (the vehicle
+ *  snapshot carries no landed state), so without a fresh pilot state the
+ *  facts are unknown and the FC route is not offered. `pilot` is the fresh
+ *  pilot state or null. */
+export function flyHereFc(t: VehicleState | null, live: boolean, pilot: PilotState | null): FlyHereFc | null {
+  if (!live || !t || !pilot) return null;
+  const mode = pilot.fcModeName ?? t.mode ?? null;
+  return { guided: mode?.toUpperCase() === "GUIDED", armed: t.armed === true, landed: pilot.landed };
 }
 
 /** The Launch sheet's go-to for a picked point: whole metres north/east of
@@ -68,6 +89,24 @@ export function offsetFromDrone(target: LatLon, drone: LatLon | null): { n: numb
 export function flyHereArgs(target: LatLon, altRelM: number | null | undefined): { lat: number; lon: number; alt_m: number } | null {
   if (typeof altRelM !== "number" || !Number.isFinite(altRelM)) return null;
   return { lat: target.lat, lon: target.lon, alt_m: Math.max(FLY_HERE_MIN_ALT_M, Math.round(altRelM * 10) / 10) };
+}
+
+/** Send a picked point to a flight controller in GUIDED: `POST /api/command`
+ *  `reposition` with `[lat, lon, alt_m]` (MAVLink `DO_REPOSITION`, altitude
+ *  above home). Resolves null once the FC accepts it, else the refusal in the
+ *  spec's words: the FC's answer (`mav_result.*` or its status text), no FC
+ *  link, a value the route refuses, or no answer. */
+export async function sendFcReposition(args: { lat: number; lon: number; alt_m: number }): Promise<string | null> {
+  let res: CommandResponse;
+  try {
+    res = await sendCommand("reposition", [args.lat, args.lon, args.alt_m]);
+  } catch (e) {
+    if (e instanceof ApiError && (e.status === 503 || e.status === 400)) return refusalText(e.status === 503 ? "no_fc" : "bad_args");
+    return refusalText("no response");
+  }
+  const ack = res.ack;
+  if (!ack?.observed) return refusalText("no response");
+  return ack.accepted ? null : (ackText(ack) ?? specText("refusal.refused"));
 }
 
 /** Where the global minimap places the drone, and whether that position comes

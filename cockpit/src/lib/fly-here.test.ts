@@ -6,6 +6,7 @@ import {
   enToLatLon,
   fcOrigin,
   flyHereArgs,
+  flyHereFc,
   flyHerePosition,
   launchGoto,
   localToLatLon,
@@ -16,7 +17,8 @@ import {
 import { freshLocalPosition, screenToLocal } from "@/lib/local-minimap";
 import { computeMapView, latLonToEN, projectEN } from "@/lib/minimap-geometry";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
-import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
+import flyHereCases from "@/shared/hud/fixtures/fly-here-cases.json";
 import { mapToScreen } from "@/shared/hud/local-frame";
 import { specText } from "@/shared/hud/spec-text";
 import type { VehicleState } from "@/lib/types";
@@ -35,14 +37,35 @@ describe("fly here", () => {
   });
 
   it("opens Fly Here in the air, the Launch sheet on the ground, nothing on a stale pilot", () => {
-    expect(mapPickAction(pilot({}), 100)).toBe("fly_here");
-    expect(mapPickAction(pilot({ armed: false, landed: true }), 100)).toBe("launch");
-    expect(mapPickAction(pilot({ armed: true, landed: true }), 100)).toBe("launch");
-    expect(mapPickAction(pilot({}), 5000)).toBeNull();
-    expect(mapPickAction(pilot({ armed: false, landed: true }), 5000)).toBeNull();
-    expect(mapPickAction(null, 0)).toBeNull();
+    expect(mapPickAction(pilot({}), 100, null)).toBe("pilot");
+    expect(mapPickAction(pilot({ armed: false, landed: true }), 100, null)).toBe("launch");
+    expect(mapPickAction(pilot({ armed: true, landed: true }), 100, null)).toBe("launch");
+    expect(mapPickAction(pilot({}), 5000, null)).toBeNull();
+    expect(mapPickAction(pilot({ armed: false, landed: true }), 5000, null)).toBeNull();
+    expect(mapPickAction(null, 0, null)).toBeNull();
     // In the air without a surface goto: nothing to offer.
-    expect(mapPickAction(pilot({ surfaceOps: [] }), 100)).toBeNull();
+    expect(mapPickAction(pilot({ surfaceOps: [] }), 100, null)).toBeNull();
+  });
+
+  // The shared golden cases: a non-null route opens the Fly Here hold on
+  // that route; otherwise a fresh pilot on the ground opens the Launch sheet
+  // and anything else does nothing.
+  it.each(flyHereCases.map((c) => [c.name, c] as const))("%s", (_name, c) => {
+    const p = parsePilotState(c.input.pilot);
+    const ground = p !== null && c.input.pilot_age_ms < 2000 && (p.landed || !p.armed);
+    expect(mapPickAction(p, c.input.pilot_age_ms, c.input.fc)).toBe(c.expected.route ?? (ground ? "launch" : null));
+  });
+
+  it("reads the FC facts from the fresh pilot state and the vehicle snapshot", () => {
+    const t = { armed: true, mode: "LOITER" } as VehicleState;
+    expect(flyHereFc(t, true, pilot({ fcModeName: "GUIDED", landed: false }))).toEqual({ guided: true, armed: true, landed: false });
+    expect(flyHereFc(t, true, pilot({ fcModeName: null, landed: true }))).toEqual({ guided: false, armed: true, landed: true });
+    expect(flyHereFc({ armed: true, mode: "guided" } as VehicleState, true, pilot({ fcModeName: null, landed: false }))).toEqual({ guided: true, armed: true, landed: false });
+    expect(flyHereFc({ armed: false, mode: "GUIDED" } as VehicleState, true, pilot({ fcModeName: "GUIDED" }))?.armed).toBe(false);
+    // Landed is known only from a fresh pilot state; a stale link knows nothing.
+    expect(flyHereFc(t, true, null)).toBeNull();
+    expect(flyHereFc(t, false, pilot({}))).toBeNull();
+    expect(flyHereFc(null, true, pilot({}))).toBeNull();
   });
 
   it("prefills the Launch go-to with whole metres north/east of the vehicle", () => {

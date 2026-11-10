@@ -2,7 +2,8 @@
 //!
 //! `POST /api/command` is the GCS's control path: it names one of a small fixed
 //! set of high-level commands (`arm`, `disarm`, `takeoff`, `land`, `rtl`,
-//! `mode`, `killSwitch`, `pauseMission`, `resumeMission`, `ekfSourceSet`), and the route turns
+//! `mode`, `killSwitch`, `pauseMission`, `resumeMission`, `ekfSourceSet`,
+//! `reposition`), and the route turns
 //! that into the corresponding MAVLink frame, writes it to
 //! `/run/ados/mavlink.sock` (which the router forwards to the FC), and correlates
 //! the flight controller's `COMMAND_ACK` so the response reports whether the FC
@@ -21,7 +22,9 @@
 //!
 //! ## What each command maps to
 //!
-//! Every command maps to a `COMMAND_LONG`. `arm`/`disarm`/`takeoff`/`land` are
+//! Every command but `reposition` maps to a `COMMAND_LONG` (`reposition`
+//! carries a global position, so it is a `COMMAND_INT`; see `reposition.rs`).
+//! `arm`/`disarm`/`takeoff`/`land` are
 //! autopilot-agnostic (the same `MAV_CMD` and params on ArduPilot and PX4).
 //! `rtl`/`mode` set a flight mode via `MAV_CMD_DO_SET_MODE` (176), and the mode
 //! encoding differs by autopilot family:
@@ -38,6 +41,7 @@
 //! | pauseMission  | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=0.0 (pause), rest 0           |
 //! | resumeMission | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=1.0 (continue), rest 0        |
 //! | ekfSourceSet N| MAV_CMD_SET_EKF_SOURCE_SET 42007| p1=N (1, 2 or 3), rest 0         |
+//! | reposition lat lon alt | COMMAND_INT MAV_CMD_DO_REPOSITION 192, frame GLOBAL_RELATIVE_ALT | p1=-1 (default speed), p2=1 (change mode), p4=NaN (keep yaw), x/y=lat/lon·1e7, z=alt above home |
 //!
 //! ## killSwitch is a FORCE-DISARM, not a graceful stop
 //!
@@ -127,7 +131,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use ados_protocol::flight_modes::{ArduPilotFirmware, MAV_AUTOPILOT_PX4};
-use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, COMMAND_LONG_DATA};
+use ados_protocol::mavlink::ardupilotmega::{
+    MavCmd, MavFrame, MavMessage, COMMAND_INT_DATA, COMMAND_LONG_DATA,
+};
 use ados_protocol::mavlink::{self, MavHeader};
 
 use crate::ipc::{FrameRead, MavlinkIpcClient};
@@ -136,13 +142,16 @@ use crate::state::{AppState, FcIdentity};
 
 pub(crate) mod ack;
 mod build;
+mod reposition;
 use ack::*;
 use build::*;
+use reposition::*;
 
 /// The command catalog: name → human description. The first six are the original
 /// text commands; the next three are agent-native additions the fleet board
-/// drives (kill / pause / resume), and `ekfSourceSet` is the cockpit's nav-source
-/// switch. Order is preserved (it is emitted as a JSON
+/// drives (kill / pause / resume), `ekfSourceSet` is the cockpit's nav-source
+/// switch and `reposition` its map "Fly here" to a flight controller in GUIDED.
+/// Order is preserved (it is emitted as a JSON
 /// object; serde_json keeps insertion order). The names are the canonical strings
 /// a caller sends; the dispatch match is case-insensitive.
 const SIMPLE_COMMANDS: &[(&str, &str)] = &[
@@ -165,6 +174,11 @@ const SIMPLE_COMMANDS: &[(&str, &str)] = &[
     (
         "ekfSourceSet",
         "Switch the EKF3 source set (args: [set], 1, 2 or 3)",
+    ),
+    (
+        "reposition",
+        "Fly a flight controller in GUIDED to a point \
+         (args: [lat, lon, alt_m], altitude above home)",
     ),
 ];
 
@@ -355,22 +369,32 @@ pub async fn execute_command(
     if let Some(resp) = crate::routes::pilot::command::via_pilot(&state, &cmd).await {
         return resp;
     }
-    let fc = state.fc_identity();
+    let target = crate::fc_target::fc_target(&state);
+
+    // `reposition` carries a global position, so it is a COMMAND_INT.
+    if cmd == "reposition" {
+        return match reposition_command(&req.args) {
+            Ok((frame, body)) => send_and_report(&state, &cmd, &addressed_int(frame, target), body).await,
+            Err(err) => err.into_response(),
+        };
+    }
 
     // Build the COMMAND_LONG + the success body for the named command. An unknown
     // command (or a bad mode arg) returns a 4xx here before any send.
-    let (base_long, mut body) = match build_command(&cmd, &req.args, fc) {
+    let (base_long, body) = match build_command(&cmd, &req.args, state.fc_identity()) {
         Ok(built) => built,
         Err(err) => return err.into_response(),
     };
     // Address it to the flight controller this request resolved: the system id
     // latched from its HEARTBEAT. The ACK is correlated against the same id.
-    let base_long = addressed(base_long, crate::fc_target::fc_target(&state));
+    send_and_report(&state, &cmd, &addressed(base_long, target), body).await
+}
 
-    // Send the command and correlate the FC's COMMAND_ACK on a dedicated socket
-    // connection. An absent MAVLink socket or a broken write means no live FC
-    // link → 503.
-    match send_awaiting_ack(&state.mavlink, &base_long, &AckConfig::default()).await {
+/// Send an addressed command and correlate the FC's COMMAND_ACK on a dedicated
+/// socket connection into `body`. An absent MAVLink socket or a broken write
+/// means no live FC link → 503.
+async fn send_and_report<C: AckedCommand>(state: &AppState, cmd: &str, frame: &C, mut body: Value) -> Response {
+    match send_awaiting_ack(&state.mavlink, frame, &AckConfig::default()).await {
         Ok(outcome) => {
             merge_ack(&mut body, &outcome);
             settle_status(&mut body, &outcome);

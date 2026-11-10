@@ -7,7 +7,8 @@
 //     SHOTS=<screenshot dir> node e2e/maps.e2e.cjs [case]
 //
 // Cases: Fly Here from a right-click and a long-press on the card map, the
-// full map and the local-frame map, the ground gesture opening the Launch
+// full map and the local-frame map, Fly Here through a flight controller in
+// GUIDED (a reposition), the ground gesture opening the Launch
 // sheet, the full map's labels and north mark clear of the top bar, the
 // minimap readout row, and the altitude-reference toggle clear of the ALT
 // tape title at the Instruments level.
@@ -38,7 +39,7 @@ function telemetry({ fix = 3, local = false } = {}) {
   };
 }
 
-async function open(browser, { pilot, fix, local, width = 1280, height = 800 }) {
+async function open(browser, { pilot, fix, local, width = 1280, height = 800, command }) {
   const ctx = await browser.newContext({ viewport: { width, height } });
   const page = await ctx.newPage();
   await page.route("**/api/**", async (route) => {
@@ -48,6 +49,7 @@ async function open(browser, { pilot, fix, local, width = 1280, height = 800 }) 
     if (p === "/api/config") return json({ agent: { name: "bench-drone" } });
     if (p === "/api/plugins") return json({ installs: [] });
     if (p === "/api/telemetry") return json(telemetry({ fix, local }));
+    if (p === "/api/command" && command) return json(command(route.request().postDataJSON()));
     return json({ detail: "not mocked" }, 404);
   });
   const sent = [];
@@ -156,6 +158,54 @@ async function groundCase(browser) {
   await ctx.close();
 }
 
+// The FC route: the pilot runs but does not take a surface goto (FC manual
+// control), the flight controller is in GUIDED, armed and flying. The map
+// gesture opens the same hold, which sends a reposition through the command
+// route; a refusal reads in the spec's words and keeps the sheet open.
+async function fcCase(browser) {
+  const FC = { ...FLYING, owner: "fc_mode", control_mode: "fc_manual", fc_mode_name: "GUIDED" };
+  const posted = [];
+  let accept = false;
+  const { ctx, page } = await open(browser, {
+    pilot: FC,
+    fix: 3,
+    command: (body) => {
+      posted.push(body);
+      return accept
+        ? { status: "ok", cmd: "reposition", ack: { observed: true, accepted: true, result: 0, result_name: "MAV_RESULT_ACCEPTED" } }
+        : { status: "error", cmd: "reposition", ack: { observed: true, accepted: false, result: 2, result_name: "MAV_RESULT_DENIED" } };
+    },
+  });
+  const b = await box(page, '[data-zone="bottom_left_card"] [data-testid="minimap"]');
+  await page.mouse.click(b.x + b.w * 0.7, b.y + b.h * 0.6, { button: "right" });
+  const sheet = flyHereSheet(page);
+  await sheet.waitFor({ state: "visible", timeout: 3000 });
+  const hold = sheet.getByRole("button", { name: "Hold to fly here" });
+  const holdOnce = async () => {
+    // Measure once the sheet has finished sliding in: a press outside it closes it.
+    await page.waitForTimeout(500);
+    const h = await hold.boundingBox();
+    await page.mouse.move(h.x + h.width / 2, h.y + h.height / 2);
+    await page.mouse.down();
+    await page.waitForTimeout(1100);
+    await page.mouse.up();
+  };
+  await holdOnce();
+  await sheet.getByText("Denied").waitFor({ state: "visible", timeout: 3000 });
+  await page.screenshot({ path: path.join(SHOTS, "fix-N-AuditAgent2-5-fc-refused.png") });
+  assert.equal(posted.length, 1, "one command sent");
+  assert.equal(posted[0].cmd, "reposition");
+  const [lat, lon, alt] = posted[0].args;
+  assert.ok(Math.abs(lat - 12.9716) < 0.01 && Math.abs(lon - 77.5946) < 0.01, `a point near the drone: ${posted[0].args}`);
+  assert.equal(alt, 12, "at the drone's height above home");
+  accept = true;
+  await holdOnce();
+  await sheet.waitFor({ state: "hidden", timeout: 3000 });
+  assert.equal(posted.length, 2);
+  console.log("PASS FC route: the map gesture opens the hold, which sends a reposition; a refusal reads Denied, an accept closes the sheet");
+  await ctx.close();
+}
+
 async function layoutCase(browser) {
   for (const vp of [
     { width: 1280, height: 800, name: "1280x800", scale: 1 },
@@ -197,6 +247,7 @@ async function layoutCase(browser) {
     if (!only || only === "fly-here") await flyHereCases(browser);
     if (!only || only === "local") await localCase(browser);
     if (!only || only === "ground") await groundCase(browser);
+    if (!only || only === "fc") await fcCase(browser);
     if (!only || only === "layout") await layoutCase(browser);
   } finally {
     await browser.close();

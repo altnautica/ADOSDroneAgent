@@ -2,7 +2,47 @@
 
 use super::*;
 
-/// Send `base_long` and correlate the FC's `COMMAND_ACK`.
+/// A command frame whose `COMMAND_ACK` the route correlates: a `COMMAND_LONG`
+/// or a `COMMAND_INT` (for commands that carry a global position).
+pub(crate) trait AckedCommand: Clone {
+    /// The opcode the ACK acknowledges.
+    fn command(&self) -> MavCmd;
+    /// The vehicle addressed, the ACK's expected source system.
+    fn target_system(&self) -> u8;
+    /// The message for send `attempt` (0 first). A `COMMAND_LONG` carries the
+    /// attempt as its `confirmation`; a `COMMAND_INT` has no such field and
+    /// resends the same frame.
+    fn message(&self, attempt: u8) -> MavMessage;
+}
+
+impl AckedCommand for COMMAND_LONG_DATA {
+    fn command(&self) -> MavCmd {
+        self.command
+    }
+    fn target_system(&self) -> u8 {
+        self.target_system
+    }
+    fn message(&self, attempt: u8) -> MavMessage {
+        MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+            confirmation: attempt,
+            ..self.clone()
+        })
+    }
+}
+
+impl AckedCommand for COMMAND_INT_DATA {
+    fn command(&self) -> MavCmd {
+        self.command
+    }
+    fn target_system(&self) -> u8 {
+        self.target_system
+    }
+    fn message(&self, _attempt: u8) -> MavMessage {
+        MavMessage::COMMAND_INT(self.clone())
+    }
+}
+
+/// Send `cmd` and correlate the FC's `COMMAND_ACK`.
 ///
 /// Opens a dedicated MAVLink-socket connection per attempt, writes the command
 /// (with `confirmation = attempt`), and reads the broadcast FC frame stream for a
@@ -29,13 +69,13 @@ use super::*;
 /// A re-open that fails on a RETRY is not a 503: the first frame did reach the
 /// socket, so the honest outcome is `NoAck` (sent, no ACK observed) rather than
 /// "no MAVLink connection".
-pub(crate) async fn send_awaiting_ack(
+pub(crate) async fn send_awaiting_ack<C: AckedCommand>(
     client: &MavlinkIpcClient,
-    base_long: &COMMAND_LONG_DATA,
+    cmd: &C,
     cfg: &AckConfig,
 ) -> Result<AckOutcome, crate::ipc::mavlink_client::SendError> {
-    let expected_cmd = base_long.command;
-    let expected_src = base_long.target_system;
+    let expected_cmd = cmd.command();
+    let expected_src = cmd.target_system();
 
     for attempt in 0..=cfg.retries {
         // A fresh connection per attempt: the previous one may have been left at
@@ -57,17 +97,15 @@ pub(crate) async fn send_awaiting_ack(
         };
 
         // (Re)send with confirmation = attempt (0 on the first send).
-        let mut long = base_long.clone();
-        long.confirmation = attempt.min(u8::MAX as u32) as u8;
         let header = MavHeader {
             system_id: SOURCE_SYSTEM_ID,
             component_id: SOURCE_COMPONENT_ID,
             sequence: 0,
         };
-        let frame =
-            mavlink::serialize_v2(header, &MavMessage::COMMAND_LONG(long)).map_err(|e| {
-                crate::ipc::mavlink_client::SendError::Io(std::io::Error::other(e.to_string()))
-            })?;
+        let msg = cmd.message(attempt.min(u8::MAX as u32) as u8);
+        let frame = mavlink::serialize_v2(header, &msg).map_err(|e| {
+            crate::ipc::mavlink_client::SendError::Io(std::io::Error::other(e.to_string()))
+        })?;
         stream.write_frame(&frame).await?;
 
         let mut last_statustext: Option<String> = None;
