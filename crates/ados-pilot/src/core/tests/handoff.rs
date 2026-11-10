@@ -157,6 +157,52 @@ fn redirected_reposition_never_leaves_an_fc_failsafe() {
     }
 }
 
+/// `start_goto` is the one entry for every goto (a surface point, a
+/// redirected reposition, a launch's first leg). It flies nothing during an
+/// FC failsafe, disarmed, on the ground, or while the setup engine tunes.
+#[test]
+fn start_goto_refuses_a_failsafe_the_ground_and_tuning() {
+    let target = [20.0, 0.0, -5.0];
+
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.run(100);
+    w.mode = copter::RTL;
+    w.run(100);
+    assert!(w.p.state(w.now).fc_failsafe);
+    w.p.start_goto(target, w.now);
+    w.run(200);
+    assert_eq!(w.p.owner(), Owner::FcMode, "failsafe");
+    assert_eq!(w.mode, copter::RTL, "the goto left the failsafe");
+    assert_eq!(w.set_modes(copter::GUIDED), 0, "failsafe");
+
+    let mut w = World::new();
+    w.run(100);
+    w.p.start_goto(target, w.now);
+    assert_eq!(w.p.owner(), Owner::Idle, "disarmed");
+
+    let mut w = World::new();
+    w.armed = true;
+    w.run(200);
+    w.p.start_goto(target, w.now);
+    assert_ne!(w.p.owner(), Owner::Goto, "landed");
+
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.p.auth.enter_tuning().unwrap();
+    w.run(100);
+    w.p.start_goto(target, w.now);
+    assert_eq!(w.p.owner(), Owner::Tuning, "tuning");
+
+    let mut w = World::new();
+    w.airborne(copter::LOITER);
+    w.run(100);
+    w.p.start_goto(target, w.now);
+    w.run(100);
+    assert_eq!(w.p.owner(), Owner::Goto, "flying, no failsafe");
+    assert_eq!(w.mode, copter::GUIDED);
+}
+
 /// The pilot kind says when the FC flies a failsafe, for the router's
 /// reposition answer, and leaves the field out otherwise.
 #[test]

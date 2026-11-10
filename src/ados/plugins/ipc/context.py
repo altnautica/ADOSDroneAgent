@@ -202,10 +202,14 @@ class _FlightClient:
 
         Returns ``{"ok": True, "lease_id": n}`` or ``{"ok": False, "err": ...}``
         (``busy``, ``disarmed``, ``not_guided_capable``, ``vehicle_class``,
-        ``pilot_unavailable``). While held, the pilot flies this skill's goals
-        through its limits and obstacle planner; it revokes the lease on pause,
-        land, return-home, a stick takeover or an FC mode change, delivered as
-        the ``flight.lease.revoked`` event. Requires ``flight.motion``.
+        ``failsafe``, ``pilot_unavailable``). ``failsafe``: the flight controller
+        flies a failsafe return or landing it entered by itself (an RC switch,
+        or a radio, battery or EKF failsafe); a skill never takes the vehicle
+        out of it, and the refusal lasts until the operator changes mode. While
+        held, the pilot flies this skill's goals through its limits and obstacle
+        planner; it revokes the lease on pause, land, return-home, a stick
+        takeover or an FC mode change, delivered as the ``flight.lease.revoked``
+        event. Requires ``flight.motion``.
         """
         return await self._ipc.flight_lease_acquire(kind=kind, skill_id=skill_id)
 
