@@ -8,7 +8,7 @@ import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { batteryReading, type BatteryHealthInput } from "@/shared/hud/battery";
 import { linkLossLine } from "@/shared/hud/link-loss";
 import { specText } from "@/shared/hud/spec-text";
-import { baseAlerts, controllerLost, pillAlerts, pillSummary, type PillSummary } from "@/shared/hud/status-pill";
+import { baseAlerts, controllerLost, pillAlerts, pillSummary, pilotFailsafe, type PillSummary } from "@/shared/hud/status-pill";
 
 import type { VehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
 
@@ -52,6 +52,7 @@ export function homePill(i: HomeStatusInputs): PillSummary {
       pilotAgeMs: i.pilotAgeMs,
       agentReachable: i.agentReachable,
       controllerLost: controllerLost(i.pilot),
+      ...pilotFailsafe(i.pilot),
     }),
     new Set(),
   );

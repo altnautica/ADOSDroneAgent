@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import layout from "../cockpit-spec/layout.json";
 import type { BatteryHealthInput } from "./battery";
 import pillCases from "./fixtures/pill-cases.json";
-import { alertSource, baseAlerts, controllerLost, pillAlerts, pillSummary, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs } from "./status-pill";
+import { alertSource, baseAlerts, controllerLost, failsafeText, pilotFailsafe, pillAlerts, pillSummary, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs } from "./status-pill";
 
 function inputs(over: Partial<BaseAlertInputs> = {}): BaseAlertInputs {
   return { status: null, telemetry: null, battery: null, msSinceLive: 0, video: "live", ...over };
@@ -248,9 +248,24 @@ describe("pill golden cases (fixtures/pill-cases.json)", () => {
         agentReachable: i.agent_reachable,
         controllerLost: i.controller_lost,
         preflightFailing: i.preflight_failing,
+        fcFailsafe: i.fc_failsafe,
+        failsafeCause: i.failsafe_cause,
       });
       const s = pillSummary(alerts, new Set());
       expect({ severity: s.severity, text: s.text, count: s.count, ids: alerts.map((a) => a.id) }).toEqual(c.expected);
     });
   }
+});
+
+describe("failsafe item", () => {
+  it("takes its inputs from the pilot state and words an unknown cause as itself", () => {
+    expect(pilotFailsafe(null)).toEqual({ fcFailsafe: false, failsafeCause: null });
+    expect(pilotFailsafe({ fcFailsafe: true, failsafeCause: "rc_or_failsafe" })).toEqual({ fcFailsafe: true, failsafeCause: "rc_or_failsafe" });
+    expect(failsafeText("battery")).toBe("Failsafe: battery");
+  });
+
+  it("shows only from a fresh pilot state", () => {
+    expect(pillAlerts({ ...none, fcFailsafe: true }).map((a) => a.id)).toEqual(["failsafe"]);
+    expect(pillAlerts({ ...none, pilotAgeMs: null, fcFailsafe: true }).map((a) => a.id)).toEqual(["pilot_not_answering"]);
+  });
 });

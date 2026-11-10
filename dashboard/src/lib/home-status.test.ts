@@ -59,6 +59,14 @@ describe("home status card", () => {
     expect(homePill({ ...base, pilot: null, pilotAgeMs: null }).alerts.map((a) => a.id)).toEqual(["pilot_not_answering"]);
   });
 
+  it("raises a critical failsafe item from a fresh pilot, and none from a stale one", () => {
+    const pilot = parsePilotState({ ...raw, readiness: [], statustext: [], fc_failsafe: true, failsafe_cause: "rc_or_failsafe" });
+    const pill = homePill({ ...base, pilot });
+    expect(pill.severity).toBe("critical");
+    expect(pill.text).toBe("Failsafe: RC switch or failsafe");
+    expect(homePill({ ...base, pilot, pilotAgeMs: 5_000 }).alerts.map((a) => a.id)).toEqual(["pilot_not_answering"]);
+  });
+
   it("raises a critical link item while the agent does not answer", () => {
     const pilot = parsePilotState({ ...raw, readiness: [], statustext: [] });
     const pill = homePill({ ...base, pilot, agentReachable: false });

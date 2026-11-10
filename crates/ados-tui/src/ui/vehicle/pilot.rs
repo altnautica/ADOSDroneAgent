@@ -208,7 +208,7 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
     };
     out.push(agl);
 
-    let alerts = pilot_alerts(&p.readiness, i.prearm, &p.statustext);
+    let alerts = pilot_alerts(p, i.prearm);
     out.push(stale(kv_text(
         t,
         "Alerts",

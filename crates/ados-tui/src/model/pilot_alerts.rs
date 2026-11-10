@@ -1,10 +1,13 @@
 //! The alerts the cockpit's status pill draws from the pilot kind and the
-//! flight controller: failing readiness items, the FC's PreArm/Arm texts and
-//! its status texts at WARNING or worse. The same rules, texts and order as
-//! the shared `status-pill.ts` `pillAlerts` for these sources.
+//! flight controller: a pilot state too old to trust, the FC's own failsafe,
+//! failing readiness items, the FC's PreArm/Arm texts and its status texts at
+//! WARNING or worse. The same rules, ids, texts and order as the shared
+//! `status-pill.ts` `pillAlerts` for these sources, held to the golden
+//! `pill-cases.json`.
 
-use super::autonomy::{FcStatusText, ReadinessItem};
-use super::spec_text::spec_text;
+use super::autonomy::Pilot;
+use super::flight_state::stale_after_ms;
+use super::spec_text::{has_spec_text, spec_text};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -14,6 +17,8 @@ pub enum Severity {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PillAlert {
+    /// The shared pill id (`failsafe`, `pilot:<item>`, `fc:<text>`, ...).
+    pub id: String,
     pub severity: Severity,
     pub text: String,
 }
@@ -26,18 +31,50 @@ fn prearm_body(text: &str) -> Option<&str> {
         .map(str::trim_start)
 }
 
-/// Every active alert, critical first, then in source order: readiness,
-/// the newest PreArm/Arm text, the status texts (one per text, at the worst
-/// severity it was sent with).
-pub fn pilot_alerts(
-    readiness: &[ReadinessItem],
-    prearm: Option<&[String]>,
-    fc_status: &[FcStatusText],
-) -> Vec<PillAlert> {
+/// Whether the pill treats the pilot state as not answering: marked stale,
+/// of unknown age, or at least `flight-state.json` `stale_after_ms` old.
+fn pilot_stale(p: &Pilot) -> bool {
+    p.stale || p.age_ms.is_none_or(|a| a >= stale_after_ms())
+}
+
+/// `Failsafe: <cause>`, the cause worded by `pilot.banner.cause.*`; no cause
+/// reads as the flight controller, an unknown one as itself.
+pub fn failsafe_text(cause: Option<&str>) -> String {
+    let c = cause.filter(|c| !c.is_empty()).unwrap_or("fc");
+    let key = format!("pilot.banner.cause.{c}");
+    let worded = if has_spec_text(&key) {
+        spec_text(&key, &[])
+    } else {
+        c.to_string()
+    };
+    spec_text("alert.failsafe", &[("cause", &worded)])
+}
+
+/// Every active alert, critical first, then in source order: the pilot not
+/// answering or the FC failsafe, readiness, the newest PreArm/Arm text, the
+/// status texts (one per text, at the worst severity it was sent with). A
+/// stale pilot state contributes only the not-answering item.
+pub fn pilot_alerts(p: &Pilot, prearm: Option<&[String]>) -> Vec<PillAlert> {
     let mut out = Vec::new();
+    let stale = pilot_stale(p);
+    if stale {
+        out.push(PillAlert {
+            id: "pilot_not_answering".into(),
+            severity: Severity::Warning,
+            text: spec_text("alert.pilot_not_answering", &[]),
+        });
+    } else if p.fc_failsafe {
+        out.push(PillAlert {
+            id: "failsafe".into(),
+            severity: Severity::Critical,
+            text: failsafe_text(p.failsafe_cause.as_deref()),
+        });
+    }
+    let readiness = if stale { &[][..] } else { &p.readiness[..] };
     for r in readiness.iter().filter(|r| !r.ok) {
         // A blocking item refuses take-off: critical, as the pre-flight sheet fails it.
         out.push(PillAlert {
+            id: format!("pilot:{}", r.id),
             severity: if r.block {
                 Severity::Critical
             } else {
@@ -53,11 +90,13 @@ pub fn pilot_alerts(
     if let Some(last) = prearm.and_then(<[String]>::last) {
         let text = prearm_body(last).unwrap_or(last);
         out.push(PillAlert {
+            id: format!("fc:{text}"),
             severity: Severity::Warning,
             text: spec_text("flow.preflight.fc_prearm.failing", &[("text", text)]),
         });
     }
     let fc_start = out.len();
+    let fc_status = if stale { &[][..] } else { &p.statustext[..] };
     for s in fc_status {
         // PreArm/Arm lines already arrive through `prearm`.
         if prearm_body(&s.text).is_some() {
@@ -72,6 +111,7 @@ pub fn pilot_alerts(
             Some(seen) if severity == Severity::Critical => seen.severity = severity,
             Some(_) => {}
             None => out.push(PillAlert {
+                id: format!("fcst:{}", s.text),
                 severity,
                 text: s.text.clone(),
             }),
@@ -94,7 +134,9 @@ pub fn alerts_count_text(n: usize) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::autonomy::{FcStatusText, ReadinessItem};
     use super::*;
+    use serde_json::Value;
 
     fn item(id: &str, ok: bool, block: bool, msg: &str) -> ReadinessItem {
         ReadinessItem {
@@ -112,21 +154,33 @@ mod tests {
         }
     }
 
+    fn fresh(readiness: Vec<ReadinessItem>, statustext: Vec<FcStatusText>) -> Pilot {
+        Pilot {
+            readiness,
+            statustext,
+            age_ms: Some(100),
+            ..Pilot::default()
+        }
+    }
+
     #[test]
     fn readiness_prearm_and_status_texts_in_pill_order() {
-        let alerts = pilot_alerts(
-            &[
+        let p = fresh(
+            vec![
                 item("agl", false, false, "No rangefinder"),
                 item("position", true, true, "Position ok"),
                 item("fc_profile", false, true, ""),
             ],
-            Some(&["PreArm: Old".into(), "Arm: Throttle too high".into()]),
-            &[
+            vec![
                 st(4.0, "EKF variance"),
                 st(4.0, "PreArm: Compass not calibrated"),
                 st(2.0, "EKF variance"),
                 st(4.0, "Low disk"),
             ],
+        );
+        let alerts = pilot_alerts(
+            &p,
+            Some(&["PreArm: Old".into(), "Arm: Throttle too high".into()]),
         );
         let got: Vec<(Severity, &str)> = alerts
             .iter()
@@ -146,8 +200,19 @@ mod tests {
 
     #[test]
     fn an_unknown_prearm_list_and_an_empty_one_add_nothing() {
-        assert!(pilot_alerts(&[], None, &[]).is_empty());
-        assert!(pilot_alerts(&[], Some(&[]), &[]).is_empty());
+        let p = fresh(vec![], vec![]);
+        assert!(pilot_alerts(&p, None).is_empty());
+        assert!(pilot_alerts(&p, Some(&[])).is_empty());
+    }
+
+    #[test]
+    fn a_failsafe_cause_reads_its_spec_label() {
+        assert_eq!(failsafe_text(None), "Failsafe: flight controller");
+        assert_eq!(
+            failsafe_text(Some("rc_or_failsafe")),
+            "Failsafe: RC switch or failsafe"
+        );
+        assert_eq!(failsafe_text(Some("battery")), "Failsafe: battery");
     }
 
     #[test]
@@ -155,5 +220,104 @@ mod tests {
         assert_eq!(alerts_count_text(0), None);
         assert_eq!(alerts_count_text(1).as_deref(), Some("1 warning"));
         assert_eq!(alerts_count_text(3).as_deref(), Some("3 warnings"));
+    }
+
+    /// Whether a golden case uses only the sources this port models (the
+    /// pilot kind and the FC's PreArm texts): the terminal has no surface
+    /// alerts, storage, agent-reachability, controller or checklist rules.
+    fn pilot_sources_only(i: &Value) -> bool {
+        let empty = |k: &str| i[k].as_array().is_none_or(Vec::is_empty);
+        empty("alerts")
+            && empty("preflight_failing")
+            && i["agent_reachable"] != Value::Bool(false)
+            && i["controller_lost"] != Value::Bool(true)
+            && i["storage_pct"].as_f64().is_none_or(|s| s < 90.0)
+    }
+
+    #[test]
+    fn pill_cases_match_the_shared_rules() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../../../web-shared/src/hud/fixtures/pill-cases.json"
+        ))
+        .expect("pill-cases.json");
+        let mut ran = 0;
+        for c in &cases {
+            let i = &c["input"];
+            if !pilot_sources_only(i) {
+                continue;
+            }
+            let p = Pilot {
+                readiness: i["readiness"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|r| ReadinessItem {
+                        id: r["id"].as_str().unwrap_or_default().into(),
+                        ok: r["ok"].as_bool() == Some(true),
+                        block: r["severity"].as_str() == Some("block"),
+                        msg: r["msg"].as_str().unwrap_or_default().into(),
+                    })
+                    .collect(),
+                statustext: i["fc_status"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|s| {
+                        st(
+                            s["severity"].as_f64().unwrap_or(6.0),
+                            s["text"].as_str().unwrap_or_default(),
+                        )
+                    })
+                    .collect(),
+                age_ms: i["pilot_age_ms"].as_u64(),
+                fc_failsafe: i["fc_failsafe"].as_bool() == Some(true),
+                failsafe_cause: i["failsafe_cause"].as_str().map(String::from),
+                ..Pilot::default()
+            };
+            let prearm: Option<Vec<String>> = i["prearm"].as_array().map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            });
+            let alerts = pilot_alerts(&p, prearm.as_deref());
+            let severity = if alerts.is_empty() {
+                "ok"
+            } else if alerts.iter().any(|a| a.severity == Severity::Critical) {
+                "critical"
+            } else {
+                "warning"
+            };
+            let text = match alerts.as_slice() {
+                [] => spec_text("cockpit.status.ok", &[]),
+                [one] => one.text.clone(),
+                many => alerts_count_text(many.len()).unwrap_or_default(),
+            };
+            let ids: Vec<&str> = alerts.iter().map(|a| a.id.as_str()).collect();
+            let e = &c["expected"];
+            let name = c["name"].as_str().unwrap_or_default();
+            assert_eq!(severity, e["severity"], "{name}: severity");
+            assert_eq!(text, e["text"], "{name}: text");
+            assert_eq!(
+                alerts.len() as u64,
+                e["count"].as_u64().unwrap_or(0),
+                "{name}: count"
+            );
+            let want: Vec<&str> = e["ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect();
+            assert_eq!(ids, want, "{name}: ids");
+            ran += 1;
+        }
+        assert!(
+            cases
+                .iter()
+                .any(|c| c["name"] == "fc_failsafe_fresh_is_critical"),
+            "the failsafe case is in the file"
+        );
+        assert!(ran >= 10, "only {ran} pill cases use the pilot sources");
     }
 }

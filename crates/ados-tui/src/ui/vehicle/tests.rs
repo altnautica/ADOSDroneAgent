@@ -678,7 +678,12 @@ fn the_pilot_panel_shows_surface_ops_and_the_failsafe_cause() {
     frame["surface_ops"] = json!([]);
     land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
     let text = draw(&mut app, 160, 48);
-    for want in ["Failsafe  FAILSAFE · RC switch or failsafe", "Offers    –"] {
+    // The alerts list carries the failsafe as the pill does.
+    for want in [
+        "Failsafe  FAILSAFE · RC switch or failsafe",
+        "Offers    –",
+        "Failsafe: RC switch or failsafe",
+    ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
     let mut frame = pilot_frame();
@@ -689,6 +694,7 @@ fn the_pilot_panel_shows_surface_ops_and_the_failsafe_cause() {
     for want in [
         "Failsafe  FAILSAFE · flight controller",
         "Offers    Fly here",
+        "Failsafe: flight controller",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }

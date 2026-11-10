@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.94] - 2026-11-10
+
+### Changed
+
+- The status pill raises a critical "Failsafe: <cause>" item while a fresh pilot state reports the flight controller's own failsafe return or landing, so it no longer reads "All systems OK" under a failsafe. The shared pill cases cover it, and the dashboard Home card and the terminal UI alert list show it.
+- The shared cockpit text gains the confirm-dialog titles and button labels, the local command refusals ("Already armed", "Already disarmed" and the rest), and the remaining HUD, stream, picture-in-picture, quick-settings and instrument words, so every surface can read them from the spec.
+
 ## [0.109.93] - 2026-11-10
 
 ### Changed
