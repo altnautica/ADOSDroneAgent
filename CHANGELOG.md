@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.85] - 2026-11-10
+
+### Changed
+
+- Cockpit: "Fly here" on the map also works when a flight controller in GUIDED is armed and flying and the ADOS pilot does not take the point: the same hold sends a reposition to the flight controller, and a refusal reads in the spec's words.
+- Agent: `POST /api/command` takes `reposition` with `[lat, lon, alt_m]` (MAVLink `DO_REPOSITION` as a `COMMAND_INT`, height above home within the cockpit's launch range), correlating the flight controller's answer like the other commands.
+
 ## [0.109.84] - 2026-11-10
 
 ### Changed
