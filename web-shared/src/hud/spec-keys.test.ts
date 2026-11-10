@@ -216,3 +216,30 @@ describe("words every surface shares", () => {
     }
   });
 });
+
+describe("cockpit panel words", () => {
+  it("covers the follow rail, PiP, vision panel, radar, re-acquire, map status and nav-source toast", () => {
+    for (const k of [
+      "follow.tracking_close",
+      "follow.swap_cameras",
+      "cockpit.pip.swap_leg",
+      "vision.on_while_view",
+      "vision.no_backend",
+      "vision.fps",
+      "vision.idle",
+      "radar.title",
+      "radar.no_heading",
+      "radar.range_change",
+      "target.reacquire_mode",
+      "nav_source.no_ack",
+      "map.status.memory",
+      "map.status.upload",
+      "map.status.live_stream",
+      "map.status.placement.onboard",
+      "map.status.upload.uploading",
+      "map.status.stream.degraded",
+    ]) {
+      expect(S[k], k).toBeTruthy();
+    }
+  });
+});
