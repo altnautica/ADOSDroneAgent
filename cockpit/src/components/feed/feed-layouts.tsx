@@ -15,6 +15,7 @@
 // (`layers.json` `pip_draws_layers: false`). Every layer sits on the CS-1
 // z-ladder; a television scales the chrome by its class scale.
 
+import { ArrowLeftRight } from "lucide-react";
 import { useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import { ExtensionWidgetZones } from "@/components/plugins/extension-feed-mounts";
@@ -316,6 +317,17 @@ export function LandscapeGrid({
               <div className="absolute inset-0" data-main-video>
                 {slots.video}
               </div>
+              {/* The card's video goes back to the stage and the map to the card. */}
+              <button
+                type="button"
+                onClick={() => useCockpitViewStore.getState().setView("pilot")}
+                aria-label={specText("cockpit.pip.swap")}
+                title={specText("cockpit.pip.swap")}
+                data-testid="video-card-swap"
+                className="absolute right-[4px] top-[4px] z-[16] flex h-[48px] w-[48px] items-center justify-center rounded-md bg-hud-glass-strong text-hud-ink hover:bg-white/10"
+              >
+                <ArrowLeftRight className="h-[16px] w-[16px]" aria-hidden />
+              </button>
             </div>
           ) : (
             <BottomLeftCardView slots={slots} m={m} />

@@ -19,6 +19,7 @@ import { FLIGHT_PX } from "@/lib/flight-layout";
 import { executeSkill, requestSkill, useSkillBusy } from "@/lib/skill-runner";
 import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
+import { specText } from "@/shared/hud/spec-text";
 import type { FollowPhase } from "@/shared/hud/nav-types";
 import { useProfile } from "@/shared/use-profile";
 import { useFeedStore } from "@/stores/feed-store";
@@ -114,7 +115,7 @@ export function FollowRail({
       if (groundStation) await (recording ? stopRecording() : startRecording());
       else await (recording ? stopNodeRecording() : startNodeRecording());
     } catch (e) {
-      toastFromError(e, recording ? "Recording did not stop" : "Recording did not start");
+      toastFromError(e, specText(recording ? "follow.rec_stop_failed" : "follow.rec_start_failed"));
     } finally {
       setRecBusy(false);
     }
@@ -135,7 +136,7 @@ export function FollowRail({
               size={size}
               icon={X}
               word="TRACKING ×"
-              label="Stop tracking"
+              label={specText("follow.stop_tracking")}
               active
               disabled={busy}
               onPress={() => void executeSkill(follow.skill, { active: true })}
@@ -147,8 +148,8 @@ export function FollowRail({
             key={b}
             size={size}
             icon={Crosshair}
-            word="FOLLOW"
-            label={follow.state.enabled ? "Follow target" : `Follow: ${follow.state.reason ?? "unavailable"}`}
+            word={specText("follow.chip")}
+            label={follow.state.enabled ? specText("follow.target") : `${specText("follow.target")}: ${follow.state.reason ?? ""}`}
             disabled={!follow.state.enabled || busy}
             onPress={() => requestSkill(follow.skill, follow.ctx)}
           />
@@ -185,8 +186,8 @@ export function FollowRail({
             key={b}
             size={size}
             icon={recording ? Square : Circle}
-            word="REC"
-            label={recording ? "Stop recording" : "Start recording"}
+            word={specText("follow.rec")}
+            label={specText(recording ? "cockpit.camera.stop_recording" : "cockpit.camera.start_recording")}
             active={recording}
             disabled={recBusy}
             onPress={() => void toggleRec()}
@@ -200,14 +201,19 @@ export function FollowRail({
   const foldItems: MenuItem[] = layout.folded.map((b) =>
     b === "camSwap"
       ? { label: `Swap cameras ${swapLabel ?? ""}`, icon: ArrowLeftRight, onSelect: swapPip }
-      : { label: recording ? "Stop recording" : "Start recording", icon: recording ? Square : Circle, enabled: !recBusy, onSelect: () => void toggleRec() },
+      : {
+          label: specText(recording ? "cockpit.camera.stop_recording" : "cockpit.camera.start_recording"),
+          icon: recording ? Square : Circle,
+          enabled: !recBusy,
+          onSelect: () => void toggleRec(),
+        },
   );
 
   return (
     <div
       className="pointer-events-auto flex min-w-0 flex-row items-center overflow-hidden"
       style={{ gap: RAIL_GAP_PX }}
-      aria-label="Follow controls"
+      aria-label={specText("follow.controls")}
       role="toolbar"
       aria-orientation="horizontal"
     >
@@ -216,8 +222,8 @@ export function FollowRail({
         <RailSlot
           size={size}
           icon={Ellipsis}
-          word="MORE"
-          label="More controls"
+          word={specText("follow.more")}
+          label={specText("follow.more_controls")}
           onPress={() => setFoldAnchor(document.activeElement?.getBoundingClientRect() ?? null)}
         />
       ) : null}

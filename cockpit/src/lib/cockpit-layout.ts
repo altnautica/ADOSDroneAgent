@@ -4,7 +4,9 @@
 // tv ≥ 1600 or the kiosk. The agent cockpit measures the viewport.
 
 import { LAYOUT_CLASSES, ON_SCREEN_STICKS, TOUCH_TARGET, WIDTH_CLASSES, type LayoutClassSpec } from "@/lib/cockpit-spec";
+import layoutJson from "@/shared/cockpit-spec/layout.json";
 import viewsJson from "@/shared/cockpit-spec/views.json";
+import { specText } from "@/shared/hud/spec-text";
 
 /** The window width class. `tv` is a large panel or the HDMI kiosk. */
 export type WidthClass = "compact" | "medium" | "expanded" | "tv";
@@ -77,6 +79,20 @@ export function onscreenSticksShown(on: boolean, padLive: boolean, portrait: boo
 
 /** The thumb pad's edge (`on_screen_sticks.pad_size`). */
 export const STICK_PAD_PX: number = ON_SCREEN_STICKS.pad_size;
+
+const LEFT_COLUMN_LABELS = (layoutJson.zones as { id: string; labels?: { show_at: string[] } }[]).find((z) => z.id === "left_column")
+  ?.labels;
+
+/** Whether the left column's buttons carry their short label under the icon
+ *  in this width class (`zones[left_column].labels.show_at`). */
+export function leftColumnLabelsAt(width: WidthClass): boolean {
+  return LEFT_COLUMN_LABELS?.show_at.includes(width) ?? false;
+}
+
+/** A built-in's short label for the left column (`builtin.short.<id>`). */
+export function leftColumnCaption(builtinId: string): string {
+  return specText(`builtin.short.${builtinId}`);
+}
 
 /** Touch targets grow by this factor in glove mode. */
 export const GLOVE_TOUCH_SCALE = 1.25;

@@ -13,6 +13,7 @@ import { haversineM } from "@/shared/format";
 import { bottomRowAgl, type BottomRowAgl } from "@/shared/hud/chip-inputs";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { CHIP_STALE_AFTER_MS } from "@/shared/hud/flight-state";
+import { fmtDistance, fmtSigned1 } from "@/shared/hud/format";
 
 const finite = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v);
 
@@ -42,4 +43,17 @@ export function rowAgl(
 ): RowAgl {
   if (pilot && nowMs - pilot.at > CHIP_STALE_AFTER_MS) return { m: null, mark: null, stale: true };
   return { ...bottomRowAgl(pilot?.data ?? null, follow), stale: false };
+}
+
+/** A bottom-row value as text and unit through the shared readout formatters
+ *  (`hud/format.ts`), so it reads the same as every other ground surface: a
+ *  distance in whole metres, then kilometres from 1 km; every other value one
+ *  decimal, never "-0.0". A missing value reads a dash with the plain unit. */
+export function readoutParts(kind: "distance" | "metres" | "speed", v: number | null | undefined): { text: string; unit: string } {
+  if (kind === "distance") {
+    const s = fmtDistance(v);
+    const i = s.lastIndexOf(" ");
+    return i < 0 ? { text: s, unit: "m" } : { text: s.slice(0, i), unit: s.slice(i + 1) };
+  }
+  return { text: fmtSigned1(v), unit: kind === "speed" ? "m/s" : "m" };
 }

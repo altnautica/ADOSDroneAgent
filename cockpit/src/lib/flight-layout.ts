@@ -10,7 +10,7 @@
 // class scale.
 
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
-import type { GridMeasures } from "@/lib/cockpit-layout";
+import { leftColumnLabelsAt, type GridMeasures } from "@/lib/cockpit-layout";
 import type { CockpitView } from "@/lib/cockpit-view";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
 
@@ -275,7 +275,7 @@ export function flightLayout(i: FlightLayoutInput): FlightLayout {
   let leftColumn: Rect | null = null;
   let leftButtonPx = i.m.colPx;
   let leftGapPx: number = FLIGHT_PX.colGap;
-  let leftLabels = i.widthClass !== "compact";
+  let leftLabels = leftColumnLabelsAt(i.widthClass);
   if (i.flies) {
     const fit = bandH / s;
     const need = () => 3 * (leftButtonPx + (leftLabels ? FLIGHT_PX.leftLabelH : 0)) + 2 * leftGapPx;

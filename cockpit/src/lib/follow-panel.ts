@@ -14,22 +14,11 @@ import {
   type IntervalBar,
   type PhaseTone,
 } from "@/shared/hud/follow-chrome";
-import type { FollowState, RangeCueKind } from "@/shared/hud/nav-types";
+import type { FollowState } from "@/shared/hud/nav-types";
 import { FOLLOW_FRESH_MS, formatRange, rangeInterval } from "@/shared/hud/target-state";
+import { specText } from "@/shared/hud/spec-text";
 
 const DASH = "—";
-
-const PHASE_WORD: Record<FollowState["phase"], string> = {
-  idle: "IDLE",
-  acquiring: "ACQUIRING",
-  following: "FOLLOWING",
-  coasting: "COASTING",
-  searching: "SEARCHING",
-  holding: "HOLD",
-  lost: "LOST",
-};
-
-const CUE_LABEL: Record<RangeCueKind, string> = { ground: "GND", box_height: "BOX", lidar: "LIDAR" };
 
 export interface FollowPanelModel {
   stale: boolean;
@@ -44,7 +33,8 @@ export interface FollowPanelModel {
   cues: { label: string; lit: boolean }[];
   latency: string;
   latencyWarn: boolean;
-  mode: "SMART" | "STRICT" | null;
+  /** The reacquire mode's word (`follow.mode.*`), or null. */
+  mode: string | null;
 }
 
 export function followPanelModel(f: FollowState | null, ageMs: number): FollowPanelModel {
@@ -53,26 +43,28 @@ export function followPanelModel(f: FollowState | null, ageMs: number): FollowPa
   const rangeM = v?.rangeM ?? null;
   const sigma = v?.rangeSigmaM ?? null;
   const lit = new Set(v?.rangeCues.map((c) => c.kind) ?? []);
+  const dep = (s: string) => specText("follow.geo.depression", { v: s });
+  const brg = (s: string) => specText("follow.geo.bearing", { v: s });
   const geo = v
     ? [
-        `DEP ${v.depressionDeg !== null ? `${Math.round(v.depressionDeg)}°` : DASH}`,
-        `BRG ${v.bearingDeg !== null ? `${bearing3(v.bearingDeg)}°` : DASH}`,
+        dep(v.depressionDeg !== null ? `${Math.round(v.depressionDeg)}°` : DASH),
+        brg(v.bearingDeg !== null ? `${bearing3(v.bearingDeg)}°` : DASH),
         v.targetSpeedMps !== null ? `${v.targetSpeedMps.toFixed(1)} m/s` : `${DASH} m/s`,
       ].join(" · ")
-    : `DEP ${DASH} · BRG ${DASH} · ${DASH} m/s`;
+    : `${dep(DASH)} · ${brg(DASH)} · ${DASH} m/s`;
   return {
     stale,
     range: rangeM !== null ? formatRange(rangeM) : `${DASH} m`,
     plusMinus: rangeM !== null && sigma !== null ? `±${(2 * sigma).toFixed(1)}` : null,
-    phase: v ? PHASE_WORD[v.phase] : "STALE",
+    phase: specText(`follow.phase.${v ? v.phase : "stale"}`),
     phaseTone: v ? PHASE_TONE[v.phase] : "warn",
     bar: rangeM !== null ? intervalBar(rangeM, sigma) : null,
     interval: rangeM !== null && sigma !== null ? rangeInterval(rangeM, sigma) : null,
     geometry: geo,
-    cues: RANGE_CUE_ORDER.map((k) => ({ label: CUE_LABEL[k], lit: lit.has(k) })),
-    latency: v?.pipelineLatencyMs != null ? `LAT ${Math.round(v.pipelineLatencyMs)} ms` : `LAT ${DASH}`,
+    cues: RANGE_CUE_ORDER.map((k) => ({ label: specText(`follow.cue.${k}`), lit: lit.has(k) })),
+    latency: specText("follow.latency", { v: v?.pipelineLatencyMs != null ? `${Math.round(v.pipelineLatencyMs)} ms` : DASH }),
     latencyWarn: (v?.pipelineLatencyMs ?? 0) > LATENCY_WARN_MS,
-    mode: v?.reacquireMode === "smart" ? "SMART" : v?.reacquireMode === "strict" ? "STRICT" : null,
+    mode: v?.reacquireMode === "smart" || v?.reacquireMode === "strict" ? specText(`follow.mode.${v.reacquireMode}`) : null,
   };
 }
 

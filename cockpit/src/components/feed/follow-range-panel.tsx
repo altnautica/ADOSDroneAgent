@@ -10,6 +10,7 @@ import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
 import { cn } from "@/lib/utils";
 import type { PhaseTone } from "@/shared/hud/follow-chrome";
 import type { FollowState } from "@/shared/hud/nav-types";
+import { specText } from "@/shared/hud/spec-text";
 
 const PHASE_CLASS: Record<PhaseTone | "warn", string> = {
   track: "text-hud-track",
@@ -36,7 +37,7 @@ export function FollowRangePanel({
 
   if (widthClass === "compact") {
     return (
-      <div className={cn(plate, "px-[10px] py-[4px] text-[13px] text-hud-ink")} role="status" aria-label="Follow range">
+      <div className={cn(plate, "px-[10px] py-[4px] text-[13px] text-hud-ink")} role="status" aria-label={specText("follow.range")}>
         {compactFollowLine(m)} <span className={PHASE_CLASS[m.phaseTone]}>{m.phase}</span>
       </div>
     );
@@ -49,7 +50,7 @@ export function FollowRangePanel({
       className={cn(plate, "flex flex-col gap-[5px] px-[13px] py-[8px] text-hud-ink")}
       style={{ width: widthClass === "tv" ? 400 : full ? 320 : undefined }}
       role="status"
-      aria-label="Follow range"
+      aria-label={specText("follow.range")}
     >
       <div className="flex items-baseline justify-between gap-[13px]">
         <span className="font-semibold leading-none" style={{ fontSize: bigPx }}>

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { clampSplit, gridMeasures, onscreenSticksShown, SPLIT_DEFAULT, STICK_PAD_PX, widthClassFor } from "@/lib/cockpit-layout";
+import {
+  clampSplit,
+  gridMeasures,
+  leftColumnCaption,
+  leftColumnLabelsAt,
+  onscreenSticksShown,
+  SPLIT_DEFAULT,
+  STICK_PAD_PX,
+  widthClassFor,
+} from "@/lib/cockpit-layout";
 
 describe("width classes (cockpit spec layout.json)", () => {
   it("splits at 600, 840 and 1600 px", () => {
@@ -62,5 +71,21 @@ describe("on-screen sticks (layout.json on_screen_sticks)", () => {
     expect(onscreenSticksShown(true, false, true, "compact")).toBe(false);
     expect(onscreenSticksShown(false, false, false, "compact")).toBe(false);
     expect(STICK_PAD_PX).toBe(120);
+  });
+});
+
+describe("left-column labels (layout.json zones[left_column].labels)", () => {
+  it("shows the short labels at medium, expanded and tv, icons only at compact", () => {
+    expect(leftColumnLabelsAt("compact")).toBe(false);
+    expect(leftColumnLabelsAt("medium")).toBe(true);
+    expect(leftColumnLabelsAt("expanded")).toBe(true);
+    expect(leftColumnLabelsAt("tv")).toBe(true);
+  });
+
+  it("captions each button with its builtin.short.<id> text", () => {
+    expect(leftColumnCaption("pause")).toBe("Pause");
+    expect(leftColumnCaption("rth")).toBe("RTH");
+    expect(leftColumnCaption("takeoff")).toBe("Take off");
+    expect(leftColumnCaption("land")).toBe("Land");
   });
 });

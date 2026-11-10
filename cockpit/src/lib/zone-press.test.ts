@@ -37,4 +37,25 @@ describe("an unavailable flight control explains itself on press", () => {
       expect(s, f).not.toMatch(/: "(Map|Attitude|Obstacles)"/);
     }
   });
+
+  it("the follow controls, follow range and on-screen sticks take their words from the spec", () => {
+    const files = [
+      "../components/feed/follow-rail.tsx",
+      "../components/feed/follow-range-panel.tsx",
+      "../components/feed/follow-chrome.tsx",
+      "../components/feed/onscreen-sticks.tsx",
+      "./follow-panel.ts",
+    ];
+    for (const f of files) {
+      const s = src(f);
+      expect(s, f).not.toMatch(/"(Follow range|Follow controls|Follow target|Stop tracking|More controls|Left on-screen stick|Right on-screen stick)"/);
+      expect(s, f).not.toMatch(/"(FOLLOW|REC|MORE|STALE|IDLE|HOLD|LOST|GND|BOX|LIDAR|SMART|STRICT)"/);
+      expect(s, f).not.toMatch(/`(DEP|BRG|LAT) /);
+      expect(s, f).not.toMatch(/"Recording did not (start|stop)"/);
+    }
+  });
+
+  it("the map view's video card swaps video and map with the spec label", () => {
+    expect(src(ZONES[1])).toMatch(/specText\("cockpit\.pip\.swap"\)/);
+  });
 });

@@ -20,6 +20,7 @@ import { cameraLabel } from "@/lib/feed-legs";
 import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
 import type { RosterCamera } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import { useFeedStore } from "@/stores/feed-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
@@ -66,7 +67,7 @@ export function FollowStrip({
             type="button"
             onClick={() => setPanelOpen((o) => !o)}
             aria-expanded={panelOpen}
-            aria-label="Follow range"
+            aria-label={specText("follow.range")}
             data-zone="follow_range"
             className={cn("flex h-[44px] min-w-0 shrink items-center gap-[6px] rounded-[var(--fs-radius-sm)] px-[8px] font-mono hover:bg-white/10", m.stale && "opacity-50")}
           >

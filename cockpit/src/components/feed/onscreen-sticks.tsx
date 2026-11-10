@@ -17,6 +17,7 @@ import { STREAM_INTERVAL_MS } from "@/lib/pad/ds4-map";
 import { PilotStreamer } from "@/lib/pad/pilot-stream";
 import { releasePilotInput, sendPilotInput } from "@/lib/pilot-link";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import { useControlsStore } from "@/stores/controls-store";
 import { useInputStore } from "@/stores/input-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -110,7 +111,7 @@ function ThumbPads() {
         <div
           key={side}
           role="slider"
-          aria-label={side === "l" ? "Left on-screen stick" : "Right on-screen stick"}
+          aria-label={specText(side === "l" ? "sticks.left" : "sticks.right")}
           aria-valuenow={Math.round(knobs[side][1] * -100)}
           aria-valuemin={-100}
           aria-valuemax={100}

@@ -7,7 +7,7 @@
 // toast. Panels use the spec's chrome tokens (`chrome-*` classes); sizes are
 // CSS px, scaled by the zone's class scale.
 
-import { useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   Camera,
   Circle,
@@ -30,10 +30,19 @@ import { useGimbalPadStore } from "@/hooks/use-gimbal-rate";
 import { useNow } from "@/hooks/use-now";
 import { usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
-import { distanceFromHomeM, rowAgl } from "@/lib/bottom-row";
-import { cameraRoute, recordRoute, runCameraAction, type CameraAction } from "@/lib/camera-actions";
+import { distanceFromHomeM, readoutParts, rowAgl } from "@/lib/bottom-row";
+import {
+  cameraRoute,
+  recordRoute,
+  runCameraAction,
+  STREAM_QUALITIES,
+  useMavCameraStore,
+  useStreamQualityStore,
+  type CameraAction,
+} from "@/lib/camera-actions";
 import { runCockpitAction } from "@/lib/cockpit-actions";
 import { cameraLabel } from "@/lib/feed-legs";
+import { leftColumnCaption } from "@/lib/cockpit-layout";
 import { FLIGHT_PX, type RightItem } from "@/lib/flight-layout";
 import { GIMBAL_KEY_DPS, GIMBAL_MAX_DPS } from "@/lib/gimbal-rate";
 import { requestSkill } from "@/lib/skill-runner";
@@ -52,12 +61,10 @@ import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { useStatusStore } from "@/stores/status-store";
 
-/** A built-in's label for the left column: its short label when the spec
- *  gives one, else its label (`builtins.json`). */
+/** A built-in's full label (`builtins.json`): the button's accessible name
+ *  and tooltip; the short label under the icon is `builtin.short.<id>`. */
 function builtinLabel(id: string): string {
-  const b = builtinsJson.builtins.find((x) => x.id === id);
-  if (!b) return id;
-  return "short_label" in b && typeof b.short_label === "string" ? b.short_label : b.label;
+  return builtinsJson.builtins.find((x) => x.id === id)?.label ?? id;
 }
 
 function ZoneButton({
@@ -144,7 +151,7 @@ export function LeftColumn({ row = false, labels = false }: { row?: boolean; lab
   const rthState = resolveSkillState(rth, ctx);
   const pauseState = resolveSkillState(pause, ctx);
   const takeoffState = resolveSkillState(takeoff, ctx);
-  const caption = (id: string) => (labels ? builtinLabel(id) : undefined);
+  const caption = (id: string) => (labels ? leftColumnCaption(id) : undefined);
   return (
     <div
       className={cn("pointer-events-auto flex items-center", row ? "flex-row" : "flex-col")}
@@ -197,10 +204,12 @@ function useVideoLive(): boolean {
   return useFeedStore((s) => s.video.state === "live");
 }
 
-/** Why a camera action is unavailable now, or null. */
+/** Why a camera action is unavailable now, or null. A vehicle camera listed
+ *  over MAVLink takes a photo or zooms without video. */
 function useCameraReason(action: CameraAction): string | null {
   const extensions = useExtensionsStore((s) => s.extensions);
-  const route = cameraRoute(action, extensions, useVideoLive());
+  const mav = useMavCameraStore((s) => s.cameras);
+  const route = cameraRoute(action, extensions, useVideoLive(), mav);
   return route.kind === "unavailable" ? route.reason : null;
 }
 
@@ -210,11 +219,12 @@ function ZoomPill() {
   const inReason = useCameraReason("zoom_in");
   const outReason = useCameraReason("zoom_out");
   const extensions = useExtensionsStore((s) => s.extensions);
-  const digital = cameraRoute("zoom_in", extensions, true).kind === "local";
+  const mav = useMavCameraStore((s) => s.cameras);
+  const digital = cameraRoute("zoom_in", extensions, true, mav).kind === "local";
   const zoom = useCockpitViewStore((s) => s.digitalZoom);
   const level = digital ? specText("camera.digital_zoom", { n: zoom }) : null;
   const btn = "flex h-1/2 w-full items-center justify-center active:bg-white/10 aria-disabled:opacity-45";
-  const press = (action: CameraAction, reason: string | null) => () => pressOrExplain(reason, () => runCameraAction(action));
+  const press = (action: CameraAction, reason: string | null) => () => pressOrExplain(reason, () => void runCameraAction(action));
   const inLabel = specText("cockpit.zoom.in");
   const outLabel = specText("cockpit.zoom.out");
   return (
@@ -262,7 +272,7 @@ function GimbalPad() {
   const pitch = useGimbalPadStore((s) => s.pitch);
   const yaw = useGimbalPadStore((s) => s.yaw);
   const recenterReason = useCameraReason("recenter");
-  const recenter = () => pressOrExplain(recenterReason, () => runCameraAction("recenter"));
+  const recenter = () => pressOrExplain(recenterReason, () => void runCameraAction("recenter"));
   const origin = useRef<{ x: number; y: number; r: number; captured: boolean } | null>(null);
   const keys = useRef(new Set<string>());
   const size = FLIGHT_PX.gimbal;
@@ -379,12 +389,18 @@ function GimbalPad() {
 }
 
 /** The camera settings over the flight screen: which camera the main video
- *  shows, and the recorder. */
+ *  shows, the stream quality (where the node serves a video profile) and the
+ *  recorder. */
 function CameraSettingsSheet({ cameras, onClose }: { cameras: readonly RosterCamera[]; onClose: () => void }) {
   const active = useFeedStore((s) => s.mainCameraId);
   const setActive = useFeedStore((s) => s.setActiveCamera);
   const recording = useStatusStore((s) => s.status?.recording === true || s.status?.video?.recording === true);
   const recordReason = recordRoute(useVideoLive()).reason;
+  const quality = useStreamQualityStore((s) => s.quality);
+  const setQuality = useStreamQualityStore((s) => s.set);
+  useEffect(() => {
+    void useStreamQualityStore.getState().load();
+  }, []);
   return (
     <Sheet title={specText("cockpit.camera.settings")} onDismiss={onClose} closeLabel={specText("cockpit.close")}>
       <div className="flex flex-col gap-[16px] px-[14px] pb-[14px]" data-testid="camera-settings-sheet">
@@ -406,6 +422,28 @@ function CameraSettingsSheet({ cameras, onClose }: { cameras: readonly RosterCam
                 {cameraLabel(c)}
               </button>
             ))}
+          </section>
+        ) : null}
+        {quality ? (
+          <section role="radiogroup" aria-label={specText("camera.quality")} className="flex flex-col gap-[6px]" data-testid="stream-quality">
+            <h3 className="text-[13px] font-semibold text-muted-foreground">{specText("camera.quality")}</h3>
+            <div className="flex gap-[6px]">
+              {STREAM_QUALITIES.map((q) => (
+                <button
+                  key={q}
+                  type="button"
+                  role="radio"
+                  aria-checked={q === quality}
+                  onClick={() => void setQuality(q)}
+                  className={cn(
+                    "flex min-h-[48px] flex-1 items-center justify-center rounded-lg border px-[12px] text-[15px]",
+                    q === quality ? "border-primary bg-primary/10" : "border-border",
+                  )}
+                >
+                  {specText(`camera.quality.${q}`)}
+                </button>
+              ))}
+            </div>
           </section>
         ) : null}
         <button
@@ -435,6 +473,10 @@ export function RightColumn({ items, cameras }: { items: readonly RightItem[]; c
   const photoReason = useCameraReason("photo");
   const recordReason = recordRoute(useVideoLive()).reason;
   const [settings, setSettings] = useState(false);
+  // The vehicle's camera list, so photo and zoom know a MAVLink camera.
+  useEffect(() => {
+    void useMavCameraStore.getState().refresh();
+  }, []);
   const render = (item: RightItem): ReactNode => {
     switch (item) {
       case "shutter":
@@ -519,13 +561,11 @@ export function RightColumn({ items, cameras }: { items: readonly RightItem[]; c
 function Readout({
   label,
   value,
-  unit,
   mark = null,
   dim = false,
 }: {
   label: string;
-  value: number | null;
-  unit: string;
+  value: { text: string; unit: string };
   mark?: string | null;
   dim?: boolean;
 }) {
@@ -541,8 +581,8 @@ function Readout({
         {mark ? <span className="ml-[3px] text-hud-warn">{mark}</span> : null}
       </span>
       <span className="chrome-value whitespace-nowrap">
-        {value === null || !Number.isFinite(value) ? "—" : value.toFixed(Math.abs(value) < 10 ? 1 : 0)}
-        <span className="chrome-label ml-[2px] font-normal">{unit}</span>
+        {value.text}
+        <span className="chrome-label ml-[2px] font-normal">{value.unit}</span>
       </span>
     </span>
   );
@@ -567,13 +607,13 @@ export function BottomRow({ short = false }: { short?: boolean }) {
       data-testid="bottom-row"
       data-zone="bottom_row"
     >
-      <Readout label={specText("cockpit.readout.distance")} value={distanceFromHomeM(t, home)} unit="m" />
-      <Readout label={specText("cockpit.readout.height")} value={t?.position?.alt_rel ?? null} unit="m" />
+      <Readout label={specText("cockpit.readout.distance")} value={readoutParts("distance", distanceFromHomeM(t, home))} />
+      <Readout label={specText("cockpit.readout.height")} value={readoutParts("metres", t?.position?.alt_rel)} />
       {!short ? (
         <>
-          <Readout label={specText("cockpit.readout.hspeed")} value={t?.velocity?.groundspeed ?? null} unit="m/s" />
-          <Readout label={specText("cockpit.readout.vspeed")} value={t?.velocity?.climb ?? null} unit="m/s" />
-          <Readout label={specText("cockpit.readout.agl")} value={agl.m} unit="m" mark={aglMarkText(agl.mark)} dim={agl.stale} />
+          <Readout label={specText("cockpit.readout.hspeed")} value={readoutParts("speed", t?.velocity?.groundspeed)} />
+          <Readout label={specText("cockpit.readout.vspeed")} value={readoutParts("speed", t?.velocity?.climb)} />
+          <Readout label={specText("cockpit.readout.agl")} value={readoutParts("metres", agl.m)} mark={aglMarkText(agl.mark)} dim={agl.stale} />
         </>
       ) : null}
     </div>
