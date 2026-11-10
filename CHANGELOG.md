@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.54] - 2026-11-10
+
+### Added
+
+- The pilot kind carries `setup_step`: the aircraft setup step running while the owner is `tuning` (for example `autotune` or `first_hover`), `null` otherwise, so every surface can fill its `TUNING · <step>` chip. The setup engine reports the running step to the pilot whenever it changes.
+
+### Changed
+
+- The HDMI kiosk keeps its browser profile across reboots in `/var/ados/kiosk/profile` (a desktop-session launch uses `/var/ados/kiosk/profile-<uid>`, owned by that user), so the controller tour, tips, layer level, view and theme it remembers survive a restart. The browser cache stays in tmpfs. Stale `SingletonLock`, `SingletonSocket` and `SingletonCookie` links are removed before every launch so the browser never refuses the profile after a reboot.
+- Plugin SDK: the `lease_acquire` docstring lists the `failsafe` refusal. The pilot's goto start is covered by a test for each of its refusals.
+
 ## [0.109.53] - 2026-11-10
 
 ### Changed
