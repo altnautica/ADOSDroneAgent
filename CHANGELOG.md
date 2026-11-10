@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.62] - 2026-11-10
+
+### Changed
+
+- The follow rail's buttons wait only while the follow skill's own command is out, not while any other command is.
+
 ## [0.109.61] - 2026-11-10
 
 ### Changed
