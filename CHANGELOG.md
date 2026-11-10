@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.55] - 2026-11-10
+
+### Changed
+
+- Cockpit demo mode (`?demo=1`) alternates a mission leg and a follow-me cycle, and the flight-state chip, follow controls and overlays always show the same one.
+
 ## [0.109.54] - 2026-11-10
 
 ### Added
