@@ -2,7 +2,8 @@
 // "Centre sticks to take control" gate ring, "Sticks are with <surface>" with
 // its hold-to-take-over, the link-loss countdown, and the cancellable
 // low-battery RTH countdown. Voice prompts speak handovers, RTH, low battery
-// and mission-state changes.
+// and mission-state changes. They stack in the Feed's alert column, under the
+// alert cards and above the layer chips, so none covers another.
 
 import { useEffect, useRef, useState } from "react";
 
@@ -65,7 +66,7 @@ export function FlightOverlays() {
   const elsewhere = sticksElsewhere(pilot);
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 top-[0.5rem] z-[45] flex flex-col items-center gap-[0.5rem] px-[0.5rem]">
+    <div className="pointer-events-none flex w-full flex-col items-center gap-[0.5rem] px-[0.5rem] empty:hidden" data-testid="flight-overlays">
       {pilot.rthCountdownS !== null ? (
         <div
           role="alert"

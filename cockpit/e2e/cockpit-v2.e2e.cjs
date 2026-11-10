@@ -10,7 +10,8 @@
 // Cases: STOP reachability (the first press on STOP lands on STOP with the
 // status-pill list open and closed, the list drawn on top, at every width
 // class and the kiosk), the gimbal pad (the recentre button takes a mouse
-// click; a flick off the pad leaves no rate running), controller config (hotspot highlight, rebind persists, conflict
+// click; a flick off the pad leaves no rate running), the kiosk alert column
+// (banners, alert cards and layer chips never overlap), controller config (hotspot highlight, rebind persists, conflict
 // blocks Save, a safety binding cannot be removed), the pilot stick stream
 // (50 Hz input frames, release on a hidden tab), and screenshots of every
 // width class, the kiosk/TV, the Mode sheet, the skill picker and the
@@ -432,6 +433,74 @@ async function gimbalFlickCase(browser) {
   console.log("gimbal pad sends no rate after a flick off and a hover with no button held");
 }
 
+/** The alert column on the kiosk: a GPS alert card, the handover banner,
+ *  "Sticks are with <surface>" and the layer chips ("Obstacles
+ *  unavailable" once the demo layer feed stops for more than 2 s) all show
+ *  at once, and no two of them overlap. */
+async function chipsCase(browser) {
+  const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
+  const page = await ctx.newPage();
+  await page.addInitScript(PAD_INIT);
+  // The demo layer feed ticks every 50 ms: record those timers to stop them.
+  await page.addInitScript(() => {
+    const set = window.setInterval.bind(window);
+    window.__feedTimers = [];
+    window.setInterval = (fn, ms, ...rest) => {
+      const id = set(fn, ms, ...rest);
+      if (ms === 50) window.__feedTimers.push(id);
+      return id;
+    };
+  });
+  await mockAgent(page, { profile: "ground_station" });
+  await page.route("**/api/telemetry", (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ armed: true, mode: "GUIDED", autopilot: 3, attitude: { roll: 0, pitch: 0, yaw: 0 }, position: { alt_rel: 3, heading: 0 }, velocity: { groundspeed: 0, climb: 0 }, gps: { fix_type: 1, satellites: 0 }, last_update: new Date().toISOString() }),
+    }),
+  );
+  const pushes = [];
+  await page.routeWebSocket(/\/api\/v1\/pilot\/stream/, (ws) => {
+    const state = {
+      owner: "pilot", control_mode: "ados", profile: "normal", avoid: "brake", armed: true, landed: false, vehicle_class: "multirotor", readiness: [], plan_ned: [],
+      input_session: { src: "bench", label: "Bench", session: 7 },
+      banner: { text_key: "pilot.banner.ados_control", args: { profile: "NORMAL" }, until_ms: null },
+    };
+    const push = setInterval(() => ws.send(JSON.stringify({ kind: "pilot", ts_ms: Date.now(), data: state })), 100);
+    pushes.push(push);
+    ws.onMessage(() => undefined);
+    ws.onClose(() => clearInterval(push));
+  });
+  await page.goto(`${BASE}?kiosk=1&demo=1`);
+  await page.waitForSelector('[data-testid="sticks-elsewhere"]', { state: "visible", timeout: 10000 });
+  assert.equal(await page.locator('[data-testid="layer-chip"]').count(), 0, "no chip while the layers are fresh");
+  await page.evaluate(() => window.__feedTimers.forEach((id) => clearInterval(id)));
+  await page.waitForSelector('[data-testid="layer-chip"]', { state: "visible", timeout: 10000 });
+  assert.ok((await page.locator('[data-testid="layer-chip"]').allInnerTexts()).includes("Obstacles unavailable"), "the obstacles chip shows");
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: path.join(SHOTS, "kiosk-alert-column.png") });
+  const boxes = await page.$$eval('[data-testid="feed-notices"] > *, [data-testid="sticks-elsewhere"], [data-testid="handover-banner"], [data-testid="layer-chip"], [role="alert"] > div, [role="status"] > div.border-2', (els) =>
+    els.map((e) => {
+      const r = e.getBoundingClientRect();
+      return { what: (e.getAttribute("data-testid") ?? e.textContent ?? "").slice(0, 40), x: r.left, y: r.top, w: r.width, h: r.height };
+    }),
+  );
+  const chip = boxes.find((b) => b.what === "layer-chip");
+  assert.ok(chip && chip.w > 0, "the layer chip is drawn");
+  assert.ok(boxes.length >= 3, `banners, cards and chip present: ${JSON.stringify(boxes)}`);
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i];
+      const b = boxes[j];
+      const overlap = a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+      const nested = (a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h) || (b.x >= a.x && b.y >= a.y && b.x + b.w <= a.x + a.w && b.y + b.h <= a.y + a.h);
+      assert.ok(!overlap || nested, `"${a.what}" overlaps "${b.what}": ${JSON.stringify(a)} ${JSON.stringify(b)}`);
+    }
+  }
+  pushes.forEach((p) => clearInterval(p));
+  await ctx.close();
+  console.log(`kiosk alert column: ${boxes.map((b) => b.what).join(" | ")}; no overlaps`);
+}
+
 (async () => {
   const browser = await chromium.launch({ headless: true, executablePath: process.env.CHROME });
   const only = process.argv[2];
@@ -439,6 +508,7 @@ async function gimbalFlickCase(browser) {
     if (!only || only === "stop") await stopCases(browser);
     if (!only || only === "recentre") await recentreCase(browser);
     if (!only || only === "gimbal-flick") await gimbalFlickCase(browser);
+    if (!only || only === "chips") await chipsCase(browser);
     if (!only || only === "controls") await controlsCases(browser);
     if (!only || only === "stream") await pilotStreamCase(browser);
     if (!only || only === "shots") await shots(browser);

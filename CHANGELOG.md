@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.44] - 2026-11-10
+
+### Fixed
+
+- Pilot no longer streams its hold over a ground station's reposition in `fc_manual` or `elrs` after Take control: outside ADOS control it gives the flight controller its hold position once and leaves GUIDED's target alone, and when the flight controller accepts a `DO_REPOSITION` the pilot hands the vehicle to it (owner `fc_mode`), so the aircraft flies to the point.
+- Pilot refuses a surface map-point goto with `failsafe` while the flight controller flies an RTL, SmartRTL or land the pilot did not command (an RC switch, or a radio, battery or EKF failsafe). The operator changes mode first, with Take control or the Mode sheet.
+- Cockpit layer status chips ("Obstacles unavailable", "Depth unscaled") stack in the alert column under the banners and alert cards instead of on the layer canvas, and the handover and "Sticks are with" banners stack under the alert cards instead of over them, so none covers another on the kiosk. The cockpit browser checks cover it. Cockpit bundle rebuilt.
+
 ## [0.109.43] - 2026-11-10
 
 ### Fixed

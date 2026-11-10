@@ -415,6 +415,7 @@ impl Pilot {
         self.fw.engage(yaw.to_degrees(), alt, lim.airspeed_cruise);
         self.hold_reason = None;
         self.landing = false;
+        self.fc_hold = None;
     }
 
     /// A surface's "fly here": `{lat, lon, alt_m}` with the altitude above
@@ -439,6 +440,11 @@ impl Pilot {
         // Outside `ados` the FC flies: a surface repositions it directly.
         if self.control_mode() != ControlMode::Ados {
             return Err("control_mode".into());
+        }
+        // The FC is flying a failsafe RTL or land of its own: the operator
+        // changes mode first (Take control, or the Mode sheet).
+        if self.fc_failsafe {
+            return Err("failsafe".into());
         }
         // A take-off still climbing would replace the goto with its own
         // after-takeoff action at the top of the climb, so it waits.

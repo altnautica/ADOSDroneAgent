@@ -3,7 +3,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { parseArFrame, parseDepthFrame, parseObstaclesFrame, type DepthFrame } from "./cockpit-frames";
-import { LayerEngine, LayerFrameStore, type LayerConfig } from "./layer-engine";
+import { chipTexts, LayerEngine, LayerFrameStore, type LayerConfig } from "./layer-engine";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
 const ar = parseArFrame(JSON.parse(readFileSync(path.join(FIXTURES, "ar-frame.json"), "utf8")))!;
@@ -149,6 +149,24 @@ describe("LayerEngine", () => {
     expect(calls.texts).toContain("AR unavailable");
     expect(calls.texts).toContain("Obstacles unavailable");
     expect(calls.texts).not.toContain("WP4 · 120 m · 0:42");
+  });
+
+  it("hands the chips to the host instead of painting them under its banners", () => {
+    const masks: number[] = [];
+    const { store, engine, calls } = setup({ onChips: (m) => masks.push(m) });
+    store.putAr(ar, clock);
+    store.putObstacles(obstacles, clock);
+    frame();
+    expect(masks).toEqual([]);
+    frame(2100);
+    expect(masks).toHaveLength(1);
+    expect(chipTexts(masks[0])).toEqual(["Obstacles unavailable", "AR unavailable"]);
+    expect(calls.texts).not.toContain("Obstacles unavailable");
+    expect(calls.texts).not.toContain("AR unavailable");
+    frame(100);
+    expect(masks).toHaveLength(1);
+    engine.stop();
+    expect(masks).toEqual([masks[0], 0]);
   });
 
   it("draws nothing for a camera the frame does not carry", () => {

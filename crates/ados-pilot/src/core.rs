@@ -96,6 +96,13 @@ pub struct Pilot {
     mission_paused: bool,
     own_mode: Option<(u32, u64)>,
     landing: bool,
+    /// Outside `ados`: the hold position already given to the FC. Its
+    /// GUIDED keeps it, so it is not streamed again, and a ground station's
+    /// reposition replaces it instead of being overwritten on the next tick.
+    fc_hold: Option<[f32; 3]>,
+    /// The FC switched itself (or an RC switch or failsafe did) to an RTL or
+    /// land mode: a surface goto waits until the operator changes mode.
+    fc_failsafe: bool,
     rth_deadline_ms: Option<u64>,
     low_batt_cancelled: bool,
     view: ViewDemand,
@@ -143,6 +150,8 @@ impl Pilot {
             mission_paused: false,
             own_mode: None,
             landing: false,
+            fc_hold: None,
+            fc_failsafe: false,
             rth_deadline_ms: None,
             low_batt_cancelled: false,
             view: ViewDemand::default(),
@@ -192,6 +201,7 @@ impl Pilot {
     }
 
     fn set_owner(&mut self, owner: Owner, reason: &str) {
+        self.fc_hold = None;
         if let Some(r) = self.auth.set_owner(owner, reason) {
             self.out.push(Out::Revoked(r));
         }

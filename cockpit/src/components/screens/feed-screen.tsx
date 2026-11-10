@@ -29,6 +29,7 @@ import { LandscapeGrid, PortraitGrid, type FeedSlots } from "@/components/feed/f
 import { FollowStrip } from "@/components/feed/follow-chrome";
 import { useFollowStripState } from "@/hooks/use-follow-strip";
 import { HudCanvas } from "@/components/feed/hud-canvas";
+import { LayerChips } from "@/components/feed/layers/layer-chips";
 import { LayerStack } from "@/components/feed/layers/layer-stack";
 import { VisionPanel } from "@/components/feed/layers/vision-panel";
 import { MiniMap } from "@/components/feed/mini-map";
@@ -212,7 +213,7 @@ export function FeedScreen() {
     topBar: <TopBar compact={widthClass === "compact"} />,
     alerts: (
       <>
-        <div className="pointer-events-auto flex w-full max-w-[560px] flex-col overflow-hidden rounded-[var(--fs-radius-sm)] empty:hidden">
+        <div className="pointer-events-auto flex w-full max-w-[560px] flex-col overflow-hidden rounded-[var(--fs-radius-sm)] empty:hidden" data-testid="feed-notices">
           <ReachNotice />
           <BannerHost fullBleed />
           <RebootBanner floating />
@@ -220,7 +221,12 @@ export function FeedScreen() {
         <AlertStack />
       </>
     ),
-    overlays: <FlightOverlays />,
+    overlays: (
+      <>
+        <FlightOverlays />
+        <LayerChips />
+      </>
+    ),
     tabs: cameras.length > 1 ? <StreamTabs cameras={cameras} /> : null,
     map: flightNavCapable ? (className) => <MiniMap className={className} /> : null,
     cards: flightNavCapable

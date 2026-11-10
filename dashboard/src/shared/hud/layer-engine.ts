@@ -144,6 +144,11 @@ export interface LayerConfig {
   depthMode: "solid" | "outline";
   /** Paint cap, frames per second (0 = display rate). */
   fpsCap: number;
+  /** When set, the status chips are not painted on the canvas: the engine
+   *  reports them here instead (one bit per {@link CHIP_IDS} entry, called
+   *  only when the set changes, and with 0 on `stop`), so the host can stack
+   *  them with its own banners where nothing covers them. */
+  onChips?: (mask: number) => void;
 }
 
 export interface PaintStats {
@@ -178,6 +183,15 @@ export const CHIP_TEXT = {
   arApprox: setupText("layer.ar_approx"),
 } as const;
 
+export type ChipId = keyof typeof CHIP_TEXT;
+/** Status chips in stacking order; chip `CHIP_IDS[i]` is bit `1 << i`. */
+export const CHIP_IDS: readonly ChipId[] = ["depth", "depthUnscaled", "surfaces", "obstacles", "ar", "arApprox"];
+
+/** The chip texts of a reported mask, in stacking order. */
+export function chipTexts(mask: number): string[] {
+  return CHIP_IDS.filter((_, i) => (mask & (1 << i)) !== 0).map((id) => CHIP_TEXT[id]);
+}
+
 export class LayerEngine {
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
@@ -207,6 +221,9 @@ export class LayerEngine {
   /** Next chip position (CSS px), reset per paint. */
   private chipX = 0;
   private chipY = 0;
+  /** This paint's chips, and the set last given to `onChips`. */
+  private chipMask = 0;
+  private chipsReported = 0;
   /** Reused video rects: the default frame (chips, zones, sectors) and one
    *  per AR frame size while laying out. */
   private rectMain: Rect = { x: 0, y: 0, w: 0, h: 0 };
@@ -272,6 +289,14 @@ export class LayerEngine {
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.ctx?.clearRect(0, 0, this.canvas?.width ?? 0, this.canvas?.height ?? 0);
+    this.reportChips(0);
+  }
+
+  private reportChips(mask: number): void {
+    const on = this.cfg.onChips;
+    if (!on || mask === this.chipsReported) return;
+    this.chipsReported = mask;
+    on(mask);
   }
 
   stats(): PaintStats {
@@ -343,11 +368,13 @@ export class LayerEngine {
   }
 
   /** Stack one status chip centred under the top chrome. */
-  private chip(text: string): void {
+  private chip(id: ChipId): void {
+    this.chipMask |= 1 << CHIP_IDS.indexOf(id);
+    if (this.cfg.onChips) return;
     const op = this.chipOps.push("", "chip");
     op.x = this.chipX;
     op.y = this.chipY;
-    op.text = text;
+    op.text = CHIP_TEXT[id];
     op.color = UNAVAILABLE_CHIP;
     this.chipY += 24;
   }
@@ -362,6 +389,7 @@ export class LayerEngine {
     const L = this.cfg.layers;
     const s = this.store;
     this.chipOps.clear();
+    this.chipMask = 0;
     const main = this.videoRect(this.rectMain, 0, 0);
     // Status chips stack centred under the top chrome (a fifth down the rect).
     this.chipX = main.x + main.w / 2;
@@ -405,13 +433,13 @@ export class LayerEngine {
     this.paintLayer(ctx, L.has("depth"), depthVis, this.depthOps);
     this.paintLayer(ctx, L.has("surfaces"), surfVis, this.surfOps);
     this.paintLayer(ctx, L.has("obstacles"), obstVis, this.obstOps);
-    if (L.has("depth") && depthVis === "hidden") this.chip(CHIP_TEXT.depth);
+    if (L.has("depth") && depthVis === "hidden") this.chip("depth");
     else if (L.has("depth") && cam !== null && s.depth.data) {
       const g = s.depth.data.cameras[cam];
-      if (g && (g.scaleSource ?? s.depth.data.scaleSource) === "none") this.chip(CHIP_TEXT.depthUnscaled);
+      if (g && (g.scaleSource ?? s.depth.data.scaleSource) === "none") this.chip("depthUnscaled");
     }
-    if (L.has("surfaces") && surfVis === "hidden") this.chip(CHIP_TEXT.surfaces);
-    if (L.has("obstacles") && obstVis === "hidden") this.chip(CHIP_TEXT.obstacles);
+    if (L.has("surfaces") && surfVis === "hidden") this.chip("surfaces");
+    if (L.has("obstacles") && obstVis === "hidden") this.chip("obstacles");
 
     // AR (route z50, motion z60).
     const wantAr = L.has("ar_route") || L.has("ar_motion");
@@ -420,7 +448,7 @@ export class LayerEngine {
       const frame = s.ar.data;
       const arCam = frame ? (frame.cameras[cam] ?? null) : null;
       const status = arStatusChip(frame, arCam, arVis === "hidden");
-      if (status) this.chip(status === "AR ≈" ? CHIP_TEXT.arApprox : CHIP_TEXT.ar);
+      if (status) this.chip(status === "AR ≈" ? "arApprox" : "ar");
       if (arVis !== "hidden" && arCam) {
         if (this.arLaidVersion !== s.ar.version) {
           this.arLaidVersion = s.ar.version;
@@ -450,6 +478,7 @@ export class LayerEngine {
     }
 
     if (this.chipOps.n > 0) paintOps(ctx, this.chipOps, 1);
+    this.reportChips(this.chipMask);
   }
 
   private interval = 0;

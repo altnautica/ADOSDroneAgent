@@ -82,6 +82,65 @@ fn external_guided_outside_ados_stays_with_the_fc() {
     }
 }
 
+/// In `fc_manual` and `elrs`, after Take control, a ground station's
+/// reposition finds the FC already in GUIDED, so the pilot sees no mode
+/// change. It still flies: the pilot sends its hold once and then leaves the
+/// FC's target alone, and the FC's accepted reposition hands it the vehicle.
+#[test]
+fn reposition_after_take_control_outside_ados_is_the_fcs() {
+    use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavResult, COMMAND_ACK_DATA};
+    let setpoints = |w: &World| {
+        w.sent
+            .iter()
+            .filter(|m| matches!(m, MavMessage::SET_POSITION_TARGET_LOCAL_NED(_)))
+            .count()
+    };
+    for mode in ["fc_manual", "elrs"] {
+        let mut w = World::new();
+        w.airborne(copter::LOITER);
+        assert!(matches!(w.action(&format!("control_mode:{mode}")), Reply::Action(a) if a.ok));
+        assert!(matches!(w.action("take_control"), Reply::Action(a) if a.ok));
+        w.run(300);
+        assert_eq!(w.mode, copter::GUIDED, "{mode}");
+        assert_eq!(w.p.owner(), Owner::Pilot, "{mode}");
+        assert!(setpoints(&w) >= 1, "{mode}: the hold was never sent");
+        w.sent.clear();
+        w.run(1000);
+        assert_eq!(
+            setpoints(&w),
+            0,
+            "{mode}: the pilot streams its hold over the FC's GUIDED target"
+        );
+        let ack = MavMessage::COMMAND_ACK(COMMAND_ACK_DATA {
+            command: MavCmd::MAV_CMD_DO_REPOSITION,
+            result: MavResult::MAV_RESULT_ACCEPTED,
+        });
+        w.p.on_fc(FC_SYS, FC_COMP, &ack, w.now);
+        w.run(400);
+        assert_eq!(w.p.owner(), Owner::FcMode, "{mode}");
+        assert_eq!(w.mode, copter::GUIDED, "{mode}");
+        assert_eq!(setpoints(&w), 0, "{mode}");
+    }
+}
+
+/// Under `ados` the pilot keeps streaming its hold: a ground station's
+/// reposition is redirected to it rather than reaching the FC.
+#[test]
+fn hold_keeps_streaming_under_ados() {
+    let mut w = World::new();
+    w.airborne(copter::LOITER);
+    assert!(matches!(w.action("take_control"), Reply::Action(a) if a.ok));
+    w.run(300);
+    w.sent.clear();
+    w.run(1000);
+    let n = w
+        .sent
+        .iter()
+        .filter(|m| matches!(m, MavMessage::SET_POSITION_TARGET_LOCAL_NED(_)))
+        .count();
+    assert!(n >= 5, "{n} hold setpoints in 1 s");
+}
+
 #[test]
 fn stick_flight_moves_and_centred_sticks_hold() {
     let mut w = World::new();
@@ -457,6 +516,49 @@ fn surface_goto_is_only_offered_under_ados() {
         assert_eq!(w.p.owner(), Owner::FcMode, "{mode}");
         assert_eq!(w.mode, copter::LOITER, "{mode}");
     }
+}
+
+/// While the FC flies an RTL or land the pilot did not command (an RC switch,
+/// a radio, battery or EKF failsafe), a surface's map point is refused: the
+/// operator changes mode first. After Take control it flies.
+#[test]
+fn surface_goto_refused_during_an_fc_failsafe() {
+    let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0});
+    for mode in [copter::RTL, copter::SMART_RTL, copter::LAND] {
+        let mut w = World::new();
+        home_at(&mut w, 12.0, 77.0);
+        w.airborne(copter::GUIDED);
+        w.run(100);
+        w.mode = mode;
+        w.run(100);
+        let r = w.action_args("goto", args.clone());
+        assert!(
+            matches!(&r, Reply::Action(a) if a.err.as_deref() == Some("failsafe")),
+            "mode {mode}: {r:?}"
+        );
+        w.run(100);
+        assert_eq!(w.mode, mode, "the FC keeps flying its failsafe");
+        assert!(matches!(w.action("take_control"), Reply::Action(a) if a.ok));
+        w.run(100);
+        assert!(matches!(w.action_args("goto", args.clone()), Reply::Action(a) if a.ok));
+        w.run(100);
+        assert_eq!(w.p.owner(), Owner::Goto, "mode {mode}");
+    }
+}
+
+/// An RTL the operator asked for is the operator's own mode change: a map
+/// point after it flies.
+#[test]
+fn surface_goto_after_an_operator_rth_flies() {
+    let mut w = World::new();
+    home_at(&mut w, 12.0, 77.0);
+    w.airborne(copter::GUIDED);
+    w.run(100);
+    assert!(matches!(w.action("rth"), Reply::Action(a) if a.ok));
+    w.run(100);
+    assert_eq!(w.mode, copter::RTL);
+    let args = serde_json::json!({"lat": 12.0009, "lon": 77.0, "alt_m": 6.0});
+    assert!(matches!(w.action_args("goto", args), Reply::Action(a) if a.ok));
 }
 
 #[test]

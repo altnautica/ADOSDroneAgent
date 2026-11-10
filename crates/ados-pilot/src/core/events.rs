@@ -1,6 +1,6 @@
 //! FC frames: arm/disarm, FC mode changes, adoption of an external GUIDED.
 
-use ados_protocol::mavlink::ardupilotmega::MavMessage;
+use ados_protocol::mavlink::ardupilotmega::{MavCmd, MavMessage, MavResult};
 use ados_protocol::pilot::{ControlMode, Owner};
 use serde_json::json;
 
@@ -29,6 +29,16 @@ impl Pilot {
         let was_armed = self.fc.armed;
         let first = self.fc.heartbeat_ms == 0;
         let changed = self.fc.update(sysid, compid, msg, now_ms);
+        if let MavMessage::COMMAND_ACK(a) = msg {
+            if sysid == self.fc.sysid
+                && compid == self.fc.compid
+                && a.command == MavCmd::MAV_CMD_DO_REPOSITION
+                && a.result == MavResult::MAV_RESULT_ACCEPTED
+            {
+                self.on_fc_reposition(now_ms);
+            }
+            return;
+        }
         if !matches!(msg, MavMessage::HEARTBEAT(_)) || self.fc.heartbeat_ms != now_ms {
             return;
         }
@@ -78,6 +88,7 @@ impl Pilot {
         self.rth_deadline_ms = None;
         self.low_batt_cancelled = false;
         self.hold_reason = None;
+        self.fc_failsafe = false;
         if self
             .launch
             .as_ref()
@@ -87,9 +98,33 @@ impl Pilot {
         }
     }
 
+    /// The FC accepted a reposition. Under `ados` the router takes those to
+    /// the pilot as a goto, so this is a ground station flying the FC
+    /// directly, outside `ados`. It is already in GUIDED, so no mode change
+    /// tells the pilot: it yields here, and streams nothing over the FC's
+    /// target from now on.
+    fn on_fc_reposition(&mut self, now_ms: u64) {
+        if self.control_mode() == ControlMode::Ados
+            || !self.fc.armed
+            || !self.in_guided()
+            || self.owner() != Owner::Pilot
+        {
+            return;
+        }
+        self.set_owner(Owner::FcMode, "fc-reposition");
+        self.landing = false;
+        let name = self.family().mode_name(self.fc.custom_mode);
+        self.banner = Some(banner(
+            "pilot.banner.fc_control",
+            &[("mode", json!(name))],
+            now_ms,
+        ));
+    }
+
     fn on_mode_change(&mut self, prev: u32, now_ms: u64) {
         let fam = self.family();
         let mode = self.fc.custom_mode;
+        self.fc_failsafe = false;
         if self.owner() == Owner::Tuning {
             return;
         }
@@ -127,6 +162,9 @@ impl Pilot {
         }
         // Any other mode: the FC flies.
         let was_ours = self.mode_is_ours(mode, now_ms);
+        // An RTL or land the pilot did not command: an RC switch or an FC
+        // failsafe (radio, battery, EKF).
+        self.fc_failsafe = !was_ours && (fam.is_rtl(mode) || fam.is_land(mode));
         if self.owner() != Owner::FcMode {
             self.set_owner(Owner::FcMode, "fc-mode");
         }

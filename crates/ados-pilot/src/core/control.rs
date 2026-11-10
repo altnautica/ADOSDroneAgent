@@ -414,9 +414,23 @@ impl Pilot {
         let m = match cmd {
             Command::Hold { pos, yaw } => {
                 self.setpoint = Some(pos);
+                // Outside `ados` no operator steers this hold (the axes are
+                // zeroed): the FC's GUIDED keeps the target once given, so it
+                // is sent once, and a ground station's reposition is not
+                // overwritten on the next tick.
+                if self.control_mode() != ControlMode::Ados {
+                    let same = self
+                        .fc_hold
+                        .is_some_and(|h| h.iter().zip(pos).all(|(a, b)| (a - b).abs() < 0.05));
+                    if same {
+                        return;
+                    }
+                    self.fc_hold = Some(pos);
+                }
                 tx.setpoint(MASK_POS_VEL_YAW, pos, [0.0; 3], yaw, 0.0)
             }
             Command::Velocity { vel, yaw_rate } => {
+                self.fc_hold = None;
                 tx.setpoint(MASK_VELOCITY, [0.0; 3], vel, 0.0, yaw_rate)
             }
         };

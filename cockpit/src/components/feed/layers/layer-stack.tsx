@@ -29,6 +29,7 @@ import { apiFetch } from "@/shared/api-fetch";
 import { LayerEngine, type PaintStats } from "@/shared/hud/layer-engine";
 import type { VideoFeedState } from "@/shared/video-transport";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
+import { useLayerChipsStore } from "@/stores/layer-chips-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 /** Layers the agent computes per camera, named in the view lease. */
@@ -130,6 +131,8 @@ export function LayerStack({ cameraId: rosterCameraId, videoWidth, videoHeight, 
       depthRangeM,
       depthMode,
       fpsCap,
+      // The chips stack with the banners in the alert column (LayerChips).
+      onChips: useLayerChipsStore.getState().setMask,
     });
   }
   useEffect(() => {
