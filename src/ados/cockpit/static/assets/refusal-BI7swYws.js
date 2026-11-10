@@ -1,1 +1,0 @@
-import{n as e,t}from"./spec-text-C4bstCbE.js";function n(n,r){if(!n)return e(`refusal.none`);if(n.startsWith(`not_ready:`)){let i=n.slice(10),a=r?.(i)??(t(`readiness.item.${i}`)?e(`readiness.item.${i}`):i);return e(`refusal.not_ready`,{item:a})}let i=`refusal.${n.replace(/ /g,`_`)}`;return t(i)?e(i):e(`refusal.unknown`,{code:n})}export{n as t};

@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.88] - 2026-11-10
+
+### Changed
+
+- Cockpit spec: one shared set of flight-screen words for the remaining confirm dialogs, quick settings, menu rows, alert titles, pre-flight rows, mode picker, target and lock texts, nav-source chip, proximity radar, local minimap, layer names, video source badges and camera sheet readouts, in sentence case.
+
 ## [0.109.87] - 2026-11-10
 
 ### Changed
