@@ -25,17 +25,77 @@ pub enum Renderer {
 pub const BROWSER_CANDIDATES: &[&str] =
     &["chromium-browser", "chromium", "chromium-browser-stable"];
 
-/// Profile/cache subdirectory inside a session user's runtime dir.
+/// Disk-cache subdirectory inside a session user's runtime dir.
 pub const KIOSK_STORAGE_SUBDIR: &str = "ados-kiosk";
+
+/// Persistent browser profiles, one level under the agent's state dir. The
+/// kiosk runs as root (`ados-kiosk.service`, `User=root`), which owns
+/// `/var/ados`; the launcher creates the profile dirs itself.
+pub const KIOSK_PROFILE_ROOT: &str = "/var/ados/kiosk";
+
+/// Chromium's single-instance markers in a profile dir: symlinks naming the
+/// host and pid of the browser holding the profile. A browser killed with
+/// the box (power cut, `SIGKILL`) leaves them behind, and the next launch on
+/// a persistent profile then refuses to start as "profile in use".
+pub const SINGLETON_FILES: &[&str] = &["SingletonLock", "SingletonSocket", "SingletonCookie"];
 
 /// Upper bound on the browser disk cache. It lives in tmpfs, so this is a RAM
 /// budget.
 pub const DISK_CACHE_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Browser storage for the cage launch: the agent's tmpfs runtime dir, which
-/// exists and is writable by the root-run child. Never `$HOME` (the SD card,
-/// rewritten continuously by a live SPA) and never `/run/user/0` (absent for a
-/// system service).
+/// The cage launch's persistent profile (the browser runs as root).
+pub fn cage_profile_dir() -> PathBuf {
+    Path::new(KIOSK_PROFILE_ROOT).join("profile")
+}
+
+/// A desktop session's persistent profile. The browser runs as the session
+/// user there, so it gets a dir of its own, owned by that user: a profile
+/// holding root-written files from a cage launch would not open.
+pub fn windowed_profile_dir(uid: u32) -> PathBuf {
+    Path::new(KIOSK_PROFILE_ROOT).join(format!("profile-{uid}"))
+}
+
+/// Remove the [`SINGLETON_FILES`] in `dir`. They are symlinks, usually
+/// dangling, so they are inspected with `symlink_metadata` and never
+/// followed; a missing one is fine.
+pub fn clear_singleton_locks(dir: &Path) -> std::io::Result<()> {
+    for name in SINGLETON_FILES {
+        let path = dir.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Make `dir` ready for a launch: created (mode 0700), owned by `owner`
+/// (`uid`, `gid`) when the browser drops to a session user, and cleared of a
+/// previous browser's singleton markers.
+pub fn prepare_profile_dir(dir: &Path, owner: Option<(u32, Option<u32>)>) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some((uid, gid)) = owner {
+            std::os::unix::fs::chown(dir, Some(uid), gid)?;
+        }
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = owner;
+    clear_singleton_locks(dir)
+}
+
+/// The cage launch's disk cache and runtime dir: the agent's tmpfs run dir,
+/// which exists and is writable by the root-run child. Never `$HOME` (the SD
+/// card, rewritten continuously by a live SPA) and never `/run/user/0`
+/// (absent for a system service).
 pub fn cage_storage_dir() -> PathBuf {
     ados_protocol::paths::run_dir().join("kiosk")
 }
@@ -204,14 +264,16 @@ pub fn render_flags(renderer: Renderer) -> Vec<String> {
     }
 }
 
-/// Profile and a bounded cache under `base_dir` (tmpfs): nothing the kiosk
-/// shows is worth persisting, and a dedicated profile never collides with the
-/// operator's own browser.
-pub fn storage_flags(base_dir: &str) -> Vec<String> {
-    let base = base_dir.trim_end_matches('/');
+/// The persistent profile at `profile_dir` (logins, settings and site
+/// storage survive a reboot) and a bounded disk cache under `cache_base`
+/// (tmpfs: the cache is rewritten continuously by a live SPA and is not worth
+/// the card's wear). A dedicated profile never collides with the operator's
+/// own browser.
+pub fn storage_flags(profile_dir: &str, cache_base: &str) -> Vec<String> {
+    let cache = cache_base.trim_end_matches('/');
     vec![
-        format!("--user-data-dir={base}/profile"),
-        format!("--disk-cache-dir={base}/cache"),
+        format!("--user-data-dir={profile_dir}"),
+        format!("--disk-cache-dir={cache}/cache"),
         format!("--disk-cache-size={DISK_CACHE_BYTES}"),
     ]
 }
@@ -234,7 +296,10 @@ pub fn cage_argv(browser: &str, url: &str, renderer: Renderer) -> Vec<String> {
     .map(|s| s.to_string())
     .collect();
     argv.extend(render_flags(renderer));
-    argv.extend(storage_flags(&cage_storage_dir().to_string_lossy()));
+    argv.extend(storage_flags(
+        &cage_profile_dir().to_string_lossy(),
+        &cage_storage_dir().to_string_lossy(),
+    ));
     argv.push("--autoplay-policy=no-user-gesture-required".into());
     argv.push(url.into());
     argv
@@ -247,7 +312,8 @@ pub fn windowed_argv(
     url: &str,
     session_type: &str,
     renderer: Renderer,
-    storage_dir: &str,
+    profile_dir: &str,
+    cache_base: &str,
 ) -> Vec<String> {
     let platform = if session_type == "wayland" {
         "wayland"
@@ -267,7 +333,7 @@ pub fn windowed_argv(
     .collect();
     argv.push(format!("--ozone-platform={platform}"));
     argv.extend(render_flags(renderer));
-    argv.extend(storage_flags(storage_dir));
+    argv.extend(storage_flags(profile_dir, cache_base));
     argv.push("--autoplay-policy=no-user-gesture-required".into());
     argv.push(url.into());
     argv

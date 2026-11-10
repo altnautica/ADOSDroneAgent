@@ -38,11 +38,11 @@ fn software_disables_the_gpu_and_gpu_names_no_gl_implementation() {
 }
 
 #[test]
-fn cage_argv_keeps_browser_storage_off_the_card() {
+fn cage_argv_persists_the_profile_and_keeps_the_cache_in_tmpfs() {
     let argv = cage_argv(BROWSER, "http://target/cockpit", Renderer::Software);
     let storage = cage_storage_dir().to_string_lossy().into_owned();
     for flag in [
-        format!("--user-data-dir={storage}/profile"),
+        "--user-data-dir=/var/ados/kiosk/profile".to_string(),
         format!("--disk-cache-dir={storage}/cache"),
         format!("--disk-cache-size={DISK_CACHE_BYTES}"),
     ] {
@@ -57,20 +57,23 @@ fn cage_argv_keeps_browser_storage_off_the_card() {
 
 #[test]
 fn windowed_argv_matches_the_session_and_scopes_storage() {
-    let storage = format!("/run/user/1000/{KIOSK_STORAGE_SUBDIR}");
+    let cache = format!("/run/user/1000/{KIOSK_STORAGE_SUBDIR}");
+    let profile = windowed_profile_dir(1000).to_string_lossy().into_owned();
+    assert_eq!(profile, "/var/ados/kiosk/profile-1000");
     let argv = windowed_argv(
         BROWSER,
         "http://target/cockpit",
         "wayland",
         Renderer::Software,
-        &storage,
+        &profile,
+        &cache,
     );
     assert!(!argv.iter().any(|a| a == "cage"));
     assert_eq!(argv[0], BROWSER);
     assert!(argv.iter().any(|a| a == "--kiosk"));
     assert!(argv.iter().any(|a| a == "--ozone-platform=wayland"));
-    assert!(argv.contains(&format!("--user-data-dir={storage}/profile")));
-    assert!(argv.contains(&format!("--disk-cache-dir={storage}/cache")));
+    assert!(argv.contains(&format!("--user-data-dir={profile}")));
+    assert!(argv.contains(&format!("--disk-cache-dir={cache}/cache")));
     assert!(!argv.iter().any(|a| a.starts_with("--user-data-dir=/home")));
     assert_eq!(argv.last().unwrap(), "http://target/cockpit");
     let x11 = windowed_argv(
@@ -78,9 +81,47 @@ fn windowed_argv_matches_the_session_and_scopes_storage() {
         "http://t",
         "x11",
         Renderer::Software,
+        &profile,
         "/run/user/1000",
     );
     assert!(x11.iter().any(|a| a == "--ozone-platform=x11"));
+}
+
+#[cfg(unix)]
+#[test]
+fn clearing_the_singleton_locks_removes_dangling_symlinks_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = dir.path().join("SingletonLock");
+    // Chromium writes `<hostname>-<pid>` as the link target: it never exists.
+    std::os::unix::fs::symlink("ados-gs-4242", &lock).unwrap();
+    std::os::unix::fs::symlink("/nonexistent/socket", dir.path().join("SingletonSocket")).unwrap();
+    std::fs::write(dir.path().join("Preferences"), "{}").unwrap();
+    assert!(std::fs::symlink_metadata(&lock).is_ok());
+    clear_singleton_locks(dir.path()).unwrap();
+    for name in SINGLETON_FILES {
+        assert!(
+            std::fs::symlink_metadata(dir.path().join(name)).is_err(),
+            "{name} left behind"
+        );
+    }
+    assert!(dir.path().join("Preferences").exists(), "the profile kept");
+    clear_singleton_locks(dir.path()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn preparing_a_profile_creates_it_private_and_clears_the_locks() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let profile = dir.path().join("kiosk/profile");
+    prepare_profile_dir(&profile, None).unwrap();
+    let mode = std::fs::metadata(&profile).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+    std::os::unix::fs::symlink("ados-gs-4242", profile.join("SingletonLock")).unwrap();
+    let uid = nix::unistd::getuid().as_raw();
+    let gid = nix::unistd::getgid().as_raw();
+    prepare_profile_dir(&profile, Some((uid, Some(gid)))).unwrap();
+    assert!(std::fs::symlink_metadata(profile.join("SingletonLock")).is_err());
 }
 
 #[test]

@@ -72,9 +72,16 @@ fn the_windowed_path_runs_as_the_session_user_without_a_sweep() {
         spec.output_mode, None,
         "the desktop owns its display settings"
     );
+    assert!(spec
+        .argv
+        .contains(&"--user-data-dir=/var/ados/kiosk/profile-1000".to_string()));
     assert!(spec.argv.contains(&format!(
-        "--user-data-dir=/run/user/1000/{KIOSK_STORAGE_SUBDIR}/profile"
+        "--disk-cache-dir=/run/user/1000/{KIOSK_STORAGE_SUBDIR}/cache"
     )));
+    assert_eq!(
+        spec.profile_dir.as_deref(),
+        Some(Path::new("/var/ados/kiosk/profile-1000"))
+    );
     let env: HashMap<_, _> = spec.env.into_iter().collect();
     assert_eq!(env["XDG_RUNTIME_DIR"], "/run/user/1000");
 }
@@ -96,6 +103,14 @@ fn the_cage_path_strips_display_and_scopes_the_gpu_libraries() {
     assert!(spec.sweep_orphans);
     assert_eq!(spec.run_as_uid, None);
     assert_eq!(spec.output_mode.as_deref(), Some("1920x1080"));
+    assert!(spec
+        .argv
+        .contains(&"--user-data-dir=/var/ados/kiosk/profile".to_string()));
+    assert!(spec.argv.contains(&format!(
+        "--disk-cache-dir={}/cache",
+        cage_storage_dir().display()
+    )));
+    assert_eq!(spec.profile_dir, Some(cage_profile_dir()));
     for key in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"] {
         assert!(spec.env_unset.iter().any(|k| k == key), "{key}");
     }

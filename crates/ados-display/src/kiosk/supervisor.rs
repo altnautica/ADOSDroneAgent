@@ -76,6 +76,9 @@ pub struct ChildSpec {
     pub sweep_orphans: bool,
     /// `WIDTHxHEIGHT` set on the outputs once cage is up.
     pub output_mode: Option<String>,
+    /// The browser's persistent profile: created (owned by `run_as_uid`) and
+    /// cleared of a previous browser's singleton markers before each spawn.
+    pub profile_dir: Option<PathBuf>,
 }
 
 /// The supervisor's fixed intervals and crash-loop guard.
@@ -212,6 +215,12 @@ impl KioskSupervisor {
             .spec
             .run_as_uid
             .and_then(|uid| super::session::passwd_entry(uid).map(|(_, _, gid)| gid));
+        if let Some(dir) = &self.spec.profile_dir {
+            let owner = self.spec.run_as_uid.map(|uid| (uid, gid));
+            if let Err(error) = super::launcher::prepare_profile_dir(dir, owner) {
+                tracing::warn!(path = %dir.display(), %error, "kiosk_profile_dir_unavailable");
+            }
+        }
         let spec = Spec {
             program,
             args,

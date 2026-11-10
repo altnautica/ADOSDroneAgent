@@ -37,8 +37,8 @@ pub use service::run;
 
 use drm::{resolve_drm_device, DrmPaths};
 use launcher::{
-    cage_argv, cage_env, cage_runtime_dir, cage_storage_dir, windowed_argv, Renderer,
-    KIOSK_STORAGE_SUBDIR,
+    cage_argv, cage_env, cage_profile_dir, cage_runtime_dir, cage_storage_dir, windowed_argv,
+    windowed_profile_dir, Renderer, KIOSK_STORAGE_SUBDIR,
 };
 use session::{session_env, DesktopSession, RUN_USER_ROOT};
 use supervisor::ChildSpec;
@@ -46,13 +46,15 @@ use supervisor::ChildSpec;
 /// The child spec for a (session, renderer) combination.
 ///
 /// Windowed (a live desktop): the session's display-server env, run as the
-/// session user (keeping the browser sandbox), storage under that user's
-/// runtime dir, no orphan sweep. The resolved renderer is honoured: a desktop
-/// with its own GL and video stack must not be forced to software, and a GPU
-/// launch that cannot bring up GL still downgrades through the crash path.
+/// session user (keeping the browser sandbox), a persistent profile of that
+/// user's own and the disk cache under that user's runtime dir, no orphan
+/// sweep. The resolved renderer is honoured: a desktop with its own GL and
+/// video stack must not be forced to software, and a GPU launch that cannot
+/// bring up GL still downgrades through the crash path.
 ///
 /// Cage (the appliance): `DISPLAY` / `WAYLAND_DISPLAY` / `XAUTHORITY` removed,
-/// renderer, DRM device and scoped GPU libraries pinned, orphan sweep on.
+/// renderer, DRM device and scoped GPU libraries pinned, orphan sweep on, the
+/// persistent cage profile and the disk cache in the agent's tmpfs run dir.
 pub fn make_spec(
     url: &str,
     session: Option<&DesktopSession>,
@@ -63,14 +65,23 @@ pub fn make_spec(
     drm: &DrmPaths,
 ) -> ChildSpec {
     if let Some(session) = session {
-        let storage = format!("{RUN_USER_ROOT}/{}/{KIOSK_STORAGE_SUBDIR}", session.uid);
+        let cache = format!("{RUN_USER_ROOT}/{}/{KIOSK_STORAGE_SUBDIR}", session.uid);
+        let profile = windowed_profile_dir(session.uid);
         return ChildSpec {
-            argv: windowed_argv(browser, url, &session.session_type, renderer, &storage),
+            argv: windowed_argv(
+                browser,
+                url,
+                &session.session_type,
+                renderer,
+                &profile.to_string_lossy(),
+                &cache,
+            ),
             env: session_env(session),
             env_unset: Vec::new(),
             run_as_uid: Some(session.uid),
             sweep_orphans: false,
             output_mode: None,
+            profile_dir: Some(profile),
         };
     }
     let existing_ld = std::env::var("LD_LIBRARY_PATH").ok();
@@ -88,12 +99,13 @@ pub fn make_spec(
         run_as_uid: None,
         sweep_orphans: true,
         output_mode: output_mode.map(str::to_string),
+        profile_dir: Some(cage_profile_dir()),
     }
 }
 
-/// Create the cage path's tmpfs dirs: the browser storage (the browser will
-/// not start when its profile's parent is missing) and cage's runtime dir,
-/// mode 0700 as the XDG spec requires.
+/// Create the cage path's tmpfs dirs: the browser disk cache's parent and
+/// cage's runtime dir, mode 0700 as the XDG spec requires. The persistent
+/// profile is prepared before every spawn ([`ChildSpec::profile_dir`]).
 pub fn prepare_cage_dirs() {
     let storage = cage_storage_dir();
     if let Err(error) = std::fs::create_dir_all(&storage) {
