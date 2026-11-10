@@ -1,0 +1,11 @@
+[
+  { "name": "orbit_with_radius", "input": { "echo": { "follow_mode": "orbit", "orbit_radius_m": 8 } }, "expected": "ORBIT 8 m" },
+  { "name": "orbit_rounds_to_one_decimal", "input": { "echo": { "follow_mode": "orbit", "orbit_radius_m": 12.345 } }, "expected": "ORBIT 12.3 m" },
+  { "name": "orbit_without_radius", "input": { "echo": { "follow_mode": "orbit" } }, "expected": "ORBIT" },
+  { "name": "follow_with_distance", "input": { "echo": { "follow_mode": "follow", "follow_distance_m": 6 } }, "expected": "FOLLOW 6 m" },
+  { "name": "follow_rounds_half_up", "input": { "echo": { "follow_mode": "follow", "follow_distance_m": 6.25 } }, "expected": "FOLLOW 6.3 m" },
+  { "name": "follow_distance_not_a_number", "input": { "echo": { "follow_mode": "follow", "follow_distance_m": "6" } }, "expected": "FOLLOW" },
+  { "name": "unknown_mode", "input": { "echo": { "follow_mode": "lead", "follow_distance_m": 6 } }, "expected": null },
+  { "name": "no_mode", "input": { "echo": { "orbit_radius_m": 8 } }, "expected": null },
+  { "name": "no_echo", "input": { "echo": null }, "expected": null }
+]

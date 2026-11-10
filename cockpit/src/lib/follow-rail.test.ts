@@ -11,7 +11,6 @@ import {
   reacquiredToastText,
   SETTING_ECHO_TIMEOUT_MS,
   settingDisplay,
-  skillDetail,
 } from "@/lib/follow-rail";
 
 const rail = { followInstalled: true, hasPattern: false, hasModeSetting: true, canSwap: true, safeHeightPx: 600 };
@@ -83,14 +82,6 @@ describe("settingDisplay", () => {
   it("reverts when no echo came within 3 s", () => {
     const req = { ...base, requested: "strict", requestedAt: 10_000 - SETTING_ECHO_TIMEOUT_MS - 1 };
     expect(settingDisplay(req)).toEqual({ value: "smart", pending: false, expired: true, confirmed: false });
-  });
-});
-
-describe("skillDetail", () => {
-  it("names the follow pattern with its distance or radius", () => {
-    expect(skillDetail({ follow_mode: "orbit", orbit_radius_m: 8 })).toBe("ORBIT 8 m");
-    expect(skillDetail({ follow_mode: "follow", follow_distance_m: 6 })).toBe("FOLLOW 6 m");
-    expect(skillDetail(undefined)).toBeNull();
   });
 });
 

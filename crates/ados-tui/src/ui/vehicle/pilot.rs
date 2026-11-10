@@ -21,7 +21,7 @@ use crate::model::spec_text::spec_text;
 use crate::theme::Theme;
 use crate::ui::widgets::{kv, kv_text, panel};
 
-use super::autonomy::{mark_stale, LABEL};
+use super::autonomy::{fit, mark_stale, LABEL};
 
 /// A spec state colour name (`tokens.json` `state.*`) in this palette.
 fn state_color(t: &Theme, name: &str) -> Color {
@@ -89,6 +89,21 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
         out.push(stale(Line::from(spans)));
     }
 
+    // An FC failsafe and what tripped it, in the spec's words.
+    if p.fc_failsafe {
+        let mut text = spec_text("chip.failsafe", &[]);
+        if let Some(cause) = &p.failsafe_cause {
+            text.push_str(" · ");
+            text.push_str(&spec_text(&format!("pilot.banner.cause.{cause}"), &[]));
+        }
+        out.push(stale(kv(
+            t,
+            "Failsafe",
+            LABEL,
+            Span::styled(text, Style::default().fg(t.error())),
+        )));
+    }
+
     let mode = [
         p.control_mode
             .as_ref()
@@ -106,6 +121,23 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
         "Mode",
         LABEL,
         if mode.is_empty() { "–".into() } else { mode },
+    )));
+
+    // The operations the pilot offers a surface now (`goto` is Fly Here).
+    let ops = p
+        .surface_ops
+        .iter()
+        .map(|op| match op.as_str() {
+            "goto" => spec_text("map.fly_here", &[]),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    out.push(stale(kv_text(
+        t,
+        "Offers",
+        LABEL,
+        if ops.is_empty() { "–".into() } else { ops },
     )));
 
     let mut avoid = vec![Span::styled(format!("{:<LABEL$} ", "Avoid"), t.dim())];
@@ -213,6 +245,6 @@ pub fn render(
             Paragraph::new(Span::styled(why.to_string(), t.dim())),
             inner,
         ),
-        None => f.render_widget(Paragraph::new(lines), inner),
+        None => f.render_widget(Paragraph::new(fit(t, lines, inner.height)), inner),
     }
 }

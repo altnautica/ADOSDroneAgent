@@ -6,6 +6,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.89] - 2026-11-10
+
+### Added
+
+- `/api/telemetry` carries `home_distance` (metres): from the GNSS position with at least a 2D fix, else from the EKF local frame against home, so the RTH chip and the bottom row read a distance without GNSS too.
+- Terminal UI: the Pilot block shows the operations the pilot offers ("Fly here") and an FC failsafe with its cause in the spec's words; the chip reads the owning skill's detail ("FOLLOW · ORBIT 8 m") from its plugin's echoed parameters.
+
+### Changed
+
+- Cockpit tips: a tip anchored in the top bar sits below the bar, clear of the alert stack; the top bar joins the zones a tip never covers.
+- The skill-detail helper is shared by the cockpit, the dashboard and the terminal UI, held to one case file.
+- Terminal UI: the Vehicle tab fits a 120×40 terminal: the trend charts give way first, then each block shows what fits and counts the rest.
+
 ## [0.109.88] - 2026-11-10
 
 ### Changed

@@ -139,16 +139,6 @@ export function avoidChip(state: AvoidState | null): { text: string; tone: "ok" 
   }
 }
 
-/** The chip's mode detail for a running skill from its echoed parameters:
- *  follow-me's `ORBIT 8 m` / `FOLLOW 6 m`; null when nothing is known. */
-export function skillDetail(echo: Readonly<Record<string, ParamValue>> | undefined): string | null {
-  if (!echo) return null;
-  const metres = (v: ParamValue | undefined) => (typeof v === "number" ? ` ${Math.round(v * 10) / 10} m` : "");
-  if (echo.follow_mode === "orbit") return `ORBIT${metres(echo.orbit_radius_m)}`;
-  if (echo.follow_mode === "follow") return `FOLLOW${metres(echo.follow_distance_m)}`;
-  return null;
-}
-
 /** `Re-acquired #15 · 0.86 · 1.8 s gap` for a `follow.reacquired` event. */
 export function reacquiredToastText(ev: FollowEvent): string | null {
   if (ev.topic !== "follow.reacquired") return null;

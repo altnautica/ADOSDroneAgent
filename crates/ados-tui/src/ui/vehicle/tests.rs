@@ -612,3 +612,114 @@ fn the_chip_reads_link_past_the_spec_stale_threshold() {
     let text = draw(&mut app, 120, 40);
     assert!(text.contains("State     FOLLOW · ACTIVE"), "{text}");
 }
+
+/// The pilot frame with mission, link-loss and alert rows, beside a full
+/// autonomy reading and the detector: the busiest Vehicle tab.
+fn busy_nav_status() -> Value {
+    let mut frame = pilot_frame();
+    frame["statustext"] = json!([
+        {"severity": 4, "text": "EKF3 IMU0 yaw inconsistent", "age_ms": 900},
+        {"severity": 4, "text": "Compass variance", "age_ms": 400},
+    ]);
+    let mut nav = nav_status();
+    nav["pilot"] = json!({"ts_ms": 1, "age_ms": 100, "data": frame});
+    nav
+}
+
+#[test]
+fn pilot_and_autonomy_fit_a_120_by_40_terminal() {
+    let mut app = live_app();
+    land(&mut app, ResourceId::NavStatus, busy_nav_status());
+    land(
+        &mut app,
+        ResourceId::VisionStatus,
+        vision_status(true, false),
+    );
+    let text = draw(&mut app, 120, 40);
+    // Every pilot row through the alert count, and the autonomy block's
+    // first rows, are on screen; whatever is cut is counted, never lost silently.
+    for want in [
+        "State     FOLLOW · ACTIVE",
+        "Mode      ADOS PILOT · Normal",
+        "Mission",
+        "Link loss → Return home",
+        "AGL       4.2 m (AGL)",
+        "Offers    Fly here",
+        "Alerts    ",
+        "Autonomy",
+        "Detector",
+        "Follow    ",
+    ] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+    assert!(
+        text.contains("more (a taller terminal shows all)"),
+        "{text}"
+    );
+    // A tall terminal shows everything, charts included, with nothing cut.
+    let text = draw(&mut app, 160, 60);
+    for want in ["Memory", "Compass variance", "Offers    Fly here"] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+    assert!(
+        !text.contains("more (a taller terminal shows all)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_pilot_panel_shows_surface_ops_and_the_failsafe_cause() {
+    let mut app = live_app();
+    let mut frame = pilot_frame();
+    frame["owner"] = json!("fc_mode");
+    frame["skill"] = Value::Null;
+    frame["fc_failsafe"] = json!(true);
+    frame["failsafe_cause"] = json!("rc_or_failsafe");
+    frame["surface_ops"] = json!([]);
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
+    let text = draw(&mut app, 160, 48);
+    for want in ["Failsafe  FAILSAFE · RC switch or failsafe", "Offers    –"] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+    let mut frame = pilot_frame();
+    frame["fc_failsafe"] = json!(true);
+    frame["failsafe_cause"] = json!("fc");
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
+    let text = draw(&mut app, 160, 48);
+    for want in [
+        "Failsafe  FAILSAFE · flight controller",
+        "Offers    Fly here",
+    ] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+}
+
+#[test]
+fn the_chip_reads_the_owning_skills_detail_from_its_plugin() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(pilot_frame(), 100),
+    );
+    let plugin = "com.example.follow".to_string();
+    let subs = app.tabs.vehicle.subs(&app.core);
+    assert!(
+        subs.iter()
+            .any(|s| s.id == ResourceId::PluginState(plugin.clone())),
+        "{subs:?}"
+    );
+    land(
+        &mut app,
+        ResourceId::PluginDetail(plugin.clone()),
+        json!({"manifest": {"gcs": {"contributes": {"skills": [
+            {"id": "follow-me", "state": {"topic": "follow.state"}}]}}}}),
+    );
+    land(
+        &mut app,
+        ResourceId::PluginState(plugin),
+        json!({"follow.state": {"payload": {"follow_mode": "orbit", "orbit_radius_m": 8}}}),
+    );
+    let text = draw(&mut app, 160, 48);
+    assert!(text.contains("State     FOLLOW · ORBIT 8 m"), "{text}");
+}

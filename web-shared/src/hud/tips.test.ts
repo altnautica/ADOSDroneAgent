@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import tipsJson from "../cockpit-spec/tips.json";
 import tipsCases from "./fixtures/tips-cases.json";
-import { dismissTip, nextTip, onFlightScreenOpen, placeTip, resetTips, TIPS, type TipDecision, type TipsContext, type TipsState } from "./tips";
+import { dismissTip, nextTip, onFlightScreenOpen, placeTip, resetTips, TIPS, type TipDecision, type TipRect, type TipsContext, type TipsState } from "./tips";
 
 const R = tipsJson.rules;
 const ANCHORS = Object.fromEntries(tipsJson.tips.map((t) => [t.anchor, true]));
@@ -119,9 +119,20 @@ describe("tip placement", () => {
 });
 
 describe("tips golden cases (fixtures/tips-cases.json)", () => {
-  for (const c of tipsCases) {
+  // A case with `input.place` checks placement; every other case the queue.
+  for (const c of tipsCases as { name: string; input: Record<string, unknown>; expected: unknown }[]) {
     it(c.name, () => {
-      const d: TipDecision = nextTip(c.input.state, c.input.ctx as TipsContext, c.input.now_ms);
+      const i = c.input as {
+        place?: { anchor: TipRect; tip: { w: number; h: number }; viewport: TipRect; avoid: TipRect[] };
+        state: TipsState;
+        ctx: TipsContext;
+        now_ms: number;
+      };
+      if (i.place) {
+        expect(placeTip(i.place.anchor, i.place.tip, i.place.viewport, i.place.avoid)).toEqual(c.expected);
+        return;
+      }
+      const d: TipDecision = nextTip(i.state, i.ctx, i.now_ms);
       expect(d).toEqual(c.expected);
     });
   }

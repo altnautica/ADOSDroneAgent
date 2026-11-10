@@ -179,6 +179,7 @@ pub fn state_label(value: &str) -> String {
 pub mod autonomy;
 pub mod flight_state;
 pub mod pilot_alerts;
+pub mod skill_detail;
 pub mod spec_text;
 mod urls;
 use urls::*;

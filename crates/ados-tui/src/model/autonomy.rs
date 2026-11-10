@@ -128,6 +128,8 @@ pub struct Pilot {
     pub owner: Option<String>,
     /// The owning skill's label, when a skill owns.
     pub skill_label: Option<String>,
+    /// The owning skill's plugin and skill ids, for its echoed parameters.
+    pub skill_ref: Option<(String, String)>,
     pub control_mode: Option<String>,
     pub profile: Option<String>,
     pub avoid: Option<String>,
@@ -159,6 +161,10 @@ pub struct Pilot {
     /// The FC flies an RTL or land of its own (a failsafe, not an operator's
     /// mode change); the agent omits `fc_failsafe` while it is false.
     pub fc_failsafe: bool,
+    /// What tripped that failsafe (`fc`, `rc_or_failsafe`), when the pilot said.
+    pub failsafe_cause: Option<String>,
+    /// The pilot operations a surface may offer now (`goto`, ...).
+    pub surface_ops: Vec<String>,
     /// The kind's age when read; `None` when the route did not say.
     pub age_ms: Option<u64>,
     pub stale: bool,
@@ -316,6 +322,12 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
                     .to_string(),
             )
         }),
+        skill_ref: d.get("skill").and_then(|k| {
+            Some((
+                k.get("plugin_id")?.as_str()?.to_string(),
+                k.get("skill_id")?.as_str()?.to_string(),
+            ))
+        }),
         control_mode: one_of(d, "control_mode", &["ados", "fc_manual", "elrs"]),
         profile: one_of(d, "profile", &["cine", "normal", "sport"]),
         avoid: one_of(d, "avoid", &["brake", "bypass", "off"]),
@@ -361,6 +373,17 @@ fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
             running.then(|| step.to_string())
         }),
         fc_failsafe: d.get("fc_failsafe").and_then(Value::as_bool) == Some(true),
+        failsafe_cause: one_of(d, "failsafe_cause", &["fc", "rc_or_failsafe"]),
+        surface_ops: d
+            .get("surface_ops")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         age_ms,
         stale,
     }

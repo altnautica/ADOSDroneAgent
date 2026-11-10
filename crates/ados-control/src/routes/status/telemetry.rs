@@ -70,10 +70,69 @@ pub(crate) fn project_telemetry(snapshot: Option<Value>) -> Value {
                     projected.insert("relayed_link".into(), relayed_link_summary(block));
                 }
             }
+            if !projected.contains_key("home_distance") {
+                if let Some(d) = home_distance_m(&projected) {
+                    projected.insert("home_distance".into(), json!(d));
+                }
+            }
             Value::Object(projected)
         }
         _ => json!({}),
     }
+}
+
+/// A local position older than this does not place the aircraft.
+const LOCAL_FRESH_MS: u64 = 2000;
+
+/// Horizontal distance from home in metres, rounded to 0.1 m: from the GNSS
+/// position when the receiver has at least a 2D fix, else from the EKF local
+/// frame (home's `local_ned` against a fresh `local_position`), so a vehicle
+/// flying on an EKF origin without GNSS still reports it. Null without a home
+/// or without a position in either frame.
+pub(crate) fn home_distance_m(t: &Map<String, Value>) -> Option<f64> {
+    let num = |v: Option<&Value>| v.and_then(Value::as_f64).filter(|x| x.is_finite());
+    let home = t.get("home").filter(|h| h.is_object())?;
+    let fix = t
+        .get("gps")
+        .and_then(|g| g.get("fix_type"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let pos = t.get("position");
+    let lat = num(pos.and_then(|p| p.get("lat")));
+    let lon = num(pos.and_then(|p| p.get("lon")));
+    let home_lat = num(home.get("lat_e7")).map(|v| v / 1e7);
+    let home_lon = num(home.get("lon_e7")).map(|v| v / 1e7);
+    if let (true, Some(lat), Some(lon), Some(hlat), Some(hlon)) =
+        (fix >= 2, lat, lon, home_lat, home_lon)
+    {
+        let real = |a: f64, b: f64| a != 0.0 || b != 0.0;
+        if real(lat, lon) && real(hlat, hlon) {
+            return Some(round_dm(haversine_m(hlat, hlon, lat, lon)));
+        }
+    }
+    let lp = t.get("local_position").filter(|l| {
+        l.get("age_ms")
+            .and_then(Value::as_u64)
+            .is_some_and(|a| a <= LOCAL_FRESH_MS)
+    })?;
+    let ned = home.get("local_ned").and_then(Value::as_array)?;
+    let dn = num(lp.get("x"))? - num(ned.first())?;
+    let de = num(lp.get("y"))? - num(ned.get(1))?;
+    Some(round_dm(dn.hypot(de)))
+}
+
+fn round_dm(m: f64) -> f64 {
+    (m * 10.0).round() / 10.0
+}
+
+/// Great-circle distance in metres between two WGS-84 points (degrees).
+fn haversine_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    const R: f64 = 6_371_000.0;
+    let (p1, p2) = (lat1.to_radians(), lat2.to_radians());
+    let dp = p2 - p1;
+    let dl = (lon2 - lon1).to_radians();
+    let a = (dp / 2.0).sin().powi(2) + p1.cos() * p2.cos() * (dl / 2.0).sin().powi(2);
+    2.0 * R * a.sqrt().asin()
 }
 
 /// The compact provenance block published alongside a relayed reading.

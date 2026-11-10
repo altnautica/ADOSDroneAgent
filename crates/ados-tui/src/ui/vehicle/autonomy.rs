@@ -209,6 +209,31 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
 
 /// The block. `failed` is the note for a failed read: beside the title while
 /// the last good reading stays (every row marked stale), else in the body.
+/// The lines that fit `rows`: all of them, or the first ones and a dim
+/// "… N more" line in place of the rest, so a short terminal says what it cut.
+pub(super) fn fit(t: &Theme, mut lines: Vec<Line<'static>>, rows: u16) -> Vec<Line<'static>> {
+    let rows = rows as usize;
+    if lines.len() <= rows || rows == 0 {
+        return lines;
+    }
+    let kept = rows - 1;
+    let more = lines.len() - kept;
+    lines.truncate(kept);
+    lines.push(Line::from(Span::styled(
+        format!("… {more} more (a taller terminal shows all)"),
+        t.dim(),
+    )));
+    lines
+}
+
+/// The number of lines the block draws for these inputs.
+pub fn line_count(core: &Core, a: Option<&Autonomy>, det: Option<&Detection>) -> usize {
+    match a.filter(|a| a.any()) {
+        Some(a) => lines(core, a, det).len(),
+        None => lines(core, &Autonomy::default(), det).len() + 1,
+    }
+}
+
 pub fn render(
     f: &mut Frame,
     area: Rect,
@@ -244,5 +269,5 @@ pub fn render(
             out
         }
     };
-    f.render_widget(Paragraph::new(out), inner);
+    f.render_widget(Paragraph::new(fit(t, out, inner.height)), inner);
 }

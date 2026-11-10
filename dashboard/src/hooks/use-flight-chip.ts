@@ -10,7 +10,7 @@ import { useMemo, useState } from "react";
 import { useNavStatus, type NavStatusBody } from "@/hooks/use-nav-status";
 import { useNow } from "@/hooks/use-now";
 import { useVehicleTelemetry, type VehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
-import { skillDetailFromState, skillStateTopic } from "@/lib/skill-detail";
+import { skillDetailFromState, skillStateTopic } from "@/shared/hud/skill-detail";
 import { apiFetch } from "@/shared/api-fetch";
 import { chipInputs } from "@/shared/hud/chip-inputs";
 import { parseArFrame, parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";

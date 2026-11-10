@@ -732,3 +732,52 @@ fn msp_armed_passes_a_boolean_and_reads_anything_else_as_unknown() {
     }
     assert_eq!(fc_liveness_from_snapshot(None).fc_msp_armed, Value::Null);
 }
+
+#[test]
+fn home_distance_comes_from_gnss_with_a_fix() {
+    // 0.001 deg of latitude north of home is ~111.2 m.
+    let snapshot = json!({
+        "gps": {"fix_type": 3},
+        "position": {"lat": 47.001, "lon": 8.5},
+        "home": {"lat_e7": 470_000_000, "lon_e7": 85_000_000, "alt_msl_m": 400.0, "local_ned": [0.0, 0.0, 0.0]},
+        "local_position": {"x": 5.0, "y": 0.0, "z": 0.0, "age_ms": 10},
+    });
+    let tel = project_telemetry(Some(snapshot));
+    assert_eq!(tel["home_distance"], json!(111.2));
+}
+
+#[test]
+fn home_distance_falls_back_to_the_local_frame_without_a_fix() {
+    let snapshot = json!({
+        "gps": {"fix_type": 0},
+        "position": {"lat": 0.0, "lon": 0.0},
+        "home": {"lat_e7": 0, "lon_e7": 0, "alt_msl_m": 0.0, "local_ned": [1.0, 2.0, 0.0]},
+        "local_position": {"x": 4.0, "y": 6.0, "z": -3.0, "age_ms": 100},
+    });
+    let tel = project_telemetry(Some(snapshot));
+    assert_eq!(tel["home_distance"], json!(5.0));
+}
+
+#[test]
+fn home_distance_is_null_without_home_or_a_fresh_position() {
+    let no_home = json!({"gps": {"fix_type": 3}, "position": {"lat": 47.0, "lon": 8.5}});
+    assert_eq!(
+        project_telemetry(Some(no_home))["home_distance"],
+        Value::Null
+    );
+    let stale = json!({
+        "gps": {"fix_type": 0},
+        "home": {"lat_e7": 0, "lon_e7": 0, "alt_msl_m": 0.0, "local_ned": [0.0, 0.0, 0.0]},
+        "local_position": {"x": 4.0, "y": 3.0, "z": 0.0, "age_ms": 5000},
+    });
+    assert_eq!(project_telemetry(Some(stale))["home_distance"], Value::Null);
+}
+
+#[test]
+fn home_distance_keeps_a_relayed_value() {
+    let snapshot = json!({"home_distance": 42.0, "home": null});
+    assert_eq!(
+        project_telemetry(Some(snapshot))["home_distance"],
+        json!(42.0)
+    );
+}

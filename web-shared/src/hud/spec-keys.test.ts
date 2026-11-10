@@ -44,7 +44,7 @@ describe("tips", () => {
   });
 
   it("never covers the safety zones", () => {
-    expect(tips.rules.never_cover_zones).toEqual(["stop", "left_column", "flight_state_chip", "alert_stack"]);
+    expect(tips.rules.never_cover_zones).toEqual(["stop", "left_column", "flight_state_chip", "alert_stack", "top_bar"]);
   });
 });
 

@@ -11,12 +11,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
+use crate::api_path::seg;
 use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx};
 use crate::model::autonomy::detection::{Detection, VISION_STATUS_PATH};
 use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
 use crate::model::fix_label;
 use crate::model::flight_state::{chip_inputs, flight_state_chip, ChipContext};
+use crate::model::skill_detail::{skill_detail_from_state, skill_state_topic};
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
 use crate::poll::{ResourceId, Sub};
 use crate::ui::widgets::{chip, kv, kv_text, panel};
@@ -37,6 +39,13 @@ pub const MSP_TEXT: &str =
 
 const HIDDEN_STALE: &str = "no fresh data from the agent · flight readings hidden";
 
+/// Rows of the attitude, flight, GPS and sensors band.
+const TOP_ROWS: u16 = 12;
+/// Rows of the trend charts, dropped first on a short terminal.
+const CHART_ROWS: u16 = 9;
+/// Rows the autonomy block keeps when the pilot block wants the column.
+const AUTONOMY_MIN_ROWS: u16 = 7;
+
 #[derive(Default)]
 pub struct VehicleTab {
     tel: Option<Telemetry>,
@@ -51,9 +60,22 @@ pub struct VehicleTab {
     bat_read: Read,
     /// When the pilot's mission turned complete.
     complete_at: Option<Instant>,
+    /// The owning skill's state topic, from its plugin's manifest.
+    skill_topic: Option<String>,
+    /// The owning skill's chip detail (`ORBIT 8 m`), from its echoed parameters.
+    mode_detail: Option<String>,
 }
 
 impl VehicleTab {
+    /// The plugin and skill ids of the skill that owns the aircraft now.
+    fn owner_skill(&self) -> Option<&(String, String)> {
+        let p = self.auto.as_ref()?.pilot.as_ref()?;
+        if p.owner.as_deref() != Some("skill") {
+            return None;
+        }
+        p.skill_ref.as_ref()
+    }
+
     /// Why live flight readings are not shown, if they are not.
     fn hidden(&self, core: &Core) -> Option<String> {
         if core.stale() {
@@ -287,8 +309,7 @@ impl VehicleTab {
                 home_dist_m: tel.and_then(|t| t.home_distance),
                 local_pos: tel.and_then(|t| t.local_pos),
                 eta_s: auto.and_then(|a| a.ar_eta_s),
-                // The skill's echoed parameters are not read here.
-                mode_detail: None,
+                mode_detail: self.mode_detail.clone(),
                 complete_age_ms: self
                     .complete_at
                     .map(|at| core.now.saturating_duration_since(at).as_millis() as f64),
@@ -319,13 +340,27 @@ impl Tab for VehicleTab {
     }
 
     fn subs(&self, _core: &Core) -> Vec<Sub> {
-        vec![
+        let mut subs = vec![
             Sub::every_ms(ResourceId::Telemetry, "/api/telemetry", 1000),
             Sub::every_ms(ResourceId::Snapshot, "/api/v1/dashboard/snapshot", 2000),
             Sub::every_ms(ResourceId::Battery, "/api/v1/battery", 2000),
             Sub::every_ms(ResourceId::NavStatus, NAV_STATUS_PATH, 500),
             Sub::every_ms(ResourceId::VisionStatus, VISION_STATUS_PATH, 1000),
-        ]
+        ];
+        // While a skill owns the aircraft: its manifest once (the state
+        // topic), then the parameters it echoes, for the chip's detail.
+        if let Some((plugin, _)) = self.owner_skill() {
+            subs.push(Sub::once(
+                ResourceId::PluginDetail(plugin.clone()),
+                format!("/api/plugins/{}", seg(plugin)),
+            ));
+            subs.push(Sub::every_ms(
+                ResourceId::PluginState(plugin.clone()),
+                format!("/api/plugins/{}/state", seg(plugin)),
+                1000,
+            ));
+        }
+        subs
     }
 
     fn on_resource(&mut self, core: &mut Core, id: &ResourceId) {
@@ -361,6 +396,19 @@ impl Tab for VehicleTab {
             return;
         };
         match id {
+            ResourceId::PluginDetail(plugin) => {
+                if let Some((_, skill)) = self.owner_skill().filter(|(p, _)| p == plugin) {
+                    self.skill_topic = skill_state_topic(v, skill);
+                }
+            }
+            ResourceId::PluginState(plugin) => {
+                if self.owner_skill().is_some_and(|(p, _)| p == plugin) {
+                    self.mode_detail = self
+                        .skill_topic
+                        .as_deref()
+                        .and_then(|topic| skill_detail_from_state(v, topic));
+                }
+            }
             ResourceId::Telemetry => {
                 let tel = Telemetry::from_value(v);
                 self.hist.record(&tel);
@@ -385,6 +433,17 @@ impl Tab for VehicleTab {
                     (true, None) => Some(core.now),
                     (false, _) => None,
                 };
+                let owner = |a: &Autonomy| {
+                    a.pilot
+                        .as_ref()
+                        .filter(|p| p.owner.as_deref() == Some("skill"))
+                        .and_then(|p| p.skill_ref.clone())
+                };
+                // Another owner (or none): the last skill's detail is not this one's.
+                if owner(&a) != self.auto.as_ref().and_then(owner) {
+                    self.skill_topic = None;
+                    self.mode_detail = None;
+                }
                 self.auto = Some(a);
                 self.nav_read = Read::ok(core.now);
             }
@@ -415,9 +474,27 @@ impl Tab for VehicleTab {
         let stale = core.stale();
         let hidden = self.hidden(core);
         let hidden = hidden.as_deref();
+        let pilot_lines = self.pilot_lines(core);
+        let packs_hidden = stale.then_some(HIDDEN_STALE);
+        // Pilot and Autonomy share the lower right column. Each wants its
+        // lines plus a border; on a short terminal the trend charts go first,
+        // then each block shows what fits and says how many lines it cut.
+        let (pilot_need, auto_need) = if packs_hidden.is_some() {
+            (3, 3)
+        } else {
+            (
+                pilot_lines.len() as u16 + 2,
+                autonomy::line_count(core, self.auto.as_ref(), self.detection.as_ref()) as u16 + 2,
+            )
+        };
+        let charts = if area.height >= TOP_ROWS + CHART_ROWS + pilot_need + auto_need {
+            CHART_ROWS
+        } else {
+            0
+        };
         let rows = Layout::vertical([
-            Constraint::Length(12),
-            Constraint::Length(9),
+            Constraint::Length(TOP_ROWS),
+            Constraint::Length(charts),
             Constraint::Min(4),
         ])
         .split(area);
@@ -432,10 +509,11 @@ impl Tab for VehicleTab {
         self.flight_panel(f, mid[0], core, hidden);
         self.gps_panel(f, mid[1], core, hidden);
         self.sensors(f, top[2], core, stale);
-        self.charts(f, rows[1], core);
+        if charts > 0 {
+            self.charts(f, rows[1], core);
+        }
         let lower =
             Layout::horizontal([Constraint::Min(40), Constraint::Length(52)]).split(rows[2]);
-        let packs_hidden = stale.then_some(HIDDEN_STALE);
         packs::render(
             f,
             lower[0],
@@ -444,16 +522,12 @@ impl Tab for VehicleTab {
             packs_hidden,
             self.bat_read.failed_note(core.now).as_deref(),
         );
-        let pilot_lines = self.pilot_lines(core);
-        let right = Layout::vertical([
-            Constraint::Length(if packs_hidden.is_some() {
-                3
-            } else {
-                pilot_lines.len() as u16 + 2
-            }),
-            Constraint::Min(4),
-        ])
-        .split(lower[1]);
+        let h = lower[1].height;
+        // The pilot block (the flight state, failsafe and alerts) first; the
+        // autonomy block keeps at least a few rows and counts what it cut.
+        let pilot_h = pilot_need.min(h.saturating_sub(auto_need.min(AUTONOMY_MIN_ROWS)));
+        let right =
+            Layout::vertical([Constraint::Length(pilot_h), Constraint::Min(3)]).split(lower[1]);
         pilot::render(f, right[0], core, pilot_lines, packs_hidden);
         autonomy::render(
             f,

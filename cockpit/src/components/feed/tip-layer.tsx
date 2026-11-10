@@ -64,10 +64,10 @@ function elementRect(el: Element): TipRect | null {
   return { x: r.left, y: r.top, w: r.width, h: r.height };
 }
 
-/** Beside `anchor` in the window, clear of every `never_cover_zones` rect and
- *  of the top bar, so a tip never hides the bar's own readouts. */
+/** Beside `anchor` in the window, clear of every `never_cover_zones` rect (the top
+ *  bar among them, so a tip never hides the bar's own readouts). */
 function placeFor(anchor: TipRect, size: { w: number; h: number }): TipPlacement | null {
-  const avoid = [...NEVER_COVER, "top_bar"].flatMap((z) => {
+  const avoid = NEVER_COVER.flatMap((z) => {
     const r = TIP_SELECTORS[z] ? visibleRect(TIP_SELECTORS[z]) : null;
     return r ? [r] : [];
   });

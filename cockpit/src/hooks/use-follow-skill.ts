@@ -4,7 +4,7 @@
 
 import { usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
-import { skillDetail } from "@/lib/follow-rail";
+import { skillDetail } from "@/shared/hud/skill-detail";
 import { resolveSkillState, type Skill, type SkillContext, type SkillState } from "@/lib/skills";
 import { useExtensionsStore } from "@/stores/extensions-store";
 
