@@ -6,6 +6,17 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.80] - 2026-11-10
+
+### Changed
+
+- Cockpit: a tap or an early release on a hold control now reads "Keep holding · <s> s" for 1.5 s instead of doing nothing silently.
+- Cockpit: the low-battery return-home and link-loss countdowns both show as critical, as the spec sets, and count whole seconds rounded up.
+- Cockpit: the banner for a flight-controller mode change names its cause in words ("RC switch or failsafe", "flight controller") rather than the raw code.
+- Cockpit: the launch line in the top-centre stack reads the same as the flight-state chip ("TAKING OFF · <step>") and shows exactly while the chip does.
+- Cockpit: the Mode sheet warns while obstacle avoidance is off, names what each hold does, and notes that the FC mode list shows the common modes first.
+- Cockpit: sheets and their scrim take their top inset from the spec's sheets rule; pilot freshness uses the shared rule (stale from 2 s).
+
 ## [0.109.79] - 2026-11-10
 
 ### Changed
