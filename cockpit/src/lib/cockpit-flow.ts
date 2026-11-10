@@ -7,6 +7,7 @@
 import { BANNERS } from "@/lib/cockpit-spec";
 import layoutJson from "@/shared/cockpit-spec/layout.json";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { countdownS } from "@/shared/hud/format";
 import { refusalText } from "@/shared/hud/refusal";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
 import { STORAGE_CRIT_PCT, STORAGE_WARN_PCT } from "@/shared/hud/status-pill";
@@ -28,7 +29,27 @@ export function visibleBanner(
   if (!banner) return null;
   const until = banner.untilMs ?? (firstSeenMs !== null ? firstSeenMs + BANNERS.handover_ms : null);
   if (until !== null && nowMs > until) return null;
-  return specText(banner.textKey, banner.args);
+  const args = "cause" in banner.args ? { ...banner.args, cause: bannerCauseText(banner.args.cause) } : banner.args;
+  return specText(banner.textKey, args);
+}
+
+/** Why the FC changed mode, in words (`pilot.banner.cause.<cause>`); a
+ *  cause this spec does not name reads a dash, never the raw code. */
+export function bannerCauseText(cause: unknown): string {
+  const key = `pilot.banner.cause.${typeof cause === "string" ? cause : ""}`;
+  return typeof cause === "string" && hasSpecText(key) ? specText(key) : "—";
+}
+
+export type BannerSeverity = "ok" | "warning" | "critical";
+
+/** A countdown banner's severity (`layout.json` `banners.severity`). */
+export function bannerSeverity(id: keyof typeof BANNERS.severity): BannerSeverity {
+  return BANNERS.severity[id] as BannerSeverity;
+}
+
+/** The low-battery RTH countdown line, whole seconds rounded up. */
+export function lowBatteryLine(rthCountdownS: number): string {
+  return specText("flow.low_battery.title", { in_s: countdownS(rthCountdownS * 1000) });
 }
 
 /** The voice prompt for a change between two pilot states, or null. */
@@ -72,7 +93,8 @@ export const LAUNCH_STEPS: readonly LaunchStep[] = ["checks", "arm", "takeoff", 
 
 /** A launch sequence still on its way: a step before `done`, no error. */
 export function launchRunning(seq: PilotState["sequence"]): seq is NonNullable<PilotState["sequence"]> {
-  return seq != null && seq.step !== "done" && !seq.error;
+  // The chip's `launching` rule (`sequence_running`) reads the same facts.
+  return seq != null && seq.step !== "done" && seq.error === null;
 }
 
 /** A launch step's name (`flow.launch.step.*`). */
@@ -80,10 +102,29 @@ export function launchStepText(step: LaunchStep): string {
   return specText(step === "after" ? "flow.launch.step.after_label" : `flow.launch.step.${step}`);
 }
 
+/** A launch step's name in upper case, as the chip's `launching` rule
+ *  writes it ("TAKING OFF · {step}"). */
+export function launchStepUpper(step: LaunchStep): string {
+  return launchStepText(step).toUpperCase();
+}
+
 /** A flight controller's command answer in words (`mav_result.*`), any other
  *  name through the refusal texts. */
 export function mavResultText(name: string | null | undefined): string {
   return name && hasSpecText(`mav_result.${name}`) ? specText(`mav_result.${name}`) : refusalText(name);
+}
+
+/** The accessible name of a Mode sheet value that needs a hold: avoidance
+ *  Off says what it turns off, a control mode what it switches to. */
+export function modeHoldLabel(row: string, value: string, label: string): string {
+  if (row === "avoid" && value === "off") return specText("flow.mode.avoid_off_hold");
+  if (row === "control_mode") return specText("flow.mode.hold_to_switch", { mode: label });
+  return specText("flow.mode.fc.hold_aria", { mode: label });
+}
+
+/** The Mode sheet's warning under avoidance while it is off, else null. */
+export function avoidOffWarning(avoid: string | null): string | null {
+  return avoid === "off" ? specText("flow.mode.avoid_off_warning") : null;
 }
 
 /** The Mode sheet's result line for one change: `<label>: done`, or the

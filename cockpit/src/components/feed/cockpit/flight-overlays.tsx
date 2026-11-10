@@ -13,13 +13,20 @@ import { useEffect, useRef, useState } from "react";
 import { HoldButton } from "@/components/ui/hold-button";
 import { sticksElsewhere, useFreshPilot } from "@/hooks/use-pilot";
 import { useNow } from "@/hooks/use-now";
-import { holdMs, launchRunning, launchStepText, visibleBanner, voicePrompt } from "@/lib/cockpit-flow";
+import { bannerSeverity, holdMs, launchRunning, launchStepUpper, lowBatteryLine, visibleBanner, voicePrompt, type BannerSeverity } from "@/lib/cockpit-flow";
 import { sendPilotAction, takePilotSession } from "@/lib/pilot-link";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { linkLossLine } from "@/shared/hud/link-loss";
 import { specText } from "@/shared/hud/spec-text";
 import { abortLaunch } from "@/stores/cockpit-ui-store";
 import { speak } from "@/stores/voice-store";
+
+/** A countdown banner's colours by its spec severity. */
+const SEVERITY_CLASS: Record<BannerSeverity, string> = {
+  ok: "border-ok bg-ok/85",
+  warning: "border-warn bg-warn/85",
+  critical: "border-err bg-err/85",
+};
 
 function GateRing({ progress }: { progress: number }) {
   const r = 26;
@@ -80,7 +87,7 @@ export function FlightOverlays() {
           className="pointer-events-auto flex items-center gap-[12px] rounded-lg border border-hud-hair bg-hud-glass-strong px-[14px] py-[6px] backdrop-blur-hud"
         >
           <span className="text-[15px] font-semibold text-hud-ink">
-            {specText("flow.launch.title")} · {launchStepText(seq.step)}
+            {specText("chip.taking_off", { step: launchStepUpper(seq.step) })}
           </span>
           <button
             type="button"
@@ -96,10 +103,11 @@ export function FlightOverlays() {
         <div
           role="alert"
           data-testid="low-battery-banner"
-          className="pointer-events-auto flex w-full max-w-[704px] items-center gap-[12px] rounded-lg border border-err bg-err/85 px-[14px] py-[8px] text-on-status"
+          data-severity={bannerSeverity("low_battery_rth")}
+          className={`pointer-events-auto flex w-full max-w-[704px] items-center gap-[12px] rounded-lg border px-[14px] py-[8px] text-on-status ${SEVERITY_CLASS[bannerSeverity("low_battery_rth")]}`}
         >
           <div className="flex-1">
-            <div className="text-[16px] font-semibold">{specText("flow.low_battery.title", { in_s: Math.ceil(pilot.rthCountdownS) })}</div>
+            <div className="text-[16px] font-semibold">{lowBatteryLine(pilot.rthCountdownS)}</div>
             <div className="text-[12px] opacity-90">{specText("flow.low_battery.cancel_warning")}</div>
           </div>
           <button
@@ -112,7 +120,12 @@ export function FlightOverlays() {
         </div>
       ) : null}
       {pilot.linkLossInS !== null ? (
-        <div role="alert" data-testid="link-loss-banner" className="rounded-lg border border-warn bg-warn/85 px-[14px] py-[6px] text-[15px] font-semibold text-on-status">
+        <div
+          role="alert"
+          data-testid="link-loss-banner"
+          data-severity={bannerSeverity("link_loss")}
+          className={`rounded-lg border px-[14px] py-[6px] text-[15px] font-semibold text-on-status ${SEVERITY_CLASS[bannerSeverity("link_loss")]}`}
+        >
           {linkLossLine(pilot)}
         </div>
       ) : null}

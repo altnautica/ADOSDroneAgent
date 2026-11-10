@@ -622,7 +622,8 @@ async function sequenceCase(browser) {
   const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
   const line = page.getByTestId("launch-sequence");
   await line.waitFor({ state: "visible", timeout: 5000 });
-  assert.match(await line.innerText(), /Take off/);
+  // The same line the chip's launching rule writes.
+  assert.match(await line.innerText(), /TAKING OFF · TAKE OFF/);
   await page.getByTestId("flight-state-chip").click();
   await sheetSettled(page);
   assert.ok(await line.isVisible(), "the step and Abort stay on screen with the Mode sheet open");
@@ -662,6 +663,30 @@ async function modePendingCase(browser) {
   assert.equal(await row.getByRole("radio", { name: "Sport" }).isDisabled(), false);
   await ctx.close();
   console.log("Mode sheet: the pick is pending at once and the row waits for the answer");
+}
+
+/** A tap on a hold control does not act: it reads "Keep holding · <s> s"
+ *  for 1.5 s, then its label again. */
+async function holdHintCase(browser) {
+  const sim = { pilot: PILOT_AIR, airborne: true };
+  const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
+  await page.getByTestId("flight-state-chip").click();
+  await sheetSettled(page);
+  const off = page.locator('[data-row="avoid"]').getByRole("button", { name: "Hold to turn avoidance off" });
+  await off.click();
+  const hint = off.getByTestId("keep-holding");
+  await debugOnFail(page, "hold-hint", async () => {
+    await hint.waitFor({ state: "visible", timeout: 500 });
+  });
+  assert.match(await hint.innerText(), /^Keep holding · \d\.\d s$/);
+  await page.screenshot({ path: path.join(SHOTS, "hold-hint.png") });
+  const shownAt = Date.now();
+  await hint.waitFor({ state: "detached", timeout: 3000 });
+  const shownMs = Date.now() - shownAt;
+  assert.ok(shownMs > 1000, `the hint stays about 1.5 s (gone after ${shownMs} ms)`);
+  assert.ok(!sim.sent.some((f) => f.op === "action" && String(f.name).startsWith("avoid:")), "a tap sends nothing");
+  await ctx.close();
+  console.log(`hold hint: a tap reads Keep holding, gone after ${shownMs} ms, nothing sent`);
 }
 
 /** Escape, a press outside and the controller's back close the topmost
@@ -829,6 +854,7 @@ async function chipsCase(browser) {
     if (!only || only === "flow-stale") await flowStaleCase(browser);
     if (!only || only === "sequence") await sequenceCase(browser);
     if (!only || only === "mode-pending") await modePendingCase(browser);
+    if (!only || only === "hold-hint") await holdHintCase(browser);
     if (!only || only === "overlay-close") await overlayCloseCase(browser);
     if (!only || only === "recentre") await recentreCase(browser);
     if (!only || only === "gimbal-flick") await gimbalFlickCase(browser);

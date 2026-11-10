@@ -2,12 +2,15 @@
 // held on it, Enter or Space held while it has focus, the gamepad's A held
 // while it has focus, and a long press of the panel's select button (which
 // completes the hold in one gesture). The control draws `progress` (0..1);
-// `onComplete` runs once when the hold fills.
+// `onComplete` runs once when the hold fills. A tap or an early release
+// leaves `keepHoldingMs`, the part of the hold still missing, for
+// `KEEP_HOLDING_HINT_MS` so the control can say to keep holding.
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
 
 import { onGamepadButtons } from "@/lib/gamepad-bus";
 import { claimPanelHold } from "@/lib/hold-input";
+import { specText } from "@/shared/hud/spec-text";
 
 /** The gamepad's A in the standard mapping. */
 const GAMEPAD_HOLD_BUTTON = 0;
@@ -23,6 +26,8 @@ export interface HoldOptions {
 export interface Hold {
   progress: number;
   holding: boolean;
+  /** After a tap or early release, the ms the hold still lacked; else null. */
+  keepHoldingMs: number | null;
   pointerHandlers: {
     onPointerDown: (e: PointerEvent<HTMLElement>) => void;
     onPointerUp: () => void;
@@ -35,24 +40,49 @@ export interface Hold {
   };
 }
 
+/** How long the "keep holding" hint stays after a tap or early release. */
+export const KEEP_HOLDING_HINT_MS = 1500;
+
+/** The hint's text; one decimal, as holds run 0.8 to 3 s. */
+export function keepHoldingText(ms: number): string {
+  return specText("hold.keep_holding", { s: (Math.max(0, ms) / 1000).toFixed(1) });
+}
+
 /** The keys that hold a focused control. */
 const HOLD_KEYS = ["Enter", " "];
 
 export function useHold({ enabled, holdMs, onComplete, targetRef }: HoldOptions): Hold {
   const [since, setSince] = useState<number | null>(null);
   const [progress, setProgress] = useState(0);
+  const [keepHoldingMs, setKeepHoldingMs] = useState<number | null>(null);
+  const sinceRef = useRef<number | null>(null);
+  useEffect(() => {
+    sinceRef.current = since;
+  });
   const completeRef = useRef(onComplete);
   useEffect(() => {
     completeRef.current = onComplete;
   });
 
   const start = useCallback(() => {
-    if (enabled) setSince((s) => s ?? performance.now());
+    if (!enabled) return;
+    setKeepHoldingMs(null);
+    setSince((s) => s ?? performance.now());
   }, [enabled]);
   const stop = useCallback(() => {
+    const began = sinceRef.current;
+    if (began !== null) setKeepHoldingMs(Math.max(0, holdMs - (performance.now() - began)));
+    sinceRef.current = null;
     setSince(null);
     setProgress(0);
-  }, []);
+  }, [holdMs]);
+
+  // The hint clears on its own.
+  useEffect(() => {
+    if (keepHoldingMs === null) return;
+    const t = window.setTimeout(() => setKeepHoldingMs(null), KEEP_HOLDING_HINT_MS);
+    return () => window.clearTimeout(t);
+  }, [keepHoldingMs]);
 
   // The fill, animated only while something holds.
   useEffect(() => {
@@ -61,6 +91,7 @@ export function useHold({ enabled, holdMs, onComplete, targetRef }: HoldOptions)
     const tick = () => {
       const p = Math.min(1, (performance.now() - since) / holdMs);
       if (p >= 1) {
+        sinceRef.current = null;
         setSince(null);
         setProgress(0);
         completeRef.current();
@@ -108,6 +139,7 @@ export function useHold({ enabled, holdMs, onComplete, targetRef }: HoldOptions)
   return {
     progress: enabled ? progress : 0,
     holding: enabled && since !== null,
+    keepHoldingMs: enabled ? keepHoldingMs : null,
     pointerHandlers: {
       onPointerDown: (e) => {
         e.currentTarget.setPointerCapture?.(e.pointerId);

@@ -1,10 +1,12 @@
 // A press-and-hold button (CS-6 `hold`): the action fires once the hold
 // fills, from a pointer, Enter/Space, the gamepad's A or a panel long-press
-// (`useHold`). Releasing early cancels; the fill shows the progress.
+// (`useHold`). Releasing early cancels; the fill shows the progress. A tap or
+// an early release reads "Keep holding · <s> s" (the part of the hold still
+// missing) for a moment in place of the label.
 
 import { useRef, type ReactNode } from "react";
 
-import { useHold } from "@/hooks/use-hold";
+import { keepHoldingText, useHold } from "@/hooks/use-hold";
 import { HOLD_MS } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 
@@ -40,7 +42,13 @@ export function HoldButton({
       )}
     >
       <span className="absolute inset-y-0 left-0 bg-primary/35" style={{ width: `${hold.progress * 100}%` }} aria-hidden />
-      <span className="relative">{children}</span>
+      {hold.keepHoldingMs !== null ? (
+        <span className="relative" role="status" data-testid="keep-holding">
+          {keepHoldingText(hold.keepHoldingMs)}
+        </span>
+      ) : (
+        <span className="relative">{children}</span>
+      )}
     </button>
   );
 }

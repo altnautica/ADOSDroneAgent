@@ -14,7 +14,7 @@ import { HoldButton } from "@/components/ui/hold-button";
 import { Sheet } from "@/components/ui/sheet";
 import { usePilot } from "@/hooks/use-pilot";
 import { sendCommand } from "@/lib/api";
-import { holdMs, mavResultText, modeResultText } from "@/lib/cockpit-flow";
+import { avoidOffWarning, holdMs, mavResultText, modeHoldLabel, modeResultText } from "@/lib/cockpit-flow";
 import { MODE_SHEET } from "@/lib/cockpit-spec";
 import { fcFamily, fcModesFor } from "@/lib/fc-modes";
 import { sendPilotAction } from "@/lib/pilot-link";
@@ -82,7 +82,7 @@ function Segment({
             disabled={busy}
             onFired={() => onPick(v)}
             className={cn("min-h-[48px] flex-1", waiting && PENDING_CLASS)}
-            label={specText("flow.mode.fc.hold_aria", { mode: labels[i] })}
+            label={modeHoldLabel(row, v, labels[i])}
           >
             {labels[i]}
             {waiting ? <Busy /> : null}
@@ -203,6 +203,11 @@ export function ModeSheet() {
               hold={MODE_SHEET.avoidance.confirm_off.ms}
               onPick={(v) => pilotAction(specText("flow.mode.section.avoidance"), { row: "avoid", value: v }, `avoid:${v}`)}
             />
+            {avoidOffWarning(pilot.avoid) ? (
+              <p role="alert" className="text-[0.75rem] font-semibold text-warn" data-testid="avoid-off-warning">
+                {avoidOffWarning(pilot.avoid)}
+              </p>
+            ) : null}
             {pilot.vehicleClass === "fixedwing" ? (
               <p className="text-[0.75rem] text-muted-foreground" data-testid="fixedwing-note">
                 {specText("pilot.avoid.fixedwing_note")}
@@ -263,13 +268,18 @@ export function ModeSheet() {
 
       <Section title={specText("flow.mode.section.fc_modes")}>
         {!advanced ? (
-          <button
-            type="button"
-            onClick={() => setAdvanced(true)}
-            className="min-h-[48px] rounded-lg border border-border text-[0.85rem]"
-          >
-            {specText("flow.mode.fc.show_all")}
-          </button>
+          <>
+            <p className="text-[0.75rem] text-muted-foreground" data-testid="fc-hidden-note">
+              {specText("flow.mode.fc.hidden_note")}
+            </p>
+            <button
+              type="button"
+              onClick={() => setAdvanced(true)}
+              className="min-h-[48px] rounded-lg border border-border text-[0.85rem]"
+            >
+              {specText("flow.mode.fc.show_all")}
+            </button>
+          </>
         ) : (
           <div className="grid grid-cols-2 gap-[0.3rem]">
             {fcModesFor(family).map((m) => {

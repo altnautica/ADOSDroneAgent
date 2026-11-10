@@ -10,7 +10,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { useTourStage } from "@/components/controls/tour-stage";
-import { pilotFresh } from "@/hooks/use-pilot";
+import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { skillVisibleFor } from "@/lib/skills";
 import tipsJson from "@/shared/cockpit-spec/tips.json";
 import { gotoAdvertised } from "@/shared/hud/fly-here-offer";
@@ -103,7 +103,7 @@ export function TipLayer({ gimbalAvailable, scale }: { gimbalAvailable: boolean;
     const tick = () => {
       const now = Date.now();
       const p = useNavStreamStore.getState().pilot;
-      const pilot = pilotFresh(p, now) ? (p?.data ?? null) : null;
+      const pilot = pilotFresh(p?.at, now) ? (p?.data ?? null) : null;
       const telemetryArmed = useFlightStore.getState().telemetry?.armed === true;
       const nav = useNavStore.getState();
       const anchorsVisible: Record<string, boolean> = {};

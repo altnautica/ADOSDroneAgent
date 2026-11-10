@@ -48,16 +48,9 @@ export interface OverlayProps {
   children: ReactNode;
 }
 
-interface SheetsRule {
-  top_inset: "top_bar" | "none";
-  never_cover_zones: readonly string[];
-}
-
-/** The sheets rule: the spec's, else the ledger rule it states (start below
- *  the top bar; never cover STOP). The spec file is ours and typed by its
- *  own schema test, so its value is taken as the rule. */
-const SHEETS: SheetsRule =
-  "sheets" in layoutJson ? (layoutJson.sheets as SheetsRule) : { top_inset: "top_bar", never_cover_zones: ["stop"] };
+/** The sheets rule (`layout.json` `sheets`): where the panels start, what
+ *  the scrim leaves uncovered and which zones keep their presses. */
+const SHEETS = layoutJson.sheets;
 
 const PASS_THROUGH = SHEETS.never_cover_zones.map((z) => `[data-zone="${z}"]`).join(",");
 
@@ -223,6 +216,7 @@ export function Overlay({
     [],
   );
 
+  const scrimTop = SHEETS.scrim_excludes === "top_bar" ? inset : 0;
   // The layer spans the window so a menu places itself in window coordinates;
   // its padding keeps the panels below the top bar, and only the scrim and the
   // panel take presses.
@@ -235,7 +229,7 @@ export function Overlay({
       >
         <div
           className={cn("pointer-events-auto absolute inset-x-0 bottom-0", scrim === "dim" ? "bg-scrim" : "bg-transparent")}
-          style={{ top: inset }}
+          style={{ top: scrimTop }}
           data-testid="overlay-scrim"
           aria-hidden
         />
