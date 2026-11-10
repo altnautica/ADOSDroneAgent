@@ -15,10 +15,34 @@
 
 import { create } from "zustand";
 
-/** How long a batch stays "fresh" after receipt. Past this the overlay drops
- *  its boxes so a stopped feed does not pin the last frame's boxes on screen.
- *  Matches the GCS overlay's staleness window. */
-export const DETECTION_STALE_MS = 2000;
+import layersJson from "@/shared/cockpit-spec/layers.json";
+
+/** A batch older than this draws at half alpha (`layers.json` `staleness`,
+ *  the same clock every layer ages on). */
+export const DETECTION_DIM_MS: number = layersJson.staleness.dim_after_ms;
+/** Past this a batch's boxes are hidden, so a stopped feed does not pin the
+ *  last frame's boxes on screen (`layers.json` `staleness`). */
+export const DETECTION_STALE_MS: number = layersJson.staleness.hide_after_ms;
+/** The alpha a dimmed batch draws at. */
+export const DETECTION_DIM_ALPHA = 0.5;
+
+/** How a batch draws at its age: full, dimmed or not at all. */
+export type BatchStage = "fresh" | "dim" | "hidden";
+
+/** The stage of a batch received at `receivedAt` (epoch ms), or of no batch. */
+export function batchStage(receivedAt: number | null | undefined, nowMs: number): BatchStage {
+  if (receivedAt == null) return "hidden";
+  const age = nowMs - receivedAt;
+  return age > DETECTION_STALE_MS ? "hidden" : age > DETECTION_DIM_MS ? "dim" : "fresh";
+}
+
+/** Whether the targets layer raises its "Targets unavailable" chip: a
+ *  detector runs for the camera (a batch arrived, or the detection lease
+ *  reports detecting) and its batch is hidden. Without a detector there is
+ *  nothing to call unavailable. */
+export function targetsUnavailable(stage: BatchStage, detector: boolean): boolean {
+  return detector && stage === "hidden";
+}
 
 /** Discrete identity-lock state of a track this frame, mirroring the vision
  *  contract `LockState` (lowercase on the wire). `locked` = the tracker held the

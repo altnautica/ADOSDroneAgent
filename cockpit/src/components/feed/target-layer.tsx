@@ -6,8 +6,10 @@
 // cockpit draws exactly what Mission Control and the Android app draw.
 //
 // Boxes arrive in the inference frame's pixels and are placed inside the
-// letterboxed rendered rect, never as a percentage of the panel. A stale batch
-// (older than DETECTION_STALE_MS) and a lost video (not playing frames) draw
+// letterboxed rendered rect, never as a percentage of the panel. The batch
+// ages like every layer (`layers.json` `staleness`): past 500 ms its boxes
+// draw at half alpha, past 2 s they hide and, while a detector runs, the Feed
+// shows "Targets unavailable"; a lost video (not playing frames) draws
 // nothing. Boxes ease toward each batch with the 120 ms smoothing, which runs a
 // frame loop only while a box is still moving; reduced motion snaps them.
 //
@@ -58,10 +60,11 @@ import {
   type TargetKind,
 } from "@/shared/hud/target-state";
 import type { VideoFeedState } from "@/shared/video-transport";
-import { DETECTION_STALE_MS, useDetectionsStore } from "@/stores/detections-store";
+import { batchStage, DETECTION_DIM_ALPHA, targetsUnavailable, useDetectionsStore } from "@/stores/detections-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
+import { useLayerChipsStore } from "@/stores/layer-chips-store";
 
 /** Box smoothing time constant (13-hud-v2 §5.4). */
 const SMOOTH_TAU_MS = 120;
@@ -278,12 +281,20 @@ export function TargetLayer({
   // fade, re-acquired snap); idle otherwise.
   const ticking = picked !== null || follow !== null || event !== null;
   const now = useNow(ticking ? 100 : null);
-  const fresh = picked && now - picked.receivedAt <= DETECTION_STALE_MS ? picked : null;
+  // The batch ages like every layer: full, dimmed past 500 ms, hidden past 2 s.
+  const stage = batchStage(picked?.receivedAt, now);
+  const fresh = stage !== "hidden" ? picked : null;
   const input = targetInputFor(multiStream, cameraId, fresh);
   const camera = input.cameraId ?? cameraId ?? "main";
   const videoLost = isVideoLost(videoState, demo);
   const detector = useDetectionLease(cameraId ?? "main", holdDetection);
   const notice = videoLost ? null : detectorNotice(detector);
+  const unavailable = targetsUnavailable(stage, picked !== null || detector === "detecting");
+  // The main layer raises "Targets unavailable" in the Feed's chip stack.
+  useEffect(() => {
+    if (!pip) useLayerChipsStore.getState().setTargetsUnavailable(unavailable);
+  }, [pip, unavailable]);
+  useEffect(() => (pip ? undefined : () => useLayerChipsStore.getState().setTargetsUnavailable(false)), [pip]);
   const yawDeg = yawRad != null && Number.isFinite(yawRad) ? yawRad * RAD_TO_DEG : null;
 
   // The followed track's last rect (for the LOST fade) and the ghost path,
@@ -491,6 +502,7 @@ export function TargetLayer({
     : [];
 
   const selection = drag?.live ? dragScreenRect(drag.a, drag.b) : null;
+  const glyphAlpha = stage === "dim" ? DETECTION_DIM_ALPHA : 1;
 
   return (
     <div
@@ -532,9 +544,11 @@ export function TargetLayer({
       }}
     >
       <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible" aria-hidden>
-        {layouts.map((g) => (
-          <GlyphMarks key={g.key} g={g} minimal={minimal} />
-        ))}
+        <g opacity={glyphAlpha} data-testid="target-glyphs">
+          {layouts.map((g) => (
+            <GlyphMarks key={g.key} g={g} minimal={minimal} />
+          ))}
+        </g>
         {selection ? (
           <rect
             x={selection.x}
@@ -549,7 +563,7 @@ export function TargetLayer({
           />
         ) : null}
       </svg>
-      <div className="pointer-events-none absolute inset-0" aria-hidden>
+      <div className="pointer-events-none absolute inset-0" style={{ opacity: glyphAlpha }} aria-hidden>
         {layouts.map((g) => (
           <GlyphTags key={g.key} g={g} />
         ))}
