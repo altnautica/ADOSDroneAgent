@@ -2007,6 +2007,8 @@ async fn commands_catalog_matches_the_simple_commands() {
         "pauseMission": "Pause the current mission / auto flight (hold position)",
         "resumeMission": "Resume a paused mission / auto flight",
         "ekfSourceSet": "Switch the EKF3 source set (args: [set], 1, 2 or 3)",
+        "reposition": "Fly a flight controller in GUIDED to a point \
+                       (args: [lat, lon, alt_m], altitude above home)",
     });
     assert_eq!(
         &Value::Object(commands.clone()),
