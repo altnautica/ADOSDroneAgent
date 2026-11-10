@@ -177,11 +177,11 @@ async function controlsCases(browser) {
   // "Press a control" mode: a press highlights and selects, never navigates.
   await page.getByRole("button", { name: "Press a control" }).click();
   await page.evaluate(() => window.__press(0, true));
-  await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("fill") !== "transparent", cross, { timeout: 2000 }).catch(() => undefined);
+  await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("fill") !== "transparent", cross, { timeout: 2000 });
   assert.notEqual(await attr(page, cross, "fill"), "transparent", "cross hotspot fills when button 0 is pressed");
   await page.screenshot({ path: path.join(SHOTS, "controls-pressed-cross.png") });
   await page.evaluate(() => window.__press(0, false));
-  await page.waitForFunction(() => document.querySelector('[data-testid="control-editor"]')?.getAttribute("data-control") === "cross", null, { timeout: 2000 }).catch(() => undefined);
+  await page.waitForFunction(() => document.querySelector('[data-testid="control-editor"]')?.getAttribute("data-control") === "cross", null, { timeout: 2000 });
   assert.equal(await attr(page, '[data-testid="control-editor"]', "data-control"), "cross", "the pressed control is selected");
   console.log("PASS (a) button 0 highlights the cross hotspot (and selects it)");
 
@@ -192,7 +192,7 @@ async function controlsCases(browser) {
   await page.$eval('[data-control="square"]', (e) => e.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   await page.getByLabel("Square tap").selectOption("record_toggle");
   await page.getByTestId("controls-save").click();
-  await page.waitForFunction(() => /"action":"record_toggle"/.test(localStorage.getItem("ados-cockpit-controls") ?? ""), null, { timeout: 2000 }).catch(() => undefined);
+  await page.waitForFunction(() => /"action":"record_toggle"/.test(localStorage.getItem("ados-cockpit-controls") ?? ""), null, { timeout: 4000 });
   await page.reload();
   await openControls(page);
   const stored = await page.evaluate(() => localStorage.getItem("ados-cockpit-controls") ?? "");
@@ -204,7 +204,7 @@ async function controlsCases(browser) {
   // (c) a second control on the same action outlines both and blocks Save.
   await page.$eval('[data-control="triangle"]', (e) => e.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   await page.getByLabel("Triangle tap").selectOption("record_toggle");
-  await page.waitForFunction(() => document.querySelector('[data-control="triangle"]')?.getAttribute("data-conflict") === "true", null, { timeout: 2000 }).catch(() => undefined);
+  await page.waitForFunction(() => document.querySelector('[data-control="triangle"]')?.getAttribute("data-conflict") === "true", null, { timeout: 4000 });
   assert.equal(await attr(page, '[data-control="square"]', "data-conflict"), "true");
   assert.equal(await attr(page, '[data-control="triangle"]', "data-conflict"), "true");
   assert.equal(await page.getByTestId("controls-save").isDisabled(), true);
@@ -214,9 +214,11 @@ async function controlsCases(browser) {
 
   // (d) removing the locked pause binding is refused.
   await page.$eval('[data-control="ps"]', (e) => e.dispatchEvent(new MouseEvent("click", { bubbles: true })));
-  // PS tap carries pause (and a second row active only during RTH).
-  const psRows = page.locator('select[aria-label="PS tap"]');
+  await page.waitForFunction(() => document.querySelector('[data-testid="control-editor"]')?.getAttribute("data-control") === "ps", null, { timeout: 4000 });
+  // PS press carries pause (outside RTH); the locked row refuses removal.
+  const psRows = page.locator('select[aria-label="PS press"]');
   const values = await psRows.evaluateAll((els) => els.map((e) => e.value));
+  assert.ok(values.includes("pause"), `PS press carries pause (got ${JSON.stringify(values)})`);
   const pauseRow = psRows.nth(values.indexOf("pause"));
   await pauseRow.selectOption("none");
   await page.getByTestId("editor-error").waitFor();
@@ -233,9 +235,13 @@ async function pilotStreamCase(browser) {
   await page.addInitScript(PAD_INIT);
   await mockAgent(page);
   const frames = [];
+  // Every mock socket's push timer, cleared before the context closes: a
+  // socket the page never closed would keep its timer (and node) alive.
+  const pushes = [];
   await page.routeWebSocket(/\/api\/v1\/pilot\/stream/, (ws) => {
     const state = { owner: "pilot", control_mode: "ados", profile: "normal", avoid: "brake", armed: true, landed: false, vehicle_class: "multirotor", readiness: [], plan_ned: [] };
     const push = setInterval(() => ws.send(JSON.stringify({ kind: "pilot", ts_ms: Date.now(), data: state })), 100);
+    pushes.push(push);
     ws.onMessage((m) => frames.push({ t: Date.now(), f: JSON.parse(String(m)) }));
     ws.onClose(() => clearInterval(push));
   });
@@ -270,6 +276,7 @@ async function pilotStreamCase(browser) {
   });
   await until("the release frame", () => frames.some((x) => x.f.op === "release"), 2000);
   console.log("PASS (e) 50 Hz pilot input with mapped axes; release on hidden tab");
+  pushes.forEach(clearInterval);
   await ctx.close();
 }
 

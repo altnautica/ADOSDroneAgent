@@ -33,8 +33,6 @@ interface ConfirmState {
   /** Bumped by a panel long-press or a controller-timed hold, which complete
    *  the hold (or the confirm) in one gesture. */
   panelConfirmNonce: number;
-  /** A command is in flight; every skill but kill is held off until it settles. */
-  busy: boolean;
   /** The last command outcome. */
   ack: AckLine | null;
 
@@ -44,7 +42,6 @@ interface ConfirmState {
   toConfirmStage: () => void;
   setHeld: (down: boolean) => void;
   panelConfirm: () => void;
-  setBusy: (busy: boolean) => void;
   setAck: (ack: AckLine | null) => void;
 }
 
@@ -52,7 +49,6 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
   pending: null,
   heldSince: null,
   panelConfirmNonce: 0,
-  busy: false,
   ack: null,
 
   open: (skill, gamepadButton = null, stage = "hold") =>
@@ -68,6 +64,5 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
     else if (!down && heldSince !== null) set({ heldSince: null });
   },
   panelConfirm: () => set((s) => ({ panelConfirmNonce: s.panelConfirmNonce + 1 })),
-  setBusy: (busy) => set({ busy }),
   setAck: (ack) => set({ ack }),
 }));

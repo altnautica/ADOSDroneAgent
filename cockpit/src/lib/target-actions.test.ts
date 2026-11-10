@@ -71,7 +71,7 @@ describe("target actions", () => {
     vi.mocked(activateExtensionSkill).mockReset().mockResolvedValue(undefined as never);
     useExtensionsStore.setState({ extensions: [ext] });
     useNavStreamStore.getState().clear();
-    useConfirmStore.setState({ pending: null, busy: false });
+    useConfirmStore.setState({ pending: null });
   });
 
   it("Follow locks the box, then opens the skill's confirm sheet instead of starting", async () => {
