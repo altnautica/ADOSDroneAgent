@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.50] - 2026-11-10
+
+### Changed
+
+- Golden case files for the shared flight-screen rules in `web-shared/src/hud/fixtures/`: `chip-cases.json` (every flight-state chip rule and secondary line, from raw pilot frames), `pill-cases.json`, `refusal-cases.json` (every refusal code) and `tips-cases.json`. The TypeScript tests run every case; other ports can read the same files.
+
 ## [0.109.49] - 2026-11-10
 
 ### Changed

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import layout from "../cockpit-spec/layout.json";
 import type { BatteryHealthInput } from "./battery";
+import pillCases from "./fixtures/pill-cases.json";
 import { alertSource, baseAlerts, pillAlerts, pillSummary, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs } from "./status-pill";
 
 function inputs(over: Partial<BaseAlertInputs> = {}): BaseAlertInputs {
@@ -193,4 +194,21 @@ describe("status pill", () => {
       ["pilot:no_agl", "warning"],
     ]);
   });
+});
+
+describe("pill golden cases (fixtures/pill-cases.json)", () => {
+  for (const c of pillCases) {
+    it(c.name, () => {
+      const i = c.input;
+      const alerts = pillAlerts({
+        alerts: i.alerts as { id: string; level: "critical" | "warning" | "advisory"; title: string }[],
+        readiness: i.readiness as { id: string; ok: boolean; severity: "block" | "warn"; msg: string }[],
+        prearm: i.prearm ?? undefined,
+        storagePct: i.storage_pct,
+        fcStatus: i.fc_status.map((s) => ({ severity: s.severity, text: s.text, ageMs: s.age_ms })),
+      });
+      const s = pillSummary(alerts, new Set());
+      expect({ severity: s.severity, text: s.text, count: s.count, ids: alerts.map((a) => a.id) }).toEqual(c.expected);
+    });
+  }
 });

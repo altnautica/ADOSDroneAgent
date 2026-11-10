@@ -3,8 +3,11 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import flightStateJson from "../cockpit-spec/flight-state.json";
+import tokensJson from "../cockpit-spec/tokens.json";
+import chipCases from "./fixtures/chip-cases.json";
 import { aglMarkText, bottomRowAgl, chipInputs, goalDistanceM, nextWaypointEtaS } from "./chip-inputs";
-import { parseArFrame, parsePilotState } from "./cockpit-frames";
+import { parseArFrame, parsePilotState, type ArFrame } from "./cockpit-frames";
 import { chipFacts, flightStateChip } from "./flight-state";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
@@ -96,4 +99,42 @@ describe("bottom row AGL", () => {
     expect(aglMarkText("BARO")).toBe("BARO");
     expect(aglMarkText(null)).toBeNull();
   });
+});
+
+describe("chip golden cases (fixtures/chip-cases.json)", () => {
+  const colors = tokensJson.state as Record<string, string>;
+
+  it("covers every chip rule", () => {
+    const covered = new Set(chipCases.map((c) => c.expected.rule));
+    expect(flightStateJson.rules.filter((r) => !covered.has(r.id)).map((r) => r.id)).toEqual([]);
+    expect(chipCases.length).toBeGreaterThanOrEqual(30);
+  });
+
+  for (const c of chipCases) {
+    it(c.name, () => {
+      const i = c.input;
+      const p = parsePilotState(i.pilot);
+      expect(p).not.toBeNull();
+      // The ETA reaches the chip through the next waypoint of an `ar` frame.
+      const arFrame = i.ar_eta_s === null ? null : ({ cameras: { c: { items: [{ t: "wp", role: "next", etaS: i.ar_eta_s }] } } } as unknown as ArFrame);
+      const v = flightStateChip(
+        chipInputs(p!, i.pilot_age_ms, 0, {
+          homeDistM: i.home_dist_m,
+          localPos: i.local_pos,
+          arFrame,
+          arAgeMs: 0,
+          modeDetail: i.mode_detail,
+          completeAgeMs: i.complete_age_ms,
+        }),
+      );
+      expect({
+        rule: v.ruleId,
+        text: v.text,
+        color: v.color,
+        dim: v.dim,
+        button: v.button,
+        secondary: v.secondary.map((s) => s.text),
+      }).toEqual({ ...c.expected, color: colors[c.expected.color] });
+    });
+  }
 });

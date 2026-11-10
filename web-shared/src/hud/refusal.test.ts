@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import refusalCases from "./fixtures/refusal-cases.json";
 import { refusalText } from "./refusal";
 
 describe("refusal text", () => {
@@ -49,4 +50,17 @@ describe("refusal text", () => {
     expect(refusalText(null)).toBe("Refused");
     expect(refusalText("")).toBe("Refused");
   });
+});
+
+describe("refusal golden cases (fixtures/refusal-cases.json)", () => {
+  it("has a case per wire code, the client's own codes, an unknown and none", () => {
+    expect(refusalCases.length).toBeGreaterThanOrEqual(55);
+    expect(refusalCases.map((c) => c.input.code)).toEqual(expect.arrayContaining(["not_ready:position", "no response", "no pilot link", "closed", "", null]));
+  });
+
+  for (const c of refusalCases) {
+    it(c.name, () => {
+      expect(refusalText(c.input.code)).toBe(c.expected.text);
+    });
+  }
 });

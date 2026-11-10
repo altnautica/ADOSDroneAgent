@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import tipsJson from "../cockpit-spec/tips.json";
-import { dismissTip, nextTip, onFlightScreenOpen, placeTip, resetTips, TIPS, type TipsContext, type TipsState } from "./tips";
+import tipsCases from "./fixtures/tips-cases.json";
+import { dismissTip, nextTip, onFlightScreenOpen, placeTip, resetTips, TIPS, type TipDecision, type TipsContext, type TipsState } from "./tips";
 
 const R = tipsJson.rules;
 const ANCHORS = Object.fromEntries(tipsJson.tips.map((t) => [t.anchor, true]));
@@ -115,4 +116,13 @@ describe("tip placement", () => {
   it("is null when no side fits", () => {
     expect(placeTip({ x: 0, y: 0, w: 1000, h: 600 }, tip, viewport, [])).toBeNull();
   });
+});
+
+describe("tips golden cases (fixtures/tips-cases.json)", () => {
+  for (const c of tipsCases) {
+    it(c.name, () => {
+      const d: TipDecision = nextTip(c.input.state, c.input.ctx as TipsContext, c.input.now_ms);
+      expect(d).toEqual(c.expected);
+    });
+  }
 });
