@@ -181,11 +181,12 @@ export const CHIP_TEXT = {
   obstacles: setupText("layer.unavailable", { layer: "Obstacles" }),
   ar: setupText("layer.unavailable", { layer: "AR" }),
   arApprox: setupText("layer.ar_approx"),
+  targets: setupText("layer.unavailable", { layer: "Targets" }),
 } as const;
 
 export type ChipId = keyof typeof CHIP_TEXT;
 /** Status chips in stacking order; chip `CHIP_IDS[i]` is bit `1 << i`. */
-export const CHIP_IDS: readonly ChipId[] = ["depth", "depthUnscaled", "surfaces", "obstacles", "ar", "arApprox"];
+export const CHIP_IDS: readonly ChipId[] = ["depth", "depthUnscaled", "surfaces", "obstacles", "ar", "arApprox", "targets"];
 
 /** The chip texts of a reported mask, in stacking order. */
 export function chipTexts(mask: number): string[] {

@@ -5,8 +5,9 @@
 import { useQuery } from "@tanstack/react-query";
 
 import { apiFetch } from "@/shared/api-fetch";
+import { chipInputs } from "@/shared/hud/chip-inputs";
 import { parsePilotState } from "@/shared/hud/cockpit-frames";
-import { chipFacts, flightStateChip, type ChipView } from "@/shared/hud/flight-state";
+import { flightStateChip, type ChipView } from "@/shared/hud/flight-state";
 
 interface NavStatusPilot {
   pilot?: { age_ms: number; data: unknown } | null;
@@ -18,7 +19,11 @@ export function navStatusChip(body: NavStatusPilot | undefined): ChipView | null
   if (!entry) return null;
   const p = parsePilotState(entry.data);
   if (!p) return null;
-  return flightStateChip(chipFacts(p, entry.age_ms, { homeDistM: null, modeDetail: null, completeAgeMs: null }));
+  // The status body carries the pilot's age; the dashboard has no local
+  // position, `ar` frame or skill detail.
+  return flightStateChip(
+    chipInputs(p, entry.age_ms, 0, { homeDistM: null, localPos: null, arFrame: null, arAgeMs: 0, modeDetail: null, completeAgeMs: null }),
+  );
 }
 
 export function useFlightChip(): ChipView | null {

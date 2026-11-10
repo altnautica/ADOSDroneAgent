@@ -3,7 +3,6 @@
 // `{lat, lon, alt_m}` (altitude above home). The agent advertises the action in
 // the pilot kind's `surface_ops`; without it the map offers nothing.
 
-import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { isValidFix, type LatLon, type MapView } from "@/lib/minimap-geometry";
 
 /** Press this long on the map, without moving, to pick a point. */
@@ -15,13 +14,6 @@ export const FLY_HERE_MIN_ALT_M = 3;
 
 const EARTH_R = 6378137;
 const DEG = Math.PI / 180;
-
-/** Whether the pilot accepts a surface `goto` now: the control mode is `ados`,
- *  it lists the action, and the drone is armed and flying. Whatever runs (a
- *  mission, a skill, an FC mode), the goto takes over after the hold. */
-export function flyHereOffered(p: PilotState | null): boolean {
-  return p !== null && p.controlMode === "ados" && p.surfaceOps.includes("goto") && p.armed && !p.landed;
-}
 
 /** The confirm sheet's warning: the hold replaces what the drone is doing. */
 export const FLY_HERE_TAKES_OVER = "Takes over from any running mission or skill.";
@@ -63,31 +55,4 @@ export function flyHerePosition(
   const drone = { lat: pos.lat as number, lon: pos.lon as number };
   // A null fix type (some republished snapshots) falls back to coord validity.
   return { drone, gnss: fixType == null || fixType >= 2 };
-}
-
-/** Operator text for a refused `goto`. */
-export function flyHereRefusal(err: string | undefined): string {
-  switch (err) {
-    case "failsafe":
-      return "Fly Here refused: the drone is in a failsafe return or landing; change mode first";
-    case "launching":
-      return "Taking off: wait for the climb to finish";
-    case "control_mode":
-      return "The flight controller has control";
-    case "not_armed":
-      return "Not armed";
-    case "landed":
-      return "On the ground";
-    case "tuning":
-      return "Tuning flight in progress";
-    case "no_home":
-      return "No home position from the flight controller";
-    case "bad_args":
-      return "Point out of range";
-    case "no response":
-    case "no pilot link":
-      return "No answer from the drone";
-    default:
-      return err ? `Refused: ${err}` : "Refused";
-  }
 }

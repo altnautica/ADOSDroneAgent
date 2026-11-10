@@ -6,8 +6,9 @@
 
 import { useEffect, useState } from "react";
 
-import { computeAlerts, type AlertLevel } from "@/lib/alerts";
+import { computeAlerts } from "@/lib/alerts";
 import { cn } from "@/lib/utils";
+import type { AlertLevel } from "@/shared/hud/status-pill";
 import { useFeedStore } from "@/stores/feed-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useStatusStore } from "@/stores/status-store";

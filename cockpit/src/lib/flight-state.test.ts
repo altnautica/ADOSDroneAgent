@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { effectiveLayers, LAYER_LEVELS, nextLevel, nextView, pluginLayerId, prevLevel } from "@/lib/cockpit-view";
-import { cockpitText } from "@/lib/cockpit-text";
+import { specText } from "@/shared/hud/spec-text";
 import { stepProfile } from "@/lib/feed-actions";
 import { flightStateChip, type ChipFacts } from "@/shared/hud/flight-state";
 import { checklistPassable, launchArgs, visibleBanner, voicePrompt } from "@/lib/cockpit-flow";
@@ -152,8 +152,8 @@ describe("launch, checklist, profiles", () => {
 
 describe("banners and voice", () => {
   it("resolves banner keys and their enumerated args from setup-strings", () => {
-    expect(cockpitText("pilot.banner.ados_engaged", { source: "rc" })).toBe("ADOS engaged by RC switch");
-    expect(cockpitText("pilot.banner.fc_control", { mode: "loiter" })).toBe("FC has control · LOITER · PS to take back");
+    expect(specText("pilot.banner.ados_engaged", { source: "rc" })).toBe("ADOS engaged by RC switch");
+    expect(specText("pilot.banner.fc_control", { mode: "loiter" })).toBe("FC has control · LOITER · PS to take back");
   });
 
   it("shows a banner for the handover time from first sight", () => {

@@ -4,8 +4,9 @@
 // in components/feed/cockpit render them.
 
 import { BANNERS } from "@/lib/cockpit-spec";
-import { cockpitText } from "@/lib/cockpit-text";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { specText } from "@/shared/hud/spec-text";
+import { STORAGE_CRIT_PCT, STORAGE_WARN_PCT } from "@/shared/hud/status-pill";
 
 /** The handover banner on screen now, or null. A banner with no end time
  *  shows for the spec's handover time from when it first arrived. */
@@ -17,37 +18,28 @@ export function visibleBanner(
   if (!banner) return null;
   const until = banner.untilMs ?? (firstSeenMs !== null ? firstSeenMs + BANNERS.handover_ms : null);
   if (until !== null && nowMs > until) return null;
-  return cockpitText(banner.textKey, banner.args);
-}
-
-/** The link-loss countdown line naming the action the pilot takes, or null
- *  with no countdown running. An agent that does not report the action gets
- *  the countdown without one rather than a guessed "Return home". */
-export function linkLossLine(p: PilotState): string | null {
-  if (p.linkLossInS === null) return null;
-  const action = p.linkLossAction ? cockpitText(`pilot.link_loss_action.${p.linkLossAction}`) : "—";
-  return cockpitText("flow.link_loss.countdown", { action, in_s: Math.ceil(p.linkLossInS) });
+  return specText(banner.textKey, banner.args);
 }
 
 /** The voice prompt for a change between two pilot states, or null. */
 export function voicePrompt(prev: PilotState | null, next: PilotState): string | null {
   if (next.banner && next.banner.textKey !== prev?.banner?.textKey) {
     if (next.banner.textKey === "pilot.banner.ados_control" || next.banner.textKey === "pilot.banner.ados_engaged") {
-      return cockpitText("voice.ados_control");
+      return specText("voice.ados_control");
     }
-    if (next.banner.textKey === "pilot.banner.fc_control") return cockpitText("voice.fc_control");
+    if (next.banner.textKey === "pilot.banner.fc_control") return specText("voice.fc_control");
   }
-  if (next.rthCountdownS !== null && prev?.rthCountdownS == null) return cockpitText("voice.low_battery");
+  if (next.rthCountdownS !== null && prev?.rthCountdownS == null) return specText("voice.low_battery");
   const was = prev?.mission?.state ?? null;
   const now = next.mission?.state ?? null;
   if (now !== was) {
-    if (now === "active") return cockpitText("voice.mission_active");
-    if (now === "paused") return cockpitText("voice.mission_paused");
-    if (now === "complete") return cockpitText("voice.mission_complete");
-    if (now === "returning") return cockpitText("voice.rth");
+    if (now === "active") return specText("voice.mission_active");
+    if (now === "paused") return specText("voice.mission_paused");
+    if (now === "complete") return specText("voice.mission_complete");
+    if (now === "returning") return specText("voice.rth");
   }
   if (next.owner === "fc_mode" && next.fcModeName && /RTL/i.test(next.fcModeName) && !(prev?.fcModeName && /RTL/i.test(prev.fcModeName))) {
-    return cockpitText("voice.rth");
+    return specText("voice.rth");
   }
   return null;
 }
@@ -77,10 +69,6 @@ export function launchArgs(p: LaunchPlan): Record<string, unknown> {
 }
 
 
-/** Storage above this fill is a blocker (recordings and logs need room). */
-export const STORAGE_BLOCK_PCT = 95;
-export const STORAGE_WARN_PCT = 85;
-
 export interface ChecklistItem {
   id: string;
   label: string;
@@ -98,18 +86,19 @@ export function checklistPassable(items: readonly ChecklistItem[]): boolean {
  *  down, which the link item already fails). */
 export function fcPrearmItem(prearm: readonly string[] | undefined): ChecklistItem | null {
   if (!Array.isArray(prearm)) return null;
-  if (prearm.length === 0) return { id: "fc_prearm", label: cockpitText("flow.preflight.fc_prearm"), state: "pass" };
+  if (prearm.length === 0) return { id: "fc_prearm", label: specText("flow.preflight.fc_prearm"), state: "pass" };
   const text = prearm[prearm.length - 1].replace(/^(PreArm|Arm):\s*/, "");
-  return { id: "fc_prearm", label: cockpitText("flow.preflight.fc_prearm.failing", { text }), state: "fail" };
+  return { id: "fc_prearm", label: specText("flow.preflight.fc_prearm.failing", { text }), state: "fail" };
 }
 
-/** On-board storage: fails at or above 95 % used, warns at 85 %, warns when
- *  the node does not report it. */
+/** On-board storage: fails at or above the spec's critical fill
+ *  (`status_pill.storage_crit_pct`), warns at its warning fill, warns when the
+ *  node does not report it. */
 export function storageItem(pct: number | null): ChecklistItem {
   return {
     id: "storage",
-    label: pct === null ? "On-board storage (not reported)" : `On-board storage ${Math.round(pct)}% used`,
-    state: pct === null ? "warn" : pct >= STORAGE_BLOCK_PCT ? "fail" : pct >= STORAGE_WARN_PCT ? "warn" : "pass",
+    label: pct === null ? specText("flow.preflight.storage.unknown") : specText("flow.preflight.storage.used", { pct: Math.round(pct) }),
+    state: pct === null ? "warn" : pct >= STORAGE_CRIT_PCT ? "fail" : pct >= STORAGE_WARN_PCT ? "warn" : "pass",
   };
 }
 

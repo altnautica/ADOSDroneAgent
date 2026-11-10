@@ -16,23 +16,23 @@ import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
 import { usePadStatus, type PadStatus } from "@/hooks/use-gamepad";
 import { usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
-import { batteryReading } from "@/lib/alerts";
 import { chromeStyle, severityColor } from "@/lib/chrome-tokens";
-import { cockpitText } from "@/lib/cockpit-text";
+import { specText } from "@/shared/hud/spec-text";
 import { TOP_BAR_OVERFLOW, type TopBarOverflowItem } from "@/lib/flight-layout";
 import { fmtClock, linkLabel } from "@/lib/safety-band";
 import { requestSkill } from "@/lib/skill-runner";
 import { BUILTIN_SKILL_BY_ID, resolveSkillState } from "@/lib/skills";
 import { Z } from "@/lib/cockpit-layout";
-import { pillAlerts, pillSummary, type PillAlert, type PillSeverity } from "@/lib/status-pill";
 import { cn } from "@/lib/utils";
+import { BATTERY_LOW_PCT, batteryReading } from "@/shared/hud/battery";
+import { pillAlerts, pillSummary, type PillAlert, type PillSeverity } from "@/shared/hud/status-pill";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStore } from "@/stores/nav-store";
 import { useStatusPillStore } from "@/stores/status-pill-store";
 import { useStatusStore } from "@/stores/status-store";
 
-const levelLabel = (level: string) => cockpitText(`cockpit.level.${level}`);
+const levelLabel = (level: string) => specText(`cockpit.level.${level}`);
 
 const SEVERITY_ICON: Record<PillSeverity, LucideIcon> = { ok: CheckCircle2, warning: AlertTriangle, critical: XCircle };
 
@@ -60,7 +60,7 @@ function BatteryItem({ compact }: { compact: boolean }) {
       </Item>
     );
   }
-  const low = reservePct ?? 20;
+  const low = reservePct ?? BATTERY_LOW_PCT;
   const severity: PillSeverity = r.pct <= low ? "critical" : r.pct <= low + 10 ? "warning" : "ok";
   const color = severity === "ok" ? undefined : severityColor(severity);
   return (
@@ -74,7 +74,7 @@ function BatteryItem({ compact }: { compact: boolean }) {
           <span
             className="absolute inset-y-[-3px] w-[2px] rounded-full bg-[var(--fs-text)]"
             style={{ left: `${reservePct}%` }}
-            title={cockpitText("cockpit.battery.reserve")}
+            title={specText("cockpit.battery.reserve")}
             data-testid="rtl-reserve-marker"
           />
         ) : null}
@@ -83,7 +83,7 @@ function BatteryItem({ compact }: { compact: boolean }) {
         {Math.round(r.pct)}%
       </span>
       {!compact && r.timeToReserveS !== null ? (
-        <span className="chrome-dim" aria-label={cockpitText("cockpit.battery.time_left", { time: fmtClock(r.timeToReserveS) })}>
+        <span className="chrome-dim" aria-label={specText("cockpit.battery.time_left", { time: fmtClock(r.timeToReserveS) })}>
           {fmtClock(r.timeToReserveS)}
         </span>
       ) : null}
@@ -116,7 +116,7 @@ function StatusPill({ compact }: { compact: boolean }) {
         ref={pillRef}
         type="button"
         onClick={(e) => setRect(open ? null : e.currentTarget.getBoundingClientRect())}
-        aria-label={`${cockpitText("cockpit.menu.status")}: ${summary.text}`}
+        aria-label={`${specText("cockpit.menu.status")}: ${summary.text}`}
         aria-expanded={open}
         data-zone="status_pill"
         data-severity={summary.severity}
@@ -186,16 +186,16 @@ function AlertList({
     <div
       ref={listRef}
       role="dialog"
-      aria-label={cockpitText("cockpit.alerts.title")}
+      aria-label={specText("cockpit.alerts.title")}
       data-testid="status-pill-list"
       className={cn("chrome-panel chrome-bar-text fixed flex max-h-[60vh] w-[min(360px,90vw)] flex-col gap-[4px] overflow-y-auto p-[8px]", Z.sheets)}
       style={{ ...chromeStyle(), left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)), top: rect.bottom + 8 }}
     >
-      <div className="chrome-label px-[4px] uppercase tracking-wide">{cockpitText("cockpit.alerts.title")}</div>
+      <div className="chrome-label px-[4px] uppercase tracking-wide">{specText("cockpit.alerts.title")}</div>
       {alerts.length === 0 ? (
         <div className="flex items-center gap-[8px] px-[4px] py-[6px]" style={{ color: severityColor("ok") }}>
           <CheckCircle2 className="chrome-icon" aria-hidden />
-          {cockpitText("cockpit.status.ok")}
+          {specText("cockpit.status.ok")}
         </div>
       ) : (
         alerts.map((a) => {
@@ -204,7 +204,7 @@ function AlertList({
             <div key={a.id} className="flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]">
               <AIcon className="chrome-icon mt-[1px] shrink-0" style={{ color: severityColor(a.severity) }} aria-hidden />
               <div className="min-w-0">
-                <div className="chrome-label">{cockpitText(`cockpit.status.source.${a.source}`)}</div>
+                <div className="chrome-label">{specText(`cockpit.status.source.${a.source}`)}</div>
                 <div>{a.text}</div>
               </div>
             </div>
@@ -348,7 +348,7 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
       <button
         type="button"
         onClick={() => command("quick-menu")}
-        aria-label={cockpitText("cockpit.menu")}
+        aria-label={specText("cockpit.menu")}
         data-zone="menu"
         className="flex h-[40px] w-[44px] shrink-0 items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10"
       >
@@ -365,7 +365,7 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
         className="chrome-stop flex h-[40px] w-[84px] shrink-0 items-center justify-center gap-[6px] font-bold tracking-wide disabled:opacity-50"
       >
         <OctagonX className="chrome-icon" aria-hidden />
-        {cockpitText("cockpit.stop")}
+        {specText("cockpit.stop")}
       </button>
     </div>
   );

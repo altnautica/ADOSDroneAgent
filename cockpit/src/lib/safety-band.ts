@@ -2,8 +2,8 @@
 // link, video, battery and the preflight checks the cockpit can evaluate.
 // Unknown is always a dash, never a fabricated value.
 
-import { BATTERY_LOW_PCT, batteryReading } from "@/lib/alerts";
 import type { BatteryHealth, GsStatus, VehicleState } from "@/lib/types";
+import { batteryLowPct, batteryReading } from "@/shared/hud/battery";
 import { DASH } from "@/shared/format";
 import type { AgentProfile } from "@/shared/use-profile";
 import type { VideoTransportSnapshot } from "@/shared/video-transport";
@@ -80,8 +80,7 @@ export function preflightChecks(i: {
 }): PreflightCheck[] {
   const fix = i.telemetry?.gps?.fix_type;
   const reading = batteryReading(i.battery, i.telemetry);
-  const reserve = i.battery?.thresholds?.reserve_percent;
-  const low = Math.max(BATTERY_LOW_PCT, typeof reserve === "number" ? reserve : 0);
+  const low = batteryLowPct(i.battery);
   return [
     { id: "link", label: "Vehicle link fresh", ok: i.live },
     { id: "gps", label: "GPS fix 3D or better", ok: i.live && typeof fix === "number" && fix >= 3 },

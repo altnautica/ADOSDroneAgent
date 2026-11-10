@@ -7,24 +7,20 @@ import { useRef, useState, type PointerEvent } from "react";
 
 import { Sheet } from "@/components/ui/sheet";
 import { HoldButton } from "@/components/ui/hold-button";
+import { useNow } from "@/hooks/use-now";
 import { usePilot } from "@/hooks/use-pilot";
-import {
-  FLY_HERE_TAKES_OVER,
-  FLY_HERE_PRESS_MS,
-  FLY_HERE_SLOP_PX,
-  enToLatLon,
-  flyHereArgs,
-  flyHereOffered,
-  flyHereRefusal,
-  unprojectEN,
-} from "@/lib/fly-here";
+import { FLY_HERE_TAKES_OVER, FLY_HERE_PRESS_MS, FLY_HERE_SLOP_PX, enToLatLon, flyHereArgs, unprojectEN } from "@/lib/fly-here";
 import { distanceMeters, latLonToEN, projectEN, type LatLon, type MapView } from "@/lib/minimap-geometry";
-import { cockpitText } from "@/lib/cockpit-text";
+import { flyHereOffered } from "@/shared/hud/fly-here-offer";
+import { refusalText } from "@/shared/hud/refusal";
+import { specText } from "@/shared/hud/spec-text";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { useFlightStore } from "@/stores/flight-store";
 
 export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView; refPoint: LatLon; drone: LatLon | null; viewBox: number }) {
   const pilot = usePilot();
+  // Re-read twice a second so the layer goes away once the pilot state is stale.
+  const now = useNow(500);
   const altRel = useFlightStore((s) => s.telemetry?.position?.alt_rel ?? null);
   const svgRef = useRef<SVGSVGElement>(null);
   const press = useRef<{ x: number; y: number; timer: number } | null>(null);
@@ -32,7 +28,7 @@ export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView
   const [result, setResult] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
-  if (!flyHereOffered(pilot?.data ?? null)) return null;
+  if (!pilot || !flyHereOffered(pilot.data, now - pilot.at)) return null;
 
   const cancel = () => {
     if (press.current) window.clearTimeout(press.current.timer);
@@ -71,7 +67,7 @@ export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView
     void sendPilotAction("goto", args).then((r) => {
       setSending(false);
       if (r.ok) setTarget(null);
-      else setResult(flyHereRefusal(r.err));
+      else setResult(refusalText(r.err));
     });
   };
 
@@ -119,7 +115,7 @@ export function FlyHereLayer({ view, refPoint, drone, viewBox }: { view: MapView
             <dd className="font-mono">{args ? `${args.alt_m} m above home` : "—"}</dd>
           </dl>
           <p className="mt-[0.6rem] text-[0.85rem] text-hud-warn">{FLY_HERE_TAKES_OVER}</p>
-          {!args ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-warn">{cockpitText("map.fly_here.needs_position")}</p> : null}
+          {!args ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-warn">{specText("map.fly_here.needs_position")}</p> : null}
           {result ? <p className="mt-[0.6rem] text-[0.85rem] text-hud-crit">{result}</p> : null}
         </Sheet>
       ) : null}

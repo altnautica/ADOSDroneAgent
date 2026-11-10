@@ -1,0 +1,99 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import { aglMarkText, bottomRowAgl, chipInputs, goalDistanceM, nextWaypointEtaS } from "./chip-inputs";
+import { parseArFrame, parsePilotState } from "./cockpit-frames";
+import { chipFacts, flightStateChip } from "./flight-state";
+
+const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
+const fixture = (name: string): unknown => JSON.parse(readFileSync(path.join(FIXTURES, name), "utf8"));
+
+const ar = parseArFrame(fixture("ar-frame.json"))!;
+const pilot = parsePilotState(fixture("pilot-frame.json"))!;
+const base = { homeDistM: null, modeDetail: null, completeAgeMs: null };
+const ctx = { homeDistM: null, localPos: null, arFrame: null, arAgeMs: 0, modeDetail: null, completeAgeMs: null };
+const wire = (extra: Record<string, unknown>) => parsePilotState({ ...(fixture("pilot-frame.json") as object), ...extra })!;
+
+describe("chip ETA from the ar frame", () => {
+  it("reads the next waypoint's ETA from a fresh frame", () => {
+    expect(nextWaypointEtaS(ar, 100)).toBe(42);
+    expect(chipFacts(pilot, 0, { ...base, etaS: nextWaypointEtaS(ar, 100) }).etaS).toBe(42);
+  });
+
+  it("drops the ETA once the frame is older than 2 s or absent", () => {
+    expect(nextWaypointEtaS(ar, 2001)).toBeNull();
+    expect(nextWaypointEtaS(null, 0)).toBeNull();
+  });
+});
+
+describe("chip GOTO distance", () => {
+  it("measures the local position to the goal horizontally", () => {
+    // Goal (12, -3.5) from (9, 0.5): a 3-4-5 triangle.
+    const d = goalDistanceM({ x: 9, y: 0.5 }, pilot.goalNed);
+    expect(d).toBeCloseTo(5, 6);
+    expect(chipFacts(pilot, 0, { ...base, distM: d }).distM).toBeCloseTo(5, 6);
+    const goto = wire({ owner: "goto", mission: null });
+    expect(flightStateChip(chipFacts(goto, 0, { ...base, distM: d })).text).toBe("GOTO · 5 m");
+  });
+
+  it("is null when either end is missing", () => {
+    expect(goalDistanceM(null, pilot.goalNed)).toBeNull();
+    expect(goalDistanceM({ x: 0, y: 0 }, null)).toBeNull();
+    expect(chipFacts(pilot, 0, base).distM).toBeNull();
+  });
+});
+
+describe("chip inputs", () => {
+  it("builds the facts from the pilot state and what sits beside it", () => {
+    const f = chipInputs(pilot, 10_500, 10_000, { ...ctx, homeDistM: 30, localPos: { x: 9, y: 0.5 }, arFrame: ar, arAgeMs: 100, modeDetail: "ORBIT 8 m" });
+    expect(f.ageMs).toBe(500);
+    expect(f.distM).toBeCloseTo(5, 6);
+    expect(f.etaS).toBe(42);
+    expect(f.homeDistM).toBe(30);
+    expect(f.modeDetail).toBe("ORBIT 8 m");
+    expect(flightStateChip(f).text).toBe("FOLLOW · ORBIT 8 m");
+  });
+
+  it("uses the skill detail only while a skill owns", () => {
+    expect(chipInputs(wire({ owner: "pilot" }), 0, 0, { ...ctx, modeDetail: "ORBIT 8 m" }).modeDetail).toBeNull();
+  });
+
+  it("drives the TRANSITION chip from the pilot kind", () => {
+    const p = wire({ vtol_transitioning: true, vehicle_class: "vtol", owner: "fc_mode", mission: null });
+    expect(chipInputs(p, 0, 0, ctx).vtolTransitioning).toBe(true);
+    expect(flightStateChip(chipInputs(p, 0, 0, ctx)).text).toBe("TRANSITION");
+    expect(chipInputs(wire({}), 0, 0, ctx).vtolTransitioning).toBe(false);
+  });
+
+  it("names the setup step of a tuning flight, and reads TUNING without one", () => {
+    expect(flightStateChip(chipInputs(wire({ owner: "tuning", setup_step: "autotune_roll" }), 0, 0, ctx)).text).toBe("TUNING · AUTOTUNE_ROLL");
+    expect(flightStateChip(chipInputs(wire({ owner: "tuning" }), 0, 0, ctx)).text).toBe("TUNING");
+  });
+});
+
+describe("bottom row AGL", () => {
+  it("reads the pilot kind's agl_m, falling back to the follow kind", () => {
+    const rng = { ...pilot, aglM: 4.2, aglSource: "rangefinder" as const };
+    expect(bottomRowAgl(rng, { aglM: 9, aglSource: "rng" })).toEqual({ m: 4.2, mark: null });
+    expect(bottomRowAgl({ ...pilot, aglM: null }, { aglM: 9, aglSource: "rng" })).toEqual({ m: 9, mark: null });
+    expect(bottomRowAgl(null, null)).toEqual({ m: null, mark: null });
+  });
+
+  it("marks a height above home as HOME and a barometric one as BARO, never as a measured AGL", () => {
+    // Above the rangefinder's 8 m the pilot kind switches to the EKF height
+    // above home: the same value, now marked.
+    const below = bottomRowAgl({ ...pilot, aglM: 7.9, aglSource: "rangefinder" }, null);
+    const above = bottomRowAgl({ ...pilot, aglM: 8.4, aglSource: "home" }, null);
+    expect(below).toEqual({ m: 7.9, mark: null });
+    expect(above).toEqual({ m: 8.4, mark: "HOME" });
+    expect(bottomRowAgl({ ...pilot, aglM: null }, { aglM: 12, aglSource: "baro" })).toEqual({ m: 12, mark: "BARO" });
+  });
+
+  it("reads the marks from the spec", () => {
+    expect(aglMarkText("HOME")).toBe("HOME");
+    expect(aglMarkText("BARO")).toBe("BARO");
+    expect(aglMarkText(null)).toBeNull();
+  });
+});

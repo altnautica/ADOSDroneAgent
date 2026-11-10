@@ -28,7 +28,8 @@ import { useBottomRowAgl, usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { cameraSkillFor, type CameraAction } from "@/lib/camera-actions";
 import { runCockpitAction } from "@/lib/cockpit-actions";
-import { cockpitText } from "@/lib/cockpit-text";
+import { aglMarkText } from "@/shared/hud/chip-inputs";
+import { specText } from "@/shared/hud/spec-text";
 import { FLIGHT_PX, type RightItem } from "@/lib/flight-layout";
 import { GIMBAL_MAX_DPS } from "@/lib/gimbal-rate";
 import { requestSkill } from "@/lib/skill-runner";
@@ -204,8 +205,8 @@ function GimbalPad() {
       className="chrome-panel relative shrink-0 touch-none !rounded-full"
       style={{ width: size, height: size }}
       role="group"
-      aria-label={cockpitText("cockpit.gimbal_pad")}
-      title={cockpitText("cockpit.gimbal_pad.hint")}
+      aria-label={specText("cockpit.gimbal_pad")}
+      title={specText("cockpit.gimbal_pad.hint")}
       data-zone="gimbal_pad"
       onPointerDown={(e) => {
         const r = e.currentTarget.getBoundingClientRect();
@@ -362,7 +363,7 @@ export function BottomRow({ short = false }: { short?: boolean }) {
         <>
           <Readout label="H.S" value={t?.velocity?.groundspeed ?? null} unit="m/s" />
           <Readout label="V.S" value={t?.velocity?.climb ?? null} unit="m/s" />
-          <Readout label="AGL" value={agl.m} unit="m" mark={agl.mark} />
+          <Readout label="AGL" value={agl.m} unit="m" mark={aglMarkText(agl.mark)} />
         </>
       ) : null}
     </div>

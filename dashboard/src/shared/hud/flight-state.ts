@@ -238,7 +238,7 @@ export function chipFacts(
     modeDetail: extra.modeDetail,
     distM: extra.distM ?? null,
     homeDistM: extra.homeDistM,
-    setupStep: null,
+    setupStep: p.setupStep,
     missionState: p.mission?.state ?? null,
     seq: p.mission?.seq ?? null,
     total: p.mission?.total ?? null,

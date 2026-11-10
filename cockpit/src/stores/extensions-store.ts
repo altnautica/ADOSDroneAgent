@@ -15,7 +15,7 @@ import {
   type InstalledExtension,
   type RejectedSkill,
 } from "@/lib/extensions";
-import { cockpitText } from "@/lib/cockpit-text";
+import { specText } from "@/shared/hud/spec-text";
 import { buildBindings, echoOutcome, type BindingConflict } from "@/lib/skill-gates";
 import type { ParamValue, PendingWrite, ReportedSkillState, Skill } from "@/lib/skills";
 import { apiFetch } from "@/shared/api-fetch";
@@ -136,7 +136,7 @@ export const useExtensionsStore = create<ExtensionsState>((set, get) => ({
         (typeof row?.failure_reason === "string" && row.failure_reason) ||
         (typeof row?.status === "string" && row.status) ||
         "removed";
-      if (ext.skills.length > 0) toast.err(cockpitText("skill.plugin_stopped", { plugin: ext.name, reason }));
+      if (ext.skills.length > 0) toast.err(specText("skill.plugin_stopped", { plugin: ext.name, reason }));
     }
     const goneIds = new Set(gone.flatMap((e) => e.skills.map((s) => s.id)));
     const goneSkill = (id: string) => goneIds.has(id);
@@ -169,7 +169,7 @@ export const useExtensionsStore = create<ExtensionsState>((set, get) => ({
       done.push(id);
       if (outcome === "expired") {
         const label = extensions.flatMap((e) => e.skills).find((sk) => sk.id === id)?.label ?? id;
-        toast.err(cockpitText("skill.did_not_respond", { skill: label }));
+        toast.err(specText("skill.did_not_respond", { skill: label }));
       }
     }
     if (done.length > 0) set((s) => ({ pending: withoutKeys(s.pending, (k) => done.includes(k)) }));

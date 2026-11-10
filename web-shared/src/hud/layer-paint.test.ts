@@ -53,5 +53,6 @@ describe("layer status chips", () => {
     expect(CHIP_TEXT.depth).toBe("Depth unavailable");
     expect(CHIP_TEXT.depthUnscaled).toBe("Depth unscaled");
     expect(CHIP_TEXT.ar).toBe("AR unavailable");
+    expect(CHIP_TEXT.targets).toBe("Targets unavailable");
   });
 });

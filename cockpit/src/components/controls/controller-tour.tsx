@@ -9,7 +9,7 @@ import { useState } from "react";
 
 import { Sheet } from "@/components/ui/sheet";
 import { usePilot } from "@/hooks/use-pilot";
-import { cockpitText } from "@/lib/cockpit-text";
+import { specText } from "@/shared/hud/spec-text";
 import { TOUR_CARDS, tourDeferred, tourStage } from "@/lib/controller-tour";
 import { getScreen } from "@/nav/registry";
 import { useControlsStore } from "@/stores/controls-store";
@@ -53,11 +53,11 @@ export function ControllerTour() {
       }
     >
       {stage === "press" ? (
-        <p className="text-[0.9rem]">{cockpitText("controls.press_any_button")}</p>
+        <p className="text-[0.9rem]">{specText("controls.press_any_button")}</p>
       ) : (
         <>
-          <h3 className="text-[1rem] font-semibold">{cockpitText(`controls.tour.${id}.title`)}</h3>
-          <p className="text-[0.85rem]">{cockpitText(`controls.tour.${id}.body`)}</p>
+          <h3 className="text-[1rem] font-semibold">{specText(`controls.tour.${id}.title`)}</h3>
+          <p className="text-[0.85rem]">{specText(`controls.tour.${id}.body`)}</p>
         </>
       )}
     </Sheet>

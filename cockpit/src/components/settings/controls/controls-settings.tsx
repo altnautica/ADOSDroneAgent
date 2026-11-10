@@ -13,7 +13,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactN
 import { Lock } from "lucide-react";
 
 import { listCockpitActions, subscribeCockpitActions, cockpitActionsVersion } from "@/lib/cockpit-actions";
-import { cockpitText } from "@/lib/cockpit-text";
+import { specText } from "@/shared/hud/spec-text";
 import { DRAWINGS, PAD_COLORS, padKindOf, type Hotspot } from "@/lib/pad/art";
 import {
   conflictedControls,
@@ -248,13 +248,13 @@ function ControlEditor({ control, registry }: { control: ControlId; registry: Re
         const own = rows.filter(({ r }) => r.gesture === g && r.with.length === 0);
         return (
           <div key={g} className="flex flex-col gap-[0.25rem]">
-            <span className="text-[0.75rem] text-muted-foreground">{cockpitText(`controls.gesture.${g}`)}</span>
+            <span className="text-[0.75rem] text-muted-foreground">{specText(`controls.gesture.${g}`)}</span>
             {own.length === 0 ? (
               <ActionSelect value="none" label={`${CONTROL_LABELS[control]} ${g}`} registry={registry} onChange={(a) => a !== "none" && setDraft(addRow(draft, control, g, a))} />
             ) : (
               own.map(({ r, i }) => (
                 <div key={i} className="flex items-center gap-[0.3rem]">
-                  {r.locked ? <Lock className="h-[1rem] w-[1rem] shrink-0 text-warn" aria-label={cockpitText("controls.locked")} /> : null}
+                  {r.locked ? <Lock className="h-[1rem] w-[1rem] shrink-0 text-warn" aria-label={specText("controls.locked")} /> : null}
                   <ActionSelect
                     value={r.action}
                     label={`${CONTROL_LABELS[control]} ${g}`}
@@ -309,8 +309,8 @@ function CalibrationCard() {
     });
   }, [running]);
   return (
-    <Section title={cockpitText("controls.calibrate.title")}>
-      <p className="text-[0.8rem] text-muted-foreground">{cockpitText("controls.calibrate.body")}</p>
+    <Section title={specText("controls.calibrate.title")}>
+      <p className="text-[0.8rem] text-muted-foreground">{specText("controls.calibrate.body")}</p>
       <div className="flex gap-[0.4rem]">
         {!running ? (
           <button type="button" disabled={!pad} onClick={() => { setCal(null); setRunning(true); }} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem] disabled:opacity-45">
@@ -336,8 +336,8 @@ function CalibrationCard() {
         ) : null}
       </div>
       <label className="flex items-center gap-[0.5rem] text-[0.82rem]">
-        {cockpitText("controls.deadzone")}
-        <input type="range" min={DEADZONE_MIN} max={DEADZONE_MAX} step={0.01} value={deadzone} onChange={(e) => setDeadzone(Number(e.target.value))} aria-label={cockpitText("controls.deadzone")} />
+        {specText("controls.deadzone")}
+        <input type="range" min={DEADZONE_MIN} max={DEADZONE_MAX} step={0.01} value={deadzone} onChange={(e) => setDeadzone(Number(e.target.value))} aria-label={specText("controls.deadzone")} />
         <span className="font-mono">{deadzone.toFixed(2)}</span>
       </label>
     </Section>
@@ -394,27 +394,27 @@ export function ControlsSettings() {
   return (
     <div className="flex flex-col gap-[0.5rem] p-[0.6rem]" data-testid="controls-settings">
       <header className="flex flex-wrap items-center gap-[0.6rem] text-[0.85rem]">
-        <span className="font-semibold">{pad ? pad.name : announced ? cockpitText("controls.press_any_button") : "No controller"}</span>
-        {conn ? <span className="text-muted-foreground">{cockpitText(`controls.connection.${conn}`)}</span> : null}
-        {pad && !pad.standard ? <span className="text-warn">{cockpitText("controls.not_standard")}</span> : null}
+        <span className="font-semibold">{pad ? pad.name : announced ? specText("controls.press_any_button") : "No controller"}</span>
+        {conn ? <span className="text-muted-foreground">{specText(`controls.connection.${conn}`)}</span> : null}
+        {pad && !pad.standard ? <span className="text-warn">{specText("controls.not_standard")}</span> : null}
         <div className="flex overflow-hidden rounded-lg border border-border" role="radiogroup" aria-label="Stick mode">
           {(["mode2", "mode1"] as const).map((m) => (
             <button key={m} type="button" role="radio" aria-checked={s.stickMode === m} onClick={() => s.setStickMode(m)} className={cn("min-h-[40px] px-[0.6rem]", s.stickMode === m && "bg-primary/30")}>
-              {cockpitText(`controls.${m}`)}
+              {specText(`controls.${m}`)}
             </button>
           ))}
         </div>
         <span className="text-muted-foreground" data-testid="controls-profile">
-          {cockpitText(isDefaultBindings(s.bindings) ? "controls.profile.ados_default" : "controls.profile.user")}
+          {specText(isDefaultBindings(s.bindings) ? "controls.profile.ados_default" : "controls.profile.user")}
         </span>
       </header>
-      {!pad ? <p className="text-[0.85rem] text-muted-foreground">{cockpitText("controls.press_any_button")}</p> : null}
+      {!pad ? <p className="text-[0.85rem] text-muted-foreground">{specText("controls.press_any_button")}</p> : null}
       <div className="flex flex-wrap items-start gap-[0.6rem]">
         <div className="min-w-[320px] flex-[2_1_480px]">
           <PadDrawingView rows={s.draft} selected={selected} onSelect={setSelected} conflicted={conflicted} deadzone={s.deadzone} registry={registry} />
           <div className="flex flex-wrap gap-[0.4rem] pt-[0.4rem]">
             <button type="button" aria-pressed={capture} onClick={() => setCapture(!capture)} className={cn("min-h-[48px] rounded-lg border px-[0.8rem] text-[0.85rem]", capture ? "border-primary bg-primary/25" : "border-border")}>
-              {cockpitText("controls.press_a_control")}
+              {specText("controls.press_a_control")}
             </button>
           </div>
         </div>
@@ -422,10 +422,10 @@ export function ControlsSettings() {
           {selected ? <ControlEditor control={selected} registry={registry} /> : <p className="text-[0.85rem] text-muted-foreground">Pick a control on the drawing to change what it does.</p>}
         </aside>
       </div>
-      {conflicts.length > 0 ? <p role="alert" className="text-[0.85rem] text-err" data-testid="conflict-note">{cockpitText("controls.conflict")}</p> : null}
+      {conflicts.length > 0 ? <p role="alert" className="text-[0.85rem] text-err" data-testid="conflict-note">{specText("controls.conflict")}</p> : null}
       {missing.length > 0 ? (
         <p role="alert" className="text-[0.85rem] text-err">
-          {cockpitText("controls.import.missing_locked", { actions: missing.map(lockedLabel).join(", ") })}
+          {specText("controls.import.missing_locked", { actions: missing.map(lockedLabel).join(", ") })}
         </p>
       ) : null}
       {s.sync.state === "refused" ? <p role="alert" className="text-[0.85rem] text-err">Ground station refused: missing {s.sync.missing.join(", ")}</p> : null}
@@ -438,7 +438,7 @@ export function ControlsSettings() {
           onClick={() => void s.save()}
           className="min-h-[48px] rounded-lg border border-primary bg-primary/30 px-[1rem] text-[0.9rem] font-semibold disabled:opacity-45"
         >
-          {cockpitText("controls.save")}
+          {specText("controls.save")}
         </button>
         {dirty ? (
           <button type="button" onClick={s.discardDraft} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
@@ -446,13 +446,13 @@ export function ControlsSettings() {
           </button>
         ) : null}
         <button type="button" onClick={s.resetToDefault} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
-          {cockpitText("controls.reset")}
+          {specText("controls.reset")}
         </button>
         <button type="button" onClick={download} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
-          {cockpitText("controls.export")}
+          {specText("controls.export")}
         </button>
         <button type="button" onClick={() => fileRef.current?.click()} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
-          {cockpitText("controls.import")}
+          {specText("controls.import")}
         </button>
         <input
           ref={fileRef}
@@ -479,13 +479,13 @@ export function ControlsSettings() {
             }}
             className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem] disabled:opacity-45"
           >
-            {cockpitText("controls.test.rumble")}
+            {specText("controls.test.rumble")}
           </button>
-          <button type="button" disabled title={cockpitText("controls.test.lightbar_unavailable")} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem] opacity-45">
-            {cockpitText("controls.test.lightbar")}
+          <button type="button" disabled title={specText("controls.test.lightbar_unavailable")} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem] opacity-45">
+            {specText("controls.test.lightbar")}
           </button>
           <button type="button" aria-pressed={showAxes} onClick={() => setShowAxes(!showAxes)} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
-            {cockpitText("controls.test.sticks")}
+            {specText("controls.test.sticks")}
           </button>
         </div>
         {showAxes && pad ? (
@@ -498,11 +498,11 @@ export function ControlsSettings() {
       <Section title="Touch and sound">
         <label className="flex min-h-[48px] items-center gap-[0.5rem] text-[0.85rem]">
           <input type="checkbox" checked={s.onscreenSticks} onChange={(e) => s.setOnscreenSticks(e.target.checked)} />
-          {cockpitText("flow.on_screen_sticks")}
+          {specText("flow.on_screen_sticks")}
         </label>
         <label className="flex min-h-[48px] items-center gap-[0.5rem] text-[0.85rem]">
           <input type="checkbox" checked={voice.enabled} disabled={!voiceSupported()} onChange={(e) => voice.setEnabled(e.target.checked)} />
-          {cockpitText("voice.setting")}
+          {specText("voice.setting")}
         </label>
       </Section>
     </div>

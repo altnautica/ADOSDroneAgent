@@ -7,7 +7,7 @@
 // unit-tested.
 
 import { BOTTOM_CHROME_CLEARANCE_PX, GLOVE_TOUCH_SCALE, type WidthClass } from "@/lib/cockpit-layout";
-import { cockpitText } from "@/lib/cockpit-text";
+import { specText } from "@/shared/hud/spec-text";
 import type { ParamValue } from "@/lib/skills";
 import type { AvoidState } from "@/shared/hud/cockpit-frames";
 import type { FollowEvent, FollowPhase } from "@/shared/hud/nav-types";
@@ -133,7 +133,7 @@ export function avoidChip(state: AvoidState | null): { text: string; tone: "ok" 
     case "blocked":
       return { text: "BLOCKED", tone: "crit" };
     case "off":
-      return { text: cockpitText("pilot.avoid.off"), tone: "crit" };
+      return { text: specText("pilot.avoid.off"), tone: "crit" };
     default:
       return null;
   }

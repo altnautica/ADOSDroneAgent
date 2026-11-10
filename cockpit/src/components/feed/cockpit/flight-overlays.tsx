@@ -10,8 +10,9 @@ import { useEffect, useRef, useState } from "react";
 import { HoldButton } from "@/components/ui/hold-button";
 import { sticksElsewhere, usePilot } from "@/hooks/use-pilot";
 import { useNow } from "@/hooks/use-now";
-import { linkLossLine, visibleBanner, voicePrompt } from "@/lib/cockpit-flow";
-import { cockpitText } from "@/lib/cockpit-text";
+import { visibleBanner, voicePrompt } from "@/lib/cockpit-flow";
+import { linkLossLine } from "@/shared/hud/link-loss";
+import { specText } from "@/shared/hud/spec-text";
 import { sendPilotAction, takePilotSession } from "@/lib/pilot-link";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { speak } from "@/stores/voice-store";
@@ -36,7 +37,7 @@ function GateRing({ progress }: { progress: number }) {
           className="text-primary"
         />
       </svg>
-      <span className="text-[0.95rem] font-semibold text-hud-ink">{cockpitText("flow.gate.centre_sticks")}</span>
+      <span className="text-[0.95rem] font-semibold text-hud-ink">{specText("flow.gate.centre_sticks")}</span>
     </div>
   );
 }
@@ -74,15 +75,15 @@ export function FlightOverlays() {
           className="pointer-events-auto flex w-full max-w-[44rem] items-center gap-[0.8rem] rounded-lg border border-err bg-err/85 px-[0.9rem] py-[0.5rem] text-on-status"
         >
           <div className="flex-1">
-            <div className="text-[1rem] font-semibold">{cockpitText("flow.low_battery.title", { in_s: Math.ceil(pilot.rthCountdownS) })}</div>
-            <div className="text-[0.75rem] opacity-90">{cockpitText("flow.low_battery.cancel_warning")}</div>
+            <div className="text-[1rem] font-semibold">{specText("flow.low_battery.title", { in_s: Math.ceil(pilot.rthCountdownS) })}</div>
+            <div className="text-[0.75rem] opacity-90">{specText("flow.low_battery.cancel_warning")}</div>
           </div>
           <button
             type="button"
             onClick={() => void sendPilotAction("rth_cancel")}
             className="min-h-[48px] rounded-lg border border-on-status px-[0.9rem] font-semibold"
           >
-            {cockpitText("flow.low_battery.cancel")}
+            {specText("flow.low_battery.cancel")}
           </button>
         </div>
       ) : null}
@@ -99,9 +100,9 @@ export function FlightOverlays() {
       {pilot.gate?.pending ? <GateRing progress={pilot.gate.progress} /> : null}
       {elsewhere ? (
         <div className="pointer-events-auto flex items-center gap-[0.6rem] rounded-lg border border-hud-hair bg-hud-glass-strong px-[0.8rem] py-[0.35rem] backdrop-blur-hud" data-testid="sticks-elsewhere">
-          <span className="text-[0.9rem] text-hud-ink">{cockpitText("flow.sticks_with", { label: elsewhere.label })}</span>
+          <span className="text-[0.9rem] text-hud-ink">{specText("flow.sticks_with", { label: elsewhere.label })}</span>
           <HoldButton holdMs={1500} onFired={() => takePilotSession()} className="min-h-[48px]">
-            {cockpitText("flow.sticks_take_over")}
+            {specText("flow.sticks_take_over")}
           </HoldButton>
         </div>
       ) : null}

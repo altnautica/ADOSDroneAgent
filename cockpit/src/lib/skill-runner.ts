@@ -19,7 +19,7 @@ import { skillContextNow } from "@/hooks/use-skill-context";
 import { sendCommand } from "@/lib/api";
 import type { ActionPhase } from "@/lib/cockpit-actions";
 import { sendPilotAction } from "@/lib/pilot-link";
-import { pilotRefusal } from "@/lib/pilot-refusal";
+import { refusalText } from "@/shared/hud/refusal";
 import { activateExclusive, runningMotionSkills } from "@/lib/skill-gates";
 import { builtinRoute, resolveSkillState, type BuiltinBinding, type Skill, type SkillContext } from "@/lib/skills";
 import { ApiError, errorDetail } from "@/shared/api-fetch";
@@ -50,7 +50,7 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
   const route = builtinRoute(skill, skillContextNow());
   if (route === "pilot") {
     const r = await sendPilotAction(b.pilotAction);
-    report(r.ok ? { text: `${skill.label}: accepted`, kind: "ok" } : { text: `${skill.label}: ${pilotRefusal(r.err)}`, kind: "err" });
+    report(r.ok ? { text: `${skill.label}: accepted`, kind: "ok" } : { text: `${skill.label}: ${refusalText(r.err)}`, kind: "err" });
     return;
   }
   if (route !== "command" || !b.command) {

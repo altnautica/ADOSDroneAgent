@@ -6,6 +6,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.49] - 2026-11-10
+
+### Changed
+
+- Cockpit and dashboard share one implementation of the flight-screen rules in `web-shared/src/hud/`: spec text lookup, refusal texts, the flight-state chip's inputs, the battery reading, the link-loss countdown, the status pill and its base alerts, the "Fly here" offer, and a contextual-tips engine for `tips.json`. Mission Control can copy the same files.
+- On-board storage warns at 90 % and turns critical at 97 % (was 85 % and 95 %) in both the status pill and the pre-flight checklist, from the cockpit spec.
+- Refusal texts come from the cockpit spec in sentence case ("Pause: No position from the flight controller"); `not_ready:<item>` names the readiness item, and an unknown code reads "Refused: <code>". "Fly here" shows the same texts.
+- The link-loss countdown also names `rtl` (Return home) and `loiter` (Hold); an action the spec does not name shows a dash.
+- Alert ids match Mission Control's: `link_lost`, `link_stale`, `batt_crit`, `batt_low`, `battery_pack_<pack>_<rule>`, `gps_no_3d`, `video_frozen`, `uplink`; alert titles and details come from the cockpit spec.
+- The flight-state chip names the setup step of a tuning flight ("TUNING · <step>") when the pilot reports `setup_step`, and reads "TUNING" without one.
+- "Fly here" is no longer offered from a stale pilot state (older than the chip's 2 s).
+- The layer engine has a "Targets unavailable" status chip text.
+
 ## [0.109.48] - 2026-11-10
 
 ### Changed
