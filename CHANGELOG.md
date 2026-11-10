@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.52] - 2026-11-10
+
+### Changed
+
+- Cockpit: detection boxes now dim after 500 ms without a new batch, hide after 2 s, and a "Targets unavailable" chip shows while a detector runs but its boxes have gone stale.
+
 ## [0.109.51] - 2026-11-10
 
 ### Changed
