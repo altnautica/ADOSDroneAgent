@@ -434,6 +434,7 @@ fn to_wire_has_the_python_to_dict_shape() {
         "autopilot",
         "armed",
         "mode",
+        "system_status",
         "position",
         "velocity",
         "attitude",
@@ -449,6 +450,10 @@ fn to_wire_has_the_python_to_dict_shape() {
         assert!(wire.get(key).is_some(), "missing wire key {key}");
     }
     assert_eq!(wire["mode"], json!("STABILIZE"));
+    assert_eq!(
+        wire["system_status"],
+        json!(MavState::MAV_STATE_STANDBY as i64)
+    );
     assert!(wire["battery"].get("cell_voltages").is_some());
     assert!(
         wire["attitude"].get("rollspeed").is_none(),

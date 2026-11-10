@@ -19,7 +19,8 @@
 import { useEffect, useMemo, useRef, type CSSProperties } from "react";
 
 import { AlertStack } from "@/components/feed/alert-stack";
-import { BottomRow, LeftColumn, RightColumn } from "@/components/feed/cockpit/cockpit-zones";
+import { BottomRow, LeftColumn } from "@/components/feed/cockpit/cockpit-zones";
+import { RightColumn } from "@/components/feed/cockpit/right-column";
 import { FlightOverlays } from "@/components/feed/cockpit/flight-overlays";
 import { LaunchSheet } from "@/components/feed/cockpit/launch-sheet";
 import { ModeSheet } from "@/components/feed/cockpit/mode-sheet";

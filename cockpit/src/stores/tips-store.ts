@@ -129,10 +129,22 @@ export const useTipsStore = create<TipsStore>((set, get) => {
   };
 });
 
+/** The Feed's flow overlays (launch step and Abort, handover, link-loss and
+ *  low-battery countdowns, sticks with another surface). They sit outside the
+ *  alert stack, so tips name them on their own. */
+export const FLIGHT_OVERLAYS_SELECTOR = "[data-testid=flight-overlays]";
+
 /** The flight screen's banners: each shell notice (agent offline, reach,
- *  reboot) and each alert in the alert stack. */
-export const ALERT_BANNER_SELECTOR =
-  '[data-testid="feed-notices"] > *, [data-zone=alert_stack] [role=alert] > *, [data-zone=alert_stack] [role=status] > *';
+ *  reboot), each alert in the alert stack, and each flow overlay (the sticks
+ *  banner carries no role, so every overlay child counts). */
+export const ALERT_BANNER_SELECTOR = [
+  '[data-testid="feed-notices"] > *',
+  "[data-zone=alert_stack] [role=alert] > *",
+  "[data-zone=alert_stack] [role=status] > *",
+  `${FLIGHT_OVERLAYS_SELECTOR} [role=alert]`,
+  `${FLIGHT_OVERLAYS_SELECTOR} [role=status]`,
+  `${FLIGHT_OVERLAYS_SELECTOR} > *`,
+].join(", ");
 
 /** Whether any flight-screen banner is on screen (tips `show_only_when`
  *  `alert_banner_visible: false`); `visible` says whether an element is laid

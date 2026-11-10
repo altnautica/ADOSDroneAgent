@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { padRoute, safetyBindings } from "@/hooks/use-gamepad";
+import { padRoute, safetyBindings } from "@/hooks/pad-router";
 import { DEFAULT_BINDINGS, type ControlId } from "@/lib/pad/ds4-map";
 import { GestureEngine, type EngineContext, type EngineEvent, type PadFrame } from "@/lib/pad/gesture-engine";
 

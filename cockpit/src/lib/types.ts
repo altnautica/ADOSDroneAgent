@@ -222,6 +222,10 @@ export interface VehicleState {
   position_age_ms?: number | null;
   armed?: boolean;
   mode?: string | null;
+  /** HEARTBEAT `system_status` (MAV_STATE); 5 CRITICAL and 6 EMERGENCY
+   *  read as a flight-controller failsafe. Absent from an agent that does not
+   *  report it. */
+  system_status?: number | null;
   position?: VehiclePosition;
   velocity?: VehicleVelocity;
   attitude?: VehicleAttitude;

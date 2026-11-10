@@ -179,6 +179,10 @@ describe("no legacy chrome on the flight screen (legacy_chrome: none)", () => {
   });
 });
 
+/** The top bar's source: the bar and its status pill (`status-pill.tsx`). */
+const topBarSource = () =>
+  ["top-bar.tsx", "status-pill.tsx"].map((f) => readFileSync(path.resolve(__dirname, "../components/feed/cockpit", f), "utf8")).join("\n");
+
 describe("the top bar's overflow (layout.json top_bar.overflow)", () => {
   it("moves items into the Menu in the spec's order", () => {
     expect(TOP_BAR_OVERFLOW).toEqual(["controller", "nav_source", "link_text", "link_icon", "layer_button"]);
@@ -194,7 +198,7 @@ describe("the top bar's overflow (layout.json top_bar.overflow)", () => {
   });
 
   it("has no link_detail item left in the bar", () => {
-    const bar = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/top-bar.tsx"), "utf8");
+    const bar = topBarSource();
     expect(bar).not.toContain("link_detail");
     // The pill truncates with an ellipsis once the bar is full.
     expect(bar).toMatch(/fit \? "min-w-0 shrink"/);
@@ -202,7 +206,7 @@ describe("the top bar's overflow (layout.json top_bar.overflow)", () => {
 });
 
 describe("the top bar's controls", () => {
-  const bar = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/top-bar.tsx"), "utf8");
+  const bar = topBarSource();
   const chip = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/flight-state-chip.tsx"), "utf8");
   const nav = readFileSync(path.resolve(__dirname, "../components/feed/nav-source-chip.tsx"), "utf8");
   const stopButton = bar.slice(bar.indexOf('data-zone="stop"') - 400, bar.indexOf('data-zone="stop"') + 400);

@@ -5,19 +5,19 @@ import { useTranslation } from "react-i18next";
 import { BATTERY_POLL_MS, useBatteryHealth } from "@/hooks/use-battery-health";
 import { navPilot, useFlightChip } from "@/hooks/use-flight-chip";
 import { HEARTBEAT_POLL_MS, useHeartbeat } from "@/hooks/use-heartbeat";
-import { navPollMs, useNavPollStore, useNavStatus } from "@/hooks/use-nav-status";
+import { useNavStatus } from "@/hooks/use-nav-status";
 import { useNow } from "@/hooks/use-now";
 import { PAIRING_POLL_MS, usePairingInfo } from "@/hooks/use-pairing";
 import { useResource } from "@/hooks/use-resource";
 import { SNAPSHOT_POLL_MS, useSnapshot } from "@/hooks/use-snapshot";
 import { STATUS_POLL_MS, useStatus } from "@/hooks/use-status";
+import { useVehicleLiveness } from "@/hooks/use-vehicle-liveness";
 import { useVehicleTelemetry, VEHICLE_TELEMETRY_POLL_MS } from "@/hooks/use-vehicle-telemetry";
 import { liveData } from "@/lib/freshness";
-import { homePill, homeStatusLines, type StatusFull } from "@/lib/home-status";
+import { freshNavFrames, homePill, homeStatusLines, type StatusFull } from "@/lib/home-status";
 import { buildTiles, type Tile } from "@/lib/status-tiles";
 import { cn } from "@/lib/utils";
 import { severityClasses } from "@/shared/format";
-import { parseFollowState } from "@/shared/hud/nav-types";
 import { specText } from "@/shared/hud/spec-text";
 
 const STATUS_FULL_POLL_MS = 5_000;
@@ -83,29 +83,34 @@ const PILL_TONE = {
  *  sticks and time-to-reserve lines. Read-only: nothing here acknowledges. */
 function VehicleStatus() {
   const nav = useNavStatus();
-  const navPanels = useNavPollStore((s) => s.videoPanels);
   const heartbeat = useHeartbeat();
   const tel = useVehicleTelemetry();
   const battery = useBatteryHealth();
   const statusFull = useResource<StatusFull>("status-full", "/api/status/full", STATUS_FULL_POLL_MS);
   const now = useNow(1_000);
+  const liveness = useVehicleLiveness(tel, VEHICLE_TELEMETRY_POLL_MS, now);
+  // The pill reads the kept pilot frame: its age turns it into one
+  // "not answering" item.
   const pilot = useMemo(() => navPilot(nav.data), [nav.data]);
-  const follow = useMemo(() => (nav.data?.follow ? parseFollowState(nav.data.follow.data) : null), [nav.data]);
   const inputs = {
     pilot,
     telemetry: tel.data ?? null,
     battery: battery.data ?? null,
     status: statusFull.data ?? null,
-    msSinceLive: tel.dataUpdatedAt > 0 ? Math.max(0, now - tel.dataUpdatedAt) : null,
+    live: liveness.live,
+    msSinceLive: liveness.msSinceLive,
+    armedAtLastLive: liveness.armedAtLastLive,
     pilotAgeMs: nav.data?.pilot && pilot ? Math.max(0, now - nav.dataUpdatedAt) + (nav.data.pilot.age_ms ?? 0) : null,
     agentReachable: !heartbeat.isError,
   };
   const pill = homePill(inputs);
-  // The lines are live values: each reads only a source that is still live.
+  // The lines are live values: each reads only a source that is still live,
+  // and the pilot and follow frames only while fresh.
+  const fresh = freshNavFrames(nav.data, nav.dataUpdatedAt, now);
   const lines = homeStatusLines({
     ...inputs,
-    pilot: liveData({ ...nav, data: pilot ?? undefined }, navPollMs(navPanels), now) ?? null,
-    follow: liveData({ ...nav, data: follow ?? undefined }, navPollMs(navPanels), now) ?? null,
+    pilot: fresh.pilot,
+    follow: fresh.follow,
     telemetry: liveData(tel, VEHICLE_TELEMETRY_POLL_MS, now) ?? null,
     battery: liveData(battery, BATTERY_POLL_MS, now) ?? null,
   });

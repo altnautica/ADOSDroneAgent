@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { executeSkill, requestSkill, useSkillBusyStore } from "@/lib/skill-runner";
+import { forgetCommandedModes } from "@/lib/fc-failsafe";
 import { armGateReason, BUILTIN_SKILL_BY_ID, resolveSkillState, type SkillContext } from "@/lib/skills";
 import { onToast } from "@/shared/api/toast";
 import { specText } from "@/shared/hud/spec-text";
@@ -24,6 +25,8 @@ function answer(status: number, body: unknown): void {
 beforeEach(() => {
   useSkillBusyStore.setState({ keys: {} });
   useConfirmStore.setState({ pending: null, ack: null });
+  // A return home sent by an earlier case would read as this cockpit's own.
+  forgetCommandedModes();
 });
 
 afterEach(() => {
@@ -106,10 +109,34 @@ describe("pause during a flight controller failsafe", () => {
     expect(sent).not.toHaveBeenCalled();
   });
 
-  it("leaves return home, land and kill alone, and lifts on a stale pilot state", () => {
+  it("leaves return home, land and kill alone, and lifts only on a fresh frame that clears it", () => {
     for (const id of ["rth", "land", "kill"]) expect(resolveSkillState(B[id]!, ctx).enabled).toBe(true);
     expect(resolveSkillState(B.pause!, { ...ctx, pilot: { ...fs, fcFailsafe: false } }).enabled).toBe(true);
-    expect(resolveSkillState(B.pause!, { ...ctx, pilot: { ...fs, fresh: false } }).reason).not.toBe(specText("refusal.failsafe"));
+    // A stale frame's failsafe is the last known one: it holds.
+    expect(resolveSkillState(B.pause!, { ...ctx, pilot: { ...fs, fresh: false } }).reason).toBe(specText("refusal.failsafe"));
+  });
+
+  const failsafe = { enabled: false, reason: specText("refusal.failsafe") };
+  const quiet = { ...fs, fcFailsafe: false };
+
+  it("is refused on a stale pilot while the flight controller flies a return or landing it was not sent", () => {
+    for (const mode of ["RTL", "SMART_RTL", "LAND", "QRTL", "QLAND"]) {
+      const fc = { mode, systemStatus: 4 };
+      expect(resolveSkillState(B.pause!, { ...ctx, pilot: { ...quiet, fresh: false }, fc })).toEqual(failsafe);
+      expect(resolveSkillState(B.pause!, { ...ctx, pilot: null, fc })).toEqual(failsafe);
+    }
+    // A fresh pilot that reports no failsafe is the authority.
+    expect(resolveSkillState(B.pause!, { ...ctx, pilot: quiet, fc: { mode: "RTL", systemStatus: 4 } }).enabled).toBe(true);
+    // Any other mode lets the pause through.
+    expect(resolveSkillState(B.pause!, { ...ctx, pilot: null, fc: { mode: "AUTO", systemStatus: 4 } }).enabled).toBe(true);
+  });
+
+  it("is refused on a stale pilot while the heartbeat reports a critical or emergency state", () => {
+    for (const systemStatus of [5, 6]) {
+      const fc = { mode: "AUTO", systemStatus };
+      expect(resolveSkillState(B.pause!, { ...ctx, pilot: { ...quiet, fresh: false }, fc })).toEqual(failsafe);
+      expect(resolveSkillState(B.pause!, { ...ctx, pilot: null, fc })).toEqual(failsafe);
+    }
   });
 });
 

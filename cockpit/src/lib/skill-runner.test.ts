@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { COMMAND_TIMEOUT_MS, CommandTimeoutError, sendCommand } from "@/lib/api";
 import type { ActionResult } from "@/lib/pilot-link";
 import { bypassesBusy, executeSkill, isSkillBusy, requestSkill, useSkillBusyStore } from "@/lib/skill-runner";
-import { BUILTIN_SKILL_BY_ID, type SkillContext } from "@/lib/skills";
+import { forgetCommandedModes } from "@/lib/fc-failsafe";
+import { BUILTIN_SKILL_BY_ID, resolveSkillState, type Skill, type SkillContext } from "@/lib/skills";
 import { onToast } from "@/shared/api/toast";
 import { useConfirmStore } from "@/stores/confirm-store";
 
@@ -72,7 +73,7 @@ describe("busy gate", () => {
     requestSkill(B.resume!, pilotCtx);
     expect(requestSkill(B.resume!, pilotCtx)).toBe(false);
     expect(actions).toHaveLength(1);
-    expect(toasts).toEqual(["Resume: Another command has control"]);
+    expect(toasts).toEqual(["Resume: Waiting for the last answer"]);
   });
 
   it("frees the skill once its answer arrives", async () => {
@@ -141,5 +142,87 @@ describe("command path timeout", () => {
     await done;
     expect(useConfirmStore.getState().ack).toEqual({ text: "Resume: No answer from the drone", kind: "err" });
     expect(isSkillBusy(B.resume!)).toBe(false);
+  });
+});
+
+/** A plugin motion skill that is running, as its plugin reports it. */
+function runningFollow(): { skill: Skill; ctx: SkillContext } {
+  const skill: Skill = {
+    id: "p:follow",
+    label: "Follow",
+    category: "behavior",
+    confirm: { kind: "tap", ms: 0 },
+    armRequirement: "any",
+    extension: {
+      pluginId: "p",
+      pluginName: "P",
+      localId: "follow",
+      configKey: "active",
+      toggle: true,
+      stateTopic: "p.state",
+      motion: true,
+      nudge: false,
+      oneShot: false,
+      vehicleClasses: ["multirotor"],
+      defaultBinding: null,
+    },
+  };
+  const ctx: SkillContext = { ...pilotCtx, reported: { [skill.id]: { state: "active", at: Date.now() } } };
+  return { skill, ctx };
+}
+
+/** Record each plugin config write; none answers. */
+function recordWrites(): unknown[] {
+  const bodies: unknown[] = [];
+  vi.stubGlobal("fetch", (_url: string, init: RequestInit) => {
+    bodies.push(JSON.parse(String(init.body)));
+    return new Promise<Response>(() => {});
+  });
+  return bodies;
+}
+
+describe("a plugin motion skill's stop while its start is unanswered", () => {
+  it("goes out from a request", () => {
+    const { skill, ctx } = runningFollow();
+    const writes = recordWrites();
+    useSkillBusyStore.setState({ keys: { [`self::${skill.id}`]: true } });
+    expect(requestSkill(skill, ctx)).toBe(true);
+    expect(writes).toEqual([{ key: "active", value: false }]);
+    expect(toasts).toEqual([]);
+  });
+
+  it("goes out from the rail's stop slot", async () => {
+    const { skill } = runningFollow();
+    const writes = recordWrites();
+    useSkillBusyStore.setState({ keys: { [`self::${skill.id}`]: true } });
+    void executeSkill(skill, { active: true });
+    await vi.waitFor(() => expect(writes).toEqual([{ key: "active", value: false }]));
+    expect(toasts).toEqual([]);
+    // The start it overtook still holds the skill's busy mark.
+    expect(isSkillBusy(skill)).toBe(true);
+  });
+});
+
+describe("pause after this cockpit's own return home on the command route", () => {
+  afterEach(() => forgetCommandedModes());
+
+  it("is allowed while the flight controller flies the return it was sent", async () => {
+    const stale: SkillContext = {
+      fcConnected: true,
+      live: true,
+      armed: true,
+      pilot: { armed: true, landed: false, vehicleClass: "multirotor", fresh: false, fcFailsafe: false },
+      pilotLinkOpen: true,
+      fc: { mode: "LOITER", systemStatus: 4 },
+    };
+    ctxNow.ctx = stale;
+    const sent: string[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      sent.push(String(init.body));
+      return new Response(JSON.stringify({ status: "ok", ack: { observed: true, accepted: true } }), { status: 200 });
+    });
+    await executeSkill(B.rth!);
+    expect(sent.join()).toContain("rtl");
+    expect(resolveSkillState(B.pause!, { ...stale, fc: { mode: "RTL", systemStatus: 4 } }).enabled).toBe(true);
   });
 });

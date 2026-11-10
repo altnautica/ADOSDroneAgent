@@ -12,6 +12,9 @@ use super::ring::Ring;
 /// Chart history length: 120 samples, one per second.
 pub const VEHICLE_HISTORY: usize = 120;
 
+/// A local position older than this does not feed the chip (ms).
+pub const LOCAL_POSITION_FRESH_MS: u64 = 2000;
+
 fn f(v: &Value, path: &[&str]) -> Option<f64> {
     walk(v, path)
         .and_then(Value::as_f64)
@@ -67,7 +70,9 @@ pub struct Telemetry {
     pub prearm: Option<Vec<String>>,
     /// Metres from home, when the route reports it.
     pub home_distance: Option<f64>,
-    /// The FC's local position (north, east), metres about the NED origin.
+    /// The FC's local position (north, east), metres about the NED origin,
+    /// while at most `LOCAL_POSITION_FRESH_MS` old (the agent passes it on
+    /// until 5 s); an unknown age is not fresh.
     pub local_pos: Option<(f64, f64)>,
 }
 
@@ -119,7 +124,13 @@ impl Telemetry {
                     .collect()
             }),
             home_distance: f(v, &["home_distance"]),
-            local_pos: f(v, &["local_position", "x"]).zip(f(v, &["local_position", "y"])),
+            local_pos: f(v, &["local_position", "x"])
+                .zip(f(v, &["local_position", "y"]))
+                .filter(|_| {
+                    walk(v, &["local_position", "age_ms"])
+                        .and_then(Value::as_u64)
+                        .is_some_and(|a| a <= LOCAL_POSITION_FRESH_MS)
+                }),
         }
     }
 }
@@ -374,5 +385,20 @@ mod tests {
         assert!(is_msp(Some("betaflight"), None));
         assert!(is_msp(None, Some("inav")));
         assert!(!is_msp(Some("ardupilot"), None));
+    }
+
+    #[test]
+    fn a_local_position_older_than_two_seconds_is_dropped() {
+        let at = |age: Value| {
+            Telemetry::from_value(&json!({
+                "attitude": {"roll": 0.0, "pitch": 0.0, "yaw": 0.0},
+                "local_position": {"x": 12.0, "y": -3.5, "z": -4.0, "age_ms": age}
+            }))
+            .local_pos
+        };
+        assert_eq!(at(json!(2000)), Some((12.0, -3.5)));
+        assert_eq!(at(json!(2001)), None);
+        assert_eq!(at(json!(4900)), None, "the agent passes it on until 5 s");
+        assert_eq!(at(Value::Null), None, "an unknown age is not fresh");
     }
 }

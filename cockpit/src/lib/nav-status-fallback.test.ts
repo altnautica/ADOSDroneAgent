@@ -4,7 +4,16 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { connectNavStream, NAV_STATUS_POLL_MS, NAV_STREAM_FALLBACK_MS, pollNavStatus, setViewLease } from "@/lib/nav-stream";
+import { layerFrames } from "@/lib/layer-frames";
+import {
+  connectNavStream,
+  NAV_STATUS_POLL_MS,
+  NAV_STATUS_TIMEOUT_MS,
+  NAV_STREAM_FALLBACK_MS,
+  pollNavStatus,
+  setViewLease,
+} from "@/lib/nav-stream";
+import { HIDE_AFTER_MS } from "@/shared/hud/layer-engine";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 vi.mock("@/shared/ws-ticket", () => ({ WS_TICKET_PROTOCOL: "ticket", mintWsTicket: async () => null }));
@@ -134,5 +143,81 @@ describe("stream fallback", () => {
     expect(statusPolls()).toBeGreaterThan(0);
     expect(useNavStreamStore.getState().radioFallback).toBe(false);
     stop();
+  });
+
+  it("aborts a hung status read after its timeout and drops the reduced rate", async () => {
+    let calls = 0;
+    let aborted = 0;
+    const stop = connectNavStream();
+    await vi.advanceTimersByTimeAsync(NAV_STREAM_FALLBACK_MS + NAV_STATUS_POLL_MS * 2);
+    expect(useNavStreamStore.getState().radioFallback).toBe(true);
+    vi.stubGlobal("fetch", hangingFetch(() => calls++, () => aborted++, { release: null }));
+    await vi.advanceTimersByTimeAsync(NAV_STATUS_TIMEOUT_MS * 4);
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(aborted).toBeGreaterThanOrEqual(1);
+    expect(useNavStreamStore.getState().radioFallback).toBe(false);
+    stop();
+  });
+
+  it("drops an in-flight status read when the stream opens", async () => {
+    const held: { release: (() => void) | null } = { release: null };
+    vi.stubGlobal("fetch", hangingFetch(() => {}, () => {}, held));
+    const stop = connectNavStream();
+    await vi.advanceTimersByTimeAsync(NAV_STREAM_FALLBACK_MS + 10);
+    expect(held.release).not.toBeNull();
+    FakeSocket.last!.open();
+    held.release!();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(useNavStreamStore.getState().pilot).toBeNull();
+    stop();
+  });
+});
+
+/** A read that hangs until its signal aborts; `held.release` answers it. */
+function hangingFetch(onCall: () => void, onAbort: () => void, held: { release: (() => void) | null }) {
+  return (url: string, init?: { signal?: AbortSignal }) => {
+    urls.push(url);
+    onCall();
+    return new Promise<Response>((resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        onAbort();
+        reject(new DOMException("aborted", "AbortError"));
+      });
+      held.release = () =>
+        resolve(new Response(JSON.stringify(STATUS), { status: 200, headers: { "Content-Type": "application/json" } }));
+    });
+  };
+}
+
+describe("fallback layer frames", () => {
+  const LAYERS = (ageMs: number) => ({
+    ar: { ts_ms: 7, age_ms: ageMs, data: { ts_ms: 7, cameras: { main: { frame_w: 4, frame_h: 3, items: [] } } } },
+    obstacles: { ts_ms: 7, age_ms: ageMs, data: { ts_ms: 7, sectors_m: [], cameras: {} } },
+    depth: { ts_ms: 7, age_ms: ageMs, data: { ts_ms: 7, cameras: {} } },
+    surfaces: { ts_ms: 7, age_ms: ageMs, data: { ts_ms: 7, camera_id: "main", zones: [] } },
+  });
+  const slots = () => [layerFrames.ar, layerFrames.obstacles, layerFrames.depth, layerFrames.surfaces];
+
+  beforeEach(() => layerFrames.clear());
+  afterEach(() => vi.restoreAllMocks());
+
+  it("stamps each layer frame with its age on the drone, so an old one hides", async () => {
+    vi.spyOn(performance, "now").mockReturnValue(100_000);
+    body = LAYERS(3000);
+    await pollNavStatus();
+    for (const s of slots()) {
+      expect(s.data).not.toBeNull();
+      expect(100_000 - s.seen).toBeGreaterThan(HIDE_AFTER_MS);
+    }
+  });
+
+  it("a repeat of a frame older than the hide age is no refresh", async () => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(100_000);
+    body = LAYERS(100);
+    await pollNavStatus();
+    now.mockReturnValue(105_000);
+    body = LAYERS(5100);
+    await pollNavStatus();
+    for (const s of slots()) expect(105_000 - s.seen).toBeGreaterThan(HIDE_AFTER_MS);
   });
 });

@@ -48,4 +48,19 @@ describe("dashboard flight-state chip", () => {
     });
     expect(JSON.stringify(chip)).toContain("ORBIT 8 m");
   });
+
+  it("measures the goal distance only from a local position at most 2 s old", () => {
+    const gotoPilot = { ...pilot, owner: "goto" };
+    const chip = (age_ms: number | undefined) =>
+      navStatusChip({
+        ...base,
+        body: { pilot: { age_ms: 100, data: gotoPilot } },
+        telemetry: { home_distance: null, local_position: { x: 0, y: 0, age_ms } },
+      })!.text;
+    // goal_ned (12, -3.5) from the origin: 12.5 m, shown whole.
+    expect(chip(2_000)).toBe("GOTO · 13 m");
+    expect(chip(2_001)).not.toContain("13");
+    expect(chip(5_000)).not.toContain("13");
+    expect(chip(undefined)).not.toContain("13");
+  });
 });

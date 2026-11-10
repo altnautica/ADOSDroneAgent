@@ -3,13 +3,15 @@
 // PreArm/Arm texts from the last 10 s), the vehicle link, GNSS, battery and
 // home from the telemetry, the controller (when ADOS Pilot flies the sticks)
 // and on-board storage. A failing blocker keeps "Checks done" disabled;
-// warnings are shown and accepted by passing.
+// warnings are shown and accepted by passing. A stale pilot state's items
+// read not reported and fail, so a frozen frame never passes the first arm.
 
 import { useEffect, useState } from "react";
 import { CircleAlert, CircleCheck, CircleX } from "lucide-react";
 
 import { Sheet } from "@/components/ui/sheet";
 import { usePadStatus } from "@/hooks/use-gamepad";
+import { useNow } from "@/hooks/use-now";
 import { usePilot } from "@/hooks/use-pilot";
 import { checklistPassable, fcPrearmItem, storageItem, type ChecklistItem } from "@/lib/cockpit-flow";
 import { preflightChecks } from "@/lib/safety-band";
@@ -19,6 +21,8 @@ import { specText } from "@/shared/hud/spec-text";
 import { useFlightStore } from "@/stores/flight-store";
 import { usePreflightStore } from "@/stores/preflight-store";
 import { useStatusStore } from "@/stores/status-store";
+
+import { pilotReadinessItems } from "./preflight-items";
 
 function useStoragePct(): number | null {
   const [pct, setPct] = useState<number | null>(null);
@@ -35,7 +39,10 @@ function useStoragePct(): number | null {
 export function PreflightSheet() {
   const pass = usePreflightStore((s) => s.pass);
   const dismiss = usePreflightStore((s) => s.dismiss);
-  const pilot = usePilot()?.data ?? null;
+  const stamped = usePilot();
+  // Ages the pilot's items out with no new frame to re-render them.
+  const now = useNow(stamped ? 500 : null);
+  const pilot = stamped?.data ?? null;
   const telemetry = useFlightStore((s) => s.telemetry);
   const live = useFlightStore((s) => s.live);
   const home = useFlightStore((s) => s.home);
@@ -43,10 +50,7 @@ export function PreflightSheet() {
   const pad = usePadStatus();
   const storage = useStoragePct();
 
-  const items: ChecklistItem[] = [];
-  for (const r of pilot?.readiness ?? []) {
-    items.push({ id: `pilot:${r.id}`, label: r.msg || r.id, state: r.ok ? "pass" : r.severity === "block" ? "fail" : "warn" });
-  }
+  const items: ChecklistItem[] = pilotReadinessItems(stamped, now);
   const prearm = fcPrearmItem(telemetry?.prearm);
   if (prearm) items.push(prearm);
   for (const c of preflightChecks({ telemetry, battery, live, home })) {

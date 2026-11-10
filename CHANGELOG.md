@@ -6,6 +6,25 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.96] - 2026-11-10
+
+### Fixed
+
+- Cockpit: the controller emergency stop (L2+R2+Circle held) and return home (Options+Circle held) complete with a sheet open. Circle no longer closes the sheet mid-combo, and a completed pad hold sends its action at once.
+- Cockpit: a pending choice in the Mode sheet never greys out the flight controller's return, landing or brake modes or the hand-over, and stopping the motion skills no longer waits on a plugin answer first.
+- Cockpit: Pause is refused during a flight controller failsafe even when the pilot state is stale: a return or landing this cockpit did not command, or a critical or emergency heartbeat, counts as a failsafe.
+- Cockpit: dragging to pick a target maps through the digital zoom; the zoom resets when the video moves into the map card, and a photo saves the zoomed view.
+- Cockpit: in the reduced-rate radio fallback each layer keeps its real age, a hung status read times out after 1 s, and a status read in flight is dropped when the stream reopens.
+- Cockpit: the left column, Mode sheet and pre-flight checks ignore a pilot state older than 2 s.
+- Cockpit: tips never sit over the launch, hand-over or link-loss banners; the controller tour leaves the controller to the safety bindings until the drone is known to be on the ground, and stays below the top bar on short screens.
+- Cockpit: Fly Here and camera answers read in words (not supported, not authorized, failsafe), camera requests time out, the camera list refreshes when the flight controller connects, and the Fly Here height stays within the launch ceiling.
+- Cockpit: a launch Abort refused from the chip or banner shows its reason; a plugin skill's stop is never held back while its start is pending.
+- Command route: `reposition` no longer switches the flight controller to GUIDED. It is refused while a failsafe is active or the flight controller is returning or landing, and the point (0, 0) is refused.
+- Camera commands only accept the acknowledgement of the addressed camera, and a photo capture is never resent.
+- Vehicle state publishes the heartbeat system status.
+- Dashboard: one shared navigation poller; the depth and surfaces toggles start the vision engine; a stale pilot hides the link-loss, height and sticks lines; the status pill reads the flight controller link, not the HTTP answer, and lists failing pre-flight checks.
+- Terminal UI: pilot rows dim on the same aged state as the chip, and an old local position no longer feeds the distance.
+
 ## [0.109.95] - 2026-11-10
 
 ### Changed

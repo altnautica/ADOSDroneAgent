@@ -15,8 +15,14 @@ export interface VehicleTelemetry {
   position?: { lat?: number | null; lon?: number | null; alt_rel?: number | null };
   /** Distance to home (m), when the agent supplies it. */
   home_distance?: number | null;
-  /** LOCAL_POSITION_NED (m), null until the FC sent one. */
-  local_position?: { x: number; y: number } | null;
+  /** The FC's home position, absent until it reported one. */
+  home?: { lat_e7?: number | null; lon_e7?: number | null } | null;
+  /** LOCAL_POSITION_NED (m) and its age, null until the FC sent one. The
+   *  agent passes it through until it is 5 s old. */
+  local_position?: { x: number; y: number; age_ms?: number | null } | null;
+  /** The vehicle's own stamps; one moving says the readings are current. */
+  last_update?: string | null;
+  last_heartbeat?: string | null;
   /** The FC's PreArm/Arm STATUSTEXT from the last 10 s; absent while the FC link is down. */
   prearm?: string[];
 }

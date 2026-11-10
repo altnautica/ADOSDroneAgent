@@ -129,7 +129,8 @@ export function FollowRail({
         const word = followButton(follow.state.active === true, phase, designated);
         if (word === null) return null;
         if (word === "tracking") {
-          // Stop is a tap: stopping makes the vehicle hold.
+          // Stop is a tap: stopping makes the vehicle hold, so it never waits
+          // behind the start that is still awaiting its answer.
           return (
             <RailSlot
               key={b}
@@ -138,7 +139,6 @@ export function FollowRail({
               word={specText("follow.tracking_close")}
               label={specText("follow.stop_tracking")}
               active
-              disabled={busy}
               onPress={() => void executeSkill(follow.skill, { active: true })}
             />
           );

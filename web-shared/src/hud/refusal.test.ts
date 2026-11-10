@@ -50,6 +50,12 @@ describe("refusal text", () => {
     expect(refusalText(null)).toBe("Refused");
     expect(refusalText("")).toBe("Refused");
   });
+
+  it("never looks up a template key as a code, so no empty prefix shows", () => {
+    expect(refusalText("unknown")).toBe("Refused: unknown");
+    expect(refusalText("not_ready")).toBe("Refused: not_ready");
+    expect(refusalText("fly_here_prefix")).toBe("Refused: fly_here_prefix");
+  });
 });
 
 describe("refusal golden cases (fixtures/refusal-cases.json)", () => {

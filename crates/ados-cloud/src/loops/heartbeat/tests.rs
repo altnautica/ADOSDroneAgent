@@ -96,7 +96,7 @@ fn base() -> HeartbeatBase {
 
 #[test]
 fn folded_video_legs_advertise_a_same_origin_whep_path_only() {
-    // VID-09: the GCS must never be handed an absolute `host:port` media
+    // The GCS must never be handed an absolute `host:port` media
     // endpoint. The agent proxies `/whep?camera=<id>` on its own :8080
     // (behind the media-auth gate); `:8889/<id>/whep` is a name it does not
     // serve, cannot resolve off-LAN, and is mixed content under an HTTPS

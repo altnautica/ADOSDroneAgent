@@ -3,7 +3,7 @@
 // Each animation frame it reads the active pad, conditions the sticks (per-pad
 // calibration, radial deadzone) and publishes one sample to the input store,
 // which the stick stream (`usePilotInput`) and the Settings › Controls drawing
-// both read. Then:
+// both read. Then `PadRouter` (`pad-router.ts`) routes the sample:
 // - on the Feed, the gesture engine turns the sample into the `ds4.json`
 //   bindings and fires them through `runCockpitAction` (sticks fly, L2/R2
 //   drive the gimbal rate, PS brakes, …), with rumble for holds, mode changes
@@ -20,24 +20,14 @@
 
 import { useEffect, useState } from "react";
 
+import { padRoute, PadRouter } from "@/hooks/pad-router";
 import { useProfile } from "@/shared/use-profile";
-import { runCockpitAction } from "@/lib/cockpit-actions";
-import { publishGamepadButtons } from "@/lib/gamepad-bus";
 import { isKiosk } from "@/lib/kiosk";
 import { padDisplayName, padKindOf } from "@/lib/pad/art";
 import { conditionSticks } from "@/lib/pad/conditioning";
-import { BUTTON_INDEX, cockpitActionId, type ControlId, type PadBinding } from "@/lib/pad/ds4-map";
-import {
-  GestureEngine,
-  gimbalPitchRate,
-  NATIVE_ACTIONS,
-  type EngineContext,
-  type EngineEvent,
-  type HoldProgress,
-  type PadFrame,
-} from "@/lib/pad/gesture-engine";
-import { pilotFeedback, playPattern, playPulse, type FeedbackView } from "@/lib/pad/rumble";
-import type { NavCommand } from "@/nav/navigator";
+import { BUTTON_INDEX } from "@/lib/pad/ds4-map";
+import type { EngineContext } from "@/lib/pad/gesture-engine";
+import { pilotFeedback, playPattern, type FeedbackView } from "@/lib/pad/rumble";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { specText } from "@/shared/hud/spec-text";
 import { overlayOpen } from "@/stores/cockpit-ui-store";
@@ -46,19 +36,6 @@ import { useInputStore, type PadSample } from "@/stores/input-store";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
-/** Menu navigation off the Feed (standard-mapping indices). */
-const NAV_COMMANDS: Readonly<Record<number, NavCommand>> = {
-  0: "activate",
-  1: "back",
-  9: "quick-menu",
-  12: "prev",
-  13: "next",
-  14: "prev",
-  15: "next",
-};
-
-const AXIS_THRESHOLD = 0.6;
-const AXIS_REPEAT_MS = 220;
 /** How often a ground-station kiosk re-reads the station's input state. */
 const GROUND_INPUT_POLL_MS = 5000;
 const RTH_MODES = ["RTL", "SMART_RTL", "QRTL"];
@@ -104,13 +81,6 @@ function sampleOf(pad: Gamepad): PadSample {
   };
 }
 
-/** A sample as the engine's frame. */
-export function padFrame(s: PadSample, t: number): PadFrame {
-  const pressed: Partial<Record<ControlId, boolean>> = {};
-  for (const [control, i] of Object.entries(BUTTON_INDEX) as [ControlId, number][]) pressed[control] = s.pressed[i] === true;
-  return { t, pressed, l2: s.l2, r2: s.r2, stickL: s.sticks.l };
-}
-
 function pilotNow(): PilotState | null {
   return useNavStreamStore.getState().pilot?.data ?? null;
 }
@@ -132,27 +102,6 @@ function engineContext(): EngineContext {
     vehicleVtol: p?.vehicleClass === "vtol",
     nativeSafety: nativeInputActive(),
   };
-}
-
-function sameHolds(a: readonly HoldProgress[], b: readonly HoldProgress[]): boolean {
-  return a.length === b.length && a.every((h, i) => h.action === b[i].action && Math.abs(h.progress - b[i].progress) < 0.01);
-}
-
-/** Where the pad goes: `flight` (every binding) on the bare Feed; `overlay`
- *  when the Menu or a sheet or dialog is open over the Feed, which the nav
- *  commands drive (Circle closes it) while the safety bindings (pause, RTH,
- *  cancel RTH, arm, kill) stay live; `nav` on every other screen. */
-export type PadRoute = "flight" | "overlay" | "nav";
-
-export function padRoute(onFeedScreen: boolean, menuOpen: boolean, overlay: boolean): PadRoute {
-  if (!onFeedScreen) return "nav";
-  return menuOpen || overlay ? "overlay" : "flight";
-}
-
-/** The bindings that stay live under an overlay: the safety actions (pause,
- *  RTH, cancel RTH, arm, kill) and every locked row. */
-export function safetyBindings(rows: readonly PadBinding[]): PadBinding[] {
-  return rows.filter((b) => b.locked || NATIVE_ACTIONS[b.action] === true);
 }
 
 export function feedbackView(p: PilotState): FeedbackView {
@@ -198,31 +147,19 @@ export function useGamepad(): GamepadState {
     let raf = 0;
     let preferred: number | null = null;
     let wasConnected = false;
-    let prevPressed: boolean[] = [];
-    let lastAxisFire = 0;
-    let route: PadRoute = "nav";
     let lastPad: Gamepad | null = null;
-    const engine = new GestureEngine(useControlsStore.getState().bindings);
-    // Under an overlay only the safety rows run, on their own engine,
-    // so no other binding fires, rumbles or draws a hold ring there.
-    const safety = new GestureEngine(safetyBindings(useControlsStore.getState().bindings));
-    const offBindings = useControlsStore.subscribe((s, prev) => {
-      if (s.bindings === prev.bindings) return;
-      engine.setBindings(s.bindings);
-      safety.setBindings(safetyBindings(s.bindings));
+    const router = new PadRouter(useControlsStore.getState().bindings, {
+      command,
+      route: () => {
+        const nav = useNavStore.getState();
+        return padRoute(activeScreenId(nav) === "feed", nav.quickMenuOpen, overlayOpen());
+      },
+      context: engineContext,
+      pad: () => lastPad,
     });
-
-    const dispatch = (events: EngineEvent[]) => {
-      for (const e of events) {
-        if (e.kind === "rumble") {
-          if (e.pattern === "pulse") playPulse(lastPad, e.intensity, e.ms);
-          else playPattern(lastPad, e.pattern);
-          continue;
-        }
-        const id = cockpitActionId(e.action);
-        if (id) runCockpitAction(id, e.phase);
-      }
-    };
+    const offBindings = useControlsStore.subscribe((s, prev) => {
+      if (s.bindings !== prev.bindings) router.setBindings(s.bindings);
+    });
 
     const onConnect = (e: GamepadEvent) => {
       preferred = e.gamepad.index;
@@ -251,66 +188,16 @@ export function useGamepad(): GamepadState {
         wasConnected = pad != null;
         setConnected(wasConnected);
       }
-      const input = useInputStore.getState();
       if (!pad) {
-        if (input.pad) {
-          dispatch(engine.reset());
-          dispatch(safety.reset());
+        if (useInputStore.getState().pad) {
+          router.lost();
           useInputStore.setState({ pad: null, holds: [], gimbalRateDps: 0, padAnnounced: false });
         }
-        prevPressed = [];
         return;
       }
-
       const sample = sampleOf(pad);
       useControlsStore.getState().setPadKind(sample.kind);
-      useInputStore.setState({ pad: sample, padAnnounced: true });
-      const pressed = sample.pressed;
-      const was = prevPressed;
-      prevPressed = pressed;
-      publishGamepadButtons(pressed);
-      if (pressed.some((p, i) => p && !was[i])) input.setSource("gamepad");
-      if (input.capture) return;
-
-      const nav = useNavStore.getState();
-      const next = padRoute(activeScreenId(nav) === "feed", nav.quickMenuOpen, overlayOpen());
-      if (next !== route) {
-        if (route === "flight") dispatch(engine.reset());
-        if (route === "overlay") dispatch(safety.reset());
-        useInputStore.setState({ holds: [], gimbalRateDps: 0 });
-      }
-      route = next;
-
-      if (!sample.standard) return;
-      if (route !== "nav") {
-        const now = performance.now();
-        const frame = padFrame(sample, now);
-        const ctx = engineContext();
-        const active = route === "flight" ? engine : safety;
-        dispatch(active.step(frame, ctx));
-        const holds = active.holds(frame, ctx);
-        if (!sameHolds(holds, input.holds)) useInputStore.setState({ holds });
-        if (route === "flight") {
-          const rate = gimbalPitchRate(useControlsStore.getState().bindings, sample.l2, sample.r2);
-          if (Math.abs(rate - input.gimbalRateDps) > 0.05) useInputStore.setState({ gimbalRateDps: rate });
-          return;
-        }
-      }
-
-      for (const [indexStr, cmd] of Object.entries(NAV_COMMANDS)) {
-        const i = Number(indexStr);
-        if (pressed[i] && !was[i]) command(cmd);
-      }
-      const axisY = sample.sticks.l[1];
-      const now = performance.now();
-      if (Math.abs(axisY) >= AXIS_THRESHOLD) {
-        if (now - lastAxisFire >= AXIS_REPEAT_MS) {
-          command(axisY < 0 ? "prev" : "next");
-          lastAxisFire = now;
-        }
-      } else {
-        lastAxisFire = 0;
-      }
+      router.step(sample, performance.now());
     };
 
     raf = requestAnimationFrame(poll);
@@ -320,7 +207,7 @@ export function useGamepad(): GamepadState {
       window.removeEventListener("gamepaddisconnected", onDisconnect);
       offBindings();
       offPilot();
-      dispatch(engine.reset());
+      router.dispose();
     };
   }, [command]);
 

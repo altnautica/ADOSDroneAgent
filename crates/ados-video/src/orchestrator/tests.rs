@@ -137,7 +137,7 @@ async fn re_applying_the_same_profile_is_a_no_op_not_an_encoder_restart() {
 
 #[tokio::test]
 async fn a_sub_threshold_ceiling_change_holds_the_rung_instead_of_respawning() {
-    // VID-04: the radio half of the adaptive loop retunes FEC and MCS
+    // The radio half of the adaptive loop retunes FEC and MCS
     // through the wfb_tx management socket at no video cost; the encoder
     // half's only actuator is a respawn — a fresh SPS/PPS, a decoder reset
     // and a ~1-2 s black frame. A clamp that moves the bitrate less than

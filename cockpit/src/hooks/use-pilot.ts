@@ -8,7 +8,7 @@ import { useActiveSkillDetail } from "@/hooks/use-follow-skill";
 import { useNow } from "@/hooks/use-now";
 import { layerFrames } from "@/lib/layer-frames";
 import { PILOT_SESSION } from "@/lib/pilot-link";
-import { chipInputs } from "@/shared/hud/chip-inputs";
+import { chipInputs, freshLocalPos } from "@/shared/hud/chip-inputs";
 import type { ArFrame, PilotState } from "@/shared/hud/cockpit-frames";
 import { flightStateChip, type ChipView } from "@/shared/hud/flight-state";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
@@ -59,7 +59,7 @@ export function useFlightChip(): ChipView | null {
   return flightStateChip(
     chipInputs(pilot.data, now, pilot.at, {
       homeDistM,
-      localPos,
+      localPos: freshLocalPos(localPos),
       modeDetail: skillDetail,
       completeAgeMs: completeAt === null ? null : now - completeAt,
       ...currentArFrame(),

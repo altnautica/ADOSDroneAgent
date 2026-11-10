@@ -8,6 +8,7 @@ import tips from "../cockpit-spec/tips.json";
 import tokens from "../cockpit-spec/tokens.json";
 import views from "../cockpit-spec/views.json";
 import holdReasons from "./fixtures/hold-reasons.json";
+import { PILL_SOURCES } from "./status-pill";
 
 const S: Record<string, string> = strings.strings;
 const HOLD: Record<string, string> = flightState.hold_reason_labels;
@@ -174,6 +175,14 @@ describe("status pill sources", () => {
     expect(S[layout.status_pill.storage_text]).toBe("{pct} % used");
   });
 
+  it("words every pill source and lists it in the layout", () => {
+    for (const s of PILL_SOURCES) {
+      expect(S[`cockpit.status.source.${s}`], s).toBeTruthy();
+    }
+    expect([...layout.status_pill.sources].sort()).toEqual([...PILL_SOURCES].sort());
+    expect(S["cockpit.status.source.video"]).toBe("Video");
+  });
+
   it("colours both countdowns critical", () => {
     expect(layout.banners.severity).toEqual({ low_battery_rth: "critical", link_loss: "critical" });
   });
@@ -214,6 +223,14 @@ describe("words every surface shares", () => {
     ]) {
       expect(S[k], k).toBeTruthy();
     }
+  });
+
+  it("has the pending, photo taken and command timeout words", () => {
+    expect(S["refusal.pending"]).toBe("Waiting for the last answer");
+    expect(S["camera.capture_sent"]).toBe("Photo taken");
+    expect(S["mav_result.TIMEOUT"]).toBe(S["refusal.no_response"]);
+    expect(S["flow.mode.stale"]).toBe("No answer from ADOS Pilot: current values unknown (—)");
+    expect(S["refusal.not_authorized"]).toBe("Not authorized on this drone");
   });
 });
 

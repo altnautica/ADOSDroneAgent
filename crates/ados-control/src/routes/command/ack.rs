@@ -74,6 +74,18 @@ pub(crate) async fn send_awaiting_ack<C: AckedCommand>(
     cmd: &C,
     cfg: &AckConfig,
 ) -> Result<AckOutcome, crate::ipc::mavlink_client::SendError> {
+    send_awaiting_ack_from(client, cmd, cfg, None).await
+}
+
+/// [`send_awaiting_ack`] that also requires the ACK's header `component_id` to
+/// be `component` when it is `Some`: a camera write addressed to one component
+/// never takes the ACK another camera on the same vehicle sent.
+pub(crate) async fn send_awaiting_ack_from<C: AckedCommand>(
+    client: &MavlinkIpcClient,
+    cmd: &C,
+    cfg: &AckConfig,
+    component: Option<u8>,
+) -> Result<AckOutcome, crate::ipc::mavlink_client::SendError> {
     let expected_cmd = cmd.command();
     let expected_src = cmd.target_system();
 
@@ -119,7 +131,9 @@ pub(crate) async fn send_awaiting_ack<C: AckedCommand>(
             }
             match stream.read_frame(deadline - now).await {
                 FrameRead::Frame(payload) => {
-                    if let Some(result) = match_command_ack(&payload, expected_cmd, expected_src) {
+                    if let Some(result) =
+                        match_command_ack(&payload, expected_cmd, expected_src, component)
+                    {
                         if result == MAV_RESULT_IN_PROGRESS {
                             // Accepted and executing: wait longer for a final
                             // result and stop resending.
@@ -177,15 +191,21 @@ pub(crate) async fn send_awaiting_ack<C: AckedCommand>(
 /// field, so this source-system fallback is the correlation key. A frame that is
 /// not a parseable `COMMAND_ACK`, is for another command, or is from another
 /// system returns `None`.
+///
+/// Given `Some(component)`, the ACK's header `component_id` must also be that
+/// component (a camera write).
 pub(super) fn match_command_ack(
     frame: &[u8],
     expected_cmd: MavCmd,
     expected_src_system: u8,
+    expected_src_component: Option<u8>,
 ) -> Option<u8> {
     let (header, msg) = mavlink::parse_any(frame).ok()?;
     match msg {
         MavMessage::COMMAND_ACK(ack)
-            if ack.command == expected_cmd && header.system_id == expected_src_system =>
+            if ack.command == expected_cmd
+                && header.system_id == expected_src_system
+                && expected_src_component.is_none_or(|c| header.component_id == c) =>
         {
             Some(ack.result as u8)
         }

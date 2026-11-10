@@ -12,7 +12,7 @@ import { useNow } from "@/hooks/use-now";
 import { useVehicleTelemetry, type VehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
 import { skillDetailFromState, skillStateTopic } from "@/shared/hud/skill-detail";
 import { apiFetch } from "@/shared/api-fetch";
-import { chipInputs } from "@/shared/hud/chip-inputs";
+import { chipInputs, freshLocalPos } from "@/shared/hud/chip-inputs";
 import { parseArFrame, parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { flightStateChip, type ChipView } from "@/shared/hud/flight-state";
 
@@ -42,7 +42,9 @@ export function navStatusChip(s: ChipSources): ChipView | null {
   return flightStateChip(
     chipInputs(pilot, s.nowMs, s.receivedAtMs - (entry.age_ms ?? 0), {
       homeDistM: s.telemetry?.home_distance ?? null,
-      localPos: s.telemetry?.local_position ?? null,
+      // The agent passes a local position through until 5 s old; the chip
+      // measures only from one at most 2 s old.
+      localPos: freshLocalPos(s.telemetry?.local_position),
       arFrame: ar ? parseArFrame(ar.data) : null,
       arAgeMs: ar ? s.nowMs - s.receivedAtMs + (ar.age_ms ?? 0) : 0,
       modeDetail: s.modeDetail,

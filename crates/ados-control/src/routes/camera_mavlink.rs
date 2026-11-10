@@ -52,7 +52,7 @@ use ados_protocol::mavlink::{self, MavHeader};
 
 use crate::ipc::mavlink_client::SendError;
 use crate::ipc::{FrameRead, MavlinkIpcClient};
-use crate::routes::command::ack::{mav_result_name, send_awaiting_ack};
+use crate::routes::command::ack::{mav_result_name, send_awaiting_ack_from};
 use crate::routes::command::{
     AckConfig, AckOutcome, MAV_RESULT_ACCEPTED, MAV_RESULT_IN_PROGRESS, SOURCE_COMPONENT_ID,
     SOURCE_SYSTEM_ID,
@@ -343,10 +343,16 @@ async fn resolve(state: &AppState, component: u8, needs: Needs) -> Result<u8, Re
 }
 
 /// Send `long` and answer `{"ok", "result", "component_id", "statustext"?}`.
-async fn send(state: &AppState, long: COMMAND_LONG_DATA) -> Response {
+/// The ACK must come from the addressed camera component, so concurrent writes
+/// to two cameras of one vehicle never take each other's answer. `resend`
+/// false sends once: a resent capture whose ACK was lost shoots twice.
+async fn send(state: &AppState, long: COMMAND_LONG_DATA, resend: bool) -> Response {
     let component = long.target_component;
-    let ack = state.mavlink_cameras.timing.ack;
-    match send_awaiting_ack(&state.mavlink, &long, &ack).await {
+    let mut ack = state.mavlink_cameras.timing.ack;
+    if !resend {
+        ack.retries = 0;
+    }
+    match send_awaiting_ack_from(&state.mavlink, &long, &ack, Some(component)).await {
         Ok(outcome) => {
             let mut body = json!({ "component_id": component });
             match outcome {
@@ -415,7 +421,7 @@ pub async fn post_capture(
         Ok(system) => system,
         Err((status, why)) => return detail(status, why),
     };
-    send(&state, capture_command((system, req.component_id))).await
+    send(&state, capture_command((system, req.component_id)), false).await
 }
 
 /// How a zoom `value` is read.
@@ -475,6 +481,7 @@ pub async fn post_zoom(State(state): State<AppState>, Json(req): Json<ZoomReques
     send(
         &state,
         zoom_command((system, req.component_id), zoom_type, value),
+        true,
     )
     .await
 }

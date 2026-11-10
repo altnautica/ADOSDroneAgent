@@ -12,7 +12,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTourStage } from "@/components/controls/tour-stage";
 import { pilotFresh } from "@/shared/hud/pilot-fresh";
 import { skillVisibleFor } from "@/lib/skills";
-import tipsJson from "@/shared/cockpit-spec/tips.json";
 import { gotoAdvertised } from "@/shared/hud/fly-here-offer";
 import { specText } from "@/shared/hud/spec-text";
 import { placeTip, TIPS, type TipPlacement, type TipRect } from "@/shared/hud/tips";
@@ -25,23 +24,10 @@ import { activeScreenId, useNavStore } from "@/stores/nav-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { alertBannerVisible, useTipsStore, type TipsScreen } from "@/stores/tips-store";
 
-/** Each spec anchor and zone, as the element that carries it on the Feed. */
-const TIP_SELECTORS: Readonly<Record<string, string>> = {
-  status_pill: "[data-zone=status_pill]",
-  flight_state_chip: "[data-testid=flight-state-chip]",
-  layer_button: "[data-zone=layer_button]",
-  stop: "[data-zone=stop]",
-  skill_picker_chip: "[data-testid=skill-picker-chip]",
-  bottom_left_card: "[data-zone=bottom_left_card]",
-  gimbal_pad: "[data-zone=gimbal_pad]",
-  left_column: "[data-zone=left_column]",
-  top_bar: "[data-zone=top_bar]",
-  alert_stack: "[data-zone=alert_stack]",
-};
+import { elementRect, TIP_SELECTORS, tipAvoidRects, visibleRect } from "./tip-rects";
 
 /** Each anchor once. */
 const ANCHORS: readonly string[] = TIPS.map((t) => t.anchor).filter((a, i, all) => all.indexOf(a) === i);
-const NEVER_COVER: readonly string[] = tipsJson.rules.never_cover_zones;
 
 /** How often the layer re-reads the screen, ms. */
 const TICK_MS = 250;
@@ -49,29 +35,9 @@ const TICK_MS = 250;
 const TIP_MAX_W_PX = 260;
 const TIP_TEXT_PX = 13;
 
-/** The element's rect when it is laid out and on screen, else null. */
-function visibleRect(selector: string): TipRect | null {
-  const el = document.querySelector(selector);
-  return el ? elementRect(el) : null;
-}
-
-/** The element's rect when it is laid out and on screen, else null. */
-function elementRect(el: Element): TipRect | null {
-  const r = el.getBoundingClientRect();
-  if (r.width <= 0 || r.height <= 0) return null;
-  if (r.right <= 0 || r.bottom <= 0 || r.left >= window.innerWidth || r.top >= window.innerHeight) return null;
-  if (getComputedStyle(el).visibility === "hidden") return null;
-  return { x: r.left, y: r.top, w: r.width, h: r.height };
-}
-
-/** Beside `anchor` in the window, clear of every `never_cover_zones` rect (the top
- *  bar among them, so a tip never hides the bar's own readouts). */
+/** Beside `anchor` in the window, clear of every `tipAvoidRects` rect. */
 function placeFor(anchor: TipRect, size: { w: number; h: number }): TipPlacement | null {
-  const avoid = NEVER_COVER.flatMap((z) => {
-    const r = TIP_SELECTORS[z] ? visibleRect(TIP_SELECTORS[z]) : null;
-    return r ? [r] : [];
-  });
-  return placeTip(anchor, size, { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight }, avoid);
+  return placeTip(anchor, size, { x: 0, y: 0, w: window.innerWidth, h: window.innerHeight }, tipAvoidRects());
 }
 
 interface Shown {
@@ -190,6 +156,12 @@ export function TipLayer({ gimbalAvailable, scale }: { gimbalAvailable: boolean;
     });
   }, [anchor]);
 
+  // "Got it": a click, a tap or a key (Enter, Space) dismisses it for good.
+  const dismiss = () => {
+    useTipsStore.getState().dismissShown(Date.now());
+    setShown(null);
+  };
+
   if (!shown) return null;
   return (
     <div
@@ -216,6 +188,12 @@ export function TipLayer({ gimbalAvailable, scale }: { gimbalAvailable: boolean;
         data-testid="cockpit-tip-dismiss"
         className="self-end rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] font-semibold"
         style={{ minHeight: 36 * scale, padding: `0 ${12 * scale}px` }}
+        onClick={dismiss}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter" && e.key !== " ") return;
+          e.preventDefault();
+          dismiss();
+        }}
       >
         {specText("tips.dismiss")}
       </button>

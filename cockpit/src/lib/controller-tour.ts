@@ -23,6 +23,20 @@ export function tourAirborne(pilot: { armed: boolean; landed: boolean } | null, 
   return telemetryArmed === true;
 }
 
+/** Whether the tour card may capture the pad (so Cross does not also start a
+ *  skill): only while the vehicle is known to be on the ground and disarmed,
+ *  from a fresh pilot state reporting landed and disarmed or, with no fresh
+ *  pilot, live telemetry reporting disarmed. An unknown arm state (cockpit
+ *  loaded mid-flight before the first frame, link down) counts as airborne:
+ *  the card shows without capturing, so kill, RTH, pause and arm stay live. */
+export function tourCapturesPad(
+  pilot: { armed: boolean; landed: boolean } | null,
+  telemetry: { live: boolean; armed: boolean | null | undefined },
+): boolean {
+  if (pilot) return pilot.landed && !pilot.armed;
+  return telemetry.live && telemetry.armed === false;
+}
+
 /** The card's buttons, in focus order: Next (Done on the last card), Skip. */
 export const TOUR_BUTTONS = ["advance", "skip"] as const;
 export type TourButton = (typeof TOUR_BUTTONS)[number];
@@ -83,13 +97,15 @@ export interface Rect {
 const CARD_GAP_PX = 12;
 
 /** Where the non-modal tour card sits in a `vw`×`vh` window: low over the
- *  video, right of the left column and clear of STOP, at most `maxW` wide.
- *  `h` is the card's measured height; `bottomPx` how high above the bottom
- *  edge it sits. */
+ *  video, right of the left column, never over the top bar, the alert stack
+ *  or STOP, at most `maxW` wide. `h` is the card's natural height; `bottomPx`
+ *  how high above the bottom edge it sits. When the room below the top zones
+ *  is shorter than the card, the returned `h` is the room left (the card's
+ *  body scrolls). */
 export function tourCardRect(
   vw: number,
   vh: number,
-  avoid: { leftColumn: Rect | null; stop: Rect | null },
+  avoid: { leftColumn: Rect | null; stop: Rect | null; topBar: Rect | null; alertStack: Rect | null },
   maxW: number,
   h: number,
   bottomPx: number,
@@ -98,8 +114,11 @@ export function tourCardRect(
   const room = Math.max(0, vw - CARD_GAP_PX - left);
   const w = Math.min(maxW, room);
   const x = left + (room - w) / 2;
-  let y = Math.max(CARD_GAP_PX, vh - bottomPx - h);
-  const s = avoid.stop;
-  if (s && x < s.x + s.w && s.x < x + w && y < s.y + s.h && s.y < y + h) y = s.y + s.h + CARD_GAP_PX;
-  return { x, y, w, h };
+  // The top zones the card's columns run under push its top edge down.
+  let top = CARD_GAP_PX;
+  for (const z of [avoid.topBar, avoid.alertStack, avoid.stop]) {
+    if (z && x < z.x + z.w && z.x < x + w) top = Math.max(top, z.y + z.h + CARD_GAP_PX);
+  }
+  const y = Math.max(top, vh - bottomPx - h);
+  return { x, y, w, h: Math.max(0, Math.min(h, vh - CARD_GAP_PX - y)) };
 }

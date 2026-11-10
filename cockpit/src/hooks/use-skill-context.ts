@@ -10,6 +10,7 @@ import { useShallow } from "zustand/react/shallow";
 
 import { useNow } from "@/hooks/use-now";
 import { usePilotLinkStore } from "@/lib/pilot-link";
+import type { FcView } from "@/lib/fc-failsafe";
 import { PILOT_FRESH_MS, type SkillContext } from "@/lib/skills";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { useFlightStore } from "@/stores/flight-store";
@@ -28,6 +29,7 @@ interface ContextInputs {
   pilotLinkOpen: boolean;
   reported: SkillContext["reported"];
   pending: SkillContext["pending"];
+  fc: FcView;
   now: number;
 }
 
@@ -51,6 +53,7 @@ function buildContext(i: ContextInputs): SkillContext {
     pilotLinkOpen: i.pilotLinkOpen,
     reported: i.reported,
     pending: i.pending,
+    fc: i.fc,
     now: i.now,
   };
 }
@@ -69,6 +72,7 @@ export function skillContextNow(): SkillContext {
     pilotLinkOpen: usePilotLinkStore.getState().link === "connected",
     reported: ext.reported,
     pending: ext.pending,
+    fc: { mode: flight.telemetry?.mode ?? null, systemStatus: flight.telemetry?.system_status ?? null },
     now: Date.now(),
   });
 }
@@ -81,6 +85,8 @@ export function useSkillContext(): SkillContext {
       armed: s.telemetry?.armed === true,
       lastArmed: s.armedAtLastLive,
       relayed: s.relayed,
+      mode: s.telemetry?.mode ?? null,
+      systemStatus: s.telemetry?.system_status ?? null,
     })),
   );
   const pilot = useNavStreamStore((s) => s.pilot);
@@ -88,5 +94,6 @@ export function useSkillContext(): SkillContext {
   const { reported, pending } = useExtensionsStore(useShallow((s) => ({ reported: s.reported, pending: s.pending })));
   // Freshness (the pilot's 2 s, a plugin's 3 s) ages with the clock.
   const now = useNow(1000);
-  return buildContext({ fcConnected, ...flight, pilot, pilotLinkOpen, reported, pending, now });
+  const { mode, systemStatus, ...rest } = flight;
+  return buildContext({ fcConnected, ...rest, pilot, pilotLinkOpen, reported, pending, fc: { mode, systemStatus }, now });
 }

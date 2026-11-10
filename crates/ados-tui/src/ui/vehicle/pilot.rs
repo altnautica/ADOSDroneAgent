@@ -3,8 +3,9 @@
 //! and profile, obstacle avoidance, the mission progress, the link-loss action
 //! or countdown, the height above ground with its source, and the alerts the
 //! cockpit's status pill draws from the pilot and the flight controller. Every
-//! word is the cockpit spec's. A row from a stale pilot kind is dim and marked
-//! "(stale)".
+//! word is the cockpit spec's. A row from a stale pilot kind (a failed read,
+//! or a kind past the spec's stale age counting the time since the last good
+//! read) is dim and marked "(stale)".
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -15,7 +16,7 @@ use ratatui::Frame;
 use crate::app::Core;
 use crate::model::autonomy::{Follow, Pilot};
 use crate::model::flight_state::readouts::{bottom_row_agl, link_loss_action_text, link_loss_line};
-use crate::model::flight_state::{avoid_state_text, ChipView};
+use crate::model::flight_state::{avoid_state_text, stale_after_ms, ChipView};
 use crate::model::pilot_alerts::{alerts_count_text, pilot_alerts, Severity};
 use crate::model::spec_text::spec_text;
 use crate::theme::Theme;
@@ -39,10 +40,15 @@ fn state_color(t: &Theme, name: &str) -> Color {
 /// What the block shows beside the pilot kind.
 pub struct PilotInputs<'a> {
     pub pilot: Option<&'a Pilot>,
+    /// The pilot kind's age now: its age at the agent plus the time since
+    /// the read (`u64::MAX` when unknown).
+    pub age_ms: u64,
     /// The chip for `pilot`; `None` when its owner is not one the spec knows.
     pub chip: Option<&'a ChipView>,
     /// The follow kind, for the height above ground when the pilot has none.
     pub follow: Option<&'a Follow>,
+    /// The follow kind's age now, as `age_ms`.
+    pub follow_age_ms: u64,
     /// The FC's PreArm/Arm texts, while the telemetry is shown.
     pub prearm: Option<&'a [String]>,
 }
@@ -61,7 +67,8 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
         // Nothing publishes the pilot kind: the chip's absent state.
         return vec![kv_text(t, "State", LABEL, spec_text("chip.no_pilot", &[]))];
     };
-    let stale = |line: Line<'static>| mark_stale(t, line, p.stale);
+    let p_stale = p.stale || i.age_ms > stale_after_ms();
+    let stale = |line: Line<'static>| mark_stale(t, line, p_stale);
     let mut out = Vec::new();
 
     let state = match i.chip {
@@ -198,9 +205,10 @@ pub fn lines(core: &Core, i: &PilotInputs) -> Vec<Line<'static>> {
                 Span::styled(format!("({})", src.text()), mark),
             ]);
             let from_stale = if from_follow {
-                i.follow.is_some_and(|f| f.stale)
+                i.follow
+                    .is_some_and(|f| f.stale || i.follow_age_ms > stale_after_ms())
             } else {
-                p.stale
+                p_stale
             };
             mark_stale(t, line, from_stale)
         }
@@ -248,3 +256,6 @@ pub fn render(
         None => f.render_widget(Paragraph::new(fit(t, lines, inner.height)), inner),
     }
 }
+
+#[cfg(test)]
+mod tests;

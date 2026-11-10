@@ -18,18 +18,21 @@ impl VehicleTab {
     }
 
     /// The Pilot block's lines: the chip evaluated on the pilot kind aged
-    /// from its last good read, with what the tab knows beside it.
+    /// from its last good read, with what the tab knows beside it. The rows
+    /// age the same way, so a poll that hangs without failing dims them too.
     pub(super) fn pilot_lines(&self, core: &Core) -> Vec<Line<'static>> {
         let auto = self.auto.as_ref();
         let pilot = auto.and_then(|a| a.pilot.as_ref());
+        let follow = auto.and_then(|a| a.follow.as_ref());
         // The FC's own readings beside the pilot kind, while they are shown.
         let tel = self.tel.as_ref().filter(|_| self.hidden(core).is_none());
+        let since_read = self.nav_read.ok_at.map_or(0, |at| {
+            core.now.saturating_duration_since(at).as_millis() as u64
+        });
+        // A kind of unknown age is stale, so the chip reads LINK.
+        let aged = |age: Option<u64>| age.map_or(u64::MAX, |a| a.saturating_add(since_read));
+        let age_ms = pilot.map_or(u64::MAX, |p| aged(p.age_ms));
         let chip = pilot.and_then(|p| {
-            let since_read = self.nav_read.ok_at.map_or(0, |at| {
-                core.now.saturating_duration_since(at).as_millis() as u64
-            });
-            // A kind of unknown age is stale, so the chip reads LINK.
-            let age = p.age_ms.map_or(u64::MAX, |a| a.saturating_add(since_read));
             let ctx = ChipContext {
                 home_dist_m: tel.and_then(|t| t.home_distance),
                 local_pos: tel.and_then(|t| t.local_pos),
@@ -39,14 +42,16 @@ impl VehicleTab {
                     .complete_at
                     .map(|at| core.now.saturating_duration_since(at).as_millis() as f64),
             };
-            chip_inputs(p, age, &ctx).map(|facts| flight_state_chip(&facts))
+            chip_inputs(p, age_ms, &ctx).map(|facts| flight_state_chip(&facts))
         });
         pilot::lines(
             core,
             &pilot::PilotInputs {
                 pilot,
+                age_ms,
                 chip: chip.as_ref(),
-                follow: auto.and_then(|a| a.follow.as_ref()),
+                follow,
+                follow_age_ms: follow.map_or(u64::MAX, |f| aged(f.age_ms)),
                 prearm: tel.and_then(|t| t.prearm.as_deref()),
             },
         )

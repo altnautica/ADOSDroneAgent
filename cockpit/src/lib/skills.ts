@@ -14,6 +14,7 @@
 
 import type { FlightCommand } from "@/lib/api";
 import { BUILTINS, type BuiltinConfirm } from "@/lib/cockpit-spec";
+import { fcSideFailsafe, type FcView } from "@/lib/fc-failsafe";
 import type { VehicleClass } from "@/shared/hud/cockpit-frames";
 import { refusalText } from "@/shared/hud/refusal";
 
@@ -204,6 +205,9 @@ export interface SkillContext {
   reported?: Record<string, ReportedSkillState | undefined>;
   /** Extension toggle writes awaiting their echo, by skill id. */
   pending?: Record<string, PendingWrite | undefined>;
+  /** The flight controller's mode and HEARTBEAT status, for the failsafe
+   *  read when no fresh pilot state reports one. */
+  fc?: FcView | null;
   /** Epoch ms now (state freshness); defaults to `Date.now()`. */
   now?: number;
 }
@@ -269,8 +273,12 @@ function resolveBuiltin(skill: Skill, b: BuiltinBinding, ctx: SkillContext): Ski
   if (skill.id === "kill") return { enabled: true };
   const pilot = ctx.pilot ?? null;
   // A pause would fight the flight controller's own failsafe return or
-  // landing: refused while a fresh pilot state reports one.
-  if (skill.id === "pause" && pilot?.fresh && pilot.fcFailsafe) return disabled(refusalText("failsafe"));
+  // landing. The pilot's flag decides while its state is fresh, and its last
+  // known flag holds until a fresh frame clears it; without a fresh pilot the
+  // flight controller's own report decides.
+  if (skill.id === "pause" && (pilot?.fcFailsafe || (!pilot?.fresh && fcSideFailsafe(ctx.fc, ctx.now)))) {
+    return disabled(refusalText("failsafe"));
+  }
   const noLink = ctx.linkReason ?? refusalText("no_fc");
   const route = builtinRoute(skill, ctx);
   if (route === null) {

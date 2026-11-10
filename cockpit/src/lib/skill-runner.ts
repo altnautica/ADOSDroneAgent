@@ -15,7 +15,8 @@
 //
 // A press waits only behind its own skill's unanswered command on this drone
 // (busy per drone and skill); Return home, Land, Pause and Emergency stop
-// never wait at all.
+// never wait at all, nor does a running plugin skill's Stop. A controller
+// hold that completes is the confirmation: the skill is sent at once.
 //
 // Plugin skills write their activation key. A motion skill's GO first stops
 // the running motion skill (preemption); a toggle write is pending until
@@ -27,11 +28,13 @@ import { create } from "zustand";
 import { skillContextNow } from "@/hooks/use-skill-context";
 import { CommandTimeoutError, sendCommand } from "@/lib/api";
 import type { ActionPhase } from "@/lib/cockpit-actions";
+import { noteCommandedModes } from "@/lib/fc-failsafe";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { refusalText } from "@/shared/hud/refusal";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
 import { activateExclusive, runningMotionSkills } from "@/lib/skill-gates";
-import { builtinRoute, resolveSkillState, type BuiltinBinding, type Skill, type SkillContext } from "@/lib/skills";
+import { LAUNCH } from "@/lib/cockpit-flow";
+import { builtinRoute, resolveSkillState, type BuiltinBinding, type Skill, type SkillContext, type SkillState } from "@/lib/skills";
 import { ApiError, errorDetail } from "@/shared/api-fetch";
 import { toast } from "@/shared/api/toast";
 import { useConfirmStore, type AckLine } from "@/stores/confirm-store";
@@ -78,6 +81,9 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
     return;
   }
   const args = skill.takesAltitude && altitudeM != null ? [altitudeM] : [];
+  // A return or landing sent from here is this cockpit's, not a failsafe.
+  if (b.command === "rtl") noteCommandedModes(["RTL", "SMART_RTL", "QRTL"]);
+  else if (b.command === "land") noteCommandedModes(["LAND", "QLAND"]);
   let res;
   try {
     res = await sendCommand(b.command, args);
@@ -201,6 +207,12 @@ export function bypassesBusy(skill: Skill): boolean {
   return skill.builtin?.stopsMotion === true;
 }
 
+/** A running plugin toggle's stop: stopping makes the vehicle hold, so it never
+ *  waits behind the skill's own unanswered start and never marks it busy. */
+function isPluginStop(skill: Skill, active: boolean | undefined): boolean {
+  return skill.extension?.toggle === true && active === true;
+}
+
 /** The drone this cockpit commands: its own node (a ground station commands
  *  the one aircraft it is paired with). Part of the busy key, as on every
  *  surface that keys busy by drone and skill. */
@@ -239,8 +251,9 @@ function dropped(skill: Skill, why: string): void {
 }
 
 async function run(skill: Skill, opts: { altitudeM?: number; active?: boolean }): Promise<void> {
-  if (isSkillBusy(skill)) {
-    dropped(skill, refusalText("busy"));
+  const stop = isPluginStop(skill, opts.active);
+  if (!stop && isSkillBusy(skill)) {
+    dropped(skill, refusalText("pending"));
     return;
   }
   // A built-in's gate holds on every route at the moment it is sent, not only
@@ -253,7 +266,7 @@ async function run(skill: Skill, opts: { altitudeM?: number; active?: boolean })
       return;
     }
   }
-  const exempt = bypassesBusy(skill);
+  const exempt = stop || bypassesBusy(skill);
   if (!exempt) setSkillBusy(skill, true);
   try {
     if (skill.builtin) {
@@ -280,20 +293,29 @@ export async function executeSkill(skill: Skill, opts: { altitudeM?: number; act
   await run(skill, opts);
 }
 
+/** The gate every request passes: the skill is drivable now and its previous
+ *  press is answered (a plugin stop never waits). Null, with the reason in a
+ *  toast, when it is not. */
+function gate(skill: Skill, ctx: SkillContext): SkillState | null {
+  const state = resolveSkillState(skill, ctx);
+  if (!state.enabled) {
+    dropped(skill, state.reason ?? refusalText(null));
+    return null;
+  }
+  if (!isPluginStop(skill, state.active) && isSkillBusy(skill)) {
+    dropped(skill, refusalText("pending"));
+    return null;
+  }
+  return state;
+}
+
 /** Request a skill: gate it, then fire (tap, or stopping a running toggle) or
  *  open its confirm sheet. Returns false, with the reason in a toast, when the
  *  skill is not drivable now or its previous press still awaits an answer. */
 export function requestSkill(skill: Skill, ctx: SkillContext, gamepadButton: number | null = null): boolean {
-  const state = resolveSkillState(skill, ctx);
-  if (!state.enabled) {
-    dropped(skill, state.reason ?? refusalText(null));
-    return false;
-  }
-  if (isSkillBusy(skill)) {
-    dropped(skill, refusalText("busy"));
-    return false;
-  }
-  if (skill.confirm.kind === "tap" || (skill.extension?.toggle && state.active)) {
+  const state = gate(skill, ctx);
+  if (!state) return false;
+  if (skill.confirm.kind === "tap" || isPluginStop(skill, state.active)) {
     void executeSkill(skill, { active: state.active });
     return true;
   }
@@ -305,8 +327,9 @@ export function requestSkill(skill: Skill, ctx: SkillContext, gamepadButton: num
  * A cockpit action bound to a skill (a controller binding or a chord):
  *   press   — gate, then fire a tap skill or open the confirm sheet; on an
  *             open sheet for the same skill, start its hold (or confirm);
- *   hold    — a hold the controller timed completed: complete the sheet's
- *             hold (opening it first), which for kill moves to its confirm;
+ *   hold    — a hold the controller timed completed: that hold is the
+ *             confirmation, so the skill is sent at once (gated as a
+ *             request) and its open sheet, if any, closes;
  *   release — end a hold on the open sheet.
  * `heldPress` starts the sheet's hold on the press itself (a held key).
  */
@@ -328,13 +351,9 @@ export function runSkillAction(skill: Skill, phase: ActionPhase, ctx: SkillConte
     }
     return;
   }
-  if (open?.stage === "confirm") return;
-  if (!open) {
-    if (skill.confirm.kind === "tap") {
-      requestSkill(skill, ctx);
-      return;
-    }
-    if (!requestSkill(skill, ctx)) return;
-  }
-  useConfirmStore.getState().panelConfirm();
+  const state = gate(skill, ctx);
+  if (!state) return;
+  if (open) confirm.cancel();
+  const altitudeM = open?.altitudeM ?? (skill.takesAltitude ? LAUNCH.altDefaultM : undefined);
+  void executeSkill(skill, { altitudeM, active: state.active });
 }

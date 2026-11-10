@@ -30,7 +30,16 @@ const fresh: TipsState = { seen: [], openCount: 1 };
 
 describe("tips queue", () => {
   it("runs in the spec's order", () => {
-    expect(TIPS.map((t) => t.id)).toEqual([...tipsJson.tips].sort((a, b) => a.order - b.order).map((t) => t.id));
+    expect(TIPS.map((t) => t.id)).toEqual([
+      "status_pill",
+      "flight_state_chip",
+      "layer_level",
+      "stop",
+      "skills_chip",
+      "fly_here",
+      "gimbal_pad",
+      "card_switch",
+    ]);
   });
 
   it("waits the first delay after the screen opens, then shows the first tip", () => {

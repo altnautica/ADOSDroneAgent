@@ -19,6 +19,7 @@ import { ApiError, apiFetch, errorDetail } from "@/shared/api-fetch";
 import { registerCockpitActions, runCockpitAction } from "@/lib/cockpit-actions";
 import type { InstalledExtension } from "@/lib/extensions";
 import { toast } from "@/shared/api/toast";
+import { refusalText } from "@/shared/hud/refusal";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
 import { create } from "zustand";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
@@ -100,24 +101,54 @@ function mavCameraFor(action: CameraAction, cams: readonly MavCamera[]): MavCame
   return null;
 }
 
-/** The vehicle's MAVLink cameras; none in demo mode or when the list fails. */
-export async function fetchMavCameras(): Promise<MavCamera[]> {
-  if (isDemoMode()) return [];
+/** How long a camera list or camera write may take before the press reads as
+ *  unanswered. The list's own probe takes about 1 s on the agent. */
+export const CAMERA_TIMEOUT_MS = 4000;
+
+/** `apiFetch` cut off after `CAMERA_TIMEOUT_MS`; a cut-off request rejects
+ *  with a `CameraTimeout`. */
+class CameraTimeout extends Error {}
+
+async function cameraFetch<T>(path: string, opts: { method?: "POST"; body?: unknown } = {}): Promise<T> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(new CameraTimeout()), CAMERA_TIMEOUT_MS);
   try {
-    const r = await apiFetch<{ cameras?: MavCamera[] }>("/api/v1/camera/mavlink");
-    return Array.isArray(r.cameras) ? r.cameras : [];
-  } catch {
-    return [];
+    return await apiFetch<T>(path, { ...opts, signal: ac.signal });
+  } catch (e) {
+    throw ac.signal.aborted ? new CameraTimeout() : e;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-/** The last camera list asked for, so the zones know a vehicle camera can
- *  take a photo or zoom without video. */
-export const useMavCameraStore = create<{ cameras: MavCamera[]; refresh: () => Promise<MavCamera[]> }>((set) => ({
+/** The vehicle's MAVLink cameras, or null when the list fails or times out;
+ *  none in demo mode. */
+async function listMavCameras(): Promise<MavCamera[] | null> {
+  if (isDemoMode()) return [];
+  try {
+    const r = await cameraFetch<{ cameras?: MavCamera[] }>("/api/v1/camera/mavlink");
+    return Array.isArray(r.cameras) ? r.cameras : [];
+  } catch {
+    return null;
+  }
+}
+
+/** The vehicle's MAVLink cameras; none in demo mode or when the list fails. */
+export async function fetchMavCameras(): Promise<MavCamera[]> {
+  return (await listMavCameras()) ?? [];
+}
+
+/** The last camera list the agent gave, so the zones know a vehicle camera can
+ *  take a photo or zoom without video, and a press routes without waiting on
+ *  the agent's probe. A failed refresh keeps the last list. `loaded` turns true
+ *  once a list has been asked for. */
+export const useMavCameraStore = create<{ cameras: MavCamera[]; loaded: boolean; refresh: () => Promise<MavCamera[]> }>((set, get) => ({
   cameras: [],
+  loaded: false,
   refresh: async () => {
-    const cameras = await fetchMavCameras();
-    set({ cameras });
+    const listed = await listMavCameras();
+    const cameras = listed ?? get().cameras;
+    set({ cameras, loaded: true });
     return cameras;
   },
 }));
@@ -143,12 +174,12 @@ export async function runMavCamera(action: CameraAction, componentId: number): P
   const failKey = photo ? "camera.capture_failed" : "camera.zoom_failed";
   const body = photo ? { component_id: componentId } : { component_id: componentId, type: "step", value: action === "zoom_in" ? 1 : -1 };
   try {
-    const r = await apiFetch<MavCameraReply>(`/api/v1/camera/mavlink/${photo ? "capture" : "zoom"}`, { method: "POST", body });
+    const r = await cameraFetch<MavCameraReply>(`/api/v1/camera/mavlink/${photo ? "capture" : "zoom"}`, { method: "POST", body });
     if (!r.ok) toast.err(specText(failKey, { reason: r.statustext || mavResultText(r.result) }));
-    else if (photo) toast.ok(mavResultText(r.result));
+    else if (photo) toast.ok(specText("camera.capture_sent"));
     return r;
   } catch (e) {
-    const reason = e instanceof ApiError ? errorDetail(e.body, e.message) : String(e);
+    const reason = e instanceof ApiError ? errorDetail(e.body, e.message) : refusalText("no response");
     toast.err(specText(failKey, { reason }));
     return null;
   }
@@ -165,17 +196,27 @@ function mainVideo(): HTMLVideoElement | null {
   return document.querySelector<HTMLVideoElement>("[data-main-video] video");
 }
 
-/** A still of the shown video as a PNG download. */
+/** The part of a `vw`×`vh` frame the pilot sees at a digital zoom: its
+ *  centre, 1/zoom of each side. */
+export function frameCrop(vw: number, vh: number, zoom: number): { sx: number; sy: number; sw: number; sh: number } {
+  const sw = vw / zoom;
+  const sh = vh / zoom;
+  return { sx: (vw - sw) / 2, sy: (vh - sh) / 2, sw, sh };
+}
+
+/** A still of the shown video, as the pilot sees it (the digital zoom's
+ *  centre crop), as a PNG download. */
 async function grabFrame(): Promise<void> {
   const video = mainVideo();
   if (!video || video.videoWidth === 0) {
     toast.err(specText("camera.no_video"));
     return;
   }
+  const { sx, sy, sw, sh } = frameCrop(video.videoWidth, video.videoHeight, useCockpitViewStore.getState().digitalZoom);
   const canvas = document.createElement("canvas");
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  canvas.getContext("2d")?.drawImage(video, 0, 0);
+  canvas.width = Math.round(sw);
+  canvas.height = Math.round(sh);
+  canvas.getContext("2d")?.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
   if (!blob) {
     toast.err(specText("camera.no_video"));
@@ -194,9 +235,19 @@ async function grabFrame(): Promise<void> {
 export async function runCameraAction(action: CameraAction): Promise<void> {
   const videoLive = useFeedStore.getState().video.state === "live";
   const extensions = useExtensionsStore.getState().extensions;
-  // The vehicle's camera list is asked only when no extension takes the action.
+  // The press routes on the last camera list and refreshes it in the
+  // background (the agent probes the vehicle for about a second); only the
+  // first press, before any list, waits for one. No list is asked when an
+  // extension takes the action.
   const skip = action === "recenter" || (videoLive && cameraSkillFor(action, extensions) !== null);
-  const mav = skip ? [] : await useMavCameraStore.getState().refresh();
+  const store = useMavCameraStore.getState();
+  let mav: readonly MavCamera[] = [];
+  if (!skip && store.loaded) {
+    mav = store.cameras;
+    void store.refresh();
+  } else if (!skip) {
+    mav = await store.refresh();
+  }
   const route = cameraRoute(action, extensions, videoLive, mav);
   if (route.kind === "unavailable") {
     toast.info(route.reason);

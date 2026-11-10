@@ -14,9 +14,9 @@ import { isValidFix, latLonToEN, type LatLon, type MapView } from "@/lib/minimap
 import type { VehicleState } from "@/lib/types";
 import { ackText } from "@/lib/mav-result";
 import { sendCommand, type CommandResponse } from "@/lib/api";
-import { ApiError } from "@/shared/api-fetch";
+import { ApiError, errorDetail, isAuthChallenge } from "@/shared/api-fetch";
 import { refusalText } from "@/shared/hud/refusal";
-import { specText } from "@/shared/hud/spec-text";
+import { hasSpecText, specText } from "@/shared/hud/spec-text";
 
 /** Press this long on a map, without moving, to pick a point
  *  (`layout.json` `map_long_press_ms`). */
@@ -27,6 +27,9 @@ export const FLY_HERE_HOLD_MS: number = layoutJson.holds_ms.fly_here;
 export const FLY_HERE_SLOP_PX = 8;
 /** The lowest height a "Fly here" sends (metres above home). */
 export const FLY_HERE_MIN_ALT_M = 3;
+/** The highest height a "Fly here" sends: the agent refuses a reposition
+ *  above the launch ceiling (`layout.json` `launch.alt_max_m`). */
+export const FLY_HERE_MAX_ALT_M: number = layoutJson.launch.alt_max_m;
 
 const EARTH_R = 6378137;
 const DEG = Math.PI / 180;
@@ -84,29 +87,43 @@ export function offsetFromDrone(target: LatLon, drone: LatLon | null): { n: numb
 }
 
 /** The `goto` arguments: the picked point at the drone's current height above
- *  home (never below the floor). Null while the cockpit has no height reading:
- *  a guessed height could send the drone down to the floor, so it refuses. */
+ *  home, held between the floor and the launch ceiling. Null while the cockpit
+ *  has no height reading: a guessed height could send the drone down to the
+ *  floor, so it refuses. */
 export function flyHereArgs(target: LatLon, altRelM: number | null | undefined): { lat: number; lon: number; alt_m: number } | null {
   if (typeof altRelM !== "number" || !Number.isFinite(altRelM)) return null;
-  return { lat: target.lat, lon: target.lon, alt_m: Math.max(FLY_HERE_MIN_ALT_M, Math.round(altRelM * 10) / 10) };
+  const alt = Math.min(FLY_HERE_MAX_ALT_M, Math.max(FLY_HERE_MIN_ALT_M, Math.round(altRelM * 10) / 10));
+  return { lat: target.lat, lon: target.lon, alt_m: alt };
 }
 
 /** Send a picked point to a flight controller in GUIDED: `POST /api/command`
  *  `reposition` with `[lat, lon, alt_m]` (MAVLink `DO_REPOSITION`, altitude
  *  above home). Resolves null once the FC accepts it, else the refusal in the
  *  spec's words: the FC's answer (`mav_result.*` or its status text), no FC
- *  link, a value the route refuses, or no answer. */
+ *  link, a value the route refuses, a route this FC lacks, a refused request,
+ *  the agent's own reason, or (only when nothing answered) no answer. */
 export async function sendFcReposition(args: { lat: number; lon: number; alt_m: number }): Promise<string | null> {
   let res: CommandResponse;
   try {
     res = await sendCommand("reposition", [args.lat, args.lon, args.alt_m]);
   } catch (e) {
-    if (e instanceof ApiError && (e.status === 503 || e.status === 400)) return refusalText(e.status === 503 ? "no_fc" : "bad_args");
-    return refusalText("no response");
+    return e instanceof ApiError ? apiRefusal(e) : refusalText("no response");
   }
   const ack = res.ack;
   if (!ack?.observed) return refusalText("no response");
   return ack.accepted ? null : (ackText(ack) ?? specText("refusal.refused"));
+}
+
+/** The refusal for an HTTP answer from the command route: the agent did
+ *  answer, so this is never "no answer". */
+function apiRefusal(e: ApiError): string {
+  if (e.status === 503) return refusalText("no_fc");
+  if (e.status === 400) return refusalText("bad_args");
+  if (e.status === 501) return refusalText("unsupported");
+  if (isAuthChallenge(e.status)) return specText("refusal.not_authorized");
+  const code = e.code;
+  if (code && hasSpecText(`refusal.${code}`) && !specText(`refusal.${code}`).includes("{")) return refusalText(code);
+  return errorDetail(e.body, specText("refusal.refused"));
 }
 
 /** Where the global minimap places the drone, and whether that position comes

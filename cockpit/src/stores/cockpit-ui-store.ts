@@ -10,6 +10,7 @@ import { create } from "zustand";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
+import { useConfirmStore } from "@/stores/confirm-store";
 
 /** One open overlay (sheet, dialog, menu), as `components/ui/overlay` keeps it. */
 export interface OpenOverlay {
@@ -59,8 +60,11 @@ export const useCockpitUiStore = create<CockpitUiState>((set, get) => ({
   launchRefusal: null,
   setLaunchRefusal: (launchRefusal) => set({ launchRefusal }),
   launchGoto: null,
-  openLaunch: (goto = null) => set({ sheet: "launch", launchGoto: goto }),
-  openSheet: (sheet) => set({ sheet, launchGoto: null }),
+  // A refusal belongs to the press that drew it: a sheet opened later starts
+  // clean (an Abort refused with the sheet closed already showed on the ack
+  // line).
+  openLaunch: (goto = null) => set({ sheet: "launch", launchGoto: goto, launchRefusal: null }),
+  openSheet: (sheet) => set(sheet === "launch" ? { sheet, launchGoto: null, launchRefusal: null } : { sheet, launchGoto: null }),
   closeSheet: () => set({ sheet: null, launchGoto: null }),
   nextCard: (dir = 1) => {
     const i = CARDS.indexOf(get().card);
@@ -69,10 +73,26 @@ export const useCockpitUiStore = create<CockpitUiState>((set, get) => ({
   setShutterMode: (shutterMode) => set({ shutterMode }),
 }));
 
+const ABORT_ACK_CLEAR_MS = 4000;
+let abortAckTimer: ReturnType<typeof setTimeout> | undefined;
+
 /** Abort a running launch: the pilot brakes to a hold, or disarms while still
- *  on the ground. A refusal shows in the Launch sheet. */
+ *  on the ground. Abort is offered with the Launch sheet closed too (the chip,
+ *  the flight overlay), so a refusal or a timeout always shows on the cockpit's
+ *  ack line, and in the Launch sheet while it is open. */
 export function abortLaunch(): void {
-  void sendPilotAction("pause").then((r) =>
-    useCockpitUiStore.getState().setLaunchRefusal(r.ok ? null : specText("flow.launch.abort_refused", { reason: refusalText(r.err) })),
-  );
+  void sendPilotAction("pause").then((r) => {
+    const ui = useCockpitUiStore.getState();
+    if (r.ok) {
+      ui.setLaunchRefusal(null);
+      return;
+    }
+    const text = specText("flow.launch.abort_refused", { reason: refusalText(r.err) });
+    if (ui.sheet === "launch") ui.setLaunchRefusal(text);
+    useConfirmStore.getState().setAck({ text, kind: "err" });
+    clearTimeout(abortAckTimer);
+    abortAckTimer = setTimeout(() => {
+      if (useConfirmStore.getState().ack?.text === text) useConfirmStore.getState().setAck(null);
+    }, ABORT_ACK_CLEAR_MS);
+  });
 }

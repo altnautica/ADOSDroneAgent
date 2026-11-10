@@ -40,6 +40,17 @@ jobs:
           # it points a public reader at a private rulebook; name the principle.
           TAG_PATTERN='(^|[^A-Za-z])(DEC|MSN|LRN)-[0-9]{2,}|(^|[^A-Za-z])Wave [0-9]|(^|[^A-Za-z])[Rr]ule #?[0-9]+'
 
+          # A plan or review item id is the same leak in a shorter form: one
+          # of K, P, O, D or T, a hyphen and a number with an optional letter
+          # suffix; SP or SH and a number; N, a name and a number; R-AG
+          # and a number. ERE has no \b, so the word boundary on each side is
+          # spelled out. Scanned outside the committed web bundles
+          # (src/ados/*/static/assets): minified code is full of one-letter
+          # names minus a number, and every bundle is built from source this
+          # scan already covers.
+          PLAN_PATTERN='(^|[^A-Za-z0-9_])([KPODT]-[0-9]+[a-z]?|N-[A-Z][A-Za-z0-9]+-[0-9]+|S[PH]-[0-9]+|R-AG-[0-9]+)([^A-Za-z0-9_]|$)'
+          PLAN_SCOPE=(. ':(exclude,glob)src/ados/*/static/assets/**')
+
           # An absolute home path is a developer machine baked into shipped
           # source. Placeholder and service-account names are allowed: tests
           # need one, and installer paths legitimately name the accounts a
@@ -52,12 +63,24 @@ jobs:
           # "the guard found itself" is indistinguishable from a real leak.
           SAMPLE_TAG="$(printf 'DEC%s284' '-')"
           SAMPLE_RULE="$(printf 'per Rule %s' '44')"
+          SAMPLE_PLAN_SHORT="$(printf 'shot fix-%s-6-local.png' 'K')"
+          SAMPLE_PLAN_LANE="$(printf 'see N-%s-10' 'Sample')"
+          SAMPLE_PLAN_SPEC="$(printf '(SP%s1)' '-')"
+          SAMPLE_PLAN_REVIEW="$(printf 'per R-%s-9' 'AG')"
           SAMPLE_HOME="$(printf '/Users/%s/src/x' 'realname')"
           printf 'ref %s and path %s\n' "$SAMPLE_TAG" "$SAMPLE_HOME" > .guard-selftest
           # The rule sample gets its own file so each alternative of the tag
           # pattern is proven on its own, not carried by the other one.
           printf 'see %s\n' "$SAMPLE_RULE" > .guard-selftest-rule
-          git add -f .guard-selftest .guard-selftest-rule
+          printf '%s\n' "$SAMPLE_PLAN_SHORT" > .guard-selftest-plan-short
+          printf '%s\n' "$SAMPLE_PLAN_LANE" > .guard-selftest-plan-lane
+          printf '%s\n' "$SAMPLE_PLAN_SPEC" > .guard-selftest-plan-spec
+          printf '%s\n' "$SAMPLE_PLAN_REVIEW" > .guard-selftest-plan-review
+          # Legitimate text the plan pattern must NOT match: hyphenated
+          # standard names, a generation count, a port inside a word.
+          printf 'CRC-16, ISO-8601, TEST-NET-1, MPEG-2, generation N-1, UDP-5600\n' > .guard-selftest-plan-clean
+          plan_samples=(.guard-selftest-plan-short .guard-selftest-plan-lane .guard-selftest-plan-spec .guard-selftest-plan-review)
+          git add -f .guard-selftest .guard-selftest-rule "${plan_samples[@]}" .guard-selftest-plan-clean
           for sample in .guard-selftest .guard-selftest-rule; do
             if ! git grep -qIE "$TAG_PATTERN" -- "$sample"; then
               echo "SELF-TEST FAILED: the planning-tag pattern does not match the known sample in $sample."
@@ -65,12 +88,22 @@ jobs:
               fail=1
             fi
           done
+          for sample in "${plan_samples[@]}"; do
+            if ! git grep -qIE "$PLAN_PATTERN" -- "$sample"; then
+              echo "SELF-TEST FAILED: the plan-id pattern does not match the known sample in $sample."
+              fail=1
+            fi
+          done
+          if git grep -qIE "$PLAN_PATTERN" -- .guard-selftest-plan-clean; then
+            echo "SELF-TEST FAILED: the plan-id pattern matches legitimate text (standard names, N-1)."
+            fail=1
+          fi
           if ! git grep -IE "$HOME_PATTERN" -- .guard-selftest | grep -qvE "$HOME_ALLOW"; then
             echo "SELF-TEST FAILED: the home-path pattern does not match a known absolute home path."
             fail=1
           fi
-          git rm -q --cached .guard-selftest .guard-selftest-rule
-          rm -f .guard-selftest .guard-selftest-rule
+          git rm -q --cached .guard-selftest .guard-selftest-rule "${plan_samples[@]}" .guard-selftest-plan-clean
+          rm -f .guard-selftest .guard-selftest-rule "${plan_samples[@]}" .guard-selftest-plan-clean
           [ "$fail" -eq 0 ] || exit 1
 
           # ---- check 1: the generated private context bridge is gitignored
@@ -87,6 +120,11 @@ jobs:
           if git grep -nIE "$TAG_PATTERN" -- .; then
             echo "FAIL: an internal planning tag is present in a tracked file (see above)."
             echo "  Describe the change, not the record that authorised it."
+            fail=1
+          fi
+          if git grep -nIE "$PLAN_PATTERN" -- "${PLAN_SCOPE[@]}"; then
+            echo "FAIL: a plan or review item id is present in a tracked file (see above)."
+            echo "  Name what the code or file does, not the item that asked for it."
             fail=1
           fi
 

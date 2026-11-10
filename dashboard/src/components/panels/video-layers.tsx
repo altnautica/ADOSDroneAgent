@@ -5,7 +5,9 @@
 // nav-status poll (5 Hz while this panel is mounted). While the panel shows
 // live video the poll carries the view lease `?view=main:<layers>`, so the
 // agent computes these layers for the primary camera only while this panel
-// watches; a toggled-on depth or surfaces layer joins the same lease.
+// watches; a toggled-on depth or surfaces layer joins the same lease and
+// holds a vision demand lease of its kind, which is what makes the engine run
+// it.
 //
 // The dashboard is the setup surface: the layer level and views live in the
 // cockpit. The two leased toggles are here because they cost the agent work.
@@ -14,7 +16,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
 import { useNavLease, useNavStatus, useNavVideoPanel } from "@/hooks/use-nav-status";
-import { CAMERA_ID, LEASED_LAYERS, layersViewQuery } from "@/lib/video-layer-lease";
+import { CAMERA_ID, holdLayerDemand, LEASED_LAYERS, layersViewQuery, type DemandKind } from "@/lib/video-layer-lease";
 import { cn } from "@/lib/utils";
 import { apiFetch } from "@/shared/api-fetch";
 import {
@@ -36,6 +38,15 @@ function videoSize(v: HTMLVideoElement | null): { videoW: number; videoH: number
   return v && v.videoWidth > 0 && v.videoHeight > 0 ? { videoW: v.videoWidth, videoH: v.videoHeight } : null;
 }
 
+/** Hold a vision demand lease of `kind` while `active` (best effort: an
+ *  unanswered POST still lapses after the hold). */
+function useLayerDemand(kind: DemandKind, active: boolean): void {
+  useEffect(() => {
+    if (!active) return;
+    return holdLayerDemand(kind, (body) => void apiFetch("/api/vision/demand", { method: "POST", body }).catch(() => undefined), document);
+  }, [kind, active]);
+}
+
 export function VideoLayers({
   active,
   videoRef,
@@ -53,6 +64,8 @@ export function VideoLayers({
   const view = layersViewQuery(toggles);
   useNavVideoPanel();
   useNavLease(active ? view : null);
+  useLayerDemand("depth", active && toggles.depth === true);
+  useLayerDemand("surfaces", active && toggles.surfaces === true);
   const nav = useNavStatus();
 
   useEffect(() => {

@@ -7,19 +7,18 @@
 import { useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/shared/api-fetch";
+import { LEASE_OWNER } from "@/lib/lease-owner";
 import { holdDetectionLease, layoutVideoBoxes, parseLatestDetections, type DetectionFrame } from "@/lib/video-detections";
 
 const POLL_MS = 200;
 const LEASE_RENEW_MS = 2000;
 const LEASE_HOLD_S = 6;
 const CAMERA_ID = "main";
-/** One lease owner per page load, so two dashboard tabs never drop each other's lease. */
-const OWNER = `dashboard:${Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, "0")}`;
 const BOX_COLOR = "var(--hud-ink)";
 const LOCKED_COLOR = "var(--hud-track)";
 
 const demand = (holdS: number) =>
-  apiFetch("/api/vision/demand", { method: "POST", body: { camera_id: CAMERA_ID, hold_s: holdS, owner: OWNER } });
+  apiFetch("/api/vision/demand", { method: "POST", body: { camera_id: CAMERA_ID, hold_s: holdS, owner: LEASE_OWNER } });
 
 export function VideoDetections({
   active,

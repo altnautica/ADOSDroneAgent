@@ -105,7 +105,7 @@ async function longPressOpensFlyHere(page, selector) {
 async function flyHereCases(browser) {
   const { ctx, page } = await open(browser, { pilot: FLYING, fix: 3 });
   // The bottom-left card map.
-  await rightClickOpensFlyHere(page, '[data-zone="bottom_left_card"] [data-testid="minimap"]', "fix-P-11a-card-rightclick.png");
+  await rightClickOpensFlyHere(page, '[data-zone="bottom_left_card"] [data-testid="minimap"]', "map-card-rightclick.png");
   await longPressOpensFlyHere(page, '[data-zone="bottom_left_card"] [data-testid="minimap"]');
   console.log("PASS card map: right-click and long-press open the Fly Here hold");
   // The full map view: labels and north mark clear of the top bar.
@@ -114,7 +114,7 @@ async function flyHereCases(browser) {
   const bar = await box(page, '[data-zone-rect="top_bar"]');
   const header = await box(page, '[data-zone="stage"] [data-testid="minimap-header"]');
   const north = await box(page, '[data-zone="stage"] [data-testid="minimap-north"]');
-  await page.screenshot({ path: path.join(SHOTS, "fix-N-AuditAgent2-10-map-view.png") });
+  await page.screenshot({ path: path.join(SHOTS, "map-view-labels.png") });
   // Nothing drawn over the frame label (top bar, video inset, columns): the
   // topmost element there belongs to the map (the label ignores pointers).
   const labelOnTop = await page.$eval('[data-zone="stage"] [data-testid="minimap-header"]', (e) => {
@@ -128,11 +128,11 @@ async function flyHereCases(browser) {
   const northPx = north.h;
   assert.ok(northPx < 24, `north mark at chrome size, not scaled with the map: ${northPx}px`);
   console.log(`PASS map view: labels at y=${header.y}, N at y=${north.y} (${northPx.toFixed(1)} px) below the bar bottom ${bar.y + bar.h}`);
-  await rightClickOpensFlyHere(page, '[data-zone="stage"] [data-testid="minimap"]', "fix-P-11a-map-rightclick.png");
+  await rightClickOpensFlyHere(page, '[data-zone="stage"] [data-testid="minimap"]', "map-view-rightclick.png");
   // The split pane.
   await setView(page, "split");
   await page.waitForTimeout(400);
-  await rightClickOpensFlyHere(page, '[data-zone="map_pane"] [data-testid="minimap"]', "fix-P-11a-split-rightclick.png");
+  await rightClickOpensFlyHere(page, '[data-zone="map_pane"] [data-testid="minimap"]', "map-split-rightclick.png");
   console.log("PASS full map and split pane: right-click opens the Fly Here hold");
   await ctx.close();
 }
@@ -140,7 +140,7 @@ async function flyHereCases(browser) {
 async function localCase(browser) {
   const { ctx, page, sent } = await open(browser, { pilot: FLYING, fix: 0, local: true });
   await page.waitForSelector('[data-testid="local-minimap"]', { timeout: 8000 });
-  await rightClickOpensFlyHere(page, '[data-testid="local-minimap"]', "fix-K-6-local-flyhere.png");
+  await rightClickOpensFlyHere(page, '[data-testid="local-minimap"]', "local-map-fly-here.png");
   console.log("PASS local-frame map: right-click opens the Fly Here hold (lat/lon through the FC origin)");
   void sent;
   await ctx.close();
@@ -152,7 +152,7 @@ async function groundCase(browser) {
   await page.mouse.click(b.x + b.w * 0.75, b.y + b.h * 0.3, { button: "right" });
   const launch = page.getByRole("dialog").filter({ hasText: "Go to a point" });
   await launch.waitFor({ state: "visible", timeout: 3000 });
-  await page.screenshot({ path: path.join(SHOTS, "fix-P-11b-ground-launch.png") });
+  await page.screenshot({ path: path.join(SHOTS, "map-ground-launch.png") });
   assert.equal(await flyHereSheet(page).count(), 0, "no Fly Here on the ground");
   console.log("PASS ground: right-click on the map opens the Launch sheet");
   await ctx.close();
@@ -192,7 +192,7 @@ async function fcCase(browser) {
   };
   await holdOnce();
   await sheet.getByText("Denied").waitFor({ state: "visible", timeout: 3000 });
-  await page.screenshot({ path: path.join(SHOTS, "fix-N-AuditAgent2-5-fc-refused.png") });
+  await page.screenshot({ path: path.join(SHOTS, "fly-here-fc-refused.png") });
   assert.equal(posted.length, 1, "one command sent");
   assert.equal(posted[0].cmd, "reposition");
   const [lat, lon, alt] = posted[0].args;
@@ -231,7 +231,7 @@ async function layoutCase(browser) {
     const tapeTop = hud.y + hud.h / 2 - R * 0.9;
     const title = { x: hud.x + hud.w - u * 3.4, y: tapeTop - u * 0.8, w: 7 * 0.6 * u * 0.62, h: u * 0.6 };
     const overlap = toggle.x < title.x + title.w && title.x < toggle.x + toggle.w && toggle.y < title.y + title.h && title.y < toggle.y + toggle.h;
-    await page.screenshot({ path: path.join(SHOTS, `fix-K-10-instruments-${vp.name}.png`) });
+    await page.screenshot({ path: path.join(SHOTS, `instruments-alt-toggle-${vp.name}.png`) });
     assert.ok(!overlap, `toggle ${JSON.stringify(toggle)} overlaps the ALT title ${JSON.stringify(title)}`);
     const tFont = await page.$eval('[data-testid="alt-ref-toggle"]', (e) => parseFloat(getComputedStyle(e).fontSize));
     assert.ok(Math.abs(tFont - 11 * vp.scale) < 0.5, `toggle text ${tFont}px = 11 px × ${vp.scale}`);

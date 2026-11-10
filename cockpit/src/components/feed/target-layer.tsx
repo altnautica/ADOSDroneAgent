@@ -24,9 +24,12 @@
 // detection only on cameras someone is watching, and says so when the
 // detector is idle or unavailable rather than showing an empty frame.
 
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Crosshair, Lock, LockOpen, Puzzle } from "lucide-react";
 
+import { GlyphMarks, GlyphTags } from "@/components/feed/target-glyphs";
+import { layoutPoint, showTargetsUnavailable } from "@/components/feed/target-pointer";
+import { spokenState } from "@/components/feed/target-spoken";
 import { Menu, type MenuItem } from "@/components/ui/menu";
 import { useElementSize } from "@/hooks/use-element-size";
 import { useDetectionLease } from "@/hooks/use-detection-lease";
@@ -56,12 +59,11 @@ import { layoutTargets, tagFontPx, type GhostSample, type GlyphLayout, type Poin
 import {
   resolveTargets,
   type LastFollowRect,
-  type TagTone,
-  type TargetDetection,
   type TargetKind,
+  type TargetDetection,
 } from "@/shared/hud/target-state";
 import type { VideoFeedState } from "@/shared/video-transport";
-import { batchStage, DETECTION_DIM_ALPHA, targetsUnavailable, useDetectionsStore } from "@/stores/detections-store";
+import { batchStage, DETECTION_DIM_ALPHA, useDetectionsStore } from "@/stores/detections-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -85,151 +87,6 @@ const SMOOTHED: Partial<Record<TargetKind, true>> = {
   FOLLOWING: true,
   HOLDING: true,
 };
-
-const STROKE: Record<TargetKind, string> = {
-  CANDIDATE: "var(--hud-ink)",
-  TRACKED: "var(--hud-primary)",
-  LOCKED: "var(--hud-track)",
-  ACQUIRING: "var(--hud-track)",
-  FOLLOWING: "var(--hud-track)",
-  HOLDING: "var(--hud-track)",
-  COASTING: "var(--hud-coast)",
-  SEARCHING: "var(--hud-coast)",
-  SEARCHING_OFFFRAME: "var(--hud-coast)",
-  LOST: "var(--hud-crit)",
-  GT: "var(--hud-gt)",
-};
-
-const TAG_TONE: Record<TagTone, string> = {
-  ink: "bg-hud-glass text-hud-ink",
-  primary: "bg-hud-glass text-hud-primary",
-  track: "bg-hud-glass text-hud-track",
-  trackFilled: "bg-hud-track text-black",
-  warnFilled: "bg-hud-warn/85 text-black",
-  coast: "bg-hud-glass text-hud-coast",
-  crit: "bg-hud-glass text-hud-crit",
-  warn: "bg-hud-glass text-hud-warn",
-  muted: "bg-hud-glass text-hud-muted",
-  gt: "bg-hud-glass text-hud-gt",
-};
-
-const OUTLINE = "var(--hud-target-outline-color)";
-
-/** A path painted twice: the dark outline, then the state colour (§2.2). */
-function Outlined({ d, color, width, dash }: { d: string; color: string; width: number; dash?: string }) {
-  return (
-    <>
-      <path d={d} stroke={OUTLINE} strokeWidth={width + 2} strokeDasharray={dash} fill="none" strokeLinecap="butt" strokeLinejoin="miter" vectorEffect="non-scaling-stroke" />
-      <path d={d} stroke={color} strokeWidth={width} strokeDasharray={dash} fill="none" strokeLinecap="butt" strokeLinejoin="miter" vectorEffect="non-scaling-stroke" />
-    </>
-  );
-}
-
-/** The glyph's spoken label (`target.chip`): its class and track id, then its
- *  state and tag words. */
-function spokenState(g: GlyphLayout): string {
-  const who = [g.item.detection?.classLabel, g.item.trackId].filter((w) => w != null && w !== "").join(" ");
-  const words = [g.kind.toLowerCase().replace("_", " "), ...g.item.bottomTags.map((t) => t.text)];
-  return specText("target.chip", { who, word: words.join(", ") });
-}
-
-/** One drawn item's marks (SVG). */
-const GlyphMarks = memo(function GlyphMarks({ g, minimal }: { g: GlyphLayout; minimal: boolean }) {
-  const color = STROKE[g.kind];
-  const fade = g.kind === "LOST" ? 1 - (g.item.lostProgress ?? 0) : 1;
-  const box = g.box;
-  return (
-    <g opacity={fade} data-ease-key={g.key}>
-      {g.kind === "CANDIDATE" && box ? (
-        <g opacity={0.7}>
-          <rect x={box.x} y={box.y} width={box.w} height={box.h} stroke={OUTLINE} strokeWidth={3} fill="none" />
-          <rect x={box.x} y={box.y} width={box.w} height={box.h} stroke={color} strokeWidth={1} fill="none" />
-        </g>
-      ) : null}
-      {g.kind === "GT" && box ? (
-        <rect x={box.x} y={box.y} width={box.w} height={box.h} stroke={color} strokeWidth={1.5} strokeDasharray="1.5 3" strokeLinecap="round" fill="none" />
-      ) : null}
-      {g.brackets ? (
-        <g
-          opacity={g.item.modifiers.uncertain ? 0.55 : 1}
-          className={cn(
-            g.item.modifiers.reacquired && "origin-center animate-in zoom-in-[1.15] duration-[320ms] ease-out motion-reduce:animate-none",
-          )}
-          style={{ transformBox: "fill-box" }}
-        >
-          <Outlined d={g.brackets} color={color} width={2.5} dash={g.kind === "COASTING" ? "4 3" : undefined} />
-        </g>
-      ) : null}
-      {g.reticle ? <Outlined d={g.reticle} color="var(--hud-ink)" width={2} /> : null}
-      {g.feet ? <Outlined d={g.feet} color="var(--hud-track)" width={2.5} /> : null}
-      {g.ghost.length > 1 && !minimal ? (
-        <polyline
-          points={g.ghost.map((p) => `${p.x},${p.y}`).join(" ")}
-          stroke="var(--hud-coast)"
-          strokeWidth={1.5}
-          strokeDasharray="1.5 3"
-          strokeLinecap="round"
-          opacity={0.6}
-          fill="none"
-        />
-      ) : null}
-      {g.ring ? (
-        <g>
-          <circle cx={g.ring.cx} cy={g.ring.cy} r={g.ring.r} stroke={OUTLINE} strokeWidth={3.5} fill="none" />
-          <circle
-            cx={g.ring.cx}
-            cy={g.ring.cy}
-            r={g.ring.r}
-            stroke={color}
-            strokeWidth={1.5}
-            fill="none"
-            className="motion-reduce:[stroke-dasharray:4_3]"
-          />
-          <g className="origin-center animate-spin [animation-duration:1.2s] motion-reduce:hidden" style={{ transformBox: "fill-box" }}>
-            <circle cx={g.ring.cx} cy={g.ring.cy} r={g.ring.r} fill="none" stroke="none" />
-            <path
-              d={`M ${g.ring.cx},${g.ring.cy - g.ring.r} A ${g.ring.r},${g.ring.r} 0 0 1 ${g.ring.cx + g.ring.r},${g.ring.cy}`}
-              stroke={color}
-              strokeWidth={3}
-              fill="none"
-            />
-          </g>
-        </g>
-      ) : null}
-      {g.arrow ? <path d={g.arrow.path} fill={color} stroke={OUTLINE} strokeWidth={1} /> : null}
-    </g>
-  );
-});
-
-/** One drawn item's word tags (HTML, so the type is crisp and blurs its plate). */
-function GlyphTags({ g }: { g: GlyphLayout }) {
-  const fade = g.kind === "LOST" ? 1 - (g.item.lostProgress ?? 0) : 1;
-  const tags = [...(g.topTag ? [g.topTag] : []), ...g.bottomTags];
-  return (
-    <div data-ease-key={g.key} className="absolute inset-0">
-      {tags.map((t, i) => (
-        <span
-          key={i}
-          className={cn(
-            "absolute whitespace-nowrap rounded-[4px] text-center font-mono font-semibold uppercase tracking-hud-tag backdrop-blur-hud",
-            TAG_TONE[t.tone],
-          )}
-          style={{
-            left: t.x,
-            top: t.y,
-            width: t.w,
-            height: t.h,
-            lineHeight: `${t.h}px`,
-            fontSize: g.fontPx,
-            opacity: fade,
-          }}
-        >
-          {t.text}
-        </span>
-      ))}
-    </div>
-  );
-}
 
 interface MenuState {
   anchor: { left: number; top: number; bottom: number };
@@ -291,7 +148,7 @@ export function TargetLayer({
   const videoLost = isVideoLost(videoState, demo);
   const detector = useDetectionLease(cameraId ?? "main", holdDetection);
   const notice = videoLost ? null : detectorNotice(detector);
-  const unavailable = targetsUnavailable(stage, picked !== null || detector === "detecting");
+  const unavailable = showTargetsUnavailable(stage, detector, picked !== null);
   // The main layer raises "Targets unavailable" in the Feed's chip stack.
   useEffect(() => {
     if (!pip) useLayerChipsStore.getState().setTargetsUnavailable(unavailable);
@@ -437,10 +294,8 @@ export function TargetLayer({
   const [drag, setDrag] = useState<{ a: Point; b: Point; live: boolean; touch: boolean } | null>(null);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointers = useRef(new Set<number>());
-  const localPoint = (e: ReactPointerEvent): Point => {
-    const r = containerRef.current!.getBoundingClientRect();
-    return { x: e.clientX - r.left, y: e.clientY - r.top };
-  };
+  // Layout pixels: the digital zoom scales this layer on screen.
+  const localPoint = (e: ReactPointerEvent): Point => layoutPoint(e.clientX, e.clientY, containerRef.current!);
   const cancelDrag = () => {
     clearTimeout(pressTimer.current ?? undefined);
     setDrag(null);

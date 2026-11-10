@@ -46,6 +46,8 @@ export const NAV_SILENT_MS = 15_000;
 export const NAV_STATUS_POLL_MS = 500;
 /** How long the stream may stay down before the status poll takes over. */
 export const NAV_STREAM_FALLBACK_MS = 5000;
+/** A status read not answered within this is aborted (and counts as failed). */
+export const NAV_STATUS_TIMEOUT_MS = 1000;
 
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 10_000;
@@ -129,30 +131,31 @@ export function parseNavFrame(raw: unknown): NavFrame | null {
 
 /**
  * Route one per-frame layer kind (`ar`, `obstacles`, `depth`, `surfaces`)
- * into the mutable layer frame store, outside React. True when consumed.
+ * into the mutable layer frame store, outside React. `at` is when the frame
+ * was produced on the performance clock. True when consumed.
  */
-export function ingestLayerFrame(raw: unknown): boolean {
+export function ingestLayerFrame(raw: unknown, at = performance.now()): boolean {
   if (typeof raw !== "object" || raw === null) return false;
   const f = raw as { kind?: unknown; data?: unknown };
   switch (f.kind) {
     case "ar": {
       const d = parseArFrame(f.data);
-      if (d) layerFrames.putAr(d);
+      if (d) layerFrames.putAr(d, at);
       return true;
     }
     case "obstacles": {
       const d = parseObstaclesFrame(f.data);
-      if (d) layerFrames.putObstacles(d);
+      if (d) layerFrames.putObstacles(d, at);
       return true;
     }
     case "depth": {
       const d = parseDepthFrame(f.data);
-      if (d) layerFrames.putDepth(d);
+      if (d) layerFrames.putDepth(d, at);
       return true;
     }
     case "surfaces": {
       const d = parseSurfacesFrame(f.data);
-      if (d) layerFrames.putSurfaces(d);
+      if (d) layerFrames.putSurfaces(d, at);
       return true;
     }
     default:
@@ -179,22 +182,26 @@ export async function pollMapLive(signal?: AbortSignal): Promise<boolean> {
  * ingested as if it had arrived on the stream, stamped with its age on the
  * drone (`age_ms`) so a stale value never reads as fresh. The `?view=` query
  * carries the view lease, so the drone computes the same overlays it would
- * for a stream client. Resolves false on any failure.
+ * for a stream client. Resolves false on any failure, and ingests nothing
+ * once `signal` is aborted.
  */
 export async function pollNavStatus(signal?: AbortSignal, now: () => number = Date.now): Promise<boolean> {
   const view = viewLease && viewLease.layers.length > 0 ? `${viewLease.cameraId}:${viewLease.layers.join(",")}` : null;
   const path = view ? `/api/v1/nav/status?view=${encodeURIComponent(view)}` : "/api/v1/nav/status";
   try {
     const raw = await apiFetch<unknown>(path, { signal });
-    if (typeof raw !== "object" || raw === null) return false;
+    if (signal?.aborted || typeof raw !== "object" || raw === null) return false;
+    const perfNow = performance.now();
     for (const [kind, entry] of Object.entries(raw as Record<string, unknown>)) {
       if (kind === "view_demand" || typeof entry !== "object" || entry === null) continue;
       const e = entry as { ts_ms?: unknown; age_ms?: unknown; data?: unknown };
       const frame = { kind, ts_ms: e.ts_ms, data: e.data };
-      if (ingestLayerFrame(frame)) continue;
+      const age = typeof e.age_ms === "number" && e.age_ms >= 0 ? e.age_ms : 0;
+      // A layer frame keeps the time it was produced, so a kept frame
+      // re-served with a growing age never refreshes its staleness clock.
+      if (ingestLayerFrame(frame, perfNow - age)) continue;
       const parsed = parseNavFrame(frame);
       if (!parsed) continue;
-      const age = typeof e.age_ms === "number" && e.age_ms >= 0 ? e.age_ms : 0;
       useNavStreamStore.getState().ingest(parsed, now() - age);
     }
     return true;
@@ -259,6 +266,9 @@ export function connectNavStream(): () => void {
       backoff.opened();
       armSilence();
       streamUp = true;
+      // A late status answer would land an older frame over stream data.
+      statusInFlight?.abort();
+      statusInFlight = null;
       store.setLink("connected");
       store.setRadioFallback(false);
     };
@@ -318,11 +328,13 @@ export function connectNavStream(): () => void {
     if (Date.now() - downSince < NAV_STREAM_FALLBACK_MS) return;
     const ac = new AbortController();
     statusInFlight = ac;
+    const timeout = setTimeout(() => ac.abort(), NAV_STATUS_TIMEOUT_MS);
     void pollNavStatus(ac.signal)
       .then((ok) => {
         if (!closed && !streamUp) store.setRadioFallback(ok);
       })
       .finally(() => {
+        clearTimeout(timeout);
         if (statusInFlight === ac) statusInFlight = null;
       });
   }, NAV_STATUS_POLL_MS);

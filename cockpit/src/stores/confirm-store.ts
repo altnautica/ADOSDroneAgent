@@ -30,8 +30,8 @@ interface ConfirmState {
   pending: PendingConfirm | null;
   /** When a non-pointer hold (controller, chord, Enter) began, else null. */
   heldSince: number | null;
-  /** Bumped by a panel long-press or a controller-timed hold, which complete
-   *  the hold (or the confirm) in one gesture. */
+  /** Bumped by a panel long-press, which completes the hold (or the
+   *  confirm) in one gesture. */
   panelConfirmNonce: number;
   /** The last command outcome. */
   ack: AckLine | null;

@@ -59,6 +59,9 @@ impl VehicleState {
             "vehicle_firmware": self.firmware.map(ArduPilotFirmware::as_str),
             "armed": self.armed,
             "mode": self.mode,
+            // HEARTBEAT.system_status (MAV_STATE): 3 standby, 4 active,
+            // 5 critical, 6 emergency.
+            "system_status": self.system_status,
             "position": {
                 "lat": self.lat,
                 "lon": self.lon,

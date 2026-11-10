@@ -7,13 +7,14 @@
 // the ground, on every screen, and waits while the vehicle is in the air.
 //
 // The pad drives it: D-pad moves between Next and Skip, Cross presses the
-// focused one, Circle closes it. While the card is up on a disarmed vehicle
-// the pad is captured for it, so Cross does not also start a skill.
+// focused one, Circle closes it. The pad is captured for the card only while
+// the vehicle is known to be on the ground and disarmed, so Cross does not
+// also start a skill; with the arm state unknown the card shows without
+// capturing, and the safety bindings stay live.
 
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { useTourStage } from "@/components/controls/tour-stage";
-import { useFreshPilot } from "@/hooks/use-pilot";
+import { useTourCapturesPad, useTourStage } from "@/components/controls/tour-stage";
 import { useWidthClass } from "@/hooks/use-width-class";
 import { gridMeasures } from "@/lib/cockpit-layout";
 import { chromeStyle } from "@/lib/chrome-tokens";
@@ -21,12 +22,16 @@ import { TOUR_BUTTONS, TOUR_CARDS, tourCardRect, tourPadCommand, tourStep, type 
 import { cn } from "@/lib/utils";
 import { specText } from "@/shared/hud/spec-text";
 import { useControlsStore } from "@/stores/controls-store";
-import { useFlightStore } from "@/stores/flight-store";
 import { useInputStore } from "@/stores/input-store";
 
 /** Card width and its gap above the bottom edge, unscaled px. */
 const CARD_MAX_W_PX = 360;
 const CARD_BOTTOM_PX = 120;
+
+/** The zones the card stays clear of; the alerts are the notices and the
+ *  alert stack together. */
+const TOP_BAR = "[data-zone=top_bar]";
+const ALERTS = ['[data-testid="feed-notices"]', "[data-zone=alert_stack]"];
 
 function zoneRect(selector: string): Rect | null {
   const el = document.querySelector(selector);
@@ -35,12 +40,21 @@ function zoneRect(selector: string): Rect | null {
   return r.width > 0 && r.height > 0 ? { x: r.left, y: r.top, w: r.width, h: r.height } : null;
 }
 
+/** The box around every shown alert zone, or null with none shown. */
+function alertsRect(): Rect | null {
+  const rects = ALERTS.map(zoneRect).filter((r): r is Rect => r !== null);
+  if (rects.length === 0) return null;
+  const x = Math.min(...rects.map((r) => r.x));
+  const y = Math.min(...rects.map((r) => r.y));
+  const right = Math.max(...rects.map((r) => r.x + r.w));
+  const bottom = Math.max(...rects.map((r) => r.y + r.h));
+  return { x, y, w: right - x, h: bottom - y };
+}
+
 export function ControllerTour() {
   const stage = useTourStage();
   const markSeen = useControlsStore((s) => s.markTourSeen);
-  const pilot = useFreshPilot();
-  const telemetryArmed = useFlightStore((s) => s.telemetry?.armed ?? null);
-  const armed = pilot ? pilot.armed : telemetryArmed === true;
+  const captures = useTourCapturesPad();
   const { widthClass } = useWidthClass();
   const scale = gridMeasures(widthClass, false).scale;
   const [cursor, setCursor] = useState<TourCursor>({ card: 0, focus: 0 });
@@ -63,8 +77,9 @@ export function ControllerTour() {
   });
 
   // The pad drives the card: capture it (no flight action, no menu move)
-  // while the card is up on a disarmed vehicle, and read its button edges.
-  const drive = stage === "tour" && !armed;
+  // while the card is up on a vehicle known to be grounded and disarmed, and
+  // read its button edges.
+  const drive = stage === "tour" && captures;
   useEffect(() => {
     if (!drive) return;
     const input = useInputStore.getState();
@@ -88,25 +103,43 @@ export function ControllerTour() {
     };
   }, [drive]);
 
-  // Placed after layout and on resize: clear of STOP and the left column.
+  // Placed after layout and on resize: clear of the top bar, the alert stack,
+  // STOP and the left column; on a short window the body scrolls.
   useLayoutEffect(() => {
     if (stage === "none") return;
     const place = () => {
-      const h = cardRef.current?.getBoundingClientRect().height ?? 0;
+      const el = cardRef.current;
+      const box = el?.getBoundingClientRect().height ?? 0;
+      // The content's own height, whatever the cap the last placement set.
+      const natural = el && el.clientHeight > 0 ? box * (el.scrollHeight / el.clientHeight) : box;
       setRect(
         tourCardRect(
           window.innerWidth,
           window.innerHeight,
-          { leftColumn: zoneRect("[data-zone=left_column]"), stop: zoneRect("[data-zone=stop]") },
+          {
+            leftColumn: zoneRect("[data-zone=left_column]"),
+            stop: zoneRect("[data-zone=stop]"),
+            topBar: zoneRect(TOP_BAR),
+            alertStack: alertsRect(),
+          },
           CARD_MAX_W_PX * scale,
-          h,
+          natural,
           CARD_BOTTOM_PX * scale,
         ),
       );
     };
     place();
     window.addEventListener("resize", place);
-    return () => window.removeEventListener("resize", place);
+    // An alert or a notice coming up moves the card down.
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    for (const sel of [TOP_BAR, ...ALERTS]) {
+      const el = document.querySelector(sel);
+      if (el) observer?.observe(el);
+    }
+    return () => {
+      window.removeEventListener("resize", place);
+      observer?.disconnect();
+    };
   }, [stage, cursor.card, scale]);
 
   if (stage === "none") return null;
@@ -134,12 +167,13 @@ export function ControllerTour() {
       role="region"
       aria-label={specText("controls.tour.title")}
       data-testid="controls-tour"
-      className="chrome-panel pointer-events-auto fixed z-[48] flex flex-col gap-[8px] p-[12px]"
+      className="chrome-panel pointer-events-auto fixed z-[48] flex flex-col gap-[8px] overflow-y-auto p-[12px]"
       style={{
         ...chromeStyle(),
         left: (rect?.x ?? 0) / scale,
         top: (rect?.y ?? 0) / scale,
         width: (rect?.w ?? CARD_MAX_W_PX * scale) / scale,
+        maxHeight: rect ? rect.h / scale : undefined,
         visibility: rect ? "visible" : "hidden",
         zoom: scale === 1 ? undefined : scale,
       }}

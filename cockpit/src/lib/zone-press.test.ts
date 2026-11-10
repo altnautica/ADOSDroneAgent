@@ -6,7 +6,12 @@ import { pressOrExplain } from "@/lib/zone-press";
 import { onToast, type ToastMessage } from "@/shared/api/toast";
 
 const src = (p: string) => readFileSync(path.resolve(__dirname, p), "utf8");
-const ZONES = ["../components/feed/cockpit/cockpit-zones.tsx", "../components/feed/feed-layouts.tsx"];
+const LAYOUTS = "../components/feed/feed-layouts.tsx";
+const BUTTON = "../components/feed/cockpit/zone-button.tsx";
+const ZONES = [
+  ...["cockpit-zones.tsx", "right-column.tsx", "gimbal-pad.tsx", "camera-settings-sheet.tsx", "zone-button.tsx"].map((f) => `../components/feed/cockpit/${f}`),
+  LAYOUTS,
+];
 
 describe("an unavailable flight control explains itself on press", () => {
   it("shows the reason in the cockpit toast and does not run", () => {
@@ -26,7 +31,7 @@ describe("an unavailable flight control explains itself on press", () => {
       expect(s, f).not.toMatch(/\sdisabled=\{/);
       expect(s, f).not.toMatch(/[\s"](?<!aria-)disabled:opacity/);
     }
-    expect(src(ZONES[0])).toMatch(/aria-disabled=\{/);
+    expect(src(BUTTON)).toMatch(/aria-disabled=\{/);
   });
 
   it("draws no hard-coded flight-screen words in the zones (all via specText)", () => {
@@ -58,6 +63,6 @@ describe("an unavailable flight control explains itself on press", () => {
   });
 
   it("the map view's video card swaps video and map with the spec label", () => {
-    expect(src(ZONES[1])).toMatch(/specText\("cockpit\.pip\.swap"\)/);
+    expect(src(LAYOUTS)).toMatch(/specText\("cockpit\.pip\.swap"\)/);
   });
 });

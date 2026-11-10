@@ -4,13 +4,19 @@
 //! `COMMAND_INT` `MAV_CMD_DO_REPOSITION` (192): `x`/`y` carry the position as
 //! degrees·1e7, so the point keeps its full precision (a `COMMAND_LONG` float
 //! param holds a latitude to about a metre only), in the home-relative frame,
-//! with `param1 = -1` (the vehicle's default speed), `param2 = 1`
-//! (`MAV_DO_REPOSITION_FLAGS_CHANGE_MODE`: the FC switches to its guided mode
-//! if needed) and `param4 = NaN` (keep the current yaw).
+//! with `param1 = -1` (the vehicle's default speed), `param2 = 0` (no
+//! `MAV_DO_REPOSITION_FLAGS_CHANGE_MODE`: the FC must already fly its guided
+//! mode, so a reposition never takes it out of another mode) and
+//! `param4 = NaN` (keep the current yaw).
 //!
 //! Every argument is checked before a frame is built: a non-finite or
-//! out-of-range latitude or longitude, or a height outside the cockpit spec's
-//! launch range (`layout.json` `launch.alt_min_m..=alt_max_m`), is a 400.
+//! out-of-range latitude or longitude, the null point (0, 0), or a height
+//! outside the cockpit spec's launch range (`layout.json`
+//! `launch.alt_min_m..=alt_max_m`), is a 400.
+//!
+//! A reposition never interrupts a failsafe: while a fresh pilot frame reports
+//! `fc_failsafe`, or the FC flies a return or landing mode, the route answers
+//! 409 `{"detail", "code": "failsafe"}` before any frame is built.
 
 use std::sync::LazyLock;
 
@@ -29,8 +35,8 @@ static ALT_RANGE_M: LazyLock<(f64, f64)> = LazyLock::new(|| {
     (bound("alt_min_m"), bound("alt_max_m"))
 });
 
-/// `MAV_DO_REPOSITION_FLAGS_CHANGE_MODE`: enter the guided mode if needed.
-const REPOSITION_CHANGE_MODE: f32 = 1.0;
+/// `param2` 0: no `MAV_DO_REPOSITION_FLAGS_CHANGE_MODE`, the FC keeps its mode.
+const REPOSITION_FLAGS: f32 = 0.0;
 /// `param1` -1: fly at the vehicle's default speed.
 const DEFAULT_SPEED: f32 = -1.0;
 
@@ -68,6 +74,9 @@ pub(super) fn reposition_command(
     if lon.abs() > 180.0 {
         return Err(bad(format!("longitude {lon} is outside -180..180")));
     }
+    if lat == 0.0 && lon == 0.0 {
+        return Err(bad("the point (0, 0) is not a picked position".to_string()));
+    }
     let (min, max) = *ALT_RANGE_M;
     if !(min..=max).contains(&alt) {
         return Err(bad(format!(
@@ -76,7 +85,7 @@ pub(super) fn reposition_command(
     }
     let frame = COMMAND_INT_DATA {
         param1: DEFAULT_SPEED,
-        param2: REPOSITION_CHANGE_MODE,
+        param2: REPOSITION_FLAGS,
         param3: 0.0,
         param4: f32::NAN,
         x: (lat * 1e7).round() as i32,
@@ -91,6 +100,73 @@ pub(super) fn reposition_command(
     };
     let body = json!({"status": "ok", "cmd": "reposition", "lat": lat, "lon": lon, "alt_m": alt});
     Ok((frame, body))
+}
+
+/// A pilot frame older than this is not read (the pilot's state cadence).
+const PILOT_FRESH_MS: u64 = 2000;
+
+/// Return and landing modes a reposition must not interrupt: ArduPilot names
+/// (QuadPlane `QRTL`/`QLAND` included) and the PX4 names the state reports.
+const RECOVERY_MODES: &[&str] = &[
+    "RTL",
+    "LAND",
+    "SMART_RTL",
+    "QRTL",
+    "QLAND",
+    "AUTO.RTL",
+    "AUTO.LAND",
+    "AUTO.PRECLAND",
+];
+
+/// Whether the nav hub holds a fresh pilot frame reporting `fc_failsafe`.
+fn pilot_reports_failsafe(state: &AppState) -> bool {
+    let status = state.nav.status_body_for(None);
+    let Some(pilot) = status.get("pilot") else {
+        return false;
+    };
+    let fresh = pilot
+        .get("age_ms")
+        .and_then(Value::as_u64)
+        .is_some_and(|age| age <= PILOT_FRESH_MS);
+    fresh
+        && pilot
+            .pointer("/data/fc_failsafe")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+/// Whether the state snapshot's current FC mode is a return or landing mode.
+fn fc_in_recovery_mode(state: &AppState) -> bool {
+    state
+        .state
+        .snapshot()
+        .as_ref()
+        .and_then(|s| s.get("mode"))
+        .and_then(Value::as_str)
+        .is_some_and(|m| {
+            RECOVERY_MODES
+                .iter()
+                .any(|r| r.eq_ignore_ascii_case(m.trim()))
+        })
+}
+
+/// The 409 a reposition gets while the FC is in a failsafe or flies a return or
+/// landing mode, else `None`.
+pub(super) fn reposition_refusal(state: &AppState) -> Option<Response> {
+    let why = if pilot_reports_failsafe(state) {
+        "the flight controller is in a failsafe"
+    } else if fc_in_recovery_mode(state) {
+        "the flight controller is returning or landing"
+    } else {
+        return None;
+    };
+    Some(
+        (
+            StatusCode::CONFLICT,
+            Json(json!({"detail": why, "code": "failsafe"})),
+        )
+            .into_response(),
+    )
 }
 
 /// Address a built `COMMAND_INT` to the FC `(system, component)`.

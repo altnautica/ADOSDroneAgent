@@ -2031,7 +2031,7 @@ fn every_encode_path_repeats_parameter_sets_per_idr() {
 
 #[test]
 fn the_radio_rtp_copy_comes_out_of_the_encoder_not_a_re_read() {
-    // VID-02: one encode, two muxers. The RTP branch must carry the exact
+    // One encode, two muxers. The RTP branch must carry the exact
     // framing contract the receiver's static SDP describes (payload type
     // 96, SSRC 0xCAFE, 1316-byte datagrams to 127.0.0.1:5600), and the RTSP
     // branch must still publish to mediamtx for WHEP.

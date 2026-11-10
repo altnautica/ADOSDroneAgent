@@ -72,15 +72,18 @@ jobs:
 
       # Pointer, hit-test and flow checks against the built bundle in headless
       # Chromium: the first press on STOP lands on STOP (with the status list
-      # and with every flight-screen sheet open), the gimbal recentre button
-      # takes a mouse click, a flick off the gimbal pad leaves no rate command
-      # running, the kiosk's banners, alert cards and layer chips never
-      # overlap, a stalled pilot clears the flow overlays, a running launch
-      # shows its step and Abort, a Mode sheet pick shows pending at once, a
-      # pad Back closes the open overlay, the controller editor highlights,
-      # persists, flags conflicts and keeps locked bindings, the stick stream
-      # runs at 50 Hz, and the map gestures (Fly Here, ground launch, labels,
-      # readouts) land where they should. The shots case stays manual.
+      # and with every flight-screen sheet open), STOP sends a kill only after
+      # its full 3 s hold and confirm, the pad's kill and RTH combos complete
+      # with a sheet open, the gimbal recentre button takes a mouse click, a
+      # flick off the gimbal pad leaves no rate command running, the kiosk's
+      # banners, alert cards and layer chips never overlap, a stalled pilot
+      # clears the flow overlays, a running launch shows its step and Abort, a
+      # Mode sheet pick shows pending at once, a pad Back closes the open
+      # overlay, the controller editor highlights, persists, flags conflicts
+      # and keeps locked bindings, the stick stream runs at 50 Hz, and the map
+      # gestures (Fly Here, ground launch, labels, readouts) land where they
+      # should. Each case runs in its own process (`<group> <case>`, the
+      # groups in e2e/*.e2e.cjs); e2e/shots.e2e.cjs stays manual.
       - name: Browser checks (STOP, sheets, flows, gimbal pad, controls, maps)
         working-directory: cockpit
         run: |
@@ -89,7 +92,11 @@ jobs:
           npx playwright-core install --with-deps --only-shell chromium
           npx vite preview --port 4273 --strictPort >/tmp/preview.log 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4273/cockpit/ >/dev/null && break; sleep 1; done
-          for c in stop stop-sheets flow-stale sequence mode-pending hold-hint overlay-close recentre gimbal-flick chips controls stream; do SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/cockpit-v2.e2e.cjs "$c"; done
+          for gc in stop:stop stop:stop-sheets stop:stop-hold stop:pad-safety \
+            flows:flow-stale flows:sequence flows:mode-pending flows:hold-hint flows:overlay-close \
+            controls:recentre controls:gimbal-flick controls:chips controls:controls controls:stream; do
+            SHOTS="$RUNNER_TEMP/e2e-shots" node "e2e/${gc%%:*}.e2e.cjs" "${gc#*:}"
+          done
           BASE=http://127.0.0.1:4273/cockpit/ SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/tips.e2e.cjs
           SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/maps.e2e.cjs
 

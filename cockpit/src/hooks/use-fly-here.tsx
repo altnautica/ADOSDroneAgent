@@ -7,7 +7,7 @@
 // ground the same gesture opens the Launch sheet with the point as its go-to.
 // Each map says how its points map to the world through `locate`.
 
-import { useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 
 import { Sheet } from "@/components/ui/sheet";
 import { HoldButton } from "@/components/ui/hold-button";
@@ -91,6 +91,14 @@ export function useFlyHere(locate: (clientX: number, clientY: number) => MapPick
     if (press.current) window.clearTimeout(press.current.timer);
     press.current = null;
   };
+  // A press still running when the map goes away (a card switch) never fires.
+  useEffect(
+    () => () => {
+      if (press.current) window.clearTimeout(press.current.timer);
+      press.current = null;
+    },
+    [],
+  );
 
   const handlers: MapPressHandlers | null =
     action === null

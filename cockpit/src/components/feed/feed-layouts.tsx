@@ -19,6 +19,7 @@ import { ArrowLeftRight } from "lucide-react";
 import { useRef, useState, type CSSProperties, type ReactNode } from "react";
 
 import { ExtensionWidgetZones } from "@/components/plugins/extension-feed-mounts";
+import { useZoomResetInCard } from "@/components/feed/video-zoom";
 import { SPLIT_MAX, SPLIT_MIN, Z, clampSplit, type GridMeasures } from "@/lib/cockpit-layout";
 import type { CockpitView } from "@/lib/cockpit-view";
 import { FLIGHT_PX, flightLayout, type FlightLayoutInput, type Rect, type RightItem } from "@/lib/flight-layout";
@@ -238,6 +239,8 @@ export function LandscapeGrid({
   const L = flightLayout({ ...input, view, splitRatio: ratio });
   const s = m.scale;
   const mapMain = view === "map";
+  // Off the stage the video has no zoom wrapper, so the zoom resets.
+  useZoomResetInCard(mapMain);
   const midTop = L.strip ? L.strip.y + L.strip.h + 8 * s : L.topBar.y + L.topBar.h + 8 * s;
 
   return (

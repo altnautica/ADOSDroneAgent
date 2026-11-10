@@ -532,3 +532,6 @@ fn the_three_routes_are_served_natively() {
         );
     }
 }
+
+#[path = "camera_mavlink_ack_tests.rs"]
+mod ack;

@@ -16,7 +16,8 @@ vi.mock("@/lib/api", () => ({
   },
 }));
 
-import { sendFcReposition } from "@/lib/fly-here";
+import layoutJson from "@/shared/cockpit-spec/layout.json";
+import { flyHereArgs, sendFcReposition } from "@/lib/fly-here";
 import { ApiError } from "@/shared/api-fetch";
 import { specText } from "@/shared/hud/spec-text";
 
@@ -55,5 +56,28 @@ describe("fly here through the flight controller", () => {
     await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.no_fc"));
     fails(new ApiError("bad", 400, {}));
     await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.bad_args"));
+  });
+
+  it("names an FC that cannot reposition, a denied request and a conflict, never as no answer", async () => {
+    fails(new ApiError("not implemented", 501, { detail: "reposition is not supported by this flight controller" }));
+    await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.unsupported"));
+    fails(new ApiError("forbidden", 403, {}));
+    await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.not_authorized"));
+    fails(new ApiError("unauthorized", 401, { error: "no_pilot_link" }));
+    await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.not_authorized"));
+    fails(new ApiError("conflict", 409, { detail: "Another client holds control" }));
+    await expect(sendFcReposition(point)).resolves.toBe("Another client holds control");
+    fails(new ApiError("conflict", 409, { error: "busy" }));
+    await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.busy"));
+  });
+});
+
+describe("fly here height", () => {
+  it("never sends a height above the launch ceiling, and keeps the floor", () => {
+    const max = layoutJson.launch.alt_max_m;
+    expect(flyHereArgs(point, 300)?.alt_m).toBe(max);
+    expect(flyHereArgs(point, max + 0.04)?.alt_m).toBe(max);
+    expect(flyHereArgs(point, 1)?.alt_m).toBe(3);
+    expect(flyHereArgs(point, 50)?.alt_m).toBe(50);
   });
 });

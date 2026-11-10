@@ -2,11 +2,21 @@
 // same inputs the cockpit uses: the status pill and its alert list
 // (`status-pill`), the link-loss line, the bottom-row AGL with its source
 // mark, who has the sticks, and the battery's time to reserve.
+//
+// The pill's link items come from vehicle liveness (`useVehicleLiveness`),
+// not from whether the agent answered. On the ground it also lists the
+// failing pre-flight checks (`@/shared/hud/preflight`). The Home card has no
+// video of its own, so it raises no frozen-video item. The lines read the
+// pilot and follow frames only while fresh (`freshNavFrames`).
 
+import type { NavStatusBody, NavStatusEntry } from "@/hooks/use-nav-status";
 import { aglMarkText, bottomRowAgl } from "@/shared/hud/chip-inputs";
-import type { PilotState } from "@/shared/hud/cockpit-frames";
+import { parsePilotState, type PilotState } from "@/shared/hud/cockpit-frames";
 import { batteryReading, type BatteryHealthInput } from "@/shared/hud/battery";
 import { linkLossLine } from "@/shared/hud/link-loss";
+import { parseFollowState } from "@/shared/hud/nav-types";
+import { pilotFresh } from "@/shared/hud/pilot-fresh";
+import { preflightChecks, preflightFailing } from "@/shared/hud/preflight";
 import { specText } from "@/shared/hud/spec-text";
 import { baseAlerts, controllerLost, pillAlerts, pillSummary, pilotFailsafe, type PillSummary } from "@/shared/hud/status-pill";
 
@@ -23,8 +33,13 @@ export interface HomeStatusInputs {
   telemetry: VehicleTelemetry | null;
   battery: BatteryHealthInput | null;
   status: StatusFull | null;
-  /** Ms since the last telemetry read; null before the first one. */
+  /** Vehicle telemetry is live (attitude present and its stamp moving). */
+  live: boolean;
+  /** Ms since vehicle telemetry was last live; null when it never was this
+   *  session (nothing to have lost). */
   msSinceLive: number | null;
+  /** The arm state at the last live sample; null before any. */
+  armedAtLastLive: boolean | null;
   /** Age of the kept pilot frame (its age at the agent plus the time since
    *  receipt); null when none ever arrived. */
   pilotAgeMs: number | null;
@@ -41,7 +56,9 @@ export function homePill(i: HomeStatusInputs): PillSummary {
     status: i.status,
     msSinceLive: i.msSinceLive,
     video: null,
+    armedAtLastLive: i.armedAtLastLive,
   });
+  const checks = preflightChecks({ telemetry: i.telemetry, battery: i.battery, live: i.live, home: i.telemetry?.home ?? null });
   return pillSummary(
     pillAlerts({
       alerts,
@@ -53,9 +70,27 @@ export function homePill(i: HomeStatusInputs): PillSummary {
       agentReachable: i.agentReachable,
       controllerLost: controllerLost(i.pilot),
       ...pilotFailsafe(i.pilot),
+      preflightFailing: preflightFailing(checks, alerts, i.telemetry?.armed),
     }),
     new Set(),
   );
+}
+
+type FollowAgl = { aglM: number | null; aglSource: "rng" | "baro" | null };
+
+/** The pilot and follow frames of the last nav-status body while each is
+ *  fresh at `nowMs` (received at `receivedAtMs` minus its age at the agent),
+ *  else null: a dead pilot's kept frame never reads as current. */
+export function freshNavFrames(
+  body: NavStatusBody | undefined,
+  receivedAtMs: number,
+  nowMs: number,
+): { pilot: PilotState | null; follow: FollowAgl | null } {
+  const fresh = (e: NavStatusEntry | null | undefined): e is NavStatusEntry => !!e && pilotFresh(receivedAtMs - (e.age_ms ?? 0), nowMs);
+  return {
+    pilot: fresh(body?.pilot) ? parsePilotState(body.pilot.data) : null,
+    follow: fresh(body?.follow) ? parseFollowState(body.follow.data) : null,
+  };
 }
 
 export interface HomeStatusLines {

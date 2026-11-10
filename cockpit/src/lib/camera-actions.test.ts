@@ -116,7 +116,7 @@ describe("the vehicle's own camera over MAVLink (between the extension and the l
       { url: "/api/v1/camera/mavlink/capture", body: { component_id: 101 } },
     ]);
     expect(seen.map((t) => [t.kind, t.message])).toEqual([
-      ["ok", specText("mav_result.ACCEPTED")],
+      ["ok", specText("camera.capture_sent")],
       ["err", specText("camera.zoom_failed", { reason: specText("mav_result.DENIED") })],
       ["err", specText("camera.capture_failed", { reason: "Busy" })],
     ]);
