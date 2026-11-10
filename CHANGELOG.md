@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.74] - 2026-11-10
+
+### Changed
+
+- The flight-state chip shows TAKING OFF with the current step and an Abort button while a take-off runs, adds FAILSAFE ahead of the secondary line when the flight controller flies a failsafe return or landing, and offers Resume with the waypoint when the pilot holds a paused mission. A mission ETA of 119.6 s now reads 2:00 instead of 1:60.
+- The status pill warns when the pilot has not answered for 2 s and then drops the readiness and flight controller messages from that old state. It also reports an unreachable agent, a lost controller in the air and each failing pre-flight item. Storage now reads like 98 % used.
+- Fly here is no longer offered during a flight controller failsafe. The shared rule can also send a reposition straight to a flight controller in GUIDED, for surfaces that use it.
+- Video errors (no frames, session lost, transport failed, HLS manifest timeout) now come from the translation file.
+
 ## [0.109.73] - 2026-11-10
 
 ### Added
