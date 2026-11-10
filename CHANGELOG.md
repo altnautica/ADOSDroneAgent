@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.48] - 2026-11-10
+
+### Changed
+
+- Cockpit spec: new `tips.json` describes the flight screen's contextual tips (one at a time, ground only, never over STOP, the left column or the flight-state chip), with their texts in the string table.
+- Cockpit spec string table gains the controller tour buttons (Next, Done, Skip, Replay controller tour), one refusal text per pilot refusal code (`refusal.*`, with `Not ready: {item}` and readiness item labels), alert titles (`alert.*`), the no-pilot chip and controller cell texts, the emergency stop hold label, camera texts (digital zoom, photo saved, no video), AGL source marks, MAVLink command result names, and the flight-screen texts of the launch sheet, Mode sheet, menu, Fly here, pre-flight checklist and skill picker.
+- Cockpit spec hold-reason labels are keyed by the exact wire string the pilot sends (`controller-lost`, `link-loss`, `obstacle-close`, `blocked`, `lease-busy`, `lease-revoked`) in both `flight-state.json` and the string table; `link-loss` now has a label.
+- Cockpit spec layout: top-bar overflow order (controller, navigation source, link text, link icon, layer button), storage warning at 90 % and critical at 97 %, a 20 % low-battery fallback, confirm-hold durations, the map long-press time, launch altitude range and default, menu order, the right column's drop order, a follow strip under the top bar, and the tips pointer. Views: the map view puts its video in the bottom-left card, and the split divider is draggable between 0.3 and 0.7.
+- Launch sheet texts read "Go to a point", "Skill" and "Nothing", the words the cockpits already showed.
+
 ## [0.109.47] - 2026-11-10
 
 ### Fixed
