@@ -54,6 +54,14 @@ describe("the status pill's pilot, agent, controller and pre-flight inputs", () 
     expect(stale.map((a) => a.id)).toEqual(["pilot_not_answering"]);
   });
 
+  it("raises the FC failsafe from a fresh pilot state only", () => {
+    const failsafe = { ...base, pilot: pilot({ fcFailsafe: true, failsafeCause: "fc" }), checks: [] };
+    const fresh = pillAlerts({ alerts: [], readiness: [], prearm: undefined, storagePct: null, ...pillWiring(failsafe) });
+    expect(fresh.map((a) => [a.id, a.severity, a.text])).toEqual([["failsafe", "critical", "Failsafe: flight controller"]]);
+    const stale = pillAlerts({ alerts: [], readiness: [], prearm: undefined, storagePct: null, ...pillWiring({ ...failsafe, nowMs: 3000 }) });
+    expect(stale.map((a) => a.id)).toEqual(["pilot_not_answering"]);
+  });
+
   it("calls the agent unreachable while its status poll fails", () => {
     expect(pillWiring(base).agentReachable).toBe(true);
     expect(pillWiring({ ...base, statusStale: true }).agentReachable).toBe(false);

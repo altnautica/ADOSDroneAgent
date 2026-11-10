@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.95] - 2026-11-10
+
+### Changed
+
+- Cockpit: the top-bar status pill shows the critical failsafe item while a fresh pilot state reports the flight controller's own failsafe return or landing.
+
 ## [0.109.94] - 2026-11-10
 
 ### Changed

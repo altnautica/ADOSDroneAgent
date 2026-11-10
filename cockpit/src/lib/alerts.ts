@@ -9,7 +9,7 @@ import { linkDiagView } from "@/lib/link-diag";
 import type { PreflightCheck } from "@/lib/safety-band";
 import type { BatteryHealth, GsStatus, VehicleState } from "@/lib/types";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
-import { baseAlerts, controllerLost, sortAlerts, type BaseAlert, type BaseAlertInputs } from "@/shared/hud/status-pill";
+import { baseAlerts, controllerLost, pilotFailsafe, sortAlerts, type BaseAlert, type BaseAlertInputs } from "@/shared/hud/status-pill";
 
 export interface CockpitAlert extends BaseAlert {
   icon: LucideIcon;
@@ -60,13 +60,21 @@ export function pillWiring(i: {
   armed: boolean | undefined;
   checks: readonly PreflightCheck[];
   alerts: readonly BaseAlert[];
-}): { pilotAgeMs: number | null; agentReachable: boolean; controllerLost: boolean; preflightFailing: { id: string; label: string }[] } {
+}): {
+  pilotAgeMs: number | null;
+  agentReachable: boolean;
+  controllerLost: boolean;
+  preflightFailing: { id: string; label: string }[];
+  fcFailsafe: boolean;
+  failsafeCause: string | null;
+} {
   const active = new Set(i.alerts.map((a) => a.id));
   const onGround = i.armed !== true;
   return {
     pilotAgeMs: i.pilot ? Math.max(0, i.nowMs - i.pilot.at) : null,
     agentReachable: !i.statusStale,
     controllerLost: controllerLost(i.pilot?.data ?? null),
+    ...pilotFailsafe(i.pilot?.data ?? null),
     preflightFailing: onGround
       ? i.checks.filter((c) => !c.ok && !(CHECK_COVERED_BY[c.id] ?? []).some((id) => active.has(id))).map((c) => ({ id: c.id, label: c.label }))
       : [],
