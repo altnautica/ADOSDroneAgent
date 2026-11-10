@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.101] - 2026-11-10
+
+### Fixed
+
+- Ground-station panel: only a long press of select counts toward the two-step emergency stop. A long press of back closes the STOP sheet and never fires the stop, and with STOP focused it keeps its own meaning (the menu).
+- Ground-station panel: on the flight screen, previous and next move focus through the flight controls, STOP first, so STOP is one press away from nothing focused; select presses the focused control.
+- The panel opens the STOP sheet through the same check as the STOP button.
+- Controls editor: Emergency stop is offered only in the Hold cell, so it no longer jumps rows and blocks Save with a conflict.
+
 ## [0.109.100] - 2026-11-10
 
 ### Fixed

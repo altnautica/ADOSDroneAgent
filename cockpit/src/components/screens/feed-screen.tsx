@@ -59,6 +59,7 @@ import { hasLocalVision, useVisionDetections } from "@/hooks/use-vision-detectio
 import { useWidthClass } from "@/hooks/use-width-class";
 import { registerCameraActions } from "@/lib/camera-actions";
 import { pushCommandHandler } from "@/lib/command-stack";
+import { trackFocusRing } from "@/lib/focus-nav";
 import { feedNavCommand, registerFeedActions } from "@/lib/feed-actions";
 import { chromeStyle } from "@/lib/chrome-tokens";
 import { gridMeasures } from "@/lib/cockpit-layout";
@@ -145,6 +146,8 @@ export function FeedScreen() {
   useEffect(() => registerCameraActions(groundStation), [groundStation]);
   useEffect(() => registerFeedActions(), []);
   useEffect(() => pushCommandHandler(feedNavCommand), []);
+  // The panel steps focus through the flight controls; draw the ring on it.
+  useEffect(() => (rootRef.current ? trackFocusRing(rootRef.current) : undefined), []);
   const gimbal = useGimbalAvailable(flightNavCapable);
   useGimbalDriver(gimbal);
 
@@ -259,6 +262,7 @@ export function FeedScreen() {
   return (
     <div
       ref={rootRef}
+      data-feed-root
       className="absolute inset-0 overflow-hidden bg-black"
       style={style}
       data-focus-rings={m.focusRingsAlways ? "always" : undefined}

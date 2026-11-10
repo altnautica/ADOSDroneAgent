@@ -1,11 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sent = vi.hoisted(() => [] as string[]);
-vi.mock("@/lib/skill-runner", () => ({
-  executeSkill: async (skill: { id: string }) => {
-    sent.push(skill.id);
-  },
-}));
+const requested = vi.hoisted(() => [] as string[]);
+vi.mock("@/lib/skill-runner", async () => {
+  const { useConfirmStore } = await import("@/stores/confirm-store");
+  return {
+    executeSkill: async (skill: { id: string }) => {
+      sent.push(skill.id);
+    },
+    // The STOP button's own path: gate, then open the confirm sheet.
+    requestSkill: (skill: Parameters<ReturnType<typeof useConfirmStore.getState>["open"]>[0]) => {
+      requested.push(skill.id);
+      useConfirmStore.getState().open(skill);
+      return true;
+    },
+  };
+});
+vi.mock("@/hooks/use-skill-context", () => ({ skillContextNow: () => ({}) }));
 
 import { BUILTIN_SKILLS } from "@/lib/skills";
 import { STOP_HOLD_MS } from "@/lib/pad/ds4-map";
@@ -17,6 +28,7 @@ import {
   PANEL_STOP_ARM_MS,
   dispatchPanelEvent,
   eventToCommand,
+  isLongSelect,
   panelLongPressCompletes,
 } from "./use-buttons";
 
@@ -69,6 +81,7 @@ describe("the panel's emergency stop", () => {
 
   beforeEach(() => {
     sent.length = 0;
+    requested.length = 0;
     commands.length = 0;
     stopFocused = true;
     useConfirmStore.getState().cancel();
@@ -107,5 +120,43 @@ describe("the panel's emergency stop", () => {
     dispatchPanelEvent(longSelect, deps);
     expect(useConfirmStore.getState().pending).toBeNull();
     expect(commands).toEqual(["quick-menu"]);
+  });
+
+  const longBack = { button: "4", label: "b4", kind: "long", action: "menu" };
+
+  it("opens the STOP sheet through the STOP button's gate", () => {
+    dispatchPanelEvent(longSelect, deps);
+    expect(requested).toEqual(["kill"]);
+  });
+
+  it("closes the STOP sheet on a long back and never fires", () => {
+    dispatchPanelEvent(longSelect, deps);
+    now += PANEL_STOP_ARM_MS * 5;
+    dispatchPanelEvent(longBack, deps);
+    expect(useConfirmStore.getState().pending).toBeNull();
+    expect(sent).toEqual([]);
+    dispatchPanelEvent(longBack, deps);
+    expect(sent).toEqual([]);
+  });
+
+  it("fires on two long selects a second apart", () => {
+    dispatchPanelEvent(longSelect, deps);
+    now += PANEL_STOP_ARM_MS;
+    dispatchPanelEvent(longSelect, deps);
+    expect(sent).toEqual(["kill"]);
+  });
+
+  it("keeps long back as the menu with STOP focused, never the STOP sheet", () => {
+    dispatchPanelEvent(longBack, deps);
+    expect(useConfirmStore.getState().pending).toBeNull();
+    expect(requested).toEqual([]);
+    expect(commands).toEqual(["quick-menu"]);
+  });
+
+  it("counts only select toward the STOP", () => {
+    expect(isLongSelect(longSelect)).toBe(true);
+    expect(isLongSelect(longBack)).toBe(false);
+    expect(isLongSelect({ button: "130", label: "enc_sw", kind: "long", action: "x" })).toBe(false);
+    expect(isLongSelect({ ...longSelect, kind: "short" })).toBe(false);
   });
 });

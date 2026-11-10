@@ -7,6 +7,7 @@
 // whichever flight the aircraft is not in.
 
 import type { NavCommand } from "@/nav/navigator";
+import { activateFocused, focusablesIn } from "@/lib/focus-nav";
 import { useNavStore } from "@/stores/nav-store";
 import { PROFILE_KEYS } from "@/lib/cockpit-spec";
 import { registerCockpitActions, runCockpitAction, type CockpitAction } from "@/lib/cockpit-actions";
@@ -110,16 +111,44 @@ export function profileActionForKey(key: string): string | null {
   return PROFILE_KEYS[key.toLowerCase()] ?? null;
 }
 
+/** The Feed's root element (its `data-feed-root` container). */
+function feedRoot(): HTMLElement | null {
+  return typeof document === "undefined" ? null : document.querySelector<HTMLElement>("[data-feed-root]");
+}
+
+/** The flight controls the panel steps through, STOP first so one press of
+ *  previous or next from nothing focused reaches it, then the rest in
+ *  document order. */
+export function feedFocusOrder(root: HTMLElement): HTMLElement[] {
+  const nodes = focusablesIn(root);
+  const stop = nodes.filter((n) => n.closest('[data-zone="stop"]') !== null);
+  return [...stop, ...nodes.filter((n) => !stop.includes(n))];
+}
+
+/** Move focus one flight control forward or back, wrapping. From nothing
+ *  focused (or focus outside the Feed) either direction lands on STOP. */
+export function stepFeedFocus(root: HTMLElement, step: 1 | -1): void {
+  const nodes = feedFocusOrder(root);
+  if (nodes.length === 0) return;
+  const here = nodes.indexOf(document.activeElement as HTMLElement);
+  const next = here < 0 ? 0 : (here + step + nodes.length) % nodes.length;
+  nodes[next].focus();
+}
+
 /** The Feed's answer to the panel buttons and encoder (registered on the
- *  command stack while the Feed is mounted). The Feed draws no menu rail, so
- *  stepping its focus would move a ring nobody sees and the next push would
- *  leave the flight screen unannounced: prev/next are taken and do nothing,
- *  and activate opens the Menu, where the focus is drawn. Overlays opened over
- *  the Feed (the Menu, sheets) sit above this on the stack and take the
- *  commands first. */
+ *  command stack while the Feed is mounted). prev/next move focus through the
+ *  flight controls (STOP first); activate clicks the focused control, or opens
+ *  the Menu when no flight control holds focus. Overlays opened over the Feed
+ *  (the Menu, sheets) sit above this on the stack and take the commands
+ *  first. */
 export function feedNavCommand(cmd: NavCommand): boolean {
-  if (cmd === "prev" || cmd === "next") return true;
+  const root = feedRoot();
+  if (cmd === "prev" || cmd === "next") {
+    if (root) stepFeedFocus(root, cmd === "next" ? 1 : -1);
+    return true;
+  }
   if (cmd === "activate") {
+    if (root && activateFocused(root)) return true;
     useNavStore.setState({ quickMenuOpen: true });
     return true;
   }

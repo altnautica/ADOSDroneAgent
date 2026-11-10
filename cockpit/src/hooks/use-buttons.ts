@@ -9,7 +9,8 @@
 import { useEffect, useState } from "react";
 
 import { completePanelHold } from "@/lib/hold-input";
-import { executeSkill } from "@/lib/skill-runner";
+import { executeSkill, requestSkill } from "@/lib/skill-runner";
+import { skillContextNow } from "@/hooks/use-skill-context";
 import { BUILTIN_SKILL_BY_ID } from "@/lib/skills";
 import { ReconnectBackoff } from "@/lib/reconnect-backoff";
 import { useConfirmStore } from "@/stores/confirm-store";
@@ -95,6 +96,16 @@ export function eventToCommand(ev: ButtonEvent): NavCommand | null {
   return base;
 }
 
+/** Whether the event is a long press of the panel's select button (a button
+ *  whose base command is `activate`, never the encoder switch, whose long
+ *  press goes back). Only this counts toward the panel's two-step STOP; a
+ *  long press of back keeps its own meaning (the menu). */
+export function isLongSelect(ev: ButtonEvent): boolean {
+  if (ev.kind !== "long" || ev.action === PASSTHROUGH_ACTION) return false;
+  const id = (ev.label ?? ev.button ?? "").toString().trim().toLowerCase();
+  return id !== ENCODER_SWITCH && BUTTON_BINDINGS[id] === "activate";
+}
+
 /** How long the ground station holds a button before it reports a long press
  *  (the panel's `LONG_PRESS_SECONDS`, 2 s). */
 export const PANEL_LONG_PRESS_MS = 2000;
@@ -126,7 +137,7 @@ export interface PanelDeps {
 export function dispatchPanelEvent(ev: ButtonEvent, deps: PanelDeps): void {
   const cmd = eventToCommand(ev);
   if (cmd) useInputStore.getState().setSource("panel");
-  const longSelect = cmd === "quick-menu" && ev.kind === "long";
+  const longSelect = isLongSelect(ev);
   const confirm = useConfirmStore.getState();
   if (confirm.pending) {
     // A skill sheet is open: back cancels it, nothing navigates underneath
@@ -139,12 +150,13 @@ export function dispatchPanelEvent(ev: ButtonEvent, deps: PanelDeps): void {
         void executeSkill(skill, { altitudeM });
       }
     } else if (longSelect && panelLongPressCompletes(skill.confirm.ms)) confirm.panelConfirm();
-    else if (cmd === "back") confirm.cancel();
+    else if (cmd === "back" || (ev.kind === "long" && cmd === "quick-menu")) confirm.cancel();
     return;
   }
-  // A long press on the focused STOP opens its sheet; it never fires it.
+  // A long press of select on the focused STOP opens its sheet through the
+  // same gate as the STOP button's click; it never fires it.
   if (longSelect && deps.stopFocused()) {
-    confirm.open(BUILTIN_SKILL_BY_ID.kill);
+    requestSkill(BUILTIN_SKILL_BY_ID.kill, skillContextNow());
     return;
   }
   // A focused guarded button or slide-to-confirm takes the long press as

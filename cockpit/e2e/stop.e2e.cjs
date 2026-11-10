@@ -8,6 +8,8 @@
 //   stop-hold    with a sheet open, STOP opens the canonical STOP sheet
 //                (spec title, body and hold label): a 1 s press counts
 //                down and sends nothing, a 3.2 s hold sends exactly one kill;
+//   panel-stop   on the kiosk, the panel's next/previous reach STOP in one
+//                press, long select twice fires it, long back never does;
 //   pad-safety   with a sheet open, a pad holding L2+R2+Circle for the hold
 //                time sends one kill and Options+Circle held sends one RTH.
 
@@ -246,9 +248,65 @@ async function padSafetyCase(browser) {
   console.log("pad safety combos with a sheet open: L2+R2+Circle held sends one kill, Options+Circle held sends one RTH");
 }
 
+/** The ground-station panel on the kiosk, from a fresh flight screen with
+ *  nothing focused: one press of next (and, separately, previous) focuses
+ *  STOP; a long select opens the STOP sheet and sends nothing; a long back
+ *  closes it and sends nothing; a second long select a second after the
+ *  first sends exactly one kill. */
+async function panelStopCase(browser) {
+  const STEP = { next: { button: "2", label: "b2" }, prev: { button: "1", label: "b1" } };
+  const select = { button: "3", label: "b3", kind: "long", action: "select" };
+  const back = { button: "4", label: "b4", kind: "long", action: "menu" };
+  for (const step of ["next", "prev"]) {
+    const sim = { pilot: PILOT_AIR, airborne: true };
+    let panel = null;
+    const vp = {
+      width: 1920,
+      height: 1080,
+      profile: "ground_station",
+      beforeGoto: async (page) => {
+        await page.route("**/api/_ws/ticket", (r) => r.fulfill({ contentType: "application/json", body: JSON.stringify({ ticket: "t" }) }));
+        await page.routeWebSocket(/\/ws\/buttons/, (ws) => {
+          panel = ws;
+        });
+      },
+    };
+    const { ctx, page } = await pilotPage(browser, vp, sim, "?kiosk=1");
+    const kills = () => sentCount(sim, "kill", "killswitch");
+    const send = (ev) => panel.send(JSON.stringify({ ...ev, timestamp_ms: Date.now() }));
+    await debugOnFail(page, `panel-stop-${step}`, async () => {
+      await until(page, "the panel socket", () => panel !== null, 8000);
+      await page.waitForTimeout(500);
+      await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+      send({ ...STEP[step], kind: "short", action: step });
+      await page.waitForFunction(() => document.activeElement?.closest('[data-zone="stop"]') != null, null, { timeout: 2000 });
+      send(select);
+      await page.getByTestId("stop-sheet-title").waitFor({ timeout: 2000 });
+      assert.equal(kills(), 0, "one long select opens the STOP sheet and sends nothing");
+      await page.waitForTimeout(1200);
+      send(back);
+      await page.locator(SHEET, { hasText: "Emergency stop" }).waitFor({ state: "detached", timeout: 2000 });
+      await page.waitForTimeout(400);
+      assert.equal(kills(), 0, "a long back closes the STOP sheet and sends nothing");
+      await page.locator(STOP).focus();
+      send(select);
+      await page.getByTestId("stop-sheet-title").waitFor({ timeout: 2000 });
+      await page.waitForTimeout(1100);
+      send(select);
+      await until(page, "the kill", () => kills() >= 1, 3000);
+      await page.waitForTimeout(500);
+      assert.equal(kills(), 1, "the second long select sends exactly one kill");
+    });
+    if (step === "next") await page.screenshot({ path: path.join(SHOTS, "panel-stop-kiosk.png") });
+    await ctx.close();
+  }
+  console.log("Kiosk panel: next or previous reaches STOP in one press; long select twice a second apart sends one kill, long back never does");
+}
+
 runCases({
   stop: stopCases,
   "stop-sheets": stopSheetsCase,
   "stop-hold": stopHoldCase,
   "pad-safety": padSafetyCase,
+  "panel-stop": panelStopCase,
 });

@@ -164,7 +164,7 @@ function ConfirmSheet() {
           <div ref={confirmRef}>{confirmControl}</div>
           <p className="mt-[0.4rem] text-center text-[0.75rem] text-muted-foreground">
             {danger
-              ? "Gamepad: hold the button · Keyboard: hold Enter · Panel: long-press select again"
+              ? "Gamepad: hold the button · Keyboard: hold Enter · Panel: long-press select twice"
               : "Gamepad: hold the button · Keyboard: hold Enter · Panel: long-press select"}
           </p>
         </>

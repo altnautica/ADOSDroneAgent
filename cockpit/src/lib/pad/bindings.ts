@@ -16,6 +16,7 @@ import {
   LOCKED_ACTIONS,
   SPEC_ACTION_BY_ID,
   stopHoldRow,
+  STOP_ACTION,
   isControlId,
   isGesture,
   isRumbleKind,
@@ -164,6 +165,15 @@ export function missingLocked(rows: readonly PadBinding[]): LockedAction[] {
 export function lockedLabel(l: LockedAction): string {
   const label = SPEC_ACTION_BY_ID[l.action]?.label ?? l.action;
   return l.combo ? `${label} (combo ${l.gesture})` : `${label} (${l.gesture})`;
+}
+
+/** Whether `action` is offered in a `gesture` cell. The emergency stop is
+ *  offered only in the Hold cell: every stop binding is a full stop hold, so
+ *  picking it in a press, tap or double-tap cell would quietly move the row to
+ *  Hold and conflict with the locked stop hold. A row that already is a stop
+ *  keeps showing it. */
+export function actionOffered(action: string, gesture: string, value: string): boolean {
+  return action !== STOP_ACTION || gesture === "hold" || value === STOP_ACTION;
 }
 
 export type EditResult = { ok: true; rows: PadBinding[] } | { ok: false; error: string };

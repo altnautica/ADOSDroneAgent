@@ -17,6 +17,7 @@ import { specText } from "@/shared/hud/spec-text";
 import { DRAWINGS, PAD_COLORS, padKindOf, type Hotspot } from "@/lib/pad/art";
 import {
   conflictedControls,
+  actionOffered,
   findConflicts,
   isDefaultBindings,
   lockedLabel,
@@ -198,7 +199,7 @@ function Section({ title, children }: { title: string; children: ReactNode }) {
   );
 }
 
-function ActionSelect({ value, onChange, registry, label }: { value: string; onChange: (a: string) => void; registry: ReadonlyMap<string, string>; label: string }) {
+function ActionSelect({ value, onChange, registry, label, gesture }: { value: string; onChange: (a: string) => void; registry: ReadonlyMap<string, string>; label: string; gesture: string }) {
   const extra = [...registry.entries()].filter(([id]) => !COVERED_COCKPIT_IDS.has(id) && id.startsWith("skill:"));
   return (
     <select aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} className="min-h-[44px] flex-1 rounded-lg border border-border bg-surface px-[0.4rem] text-[0.82rem]">
@@ -206,7 +207,7 @@ function ActionSelect({ value, onChange, registry, label }: { value: string; onC
         .filter((g) => g !== "none")
         .map((g) => (
           <optgroup key={g} label={GROUP_LABEL[g]}>
-            {SPEC_ACTIONS.filter((a) => a.group === g).map((a) => (
+            {SPEC_ACTIONS.filter((a) => a.group === g && actionOffered(a.id, gesture, value)).map((a) => (
               <option key={a.id} value={a.id}>
                 {a.label}
               </option>
@@ -250,13 +251,14 @@ function ControlEditor({ control, registry }: { control: ControlId; registry: Re
           <div key={g} className="flex flex-col gap-[0.25rem]">
             <span className="text-[0.75rem] text-muted-foreground">{specText(`controls.gesture.${g}`)}</span>
             {own.length === 0 ? (
-              <ActionSelect value="none" label={`${CONTROL_LABELS[control]} ${g}`} registry={registry} onChange={(a) => a !== "none" && setDraft(addRow(draft, control, g, a))} />
+              <ActionSelect value="none" gesture={g} label={`${CONTROL_LABELS[control]} ${g}`} registry={registry} onChange={(a) => a !== "none" && setDraft(addRow(draft, control, g, a))} />
             ) : (
               own.map(({ r, i }) => (
                 <div key={i} className="flex items-center gap-[0.3rem]">
                   {r.locked ? <Lock className="h-[1rem] w-[1rem] shrink-0 text-warn" aria-label={specText("controls.locked")} /> : null}
                   <ActionSelect
                     value={r.action}
+                    gesture={g}
                     label={`${CONTROL_LABELS[control]} ${g}`}
                     registry={registry}
                     onChange={(a) => apply(a === "none" ? removeRow(draft, i) : setRowAction(draft, i, a))}

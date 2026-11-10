@@ -208,6 +208,8 @@ async function pilotPage(browser, vp, sim, query = "") {
     });
     ws.onClose(() => clearInterval(push));
   });
+  // A case's own routes (a second socket, say), registered before the load.
+  if (vp.beforeGoto) await vp.beforeGoto(page);
   await page.goto(`${BASE}${query}`);
   await page.waitForSelector('[data-testid="top-bar-stop"]', { timeout: 10000 });
   await page.waitForSelector('[data-testid="flight-state-chip"]', { timeout: 10000 });
