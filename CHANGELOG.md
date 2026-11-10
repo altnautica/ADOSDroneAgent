@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.93] - 2026-11-10
+
+### Changed
+
+- The follow controls, picture-in-picture swap, vision panel, proximity radar, re-acquire toggle and map status rows now take their words from the shared cockpit text, and an unacknowledged navigation-source switch again says that the flight controller did not acknowledge it.
+
 ## [0.109.92] - 2026-11-10
 
 ### Changed
