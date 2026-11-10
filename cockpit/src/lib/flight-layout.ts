@@ -12,6 +12,7 @@
 import { CHROME_TOKENS } from "@/lib/chrome-tokens";
 import type { GridMeasures } from "@/lib/cockpit-layout";
 import type { CockpitView } from "@/lib/cockpit-view";
+import layoutJson from "@/shared/cockpit-spec/layout.json";
 
 export interface Rect {
   x: number;
@@ -24,11 +25,57 @@ export interface Rect {
 export type RightItem = "shutter" | "mode" | "zoom" | "gimbal" | "settings";
 
 /** The top bar's items that move into the Menu when the row runs out of
- *  room, lowest priority first (`top_bar.overflow.to_menu_order`, then the
- *  link icon and the layer button on the narrowest bars). The flight-state
- *  chip, the status pill, battery, Menu and STOP never move. */
-export const TOP_BAR_OVERFLOW = ["controller", "nav_source", "link_detail", "link", "layer_button"] as const;
-export type TopBarOverflowItem = (typeof TOP_BAR_OVERFLOW)[number];
+ *  room, lowest priority first (`top_bar.overflow.to_menu_order`):
+ *  `link_text` is the link's text, `link_icon` the link item as a whole. */
+export type TopBarOverflowItem = "controller" | "nav_source" | "link_text" | "link_icon" | "layer_button";
+
+interface TopBarSpec {
+  overflow: { to_menu_order: TopBarOverflowItem[]; never_move: string[] };
+}
+
+const TOP_BAR_SPEC = layoutJson.zones.find((z) => z.id === "top_bar") as unknown as TopBarSpec;
+
+export const TOP_BAR_OVERFLOW: readonly TopBarOverflowItem[] = TOP_BAR_SPEC.overflow.to_menu_order;
+
+/** The top-bar items that never move: the flight-state chip, the status
+ *  pill, battery, Menu (`settings`) and STOP. */
+export const TOP_BAR_NEVER_MOVE: readonly string[] = TOP_BAR_SPEC.overflow.never_move;
+
+/** The items in the Menu once `count` of them have moved, in move order. */
+export function movedItems(count: number): Set<TopBarOverflowItem> {
+  return new Set(TOP_BAR_OVERFLOW.slice(0, Math.max(0, count)));
+}
+
+/** Every movable item is in the Menu: the chip and the pill truncate with an
+ *  ellipsis rather than push battery or STOP off the bar. */
+export function barFull(count: number): boolean {
+  return count >= TOP_BAR_OVERFLOW.length;
+}
+
+/** The smallest hit area of a flight-screen control, CSS px
+ *  (`layout.json` `touch_target.min`). */
+export const TOUCH_MIN_PX: number = layoutJson.touch_target.min;
+
+/** Classes that grow a control's hit area to 48 × 48 CSS px (`TOUCH_MIN_PX`)
+ *  around its drawing without moving anything: a transparent centred
+ *  `::before`, part of the control for hit testing. The top bar is 48 px
+ *  tall, so the hit area spans it. */
+export const HIT_AREA =
+  "relative before:absolute before:left-1/2 before:top-1/2 before:h-[48px] before:w-[max(100%,48px)] before:-translate-x-1/2 before:-translate-y-1/2 before:content-['']";
+
+/** The class scale of a width class (`layout.json` `classes.<class>.scale`):
+ *  text drawn outside a scaled zone is sized px × this. */
+export function classScale(widthClass: keyof typeof layoutJson.classes): number {
+  return layoutJson.classes[widthClass]?.scale ?? 1;
+}
+
+/** How far below the stage centre the no-picture note starts, in the centre
+ *  marks' unit (the root font size, `1rem`): the reticle reaches 0.4 below
+ *  the centre and the horizon mark at most `CENTRE_MARK_REACH_U`, so the note
+ *  never sits under either. */
+export const CENTRE_MARK_REACH_U = 4;
+export const VIDEO_NOTE_OFFSET_U = CENTRE_MARK_REACH_U + 0.6;
+export const VIDEO_NOTE_TOP = `calc(50% + ${VIDEO_NOTE_OFFSET_U}rem)`;
 
 /** Unscaled CSS px. */
 export const FLIGHT_PX = {
@@ -42,7 +89,7 @@ export const FLIGHT_PX = {
   barMinW: 112 + 44 + 64 + 44 + 84 + 5 * 6 + 2 * 4,
   colGap: 10,
   colGapMin: 4,
-  touchMin: 48,
+  touchMin: TOUCH_MIN_PX,
   modeH: 36,
   zoomH: 96,
   gimbal: 108,

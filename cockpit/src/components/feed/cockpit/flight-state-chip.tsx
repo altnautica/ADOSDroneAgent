@@ -6,7 +6,9 @@
 import { useFlightChip } from "@/hooks/use-pilot";
 import { openAircraftSetup } from "@/lib/aircraft-setup";
 import { runCockpitAction } from "@/lib/cockpit-actions";
+import { HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 
 /** `fit`: the bar has nothing left to move into the Menu, so the chip
@@ -18,18 +20,18 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
   if (!chip) {
     return (
       <span className="chrome-chip-text chrome-dim shrink-0 rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] px-[10px] py-[6px]" data-testid="flight-state-chip">
-        NO PILOT
+        {specText("chip.no_pilot")}
       </span>
     );
   }
 
   const button =
     chip.button === "take_control"
-      ? { label: "Take control", run: () => runCockpitAction("take_control") }
+      ? { label: specText("flow.take_control"), run: () => runCockpitAction("take_control") }
       : chip.button === "resume"
-        ? { label: "Resume", run: () => runCockpitAction("resume") }
+        ? { label: specText("flow.resume"), run: () => runCockpitAction("resume") }
         : chip.button === "setup"
-          ? { label: "Set up aircraft", run: () => openAircraftSetup() }
+          ? { label: specText("setup.wizard.entry.set_up_aircraft"), run: () => openAircraftSetup() }
           : null;
 
   return (
@@ -37,9 +39,9 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
       <button
         type="button"
         onClick={() => openSheet("mode")}
-        aria-label={`Flight state ${chip.text}. Open mode sheet`}
+        aria-label={specText("chip.aria", { text: chip.text })}
         data-testid="flight-state-chip"
-        className="flex h-[40px] min-w-0 shrink flex-col items-start justify-center rounded-[var(--fs-radius-sm)] border px-[10px] text-left transition-transform duration-150 ease-out active:scale-[0.97]"
+        className={cn(HIT_AREA, "flex h-[40px] min-w-0 shrink flex-col items-start justify-center rounded-[var(--fs-radius-sm)] border px-[10px] text-left transition-transform duration-150 ease-out active:scale-[0.97]")}
         style={{ borderColor: `${chip.color}B3`, background: `${chip.color}2E` }}
       >
         <span className="chrome-chip-text max-w-full truncate whitespace-nowrap leading-[16px] tracking-[0.02em]" style={{ color: chip.color }}>
@@ -60,7 +62,7 @@ export function FlightStateChip({ compact = false, fit = false }: { compact?: bo
         <button
           type="button"
           onClick={button.run}
-          className="h-[40px] whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] bg-white/10 px-[10px] font-semibold hover:bg-white/15"
+          className={cn(HIT_AREA, "h-[40px] whitespace-nowrap rounded-[var(--fs-radius-sm)] border border-[var(--fs-border)] bg-white/10 px-[10px] font-semibold hover:bg-white/15")}
         >
           {button.label}
         </button>

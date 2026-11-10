@@ -32,15 +32,21 @@ export function feedCameras(streams: StatusStream[] | undefined, roster: RosterC
   return roster;
 }
 
-/** Labels for the camera roles the agent defines, for a leg with no name.
- *  `down` is the downward-facing (belly) camera. */
+/** Labels for the camera roles the agent defines. `down` is the
+ *  downward-facing (belly) camera; any other role reads as its word,
+ *  capitalised. */
 const ROLE_LABEL: Readonly<Record<string, string>> = { down: "Belly" };
 
-/** The operator-facing name of a leg: its label or name, else its role word,
- *  else its id. */
+function roleLabel(role: string | undefined): string | undefined {
+  if (!role) return undefined;
+  return ROLE_LABEL[role] ?? role.charAt(0).toUpperCase() + role.slice(1).replace(/_/g, " ");
+}
+
+/** The operator-facing name of a leg: the agent's label, else its role's
+ *  label (a raw camera name such as a device path is not a human label),
+ *  else its name, else its id. */
 export function cameraLabel(cam: Pick<RosterCamera, "id" | "label" | "name" | "role">): string {
-  const roleLabel = cam.role ? (ROLE_LABEL[cam.role] ?? cam.role) : undefined;
-  return cam.label ?? cam.name ?? roleLabel ?? cam.id;
+  return cam.label ?? roleLabel(cam.role) ?? cam.name ?? cam.id;
 }
 
 /**

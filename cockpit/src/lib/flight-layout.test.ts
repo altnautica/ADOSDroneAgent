@@ -2,9 +2,27 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 
+import layersJson from "@/shared/cockpit-spec/layers.json";
+import layoutJson from "@/shared/cockpit-spec/layout.json";
 import { gridMeasures, widthClassFor } from "@/lib/cockpit-layout";
-import { COCKPIT_VIEWS, effectiveLayers, LAYER_LEVELS } from "@/lib/cockpit-view";
-import { FLIGHT_PX, flightLayout, intersects, type FlightLayout, type Rect } from "@/lib/flight-layout";
+import { BUILTIN_LAYERS, COCKPIT_VIEWS, effectiveLayers, LAYER_LEVELS } from "@/lib/cockpit-view";
+import {
+  barFull,
+  CENTRE_MARK_REACH_U,
+  classScale,
+  FLIGHT_PX,
+  flightLayout,
+  HIT_AREA,
+  intersects,
+  movedItems,
+  TOP_BAR_NEVER_MOVE,
+  TOP_BAR_OVERFLOW,
+  TOUCH_MIN_PX,
+  VIDEO_NOTE_OFFSET_U,
+  VIDEO_NOTE_TOP,
+  type FlightLayout,
+  type Rect,
+} from "@/lib/flight-layout";
 
 const VIEWPORTS = [
   { name: "kiosk 1920x1080", width: 1920, height: 1080, kiosk: true },
@@ -121,5 +139,82 @@ describe("no legacy chrome on the flight screen (legacy_chrome: none)", () => {
   it("the Feed's grid draws no telemetry strip or hint bar", () => {
     const grid = src("../components/feed/feed-layouts.tsx") + src("../components/screens/feed-screen.tsx");
     for (const legacy of ["StatusStrip", "MenuRail", "ActionBar", "move", "SafetyBand"]) expect(grid).not.toMatch(new RegExp(`<${legacy}\\b`));
+  });
+});
+
+describe("the top bar's overflow (layout.json top_bar.overflow)", () => {
+  it("moves items into the Menu in the spec's order", () => {
+    expect(TOP_BAR_OVERFLOW).toEqual(["controller", "nav_source", "link_text", "link_icon", "layer_button"]);
+    expect([...movedItems(0)]).toEqual([]);
+    expect([...movedItems(3)]).toEqual(["controller", "nav_source", "link_text"]);
+    expect(barFull(4)).toBe(false);
+    expect(barFull(5)).toBe(true);
+  });
+
+  it("never moves the chip, the pill, battery, Menu or STOP", () => {
+    expect(TOP_BAR_NEVER_MOVE).toEqual(["flight_state_chip", "status_pill", "battery", "settings", "stop"]);
+    for (const id of TOP_BAR_NEVER_MOVE) expect(TOP_BAR_OVERFLOW as readonly string[]).not.toContain(id);
+  });
+
+  it("has no link_detail item left in the bar", () => {
+    const bar = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/top-bar.tsx"), "utf8");
+    expect(bar).not.toContain("link_detail");
+    // The pill truncates with an ellipsis once the bar is full.
+    expect(bar).toMatch(/fit \? "min-w-0 shrink"/);
+  });
+});
+
+describe("the top bar's controls", () => {
+  const bar = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/top-bar.tsx"), "utf8");
+  const chip = readFileSync(path.resolve(__dirname, "../components/feed/cockpit/flight-state-chip.tsx"), "utf8");
+  const nav = readFileSync(path.resolve(__dirname, "../components/feed/nav-source-chip.tsx"), "utf8");
+  const stopButton = bar.slice(bar.indexOf('data-zone="stop"') - 400, bar.indexOf('data-zone="stop"') + 400);
+
+  it("grow every hit area to touch_target.min", () => {
+    expect(TOUCH_MIN_PX).toBe(layoutJson.touch_target.min);
+    expect(HIT_AREA).toContain(`before:h-[${TOUCH_MIN_PX}px]`);
+    expect(HIT_AREA).toContain(`before:w-[max(100%,${TOUCH_MIN_PX}px)]`);
+    // The bar is as tall as the hit areas it hosts.
+    expect(FLIGHT_PX.barH).toBeGreaterThanOrEqual(TOUCH_MIN_PX);
+    // The pill, the layer level and its ▾, Menu and STOP; the chip and its inline button; the nav-source chip.
+    expect(bar.match(/cn\(\s*HIT_AREA/g)?.length).toBe(5);
+    expect(chip.match(/cn\(HIT_AREA/g)?.length).toBe(2);
+    expect(nav).toMatch(/HIT_AREA/);
+    // The layer menu's ▾ is itself 48 px wide.
+    expect(bar).toMatch(/data-testid="layer-flags-button"\s+className=\{cn\(HIT_AREA, "flex h-\[40px\] w-\[48px\]/);
+  });
+
+  it("STOP is never disabled and names its 3 s hold", () => {
+    expect(stopButton).not.toMatch(/disabled=/);
+    expect(stopButton).toContain('specText("stop.hold_label")');
+  });
+
+  it("draw no hard-coded words", () => {
+    for (const word of ['"Battery"', "BAT —", '"No pad"', '"Native', '"Not standard"', "`Link ", '"Top bar"', "Emergency stop", '"Flight status"', "Next level"]) {
+      expect(bar, word).not.toContain(word);
+    }
+    for (const word of ["NO PILOT", '"Take control"', '"Resume"', '"Set up aircraft"', "Open mode sheet"]) expect(chip, word).not.toContain(word);
+  });
+
+  it("the layer menu lists every layer flag", () => {
+    expect(BUILTIN_LAYERS.map((l) => l.id)).toEqual(layersJson.layers.map((l) => l.id));
+    expect(BUILTIN_LAYERS.every((l) => l.label.length > 0)).toBe(true);
+  });
+});
+
+describe("the no-picture note", () => {
+  it("sits below the reticle and the horizon mark's whole travel", () => {
+    expect(VIDEO_NOTE_OFFSET_U).toBeGreaterThan(CENTRE_MARK_REACH_U);
+    expect(VIDEO_NOTE_TOP).toBe(`calc(50% + ${VIDEO_NOTE_OFFSET_U}rem)`);
+    const video = readFileSync(path.resolve(__dirname, "../components/shell/video-layer.tsx"), "utf8");
+    expect(video).toContain("top: VIDEO_NOTE_TOP");
+    // Never the transport's error text, never a claim that no source exists.
+    expect(video).not.toContain("snapshot.error");
+    expect(video).not.toContain("No video source");
+  });
+
+  it("is sized in px × the class scale", () => {
+    expect(classScale("tv")).toBe(layoutJson.classes.tv.scale);
+    expect(classScale("medium")).toBe(1);
   });
 });

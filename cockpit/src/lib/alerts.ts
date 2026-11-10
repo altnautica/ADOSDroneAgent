@@ -7,7 +7,7 @@ import { BatteryLow, BatteryWarning, Satellite, SignalZero, VideoOff, WifiOff } 
 
 import { linkDiagView } from "@/lib/link-diag";
 import type { BatteryHealth, GsStatus, VehicleState } from "@/lib/types";
-import { baseAlerts, sortAlerts, type BaseAlert, type BaseAlertInputs } from "@/shared/hud/status-pill";
+import { baseAlerts, sortAlerts, type BaseAlert, type BaseAlertInputs, type PillAlert, type PillSource } from "@/shared/hud/status-pill";
 
 export interface CockpitAlert extends BaseAlert {
   icon: LucideIcon;
@@ -36,4 +36,18 @@ export function computeAlerts(i: AlertInputs): CockpitAlert[] {
     out.push({ id: "rf", level: "warning", title: rf.title, detail: rf.hint, icon: rf.icon });
   }
   return sortAlerts(out);
+}
+
+/** Pill sources read from the pilot frame. */
+const PILOT_SOURCE: Partial<Record<PillSource, true>> = { pilot_readiness: true, fc_status_text: true };
+
+/** A pill alert read from a pilot frame that is no longer fresh: it stays
+ *  listed but is drawn dimmed, never as live. */
+export function pillAlertStale(a: PillAlert, pilotFresh: boolean): boolean {
+  return !pilotFresh && PILOT_SOURCE[a.source] === true;
+}
+
+/** The pill dims when everything it reports comes from a stale pilot frame. */
+export function pillStale(alerts: readonly PillAlert[], pilotFresh: boolean): boolean {
+  return alerts.length > 0 && alerts.every((a) => pillAlertStale(a, pilotFresh));
 }

@@ -71,10 +71,11 @@ describe("cameraLabel", () => {
   it("names a down-facing leg Belly", () => {
     expect(cameraLabel({ id: "belly", role: "down" })).toBe("Belly");
   });
-  it("prefers the agent's label, then name, then role, then id", () => {
+  it("prefers the agent's label, then the role's label, then name, then id", () => {
     expect(cameraLabel({ id: "x", label: "Nose", role: "down" })).toBe("Nose");
+    expect(cameraLabel({ id: "x", name: "primary", role: "primary" })).toBe("Primary");
+    expect(cameraLabel({ id: "x", name: "/dev/video2", role: "down" })).toBe("Belly");
     expect(cameraLabel({ id: "x", name: "Cam 2" })).toBe("Cam 2");
-    expect(cameraLabel({ id: "x", role: "primary" })).toBe("primary");
     expect(cameraLabel({ id: "x" })).toBe("x");
   });
 });

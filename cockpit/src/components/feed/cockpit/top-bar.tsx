@@ -1,36 +1,42 @@
 // The cockpit top bar (cockpit spec `layout.json` zone `top_bar`), one row
 // that never scrolls: the flight-state chip, the status pill, battery
 // (percent, time left and the RTL-reserve marker), link, navigation source,
-// the controller, the layer-level button, Menu, and STOP at the right end.
-// When the row runs out of room the lowest-priority items move into the Menu
-// (`TOP_BAR_OVERFLOW`); the chip, the pill, battery, Menu and STOP stay.
+// the controller, the layer-level button with its layer menu, Menu, and STOP
+// at the right end. When the row runs out of room items move into the Menu in
+// the spec's order (`TOP_BAR_OVERFLOW`); the chip, the pill, battery, Menu
+// and STOP stay, and with every movable item gone the chip and the pill
+// truncate with an ellipsis. Every control's hit area is at least
+// `touch_target.min` (`HIT_AREA`), whatever its drawn size.
 
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { AlertTriangle, CheckCircle2, Gamepad2, Layers, Menu, OctagonX, Radio, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, Gamepad2, Layers, Menu, OctagonX, Radio, XCircle } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 import { FlightStateChip } from "@/components/feed/cockpit/flight-state-chip";
 import { NavSourceChip } from "@/components/feed/nav-source-chip";
 import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
 import { usePadStatus, type PadStatus } from "@/hooks/use-gamepad";
-import { usePilot } from "@/hooks/use-pilot";
+import { useFreshPilot, usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
+import { pillAlertStale, pillStale } from "@/lib/alerts";
 import { chromeStyle, severityColor } from "@/lib/chrome-tokens";
-import { specText } from "@/shared/hud/spec-text";
-import { TOP_BAR_OVERFLOW, type TopBarOverflowItem } from "@/lib/flight-layout";
+import { Z } from "@/lib/cockpit-layout";
+import { BUILTIN_LAYERS, layerFlag } from "@/lib/cockpit-view";
+import { barFull, HIT_AREA, movedItems, TOP_BAR_OVERFLOW, type TopBarOverflowItem } from "@/lib/flight-layout";
 import { fmtClock, linkLabel } from "@/lib/safety-band";
 import { requestSkill } from "@/lib/skill-runner";
-import { BUILTIN_SKILL_BY_ID, resolveSkillState } from "@/lib/skills";
-import { Z } from "@/lib/cockpit-layout";
+import { BUILTIN_SKILL_BY_ID } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { BATTERY_LOW_PCT, batteryReading } from "@/shared/hud/battery";
+import { specText } from "@/shared/hud/spec-text";
 import { pillAlerts, pillSummary, type PillAlert, type PillSeverity } from "@/shared/hud/status-pill";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStore } from "@/stores/nav-store";
 import { useStatusPillStore } from "@/stores/status-pill-store";
 import { useStatusStore } from "@/stores/status-store";
+import { useTopBarStore } from "@/stores/top-bar-store";
 
 const levelLabel = (level: string) => specText(`cockpit.level.${level}`);
 
@@ -53,10 +59,11 @@ function BatteryItem({ compact }: { compact: boolean }) {
   const r = batteryReading(battery, telemetry);
   const reserve = battery?.thresholds?.reserve_percent;
   const reservePct = typeof reserve === "number" && reserve > 0 && reserve < 100 ? reserve : null;
+  const label = specText("cockpit.status.source.battery");
   if (!r) {
     return (
-      <Item label="Battery" zone="battery">
-        <span className="chrome-dim">BAT —</span>
+      <Item label={label} zone="battery">
+        <span className="chrome-dim">{specText("cockpit.battery.none")}</span>
       </Item>
     );
   }
@@ -64,7 +71,7 @@ function BatteryItem({ compact }: { compact: boolean }) {
   const severity: PillSeverity = r.pct <= low ? "critical" : r.pct <= low + 10 ? "warning" : "ok";
   const color = severity === "ok" ? undefined : severityColor(severity);
   return (
-    <span className="flex shrink-0 items-center gap-[6px] whitespace-nowrap" aria-label="Battery" data-zone="battery">
+    <span className="flex shrink-0 items-center gap-[6px] whitespace-nowrap" aria-label={label} data-zone="battery">
       <span className="relative h-[11px] w-[26px] rounded-[3px] border border-[var(--fs-text-dim)]" aria-hidden>
         <span
           className="absolute inset-y-[1px] left-[1px] rounded-[1px]"
@@ -92,10 +99,15 @@ function BatteryItem({ compact }: { compact: boolean }) {
 }
 
 /** The status pill: "All systems OK", the one alert, or "<n> warnings",
- *  flashing on a new alert until the list is opened. */
-function StatusPill({ compact }: { compact: boolean }) {
+ *  flashing on a new alert until the list is opened. Items read from the
+ *  pilot frame (readiness, the FC's status texts) stay listed once that
+ *  frame is stale, drawn dimmed and never as live; a pill reporting only
+ *  stale items dims. `fit`: every movable item is in the Menu, so the pill
+ *  truncates with an ellipsis. */
+function StatusPill({ compact, fit }: { compact: boolean; fit: boolean }) {
   const alerts = useCockpitAlerts();
   const pilot = usePilot()?.data;
+  const pilotFresh = useFreshPilot() !== null;
   const readiness = pilot?.readiness ?? [];
   const fcStatus = pilot?.statustext;
   const prearm = useFlightStore((s) => s.telemetry?.prearm);
@@ -107,6 +119,7 @@ function StatusPill({ compact }: { compact: boolean }) {
   const pillRef = useRef<HTMLButtonElement>(null);
   const open = rect !== null;
   const summary = pillSummary(pillAlerts({ alerts, readiness, prearm, storagePct, fcStatus }), acked);
+  const dim = pillStale(summary.alerts, pilotFresh);
   const color = severityColor(summary.severity);
   const Icon = SEVERITY_ICON[summary.severity];
 
@@ -120,10 +133,13 @@ function StatusPill({ compact }: { compact: boolean }) {
         aria-expanded={open}
         data-zone="status_pill"
         data-severity={summary.severity}
+        data-stale={dim || undefined}
         className={cn(
-          "flex min-h-[36px] items-center gap-[6px] rounded-full border px-[10px] font-semibold",
-          "shrink-0",
-          summary.flashing && "chrome-pill-flash",
+          HIT_AREA,
+          "flex min-h-[36px] min-w-[44px] items-center gap-[6px] rounded-full border px-[10px] font-semibold",
+          fit ? "min-w-0 shrink" : "shrink-0",
+          summary.flashing && !dim && "chrome-pill-flash",
+          dim && "opacity-55",
         )}
         style={{ color, borderColor: `${color}80` }}
       >
@@ -131,45 +147,27 @@ function StatusPill({ compact }: { compact: boolean }) {
         {compact && summary.count > 0 ? (
           <span className="tabular-nums">{summary.count}</span>
         ) : compact ? null : (
-          <span className="truncate">{summary.text}</span>
+          <span className="min-w-0 truncate">{summary.text}</span>
         )}
       </button>
-      {rect ? <AlertList rect={rect} pill={pillRef} alerts={summary.alerts} ack={ack} onClose={() => setRect(null)} /> : null}
+      {rect ? (
+        <AlertList rect={rect} pill={pillRef} alerts={summary.alerts} pilotFresh={pilotFresh} ack={ack} onClose={() => setRect(null)} />
+      ) : null}
     </>
   );
 }
 
-/** The pill's alert list, drawn over the whole window (a portal, so the top
- *  bar's blur and clipping cannot trap or hide it) below the pill. There is no
- *  scrim: a press anywhere outside closes it and still reaches what it hit, so
- *  STOP takes the first press with the list open. Mounting it is showing it,
- *  so it acknowledges what it lists, and an alert arriving while it is open. */
-function AlertList({
-  rect,
-  pill,
-  alerts,
-  ack,
-  onClose,
-}: {
-  rect: DOMRect;
-  pill: React.RefObject<HTMLButtonElement>;
-  alerts: readonly PillAlert[];
-  ack: (ids: string[]) => void;
-  onClose: () => void;
-}) {
-  const listRef = useRef<HTMLDivElement>(null);
+/** Close a popover on a press outside it and its anchor (the press still
+ *  reaches what it hit, so STOP takes the first press) or on Escape. */
+function useDismiss(popover: React.RefObject<HTMLElement>, anchor: React.RefObject<HTMLElement>, onClose: () => void): void {
   const closeRef = useRef(onClose);
   useEffect(() => {
     closeRef.current = onClose;
   });
-  const idKey = alerts.map((a) => a.id).join("|");
-  useEffect(() => {
-    ack(idKey ? idKey.split("|") : []);
-  }, [idKey, ack]);
   useEffect(() => {
     const outside = (e: Event) => {
       const t = e.target as Node | null;
-      if (t && (listRef.current?.contains(t) || pill.current?.contains(t))) return;
+      if (t && (popover.current?.contains(t) || anchor.current?.contains(t))) return;
       closeRef.current();
     };
     const onKey = (e: KeyboardEvent) => {
@@ -181,7 +179,35 @@ function AlertList({
       document.removeEventListener("pointerdown", outside, true);
       document.removeEventListener("keydown", onKey);
     };
-  }, [pill]);
+  }, [popover, anchor]);
+}
+
+/** The pill's alert list, drawn over the whole window (a portal, so the top
+ *  bar's blur and clipping cannot trap or hide it) below the pill. There is no
+ *  scrim: a press anywhere outside closes it and still reaches what it hit, so
+ *  STOP takes the first press with the list open. Mounting it is showing it,
+ *  so it acknowledges what it lists, and an alert arriving while it is open. */
+function AlertList({
+  rect,
+  pill,
+  alerts,
+  pilotFresh,
+  ack,
+  onClose,
+}: {
+  rect: DOMRect;
+  pill: React.RefObject<HTMLButtonElement>;
+  alerts: readonly PillAlert[];
+  pilotFresh: boolean;
+  ack: (ids: string[]) => void;
+  onClose: () => void;
+}) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const idKey = alerts.map((a) => a.id).join("|");
+  useEffect(() => {
+    ack(idKey ? idKey.split("|") : []);
+  }, [idKey, ack]);
+  useDismiss(listRef, pill, onClose);
   return createPortal(
     <div
       ref={listRef}
@@ -200,8 +226,13 @@ function AlertList({
       ) : (
         alerts.map((a) => {
           const AIcon = SEVERITY_ICON[a.severity];
+          const stale = pillAlertStale(a, pilotFresh);
           return (
-            <div key={a.id} className="flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]">
+            <div
+              key={a.id}
+              className={cn("flex items-start gap-[8px] rounded-[var(--fs-radius-sm)] px-[4px] py-[6px]", stale && "opacity-55")}
+              data-stale={stale || undefined}
+            >
               <AIcon className="chrome-icon mt-[1px] shrink-0" style={{ color: severityColor(a.severity) }} aria-hidden />
               <div className="min-w-0">
                 <div className="chrome-label">{specText(`cockpit.status.source.${a.source}`)}</div>
@@ -217,17 +248,17 @@ function AlertList({
 }
 
 function controllerLabel(pad: PadStatus): { text: string; ok: boolean | null } {
-  if (!pad.connected) return { text: "No pad", ok: null };
+  if (!pad.connected) return { text: specText("controls.pad.none"), ok: null };
   const battery = pad.batteryPct !== null ? ` ${Math.round(pad.batteryPct)}%` : "";
-  if (pad.native) return { text: `Native${battery}`, ok: true };
-  return pad.standard ? { text: `Pad${battery}`, ok: true } : { text: "Not standard", ok: false };
+  if (pad.native) return { text: specText("controls.pad.native", { battery }), ok: true };
+  return pad.standard ? { text: specText("controls.pad.connected", { battery }), ok: true } : { text: specText("controls.pad.not_standard"), ok: false };
 }
 
 function ControllerItem() {
   const pad = usePadStatus();
   const c = controllerLabel(pad);
   return (
-    <Item icon={Gamepad2} label={pad.name ? `Controller ${pad.name}` : "Controller"} zone="controller">
+    <Item icon={Gamepad2} label={pad.name ? specText("cockpit.controller.named", { name: pad.name }) : specText("cockpit.controller")} zone="controller">
       <span className={c.ok === null ? "chrome-dim" : undefined} style={c.ok === false ? { color: severityColor("warning") } : undefined}>
         {c.text}
       </span>
@@ -235,7 +266,8 @@ function ControllerItem() {
   );
 }
 
-function LinkItem({ detail }: { detail: boolean }) {
+/** The link: its icon, and its text unless that has moved into the Menu. */
+function LinkItem({ text }: { text: boolean }) {
   const status = useStatusStore((s) => s.status);
   const [, setTick] = useState(0);
   // The link label carries an age; re-read it once a second.
@@ -245,35 +277,92 @@ function LinkItem({ detail }: { detail: boolean }) {
   }, []);
   const label = linkLabel(status);
   return (
-    <Item icon={Radio} label={`Link ${label}`} zone="link">
-      {detail ? <span>{label}</span> : null}
+    <Item icon={Radio} label={specText("cockpit.link.named", { label })} zone="link">
+      {text ? <span>{label}</span> : null}
     </Item>
   );
 }
 
+/** The layer menu: one checkbox per layer flag (`layers.json` layers). */
+function LayerFlagsList({ className }: { className?: string }) {
+  const layers = useCockpitViewStore((s) => s.layers);
+  const toggleLayer = useCockpitViewStore((s) => s.toggleLayer);
+  return (
+    <div role="group" aria-label={specText("cockpit.layers.flags")} className={cn("flex flex-col", className)} data-testid="layer-flags">
+      {BUILTIN_LAYERS.map((l) => (
+        <label key={l.id} className="flex min-h-[48px] cursor-pointer items-center justify-between gap-[12px] px-[6px]">
+          <span>{l.label}</span>
+          <input
+            type="checkbox"
+            className="h-[18px] w-[18px] accent-[var(--fs-ok)]"
+            checked={layerFlag(layers, l.id)}
+            onChange={(e) => toggleLayer(l.id, e.target.checked)}
+            data-layer={l.id}
+          />
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function LayerFlagsPopover({ rect, anchor, onClose }: { rect: DOMRect; anchor: React.RefObject<HTMLButtonElement>; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useDismiss(ref, anchor, onClose);
+  return createPortal(
+    <div
+      ref={ref}
+      role="dialog"
+      aria-label={specText("cockpit.layers.flags")}
+      className={cn("chrome-panel chrome-bar-text fixed w-[220px] p-[6px]", Z.sheets)}
+      style={{ ...chromeStyle(), left: Math.max(8, Math.min(rect.right - 220, window.innerWidth - 228)), top: rect.bottom + 8 }}
+    >
+      <LayerFlagsList />
+    </div>,
+    document.body,
+  );
+}
+
+/** The layer level (a tap cycles it) and the ▾ that lists every layer flag. */
 function LayerButton({ withLabel = true }: { withLabel?: boolean }) {
   const level = useCockpitViewStore((s) => s.level);
   const cycleLevel = useCockpitViewStore((s) => s.cycleLevel);
+  const caretRef = useRef<HTMLButtonElement>(null);
+  const [rect, setRect] = useState<DOMRect | null>(null);
   return (
-    <button
-      type="button"
-      onClick={cycleLevel}
-      aria-label={`Layers ${levelLabel(level)}. Next level`}
-      data-zone="layer_button"
-      data-level={level}
-      className="flex min-h-[40px] shrink-0 items-center gap-[6px] rounded-[var(--fs-radius-sm)] px-[8px] hover:bg-white/10"
-    >
-      <Layers className="chrome-icon" aria-hidden />
-      {withLabel ? levelLabel(level) : null}
-    </button>
+    <span className="flex shrink-0 items-center" data-zone="layer_button" data-level={level}>
+      <button
+        type="button"
+        onClick={cycleLevel}
+        aria-label={specText("cockpit.layers.next", { level: levelLabel(level) })}
+        className={cn(HIT_AREA, "flex h-[40px] min-w-[34px] items-center gap-[6px] rounded-[var(--fs-radius-sm)] px-[8px] hover:bg-white/10")}
+      >
+        <Layers className="chrome-icon" aria-hidden />
+        {withLabel ? levelLabel(level) : null}
+      </button>
+      <button
+        ref={caretRef}
+        type="button"
+        onClick={(e) => setRect(rect ? null : e.currentTarget.getBoundingClientRect())}
+        aria-label={specText("cockpit.layers.flags")}
+        aria-expanded={rect !== null}
+        aria-haspopup="dialog"
+        data-testid="layer-flags-button"
+        className={cn(HIT_AREA, "flex h-[40px] w-[48px] items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10")}
+      >
+        <ChevronDown className="chrome-icon" aria-hidden />
+      </button>
+      {rect ? <LayerFlagsPopover rect={rect} anchor={caretRef} onClose={() => setRect(null)} /> : null}
+    </span>
   );
 }
 
 /** How many of `TOP_BAR_OVERFLOW` are moved out of the row: one more each
  *  frame the row overflows, back to none when the bar is resized. The row is
- *  re-checked once a second as its values change width. */
+ *  re-checked once a second as its values change width. The count is shared
+ *  with the Menu, which lists exactly the moved items. */
 function useOverflowCount(row: React.RefObject<HTMLDivElement>): number {
-  const [hidden, setHidden] = useState(0);
+  const hidden = useTopBarStore((s) => s.movedCount);
+  const setHidden = useTopBarStore((s) => s.setMovedCount);
   useLayoutEffect(() => {
     const el = row.current;
     const bar = el?.parentElement;
@@ -310,8 +399,9 @@ function useOverflowCount(row: React.RefObject<HTMLDivElement>): number {
       ro.disconnect();
       clearInterval(tick);
       cancelAnimationFrame(raf);
+      setHidden(0);
     };
-  }, [row]);
+  }, [row, setHidden]);
   return hidden;
 }
 
@@ -319,24 +409,24 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
   const command = useNavStore((s) => s.command);
   const ctx = useSkillContext();
   const kill = BUILTIN_SKILL_BY_ID.kill;
-  const killState = resolveSkillState(kill, ctx);
   const row = useRef<HTMLDivElement>(null);
   const hiddenCount = useOverflowCount(row);
-  const moved = new Set<TopBarOverflowItem>(TOP_BAR_OVERFLOW.slice(0, hiddenCount));
+  const moved = movedItems(hiddenCount);
+  const full = barFull(hiddenCount);
 
   return (
     <div
       role="region"
-      aria-label="Top bar"
+      aria-label={specText("cockpit.top_bar")}
       data-zone="top_bar"
       data-moved={[...moved].join(" ")}
-      className="chrome-panel chrome-bar-text pointer-events-auto flex h-full w-full items-center gap-[6px] overflow-hidden p-[4px] pl-[6px]"
+      className="chrome-panel chrome-bar-text pointer-events-auto flex h-full w-full items-center gap-[6px] overflow-x-clip p-[4px] pl-[6px]"
     >
-      <div ref={row} className="flex min-w-0 flex-1 items-center gap-[12px] overflow-hidden">
-        <FlightStateChip compact={compact} fit={hiddenCount >= TOP_BAR_OVERFLOW.length} />
-        <StatusPill compact={compact} />
+      <div ref={row} className="flex min-w-0 flex-1 items-center gap-[12px] overflow-x-clip">
+        <FlightStateChip compact={compact} fit={full} />
+        <StatusPill compact={compact} fit={full} />
         <BatteryItem compact={compact} />
-        {!moved.has("link") ? <LinkItem detail={!moved.has("link_detail")} /> : null}
+        {!moved.has("link_icon") ? <LinkItem text={!moved.has("link_text")} /> : null}
         {!moved.has("nav_source") ? (
           <span className="shrink-0" data-zone="nav_source">
             <NavSourceChip />
@@ -350,19 +440,20 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
         onClick={() => command("quick-menu")}
         aria-label={specText("cockpit.menu")}
         data-zone="menu"
-        className="flex h-[40px] w-[44px] shrink-0 items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10"
+        className={cn(HIT_AREA, "flex h-[40px] w-[44px] shrink-0 items-center justify-center rounded-[var(--fs-radius-sm)] hover:bg-white/10")}
       >
         <Menu className="chrome-icon" aria-hidden />
       </button>
       <button
         type="button"
+        // Always enabled, always opens the hold-to-confirm; a refused press
+        // says why on the cockpit's toast channel (`requestSkill`).
         onClick={() => requestSkill(kill, ctx)}
-        disabled={!killState.enabled}
-        title={killState.enabled ? "Emergency stop (hold 3 s, then confirm)" : killState.reason}
-        aria-label={killState.enabled ? "Emergency stop" : `Emergency stop: ${killState.reason ?? "unavailable"}`}
+        title={specText("stop.hold_label")}
+        aria-label={specText("stop.hold_label")}
         data-zone="stop"
         data-testid="top-bar-stop"
-        className="chrome-stop flex h-[40px] w-[84px] shrink-0 items-center justify-center gap-[6px] font-bold tracking-wide disabled:opacity-50"
+        className={cn(HIT_AREA, "chrome-stop flex h-[40px] w-[84px] shrink-0 items-center justify-center gap-[6px] font-bold tracking-wide")}
       >
         <OctagonX className="chrome-icon" aria-hidden />
         {specText("cockpit.stop")}
@@ -371,21 +462,44 @@ export function TopBar({ compact = false }: { compact?: boolean }) {
   );
 }
 
-/** The top-bar items that move into the Menu, shown there in full: link,
- *  navigation source, controller and the layer level. */
-export function FlightMenuSection() {
+/** The top-bar items the bar has moved into the Menu, shown there in full,
+ *  in the order they moved. */
+export function FlightMenuSection({ moved }: { moved: ReadonlySet<TopBarOverflowItem> }) {
   return (
     <div
       className="chrome-bar-text flex flex-wrap items-center gap-x-[16px] gap-y-[8px] rounded-md border border-border p-[8px]"
       style={chromeStyle()}
-      aria-label="Flight status"
+      aria-label={specText("cockpit.flight_status")}
+      data-testid="menu-overflow"
     >
-      <LinkItem detail />
-      <span className="shrink-0">
-        <NavSourceChip />
-      </span>
-      <ControllerItem />
-      <LayerButton />
+      {moved.has("controller") ? <ControllerItem /> : null}
+      {moved.has("nav_source") ? (
+        <span className="shrink-0" data-zone="nav_source">
+          <NavSourceChip />
+        </span>
+      ) : null}
+      {moved.has("link_text") || moved.has("link_icon") ? <LinkItem text /> : null}
+      {moved.has("layer_button") ? <LayerButton /> : null}
+    </div>
+  );
+}
+
+/** The Menu's Layers entry: the level button and every layer flag. */
+export function LayersMenuSection() {
+  const level = useCockpitViewStore((s) => s.level);
+  const cycleLevel = useCockpitViewStore((s) => s.cycleLevel);
+  return (
+    <div className="chrome-bar-text flex flex-col gap-[4px] rounded-md border border-border p-[8px]" style={chromeStyle()} data-testid="menu-layers">
+      <button
+        type="button"
+        onClick={cycleLevel}
+        aria-label={specText("cockpit.layers.next", { level: levelLabel(level) })}
+        className="flex min-h-[48px] items-center gap-[8px] rounded-[var(--fs-radius-sm)] px-[6px] hover:bg-white/10"
+      >
+        <Layers className="chrome-icon" aria-hidden />
+        {specText("cockpit.menu.layers")} · {levelLabel(level)}
+      </button>
+      <LayerFlagsList />
     </div>
   );
 }

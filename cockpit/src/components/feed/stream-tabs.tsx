@@ -1,13 +1,14 @@
-// Multi-stream tabs, top-left over the feed. Shown only when the node reports
-// more than one camera; each tab selects the active stream, and the Feed
-// re-points the video layer to it. Shown under the safety band.
+// The Menu's Cameras entry: one button per video leg the node offers, by its
+// human label, the selected one pressed. Choosing a leg re-points the Feed's
+// video layer to it. The switch lives in the Menu, never over the video.
 
-import { useFeedStore } from "@/stores/feed-store";
 import { cameraLabel } from "@/lib/feed-legs";
 import type { RosterCamera } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
+import { useFeedStore } from "@/stores/feed-store";
 
-export function StreamTabs({ cameras }: { cameras: RosterCamera[] }) {
+export function CameraSwitcher({ cameras }: { cameras: RosterCamera[] }) {
   const activeCameraId = useFeedStore((s) => s.activeCameraId);
   const setActiveCamera = useFeedStore((s) => s.setActiveCamera);
 
@@ -15,9 +16,7 @@ export function StreamTabs({ cameras }: { cameras: RosterCamera[] }) {
   const activeId = activeCameraId ?? cameras[0]?.id ?? null;
 
   return (
-    <div
-className="pointer-events-auto flex gap-[0.3rem]"
-    >
+    <div role="group" aria-label={specText("cockpit.menu.cameras")} className="flex flex-wrap gap-[6px]" data-testid="menu-cameras">
       {cameras.map((cam) => {
         const active = cam.id === activeId;
         return (
@@ -27,10 +26,8 @@ className="pointer-events-auto flex gap-[0.3rem]"
             onClick={() => setActiveCamera(cam.id)}
             aria-pressed={active}
             className={cn(
-              "min-h-[40px] whitespace-nowrap rounded-md px-[0.55rem] py-[0.3rem] text-[0.75rem] font-medium backdrop-blur-sm transition-colors",
-              active
-                ? "bg-primary text-primary-foreground"
-                : "bg-background/55 text-surface-foreground hover:bg-muted",
+              "chrome-bar-text min-h-[48px] min-w-[48px] whitespace-nowrap rounded-[var(--fs-radius-sm)] border px-[12px] font-semibold",
+              active ? "border-[var(--fs-ok)] bg-white/15" : "border-[var(--fs-border)] hover:bg-white/10",
             )}
           >
             {cameraLabel(cam)}

@@ -10,9 +10,11 @@ import { HoldButton } from "@/components/ui/hold-button";
 import { Sheet } from "@/components/ui/sheet";
 import { sendCommand } from "@/lib/api";
 import { EKF_AXES, EKF_SETS, ekfFlagWords, sourceWord } from "@/lib/ekf-sources";
+import { ackText } from "@/lib/mav-result";
 import { cn } from "@/lib/utils";
 import { toast, toastFromError } from "@/shared/api/toast";
 import { navSourceTextEn, type NavSourceResult } from "@/shared/hud/nav-source";
+import { specText } from "@/shared/hud/spec-text";
 import type { NavState } from "@/shared/hud/nav-types";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -42,7 +44,7 @@ export default function NavSourcePopover({
       const res = await sendCommand("ekfsourceset", [set]);
       const ack = res.ack;
       if (ack?.observed && !ack.accepted) {
-        toast.err(`Set ${set} refused`, ack.statustext ?? ack.result_name ?? undefined);
+        toast.err(`Set ${set} refused`, ackText(ack));
       } else {
         setCommandedSet(set);
         if (ack?.observed) toast.ok(`EKF source set ${set} active`);
@@ -56,7 +58,7 @@ export default function NavSourcePopover({
   };
 
   return (
-    <Sheet title="Navigation source" onDismiss={onClose}>
+    <Sheet title={specText("cockpit.status.source.nav_source")} onDismiss={onClose}>
       <div className="flex flex-col gap-[0.9rem] text-[0.85rem]">
         <div className="font-mono">
           {text.label}

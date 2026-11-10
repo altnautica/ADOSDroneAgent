@@ -12,7 +12,9 @@ import type { LucideIcon } from "lucide-react";
 import { useNow } from "@/hooks/use-now";
 import { useWidthClass } from "@/hooks/use-width-class";
 import { loadEkfSourceParams, navSourceInput } from "@/lib/ekf-sources";
+import { HIT_AREA } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import { navSourceTextEn, resolveNavSource, type NavSourceKind, type NavTone } from "@/shared/hud/nav-source";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
@@ -69,10 +71,13 @@ export function NavSourceChip() {
         type="button"
         onClick={() => setOpen(true)}
         aria-haspopup="dialog"
-        aria-label={`Navigation source: ${text.label}${text.word ? `, ${text.word}` : ""}`}
-        className="flex min-h-[40px] shrink-0 items-center gap-[0.25rem] whitespace-nowrap rounded-md px-[0.3rem] font-mono text-[0.75rem] hover:bg-hud-hair"
+        aria-label={`${specText("cockpit.status.source.nav_source")}: ${text.label}${text.word ? `, ${text.word}` : ""}`}
+        className={cn(
+          HIT_AREA,
+          "flex h-[40px] shrink-0 items-center gap-[4px] whitespace-nowrap rounded-md px-[4px] font-mono text-[12px] leading-[15px] hover:bg-hud-hair",
+        )}
       >
-        <Icon className={cn("h-[0.85rem] w-[0.85rem]", TONE[result.tone])} aria-hidden />
+        <Icon className={cn("h-[14px] w-[14px]", TONE[result.tone])} aria-hidden />
         <span className={TONE[result.tone]}>{text.label}</span>
         {showWord ? <span className={cn("font-semibold", TONE[result.tone])}>{text.word}</span> : null}
       </button>

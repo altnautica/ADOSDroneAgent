@@ -27,6 +27,10 @@ export const LAYER_DEFAULTS: Readonly<Record<string, boolean>> = Object.fromEntr
   layersJson.layers.map((l) => [l.id, l.default]),
 );
 
+/** The built-in layers in the spec's order, with their labels: the Layers
+ *  ▾ menu lists one checkbox per flag. */
+export const BUILTIN_LAYERS: readonly { id: string; label: string }[] = layersJson.layers.map((l) => ({ id: l.id, label: l.label }));
+
 /** Layers the Route level keeps. */
 export const ROUTE_LAYERS: readonly string[] = layersJson.levels.route.layers;
 /** Layers the Off level keeps. */
