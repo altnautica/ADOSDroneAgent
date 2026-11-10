@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.77] - 2026-11-10
+
+### Changed
+
+- Pause is refused with a reason while the flight controller runs its own failsafe return or landing; return home, land and the emergency stop are unaffected.
+- Command results with the MAVLink prefix and the unknown landed state now read in the cockpit's own words.
+
 ## [0.109.76] - 2026-11-10
 
 ### Changed
