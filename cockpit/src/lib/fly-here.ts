@@ -4,7 +4,7 @@
 // the pilot kind's `surface_ops`; without it the map offers nothing.
 
 import type { PilotState } from "@/shared/hud/cockpit-frames";
-import type { LatLon, MapView } from "@/lib/minimap-geometry";
+import { isValidFix, type LatLon, type MapView } from "@/lib/minimap-geometry";
 
 /** Press this long on the map, without moving, to pick a point. */
 export const FLY_HERE_PRESS_MS = 600;
@@ -48,9 +48,28 @@ export function flyHereArgs(target: LatLon, altRelM: number | null | undefined):
   return { lat: target.lat, lon: target.lon, alt_m: Math.max(FLY_HERE_MIN_ALT_M, Math.round(altRelM * 10) / 10) };
 }
 
+/** Where the global minimap places the drone, and whether that position comes
+ *  from a GNSS fix. The flight controller's global position also holds without
+ *  a fix while its EKF has an origin (it reports the local position through the
+ *  origin), and the pilot maps a `goto` through the same frame, so the drone
+ *  marker and "Fly here" use it as Mission Control does. Without a fix and
+ *  without an origin the FC reports (0, 0): no position, so no "Fly here". */
+export function flyHerePosition(
+  pos: { lat?: number | null; lon?: number | null } | null | undefined,
+  fixType: number | null | undefined,
+  live: boolean,
+): { drone: LatLon | null; gnss: boolean } {
+  if (!live || !pos || !isValidFix(pos.lat, pos.lon)) return { drone: null, gnss: false };
+  const drone = { lat: pos.lat as number, lon: pos.lon as number };
+  // A null fix type (some republished snapshots) falls back to coord validity.
+  return { drone, gnss: fixType == null || fixType >= 2 };
+}
+
 /** Operator text for a refused `goto`. */
 export function flyHereRefusal(err: string | undefined): string {
   switch (err) {
+    case "failsafe":
+      return "Fly Here refused: the drone is in a failsafe return or landing; change mode first";
     case "launching":
       return "Taking off: wait for the climb to finish";
     case "control_mode":

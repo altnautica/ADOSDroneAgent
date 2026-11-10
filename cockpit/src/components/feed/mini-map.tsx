@@ -8,9 +8,11 @@
 //
 // Honest surfaces: there is no home datum on the wire, so the map never
 // draws one — the "start" marker is the first fix we observed this session (our
-// launch proxy), labelled as such, not the flight controller's home. With no
-// valid fix it shows a plain "No GPS fix" state; when the fix goes stale it dims
-// the last known track rather than pinning a live-looking marker.
+// launch proxy), labelled as such, not the flight controller's home. Without a
+// GNSS fix the drone and "Fly here" still use the FC's position through its EKF
+// origin (marked "no fix"); with neither it shows a plain "No GPS fix" state;
+// when the fix goes stale it dims the last known track rather than pinning a
+// live-looking marker.
 //
 // Without GNSS the minimap switches to the local frame (see
 // `local-mini-map`): AUTO goes local after 2 s below a 3D fix or while the
@@ -22,6 +24,7 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { Layers } from "lucide-react";
 
 import { FlyHereLayer } from "@/components/feed/fly-here";
+import { flyHerePosition } from "@/lib/fly-here";
 import { LocalMiniMap } from "@/components/feed/local-mini-map";
 import { useNow } from "@/hooks/use-now";
 import { minimapFrame, nextMinimapPin } from "@/lib/local-minimap";
@@ -32,7 +35,6 @@ import { useFlightStore } from "@/stores/flight-store";
 import { useStatusStore } from "@/stores/status-store";
 import {
   computeMapView,
-  isValidFix,
   latLonToEN,
   projectEN,
   viewSpanMeters,
@@ -151,20 +153,11 @@ function GlobalMiniMap() {
   }, [pairedDeviceId, syncVehicle]);
 
   const pos = telemetry?.position ?? null;
-  const fix = telemetry?.gps?.fix_type ?? null;
-  // Narrow the nullable wire coords to a real LatLon (or null) once.
-  const coords: LatLon | null =
-    pos != null &&
-    typeof pos.lat === "number" &&
-    typeof pos.lon === "number" &&
-    isValidFix(pos.lat, pos.lon)
-      ? { lat: pos.lat, lon: pos.lon }
-      : null;
-  // A null fix-type (some republished GS snapshots) falls back to coord validity;
-  // otherwise require at least a 2D fix so a garbage first sample is not plotted.
-  const fixOk = coords != null && (fix == null || fix >= 2);
-  const hasFix = live && fixOk;
-  const droneFix: LatLon | null = hasFix ? coords : null;
+  // The drone: a GNSS fix, else the FC's position through its EKF origin (as
+  // Mission Control places it). The breadcrumb records only a GNSS fix; the
+  // marker and "Fly here" use either.
+  const { drone: dronePos, gnss: hasFix } = flyHerePosition(pos, telemetry?.gps?.fix_type ?? null, live);
+  const droneFix: LatLon | null = hasFix ? dronePos : null;
   const headingDeg = headingOrNull(pos?.heading);
 
   // Record the live fix into the breadcrumb (the store applies the jitter filter
@@ -178,13 +171,13 @@ function GlobalMiniMap() {
 
   // Reference for the local projection: the start, else the live fix, else the
   // first breadcrumb. Without any of these there is nothing to draw.
-  const ref: LatLon | null = start ?? droneFix ?? samples[0] ?? null;
+  const ref: LatLon | null = start ?? dronePos ?? samples[0] ?? null;
 
   const trailEN: EN[] = ref
     ? samples.map((s) => latLonToEN(s.lat, s.lon, ref.lat, ref.lon))
     : [];
   const droneEN: EN | null =
-    ref && droneFix ? latLonToEN(droneFix.lat, droneFix.lon, ref.lat, ref.lon) : null;
+    ref && dronePos ? latLonToEN(dronePos.lat, dronePos.lon, ref.lat, ref.lon) : null;
   const startEN: EN | null =
     ref && start ? latLonToEN(start.lat, start.lon, ref.lat, ref.lon) : null;
 
@@ -313,7 +306,7 @@ function GlobalMiniMap() {
                 </text>
               </g>
             </svg>
-            {view && ref ? <FlyHereLayer view={view} refPoint={ref} drone={droneFix} viewBox={VIEW} /> : null}
+            {view && ref && dronePos ? <FlyHereLayer view={view} refPoint={ref} drone={dronePos} viewBox={VIEW} /> : null}
 
             {/* scale + stale readout */}
             <div className="absolute bottom-[0.1rem] left-0 right-0 flex items-center justify-between px-[0.3rem]">

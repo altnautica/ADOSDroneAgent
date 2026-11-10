@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { FLY_HERE_TAKES_OVER, enToLatLon, flyHereArgs, flyHereOffered, flyHereRefusal, unprojectEN } from "@/lib/fly-here";
+import { FLY_HERE_TAKES_OVER, enToLatLon, flyHereArgs, flyHereOffered, flyHerePosition, flyHereRefusal, unprojectEN } from "@/lib/fly-here";
 import { computeMapView, latLonToEN, projectEN } from "@/lib/minimap-geometry";
 import { parsePilotState } from "@/shared/hud/cockpit-frames";
 
@@ -57,5 +57,29 @@ describe("fly here", () => {
     expect(flyHereRefusal("no response")).toBe("No answer from the drone");
     expect(flyHereRefusal("launching")).toMatch(/climb/);
     expect(flyHereRefusal("control_mode")).toMatch(/flight controller/);
+  });
+
+  it("names every refusal the pilot returns, failsafe included", () => {
+    expect(flyHereRefusal("failsafe")).toBe(
+      "Fly Here refused: the drone is in a failsafe return or landing; change mode first",
+    );
+    for (const code of ["bad_args", "not_armed", "landed", "tuning", "no_home", "launching", "control_mode", "failsafe"]) {
+      expect(flyHereRefusal(code)).not.toMatch(/^Refused/);
+      expect(flyHereRefusal(code)).not.toBe(`Refused: ${code}`);
+    }
+  });
+
+  it("places the drone from the FC position through the EKF origin without a GNSS fix", () => {
+    const pos = { lat: 12.97, lon: 77.59 };
+    expect(flyHerePosition(pos, 3, true)).toEqual({ drone: pos, gnss: true });
+    expect(flyHerePosition(pos, 0, true)).toEqual({ drone: pos, gnss: false });
+    expect(flyHerePosition(pos, 1, true)).toEqual({ drone: pos, gnss: false });
+    expect(flyHerePosition(pos, null, true)).toEqual({ drone: pos, gnss: true });
+  });
+
+  it("has no drone position (so no Fly Here) without a fix and without an EKF origin", () => {
+    expect(flyHerePosition({ lat: 0, lon: 0 }, 0, true).drone).toBeNull();
+    expect(flyHerePosition(null, 3, true).drone).toBeNull();
+    expect(flyHerePosition({ lat: 12.97, lon: 77.59 }, 3, false).drone).toBeNull();
   });
 });

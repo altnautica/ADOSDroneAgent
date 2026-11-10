@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.46] - 2026-11-10
+
+### Fixed
+
+- Cockpit minimap places the drone and offers "Fly here" without a GNSS fix while the flight controller reports a position through its EKF origin, as Mission Control does; the pilot maps the picked point through the same frame. With neither a fix nor an origin the map shows "No GPS fix" and offers no "Fly here".
+- Cockpit "Fly here" names a refusal during a flight-controller failsafe return or landing ("change mode first") instead of showing the raw `failsafe` code.
+
 ## [0.109.45] - 2026-11-10
 
 ### Fixed
