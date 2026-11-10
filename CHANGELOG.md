@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.66] - 2026-11-10
+
+### Changed
+
+- Cockpit: with a sheet, dialog or the Menu open over the flight screen, the controller drives it (Circle closes it instead of stopping the running skill); pause, return home, arm and emergency stop stay live underneath.
+
 ## [0.109.65] - 2026-11-10
 
 ### Changed
