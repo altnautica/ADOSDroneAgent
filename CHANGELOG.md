@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.67] - 2026-11-10
+
+### Changed
+
+- Cockpit status-pill alert list is laid out on its own panel again on the shared overlay, so it is measured and drawn as before.
+
 ## [0.109.66] - 2026-11-10
 
 ### Changed
