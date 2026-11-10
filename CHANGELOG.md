@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.71] - 2026-11-10
+
+### Changed
+
+- Cockpit spec: flight-screen sheets start below the top bar so STOP stays reachable; the flight-state chip is capped at 40 % of the bar; the link cell shows the newest frame age and the battery names its time to reserve; left-column buttons carry short labels.
+- Cockpit spec: the status pill gains sources for a silent pilot, a lost controller in the air and failing pre-flight checks; storage reads "98 % used"; both automatic-manoeuvre countdowns are critical.
+- Cockpit spec: tips never cover the alert stack and wait while an alert shows; tip texts fit touch, mouse and pad; shared words for video states, flight controller mode-change causes, failsafe, take-off, hold hints, the setup offer, the nav-source popover, follow, minimap, instruments, targets and the vision panel.
+- Cockpit spec: flight-screen panels are more opaque and STOP is a darker red so text keeps 4.5:1 over bright video; tv labels are at least 16 px.
+
 ## [0.109.70] - 2026-11-10
 
 ### Changed
