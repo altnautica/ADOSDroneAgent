@@ -84,6 +84,7 @@ const PILL_TONE = {
 function VehicleStatus() {
   const nav = useNavStatus();
   const navPanels = useNavPollStore((s) => s.videoPanels);
+  const heartbeat = useHeartbeat();
   const tel = useVehicleTelemetry();
   const battery = useBatteryHealth();
   const statusFull = useResource<StatusFull>("status-full", "/api/status/full", STATUS_FULL_POLL_MS);
@@ -96,6 +97,8 @@ function VehicleStatus() {
     battery: battery.data ?? null,
     status: statusFull.data ?? null,
     msSinceLive: tel.dataUpdatedAt > 0 ? Math.max(0, now - tel.dataUpdatedAt) : null,
+    pilotAgeMs: nav.data?.pilot && pilot ? Math.max(0, now - nav.dataUpdatedAt) + (nav.data.pilot.age_ms ?? 0) : null,
+    agentReachable: !heartbeat.isError,
   };
   const pill = homePill(inputs);
   // The lines are live values: each reads only a source that is still live.

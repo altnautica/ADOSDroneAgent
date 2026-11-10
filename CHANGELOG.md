@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.76] - 2026-11-10
+
+### Changed
+
+- The dashboard status pill warns when the pilot has not answered, when the agent is unreachable and when the controller is lost in the air. The fallback refusal text comes from the translation file.
+
 ## [0.109.75] - 2026-11-10
 
 ### Changed

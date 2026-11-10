@@ -1,4 +1,5 @@
 import { ApiError, isAuthChallenge } from "@/shared/api-fetch";
+import i18n from "@/shared/i18n";
 
 /**
  * The agent's own words when it answered and refused, or `null` when it did not
@@ -16,5 +17,5 @@ export function refusalDetail(error: unknown): string | null {
     const detail = (body as { detail: unknown }).detail;
     if (typeof detail === "string" && detail.trim()) return detail;
   }
-  return "This device refused the request.";
+  return i18n.t("common.refusedFallback");
 }

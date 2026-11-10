@@ -9,7 +9,7 @@ import { parsePilotState } from "@/shared/hud/cockpit-frames";
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
 const raw = JSON.parse(readFileSync(path.join(FIXTURES, "pilot-frame.json"), "utf8")) as Record<string, unknown>;
 
-const base: HomeStatusInputs = { pilot: parsePilotState(raw), telemetry: null, battery: null, status: null, msSinceLive: 0 };
+const base: HomeStatusInputs = { pilot: parsePilotState(raw), telemetry: null, battery: null, status: null, msSinceLive: 0, pilotAgeMs: 100, agentReachable: true };
 
 describe("home status card", () => {
   it("lists the readiness, prearm, FC status text and storage alerts in the pill", () => {
@@ -27,7 +27,7 @@ describe("home status card", () => {
     const sources = pill.alerts.map((a) => a.source).sort();
     expect(sources).toEqual(["fc_prearm", "fc_status_text", "pilot_readiness", "storage"]);
     expect(pill.severity).toBe("critical");
-    expect(pill.text).toBe("4 warnings");
+    expect(pill.alerts.length).toBe(4);
   });
 
   it("reads all systems OK with nothing active", () => {
@@ -47,5 +47,27 @@ describe("home status card", () => {
     expect(lines.agl).toEqual({ text: "4.1 m", mark: "HOME" });
     expect(lines.sticks).toMatch(/^Sticks are with /);
     expect(lines.timeToReserve).toBe("10:10 left");
+  });
+
+  it("warns once when the kept pilot frame is stale and drops the items it carried", () => {
+    const pilot = parsePilotState({
+      ...raw,
+      readiness: [{ id: "fc_profile", ok: false, severity: "block", msg: "FC failsafe parameters do not match" }],
+    });
+    const pill = homePill({ ...base, pilot, pilotAgeMs: 5_000 });
+    expect(pill.alerts.map((a) => a.id)).toEqual(["pilot_not_answering"]);
+    expect(homePill({ ...base, pilot: null, pilotAgeMs: null }).alerts.map((a) => a.id)).toEqual(["pilot_not_answering"]);
+  });
+
+  it("raises a critical link item while the agent does not answer", () => {
+    const pilot = parsePilotState({ ...raw, readiness: [], statustext: [] });
+    const pill = homePill({ ...base, pilot, agentReachable: false });
+    expect(pill.alerts.find((a) => a.id === "agent_unreachable")?.severity).toBe("critical");
+    expect(pill.severity).toBe("critical");
+  });
+
+  it("flags a lost controller while armed and airborne", () => {
+    const pilot = parsePilotState({ ...raw, readiness: [], statustext: [], hold_reason: "controller-lost", armed: true, landed: false });
+    expect(homePill({ ...base, pilot }).alerts.map((a) => a.id)).toContain("controller_lost");
   });
 });

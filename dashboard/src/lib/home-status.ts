@@ -8,7 +8,7 @@ import type { PilotState } from "@/shared/hud/cockpit-frames";
 import { batteryReading, type BatteryHealthInput } from "@/shared/hud/battery";
 import { linkLossLine } from "@/shared/hud/link-loss";
 import { specText } from "@/shared/hud/spec-text";
-import { baseAlerts, pillAlerts, pillSummary, type PillSummary } from "@/shared/hud/status-pill";
+import { baseAlerts, controllerLost, pillAlerts, pillSummary, type PillSummary } from "@/shared/hud/status-pill";
 
 import type { VehicleTelemetry } from "@/hooks/use-vehicle-telemetry";
 
@@ -25,6 +25,11 @@ export interface HomeStatusInputs {
   status: StatusFull | null;
   /** Ms since the last telemetry read; null before the first one. */
   msSinceLive: number | null;
+  /** Age of the kept pilot frame (its age at the agent plus the time since
+   *  receipt); null when none ever arrived. */
+  pilotAgeMs: number | null;
+  /** False while the agent's own status read fails. */
+  agentReachable: boolean;
 }
 
 /** The pill and its alert list, from the cockpit's inputs. The dashboard
@@ -44,6 +49,9 @@ export function homePill(i: HomeStatusInputs): PillSummary {
       prearm: i.telemetry?.prearm,
       storagePct: i.status?.system?.disk_pct ?? null,
       fcStatus: i.pilot?.statustext,
+      pilotAgeMs: i.pilotAgeMs,
+      agentReachable: i.agentReachable,
+      controllerLost: controllerLost(i.pilot),
     }),
     new Set(),
   );
