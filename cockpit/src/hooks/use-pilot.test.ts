@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { currentArFrame } from "@/hooks/use-pilot";
+import { currentArFrame, pilotFresh } from "@/hooks/use-pilot";
 import { layerFrames } from "@/lib/layer-frames";
 import { nextWaypointEtaS } from "@/shared/hud/chip-inputs";
 import { parseArFrame } from "@/shared/hud/cockpit-frames";
@@ -28,5 +28,14 @@ describe("chip ETA clock", () => {
     vi.spyOn(Date, "now").mockReturnValue(Date.now() - 3_600_000);
     layerFrames.ar.seen = performance.now() - 3000;
     expect(currentEta()).toBeNull();
+  });
+});
+
+describe("pilot freshness", () => {
+  const frame = { data: {} as never, at: 10_000 };
+  it("is live up to the spec's stale_after_ms and stale after it", () => {
+    expect(pilotFresh(frame, 10_000 + 2000)).toBe(true);
+    expect(pilotFresh(frame, 10_000 + 2001)).toBe(false);
+    expect(pilotFresh(null, 10_000)).toBe(false);
   });
 });

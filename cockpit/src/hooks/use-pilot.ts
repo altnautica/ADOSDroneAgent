@@ -10,12 +10,27 @@ import { layerFrames } from "@/lib/layer-frames";
 import { PILOT_SESSION } from "@/lib/pilot-link";
 import { bottomRowAgl, chipInputs, type BottomRowAgl } from "@/shared/hud/chip-inputs";
 import type { ArFrame, PilotState } from "@/shared/hud/cockpit-frames";
-import { flightStateChip, type ChipView } from "@/shared/hud/flight-state";
+import { CHIP_STALE_AFTER_MS, flightStateChip, type ChipView } from "@/shared/hud/flight-state";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore, type Stamped } from "@/stores/nav-stream-store";
 
 export function usePilot(): Stamped<PilotState> | null {
   return useNavStreamStore((s) => s.pilot);
+}
+
+/** Whether a pilot frame received at `at` (epoch ms) is still live: no older
+ *  than the spec's `stale_after_ms`, the age at which the chip dims. A frame
+ *  past it is never drawn as live (countdowns, gate ring, handover, sticks). */
+export function pilotFresh(p: Stamped<PilotState> | null, nowMs: number): boolean {
+  return p !== null && nowMs - p.at <= CHIP_STALE_AFTER_MS;
+}
+
+/** The pilot state while it is fresh, else null, re-evaluated twice a second
+ *  so a stalled pilot ages out with no new frame to re-render it. */
+export function useFreshPilot(): PilotState | null {
+  const pilot = usePilot();
+  const now = useNow(pilot ? 500 : null);
+  return pilot !== null && pilotFresh(pilot, now) ? pilot.data : null;
 }
 
 /** The bottom row's AGL, from the pilot kind with the follow kind behind it. */

@@ -18,6 +18,11 @@ interface CockpitUiState {
    *  Launch sheet unmounting behind the pre-flight checklist. */
   launchRefusal: string | null;
   setLaunchRefusal: (text: string | null) => void;
+  /** A go-to point (metres north/east of the vehicle) the Launch sheet opens
+   *  with, set by a long-press on a map while on the ground. */
+  launchGoto: { n: number; e: number } | null;
+  /** Open the Launch sheet, prefilled with a go-to point when given. */
+  openLaunch: (goto?: { n: number; e: number } | null) => void;
   openSheet: (sheet: CockpitSheet) => void;
   closeSheet: () => void;
   nextCard: (dir?: 1 | -1) => void;
@@ -30,8 +35,10 @@ export const useCockpitUiStore = create<CockpitUiState>((set, get) => ({
   shutterMode: "video",
   launchRefusal: null,
   setLaunchRefusal: (launchRefusal) => set({ launchRefusal }),
-  openSheet: (sheet) => set({ sheet }),
-  closeSheet: () => set({ sheet: null }),
+  launchGoto: null,
+  openLaunch: (goto = null) => set({ sheet: "launch", launchGoto: goto }),
+  openSheet: (sheet) => set({ sheet, launchGoto: null }),
+  closeSheet: () => set({ sheet: null, launchGoto: null }),
   nextCard: (dir = 1) => {
     const i = CARDS.indexOf(get().card);
     set({ card: CARDS[(i + dir + CARDS.length) % CARDS.length] });
