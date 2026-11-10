@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { GIMBAL_RESEND_MS, createGimbalRateSender } from "@/lib/gimbal-rate";
+import { GIMBAL_BACKOFF_MS, GIMBAL_RESEND_MS, createGimbalRateSender } from "@/lib/gimbal-rate";
+import { ApiError } from "@/shared/api-fetch";
 
 describe("gimbal rate pacing", () => {
   beforeEach(() => vi.useFakeTimers());
@@ -50,6 +51,50 @@ describe("gimbal rate pacing", () => {
     t.dispose();
     expect(sent).toEqual([
       [5, 5],
+      [0, 0],
+    ]);
+  });
+
+  it("keeps one request in flight: a slow answer holds the next send", async () => {
+    const sent: [number, number][] = [];
+    let answer: () => void = () => undefined;
+    const s = createGimbalRateSender((p, y) => {
+      sent.push([p, y]);
+      return new Promise<void>((resolve) => {
+        answer = resolve;
+      });
+    });
+    s.set(10, 0);
+    for (let i = 1; i <= 5; i += 1) {
+      s.set(10 + i, 0);
+      vi.advanceTimersByTime(100);
+    }
+    expect(sent).toEqual([[10, 0]]);
+    answer();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(sent).toEqual([
+      [10, 0],
+      [15, 0],
+    ]);
+    s.dispose();
+  });
+
+  it("backs off after a 429 and still ends a held rate with a zero", async () => {
+    const sent: [number, number][] = [];
+    let n = 0;
+    const s = createGimbalRateSender((p, y) => {
+      sent.push([p, y]);
+      n += 1;
+      return n === 1 ? Promise.reject(new ApiError("429 Too Many Requests", 429, null)) : Promise.resolve();
+    });
+    s.set(20, 0);
+    await vi.advanceTimersByTimeAsync(GIMBAL_BACKOFF_MS - 100);
+    expect(sent).toEqual([[20, 0]]);
+    s.set(0, 0);
+    expect(sent).toEqual([[20, 0]]);
+    await vi.advanceTimersByTimeAsync(200);
+    expect(sent).toEqual([
+      [20, 0],
       [0, 0],
     ]);
   });

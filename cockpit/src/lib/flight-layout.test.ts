@@ -15,6 +15,7 @@ import {
   HIT_AREA,
   intersects,
   movedItems,
+  RIGHT_DROP_ORDER,
   TOP_BAR_NEVER_MOVE,
   TOP_BAR_OVERFLOW,
   TOUCH_MIN_PX,
@@ -80,8 +81,13 @@ describe("the flight screen zones (cockpit spec layout.json)", () => {
         // The left column never sits under the top bar, and every column item fits.
         if (L.leftColumn) expect(L.leftColumn.y).toBeGreaterThanOrEqual(L.topBar.y + L.topBar.h);
         expect(L.rightColumn.y).toBeGreaterThanOrEqual(L.topBar.y + L.topBar.h);
-        expect(L.rightItems).toEqual(expect.arrayContaining(["shutter", "mode", "settings"]));
+        expect(L.rightItems).toEqual(expect.arrayContaining(["shutter", "photo_video_switch", "camera_settings"]));
         expect(L.bottomRow, `${label}: telemetry row`).not.toBeNull();
+        // Every column control's hit area is at least the touch floor.
+        expect(L.leftButtonPx, `${label}: left button`).toBeGreaterThanOrEqual(FLIGHT_PX.touchMin);
+        // The map view puts the video in the bottom-left card; a split has no card.
+        expect(L.cardHoldsVideo, `${label}: video card`).toBe(L.card !== null && label.includes(" map"));
+        if (label.includes(" split")) expect(L.card).toBeNull();
       }
     });
 
@@ -101,12 +107,34 @@ describe("the flight screen zones (cockpit spec layout.json)", () => {
     expect(412 - 2 * FLIGHT_PX.edge - 2 * 4).toBeGreaterThanOrEqual(FLIGHT_PX.barMinW);
   });
 
-  it("drops the gimbal pad before zoom where the band is short", () => {
+  it("drops the gimbal pad before zoom where the band is short (right_column.drop_order)", () => {
+    expect(RIGHT_DROP_ORDER).toEqual(["gimbal_pad", "zoom"]);
     const m = gridMeasures("medium", false);
     const L = flightLayout({ width: 760, height: 480, m, widthClass: "medium", view: "pilot", flies: true, strip: false, gimbal: true, splitRatio: 0.6 });
-    expect(L.rightItems).not.toContain("gimbal");
+    expect(L.rightItems).not.toContain("gimbal_pad");
     const big = flightLayout({ width: 1280, height: 800, m: gridMeasures("expanded", false), widthClass: "expanded", view: "pilot", flies: true, strip: false, gimbal: true, splitRatio: 0.6 });
-    expect(big.rightItems).toEqual(["shutter", "mode", "zoom", "gimbal", "settings"]);
+    expect(big.rightItems).toEqual(["shutter", "photo_video_switch", "zoom", "gimbal_pad", "camera_settings"]);
+  });
+
+  it("labels the left column under the icons at medium and up, icons only at compact", () => {
+    for (const [w, h, wc, labels] of [
+      [580, 360, "compact", false],
+      [760, 480, "medium", true],
+      [1280, 800, "expanded", true],
+      [1920, 1080, "tv", true],
+    ] as const) {
+      const L = flightLayout({ width: w, height: h, m: gridMeasures(wc, false), widthClass: wc, view: "pilot", flies: true, strip: false, gimbal: false, splitRatio: 0.5 });
+      expect(L.leftLabels, wc).toBe(labels);
+      const s = gridMeasures(wc, false).scale;
+      const item = L.leftButtonPx + (labels ? FLIGHT_PX.leftLabelH : 0);
+      expect(L.leftColumn!.h / s).toBeCloseTo(3 * item + 2 * L.leftGapPx);
+      if (labels) expect(L.leftColumn!.w / s).toBeGreaterThanOrEqual(FLIGHT_PX.leftLabelW);
+    }
+  });
+
+  it("gives every right-column control a hit area of at least touch_target.min", () => {
+    for (const px of [FLIGHT_PX.modeH, FLIGHT_PX.modeW, FLIGHT_PX.knobHit, (FLIGHT_PX.zoomH - 3) / 2]) expect(px).toBeGreaterThanOrEqual(FLIGHT_PX.touchMin);
+    for (const wc of ["compact", "medium", "expanded", "tv"] as const) expect(gridMeasures(wc, false).colPx).toBeGreaterThanOrEqual(FLIGHT_PX.touchMin);
   });
 
   it("keeps the instruments centred on the video", () => {

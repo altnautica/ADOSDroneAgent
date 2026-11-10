@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from "react";
 import { RADAR_RANGE_M, RADAR_STALE_MS, sectorRadius } from "@/lib/cockpit-flow";
 import { layerFrames } from "@/lib/layer-frames";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import { STATE_COLORS } from "@/lib/cockpit-spec";
 import { nearestSector } from "@/shared/hud/layer-layout";
 import { useFlightStore } from "@/stores/flight-store";
@@ -88,13 +89,27 @@ function useObstacleCanvas(): React.RefObject<HTMLCanvasElement> {
   return ref;
 }
 
-export function ObstacleRadarCard({ className }: { className?: string }) {
+/** A face's small title, top-left inside the card. */
+function FaceTitle({ text }: { text: string }) {
+  return (
+    <span className="chrome-label pointer-events-none absolute left-[6px] top-[4px] z-[1] uppercase tracking-wide" style={{ fontSize: 11, lineHeight: "16px" }} data-testid="card-title">
+      {text}
+    </span>
+  );
+}
+
+/** The obstacle radar; inside the attitude card it draws without its own
+ *  title. */
+export function ObstacleRadarCard({ className, titled = true }: { className?: string; titled?: boolean }) {
   const ref = useObstacleCanvas();
   const nearest = useNearestLabel();
+  const title = specText("cockpit.card.obstacle_radar");
   return (
     <div className={cn("relative", className)} data-testid="obstacle-radar">
-      <canvas ref={ref} className="h-full w-full" aria-label="Obstacle radar" />
-      <span className="absolute bottom-[0.2rem] left-1/2 -translate-x-1/2 font-mono text-[0.68rem] text-hud-ink">{nearest}</span>
+      {titled ? <FaceTitle text={title} /> : null}
+      <canvas ref={ref} className="h-full w-full" aria-label={title} />
+      {/* Top-right: the title sits top-left and the card's dots along the foot. */}
+      <span className="absolute right-[6px] top-[4px] font-mono text-[11px] text-hud-ink">{nearest}</span>
     </div>
   );
 }
@@ -123,8 +138,9 @@ export function AttitudeRadarCard({ className }: { className?: string }) {
   const rollDeg = roll === null ? 0 : (roll * 180) / Math.PI;
   const pitchDeg = pitch === null ? 0 : (pitch * 180) / Math.PI;
   return (
-    <div className={cn("flex items-stretch gap-[0.2rem] p-[0.2rem]", className)} data-testid="attitude-radar">
-      <svg viewBox="-50 -50 100 100" className={cn("h-full flex-1", !live && "opacity-40")} aria-label="Attitude">
+    <div className={cn("relative flex items-stretch gap-[3px] p-[3px]", className)} data-testid="attitude-radar">
+      <FaceTitle text={specText("cockpit.card.attitude_radar")} />
+      <svg viewBox="-50 -50 100 100" className={cn("h-full flex-1", !live && "opacity-40")} aria-label={specText("cockpit.card.attitude_radar")}>
         <clipPath id="att-clip">
           <circle r="46" />
         </clipPath>
@@ -136,7 +152,7 @@ export function AttitudeRadarCard({ className }: { className?: string }) {
         <circle r="46" fill="none" stroke="rgba(237,237,237,0.4)" />
         <path d="M-22 0 H-8 L0 6 L8 0 H22" fill="none" stroke="#FFD400" strokeWidth="2.5" />
       </svg>
-      <ObstacleRadarCard className="h-full flex-1" />
+      <ObstacleRadarCard className="h-full flex-1" titled={false} />
     </div>
   );
 }

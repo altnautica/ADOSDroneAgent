@@ -170,9 +170,9 @@ export function FeedScreen() {
   const layers = effectiveLayers(level, layerFlags, view, pluginOverlayIds);
 
   const slots: FeedSlots = {
-    video: (
+    video: <VideoLayer whepUrl={whepUrl} hlsUrl={hlsUrl} reconnectKey={reconnectKey} />,
+    layers: (
       <>
-        <VideoLayer whepUrl={whepUrl} hlsUrl={hlsUrl} reconnectKey={reconnectKey} />
         <ExtensionVideoOverlays
           cameraId={cameraId}
           multiStream={cameras.length > 1}
@@ -226,7 +226,7 @@ export function FeedScreen() {
         <LayerChips />
       </>
     ),
-    tabs: null,
+
     map: flightNavCapable ? (className) => <MiniMap className={className} /> : null,
     cards: flightNavCapable
       ? {
@@ -235,18 +235,9 @@ export function FeedScreen() {
           obstacle_radar: (className) => <ObstacleRadarCard className={className} />,
         }
       : {},
-    pip: pipCamera ? (
-      <PipInset
-        key={pipCamera.id}
-        camera={pipCamera}
-        streamNonce={streamNonce}
-        visionCapable={visionCapable}
-        holdDetection={localVisionCapable}
-        widthClass={widthClass}
-      />
-    ) : null,
-    leftColumn: (row) => (flightNavCapable ? <LeftColumn row={row} /> : null),
-    rightColumn: (items) => <RightColumn items={items} />,
+    pip: pipCamera ? <PipInset key={pipCamera.id} camera={pipCamera} streamNonce={streamNonce} /> : null,
+    leftColumn: (o) => (flightNavCapable ? <LeftColumn {...o} /> : null),
+    rightColumn: (items) => <RightColumn items={items} cameras={cameras} />,
     bottomRow: flightNavCapable ? (short) => <BottomRow short={short} /> : null,
     skillPicker: <SkillPicker />,
     ack: <SkillAckLine />,

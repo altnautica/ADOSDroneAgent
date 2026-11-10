@@ -1,8 +1,9 @@
 // The range panel (13-hud-v2 §8.1, L2, read-only): bottom-centre over the
 // video, above the bottom chrome, shown in following mode. Range and phase,
-// the ±2σ interval bar, height and its source, the target geometry, and the
-// range cues with the pipeline latency and the re-acquire mode. Rows by width
-// class: one merged line at compact, three rows at medium, five above.
+// the ±2σ interval bar, the target geometry, and the range cues with the
+// pipeline latency and the re-acquire mode; height above ground is the bottom
+// row's alone. Rows by width class: one merged line at compact, two rows at
+// medium, four above.
 
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { compactFollowLine, followPanelModel } from "@/lib/follow-panel";
@@ -35,7 +36,7 @@ export function FollowRangePanel({
 
   if (widthClass === "compact") {
     return (
-      <div className={cn(plate, "px-[0.6rem] py-[0.25rem] text-[0.8rem] text-hud-ink")} role="status" aria-label="Follow range">
+      <div className={cn(plate, "px-[10px] py-[4px] text-[13px] text-hud-ink")} role="status" aria-label="Follow range">
         {compactFollowLine(m)} <span className={PHASE_CLASS[m.phaseTone]}>{m.phase}</span>
       </div>
     );
@@ -45,18 +46,18 @@ export function FollowRangePanel({
   const bigPx = widthClass === "tv" ? 34 : 28;
   return (
     <div
-      className={cn(plate, "flex flex-col gap-[0.3rem] px-[0.8rem] py-[0.5rem] text-hud-ink")}
+      className={cn(plate, "flex flex-col gap-[5px] px-[13px] py-[8px] text-hud-ink")}
       style={{ width: widthClass === "tv" ? 400 : full ? 320 : undefined }}
       role="status"
       aria-label="Follow range"
     >
-      <div className="flex items-baseline justify-between gap-[0.8rem]">
+      <div className="flex items-baseline justify-between gap-[13px]">
         <span className="font-semibold leading-none" style={{ fontSize: bigPx }}>
           {m.range}
         </span>
         <span className={cn("text-[11px] font-semibold uppercase tracking-hud-tag", PHASE_CLASS[m.phaseTone])}>{m.phase}</span>
       </div>
-      <div className="flex items-center gap-[0.5rem]">
+      <div className="flex items-center gap-[8px]">
         <svg width={160} height={10} className="shrink-0" aria-hidden>
           <rect x={0} y={3} width={160} height={4} rx={2} fill="var(--hud-hair)" />
           {m.bar && m.bar.lo !== null && m.bar.hi !== null ? (
@@ -64,26 +65,17 @@ export function FollowRangePanel({
           ) : null}
           {m.bar ? <rect x={m.bar.tick * 160 - 1} y={0} width={2} height={10} fill="var(--hud-ink)" /> : null}
         </svg>
-        <span className="whitespace-nowrap text-[0.75rem] text-hud-ink-2">{m.interval ?? "—"}</span>
-      </div>
-      <div className="text-[0.75rem]">
-        <span className="text-hud-muted">AGL</span> {m.agl}
-        {m.aglSource ? (
-          <>
-            {" · "}
-            <span className={m.aglSource === "BARO" ? "text-hud-warn" : undefined}>{m.aglSource}</span>
-          </>
-        ) : null}
+        <span className="whitespace-nowrap text-[12px] text-hud-ink-2">{m.interval ?? "—"}</span>
       </div>
       {full ? (
         <>
-          <div className="text-[0.75rem] text-hud-ink-2">{m.geometry}</div>
-          <div className="flex flex-wrap items-center gap-[0.35rem] text-[0.7rem]">
+          <div className="text-[12px] text-hud-ink-2">{m.geometry}</div>
+          <div className="flex flex-wrap items-center gap-[6px] text-[11px]">
             {m.cues.map((c) => (
               <span
                 key={c.label}
                 className={cn(
-                  "rounded border border-hud-hair px-[0.3rem]",
+                  "rounded border border-hud-hair px-[5px]",
                   c.lit ? "bg-hud-glass text-hud-ink" : "text-hud-muted line-through",
                 )}
               >

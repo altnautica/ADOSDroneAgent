@@ -3,7 +3,8 @@
 // same on every surface: compact < 600, medium 600–839, expanded 840–1599,
 // tv ≥ 1600 or the kiosk. The agent cockpit measures the viewport.
 
-import { LAYOUT_CLASSES, TOUCH_TARGET, WIDTH_CLASSES, type LayoutClassSpec } from "@/lib/cockpit-spec";
+import { LAYOUT_CLASSES, ON_SCREEN_STICKS, TOUCH_TARGET, WIDTH_CLASSES, type LayoutClassSpec } from "@/lib/cockpit-spec";
+import viewsJson from "@/shared/cockpit-spec/views.json";
 
 /** The window width class. `tv` is a large panel or the HDMI kiosk. */
 export type WidthClass = "compact" | "medium" | "expanded" | "tv";
@@ -57,14 +58,25 @@ export function gridMeasures(width: WidthClass, glove: boolean): GridMeasures {
 }
 
 /** The video share of a split, and its bounds. */
-export const SPLIT_MIN = 0.2;
-export const SPLIT_MAX = 0.8;
-export const SPLIT_DEFAULT = 0.6;
+const SPLIT_DIVIDER = viewsJson.views.find((v) => v.id === "split")?.divider ?? { default: 0.5, min: 0.3, max: 0.7 };
+export const SPLIT_MIN = SPLIT_DIVIDER.min;
+export const SPLIT_MAX = SPLIT_DIVIDER.max;
+export const SPLIT_DEFAULT = SPLIT_DIVIDER.default;
 
 export function clampSplit(ratio: number): number {
   if (!Number.isFinite(ratio)) return SPLIT_DEFAULT;
   return Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, ratio));
 }
+
+/** Whether the on-screen thumb pads show: switched on, no controller
+ *  connected, landscape, and a width class the spec lists
+ *  (`layout.json` `on_screen_sticks.classes`). */
+export function onscreenSticksShown(on: boolean, padLive: boolean, portrait: boolean, width: WidthClass): boolean {
+  return on && !padLive && !portrait && (ON_SCREEN_STICKS.classes as readonly string[]).includes(width);
+}
+
+/** The thumb pad's edge (`on_screen_sticks.pad_size`). */
+export const STICK_PAD_PX: number = ON_SCREEN_STICKS.pad_size;
 
 /** Touch targets grow by this factor in glove mode. */
 export const GLOVE_TOUCH_SCALE = 1.25;

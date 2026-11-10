@@ -1,6 +1,6 @@
 // The Feed in the cockpit grid (cockpit spec `layout.json`), per view (`views.json`):
 //   pilot  — video main, edge to edge; the grid floats over it
-//   map    — map main, the video as a picture-in-picture
+//   map    — map main, the video in the bottom-left card (`map.video_slot`)
 //   split  — video and map side by side behind a draggable divider
 //   vision — video main with the vision side panel
 // Landscape places every zone at the rectangle `lib/flight-layout` computes
@@ -10,37 +10,41 @@
 // along the bottom, and the follow strip under the top bar between the
 // columns. Portrait stacks a 16:9 video with the top bar inside it over the
 // left column as a row, the skill picker, the telemetry row and the map.
-// Every layer sits on the CS-1 z-ladder; a television scales the chrome by
-// its class scale.
+// The data layers draw only over the main video: the video in the card and
+// a picture-in-picture inset never carry layers or targets
+// (`layers.json` `pip_draws_layers: false`). Every layer sits on the CS-1
+// z-ladder; a television scales the chrome by its class scale.
 
 import { useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
 
 import { ExtensionWidgetZones } from "@/components/plugins/extension-feed-mounts";
 import { SPLIT_MAX, SPLIT_MIN, Z, clampSplit, type GridMeasures } from "@/lib/cockpit-layout";
 import type { CockpitView } from "@/lib/cockpit-view";
-import { flightLayout, type FlightLayoutInput, type Rect, type RightItem } from "@/lib/flight-layout";
+import { FLIGHT_PX, flightLayout, type FlightLayoutInput, type Rect, type RightItem } from "@/lib/flight-layout";
 import { cn } from "@/lib/utils";
+import { specText } from "@/shared/hud/spec-text";
 import { useCockpitUiStore, type BottomLeftCard } from "@/stores/cockpit-ui-store";
-import { useSettingsStore } from "@/stores/settings-store";
+import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 
 /** What the grid places. Map, radar and the cards are absent on a node that
  *  does not fly. */
 export interface FeedSlots {
-  /** Video, host targets, data layers and extension overlays; fills its parent. */
+  /** The video alone; fills its parent. */
   video: ReactNode;
+  /** Host targets, data layers and extension overlays over the main video;
+   *  fills its parent. */
+  layers: ReactNode;
   /** The flight instruments and centre marks; fills its parent. */
   hud: ReactNode;
   topBar: ReactNode;
   alerts: ReactNode;
   /** Handover banner, gate ring, countdowns. */
   overlays: ReactNode;
-  tabs: ReactNode;
   map: ((className: string) => ReactNode) | null;
   /** The bottom-left card's contents per card id. */
   cards: Partial<Record<BottomLeftCard, (className: string) => ReactNode>>;
   pip: ReactNode;
-  leftColumn: (row: boolean) => ReactNode;
+  leftColumn: (o: { row: boolean; labels: boolean }) => ReactNode;
   rightColumn: (items: readonly RightItem[]) => ReactNode;
   bottomRow: ((short: boolean) => ReactNode) | null;
   /** The follow strip's contents, given the band height under it. */
@@ -86,25 +90,26 @@ function Zone({
   );
 }
 
-const CARD_LABEL: Record<BottomLeftCard, string> = {
-  map: "Map",
-  attitude_radar: "Attitude",
-  obstacle_radar: "Obstacles",
-};
+const CARD_ORDER: readonly BottomLeftCard[] = ["map", "attitude_radar", "obstacle_radar"];
+
+/** A swipe longer than this switches the card. */
+const SWIPE_PX = 40;
 
 /** The bottom-left card: one of map / attitude + radar / obstacle radar,
- *  switched by swipe or its arrows (L3 swaps video and map). */
+ *  switched by a swipe or its dots (L3 swaps video and map). Each face
+ *  carries its small title inside the card. */
 function BottomLeftCardView({ slots, m }: { slots: FeedSlots; m: GridMeasures }) {
   const card = useCockpitUiStore((s) => s.card);
   const nextCard = useCockpitUiStore((s) => s.nextCard);
   const swipeX = useRef<number | null>(null);
-  const available = (Object.keys(CARD_LABEL) as BottomLeftCard[]).filter((c) => slots.cards[c]);
+  const available = CARD_ORDER.filter((c) => slots.cards[c]);
   if (available.length === 0) return null;
   const shown = available.includes(card) ? card : available[0];
   const render = slots.cards[shown];
+  const at = available.indexOf(shown);
   return (
     <div
-      className="chrome-panel pointer-events-auto relative h-full w-full overflow-hidden"
+      className="chrome-panel pointer-events-auto relative h-full w-full touch-pan-y overflow-hidden"
       data-testid="bottom-left-card"
       data-zone="bottom_left_card"
       data-card={shown}
@@ -112,20 +117,36 @@ function BottomLeftCardView({ slots, m }: { slots: FeedSlots; m: GridMeasures })
         swipeX.current = e.clientX;
       }}
       onPointerUp={(e) => {
-        if (swipeX.current !== null && Math.abs(e.clientX - swipeX.current) > 40) nextCard(e.clientX < swipeX.current ? 1 : -1);
+        if (swipeX.current !== null && Math.abs(e.clientX - swipeX.current) > SWIPE_PX) nextCard(e.clientX < swipeX.current ? 1 : -1);
+        swipeX.current = null;
+      }}
+      onPointerCancel={() => {
         swipeX.current = null;
       }}
     >
       {render?.("h-full w-full")}
       {m.card.kind === "card" && available.length > 1 ? (
-        <div className="chrome-label absolute inset-x-0 bottom-0 flex items-center justify-between px-[4px] pb-[4px]">
-          <button type="button" aria-label="Previous card" onClick={() => nextCard(-1)} className="flex h-[26px] w-[26px] items-center justify-center rounded-full bg-black/45 text-[var(--fs-text)]">
-            <ChevronLeft className="h-[14px] w-[14px]" aria-hidden />
-          </button>
-          <span className="rounded-full bg-black/45 px-[8px] py-[2px]">{CARD_LABEL[shown]}</span>
-          <button type="button" aria-label="Next card" onClick={() => nextCard(1)} className="flex h-[26px] w-[26px] items-center justify-center rounded-full bg-black/45 text-[var(--fs-text)]">
-            <ChevronRight className="h-[14px] w-[14px]" aria-hidden />
-          </button>
+        // The dots: a strip the touch floor high; each dot's hit area is the
+        // touch floor square, its drawn dot small.
+        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center" style={{ height: FLIGHT_PX.touchMin }} role="tablist">
+          {available.map((c, i) => (
+            <button
+              key={c}
+              type="button"
+              role="tab"
+              aria-selected={i === at}
+              aria-label={specText(`cockpit.card.${c}`)}
+              onClick={() => {
+                const d = (i - at + available.length) % available.length;
+                if (d !== 0) nextCard(d === 1 ? 1 : -1);
+              }}
+              className="pointer-events-auto flex items-center justify-center"
+              style={{ width: FLIGHT_PX.touchMin, height: FLIGHT_PX.touchMin }}
+              data-testid={`card-dot-${c}`}
+            >
+              <span className={cn("block h-[8px] w-[8px] rounded-full", i === at ? "bg-[var(--fs-text)]" : "bg-white/35")} aria-hidden />
+            </button>
+          ))}
         </div>
       ) : null}
     </div>
@@ -148,12 +169,13 @@ function Divider({ r, ratio, onDrag, onCommit }: {
       role="separator"
       tabIndex={0}
       aria-orientation="vertical"
-      aria-label="Video and map divider"
-      aria-valuemin={SPLIT_MIN * 100}
-      aria-valuemax={SPLIT_MAX * 100}
+      aria-label={specText("cockpit.divider")}
+      aria-valuemin={Math.round(SPLIT_MIN * 100)}
+      aria-valuemax={Math.round(SPLIT_MAX * 100)}
       aria-valuenow={Math.round(ratio * 100)}
       className={cn("pointer-events-auto absolute flex cursor-col-resize touch-none items-center justify-center", Z.zoneChrome)}
       style={{ left: r.x, top: 0, width: r.w, bottom: 0 }}
+      data-testid="split-divider"
       onPointerDown={(e) => {
         e.currentTarget.setPointerCapture?.(e.pointerId);
         setDragging(true);
@@ -181,6 +203,23 @@ function Divider({ r, ratio, onDrag, onCommit }: {
   );
 }
 
+/** The main video with its layers, zoomed by the digital zoom (the layers
+ *  scale with the picture so they stay on it). Marked as the main video for
+ *  the photo's frame grab. */
+function MainVideo({ video, layers }: { video: ReactNode; layers: ReactNode }) {
+  const zoom = useCockpitViewStore((s) => s.digitalZoom);
+  return (
+    <div
+      className="absolute inset-0 origin-center transition-transform duration-200 ease-out"
+      style={zoom === 1 ? undefined : { transform: `scale(${zoom})` }}
+      data-main-video
+    >
+      {video}
+      {layers}
+    </div>
+  );
+}
+
 export function LandscapeGrid({
   slots,
   m,
@@ -190,8 +229,8 @@ export function LandscapeGrid({
   m: GridMeasures;
   input: Omit<FlightLayoutInput, "splitRatio">;
 }) {
-  const stored = useSettingsStore((s) => s.splitRatio);
-  const persist = useSettingsStore((s) => s.setSplitRatio);
+  const stored = useCockpitViewStore((s) => s.split);
+  const persist = useCockpitViewStore((s) => s.setSplit);
   const [drag, setDrag] = useState<number | null>(null);
   const ratio = drag ?? stored;
   const view: CockpitView = input.view === "map" && slots.map === null ? "pilot" : input.view;
@@ -199,26 +238,16 @@ export function LandscapeGrid({
   const s = m.scale;
   const mapMain = view === "map";
   const midTop = L.strip ? L.strip.y + L.strip.h + 8 * s : L.topBar.y + L.topBar.h + 8 * s;
-  const pipW = Math.min(320, Math.max(160, L.stage.w * 0.24));
 
   return (
     <div className="pointer-events-none absolute inset-0" data-flight-view={view}>
       {/* The stage: video (or the map) edge to edge. */}
       <div className="pointer-events-auto absolute overflow-hidden" style={{ left: L.stage.x, top: L.stage.y, width: L.stage.w, height: L.stage.h }} data-zone="stage">
         {mapMain ? (
-          <>
-            {slots.map?.("h-full w-full")}
-            <div
-              className={cn("chrome-panel absolute aspect-video overflow-hidden", Z.pip)}
-              style={{ right: L.stage.w - L.rightColumn.x + 8 * s, top: midTop, width: pipW }}
-              data-testid="video-pip"
-            >
-              {slots.video}
-            </div>
-          </>
+          slots.map?.("h-full w-full")
         ) : (
           <>
-            {slots.video}
+            <MainVideo video={slots.video} layers={slots.layers} />
             {slots.pip ? (
               <div className={cn("absolute", Z.pip)} style={{ right: L.stage.w - L.rightColumn.x + 8 * s, top: midTop }}>
                 {slots.pip}
@@ -266,20 +295,15 @@ export function LandscapeGrid({
         {slots.overlays}
         {slots.ack}
       </div>
-      {slots.tabs ? (
-        <div className={cn("pointer-events-auto absolute", Z.zones)} style={{ left: L.alerts.x, top: midTop }}>
-          {slots.tabs}
-        </div>
-      ) : null}
       {L.leftColumn ? (
         <Zone
           r={L.leftColumn}
           scale={s}
-          className={Z.zoneChrome}
+          className={cn("flex justify-center", Z.zoneChrome)}
           zone="left_column"
           vars={{ "--cockpit-col": `${L.leftButtonPx}px`, "--cockpit-col-gap": `${L.leftGapPx}px` }}
         >
-          {slots.leftColumn(false)}
+          {slots.leftColumn({ row: false, labels: L.leftLabels })}
         </Zone>
       ) : null}
       <Zone r={L.rightColumn} scale={s} className={cn("flex justify-center", Z.zoneChrome)} zone="right_column">
@@ -287,7 +311,15 @@ export function LandscapeGrid({
       </Zone>
       {L.card ? (
         <Zone r={L.card} scale={s} className={Z.zones} zone="bottom_left_card">
-          <BottomLeftCardView slots={slots} m={m} />
+          {L.cardHoldsVideo ? (
+            <div className="chrome-panel pointer-events-auto relative h-full w-full overflow-hidden" data-testid="video-card" data-zone="bottom_left_card">
+              <div className="absolute inset-0" data-main-video>
+                {slots.video}
+              </div>
+            </div>
+          ) : (
+            <BottomLeftCardView slots={slots} m={m} />
+          )}
         </Zone>
       ) : null}
       {L.bottomRow && slots.bottomRow ? (
@@ -307,7 +339,7 @@ export function PortraitGrid({ slots }: { slots: FeedSlots }) {
   return (
     <div className="pointer-events-none absolute inset-[8px] flex flex-col gap-[8px]">
       <div className="pointer-events-auto relative aspect-video w-full shrink-0 overflow-hidden rounded-[var(--fs-radius)]">
-        {slots.video}
+        <MainVideo video={slots.video} layers={slots.layers} />
         <div className="pointer-events-none absolute inset-0">{slots.hud}</div>
         <div className={cn("absolute inset-x-[4px] top-[4px] h-[48px]", Z.topBar)} data-zone-rect="top_bar">
           {slots.topBar}
@@ -317,11 +349,10 @@ export function PortraitGrid({ slots }: { slots: FeedSlots }) {
         </div>
         {slots.pip ? <div className={cn("absolute bottom-[4px] right-[4px]", Z.pip)}>{slots.pip}</div> : null}
       </div>
-      {slots.tabs ? <div className="pointer-events-auto shrink-0">{slots.tabs}</div> : null}
       <div className="flex shrink-0 flex-col items-center gap-[6px]">{slots.alerts}</div>
       {slots.followStrip ? <div className="h-[56px] shrink-0">{slots.followStrip(0)}</div> : null}
       <div className={cn("flex shrink-0 items-center justify-between gap-[8px]", Z.zoneChrome)}>
-        {slots.leftColumn(true)}
+        {slots.leftColumn({ row: true, labels: false })}
         {slots.skillPicker}
       </div>
       {slots.bottomRow ? <div className="flex h-[44px] shrink-0 justify-center">{slots.bottomRow(true)}</div> : null}

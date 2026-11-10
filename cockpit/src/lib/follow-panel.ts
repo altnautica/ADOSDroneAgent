@@ -1,8 +1,9 @@
 // The range panel's content (13-hud-v2 §8.1) from the latest `follow.state`:
-// the big range and phase word, the ±2σ interval bar, height and its source,
-// the geometry line, and the range cues with the pipeline latency and the
-// re-acquire mode. Every value reads `—` once the report is older than 2 s,
-// and the phase word then reads STALE. Pure, so the panel is a thin view.
+// the big range and phase word, the ±2σ interval bar, the geometry line, and
+// the range cues with the pipeline latency and the re-acquire mode. Height
+// above ground is the bottom row's alone: one AGL on screen. Every value
+// reads `—` once the report is older than 2 s, and the phase word then reads
+// STALE. Pure, so the panel is a thin view.
 
 import {
   bearing3,
@@ -39,8 +40,6 @@ export interface FollowPanelModel {
   phaseTone: PhaseTone | "warn";
   bar: IntervalBar | null;
   interval: string | null;
-  agl: string;
-  aglSource: "RNG" | "BARO" | null;
   geometry: string;
   cues: { label: string; lit: boolean }[];
   latency: string;
@@ -69,8 +68,6 @@ export function followPanelModel(f: FollowState | null, ageMs: number): FollowPa
     phaseTone: v ? PHASE_TONE[v.phase] : "warn",
     bar: rangeM !== null ? intervalBar(rangeM, sigma) : null,
     interval: rangeM !== null && sigma !== null ? rangeInterval(rangeM, sigma) : null,
-    agl: v?.aglM != null ? `${v.aglM.toFixed(1)} m` : `${DASH} m`,
-    aglSource: v?.aglSource === "rng" ? "RNG" : v?.aglSource === "baro" ? "BARO" : null,
     geometry: geo,
     cues: RANGE_CUE_ORDER.map((k) => ({ label: CUE_LABEL[k], lit: lit.has(k) })),
     latency: v?.pipelineLatencyMs != null ? `LAT ${Math.round(v.pipelineLatencyMs)} ms` : `LAT ${DASH}`,
@@ -79,9 +76,7 @@ export function followPanelModel(f: FollowState | null, ageMs: number): FollowPa
   };
 }
 
-/** The compact single line: `10.2 m ±0.6 · AGL 4.1 RNG`. */
+/** The compact single line: `10.2 m ±0.6`. */
 export function compactFollowLine(m: FollowPanelModel): string {
-  const range = m.plusMinus ? `${m.range} ${m.plusMinus}` : m.range;
-  const agl = `AGL ${m.agl.replace(/ m$/, "")}${m.aglSource ? ` ${m.aglSource}` : ""}`;
-  return `${range} · ${agl}`;
+  return m.plusMinus ? `${m.range} ${m.plusMinus}` : m.range;
 }

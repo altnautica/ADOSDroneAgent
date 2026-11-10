@@ -30,8 +30,6 @@ describe("followPanelModel", () => {
       phase: "FOLLOWING",
       phaseTone: "track",
       interval: "9.6 – 10.8 m",
-      agl: "4.1 m",
-      aglSource: "RNG",
       geometry: "DEP 22° · BRG 064° · 1.4 m/s",
       latency: "LAT 85 ms",
       latencyWarn: false,
@@ -54,8 +52,6 @@ describe("followPanelModel", () => {
       phase: "STALE",
       phaseTone: "warn",
       bar: null,
-      agl: "— m",
-      aglSource: null,
       geometry: "DEP — · BRG — · — m/s",
       latency: "LAT —",
       mode: null,
@@ -64,14 +60,17 @@ describe("followPanelModel", () => {
     expect(followPanelModel(null, 0).stale).toBe(true);
   });
 
-  it("warns on latency above 250 ms and reads BARO", () => {
+  it("warns on latency above 250 ms", () => {
     const g = parseFollowState({ phase: "coasting", pipeline_latency_ms: 300, agl_source: "baro", reacquire_mode: "strict" })!;
     const m = followPanelModel(g, 0);
-    expect(m).toMatchObject({ latencyWarn: true, aglSource: "BARO", mode: "STRICT", phase: "COASTING", phaseTone: "coast" });
+    expect(m).toMatchObject({ latencyWarn: true, mode: "STRICT", phase: "COASTING", phaseTone: "coast" });
   });
 
-  it("merges rows 1 and 3 into the compact line", () => {
-    expect(compactFollowLine(followPanelModel(f, 0))).toBe("10.2 m ±0.6 · AGL 4.1 RNG");
-    expect(compactFollowLine(followPanelModel(null, 0))).toBe("— m · AGL —");
+  it("carries no second AGL: the bottom row's is the only one on screen", () => {
+    const m = followPanelModel(f, 0);
+    expect(m).not.toHaveProperty("agl");
+    expect(m).not.toHaveProperty("aglSource");
+    expect(compactFollowLine(m)).toBe("10.2 m ±0.6");
+    expect(compactFollowLine(followPanelModel(null, 0))).toBe("— m");
   });
 });

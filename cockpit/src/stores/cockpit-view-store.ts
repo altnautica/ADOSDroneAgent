@@ -1,13 +1,17 @@
-// The cockpit's view, layer level and layer flags, persisted per surface and
-// per vehicle in localStorage (`ados-cockpit-view:<vehicle>`). The Feed binds
-// the vehicle it shows (this drone, or a ground station's paired drone); the
-// stored choice for that vehicle loads then. Readers: the Feed layout (view),
-// the layer stack (effective layers), the top-bar layer button, the D-pad and
-// the `V` / `O` keys. The depth layer's options (`layers.json` `options.depth`:
-// range Off / 2 m / 5 m, Solid / Outline) persist with them.
+// The cockpit's view, layer level, layer flags and split divider, persisted
+// per surface and per vehicle in localStorage (`ados-cockpit-view:<vehicle>`).
+// The Feed binds the vehicle it shows (this drone, or a ground station's
+// paired drone); the stored choice for that vehicle loads then. Readers: the
+// Feed layout (view, divider), the layer stack (effective layers), the
+// top-bar layer button, the Menu's View entry, the D-pad and the `V` / `O`
+// keys. The depth layer's options (`layers.json` `options.depth`: range Off /
+// 2 m / 5 m, Solid / Outline) persist with them. The digital zoom of the
+// shown video lasts the session.
 
 import { create } from "zustand";
 
+import type { DigitalZoom } from "@/lib/camera-actions";
+import { clampSplit, SPLIT_DEFAULT } from "@/lib/cockpit-layout";
 import {
   COCKPIT_VIEWS,
   LAYER_LEVELS,
@@ -33,10 +37,11 @@ interface Persisted {
   layers: Record<string, boolean>;
   depthRangeM: DepthRangeM;
   depthStyle: DepthStyle;
+  /** The video's share of the split view (`views.json` `split.divider`). */
+  split: number;
 }
 
-const DEFAULTS: Persisted = { view: "pilot", level: "full", layers: {}, depthRangeM: 5, depthStyle: "solid" };
-
+const DEFAULTS: Persisted = { view: "pilot", level: "full", layers: {}, depthRangeM: 5, depthStyle: "solid", split: SPLIT_DEFAULT };
 function load(vehicle: string, defaultLevel: LayerLevel = DEFAULTS.level): Persisted {
   const fresh = (): Persisted => ({ ...DEFAULTS, level: defaultLevel, layers: {} });
   if (typeof localStorage === "undefined") return fresh();
@@ -54,6 +59,7 @@ function load(vehicle: string, defaultLevel: LayerLevel = DEFAULTS.level): Persi
       layers,
       depthRangeM: DEPTH_RANGES.includes(p.depthRangeM as DepthRangeM) ? (p.depthRangeM as DepthRangeM) : DEFAULTS.depthRangeM,
       depthStyle: DEPTH_STYLES.includes(p.depthStyle as DepthStyle) ? (p.depthStyle as DepthStyle) : DEFAULTS.depthStyle,
+      split: typeof p.split === "number" ? clampSplit(p.split) : DEFAULTS.split,
     };
   } catch {
     return fresh();
@@ -81,13 +87,17 @@ export interface CockpitViewState extends Persisted {
   toggleLayer: (id: string, on?: boolean) => void;
   setDepthRange: (m: DepthRangeM) => void;
   setDepthStyle: (style: DepthStyle) => void;
+  /** Set the split divider (clamped to the spec's bounds). */
+  setSplit: (ratio: number) => void;
+  digitalZoom: DigitalZoom;
+  setDigitalZoom: (z: DigitalZoom) => void;
 }
 
 export const useCockpitViewStore = create<CockpitViewState>((set, get) => {
   const update = (patch: Partial<Persisted>) => {
     set(patch);
     const s = get();
-    save(s.vehicle, { view: s.view, level: s.level, layers: s.layers, depthRangeM: s.depthRangeM, depthStyle: s.depthStyle });
+    save(s.vehicle, { view: s.view, level: s.level, layers: s.layers, depthRangeM: s.depthRangeM, depthStyle: s.depthStyle, split: s.split });
   };
   return {
     vehicle: "",
@@ -106,5 +116,8 @@ export const useCockpitViewStore = create<CockpitViewState>((set, get) => {
     },
     setDepthRange: (depthRangeM) => update({ depthRangeM }),
     setDepthStyle: (depthStyle) => update({ depthStyle }),
+    setSplit: (ratio) => update({ split: clampSplit(ratio) }),
+    digitalZoom: 1,
+    setDigitalZoom: (digitalZoom) => set({ digitalZoom }),
   };
 });

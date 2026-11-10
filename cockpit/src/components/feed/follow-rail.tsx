@@ -54,7 +54,7 @@ function RailSlot({
       aria-pressed={active}
       style={{ width: size, height: size }}
       className={cn(
-        "flex shrink-0 flex-col items-center justify-center gap-[0.15rem] rounded-md border font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.06em] disabled:opacity-45",
+        "flex shrink-0 flex-col items-center justify-center gap-[2px] rounded-md border font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.06em] disabled:opacity-45",
         danger
           ? "border-hud-crit/60 text-hud-crit"
           : active
@@ -62,7 +62,7 @@ function RailSlot({
             : "border-hud-hair text-hud-ink hover:bg-hud-hair",
       )}
     >
-      <Icon className="h-[1.05rem] w-[1.05rem]" aria-hidden />
+      <Icon className="h-[17px] w-[17px]" aria-hidden />
       <span>{word}</span>
     </button>
   );
@@ -167,7 +167,7 @@ export function FollowRail({
               <span
                 data-testid="avoid-chip"
                 className={cn(
-                  "rounded border px-[0.25rem] text-center font-mono text-[0.68rem]",
+                  "rounded border px-[4px] text-center font-mono text-[11px]",
                   avoid.tone === "ok" ? "border-ok/60 text-ok" : avoid.tone === "warn" ? "border-warn text-warn" : "border-err text-err",
                 )}
               >

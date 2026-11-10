@@ -21,8 +21,16 @@ export interface Rect {
   h: number;
 }
 
-/** The right column's items, top to bottom (`layout.json` `right_column`). */
-export type RightItem = "shutter" | "mode" | "zoom" | "gimbal" | "settings";
+/** The right column's items, top to bottom (`layout.json` zone
+ *  `right_column` `items`), by their spec ids. */
+export type RightItem = (typeof RIGHT_ITEMS)[number];
+export const RIGHT_ITEMS = ["shutter", "photo_video_switch", "zoom", "gimbal_pad", "camera_settings"] as const;
+const RIGHT_ZONE = layoutJson.zones.find((z) => z.id === "right_column");
+/** The items that leave the column, in order, where it is too short
+ *  (`right_column.drop_order`). */
+export const RIGHT_DROP_ORDER: readonly RightItem[] = (RIGHT_ZONE?.drop_order ?? []).filter((id): id is RightItem =>
+  (RIGHT_ITEMS as readonly string[]).includes(id),
+);
 
 /** The top bar's items that move into the Menu when the row runs out of
  *  room, lowest priority first (`top_bar.overflow.to_menu_order`):
@@ -90,8 +98,19 @@ export const FLIGHT_PX = {
   colGap: 10,
   colGapMin: 4,
   touchMin: TOUCH_MIN_PX,
-  modeH: 36,
-  zoomH: 96,
+  /** The photo/video switch: one control that toggles, its hit area the
+   *  touch floor high. */
+  modeH: 48,
+  modeW: 64,
+  /** The gimbal pad's recentre knob: drawn 36 px, hit 48 px. */
+  knob: 36,
+  knobHit: 48,
+  /** A left-column button's label line under its icon, and the width the
+   *  label may take (medium, expanded and tv; compact shows icons only). */
+  leftLabelH: 16,
+  leftLabelW: 76,
+  /** Two 48 px halves, the 1 px rule between them and the 2 px border. */
+  zoomH: 100,
   gimbal: 108,
   rowH: 44,
   rowFullW: 368,
@@ -124,6 +143,9 @@ export interface FlightLayoutInput {
 export interface FlightLayout {
   /** The surface the video (or, in the map view, the map) fills. */
   stage: Rect;
+  /** What the bottom-left card shows: its instrument faces, or in the map
+   *  view the video (`views.json` `map.video_slot`). */
+  cardHoldsVideo: boolean;
   /** The map pane of a split, right of the divider. */
   mapPane: Rect | null;
   divider: Rect | null;
@@ -149,6 +171,8 @@ export interface FlightLayout {
   /** The left column's button edge and gap, unscaled. */
   leftButtonPx: number;
   leftGapPx: number;
+  /** The left column's buttons carry a short label under the icon. */
+  leftLabels: boolean;
 }
 
 const right = (r: Rect) => r.x + r.w;
@@ -158,13 +182,13 @@ function rightItemHeight(item: RightItem, i: FlightLayoutInput): number {
   switch (item) {
     case "shutter":
       return i.m.shutterPx;
-    case "mode":
+    case "photo_video_switch":
       return FLIGHT_PX.modeH;
     case "zoom":
       return FLIGHT_PX.zoomH;
-    case "gimbal":
+    case "gimbal_pad":
       return FLIGHT_PX.gimbal;
-    case "settings":
+    case "camera_settings":
       return i.m.colPx;
   }
 }
@@ -205,11 +229,11 @@ export function flightLayout(i: FlightLayoutInput): FlightLayout {
     h: stopH,
   };
 
-  // The bottom zones: the card bottom-left (pilot and vision views; the map
-  // is already on screen in the others), the skill picker bottom-right, and
-  // the telemetry row between them, or raised above them where it does not
-  // fit between.
-  const showCard = i.flies && (i.view === "pilot" || i.view === "vision");
+  // The bottom zones: the card bottom-left (its faces in the pilot and vision
+  // views, the video in the map view; a split already shows the map), the
+  // skill picker bottom-right, and the telemetry row between them, or raised
+  // above them where it does not fit between.
+  const showCard = i.flies && i.view !== "split";
   const cardW = (i.m.card.kind === "chip" ? i.m.card.sizePx : i.m.card.widthPx) * s;
   const cardH = (i.m.card.kind === "chip" ? i.m.card.sizePx : i.m.card.heightPx) * s;
   const card: Rect | null = showCard ? { x: stage.x + E, y: H - E - cardH, w: cardW, h: cardH } : null;
@@ -244,32 +268,35 @@ export function flightLayout(i: FlightLayoutInput): FlightLayout {
   const bandBottom = Math.min(card ? card.y : H, skillPicker.y, bottomRow ? bottomRow.y : H) - E;
   const bandH = Math.max(0, bandBottom - bandTop);
 
-  // Left column: its buttons shrink (never under the 48 px touch floor) where
-  // a short band cannot hold three glove-size buttons and their gaps.
+  // Left column: icon plus a short label under it at medium and up, icon
+  // only at compact. Its buttons shrink (never under the 48 px touch floor)
+  // where a short band cannot hold three glove-size buttons and their gaps;
+  // where even that is too tall, the labels go.
   let leftColumn: Rect | null = null;
   let leftButtonPx = i.m.colPx;
   let leftGapPx: number = FLIGHT_PX.colGap;
+  let leftLabels = i.widthClass !== "compact";
   if (i.flies) {
     const fit = bandH / s;
-    if (3 * leftButtonPx + 2 * leftGapPx > fit) leftGapPx = FLIGHT_PX.colGapMin;
-    if (3 * leftButtonPx + 2 * leftGapPx > fit) leftButtonPx = Math.max(FLIGHT_PX.touchMin, Math.floor((fit - 2 * leftGapPx) / 3));
-    const w = leftButtonPx * s;
-    const h = (3 * leftButtonPx + 2 * leftGapPx) * s;
+    const need = () => 3 * (leftButtonPx + (leftLabels ? FLIGHT_PX.leftLabelH : 0)) + 2 * leftGapPx;
+    if (need() > fit) leftGapPx = FLIGHT_PX.colGapMin;
+    if (need() > fit && leftLabels && 3 * (FLIGHT_PX.touchMin + FLIGHT_PX.leftLabelH) + 2 * leftGapPx > fit) leftLabels = false;
+    const label = leftLabels ? FLIGHT_PX.leftLabelH : 0;
+    if (need() > fit) leftButtonPx = Math.max(FLIGHT_PX.touchMin, Math.floor((fit - 2 * leftGapPx) / 3 - label));
+    const w = Math.max(leftButtonPx, leftLabels ? FLIGHT_PX.leftLabelW : 0) * s;
+    const h = need() * s;
     leftColumn = { x: stage.x + E, y: bandTop + Math.max(0, (bandH - h) / 2), w, h };
   }
 
-  // Right column items, dropping the gimbal pad and then zoom where the band
-  // is too short for them.
-  const rightItems: RightItem[] =
-    i.widthClass === "compact"
-      ? ["shutter", "mode", "settings"]
-      : (["shutter", "mode", "zoom", ...(i.gimbal ? (["gimbal"] as const) : []), "settings"] as RightItem[]);
-  for (const drop of ["gimbal", "zoom"] as const) {
+  // Right column items (`right_column.items`), leaving in `drop_order` (the
+  // gimbal pad, then zoom) where the band is too short for them.
+  const rightItems: RightItem[] = RIGHT_ITEMS.filter((it) => it !== "gimbal_pad" || i.gimbal);
+  for (const drop of RIGHT_DROP_ORDER) {
     if (columnHeight(rightItems, i) * s <= bandH) break;
     const at = rightItems.indexOf(drop);
     if (at >= 0) rightItems.splice(at, 1);
   }
-  const rightW = Math.max(i.m.shutterPx, i.m.colPx, rightItems.includes("gimbal") ? FLIGHT_PX.gimbal : 0) * s;
+  const rightW = Math.max(i.m.shutterPx, i.m.colPx, FLIGHT_PX.modeW, rightItems.includes("gimbal_pad") ? FLIGHT_PX.gimbal : 0) * s;
   const rightH = columnHeight(rightItems, i) * s;
   const rightColumn: Rect = { x: right(stage) - E - rightW, y: bandTop + Math.max(0, (bandH - rightH) / 2), w: rightW, h: rightH };
 
@@ -287,6 +314,7 @@ export function flightLayout(i: FlightLayoutInput): FlightLayout {
 
   return {
     stage,
+    cardHoldsVideo: card !== null && i.view === "map",
     mapPane,
     divider,
     visionPanel,
@@ -305,6 +333,7 @@ export function flightLayout(i: FlightLayoutInput): FlightLayout {
     bandHeight: bandH,
     leftButtonPx,
     leftGapPx,
+    leftLabels,
   };
 }
 

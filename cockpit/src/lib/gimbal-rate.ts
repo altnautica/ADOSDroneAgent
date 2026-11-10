@@ -2,7 +2,8 @@
 // says whether the vehicle takes rates now (a MAVLink flight controller with a
 // fresh gimbal attitude); `POST` sends pitch and yaw rates the agent holds for
 // `hold_ms` before stopping the gimbal itself. The pad resends while held at
-// half the hold and sends a zero rate on release.
+// half the hold and sends a zero rate on release. At most one request is in
+// flight, and a 429 backs the sender off before it tries again.
 
 import { ApiError, apiFetch } from "@/shared/api-fetch";
 
@@ -18,6 +19,11 @@ export const GIMBAL_RESEND_MS = GIMBAL_HOLD_MS / 2 - 50;
 /** At most one rate request per this many ms while the rate changes, so a
  *  drag on the pad stays far inside the agent's per-caller request budget. */
 export const GIMBAL_SEND_INTERVAL_MS = 100;
+/** The first wait after a 429, doubled per further 429 up to the max. */
+export const GIMBAL_BACKOFF_MS = 1000;
+export const GIMBAL_BACKOFF_MAX_MS = 4000;
+/** The rate an arrow key sends while the pad has focus. */
+export const GIMBAL_KEY_DPS = 30;
 
 /** Whether the pad can show. An agent without the route (404) cannot take
  *  rates. */
@@ -50,17 +56,48 @@ export interface GimbalRateSender {
  *  after it are coalesced to one request per `GIMBAL_SEND_INTERVAL_MS`
  *  carrying the newest rate, an unchanged held rate is resent every
  *  `GIMBAL_RESEND_MS` before the agent's hold runs out, and the return to
- *  zero sends one zero rate immediately. */
-export function createGimbalRateSender(send: (pitchDps: number, yawDps: number) => void): GimbalRateSender {
+ *  zero sends one zero rate immediately. A `send` that returns a promise
+ *  holds the next request until it settles; a 429 answer holds requests for
+ *  `GIMBAL_BACKOFF_MS`, doubling per repeat. A zero held back by either goes
+ *  as soon as it may. */
+export function createGimbalRateSender(send: (pitchDps: number, yawDps: number) => unknown): GimbalRateSender {
   let pitch = 0;
   let yaw = 0;
   let dirty = false;
   let lastSentAt = 0;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let inFlight = false;
+  let blockedUntil = 0;
+  let backoffMs = 0;
+  // A zero rate waiting on an answer or a backoff, with no pacing timer left.
+  const flushZero = () => {
+    if (dirty && timer === null) emit();
+  };
   const emit = () => {
+    const now = Date.now();
+    if (inFlight || now < blockedUntil) {
+      dirty = true;
+      return;
+    }
     dirty = false;
-    lastSentAt = Date.now();
-    send(pitch, yaw);
+    lastSentAt = now;
+    const r = send(pitch, yaw);
+    if (!(r instanceof Promise)) return;
+    inFlight = true;
+    r.then(
+      () => {
+        backoffMs = 0;
+      },
+      (e: unknown) => {
+        if (!(e instanceof ApiError && e.status === 429)) return;
+        backoffMs = backoffMs === 0 ? GIMBAL_BACKOFF_MS : Math.min(GIMBAL_BACKOFF_MAX_MS, backoffMs * 2);
+        blockedUntil = Date.now() + backoffMs;
+        setTimeout(flushZero, backoffMs);
+      },
+    ).finally(() => {
+      inFlight = false;
+      flushZero();
+    });
   };
   const stop = () => {
     if (timer === null) return;

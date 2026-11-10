@@ -1,14 +1,17 @@
 // On-screen sticks (Settings › Controls › On-screen sticks, default off): two
-// 120 px thumb pads in the bottom corners, shown in compact and expanded
+// thumb pads (`layout.json` `on_screen_sticks.pad_size`) in the bottom
+// corners, shown in the spec's width classes (`on_screen_sticks.classes`) in
 // landscape when no controller is connected, so a touch surface can fly the
 // pilot in `ados` mode. They send the same `input` frames as a controller, at
-// 50 Hz through the stick mode and deadzone, with the same stop rules: lifting
-// both thumbs, hiding the tab or leaving `ados` mode sends `release`, and the
-// pilot brakes to a hold.
+// 50 Hz through the stick mode and the deadzone (the Controls setting, whose
+// default and bounds are `ds4.json` `conditioning`), with the same stop rules:
+// lifting both thumbs, hiding the tab or leaving `ados` mode sends `release`,
+// and the pilot brakes to a hold.
 
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 
 import { useWidthClass } from "@/hooks/use-width-class";
+import { STICK_PAD_PX, onscreenSticksShown } from "@/lib/cockpit-layout";
 import { radialDeadzone, pilotAxes, type Stick } from "@/lib/pad/conditioning";
 import { STREAM_INTERVAL_MS } from "@/lib/pad/ds4-map";
 import { PilotStreamer } from "@/lib/pad/pilot-stream";
@@ -18,7 +21,7 @@ import { useControlsStore } from "@/stores/controls-store";
 import { useInputStore } from "@/stores/input-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
-const PAD_PX = 120;
+const PAD_PX = STICK_PAD_PX;
 const KNOB_PX = 44;
 
 type Side = "l" | "r";
@@ -32,7 +35,7 @@ export function OnscreenSticks() {
   const on = useControlsStore((s) => s.onscreenSticks);
   const padLive = useInputStore((s) => s.pad !== null);
   const { widthClass, portrait } = useWidthClass();
-  const shown = on && !padLive && !portrait && (widthClass === "compact" || widthClass === "expanded");
+  const shown = onscreenSticksShown(on, padLive, portrait, widthClass);
   return shown ? <ThumbPads /> : null;
 }
 
@@ -118,8 +121,8 @@ function ThumbPads() {
           onPointerCancel={(e) => up(side, e)}
           style={{ width: PAD_PX, height: PAD_PX }}
           className={cn(
-            "pointer-events-auto absolute bottom-[1rem] z-30 touch-none select-none rounded-full border border-hud-hair bg-hud-glass backdrop-blur-hud",
-            side === "l" ? "left-[1rem]" : "right-[1rem]",
+            "pointer-events-auto absolute bottom-[16px] z-30 touch-none select-none rounded-full border border-hud-hair bg-hud-glass backdrop-blur-hud",
+            side === "l" ? "left-[16px]" : "right-[16px]",
           )}
         >
           <div

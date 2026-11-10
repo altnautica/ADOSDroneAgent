@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { clampSplit, gridMeasures, SPLIT_DEFAULT, widthClassFor } from "@/lib/cockpit-layout";
+import { clampSplit, gridMeasures, onscreenSticksShown, SPLIT_DEFAULT, STICK_PAD_PX, widthClassFor } from "@/lib/cockpit-layout";
 
 describe("width classes (cockpit spec layout.json)", () => {
   it("splits at 600, 840 and 1600 px", () => {
@@ -43,10 +43,24 @@ describe("grid measures", () => {
     expect(gridMeasures("medium", true).colPx).toBe(70);
   });
 
-  it("keeps the split between 0.2 and 0.8", () => {
-    expect(clampSplit(0.05)).toBe(0.2);
-    expect(clampSplit(0.95)).toBe(0.8);
-    expect(clampSplit(0.5)).toBe(0.5);
-    expect(clampSplit(Number.NaN)).toBe(SPLIT_DEFAULT);
+  it("keeps the split divider at 0.3–0.7, 0.5 by default (views.json split.divider)", () => {
+    expect(SPLIT_DEFAULT).toBe(0.5);
+    expect(clampSplit(0.05)).toBe(0.3);
+    expect(clampSplit(0.95)).toBe(0.7);
+    expect(clampSplit(0.55)).toBe(0.55);
+    expect(clampSplit(Number.NaN)).toBe(0.5);
+  });
+});
+
+describe("on-screen sticks (layout.json on_screen_sticks)", () => {
+  it("show only in the spec's classes, in landscape, with no controller", () => {
+    expect(onscreenSticksShown(true, false, false, "compact")).toBe(true);
+    expect(onscreenSticksShown(true, false, false, "expanded")).toBe(true);
+    expect(onscreenSticksShown(true, false, false, "medium")).toBe(false);
+    expect(onscreenSticksShown(true, false, false, "tv")).toBe(false);
+    expect(onscreenSticksShown(true, true, false, "compact")).toBe(false);
+    expect(onscreenSticksShown(true, false, true, "compact")).toBe(false);
+    expect(onscreenSticksShown(false, false, false, "compact")).toBe(false);
+    expect(STICK_PAD_PX).toBe(120);
   });
 });

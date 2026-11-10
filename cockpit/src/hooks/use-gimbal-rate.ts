@@ -58,7 +58,8 @@ export function useGimbalDriver(available: boolean): void {
 
   useEffect(() => {
     if (!available) return;
-    const s = createGimbalRateSender((p, y) => void sendGimbalRate(p, y).catch(() => undefined));
+    // The sender reads the answer: one request in flight, and a 429 backs off.
+    const s = createGimbalRateSender(sendGimbalRate);
     sender.current = s;
     return () => {
       sender.current = null;
