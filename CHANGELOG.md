@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.68] - 2026-11-10
+
+### Changed
+
+- Cockpit spec: the emergency stop built-in is allowed in any arm state (`arm_requirement: any`). STOP is always enabled and always opens the 3 s hold; on a disarmed drone it sends the harmless kill.
+
 ## [0.109.67] - 2026-11-10
 
 ### Changed

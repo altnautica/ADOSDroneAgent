@@ -122,7 +122,7 @@
       "id": "kill",
       "label": "Emergency stop",
       "icon": "octagon-alert",
-      "arm_requirement": "armed",
+      "arm_requirement": "any",
       "confirm": { "kind": "hold_confirm", "ms": 3000 },
       "needs_fresh_link": false,
       "stale_link": "send_blind",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import builtins from "../cockpit-spec/builtins.json";
 import flightState from "../cockpit-spec/flight-state.json";
 import layout from "../cockpit-spec/layout.json";
 import strings from "../cockpit-spec/setup-strings.json";
@@ -69,6 +70,14 @@ describe("layout values", () => {
     expect(top.overflow.to_menu_order).toEqual(["controller", "nav_source", "link_text", "link_icon", "layer_button"]);
     for (const id of top.overflow.never_move) expect(top.overflow.to_menu_order).not.toContain(id);
     expect(new Set(layout.menu.order).size).toBe(layout.menu.order.length);
+  });
+});
+
+describe("emergency stop", () => {
+  it("is allowed in any arm state and always holds 3 s before it sends", () => {
+    const kill = builtins.builtins.find((b) => b.id === "kill");
+    expect(kill?.arm_requirement).toBe("any");
+    expect(kill?.confirm).toEqual({ kind: "hold_confirm", ms: layout.holds_ms.stop });
   });
 });
 
