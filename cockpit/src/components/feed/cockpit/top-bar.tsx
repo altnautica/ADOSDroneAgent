@@ -183,10 +183,10 @@ function AlertList({
       onDismiss={onClose}
       scrim="clear"
       labelledBy={titleId}
-      panelClassName="chrome-panel chrome-bar-text flex max-h-[60vh] w-[min(360px,90vw)] flex-col gap-[4px] overflow-y-auto p-[8px]"
+      panelClassName="chrome-panel chrome-bar-text w-[min(360px,90vw)]"
       panelStyle={{ ...chromeStyle(), position: "absolute", left: Math.max(8, Math.min(rect.left, window.innerWidth - 368)), top: rect.bottom + 8 }}
     >
-      <div className="contents" data-testid="status-pill-list">
+      <div className="flex max-h-[60vh] flex-col gap-[4px] overflow-y-auto p-[8px]" data-testid="status-pill-list">
         <div id={titleId} className="chrome-label px-[4px] uppercase tracking-wide">
           {specText("cockpit.alerts.title")}
         </div>
