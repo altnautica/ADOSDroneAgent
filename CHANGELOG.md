@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.86] - 2026-11-10
+
+### Changed
+
+- Formatting only: the flight-controller reposition command and its tests follow rustfmt.
+
 ## [0.109.85] - 2026-11-10
 
 ### Changed
