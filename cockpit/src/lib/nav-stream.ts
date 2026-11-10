@@ -9,6 +9,10 @@
 // discrete `follow.reacquired` / `follow.lost`; `{kind: "keepalive"}` only
 // proves the socket is alive. A node with nothing publishing simply leaves the
 // store empty, and every surface reading it shows its absent state.
+//
+// When the stream has been down for 5 s (a radio relay that carries HTTP but
+// not the socket), `GET /api/v1/nav/status` is polled at 2 Hz instead and the
+// store reports the reduced rate (`radioFallback`) until the stream returns.
 
 import { ReconnectBackoff } from "@/lib/reconnect-backoff";
 import { layerFrames } from "@/lib/layer-frames";
@@ -38,6 +42,10 @@ export const NAV_STREAM_SCOPE = "nav.stream";
 export const MAP_LIVE_POLL_MS = 1000;
 /** The server keeps alive every 5 s; a socket silent this long is redialled. */
 export const NAV_SILENT_MS = 15_000;
+/** Interval of the `GET /api/v1/nav/status` fallback poll (2 Hz). */
+export const NAV_STATUS_POLL_MS = 500;
+/** How long the stream may stay down before the status poll takes over. */
+export const NAV_STREAM_FALLBACK_MS = 5000;
 
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 10_000;
@@ -167,6 +175,35 @@ export async function pollMapLive(signal?: AbortSignal): Promise<boolean> {
 }
 
 /**
+ * One fallback read of `GET /api/v1/nav/status`: every kind present is
+ * ingested as if it had arrived on the stream, stamped with its age on the
+ * drone (`age_ms`) so a stale value never reads as fresh. The `?view=` query
+ * carries the view lease, so the drone computes the same overlays it would
+ * for a stream client. Resolves false on any failure.
+ */
+export async function pollNavStatus(signal?: AbortSignal, now: () => number = Date.now): Promise<boolean> {
+  const view = viewLease && viewLease.layers.length > 0 ? `${viewLease.cameraId}:${viewLease.layers.join(",")}` : null;
+  const path = view ? `/api/v1/nav/status?view=${encodeURIComponent(view)}` : "/api/v1/nav/status";
+  try {
+    const raw = await apiFetch<unknown>(path, { signal });
+    if (typeof raw !== "object" || raw === null) return false;
+    for (const [kind, entry] of Object.entries(raw as Record<string, unknown>)) {
+      if (kind === "view_demand" || typeof entry !== "object" || entry === null) continue;
+      const e = entry as { ts_ms?: unknown; age_ms?: unknown; data?: unknown };
+      const frame = { kind, ts_ms: e.ts_ms, data: e.data };
+      if (ingestLayerFrame(frame)) continue;
+      const parsed = parseNavFrame(frame);
+      if (!parsed) continue;
+      const age = typeof e.age_ms === "number" && e.age_ms >= 0 ? e.age_ms : 0;
+      useNavStreamStore.getState().ingest(parsed, now() - age);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Open the nav stream and the occupancy poll for this node. Returns a cleanup
  * that closes both and clears the store, so nothing stale lingers.
  */
@@ -182,6 +219,11 @@ export function connectNavStream(): () => void {
   let silentTimer: ReturnType<typeof setTimeout> | null = null;
   const backoff = new ReconnectBackoff(RECONNECT_MIN_MS, RECONNECT_MAX_MS);
   const controller = new AbortController();
+  // Whether the stream is open, and since when it has been down (from the
+  // start until its first open): the status poll takes over after
+  // NAV_STREAM_FALLBACK_MS down.
+  let streamUp = false;
+  let downSince = Date.now();
 
   const scheduleReconnect = () => {
     if (closed || reconnectTimer) return;
@@ -216,7 +258,9 @@ export function connectNavStream(): () => void {
       sendViewLease();
       backoff.opened();
       armSilence();
+      streamUp = true;
       store.setLink("connected");
+      store.setRadioFallback(false);
     };
     socket.onmessage = (msg) => {
       backoff.message();
@@ -235,6 +279,10 @@ export function connectNavStream(): () => void {
       if (leaseSocket === socket) leaseSocket = null;
       socket = null;
       clearTimeout(silentTimer ?? undefined);
+      if (streamUp) {
+        streamUp = false;
+        downSince = Date.now();
+      }
       scheduleReconnect();
     };
     socket.onerror = () => {
@@ -262,13 +310,32 @@ export function connectNavStream(): () => void {
     });
   }, MAP_LIVE_POLL_MS);
 
+  // Reduced-rate fallback: the stream did not come up (or dropped) but the
+  // HTTP path may still answer, e.g. over a ground-station radio relay.
+  let statusInFlight: AbortController | null = null;
+  const statusPoll = setInterval(() => {
+    if (closed || streamUp || statusInFlight || document.visibilityState === "hidden") return;
+    if (Date.now() - downSince < NAV_STREAM_FALLBACK_MS) return;
+    const ac = new AbortController();
+    statusInFlight = ac;
+    void pollNavStatus(ac.signal)
+      .then((ok) => {
+        if (!closed && !streamUp) store.setRadioFallback(ok);
+      })
+      .finally(() => {
+        if (statusInFlight === ac) statusInFlight = null;
+      });
+  }, NAV_STATUS_POLL_MS);
+
   return () => {
     closed = true;
     controller.abort();
     clearInterval(poll);
+    clearInterval(statusPoll);
     clearInterval(leaseTimer);
     leaseSocket = null;
     inFlight?.abort();
+    statusInFlight?.abort();
     clearTimeout(reconnectTimer ?? undefined);
     clearTimeout(silentTimer ?? undefined);
     if (socket) {

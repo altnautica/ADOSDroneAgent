@@ -66,12 +66,16 @@ export interface NavStreamState {
    *  before they were read. A parameter the FC did not report is absent. */
   ekfParams: Record<string, number> | null;
   link: NavLinkState;
+  /** The stream is down and the feed comes from the 2 Hz status poll (a radio
+   *  relay): the values update at a reduced rate. */
+  radioFallback: boolean;
 
   ingest: (frame: NavFrame, at?: number) => void;
   mergeOccupancy: (live: OccupancyLive, at?: number) => void;
   designate: (ref: DesignatedRef | null) => void;
   setCommandedSet: (set: 1 | 2 | 3) => void;
   setLink: (link: NavLinkState) => void;
+  setRadioFallback: (radioFallback: boolean) => void;
   setEkfParams: (params: Record<string, number>) => void;
   clear: () => void;
 }
@@ -91,6 +95,7 @@ const EMPTY = {
   lastCommandedSet: null,
   ekfParams: null as Record<string, number> | null,
   link: "idle" as NavLinkState,
+  radioFallback: false,
 };
 
 /**
@@ -139,6 +144,7 @@ export const useNavStreamStore = create<NavStreamState>((set) => ({
   designate: (designated) => set({ designated }),
   setCommandedSet: (lastCommandedSet) => set({ lastCommandedSet }),
   setLink: (link) => set({ link }),
+  setRadioFallback: (radioFallback) => set((s) => (s.radioFallback === radioFallback ? s : { radioFallback })),
   setEkfParams: (ekfParams) => set({ ekfParams }),
   clear: () => set({ ...EMPTY }),
 }));
