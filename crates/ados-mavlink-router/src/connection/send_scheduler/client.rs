@@ -134,12 +134,10 @@ impl FcConnection {
         // dropped and client gotos fly through the pilot instead. A
         // `DO_REPOSITION` taken off the FC stream is answered here.
         let gated;
+        let pilot_injector =
+            injector.is_some_and(|c| c.client_id == crate::pilot_link::PILOT_INJECTOR);
         let data: &[u8] = match crate::pilot_link::global() {
-            Some(link)
-                if link.gating()
-                    && !injector
-                        .is_some_and(|c| c.client_id == crate::pilot_link::PILOT_INJECTOR) =>
-            {
+            Some(link) if link.gating() && !pilot_injector => {
                 let geo = self.pilot_georef().await;
                 let out = crate::pilot_link::filter(data, geo);
                 if out.dropped > 0 {
@@ -166,6 +164,11 @@ impl FcConnection {
             }
             _ => data,
         };
+        // A ground station's mode command is the operator's: the pilot tells
+        // the mode change it causes from an FC failsafe by it.
+        if let Some(link) = crate::pilot_link::global().filter(|_| !pilot_injector) {
+            link.note_client_modes(data);
+        }
         if self.client_tap.receiver_count() > 0 {
             let _ = self.client_tap.send(bytes::Bytes::copy_from_slice(data));
         }

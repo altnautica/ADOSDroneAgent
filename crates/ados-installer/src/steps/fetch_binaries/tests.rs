@@ -199,6 +199,10 @@ fn a_missing_rev_release_names_the_path_filter_as_the_reason() {
         msg.contains("without --ref"),
         "names the way forward: {msg}"
     );
+    assert!(
+        msg.contains("changed a workflow"),
+        "names a build overtaken by a workflow change: {msg}"
+    );
 }
 
 #[test]

@@ -135,17 +135,20 @@ pub(super) fn resolve_release(pin: Option<&str>, tmp_dir: &Path) -> anyhow::Resu
 /// It names the path filter, because that is the likely reason and it is not
 /// guessable from a 404: `.github/workflows/rust.yml` only runs on changes under
 /// `crates/**`, the four generated `.py` contract files, `data/systemd/**`, and
-/// itself. A commit touching only `src/ados/**` therefore publishes nothing,
-/// and the alternative — dropping the filter — pays ~23 arm64 release builds for
-/// every commit to the Python tree.
+/// the workflows. A commit touching only `src/ados/**` therefore publishes
+/// nothing, and the alternative — dropping the filter — pays ~23 arm64 release
+/// builds for every commit to the Python tree. A commit whose build was still
+/// queued when a later push changed a workflow publishes nothing either:
+/// GitHub refuses the workflow token that release.
 pub fn rev_release_missing(rev: &str) -> String {
     format!(
         "no {tag} release exists, so the prebuilt binaries for revision {rev} were never \
          published. The workflow that builds them runs only on commits touching `crates/**`, \
-         the generated `_*_generated.py` contract files, or `data/systemd/**` — a commit that \
-         changed only `src/ados/**` publishes no per-revision release. Pin a commit that \
-         touched the Rust tree, or re-run without --ref to install the build the \
-         `prebuilt-main` manifest names.",
+         the generated `_*_generated.py` contract files, `data/systemd/**` or the workflows — \
+         a commit that changed only `src/ados/**` publishes no per-revision release, and \
+         neither does one whose build was overtaken by a later push that changed a workflow. \
+         Pin a commit that touched the Rust tree, or re-run without --ref to install the \
+         build the `prebuilt-main` manifest names.",
         tag = rev_release_tag(rev)
     )
 }

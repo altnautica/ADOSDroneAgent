@@ -346,3 +346,113 @@ fn an_intercepted_reposition_is_answered_with_its_outcome() {
         MavResult::MAV_RESULT_FAILED
     );
 }
+
+/// `SET_MODE` as a ground station sends it: `base_mode` is the custom-mode
+/// flag (1, or 129 armed), which the typed decoder refuses, so the frame is
+/// built by hand. `v2` selects the MAVLink 2 header.
+fn set_mode_frame(custom_mode: u32, base_mode: u8, v2: bool) -> Vec<u8> {
+    let mut payload = custom_mode.to_le_bytes().to_vec();
+    payload.extend([1, base_mode]);
+    let mut f = if v2 {
+        vec![0xFD, payload.len() as u8, 0, 0, 0, 255, 190, 11, 0, 0]
+    } else {
+        vec![0xFE, payload.len() as u8, 0, 255, 190, 11]
+    };
+    f.extend(payload);
+    f.extend([0, 0]);
+    f
+}
+
+fn command_long(command: MavCmd, param1: f32, param2: f32) -> MavMessage {
+    MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+        param1,
+        param2,
+        param3: 0.0,
+        param4: 0.0,
+        param5: 0.0,
+        param6: 0.0,
+        param7: 0.0,
+        command,
+        target_system: 1,
+        target_component: 1,
+        confirmation: 0,
+    })
+}
+
+fn modes_in(data: &[u8]) -> Vec<ModeCommand> {
+    let mut v = Vec::new();
+    mode_commands(data, |c| v.push(c));
+    v
+}
+
+/// Every way a ground station asks the FC for a mode is seen, in one write
+/// with other frames around it; a mode without the custom flag is not one.
+#[test]
+fn client_mode_commands_are_found_in_a_write() {
+    let mut data = frame(&heartbeat());
+    data.extend(set_mode_frame(6, 1, true));
+    data.extend(set_mode_frame(9, 129, false));
+    data.extend(set_mode_frame(5, 0, true));
+    data.extend(frame(&command_long(MavCmd::MAV_CMD_DO_SET_MODE, 1.0, 6.0)));
+    data.extend(frame(&command_long(MavCmd::MAV_CMD_DO_SET_MODE, 0.0, 6.0)));
+    data.extend(frame(&command_long(
+        MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH,
+        0.0,
+        0.0,
+    )));
+    data.extend(frame(&command_long(MavCmd::MAV_CMD_NAV_LAND, 0.0, 0.0)));
+    data.extend(frame(&reposition_long()));
+    assert_eq!(
+        modes_in(&data),
+        vec![
+            ModeCommand::Custom(6),
+            ModeCommand::Custom(9),
+            ModeCommand::Custom(6),
+            ModeCommand::Rtl,
+            ModeCommand::Land,
+        ]
+    );
+}
+
+/// The pilot hears each client mode command as the `client.mode` feed.
+#[tokio::test]
+async fn client_mode_commands_reach_the_pilot_as_a_feed() {
+    let (tx, mut rx) = mpsc::channel(4);
+    let link = PilotLink::new(ControlMode::FcManual, tx);
+    let mut data = set_mode_frame(6, 1, true);
+    data.extend(frame(&command_long(MavCmd::MAV_CMD_NAV_LAND, 0.0, 0.0)));
+    link.note_client_modes(&data);
+    for want in [serde_json::json!(6), serde_json::json!("land")] {
+        match ados_protocol::pilot::decode_request(&rx.recv().await.unwrap()).unwrap() {
+            ados_protocol::pilot::Request::Feed { topic, payload } => {
+                assert_eq!(topic, ados_protocol::pilot::CLIENT_MODE_TOPIC);
+                let p = serde_json::to_value(&payload).unwrap();
+                assert_eq!(p["mode"], want);
+            }
+            other => panic!("not a feed: {other:?}"),
+        }
+    }
+    assert!(rx.try_recv().is_err());
+}
+
+/// While the FC flies a failsafe RTL or land the pilot ignores a redirected
+/// reposition, and the sender is told so instead of seeing it accepted.
+#[test]
+fn a_reposition_during_an_fc_failsafe_is_rejected() {
+    let (tx, _rx) = mpsc::channel(4);
+    let link = PilotLink::new(ControlMode::Ados, tx);
+    let out = filter(&frame(&reposition_long()), Some(GEO));
+    let r = out.repositions[0];
+    let mut state = pilot_state("fc_mode", true, false, "multirotor");
+    if let rmpv::Value::Map(m) = &mut state {
+        m.push((rmpv::Value::from("fc_failsafe"), rmpv::Value::from(true)));
+    }
+    link.on_state(&state);
+    assert_eq!(
+        ack_of(&link, r).1,
+        MavResult::MAV_RESULT_TEMPORARILY_REJECTED
+    );
+    // An RTL the operator chose is not a failsafe: the goto flies.
+    link.on_state(&pilot_state("fc_mode", true, false, "multirotor"));
+    assert_eq!(ack_of(&link, r).1, MavResult::MAV_RESULT_ACCEPTED);
+}

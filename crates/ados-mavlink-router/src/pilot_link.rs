@@ -15,7 +15,11 @@
 //!   FC's GCS failsafe cannot do it: any sysid-1 heartbeat counts for it (the
 //!   router's own, a VIO component's), so the pilot's heartbeat stopping
 //!   never trips it;
-//! * the swarm loop submits its velocities as `swarm.goal`.
+//! * the swarm loop submits its velocities as `swarm.goal`;
+//! * every client mode command toward the FC (`SET_MODE`, `DO_SET_MODE`,
+//!   `NAV_RETURN_TO_LAUNCH`, `NAV_LAND`), in any control mode, is reported
+//!   to the pilot as the `client.mode` feed, so an operator's RTL or land is
+//!   not taken for a failsafe ([`PilotLink::note_client_modes`]).
 //!
 //! The pilot's own MAVLink connection (injector `pilot`) is exempt. With the
 //! pilot down, or in `fc_manual` / `elrs`, everything passes as before.
@@ -73,7 +77,8 @@ pub struct PilotLink {
     /// The death failsafe already fired for this silence.
     fired: AtomicBool,
     /// The last state lets the pilot start a goto: armed, in the air, not
-    /// tuning (the conditions of its `goto` handler).
+    /// tuning, and the FC not in a failsafe RTL or land (the conditions of
+    /// its `goto` handler).
     goto_ok: AtomicBool,
 }
 
@@ -222,7 +227,7 @@ impl PilotLink {
             .store(if flying { class } else { 0 }, Ordering::Relaxed);
         let tuning = field("owner").and_then(rmpv::Value::as_str) == Some("tuning");
         self.goto_ok.store(
-            flag("armed") && !flag("landed") && !tuning,
+            flag("armed") && !flag("landed") && !tuning && !flag("fc_failsafe"),
             Ordering::Relaxed,
         );
     }
@@ -297,12 +302,31 @@ impl PilotLink {
         );
     }
 
+    /// Tell the pilot about each mode command in a client write toward the
+    /// FC, so it can tell an operator's RTL or land from a failsafe.
+    pub fn note_client_modes(&self, data: &[u8]) {
+        mode_commands(data, |c| {
+            let mode = match c {
+                ModeCommand::Custom(m) => serde_json::json!(m),
+                ModeCommand::Rtl => serde_json::json!("rtl"),
+                ModeCommand::Land => serde_json::json!("land"),
+            };
+            self.send(
+                "feed",
+                serde_json::json!({
+                    "topic": pilot::CLIENT_MODE_TOPIC,
+                    "payload": {"mode": mode},
+                }),
+            );
+        });
+    }
+
     /// The `COMMAND_ACK` for a client `DO_REPOSITION` the filter took off the
     /// FC stream, as from the flight controller (`fc_sysid`, component 1), so
     /// the sender learns the outcome instead of retrying into a timeout:
     /// accepted when it went to a pilot that will fly it, temporarily
-    /// rejected when the pilot cannot (disarmed, landed, tuning), failed when
-    /// the target could not be placed.
+    /// rejected when the pilot cannot (disarmed, landed, tuning, the FC in a
+    /// failsafe RTL or land), failed when the target could not be placed.
     pub fn reposition_ack(&self, r: Reposition, fc_sysid: u8) -> Option<Vec<u8>> {
         use ados_protocol::mavlink::ardupilotmega::{
             MavCmd, MavMessage, MavResult, COMMAND_ACK_DATA,

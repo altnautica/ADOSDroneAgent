@@ -187,3 +187,78 @@ fn is_reposition(m: &MavMessage) -> bool {
         _ => false,
     }
 }
+
+/// A client's mode command toward the flight controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeCommand {
+    /// `SET_MODE` or `DO_SET_MODE` with this custom mode.
+    Custom(u32),
+    /// `NAV_RETURN_TO_LAUNCH`.
+    Rtl,
+    /// `NAV_LAND`.
+    Land,
+}
+
+const MSG_SET_MODE: u32 = 11;
+const MSG_COMMAND_INT: u32 = 75;
+const MSG_COMMAND_LONG: u32 = 76;
+/// `MAV_MODE_FLAG_CUSTOM_MODE_ENABLED`: without it ArduPilot ignores the
+/// custom mode.
+const CUSTOM_MODE_ENABLED: u32 = 1;
+
+/// Call `f` for every mode command in a client write. Only `SET_MODE` and
+/// `COMMAND_LONG` / `COMMAND_INT` frames are decoded.
+pub fn mode_commands(data: &[u8], mut f: impl FnMut(ModeCommand)) {
+    let mut i = 0;
+    while i < data.len() {
+        let rest = &data[i..];
+        let Some(n) = frame_len(rest).filter(|&n| n <= rest.len() && n >= 8) else {
+            return;
+        };
+        let frame = &rest[..n];
+        let cmd = match frame_id(frame) {
+            MSG_SET_MODE => set_mode(frame),
+            MSG_COMMAND_LONG | MSG_COMMAND_INT => ados_protocol::mavlink::parse_any(frame)
+                .ok()
+                .and_then(|(_, m)| command_mode(&m)),
+            _ => None,
+        };
+        if let Some(c) = cmd {
+            f(c);
+        }
+        i += n;
+    }
+}
+
+/// `SET_MODE` read from the payload bytes: its `base_mode` is typed as the
+/// `MAV_MODE` enum, which the custom-mode flag a ground station sends (1, or
+/// 129 armed) is not a value of, so the decoder refuses it.
+fn set_mode(frame: &[u8]) -> Option<ModeCommand> {
+    let off = if frame[0] == 0xFD { 10 } else { 6 };
+    let len = usize::from(frame[1]);
+    let payload = frame.get(off..off + len)?;
+    // MAVLink 2 trims trailing zero bytes.
+    let b = |k: usize| payload.get(k).copied().unwrap_or(0);
+    let custom = u32::from_le_bytes([b(0), b(1), b(2), b(3)]);
+    (u32::from(b(5)) & CUSTOM_MODE_ENABLED != 0).then_some(ModeCommand::Custom(custom))
+}
+
+fn command_mode(m: &MavMessage) -> Option<ModeCommand> {
+    let (command, p1, p2) = match m {
+        MavMessage::COMMAND_LONG(c) => (c.command, c.param1, c.param2),
+        MavMessage::COMMAND_INT(c) => (c.command, c.param1, c.param2),
+        _ => return None,
+    };
+    match command {
+        MavCmd::MAV_CMD_DO_SET_MODE => {
+            let custom = p1.is_finite()
+                && p2.is_finite()
+                && p2 >= 0.0
+                && (p1 as u32) & CUSTOM_MODE_ENABLED != 0;
+            custom.then_some(ModeCommand::Custom(p2 as u32))
+        }
+        MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH => Some(ModeCommand::Rtl),
+        MavCmd::MAV_CMD_NAV_LAND => Some(ModeCommand::Land),
+        _ => None,
+    }
+}

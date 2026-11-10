@@ -23,6 +23,33 @@ const EXTRA_PARAMS: &[&str] = &[
 /// Re-request missing parameters this often.
 const PARAM_RETRY_MS: u64 = 15_000;
 
+/// A ground station's mode command toward the FC, as the router saw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientMode {
+    /// `SET_MODE` or `DO_SET_MODE` with this custom mode.
+    Custom(u32),
+    /// `NAV_RETURN_TO_LAUNCH`.
+    Rtl,
+    /// `NAV_LAND`.
+    Land,
+}
+
+impl ClientMode {
+    /// The router's `client.mode` payload: `{"mode": <custom mode>}`,
+    /// `{"mode": "rtl"}` or `{"mode": "land"}`.
+    pub fn parse(payload: &serde_json::Value) -> Option<Self> {
+        let m = payload.get("mode")?;
+        if let Some(n) = m.as_u64() {
+            return u32::try_from(n).ok().map(Self::Custom);
+        }
+        match m.as_str()? {
+            "rtl" => Some(Self::Rtl),
+            "land" => Some(Self::Land),
+            _ => None,
+        }
+    }
+}
+
 impl Pilot {
     /// Fold one frame from the FC in.
     pub fn on_fc(&mut self, sysid: u8, compid: u8, msg: &MavMessage, now_ms: u64) {
@@ -101,24 +128,43 @@ impl Pilot {
     /// The FC accepted a reposition. Under `ados` the router takes those to
     /// the pilot as a goto, so this is a ground station flying the FC
     /// directly, outside `ados`. It is already in GUIDED, so no mode change
-    /// tells the pilot: it yields here, and streams nothing over the FC's
-    /// target from now on.
+    /// tells the pilot: whoever flies through the pilot (its hold, a skill,
+    /// a goto, the swarm) yields here, and nothing is streamed over the
+    /// FC's target from now on.
     fn on_fc_reposition(&mut self, now_ms: u64) {
         if self.control_mode() == ControlMode::Ados
             || !self.fc.armed
             || !self.in_guided()
-            || self.owner() != Owner::Pilot
+            || !matches!(
+                self.owner(),
+                Owner::Pilot | Owner::Skill | Owner::Goto | Owner::Swarm
+            )
         {
             return;
         }
         self.set_owner(Owner::FcMode, "fc-reposition");
         self.landing = false;
+        self.goto = None;
+        self.swarm = None;
         let name = self.family().mode_name(self.fc.custom_mode);
         self.banner = Some(banner(
             "pilot.banner.fc_control",
             &[("mode", json!(name))],
             now_ms,
         ));
+    }
+
+    /// A ground station asked the FC for `mode` just before it changed.
+    fn mode_is_clients(&self, mode: u32, now_ms: u64) -> bool {
+        let fam = self.family();
+        self.client_mode.is_some_and(|(c, t)| {
+            now_ms.saturating_sub(t) < super::CLIENT_MODE_WINDOW_MS
+                && match c {
+                    ClientMode::Custom(m) => m == mode,
+                    ClientMode::Rtl => fam.is_rtl(mode),
+                    ClientMode::Land => fam.is_land(mode),
+                }
+        })
     }
 
     fn on_mode_change(&mut self, prev: u32, now_ms: u64) {
@@ -162,9 +208,12 @@ impl Pilot {
         }
         // Any other mode: the FC flies.
         let was_ours = self.mode_is_ours(mode, now_ms);
-        // An RTL or land the pilot did not command: an RC switch or an FC
-        // failsafe (radio, battery, EKF).
-        self.fc_failsafe = !was_ours && (fam.is_rtl(mode) || fam.is_land(mode));
+        // An operator's change: the pilot's own, or a ground station's mode
+        // command (Mode sheet, RTH, land) the router saw.
+        let operator = was_ours || self.mode_is_clients(mode, now_ms);
+        // An RTL or land nobody commanded: an RC switch or an FC failsafe
+        // (radio, battery, EKF).
+        self.fc_failsafe = !operator && (fam.is_rtl(mode) || fam.is_land(mode));
         if self.owner() != Owner::FcMode {
             self.set_owner(Owner::FcMode, "fc-mode");
         }
@@ -173,7 +222,7 @@ impl Pilot {
         {
             self.launch = None;
         }
-        if !was_ours && prev != mode {
+        if !operator && prev != mode {
             let name = fam.mode_name(mode);
             let cause = if self.fc.rc.is_some() {
                 "rc_or_failsafe"

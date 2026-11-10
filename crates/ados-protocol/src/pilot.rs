@@ -29,6 +29,13 @@ pub const PILOT_V1_VERSION: u16 = match crate::contracts::contract_version("pilo
 /// readiness item and a banner stays far below this.
 pub const PILOT_MAX_FRAME: usize = 256 * 1024;
 
+/// The router's `feed` topic for a ground station's mode command toward the
+/// flight controller: `{"mode": <custom mode>}` for `SET_MODE` and
+/// `DO_SET_MODE`, `{"mode": "rtl"}` for `NAV_RETURN_TO_LAUNCH`,
+/// `{"mode": "land"}` for `NAV_LAND`. The pilot tells an operator's mode
+/// change from the FC's own (an RC switch or a failsafe) with it.
+pub const CLIENT_MODE_TOPIC: &str = "client.mode";
+
 /// One goal from a skill holding the motion lease.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Goal {

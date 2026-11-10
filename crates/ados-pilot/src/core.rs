@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use ados_protocol::mavlink::ardupilotmega::MavMessage;
 use ados_protocol::pilot::{
     ActionResult, Banner, Holder, LeaseReply, LeaseRevoked, Mission, Owner, Request, Sticks,
-    ViewDemand,
+    ViewDemand, CLIENT_MODE_TOPIC,
 };
 
 use crate::authority::Authority;
@@ -37,6 +37,9 @@ pub const PLAN_PERIOD_MS: u64 = 200;
 pub const STICKS_PERIOD_MS: u64 = 50;
 /// A mode change within this long of our own DO_SET_MODE is ours.
 pub const OWN_MODE_WINDOW_MS: u64 = 3000;
+/// A mode change within this long of a ground station's mode command for it
+/// (seen by the router) is the operator's, not a failsafe.
+pub const CLIENT_MODE_WINDOW_MS: u64 = 2000;
 
 /// Something the runtime must deliver.
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +98,9 @@ pub struct Pilot {
     mission: Option<Mission>,
     mission_paused: bool,
     own_mode: Option<(u32, u64)>,
+    /// The last mode command a ground station sent the FC, as the router
+    /// reported it.
+    client_mode: Option<(events::ClientMode, u64)>,
     landing: bool,
     /// Outside `ados`: the hold position already given to the FC. Its
     /// GUIDED keeps it, so it is not streamed again, and a ground station's
@@ -149,6 +155,7 @@ impl Pilot {
             mission: None,
             mission_paused: false,
             own_mode: None,
+            client_mode: None,
             landing: false,
             fc_hold: None,
             fc_failsafe: false,
@@ -307,7 +314,12 @@ impl Pilot {
                 Reply::None
             }
             Request::Goto { n, e, d, .. } => {
-                self.start_goto([n, e, d], now_ms);
+                // The router's redirect of a ground station's reposition: it
+                // never pulls the FC out of its failsafe RTL or land (the
+                // router answers the sender TEMPORARILY_REJECTED).
+                if !self.fc_failsafe {
+                    self.start_goto([n, e, d], now_ms);
+                }
                 Reply::None
             }
             Request::SwarmGoal { vn, ve, vd, yaw } => {
@@ -356,6 +368,11 @@ impl Pilot {
             "mission" => {
                 let m = <Mission as serde::Deserialize>::deserialize(payload).ok();
                 self.on_mission(m, now_ms);
+            }
+            CLIENT_MODE_TOPIC => {
+                if let Some(c) = events::ClientMode::parse(payload) {
+                    self.client_mode = Some((c, now_ms));
+                }
             }
             _ => {}
         }

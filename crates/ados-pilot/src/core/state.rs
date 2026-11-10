@@ -176,6 +176,7 @@ impl Pilot {
                     age_ms,
                 })
                 .collect(),
+            fc_failsafe: self.fc_failsafe,
         }
     }
 

@@ -22,7 +22,10 @@ on:
       - "src/ados/plugins/builtin/**/manifest.yaml"
       - "schemas/agent-config.schema.json"
       - "docs/api-surface.md"
-      - ".github/workflows/rust.yml"
+      # Every workflow, not only this one: a push that changes any workflow
+      # leaves GitHub refusing a release on the commits before it (see the
+      # publish job), so its own run must publish the binaries main carries.
+      - ".github/workflows/**"
   pull_request:
     branches: [main]
     paths:
@@ -554,7 +557,16 @@ jobs:
           done
           rm -f /tmp/sign.key
 
+      # GitHub refuses a workflow token a release, and the tag it creates, on
+      # a commit behind main whose workflow files differ from main's: that
+      # takes the `workflows` permission, which GITHUB_TOKEN cannot hold
+      # (HTTP 403 "Resource not accessible by integration"). It happens to a
+      # queued run once a later push changed a workflow. Every push that
+      # changes a workflow runs this workflow (see the push paths), so that
+      # later run publishes the binaries main carries and moves the pointer;
+      # this one records that it was superseded and publishes nothing.
       - name: Publish rev-<sha>
+        id: rev
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -564,19 +576,31 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             # A re-run of the same commit: same names, replaced one at a time.
             gh release upload "$tag" rev/* --clobber
-          else
-            gh release create "$tag" rev/* \
-              --draft \
-              --prerelease \
-              --target "${GITHUB_SHA}" \
-              --title "ADOS binaries for ${GITHUB_SHA}" \
-              --notes "Prebuilt binaries for commit ${GITHUB_SHA}, built in one job. prebuilt-main/manifest.json lists every asset's sha256 and size."
-            gh release edit "$tag" --draft=false
+            exit 0
           fi
+          if ! gh release create "$tag" rev/* \
+            --draft \
+            --prerelease \
+            --target "${GITHUB_SHA}" \
+            --title "ADOS binaries for ${GITHUB_SHA}" \
+            --notes "Prebuilt binaries for commit ${GITHUB_SHA}, built in one job. prebuilt-main/manifest.json lists every asset's sha256 and size."; then
+            git fetch --quiet origin main
+            tip="$(git rev-parse FETCH_HEAD)"
+            if [ "$tip" != "${GITHUB_SHA}" ] \
+              && ! gh release view "$tag" >/dev/null 2>&1 \
+              && ! git diff --quiet "${GITHUB_SHA}" "$tip" -- ':(top).github/workflows'; then
+              echo "::notice::main is at ${tip}, whose workflow files differ from ${GITHUB_SHA}'s, so GitHub refuses this token a release on ${GITHUB_SHA}. The run for that push publishes main's binaries; rev-${GITHUB_SHA} is not published."
+              echo "superseded=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            exit 1
+          fi
+          gh release edit "$tag" --draft=false
 
       # The pointer only ever moves forward: a run for a commit that is an
       # ancestor of the one prebuilt-main already names leaves it alone.
       - name: Move the prebuilt-main pointer and the installer
+        if: ${{ steps.rev.outputs.superseded != 'true' }}
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}

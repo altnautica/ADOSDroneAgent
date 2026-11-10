@@ -316,16 +316,42 @@ impl Pilot {
                     .command(MavCmd::MAV_CMD_DO_PAUSE_CONTINUE, [0.0; 7]);
                 self.mav(m);
                 self.mission_paused = true;
+                return Ok(());
             }
-            Owner::FcMode | Owner::Idle | Owner::Tuning => {}
-            _ => {
-                self.landing = false;
-                self.brake_hold(now_ms, None);
-                if self.fc.vehicle_class() == VehicleClass::Fixedwing || self.fc.vtol_forward() {
-                    self.fw = Default::default();
-                }
-            }
+            Owner::Tuning => return Err("tuning".into()),
+            // The FC flies (a ground station's reposition, a mode of its
+            // own): the pilot takes the vehicle and brakes it to a hold here,
+            // as it does for its own flight.
+            Owner::FcMode | Owner::Idle => self.take_for_pause(now_ms)?,
+            _ => {}
         }
+        self.landing = false;
+        self.brake_hold(now_ms, None);
+        if self.fc.vehicle_class() == VehicleClass::Fixedwing || self.fc.vtol_forward() {
+            self.fw = Default::default();
+        }
+        Ok(())
+    }
+
+    /// Pause while the FC flies: GUIDED, owner `pilot`. Refused (nothing
+    /// sent) on the ground, without a position for the hold, and during an
+    /// FC failsafe RTL or land, which the pilot never leaves on its own.
+    fn take_for_pause(&mut self, now_ms: u64) -> ActionRes {
+        if self.fc.landed() {
+            return Err("landed".into());
+        }
+        if self.fc_failsafe {
+            return Err("failsafe".into());
+        }
+        if self.pos(now_ms).is_none() {
+            return Err("no_position".into());
+        }
+        if !self.in_guided() {
+            let g = self.family().guided();
+            self.set_mode(g, now_ms);
+        }
+        self.set_owner(Owner::Pilot, "pause");
+        self.sessions.arm_gate();
         Ok(())
     }
 

@@ -209,6 +209,12 @@ pub struct PilotState {
     pub agl_source: Option<String>,
     /// FC STATUSTEXT at WARNING or worse from the last 30 s, newest first.
     pub statustext: Vec<FcStatusText>,
+    /// The flight controller flies an RTL or land it entered by itself (an RC
+    /// switch, or a radio, battery or EKF failsafe): no client or pilot mode
+    /// command preceded it. A reposition waits until the operator changes
+    /// mode. Omitted while false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fc_failsafe: bool,
 }
 
 /// One camera's obstacle (or depth) grid: 32×18 cells, row-major, row 0 at

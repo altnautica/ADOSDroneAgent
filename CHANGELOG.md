@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.45] - 2026-11-10
+
+### Fixed
+
+- Pilot Pause brakes the vehicle while the flight controller flies on its own, in every control mode: after the pilot hands a ground station's reposition to the flight controller in `fc_manual` or `elrs`, and in any mode the flight controller flies, Pause puts it in GUIDED and holds it as the pilot. Pause answers ok only when it did something: it is refused with `landed` on the ground, `no_position` without a position for the hold, and `failsafe` during a flight-controller failsafe return or landing.
+- Pilot tells an operator's return or landing from a flight-controller failsafe: the router reports every ground station mode command toward the flight controller (`SET_MODE`, `DO_SET_MODE`, `NAV_RETURN_TO_LAUNCH`, `NAV_LAND`) to the pilot, and an RTL or land that follows one within 2 s is the operator's. Only an RTL or land nobody commanded (an RC switch, or a radio, battery or EKF failsafe) counts as a failsafe and carries the `rc_or_failsafe` banner; a map-point goto after an operator's Mode-sheet RTL or land flies.
+- A ground station's reposition that the router hands to the pilot under ADOS control never pulls the flight controller out of a failsafe return or landing: the pilot ignores it, publishes `fc_failsafe` in its state, and the router answers the sender `TEMPORARILY_REJECTED` instead of `ACCEPTED`.
+- A skill or swarm flying through the pilot outside ADOS control yields to a ground station's reposition the flight controller accepted, as the pilot's own hold does: the skill's lease is revoked with `fc-reposition`, and nothing is streamed over the flight controller's target.
+
 ## [0.109.44] - 2026-11-10
 
 ### Fixed
