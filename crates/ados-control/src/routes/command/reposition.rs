@@ -107,18 +107,28 @@ pub(super) fn reposition_command(
 /// A pilot frame older than this is not read (the pilot's state cadence).
 const PILOT_FRESH_MS: u64 = 2000;
 
+/// The return and landing modes a failsafe flies, shared with the cockpit and
+/// the dashboard (`web-shared/src/hud/fc-failsafe-modes.json`).
+const FAILSAFE_MODES_JSON: &str =
+    include_str!("../../../../../web-shared/src/hud/fc-failsafe-modes.json");
+
 /// Return and landing modes a reposition must not interrupt: ArduPilot names
-/// (QuadPlane `QRTL`/`QLAND` included) and the PX4 names the state reports.
-const RECOVERY_MODES: &[&str] = &[
-    "RTL",
-    "LAND",
-    "SMART_RTL",
-    "QRTL",
-    "QLAND",
-    "AUTO.RTL",
-    "AUTO.LAND",
-    "AUTO.PRECLAND",
-];
+/// (QuadPlane included) and the PX4 names the state reports.
+static RECOVERY_MODES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    let modes: Value =
+        serde_json::from_str(FAILSAFE_MODES_JSON).expect("fc-failsafe-modes.json parses");
+    ["return", "land"]
+        .iter()
+        .flat_map(|k| {
+            modes[*k]
+                .as_array()
+                .unwrap_or_else(|| panic!("fc-failsafe-modes.json {k} is a list"))
+                .iter()
+                .map(|m| m.as_str().expect("a mode name").to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+});
 
 /// Whether the nav hub holds a fresh pilot frame reporting `fc_failsafe`.
 fn pilot_reports_failsafe(state: &AppState) -> bool {

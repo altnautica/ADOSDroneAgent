@@ -109,8 +109,8 @@ export const TRIGGER_PRESSED = ds4.stream.trigger_pressed_threshold;
 export const CENTERED_THRESHOLD = ds4.centered_threshold;
 export const DOUBLE_TAP_MS = ds4.double_tap_ms;
 
-/** The emergency stop's hold (`layout.json` `holds_ms.stop`). A hold row
- *  bound to the stop never completes sooner, whatever its own `hold_ms`. */
+/** The emergency stop's hold (`layout.json` `holds_ms.stop`). A row bound to
+ *  the stop never completes sooner, whatever its own gesture or `hold_ms`. */
 export const STOP_HOLD_MS: number = layout.holds_ms.stop;
 export const STOP_ACTION = "kill";
 
@@ -119,6 +119,16 @@ export const STOP_ACTION = "kill";
 export function effectiveHoldMs(b: Pick<PadBinding, "action" | "hold_ms">): number | null {
   if (b.hold_ms == null) return null;
   return b.action === STOP_ACTION ? Math.max(b.hold_ms, STOP_HOLD_MS) : b.hold_ms;
+}
+
+/** A row as it runs: a row bound to the emergency stop is always a hold of at
+ *  least the stop hold. A `press`, `tap` or `double_tap` row becomes a hold of
+ *  `STOP_HOLD_MS`, and a shorter hold is raised to it. Every other row is
+ *  returned unchanged (the same object). */
+export function stopHoldRow(b: PadBinding): PadBinding {
+  if (b.action !== STOP_ACTION || b.gesture === "analog") return b;
+  if (b.gesture === "hold" && b.hold_ms != null && b.hold_ms >= STOP_HOLD_MS) return b;
+  return { ...b, gesture: "hold", hold_ms: STOP_HOLD_MS, rumble: b.rumble ?? "ramp" };
 }
 
 /** The W3C standard-mapping button index of every button control (the same

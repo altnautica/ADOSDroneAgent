@@ -1,0 +1,5 @@
+{
+  "$description": "The flight-controller modes a failsafe flies, by the mode names the agent's state reports: ArduPilot names (QuadPlane included) and the PX4 names. Read by the cockpit, the dashboard and the agent's reposition guard.",
+  "return": ["RTL", "SMART_RTL", "QRTL", "AUTO_RTL", "AUTO.RTL"],
+  "land": ["LAND", "QLAND", "LOITER_ALT_QLAND", "AUTO.LAND", "AUTO.PRECLAND"]
+}

@@ -132,20 +132,24 @@ export function ControllerTour() {
       // does not re-render the card.
       setRect((prev) => (prev && prev.x === next.x && prev.y === next.y && prev.w === next.w && prev.h === next.h ? prev : next));
     };
-    // An alert or a notice coming up, or the top bar changing size, moves
-    // the card.
+    // An alert or a notice coming up, or a zone it avoids changing size,
+    // moves the card.
     const sizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
     let watched: Element[] = [];
     const watch = () => {
-      const now = [TOP_BAR, ...ALERTS].map((sel) => document.querySelector(sel)).filter((e): e is Element => e !== null);
+      const now = [TOP_BAR, ...ALERTS, "[data-zone=left_column]", "[data-zone=stop]"]
+        .map((sel) => document.querySelector(sel))
+        .filter((e): e is Element => e !== null);
       if (now.length === watched.length && now.every((e, i) => e === watched[i])) return;
       sizes?.disconnect();
       for (const e of now) sizes?.observe(e);
       watched = now;
     };
-    // A zone mounting, leaving or moving (a screen change) re-places the
-    // card once per frame. The card's own placement changes only its style,
-    // which this ignores.
+    // A zone mounting, leaving or being renamed (a screen change) re-places
+    // the card once per frame. Only the tree and `data-zone` are watched:
+    // HUD tapes and canvases rewrite styles every frame, and size changes
+    // reach the card through the ResizeObserver above. Changes inside the
+    // card itself are ignored.
     let frame = 0;
     const card = cardRef.current;
     const onMutation = (records: MutationRecord[]) => {
@@ -158,7 +162,7 @@ export function ControllerTour() {
       });
     };
     const tree = typeof MutationObserver === "undefined" ? null : new MutationObserver(onMutation);
-    tree?.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-zone", "class", "style"] });
+    tree?.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-zone"] });
     watch();
     place();
     window.addEventListener("resize", place);

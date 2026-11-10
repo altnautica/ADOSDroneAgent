@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // The tip's "Got it" button: a click and the keyboard (Enter, Space) both
-// dismiss the tip and mark it seen.
+// dismiss the tip and mark it seen. An unknown arm state shows no tip.
 
 import { createElement } from "react";
 import { act } from "react-dom/test-utils";
@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TipLayer } from "@/components/feed/tip-layer";
 import tipsJson from "@/shared/cockpit-spec/tips.json";
+import { useFlightStore } from "@/stores/flight-store";
 import { useNavStore } from "@/stores/nav-store";
 import { useTipsStore } from "@/stores/tips-store";
 
@@ -32,6 +33,8 @@ beforeEach(async () => {
   localStorage.clear();
   useTipsStore.getState().reload();
   useNavStore.setState({ activeTabId: "feed", detailStack: [], quickMenuOpen: false });
+  // The flight controller reports the vehicle disarmed (no pilot frame).
+  useFlightStore.setState({ telemetry: { armed: false } as never });
   // Every anchor laid out and on screen.
   vi.spyOn(Element.prototype, "getBoundingClientRect").mockReturnValue(new DOMRect(400, 300, 80, 40));
   for (const [k, v] of ANCHOR_ATTRS) {
@@ -79,4 +82,17 @@ describe("the tip's Got it button", () => {
       expect(useTipsStore.getState().tips.seen).toContain(id);
     });
   }
+});
+
+describe("an unknown arm state", () => {
+  it("hides the tip without marking it seen and shows none while unknown", async () => {
+    const id = shownTip();
+    await act(async () => useFlightStore.setState({ telemetry: {} as never }));
+    await act(async () => vi.advanceTimersByTime(tipsJson.rules.first_delay_ms + tipsJson.rules.gap_between_ms + 500));
+    expect(document.querySelector("[data-testid=cockpit-tip]")).toBeNull();
+    expect(useTipsStore.getState().tips.seen).not.toContain(id);
+    await act(async () => useFlightStore.setState({ telemetry: null }));
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(document.querySelector("[data-testid=cockpit-tip]")).toBeNull();
+  });
 });

@@ -70,7 +70,10 @@ export function TipLayer({ gimbalAvailable, scale }: { gimbalAvailable: boolean;
       const now = Date.now();
       const p = useNavStreamStore.getState().pilot;
       const pilot = pilotFresh(p?.at, now) ? (p?.data ?? null) : null;
-      const telemetryArmed = useFlightStore.getState().telemetry?.armed === true;
+      // Without a fresh pilot the flight controller's report decides: a known
+      // arm dismisses the tip for good, and an unknown arm state counts as
+      // possibly airborne, so no tip shows (and none is marked seen).
+      const telemetryArmed = useFlightStore.getState().telemetry?.armed;
       const nav = useNavStore.getState();
       const anchorsVisible: Record<string, boolean> = {};
       const rects: Record<string, TipRect> = {};
@@ -80,8 +83,8 @@ export function TipLayer({ gimbalAvailable, scale }: { gimbalAvailable: boolean;
         if (r) rects[a] = r;
       }
       const screen: TipsScreen = {
-        armed: pilot ? pilot.armed : telemetryArmed,
-        airborne: pilot ? pilot.armed && !pilot.landed : telemetryArmed,
+        armed: pilot ? pilot.armed : telemetryArmed === true,
+        airborne: pilot ? pilot.armed && !pilot.landed : telemetryArmed !== false,
         flightScreen: activeScreenId(nav) === "feed" && nav.detailStack.length === 0,
         sheetOrMenuOpen:
           useCockpitUiStore.getState().sheet !== null ||

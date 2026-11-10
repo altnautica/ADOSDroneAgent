@@ -9,6 +9,8 @@
 import { useEffect, useState } from "react";
 
 import { completePanelHold } from "@/lib/hold-input";
+import { executeSkill } from "@/lib/skill-runner";
+import { BUILTIN_SKILL_BY_ID } from "@/lib/skills";
 import { ReconnectBackoff } from "@/lib/reconnect-backoff";
 import { useConfirmStore } from "@/stores/confirm-store";
 import { useInputStore } from "@/stores/input-store";
@@ -104,6 +106,59 @@ export function panelLongPressCompletes(confirmMs: number): boolean {
   return confirmMs <= PANEL_LONG_PRESS_MS;
 }
 
+/** How long the STOP sheet must have been open before a panel long-press
+ *  fires the emergency stop. */
+export const PANEL_STOP_ARM_MS = 1000;
+
+/** The panel's emergency stop. The panel reports a long press only on
+ *  release, so it cannot time the 3 s hold; it takes two deliberate long
+ *  presses instead. A long press on the focused STOP opens the STOP sheet
+ *  (focus on its hold button); a second long press, once the sheet has been
+ *  open `PANEL_STOP_ARM_MS`, fires the stop. One long press never fires it. */
+export interface PanelDeps {
+  command: (cmd: NavCommand) => void;
+  /** Whether the focused control is STOP. */
+  stopFocused: () => boolean;
+  now: () => number;
+}
+
+/** Act on one classified panel event. */
+export function dispatchPanelEvent(ev: ButtonEvent, deps: PanelDeps): void {
+  const cmd = eventToCommand(ev);
+  if (cmd) useInputStore.getState().setSource("panel");
+  const longSelect = cmd === "quick-menu" && ev.kind === "long";
+  const confirm = useConfirmStore.getState();
+  if (confirm.pending) {
+    // A skill sheet is open: back cancels it, nothing navigates underneath
+    // it. A long press of select fires the STOP once its sheet has been open
+    // a moment, and completes any other hold no longer than the long press.
+    const { skill, openedAt, altitudeM } = confirm.pending;
+    if (longSelect && skill.id === BUILTIN_SKILL_BY_ID.kill.id) {
+      if (deps.now() - openedAt >= PANEL_STOP_ARM_MS) {
+        confirm.cancel();
+        void executeSkill(skill, { altitudeM });
+      }
+    } else if (longSelect && panelLongPressCompletes(skill.confirm.ms)) confirm.panelConfirm();
+    else if (cmd === "back") confirm.cancel();
+    return;
+  }
+  // A long press on the focused STOP opens its sheet; it never fires it.
+  if (longSelect && deps.stopFocused()) {
+    confirm.open(BUILTIN_SKILL_BY_ID.kill);
+    return;
+  }
+  // A focused guarded button or slide-to-confirm takes the long press as
+  // its completed hold.
+  if (longSelect && completePanelHold()) return;
+  if (cmd) deps.command(cmd);
+}
+
+/** Whether the document's focused control is STOP. */
+function focusedIsStop(): boolean {
+  const el = typeof document === "undefined" ? null : document.activeElement;
+  return el instanceof HTMLElement && el.closest('[data-zone="stop"]') !== null;
+}
+
 export interface ButtonsState {
   connected: boolean;
 }
@@ -180,23 +235,11 @@ export function useButtons(): ButtonsState {
         if ("event" in frame && (frame as { event: unknown }).event === "error") {
           return;
         }
-        const cmd = eventToCommand(frame as ButtonEvent);
-        const ev = frame as ButtonEvent;
-        if (cmd) useInputStore.getState().setSource("panel");
-        const longSelect = cmd === "quick-menu" && ev.kind === "long";
-        const confirm = useConfirmStore.getState();
-        if (confirm.pending) {
-          // A skill sheet is open: a long-press of select completes a hold
-          // no longer than the long press, back cancels it, nothing
-          // navigates underneath it.
-          if (longSelect && panelLongPressCompletes(confirm.pending.skill.confirm.ms)) confirm.panelConfirm();
-          else if (cmd === "back") confirm.cancel();
-          return;
-        }
-        // A focused guarded button or slide-to-confirm takes the long press as
-        // its completed hold.
-        if (longSelect && completePanelHold()) return;
-        if (cmd) command(cmd);
+        dispatchPanelEvent(frame as ButtonEvent, {
+          command,
+          stopFocused: focusedIsStop,
+          now: () => performance.now(),
+        });
       };
 
       socket.onclose = () => {

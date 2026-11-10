@@ -43,13 +43,14 @@ jobs:
           # A plan or review item id is the same leak in a shorter form: one
           # of K, P, O, D or T, a hyphen and a number with an optional letter
           # suffix; SP or SH and a number; N, a name and a number; internal
-          # finding ids (their prefix is assembled at run time, below, so this
+          # finding ids, with or without a round number, for any surface
+          # prefix (their prefix is assembled at run time, below, so this
           # file never spells one). ERE has no \b, so the word boundary on each side is
           # spelled out. Scanned outside the committed web bundles
           # (src/ados/*/static/assets): minified code is full of one-letter
           # names minus a number, and every bundle is built from source this
           # scan already covers.
-          FINDING_PREFIX="$(printf 'R-%s-' AG)"
+          FINDING_PREFIX="$(printf 'R[0-9]*-%s-' '[A-Z]{2,}')"
           PLAN_PATTERN='(^|[^A-Za-z0-9_])([KPODT]-[0-9]+[a-z]?|N-[A-Z][A-Za-z0-9]+-[0-9]+|S[PH]-[0-9]+|'"${FINDING_PREFIX}"'[0-9]+)([^A-Za-z0-9_]|$)'
           PLAN_SCOPE=(. ':(exclude,glob)src/ados/*/static/assets/**')
 
@@ -69,6 +70,7 @@ jobs:
           SAMPLE_PLAN_LANE="$(printf 'see N-%s-10' 'Sample')"
           SAMPLE_PLAN_SPEC="$(printf '(SP%s1)' '-')"
           SAMPLE_PLAN_REVIEW="$(printf 'per R-%s-9' 'AG')"
+          SAMPLE_PLAN_REVIEW_ROUND="$(printf 'per R4-%s-12' 'MC')"
           SAMPLE_HOME="$(printf '/Users/%s/src/x' 'realname')"
           printf 'ref %s and path %s\n' "$SAMPLE_TAG" "$SAMPLE_HOME" > .guard-selftest
           # The rule sample gets its own file so each alternative of the tag
@@ -78,10 +80,12 @@ jobs:
           printf '%s\n' "$SAMPLE_PLAN_LANE" > .guard-selftest-plan-lane
           printf '%s\n' "$SAMPLE_PLAN_SPEC" > .guard-selftest-plan-spec
           printf '%s\n' "$SAMPLE_PLAN_REVIEW" > .guard-selftest-plan-review
+          printf '%s\n' "$SAMPLE_PLAN_REVIEW_ROUND" > .guard-selftest-plan-review-round
           # Legitimate text the plan pattern must NOT match: hyphenated
-          # standard names, a generation count, a port inside a word.
-          printf 'CRC-16, ISO-8601, TEST-NET-1, MPEG-2, generation N-1, UDP-5600\n' > .guard-selftest-plan-clean
-          plan_samples=(.guard-selftest-plan-short .guard-selftest-plan-lane .guard-selftest-plan-spec .guard-selftest-plan-review)
+          # standard names, a generation count, a port inside a word, bus and
+          # document names that start with an R.
+          printf 'CRC-16, ISO-8601, TEST-NET-1, MPEG-2, generation N-1, UDP-5600, RS-485, RFC-2119\n' > .guard-selftest-plan-clean
+          plan_samples=(.guard-selftest-plan-short .guard-selftest-plan-lane .guard-selftest-plan-spec .guard-selftest-plan-review .guard-selftest-plan-review-round)
           git add -f .guard-selftest .guard-selftest-rule "${plan_samples[@]}" .guard-selftest-plan-clean
           for sample in .guard-selftest .guard-selftest-rule; do
             if ! git grep -qIE "$TAG_PATTERN" -- "$sample"; then

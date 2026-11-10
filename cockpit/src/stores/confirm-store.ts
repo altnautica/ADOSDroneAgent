@@ -15,6 +15,9 @@ export interface PendingConfirm {
   altitudeM: number;
   /** The gamepad button that opened the sheet; holding it satisfies the hold. */
   gamepadButton: number | null;
+  /** When the sheet opened (`performance.now()`): a panel long-press fires
+   *  the emergency stop only once its sheet has been open a moment. */
+  openedAt: number;
 }
 
 export type AckKind = "ok" | "warn" | "err";
@@ -48,7 +51,7 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
   ack: null,
 
   open: (skill, gamepadButton = null) =>
-    set({ pending: { skill, altitudeM: LAUNCH.altDefaultM, gamepadButton }, heldSince: null }),
+    set({ pending: { skill, altitudeM: LAUNCH.altDefaultM, gamepadButton, openedAt: performance.now() }, heldSince: null }),
   cancel: () => set({ pending: null, heldSince: null }),
   setAltitude: (m) => set((s) => (s.pending ? { pending: { ...s.pending, altitudeM: m } } : s)),
   setHeld: (down) => {

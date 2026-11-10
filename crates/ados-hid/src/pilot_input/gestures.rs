@@ -381,4 +381,66 @@ mod tests {
         fired.extend(g.tick(&st(&[]), &ctx, 2920).actions);
         assert!(fired.is_empty());
     }
+
+    /// The native engine for a document whose kill row is `kill`.
+    fn engine_with_kill(kill: Binding) -> Gestures {
+        let mut doc = ControlsDoc::ados_default();
+        doc.bindings.push(kill);
+        Gestures::new(&doc.native_bindings())
+    }
+
+    #[test]
+    fn a_kill_bound_to_press_tap_or_a_short_hold_waits_for_the_stop_hold() {
+        let stop = crate::pilot_input::spec::stop_hold_ms();
+        assert_eq!(stop, 3000);
+        let ctx = Context::default();
+        for kill in [
+            row("triangle", &[], "press", None, None, "kill"),
+            row("triangle", &[], "tap", None, None, "kill"),
+            row("triangle", &[], "hold", Some(1500), None, "kill"),
+            row("triangle", &[], "hold", Some(1), None, "kill"),
+        ] {
+            let shape = format!("{} {:?}", kill.gesture, kill.hold_ms);
+            // A short press, released: nothing.
+            let mut g = engine_with_kill(kill.clone());
+            assert!(
+                press_for(&mut g, &ctx, &["triangle"], 100).is_empty(),
+                "{shape}: a short press"
+            );
+            // Held: nothing before the stop hold, the kill at it.
+            let mut g = engine_with_kill(kill);
+            let mut fired = Vec::new();
+            for ms in (0..stop).step_by(20) {
+                fired.extend(g.tick(&st(&["triangle"]), &ctx, ms).actions);
+            }
+            assert!(
+                fired.is_empty(),
+                "{shape}: fired before {stop} ms: {fired:?}"
+            );
+            assert_eq!(
+                g.tick(&st(&["triangle"]), &ctx, stop).actions,
+                vec!["kill"],
+                "{shape}: fires at {stop} ms"
+            );
+        }
+    }
+
+    #[test]
+    fn a_kill_hold_at_or_above_the_stop_hold_is_kept() {
+        let doc = {
+            let mut d = ControlsDoc::ados_default();
+            d.bindings
+                .push(row("triangle", &[], "hold", Some(4000), None, "kill"));
+            d
+        };
+        let rows = doc.native_bindings();
+        let kills: Vec<_> = rows.iter().filter(|b| b.action == "kill").collect();
+        assert!(kills.iter().all(|b| b.gesture == "hold"));
+        assert!(kills
+            .iter()
+            .any(|b| b.control == "triangle" && b.hold_ms == Some(4000)));
+        assert!(kills
+            .iter()
+            .any(|b| b.control == "circle" && b.hold_ms == Some(3000)));
+    }
 }

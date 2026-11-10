@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.100] - 2026-11-10
+
+### Fixed
+
+- A ground-station panel reaches the emergency stop again: a long press on the focused STOP opens the STOP sheet with focus on its hold button, and a second long press, once the sheet has been open for 1 s, stops the motors. One long press never stops them.
+- Every controller binding of the emergency stop, in the browser and in the ground station's native input, waits for the full 3 s stop hold from the shared layout spec: a press or tap row runs as a 3 s hold, and a shorter hold is raised to 3 s. Stored profiles and direct binding writes are covered, and each raised row is logged.
+- Tips stay hidden while the arm state is unknown (flight controller link down, no fresh pilot frame).
+- `reposition` reads its return and landing modes from the same shared list as the cockpit, so Copter `AUTO_RTL` and Plane `LOITER_ALT_QLAND` refuse as a failsafe.
+- The controller tour card re-places only when a zone mounts, leaves or is renamed, or a zone it avoids changes size, not on every style change.
+
 ## [0.109.99] - 2026-11-10
 
 ### Fixed

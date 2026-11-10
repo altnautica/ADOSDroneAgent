@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::spec::{ds4, Binding};
+use super::spec::{ds4, stop_hold_ms, Binding};
 
 /// The document `kind`.
 pub const CONTROLS_KIND: &str = "ados-controls";
@@ -12,6 +12,9 @@ pub const CONTROLS_KIND: &str = "ados-controls";
 /// The actions the ground station executes itself from the pad (sticks aside):
 /// the safety set. Every other binding belongs to the cockpit in the browser.
 pub const NATIVE_ACTIONS: [&str; 5] = ["pause", "rth", "rth_cancel", "arm", "kill"];
+
+/// The emergency stop action.
+pub const STOP_ACTION: &str = "kill";
 
 /// The ground-station emergency lane switch: L2 + R2 + Share held 2 s hands the
 /// RC link to ELRS. Native only, never rebindable, so it is not a spec row.
@@ -128,13 +131,35 @@ impl ControlsDoc {
     }
 
     /// The rows the ground station runs natively, plus the emergency lane switch.
+    ///
+    /// Every row bound to the emergency stop is held at least the spec's stop
+    /// hold (`layout.json` `holds_ms.stop`): a `press` or `tap` row becomes a
+    /// `hold` of that length, and a shorter `hold` is raised to it. A stored
+    /// document or a direct API write can carry such a row; it is logged once
+    /// per load.
     pub fn native_bindings(&self) -> Vec<Binding> {
+        let stop_ms = stop_hold_ms();
         let mut rows: Vec<Binding> = self
             .bindings
             .iter()
             .filter(|b| NATIVE_ACTIONS.contains(&b.action.as_str()))
             .filter(|b| matches!(b.gesture.as_str(), "tap" | "press" | "hold"))
             .cloned()
+            .map(|mut b| {
+                let held = b.gesture == "hold" && b.hold_ms.is_some_and(|ms| ms >= stop_ms);
+                if b.action == STOP_ACTION && !held {
+                    tracing::warn!(
+                        control = %b.control,
+                        gesture = %b.gesture,
+                        hold_ms = ?b.hold_ms,
+                        stop_hold_ms = stop_ms,
+                        "pilot_input_stop_binding_raised_to_stop_hold"
+                    );
+                    b.gesture = "hold".to_string();
+                    b.hold_ms = Some(stop_ms);
+                }
+                b
+            })
             .collect();
         rows.push(Binding {
             control: "share".to_string(),

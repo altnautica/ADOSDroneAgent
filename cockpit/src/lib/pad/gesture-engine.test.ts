@@ -100,6 +100,29 @@ describe("a hold row bound to the emergency stop", () => {
     });
   }
 
+  for (const gesture of ["press", "tap", "double_tap"] as const) {
+    it(`runs a ${gesture} row bound to the stop as a stop hold`, () => {
+      const row: PadBinding = { ...stopRow(0), gesture, hold_ms: null, rumble: null };
+      const rows = DEFAULT_BINDINGS.filter((b) => b.control !== "triangle").concat(row);
+      // A short press, released: nothing.
+      const tapped = new GestureEngine(rows);
+      const quick = [...presses(tapped.step(frame(0, ["triangle"]), ctx)), ...presses(tapped.step(frame(80), ctx))];
+      for (let t = 100; t <= 1000; t += 50) quick.push(...presses(tapped.step(frame(t), ctx)));
+      expect(quick).toEqual([]);
+      // Held: nothing before the stop hold, the stop at it.
+      const e = new GestureEngine(rows);
+      const fired: string[] = [];
+      for (let t = 0; t <= STOP_HOLD_MS - 100; t += 50) fired.push(...presses(e.step(frame(t, ["triangle"]), ctx)));
+      expect(fired).toEqual([]);
+      expect(presses(e.step(frame(STOP_HOLD_MS, ["triangle"]), ctx))).toEqual(["kill:hold"]);
+    });
+  }
+
+  it("is raised to a stop hold by the editor whatever its gesture", () => {
+    const added = addRow(DEFAULT_BINDINGS, "triangle", "press", "kill");
+    expect(added[added.length - 1]).toMatchObject({ gesture: "hold", hold_ms: STOP_HOLD_MS });
+  });
+
   it("is clamped to the stop hold by the editor", () => {
     const added = addRow(DEFAULT_BINDINGS, "triangle", "hold", "kill");
     expect(added[added.length - 1]!.hold_ms).toBe(STOP_HOLD_MS);

@@ -1,0 +1,1 @@
+import{t as e}from"./react-rbL6QGFy.js";var t=e(()=>({status:null,stale:!1,error:null,battery:null}));export{t};

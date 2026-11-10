@@ -1,9 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const sent = vi.hoisted(() => [] as string[]);
+vi.mock("@/lib/skill-runner", () => ({
+  executeSkill: async (skill: { id: string }) => {
+    sent.push(skill.id);
+  },
+}));
 
 import { BUILTIN_SKILLS } from "@/lib/skills";
 import { STOP_HOLD_MS } from "@/lib/pad/ds4-map";
+import { useConfirmStore } from "@/stores/confirm-store";
+import type { NavCommand } from "@/nav/navigator";
 
-import { PANEL_LONG_PRESS_MS, eventToCommand, panelLongPressCompletes } from "./use-buttons";
+import {
+  PANEL_LONG_PRESS_MS,
+  PANEL_STOP_ARM_MS,
+  dispatchPanelEvent,
+  eventToCommand,
+  panelLongPressCompletes,
+} from "./use-buttons";
 
 describe("eventToCommand", () => {
   it("maps a bound button", () => {
@@ -38,5 +53,59 @@ describe("panel long-press as a completed hold", () => {
     const kill = BUILTIN_SKILLS.find((s) => s.id === "kill")!;
     expect(kill.confirm.ms).toBe(STOP_HOLD_MS);
     expect(panelLongPressCompletes(kill.confirm.ms)).toBe(false);
+  });
+});
+
+describe("the panel's emergency stop", () => {
+  const longSelect = { button: "17", label: "b3", kind: "long", action: "cycle_screen" };
+  let now = 0;
+  let stopFocused = true;
+  const commands: NavCommand[] = [];
+  const deps = {
+    command: (c: NavCommand) => commands.push(c),
+    stopFocused: () => stopFocused,
+    now: () => now,
+  };
+
+  beforeEach(() => {
+    sent.length = 0;
+    commands.length = 0;
+    stopFocused = true;
+    useConfirmStore.getState().cancel();
+    vi.spyOn(performance, "now").mockImplementation(() => now);
+    now = 10_000;
+  });
+
+  it("opens the STOP sheet on one long press and sends nothing", () => {
+    dispatchPanelEvent(longSelect, deps);
+    expect(useConfirmStore.getState().pending?.skill.id).toBe("kill");
+    expect(sent).toEqual([]);
+    expect(commands).toEqual([]);
+  });
+
+  it("fires the stop on a second long press once the sheet has been open a moment", () => {
+    dispatchPanelEvent(longSelect, deps);
+    now += PANEL_STOP_ARM_MS - 1;
+    dispatchPanelEvent(longSelect, deps);
+    expect(sent).toEqual([]);
+    expect(useConfirmStore.getState().pending?.skill.id).toBe("kill");
+    now += 1;
+    dispatchPanelEvent(longSelect, deps);
+    expect(sent).toEqual(["kill"]);
+    expect(useConfirmStore.getState().pending).toBeNull();
+  });
+
+  it("cancels the STOP sheet on back", () => {
+    dispatchPanelEvent(longSelect, deps);
+    dispatchPanelEvent({ button: "4", label: "b4", kind: "short", action: "back" }, deps);
+    expect(useConfirmStore.getState().pending).toBeNull();
+    expect(sent).toEqual([]);
+  });
+
+  it("opens the quick menu on a long press away from STOP", () => {
+    stopFocused = false;
+    dispatchPanelEvent(longSelect, deps);
+    expect(useConfirmStore.getState().pending).toBeNull();
+    expect(commands).toEqual(["quick-menu"]);
   });
 });

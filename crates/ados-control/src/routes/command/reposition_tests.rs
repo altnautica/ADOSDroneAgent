@@ -227,7 +227,18 @@ async fn reposition_is_refused_while_a_fresh_pilot_reports_a_failsafe() {
 
 #[tokio::test]
 async fn reposition_is_refused_while_the_fc_returns_or_lands() {
-    for mode in ["RTL", "LAND", "SMART_RTL", "QRTL", "QLAND", "AUTO.RTL"] {
+    // Every return and landing mode the cockpit's shared list names, the
+    // Copter battery failsafe's AUTO_RTL and Plane's LOITER_ALT_QLAND included.
+    for mode in [
+        "RTL",
+        "LAND",
+        "SMART_RTL",
+        "QRTL",
+        "QLAND",
+        "AUTO_RTL",
+        "LOITER_ALT_QLAND",
+        "AUTO.RTL",
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let state = state_with_socket(dir.path(), dir.path().join("absent.sock"));
         state

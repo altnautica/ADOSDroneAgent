@@ -156,6 +156,24 @@ pub fn ds4() -> &'static Ds4Spec {
 static SPEC: LazyLock<Ds4Spec> =
     LazyLock::new(|| serde_json::from_str(DS4_JSON).expect("cockpit-spec ds4.json parses"));
 
+/// The cockpit layout spec (`web-shared/src/cockpit-spec/layout.json`), for
+/// its confirm hold times.
+pub const LAYOUT_JSON: &str = include_str!("../../../../web-shared/src/cockpit-spec/layout.json");
+
+/// The emergency stop's confirm hold, `layout.json` `holds_ms.stop`: every
+/// binding of the stop is held at least this long before it fires.
+pub fn stop_hold_ms() -> u64 {
+    *STOP_HOLD_MS
+}
+
+static STOP_HOLD_MS: LazyLock<u64> = LazyLock::new(|| {
+    let layout: serde_json::Value =
+        serde_json::from_str(LAYOUT_JSON).expect("cockpit-spec layout.json parses");
+    layout["holds_ms"]["stop"]
+        .as_u64()
+        .expect("cockpit-spec layout.json holds_ms.stop is a whole number of ms")
+});
+
 /// An evdev ABS/KEY name from the spec onto its code.
 pub fn evdev_code(name: &str) -> Option<u16> {
     Some(match name {

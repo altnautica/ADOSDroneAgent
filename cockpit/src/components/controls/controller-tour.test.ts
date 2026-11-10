@@ -93,3 +93,32 @@ describe("the tour card's placement", () => {
     expect(top).toBeGreaterThanOrEqual(90);
   });
 });
+
+describe("the tour card's observer", () => {
+  it("ignores style and class changes elsewhere, which a HUD makes every frame", async () => {
+    boxes.top_bar = { x: 0, y: 0, w: 580, h: 52 };
+    const bar = document.createElement("div");
+    bar.setAttribute("data-zone", "top_bar");
+    document.body.appendChild(bar);
+    const tape = document.createElement("div");
+    document.body.appendChild(tape);
+    await settle();
+    let reads = 0;
+    HTMLElement.prototype.getBoundingClientRect = function () {
+      reads += 1;
+      return rectOf(this);
+    };
+    for (let i = 0; i < 5; i++) {
+      tape.style.transform = `translateY(${i}px)`;
+      tape.className = `tape-${i}`;
+      await settle();
+    }
+    expect(reads).toBe(0);
+    // A zone coming or going still re-places it.
+    const alerts = document.createElement("div");
+    alerts.setAttribute("data-zone", "alert_stack");
+    document.body.appendChild(alerts);
+    await settle();
+    expect(reads).toBeGreaterThan(0);
+  });
+});

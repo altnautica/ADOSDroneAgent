@@ -16,15 +16,17 @@
 //   goes down, and the episode keeps timing: a hold row on the same control
 //   still fires on top (PS: brake at once, RTH after 2 s held).
 // - A hold fires its `hold` phase once it has been held `hold_ms` and its
-//   `release` on the way up. An emergency-stop row needs at least the spec
-//   stop hold (`STOP_HOLD_MS`), whatever its own `hold_ms`. `stick_l_centered` restarts the hold whenever the
-//   left stick leaves the centre.
+//   `release` on the way up. A row bound to the emergency stop is always a
+//   hold of at least the spec stop hold (`stopHoldRow`): a press or tap row
+//   bound to it runs as that hold. `stick_l_centered` restarts the hold
+//   whenever the left stick leaves the centre.
 // - `when` gates a row at the moment it would fire.
 
 import {
   CENTERED_THRESHOLD,
   DOUBLE_TAP_MS,
   effectiveHoldMs,
+  stopHoldRow,
   RUMBLE,
   TRIGGER_PRESSED,
   type ControlId,
@@ -93,6 +95,22 @@ interface ComboGroup {
   rows: PadBinding[];
 }
 
+/** Stop rows already reported as raised to the stop hold, so each is logged
+ *  once. */
+const reportedStopRows = new Set<string>();
+
+/** The row as it runs, logging once when an emergency-stop row is raised to
+ *  the stop hold. */
+function asRun(b: PadBinding): PadBinding {
+  const run = stopHoldRow(b);
+  const key = `${[b.control, ...b.with].join("+")}:${b.gesture}:${b.hold_ms ?? ""}`;
+  if (run !== b && !reportedStopRows.has(key)) {
+    reportedStopRows.add(key);
+    console.warn(`controller: emergency-stop binding ${key} runs as a ${run.hold_ms} ms hold`);
+  }
+  return run;
+}
+
 const isTrigger = (c: ControlId) => c === "l2" || c === "r2";
 
 export function whenSatisfied(when: WhenCondition | null, ctx: EngineContext, frame: PadFrame): boolean {
@@ -148,9 +166,9 @@ export class GestureEngine {
 
   private index(nativeSafety: boolean): void {
     this.nativeSafety = nativeSafety;
-    this.rows = this.source.filter(
-      (b) => b.gesture !== "analog" && b.action !== "none" && !(nativeSafety && NATIVE_ACTIONS[b.action]),
-    );
+    this.rows = this.source
+      .filter((b) => b.gesture !== "analog" && b.action !== "none" && !(nativeSafety && NATIVE_ACTIONS[b.action]))
+      .map(asRun);
     this.singles.clear();
     const groups = new Map<string, ComboGroup>();
     this.comboMembers.clear();

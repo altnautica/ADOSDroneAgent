@@ -1,7 +1,8 @@
 // The confirm sheet for every non-tap skill, on the shared sheet. One sheet,
 // several input paths: press-and-hold (touch/pointer), a held controller
-// button or Enter, and a long-press of the panel's activate button (only for
-// a hold no longer than the long press, so never the stop). The hold time is the spec's (`builtins.json` `confirm.ms`). The emergency stop (a
+// button or Enter, and a long-press of the panel's activate button (a hold no
+// longer than the long press; the STOP takes a second panel long-press, see
+// `dispatchPanelEvent`). The hold time is the spec's (`builtins.json` `confirm.ms`). The emergency stop (a
 // `hold_confirm` skill) is the canonical STOP sheet: title `cockpit.estop`,
 // body `confirm.kill.message`, one hold button labelled `stop.hold_label`
 // that counts down (`hold.keep_holding`) while held, and fires once the hold
@@ -64,7 +65,7 @@ function ConfirmSheet() {
 
 
   // A panel long-press is a completed hold in one gesture, for a hold no
-  // longer than the long press (never the emergency stop).
+  // longer than the long press (the STOP is fired by the panel dispatch).
   useEffect(() => {
     if (panelNonce !== initialNonce.current && panelLongPressCompletes(holdMs)) fire();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -162,7 +163,9 @@ function ConfirmSheet() {
         <>
           <div ref={confirmRef}>{confirmControl}</div>
           <p className="mt-[0.4rem] text-center text-[0.75rem] text-muted-foreground">
-            Gamepad: hold the button · Keyboard: hold Enter · Panel: long-press select
+            {danger
+              ? "Gamepad: hold the button · Keyboard: hold Enter · Panel: long-press select again"
+              : "Gamepad: hold the button · Keyboard: hold Enter · Panel: long-press select"}
           </p>
         </>
       }
