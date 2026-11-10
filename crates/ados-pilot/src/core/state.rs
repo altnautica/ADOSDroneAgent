@@ -177,6 +177,11 @@ impl Pilot {
                 })
                 .collect(),
             fc_failsafe: self.fc_failsafe,
+            setup_step: if owner == Owner::Tuning {
+                self.setup_step.map(str::to_owned)
+            } else {
+                None
+            },
         }
     }
 

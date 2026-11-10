@@ -1100,6 +1100,12 @@ impl Engine {
         Some(s.core().view(run.wizard, s.id()))
     }
 
+    /// The running step's id, `None` without a run.
+    pub fn active_step(&self) -> Option<&'static str> {
+        let run = self.run.as_ref()?;
+        run.steps.get(run.idx).map(|s| s.id())
+    }
+
     fn wizard_view(&self, w: WizardId, now: u64) -> WizardView {
         let wr = match w {
             WizardId::Ground => &self.state.ground,

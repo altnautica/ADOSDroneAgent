@@ -51,6 +51,8 @@ pub enum CoreCmd {
     SetRcAdosPosition(u8),
     /// `Some(msg)`: setup incomplete (blocks arming); `None`: complete.
     SetupNeeded(Option<String>),
+    /// The setup engine's active step id, `None` without a run.
+    SetupStep(Option<&'static str>),
 }
 
 /// Handle the setup engine uses to take and give back the `tuning` owner.
@@ -88,6 +90,10 @@ impl PilotHandle {
 
     pub async fn setup_needed(&self, msg: Option<String>) {
         let _ = self.cmd.send(CoreCmd::SetupNeeded(msg)).await;
+    }
+
+    pub async fn setup_step(&self, step: Option<&'static str>) {
+        let _ = self.cmd.send(CoreCmd::SetupStep(step)).await;
     }
 }
 
@@ -263,6 +269,7 @@ impl Core {
                     }
                     Some(CoreCmd::SetRcAdosPosition(n)) => self.pilot.set_rc_ados_position(n),
                     Some(CoreCmd::SetupNeeded(msg)) => self.pilot.setup_needed = Some(msg),
+                    Some(CoreCmd::SetupStep(step)) => self.pilot.setup_step = step,
                     None => {}
                 },
             }

@@ -123,6 +123,8 @@ pub struct Pilot {
     /// Setup engine verdict: `None` unknown (no item), `Some(None)` complete,
     /// `Some(Some(msg))` incomplete.
     pub setup_needed: Option<Option<String>>,
+    /// The setup engine's active step, published while the owner is `Tuning`.
+    pub setup_step: Option<&'static str>,
     /// Wall-clock epoch ms at monotonic 0, for published absolute times.
     pub epoch_offset_ms: u64,
     /// Sticks handed to the setup engine while the owner is `Tuning`.
@@ -171,6 +173,7 @@ impl Pilot {
             last_tick_ms: None,
             controller_lost_shown: false,
             setup_needed: None,
+            setup_step: None,
             epoch_offset_ms: 0,
             tuning_axes: [0.0; 4],
             out: Vec::new(),

@@ -626,6 +626,38 @@ fn surface_goto_refused_while_tuning() {
 }
 
 #[test]
+fn the_pilot_kind_names_the_setup_step_only_while_tuning() {
+    let mut w = World::new();
+    w.airborne(copter::GUIDED);
+    w.p.setup_step = Some("autotune");
+    w.run(100);
+    let v = serde_json::to_value(w.p.state(w.now)).unwrap();
+    assert_eq!(
+        v["setup_step"],
+        serde_json::Value::Null,
+        "owner {:?}",
+        w.p.owner()
+    );
+    assert!(v.as_object().unwrap().contains_key("setup_step"));
+
+    w.p.auth.enter_tuning().unwrap();
+    w.run(100);
+    let s = w.p.state(w.now);
+    assert_eq!(s.setup_step.as_deref(), Some("autotune"));
+    assert_eq!(serde_json::to_value(&s).unwrap()["setup_step"], "autotune");
+
+    w.p.setup_step = None;
+    w.run(100);
+    assert_eq!(w.p.owner(), Owner::Tuning);
+    assert_eq!(w.p.state(w.now).setup_step, None);
+
+    w.p.setup_step = Some("first_hover");
+    w.action("land");
+    assert_ne!(w.p.owner(), Owner::Tuning);
+    assert_eq!(w.p.state(w.now).setup_step, None);
+}
+
+#[test]
 fn surface_goto_offsets_from_a_home_away_from_the_local_origin() {
     let mut w = World::new();
     let m = MavMessage::HOME_POSITION(HOME_POSITION_DATA {

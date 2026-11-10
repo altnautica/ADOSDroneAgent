@@ -215,6 +215,10 @@ pub struct PilotState {
     /// mode. Omitted while false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fc_failsafe: bool,
+    /// The FC setup engine's active step id (`autotune`, `first_hover`, …)
+    /// while the owner is `tuning`; `None` otherwise.
+    #[serde(default)]
+    pub setup_step: Option<String>,
 }
 
 /// One camera's obstacle (or depth) grid: 32×18 cells, row-major, row 0 at

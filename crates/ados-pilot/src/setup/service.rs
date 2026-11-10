@@ -72,6 +72,7 @@ async fn run(
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut needed: Option<Option<String>> = None;
+    let mut step_sent: Option<Option<&'static str>> = None;
     loop {
         tokio::select! {
             v = version_frames.recv() => if let Ok(frame) = v {
@@ -100,13 +101,14 @@ async fn run(
                         .collect(),
                 };
                 let owner_tuning = *handle.owner.borrow() == Owner::Tuning;
-                let (msgs, effects, out_frames, need) = {
+                let (msgs, effects, out_frames, need, step) = {
                     let mut e = inner.engine.lock().expect("engine lock");
                     e.set_inputs(inputs);
                     e.set_pilot_tuning(owner_tuning);
                     e.tick(now);
+                    let step = e.active_step();
                     let ob = e.outbox();
-                    (ob.take_msgs(), ob.take_effects(), e.frames(now), e.setup_needed(now))
+                    (ob.take_msgs(), ob.take_effects(), e.frames(now), e.setup_needed(now), step)
                 };
                 for m in msgs {
                     if tx.try_send(m).is_err() {
@@ -130,6 +132,10 @@ async fn run(
                 if needed.as_ref() != Some(&need) {
                     handle.setup_needed(need.clone()).await;
                     needed = Some(need);
+                }
+                if step_sent != Some(step) {
+                    handle.setup_step(step).await;
+                    step_sent = Some(step);
                 }
             }
         }

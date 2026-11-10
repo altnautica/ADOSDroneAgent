@@ -318,6 +318,17 @@ fn full_ground_copter_flow() {
 }
 
 #[test]
+fn active_step_names_the_running_step() {
+    let mut s = Sim::copter();
+    assert_eq!(s.e.active_step(), None);
+    assert_eq!(s.e.run_step(G, "accel", s.now)["ok"], json!(true));
+    assert_eq!(s.e.active_step(), Some("accel"));
+    do_accel(&mut s);
+    s.until(|s| s.e.current_view().is_none(), 5_000);
+    assert_eq!(s.e.active_step(), None);
+}
+
+#[test]
 fn accel_pose_sequence() {
     let mut s = Sim::copter();
     assert_eq!(s.e.run_step(G, "accel", s.now)["ok"], json!(true));
