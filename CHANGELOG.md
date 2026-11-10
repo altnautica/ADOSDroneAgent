@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.63] - 2026-11-10
+
+### Changed
+
+- Cockpit: the maps end-to-end check follows the map view with the video in the bottom-left card and exits when it finishes.
+
 ## [0.109.62] - 2026-11-10
 
 ### Changed
