@@ -14,6 +14,7 @@ import { prevLevel } from "@/lib/cockpit-view";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
+import { specText } from "@/shared/hud/spec-text";
 
 export const PROFILES = ["cine", "normal", "sport"] as const;
 
@@ -33,7 +34,7 @@ export function registerFeedActions(): () => void {
     { id: "view.next", label: "Next view", group: "view", run: press(() => view().cycleView()) },
     {
       id: "swap_map",
-      label: "Swap video and map",
+      label: specText("cockpit.pip.swap"),
       group: "view",
       run: press(() => view().setView(view().view === "map" ? "pilot" : "map")),
     },

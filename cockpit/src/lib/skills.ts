@@ -176,6 +176,8 @@ export interface PilotView {
   armed: boolean;
   landed: boolean;
   vehicleClass: VehicleClass | null;
+  /** The flight controller is in its own failsafe return or landing. */
+  fcFailsafe?: boolean;
   /** The pilot state is no older than `PILOT_FRESH_MS`. */
   fresh: boolean;
 }
@@ -252,11 +254,11 @@ export function armGateReason(req: ArmRequirement, armed: boolean, landed: boole
       return armed ? refusalText("armed") : null;
     case "armed_landed":
       if (!armed) return refusalText("not_armed");
-      if (landed === null) return "Landed state unknown";
+      if (landed === null) return refusalText("landed_unknown");
       return landed ? null : refusalText("not_landed");
     case "disarmed_or_landed":
       if (!armed) return null;
-      if (landed === null) return "Landed state unknown";
+      if (landed === null) return refusalText("landed_unknown");
       return landed ? null : refusalText("not_landed");
   }
 }
@@ -266,6 +268,9 @@ function resolveBuiltin(skill: Skill, b: BuiltinBinding, ctx: SkillContext): Ski
   // and a send with no route says so when it fails.
   if (skill.id === "kill") return { enabled: true };
   const pilot = ctx.pilot ?? null;
+  // A pause would fight the flight controller's own failsafe return or
+  // landing: refused while a fresh pilot state reports one.
+  if (skill.id === "pause" && pilot?.fresh && pilot.fcFailsafe) return disabled(refusalText("failsafe"));
   const noLink = ctx.linkReason ?? refusalText("no_fc");
   const route = builtinRoute(skill, ctx);
   if (route === null) {

@@ -36,6 +36,7 @@ import { ApiError, errorDetail } from "@/shared/api-fetch";
 import { toast } from "@/shared/api/toast";
 import { useConfirmStore, type AckLine } from "@/stores/confirm-store";
 import { activateExtensionSkill, pluginSkills, useExtensionsStore } from "@/stores/extensions-store";
+import { ackText } from "@/lib/mav-result";
 import { requirePreflight } from "@/stores/preflight-store";
 
 const ACK_CLEAR_MS = 4000;
@@ -55,8 +56,8 @@ function failureText(e: unknown): string {
 }
 
 /** A `COMMAND_ACK` result name in the spec's words (`mav_result.*`). */
-function mavResultText(name: string | undefined): string {
-  return name && hasSpecText(`mav_result.${name}`) ? specText(`mav_result.${name}`) : refusalText(null);
+function resultWord(name: string | undefined | null): string {
+  return ackText({ result_name: name ?? "REFUSED" }) ?? specText("refusal.refused");
 }
 
 /** The request never reached the agent, or the agent's upstream is down: a
@@ -69,7 +70,7 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
   const route = builtinRoute(skill, skillContextNow());
   if (route === "pilot") {
     const r = await sendPilotAction(b.pilotAction);
-    report(r.ok ? { text: `${skill.label}: ${mavResultText("ACCEPTED")}`, kind: "ok" } : { text: `${skill.label}: ${refusalText(r.err)}`, kind: "err" });
+    report(r.ok ? { text: `${skill.label}: ${resultWord("ACCEPTED")}`, kind: "ok" } : { text: `${skill.label}: ${refusalText(r.err)}`, kind: "err" });
     return;
   }
   if (route !== "command" || !b.command) {
@@ -93,10 +94,10 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
   if (!a?.observed) {
     report({ text: specText("skill.did_not_respond", { skill: skill.label }), kind: "warn" });
   } else if (a.accepted) {
-    report({ text: `${skill.label}: ${mavResultText("ACCEPTED")}`, kind: "ok" });
+    report({ text: `${skill.label}: ${resultWord("ACCEPTED")}`, kind: "ok" });
   } else {
     const why = a.statustext ? ` — ${a.statustext}` : "";
-    report({ text: `${skill.label}: ${mavResultText(a.result_name)}${why}`, kind: "err" });
+    report({ text: `${skill.label}: ${resultWord(a.result_name)}${why}`, kind: "err" });
   }
 }
 
@@ -190,7 +191,7 @@ async function runExtension(skill: Skill, active: boolean): Promise<void> {
   } else {
     await writeActivation(skill, true);
   }
-  report({ text: `${skill.label}: ${mavResultText("ACCEPTED")}`, kind: "ok" });
+  report({ text: `${skill.label}: ${resultWord("ACCEPTED")}`, kind: "ok" });
 }
 
 /** Return home, Land, Pause and Emergency stop (the built-ins that stop motion)

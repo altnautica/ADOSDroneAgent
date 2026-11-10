@@ -44,6 +44,7 @@ function buildContext(i: ContextInputs): SkillContext {
           armed: p.data.armed,
           landed: p.data.landed,
           vehicleClass: p.data.vehicleClass,
+          fcFailsafe: p.data.fcFailsafe,
           fresh: i.now - p.at <= PILOT_FRESH_MS,
         }
       : null,
