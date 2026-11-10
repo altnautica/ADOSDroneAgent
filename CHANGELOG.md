@@ -6,6 +6,15 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.84] - 2026-11-10
+
+### Changed
+
+- Cockpit status pill: no pilot state, or a stale one, is never reported as OK. The pill also raises an agent that stops answering, a controller lost in the air, and, on the ground, each failing pre-flight check.
+- Cockpit flight-state chip: the failsafe and paused-mission lines and the Resume and Abort buttons come from the shared chip rules. Abort cancels a running launch. The chip takes at most 40 % of the bar; when it is cut short, the full text shows on hover or tap. While the nav stream runs at the radio's reduced rate, the chip says so.
+- Cockpit top bar: the link cell shows the age of the newest vehicle frame, and its icon turns amber at 3 s and red at 10 s. Tapping the cell shows the RSSI. The battery cell shows the time left to the reserve.
+- Cockpit: critical text, the panel and STOP use the spec's colours. Alert-level labels on a TV are at least 16 px. Alert levels and the nav-source popover use the spec's wording. The video placeholder uses the spec's wording and offers Retry when the picture fails or freezes.
+
 ## [0.109.83] - 2026-11-10
 
 ### Changed
