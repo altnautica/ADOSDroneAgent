@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.57] - 2026-11-10
+
+### Changed
+
+- Cockpit: the skill picker (GO, Starting…, Stop, ACTIVE, tabs, avoidance chip) and the controller cell read their words from the shared cockpit spec, and the picker marks a running skill in the spec skill colour.
+
 ## [0.109.56] - 2026-11-10
 
 ### Changed
