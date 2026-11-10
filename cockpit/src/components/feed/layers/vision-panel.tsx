@@ -212,7 +212,7 @@ export function LayerSwitch({
       {forcedBy !== null ? (
         <>
           <p id={reasonId} className="text-[0.85em] text-white/60">
-            On while the {forcedBy} view is open
+            {specText("vision.on_while_view", { view: forcedBy })}
           </p>
           <label className="flex min-h-[48px] items-center justify-between text-[0.85em] text-white/70">
             <span>{specText("vision.keep_on")}</span>
@@ -289,7 +289,7 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
         {status ? (
           <div className="space-y-[2px] text-[0.85em]">
             <div>
-              {status.backend ?? "no backend"} · {status.backend_state}
+              {status.backend ?? specText("vision.no_backend")} · {status.backend_state}
             </div>
             {status.backend_reason ? <div className="text-amber-400">{status.backend_reason}</div> : null}
             {status.models.map((m) => (
@@ -297,7 +297,7 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
                 <span className="truncate">
                   {m.id} ({m.kind})
                 </span>
-                <span>{m.fps !== null ? `${m.fps.toFixed(1)} fps` : "idle"}</span>
+                <span>{m.fps !== null ? specText("vision.fps", { n: m.fps.toFixed(1) }) : specText("vision.idle")}</span>
               </div>
             ))}
           </div>

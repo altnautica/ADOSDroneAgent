@@ -2,6 +2,7 @@
 // STRICT | SMART). A written value awaiting the plugin's echo carries a 1 px
 // dashed outline (13-hud-v2 §8.2 #2); a tap is the whole confirm.
 
+import { specText } from "@/shared/hud/spec-text";
 import { useSkillSetting } from "@/hooks/use-skill-setting";
 import type { Skill, SkillSetting } from "@/lib/skills";
 import { cn } from "@/lib/utils";
@@ -21,7 +22,7 @@ export function SettingToggle({
   return (
     <div
       role="radiogroup"
-      aria-label={setting.key === "reacquire_mode" ? "Re-acquire mode" : setting.key}
+      aria-label={setting.key === "reacquire_mode" ? specText("target.reacquire_mode") : setting.key}
       className={cn("flex overflow-hidden rounded-md border border-hud-hair", vertical ? "flex-col" : "flex-row", className)}
     >
       {setting.values.map((v) => {

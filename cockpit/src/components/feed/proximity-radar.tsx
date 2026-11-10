@@ -17,6 +17,7 @@
 // range the operator cycles from the corner label, and the readout carries the
 // nearest return with its CLEAR / CAUTION / DANGER word.
 
+import { specText } from "@/shared/hud/spec-text";
 import { useNow } from "@/hooks/use-now";
 import { useFlightStore } from "@/stores/flight-store";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -107,7 +108,7 @@ export function ProximityRadar({ className }: { className?: string } = {}) {
           text: `${String(Math.round(heading) % 360).padStart(3, "0")}°`,
           cls: "text-surface-foreground/80",
         }
-      : { text: "no heading", cls: "text-muted-foreground" };
+      : { text: specText("radar.no_heading"), cls: "text-muted-foreground" };
 
   return (
     <div
@@ -123,12 +124,12 @@ export function ProximityRadar({ className }: { className?: string } = {}) {
           className="absolute left-[4px] top-[2px] z-10 text-[11px] uppercase tracking-wide text-muted-foreground"
           aria-hidden
         >
-          Radar
+          {specText("radar.title")}
         </span>
         <button
           type="button"
           onClick={() => setSetting(cycleRadarScale(setting))}
-          aria-label={`Radar range ${view.scaleLabel}; change range`}
+          aria-label={specText("radar.range_change", { r: view.scaleLabel })}
           className="pointer-events-auto absolute right-[2px] top-0 z-10 min-h-[24px] rounded px-[4px] font-mono text-[11px] text-surface-foreground/80"
         >
           {view.scaleLabel}

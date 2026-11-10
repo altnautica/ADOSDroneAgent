@@ -6,6 +6,7 @@
 // swaps the inset with the main video; the old main then stays in the inset.
 // Sizes are CSS px; the grid's class scale applies around it.
 
+import { specText } from "@/shared/hud/spec-text";
 import { useState } from "react";
 import { ArrowLeftRight } from "lucide-react";
 
@@ -42,7 +43,7 @@ export function PipInset({ camera, streamNonce }: { camera: RosterCamera; stream
       <button
         type="button"
         onClick={swapPip}
-        aria-label={`Swap ${label} into the main view`}
+        aria-label={specText("cockpit.pip.swap_leg", { leg: label })}
         className="absolute left-[4px] top-[4px] z-[16] flex min-h-[48px] min-w-[48px] items-center gap-[5px] rounded-md bg-hud-glass-strong px-[7px] font-semibold uppercase tracking-wide text-hud-ink"
         style={{ fontSize: 11 }}
       >

@@ -1,5 +1,5 @@
 // The follow controls (L3), a row in the follow strip under the top bar:
-// FOLLOW / TRACKING ×, the FOLLOW | ORBIT pattern with the avoidance chip,
+// FOLLOW / the tracking close chip, the FOLLOW | ORBIT pattern with the avoidance chip,
 // the STRICT | SMART re-acquire toggle, the FRONT ⇄ BELLY camera swap and
 // REC. Hold, return home and land are the left column's alone; the rail never
 // repeats them. Kill is not here; it stays guarded in the top bar.
@@ -135,7 +135,7 @@ export function FollowRail({
               key={b}
               size={size}
               icon={X}
-              word="TRACKING ×"
+              word={specText("follow.tracking_close")}
               label={specText("follow.stop_tracking")}
               active
               disabled={busy}
@@ -178,7 +178,7 @@ export function FollowRail({
         ) : null;
       case "camSwap":
         return (
-          <RailSlot key={b} size={size} icon={ArrowLeftRight} word={swapLabel ?? ""} label={`Swap cameras ${swapLabel ?? ""}`} onPress={swapPip} />
+          <RailSlot key={b} size={size} icon={ArrowLeftRight} word={swapLabel ?? ""} label={specText("follow.swap_cameras", { pair: swapLabel ?? "" })} onPress={swapPip} />
         );
       case "rec":
         return (
@@ -200,7 +200,7 @@ export function FollowRail({
 
   const foldItems: MenuItem[] = layout.folded.map((b) =>
     b === "camSwap"
-      ? { label: `Swap cameras ${swapLabel ?? ""}`, icon: ArrowLeftRight, onSelect: swapPip }
+      ? { label: specText("follow.swap_cameras", { pair: swapLabel ?? "" }), icon: ArrowLeftRight, onSelect: swapPip }
       : {
           label: specText(recording ? "cockpit.camera.stop_recording" : "cockpit.camera.start_recording"),
           icon: recording ? Square : Circle,

@@ -98,18 +98,16 @@ describe("map, instrument, target and vision text", () => {
     "target-layer.tsx",
     "whats-locked-chip.tsx",
     "../../lib/detection-lease.ts",
+    "layers/vision-panel.tsx",
+    "proximity-radar.tsx",
+    "reacquire-toggle.tsx",
+    "pip-inset.tsx",
+    "follow-rail.tsx",
+    "../../lib/map-status-view.ts",
   ])("%s draws no hard-coded words", (rel) => {
     expect(drawnWords(rel)).toEqual([]);
   });
 
-  // Words the spec has no key for yet; each leaves this list when its key lands.
-  it.each([
-    ["layers/vision-panel.tsx", ["On while the", "view is open", "no backend", "{} fps", "idle"]],
-    ["proximity-radar.tsx", ["no heading", "Radar", "Radar range {}; change range"]],
-    ["reacquire-toggle.tsx", ["Re-acquire mode"]],
-  ] as const)("%s draws no hard-coded words but the ones awaiting a spec key", (rel, awaiting) => {
-    expect(drawnWords(rel)).toEqual(awaiting);
-  });
 
   it("reads the detector notices from the spec", () => {
     expect(detectorNotice("idle")).toBe("Detector idle");

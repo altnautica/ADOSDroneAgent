@@ -49,7 +49,7 @@ export default function NavSourcePopover({
         setCommandedSet(set);
         if (ack?.observed) toast.ok(specText("nav_source.set_active", { n: set }));
         // "sent" rather than "active": the flight controller has not acknowledged it.
-        else toast.info(specText("nav_source.set_sent", { n: set }));
+        else toast.info(specText("nav_source.set_sent", { n: set }), specText("nav_source.no_ack"));
       }
     } catch (e) {
       toastFromError(e, specText("nav_source.set_not_sent", { n: set }));

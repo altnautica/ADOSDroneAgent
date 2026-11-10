@@ -45,6 +45,7 @@ describe("an unavailable flight control explains itself on press", () => {
       "../components/feed/follow-chrome.tsx",
       "../components/feed/onscreen-sticks.tsx",
       "./follow-panel.ts",
+      "../components/feed/pip-inset.tsx",
     ];
     for (const f of files) {
       const s = src(f);
@@ -52,6 +53,7 @@ describe("an unavailable flight control explains itself on press", () => {
       expect(s, f).not.toMatch(/"(FOLLOW|REC|MORE|STALE|IDLE|HOLD|LOST|GND|BOX|LIDAR|SMART|STRICT)"/);
       expect(s, f).not.toMatch(/`(DEP|BRG|LAT) /);
       expect(s, f).not.toMatch(/"Recording did not (start|stop)"/);
+      expect(s, f).not.toMatch(/TRACKING ×|Swap cameras|Swap \$\{/);
     }
   });
 

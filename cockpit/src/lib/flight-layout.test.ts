@@ -306,9 +306,10 @@ describe("the top bar's cells from the spec", () => {
     expect(stack).toContain("alert.level.");
     for (const w of ['"Critical"', '"Warning"', '"Advisory"']) expect(stack, w).not.toContain(w);
     const pop = readFileSync(path.resolve(__dirname, "../components/feed/nav-source-popover.tsx"), "utf8");
-    for (const w of ['"ACTIVE"', ">Set<", ">Ext nav<", ">GPS<", ">EKF<", "Use set {s}", "refused`", "sats`", "No live flight controller"]) {
+    for (const w of ['"ACTIVE"', ">Set<", ">Ext nav<", ">GPS<", ">EKF<", "Use set {s}", "refused`", "sats`", "No live flight controller", "No acknowledgement"]) {
       expect(pop, w).not.toContain(w);
     }
+    expect(pop).toContain('specText("nav_source.no_ack")');
   });
 
   it("the chip is capped at max_frac of the bar with its full text on hover and tap", () => {
