@@ -252,7 +252,8 @@ async function padSafetyCase(browser) {
  *  nothing focused: one press of next (and, separately, previous) focuses
  *  STOP; a long select opens the STOP sheet and sends nothing; a long back
  *  closes it and sends nothing; a second long select a second after the
- *  first sends exactly one kill. */
+ *  first sends exactly one kill; on a sheet a short select opened, the first
+ *  long select only arms it and a second one a second later fires. */
 async function panelStopCase(browser) {
   const STEP = { next: { button: "2", label: "b2" }, prev: { button: "1", label: "b1" } };
   const select = { button: "3", label: "b3", kind: "long", action: "select" };
@@ -296,6 +297,21 @@ async function panelStopCase(browser) {
       await until(page, "the kill", () => kills() >= 1, 3000);
       await page.waitForTimeout(500);
       assert.equal(kills(), 1, "the second long select sends exactly one kill");
+      // A sheet opened by a short select is armed only by a long select:
+      // one long select a second later sends nothing, a second one fires.
+      await page.waitForTimeout(300);
+      await page.locator(STOP).focus();
+      send({ ...select, kind: "short" });
+      await page.getByTestId("stop-sheet-title").waitFor({ timeout: 2000 });
+      await page.waitForTimeout(1200);
+      send(select);
+      await page.waitForTimeout(600);
+      assert.equal(kills(), 1, "one long select on a short-select sheet sends nothing");
+      await page.waitForTimeout(600);
+      send(select);
+      await until(page, "the second kill", () => kills() >= 2, 3000);
+      await page.waitForTimeout(500);
+      assert.equal(kills(), 2, "the second long select on a short-select sheet sends exactly one kill");
     });
     if (step === "next") await page.screenshot({ path: path.join(SHOTS, "panel-stop-kiosk.png") });
     await ctx.close();

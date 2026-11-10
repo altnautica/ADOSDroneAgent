@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.102] - 2026-11-10
+
+### Fixed
+
+- Ground-station panel: only a long press of select arms the emergency stop. On a STOP sheet opened any other way (a short select, touch or a pad), the first long select arms it and only a second one, a second later, fires it.
+
 ## [0.109.101] - 2026-11-10
 
 ### Fixed

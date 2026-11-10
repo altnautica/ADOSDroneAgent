@@ -123,9 +123,10 @@ export const PANEL_STOP_ARM_MS = 1000;
 
 /** The panel's emergency stop. The panel reports a long press only on
  *  release, so it cannot time the 3 s hold; it takes two deliberate long
- *  presses instead. A long press on the focused STOP opens the STOP sheet
- *  (focus on its hold button); a second long press, once the sheet has been
- *  open `PANEL_STOP_ARM_MS`, fires the stop. One long press never fires it. */
+ *  presses instead. A long press of select on the focused STOP opens the
+ *  STOP sheet and arms it; a second long press, `PANEL_STOP_ARM_MS` after the
+ *  arming one, fires the stop. A sheet opened any other way is armed by its
+ *  first long select. One long press never fires it. */
 export interface PanelDeps {
   command: (cmd: NavCommand) => void;
   /** Whether the focused control is STOP. */
@@ -143,9 +144,12 @@ export function dispatchPanelEvent(ev: ButtonEvent, deps: PanelDeps): void {
     // A skill sheet is open: back cancels it, nothing navigates underneath
     // it. A long press of select fires the STOP once its sheet has been open
     // a moment, and completes any other hold no longer than the long press.
-    const { skill, openedAt, altitudeM } = confirm.pending;
+    const { skill, panelArmedAt, altitudeM } = confirm.pending;
     if (longSelect && skill.id === BUILTIN_SKILL_BY_ID.kill.id) {
-      if (deps.now() - openedAt >= PANEL_STOP_ARM_MS) {
+      // Only a panel long select arms the stop: the first one on a sheet
+      // opened any other way arms it, and a later one fires it.
+      if (panelArmedAt === null) confirm.armPanel(deps.now());
+      else if (deps.now() - panelArmedAt >= PANEL_STOP_ARM_MS) {
         confirm.cancel();
         void executeSkill(skill, { altitudeM });
       }
@@ -156,7 +160,7 @@ export function dispatchPanelEvent(ev: ButtonEvent, deps: PanelDeps): void {
   // A long press of select on the focused STOP opens its sheet through the
   // same gate as the STOP button's click; it never fires it.
   if (longSelect && deps.stopFocused()) {
-    requestSkill(BUILTIN_SKILL_BY_ID.kill, skillContextNow());
+    if (requestSkill(BUILTIN_SKILL_BY_ID.kill, skillContextNow())) useConfirmStore.getState().armPanel(deps.now());
     return;
   }
   // A focused guarded button or slide-to-confirm takes the long press as

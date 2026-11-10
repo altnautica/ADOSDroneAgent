@@ -15,9 +15,11 @@ export interface PendingConfirm {
   altitudeM: number;
   /** The gamepad button that opened the sheet; holding it satisfies the hold. */
   gamepadButton: number | null;
-  /** When the sheet opened (`performance.now()`): a panel long-press fires
-   *  the emergency stop only once its sheet has been open a moment. */
-  openedAt: number;
+  /** When a panel long press of select armed the emergency stop
+   *  (`performance.now()`), else null. Only a panel long select arms it, so
+   *  a sheet opened any other way (short select, touch, pad) still takes two
+   *  long selects; the second fires once it is `PANEL_STOP_ARM_MS` later. */
+  panelArmedAt: number | null;
 }
 
 export type AckKind = "ok" | "warn" | "err";
@@ -41,6 +43,8 @@ interface ConfirmState {
   setAltitude: (m: number) => void;
   setHeld: (down: boolean) => void;
   panelConfirm: () => void;
+  /** Record the panel long select that armed the open sheet's stop. */
+  armPanel: (at: number) => void;
   setAck: (ack: AckLine | null) => void;
 }
 
@@ -51,7 +55,7 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
   ack: null,
 
   open: (skill, gamepadButton = null) =>
-    set({ pending: { skill, altitudeM: LAUNCH.altDefaultM, gamepadButton, openedAt: performance.now() }, heldSince: null }),
+    set({ pending: { skill, altitudeM: LAUNCH.altDefaultM, gamepadButton, panelArmedAt: null }, heldSince: null }),
   cancel: () => set({ pending: null, heldSince: null }),
   setAltitude: (m) => set((s) => (s.pending ? { pending: { ...s.pending, altitudeM: m } } : s)),
   setHeld: (down) => {
@@ -61,5 +65,6 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
     else if (!down && heldSince !== null) set({ heldSince: null });
   },
   panelConfirm: () => set((s) => ({ panelConfirmNonce: s.panelConfirmNonce + 1 })),
+  armPanel: (at) => set((s) => (s.pending ? { pending: { ...s.pending, panelArmedAt: at } } : s)),
   setAck: (ack) => set({ ack }),
 }));

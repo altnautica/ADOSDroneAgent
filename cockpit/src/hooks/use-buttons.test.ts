@@ -159,4 +159,19 @@ describe("the panel's emergency stop", () => {
     expect(isLongSelect({ button: "130", label: "enc_sw", kind: "long", action: "x" })).toBe(false);
     expect(isLongSelect({ ...longSelect, kind: "short" })).toBe(false);
   });
+
+  it("takes two long selects on a sheet opened another way (short select, touch, pad)", () => {
+    const kill = BUILTIN_SKILLS.find((x) => x.id === "kill")!;
+    useConfirmStore.getState().open(kill);
+    now += PANEL_STOP_ARM_MS * 3;
+    dispatchPanelEvent(longSelect, deps);
+    expect(sent).toEqual([]);
+    expect(useConfirmStore.getState().pending?.skill.id).toBe("kill");
+    now += PANEL_STOP_ARM_MS - 1;
+    dispatchPanelEvent(longSelect, deps);
+    expect(sent).toEqual([]);
+    now += 1;
+    dispatchPanelEvent(longSelect, deps);
+    expect(sent).toEqual(["kill"]);
+  });
 });
