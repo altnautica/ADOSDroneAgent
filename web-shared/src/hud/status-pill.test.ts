@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import layout from "../cockpit-spec/layout.json";
 import type { BatteryHealthInput } from "./battery";
 import pillCases from "./fixtures/pill-cases.json";
-import { alertSource, baseAlerts, pillAlerts, pillSummary, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs } from "./status-pill";
+import { alertSource, baseAlerts, controllerLost, pillAlerts, pillSummary, STORAGE_CRIT_PCT, STORAGE_WARN_PCT, type BaseAlertInputs } from "./status-pill";
 
 function inputs(over: Partial<BaseAlertInputs> = {}): BaseAlertInputs {
   return { status: null, telemetry: null, battery: null, msSinceLive: 0, video: "live", ...over };
@@ -150,7 +150,7 @@ describe("status pill", () => {
     expect([STORAGE_WARN_PCT, STORAGE_CRIT_PCT]).toEqual([layout.status_pill.storage_warn_pct, layout.status_pill.storage_crit_pct]);
     const storage = (pct: number) => pillAlerts({ ...none, storagePct: pct }).find((x) => x.source === "storage")?.severity ?? "ok";
     expect([89, 90, 96, 97].map(storage)).toEqual(["ok", "warning", "warning", "critical"]);
-    expect(pillAlerts({ ...none, storagePct: 90 })[0].text).toBe("Storage 90%");
+    expect(pillAlerts({ ...none, storagePct: 90 })[0].text).toBe("90 % used");
   });
 
   it("raises FC warnings from the pilot kind, critical at ERROR or worse, skipping PreArm lines", () => {
@@ -194,6 +194,44 @@ describe("status pill", () => {
       ["pilot:no_agl", "warning"],
     ]);
   });
+
+  it("never reads OK without a fresh pilot state, and drops what the stale frame said", () => {
+    const block = { id: "gps", ok: false, severity: "block" as const, msg: "No GNSS fix" };
+    const fcStatus = [{ severity: 4, text: "EKF3 lane switch 1", ageMs: 0 }];
+    const ids = (pilotAgeMs: number | null | undefined) =>
+      pillAlerts({ ...none, readiness: [block], fcStatus, controllerLost: true, pilotAgeMs }).map((a) => a.id);
+    expect(ids(undefined)).toEqual(["pilot:gps", "controller_lost", "fcst:EKF3 lane switch 1"]);
+    expect(ids(1999)).toEqual(["pilot:gps", "controller_lost", "fcst:EKF3 lane switch 1"]);
+    expect(ids(2000)).toEqual(["pilot_not_answering"]);
+    expect(ids(null)).toEqual(["pilot_not_answering"]);
+    const s = pillSummary(pillAlerts({ ...none, pilotAgeMs: null }), new Set());
+    expect(s).toMatchObject({ severity: "warning", text: "Pilot not answering" });
+    expect(s.alerts[0].source).toBe("pilot");
+  });
+
+  it("raises the agent, controller and pre-flight items from the spec", () => {
+    const a = pillAlerts({
+      ...none,
+      pilotAgeMs: 0,
+      agentReachable: false,
+      controllerLost: true,
+      preflightFailing: [{ id: "gps", label: "GNSS fix" }],
+    });
+    expect(a.map((x) => [x.id, x.source, x.severity, x.text])).toEqual([
+      ["agent_unreachable", "link", "critical", "Agent unreachable"],
+      ["controller_lost", "controller", "warning", "Controller lost"],
+      ["preflight:gps", "preflight", "warning", "Pre-flight: GNSS fix"],
+    ]);
+  });
+
+  it("calls the controller lost only while armed and airborne", () => {
+    const p = { holdReason: "controller-lost", armed: true, landed: false };
+    expect(controllerLost(p)).toBe(true);
+    expect(controllerLost({ ...p, landed: true })).toBe(false);
+    expect(controllerLost({ ...p, armed: false })).toBe(false);
+    expect(controllerLost({ ...p, holdReason: "link-loss" })).toBe(false);
+    expect(controllerLost(null)).toBe(false);
+  });
 });
 
 describe("pill golden cases (fixtures/pill-cases.json)", () => {
@@ -206,6 +244,10 @@ describe("pill golden cases (fixtures/pill-cases.json)", () => {
         prearm: i.prearm ?? undefined,
         storagePct: i.storage_pct,
         fcStatus: i.fc_status.map((s) => ({ severity: s.severity, text: s.text, ageMs: s.age_ms })),
+        pilotAgeMs: i.pilot_age_ms,
+        agentReachable: i.agent_reachable,
+        controllerLost: i.controller_lost,
+        preflightFailing: i.preflight_failing,
       });
       const s = pillSummary(alerts, new Set());
       expect({ severity: s.severity, text: s.text, count: s.count, ids: alerts.map((a) => a.id) }).toEqual(c.expected);

@@ -19,6 +19,7 @@
 //     presents a frame, so a viewer whose WHEP never works keeps its picture.
 
 import { startHls } from "./hls";
+import i18n from "./i18n";
 import { startWhep } from "./whep";
 
 export type TransportKind = "whep" | "hls";
@@ -230,7 +231,7 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
       if (myGen !== gen) return;
       const now = Date.now();
       if (!sawFrame) {
-        if (now - sessionStartedAt >= firstFrameMs) failCurrent(myGen, "No video frames received.");
+        if (now - sessionStartedAt >= firstFrameMs) failCurrent(myGen, i18n.t("video.error.noFrames"));
         return;
       }
       if (now - lastFrameAt >= noFrameMs) onFreeze(myGen);
@@ -247,14 +248,14 @@ export function createVideoTransport(opts: VideoTransportOptions): VideoTranspor
     const kind = order[i];
     emit({ state, transport: kind, highLatency: isHighLatency(i) });
     const result = await dial(kind, urlFor(kind), video, () => {
-      if (myGen === gen) failCurrent(myGen, "Video session lost.");
+      if (myGen === gen) failCurrent(myGen, i18n.t("video.error.sessionLost"));
     });
     if (myGen !== gen || !running) {
       if (result.session) void Promise.resolve(result.session.close()).catch(() => undefined);
       return;
     }
     if (!result.ok || !result.session) {
-      failCurrent(myGen, result.error ?? "Video transport failed.");
+      failCurrent(myGen, result.error ?? i18n.t("video.error.transportFailed"));
       return;
     }
     session = result.session;

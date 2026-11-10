@@ -8,6 +8,7 @@
 // fetching segments into the same `<video>`.
 
 import { credentialHeaders } from "./api-fetch";
+import i18n from "./i18n";
 import { withMediaAuth } from "./media-auth";
 
 export interface HlsSession {
@@ -167,7 +168,7 @@ export async function startHls(
     hls.loadSource(hlsUrl);
 
     const manifestTimer = setTimeout(() => {
-      if (!settled) fail(`HLS manifest timeout (${MANIFEST_TIMEOUT_MS / 1000}s).`);
+      if (!settled) fail(i18n.t("video.error.hlsTimeout", { s: MANIFEST_TIMEOUT_MS / 1000 }));
     }, MANIFEST_TIMEOUT_MS);
   });
 }

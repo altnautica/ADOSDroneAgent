@@ -90,6 +90,20 @@ describe("parsePilotState on the golden fixture", () => {
     expect(p!.surfaceOps).toEqual(["goto"]);
     expect([p!.aglM, p!.aglSource]).toEqual([4.2, "rangefinder"]);
     expect(p!.statustext).toEqual([{ severity: 4, text: "PreArm: Compass not calibrated", ageMs: 1200 }]);
+    // The agent omits `fc_failsafe` while false and sends `failsafe_cause: null`.
+    expect([p!.fcFailsafe, p!.failsafeCause]).toEqual([false, null]);
+  });
+
+  it("reads an FC failsafe and its cause", () => {
+    const raw = { ...(fixture("pilot-frame.json") as object), owner: "fc_mode", fc_failsafe: true, failsafe_cause: "rc_or_failsafe" };
+    expect(parsePilotState(raw)).toMatchObject({ fcFailsafe: true, failsafeCause: "rc_or_failsafe" });
+    expect(parsePilotState({ owner: "fc_mode", fc_failsafe: true, failsafe_cause: "fc" })).toMatchObject({ fcFailsafe: true, failsafeCause: "fc" });
+  });
+
+  it("reads a mission the pilot holds paused", () => {
+    const p2 = parsePilotState({ owner: "pilot", mission: { state: "paused", seq: 3, total: 6 } });
+    expect(p2!.owner).toBe("pilot");
+    expect(p2!.mission).toMatchObject({ state: "paused", seq: 3, total: 6 });
   });
 
   it("rejects an unknown owner", () => {

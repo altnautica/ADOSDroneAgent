@@ -4,7 +4,8 @@
     "backToHome": "Back to Home",
     "close": "Close",
     "loading": "Loading…",
-    "dash": "—"
+    "dash": "—",
+    "refusedFallback": "This device refused the request."
   },
   "nav": {
     "home": "Home",
@@ -457,6 +458,12 @@
       "latency": "Latency",
       "camerasDetected": "Cameras detected",
       "noCameras": "No cameras detected. Plug in a USB UVC camera or a MIPI-CSI module and Rescan."
+    },
+    "error": {
+      "noFrames": "No video frames received.",
+      "sessionLost": "Video session lost.",
+      "transportFailed": "Video transport failed.",
+      "hlsTimeout": "HLS manifest timeout ({{s}}s)."
     }
   },
   "io": {

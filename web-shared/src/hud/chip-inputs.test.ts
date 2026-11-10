@@ -9,6 +9,7 @@ import chipCases from "./fixtures/chip-cases.json";
 import { aglMarkText, bottomRowAgl, chipInputs, goalDistanceM, nextWaypointEtaS } from "./chip-inputs";
 import { parseArFrame, parsePilotState, type ArFrame } from "./cockpit-frames";
 import { chipFacts, flightStateChip } from "./flight-state";
+import { specText } from "./spec-text";
 
 const FIXTURES = path.resolve(__dirname, "../../../crates/ados-control/tests/fixtures");
 const fixture = (name: string): unknown => JSON.parse(readFileSync(path.join(FIXTURES, name), "utf8"));
@@ -108,6 +109,18 @@ describe("chip golden cases (fixtures/chip-cases.json)", () => {
     const covered = new Set(chipCases.map((c) => c.expected.rule));
     expect(flightStateJson.rules.filter((r) => !covered.has(r.id)).map((r) => r.id)).toEqual([]);
     expect(chipCases.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it("writes the launching, failsafe and paused-mission texts as the spec strings do", () => {
+    const rule = flightStateJson.rules.find((r) => r.id === "launching")!;
+    expect(rule.text).toBe(specText("chip.taking_off", { step: "{step}" }));
+    expect(flightStateJson.secondary.fc_failsafe.text).toBe(specText("chip.failsafe"));
+    expect(flightStateJson.secondary.mission_paused_line.text).toBe(specText("chip.mission_paused_line", { seq: "{seq}", total: "{total}" }));
+  });
+
+  it("reads a mission ETA of 119.6 s as 2:00, never 1:60", () => {
+    const facts = chipFacts(wire({ owner: "mission_fc", mission: { state: "active", seq: 4, total: 6 } }), 100, { ...base, etaS: 119.6 });
+    expect(flightStateChip(facts).text).toBe("MISSION · WP 4/6 · ETA 2:00");
   });
 
   for (const c of chipCases) {

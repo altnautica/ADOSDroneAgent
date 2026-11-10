@@ -30,7 +30,7 @@ const DEG = Math.PI / 180;
 export type MapPickAction = "fly_here" | "launch" | null;
 
 export function mapPickAction(p: PilotState | null, pilotAgeMs: number): MapPickAction {
-  if (flyHereOffered(p, pilotAgeMs)) return "fly_here";
+  if (flyHereOffered(p, pilotAgeMs).route === "pilot") return "fly_here";
   if (p !== null && pilotAgeMs < CHIP_STALE_AFTER_MS && (p.landed || !p.armed)) return "launch";
   return null;
 }

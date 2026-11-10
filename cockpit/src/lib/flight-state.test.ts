@@ -31,6 +31,8 @@ const base: ChipFacts = {
   controlMode: "ados",
   holdReason: null,
   avoidState: null,
+  launchStep: null,
+  fcFailsafe: false,
   ageMs: 100,
 };
 
