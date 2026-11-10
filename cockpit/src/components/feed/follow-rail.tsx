@@ -16,12 +16,11 @@ import { startNodeRecording, startRecording, stopNodeRecording, stopRecording } 
 import type { WidthClass } from "@/lib/cockpit-layout";
 import { avoidChip, followButton, railButtonPx, railLayout, RAIL_GAP_PX, type RailButton } from "@/lib/follow-rail";
 import { FLIGHT_PX } from "@/lib/flight-layout";
-import { executeSkill, requestSkill } from "@/lib/skill-runner";
+import { executeSkill, requestSkill, useSkillBusy } from "@/lib/skill-runner";
 import { cn } from "@/lib/utils";
 import { toastFromError } from "@/shared/api/toast";
 import type { FollowPhase } from "@/shared/hud/nav-types";
 import { useProfile } from "@/shared/use-profile";
-import { useConfirmStore } from "@/stores/confirm-store";
 import { useFeedStore } from "@/stores/feed-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useStatusStore } from "@/stores/status-store";
@@ -85,7 +84,7 @@ export function FollowRail({
   swapLabel: string | null;
 }) {
   const glove = useSettingsStore((s) => s.glove);
-  const busy = useConfirmStore((s) => s.busy);
+  const busy = useSkillBusy(follow?.skill);
   const swapPip = useFeedStore((s) => s.swapPip);
   const recording = useStatusStore((s) => s.status?.recording === true || s.status?.video?.recording === true);
   const groundStation = useProfile() === "ground_station";
