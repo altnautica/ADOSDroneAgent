@@ -16,24 +16,42 @@ use crate::ui::widgets::{chip, panel};
 const FLOOR_MV: f64 = 2500.0;
 const SPAN_MV: u64 = 2000;
 
+/// The block. A route that reports `stale` (or a read that failed, `failed`
+/// holding the note) keeps the last packs on screen, dim, under a "(stale)"
+/// title.
 pub fn render(
     f: &mut Frame,
     area: Rect,
     core: &Core,
     bat: Option<&Batteries>,
     hidden: Option<&str>,
+    failed: Option<&str>,
 ) {
     let t = &core.theme;
-    let block = panel(t, core.sym, "Battery packs");
-    let inner = block.inner(area);
+    let stale = hidden.is_none() && bat.is_some_and(|b| b.enabled && b.stale);
+    let title = if stale {
+        "Battery packs (stale)"
+    } else {
+        "Battery packs"
+    };
+    let block = panel(t, core.sym, title);
+    let mut inner = block.inner(area);
     f.render_widget(block, area);
     let note = |text: String| Paragraph::new(Span::styled(text, t.dim()));
     if let Some(why) = hidden {
         f.render_widget(note(why.to_string()), inner);
         return;
     }
+    if let Some(why) = failed {
+        let [top, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+        f.render_widget(note(why.to_string()), top);
+        inner = rest;
+    }
     let Some(bat) = bat else {
-        f.render_widget(note("Waiting for the battery monitor…".into()), inner);
+        if failed.is_none() {
+            f.render_widget(note("Waiting for the battery monitor…".into()), inner);
+        }
         return;
     };
     if !bat.enabled {
@@ -58,6 +76,9 @@ pub fn render(
     let rects = Layout::vertical(constraints).split(inner);
     for (p, rect) in bat.packs.iter().zip(rects.iter()) {
         pack(f, *rect, core, p, bat.reserve_percent);
+    }
+    if stale {
+        f.buffer_mut().set_style(inner, t.dim());
     }
 }
 

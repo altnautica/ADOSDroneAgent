@@ -177,6 +177,9 @@ pub fn state_label(value: &str) -> String {
 }
 
 pub mod autonomy;
+pub mod flight_state;
+pub mod pilot_alerts;
+pub mod spec_text;
 mod urls;
 use urls::*;
 mod from_status;
@@ -197,7 +200,10 @@ struct HostRef {
     primary: bool,
 }
 
-/// A MAVLink `GPS_FIX_TYPE` integer as a short human label.
+/// A MAVLink `GPS_FIX_TYPE` integer as a short human label: the one fix-word
+/// table for every panel that names a fix (the GPS panel, the Overview and
+/// the Autonomy block's Odometry row). The cockpit spec carries no fix-word
+/// table to read instead.
 pub fn fix_label(fix_type: i64) -> String {
     match fix_type {
         0 => "no GPS",
@@ -207,6 +213,8 @@ pub fn fix_label(fix_type: i64) -> String {
         4 => "DGPS",
         5 => "RTK float",
         6 => "RTK fixed",
+        7 => "static",
+        8 => "PPP",
         _ => "unknown",
     }
     .to_string()

@@ -62,6 +62,13 @@ pub struct Telemetry {
     pub climb: Option<f64>,
     pub mode: Option<String>,
     pub armed: Option<bool>,
+    /// The FC's PreArm/Arm texts from the last 10 s, oldest first; `None`
+    /// from an agent that does not report them.
+    pub prearm: Option<Vec<String>>,
+    /// Metres from home, when the route reports it.
+    pub home_distance: Option<f64>,
+    /// The FC's local position (north, east), metres about the NED origin.
+    pub local_pos: Option<(f64, f64)>,
 }
 
 impl Telemetry {
@@ -105,6 +112,14 @@ impl Telemetry {
             climb: f(v, &["velocity", "climb"]),
             mode: s(v, &["mode"]),
             armed: v.get("armed").and_then(Value::as_bool),
+            prearm: v.get("prearm").and_then(Value::as_array).map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            }),
+            home_distance: f(v, &["home_distance"]),
+            local_pos: f(v, &["local_position", "x"]).zip(f(v, &["local_position", "y"])),
         }
     }
 }

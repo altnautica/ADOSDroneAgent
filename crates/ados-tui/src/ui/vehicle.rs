@@ -1,5 +1,9 @@
 //! Tab 2, Vehicle: attitude, heading, GPS, flight state, altitude and battery
-//! trends, battery packs, the autonomy block, and the sensor/clock row.
+//! trends, battery packs, the pilot block (the cockpit's flight-state chip,
+//! mission, link loss, height and alerts), the autonomy block, and the
+//! sensor/clock row.
+
+use std::time::Instant;
 
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
@@ -11,6 +15,7 @@ use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx};
 use crate::model::autonomy::{Autonomy, Detection, NAV_STATUS_PATH, VISION_STATUS_PATH};
 use crate::model::fix_label;
+use crate::model::flight_state::{chip_inputs, flight_state_chip, ChipContext};
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
 use crate::poll::{ResourceId, Sub};
 use crate::ui::widgets::{chip, kv, kv_text, panel};
@@ -19,6 +24,7 @@ mod attitude;
 mod autonomy;
 pub(in crate::ui) mod chart;
 mod packs;
+mod pilot;
 
 use chart::{line_chart, Trace};
 
@@ -38,6 +44,10 @@ pub struct VehicleTab {
     /// unreachable or does not report it.
     detection: Option<Detection>,
     hist: VehicleHistory,
+    nav_read: Read,
+    bat_read: Read,
+    /// When the pilot's mission turned complete.
+    complete_at: Option<Instant>,
 }
 
 impl VehicleTab {
@@ -256,6 +266,72 @@ impl VehicleTab {
         lines.extend(crate::ui::profile_row::packed_lines(t, d, inner.width));
         f.render_widget(Paragraph::new(lines), inner);
     }
+
+    /// The Pilot block's lines: the chip evaluated on the pilot kind aged
+    /// from its last good read, with what the tab knows beside it.
+    fn pilot_lines(&self, core: &Core) -> Vec<Line<'static>> {
+        let auto = self.auto.as_ref();
+        let pilot = auto.and_then(|a| a.pilot.as_ref());
+        // The FC's own readings beside the pilot kind, while they are shown.
+        let tel = self.tel.as_ref().filter(|_| self.hidden(core).is_none());
+        let chip = pilot.and_then(|p| {
+            let since_read = self.nav_read.ok_at.map_or(0, |at| {
+                core.now.saturating_duration_since(at).as_millis() as u64
+            });
+            // A kind of unknown age is stale, so the chip reads LINK.
+            let age = p.age_ms.map_or(u64::MAX, |a| a.saturating_add(since_read));
+            let ctx = ChipContext {
+                home_dist_m: tel.and_then(|t| t.home_distance),
+                local_pos: tel.and_then(|t| t.local_pos),
+                eta_s: auto.and_then(|a| a.ar_eta_s),
+                // The skill's echoed parameters are not read here.
+                mode_detail: None,
+                complete_age_ms: self
+                    .complete_at
+                    .map(|at| core.now.saturating_duration_since(at).as_millis() as f64),
+            };
+            chip_inputs(p, age, &ctx).map(|facts| flight_state_chip(&facts))
+        });
+        pilot::lines(
+            core,
+            &pilot::PilotInputs {
+                pilot,
+                chip: chip.as_ref(),
+                follow: auto.and_then(|a| a.follow.as_ref()),
+                prearm: tel.and_then(|t| t.prearm.as_deref()),
+            },
+        )
+    }
+}
+
+/// The outcome of one resource's reads: when the last one succeeded, and the
+/// error of a failed one since.
+#[derive(Debug, Default)]
+struct Read {
+    ok_at: Option<Instant>,
+    failed: Option<String>,
+}
+
+impl Read {
+    fn ok(now: Instant) -> Self {
+        Self {
+            ok_at: Some(now),
+            failed: None,
+        }
+    }
+
+    /// The note for a failed read: how long ago the last good one was, or
+    /// the error when there never was one.
+    fn failed_note(&self, now: Instant) -> Option<String> {
+        let err = self.failed.as_ref()?;
+        Some(match self.ok_at {
+            Some(at) => format!(
+                "read failed · last good read {} s ago",
+                now.saturating_duration_since(at).as_secs()
+            ),
+            None => format!("unavailable: {err}"),
+        })
+    }
 }
 
 /// An 8-point compass word for a heading in degrees.
@@ -289,10 +365,26 @@ impl Tab for VehicleTab {
                 .and_then(Detection::from_status);
             return;
         }
-        let Some(v) = slot
-            .filter(|s| s.error.is_none())
-            .and_then(|s| s.value.as_ref())
-        else {
+        if let Some(err) = slot.and_then(|s| s.error.clone()) {
+            // A failed read keeps the last good model, marked stale.
+            match id {
+                ResourceId::NavStatus => {
+                    if let Some(a) = &mut self.auto {
+                        a.mark_stale();
+                    }
+                    self.nav_read.failed = Some(err);
+                }
+                ResourceId::Battery => {
+                    if let Some(b) = &mut self.bat {
+                        b.stale = true;
+                    }
+                    self.bat_read.failed = Some(err);
+                }
+                _ => {}
+            }
+            return;
+        }
+        let Some(v) = slot.and_then(|s| s.value.as_ref()) else {
             return;
         };
         match id {
@@ -302,8 +394,27 @@ impl Tab for VehicleTab {
                 self.tel = Some(tel);
             }
             ResourceId::Snapshot => self.fc = FcIdent::from_snapshot(v),
-            ResourceId::Battery => self.bat = Some(Batteries::from_value(v)),
-            ResourceId::NavStatus => self.auto = Some(Autonomy::from_value(v)),
+            ResourceId::Battery => {
+                self.bat = Some(Batteries::from_value(v));
+                self.bat_read = Read::ok(core.now);
+            }
+            ResourceId::NavStatus => {
+                let a = Autonomy::from_value(v);
+                let complete = a
+                    .pilot
+                    .as_ref()
+                    .and_then(|p| p.mission.as_ref())
+                    .is_some_and(|m| m.state.as_deref() == Some("complete"));
+                // When the mission turned complete, for the chip's
+                // MISSION COMPLETE window.
+                self.complete_at = match (complete, self.complete_at) {
+                    (true, Some(at)) => Some(at),
+                    (true, None) => Some(core.now),
+                    (false, _) => None,
+                };
+                self.auto = Some(a);
+                self.nav_read = Read::ok(core.now);
+            }
             _ => {}
         }
     }
@@ -349,17 +460,36 @@ impl Tab for VehicleTab {
         self.gps_panel(f, mid[1], core, hidden);
         self.sensors(f, top[2], core, stale);
         self.charts(f, rows[1], core);
+        let lower =
+            Layout::horizontal([Constraint::Min(40), Constraint::Length(52)]).split(rows[2]);
         let packs_hidden = stale.then_some(HIDDEN_STALE);
-        let bottom =
-            Layout::horizontal([Constraint::Min(40), Constraint::Length(44)]).split(rows[2]);
-        packs::render(f, bottom[0], core, self.bat.as_ref(), packs_hidden);
+        packs::render(
+            f,
+            lower[0],
+            core,
+            self.bat.as_ref(),
+            packs_hidden,
+            self.bat_read.failed_note(core.now).as_deref(),
+        );
+        let pilot_lines = self.pilot_lines(core);
+        let right = Layout::vertical([
+            Constraint::Length(if packs_hidden.is_some() {
+                3
+            } else {
+                pilot_lines.len() as u16 + 2
+            }),
+            Constraint::Min(4),
+        ])
+        .split(lower[1]);
+        pilot::render(f, right[0], core, pilot_lines, packs_hidden);
         autonomy::render(
             f,
-            bottom[1],
+            right[1],
             core,
             self.auto.as_ref(),
             self.detection.as_ref(),
             packs_hidden,
+            self.nav_read.failed_note(core.now).as_deref(),
         );
     }
 

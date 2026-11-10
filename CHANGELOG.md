@@ -6,13 +6,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.78] - 2026-11-10
+
+### Changed
+
+- The terminal UI Vehicle tab adds a Pilot panel read from the shared cockpit spec: the flight-state chip and its second line, mode, avoidance, mission waypoint, link-loss action or countdown, AGL with its source, and an alert list. The pilot state turns stale after 2 s, as on the cockpit.
+- A failed pilot or battery read keeps the last values but dims every row and marks it stale; a kind without an age reads stale. A stale battery route dims the battery block. The GPS panel and the odometry row use the same fix words.
+
 ## [0.109.77] - 2026-11-10
 
 ### Changed
 
 - Pause is refused with a reason while the flight controller runs its own failsafe return or landing; return home, land and the emergency stop are unaffected.
 - Command results with the MAVLink prefix and the unknown landed state now read in the cockpit's own words.
-
 ## [0.109.76] - 2026-11-10
 
 ### Changed

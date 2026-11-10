@@ -1,11 +1,12 @@
 use std::time::{Duration, Instant};
 
+use ratatui::buffer::Buffer;
 use serde_json::{json, Value};
 
 use crate::app::{App, Slot, Tab, TabId};
 use crate::model::ProfileRoutes;
 use crate::poll::ResourceId;
-use crate::ui::tests::{draw, feed, test_app};
+use crate::ui::tests::{draw, draw_buffer, feed, test_app};
 
 /// Put a resource body in the app and hand it to the Vehicle tab.
 fn land(app: &mut App, id: ResourceId, value: Value) {
@@ -168,7 +169,7 @@ fn the_autonomy_block_shows_follow_nav_lidar_and_map_as_words() {
         "10.2 m ± 0.6 m",
         "smart",
         "set 1 · ext nav good",
-        "30 Hz · GPS no fix",
+        "30 Hz · GPS no GPS",
         "min 2.5 m · 10 Hz",
         "120000 pts · 850 m²",
         "210/614 MB (34%) · voxel 10 cm",
@@ -210,14 +211,12 @@ fn the_autonomy_block_shows_who_flies_and_how() {
     );
     let text = draw(&mut app, 120, 40);
     for want in [
-        "Owner     FOLLOW · ORBIT 8 m",
-        "Mode      ADOS PILOT · NORMAL",
-        "Avoid     brake · detour 2.4 m",
+        "State     FOLLOW · ACTIVE",
+        "Mode      ADOS PILOT · Normal",
+        "Avoid     Brake · AVOIDING 2.4 m",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
-    // The owner label already names the skill: it is not repeated.
-    assert!(!text.contains("ORBIT 8 m · Follow"), "{text}");
     assert!(!text.contains("(stale)"), "{text}");
 }
 
@@ -234,22 +233,21 @@ fn an_old_pilot_kind_is_marked_stale_and_avoid_off_reads_off() {
     land(&mut app, ResourceId::NavStatus, pilot_status(frame, 9000));
     let text = draw(&mut app, 120, 40);
     for want in [
-        "Owner     ADOS PILOT (stale)",
-        "Mode      FC MANUAL · SPORT",
-        "Avoid     OFF",
+        "State     LINK (stale)",
+        "Mode      FC MANUAL · Sport (stale)",
+        "Avoid     AVOIDANCE OFF",
     ] {
         assert!(text.contains(want), "missing {want:?}\n{text}");
     }
 }
 
 #[test]
-fn without_a_pilot_kind_the_pilot_rows_read_a_dash() {
+fn without_a_pilot_kind_the_state_reads_no_pilot() {
     let mut app = live_app();
     land(&mut app, ResourceId::NavStatus, nav_status());
     let text = draw(&mut app, 120, 40);
-    for want in ["Owner     –", "Mode      –", "Avoid     –"] {
-        assert!(text.contains(want), "missing {want:?}\n{text}");
-    }
+    assert!(text.contains("State     NO PILOT"), "{text}");
+    assert!(!text.contains("Mode      –"), "{text}");
 }
 
 #[test]
@@ -352,4 +350,265 @@ fn the_vehicle_tab_polls_vision_status_every_second() {
         .expect("vision status subscribed");
     assert_eq!(vision.path, "/api/vision/status");
     assert_eq!(vision.period, Duration::from_millis(1000));
+}
+
+/// Record a failed read of `id` that keeps the last good body, as the poller
+/// does, and hand it to the Vehicle tab.
+fn fail(app: &mut App, id: ResourceId) {
+    let slot = app.core.res.get_mut(&id).expect("an earlier read");
+    slot.error = Some("HTTP 503: hub down".into());
+    slot.code = Some(503);
+    app.tabs.vehicle.on_resource(&mut app.core, &id);
+}
+
+/// The screen line holding `prefix`, from `prefix` on.
+fn row<'a>(text: &'a str, prefix: &str) -> &'a str {
+    let line = text
+        .lines()
+        .find(|l| l.contains(prefix))
+        .unwrap_or_else(|| panic!("no row {prefix:?}\n{text}"));
+    &line[line.find(prefix).unwrap_or(0)..]
+}
+
+/// The cell where `needle` first starts on screen.
+fn cell_of(buf: &Buffer, needle: &str) -> (u16, u16) {
+    for y in 0..buf.area.height {
+        let mut line = String::new();
+        let mut xs = Vec::new();
+        for x in 0..buf.area.width {
+            let sym = buf[(x, y)].symbol();
+            xs.extend(sym.chars().map(|_| x));
+            line.push_str(sym);
+        }
+        if let Some(at) = line.find(needle) {
+            return (xs[line[..at].chars().count()], y);
+        }
+    }
+    panic!("{needle:?} is not on screen");
+}
+
+/// `needle` is drawn in the theme's dim (muted) colour.
+fn assert_dim(app: &App, buf: &Buffer, needle: &str) {
+    let (x, y) = cell_of(buf, needle);
+    assert_eq!(
+        buf[(x, y)].fg,
+        app.core.theme.muted(),
+        "{needle:?} is not drawn dim"
+    );
+}
+
+fn nav_with_pilot(pilot: Value) -> Value {
+    let mut body = nav_status();
+    body["pilot"] = pilot;
+    body
+}
+
+#[test]
+fn a_failed_nav_read_keeps_every_row_and_marks_it_stale() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        nav_with_pilot(json!({"ts_ms": 1, "age_ms": 100, "data": pilot_frame()})),
+    );
+    let fresh = draw(&mut app, 160, 48);
+    assert!(!fresh.contains("(stale)"), "{fresh}");
+    fail(&mut app, ResourceId::NavStatus);
+    let text = draw(&mut app, 160, 48);
+    for prefix in [
+        "Mode      ADOS PILOT",
+        "Avoid     ",
+        "Follow    ",
+        "Range     10.2 m",
+        "Reacquire smart",
+        "Nav       ",
+        "Odometry  30 Hz",
+        "Lidar     min 2.5 m",
+        "Map       120000 pts",
+        "Memory    ",
+    ] {
+        assert!(
+            row(&text, prefix).contains("(stale)"),
+            "{prefix:?} kept without a stale mark\n{text}"
+        );
+    }
+    assert!(text.contains("last good read 0 s ago"), "{text}");
+    let buf = draw_buffer(&mut app, 160, 48);
+    assert_dim(&app, &buf, "coasting #12");
+    assert_dim(&app, &buf, "120000 pts");
+}
+
+#[test]
+fn every_row_built_from_a_stale_kind_is_marked_and_dim() {
+    let mut app = live_app();
+    let mut body = nav_with_pilot(json!({"ts_ms": 1, "age_ms": 5000, "data": pilot_frame()}));
+    body["nav"]["age_ms"] = json!(9000);
+    // No scan: the Lidar row falls back to the nav kind's nearest obstacle.
+    body["scan"] = Value::Null;
+    land(&mut app, ResourceId::NavStatus, body);
+    let text = draw(&mut app, 160, 48);
+    for prefix in [
+        "Mode      ADOS PILOT",
+        "Avoid     ",
+        "Nav       ",
+        "Odometry  ",
+        "Lidar     min 3.0 m",
+    ] {
+        assert!(
+            row(&text, prefix).contains("(stale)"),
+            "{prefix:?} reads live from a stale kind\n{text}"
+        );
+    }
+    assert!(!row(&text, "Follow    ").contains("(stale)"), "{text}");
+    let buf = draw_buffer(&mut app, 160, 48);
+    assert_dim(&app, &buf, "ADOS PILOT");
+    assert_dim(&app, &buf, "min 3.0 m");
+}
+
+#[test]
+fn a_pilot_kind_without_an_age_reads_stale() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        json!({"pilot": {"ts_ms": 1, "data": pilot_frame()}}),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(
+        row(&text, "Mode      ADOS PILOT").contains("(stale)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_gps_panel_and_the_odometry_row_name_a_fix_alike() {
+    for (fix, word) in [(0, "no GPS"), (1, "no fix"), (7, "static"), (8, "PPP")] {
+        let mut app = live_app();
+        let mut tel = telemetry();
+        tel["gps"]["fix_type"] = json!(fix);
+        land(&mut app, ResourceId::Telemetry, tel);
+        let mut body = nav_status();
+        body["nav"]["data"]["gps_fix"] = json!(fix);
+        land(&mut app, ResourceId::NavStatus, body);
+        let text = draw(&mut app, 120, 40);
+        assert!(
+            row(&text, "Fix       ").starts_with(&format!("Fix       {word}")),
+            "fix {fix}: GPS panel\n{text}"
+        );
+        assert!(
+            row(&text, "Odometry  ").contains(&format!("GPS {word}")),
+            "fix {fix}: Odometry row\n{text}"
+        );
+    }
+}
+
+#[test]
+fn a_stale_battery_route_dims_the_block() {
+    let mut app = live_app();
+    let mut body = battery();
+    body["stale"] = json!(true);
+    land(&mut app, ResourceId::Battery, body);
+    let text = draw(&mut app, 120, 40);
+    assert!(row(&text, "Battery packs").contains("(stale)"), "{text}");
+    let buf = draw_buffer(&mut app, 120, 40);
+    assert_dim(&app, &buf, "15.15 V");
+}
+
+#[test]
+fn a_failed_battery_read_keeps_the_packs_and_marks_them_stale() {
+    let mut app = live_app();
+    let fresh = draw(&mut app, 120, 40);
+    assert!(!row(&fresh, "Battery packs").contains("(stale)"), "{fresh}");
+    fail(&mut app, ResourceId::Battery);
+    let text = draw(&mut app, 120, 40);
+    assert!(row(&text, "Battery packs").contains("(stale)"), "{text}");
+    assert!(text.contains("15.15 V"), "{text}");
+    assert!(text.contains("last good read 0 s ago"), "{text}");
+    let buf = draw_buffer(&mut app, 120, 40);
+    assert_dim(&app, &buf, "15.15 V");
+}
+
+#[test]
+fn the_pilot_panel_reads_its_rows_from_the_spec() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(pilot_frame(), 100),
+    );
+    let text = draw(&mut app, 160, 48);
+    for want in [
+        "State     FOLLOW · ACTIVE",
+        "AVOIDING · ADOS PILOT",
+        "Mode      ADOS PILOT · Normal",
+        "Avoid     Brake · AVOIDING 2.4 m",
+        "Mission   No mission loaded on the drone",
+        "Link loss → Return home",
+        "AGL       4.2 m (AGL)",
+        "Alerts    1 warning",
+        "No downward rangefinder",
+    ] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+    assert!(!text.contains("(stale)"), "{text}");
+}
+
+#[test]
+fn the_pilot_panel_on_a_mission_with_the_link_lost() {
+    let mut app = live_app();
+    let mut tel = telemetry();
+    tel["prearm"] = json!(["PreArm: Compass not calibrated"]);
+    land(&mut app, ResourceId::Telemetry, tel);
+    let mut frame = pilot_frame();
+    frame["owner"] = json!("mission_fc");
+    frame["skill"] = Value::Null;
+    frame["mission"] = json!({"state": "active", "seq": 4, "total": 6, "landing_seq": false});
+    frame["link_loss_in_s"] = json!(3.4);
+    frame["link_loss_action"] = json!("land");
+    frame["agl_m"] = json!(8.4);
+    frame["agl_source"] = json!("home");
+    frame["readiness"] = json!([]);
+    frame["statustext"] = json!([
+        {"severity": 4, "text": "EKF3 IMU0 yaw inconsistent", "age_ms": 900},
+        {"severity": 2, "text": "EKF3 IMU0 yaw inconsistent", "age_ms": 400},
+        {"severity": 4, "text": "PreArm: Compass not calibrated", "age_ms": 1200},
+    ]);
+    land(&mut app, ResourceId::NavStatus, pilot_status(frame, 100));
+    let text = draw(&mut app, 160, 48);
+    for want in [
+        "State     MISSION · WP 4/6",
+        "Mission   WP 4/6",
+        "Link loss Link lost: Land in 4 s",
+        "AGL       8.4 m (HOME)",
+        "Alerts    2 warnings",
+        "EKF3 IMU0 yaw inconsistent",
+        "Flight controller: Compass not calibrated",
+    ] {
+        assert!(text.contains(want), "missing {want:?}\n{text}");
+    }
+    // The FC repeats a text: one alert, at its worst severity.
+    assert_eq!(
+        text.matches("EKF3 IMU0 yaw inconsistent").count(),
+        1,
+        "{text}"
+    );
+}
+
+#[test]
+fn the_chip_reads_link_past_the_spec_stale_threshold() {
+    let mut app = live_app();
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(pilot_frame(), 2500),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("State     LINK (stale)"), "{text}");
+    land(
+        &mut app,
+        ResourceId::NavStatus,
+        pilot_status(pilot_frame(), 2000),
+    );
+    let text = draw(&mut app, 120, 40);
+    assert!(text.contains("State     FOLLOW · ACTIVE"), "{text}");
 }

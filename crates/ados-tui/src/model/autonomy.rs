@@ -9,11 +9,23 @@
 
 use serde_json::Value;
 
+use super::flight_state::{stale_after_ms, AR_ETA_MAX_AGE_MS, PILOT_OWNERS};
+
 /// The path the Vehicle tab polls.
 pub const NAV_STATUS_PATH: &str = "/api/v1/nav/status";
 
-/// A kind older than this is shown as stale rather than as current.
-pub const STALE_AFTER_MS: u64 = 3_000;
+/// The steps of the pilot's launch sequence.
+const LAUNCH_STEPS: [&str; 5] = ["checks", "arm", "takeoff", "after", "done"];
+
+/// The mission states the pilot kind reports.
+const MISSION_STATES: [&str; 6] = [
+    "none",
+    "loaded",
+    "active",
+    "paused",
+    "complete",
+    "returning",
+];
 
 /// The vision engine's status read (its `detection` block names the cameras
 /// the detector is running on).
@@ -34,15 +46,22 @@ fn s(v: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// One kind's payload and how old it is.
-fn kind<'a>(v: &'a Value, name: &str) -> Option<(&'a Value, bool)> {
+/// A string field holding one of `values`, else `None`.
+fn one_of(v: &Value, key: &str, values: &[&str]) -> Option<String> {
+    v.get(key)
+        .and_then(Value::as_str)
+        .filter(|s| values.contains(s))
+        .map(str::to_string)
+}
+
+/// One kind's payload, its age, and whether it is stale. A kind without a
+/// whole-millisecond `age_ms` is of unknown age, so it is stale too.
+fn kind<'a>(v: &'a Value, name: &str) -> Option<(&'a Value, Option<u64>, bool)> {
     let entry = v.get(name).filter(|e| !e.is_null())?;
     let data = entry.get("data")?;
-    let stale = entry
-        .get("age_ms")
-        .and_then(Value::as_u64)
-        .is_some_and(|age| age > STALE_AFTER_MS);
-    Some((data, stale))
+    let age = entry.get("age_ms").and_then(Value::as_u64);
+    let stale = age.is_none_or(|a| a > stale_after_ms());
+    Some((data, age, stale))
 }
 
 /// The follow-me read-back (`follow.state`).
@@ -54,6 +73,9 @@ pub struct Follow {
     pub range_sigma_m: Option<f64>,
     pub reacquire_mode: Option<String>,
     pub coast_remaining_s: Option<f64>,
+    /// Height above ground the follow skill flies on (`rng` or `baro`).
+    pub agl_m: Option<f64>,
+    pub agl_source: Option<String>,
     pub stale: bool,
 }
 
@@ -94,15 +116,18 @@ pub struct MapSession {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PilotMission {
     pub state: Option<String>,
-    pub seq: Option<i64>,
-    pub total: Option<i64>,
+    pub seq: Option<f64>,
+    pub total: Option<f64>,
+    /// The mission is on its landing sequence.
+    pub landing_seq: bool,
 }
 
-/// Who flies the vehicle and how (the `pilot` kind).
+/// Who flies the vehicle and how (the `pilot` kind). Enumerated fields hold
+/// only the values the shared parser accepts; anything else reads as absent.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pilot {
+    /// One of [`PILOT_OWNERS`]; `None` for an owner the chip does not know.
     pub owner: Option<String>,
-    pub owner_label: Option<String>,
     /// The owning skill's label, when a skill owns.
     pub skill_label: Option<String>,
     pub control_mode: Option<String>,
@@ -111,9 +136,33 @@ pub struct Pilot {
     pub avoid_state: Option<String>,
     pub hold_reason: Option<String>,
     pub min_clearance_m: Option<f64>,
+    pub fc_mode: Option<f64>,
     pub fc_mode_name: Option<String>,
-    pub armed: Option<bool>,
+    pub vehicle_class: Option<String>,
+    pub vtol_transitioning: bool,
+    /// The goal, NED metres about the local origin.
+    pub goal_ned: Option<[f64; 3]>,
+    pub readiness: Vec<ReadinessItem>,
+    /// Seconds left before the link-loss action, while the link is lost.
+    pub link_loss_in_s: Option<f64>,
+    pub link_loss_action: Option<String>,
     pub mission: Option<PilotMission>,
+    /// Height above ground: a fresh downward rangefinder, else the EKF
+    /// height above home (`agl_source`).
+    pub agl_m: Option<f64>,
+    pub agl_source: Option<String>,
+    /// FC STATUSTEXT at WARNING or worse from the last 30 s, newest first.
+    pub statustext: Vec<FcStatusText>,
+    /// The setup step a tuning flight is on.
+    pub setup_step: Option<String>,
+    /// The step of a running launch sequence: a known step other than
+    /// `done`, with no error.
+    pub launch_step: Option<String>,
+    /// The FC flies an RTL or land of its own (a failsafe, not an operator's
+    /// mode change); the agent omits `fc_failsafe` while it is false.
+    pub fc_failsafe: bool,
+    /// The kind's age when read; `None` when the route did not say.
+    pub age_ms: Option<u64>,
     pub stale: bool,
 }
 
@@ -125,42 +174,25 @@ pub struct Autonomy {
     pub nav: Option<NavSource>,
     pub lidar: Option<Lidar>,
     pub map: Option<MapSession>,
+    /// The next waypoint's ETA from a fresh `ar` kind.
+    pub ar_eta_s: Option<f64>,
 }
 
 impl Autonomy {
     pub fn from_value(v: &Value) -> Self {
-        let pilot = kind(v, "pilot").map(|(d, stale)| Pilot {
-            owner: s(d, "owner"),
-            owner_label: s(d, "owner_label"),
-            skill_label: d.get("skill").and_then(|k| s(k, "label")),
-            control_mode: s(d, "control_mode"),
-            profile: s(d, "profile"),
-            avoid: s(d, "avoid"),
-            avoid_state: s(d, "avoid_state"),
-            hold_reason: s(d, "hold_reason"),
-            min_clearance_m: f(d, "min_clearance_m"),
-            fc_mode_name: s(d, "fc_mode_name"),
-            armed: d.get("armed").and_then(Value::as_bool),
-            mission: d
-                .get("mission")
-                .filter(|m| m.is_object())
-                .map(|m| PilotMission {
-                    state: s(m, "state"),
-                    seq: i(m, "seq"),
-                    total: i(m, "total"),
-                }),
-            stale,
-        });
-        let follow = kind(v, "follow").map(|(d, stale)| Follow {
+        let pilot = kind(v, "pilot").map(|(d, age, stale)| pilot(d, age, stale));
+        let follow = kind(v, "follow").map(|(d, _, stale)| Follow {
             phase: s(d, "phase"),
             track_id: i(d, "track_id"),
             range_m: f(d, "range_m"),
             range_sigma_m: f(d, "range_sigma_m"),
             reacquire_mode: s(d, "reacquire_mode"),
             coast_remaining_s: f(d, "coast_remaining_s"),
+            agl_m: f(d, "agl_m"),
+            agl_source: one_of(d, "agl_source", &["rng", "baro"]),
             stale,
         });
-        let nav = kind(v, "nav").map(|(d, stale)| NavSource {
+        let nav = kind(v, "nav").map(|(d, _, stale)| NavSource {
             mode: s(d, "mode"),
             active_set: i(d, "active_set"),
             extnav_health: s(d, "extnav_health"),
@@ -170,7 +202,7 @@ impl Autonomy {
             gps_fix: i(d, "gps_fix"),
             stale,
         });
-        let lidar = kind(v, "scan").map(|(d, stale)| Lidar {
+        let lidar = kind(v, "scan").map(|(d, _, stale)| Lidar {
             // `0.0` is "no return" on the scan topic, so it is not a range.
             min_range_m: d
                 .get("ranges_m")
@@ -182,7 +214,7 @@ impl Autonomy {
                 .reduce(f64::min),
             stale,
         });
-        let map = kind(v, "map").map(|(d, stale)| MapSession {
+        let map = kind(v, "map").map(|(d, _, stale)| MapSession {
             placement: s(d, "placement"),
             sweep_points: i(d, "sweep_points"),
             area_m2: f(d, "area_m2"),
@@ -192,12 +224,14 @@ impl Autonomy {
             keyframes_dropped: i(d, "keyframes_dropped"),
             stale,
         });
+        let ar_eta_s = kind(v, "ar").and_then(|(d, age, _)| next_waypoint_eta_s(d, age));
         Self {
             pilot,
             follow,
             nav,
             lidar,
             map,
+            ar_eta_s,
         }
     }
 
@@ -209,6 +243,149 @@ impl Autonomy {
             || self.lidar.is_some()
             || self.map.is_some()
     }
+
+    /// Mark every kind stale: the last good reading stays on screen after a
+    /// failed read, but no row of it reads as current.
+    pub fn mark_stale(&mut self) {
+        if let Some(p) = &mut self.pilot {
+            p.stale = true;
+        }
+        if let Some(f) = &mut self.follow {
+            f.stale = true;
+        }
+        if let Some(n) = &mut self.nav {
+            n.stale = true;
+        }
+        if let Some(l) = &mut self.lidar {
+            l.stale = true;
+        }
+        if let Some(m) = &mut self.map {
+            m.stale = true;
+        }
+    }
+}
+
+fn pilot(d: &Value, age_ms: Option<u64>, stale: bool) -> Pilot {
+    let readiness = d
+        .get("readiness")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| {
+            Some(ReadinessItem {
+                id: r.get("id")?.as_str()?.to_string(),
+                ok: r.get("ok").and_then(Value::as_bool) == Some(true),
+                block: r.get("severity").and_then(Value::as_str) != Some("warn"),
+                msg: r
+                    .get("msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect();
+    let statustext = d
+        .get("statustext")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(8)
+        .filter_map(|s| {
+            Some(FcStatusText {
+                severity: f(s, "severity")?,
+                text: s.get("text")?.as_str()?.to_string(),
+            })
+        })
+        .collect();
+    let goal_ned = d
+        .get("goal_ned")
+        .and_then(Value::as_array)
+        .filter(|a| a.len() >= 3)
+        .and_then(|a| {
+            let n = |i: usize| a[i].as_f64().filter(|x| x.is_finite());
+            Some([n(0)?, n(1)?, n(2)?])
+        });
+    Pilot {
+        owner: one_of(d, "owner", &PILOT_OWNERS),
+        skill_label: d.get("skill").and_then(|k| {
+            // A skill names its plugin and skill id; the label defaults to the id.
+            k.get("plugin_id")?.as_str()?;
+            let id = k.get("skill_id")?.as_str()?;
+            Some(
+                k.get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or(id)
+                    .to_string(),
+            )
+        }),
+        control_mode: one_of(d, "control_mode", &["ados", "fc_manual", "elrs"]),
+        profile: one_of(d, "profile", &["cine", "normal", "sport"]),
+        avoid: one_of(d, "avoid", &["brake", "bypass", "off"]),
+        avoid_state: one_of(d, "avoid_state", &["clear", "detour", "blocked", "off"]),
+        hold_reason: s(d, "hold_reason"),
+        min_clearance_m: f(d, "min_clearance_m"),
+        fc_mode: f(d, "fc_mode"),
+        fc_mode_name: d
+            .get("fc_mode_name")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        vehicle_class: one_of(d, "vehicle_class", &["multirotor", "fixedwing", "vtol"]),
+        vtol_transitioning: d.get("vtol_transitioning").and_then(Value::as_bool) == Some(true),
+        goal_ned,
+        readiness,
+        link_loss_in_s: f(d, "link_loss_in_s"),
+        link_loss_action: one_of(
+            d,
+            "link_loss_action",
+            &["rth", "rtl", "hold", "loiter", "land"],
+        ),
+        mission: d
+            .get("mission")
+            .filter(|m| m.is_object())
+            .map(|m| PilotMission {
+                state: one_of(m, "state", &MISSION_STATES),
+                seq: f(m, "seq").or_else(|| f(m, "current_seq")),
+                total: f(m, "total"),
+                landing_seq: m.get("landing_seq").and_then(Value::as_bool) == Some(true),
+            }),
+        agl_m: f(d, "agl_m"),
+        agl_source: one_of(d, "agl_source", &["rangefinder", "home"]),
+        statustext,
+        setup_step: d
+            .get("setup_step")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        launch_step: d.get("sequence").filter(|q| q.is_object()).and_then(|q| {
+            let step = q.get("step")?.as_str()?;
+            let running = LAUNCH_STEPS.contains(&step)
+                && step != "done"
+                && q.get("error").and_then(Value::as_str).is_none();
+            running.then(|| step.to_string())
+        }),
+        fc_failsafe: d.get("fc_failsafe").and_then(Value::as_bool) == Some(true),
+        age_ms,
+        stale,
+    }
+}
+
+/// The ETA of the next waypoint in an `ar` frame `age_ms` old, from whichever
+/// camera carries it; `None` once the frame is older than
+/// [`AR_ETA_MAX_AGE_MS`] or names no next waypoint.
+fn next_waypoint_eta_s(data: &Value, age_ms: Option<u64>) -> Option<f64> {
+    if age_ms.is_none_or(|a| a > AR_ETA_MAX_AGE_MS) {
+        return None;
+    }
+    data.get("cameras")?
+        .as_object()?
+        .values()
+        .filter_map(|c| c.get("items").and_then(Value::as_array))
+        .flatten()
+        .find(|it| {
+            it.get("t").and_then(Value::as_str) == Some("wp")
+                && it.get("role").and_then(Value::as_str) == Some("next")
+                && f(it, "eta_s").is_some()
+        })
+        .and_then(|it| f(it, "eta_s"))
 }
 
 /// Where the detector runs: the engine detects on a camera only while a
@@ -322,7 +499,9 @@ impl Detection {
         })
     }
 
-    /// `idle`, or `detecting: main, belly`.
+    /// `idle`, or `detecting: main, belly`. The engine's status reports, per
+    /// camera, only whether detection runs there (and the leases holding it),
+    /// not how many objects it found, so no count is shown.
     pub fn word(&self) -> String {
         if self.detecting.is_empty() {
             "idle".to_string()
@@ -362,19 +541,22 @@ pub fn health_tone(health: &str) -> Tone {
     }
 }
 
-/// A GPS fix type as a short word (MAVLink `GPS_FIX_TYPE`).
-pub fn gps_fix_word(fix: i64) -> &'static str {
-    match fix {
-        0 | 1 => "no fix",
-        2 => "2D",
-        3 => "3D",
-        4 => "DGPS",
-        5 => "RTK float",
-        6 => "RTK fixed",
-        7 => "static",
-        8 => "PPP",
-        _ => "unknown",
-    }
+/// One FC STATUSTEXT line from the pilot kind; `severity` is MAVLink's
+/// (0 emergency … 4 warning).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FcStatusText {
+    pub severity: f64,
+    pub text: String,
+}
+
+/// One pre-flight readiness item from the pilot kind.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadinessItem {
+    pub id: String,
+    pub ok: bool,
+    /// A failing blocking item refuses take-off; otherwise it only warns.
+    pub block: bool,
+    pub msg: String,
 }
 
 #[cfg(test)]
@@ -442,7 +624,6 @@ mod tests {
         assert!(a.any());
         let p = a.pilot.unwrap();
         assert_eq!(p.owner.as_deref(), Some("skill"));
-        assert_eq!(p.owner_label.as_deref(), Some("FOLLOW · ORBIT 8 m"));
         assert_eq!(p.skill_label.as_deref(), Some("Follow"));
         assert_eq!(p.control_mode.as_deref(), Some("ados"));
         assert_eq!(p.profile.as_deref(), Some("normal"));
@@ -450,17 +631,49 @@ mod tests {
         assert_eq!(p.avoid_state.as_deref(), Some("detour"));
         assert_eq!(p.hold_reason, None);
         assert_eq!(p.min_clearance_m, Some(2.4));
+        assert_eq!(p.fc_mode, Some(4.0));
         assert_eq!(p.fc_mode_name.as_deref(), Some("GUIDED"));
-        assert_eq!(p.armed, Some(true));
+        assert_eq!(p.vehicle_class.as_deref(), Some("multirotor"));
+        assert_eq!(p.goal_ned, Some([12.0, -3.5, -4.0]));
+        assert_eq!(p.readiness.len(), 3);
+        assert!(!p.readiness[2].ok && !p.readiness[2].block);
+        assert_eq!(p.link_loss_in_s, None);
+        assert_eq!(p.link_loss_action.as_deref(), Some("rth"));
+        assert_eq!(p.agl_m, Some(4.2));
+        assert_eq!(p.agl_source.as_deref(), Some("rangefinder"));
+        assert_eq!(
+            p.statustext,
+            vec![FcStatusText {
+                severity: 4.0,
+                text: "PreArm: Compass not calibrated".into()
+            }]
+        );
+        assert_eq!(p.setup_step, None);
         assert_eq!(
             p.mission,
             Some(PilotMission {
                 state: Some("none".into()),
-                seq: Some(0),
-                total: Some(0)
+                seq: Some(0.0),
+                total: Some(0.0),
+                landing_seq: false,
             })
         );
+        assert_eq!(p.age_ms, Some(100));
         assert!(!p.stale);
+    }
+
+    #[test]
+    fn an_unknown_owner_or_enum_value_reads_as_absent() {
+        let mut frame = pilot_frame();
+        frame["owner"] = json!("warp");
+        frame["profile"] = json!("ludicrous");
+        frame["link_loss_action"] = json!("teleport");
+        let p = Autonomy::from_value(&json!({"pilot": {"ts_ms": 1, "age_ms": 1, "data": frame}}))
+            .pilot
+            .unwrap();
+        assert_eq!(p.owner, None);
+        assert_eq!(p.profile, None);
+        assert_eq!(p.link_loss_action, None);
     }
 
     #[test]
@@ -470,6 +683,65 @@ mod tests {
         );
         assert!(old.pilot.unwrap().stale);
         assert_eq!(Autonomy::from_value(&json!({"pilot": null})).pilot, None);
+    }
+
+    #[test]
+    fn a_kind_past_the_spec_threshold_is_stale() {
+        let at = |age: u64| {
+            Autonomy::from_value(
+                &json!({"pilot": {"ts_ms": 1, "age_ms": age, "data": pilot_frame()}}),
+            )
+            .pilot
+            .unwrap()
+            .stale
+        };
+        assert!(!at(stale_after_ms()));
+        assert!(at(stale_after_ms() + 1));
+        assert!(at(2500), "2.5 s is past the spec's 2 s");
+    }
+
+    #[test]
+    fn a_kind_without_a_whole_millisecond_age_is_stale() {
+        for entry in [
+            json!({"ts_ms": 1, "data": {"phase": "following"}}),
+            json!({"ts_ms": 1, "age_ms": null, "data": {"phase": "following"}}),
+            json!({"ts_ms": 1, "age_ms": "40", "data": {"phase": "following"}}),
+            json!({"ts_ms": 1, "age_ms": -5, "data": {"phase": "following"}}),
+            json!({"ts_ms": 1, "age_ms": 40.5, "data": {"phase": "following"}}),
+        ] {
+            let a = Autonomy::from_value(&json!({ "follow": entry }));
+            assert!(a.follow.unwrap().stale, "{entry}");
+        }
+    }
+
+    #[test]
+    fn mark_stale_marks_every_kind() {
+        let mut a = Autonomy::from_value(&json!({
+            "pilot": {"ts_ms": 1, "age_ms": 10, "data": pilot_frame()},
+            "follow": {"ts_ms": 1, "age_ms": 10, "data": {}},
+            "nav": {"ts_ms": 1, "age_ms": 10, "data": {}},
+            "scan": {"ts_ms": 1, "age_ms": 10, "data": {}},
+            "map": {"ts_ms": 1, "age_ms": 10, "data": {}},
+        }));
+        a.mark_stale();
+        assert!(a.pilot.unwrap().stale);
+        assert!(a.follow.unwrap().stale);
+        assert!(a.nav.unwrap().stale);
+        assert!(a.lidar.unwrap().stale);
+        assert!(a.map.unwrap().stale);
+    }
+
+    #[test]
+    fn the_ar_kind_carries_the_next_waypoints_eta_while_fresh() {
+        let ar: Value = serde_json::from_str(include_str!(
+            "../../../ados-control/tests/fixtures/ar-frame.json"
+        ))
+        .unwrap();
+        let eta = |age: u64| {
+            Autonomy::from_value(&json!({"ar": {"ts_ms": 1, "age_ms": age, "data": ar}})).ar_eta_s
+        };
+        assert_eq!(eta(100), Some(42.0));
+        assert_eq!(eta(AR_ETA_MAX_AGE_MS + 1), None);
     }
 
     #[test]
@@ -538,6 +810,5 @@ mod tests {
         assert_eq!(phase_tone("lost"), Tone::Fault);
         assert_eq!(phase_tone("idle"), Tone::Neutral);
         assert_eq!(health_tone("degraded"), Tone::Caution);
-        assert_eq!(gps_fix_word(3), "3D");
     }
 }

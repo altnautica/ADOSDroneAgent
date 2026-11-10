@@ -1,8 +1,9 @@
-//! The Autonomy block from `/api/v1/nav/status`: who flies the vehicle (owner,
-//! control mode and profile, obstacle avoidance), follow phase, lock and range,
+//! The Autonomy block from `/api/v1/nav/status`: follow phase, lock and range,
 //! the re-acquire mode, the navigation source, the lidar and the map session;
 //! and, from `/api/vision/status`, the cameras the detector is running on.
 //! Every state is a symbol and a word; colour only repeats what the word says.
+//! Every row built from a stale kind (or from a failed read) is dim and
+//! marked "(stale)".
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
@@ -11,18 +12,21 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::Core;
-use crate::model::autonomy::{
-    gps_fix_word, health_tone, phase_tone, Autonomy, DepthLayer, Detection, Pilot, Tone,
-};
+use crate::model::autonomy::{health_tone, phase_tone, Autonomy, DepthLayer, Detection, Tone};
+use crate::model::fix_label;
+use crate::theme::Theme;
 use crate::ui::widgets::{kv, kv_text, panel};
 
 /// Label column width.
-const LABEL: usize = 9;
+pub(super) const LABEL: usize = 9;
 
 /// The block's text when nothing has published any kind yet.
 pub const NOTHING_TEXT: &str = "no autonomy plugin is publishing";
 
-fn tone_span(core: &Core, tone: Tone, word: String) -> Span<'static> {
+/// What a stale row reads after its value.
+pub(super) const STALE_SUFFIX: &str = " (stale)";
+
+pub(super) fn tone_span(core: &Core, tone: Tone, word: String) -> Span<'static> {
     let t = &core.theme;
     let (sym, color): (&str, Option<Color>) = match tone {
         Tone::Good => (core.sym.ok, Some(t.success())),
@@ -37,12 +41,16 @@ fn tone_span(core: &Core, tone: Tone, word: String) -> Span<'static> {
     }
 }
 
-fn stale_suffix(stale: bool) -> &'static str {
+/// A `label value` row from a stale source: every value span dim, then
+/// "(stale)". The label (the first span) keeps its style.
+pub(super) fn mark_stale(t: &Theme, mut line: Line<'static>, stale: bool) -> Line<'static> {
     if stale {
-        " (stale)"
-    } else {
-        ""
+        for span in line.spans.iter_mut().skip(1) {
+            span.style = t.dim();
+        }
+        line.spans.push(Span::styled(STALE_SUFFIX, t.dim()));
     }
+    line
 }
 
 fn opt<T>(v: Option<T>, fmt: impl Fn(T) -> String) -> String {
@@ -76,69 +84,6 @@ fn depth_line(core: &Core, d: &DepthLayer) -> Line<'static> {
     kv(&core.theme, "Depth", LABEL, tone_span(core, tone, d.word()))
 }
 
-/// A control mode as the pilot names it.
-fn control_mode_word(mode: &str) -> String {
-    match mode {
-        "ados" => "ADOS PILOT".into(),
-        "fc_manual" => "FC MANUAL".into(),
-        "elrs" => "ELRS".into(),
-        other => other.to_uppercase(),
-    }
-}
-
-/// The Owner, Mode and Avoid rows; `–` throughout when nothing publishes `pilot`.
-fn pilot_lines(core: &Core, p: Option<&Pilot>) -> Vec<Line<'static>> {
-    let t = &core.theme;
-    let Some(p) = p else {
-        return ["Owner", "Mode", "Avoid"]
-            .into_iter()
-            .map(|k| kv_text(t, k, LABEL, "–".to_string()))
-            .collect();
-    };
-    let mut owner = p
-        .owner_label
-        .clone()
-        .or_else(|| p.owner.clone())
-        .unwrap_or_else(|| "–".into());
-    if p.owner.as_deref() == Some("skill") {
-        // The pilot's owner label usually names the skill already.
-        if let Some(label) = &p.skill_label {
-            if !owner.to_lowercase().contains(&label.to_lowercase()) {
-                owner.push_str(&format!(" · {label}"));
-            }
-        }
-    }
-    owner.push_str(stale_suffix(p.stale));
-    let mode = match (p.control_mode.as_deref(), p.profile.as_deref()) {
-        (Some(m), Some(pr)) => format!("{} · {}", control_mode_word(m), pr.to_uppercase()),
-        (Some(m), None) => control_mode_word(m),
-        (None, Some(pr)) => pr.to_uppercase(),
-        (None, None) => "–".into(),
-    };
-    let avoid = if p.avoid.as_deref() == Some("off") {
-        kv(
-            t,
-            "Avoid",
-            LABEL,
-            Span::styled("OFF", Style::default().fg(t.error())),
-        )
-    } else {
-        let mut word = opt(p.avoid.clone(), |a| a);
-        if let Some(state) = &p.avoid_state {
-            word.push_str(&format!(" · {state}"));
-        }
-        if let Some(m) = p.min_clearance_m {
-            word.push_str(&format!(" {m:.1} m"));
-        }
-        kv_text(t, "Avoid", LABEL, word)
-    };
-    vec![
-        kv_text(t, "Owner", LABEL, owner),
-        kv_text(t, "Mode", LABEL, mode),
-        avoid,
-    ]
-}
-
 /// The block's lines for `a` and the detector state `det`.
 pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'static>> {
     let t = &core.theme;
@@ -149,7 +94,6 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             out.push(depth_line(core, depth));
         }
     }
-    out.extend(pilot_lines(core, a.pilot.as_ref()));
     if let Some(follow) = &a.follow {
         let phase = follow.phase.clone().unwrap_or_else(|| "unknown".into());
         let mut word = phase.clone();
@@ -161,25 +105,24 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
                 word.push_str(&format!(" {s:.1} s"));
             }
         }
-        word.push_str(stale_suffix(follow.stale));
-        out.push(kv(
-            t,
-            "Follow",
-            LABEL,
-            tone_span(core, phase_tone(&phase), word),
-        ));
         let range = match (follow.range_m, follow.range_sigma_m) {
             (Some(r), Some(s)) => format!("{r:.1} m ± {s:.1} m"),
             (Some(r), None) => format!("{r:.1} m"),
             _ => "–".to_string(),
         };
-        out.push(kv_text(t, "Range", LABEL, range));
-        out.push(kv_text(
-            t,
-            "Reacquire",
-            LABEL,
-            follow.reacquire_mode.clone().unwrap_or_else(|| "–".into()),
-        ));
+        let reacquire = follow.reacquire_mode.clone().unwrap_or_else(|| "–".into());
+        for line in [
+            kv(
+                t,
+                "Follow",
+                LABEL,
+                tone_span(core, phase_tone(&phase), word),
+            ),
+            kv_text(t, "Range", LABEL, range),
+            kv_text(t, "Reacquire", LABEL, reacquire),
+        ] {
+            out.push(mark_stale(t, line, follow.stale));
+        }
     }
     if let Some(nav) = &a.nav {
         let health = nav
@@ -187,59 +130,52 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             .clone()
             .unwrap_or_else(|| "unknown".into());
         let word = format!(
-            "set {} · ext nav {health}{}",
+            "set {} · ext nav {health}",
             opt(nav.active_set, |s| s.to_string()),
-            stale_suffix(nav.stale)
         );
-        out.push(kv(
-            t,
-            "Nav",
-            LABEL,
-            tone_span(core, health_tone(&health), word),
-        ));
-        out.push(kv_text(
-            t,
-            "Odometry",
-            LABEL,
-            format!(
-                "{} · GPS {}",
-                opt(nav.odom_rate_hz, |r| format!("{r:.0} Hz")),
-                opt(nav.gps_fix, |f| gps_fix_word(f).to_string())
-            ),
-        ));
+        let odometry = format!(
+            "{} · GPS {}",
+            opt(nav.odom_rate_hz, |r| format!("{r:.0} Hz")),
+            opt(nav.gps_fix, fix_label)
+        );
+        for line in [
+            kv(t, "Nav", LABEL, tone_span(core, health_tone(&health), word)),
+            kv_text(t, "Odometry", LABEL, odometry),
+        ] {
+            out.push(mark_stale(t, line, nav.stale));
+        }
     }
-    let nearest = a
+    // The nearest return: the scan's, else the nav kind's nearest obstacle;
+    // each value carries the staleness of the kind it came from.
+    let from_scan = a
         .lidar
         .as_ref()
-        .and_then(|l| l.min_range_m)
-        .or_else(|| a.nav.as_ref().and_then(|n| n.min_obstacle_m));
-    if a.lidar.is_some() || a.nav.as_ref().is_some_and(|n| n.min_obstacle_m.is_some()) {
-        let rate = a.nav.as_ref().and_then(|n| n.obstacle_rate_hz);
-        let stale = a.lidar.as_ref().is_some_and(|l| l.stale);
-        out.push(kv_text(
+        .and_then(|l| l.min_range_m.map(|m| (m, l.stale)));
+    let from_nav = a
+        .nav
+        .as_ref()
+        .and_then(|n| n.min_obstacle_m.map(|m| (m, n.stale)));
+    if a.lidar.is_some() || from_nav.is_some() {
+        let nearest = from_scan.or(from_nav);
+        let rate = a
+            .nav
+            .as_ref()
+            .and_then(|n| n.obstacle_rate_hz.map(|r| (r, n.stale)));
+        let stale = nearest.map_or_else(|| a.lidar.as_ref().is_some_and(|l| l.stale), |(_, s)| s)
+            || rate.is_some_and(|(_, s)| s);
+        let line = kv_text(
             t,
             "Lidar",
             LABEL,
             format!(
-                "min {} · {}{}",
-                opt(nearest, |m| format!("{m:.1} m")),
-                opt(rate, |r| format!("{r:.0} Hz")),
-                stale_suffix(stale)
+                "min {} · {}",
+                opt(nearest, |(m, _)| format!("{m:.1} m")),
+                opt(rate, |(r, _)| format!("{r:.0} Hz")),
             ),
-        ));
+        );
+        out.push(mark_stale(t, line, stale));
     }
     if let Some(map) = &a.map {
-        out.push(kv_text(
-            t,
-            "Map",
-            LABEL,
-            format!(
-                "{} pts · {}{}",
-                opt(map.sweep_points, |p| p.to_string()),
-                opt(map.area_m2, |m| format!("{m:.0} m²")),
-                stale_suffix(map.stale)
-            ),
-        ));
         let memory = match (map.memory_used_mb, map.memory_budget_mb) {
             (Some(u), Some(b)) if b > 0.0 => {
                 format!("{u:.0}/{b:.0} MB ({:.0}%)", 100.0 * u / b)
@@ -255,11 +191,23 @@ pub fn lines(core: &Core, a: &Autonomy, det: Option<&Detection>) -> Vec<Line<'st
             "{memory} · voxel {}",
             opt(map.voxel_m, |v| format!("{:.0} cm", v * 100.0))
         );
-        out.push(kv(t, "Memory", LABEL, tone_span(core, tone, word)));
+        let summary = format!(
+            "{} pts · {}",
+            opt(map.sweep_points, |p| p.to_string()),
+            opt(map.area_m2, |m| format!("{m:.0} m²")),
+        );
+        for line in [
+            kv_text(t, "Map", LABEL, summary),
+            kv(t, "Memory", LABEL, tone_span(core, tone, word)),
+        ] {
+            out.push(mark_stale(t, line, map.stale));
+        }
     }
     out
 }
 
+/// The block. `failed` is the note for a failed read: beside the title while
+/// the last good reading stays (every row marked stale), else in the body.
 pub fn render(
     f: &mut Frame,
     area: Rect,
@@ -267,24 +215,33 @@ pub fn render(
     a: Option<&Autonomy>,
     det: Option<&Detection>,
     hidden: Option<&str>,
+    failed: Option<&str>,
 ) {
     let t = &core.theme;
-    let block = panel(t, core.sym, "Autonomy");
+    let a = a.filter(|a| a.any()).filter(|_| hidden.is_none());
+    let title = match (a, failed) {
+        (Some(_), Some(why)) => format!("Autonomy · {why}"),
+        _ => "Autonomy".to_string(),
+    };
+    let block = panel(t, core.sym, &title);
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let note = |text: &str| Paragraph::new(Span::styled(text.to_string(), t.dim()));
+    let note = |text: &str| Line::from(Span::styled(text.to_string(), t.dim()));
     if let Some(why) = hidden {
-        f.render_widget(note(why), inner);
+        f.render_widget(Paragraph::new(note(why)), inner);
         return;
     }
-    let empty = Autonomy::default();
-    match a.filter(|a| a.any()) {
-        Some(a) => f.render_widget(Paragraph::new(lines(core, a, det)), inner),
-        None if det.is_some() => {
-            let mut l = lines(core, &empty, det);
-            l.push(Line::from(Span::styled(NOTHING_TEXT.to_string(), t.dim())));
-            f.render_widget(Paragraph::new(l), inner);
+    let out = match a {
+        Some(a) => lines(core, a, det),
+        None => {
+            let mut out = Vec::new();
+            if det.is_some() {
+                out.extend(lines(core, &Autonomy::default(), det));
+            }
+            // A failed first read is not "nothing is publishing".
+            out.push(note(failed.unwrap_or(NOTHING_TEXT)));
+            out
         }
-        None => f.render_widget(note(NOTHING_TEXT), inner),
-    }
+    };
+    f.render_widget(Paragraph::new(out), inner);
 }

@@ -410,6 +410,8 @@ fn fix_label_maps_gps_fix_types() {
     assert_eq!(fix_label(1), "no fix");
     assert_eq!(fix_label(3), "3D");
     assert_eq!(fix_label(6), "RTK fixed");
+    assert_eq!(fix_label(7), "static");
+    assert_eq!(fix_label(8), "PPP");
     assert_eq!(fix_label(99), "unknown");
 }
 

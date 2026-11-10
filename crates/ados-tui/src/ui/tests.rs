@@ -1,10 +1,11 @@
 //! Render tests: draw whole frames to an off-screen backend and assert the
-//! visible text (never styling).
+//! visible text (and, through `draw_buffer`, a style where it carries meaning).
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
 use ratatui::Terminal;
 use serde_json::{json, Value};
 
@@ -39,15 +40,21 @@ pub(crate) fn feed(app: &mut App, setup: Value, routes: ProfileRoutes, age: Dura
     app.core.now = Instant::now();
 }
 
-/// Render one frame at `w`×`h` and return the text, row by row.
-pub(crate) fn draw(app: &mut App, w: u16, h: u16) -> String {
+/// Render one frame at `w`×`h` and return the buffer, for the few tests that
+/// assert a style (a stale row drawn dim).
+pub(crate) fn draw_buffer(app: &mut App, w: u16, h: u16) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal
         .draw(|f| {
             let _ = super::render(f, app);
         })
         .unwrap();
-    let buf = terminal.backend().buffer().clone();
+    terminal.backend().buffer().clone()
+}
+
+/// Render one frame at `w`×`h` and return the text, row by row.
+pub(crate) fn draw(app: &mut App, w: u16, h: u16) -> String {
+    let buf = draw_buffer(app, w, h);
     let mut out = String::new();
     for y in 0..buf.area.height {
         for x in 0..buf.area.width {
