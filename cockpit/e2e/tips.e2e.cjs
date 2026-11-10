@@ -146,7 +146,7 @@ async function tipsCase(browser) {
   const firstAfter = Date.now() - opened;
   assert.ok(firstAfter >= RULES.first_delay_ms - 300, `first tip after ${firstAfter} ms`);
   assert.ok(first.text.includes(STRINGS["tips.status_pill"]), first.text);
-  assert.equal(STRINGS["tips.status_pill"], "Warnings collect here. Tap to see them.");
+  assert.equal(STRINGS["tips.status_pill"], "Warnings collect here. Select to see them.");
   const pill = await rectOf(page, "[data-zone=status_pill]");
   assert.ok(gap(first, pill) <= 32, `tip ${JSON.stringify(first)} is beside the pill ${JSON.stringify(pill)}`);
   for (const zone of ["[data-zone=stop]", "[data-zone=left_column]", '[data-testid="flight-state-chip"]', "[data-zone=top_bar]"]) {

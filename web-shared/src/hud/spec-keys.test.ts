@@ -5,6 +5,7 @@ import flightState from "../cockpit-spec/flight-state.json";
 import layout from "../cockpit-spec/layout.json";
 import strings from "../cockpit-spec/setup-strings.json";
 import tips from "../cockpit-spec/tips.json";
+import tokens from "../cockpit-spec/tokens.json";
 import views from "../cockpit-spec/views.json";
 import holdReasons from "./fixtures/hold-reasons.json";
 
@@ -43,7 +44,7 @@ describe("tips", () => {
   });
 
   it("never covers the safety zones", () => {
-    expect(tips.rules.never_cover_zones).toEqual(["stop", "left_column", "flight_state_chip"]);
+    expect(tips.rules.never_cover_zones).toEqual(["stop", "left_column", "flight_state_chip", "alert_stack"]);
   });
 });
 
@@ -87,5 +88,131 @@ describe("views", () => {
     expect(map.video_slot).toBe("bottom_left_card");
     const split = views.views.find((v) => v.id === "split") as { divider?: { default: number; min: number; max: number } };
     expect(split.divider).toMatchObject({ default: 0.5, min: 0.3, max: 0.7 });
+  });
+});
+
+/** WCAG relative luminance of #RRGGBB. */
+function lum(hex: string): number {
+  const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+  const [r, g, b] = c.map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+function contrast(a: string, b: string): number {
+  const [hi, lo] = [lum(a), lum(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+/** #RRGGBBAA panel composited over an opaque #RRGGBB backdrop. */
+function over(panel: string, backdrop: string): string {
+  const a = parseInt(panel.slice(7, 9), 16) / 255;
+  const ch = (i: number) => Math.round(parseInt(panel.slice(i, i + 2), 16) * a + parseInt(backdrop.slice(i, i + 2), 16) * (1 - a));
+  return "#" + [1, 3, 5].map((i) => ch(i).toString(16).padStart(2, "0")).join("");
+}
+
+describe("flight-screen readability over bright video", () => {
+  const panelOnWhite = over(tokens.chrome.panel_bg, "#FFFFFF");
+
+  it("keeps panel text at 4.5:1 or more over a white picture", () => {
+    expect(contrast(tokens.chrome.text, panelOnWhite)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(tokens.chrome.text_critical, panelOnWhite)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("gives the STOP label 4.5:1 on its fill", () => {
+    expect(contrast(tokens.chrome.stop_text, tokens.chrome.stop_bg)).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("lifts tv labels to 16 px", () => {
+    expect(layout.classes.tv.label_min_px).toBe(16);
+  });
+});
+
+describe("flight-screen sheets", () => {
+  it("start below the top bar and never cover STOP", () => {
+    expect(layout.sheets).toMatchObject({ top_inset: "top_bar", never_cover_zones: ["stop"], scrim_excludes: "top_bar" });
+  });
+});
+
+describe("top bar cells", () => {
+  const top = layout.zones.find((z) => z.id === "top_bar") as unknown as {
+    chip: { max_frac: number };
+    link: { text: string; never: string };
+    battery: { time_to_reserve: { text: string; short: string } };
+  };
+
+  it("caps the chip width", () => {
+    expect(top.chip.max_frac).toBe(0.4);
+    expect(S["chip.full_text"]).toBe("Flight state: {text}");
+  });
+
+  it("names the link cell metric and the reserve time", () => {
+    expect(S[top.link.text]).toBe("{s} s");
+    expect(S[top.link.never]).toBeTruthy();
+    expect(S[top.battery.time_to_reserve.text]).toBe("{t} to reserve");
+    expect(S[top.battery.time_to_reserve.short]).toBe("{t} RES");
+  });
+});
+
+describe("left column", () => {
+  it("labels every built-in with a short label from the spec", () => {
+    for (const b of builtins.builtins) {
+      const short = (b as { short_label?: string }).short_label;
+      expect(short, b.id).toBeTruthy();
+      expect(S[`builtin.short.${b.id}`]).toBe(short);
+    }
+    const left = layout.zones.find((z) => z.id === "left_column") as unknown as { labels: { show_at: string[] } };
+    expect(left.labels.show_at).toEqual(["medium", "expanded", "tv"]);
+  });
+});
+
+describe("status pill sources", () => {
+  it("covers a silent pilot, a lost controller and failing pre-flight checks", () => {
+    expect(layout.status_pill.sources).toEqual(expect.arrayContaining(["pilot", "controller", "preflight"]));
+    for (const k of ["alert.pilot_not_answering", "alert.controller_lost", "alert.agent_unreachable", "alert.preflight_failing"]) {
+      expect(S[k], k).toBeTruthy();
+    }
+    expect(S[layout.status_pill.storage_text]).toBe("{pct} % used");
+  });
+
+  it("colours both countdowns critical", () => {
+    expect(layout.banners.severity).toEqual({ low_battery_rth: "critical", link_loss: "critical" });
+  });
+});
+
+describe("tips stay clear of alerts", () => {
+  it("never cover the alert stack and wait while an alert banner shows", () => {
+    expect(tips.rules.never_cover_zones).toContain("alert_stack");
+    expect(tips.rules.show_only_when.alert_banner_visible).toBe(false);
+    expect(layout.zones.some((z) => z.id === "alert_stack")).toBe(true);
+  });
+
+  it("use verbs that fit touch, mouse and pad", () => {
+    for (const t of tips.tips) expect(S[`tips.${t.id}`], t.id).not.toMatch(/\bTap\b/);
+  });
+});
+
+describe("words every surface shares", () => {
+  it("has video state words, cause labels and the new chip and hold texts", () => {
+    for (const k of [
+      "video.state.connecting",
+      "video.state.no_source",
+      "video.state.failed",
+      "video.state.reconnecting",
+      "pilot.banner.cause.rc_or_failsafe",
+      "pilot.banner.cause.fc",
+      "chip.failsafe",
+      "chip.mission_paused_line",
+      "chip.taking_off",
+      "hold.keep_holding",
+      "setup.banner.title",
+      "setup.banner.open",
+      "setup.banner.later",
+      "refusal.landed_unknown",
+      "nav.reduced_rate",
+      "shell.agent_offline",
+      "controls.sync.refused",
+    ]) {
+      expect(S[k], k).toBeTruthy();
+    }
   });
 });
