@@ -6,6 +6,19 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.59] - 2026-11-10
+
+### Changed
+
+- Cockpit top bar: items move into the Menu in the spec's order (controller, navigation source, link text, link icon, layer button); the chip, status pill, battery, Menu and STOP never move, and the pill truncates with an ellipsis on the narrowest bars.
+- Cockpit STOP is always enabled and always opens the 3 s hold-to-confirm ("Emergency stop · hold 3 s"), also while disarmed.
+- Cockpit Menu follows the spec's order: moved top-bar items (only those hidden), View, Cameras, Layers, Pre-flight, Flight modes, Controls, Extension panels, Set up aircraft (only when needed), Settings, Exit (none on the kiosk).
+- Cockpit camera switching moves from tabs over the video into the Menu, with human labels (role label before a raw device name).
+- Cockpit layer button gains a ▾ menu with a checkbox per layer.
+- Cockpit top-bar controls have hit areas of at least 48 px; the alert stack, navigation-source chip and no-picture note are sized in px times the class scale, and the no-picture note sits below the centre marks.
+- Cockpit status pill keeps readiness and flight-controller texts from a stale pilot frame listed but dimmed; the navigation-source popover shows refusals in words, never a raw result id.
+- Cockpit top bar, flight-state chip and Menu words come from the cockpit spec.
+
 ## [0.109.58] - 2026-11-10
 
 ### Changed
