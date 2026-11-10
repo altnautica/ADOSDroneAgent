@@ -13,7 +13,8 @@ use ratatui::Frame;
 
 use crate::app::{Core, FrameOut, Tab};
 use crate::keymap::{Command, Ctx};
-use crate::model::autonomy::{Autonomy, Detection, NAV_STATUS_PATH, VISION_STATUS_PATH};
+use crate::model::autonomy::detection::{Detection, VISION_STATUS_PATH};
+use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
 use crate::model::fix_label;
 use crate::model::flight_state::{chip_inputs, flight_state_chip, ChipContext};
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
@@ -25,8 +26,10 @@ mod autonomy;
 pub(in crate::ui) mod chart;
 mod packs;
 mod pilot;
+mod read;
 
 use chart::{line_chart, Trace};
+use read::Read;
 
 /// What the Vehicle tab shows for an MSP flight controller.
 pub const MSP_TEXT: &str =
@@ -301,36 +304,6 @@ impl VehicleTab {
                 prearm: tel.and_then(|t| t.prearm.as_deref()),
             },
         )
-    }
-}
-
-/// The outcome of one resource's reads: when the last one succeeded, and the
-/// error of a failed one since.
-#[derive(Debug, Default)]
-struct Read {
-    ok_at: Option<Instant>,
-    failed: Option<String>,
-}
-
-impl Read {
-    fn ok(now: Instant) -> Self {
-        Self {
-            ok_at: Some(now),
-            failed: None,
-        }
-    }
-
-    /// The note for a failed read: how long ago the last good one was, or
-    /// the error when there never was one.
-    fn failed_note(&self, now: Instant) -> Option<String> {
-        let err = self.failed.as_ref()?;
-        Some(match self.ok_at {
-            Some(at) => format!(
-                "read failed · last good read {} s ago",
-                now.saturating_duration_since(at).as_secs()
-            ),
-            None => format!("unavailable: {err}"),
-        })
     }
 }
 

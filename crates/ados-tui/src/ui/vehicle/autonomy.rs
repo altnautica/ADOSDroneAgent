@@ -12,7 +12,8 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
 use crate::app::Core;
-use crate::model::autonomy::{health_tone, phase_tone, Autonomy, DepthLayer, Detection, Tone};
+use crate::model::autonomy::detection::{DepthLayer, Detection};
+use crate::model::autonomy::{health_tone, phase_tone, Autonomy, Tone};
 use crate::model::fix_label;
 use crate::theme::Theme;
 use crate::ui::widgets::{kv, kv_text, panel};

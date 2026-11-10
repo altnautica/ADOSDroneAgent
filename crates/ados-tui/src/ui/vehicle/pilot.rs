@@ -14,9 +14,8 @@ use ratatui::Frame;
 
 use crate::app::Core;
 use crate::model::autonomy::{Follow, Pilot};
-use crate::model::flight_state::{
-    avoid_state_text, bottom_row_agl, link_loss_action_text, link_loss_line, ChipView,
-};
+use crate::model::flight_state::readouts::{bottom_row_agl, link_loss_action_text, link_loss_line};
+use crate::model::flight_state::{avoid_state_text, ChipView};
 use crate::model::pilot_alerts::{alerts_count_text, pilot_alerts, Severity};
 use crate::model::spec_text::spec_text;
 use crate::theme::Theme;

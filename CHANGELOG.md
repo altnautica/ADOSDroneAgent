@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.83] - 2026-11-10
+
+### Changed
+
+- The terminal UI's vehicle and flight-state code is split into smaller modules to stay within the source size limit. No behaviour change.
+
 ## [0.109.82] - 2026-11-10
 
 ### Changed
