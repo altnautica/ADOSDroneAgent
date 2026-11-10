@@ -66,6 +66,7 @@ import { useExtensionsStore } from "@/stores/extensions-store";
 import { useFlightStore } from "@/stores/flight-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 import { useLayerChipsStore } from "@/stores/layer-chips-store";
+import { specText } from "@/shared/hud/spec-text";
 
 /** Box smoothing time constant (13-hud-v2 §5.4). */
 const SMOOTH_TAU_MS = 120;
@@ -124,12 +125,12 @@ function Outlined({ d, color, width, dash }: { d: string; color: string; width: 
   );
 }
 
+/** The glyph's spoken label (`target.chip`): its class and track id, then its
+ *  state and tag words. */
 function spokenState(g: GlyphLayout): string {
-  const d = g.item.detection;
-  const who = d ? `${d.classLabel || "object"}${g.item.trackId != null ? ` ${g.item.trackId}` : ""}` : "target";
-  const words = [who, g.kind.toLowerCase().replace("_", " ")];
-  for (const t of g.item.bottomTags) words.push(t.text);
-  return words.join(", ");
+  const who = [g.item.detection?.classLabel, g.item.trackId].filter((w) => w != null && w !== "").join(" ");
+  const words = [g.kind.toLowerCase().replace("_", " "), ...g.item.bottomTags.map((t) => t.text)];
+  return specText("target.chip", { who, word: words.join(", ") });
 }
 
 /** One drawn item's marks (SVG). */
@@ -473,7 +474,7 @@ export function TargetLayer({
         const ref = designatedFor(camera, d);
         if (entry.kind === "lock") {
           return {
-            label: "Lock",
+            label: specText("target.lock"),
             icon: Lock,
             enabled: ref !== null,
             onSelect: () => {
@@ -482,7 +483,7 @@ export function TargetLayer({
           };
         }
         if (entry.kind === "release") {
-          return { label: "Release", icon: LockOpen, onSelect: () => void releaseTarget(ctx) };
+          return { label: specText("target.release"), icon: LockOpen, onSelect: () => void releaseTarget(ctx) };
         }
         const a = entry.action;
         return {

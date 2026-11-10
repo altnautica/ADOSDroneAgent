@@ -27,6 +27,7 @@ import { cn } from "@/lib/utils";
 import { mapToScreen } from "@/shared/hud/local-frame";
 import { buildLocalScene, DEFAULT_LOCAL_ZOOM, stepZoom, viewCentre, wheelZoom } from "@/shared/hud/local-scene";
 import { specText } from "@/shared/hud/spec-text";
+import { fmtDistance } from "@/shared/hud/format";
 import { useFlightStore } from "@/stores/flight-store";
 import { ageOf, useNavStreamStore } from "@/stores/nav-stream-store";
 import { useSettingsStore } from "@/stores/settings-store";
@@ -215,12 +216,12 @@ export function LocalMiniMap({ className, scale = 1, inCard = false }: { classNa
 
       {!scene?.drone ? (
         <div className="absolute inset-0 flex items-center justify-center px-[4px] text-center text-muted-foreground" style={{ fontSize: textPx }}>
-          No local position
+          {specText("minimap.no_local_position")}
         </div>
       ) : null}
 
       <MiniMapReadoutRow
-        readout={scene ? { scale: `${scene.scaleBar.m} m`, warn: scene.dim && Object.keys(occupancy.tiles).length > 0 ? "MAP STALE" : null } : null}
+        readout={scene ? { scale: fmtDistance(scene.scaleBar.m), warn: scene.dim && Object.keys(occupancy.tiles).length > 0 ? specText("minimap.stale") : null } : null}
         scale={scale}
         inCard={inCard}
       />

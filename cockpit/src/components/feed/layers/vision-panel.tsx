@@ -17,6 +17,8 @@ import { isDemoMode } from "@/lib/utils";
 import { useFlightStore } from "@/stores/flight-store";
 import { DEPTH_RANGES, DEPTH_STYLES, useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { DETECTION_STALE_MS, useDetectionsStore } from "@/stores/detections-store";
+import { fmtDistance } from "@/shared/hud/format";
+import { specText } from "@/shared/hud/spec-text";
 
 const STATUS_POLL_MS = 2000;
 /** The second tap that restarts the engine must come within this window. */
@@ -110,16 +112,16 @@ function ModelPicker() {
         setBusy(false);
       },
       (e: unknown) => {
-        setErr(e instanceof Error ? e.message : "Could not switch the detector");
+        setErr(e instanceof Error ? e.message : specText("vision.switch_failed"));
         setBusy(false);
       },
     );
   };
   return (
     <section className="space-y-[4px]">
-      <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">Detector model</h3>
-      {models.length === 0 ? <p className="text-[0.85em] text-white/60">No detection models installed</p> : null}
-      {flying ? <p className="text-[0.85em] text-white/60">Disarm to switch the detector: it restarts the vision engine.</p> : null}
+      <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">{specText("vision.detector_model")}</h3>
+      {models.length === 0 ? <p className="text-[0.85em] text-white/60">{specText("vision.no_models")}</p> : null}
+      {flying ? <p className="text-[0.85em] text-white/60">{specText("vision.disarm_to_switch")}</p> : null}
       {models.map((m) => (
         <button
           key={m.id}
@@ -130,7 +132,7 @@ function ModelPicker() {
         >
           <span className="truncate">{m.id}</span>
           <span className="text-[0.85em] text-white/60">
-            {m.id === list.active ? "Active" : armed === m.id ? "Tap again to restart engine" : ""}
+            {m.id === list.active ? specText("vision.active") : armed === m.id ? specText("vision.restart_hint") : ""}
           </span>
         </button>
       ))}
@@ -139,7 +141,7 @@ function ModelPicker() {
   );
 }
 
-const RANGE_LABELS: Record<number, string> = { 0: "Off", 2: "2 m", 5: "5 m" };
+const RANGE_LABELS: Record<number, string> = { 0: specText("vision.off"), 2: fmtDistance(2), 5: fmtDistance(5) };
 
 /** The depth layer's range (Off / 2 m / 5 m) and style (Solid / Outline). */
 function DepthOptions() {
@@ -151,17 +153,17 @@ function DepthOptions() {
     `min-h-[48px] flex-1 rounded-md px-[8px] text-[1em] ${on ? "bg-white/25 font-semibold" : "bg-white/5"}`;
   return (
     <div className="space-y-[4px] pt-[4px]">
-      <div role="radiogroup" aria-label="Depth range" className="flex gap-[4px]">
+      <div role="radiogroup" aria-label={specText("vision.depth_range")} className="flex gap-[4px]">
         {DEPTH_RANGES.map((m) => (
           <button key={m} type="button" role="radio" aria-checked={range === m} onClick={() => setRange(m)} className={seg(range === m)}>
             {RANGE_LABELS[m]}
           </button>
         ))}
       </div>
-      <div role="radiogroup" aria-label="Depth style" className="flex gap-[4px]">
+      <div role="radiogroup" aria-label={specText("vision.depth_style")} className="flex gap-[4px]">
         {DEPTH_STYLES.map((st) => (
           <button key={st} type="button" role="radio" aria-checked={style === st} onClick={() => setStyle(st)} className={seg(style === st)}>
-            {st === "solid" ? "Solid" : "Outline"}
+            {specText(st === "solid" ? "vision.depth_style.solid" : "vision.depth_style.outline")}
           </button>
         ))}
       </div>
@@ -171,8 +173,8 @@ function DepthOptions() {
 
 /** The vision panel's leased layers, with their switch labels. */
 const PANEL_LAYERS = [
-  { id: "depth", label: "Depth" },
-  { id: "surfaces", label: "Surfaces" },
+  { id: "depth", label: specText("vision.depth") },
+  { id: "surfaces", label: specText("vision.surfaces") },
 ] as const;
 
 /**
@@ -213,7 +215,7 @@ export function LayerSwitch({
             On while the {forcedBy} view is open
           </p>
           <label className="flex min-h-[48px] items-center justify-between text-[0.85em] text-white/70">
-            <span>Keep on in other views</span>
+            <span>{specText("vision.keep_on")}</span>
             <input type="checkbox" checked={stored} onChange={(e) => onToggle(id, e.target.checked)} />
           </label>
         </>
@@ -247,11 +249,11 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
       ref={rootRef}
       className="flex h-full w-full flex-col gap-[16px] overflow-y-auto bg-black/70 p-[12px] text-white"
       style={{ fontSize: CHROME_TOKENS.type.chip_px * scale }}
-      aria-label="Vision"
+      aria-label={specText("vision.title")}
       data-testid="vision-panel"
     >
       <section className="space-y-[4px]">
-        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">Layers</h3>
+        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">{specText("vision.layers")}</h3>
         {PANEL_LAYERS.map(({ id, label }) => (
           <LayerSwitch
             key={id}
@@ -266,8 +268,8 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
       </section>
 
       <section className="space-y-[4px]">
-        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">Detections</h3>
-        {!fresh ? <p className="text-[0.85em] text-white/60">No current detections</p> : null}
+        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">{specText("vision.detections")}</h3>
+        {!fresh ? <p className="text-[0.85em] text-white/60">{specText("vision.no_detections")}</p> : null}
         <ul className="space-y-[2px] font-mono text-[0.85em]">
           {rows.map((d, i) => (
             <li key={d.trackId ?? `i${i}`} className="flex justify-between">
@@ -282,8 +284,8 @@ export function VisionPanel({ cameraId }: { cameraId: string | null }) {
       </section>
 
       <section className="space-y-[4px]">
-        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">Engine</h3>
-        {error && !status ? <p className="text-[0.85em] text-red-400">Vision engine unreachable</p> : null}
+        <h3 className="text-[0.85em] uppercase tracking-wider text-white/60">{specText("vision.engine")}</h3>
+        {error && !status ? <p className="text-[0.85em] text-red-400">{specText("vision.engine_unreachable")}</p> : null}
         {status ? (
           <div className="space-y-[2px] text-[0.85em]">
             <div>

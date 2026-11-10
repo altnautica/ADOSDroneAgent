@@ -14,6 +14,7 @@ import { whatsLocked, type ChipTone } from "@/lib/whats-locked";
 import { DETECTION_STALE_MS, useDetectionsStore } from "@/stores/detections-store";
 import { useFeedStore } from "@/stores/feed-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
+import { specText } from "@/shared/hud/spec-text";
 
 const TONE: Record<ChipTone, string> = {
   track: "text-hud-track",
@@ -39,7 +40,7 @@ export function WhatsLockedChip({ multiStream, mainCameraId }: { multiStream: bo
   const camera = multiStream ? designated.cameraId : (fresh?.cameraId ?? designated.cameraId);
   const detection = fresh?.detections.find((d) => isDesignated(designated, camera, d)) ?? null;
   const onMain = !multiStream || designated.cameraId === mainCameraId;
-  const staleReason = onMain && isVideoLost(videoState, isDemoMode()) ? "No video" : fresh ? null : "Waiting for feed";
+  const staleReason = onMain && isVideoLost(videoState, isDemoMode()) ? specText("camera.no_video") : fresh ? null : specText("target.waiting_for_feed");
 
   const chip = whatsLocked({
     designated,
@@ -54,7 +55,7 @@ export function WhatsLockedChip({ multiStream, mainCameraId }: { multiStream: bo
   return (
     <div
       role="status"
-      aria-label={`Target ${chip.who}: ${chip.word}`}
+      aria-label={specText("target.chip", { who: chip.who, word: chip.word })}
       className={cn(
         "pointer-events-auto flex items-center gap-[8px] rounded-lg border bg-hud-glass-strong py-[3px] pl-[8px] pr-[3px] font-mono text-[13px] backdrop-blur-hud",
         chip.tone === "track" ? "border-hud-track" : "border-hud-hair",
@@ -69,7 +70,7 @@ export function WhatsLockedChip({ multiStream, mainCameraId }: { multiStream: bo
       <button
         type="button"
         onClick={() => void releaseTarget(ctx)}
-        aria-label="Release target"
+        aria-label={specText("target.release_target")}
         className="flex h-[32px] w-[32px] items-center justify-center rounded-md text-hud-ink hover:bg-hud-hair"
       >
         <X className="h-[16px] w-[16px]" aria-hidden />

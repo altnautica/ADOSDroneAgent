@@ -33,6 +33,8 @@ import {
 } from "@/lib/hud-geometry";
 import type { VehicleState } from "@/lib/types";
 import { bearingDeg, haversineM } from "@/shared/format";
+import { fmtDistance, fmtSigned1 } from "@/shared/hud/format";
+import { specText } from "@/shared/hud/spec-text";
 import { useFlightStore, type HomePoint } from "@/stores/flight-store";
 import { useSettingsStore, type AltRef } from "@/stores/settings-store";
 
@@ -189,7 +191,7 @@ function draw(
     ctx.fillStyle = p.ink2;
     ctx.font = font(0.7);
     ctx.textAlign = "center";
-    ctx.fillText("NO ATTITUDE", cx, cy - u * 0.9);
+    ctx.fillText(specText("hud.no_attitude"), cx, cy - u * 0.9);
   }
 
   // Roll arc + pointer.
@@ -283,7 +285,7 @@ function draw(
       ctx.lineTo(x + u * 0.3, ty + u * 1.6);
       ctx.fill();
       ctx.font = font(0.6);
-      ctx.fillText(`H ${Math.round(haversineM(lat, lon, home.lat, home.lon))} m`, x, ty + u * 1.7);
+      ctx.fillText(`H ${fmtDistance(haversineM(lat, lon, home.lat, home.lon))}`, x, ty + u * 1.7);
     }
   }
   ctx.fillStyle = p.glass;
@@ -339,8 +341,8 @@ function draw(
     ctx.textAlign = "center";
     ctx.fillText(value !== null ? value.toFixed(value < 100 && value > -100 ? 1 : 0) : DASH, bx + bw / 2, cy);
   };
-  tape(speedX, speed, 10, 1, 5, "l", useAir ? "AS m/s" : "GS m/s");
-  tape(altX, alt, 30, 5, 10, "r", altRef === "msl" ? "ALT MSL" : "ALT REL");
+  tape(speedX, speed, 10, 1, 5, "l", specText(useAir ? "hud.tape.as" : "hud.tape.gs"));
+  tape(altX, alt, 30, 5, 10, "r", specText(altRef === "msl" ? "hud.tape.alt_msl" : "hud.tape.alt_rel"));
 
   // Vertical-speed bar beside the altitude tape (±5 m/s full scale).
   const climb = stale ? null : (t?.velocity?.climb ?? null);
@@ -362,7 +364,7 @@ function draw(
   ctx.fillStyle = p.ink;
   ctx.font = font(0.6);
   ctx.textAlign = "right";
-  ctx.fillText(`V/S ${finite(climb) ? `${climb >= 0 ? "+" : ""}${climb.toFixed(1)}` : DASH}`, altX - u * 0.2, tapeTop + tapeH + u * 0.6);
+  ctx.fillText(specText("hud.vs", { v: fmtSigned1(climb) }), altX - u * 0.2, tapeTop + tapeH + u * 0.6);
   ctx.globalAlpha = 1;
 }
 
@@ -469,12 +471,12 @@ export function HudCanvas({ instruments }: { instruments: boolean }) {
         <button
           type="button"
           onClick={() => setAltRef(altRef === "rel" ? "msl" : "rel")}
-          aria-label={`Altitude reference ${altRef === "rel" ? "home-relative" : "mean sea level"}; switch`}
+          aria-label={specText("hud.alt_ref.switch", { ref: specText(altRef === "rel" ? "hud.alt_ref.rel_long" : "hud.alt_ref.msl_long") })}
           className="pointer-events-auto absolute rounded-md border border-hud-hair bg-hud-glass font-mono text-hud-ink"
           style={{ left: pos.x, top: pos.y, height: ALT_REF_BUTTON_H, padding: `0 ${6 * scale}px`, fontSize: CHROME_TOKENS.type.label_px * scale }}
           data-testid="alt-ref-toggle"
         >
-          {altRef === "rel" ? "REL" : "MSL"}
+          {specText(altRef === "rel" ? "hud.alt_ref.rel" : "hud.alt_ref.msl")}
         </button>
       ) : null}
     </div>

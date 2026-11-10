@@ -6,6 +6,7 @@
 // which the overlay shows instead of an empty frame that looks broken.
 
 import type { DetectionDemandResponse } from "@/lib/api";
+import { specText } from "@/shared/hud/spec-text";
 
 /** Lease length per request, seconds. */
 export const LEASE_HOLD_S = 6;
@@ -54,15 +55,8 @@ export function startDetectionLease(
   };
 }
 
-/** The overlay's notice for a detector state, or null when boxes speak for
- *  themselves (detecting) or nothing is known yet. */
+/** The overlay's notice for a detector state (`detector.*`), or null when
+ *  boxes speak for themselves (detecting) or nothing is known yet. */
 export function detectorNotice(state: DetectorState | null): string | null {
-  switch (state) {
-    case "idle":
-      return "Detector idle";
-    case "unavailable":
-      return "Detector unavailable";
-    default:
-      return null;
-  }
+  return state === "idle" || state === "unavailable" ? specText(`detector.${state}`) : null;
 }

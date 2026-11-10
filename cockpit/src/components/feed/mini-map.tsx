@@ -50,6 +50,7 @@ import { useTrackStore } from "@/stores/track-store";
 import { cn } from "@/lib/utils";
 import { useMissionRoute } from "@/lib/mission-route";
 import { specText } from "@/shared/hud/spec-text";
+import { fmtDistance } from "@/shared/hud/format";
 import { setupText } from "@/shared/setup-wizard/strings";
 import tokens from "@/shared/cockpit-spec/tokens.json";
 
@@ -67,7 +68,7 @@ function headingOrNull(h: number | null | undefined): number | null {
 
 const MapPanel = lazy(() => import("@/components/feed/map-panel"));
 
-const PIN_WORD = { auto: "AUTO", local: "LOCAL", map: "MAP" } as const;
+const PIN_WORD = { auto: "minimap.pin.auto", local: "minimap.pin.local", map: "minimap.pin.map" } as const;
 
 export function MiniMap({ className }: { className?: string } = {}) {
   const telemetry = useFlightStore((s) => s.telemetry);
@@ -116,7 +117,7 @@ export function MiniMap({ className }: { className?: string } = {}) {
             data-testid="minimap-header"
           >
             <span className="pt-[2px] uppercase tracking-wide text-muted-foreground">
-              {local ? (reason === "pinned" ? "Local" : "Local · no GPS") : specText("cockpit.card.map")}
+              {local ? specText(reason === "pinned" ? "minimap.local" : "minimap.local_no_gps") : specText("cockpit.card.map")}
             </span>
             <span className="flex gap-[2px]">
               {hasMapStatus ? (
@@ -124,7 +125,7 @@ export function MiniMap({ className }: { className?: string } = {}) {
                   type="button"
                   onClick={() => setPanelOpen(true)}
                   aria-haspopup="dialog"
-                  aria-label="Mapping status"
+                  aria-label={specText("minimap.mapping_status")}
                   className="pointer-events-auto flex min-h-[24px] items-center rounded px-[4px] text-hud-ink hover:bg-hud-hair"
                 >
                   <Layers style={{ width: labelPx * 1.2, height: labelPx * 1.2 }} aria-hidden />
@@ -133,10 +134,10 @@ export function MiniMap({ className }: { className?: string } = {}) {
               <button
                 type="button"
                 onClick={() => setPin(nextMinimapPin(pin))}
-                aria-label={`Minimap frame ${PIN_WORD[pin]}; change`}
+                aria-label={specText("minimap.frame_change", { pin: specText(PIN_WORD[pin]) })}
                 className="pointer-events-auto min-h-[24px] rounded px-[4px] font-mono text-surface-foreground/80 hover:bg-hud-hair"
               >
-                {PIN_WORD[pin]}
+                {specText(PIN_WORD[pin])}
               </button>
             </span>
           </div>
@@ -225,7 +226,7 @@ function GlobalMiniMap({ scale, inCard }: { scale: number; inCard: boolean }) {
   const textUnits = svgTextUnits(CHROME_TOKENS.type.label_px * scale, Math.min(box.w, box.h), VIEW);
   const readout: MiniMapReadout | null = empty
     ? null
-    : { scale: spanM >= 1000 ? `~${(spanM / 1000).toFixed(1)} km` : `~${Math.round(spanM)} m`, warn: hasFix ? null : specText("alert.gps_no_3d.no_fix") };
+    : { scale: `~${fmtDistance(spanM)}`, warn: hasFix ? null : specText("alert.gps_no_3d.no_fix") };
 
   return (
     <div ref={boxRef} className="pointer-events-none relative h-full w-full" aria-hidden>
@@ -235,7 +236,7 @@ function GlobalMiniMap({ scale, inCard }: { scale: number; inCard: boolean }) {
             className="flex h-full w-full items-center justify-center px-[4px] text-center text-muted-foreground"
             style={{ fontSize: CHROME_TOKENS.type.label_px * scale }}
           >
-            No GPS fix
+            {specText("minimap.no_gps_fix")}
           </div>
         ) : (
           <>
