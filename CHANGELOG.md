@@ -6,6 +6,21 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.61] - 2026-11-10
+
+### Changed
+
+- Cockpit left column shows a short label under each icon at medium width and up; icons only on compact screens.
+- A cockpit flight or camera button that is unavailable now stays pressable and shows why in a toast instead of doing nothing; every column control has a hit area of at least 48 px.
+- The bottom row's D shows a distance in GNSS-denied flight, measured from the flight controller's local position origin, and the AGL dims to a dash when the pilot stops reporting.
+- Zoom falls back to a digital 1×/2×/4× zoom of the shown video and Photo to a frame grab downloaded in the browser ("Photo saved") when no camera extension offers them; without video the camera buttons say "No video".
+- Camera settings open as a sheet over the flight screen (camera choice, recording).
+- The gimbal pad keeps one request in flight, backs off on 429, aims with the arrow keys at 30 °/s while focused and recentres on Enter.
+- The bottom-left card switches by swipe or dots; each face carries its own title.
+- The map view shows the video in the bottom-left card; a picture-in-picture never draws data layers or targets.
+- The split divider defaults to the middle, stays between 30 % and 70 %, and is remembered per vehicle with the view.
+- The follow range panel no longer repeats the height above ground; the bottom row's AGL is the only one on screen.
+
 ## [0.109.60] - 2026-11-10
 
 ### Changed
