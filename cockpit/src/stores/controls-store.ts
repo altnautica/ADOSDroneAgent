@@ -35,6 +35,7 @@ import {
   type StickMode,
 } from "@/lib/pad/ds4-map";
 import { ApiError, apiFetch } from "@/shared/api-fetch";
+import { specText } from "@/shared/hud/spec-text";
 
 export const CONTROLS_KEY = "ados-cockpit-controls";
 export const GS_INPUT_PATH = "/api/v1/ground-station/input";
@@ -306,3 +307,8 @@ export const useControlsStore = create<ControlsState>((set, get) => {
 
 /** Labels of the locked actions, for the editor's notes. */
 export const LOCKED_LABELS = LOCKED_ACTIONS.map((l) => SPEC_ACTION_BY_ID[l.action]?.label ?? l.action);
+
+/** The line under the actions list when the ground station refused a sync. */
+export function syncRefusedText(missing: readonly string[]): string {
+  return specText("controls.sync.refused", { actions: missing.join(", ") });
+}

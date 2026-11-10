@@ -3,10 +3,12 @@
 // one-shot cloud-posture nudge. A full-bleed screen (the Feed) has its own
 // alert stack, so there only the agent-offline banner shows. The `err` and
 // `warn` banners wrap to two lines and size in px times the width class's
-// chrome scale; the advisory cloud line stays on one truncated line.
+// chrome scale; the advisory cloud line stays on one truncated line. Off the
+// flight screen it also carries the one-time aircraft setup offer.
 
 import { AlertCircle, AlertTriangle, Cloud } from "lucide-react";
 
+import { SetupOfferBanner } from "@/components/shell/setup-offer-banner";
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
 import { useWidthClass } from "@/hooks/use-width-class";
 import { gridMeasures } from "@/lib/cockpit-layout";
@@ -32,7 +34,9 @@ export function BannerHost({ fullBleed = false }: { fullBleed?: boolean }) {
     (b) => !fullBleed || b.id === "agent-offline",
   );
   const showNudge = nudge.visible && !fullBleed;
-  if (banners.length === 0 && !showNudge) return null;
+  // The setup offer stays off the flight screen: a full-bleed host shows it never.
+  const setupOffer = fullBleed ? null : <SetupOfferBanner />;
+  if (banners.length === 0 && !showNudge && !setupOffer) return null;
 
   return (
     <div className={cn("flex shrink-0 flex-col", fullBleed && "pointer-events-auto")}>
@@ -52,6 +56,7 @@ export function BannerHost({ fullBleed = false }: { fullBleed?: boolean }) {
           </div>
         );
       })}
+      {setupOffer}
       {showNudge ? (
         <div role="status" className="flex items-center gap-[0.5rem] bg-primary/10 px-[0.75rem] py-[0.3rem] text-[0.8rem]">
           <Cloud className="h-[1rem] w-[1rem] shrink-0 text-hud-primary" aria-hidden />

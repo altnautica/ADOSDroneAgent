@@ -40,6 +40,9 @@ async function mockAgent(page) {
     if (p === "/api/pairing/info") return json({ profile: "drone", name: "bench-drone", paired: true, device_id: "drone-1" });
     if (p === "/api/config") return json({ agent: { name: "bench-drone" } });
     if (p === "/api/plugins") return json({ installs: [] });
+    // The status poll answers, so the agent-offline banner (which holds tips)
+    // stays down.
+    if (p === "/api/status/full") return json({ health: {}, telemetry: {} });
     if (p === "/api/telemetry")
       return json({
         armed: vehicle.armed,
@@ -202,8 +205,23 @@ async function tipsCase(browser) {
   await page.getByRole("button", { name: "Feed" }).first().click();
   await page.waitForSelector("[data-zone=status_pill]", { timeout: 10000 });
   await waitTip(page, "status_pill", RULES.first_delay_ms + 3000);
+  // (7) A banner in the flight screen's notices hides the tip.
+  await page.evaluate(() => {
+    const b = document.createElement("div");
+    b.setAttribute("role", "status");
+    b.id = "e2e-banner";
+    b.textContent = "banner";
+    b.style.height = "24px";
+    document.querySelector('[data-testid="feed-notices"]').appendChild(b);
+  });
+  const hideBy = Date.now() + 1500;
+  while ((await tipNow(page)) !== null) {
+    assert.ok(Date.now() < hideBy, "tip still shown beside an alert banner");
+    await page.waitForTimeout(100);
+  }
+  await page.evaluate(() => document.getElementById("e2e-banner").remove());
   await ctx.close();
-  console.log(`tips: first after ${firstAfter} ms, next after ${gapMs} ms, none while armed, seen kept on reload, reset brings them back`);
+  console.log(`tips: first after ${firstAfter} ms, next after ${gapMs} ms, none while armed, seen kept on reload, reset brings them back, hidden under a banner`);
 }
 
 (async () => {

@@ -128,3 +128,15 @@ export const useTipsStore = create<TipsStore>((set, get) => {
     reload: () => set({ tips: load() }),
   };
 });
+
+/** The flight screen's banners: each shell notice (agent offline, reach,
+ *  reboot) and each alert in the alert stack. */
+export const ALERT_BANNER_SELECTOR =
+  '[data-testid="feed-notices"] > *, [data-zone=alert_stack] [role=alert] > *, [data-zone=alert_stack] [role=status] > *';
+
+/** Whether any flight-screen banner is on screen (tips `show_only_when`
+ *  `alert_banner_visible: false`); `visible` says whether an element is laid
+ *  out and on screen. */
+export function alertBannerVisible(root: Pick<ParentNode, "querySelectorAll">, visible: (el: Element) => boolean): boolean {
+  return Array.from(root.querySelectorAll(ALERT_BANNER_SELECTOR)).some(visible);
+}

@@ -23,7 +23,7 @@ import { useFlightStore } from "@/stores/flight-store";
 import { useInputStore } from "@/stores/input-store";
 import { activeScreenId, useNavStore } from "@/stores/nav-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
-import { useTipsStore, type TipsScreen } from "@/stores/tips-store";
+import { alertBannerVisible, useTipsStore, type TipsScreen } from "@/stores/tips-store";
 
 /** Each spec anchor and zone, as the element that carries it on the Feed. */
 const TIP_SELECTORS: Readonly<Record<string, string>> = {
@@ -52,7 +52,11 @@ const TIP_TEXT_PX = 13;
 /** The element's rect when it is laid out and on screen, else null. */
 function visibleRect(selector: string): TipRect | null {
   const el = document.querySelector(selector);
-  if (!el) return null;
+  return el ? elementRect(el) : null;
+}
+
+/** The element's rect when it is laid out and on screen, else null. */
+function elementRect(el: Element): TipRect | null {
   const r = el.getBoundingClientRect();
   if (r.width <= 0 || r.height <= 0) return null;
   if (r.right <= 0 || r.bottom <= 0 || r.left >= window.innerWidth || r.top >= window.innerHeight) return null;
@@ -120,6 +124,7 @@ export function TipLayer({ gimbalAvailable, scale }: { gimbalAvailable: boolean;
           useConfirmStore.getState().pending !== null ||
           document.querySelector("[role=dialog]") !== null,
         tourVisible: live.current.tourVisible,
+        alertBannerVisible: alertBannerVisible(document, (el) => elementRect(el) !== null),
         skillsAvailable: live.current.skillsAvailable,
         gotoOffered: gotoAdvertised(pilot),
         gimbalAvailable: live.current.gimbalAvailable,

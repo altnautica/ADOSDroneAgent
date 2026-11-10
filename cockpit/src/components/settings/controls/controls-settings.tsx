@@ -43,7 +43,7 @@ import {
 import { playPattern, type RumblePattern } from "@/lib/pad/rumble";
 import { actionLabel, hotspotLabel } from "@/lib/pad/labels";
 import { cn } from "@/lib/utils";
-import { useControlsStore } from "@/stores/controls-store";
+import { syncRefusedText, useControlsStore } from "@/stores/controls-store";
 import { useInputStore, type PadSample } from "@/stores/input-store";
 import { useVoiceStore, voiceSupported } from "@/stores/voice-store";
 
@@ -428,7 +428,7 @@ export function ControlsSettings() {
           {specText("controls.import.missing_locked", { actions: missing.map(lockedLabel).join(", ") })}
         </p>
       ) : null}
-      {s.sync.state === "refused" ? <p role="alert" className="text-[0.85rem] text-err">Ground station refused: missing {s.sync.missing.join(", ")}</p> : null}
+      {s.sync.state === "refused" ? <p role="alert" className="text-[0.85rem] text-err">{syncRefusedText(s.sync.missing)}</p> : null}
       {s.sync.state === "error" ? <p role="alert" className="text-[0.85rem] text-err">{s.sync.message}</p> : null}
       <div className="flex flex-wrap gap-[0.4rem]">
         <button

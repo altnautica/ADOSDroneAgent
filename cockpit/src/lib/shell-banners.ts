@@ -2,6 +2,7 @@
 // stopped answering, or a drone's flight controller is not connected. Pure so
 // the rules are testable. The shell carries no locale, so the copy is here.
 
+import { specText } from "@/shared/hud/spec-text";
 import type { AgentProfile } from "@/shared/use-profile";
 import type { ReachRefusal } from "@/stores/reach-store";
 
@@ -30,7 +31,7 @@ export function shellBanners(i: ShellBannerInputs): ShellBanner[] {
   const out: ShellBanner[] = [];
   const offline = i.statusStale && i.refusal === "none";
   if (offline) {
-    out.push({ id: "agent-offline", severity: "err", message: "Agent is unreachable. Reconnecting…" });
+    out.push({ id: "agent-offline", severity: "err", message: specText("shell.agent_offline") });
   }
   // Only on a drone, only while the agent answers (an offline agent says
   // nothing true about its FC), and only on an explicit `false`: an unknown

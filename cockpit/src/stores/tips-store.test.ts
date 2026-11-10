@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import tipsJson from "@/shared/cockpit-spec/tips.json";
-import { TIPS_KEY, useTipsStore, type TipsScreen } from "@/stores/tips-store";
+import { alertBannerVisible, ALERT_BANNER_SELECTOR, TIPS_KEY, useTipsStore, type TipsScreen } from "@/stores/tips-store";
 
 const FIRST = tipsJson.rules.first_delay_ms;
 const GAP = tipsJson.rules.gap_between_ms;
@@ -125,5 +125,30 @@ describe("tips store", () => {
     tips().reset();
     expect(tips().tips).toEqual({ seen: [], openCount: 0 });
     expect(JSON.parse(mem.get(TIPS_KEY) ?? "{}")).toEqual({ seen: [], open_count: 0 });
+  });
+});
+
+describe("alert banners", () => {
+  it("holds tips while a flight-screen banner is up", () => {
+    tips().flightScreenOpened(0);
+    expect(tips().tick(ground({ alertBannerVisible: true }), FIRST).kind).toBe("none");
+    expect(tips().tick(ground({ alertBannerVisible: false }), FIRST)).toMatchObject({ kind: "show" });
+  });
+
+  it("finds a visible notice or alert in the flight screen's banner zones", () => {
+    const shown = { id: "shown" } as unknown as Element;
+    const hidden = { id: "hidden" } as unknown as Element;
+    const root = (els: Element[]) => ({
+      querySelectorAll: (sel: string) => {
+        expect(sel).toBe(ALERT_BANNER_SELECTOR);
+        return els as unknown as NodeListOf<Element>;
+      },
+    });
+    const visible = (el: Element) => el === shown;
+    expect(ALERT_BANNER_SELECTOR).toContain("[data-zone=alert_stack]");
+    expect(ALERT_BANNER_SELECTOR).toContain('[data-testid="feed-notices"]');
+    expect(alertBannerVisible(root([]), visible)).toBe(false);
+    expect(alertBannerVisible(root([hidden]), visible)).toBe(false);
+    expect(alertBannerVisible(root([hidden, shown]), visible)).toBe(true);
   });
 });
