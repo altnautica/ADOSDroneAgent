@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.90] - 2026-11-10
+
+### Changed
+
+- The cockpit's kiosk alert-column browser check no longer flakes on a slow machine: it now stops the demo layer feed, which also writes a pilot frame, before it waits for "Sticks are with".
+
 ## [0.109.89] - 2026-11-10
 
 ### Added
