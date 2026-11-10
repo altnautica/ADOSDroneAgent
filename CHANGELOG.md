@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.92] - 2026-11-10
+
+### Changed
+
+- Terminal UI: the Vehicle tab's chip line moves to its own module, so the tab stays within the Rust file size limit.
+
 ## [0.109.91] - 2026-11-10
 
 ### Changed

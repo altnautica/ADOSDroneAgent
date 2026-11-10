@@ -17,7 +17,6 @@ use crate::keymap::{Command, Ctx};
 use crate::model::autonomy::detection::{Detection, VISION_STATUS_PATH};
 use crate::model::autonomy::{Autonomy, NAV_STATUS_PATH};
 use crate::model::fix_label;
-use crate::model::flight_state::{chip_inputs, flight_state_chip, ChipContext};
 use crate::model::skill_detail::{skill_detail_from_state, skill_state_topic};
 use crate::model::vehicle::{is_msp, Batteries, FcIdent, Telemetry, VehicleHistory};
 use crate::poll::{ResourceId, Sub};
@@ -26,11 +25,13 @@ use crate::ui::widgets::{chip, kv, kv_text, panel};
 mod attitude;
 mod autonomy;
 pub(in crate::ui) mod chart;
+mod chip_line;
 mod packs;
 mod pilot;
 mod read;
 
 use chart::{line_chart, Trace};
+use chip_line::compass;
 use read::Read;
 
 /// What the Vehicle tab shows for an MSP flight controller.
@@ -67,15 +68,6 @@ pub struct VehicleTab {
 }
 
 impl VehicleTab {
-    /// The plugin and skill ids of the skill that owns the aircraft now.
-    fn owner_skill(&self) -> Option<&(String, String)> {
-        let p = self.auto.as_ref()?.pilot.as_ref()?;
-        if p.owner.as_deref() != Some("skill") {
-            return None;
-        }
-        p.skill_ref.as_ref()
-    }
-
     /// Why live flight readings are not shown, if they are not.
     fn hidden(&self, core: &Core) -> Option<String> {
         if core.stale() {
@@ -291,47 +283,6 @@ impl VehicleTab {
         lines.extend(crate::ui::profile_row::packed_lines(t, d, inner.width));
         f.render_widget(Paragraph::new(lines), inner);
     }
-
-    /// The Pilot block's lines: the chip evaluated on the pilot kind aged
-    /// from its last good read, with what the tab knows beside it.
-    fn pilot_lines(&self, core: &Core) -> Vec<Line<'static>> {
-        let auto = self.auto.as_ref();
-        let pilot = auto.and_then(|a| a.pilot.as_ref());
-        // The FC's own readings beside the pilot kind, while they are shown.
-        let tel = self.tel.as_ref().filter(|_| self.hidden(core).is_none());
-        let chip = pilot.and_then(|p| {
-            let since_read = self.nav_read.ok_at.map_or(0, |at| {
-                core.now.saturating_duration_since(at).as_millis() as u64
-            });
-            // A kind of unknown age is stale, so the chip reads LINK.
-            let age = p.age_ms.map_or(u64::MAX, |a| a.saturating_add(since_read));
-            let ctx = ChipContext {
-                home_dist_m: tel.and_then(|t| t.home_distance),
-                local_pos: tel.and_then(|t| t.local_pos),
-                eta_s: auto.and_then(|a| a.ar_eta_s),
-                mode_detail: self.mode_detail.clone(),
-                complete_age_ms: self
-                    .complete_at
-                    .map(|at| core.now.saturating_duration_since(at).as_millis() as f64),
-            };
-            chip_inputs(p, age, &ctx).map(|facts| flight_state_chip(&facts))
-        });
-        pilot::lines(
-            core,
-            &pilot::PilotInputs {
-                pilot,
-                chip: chip.as_ref(),
-                follow: auto.and_then(|a| a.follow.as_ref()),
-                prearm: tel.and_then(|t| t.prearm.as_deref()),
-            },
-        )
-    }
-}
-
-/// An 8-point compass word for a heading in degrees.
-fn compass(deg: f64) -> &'static str {
-    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-    POINTS[((deg.rem_euclid(360.0) + 22.5) / 45.0) as usize % 8]
 }
 
 impl Tab for VehicleTab {
