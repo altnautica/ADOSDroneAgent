@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.91] - 2026-11-10
+
+### Changed
+
+- Shared readout cases pin the binary-tie rounding of the V/S and distance readouts (0.35 reads 0.3; 1005 m reads 1.00 km).
+
 ## [0.109.90] - 2026-11-10
 
 ### Changed
