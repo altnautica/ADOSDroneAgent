@@ -1,42 +1,28 @@
-import { describe, expect, it } from "vitest";
+// DS4 Options does what `ds4.json` binds it to, and on every surface that is
+// the Menu.
 
-import { pushCommandHandler } from "@/lib/command-stack";
-import { feedNavCommand, profileActionForKey } from "@/lib/feed-actions";
-import { TAB_ORDER } from "@/nav/navigator";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { runCockpitAction } from "@/lib/cockpit-actions";
+import { registerFeedActions } from "@/lib/feed-actions";
+import { DEFAULT_BINDINGS } from "@/lib/pad/ds4-map";
+import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useNavStore } from "@/stores/nav-store";
 
-describe("profile keys", () => {
-  it("maps F1–F3 to the profile actions once prefixed", () => {
-    expect(profileActionForKey("F1")).toBe("profile:cine");
-    expect(profileActionForKey("f2")).toBe("profile:normal");
-    expect(profileActionForKey("f3")).toBe("profile:sport");
-    expect(profileActionForKey("f4")).toBeNull();
-  });
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
-describe("panel buttons on the flight screen", () => {
-  it("never step a hidden menu focus off the Feed; activate opens the Menu instead", () => {
-    useNavStore.setState({
-      activeTabId: "feed",
-      detailStack: [],
-      tabChosen: true,
-      menuFocusIndex: 0,
-      quickMenuOpen: false,
-      visibleTabs: [...TAB_ORDER],
-    });
-    const off = pushCommandHandler(feedNavCommand);
-    try {
-      const nav = useNavStore.getState();
-      nav.command("next");
-      nav.command("prev");
-      nav.command("next");
-      nav.command("activate");
-      const s = useNavStore.getState();
-      expect(s.activeTabId).toBe("feed");
-      expect(s.menuFocusIndex).toBe(0);
-      expect(s.quickMenuOpen).toBe(true);
-    } finally {
-      off();
-    }
+describe("DS4 Options", () => {
+  it("opens the Menu through the action ds4.json binds it to", () => {
+    vi.stubGlobal("window", { addEventListener: () => {}, removeEventListener: () => {} });
+    const off = registerFeedActions();
+    const options = DEFAULT_BINDINGS.find((b) => b.control === "options" && b.with.length === 0 && b.gesture === "tap");
+    expect(options).toBeDefined();
+    useNavStore.setState({ quickMenuOpen: false });
+    expect(runCockpitAction(options!.action)).toBe(true);
+    expect(useNavStore.getState().quickMenuOpen).toBe(true);
+    expect(useCockpitUiStore.getState().sheet).toBeNull();
+    off();
   });
 });

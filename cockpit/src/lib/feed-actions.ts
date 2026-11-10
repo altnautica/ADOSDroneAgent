@@ -2,9 +2,9 @@
 // and `views.json`), registered while the Feed is mounted so every controller
 // binding and keyboard key fires the same code: Triangle / `V` cycles the
 // view, L3 swaps video and map, the D-pad (picker closed) steps the layer
-// level, F1–F3 and Options + D-pad pick the flight profile, Options opens the
-// Mode sheet, and the VTOL transition goes to whichever flight the aircraft is
-// not in.
+// level, F1–F3 and Options + D-pad pick the flight profile, Options (the
+// spec's `quick_settings`) opens the Menu, and the VTOL transition goes to
+// whichever flight the aircraft is not in.
 
 import type { NavCommand } from "@/nav/navigator";
 import { useNavStore } from "@/stores/nav-store";
@@ -12,7 +12,6 @@ import { PROFILE_KEYS } from "@/lib/cockpit-spec";
 import { registerCockpitActions, runCockpitAction, type CockpitAction } from "@/lib/cockpit-actions";
 import { prevLevel } from "@/lib/cockpit-view";
 import { sendPilotAction } from "@/lib/pilot-link";
-import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useCockpitViewStore } from "@/stores/cockpit-view-store";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
@@ -45,7 +44,7 @@ export function registerFeedActions(): () => void {
       group: "view",
       run: press(() => view().setLevel(prevLevel(view().level))),
     },
-    { id: "quick_settings", label: "Quick settings", group: "view", run: press(() => useCockpitUiStore.getState().openSheet("mode")) },
+    { id: "quick_settings", label: "Quick settings", group: "view", run: press(() => useNavStore.setState({ quickMenuOpen: true })) },
     ...PROFILES.map(
       (p): CockpitAction => ({
         id: `profile:${p}`,
