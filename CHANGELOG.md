@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.65] - 2026-11-10
+
+### Changed
+
+- Cockpit status-pill alert list and layer menu open on the shared overlay frame: one overlay at a time, Escape, controller back or a press outside closes them, and STOP still takes the first press.
+
 ## [0.109.64] - 2026-11-10
 
 ### Changed
