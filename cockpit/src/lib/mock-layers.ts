@@ -1,13 +1,54 @@
 // A demo-mode feed for the cockpit data layers: `pilot`, `ar`, `obstacles`,
 // `depth` and `surfaces` frames at 20 Hz in the agent's wire shapes, pushed
 // through the same parsers and stores the live nav stream uses, so `?demo=1`
-// draws every layer with no agent attached. The scene: a four-waypoint
-// mission flying toward WP4 with the route swaying as the vehicle yaws, a
-// follow path detouring around an obstacle, an orbit ring, home off the left
-// edge, and a wall closing in on the right of the frame.
+// draws every layer with no agent attached. The scene follows the demo's one
+// clock (`demoScene`): during the mission leg the pilot reports the flight
+// controller's mission as owner and the overlays show a four-waypoint mission
+// flying toward WP4, the route swaying as the vehicle yaws; during the
+// follow-me cycle the pilot reports the follow-me skill as owner and the
+// overlays show its path detouring around an obstacle. Always present: an
+// orbit ring, home off the left edge, and a wall closing in on the right of
+// the frame.
 
+import { demoScene, DEMO_FOLLOW_SKILL } from "@/lib/mock-nav";
 import { ingestLayerFrame, parseNavFrame } from "@/lib/nav-stream";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
+
+const MISSION_SEQ = 4;
+const MISSION = {
+  state: "active",
+  seq: MISSION_SEQ,
+  total: 6,
+  item_reached: MISSION_SEQ - 1,
+  id: null,
+  source: "mission_state",
+  age_ms: 80,
+  landing_seq: false,
+};
+
+/** The demo pilot frame's wire payload at epoch ms `nowMs`: its owner is the
+ *  scene's (the mission on the flight controller, or the follow-me skill). */
+export function demoPilotData(nowMs: number): Record<string, unknown> {
+  const follow = demoScene(nowMs).scene === "follow";
+  return {
+    owner: follow ? "skill" : "mission_fc",
+    owner_label: null,
+    skill: follow ? DEMO_FOLLOW_SKILL : null,
+    vehicle_class: "multirotor",
+    control_mode: "ados",
+    profile: "normal",
+    avoid: "brake",
+    fc_mode: follow ? 4 : 3,
+    fc_mode_name: follow ? "GUIDED" : "AUTO",
+    armed: true,
+    landed: false,
+    avoid_state: "detour",
+    min_clearance_m: 2.4,
+    plan_ned: [],
+    readiness: [],
+    mission: follow ? null : MISSION,
+  };
+}
 
 const TICK_MS = 50;
 /** Every id the demo video can resolve to. */
@@ -44,45 +85,30 @@ class MockLayerStream {
   }
 
   private tick(): void {
-    const t = (Date.now() - this.startMs) / 1000;
     const now = Date.now();
+    const t = (now - this.startMs) / 1000;
     const sway = 0.04 * Math.sin(t * 0.7);
-    const seq = 4;
-    const mission = { state: "active", seq, total: 6, item_reached: seq - 1, id: null, source: "mission_state", age_ms: 80, landing_seq: false };
+    const follow = demoScene(now).scene === "follow";
+    const mission = follow ? null : MISSION;
 
-    const pilot = parseNavFrame({
-      kind: "pilot",
-      data: {
-        owner: "mission_fc",
-        owner_label: null,
-        skill: null,
-        vehicle_class: "multirotor",
-        control_mode: "ados",
-        profile: "normal",
-        avoid: "brake",
-        fc_mode: 3,
-        fc_mode_name: "AUTO",
-        armed: true,
-        landed: false,
-        avoid_state: "detour",
-        min_clearance_m: 2.4,
-        plan_ned: [],
-        readiness: [],
-        mission,
-      },
-    });
+    const pilot = parseNavFrame({ kind: "pilot", data: demoPilotData(now) });
     if (pilot) useNavStreamStore.getState().ingest(pilot);
 
-    const items = [
+    const missionItems = [
       { t: "wp", k: "wp:4", seq: 4, role: "next", x: 0.52 + sway, y: 0.41, gx: 0.52 + sway, gy: 0.63, dist_m: Math.max(5, 120 - t * 2), eta_s: Math.max(0, 42 - t), size: 0.25 },
       { t: "wp", k: "wp:5", seq: 5, role: "after", x: 0.64 + sway, y: 0.37, gx: null, gy: null, dist_m: 180, eta_s: null, size: 0.18 },
       { t: "wp", k: "wp:6", seq: 6, role: "other", x: 0.74 + sway, y: 0.35, gx: null, gy: null, dist_m: 240, eta_s: null, size: 0.1 },
       { t: "leg", k: "leg:active", role: "active", pts: [[0.5, 0.95], [0.52 + sway, 0.63]] },
       { t: "leg", k: "leg:next", role: "next", pts: [[0.52 + sway, 0.63], [0.64 + sway, 0.6]] },
       { t: "leg", k: "leg:future", role: "future", pts: [[0.64 + sway, 0.6], [0.7 + sway, 0.58], [0.74 + sway, 0.57]] },
-      { t: "fpv", k: "fpv", x: 0.5 + sway * 0.5, y: 0.55 },
+    ];
+    const followItems = [
       { t: "fpath", k: "fpath", state: "detour", pts: [[0.5, 0.72], [0.47, 0.66], [0.45 + sway, 0.6]] },
       { t: "fgoal", k: "fgoal", x: 0.45 + sway, y: 0.6 },
+    ];
+    const items = [
+      ...(follow ? followItems : missionItems),
+      { t: "fpv", k: "fpv", x: 0.5 + sway * 0.5, y: 0.55 },
       {
         t: "orbit",
         k: "orbit",

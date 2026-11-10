@@ -1,11 +1,16 @@
 // A demo-mode navigation feed. Feeds the nav-stream store through the same
 // `ingest` seam the live socket uses, so `?demo=1` exercises every HUD state
-// with no agent attached: the follow phase cycles acquiring → following →
-// coasting → searching → re-acquired → lost every 4 s on the demo detection
-// stream's track 12; the vehicle circles the origin in the local frame with a
-// matching SLAM pose and a planar scan of a 6 m room; vision-nav reports
+// with no agent attached. The demo alternates two scripted scenes on one
+// clock (`demoScene`), so every surface tells the same story at once: a
+// mission leg (the pilot reports the flight controller's mission as owner,
+// follow-me is idle), then a follow-me cycle (the pilot reports the follow-me
+// skill as owner) whose phase steps acquiring → following → coasting →
+// searching → re-acquired → lost every 4 s on the demo detection stream's
+// track 12. Throughout, the vehicle circles the origin in the local frame with
+// a matching SLAM pose and a planar scan of a 6 m room; vision-nav reports
 // external nav; the map status climbs. Loaded only when `isDemoMode()`.
 
+import type { FollowPhase } from "@/shared/hud/nav-types";
 import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 const TICK_MS = 100;
@@ -17,6 +22,26 @@ const FRAME_H = 480;
 const TRACK_ID = 12;
 
 const PHASES = ["acquiring", "following", "coasting", "searching", "following", "lost"] as const;
+/** One follow-me cycle; the mission leg before it lasts as long. */
+const FOLLOW_CYCLE_MS = PHASES.length * PHASE_MS;
+export const DEMO_CYCLE_MS = 2 * FOLLOW_CYCLE_MS;
+
+/** The follow-me skill the demo pilot reports as owner during its cycle. */
+export const DEMO_FOLLOW_SKILL = { plugin_id: "com.altnautica.follow-me", skill_id: "follow", label: "Follow me" } as const;
+
+export type DemoScene =
+  | { scene: "mission" }
+  | { scene: "follow"; index: number; phase: FollowPhase; inPhaseS: number };
+
+/** The demo's scripted scene at epoch ms `nowMs`. Every demo feed reads this
+ *  one clock, so the pilot's owner, the follow state and the overlays agree. */
+export function demoScene(nowMs: number): DemoScene {
+  const inCycle = ((nowMs % DEMO_CYCLE_MS) + DEMO_CYCLE_MS) % DEMO_CYCLE_MS;
+  if (inCycle < FOLLOW_CYCLE_MS) return { scene: "mission" };
+  const inFollow = inCycle - FOLLOW_CYCLE_MS;
+  const index = Math.floor(inFollow / PHASE_MS);
+  return { scene: "follow", index, phase: PHASES[index], inPhaseS: (inFollow % PHASE_MS) / 1000 };
+}
 
 /** Ranges of a square room of half-width `half` seen from `(x, y)` with body
  *  yaw `yaw` (FRD, 1° bins clockwise from forward). */
@@ -55,9 +80,11 @@ class MockNavStream {
 
   private tick(): void {
     const store = useNavStreamStore.getState();
-    const t = (Date.now() - this.startMs) / 1000;
-    const index = Math.floor((t * 1000) / PHASE_MS) % PHASES.length;
-    const phase = PHASES[index];
+    const now = Date.now();
+    const t = (now - this.startMs) / 1000;
+    const demo = demoScene(now);
+    const index = demo.scene === "follow" ? demo.index : -1;
+    const phase: FollowPhase = demo.scene === "follow" ? demo.phase : "idle";
     if (index !== this.lastPhase) {
       if (index === 0) {
         store.designate({ cameraId: CAMERA_ID, trackId: TRACK_ID, bbox: { x: 0, y: 0, width: 0, height: 0 } });
@@ -79,7 +106,7 @@ class MockNavStream {
     const c = Math.cos(yaw);
     const s = Math.sin(yaw);
     const range = 9 + 2 * Math.sin(t * 0.3);
-    const inPhase = ((t * 1000) % PHASE_MS) / 1000;
+    const inPhase = demo.scene === "follow" ? demo.inPhaseS : 0;
 
     store.ingest({
       kind: "pose",
@@ -105,7 +132,7 @@ class MockNavStream {
     store.ingest({
       kind: "follow",
       data: {
-        active: phase !== "lost",
+        active: phase !== "lost" && phase !== "idle",
         phase,
         trackId: TRACK_ID,
         confidence: 0.9,
