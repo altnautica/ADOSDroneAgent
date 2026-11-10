@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.56] - 2026-11-10
+
+### Changed
+
+- Cockpit: the controller Options button opens the Menu, the same as on the other surfaces (it opened the Mode sheet).
+
 ## [0.109.55] - 2026-11-10
 
 ### Changed
