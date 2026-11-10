@@ -1,8 +1,31 @@
 // Which cockpit sheet is open (Mode sheet, Launch sheet, pre-flight
 // checklist), and the bottom-left card shown. One sheet at a time: opening one
-// closes the other.
+// closes the other. Also the stack of every open overlay (kept by the shared
+// overlay frame) and the launch Abort, which the Launch sheet and the flight
+// overlays both offer.
 
+import type { RefObject } from "react";
 import { create } from "zustand";
+
+import { sendPilotAction } from "@/lib/pilot-link";
+import { refusalText } from "@/shared/hud/refusal";
+import { specText } from "@/shared/hud/spec-text";
+
+/** One open overlay (sheet, dialog, menu), as `components/ui/overlay` keeps it. */
+export interface OpenOverlay {
+  dismiss: () => void;
+  panel: RefObject<HTMLDivElement | null>;
+  /** Opened from inside another overlay, so it stacks on it. */
+  nested: boolean;
+}
+
+/** The overlays open now, oldest first. */
+export const openOverlays: OpenOverlay[] = [];
+
+/** Whether any overlay is open (the controller then drives it, not flight). */
+export function overlayOpen(): boolean {
+  return openOverlays.length > 0;
+}
 
 export type CockpitSheet = "mode" | "launch" | "preflight" | null;
 export type BottomLeftCard = "map" | "attitude_radar" | "obstacle_radar";
@@ -45,3 +68,11 @@ export const useCockpitUiStore = create<CockpitUiState>((set, get) => ({
   },
   setShutterMode: (shutterMode) => set({ shutterMode }),
 }));
+
+/** Abort a running launch: the pilot brakes to a hold, or disarms while still
+ *  on the ground. A refusal shows in the Launch sheet. */
+export function abortLaunch(): void {
+  void sendPilotAction("pause").then((r) =>
+    useCockpitUiStore.getState().setLaunchRefusal(r.ok ? null : specText("flow.launch.abort_refused", { reason: refusalText(r.err) })),
+  );
+}

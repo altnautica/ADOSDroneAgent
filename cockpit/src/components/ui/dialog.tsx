@@ -25,8 +25,8 @@ export function Dialog({ title, onDismiss, confirm, dismiss, children }: DialogP
       onDismiss={onDismiss}
       labelledBy={titleId}
       initialFocus={confirmRef}
-      layerClassName="flex items-center justify-center p-[1rem]"
-      panelClassName="flex max-h-full w-full max-w-[520px] flex-col gap-[0.9rem] overflow-y-auto rounded-xl border border-border bg-surface p-[1.2rem] text-surface-foreground duration-quick animate-in fade-in zoom-in-95 motion-reduce:animate-none"
+      layerClassName="flex items-center justify-center px-[1rem] pb-[1rem]"
+      panelClassName="mt-[1rem] flex max-h-[calc(100%-1rem)] w-full max-w-[520px] flex-col gap-[0.9rem] overflow-y-auto rounded-xl border border-border bg-surface p-[1.2rem] text-surface-foreground duration-quick animate-in fade-in zoom-in-95 motion-reduce:animate-none"
     >
       <h2 id={titleId} className="text-[1.1rem] font-semibold">
         {title}

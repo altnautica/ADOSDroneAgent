@@ -70,12 +70,15 @@ jobs:
         working-directory: cockpit
         run: npm run build
 
-      # Pointer and hit-test checks against the built bundle in headless
-      # Chromium: the first press on STOP lands on STOP, the gimbal recentre
-      # button takes a mouse click, a flick off the gimbal pad leaves no rate
-      # command running, and the kiosk's banners, alert cards and layer chips
-      # never overlap. The controls, stream and shots cases stay manual.
-      - name: Browser checks (STOP, gimbal pad, alert column)
+      # Pointer, hit-test and flow checks against the built bundle in headless
+      # Chromium: the first press on STOP lands on STOP (with the status list
+      # and with every flight-screen sheet open), the gimbal recentre button
+      # takes a mouse click, a flick off the gimbal pad leaves no rate command
+      # running, the kiosk's banners, alert cards and layer chips never
+      # overlap, a stalled pilot clears the flow overlays, a running launch
+      # shows its step and Abort, and a Mode sheet pick shows pending at once.
+      # The overlay-close, controls, stream and shots cases stay manual.
+      - name: Browser checks (STOP, sheets, flows, gimbal pad, alert column)
         working-directory: cockpit
         run: |
           set -euo pipefail
@@ -83,7 +86,7 @@ jobs:
           npx playwright-core install --with-deps --only-shell chromium
           npx vite preview --port 4273 --strictPort >/tmp/preview.log 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4273/cockpit/ >/dev/null && break; sleep 1; done
-          for c in stop recentre gimbal-flick chips; do SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/cockpit-v2.e2e.cjs "$c"; done
+          for c in stop stop-sheets flow-stale sequence mode-pending recentre gimbal-flick chips; do SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/cockpit-v2.e2e.cjs "$c"; done
 
       - name: Verify dist
         run: |

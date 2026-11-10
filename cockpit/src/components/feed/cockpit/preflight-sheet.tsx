@@ -15,6 +15,7 @@ import { checklistPassable, fcPrearmItem, storageItem, type ChecklistItem } from
 import { preflightChecks } from "@/lib/safety-band";
 import { apiFetch } from "@/shared/api-fetch";
 import type { AgentHeartbeat } from "@/shared/api/types";
+import { specText } from "@/shared/hud/spec-text";
 import { useFlightStore } from "@/stores/flight-store";
 import { usePreflightStore } from "@/stores/preflight-store";
 import { useStatusStore } from "@/stores/status-store";
@@ -54,7 +55,11 @@ export function PreflightSheet() {
   if (pilot?.controlMode === "ados") {
     items.push({
       id: "controller",
-      label: pad.connected ? `Controller connected${pad.name ? ` (${pad.name})` : ""}` : "Controller connected (or on-screen sticks / skills only)",
+      label: pad.connected
+        ? pad.name
+          ? specText("flow.preflight.controller_named", { name: pad.name })
+          : specText("flow.preflight.controller")
+        : specText("flow.preflight.controller_optional"),
       state: pad.connected ? "pass" : "warn",
     });
   }
@@ -63,7 +68,7 @@ export function PreflightSheet() {
   const ok = checklistPassable(items);
   return (
     <Sheet
-      title="Pre-flight checklist"
+      title={specText("flow.preflight.title")}
       onDismiss={dismiss}
       footer={
         <button
@@ -73,7 +78,7 @@ export function PreflightSheet() {
           data-testid="preflight-pass"
           className="min-h-[56px] w-full rounded-lg border border-primary bg-primary/25 text-[0.95rem] font-semibold disabled:opacity-45"
         >
-          {ok ? "Checks done" : "Fix the failing checks"}
+          {specText(ok ? "flow.preflight.done" : "flow.preflight.fix")}
         </button>
       }
     >

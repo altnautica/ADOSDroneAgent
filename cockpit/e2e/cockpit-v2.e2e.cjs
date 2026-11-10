@@ -9,13 +9,18 @@
 //
 // Cases: STOP reachability (the first press on STOP lands on STOP with the
 // status-pill list open and closed, the list drawn on top, at every width
-// class and the kiosk), the gimbal pad (the recentre button takes a mouse
+// class and the kiosk; `stop-sheets`: the same with every flight-screen sheet
+// open, each sheet starting below the top bar), the flow overlays clearing on
+// a stalled pilot (`flow-stale`), a running launch's step and Abort
+// (`sequence`), the Mode sheet's pending pick (`mode-pending`), Escape / a
+// press outside / the controller's back closing the topmost sheet
+// (`overlay-close`), the gimbal pad (the recentre button takes a mouse
 // click; a flick off the pad leaves no rate running), the kiosk alert column
-// (banners, alert cards and layer chips never overlap), controller config (hotspot highlight, rebind persists, conflict
-// blocks Save, a safety binding cannot be removed), the pilot stick stream
-// (50 Hz input frames, release on a hidden tab), and screenshots of every
-// width class, the kiosk/TV, the Mode sheet, the skill picker and the
-// pre-flight checklist.
+// (banners, alert cards and layer chips never overlap), controller config
+// (hotspot highlight, rebind persists, conflict blocks Save, a safety binding
+// cannot be removed), the pilot stick stream (50 Hz input frames, release on
+// a hidden tab), and screenshots of every width class, the kiosk/TV, the Mode
+// sheet, the skill picker and the pre-flight checklist (`shots`, manual).
 
 const { chromium } = require("playwright-core");
 const assert = require("node:assert/strict");
@@ -136,7 +141,15 @@ function attr(page, selector, name) {
 }
 
 async function openControls(page) {
-  await page.getByRole("button", { name: "Settings" }).first().click();
+  // From the flight screen Settings is a tab of the Menu ("Go to"); from any
+  // other screen it is in the side navigation.
+  await page.waitForSelector('[data-zone="menu"], nav', { timeout: 10000 });
+  if (await page.locator('[data-zone="menu"]').count()) {
+    await page.locator('[data-zone="menu"]').click();
+    await page.locator('[role="dialog"]').getByRole("button", { name: "Settings", exact: true }).click();
+  } else {
+    await page.getByRole("button", { name: "Settings", exact: true }).first().click();
+  }
   await page.getByText("Controls", { exact: true }).first().click();
   await page.waitForSelector('[data-testid="controls-settings"]', { timeout: 8000 }).catch(async (e) => {
     await page.screenshot({ path: path.join(SHOTS, "debug-controls.png") });
@@ -151,12 +164,11 @@ async function controlsCases(browser) {
   await page.addInitScript(PAD_INIT);
   await mockAgent(page);
   await page.goto(BASE);
-  await page.evaluate(() => localStorage.removeItem("ados-cockpit-controls"));
+  // Factory controls, with the first-connect tour already seen (a sheet of
+  // its own that would otherwise open over the editor).
+  await page.evaluate(() => localStorage.setItem("ados-cockpit-controls", JSON.stringify({ tour_seen: true })));
   await page.reload();
   await openControls(page);
-  // Skip the first-connect tour if it shows.
-  const skip = page.getByRole("button", { name: "Skip" });
-  if (await skip.isVisible().catch(() => false)) await skip.click();
 
   // (a) button 0 highlights the cross hotspot within a frame.
   const cross = '[data-control="cross"]';
@@ -165,10 +177,11 @@ async function controlsCases(browser) {
   // "Press a control" mode: a press highlights and selects, never navigates.
   await page.getByRole("button", { name: "Press a control" }).click();
   await page.evaluate(() => window.__press(0, true));
-  await page.waitForTimeout(50);
+  await page.waitForFunction((sel) => document.querySelector(sel)?.getAttribute("fill") !== "transparent", cross, { timeout: 2000 }).catch(() => undefined);
   assert.notEqual(await attr(page, cross, "fill"), "transparent", "cross hotspot fills when button 0 is pressed");
   await page.screenshot({ path: path.join(SHOTS, "controls-pressed-cross.png") });
   await page.evaluate(() => window.__press(0, false));
+  await page.waitForFunction(() => document.querySelector('[data-testid="control-editor"]')?.getAttribute("data-control") === "cross", null, { timeout: 2000 }).catch(() => undefined);
   assert.equal(await attr(page, '[data-testid="control-editor"]', "data-control"), "cross", "the pressed control is selected");
   console.log("PASS (a) button 0 highlights the cross hotspot (and selects it)");
 
@@ -179,6 +192,7 @@ async function controlsCases(browser) {
   await page.$eval('[data-control="square"]', (e) => e.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   await page.getByLabel("Square tap").selectOption("record_toggle");
   await page.getByTestId("controls-save").click();
+  await page.waitForFunction(() => /"action":"record_toggle"/.test(localStorage.getItem("ados-cockpit-controls") ?? ""), null, { timeout: 2000 }).catch(() => undefined);
   await page.reload();
   await openControls(page);
   const stored = await page.evaluate(() => localStorage.getItem("ados-cockpit-controls") ?? "");
@@ -190,6 +204,7 @@ async function controlsCases(browser) {
   // (c) a second control on the same action outlines both and blocks Save.
   await page.$eval('[data-control="triangle"]', (e) => e.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   await page.getByLabel("Triangle tap").selectOption("record_toggle");
+  await page.waitForFunction(() => document.querySelector('[data-control="triangle"]')?.getAttribute("data-conflict") === "true", null, { timeout: 2000 }).catch(() => undefined);
   assert.equal(await attr(page, '[data-control="square"]', "data-conflict"), "true");
   assert.equal(await attr(page, '[data-control="triangle"]', "data-conflict"), "true");
   assert.equal(await page.getByTestId("controls-save").isDisabled(), true);
@@ -225,24 +240,35 @@ async function pilotStreamCase(browser) {
     ws.onClose(() => clearInterval(push));
   });
   await page.goto(BASE);
-  await page.waitForTimeout(1500);
+  // The stick stream runs once the pilot link is open and the pad is seen.
+  const until = async (what, pred, ms) => {
+    const end = Date.now() + ms;
+    while (!pred()) {
+      if (Date.now() > end) assert.fail(`timed out waiting for ${what}`);
+      await page.waitForTimeout(25);
+    }
+  };
+  await until("the first input frame", () => frames.some((x) => x.f.op === "input"), 10000);
   await page.evaluate(() => {
     window.__pad.axes = [0, 0, 0, -0.8];
   });
+  await until("the stick deflection in a frame", () => frames.some((x) => x.f.op === "input" && x.f.axes[1] > 0.5), 3000);
   const t0 = Date.now();
-  await page.waitForTimeout(2000);
-  const inputs = frames.filter((x) => x.f.op === "input" && x.t >= t0 + 200 && x.t <= t0 + 1800);
-  const hz = inputs.length / 1.6;
-  const last = inputs[inputs.length - 1]?.f;
-  console.log(`pilot stream: ${inputs.length} input frames in 1.6 s = ${hz.toFixed(1)} Hz; last axes ${JSON.stringify(last?.axes)}`);
+  await until("1.6 s of frames", () => frames.some((x) => x.f.op === "input" && x.t >= t0 + 1600), 5000);
+  // The rate on the cockpit's own clock (each frame's t_ms), so a busy test
+  // host delaying delivery does not skew it.
+  const inputs = frames.filter((x) => x.f.op === "input" && x.t >= t0).map((x) => x.f);
+  const span = (inputs[inputs.length - 1].t_ms - inputs[0].t_ms) / 1000;
+  const hz = (inputs.length - 1) / span;
+  const last = inputs[inputs.length - 1];
+  console.log(`pilot stream: ${inputs.length} input frames in ${span.toFixed(2)} s = ${hz.toFixed(1)} Hz; last axes ${JSON.stringify(last?.axes)}`);
   assert.ok(hz >= 45 && hz <= 55, "input frames at ~50 Hz");
   assert.ok(last.axes[1] > 0.5, "right stick up maps to pitch forward (+)");
   await page.evaluate(() => {
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
     document.dispatchEvent(new Event("visibilitychange"));
   });
-  await page.waitForTimeout(400);
-  assert.ok(frames.some((x) => x.f.op === "release"), "hidden tab sends release");
+  await until("the release frame", () => frames.some((x) => x.f.op === "release"), 2000);
   console.log("PASS (e) 50 Hz pilot input with mapped axes; release on hidden tab");
   await ctx.close();
 }
@@ -372,6 +398,292 @@ async function stopCases(browser) {
     await ctx.close();
   }
   console.log("STOP reachable with the status list open and closed at every width class");
+}
+
+/** A pilot on the ground, ready to launch, and one flying under ADOS Pilot
+ *  with Fly here offered. */
+const PILOT_GROUND = {
+  owner: "idle", control_mode: "ados", profile: "normal", avoid: "brake", armed: false, landed: true, vehicle_class: "multirotor", plan_ned: [],
+  readiness: [{ id: "fc_profile", ok: true, severity: "block", msg: "FC failsafes set for ADOS" }],
+  surface_ops: ["goto"],
+};
+const PILOT_AIR = { ...PILOT_GROUND, owner: "pilot", armed: true, landed: false };
+
+function telemetryFor(airborne) {
+  return {
+    armed: airborne, mode: airborne ? "GUIDED" : "LOITER", autopilot: 3,
+    attitude: { roll: 0, pitch: 0, yaw: 0 },
+    position: { lat: 12.97, lon: 77.59, alt_rel: airborne ? 12 : 0, heading: 70 },
+    velocity: { groundspeed: 0, climb: 0 }, gps: { fix_type: 3, satellites: 14 },
+    prearm: [], last_update: new Date().toISOString(),
+  };
+}
+
+/** A page with a mocked pilot stream; `sim.pilot` is what it sends (null:
+ *  nothing, so the last frame goes stale), `sim.airborne` drives telemetry. */
+async function pilotPage(browser, vp, sim, query = "") {
+  const ctx = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+  const page = await ctx.newPage();
+  page.on("pageerror", (e) => console.log("pageerror:", String(e).slice(0, 400)));
+  await page.addInitScript(PAD_INIT);
+  // The first-connect controller tour is a sheet of its own; seen already, so
+  // it cannot replace the sheet a case opens.
+  await page.addInitScript(() => {
+    if (!localStorage.getItem("ados-cockpit-controls")) localStorage.setItem("ados-cockpit-controls", JSON.stringify({ tour_seen: true }));
+  });
+  await mockAgent(page, { profile: vp.profile ?? "drone" });
+  await page.route("**/api/telemetry", (route) => route.fulfill({ contentType: "application/json", body: JSON.stringify(telemetryFor(sim.airborne)) }));
+  sim.sent = [];
+  await page.routeWebSocket(/\/api\/v1\/pilot\/stream/, (ws) => {
+    const push = setInterval(() => {
+      if (sim.pilot) ws.send(JSON.stringify({ kind: "pilot", ts_ms: Date.now(), data: sim.pilot }));
+    }, 100);
+    // A closed page may never report the socket closed; the timer must not
+    // keep the run alive.
+    push.unref();
+    ctx.on("close", () => clearInterval(push));
+    ws.onMessage((m) => {
+      const f = JSON.parse(String(m));
+      if (f.op !== "input") sim.sent.push(f);
+      if (f.op !== "action") return;
+      // `sim.reply(frame)`: { ok, err, delayMs } or null for no answer.
+      const r = sim.reply ? sim.reply(f) : { ok: true };
+      if (r) setTimeout(() => ws.send(JSON.stringify({ kind: "action_result", id: f.id, ok: r.ok, err: r.err })), r.delayMs ?? 0);
+    });
+    ws.onClose(() => clearInterval(push));
+  });
+  await page.goto(`${BASE}${query}`);
+  await page.waitForSelector('[data-testid="top-bar-stop"]', { timeout: 10000 });
+  await page.waitForSelector('[data-testid="flight-state-chip"]', { timeout: 10000 });
+  // The first pilot frame has reached the chip (it no longer reads NO PILOT).
+  if (sim.pilot) await page.waitForFunction(() => !/NO PILOT/.test(document.querySelector('[data-testid="flight-state-chip"]')?.textContent ?? ""), null, { timeout: 10000 });
+  const skip = page.getByRole("button", { name: "Skip" });
+  if (await skip.count()) await skip.first().click();
+  return { ctx, page };
+}
+
+const SHEET = '[role="dialog"][aria-modal="true"]';
+
+/** Wait until the open sheets have finished sliding in. */
+async function sheetSettled(page) {
+  await page.locator(SHEET).first().waitFor({ state: "visible", timeout: 4000 });
+  await page.waitForFunction((sel) => [...document.querySelectorAll(sel)].every((e) => e.getAnimations({ subtree: true }).length === 0), SHEET, { timeout: 4000 });
+}
+
+/** Hold a control with the mouse for `ms`. */
+async function holdOn(page, locator, ms) {
+  const b = await locator.boundingBox();
+  await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(ms);
+  await page.mouse.up();
+}
+
+/** The flight-screen sheets, each opened the way a pilot opens it. */
+const GROUND_SHEETS = [
+  ["mode", (p) => p.getByTestId("flight-state-chip").click()],
+  ["launch", (p) => p.getByTestId("left-takeoff").click()],
+  [
+    "preflight",
+    async (p) => {
+      await p.getByTestId("left-takeoff").click();
+      await sheetSettled(p);
+      await holdOn(p, p.getByRole("button", { name: "Launch (hold)" }), 1800);
+      await p.getByTestId("preflight-list").waitFor({ timeout: 3000 });
+    },
+  ],
+  ["menu", (p) => p.click('[data-zone="menu"]')],
+  ["skills", (p) => p.getByTestId("skill-picker-chip").click()],
+];
+const AIR_SHEETS = [
+  ["mode-airborne", (p) => p.getByTestId("flight-state-chip").click()],
+  ["skill-confirm", (p) => p.getByTestId("left-rth").click()],
+  [
+    "fly-here",
+    async (p) => {
+      const map = p.locator('[aria-label="Long-press the map to fly there"]').first();
+      await map.waitFor({ state: "attached", timeout: 5000 });
+      await holdOn(p, map, 1200);
+    },
+  ],
+];
+
+/** Run `fn`; on a failure save a screenshot of the page first. */
+async function debugOnFail(page, name, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    await page.screenshot({ path: path.join(SHOTS, `debug-${name}.png`) }).catch(() => undefined);
+    throw e;
+  }
+}
+
+/** The kiosk and every width class, with each flight-screen sheet open:
+ *  the topmost element at STOP's centre is STOP, the sheet starts below the
+ *  top bar, and a press on STOP reaches STOP (and its confirmation replaces
+ *  the sheet). */
+async function stopSheetsCase(browser) {
+  const viewports = [...VIEWPORTS, { name: "kiosk-tv", width: 1920, height: 1080, query: "?kiosk=1", profile: "ground_station" }];
+  for (const vp of viewports) {
+    const sim = { pilot: PILOT_GROUND, airborne: false };
+    const { ctx, page } = await pilotPage(browser, vp, sim, vp.query ?? "");
+    const stop = '[data-testid="top-bar-stop"]';
+    const check = async (name) => {
+      await sheetSettled(page);
+      assert.equal(await hits(page, stop), true, `${vp.name} ${name}: STOP is the topmost element at its centre`);
+      const bar = await page.locator('[data-zone="top_bar"]').boundingBox();
+      const panel = await page.locator(SHEET).first().boundingBox();
+      assert.ok(panel.y >= bar.y + bar.height - 1, `${vp.name} ${name}: the sheet starts below the top bar (${panel.y} < ${bar.y + bar.height})`);
+    };
+    for (const [name, openIt] of GROUND_SHEETS) {
+      await debugOnFail(page, `${vp.name}-${name}`, async () => {
+        await openIt(page);
+        await check(name);
+      });
+      if (name === "launch") await page.screenshot({ path: path.join(SHOTS, `stop-sheets-${vp.name}-launch.png`) });
+      await page.keyboard.press("Escape");
+      await page.locator(SHEET).waitFor({ state: "detached", timeout: 2000 });
+    }
+    sim.pilot = PILOT_AIR;
+    sim.airborne = true;
+    await page.getByTestId("left-land").waitFor({ state: "attached", timeout: 5000 });
+    for (const [name, openIt] of AIR_SHEETS) {
+      if (name === "fly-here" && (await page.locator('[aria-label="Long-press the map to fly there"]').count()) === 0) {
+        console.log(`${vp.name}: no map on screen at this class, Fly here not offered`);
+        continue;
+      }
+      await debugOnFail(page, `${vp.name}-${name}`, async () => {
+        await openIt(page);
+        await check(name);
+      });
+      if (name === "mode-airborne") await page.screenshot({ path: path.join(SHOTS, `stop-sheets-${vp.name}-mode.png`) });
+      // One real press on STOP reaches STOP; its confirmation replaces the sheet.
+      await page.$eval(stop, (el) => {
+        window.__stopDowns = 0;
+        el.addEventListener("pointerdown", () => (window.__stopDowns += 1), { once: true });
+      });
+      const s = await page.locator(stop).boundingBox();
+      await page.mouse.click(s.x + s.width / 2, s.y + s.height / 2);
+      assert.equal(await page.evaluate(() => window.__stopDowns), 1, `${vp.name} ${name}: STOP took the first press`);
+      await page.locator(SHEET, { hasText: "Emergency stop" }).waitFor({ timeout: 2000 });
+      const open = await page.$$eval(SHEET, (els) => els.map((e) => e.textContent.slice(0, 40)));
+      assert.equal(open.length, 1, `${vp.name} ${name}: one sheet at a time: ${JSON.stringify(open)}`);
+      await page.keyboard.press("Escape");
+      await page.locator(SHEET).waitFor({ state: "detached", timeout: 2000 });
+    }
+    await ctx.close();
+  }
+  console.log("STOP is on top and takes the first press with every flight-screen sheet open, at every width class and the kiosk");
+}
+
+/** A stalled pilot (no frame for more than `stale_after_ms`, 2 s) clears
+ *  every overlay drawn from its last frame: the low-battery and link-loss
+ *  countdowns (with Cancel), the gate ring and "Sticks are with …". */
+async function flowStaleCase(browser) {
+  const sim = {
+    pilot: {
+      ...PILOT_AIR,
+      rth_countdown_s: 9,
+      link_loss_in_s: 5,
+      link_loss_action: "rth",
+      gate: { pending: true, progress: 0.4 },
+      input_session: { src: "bench", label: "Bench", session: 7 },
+      banner: { text_key: "pilot.banner.ados_control", args: { profile: "NORMAL" }, until_ms: null },
+    },
+    airborne: true,
+  };
+  const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
+  const live = ['[data-testid="low-battery-banner"]', '[data-testid="link-loss-banner"]', '[data-testid="gate-ring"]', '[data-testid="sticks-elsewhere"]'];
+  for (const sel of [...live, '[data-testid="handover-banner"]']) await page.locator(sel).waitFor({ state: "visible", timeout: 5000 });
+  sim.pilot = null;
+  const t0 = Date.now();
+  await debugOnFail(page, "flow-stale", async () => {
+    for (const sel of live) await page.locator(sel).waitFor({ state: "detached", timeout: 3200 });
+  });
+  const gone = Date.now() - t0;
+  assert.ok(gone >= 1500, `the overlays stay while the frame is fresh (gone after ${gone} ms)`);
+  await page.screenshot({ path: path.join(SHOTS, "flow-stale.png") });
+  await ctx.close();
+  console.log(`stalled pilot: countdowns, gate ring and sticks-with gone ${gone} ms after the last frame`);
+}
+
+/** A running launch sequence shows its step and Abort in the top-centre
+ *  stack with no sheet open and with another sheet open; Abort sends the
+ *  pilot's pause; the line goes once the sequence is done. */
+async function sequenceCase(browser) {
+  const sim = { pilot: { ...PILOT_AIR, sequence: { step: "takeoff", after: "hold", error: null } }, airborne: true };
+  const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
+  const line = page.getByTestId("launch-sequence");
+  await line.waitFor({ state: "visible", timeout: 5000 });
+  assert.match(await line.innerText(), /Take off/);
+  await page.getByTestId("flight-state-chip").click();
+  await sheetSettled(page);
+  assert.ok(await line.isVisible(), "the step and Abort stay on screen with the Mode sheet open");
+  await page.screenshot({ path: path.join(SHOTS, "sequence-mode-sheet.png") });
+  await page.keyboard.press("Escape");
+  await page.locator(SHEET).waitFor({ state: "detached", timeout: 2000 });
+  await page.getByTestId("launch-abort").click();
+  const deadline = Date.now() + 2000;
+  while (!sim.sent.some((f) => f.op === "action" && f.name === "pause") && Date.now() < deadline) await page.waitForTimeout(50);
+  assert.ok(sim.sent.some((f) => f.op === "action" && f.name === "pause"), "Abort sends the pilot's pause");
+  sim.pilot = { ...PILOT_AIR, sequence: { step: "done", after: "hold", error: null } };
+  await line.waitFor({ state: "detached", timeout: 3000 });
+  await ctx.close();
+  console.log("launch sequence: step and Abort in the top-centre stack, with or without a sheet; Abort sends pause");
+}
+
+/** A pick in the Mode sheet turns pending at once (outlined, busy) and holds
+ *  the row until the pilot answers, then the result line shows. */
+async function modePendingCase(browser) {
+  const sim = { pilot: PILOT_AIR, airborne: true, reply: (f) => (f.name.startsWith("profile:") ? { ok: true, delayMs: 1500 } : { ok: true }) };
+  const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
+  await debugOnFail(page, "mode-pending-open", async () => {
+    await page.getByTestId("flight-state-chip").click();
+    await sheetSettled(page);
+  });
+  const row = page.locator('[data-row="profile"]');
+  await row.getByRole("radio", { name: "Cine" }).click();
+  await debugOnFail(page, "mode-pending", async () => {
+    await row.locator('[data-pending="true"]').waitFor({ state: "visible", timeout: 150 });
+  });
+  assert.equal(await row.getAttribute("aria-busy"), "true", "the row is busy");
+  assert.equal(await row.getByRole("radio", { name: "Sport" }).isDisabled(), true, "the row waits for the answer");
+  await page.screenshot({ path: path.join(SHOTS, "mode-pending.png") });
+  await page.getByTestId("mode-result").waitFor({ timeout: 4000 });
+  assert.equal(await page.getByTestId("mode-result").innerText(), "Profile: done");
+  assert.equal(await row.locator('[data-pending="true"]').count(), 0, "pending clears with the answer");
+  assert.equal(await row.getByRole("radio", { name: "Sport" }).isDisabled(), false);
+  await ctx.close();
+  console.log("Mode sheet: the pick is pending at once and the row waits for the answer");
+}
+
+/** Escape, a press outside and the controller's back close the topmost
+ *  overlay first: a press on the chip with a sheet open closes the sheet and
+ *  does not open the Mode sheet. */
+async function overlayCloseCase(browser) {
+  const sim = { pilot: PILOT_GROUND, airborne: false };
+  const { ctx, page } = await pilotPage(browser, { width: 1280, height: 800 }, sim);
+  const openers = GROUND_SHEETS.filter(([name]) => name !== "preflight");
+  for (const [name, openIt] of openers) {
+    await openIt(page);
+    await sheetSettled(page);
+    await page.keyboard.press("Escape");
+    await page.locator(SHEET).waitFor({ state: "detached", timeout: 1000 }).catch(() => assert.fail(`${name}: Escape closes it`));
+    await openIt(page);
+    await sheetSettled(page);
+    await page.getByTestId("flight-state-chip").click();
+    await page.locator(SHEET).waitFor({ state: "detached", timeout: 1000 }).catch(() => assert.fail(`${name}: a press outside closes it`));
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator(SHEET).count(), 0, `${name}: the press that closed it did nothing else`);
+    await openIt(page);
+    await sheetSettled(page);
+    await page.evaluate(() => window.__press(1, true));
+    await page.waitForTimeout(100);
+    await page.evaluate(() => window.__press(1, false));
+    await page.locator(SHEET).waitFor({ state: "detached", timeout: 1000 }).catch(() => assert.fail(`${name}: the controller's back closes it`));
+  }
+  await ctx.close();
+  console.log("Escape, a press outside and the controller's back close the topmost sheet first");
 }
 
 /** A mouse click on the gimbal pad's recentre button reaches the button (the
@@ -506,6 +818,11 @@ async function chipsCase(browser) {
   const only = process.argv[2];
   try {
     if (!only || only === "stop") await stopCases(browser);
+    if (!only || only === "stop-sheets") await stopSheetsCase(browser);
+    if (!only || only === "flow-stale") await flowStaleCase(browser);
+    if (!only || only === "sequence") await sequenceCase(browser);
+    if (!only || only === "mode-pending") await modePendingCase(browser);
+    if (!only || only === "overlay-close") await overlayCloseCase(browser);
     if (!only || only === "recentre") await recentreCase(browser);
     if (!only || only === "gimbal-flick") await gimbalFlickCase(browser);
     if (!only || only === "chips") await chipsCase(browser);

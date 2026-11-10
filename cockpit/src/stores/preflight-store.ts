@@ -15,6 +15,8 @@ interface PreflightState {
   pending: (() => void) | null;
   /** The sheet the checklist replaced, reopened when it passes. */
   returnTo: CockpitSheet;
+  /** The Launch sheet's go-to prefill, kept for its reopening. */
+  returnGoto: { n: number; e: number } | null;
   pass: () => void;
   dismiss: () => void;
 }
@@ -23,16 +25,18 @@ export const usePreflightStore = create<PreflightState>((set, get) => ({
   passed: false,
   pending: null,
   returnTo: null,
+  returnGoto: null,
   pass: () => {
-    const { pending: then, returnTo } = get();
-    set({ passed: true, pending: null, returnTo: null });
+    const { pending: then, returnTo, returnGoto } = get();
+    set({ passed: true, pending: null, returnTo: null, returnGoto: null });
     const ui = useCockpitUiStore.getState();
-    if (returnTo) ui.openSheet(returnTo);
+    if (returnTo === "launch") ui.openLaunch(returnGoto);
+    else if (returnTo) ui.openSheet(returnTo);
     else ui.closeSheet();
     then?.();
   },
   dismiss: () => {
-    set({ pending: null, returnTo: null });
+    set({ pending: null, returnTo: null, returnGoto: null });
     useCockpitUiStore.getState().closeSheet();
   },
 }));
@@ -45,6 +49,6 @@ export function requirePreflight(then: () => void): void {
     return;
   }
   const ui = useCockpitUiStore.getState();
-  usePreflightStore.setState({ pending: then, returnTo: ui.sheet === "preflight" ? null : ui.sheet });
+  usePreflightStore.setState({ pending: then, returnTo: ui.sheet === "preflight" ? null : ui.sheet, returnGoto: ui.launchGoto });
   ui.openSheet("preflight");
 }

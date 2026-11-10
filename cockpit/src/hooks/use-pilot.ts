@@ -8,7 +8,7 @@ import { useActiveSkillDetail } from "@/hooks/use-follow-skill";
 import { useNow } from "@/hooks/use-now";
 import { layerFrames } from "@/lib/layer-frames";
 import { PILOT_SESSION } from "@/lib/pilot-link";
-import { bottomRowAgl, chipInputs, type BottomRowAgl } from "@/shared/hud/chip-inputs";
+import { chipInputs } from "@/shared/hud/chip-inputs";
 import type { ArFrame, PilotState } from "@/shared/hud/cockpit-frames";
 import { CHIP_STALE_AFTER_MS, flightStateChip, type ChipView } from "@/shared/hud/flight-state";
 import { useFlightStore } from "@/stores/flight-store";
@@ -31,14 +31,6 @@ export function useFreshPilot(): PilotState | null {
   const pilot = usePilot();
   const now = useNow(pilot ? 500 : null);
   return pilot !== null && pilotFresh(pilot, now) ? pilot.data : null;
-}
-
-/** The bottom row's AGL, from the pilot kind with the follow kind behind it. */
-export function useBottomRowAgl(): BottomRowAgl {
-  const pilot = useNavStreamStore((s) => s.pilot?.data ?? null);
-  const followAgl = useNavStreamStore((s) => s.follow?.data.aglM ?? null);
-  const followSource = useNavStreamStore((s) => s.follow?.data.aglSource ?? null);
-  return bottomRowAgl(pilot, { aglM: followAgl, aglSource: followSource });
 }
 
 /** Whether the stick session belongs to another surface. */

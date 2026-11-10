@@ -10,13 +10,11 @@ import { ShieldAlert } from "lucide-react";
 import { NumberSettingRow } from "@/components/ui/number-setting-row";
 import { Sheet } from "@/components/ui/sheet";
 import { useSkillContext } from "@/hooks/use-skill-context";
+import { LAUNCH } from "@/lib/cockpit-flow";
 import { executeSkill } from "@/lib/skill-runner";
 import { resolveSkillState } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { useConfirmStore } from "@/stores/confirm-store";
-
-const ALT_MIN_M = 2;
-const ALT_MAX_M = 120;
 
 export function SkillConfirmSheet() {
   const pending = useConfirmStore((s) => s.pending);
@@ -184,8 +182,8 @@ function ConfirmSheet() {
           title="Takeoff altitude"
           value={altitudeM}
           onChange={setAltitude}
-          min={ALT_MIN_M}
-          max={ALT_MAX_M}
+          min={LAUNCH.altMinM}
+          max={LAUNCH.altMaxM}
           format={(m) => `${m} m`}
           decrementLabel="Lower takeoff altitude"
           incrementLabel="Raise takeoff altitude"

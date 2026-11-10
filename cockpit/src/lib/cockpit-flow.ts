@@ -1,12 +1,22 @@
 // Pure rules of the cockpit's flight flows: the handover banner's
-// visibility and its voice prompts, the Launch action's args, the pre-flight
-// checklist's pass rule, and the obstacle radar's ring scale. The components
-// in components/feed/cockpit render them.
+// visibility and its voice prompts, the confirm holds, the Launch action's
+// values and args, the launch sequence, the pre-flight checklist's pass rule,
+// the result line of a mode change, and the obstacle radar's ring scale. The
+// components in components/feed/cockpit render them.
 
 import { BANNERS } from "@/lib/cockpit-spec";
+import layoutJson from "@/shared/cockpit-spec/layout.json";
 import type { PilotState } from "@/shared/hud/cockpit-frames";
-import { specText } from "@/shared/hud/spec-text";
+import { refusalText } from "@/shared/hud/refusal";
+import { hasSpecText, specText } from "@/shared/hud/spec-text";
 import { STORAGE_CRIT_PCT, STORAGE_WARN_PCT } from "@/shared/hud/status-pill";
+
+export type HoldId = keyof typeof layoutJson.holds_ms;
+
+/** How long a confirm hold lasts (`layout.json` `holds_ms`). */
+export function holdMs(id: HoldId): number {
+  return layoutJson.holds_ms[id];
+}
 
 /** The handover banner on screen now, or null. A banner with no end time
  *  shows for the spec's handover time from when it first arrived. */
@@ -48,9 +58,39 @@ export function voicePrompt(prev: PilotState | null, next: PilotState): string |
 export type LaunchAfter = "hold" | "skill" | "mission" | "goto";
 export type WhenDone = "none" | "land" | "rth";
 
-export const COPTER_TAKEOFF_ALT_M = 3;
-export const ALT_MIN_M = 1;
-export const ALT_MAX_M = 120;
+/** The Launch sheet's take-off altitude range and default, and the go-to
+ *  point it starts with (`layout.json` `launch`; none: the pilot picks it). */
+export const LAUNCH = {
+  altMinM: layoutJson.launch.alt_min_m,
+  altMaxM: layoutJson.launch.alt_max_m,
+  altDefaultM: layoutJson.launch.alt_default_m,
+  gotoDefault: layoutJson.launch.goto_default as { n: number; e: number } | null,
+};
+
+export type LaunchStep = NonNullable<PilotState["sequence"]>["step"];
+export const LAUNCH_STEPS: readonly LaunchStep[] = ["checks", "arm", "takeoff", "after", "done"];
+
+/** A launch sequence still on its way: a step before `done`, no error. */
+export function launchRunning(seq: PilotState["sequence"]): seq is NonNullable<PilotState["sequence"]> {
+  return seq != null && seq.step !== "done" && !seq.error;
+}
+
+/** A launch step's name (`flow.launch.step.*`). */
+export function launchStepText(step: LaunchStep): string {
+  return specText(step === "after" ? "flow.launch.step.after_label" : `flow.launch.step.${step}`);
+}
+
+/** A flight controller's command answer in words (`mav_result.*`), any other
+ *  name through the refusal texts. */
+export function mavResultText(name: string | null | undefined): string {
+  return name && hasSpecText(`mav_result.${name}`) ? specText(`mav_result.${name}`) : refusalText(name);
+}
+
+/** The Mode sheet's result line for one change: `<label>: done`, or the
+ *  reason in words. */
+export function modeResultText(label: string, r: { ok: boolean; reason?: string }): string {
+  return r.ok ? specText("flow.mode.result.done", { label }) : specText("flow.mode.result.failed", { label, reason: r.reason ?? specText("flow.mode.refused") });
+}
 
 export interface LaunchPlan {
   after: LaunchAfter;

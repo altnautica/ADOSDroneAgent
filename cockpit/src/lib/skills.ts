@@ -31,8 +31,6 @@ export const GUARD_WINDOW_MS = 3000;
 
 /** A plugin skill whose manifest sets `confirm: true` needs this hold. */
 export const PLUGIN_CONFIRM_MS = 800;
-/** Takeoff altitude offered when the command path (no pilot) takes off. */
-export const DEFAULT_TAKEOFF_ALT_M = 10;
 /** A pilot state older than this is a stale link (the chip's LINK rule). */
 export const PILOT_FRESH_MS = 2000;
 

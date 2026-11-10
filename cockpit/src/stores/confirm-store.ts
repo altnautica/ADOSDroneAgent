@@ -7,7 +7,8 @@
 
 import { create } from "zustand";
 
-import { DEFAULT_TAKEOFF_ALT_M, type Skill } from "@/lib/skills";
+import { LAUNCH } from "@/lib/cockpit-flow";
+import type { Skill } from "@/lib/skills";
 
 export interface PendingConfirm {
   skill: Skill;
@@ -55,7 +56,7 @@ export const useConfirmStore = create<ConfirmState>((set, get) => ({
   ack: null,
 
   open: (skill, gamepadButton = null, stage = "hold") =>
-    set({ pending: { skill, altitudeM: DEFAULT_TAKEOFF_ALT_M, gamepadButton, stage }, heldSince: null }),
+    set({ pending: { skill, altitudeM: LAUNCH.altDefaultM, gamepadButton, stage }, heldSince: null }),
   cancel: () => set({ pending: null, heldSince: null }),
   setAltitude: (m) => set((s) => (s.pending ? { pending: { ...s.pending, altitudeM: m } } : s)),
   toConfirmStage: () =>

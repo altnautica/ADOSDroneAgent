@@ -1,9 +1,11 @@
-// The Launch sheet, opened by the left column's Take off: the take-off
+// The Launch sheet, opened by the left column's Take off (or a long-press on
+// a map while on the ground, prefilled with that point): the take-off
 // altitude, what to do once there (hold, a skill, the loaded mission, or a
-// point), and an optional "when done" action. Holding Launch (1.5 s) passes the
-// pre-flight checklist gate and sends the pilot's `launch` action; the
-// sequence's progress (checks → arm → take off → after) shows as a step strip,
-// and Abort brakes to a hold (or disarms while still on the ground).
+// point), and an optional "when done" action. Holding Launch passes the
+// pre-flight checklist gate (the first arm of a session) and sends the
+// pilot's `launch` action; the sequence's progress (checks → arm → take off →
+// after) shows as a step strip, and Abort brakes to a hold (or disarms while
+// still on the ground). Ranges, defaults and texts come from the spec.
 
 import { useEffect, useMemo, useState } from "react";
 
@@ -11,36 +13,28 @@ import { HoldButton } from "@/components/ui/hold-button";
 import { Sheet } from "@/components/ui/sheet";
 import { usePilot } from "@/hooks/use-pilot";
 import { getParam } from "@/lib/api";
-import { ALT_MAX_M, ALT_MIN_M, COPTER_TAKEOFF_ALT_M, launchArgs, type LaunchAfter, type WhenDone } from "@/lib/cockpit-flow";
+import { LAUNCH, LAUNCH_STEPS, launchArgs, launchRunning, launchStepText, type LaunchAfter, type WhenDone } from "@/lib/cockpit-flow";
 import { BUILTIN_BY_ID } from "@/lib/cockpit-spec";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { skillVisibleFor } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
-import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
+import { abortLaunch, useCockpitUiStore } from "@/stores/cockpit-ui-store";
 import { useExtensionsStore } from "@/stores/extensions-store";
 import { requirePreflight } from "@/stores/preflight-store";
 
-const STEPS = [
-  { id: "checks", label: "Checks" },
-  { id: "arm", label: "Arm" },
-  { id: "takeoff", label: "Take off" },
-  { id: "after", label: "After" },
-  { id: "done", label: "Done" },
-] as const;
-
-/** The launch sequence's step strip. Exported: the chip collapses into it. */
-export function LaunchSteps() {
+/** The launch sequence's step strip. */
+function LaunchSteps() {
   const seq = usePilot()?.data.sequence ?? null;
   if (!seq) return null;
-  const at = STEPS.findIndex((s) => s.id === seq.step);
+  const at = LAUNCH_STEPS.indexOf(seq.step);
   return (
     <div className="flex flex-col gap-[0.3rem]" data-testid="launch-steps">
       <ol className="flex gap-[0.25rem]">
-        {STEPS.map((s, i) => (
+        {LAUNCH_STEPS.map((s, i) => (
           <li
-            key={s.id}
+            key={s}
             aria-current={i === at ? "step" : undefined}
             className={cn(
               "flex-1 rounded border px-[0.3rem] py-[0.2rem] text-center text-[0.72rem] font-semibold",
@@ -53,51 +47,64 @@ export function LaunchSteps() {
                     : "border-border text-muted-foreground",
             )}
           >
-            {s.label}
+            {launchStepText(s)}
           </li>
         ))}
       </ol>
-      {seq.error ? <p className="text-[0.78rem] text-err">{seq.error}</p> : null}
+      {seq.error ? <p className="text-[0.78rem] text-err">{refusalText(seq.error)}</p> : null}
     </div>
   );
 }
 
-function Stepper({ label, value, onChange, min, max, step = 1, unit }: {
+function Stepper({ label, value, onChange, min, max, step = 1 }: {
   label: string;
-  value: number;
+  /** Null: not set yet; the first press starts from zero. */
+  value: number | null;
   onChange: (v: number) => void;
   min: number;
   max: number;
   step?: number;
-  unit: string;
 }) {
   const set = (v: number) => onChange(Math.min(max, Math.max(min, v)));
   return (
     <div className="flex items-center gap-[0.4rem]">
       <span className="min-w-[6rem] text-[0.82rem]">{label}</span>
-      <button type="button" aria-label={`${label} down`} onClick={() => set(value - step)} className="h-[48px] w-[48px] rounded-lg border border-border text-[1.1rem]">
+      <button
+        type="button"
+        aria-label={specText("flow.stepper.down", { label })}
+        onClick={() => set((value ?? 0) - step)}
+        className="h-[48px] w-[48px] rounded-lg border border-border text-[1.1rem]"
+      >
         −
       </button>
       <span className="min-w-[4.5rem] text-center font-mono text-[0.95rem]">
-        {value} {unit}
+        {value === null ? "—" : specText("map.fly_here.distance_value", { dist: value })}
       </span>
-      <button type="button" aria-label={`${label} up`} onClick={() => set(value + step)} className="h-[48px] w-[48px] rounded-lg border border-border text-[1.1rem]">
+      <button
+        type="button"
+        aria-label={specText("flow.stepper.up", { label })}
+        onClick={() => set((value ?? 0) + step)}
+        className="h-[48px] w-[48px] rounded-lg border border-border text-[1.1rem]"
+      >
         +
       </button>
     </div>
   );
 }
 
+const WHEN_DONE: readonly WhenDone[] = ["none", "land", "rth"];
+
 export function LaunchSheet() {
   const close = useCockpitUiStore((s) => s.closeSheet);
+  const prefill = useCockpitUiStore((s) => s.launchGoto) ?? LAUNCH.gotoDefault;
   const pilot = usePilot()?.data ?? null;
   const extensions = useExtensionsStore((s) => s.extensions);
   const plane = pilot?.vehicleClass === "fixedwing";
-  const [altM, setAltM] = useState(COPTER_TAKEOFF_ALT_M);
-  const [after, setAfter] = useState<LaunchAfter>("hold");
+  const [altM, setAltM] = useState(LAUNCH.altDefaultM);
+  const [after, setAfter] = useState<LaunchAfter>(prefill ? "goto" : "hold");
   const [skill, setSkill] = useState<string | null>(null);
-  const [gotoN, setGotoN] = useState(20);
-  const [gotoE, setGotoE] = useState(0);
+  const [gotoN, setGotoN] = useState<number | null>(prefill?.n ?? null);
+  const [gotoE, setGotoE] = useState<number | null>(prefill?.e ?? null);
   const [whenDone, setWhenDone] = useState<WhenDone>("none");
   const result = useCockpitUiStore((s) => s.launchRefusal);
 
@@ -121,17 +128,18 @@ export function LaunchSheet() {
     [extensions, pilot?.vehicleClass],
   );
   const missionLoaded = pilot?.mission?.state === "loaded";
-  const sequenceRunning = pilot?.sequence != null && pilot.sequence.step !== "done" && !pilot.sequence.error;
+  const sequenceRunning = launchRunning(pilot?.sequence ?? null);
 
   const options: { id: LaunchAfter; label: string; reason: string | null }[] = [
-    { id: "hold", label: "Hold", reason: null },
-    { id: "skill", label: "Skill", reason: behaviors.length === 0 ? "No behaviour skill installed" : null },
-    { id: "mission", label: "Start mission", reason: missionLoaded ? null : "No mission loaded on the drone" },
-    { id: "goto", label: "Go to a point", reason: null },
+    { id: "hold", label: specText("flow.launch.after.hold"), reason: null },
+    { id: "skill", label: specText("flow.launch.after.skill"), reason: behaviors.length === 0 ? specText("flow.launch.after.skill_none") : null },
+    { id: "mission", label: specText("flow.launch.after.mission"), reason: missionLoaded ? null : specText("flow.launch.after.mission_none") },
+    { id: "goto", label: specText("flow.launch.after.goto"), reason: null },
   ];
 
   const chosen = behaviors.find((b) => b.id === skill) ?? null;
-  const ready = !(after === "skill" && !chosen) && pilot !== null;
+  const goto = gotoN !== null && gotoE !== null ? { n: gotoN, e: gotoE } : null;
+  const ready = pilot !== null && !(after === "skill" && !chosen) && !(after === "goto" && !goto);
 
   const launch = () =>
     requirePreflight(() => {
@@ -139,7 +147,7 @@ export function LaunchSheet() {
         after,
         altM,
         skill: chosen ? { pluginId: chosen.pluginId, skillId: chosen.skillId } : null,
-        goto: after === "goto" ? { n: gotoN, e: gotoE, altM } : null,
+        goto: after === "goto" && goto ? { ...goto, altM } : null,
         whenDone,
       });
       const { setLaunchRefusal } = useCockpitUiStore.getState();
@@ -151,20 +159,16 @@ export function LaunchSheet() {
 
   return (
     <Sheet
-      title="Launch"
+      title={specText("flow.launch.title")}
       onDismiss={close}
       footer={
         sequenceRunning ? (
           <button
             type="button"
-            onClick={() =>
-              void sendPilotAction("pause").then((r) =>
-                useCockpitUiStore.getState().setLaunchRefusal(r.ok ? null : specText("flow.launch.abort_refused", { reason: refusalText(r.err) })),
-              )
-            }
+            onClick={abortLaunch}
             className="min-h-[56px] w-full rounded-lg border border-err bg-err/20 text-[0.95rem] font-semibold text-err"
           >
-            Abort
+            {specText("flow.launch.abort")}
           </button>
         ) : (
           <HoldButton
@@ -172,20 +176,24 @@ export function LaunchSheet() {
             disabled={!ready}
             onFired={launch}
             className="min-h-[56px] w-full text-[0.95rem]"
-            label="Launch (hold)"
+            label={specText("flow.launch.hold_aria")}
           >
-            Hold to launch
+            {specText("flow.launch.hold_to_launch")}
           </HoldButton>
         )
       }
     >
-      {!pilot ? <p className="text-[0.85rem] text-err">ADOS Pilot is not reporting: launch is unavailable.</p> : null}
+      {!pilot ? <p className="text-[0.85rem] text-err">{specText("flow.launch.no_pilot")}</p> : null}
       <LaunchSteps />
       {result ? <p role="status" className="text-[0.8rem] text-err">{result}</p> : null}
       <div className="flex flex-col gap-[0.6rem] py-[0.4rem]">
-        <Stepper label="Take-off altitude" value={altM} onChange={setAltM} min={ALT_MIN_M} max={ALT_MAX_M} unit="m" />
+        {plane ? (
+          <p className="text-[0.82rem] text-muted-foreground">{specText("flow.launch.plane_alt")}</p>
+        ) : (
+          <Stepper label={specText("flow.launch.alt_m")} value={altM} onChange={setAltM} min={LAUNCH.altMinM} max={LAUNCH.altMaxM} />
+        )}
         <div className="flex flex-col gap-[0.3rem]">
-          <span className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted-foreground">After take-off</span>
+          <span className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted-foreground">{specText("flow.launch.after")}</span>
           <div className="grid grid-cols-2 gap-[0.3rem]" role="radiogroup">
             {options.map((o) => (
               <button
@@ -208,7 +216,7 @@ export function LaunchSheet() {
           </div>
         </div>
         {after === "skill" ? (
-          <div className="flex flex-col gap-[0.25rem]" role="radiogroup" aria-label="Skill after take-off">
+          <div className="flex flex-col gap-[0.25rem]" role="radiogroup" aria-label={specText("flow.launch.after.skill_list")}>
             {behaviors.map((b) => (
               <button
                 key={b.id}
@@ -224,15 +232,15 @@ export function LaunchSheet() {
           </div>
         ) : null}
         {after === "goto" ? (
-          <>
-            <Stepper label="North of home" value={gotoN} onChange={setGotoN} min={-500} max={500} step={5} unit="m" />
-            <Stepper label="East of home" value={gotoE} onChange={setGotoE} min={-500} max={500} step={5} unit="m" />
-          </>
+          <div data-testid="launch-goto">
+            <Stepper label={specText("flow.launch.goto.north")} value={gotoN} onChange={setGotoN} min={-500} max={500} step={5} />
+            <Stepper label={specText("flow.launch.goto.east")} value={gotoE} onChange={setGotoE} min={-500} max={500} step={5} />
+          </div>
         ) : null}
         <div className="flex flex-col gap-[0.3rem]">
-          <span className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted-foreground">When done</span>
+          <span className="text-[0.72rem] font-semibold uppercase tracking-wide text-muted-foreground">{specText("flow.launch.when_done")}</span>
           <div className="flex gap-[0.3rem]" role="radiogroup">
-            {(["none", "land", "rth"] as const).map((w) => (
+            {WHEN_DONE.map((w) => (
               <button
                 key={w}
                 type="button"
@@ -241,7 +249,7 @@ export function LaunchSheet() {
                 onClick={() => setWhenDone(w)}
                 className={cn("min-h-[48px] flex-1 rounded-lg border text-[0.85rem]", whenDone === w ? "border-primary bg-primary/25" : "border-border")}
               >
-                {w === "none" ? "Nothing" : w === "land" ? "Land" : "Return home"}
+                {specText(`flow.launch.when_done.${w}`)}
               </button>
             ))}
           </div>
