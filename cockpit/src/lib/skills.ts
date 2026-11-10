@@ -263,6 +263,9 @@ export function armGateReason(req: ArmRequirement, armed: boolean, landed: boole
 }
 
 function resolveBuiltin(skill: Skill, b: BuiltinBinding, ctx: SkillContext): SkillState {
+  // The emergency stop is always offered: its 3 s hold and confirm guard it,
+  // and a send with no route says so when it fails.
+  if (skill.id === "kill") return { enabled: true };
   const pilot = ctx.pilot ?? null;
   const noLink = ctx.linkReason ?? "No flight controller link";
   const route = builtinRoute(skill, ctx);

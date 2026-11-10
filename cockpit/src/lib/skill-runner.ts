@@ -3,26 +3,36 @@
 // controller bindings through the cockpit actions) goes through
 // `requestSkill`, so the gates and the confirm tier are the same whichever
 // source fired it. The outcome is reported truthfully: accepted, rejected with
-// the reason, sent but not acknowledged, queued, or failed.
+// the reason, sent but not acknowledged, queued, or failed. A press that is
+// dropped (the skill is not drivable now, or its previous press still awaits
+// an answer) says why in a toast; it is never silent.
 //
 // Built-ins go to the drone's pilot (`action`) while a pilot state is present
-// and its link is open, else to `POST /api/command`. Pause, land, rth and kill
-// also stop every running motion skill (navigation and camera skills keep
-// running). Kill never waits behind another command.
+// and its link is open, else to `POST /api/command`. Both paths answer within
+// three seconds, a missing answer included. Pause, land, rth and kill also
+// stop every running motion skill (navigation and camera skills keep
+// running).
+//
+// A press waits only behind its own skill's unanswered command on this drone
+// (busy per drone and skill); Return home, Land, Pause and Emergency stop
+// never wait at all.
 //
 // Plugin skills write their activation key. A motion skill's GO first stops
 // the running motion skill (preemption); a toggle write is pending until
 // the plugin echoes it; a stop that fails because the link is down is queued
 // and sent when the link returns.
 
+import { create } from "zustand";
+
 import { skillContextNow } from "@/hooks/use-skill-context";
-import { sendCommand } from "@/lib/api";
+import { CommandTimeoutError, sendCommand } from "@/lib/api";
 import type { ActionPhase } from "@/lib/cockpit-actions";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { refusalText } from "@/shared/hud/refusal";
 import { activateExclusive, runningMotionSkills } from "@/lib/skill-gates";
 import { builtinRoute, resolveSkillState, type BuiltinBinding, type Skill, type SkillContext } from "@/lib/skills";
 import { ApiError, errorDetail } from "@/shared/api-fetch";
+import { toast } from "@/shared/api/toast";
 import { useConfirmStore, type AckLine } from "@/stores/confirm-store";
 import { activateExtensionSkill, pluginSkills, useExtensionsStore } from "@/stores/extensions-store";
 import { requirePreflight } from "@/stores/preflight-store";
@@ -37,7 +47,8 @@ function report(ack: AckLine): void {
 }
 
 function failureText(e: unknown): string {
-  return e instanceof ApiError ? errorDetail(e.body, e.message) : "command failed";
+  if (e instanceof CommandTimeoutError) return refusalText(e.code);
+  return e instanceof ApiError ? errorDetail(e.body, e.message) : refusalText("no response");
 }
 
 /** The request never reached the agent, or the agent's upstream is down: a
@@ -54,7 +65,7 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
     return;
   }
   if (route !== "command" || !b.command) {
-    report({ text: `${skill.label}: no link`, kind: "err" });
+    report({ text: `${skill.label}: ${refusalText("no_fc")}`, kind: "err" });
     return;
   }
   const args = skill.takesAltitude && altitudeM != null ? [altitudeM] : [];
@@ -163,18 +174,57 @@ async function runExtension(skill: Skill, active: boolean): Promise<void> {
   report({ text: `${skill.label}: sent`, kind: "ok" });
 }
 
-/** Pause and kill (the built-ins sent blind on a stale link) never wait behind
- *  another command's acknowledgement and never hold the others off: "Land,
- *  then Pause to abort" must brake at once. */
+/** Return home, Land, Pause and Emergency stop (the built-ins that stop motion)
+ *  never wait behind a command and never hold one off: "Take off, then Return
+ *  home" and "Land, then Pause to abort" act at once. */
 export function bypassesBusy(skill: Skill): boolean {
-  return skill.builtin?.staleLink === "send_blind";
+  return skill.builtin?.stopsMotion === true;
+}
+
+/** The drone this cockpit commands: its own node (a ground station commands
+ *  the one aircraft it is paired with). Part of the busy key, as on every
+ *  surface that keys busy by drone and skill. */
+const DRONE = "self";
+
+/** The (drone, skill) pairs whose command awaits its answer. */
+export const useSkillBusyStore = create<{ keys: Readonly<Record<string, true>> }>(() => ({ keys: {} }));
+
+function busyKey(skill: Skill): string {
+  return `${DRONE}::${skill.id}`;
+}
+
+function setSkillBusy(skill: Skill, on: boolean): void {
+  useSkillBusyStore.setState((s) => {
+    const keys = { ...s.keys };
+    if (on) keys[busyKey(skill)] = true;
+    else delete keys[busyKey(skill)];
+    return { keys };
+  });
+}
+
+/** Whether a press of `skill` now would be dropped because its own previous
+ *  command still awaits an answer. */
+export function isSkillBusy(skill: Skill): boolean {
+  return !bypassesBusy(skill) && useSkillBusyStore.getState().keys[busyKey(skill)] === true;
+}
+
+/** React: the same, for a control that dims while its command is out. */
+export function useSkillBusy(skill: Skill | null | undefined): boolean {
+  return useSkillBusyStore((s) => skill != null && !bypassesBusy(skill) && s.keys[busyKey(skill)] === true);
+}
+
+/** A press that does not go out says why. */
+function dropped(skill: Skill, why: string): void {
+  toast.info(`${skill.label}: ${why}`);
 }
 
 async function run(skill: Skill, opts: { altitudeM?: number; active?: boolean }): Promise<void> {
+  if (isSkillBusy(skill)) {
+    dropped(skill, refusalText("busy"));
+    return;
+  }
   const exempt = bypassesBusy(skill);
-  const store = useConfirmStore.getState();
-  if (store.busy && !exempt) return;
-  if (!exempt) store.setBusy(true);
+  if (!exempt) setSkillBusy(skill, true);
   try {
     if (skill.builtin) {
       const sent = sendBuiltin(skill, skill.builtin, opts.altitudeM);
@@ -186,7 +236,7 @@ async function run(skill: Skill, opts: { altitudeM?: number; active?: boolean })
   } catch (e) {
     report({ text: `${skill.label}: ${failureText(e)}`, kind: "err" });
   } finally {
-    if (!exempt) useConfirmStore.getState().setBusy(false);
+    if (!exempt) setSkillBusy(skill, false);
   }
 }
 
@@ -201,16 +251,23 @@ export async function executeSkill(skill: Skill, opts: { altitudeM?: number; act
 }
 
 /** Request a skill: gate it, then fire (tap, or stopping a running toggle) or
- *  open its confirm sheet. Returns false when the skill is not drivable now. */
+ *  open its confirm sheet. Returns false, with the reason in a toast, when the
+ *  skill is not drivable now or its previous press still awaits an answer. */
 export function requestSkill(skill: Skill, ctx: SkillContext, gamepadButton: number | null = null): boolean {
   const state = resolveSkillState(skill, ctx);
-  const store = useConfirmStore.getState();
-  if (!state.enabled || (store.busy && !bypassesBusy(skill))) return false;
+  if (!state.enabled) {
+    dropped(skill, state.reason ?? refusalText(null));
+    return false;
+  }
+  if (isSkillBusy(skill)) {
+    dropped(skill, refusalText("busy"));
+    return false;
+  }
   if (skill.confirm.kind === "tap" || (skill.extension?.toggle && state.active)) {
     void executeSkill(skill, { active: state.active });
     return true;
   }
-  store.open(skill, gamepadButton);
+  useConfirmStore.getState().open(skill, gamepadButton);
   return true;
 }
 

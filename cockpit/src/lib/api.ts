@@ -211,18 +211,51 @@ export type FlightCommand =
   | "resumemission"
   | "ekfsourceset";
 
+/** A flight command with no answer after this long is reported as unanswered,
+ *  the same window a pilot action gets. */
+export const COMMAND_TIMEOUT_MS = 3000;
+
+/** `sendCommand` got no answer within `COMMAND_TIMEOUT_MS`. Its `code` is the
+ *  client's own refusal code for a missing answer (`refusalText`). */
+export class CommandTimeoutError extends Error {
+  readonly code = "no response";
+
+  constructor() {
+    super("no response");
+    this.name = "CommandTimeoutError";
+  }
+}
+
 /** Send one high-level flight command (`POST /api/command`). Throws `ApiError`
- *  on a 503 (no FC link) or 400 (unknown command / bad argument). */
-export function sendCommand(
+ *  on a 503 (no FC link) or 400 (unknown command / bad argument), and
+ *  `CommandTimeoutError` when nothing answers within `COMMAND_TIMEOUT_MS`. */
+export async function sendCommand(
   cmd: FlightCommand,
   args: (string | number)[] = [],
   signal?: AbortSignal,
 ): Promise<CommandResponse> {
-  return apiFetch<CommandResponse>("/api/command", {
-    method: "POST",
-    body: { cmd, args },
-    signal,
-  });
+  const ctl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    ctl.abort();
+  }, COMMAND_TIMEOUT_MS);
+  const forward = () => ctl.abort();
+  if (signal?.aborted) ctl.abort();
+  else signal?.addEventListener("abort", forward, { once: true });
+  try {
+    return await apiFetch<CommandResponse>("/api/command", {
+      method: "POST",
+      body: { cmd, args },
+      signal: ctl.signal,
+    });
+  } catch (e) {
+    if (timedOut) throw new CommandTimeoutError();
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", forward);
+  }
 }
 
 /** Start the ground-station video recorder. */

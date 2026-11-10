@@ -81,6 +81,13 @@ describe("stale link rules", () => {
     const noPilot: SkillContext = { fcConnected: true, live: true, armed: true, pilot: null };
     expect(resolveSkillState(BUILTIN_SKILL_BY_ID.take_control, noPilot)).toMatchObject({ enabled: false, reason: "Pilot not running" });
   });
+
+  it("kill is enabled while disarmed and with no link", () => {
+    const disarmed: SkillContext = { ...flying, armed: false, pilot: { ...pilot, armed: false, landed: true } };
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.kill, disarmed).enabled).toBe(true);
+    const noLink: SkillContext = { fcConnected: false, live: false, armed: false, pilot: null };
+    expect(resolveSkillState(BUILTIN_SKILL_BY_ID.kill, noLink).enabled).toBe(true);
+  });
 });
 
 describe("plugin skill freshness and link loss", () => {
