@@ -6,6 +6,12 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.81] - 2026-11-10
+
+### Changed
+
+- Cockpit: the minimap, the Map panel, the flight instruments, the target overlay and its menu, the what's-locked chip and the Vision panel read their words from the cockpit spec, so they match the other ground surfaces; distances on the map scale, the home distance and the depth ranges use the shared distance format, and the vertical-speed readout uses the shared signed format (never "-0.0").
+
 ## [0.109.80] - 2026-11-10
 
 ### Changed
