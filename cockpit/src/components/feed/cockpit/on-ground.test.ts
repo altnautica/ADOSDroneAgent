@@ -23,4 +23,9 @@ describe("onGround", () => {
     expect(onGround(null, false, NOW)).toBe(true);
     expect(onGround(null, true, NOW)).toBe(false);
   });
+
+  it("reads an unknown arm state (FC link down) as possibly airborne", () => {
+    expect(onGround(null, undefined, NOW)).toBe(false);
+    expect(onGround(pilot(2500, { landed: true, armed: false }), undefined, NOW)).toBe(false);
+  });
 });

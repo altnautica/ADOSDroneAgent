@@ -78,4 +78,8 @@ describe("the status pill's pilot, agent, controller and pre-flight inputs", () 
     expect(covered.preflightFailing.map((c) => c.id)).toEqual(["home"]);
     expect(pillWiring({ ...base, armed: true }).preflightFailing).toEqual([]);
   });
+
+  it("lists no pre-flight items while the arm state is unknown (FC link down)", () => {
+    expect(pillWiring({ ...base, armed: undefined }).preflightFailing).toEqual([]);
+  });
 });

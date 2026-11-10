@@ -6,6 +6,7 @@ import { defaultLeasedLayers, holdLayerDemand, layersViewQuery, LEASED_LAYERS, t
 import {
   NAV_POLL_IDLE_MS,
   NAV_POLL_VIDEO_MS,
+  NAV_STATUS_TIMEOUT_MS,
   NavPoller,
   navPollMs,
   navStatusPath,
@@ -71,6 +72,23 @@ describe("one nav-status poller for every reader", () => {
 });
 
 describe("shared nav-status poll", () => {
+  // Real timers: AbortSignal.timeout runs on the runtime's own clock.
+  it("abandons a hung read after the timeout so the poll keeps going", async () => {
+    const client = new QueryClient();
+    let calls = 0;
+    const poller = new NavPoller(client, (_path, signal) => {
+      calls += 1;
+      // Never answers; only the abort ends it.
+      return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason)));
+    });
+    useNavPollStore.setState({ videoPanels: 1, view: null });
+    const release = poller.acquire();
+    expect(calls).toBe(1);
+    await new Promise((r) => setTimeout(r, NAV_STATUS_TIMEOUT_MS + 300));
+    expect(calls).toBeGreaterThan(1);
+    release();
+  });
+
   it("polls at 5 Hz while a video panel is mounted, else 1 Hz", () => {
     expect(navPollMs(1)).toBe(NAV_POLL_VIDEO_MS);
     expect(NAV_POLL_VIDEO_MS).toBe(200);

@@ -3,7 +3,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CAMERA_TIMEOUT_MS, fetchMavCameras, frameCrop, runCameraAction, runMavCamera, useMavCameraStore } from "@/lib/camera-actions";
+import {
+  AGENT_CAMERA_WRITE_BUDGET_MS,
+  CAMERA_LIST_TIMEOUT_MS,
+  CAMERA_WRITE_TIMEOUT_MS,
+  fetchMavCameras, frameCrop, runCameraAction,
+  runMavCamera,
+  useMavCameraStore,
+} from "@/lib/camera-actions";
 import { onToast, type ToastMessage } from "@/shared/api/toast";
 import { refusalText } from "@/shared/hud/refusal";
 import { specText } from "@/shared/hud/spec-text";
@@ -31,22 +38,82 @@ beforeEach(() => {
   vi.stubGlobal("window", { location: { search: "" } });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Let any background list end, so none is shared into the next test.
+  await vi.advanceTimersByTimeAsync(CAMERA_LIST_TIMEOUT_MS + 10);
   off();
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
 
 describe("camera timeouts", () => {
-  it("is 3 to 5 s", () => {
-    expect(CAMERA_TIMEOUT_MS).toBeGreaterThanOrEqual(3000);
-    expect(CAMERA_TIMEOUT_MS).toBeLessThanOrEqual(5000);
+  it("the list gives up in 3 to 5 s", () => {
+    expect(CAMERA_LIST_TIMEOUT_MS).toBeGreaterThanOrEqual(3000);
+    expect(CAMERA_LIST_TIMEOUT_MS).toBeLessThanOrEqual(5000);
+  });
+
+  it("a write outlasts the agent's own wait, with margin", () => {
+    // probe 1 s + three sends at 1.2 s + the 8 s IN_PROGRESS wait
+    expect(AGENT_CAMERA_WRITE_BUDGET_MS).toBe(12_600);
+    expect(CAMERA_WRITE_TIMEOUT_MS).toBeGreaterThanOrEqual(AGENT_CAMERA_WRITE_BUDGET_MS + 2000);
+  });
+
+  it("a capture the camera is still taking is not cut off before the agent answers", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", (url: string, init: RequestInit = {}) => {
+      calls.push(url);
+      return new Promise<Response>((resolve, reject) => {
+        const t = setTimeout(
+          () => resolve(new Response(JSON.stringify({ ok: true, result: "IN_PROGRESS" }), { status: 200, headers: { "Content-Type": "application/json" } })),
+          AGENT_CAMERA_WRITE_BUDGET_MS,
+        );
+        init.signal?.addEventListener("abort", () => (clearTimeout(t), reject(init.signal?.reason)), { once: true });
+      });
+    });
+    const done = runMavCamera("photo", 101);
+    await vi.advanceTimersByTimeAsync(AGENT_CAMERA_WRITE_BUDGET_MS + 10);
+    await expect(done).resolves.toEqual({ ok: true, result: "IN_PROGRESS" });
+    expect(seen.map((t) => t.message)).toEqual([specText("camera.capture_sent")]);
+    expect(calls).toEqual(["/api/v1/camera/mavlink/capture"]);
+  });
+
+  it("an IN_PROGRESS answer is never a failure, nor a retry, nor a frame grab", async () => {
+    useFeedStore.setState((s) => ({ video: { ...s.video, state: "live" } }));
+    useExtensionsStore.setState({ extensions: [] });
+    useMavCameraStore.setState({ cameras: [{ component_id: 101, can_zoom: false, can_capture_image: true }], loaded: true });
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", async (url: string) => {
+      calls.push(url);
+      const body = url.endsWith("/capture") ? { ok: false, result: "IN_PROGRESS" } : { cameras: [{ component_id: 101, can_zoom: false, can_capture_image: true }] };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    const grab = vi.fn();
+    vi.stubGlobal("document", { querySelector: grab, createElement: grab });
+    await runCameraAction("photo");
+    expect(calls.filter((u) => u.endsWith("/capture"))).toHaveLength(1);
+    expect(grab).not.toHaveBeenCalled();
+    expect(seen.map((t) => t.message)).toEqual([specText("camera.capture_sent")]);
+  });
+
+  it("presses share one camera list in flight", async () => {
+    const calls: string[] = [];
+    vi.stubGlobal("fetch", hangingFetch(calls));
+    const store = useMavCameraStore.getState();
+    const a = store.refresh();
+    const b = store.refresh();
+    expect(a).toBe(b);
+    await vi.advanceTimersByTimeAsync(CAMERA_LIST_TIMEOUT_MS + 10);
+    await a;
+    expect(calls).toEqual(["/api/v1/camera/mavlink"]);
+    void store.refresh();
+    expect(calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(CAMERA_LIST_TIMEOUT_MS + 10);
   });
 
   it("a stalled capture ends in the failure text with the no-answer wording", async () => {
     vi.stubGlobal("fetch", hangingFetch([]));
     const done = runMavCamera("photo", 101);
-    await vi.advanceTimersByTimeAsync(CAMERA_TIMEOUT_MS + 10);
+    await vi.advanceTimersByTimeAsync(CAMERA_WRITE_TIMEOUT_MS + 10);
     await expect(done).resolves.toBeNull();
     expect(seen.map((t) => t.message)).toEqual([specText("camera.capture_failed", { reason: refusalText("no response") })]);
   });
@@ -54,7 +121,7 @@ describe("camera timeouts", () => {
   it("a stalled zoom ends in the zoom failure text with the no-answer wording", async () => {
     vi.stubGlobal("fetch", hangingFetch([]));
     const done = runMavCamera("zoom_in", 100);
-    await vi.advanceTimersByTimeAsync(CAMERA_TIMEOUT_MS + 10);
+    await vi.advanceTimersByTimeAsync(CAMERA_WRITE_TIMEOUT_MS + 10);
     await done;
     expect(seen.map((t) => t.message)).toEqual([specText("camera.zoom_failed", { reason: refusalText("no response") })]);
   });
@@ -62,7 +129,7 @@ describe("camera timeouts", () => {
   it("a stalled camera list gives up", async () => {
     vi.stubGlobal("fetch", hangingFetch([]));
     const list = fetchMavCameras();
-    await vi.advanceTimersByTimeAsync(CAMERA_TIMEOUT_MS + 10);
+    await vi.advanceTimersByTimeAsync(CAMERA_LIST_TIMEOUT_MS + 10);
     await expect(list).resolves.toEqual([]);
   });
 });

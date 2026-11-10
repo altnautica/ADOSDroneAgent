@@ -225,4 +225,19 @@ describe("pause after this cockpit's own return home on the command route", () =
     expect(sent.join()).toContain("rtl");
     expect(resolveSkillState(B.pause!, { ...stale, fc: { mode: "RTL", systemStatus: 4 } }).enabled).toBe(true);
   });
+
+  it("is allowed while a PX4 flight controller flies the landing it was sent", async () => {
+    const stale: SkillContext = {
+      fcConnected: true,
+      live: true,
+      armed: true,
+      pilot: { armed: true, landed: false, vehicleClass: "multirotor", fresh: false, fcFailsafe: false },
+      pilotLinkOpen: true,
+      fc: { mode: "AUTO.LOITER", systemStatus: 4 },
+    };
+    ctxNow.ctx = stale;
+    vi.stubGlobal("fetch", async () => new Response(JSON.stringify({ status: "ok", ack: { observed: true, accepted: true } }), { status: 200 }));
+    await executeSkill(B.land!);
+    expect(resolveSkillState(B.pause!, { ...stale, fc: { mode: "AUTO.LAND", systemStatus: 4 } }).enabled).toBe(true);
+  });
 });

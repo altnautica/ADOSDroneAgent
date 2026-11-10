@@ -6,6 +6,21 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.99] - 2026-11-10
+
+### Fixed
+
+- A controller row bound to the emergency stop always needs the full 3 s stop hold, whatever hold the row or an imported profile sets; the editor and import raise such a row to 3 s.
+- A ground-station panel long-press (2 s) no longer completes the 3 s emergency stop hold.
+- The cockpit reads the top-level `code` of a refusal and shows its spec text, so a refused reposition reads in plain words.
+- PX4 return and landing modes (`AUTO.RTL`, `AUTO.LAND`, `AUTO.PRECLAND`) count as flight-controller recovery modes for the Pause refusal and the controller RTH state; one shared list feeds them.
+- `reposition` refuses unless the flight controller is in GUIDED, and refuses during a critical or emergency heartbeat or a pilot-reported failsafe.
+- Camera writes wait longer than the agent's own camera budget; an in-progress answer is not a failure and never retries or grabs a frame.
+- A step zoom is sent once, never resent.
+- The controller tour card re-places when the top bar mounts or resizes.
+- With the flight controller link down, the arm state is unknown: the status pill shows Link lost without pre-flight items, and the cockpit treats the drone as possibly airborne.
+- The dashboard nav poll times out after 1 s; the terminal UI judges alert staleness on the aged pilot age.
+
 ## [0.109.98] - 2026-11-10
 
 ### Fixed

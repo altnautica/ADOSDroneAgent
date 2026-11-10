@@ -34,10 +34,10 @@ function builtinLabel(id: string): string {
 }
 
 /** Whether the aircraft is on the ground: the fresh pilot's `landed`, else
- *  disarmed telemetry (`on-ground.ts`). */
+ *  telemetry reported disarmed; unknown is not ground (`on-ground.ts`). */
 function useOnGround(): boolean {
   const fresh = useFreshPilot();
-  const armed = useFlightStore((s) => s.telemetry?.armed === true);
+  const armed = useFlightStore((s) => s.telemetry?.armed);
   return groundFrom(fresh, armed);
 }
 

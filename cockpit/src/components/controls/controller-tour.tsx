@@ -103,8 +103,11 @@ export function ControllerTour() {
     };
   }, [drive]);
 
-  // Placed after layout and on resize: clear of the top bar, the alert stack,
-  // STOP and the left column; on a short window the body scrolls.
+  // Placed after layout, on resize, and whenever the zones it avoids come,
+  // go or change size: clear of the top bar, the alert stack, STOP and the
+  // left column; on a short window the body scrolls. The card mounts at app
+  // level, so the screen under it can change, and the Feed's top bar can
+  // mount after it.
   useLayoutEffect(() => {
     if (stage === "none") return;
     const place = () => {
@@ -112,33 +115,58 @@ export function ControllerTour() {
       const box = el?.getBoundingClientRect().height ?? 0;
       // The content's own height, whatever the cap the last placement set.
       const natural = el && el.clientHeight > 0 ? box * (el.scrollHeight / el.clientHeight) : box;
-      setRect(
-        tourCardRect(
-          window.innerWidth,
-          window.innerHeight,
-          {
-            leftColumn: zoneRect("[data-zone=left_column]"),
-            stop: zoneRect("[data-zone=stop]"),
-            topBar: zoneRect(TOP_BAR),
-            alertStack: alertsRect(),
-          },
-          CARD_MAX_W_PX * scale,
-          natural,
-          CARD_BOTTOM_PX * scale,
-        ),
+      const next = tourCardRect(
+        window.innerWidth,
+        window.innerHeight,
+        {
+          leftColumn: zoneRect("[data-zone=left_column]"),
+          stop: zoneRect("[data-zone=stop]"),
+          topBar: zoneRect(TOP_BAR),
+          alertStack: alertsRect(),
+        },
+        CARD_MAX_W_PX * scale,
+        natural,
+        CARD_BOTTOM_PX * scale,
       );
+      // An unchanged placement keeps the state, so a DOM change elsewhere
+      // does not re-render the card.
+      setRect((prev) => (prev && prev.x === next.x && prev.y === next.y && prev.w === next.w && prev.h === next.h ? prev : next));
     };
+    // An alert or a notice coming up, or the top bar changing size, moves
+    // the card.
+    const sizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
+    let watched: Element[] = [];
+    const watch = () => {
+      const now = [TOP_BAR, ...ALERTS].map((sel) => document.querySelector(sel)).filter((e): e is Element => e !== null);
+      if (now.length === watched.length && now.every((e, i) => e === watched[i])) return;
+      sizes?.disconnect();
+      for (const e of now) sizes?.observe(e);
+      watched = now;
+    };
+    // A zone mounting, leaving or moving (a screen change) re-places the
+    // card once per frame. The card's own placement changes only its style,
+    // which this ignores.
+    let frame = 0;
+    const card = cardRef.current;
+    const onMutation = (records: MutationRecord[]) => {
+      if (card && records.every((r) => card.contains(r.target))) return;
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        watch();
+        place();
+      });
+    };
+    const tree = typeof MutationObserver === "undefined" ? null : new MutationObserver(onMutation);
+    tree?.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["data-zone", "class", "style"] });
+    watch();
     place();
     window.addEventListener("resize", place);
-    // An alert or a notice coming up moves the card down.
-    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(place);
-    for (const sel of [TOP_BAR, ...ALERTS]) {
-      const el = document.querySelector(sel);
-      if (el) observer?.observe(el);
-    }
     return () => {
       window.removeEventListener("resize", place);
-      observer?.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+      tree?.disconnect();
+      sizes?.disconnect();
     };
   }, [stage, cursor.card, scale]);
 

@@ -42,13 +42,15 @@ jobs:
 
           # A plan or review item id is the same leak in a shorter form: one
           # of K, P, O, D or T, a hyphen and a number with an optional letter
-          # suffix; SP or SH and a number; N, a name and a number; R-AG
-          # and a number. ERE has no \b, so the word boundary on each side is
+          # suffix; SP or SH and a number; N, a name and a number; internal
+          # finding ids (their prefix is assembled at run time, below, so this
+          # file never spells one). ERE has no \b, so the word boundary on each side is
           # spelled out. Scanned outside the committed web bundles
           # (src/ados/*/static/assets): minified code is full of one-letter
           # names minus a number, and every bundle is built from source this
           # scan already covers.
-          PLAN_PATTERN='(^|[^A-Za-z0-9_])([KPODT]-[0-9]+[a-z]?|N-[A-Z][A-Za-z0-9]+-[0-9]+|S[PH]-[0-9]+|R-AG-[0-9]+)([^A-Za-z0-9_]|$)'
+          FINDING_PREFIX="$(printf 'R-%s-' AG)"
+          PLAN_PATTERN='(^|[^A-Za-z0-9_])([KPODT]-[0-9]+[a-z]?|N-[A-Z][A-Za-z0-9]+-[0-9]+|S[PH]-[0-9]+|'"${FINDING_PREFIX}"'[0-9]+)([^A-Za-z0-9_]|$)'
           PLAN_SCOPE=(. ':(exclude,glob)src/ados/*/static/assets/**')
 
           # An absolute home path is a developer machine baked into shipped

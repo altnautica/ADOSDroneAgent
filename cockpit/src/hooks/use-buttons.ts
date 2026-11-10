@@ -93,6 +93,17 @@ export function eventToCommand(ev: ButtonEvent): NavCommand | null {
   return base;
 }
 
+/** How long the ground station holds a button before it reports a long press
+ *  (the panel's `LONG_PRESS_SECONDS`, 2 s). */
+export const PANEL_LONG_PRESS_MS = 2000;
+
+/** A panel long-press is a completed hold in one gesture only for a hold no
+ *  longer than the long press itself: it never completes the 3 s emergency
+ *  stop, which the panel cannot time. */
+export function panelLongPressCompletes(confirmMs: number): boolean {
+  return confirmMs <= PANEL_LONG_PRESS_MS;
+}
+
 export interface ButtonsState {
   connected: boolean;
 }
@@ -175,9 +186,10 @@ export function useButtons(): ButtonsState {
         const longSelect = cmd === "quick-menu" && ev.kind === "long";
         const confirm = useConfirmStore.getState();
         if (confirm.pending) {
-          // A skill sheet is open: a long-press of select completes its hold,
-          // back cancels it, nothing navigates underneath it.
-          if (longSelect) confirm.panelConfirm();
+          // A skill sheet is open: a long-press of select completes a hold
+          // no longer than the long press, back cancels it, nothing
+          // navigates underneath it.
+          if (longSelect && panelLongPressCompletes(confirm.pending.skill.confirm.ms)) confirm.panelConfirm();
           else if (cmd === "back") confirm.cancel();
           return;
         }

@@ -69,7 +69,8 @@ export function pillWiring(i: {
   failsafeCause: string | null;
 } {
   const active = new Set(i.alerts.map((a) => a.id));
-  const onGround = i.armed !== true;
+  // Unknown arm state (FC link down) counts as possibly airborne.
+  const onGround = i.armed === false;
   return {
     pilotAgeMs: i.pilot ? Math.max(0, i.nowMs - i.pilot.at) : null,
     agentReachable: !i.statusStale,

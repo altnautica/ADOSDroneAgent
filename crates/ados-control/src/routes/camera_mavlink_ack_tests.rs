@@ -102,12 +102,19 @@ async fn a_capture_is_never_resent_so_a_lost_ack_cannot_shoot_twice() {
         .filter(|c| c.command == MavCmd::MAV_CMD_IMAGE_START_CAPTURE)
         .count();
     assert_eq!(shots, 1);
-    // A zoom is idempotent and keeps the configured resends.
+    // A step zoom is relative: a resend after a lost ACK would step again, so
+    // it is sent once.
     let _ = zoom(&state, CAM, ZoomType::Step, 1.0).await;
-    let zooms = vehicle
-        .commands()
-        .iter()
-        .filter(|c| c.command == MavCmd::MAV_CMD_SET_CAMERA_ZOOM)
-        .count();
-    assert_eq!(zooms, 3);
+    let zooms = |vehicle: &FakeVehicle| {
+        vehicle
+            .commands()
+            .iter()
+            .filter(|c| c.command == MavCmd::MAV_CMD_SET_CAMERA_ZOOM)
+            .count()
+    };
+    assert_eq!(zooms(&vehicle), 1);
+    // A range zoom sets an absolute position, so a resend is harmless and it
+    // keeps the configured resends.
+    let _ = zoom(&state, CAM, ZoomType::Range, 50.0).await;
+    assert_eq!(zooms(&vehicle), 4);
 }

@@ -41,7 +41,7 @@
 //! | pauseMission  | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=0.0 (pause), rest 0           |
 //! | resumeMission | MAV_CMD_DO_PAUSE_CONTINUE 193   | p1=1.0 (continue), rest 0        |
 //! | ekfSourceSet N| MAV_CMD_SET_EKF_SOURCE_SET 42007| p1=N (1, 2 or 3), rest 0         |
-//! | reposition lat lon alt | COMMAND_INT MAV_CMD_DO_REPOSITION 192, frame GLOBAL_RELATIVE_ALT | p1=-1 (default speed), p2=0 (keep mode; 409 in a failsafe, RTL or LAND), p4=NaN (keep yaw), x/y=lat/lon·1e7, z=alt above home |
+//! | reposition lat lon alt | COMMAND_INT MAV_CMD_DO_REPOSITION 192, frame GLOBAL_RELATIVE_ALT | p1=-1 (default speed), p2=0 (keep mode; 409 outside ArduPilot GUIDED, in a failsafe, RTL or LAND), p4=NaN (keep yaw), x/y=lat/lon·1e7, z=alt above home |
 //!
 //! ## killSwitch is a FORCE-DISARM, not a graceful stop
 //!
@@ -336,7 +336,8 @@ pub struct CommandRequest {
 /// cannot be reached (the command never silently drops). 400 `{"detail": ...}`
 /// on an unknown command, a `mode` with no name, or an unknown mode name. 409
 /// on `rtl`/`mode` for an ArduPilot vehicle type with no mode table, and on
-/// `reposition` during a failsafe or a return or landing mode.
+/// `reposition` outside ArduPilot GUIDED, during a failsafe, or in a return or
+/// landing mode.
 /// Otherwise the frame is built, written to the socket, and the FC's
 /// `COMMAND_ACK` is correlated into the `ack` block of the response.
 pub async fn execute_command(

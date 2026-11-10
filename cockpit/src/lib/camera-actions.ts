@@ -101,17 +101,27 @@ function mavCameraFor(action: CameraAction, cams: readonly MavCamera[]): MavCame
   return null;
 }
 
-/** How long a camera list or camera write may take before the press reads as
- *  unanswered. The list's own probe takes about 1 s on the agent. */
-export const CAMERA_TIMEOUT_MS = 4000;
+/** How long the camera list may take before it reads as unanswered. The
+ *  agent's own probe takes about 1 s. */
+export const CAMERA_LIST_TIMEOUT_MS = 4000;
 
-/** `apiFetch` cut off after `CAMERA_TIMEOUT_MS`; a cut-off request rejects
- *  with a `CameraTimeout`. */
+/** The agent's longest wait on one camera write: a probe for a camera it has
+ *  not registered (1 s), the first send and two resends at 1.2 s each, then
+ *  the extended wait after an `IN_PROGRESS` answer (8 s). */
+export const AGENT_CAMERA_WRITE_BUDGET_MS = 1000 + 1200 * 3 + 8000;
+
+/** How long a camera write may take before the press reads as unanswered:
+ *  past the agent's own wait, with margin for the link, so a capture the
+ *  camera is still taking never reads as a failure. */
+export const CAMERA_WRITE_TIMEOUT_MS = AGENT_CAMERA_WRITE_BUDGET_MS + 3400;
+
+/** `apiFetch` cut off after `timeoutMs`; a cut-off request rejects with a
+ *  `CameraTimeout`. */
 class CameraTimeout extends Error {}
 
-async function cameraFetch<T>(path: string, opts: { method?: "POST"; body?: unknown } = {}): Promise<T> {
+async function cameraFetch<T>(path: string, timeoutMs: number, opts: { method?: "POST"; body?: unknown } = {}): Promise<T> {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(new CameraTimeout()), CAMERA_TIMEOUT_MS);
+  const timer = setTimeout(() => ac.abort(new CameraTimeout()), timeoutMs);
   try {
     return await apiFetch<T>(path, { ...opts, signal: ac.signal });
   } catch (e) {
@@ -126,7 +136,7 @@ async function cameraFetch<T>(path: string, opts: { method?: "POST"; body?: unkn
 async function listMavCameras(): Promise<MavCamera[] | null> {
   if (isDemoMode()) return [];
   try {
-    const r = await cameraFetch<{ cameras?: MavCamera[] }>("/api/v1/camera/mavlink");
+    const r = await cameraFetch<{ cameras?: MavCamera[] }>("/api/v1/camera/mavlink", CAMERA_LIST_TIMEOUT_MS);
     return Array.isArray(r.cameras) ? r.cameras : [];
   } catch {
     return null;
@@ -142,14 +152,23 @@ export async function fetchMavCameras(): Promise<MavCamera[]> {
  *  take a photo or zoom without video, and a press routes without waiting on
  *  the agent's probe. A failed refresh keeps the last list. `loaded` turns true
  *  once a list has been asked for. */
+let refreshing: Promise<MavCamera[]> | null = null;
+
 export const useMavCameraStore = create<{ cameras: MavCamera[]; loaded: boolean; refresh: () => Promise<MavCamera[]> }>((set, get) => ({
   cameras: [],
   loaded: false,
-  refresh: async () => {
-    const listed = await listMavCameras();
-    const cameras = listed ?? get().cameras;
-    set({ cameras, loaded: true });
-    return cameras;
+  refresh: () => {
+    // One list in flight at a time: presses during it share its answer.
+    refreshing ??= listMavCameras()
+      .then((listed) => {
+        const cameras = listed ?? get().cameras;
+        set({ cameras, loaded: true });
+        return cameras;
+      })
+      .finally(() => {
+        refreshing = null;
+      });
+    return refreshing;
   },
 }));
 
@@ -166,7 +185,8 @@ export function mavResultText(result: string): string {
   return hasSpecText(key) ? specText(key) : result;
 }
 
-/** Send one MAVLink camera command. The photo's result shows as a toast; a
+/** Send one MAVLink camera command, once: the agent resends itself, and a
+ *  resent capture shoots twice. The photo's result shows as a toast; a
  *  refusal or error shows `camera.capture_failed` / `camera.zoom_failed`
  *  with the vehicle's text, else the result's name. */
 export async function runMavCamera(action: CameraAction, componentId: number): Promise<MavCameraReply | null> {
@@ -174,8 +194,13 @@ export async function runMavCamera(action: CameraAction, componentId: number): P
   const failKey = photo ? "camera.capture_failed" : "camera.zoom_failed";
   const body = photo ? { component_id: componentId } : { component_id: componentId, type: "step", value: action === "zoom_in" ? 1 : -1 };
   try {
-    const r = await cameraFetch<MavCameraReply>(`/api/v1/camera/mavlink/${photo ? "capture" : "zoom"}`, { method: "POST", body });
-    if (!r.ok) toast.err(specText(failKey, { reason: r.statustext || mavResultText(r.result) }));
+    const r = await cameraFetch<MavCameraReply>(`/api/v1/camera/mavlink/${photo ? "capture" : "zoom"}`, CAMERA_WRITE_TIMEOUT_MS, {
+      method: "POST",
+      body,
+    });
+    // IN_PROGRESS is the camera still working on an accepted command, never
+    // a failure, whatever `ok` says.
+    if (!r.ok && r.result !== "IN_PROGRESS") toast.err(specText(failKey, { reason: r.statustext || mavResultText(r.result) }));
     else if (photo) toast.ok(specText("camera.capture_sent"));
     return r;
   } catch (e) {

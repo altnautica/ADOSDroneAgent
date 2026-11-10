@@ -70,6 +70,13 @@ describe("fly here through the flight controller", () => {
     fails(new ApiError("conflict", 409, { error: "busy" }));
     await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.busy"));
   });
+
+  it("reads the agent's own 409 code through the refusal table, not its raw detail", async () => {
+    fails(new ApiError("conflict", 409, { detail: "the flight controller is in a failsafe", code: "failsafe" }));
+    await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.failsafe"));
+    fails(new ApiError("conflict", 409, { detail: "not in a state to reposition", code: "bad_state" }));
+    await expect(sendFcReposition(point)).resolves.toBe(specText("refusal.bad_state"));
+  });
 });
 
 describe("fly here height", () => {

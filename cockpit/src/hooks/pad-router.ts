@@ -151,6 +151,7 @@ export class PadRouter {
   /** The poller stopped. */
   dispose(): void {
     this.dispatch(this.engine.reset());
+    this.dispatch(this.safety.reset());
   }
 
   /** Route one sample. The sample is published to the input store here, after

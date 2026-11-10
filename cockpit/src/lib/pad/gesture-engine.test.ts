@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { missingLocked, moveRow, satisfiesLocked } from "@/lib/pad/bindings";
-import { DEFAULT_BINDINGS, LOCKED_ACTIONS, type ControlId, type PadBinding } from "@/lib/pad/ds4-map";
+import { addRow, buildDoc, missingLocked, moveRow, parseControlsDoc, satisfiesLocked, setRowAction } from "@/lib/pad/bindings";
+import { DEFAULT_BINDINGS, LOCKED_ACTIONS, STOP_HOLD_MS, type ControlId, type PadBinding } from "@/lib/pad/ds4-map";
+import layout from "@/shared/cockpit-spec/layout.json";
 import { GestureEngine, type EngineContext, type EngineEvent, type PadFrame } from "@/lib/pad/gesture-engine";
 
 const ctx: EngineContext = { pickerOpen: false, landed: false, rthActive: false, vehicleVtol: false, nativeSafety: false };
@@ -68,5 +69,50 @@ describe("locked bindings", () => {
     expect(satisfiesLocked({ ...def, hold_ms: 50 }, arm)).toBe(false);
     expect(satisfiesLocked({ ...def, when: null }, arm)).toBe(false);
     expect(satisfiesLocked({ ...def, control: "stick_r" }, arm)).toBe(false);
+  });
+});
+
+describe("a hold row bound to the emergency stop", () => {
+  const stopRow = (hold_ms: number): PadBinding => ({
+    control: "triangle",
+    with: [],
+    gesture: "hold",
+    hold_ms,
+    when: null,
+    action: "kill",
+    rumble: "ramp",
+    locked: false,
+  });
+
+  it("takes the spec stop hold", () => {
+    expect(STOP_HOLD_MS).toBe(layout.holds_ms.stop);
+    expect(STOP_HOLD_MS).toBe(3000);
+  });
+
+  for (const hold_ms of [1, 1500]) {
+    it(`never fires kill before the stop hold (row hold ${hold_ms} ms)`, () => {
+      const rows = DEFAULT_BINDINGS.filter((b) => b.control !== "triangle").concat(stopRow(hold_ms));
+      const e = new GestureEngine(rows);
+      const fired: string[] = [];
+      for (let t = 0; t <= STOP_HOLD_MS - 100; t += 50) fired.push(...presses(e.step(frame(t, ["triangle"]), ctx)));
+      expect(fired).toEqual([]);
+      expect(presses(e.step(frame(STOP_HOLD_MS, ["triangle"]), ctx))).toEqual(["kill:hold"]);
+    });
+  }
+
+  it("is clamped to the stop hold by the editor", () => {
+    const added = addRow(DEFAULT_BINDINGS, "triangle", "hold", "kill");
+    expect(added[added.length - 1]!.hold_ms).toBe(STOP_HOLD_MS);
+    const other = addRow(DEFAULT_BINDINGS, "triangle", "hold", "zoom_in");
+    expect(other[other.length - 1]!.hold_ms).toBe(1500);
+    const set = setRowAction(other, other.length - 1, "kill");
+    expect(set.ok && set.rows[set.rows.length - 1]!.hold_ms).toBe(STOP_HOLD_MS);
+  });
+
+  it("is clamped to the stop hold on import", () => {
+    const doc = buildDoc([...DEFAULT_BINDINGS, stopRow(1)], "mode2", 0.1, "ds4");
+    const parsed = parseControlsDoc(JSON.stringify(doc));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.doc.bindings[parsed.doc.bindings.length - 1]!.hold_ms).toBe(STOP_HOLD_MS);
   });
 });

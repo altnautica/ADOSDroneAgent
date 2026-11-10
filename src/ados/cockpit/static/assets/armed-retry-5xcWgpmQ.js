@@ -1,1 +1,0 @@
-import{t as e}from"./api-fetch-TRbTS-73.js";async function t(t,n){try{return await t(!1)}catch(r){if(!(r instanceof e&&r.status===409&&r.code===`E_ARMED`)||!await n(`The vehicle is armed. Applying this now can drop the link. Apply anyway?`))throw r;return t(!0)}}export{t};

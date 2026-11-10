@@ -1,7 +1,7 @@
 // The confirm sheet for every non-tap skill, on the shared sheet. One sheet,
 // several input paths: press-and-hold (touch/pointer), a held controller
-// button or Enter, and a long-press of the panel's activate button. The hold
-// time is the spec's (`builtins.json` `confirm.ms`). The emergency stop (a
+// button or Enter, and a long-press of the panel's activate button (only for
+// a hold no longer than the long press, so never the stop). The hold time is the spec's (`builtins.json` `confirm.ms`). The emergency stop (a
 // `hold_confirm` skill) is the canonical STOP sheet: title `cockpit.estop`,
 // body `confirm.kill.message`, one hold button labelled `stop.hold_label`
 // that counts down (`hold.keep_holding`) while held, and fires once the hold
@@ -12,6 +12,7 @@ import { ShieldAlert } from "lucide-react";
 
 import { NumberSettingRow } from "@/components/ui/number-setting-row";
 import { Sheet } from "@/components/ui/sheet";
+import { panelLongPressCompletes } from "@/hooks/use-buttons";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { LAUNCH } from "@/lib/cockpit-flow";
 import { executeSkill } from "@/lib/skill-runner";
@@ -62,9 +63,10 @@ function ConfirmSheet() {
   }, [state.enabled, cancel]);
 
 
-  // A panel long-press is a completed hold in one gesture.
+  // A panel long-press is a completed hold in one gesture, for a hold no
+  // longer than the long press (never the emergency stop).
   useEffect(() => {
-    if (panelNonce !== initialNonce.current) fire();
+    if (panelNonce !== initialNonce.current && panelLongPressCompletes(holdMs)) fire();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panelNonce]);
 

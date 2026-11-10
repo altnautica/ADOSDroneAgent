@@ -1,1 +1,0 @@
-import{n as e,r as t,t as n}from"./spec-text-Biq-gJUF.js";function r(r,i){if(!r)return t(`refusal.none`);if(r.startsWith(`not_ready:`)){let e=r.slice(10),a=i?.(e)??(n(`readiness.item.${e}`)?t(`readiness.item.${e}`):e);return t(`refusal.not_ready`,{item:a})}let a=`refusal.${r.replace(/ /g,`_`)}`;return n(a)&&!e(a)?t(a):t(`refusal.unknown`,{code:r})}export{r as t};

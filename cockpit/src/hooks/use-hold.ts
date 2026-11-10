@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent, type RefObject } from "react";
 
+import { panelLongPressCompletes } from "@/hooks/use-buttons";
 import { onGamepadButtons } from "@/lib/gamepad-bus";
 import { claimPanelHold } from "@/lib/hold-input";
 import { specText } from "@/shared/hud/spec-text";
@@ -46,6 +47,11 @@ export const KEEP_HOLDING_HINT_MS = 1500;
 /** The hint's text; one decimal, as holds run 0.8 to 3 s. */
 export function keepHoldingText(ms: number): string {
   return specText("hold.keep_holding", { s: (Math.max(0, ms) / 1000).toFixed(1) });
+}
+
+/** Whether a focused hold of `holdMs` takes a panel long-press as completed. */
+export function claimsPanelHold(holdMs: number): boolean {
+  return panelLongPressCompletes(holdMs);
 }
 
 /** The keys that hold a focused control. */
@@ -114,10 +120,11 @@ export function useHold({ enabled, holdMs, onComplete, targetRef }: HoldOptions)
     });
   }, [enabled, start, stop, targetRef]);
 
-  // A panel long-press completes the hold while this control has focus.
+  // A panel long-press completes the hold while this control has focus, for a
+  // hold no longer than the long press (never the 3 s emergency stop).
   useEffect(() => {
     const el = targetRef.current;
-    if (!enabled || !el) return;
+    if (!enabled || !el || !claimsPanelHold(holdMs)) return;
     let release: (() => void) | null = null;
     const onFocus = () => {
       release = claimPanelHold(() => completeRef.current());
@@ -134,7 +141,7 @@ export function useHold({ enabled, holdMs, onComplete, targetRef }: HoldOptions)
       el.removeEventListener("blur", onBlur);
       onBlur();
     };
-  }, [enabled, targetRef]);
+  }, [enabled, holdMs, targetRef]);
 
   return {
     progress: enabled ? progress : 0,

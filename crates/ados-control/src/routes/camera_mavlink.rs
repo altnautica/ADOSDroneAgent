@@ -481,7 +481,8 @@ pub async fn post_zoom(State(state): State<AppState>, Json(req): Json<ZoomReques
     send(
         &state,
         zoom_command((system, req.component_id), zoom_type, value),
-        true,
+        // A step is relative: a resend after a lost ACK would step again.
+        req.kind != ZoomType::Step,
     )
     .await
 }

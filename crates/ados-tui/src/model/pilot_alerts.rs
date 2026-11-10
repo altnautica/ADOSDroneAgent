@@ -33,8 +33,8 @@ fn prearm_body(text: &str) -> Option<&str> {
 
 /// Whether the pill treats the pilot state as not answering: marked stale,
 /// of unknown age, or at least `flight-state.json` `stale_after_ms` old.
-fn pilot_stale(p: &Pilot) -> bool {
-    p.stale || p.age_ms.is_none_or(|a| a >= stale_after_ms())
+fn pilot_stale(p: &Pilot, age_ms: Option<u64>) -> bool {
+    p.stale || age_ms.is_none_or(|a| a >= stale_after_ms())
 }
 
 /// `Failsafe: <cause>`, the cause worded by `pilot.banner.cause.*`; no cause
@@ -53,10 +53,12 @@ pub fn failsafe_text(cause: Option<&str>) -> String {
 /// Every active alert, critical first, then in source order: the pilot not
 /// answering or the FC failsafe, readiness, the newest PreArm/Arm text, the
 /// status texts (one per text, at the worst severity it was sent with). A
-/// stale pilot state contributes only the not-answering item.
-pub fn pilot_alerts(p: &Pilot, prearm: Option<&[String]>) -> Vec<PillAlert> {
+/// stale pilot state contributes only the not-answering item. `age_ms` is the
+/// pilot state's age now (the read's age plus the time since the read), so a
+/// hung poll ages the alerts as it ages the rows.
+pub fn pilot_alerts(p: &Pilot, age_ms: Option<u64>, prearm: Option<&[String]>) -> Vec<PillAlert> {
     let mut out = Vec::new();
-    let stale = pilot_stale(p);
+    let stale = pilot_stale(p, age_ms);
     if stale {
         out.push(PillAlert {
             id: "pilot_not_answering".into(),
@@ -180,6 +182,7 @@ mod tests {
         );
         let alerts = pilot_alerts(
             &p,
+            p.age_ms,
             Some(&["PreArm: Old".into(), "Arm: Throttle too high".into()]),
         );
         let got: Vec<(Severity, &str)> = alerts
@@ -201,8 +204,25 @@ mod tests {
     #[test]
     fn an_unknown_prearm_list_and_an_empty_one_add_nothing() {
         let p = fresh(vec![], vec![]);
-        assert!(pilot_alerts(&p, None).is_empty());
-        assert!(pilot_alerts(&p, Some(&[])).is_empty());
+        assert!(pilot_alerts(&p, p.age_ms, None).is_empty());
+        assert!(pilot_alerts(&p, p.age_ms, Some(&[])).is_empty());
+    }
+
+    #[test]
+    fn alerts_judge_staleness_on_the_aged_age_not_the_read_age() {
+        let p = Pilot {
+            fc_failsafe: true,
+            ..fresh(vec![item("agl", false, true, "No rangefinder")], vec![])
+        };
+        let fresh_ids: Vec<String> = pilot_alerts(&p, p.age_ms, None)
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
+        assert_eq!(fresh_ids, ["failsafe", "pilot:agl"]);
+        // The read said 100 ms, but the poll hung: the state is old now.
+        let aged = pilot_alerts(&p, Some(stale_after_ms() + 1), None);
+        let aged_ids: Vec<&str> = aged.iter().map(|a| a.id.as_str()).collect();
+        assert_eq!(aged_ids, ["pilot_not_answering"]);
     }
 
     #[test]
@@ -280,7 +300,7 @@ mod tests {
                     .map(String::from)
                     .collect()
             });
-            let alerts = pilot_alerts(&p, prearm.as_deref());
+            let alerts = pilot_alerts(&p, p.age_ms, prearm.as_deref());
             let severity = if alerts.is_empty() {
                 "ok"
             } else if alerts.iter().any(|a| a.severity == Severity::Critical) {

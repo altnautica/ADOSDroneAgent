@@ -15,8 +15,10 @@
 //! `launch.alt_min_m..=alt_max_m`), is a 400.
 //!
 //! A reposition never interrupts a failsafe: while a fresh pilot frame reports
-//! `fc_failsafe`, or the FC flies a return or landing mode, the route answers
-//! 409 `{"detail", "code": "failsafe"}` before any frame is built.
+//! `fc_failsafe`, the FC heartbeat reports a critical or emergency state, or
+//! the FC flies a return or landing mode, the route answers 409
+//! `{"detail", "code": "failsafe"}` before any frame is built. Outside
+//! ArduPilot GUIDED (PX4 included) it answers 409 `code: "bad_state"`.
 
 use std::sync::LazyLock;
 
@@ -135,35 +137,68 @@ fn pilot_reports_failsafe(state: &AppState) -> bool {
             .unwrap_or(false)
 }
 
-/// Whether the state snapshot's current FC mode is a return or landing mode.
-fn fc_in_recovery_mode(state: &AppState) -> bool {
-    state
-        .state
-        .snapshot()
-        .as_ref()
+/// The FC's current mode name from the state snapshot, trimmed.
+fn fc_mode(snapshot: Option<&Value>) -> Option<String> {
+    snapshot
         .and_then(|s| s.get("mode"))
         .and_then(Value::as_str)
-        .is_some_and(|m| {
-            RECOVERY_MODES
-                .iter()
-                .any(|r| r.eq_ignore_ascii_case(m.trim()))
-        })
+        .map(|m| m.trim().to_string())
 }
 
-/// The 409 a reposition gets while the FC is in a failsafe or flies a return or
-/// landing mode, else `None`.
+/// Whether the current FC mode is a return or landing mode.
+fn in_recovery_mode(mode: Option<&str>) -> bool {
+    mode.is_some_and(|m| RECOVERY_MODES.iter().any(|r| r.eq_ignore_ascii_case(m)))
+}
+
+/// HEARTBEAT `system_status` `MAV_STATE_CRITICAL` (5) and `MAV_STATE_EMERGENCY` (6).
+const FAILSAFE_STATES: [i64; 2] = [5, 6];
+
+/// Whether the FC's own heartbeat reports a critical or emergency state.
+fn heartbeat_reports_failsafe(snapshot: Option<&Value>) -> bool {
+    snapshot
+        .and_then(|s| s.get("system_status"))
+        .and_then(Value::as_i64)
+        .is_some_and(|s| FAILSAFE_STATES.contains(&s))
+}
+
+/// `MAV_AUTOPILOT_PX4`.
+const AUTOPILOT_PX4: i64 = 12;
+
+/// Whether the FC flies ArduPilot GUIDED, the one mode a reposition applies
+/// to. PX4 has no guided mode this route accepts.
+fn in_guided(snapshot: Option<&Value>, mode: Option<&str>) -> bool {
+    let px4 = snapshot
+        .and_then(|s| s.get("autopilot"))
+        .and_then(Value::as_i64)
+        == Some(AUTOPILOT_PX4);
+    !px4 && mode.is_some_and(|m| m.eq_ignore_ascii_case("GUIDED"))
+}
+
+/// The 409 a reposition gets, else `None`: `code: "failsafe"` while the FC is
+/// in a failsafe (a fresh pilot frame, or a critical or emergency heartbeat)
+/// or flies a return or landing mode; `code: "bad_state"` when it does not fly
+/// ArduPilot GUIDED.
 pub(super) fn reposition_refusal(state: &AppState) -> Option<Response> {
-    let why = if pilot_reports_failsafe(state) {
-        "the flight controller is in a failsafe"
-    } else if fc_in_recovery_mode(state) {
-        "the flight controller is returning or landing"
+    let snapshot = state.state.snapshot();
+    let snapshot = snapshot.as_ref();
+    let mode = fc_mode(snapshot);
+    let mode = mode.as_deref();
+    let (why, code) = if pilot_reports_failsafe(state) || heartbeat_reports_failsafe(snapshot) {
+        ("the flight controller is in a failsafe", "failsafe")
+    } else if in_recovery_mode(mode) {
+        ("the flight controller is returning or landing", "failsafe")
+    } else if !in_guided(snapshot, mode) {
+        (
+            "reposition needs the flight controller in GUIDED",
+            "bad_state",
+        )
     } else {
         return None;
     };
     Some(
         (
             StatusCode::CONFLICT,
-            Json(json!({"detail": why, "code": "failsafe"})),
+            Json(json!({"detail": why, "code": code})),
         )
             .into_response(),
     )

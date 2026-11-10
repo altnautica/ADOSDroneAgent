@@ -102,7 +102,9 @@ describe("home status card", () => {
     // Past 10 s, armed at the last live sample: the critical link-lost item.
     for (let t = 6_000; t <= 12_000; t += 1_000) l = nextLiveness(l, { armed: undefined }, t);
     const lost = homePill({ ...fcDown, ...vehicleLiveness(l, 12_000, true) });
-    expect(lost.alerts[0]).toMatchObject({ id: "alert:link_lost", source: "link", severity: "critical" });
+    expect(lost.alerts[0]).toMatchObject({ id: "alert:link_lost", source: "link", severity: "critical" });    // The arm state is unknown with the FC link down: no pre-flight items.
+    expect(pill.alerts.filter((a) => a.source === "preflight")).toEqual([]);
+    expect(lost.alerts.filter((a) => a.source === "preflight")).toEqual([]);
   });
 
   it("stays OK while the vehicle stamp keeps moving", () => {

@@ -58,13 +58,22 @@ export function navPollMs(videoPanels: number): number {
 
 export type NavStatusFetch = (path: string, signal: AbortSignal) => Promise<NavStatusBody>;
 
+/** A nav-status read that has not answered by now is abandoned, so one hung
+ *  request cannot hold the joined fetch (and so the poll) forever. */
+export const NAV_STATUS_TIMEOUT_MS = 1000;
+
 const fetchNavStatus: NavStatusFetch = (path, signal) => apiFetch<NavStatusBody>(path, { signal });
+
+/** The query's own signal, also aborted after `NAV_STATUS_TIMEOUT_MS`. */
+function withTimeout(signal: AbortSignal): AbortSignal {
+  return AbortSignal.any([signal, AbortSignal.timeout(NAV_STATUS_TIMEOUT_MS)]);
+}
 
 /** What every reader subscribes with: the shared cache entry, never a fetch
  *  of its own (the poller is the only fetcher). */
 export const navStatusReaderOptions = {
   queryKey: NAV_STATUS_KEY,
-  queryFn: ({ signal }: { signal: AbortSignal }) => fetchNavStatus(navStatusPath(useNavPollStore.getState().view), signal),
+  queryFn: ({ signal }: { signal: AbortSignal }) => fetchNavStatus(navStatusPath(useNavPollStore.getState().view), withTimeout(signal)),
   enabled: false,
   refetchInterval: false,
   retry: false,
@@ -125,7 +134,7 @@ export class NavPoller {
     void this.client
       .fetchQuery({
         queryKey: NAV_STATUS_KEY,
-        queryFn: ({ signal }) => this.fetchBody(navStatusPath(useNavPollStore.getState().view), signal),
+        queryFn: ({ signal }) => this.fetchBody(navStatusPath(useNavPollStore.getState().view), withTimeout(signal)),
         staleTime: 0,
         retry: false,
       })

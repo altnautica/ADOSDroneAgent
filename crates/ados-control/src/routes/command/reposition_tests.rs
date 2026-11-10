@@ -109,6 +109,7 @@ async fn reposition_reaches_the_latched_fc_as_a_command_int() {
         "autopilot": 3,
         "fc_system_id": 7,
         "fc_component_id": 1,
+        "mode": "GUIDED",
     }));
     let resp = execute_command(
         State(state),
@@ -140,7 +141,7 @@ async fn reposition_refuses_a_bad_point_before_any_send() {
     let state = state_with_socket(dir.path(), dir.path().join("absent.sock"));
     state
         .state
-        .set_snapshot_for_test(json!({"fc_connected": true, "autopilot": 3}));
+        .set_snapshot_for_test(json!({"fc_connected": true, "autopilot": 3, "mode": "GUIDED"}));
     let resp = execute_command(
         State(state),
         Json(CommandRequest {
@@ -265,4 +266,51 @@ async fn reposition_in_guided_is_sent_without_a_mode_change() {
         panic!("expected COMMAND_INT on the socket");
     };
     assert_eq!(sent.param2, 0.0);
+}
+
+#[tokio::test]
+async fn reposition_is_refused_while_the_heartbeat_reports_critical_or_emergency() {
+    for system_status in [5, 6] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_socket(dir.path(), dir.path().join("absent.sock"));
+        state.state.set_snapshot_for_test(json!({
+            "fc_connected": true,
+            "autopilot": 3,
+            "mode": "GUIDED",
+            "system_status": system_status,
+        }));
+        let resp = reposition_in(state).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "{system_status}");
+        assert_eq!(
+            json_of(resp).await["code"],
+            json!("failsafe"),
+            "{system_status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn reposition_is_refused_outside_ardupilot_guided() {
+    // (autopilot, mode): ArduPilot in a non-guided mode, no mode yet, and PX4,
+    // which this route never repositions.
+    for (autopilot, mode) in [
+        (3, json!("LOITER")),
+        (3, json!("AUTO")),
+        (3, json!("STABILIZE")),
+        (3, Value::Null),
+        (12, json!("POSCTL")),
+        (12, json!("AUTO.LOITER")),
+        (12, json!("GUIDED")),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_socket(dir.path(), dir.path().join("absent.sock"));
+        state.state.set_snapshot_for_test(
+            json!({"fc_connected": true, "autopilot": autopilot, "mode": mode}),
+        );
+        let resp = reposition_in(state).await;
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "{autopilot} {mode}");
+        let body = json_of(resp).await;
+        assert_eq!(body["code"], json!("bad_state"), "{autopilot} {mode}");
+        assert!(body["detail"].is_string());
+    }
 }

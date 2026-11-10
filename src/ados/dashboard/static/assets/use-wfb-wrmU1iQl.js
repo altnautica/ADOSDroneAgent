@@ -1,1 +1,0 @@
-import{s as e}from"./card-C8ulU-6k.js";import{n as t}from"./api-fetch-BBI4ANFg.js";function n(){return t(`/api/wfb`)}function r(e){return t(`/api/video/config`,{method:`POST`,body:e})}function i(){return e({queryKey:[`wfb`,`status`],queryFn:()=>n(),refetchInterval:2e3})}export{r as n,i as t};

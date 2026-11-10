@@ -43,5 +43,7 @@ describe("preflight checks", () => {
     const without = preflightChecks({ telemetry: ground, battery: null, live: true });
     expect(preflightFailing(without, [], false)).toEqual([{ id: "home", label: "Home position set" }]);
     expect(preflightFailing(without, [], true)).toEqual([]);
+    expect(preflightFailing(without, [], undefined)).toEqual([]);
+    expect(preflightFailing(without, [], null)).toEqual([]);
   });
 });

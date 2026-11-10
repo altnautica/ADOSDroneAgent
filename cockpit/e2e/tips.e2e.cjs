@@ -163,7 +163,7 @@ async function tipsCase(browser) {
   for (const zone of ["[data-zone=stop]", "[data-zone=left_column]", '[data-testid="flight-state-chip"]', "[data-zone=top_bar]", "[data-zone=alert_stack]"]) {
     assert.ok(!overlaps(first, await rectOf(page, zone)), `tip covers ${zone}`);
   }
-  await page.screenshot({ path: path.join(SHOTS, "fix-TIPS.png") });
+  await page.screenshot({ path: path.join(SHOTS, "first-tip-beside-pill.png") });
 
   console.log("tips: first tip beside the pill");
   // (2) STOP stays the topmost element at its centre.

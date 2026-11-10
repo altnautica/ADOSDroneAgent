@@ -18,6 +18,7 @@
 // drives nothing: its button and axis indices are unknown, so the gesture
 // engine and the stick stream ignore it and the top bar flags it.
 
+import { FC_RETURN_MODES } from "@/lib/fc-failsafe";
 import { useEffect, useState } from "react";
 
 import { padRoute, PadRouter } from "@/hooks/pad-router";
@@ -38,7 +39,11 @@ import { useNavStreamStore } from "@/stores/nav-stream-store";
 
 /** How often a ground-station kiosk re-reads the station's input state. */
 const GROUND_INPUT_POLL_MS = 5000;
-const RTH_MODES = ["RTL", "SMART_RTL", "QRTL"];
+/** Whether the flight controller's mode is a return home (ArduPilot or PX4
+ *  name, any case), from the shared return-mode list. */
+export function rthModeActive(mode: string | null | undefined): boolean {
+  return mode != null && FC_RETURN_MODES.includes(mode.toUpperCase());
+}
 
 export interface GamepadState {
   connected: boolean;
@@ -98,7 +103,7 @@ function engineContext(): EngineContext {
   return {
     pickerOpen: useInputStore.getState().pickerOpen,
     landed: p ? p.landed : null,
-    rthActive: p?.fcModeName != null && RTH_MODES.includes(p.fcModeName.toUpperCase()),
+    rthActive: rthModeActive(p?.fcModeName),
     vehicleVtol: p?.vehicleClass === "vtol",
     nativeSafety: nativeInputActive(),
   };

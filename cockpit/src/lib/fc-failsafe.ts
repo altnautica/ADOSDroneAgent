@@ -7,10 +7,10 @@
 // has not left it since. Once the mode changes, a later return to it is the
 // flight controller's own.
 
+import { FC_FAILSAFE_MODES } from "@/shared/hud/fc-failsafe-modes";
 import { useFlightStore } from "@/stores/flight-store";
 
-/** The flight-controller modes a failsafe flies: return and landing. */
-export const FC_FAILSAFE_MODES: Readonly<Record<string, true>> = { RTL: true, SMART_RTL: true, LAND: true, QRTL: true, QLAND: true };
+export { FC_FAILSAFE_MODES, FC_LAND_MODES, FC_RETURN_MODES } from "@/shared/hud/fc-failsafe-modes";
 
 /** The recovery holds the Mode sheet keeps live whatever else is pending. */
 export const FC_RECOVERY_MODES: Readonly<Record<string, true>> = { ...FC_FAILSAFE_MODES, BRAKE: true };

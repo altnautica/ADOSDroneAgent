@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { PadRouter, type PadRoute } from "@/hooks/pad-router";
 import { registerCockpitActions } from "@/lib/cockpit-actions";
-import { BUTTON_INDEX, DEFAULT_BINDINGS, type ControlId } from "@/lib/pad/ds4-map";
+import { BUTTON_INDEX, DEFAULT_BINDINGS, STOP_HOLD_MS, type ControlId, type PadBinding } from "@/lib/pad/ds4-map";
 import type { EngineContext } from "@/lib/pad/gesture-engine";
 import type { ActionResult } from "@/lib/pilot-link";
 import { runSkillAction, useSkillBusyStore } from "@/lib/skill-runner";
@@ -16,6 +16,8 @@ import { BUILTIN_SKILLS, skillActionId, type SkillContext } from "@/lib/skills";
 import type { NavCommand } from "@/nav/navigator";
 import { useConfirmStore } from "@/stores/confirm-store";
 import { useInputStore, type PadSample } from "@/stores/input-store";
+import { usePreflightStore } from "@/stores/preflight-store";
+import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
 
 const airborne: SkillContext = {
   fcConnected: true,
@@ -181,5 +183,51 @@ describe("a press that ends a capture", () => {
     off();
     expect(useInputStore.getState().capture).toBe(false);
     expect(commands).toEqual([]);
+  });
+});
+
+describe("a user row bound to the emergency stop", () => {
+  for (const hold_ms of [1, 1500]) {
+    it(`sends no kill before the stop hold (row hold ${hold_ms} ms)`, () => {
+      const row: PadBinding = { control: "triangle", with: [], gesture: "hold", hold_ms, when: null, action: "kill", rumble: "ramp", locked: false };
+      router = new PadRouter([...DEFAULT_BINDINGS.filter((b) => b.control !== "triangle"), row], {
+        command: (cmd) => commands.push(cmd),
+        route: (): PadRoute => "flight",
+        context: () => ctx,
+        pad: () => null,
+      });
+      hold(["triangle"], 0, STOP_HOLD_MS - 100);
+      expect(sent).toEqual([]);
+      hold(["triangle"], STOP_HOLD_MS, STOP_HOLD_MS);
+      expect(sent).toEqual(["kill"]);
+    });
+  }
+});
+
+describe("dispose", () => {
+  it("resets the safety engine, so a hold does not carry across it", () => {
+    sheetOpen = true;
+    hold(["l2", "r2", "circle"], 0, 2000);
+    router.dispose();
+    hold(["l2", "r2", "circle"], 2050, 3200);
+    expect(sent).toEqual([]);
+  });
+});
+
+describe("a pad arm hold", () => {
+  it("opens the pre-flight checklist instead of arming", () => {
+    const ground: SkillContext = {
+      fcConnected: true,
+      live: true,
+      armed: false,
+      pilot: { armed: false, landed: true, vehicleClass: "multirotor", fresh: true },
+      pilotLinkOpen: true,
+    };
+    usePreflightStore.setState({ passed: false, pending: null });
+    const arm = BUILTIN_SKILLS.find((s) => s.id === "arm")!;
+    runSkillAction(arm, "hold", ground);
+    expect(sent).toEqual([]);
+    expect(usePreflightStore.getState().pending).not.toBeNull();
+    expect(useCockpitUiStore.getState().sheet).toBe("preflight");
   });
 });

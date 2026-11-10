@@ -24,6 +24,10 @@ describe("the flight controller's own failsafe, read from its mode and heartbeat
     expect(fcSideFailsafe({ mode: "RTL", systemStatus: 4 }, T0)).toBe(true);
     expect(fcSideFailsafe({ mode: "smart_rtl", systemStatus: 4 }, T0)).toBe(true);
     expect(fcSideFailsafe({ mode: "LOITER", systemStatus: 4 }, T0)).toBe(false);
+    for (const mode of ["AUTO.RTL", "AUTO.LAND", "AUTO.PRECLAND", "AUTO_RTL", "LOITER_ALT_QLAND"]) {
+      expect(fcSideFailsafe({ mode, systemStatus: 4 }, T0)).toBe(true);
+    }
+    expect(fcSideFailsafe({ mode: "AUTO.LOITER", systemStatus: 4 }, T0)).toBe(false);
     expect(fcSideFailsafe({ mode: null, systemStatus: 6 }, T0)).toBe(true);
     expect(fcSideFailsafe(null, T0)).toBe(false);
   });

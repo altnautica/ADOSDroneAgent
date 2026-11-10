@@ -17,7 +17,8 @@ export class ApiError extends Error {
   }
 
   /** The agent's machine-readable error code when the body carries one
-   *  (`{"error":"E_ARMED"}`, `{"detail":{"error":{"code":…}}}`), else null. */
+   *  (`{"error":"E_ARMED"}`, `{"detail":"…","code":"failsafe"}`,
+   *  `{"detail":{"error":{"code":…}}}`), else null. */
   get code(): string | null {
     return errorCode(this.body);
   }
@@ -31,6 +32,7 @@ function errorCode(body: unknown): string | null {
     const c = (b.error as Record<string, unknown>).code;
     if (typeof c === "string") return c;
   }
+  if (typeof b.code === "string") return b.code;
   if (b.detail && typeof b.detail === "object") return errorCode(b.detail);
   return null;
 }

@@ -12,6 +12,7 @@
 // fires as is.
 
 import ds4 from "@/shared/cockpit-spec/ds4.json";
+import layout from "@/shared/cockpit-spec/layout.json";
 
 export type ControlId =
   | "stick_l"
@@ -107,6 +108,18 @@ export const STALE_SAMPLE_MS = ds4.stream.stale_timestamp_ms;
 export const TRIGGER_PRESSED = ds4.stream.trigger_pressed_threshold;
 export const CENTERED_THRESHOLD = ds4.centered_threshold;
 export const DOUBLE_TAP_MS = ds4.double_tap_ms;
+
+/** The emergency stop's hold (`layout.json` `holds_ms.stop`). A hold row
+ *  bound to the stop never completes sooner, whatever its own `hold_ms`. */
+export const STOP_HOLD_MS: number = layout.holds_ms.stop;
+export const STOP_ACTION = "kill";
+
+/** The hold a row actually needs: its own, raised to the stop hold for an
+ *  emergency-stop row. Null for a row with no hold. */
+export function effectiveHoldMs(b: Pick<PadBinding, "action" | "hold_ms">): number | null {
+  if (b.hold_ms == null) return null;
+  return b.action === STOP_ACTION ? Math.max(b.hold_ms, STOP_HOLD_MS) : b.hold_ms;
+}
 
 /** The W3C standard-mapping button index of every button control (the same
  *  numbers as the stick stream's button bits). */

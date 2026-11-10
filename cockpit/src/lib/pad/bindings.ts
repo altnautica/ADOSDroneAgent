@@ -15,6 +15,7 @@ import {
   EXPORT_VERSION,
   LOCKED_ACTIONS,
   SPEC_ACTION_BY_ID,
+  effectiveHoldMs,
   isControlId,
   isGesture,
   isRumbleKind,
@@ -165,6 +166,12 @@ export function lockedLabel(l: LockedAction): string {
   return l.combo ? `${label} (combo ${l.gesture})` : `${label} (${l.gesture})`;
 }
 
+/** An emergency-stop hold row never holds for less than the spec stop hold. */
+export function clampStopHold(b: PadBinding): PadBinding {
+  const ms = effectiveHoldMs(b);
+  return ms === b.hold_ms ? b : { ...b, hold_ms: ms };
+}
+
 export type EditResult = { ok: true; rows: PadBinding[] } | { ok: false; error: string };
 
 /** Set a row's action. A locked row keeps its action: it can only move. */
@@ -176,14 +183,14 @@ export function setRowAction(rows: readonly PadBinding[], index: number, action:
     return { ok: false, error: `${label} is locked: it can be moved to another control, never removed.` };
   }
   const next = cloneBindings(rows);
-  next[index] = { ...next[index], action };
+  next[index] = clampStopHold({ ...next[index], action });
   return { ok: true, rows: next };
 }
 
 /** Add a row on a control for a gesture that has none yet. */
 export function addRow(rows: readonly PadBinding[], control: ControlId, gesture: Gesture, action: string): PadBinding[] {
   const next = cloneBindings(rows);
-  next.push({
+  next.push(clampStopHold({
     control,
     with: [],
     gesture,
@@ -192,7 +199,7 @@ export function addRow(rows: readonly PadBinding[], control: ControlId, gesture:
     action,
     rumble: gesture === "hold" ? "ramp" : null,
     locked: false,
-  });
+  }));
   return next;
 }
 
@@ -272,7 +279,7 @@ function parseRow(raw: unknown, i: number, errors: string[]): PadBinding | null 
     locked: r.locked === true,
   };
   if (typeof r.rate_full_dps === "number") row.rate_full_dps = r.rate_full_dps;
-  return row;
+  return clampStopHold(row);
 }
 
 export type ImportResult =

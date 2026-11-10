@@ -16,13 +16,15 @@
 //   goes down, and the episode keeps timing: a hold row on the same control
 //   still fires on top (PS: brake at once, RTH after 2 s held).
 // - A hold fires its `hold` phase once it has been held `hold_ms` and its
-//   `release` on the way up. `stick_l_centered` restarts the hold whenever the
+//   `release` on the way up. An emergency-stop row needs at least the spec
+//   stop hold (`STOP_HOLD_MS`), whatever its own `hold_ms`. `stick_l_centered` restarts the hold whenever the
 //   left stick leaves the centre.
 // - `when` gates a row at the moment it would fire.
 
 import {
   CENTERED_THRESHOLD,
   DOUBLE_TAP_MS,
+  effectiveHoldMs,
   RUMBLE,
   TRIGGER_PRESSED,
   type ControlId,
@@ -175,8 +177,9 @@ export class GestureEngine {
     const add = (rows: PadBinding[], ep: Episode, controls: ControlId[]) => {
       if (ep.done) return;
       const hold = this.pickHold(rows, ctx, frame);
-      if (!hold || hold.hold_ms == null) return;
-      out.push({ action: hold.action, controls, progress: Math.min(1, (frame.t - ep.start) / hold.hold_ms) });
+      const ms = hold ? effectiveHoldMs(hold) : null;
+      if (!hold || ms == null) return;
+      out.push({ action: hold.action, controls, progress: Math.min(1, (frame.t - ep.start) / ms) });
     };
     for (const [c, ep] of this.singleEp) add(this.singles.get(c) ?? [], ep, [c]);
     for (const [key, ep] of this.comboEp) {
@@ -236,7 +239,7 @@ export class GestureEngine {
       if (b.gesture !== "hold" || b.hold_ms == null) continue;
       // `stick_l_centered` restarts the hold rather than hiding it.
       if (b.when !== "stick_l_centered" && !whenSatisfied(b.when, ctx, frame)) continue;
-      if (!best || b.hold_ms < (best.hold_ms ?? Infinity)) best = b;
+      if (!best || effectiveHoldMs(b)! < (effectiveHoldMs(best) ?? Infinity)) best = b;
     }
     return best;
   }
@@ -337,20 +340,21 @@ export class GestureEngine {
     const advance = (rows: readonly PadBinding[], ep: Episode) => {
       if (ep.done) return;
       const hold = this.pickHold(rows, ctx, frame);
-      if (!hold || hold.hold_ms == null) return;
+      const ms = hold ? effectiveHoldMs(hold) : null;
+      if (!hold || ms == null) return;
       if (hold.when === "stick_l_centered" && !whenSatisfied(hold.when, ctx, frame)) {
         ep.start = frame.t;
         ep.lastPulse = frame.t;
         return;
       }
       const elapsed = frame.t - ep.start;
-      if (elapsed >= hold.hold_ms) {
+      if (elapsed >= ms) {
         this.fire(hold, "hold", out);
         ep.fired = hold;
         ep.done = true;
         return;
       }
-      const progress = elapsed / hold.hold_ms;
+      const progress = elapsed / ms;
       if (hold.rumble === "ramp" && frame.t - ep.lastPulse >= RUMBLE.ramp.tick_ms) {
         ep.lastPulse = frame.t;
         const intensity = RUMBLE.ramp.from + (RUMBLE.ramp.to - RUMBLE.ramp.from) * progress;

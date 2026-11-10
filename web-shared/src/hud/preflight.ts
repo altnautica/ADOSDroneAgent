@@ -61,14 +61,16 @@ export const CHECK_COVERED_BY: Readonly<Record<string, readonly string[]>> = {
   battery: ["batt_low", "batt_crit"],
 };
 
-/** The failing checks the pill lists: none unless on the ground (not
- *  armed), and none a listed base alert already covers. */
+/** The failing checks the pill lists: none unless known to be on the ground
+ *  (reported disarmed), and none a listed base alert already covers. An
+ *  unknown arm state (the agent withholds `armed` while the flight
+ *  controller link is down) counts as possibly airborne. */
 export function preflightFailing(
   checks: readonly PreflightCheck[],
   alerts: readonly { id: string }[],
   armed: boolean | null | undefined,
 ): { id: string; label: string }[] {
-  if (armed === true) return [];
+  if (armed !== false) return [];
   const active = new Set(alerts.map((a) => a.id));
   return checks
     .filter((c) => !c.ok && !(CHECK_COVERED_BY[c.id] ?? []).some((id) => active.has(id)))

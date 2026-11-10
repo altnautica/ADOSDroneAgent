@@ -28,7 +28,7 @@ import { create } from "zustand";
 import { skillContextNow } from "@/hooks/use-skill-context";
 import { CommandTimeoutError, sendCommand } from "@/lib/api";
 import type { ActionPhase } from "@/lib/cockpit-actions";
-import { noteCommandedModes } from "@/lib/fc-failsafe";
+import { FC_LAND_MODES, FC_RETURN_MODES, noteCommandedModes } from "@/lib/fc-failsafe";
 import { sendPilotAction } from "@/lib/pilot-link";
 import { refusalText } from "@/shared/hud/refusal";
 import { hasSpecText, specText } from "@/shared/hud/spec-text";
@@ -82,8 +82,8 @@ async function sendBuiltin(skill: Skill, b: BuiltinBinding, altitudeM: number | 
   }
   const args = skill.takesAltitude && altitudeM != null ? [altitudeM] : [];
   // A return or landing sent from here is this cockpit's, not a failsafe.
-  if (b.command === "rtl") noteCommandedModes(["RTL", "SMART_RTL", "QRTL"]);
-  else if (b.command === "land") noteCommandedModes(["LAND", "QLAND"]);
+  if (b.command === "rtl") noteCommandedModes(FC_RETURN_MODES);
+  else if (b.command === "land") noteCommandedModes(FC_LAND_MODES);
   let res;
   try {
     res = await sendCommand(b.command, args);
