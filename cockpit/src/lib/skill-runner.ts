@@ -223,6 +223,16 @@ async function run(skill: Skill, opts: { altitudeM?: number; active?: boolean })
     dropped(skill, refusalText("busy"));
     return;
   }
+  // A built-in's gate holds on every route at the moment it is sent, not only
+  // when its sheet opened: a Disarm confirmed after take-off is not sent. A
+  // plugin skill's stop is never held back.
+  if (skill.builtin) {
+    const state = resolveSkillState(skill, skillContextNow());
+    if (!state.enabled) {
+      dropped(skill, state.reason ?? refusalText(null));
+      return;
+    }
+  }
   const exempt = bypassesBusy(skill);
   if (!exempt) setSkillBusy(skill, true);
   try {

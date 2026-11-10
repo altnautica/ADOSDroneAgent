@@ -12,11 +12,8 @@ vi.mock("@/hooks/use-skill-context", () => ({ skillContextNow: () => ctxNow.ctx 
 
 const actions = vi.hoisted(() => [] as { name: string; answer: (r: ActionResult) => void }[]);
 vi.mock("@/lib/pilot-link", () => ({
-  sendPilotAction: (name: string) => {
-    const { promise, resolve } = Promise.withResolvers<ActionResult>();
-    actions.push({ name, answer: resolve });
-    return promise;
-  },
+  // The app's TypeScript lib predates Promise.withResolvers.
+  sendPilotAction: (name: string) => new Promise<ActionResult>((answer) => actions.push({ name, answer })),
 }));
 const B = BUILTIN_SKILL_BY_ID;
 const pilotCtx: SkillContext = {
@@ -93,13 +90,35 @@ describe("busy gate", () => {
   });
 });
 
+describe("arm and disarm gates on every route", () => {
+  it("a press of Arm while airborne opens nothing and says why", () => {
+    expect(requestSkill(B.arm!, pilotCtx)).toBe(false);
+    expect(useConfirmStore.getState().pending).toBeNull();
+    expect(toasts).toEqual(["Arm: Already armed"]);
+  });
+
+  it("a Disarm confirmed after take-off is not sent", async () => {
+    await executeSkill(B.disarm!);
+    expect(actions).toHaveLength(0);
+    expect(toasts).toEqual(["Disarm: Airborne"]);
+  });
+
+  it("a Disarm on the ground while armed is sent", async () => {
+    ctxNow.ctx = { ...pilotCtx, pilot: { ...pilotCtx.pilot!, landed: true } };
+    void executeSkill(B.disarm!);
+    expect(actions.map((a) => a.name)).toEqual(["disarm"]);
+  });
+});
+
 /** A fetch that never answers until aborted. */
 function silentFetch(): void {
-  vi.stubGlobal("fetch", (_url: string, init: RequestInit) => {
-    const { promise, reject } = Promise.withResolvers<Response>();
-    init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
-    return promise;
-  });
+  vi.stubGlobal(
+    "fetch",
+    (_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")));
+      }),
+  );
 }
 
 describe("command path timeout", () => {
