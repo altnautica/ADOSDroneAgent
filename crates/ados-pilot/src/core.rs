@@ -400,6 +400,11 @@ impl Pilot {
         {
             return refuse("not_guided_capable", None);
         }
+        // A skill or the swarm never pulls the FC out of an RTL or land it
+        // flies on its own; the operator's Take control or Mode sheet does.
+        if self.fc_failsafe {
+            return refuse("failsafe", None);
+        }
         if self.owner() == Owner::Tuning {
             return refuse("busy", None);
         }
@@ -425,7 +430,7 @@ impl Pilot {
     }
 
     fn start_goto(&mut self, target: [f32; 3], now_ms: u64) {
-        if !self.fc.armed || self.fc.landed() {
+        if !self.fc.armed || self.fc.landed() || self.fc_failsafe {
             return;
         }
         if matches!(self.owner(), Owner::Tuning) {

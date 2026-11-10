@@ -6,6 +6,13 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.47] - 2026-11-10
+
+### Fixed
+
+- A skill or the swarm never pulls the flight controller out of a failsafe return or landing: while the pilot reports `fc_failsafe`, a motion lease is refused with `failsafe`, and no goto switches the flight controller to GUIDED. The operator's Take control and the Mode sheet stay available; after Take control a lease is granted again.
+- Cockpit shows the pilot's refusals of a built-in action (Pause, Land, RTH, Resume and the others), of Launch and of the launch sheet's Abort in words, for example "Pause: no position from the flight controller" instead of "Pause: no_position". Abort now shows its refusal instead of dropping it.
+
 ## [0.109.46] - 2026-11-10
 
 ### Fixed

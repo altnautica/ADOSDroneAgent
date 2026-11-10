@@ -14,6 +14,7 @@ import { getParam } from "@/lib/api";
 import { ALT_MAX_M, ALT_MIN_M, COPTER_TAKEOFF_ALT_M, launchArgs, type LaunchAfter, type WhenDone } from "@/lib/cockpit-flow";
 import { BUILTIN_BY_ID } from "@/lib/cockpit-spec";
 import { sendPilotAction } from "@/lib/pilot-link";
+import { pilotRefusal } from "@/lib/pilot-refusal";
 import { skillVisibleFor } from "@/lib/skills";
 import { cn } from "@/lib/utils";
 import { useCockpitUiStore } from "@/stores/cockpit-ui-store";
@@ -142,7 +143,7 @@ export function LaunchSheet() {
       });
       const { setLaunchRefusal } = useCockpitUiStore.getState();
       setLaunchRefusal(null);
-      void sendPilotAction("launch", args).then((r) => setLaunchRefusal(r.ok ? null : `Launch refused: ${r.err ?? "unknown"}`));
+      void sendPilotAction("launch", args).then((r) => setLaunchRefusal(r.ok ? null : `Launch refused: ${pilotRefusal(r.err)}`));
     });
 
   return (
@@ -153,7 +154,11 @@ export function LaunchSheet() {
         sequenceRunning ? (
           <button
             type="button"
-            onClick={() => void sendPilotAction("pause")}
+            onClick={() =>
+              void sendPilotAction("pause").then((r) =>
+                useCockpitUiStore.getState().setLaunchRefusal(r.ok ? null : `Abort refused: ${pilotRefusal(r.err)}`),
+              )
+            }
             className="min-h-[56px] w-full rounded-lg border border-err bg-err/20 text-[0.95rem] font-semibold text-err"
           >
             Abort

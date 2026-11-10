@@ -546,6 +546,39 @@ fn surface_goto_refused_during_an_fc_failsafe() {
     }
 }
 
+/// During an FC failsafe RTL or land a skill's motion lease is refused with
+/// `failsafe` and the FC keeps flying its failsafe. Take control still works,
+/// and after it the lease is granted again.
+#[test]
+fn skill_lease_refused_during_an_fc_failsafe() {
+    for mode in [copter::RTL, copter::SMART_RTL, copter::LAND] {
+        let mut w = World::new();
+        home_at(&mut w, 12.0, 77.0);
+        w.airborne(copter::GUIDED);
+        w.run(100);
+        w.mode = mode;
+        w.run(100);
+        let r = w.req(Request::LeaseAcquire {
+            holder: ados_protocol::pilot::Holder {
+                plugin_id: "com.example.follow".into(),
+                skill_id: "follow-me".into(),
+            },
+            kind: "motion".into(),
+        });
+        assert!(
+            matches!(&r, Reply::Lease(l) if !l.ok && l.err.as_deref() == Some("failsafe")),
+            "mode {mode}: {r:?}"
+        );
+        w.run(200);
+        assert_eq!(w.mode, mode, "the FC keeps flying its failsafe");
+        assert_ne!(w.p.owner(), Owner::Skill, "mode {mode}");
+        assert!(matches!(w.action("take_control"), Reply::Action(a) if a.ok));
+        w.run(100);
+        w.lease();
+        assert_eq!(w.p.owner(), Owner::Skill, "mode {mode}");
+    }
+}
+
 /// An RTL the operator asked for is the operator's own mode change: a map
 /// point after it flies.
 #[test]
