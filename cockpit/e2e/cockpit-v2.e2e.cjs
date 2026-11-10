@@ -785,13 +785,22 @@ async function chipsCase(browser) {
   const ctx = await browser.newContext({ viewport: { width: 1920, height: 1080 } });
   const page = await ctx.newPage();
   await page.addInitScript(PAD_INIT);
-  // The demo layer feed ticks every 50 ms: record those timers to stop them.
+  // The demo layer feed ticks every 50 ms: record those timers to stop them,
+  // and count their ticks to see that layer frames have arrived. Each tick
+  // also writes the demo's own pilot frame (no input session) into the store
+  // the pilot stream below writes, so while the feed runs "Sticks are with"
+  // is only drawn between a stream frame and the next tick.
   await page.addInitScript(() => {
     const set = window.setInterval.bind(window);
     window.__feedTimers = [];
+    window.__feedTicks = 0;
     window.setInterval = (fn, ms, ...rest) => {
-      const id = set(fn, ms, ...rest);
-      if (ms === 50) window.__feedTimers.push(id);
+      if (ms !== 50) return set(fn, ms, ...rest);
+      const id = set((...a) => {
+        window.__feedTicks++;
+        return fn(...a);
+      }, ms, ...rest);
+      window.__feedTimers.push(id);
       return id;
     };
   });
@@ -815,9 +824,11 @@ async function chipsCase(browser) {
     ws.onClose(() => clearInterval(push));
   });
   await page.goto(`${BASE}?kiosk=1&demo=1`);
-  await page.waitForSelector('[data-testid="sticks-elsewhere"]', { state: "visible", timeout: 10000 });
+  await page.waitForFunction(() => window.__feedTicks >= 1, null, { timeout: 10000 });
   assert.equal(await page.locator('[data-testid="layer-chip"]').count(), 0, "no chip while the layers are fresh");
+  // Stopping the feed leaves the pilot stream the only pilot writer.
   await page.evaluate(() => window.__feedTimers.forEach((id) => clearInterval(id)));
+  await page.waitForSelector('[data-testid="sticks-elsewhere"]', { state: "visible", timeout: 10000 });
   await page.waitForSelector('[data-testid="layer-chip"]', { state: "visible", timeout: 10000 });
   assert.ok((await page.locator('[data-testid="layer-chip"]').allInnerTexts()).includes("Obstacles unavailable"), "the obstacles chip shows");
   await page.waitForTimeout(500);
