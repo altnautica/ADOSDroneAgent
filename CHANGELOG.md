@@ -6,6 +6,14 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.79] - 2026-11-10
+
+### Changed
+
+- Cockpit: a one-time "Set up this aircraft" banner offers the setup wizard for a new flight controller, on the ground and off the flight screen.
+- Cockpit: contextual tips wait while a banner or alert is showing on the flight screen and never cover the alert stack.
+- Cockpit: the agent-offline banner and the controller sync refusal line use the shared spec strings.
+
 ## [0.109.78] - 2026-11-10
 
 ### Changed
