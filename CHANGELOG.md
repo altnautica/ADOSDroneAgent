@@ -6,6 +6,16 @@ the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.109.51] - 2026-11-10
+
+### Changed
+
+- Cockpit: a skill press now waits only behind its own unanswered command, so Return home and Land always respond while another command is pending; Return home, Land, Pause and Emergency stop never wait.
+- Cockpit: a flight command sent to the flight controller with no answer within 3 s reports "No answer from the drone" instead of hanging.
+- Cockpit: a press that is not sent (the skill is unavailable or its previous press is still waiting) shows the reason in a toast.
+- Cockpit: Emergency stop is always offered behind its hold and confirm, also while disarmed or with no link.
+- Cockpit: Arm and Disarm are checked again at the moment they are sent on every route, so a Disarm confirmed after take-off is not sent and says why.
+
 ## [0.109.50] - 2026-11-10
 
 ### Changed
