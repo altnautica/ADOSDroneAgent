@@ -37,7 +37,6 @@ import { OnscreenSticks } from "@/components/feed/onscreen-sticks";
 import { PipInset } from "@/components/feed/pip-inset";
 import { SkillConfirmSheet } from "@/components/feed/skill-confirm-sheet";
 import { SkillAckLine, SkillPicker } from "@/components/feed/skill-picker/skill-picker";
-import { StreamTabs } from "@/components/feed/stream-tabs";
 import { TargetLayer } from "@/components/feed/target-layer";
 import { ExtensionVideoOverlays } from "@/components/plugins/extension-feed-mounts";
 import { VideoLayer } from "@/components/shell/video-layer";
@@ -227,7 +226,7 @@ export function FeedScreen() {
         <LayerChips />
       </>
     ),
-    tabs: cameras.length > 1 ? <StreamTabs cameras={cameras} /> : null,
+    tabs: null,
     map: flightNavCapable ? (className) => <MiniMap className={className} /> : null,
     cards: flightNavCapable
       ? {

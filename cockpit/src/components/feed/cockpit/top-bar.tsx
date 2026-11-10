@@ -16,7 +16,7 @@ import type { LucideIcon } from "lucide-react";
 import { FlightStateChip } from "@/components/feed/cockpit/flight-state-chip";
 import { NavSourceChip } from "@/components/feed/nav-source-chip";
 import { useCockpitAlerts } from "@/hooks/use-cockpit-alerts";
-import { usePadStatus, type PadStatus } from "@/hooks/use-gamepad";
+import { padStatusText, usePadStatus } from "@/hooks/use-gamepad";
 import { useFreshPilot, usePilot } from "@/hooks/use-pilot";
 import { useSkillContext } from "@/hooks/use-skill-context";
 import { pillAlertStale, pillStale } from "@/lib/alerts";
@@ -247,16 +247,9 @@ function AlertList({
   );
 }
 
-function controllerLabel(pad: PadStatus): { text: string; ok: boolean | null } {
-  if (!pad.connected) return { text: specText("controls.pad.none"), ok: null };
-  const battery = pad.batteryPct !== null ? ` ${Math.round(pad.batteryPct)}%` : "";
-  if (pad.native) return { text: specText("controls.pad.native", { battery }), ok: true };
-  return pad.standard ? { text: specText("controls.pad.connected", { battery }), ok: true } : { text: specText("controls.pad.not_standard"), ok: false };
-}
-
 function ControllerItem() {
   const pad = usePadStatus();
-  const c = controllerLabel(pad);
+  const c = padStatusText(pad);
   return (
     <Item icon={Gamepad2} label={pad.name ? specText("cockpit.controller.named", { name: pad.name }) : specText("cockpit.controller")} zone="controller">
       <span className={c.ok === null ? "chrome-dim" : undefined} style={c.ok === false ? { color: severityColor("warning") } : undefined}>
