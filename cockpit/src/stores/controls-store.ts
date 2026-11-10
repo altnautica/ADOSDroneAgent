@@ -170,6 +170,9 @@ interface ControlsState {
   setCalibration: (padId: string, cal: PadCalibration | null) => void;
   setOnscreenSticks: (on: boolean) => void;
   markTourSeen: () => void;
+  /** Settings › Controls › Replay controller tour: it shows again on the
+   *  ground with a controller reporting. */
+  replayTour: () => void;
   /** Read the ground station's input state (kiosk on a ground station only). */
   loadGroundInput: (signal?: AbortSignal) => Promise<void>;
   setStationKiosk: (on: boolean) => void;
@@ -281,6 +284,10 @@ export const useControlsStore = create<ControlsState>((set, get) => {
     },
     markTourSeen: () => {
       set({ tourSeen: true });
+      commit();
+    },
+    replayTour: () => {
+      set({ tourSeen: false });
       commit();
     },
     loadGroundInput: async (signal) => {

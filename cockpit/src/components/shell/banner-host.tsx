@@ -1,12 +1,16 @@
 // The shell's banner slot, beside the reboot banner and the reach notice:
 // agent unreachable, a drone's flight controller disconnected, and the
 // one-shot cloud-posture nudge. A full-bleed screen (the Feed) has its own
-// alert stack, so there only the agent-offline banner shows.
+// alert stack, so there only the agent-offline banner shows. The `err` and
+// `warn` banners wrap to two lines and size in px times the width class's
+// chrome scale; the advisory cloud line stays on one truncated line.
 
 import { AlertCircle, AlertTriangle, Cloud } from "lucide-react";
 
 import { useCloudPostureNudge } from "@/hooks/use-cloud-posture-nudge";
-import { shellBanners } from "@/lib/shell-banners";
+import { useWidthClass } from "@/hooks/use-width-class";
+import { gridMeasures } from "@/lib/cockpit-layout";
+import { bannerTextStyle, shellBanners } from "@/lib/shell-banners";
 import { cn } from "@/lib/utils";
 import { useProfile } from "@/shared/use-profile";
 import { useNavStore } from "@/stores/nav-store";
@@ -21,6 +25,8 @@ export function BannerHost({ fullBleed = false }: { fullBleed?: boolean }) {
   const profile = useProfile();
   const goTab = useNavStore((s) => s.goTab);
   const nudge = useCloudPostureNudge();
+  const { widthClass } = useWidthClass();
+  const scale = gridMeasures(widthClass, false).scale;
 
   const banners = shellBanners({ statusStale: stale, refusal, profile, fcConnected, hasStatus }).filter(
     (b) => !fullBleed || b.id === "agent-offline",
@@ -36,13 +42,13 @@ export function BannerHost({ fullBleed = false }: { fullBleed?: boolean }) {
           <div
             key={b.id}
             role="status"
-            className={cn(
-              "flex items-center gap-[0.5rem] px-[0.75rem] py-[0.3rem] text-[0.8rem] font-medium",
-              b.severity === "err" ? "bg-err/20 text-err" : "bg-warn/20 text-warn",
-            )}
+            className={cn("flex items-center font-medium", b.severity === "err" ? "bg-err/20 text-err" : "bg-warn/20 text-warn")}
+            style={{ gap: 8 * scale, padding: `${5 * scale}px ${12 * scale}px` }}
           >
-            <Icon className="h-[1rem] w-[1rem] shrink-0" aria-hidden />
-            <span className="truncate">{b.message}</span>
+            <Icon className="shrink-0" style={{ width: 16 * scale, height: 16 * scale }} aria-hidden />
+            <span className="min-w-0" style={bannerTextStyle(scale)} data-testid="shell-banner-text">
+              {b.message}
+            </span>
           </div>
         );
       })}

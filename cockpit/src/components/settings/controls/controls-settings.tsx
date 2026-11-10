@@ -394,10 +394,10 @@ export function ControlsSettings() {
   return (
     <div className="flex flex-col gap-[0.5rem] p-[0.6rem]" data-testid="controls-settings">
       <header className="flex flex-wrap items-center gap-[0.6rem] text-[0.85rem]">
-        <span className="font-semibold">{pad ? pad.name : announced ? specText("controls.press_any_button") : "No controller"}</span>
+        <span className="font-semibold">{pad ? pad.name : announced ? specText("controls.press_any_button") : specText("controls.no_controller")}</span>
         {conn ? <span className="text-muted-foreground">{specText(`controls.connection.${conn}`)}</span> : null}
         {pad && !pad.standard ? <span className="text-warn">{specText("controls.not_standard")}</span> : null}
-        <div className="flex overflow-hidden rounded-lg border border-border" role="radiogroup" aria-label="Stick mode">
+        <div className="flex overflow-hidden rounded-lg border border-border" role="radiogroup" aria-label={specText("controls.stick_mode")}>
           {(["mode2", "mode1"] as const).map((m) => (
             <button key={m} type="button" role="radio" aria-checked={s.stickMode === m} onClick={() => s.setStickMode(m)} className={cn("min-h-[40px] px-[0.6rem]", s.stickMode === m && "bg-primary/30")}>
               {specText(`controls.${m}`)}
@@ -419,7 +419,7 @@ export function ControlsSettings() {
           </div>
         </div>
         <aside className="min-w-[280px] flex-[1_1_300px] rounded-xl border border-border p-[0.6rem]">
-          {selected ? <ControlEditor control={selected} registry={registry} /> : <p className="text-[0.85rem] text-muted-foreground">Pick a control on the drawing to change what it does.</p>}
+          {selected ? <ControlEditor control={selected} registry={registry} /> : <p className="text-[0.85rem] text-muted-foreground">{specText("controls.pick_hint")}</p>}
         </aside>
       </div>
       {conflicts.length > 0 ? <p role="alert" className="text-[0.85rem] text-err" data-testid="conflict-note">{specText("controls.conflict")}</p> : null}
@@ -467,7 +467,7 @@ export function ControlsSettings() {
         />
       </div>
       {importErrors.length > 0 ? <p role="alert" className="text-[0.82rem] text-err">{importErrors.join("; ")}</p> : null}
-      <Section title="Test">
+      <Section title={specText("controls.section.test")}>
         <div className="flex flex-wrap gap-[0.4rem]">
           <button
             type="button"
@@ -487,6 +487,9 @@ export function ControlsSettings() {
           <button type="button" aria-pressed={showAxes} onClick={() => setShowAxes(!showAxes)} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
             {specText("controls.test.sticks")}
           </button>
+          <button type="button" data-testid="controls-tour-replay" onClick={s.replayTour} className="min-h-[48px] rounded-lg border border-border px-[0.8rem] text-[0.85rem]">
+            {specText("controls.tour.replay")}
+          </button>
         </div>
         {showAxes && pad ? (
           <p className="font-mono text-[0.8rem]" data-testid="stick-values">
@@ -495,7 +498,7 @@ export function ControlsSettings() {
         ) : null}
       </Section>
       <CalibrationCard />
-      <Section title="Touch and sound">
+      <Section title={specText("controls.section.touch_sound")}>
         <label className="flex min-h-[48px] items-center gap-[0.5rem] text-[0.85rem]">
           <input type="checkbox" checked={s.onscreenSticks} onChange={(e) => s.setOnscreenSticks(e.target.checked)} />
           {specText("flow.on_screen_sticks")}

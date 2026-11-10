@@ -87,6 +87,7 @@ jobs:
           npx vite preview --port 4273 --strictPort >/tmp/preview.log 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:4273/cockpit/ >/dev/null && break; sleep 1; done
           for c in stop stop-sheets flow-stale sequence mode-pending recentre gimbal-flick chips; do SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/cockpit-v2.e2e.cjs "$c"; done
+          BASE=http://127.0.0.1:4273/cockpit/ SHOTS="$RUNNER_TEMP/e2e-shots" node e2e/tips.e2e.cjs
 
       - name: Verify dist
         run: |

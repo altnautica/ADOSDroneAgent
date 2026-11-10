@@ -40,3 +40,29 @@ export function shellBanners(i: ShellBannerInputs): ShellBanner[] {
   }
   return out;
 }
+
+/** An `err`/`warn` banner's text: 13 px times the width class's chrome scale
+ *  (×1.33 on a television), wrapping to at most two lines, so "Agent is
+ *  unreachable. Reconnecting…" reads in full in the narrow top-centre slot. */
+export const BANNER_TEXT_PX = 13;
+export const BANNER_MAX_LINES = 2;
+
+export function bannerTextStyle(scale: number): {
+  fontSize: number;
+  lineHeight: string;
+  WebkitLineClamp: number;
+  display: "-webkit-box";
+  WebkitBoxOrient: "vertical";
+  overflow: "hidden";
+  whiteSpace: "normal";
+} {
+  return {
+    fontSize: BANNER_TEXT_PX * scale,
+    lineHeight: `${Math.round(BANNER_TEXT_PX * 1.3 * scale)}px`,
+    WebkitLineClamp: BANNER_MAX_LINES,
+    display: "-webkit-box",
+    WebkitBoxOrient: "vertical",
+    overflow: "hidden",
+    whiteSpace: "normal",
+  };
+}

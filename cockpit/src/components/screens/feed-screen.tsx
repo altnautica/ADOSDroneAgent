@@ -4,7 +4,8 @@
 // layer, the data layers (AR, obstacles, depth, surfaces), the centre marks
 // and instruments (L2), the top bar with the flight-state chip and STOP, the
 // left and right columns, the bottom-left card, the telemetry row, the skill
-// picker, the follow strip, the flow overlays and the cockpit sheets. No shell
+// picker, the follow strip, the flow overlays, the cockpit sheets and the
+// contextual tips (`tip-layer.tsx`). No shell
 // chrome is drawn around it; every other screen is behind the top bar's Menu.
 // The flight-telemetry poll, the extension-state poll, the pilot link, the
 // stick stream and the gimbal driver run only while the Feed is mounted.
@@ -38,6 +39,7 @@ import { PipInset } from "@/components/feed/pip-inset";
 import { SkillConfirmSheet } from "@/components/feed/skill-confirm-sheet";
 import { SkillAckLine, SkillPicker } from "@/components/feed/skill-picker/skill-picker";
 import { TargetLayer } from "@/components/feed/target-layer";
+import { TipLayer } from "@/components/feed/tip-layer";
 import { ExtensionVideoOverlays } from "@/components/plugins/extension-feed-mounts";
 import { VideoLayer } from "@/components/shell/video-layer";
 import { BannerHost } from "@/components/shell/banner-host";
@@ -217,7 +219,9 @@ export function FeedScreen() {
           <BannerHost fullBleed />
           <RebootBanner floating />
         </div>
-        <AlertStack />
+        <div data-zone="alert_stack">
+          <AlertStack />
+        </div>
       </>
     ),
     overlays: (
@@ -280,6 +284,7 @@ export function FeedScreen() {
       ) : null}
       <SkillConfirmSheet />
       <CockpitSheets />
+      <TipLayer gimbalAvailable={gimbal} scale={m.scale} />
     </div>
   );
 }

@@ -18,7 +18,7 @@
 
 import { Suspense, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { ChevronLeft, ChevronRight, Gamepad2, Layers, Palette, Settings as SettingsIcon, Wrench } from "lucide-react";
+import { ChevronLeft, ChevronRight, Gamepad2, Layers, Lightbulb, Palette, Settings as SettingsIcon, Wrench } from "lucide-react";
 
 import { AppearanceSettings } from "@/components/settings/appearance-settings";
 import { ControlsSettings } from "@/components/settings/controls/controls-settings";
@@ -30,6 +30,7 @@ import {
   visibleSections,
   type SettingsSectionId,
 } from "@/lib/settings-sections";
+import { specText } from "@/shared/hud/spec-text";
 import { useNodeIdentity, type NodeIdentityLite } from "@/shared/use-profile";
 import "@/shared/i18n";
 
@@ -38,6 +39,7 @@ import { EmptyNote, StaleBadge } from "@/components/ui/data";
 import { PathRow } from "@/components/settings/settings-rows";
 import { LeafEditor } from "@/components/settings/leaf-editor";
 import { useConfigStore, useConfigSubscription, type WriteResult } from "@/stores/config-store";
+import { useTipsStore } from "@/stores/tips-store";
 import type { ScreenAction } from "@/nav/navigator";
 import type { AgentConfig, ConfigValue } from "@/lib/types";
 import {
@@ -233,6 +235,15 @@ function CuratedRoot({
           </div>
         </div>
         <ChevronRight className="h-[1.2rem] w-[1.2rem] shrink-0 text-muted-foreground" aria-hidden />
+      </button>
+      <button
+        type="button"
+        data-testid="settings-reset-tips"
+        onClick={() => useTipsStore.getState().reset()}
+        className="touch-target flex w-full items-center gap-[0.6rem] rounded-md bg-input/30 px-[0.7rem] py-[0.45rem] text-left hover:bg-muted active:bg-muted"
+      >
+        <Lightbulb className="h-[1.4rem] w-[1.4rem] shrink-0 text-muted-foreground" aria-hidden />
+        <div className="min-w-0 flex-1 truncate text-[0.95rem] text-surface-foreground">{specText("tips.reset")}</div>
       </button>
       {onAircraftSetup ? (
         <button
